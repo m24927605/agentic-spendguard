@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
         canonical_ingest,
         idempotency,
         producer_sequence_start,
+        cfg.reservation_ttl_seconds,
     );
 
     // 2b) Install pre-pulled bundles from disk (Helm init container loads

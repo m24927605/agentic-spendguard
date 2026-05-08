@@ -25,7 +25,7 @@ demo-build:
 demo-up:
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init manifest-init endpoint-catalog \
-	    ledger canonical-ingest sidecar webhook-receiver
+	    ledger canonical-ingest sidecar webhook-receiver ttl-sweeper
 	@echo "[demo] core services up; running demo container (DEMO_MODE=$(DEMO_MODE))..."
 	$(COMPOSE) run --rm \
 	    --env SPENDGUARD_DEMO_MODE=$(DEMO_MODE) \
@@ -39,6 +39,9 @@ else ifeq ($(DEMO_MODE),invoice)
 else ifeq ($(DEMO_MODE),release)
 	@echo "[demo] verifying Phase 2B Step 7.5 (release-mode reserve + release)..."
 	@$(MAKE) demo-verify-step7_5
+else ifeq ($(DEMO_MODE),ttl_sweep)
+	@echo "[demo] verifying TTL Sweeper (reserve+TTL=5s -> sweeper auto-release)..."
+	@$(MAKE) demo-verify-ttl-sweep
 else
 	@echo "[demo] verifying Phase 2B Step 7 (agent-mode commit_estimated only)..."
 	@$(MAKE) demo-verify-step7
@@ -76,7 +79,15 @@ demo-verify-step9:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step9.sql
 	@echo "[demo] Step 9 verification done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9
+# TTL Sweeper verification: 1 reserve + 1 release(reason=TTL_EXPIRED);
+# reservations.current_state='released'; available=500 (full refund);
+# audit_outbox contains 1 audit.outcome with cloudevent_payload.data
+# decoded JSON.reason='TTL_EXPIRED'.
+demo-verify-ttl-sweep:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_ttl_sweep.sql
+	@echo "[demo] TTL Sweeper verification done"
+
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

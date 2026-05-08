@@ -194,6 +194,24 @@ INSERT INTO fencing_scopes (
     'ledger_lease'
 ) ON CONFLICT DO NOTHING;
 
+-- 6c) TTL Sweeper fencing scope (Phase 2B closes Step 7.5 P1.1).
+-- Distinct workload from sidecar + webhook so producer_sequence space
+-- is independent. control_plane_writer scope_type per Migration 0019.
+INSERT INTO fencing_scopes (
+    fencing_scope_id, scope_type, tenant_id, workload_kind,
+    current_epoch, active_owner_instance_id,
+    ttl_expires_at, epoch_source_authority
+) VALUES (
+    '00000000-0000-7000-a000-000000000060'::UUID,
+    'control_plane_writer',
+    '${TENANT_ID}'::UUID,
+    'demo_ttl_sweeper',
+    1,
+    'demo-ttl-sweeper',
+    'infinity'::timestamptz,
+    'ledger_lease'
+) ON CONFLICT DO NOTHING;
+
 -- 7) Operator deposit: credit available_budget 500, debit adjustment 500.
 -- This routes through post_ledger_transaction (the SP) so the per-unit
 -- balance + fencing + audit_outbox invariants are exercised end-to-end

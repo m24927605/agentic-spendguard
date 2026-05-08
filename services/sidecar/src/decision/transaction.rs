@@ -173,10 +173,13 @@ pub async fn run_through_reserve(
         fencing: Some(fencing),
         claims,
         lock_order_token: None, // server derives
-        // POC: 10-min default TTL. Phase 2 derives TTL from the matched
-        // contract rule's `reservation.ttl` field (Contract §7).
+        // TTL from config (Codex TTL r1 P1.4). Default 600s; demo
+        // ttl_sweep overrides to 5s. Phase 2 derives TTL from the
+        // matched contract rule's `reservation.ttl` field (Contract §7).
         ttl_expires_at: Some(prost_types::Timestamp {
-            seconds: (Utc::now() + chrono::Duration::seconds(60 * 10)).timestamp(),
+            seconds: (Utc::now()
+                + chrono::Duration::seconds(state.inner.reservation_ttl_seconds))
+                .timestamp(),
             nanos: 0,
         }),
         audit_event: Some(cloudevent),

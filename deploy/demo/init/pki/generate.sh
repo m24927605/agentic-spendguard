@@ -56,7 +56,7 @@ fi
 # Per-cert idempotent: skip individual cert if already minted. This lets
 # new services (e.g. webhook_receiver) get certs on existing pki-data
 # volumes without rotating the others.
-for svc in ledger canonical_ingest sidecar endpoint_catalog webhook_receiver; do
+for svc in ledger canonical_ingest sidecar endpoint_catalog webhook_receiver ttl_sweeper; do
     if [ -f "$OUT/$svc.crt" ] && [ -f "$OUT/$svc.key" ]; then
         echo "[pki] $svc cert already exists, skipping"
         continue
@@ -74,6 +74,7 @@ for svc in ledger canonical_ingest sidecar endpoint_catalog webhook_receiver; do
         canonical_ingest) dns_alias="canonical-ingest" ;;
         endpoint_catalog) dns_alias="endpoint-catalog" ;;
         webhook_receiver) dns_alias="webhook-receiver" ;;
+        ttl_sweeper)      dns_alias="ttl-sweeper" ;;
         *)                dns_alias="$svc" ;;
     esac
 

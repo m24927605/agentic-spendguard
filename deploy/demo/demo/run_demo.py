@@ -543,6 +543,8 @@ async def main() -> int:
         return await run_decision_mode(also_invoice=True)
     if DEMO_MODE == "release":
         return await run_release_mode()
+    if DEMO_MODE == "ttl_sweep":
+        return await run_ttl_sweep_mode()
     return await run_agent_mode()
 
 
@@ -660,6 +662,105 @@ async def run_release_mode() -> int:
     )
     print(f"[demo] emit_llm_call_post(RUN_ABORTED) ok reservation={reservation_id}")
     await client.close()
+    return 0
+
+
+async def run_ttl_sweep_mode() -> int:
+    """TTL Sweeper demo: reserve with short TTL (sidecar reads
+    SPENDGUARD_SIDECAR_RESERVATION_TTL_SECONDS=5), sleep ~10s, the
+    sweeper background worker auto-releases. verify_step_ttl_sweep.sql
+    asserts the release happened.
+    """
+    from spendguard_pydantic_ai import (
+        SpendGuardClient,
+        derive_idempotency_key,
+        new_uuid7,
+    )
+    from spendguard_pydantic_ai._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+
+    run_id = str(new_uuid7())
+    step_id = f"{run_id}:step0"
+    llm_call_id = str(new_uuid7())
+    decision_id = str(new_uuid7())
+
+    claims = [
+        common_pb2.BudgetClaim(
+            budget_id=budget_id,
+            unit=common_pb2.UnitRef(
+                unit_id=unit_id,
+                token_kind="output_token",
+                model_family="gpt-4",
+            ),
+            amount_atomic="100",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id=window_id,
+        ),
+    ]
+    pricing = common_pb2.PricingFreeze(
+        pricing_version=pricing_version,
+        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
+        fx_rate_version=fx,
+        unit_conversion_version=unit_conv,
+    )
+    idempotency_key = derive_idempotency_key(
+        tenant_id=tenant_id,
+        session_id=client.session_id,
+        run_id=run_id,
+        step_id=step_id,
+        llm_call_id=llm_call_id,
+        trigger="LLM_CALL_PRE",
+    )
+    outcome = await client.request_decision(
+        trigger="LLM_CALL_PRE",
+        run_id=run_id,
+        step_id=step_id,
+        llm_call_id=llm_call_id,
+        tool_call_id="",
+        decision_id=decision_id,
+        route="llm.call",
+        projected_claims=claims,
+        idempotency_key=idempotency_key,
+    )
+    print(
+        f"[demo] reserved decision_id={outcome.decision_id} "
+        f"reservation_ids={list(outcome.reservation_ids)} (TTL=5s)"
+    )
+    await client.close()
+
+    # Wait for TTL to expire + sweeper poll cycle to fire.
+    # TTL=5s, sweeper polls every 2s, total wait 12s gives ~3 sweep cycles.
+    print("[demo] waiting 12s for TTL expiry + sweeper poll cycles...")
+    await asyncio.sleep(12)
+    print("[demo] verifying TTL release happened via verify_step_ttl_sweep.sql")
     return 0
 
 

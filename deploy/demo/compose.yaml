@@ -214,6 +214,10 @@ services:
       # "not a valid lease" (a properly-acquired lease has CAS-incremented
       # at least once). The seed SQL inserts current_epoch=1.
       SPENDGUARD_SIDECAR_FENCING_INITIAL_EPOCH:    "1"
+      # Reservation TTL (Phase 2B TTL Sweeper). Default 600s; demo
+      # ttl_sweep mode exports SIDECAR_TTL_SECONDS=5 before docker
+      # compose up to override (Codex TTL r2 V2.13).
+      SPENDGUARD_SIDECAR_RESERVATION_TTL_SECONDS:  "${SIDECAR_TTL_SECONDS:-600}"
       # Upstream URLs (mTLS gRPC over docker DNS)
       SPENDGUARD_SIDECAR_LEDGER_URL:               "https://ledger:50051"
       SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL:     "https://canonical-ingest:50052"
@@ -239,6 +243,35 @@ services:
       retries: 30
       start_period: 10s
 
+    networks: [spendguard-net]
+
+  ttl-sweeper:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.ttl_sweeper
+    container_name: spendguard-ttl-sweeper
+    environment:
+      RUST_LOG:                                          "info,spendguard_ttl_sweeper=debug"
+      SPENDGUARD_TTL_SWEEPER_DATABASE_URL:               "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
+      SPENDGUARD_TTL_SWEEPER_LEDGER_URL:                 "https://ledger:50051"
+      SPENDGUARD_TTL_SWEEPER_TENANT_ID:                  "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_TTL_SWEEPER_TLS_CLIENT_CERT:            "/etc/ssl/spendguard/ttl_sweeper.crt"
+      SPENDGUARD_TTL_SWEEPER_TLS_CLIENT_KEY:             "/etc/ssl/spendguard/ttl_sweeper.key"
+      SPENDGUARD_TTL_SWEEPER_TLS_CA_PEM:                 "/etc/ssl/spendguard/ca.crt"
+      SPENDGUARD_TTL_SWEEPER_FENCING_SCOPE_ID:           "00000000-0000-7000-a000-000000000060"
+      SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID:       "demo-ttl-sweeper"
+      SPENDGUARD_TTL_SWEEPER_FENCING_INITIAL_EPOCH:      "1"
+      SPENDGUARD_TTL_SWEEPER_POLL_INTERVAL_SECONDS:      "2"
+      SPENDGUARD_TTL_SWEEPER_BATCH_SIZE:                 "10"
+    volumes:
+      - pki-data:/etc/ssl/spendguard:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ledger:
+        condition: service_started
+      pki-init:
+        condition: service_completed_successfully
     networks: [spendguard-net]
 
   webhook-receiver:
