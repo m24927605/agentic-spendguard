@@ -81,6 +81,11 @@ pub struct SidecarStateInner {
     /// path does NOT need this map — the LlmCallPostPayload carries
     /// reservation_id directly.
     pub decision_id_to_reservation: Mutex<HashMap<Uuid, Uuid>>,
+
+    /// Reservation TTL in seconds (Codex TTL r1 P1.4). Read from
+    /// SPENDGUARD_SIDECAR_RESERVATION_TTL_SECONDS at startup; default
+    /// 600s. DEMO_MODE=ttl_sweep overrides to 5s.
+    pub reservation_ttl_seconds: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -150,6 +155,7 @@ impl SidecarState {
         canonical_ingest: CanonicalIngestClient,
         idempotency: IdempotencyCache,
         producer_sequence_start: u64,
+        reservation_ttl_seconds: i64,
     ) -> Self {
         Self {
             inner: Arc::new(SidecarStateInner {
@@ -165,6 +171,7 @@ impl SidecarState {
                 producer_sequence: Arc::new(AtomicU64::new(producer_sequence_start)),
                 reservation_cache: Mutex::new(HashMap::new()),
                 decision_id_to_reservation: Mutex::new(HashMap::new()),
+                reservation_ttl_seconds,
             }),
         }
     }

@@ -117,6 +117,12 @@ pub struct Config {
     /// Idempotency cache TTL — entries older than this are evicted.
     #[serde(default = "default_idempotency_cache_ttl_secs")]
     pub idempotency_cache_ttl_secs: i64,
+
+    /// Reservation TTL in seconds (Codex TTL r1 P1.4). Default 600s
+    /// (10min). DEMO_MODE=ttl_sweep overrides to 5s.
+    /// Phase 2 derives from contract rule reservation.ttl per Contract §7.
+    #[serde(default = "default_reservation_ttl_seconds")]
+    pub reservation_ttl_seconds: i64,
 }
 
 fn default_uds_path() -> String {
@@ -159,6 +165,9 @@ fn default_idempotency_cache_size() -> usize {
     8192
 }
 fn default_idempotency_cache_ttl_secs() -> i64 {
+    600
+}
+fn default_reservation_ttl_seconds() -> i64 {
     600
 }
 
