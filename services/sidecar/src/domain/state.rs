@@ -175,6 +175,20 @@ impl SidecarState {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Allocate `n` contiguous producer_sequence values atomically.
+    /// Returns `(start, end_inclusive)`. Used by Step 9 InvoiceReconcile
+    /// where the SP requires a decision row at seq N and an outcome row
+    /// at seq N+1 (both in the same workload-instance space).
+    /// Panics on `n == 0` (Codex challenge P3.2 — defensive).
+    pub fn next_producer_sequence_block(&self, n: u64) -> (u64, u64) {
+        assert!(n > 0, "next_producer_sequence_block requires n > 0");
+        let start = self
+            .inner
+            .producer_sequence
+            .fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+        (start, start + n - 1)
+    }
+
     pub fn is_draining(&self) -> bool {
         *self.inner.draining.read()
     }
