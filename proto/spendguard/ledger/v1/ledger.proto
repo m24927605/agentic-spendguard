@@ -1,0 +1,555 @@
+// SpendGuard Ledger service.
+//
+// Spec references:
+//   - Stage 2 POC Topology spec v1alpha1 §4 (audit_outbox), §8.2.1 (gRPC API)
+//   - Ledger Storage spec v1alpha1 §1-§22 (canonical truth model + DDL)
+//   - Contract DSL spec v1alpha1 §6 (decision transaction stages),
+//     §5 (commit state machine), §10 (refund/dispute), §14 (latency budget)
+//   - Trace spec v1alpha1 §11 (audit anchors)
+//
+// Transport: gRPC over mTLS.
+// Idempotency: scoped to (tenant_id, operation_kind, idempotency_key).
+// Per-unit balance: enforced server-side (Ledger §3); cross-unit comparison forbidden.
+// Audit invariant: ReserveSet + audit_outbox row inserted in single Postgres tx
+// with synchronous_commit=on + sync replica quorum (Stage 2 §4).
+//
+// Compatibility: proto3, additive evolution; no field removal pre-GA.
+
+syntax = "proto3";
+
+package spendguard.ledger.v1;
+
+import "google/protobuf/timestamp.proto";
+import "spendguard/common/v1/common.proto";
+
+// ============================================================================
+// SERVICE
+// ============================================================================
+
+service Ledger {
+  // -- Reservation lifecycle ------------------------------------------------
+
+  // Atomic multi-budget reservation + audit_decision durable commit.
+  //
+  // Invariant: response is returned only after WAL durable + ≥1 sync replica
+  // ack (Stage 2 §4.2). Sidecar must NOT publish_effect before receiving
+  // success response.
+  rpc ReserveSet(ReserveSetRequest) returns (ReserveSetResponse);
+
+  // Release held reservation (TTL expired / runtime error / run aborted).
+  rpc Release(ReleaseRequest) returns (ReleaseResponse);
+
+  // -- Commit lifecycle (per Contract §5 commitStateMachine) ----------------
+
+  rpc CommitEstimated(CommitEstimatedRequest) returns (CommitEstimatedResponse);
+  rpc ProviderReport(ProviderReportRequest) returns (ProviderReportResponse);
+  rpc InvoiceReconcile(InvoiceReconcileRequest) returns (InvoiceReconcileResponse);
+
+  // -- Refund / dispute (per Ledger §10; Contract §5.1a) --------------------
+
+  rpc RefundCredit(RefundCreditRequest) returns (RefundCreditResponse);
+  rpc DisputeAdjustment(DisputeAdjustmentRequest) returns (DisputeAdjustmentResponse);
+
+  // -- Compensation (reverse a prior posting; for reconciliation) -----------
+
+  rpc Compensate(CompensateRequest) returns (CompensateResponse);
+
+  // -- Query -----------------------------------------------------------------
+
+  rpc QueryBudgetState(QueryBudgetStateRequest) returns (QueryBudgetStateResponse);
+
+  // Lookup reservation context (Phase 2B Step 7). Sidecar uses this to
+  // recover commit-time context after a reservation_cache miss (e.g.,
+  // process restart). Returns the canonical reservation row + frozen
+  // pricing tuple + fencing scope from the original ReserveSet.
+  rpc QueryReservationContext(QueryReservationContextRequest)
+      returns (QueryReservationContextResponse);
+
+  // -- Recovery (per Stage 2 §4.5; Codex round 1 A3, A9) --------------------
+
+  // Stream historical audit_outbox events for sidecar crash recovery.
+  // Server enforces fencing_epoch == current; rejects stale.
+  rpc ReplayAuditFromCursor(ReplayAuditFromCursorRequest)
+      returns (stream ReplayAuditEvent);
+
+  // Query whether a decision has reached publish/outcome state.
+  rpc QueryDecisionOutcome(QueryDecisionOutcomeRequest)
+      returns (QueryDecisionOutcomeResponse);
+}
+
+// ============================================================================
+// SHARED MESSAGES
+// ============================================================================
+
+message Reservation {
+  string reservation_id = 1;                // UUID v7
+  string budget_id = 2;
+  string window_instance_id = 3;
+  spendguard.common.v1.UnitRef unit = 4;
+  string amount_atomic = 5;                  // NUMERIC(38,0) decimal string
+  google.protobuf.Timestamp ttl_expires_at = 6;
+  string idempotency_key = 7;
+
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    RESERVED = 1;
+    COMMITTED = 2;
+    RELEASED = 3;
+    OVERRUN_DEBT = 4;
+  }
+  State current_state = 8;
+}
+
+// Commit state mirrors Contract §5 commitStateMachine.
+enum CommitState {
+  COMMIT_STATE_UNSPECIFIED = 0;
+  UNKNOWN = 1;
+  ESTIMATED = 2;
+  PROVIDER_REPORTED = 3;
+  INVOICE_RECONCILED = 4;
+}
+
+// ============================================================================
+// ReserveSet
+// ============================================================================
+
+message ReserveSetRequest {
+  string tenant_id = 1;
+
+  // Contract §6 idempotency_key for the entire decision transaction.
+  string decision_id = 2;
+  // Anchor for audit chain (per Trace §11.1 audit.decision_event_id).
+  string audit_decision_event_id = 3;
+  // Monotonic per (tenant_id, workload_instance_id).
+  uint64 producer_sequence = 4;
+
+  spendguard.common.v1.Idempotency idempotency = 5;
+  spendguard.common.v1.Fencing fencing = 6;
+
+  // Multi-budget claims; server canonicalizes order via lock_order_token.
+  // ReservationSet is all_or_nothing (per Contract §4).
+  repeated spendguard.common.v1.BudgetClaim claims = 7;
+
+  // Optional: caller may supply derived token; server validates and rejects
+  // mismatches with LOCK_ORDER_TOKEN_MISMATCH. If omitted, server derives.
+  spendguard.common.v1.LockOrderToken lock_order_token = 8;
+
+  // Reservation TTL (per Contract §7).
+  google.protobuf.Timestamp ttl_expires_at = 9;
+
+  // Audit payload — pre-built CloudEvents 1.0 envelope, signed by sidecar.
+  // Inserted into audit_outbox in same Postgres tx as ledger entries.
+  spendguard.common.v1.CloudEvent audit_event = 10;
+
+  // Pricing context (per Stage 2 §9.4 build-time freeze).
+  // Sidecar reads from cached contract_bundle; no Platform Pricing DB query.
+  spendguard.common.v1.PricingFreeze pricing = 11;
+
+  // Bundle context (per Contract §17).
+  spendguard.common.v1.ContractBundleRef contract_bundle = 12;
+}
+
+message ReserveSetResponse {
+  oneof outcome {
+    ReserveSetSuccess success = 1;
+    spendguard.common.v1.Replay replay = 2;
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message ReserveSetSuccess {
+  string ledger_transaction_id = 1;
+  string reservation_set_id = 2;
+  repeated Reservation reservations = 3;
+  string audit_decision_event_id = 4;
+  uint64 producer_sequence = 5;
+
+  // Server-derived (or caller-validated) lock order token.
+  spendguard.common.v1.LockOrderToken lock_order_token = 6;
+
+  // Full payload — only on first success; replay returns Replay variant.
+  spendguard.common.v1.FullResponsePayload full = 7;
+
+  google.protobuf.Timestamp recorded_at = 8;
+}
+
+// ============================================================================
+// Release
+// ============================================================================
+
+message ReleaseRequest {
+  string tenant_id = 1;
+  string reservation_set_id = 2;
+  spendguard.common.v1.Idempotency idempotency = 3;
+  spendguard.common.v1.Fencing fencing = 4;
+
+  enum Reason {
+    REASON_UNSPECIFIED = 0;
+    TTL_EXPIRED = 1;
+    RUNTIME_ERROR = 2;
+    RUN_ABORTED = 3;
+    EXPLICIT = 4;
+  }
+  Reason reason = 5;
+
+  // Audit event for release.
+  spendguard.common.v1.CloudEvent audit_event = 6;
+  string decision_id = 7;
+  uint64 producer_sequence = 8;
+}
+
+message ReleaseResponse {
+  oneof outcome {
+    ReleaseSuccess success = 1;
+    spendguard.common.v1.Replay replay = 2;
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message ReleaseSuccess {
+  string ledger_transaction_id = 1;
+  repeated string released_reservation_ids = 2;
+  google.protobuf.Timestamp recorded_at = 3;
+}
+
+// ============================================================================
+// CommitEstimated / ProviderReport / InvoiceReconcile
+// ============================================================================
+
+message CommitEstimatedRequest {
+  string tenant_id = 1;
+  string reservation_id = 2;
+  string estimated_amount_atomic = 3;       // NUMERIC(38,0)
+  spendguard.common.v1.UnitRef unit = 4;
+  spendguard.common.v1.Idempotency idempotency = 5;
+  spendguard.common.v1.Fencing fencing = 6;
+  spendguard.common.v1.PricingFreeze pricing = 7;
+  spendguard.common.v1.CloudEvent audit_event = 8;
+  string decision_id = 9;
+  uint64 producer_sequence = 10;
+}
+
+message CommitEstimatedResponse {
+  oneof outcome {
+    CommitSuccess success = 1;
+    spendguard.common.v1.Replay replay = 2;
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message ProviderReportRequest {
+  string tenant_id = 1;
+  string reservation_id = 2;
+  string provider_reported_amount_atomic = 3;
+  spendguard.common.v1.UnitRef unit = 4;
+  string provider_response_metadata = 5;    // raw header / provider event id
+  spendguard.common.v1.Idempotency idempotency = 6;
+  spendguard.common.v1.Fencing fencing = 7;
+  spendguard.common.v1.PricingFreeze pricing = 8;
+  spendguard.common.v1.CloudEvent audit_event = 9;
+  uint64 producer_sequence = 10;
+
+  // Audit anchor (per Stage 2 §4.3 audit_outbox.decision_id NOT NULL).
+  // For sidecar-originated commits: matches the original ReserveSet
+  // decision_id. For webhook-originated reports: receiver mints a new
+  // decision_id; audit chain links via reservation_id.
+  string decision_id = 11;
+}
+
+message ProviderReportResponse {
+  oneof outcome {
+    CommitSuccess success = 1;
+    spendguard.common.v1.Replay replay = 2;
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message InvoiceReconcileRequest {
+  string tenant_id = 1;
+  string provider_invoice_id = 2;
+  string invoice_reconciled_amount_atomic = 3;
+  spendguard.common.v1.UnitRef unit = 4;
+  string reservation_id = 5;
+  spendguard.common.v1.Idempotency idempotency = 6;
+  spendguard.common.v1.PricingFreeze pricing = 7;
+  spendguard.common.v1.CloudEvent audit_event = 8;
+  uint64 producer_sequence = 9;
+
+  // Audit anchor (per Stage 2 §4.3). Webhook-originated invoice reconcile:
+  // receiver mints decision_id; audit chain links via reservation_id.
+  string decision_id = 10;
+
+  // Control-plane fencing scope for webhook/reconciliation writers
+  // (per Sidecar §9 + Ledger §9 fencing_scopes; webhook receiver has its
+  // own workload identity + epoch).
+  spendguard.common.v1.Fencing fencing = 11;
+}
+
+message InvoiceReconcileResponse {
+  oneof outcome {
+    CommitSuccess success = 1;
+    spendguard.common.v1.Replay replay = 2;
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message CommitSuccess {
+  string ledger_transaction_id = 1;
+  string reservation_id = 2;
+  CommitState latest_state = 3;
+  string delta_to_reserved_atomic = 4;      // NUMERIC(38,0); signed
+  google.protobuf.Timestamp recorded_at = 5;
+}
+
+// ============================================================================
+// RefundCredit / DisputeAdjustment / Compensate
+// ============================================================================
+
+message RefundCreditRequest {
+  string tenant_id = 1;
+  string provider_credit_id = 2;
+  string original_reservation_id = 3;
+  string credit_amount_atomic = 4;
+  spendguard.common.v1.UnitRef unit = 5;
+  spendguard.common.v1.Idempotency idempotency = 6;
+  spendguard.common.v1.PricingFreeze pricing = 7;
+  spendguard.common.v1.CloudEvent audit_event = 8;
+  uint64 producer_sequence = 9;
+  google.protobuf.Timestamp credited_at = 10;
+
+  // Audit anchor for the refund event (per Stage 2 §4.3).
+  string decision_id = 11;
+
+  // Control-plane fencing scope (webhook receiver writer identity).
+  spendguard.common.v1.Fencing fencing = 12;
+}
+
+message RefundCreditResponse {
+  oneof outcome {
+    RefundCreditSuccess success = 1;
+    spendguard.common.v1.Replay replay = 2;
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message RefundCreditSuccess {
+  string ledger_transaction_id = 1;
+  string refund_credit_event_id = 2;
+  google.protobuf.Timestamp recorded_at = 3;
+}
+
+message DisputeAdjustmentRequest {
+  string tenant_id = 1;
+  string provider_dispute_id = 2;
+
+  enum CaseState {
+    CASE_STATE_UNSPECIFIED = 0;
+    OPEN = 1;
+    UNDER_REVIEW = 2;
+    RESOLVED_IN_FAVOR = 3;
+    RESOLVED_AGAINST = 4;
+    WITHDRAWN = 5;
+  }
+  CaseState case_state = 3;
+
+  string original_reservation_id = 4;
+  string resolution_amount_atomic = 5;      // when case_state in resolved_*
+  spendguard.common.v1.UnitRef unit = 6;
+  spendguard.common.v1.Idempotency idempotency = 7;
+  spendguard.common.v1.CloudEvent audit_event = 8;
+  uint64 producer_sequence = 9;
+  google.protobuf.Timestamp resolved_at = 10;
+
+  // Audit anchor for the dispute lifecycle event (per Stage 2 §4.3).
+  string decision_id = 11;
+
+  // Control-plane fencing scope (webhook receiver writer identity).
+  spendguard.common.v1.Fencing fencing = 12;
+
+  // Pricing context — for resolution amounts. Inherited from the original
+  // reservation when caller does not supply (server validates equality).
+  spendguard.common.v1.PricingFreeze pricing = 13;
+}
+
+message DisputeAdjustmentResponse {
+  oneof outcome {
+    DisputeAdjustmentSuccess success = 1;
+    spendguard.common.v1.Replay replay = 2;
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message DisputeAdjustmentSuccess {
+  string ledger_transaction_id = 1;
+  string dispute_event_id = 2;
+  google.protobuf.Timestamp recorded_at = 3;
+}
+
+message CompensateRequest {
+  string tenant_id = 1;
+  // Reverse a prior posting via compensating entry (Ledger §6 immutability).
+  string original_ledger_transaction_id = 2;
+  string reason_code = 3;
+  spendguard.common.v1.Idempotency idempotency = 4;
+  spendguard.common.v1.CloudEvent audit_event = 5;
+  uint64 producer_sequence = 6;
+
+  // Audit anchor (per Stage 2 §4.3). For reconciliation-driven compensations
+  // the operator/system mints a new decision_id; audit chain links via
+  // original_ledger_transaction_id.
+  string decision_id = 7;
+
+  // Control-plane fencing scope (operator / reconciliation writer identity).
+  spendguard.common.v1.Fencing fencing = 8;
+}
+
+message CompensateResponse {
+  oneof outcome {
+    CompensateSuccess success = 1;
+    spendguard.common.v1.Replay replay = 2;
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message CompensateSuccess {
+  string compensating_ledger_transaction_id = 1;
+  google.protobuf.Timestamp recorded_at = 2;
+}
+
+// ============================================================================
+// QueryBudgetState
+// ============================================================================
+
+message QueryBudgetStateRequest {
+  string tenant_id = 1;
+  string budget_id = 2;
+  string window_instance_id = 3;
+  // For rolling windows; required parameter (Ledger §8 — no now()).
+  google.protobuf.Timestamp snapshot_at = 4;
+  // Required (Ledger §3 forbids cross-unit aggregation in hot path).
+  // The (budget_id, window_instance_id, unit_id) triple selects the
+  // ledger_accounts row set this query aggregates over.
+  string unit_id = 5;
+}
+
+message QueryBudgetStateResponse {
+  spendguard.common.v1.UnitRef unit = 1;
+  string available_atomic = 2;
+  string reserved_hold_atomic = 3;
+  string committed_spend_atomic = 4;
+  string debt_atomic = 5;
+  string adjustment_atomic = 6;
+  string refund_credit_atomic = 7;
+  uint64 reservation_count = 8;
+  uint64 commit_count = 9;
+  google.protobuf.Timestamp as_of = 10;
+}
+
+// ============================================================================
+// ReplayAuditFromCursor
+// ============================================================================
+
+message ReplayAuditFromCursorRequest {
+  string tenant_id = 1;
+  string workload_instance_id = 2;
+  // Must match current fencing scope epoch; stale rejected with
+  // FENCING_EPOCH_STALE.
+  uint64 fencing_epoch = 3;
+  // Exclusive lower bound on producer_sequence.
+  uint64 producer_sequence_after = 4;
+  uint32 limit = 5;
+
+  // Specific fencing scope to validate against. Optional for POC where a
+  // workload owns at most one active scope; REQUIRED for GA when a workload
+  // may own multiple scopes (per Sidecar §9 fencing_scope_id_map).
+  // When omitted, server picks the most-recently-updated live scope owned
+  // by the caller, but rejects if more than one matches with different
+  // current_epoch values.
+  string fencing_scope_id = 6;
+}
+
+message ReplayAuditEvent {
+  spendguard.common.v1.CloudEvent event = 1;
+  uint64 producer_sequence = 2;
+  google.protobuf.Timestamp recorded_at = 3;
+  string ledger_transaction_id = 4;
+
+  enum ForwardingState {
+    FORWARDING_STATE_UNSPECIFIED = 0;
+    PENDING = 1;
+    FORWARDED = 2;
+  }
+  ForwardingState forwarding_state = 5;
+}
+
+// ============================================================================
+// QueryDecisionOutcome
+// ============================================================================
+
+message QueryDecisionOutcomeRequest {
+  string tenant_id = 1;
+  string decision_id = 2;
+}
+
+message QueryDecisionOutcomeResponse {
+  enum Stage {
+    STAGE_UNSPECIFIED = 0;
+    NOT_FOUND = 1;
+    AUDIT_DECISION_RECORDED = 2;     // reserve+audit_outbox committed
+    AUDIT_OUTCOME_RECORDED = 3;       // commit/release+audit_outcome committed
+  }
+  Stage stage = 1;
+  string ledger_transaction_id = 2;
+  string audit_decision_event_id = 3;
+  string audit_outcome_event_id = 4;
+  google.protobuf.Timestamp last_updated_at = 5;
+
+  // For idempotent re-publish (Stage 2 §4.6 adapter idempotency).
+  bytes effect_hash = 6;
+}
+
+// ============================================================================
+// QueryReservationContext (Phase 2B Step 7)
+// ============================================================================
+
+message QueryReservationContextRequest {
+  string tenant_id = 1;
+  string reservation_id = 2;
+}
+
+message QueryReservationContextResponse {
+  oneof outcome {
+    ReservationContext context = 1;
+    spendguard.common.v1.Error error = 2;
+  }
+}
+
+// Server-derived view of the original ReserveSet for one reservation.
+// All fields are derived from `reservations` + `ledger_entries` joined
+// against `ledger_accounts` (account_kind='reserved_hold' credit row).
+//
+// Phase 2B Step 7 single-reservation constraint: server returns Error
+// MULTI_RESERVATION_COMMIT_DEFERRED when the originating decision created
+// more than one reservation. The CommitEstimatedSet RPC for batched
+// commits is deferred to a future slice.
+message ReservationContext {
+  string reservation_id = 1;
+  string budget_id = 2;
+  string window_instance_id = 3;
+  spendguard.common.v1.UnitRef unit = 4;
+  // NUMERIC(38,0) decimal string. Sum of the original `reserved_hold`
+  // credit entries for this reservation.
+  string original_reserved_amount_atomic = 5;
+  spendguard.common.v1.PricingFreeze pricing = 6;
+  string fencing_scope_id = 7;
+  uint64 fencing_epoch_at_post = 8;
+  // Original ReserveSet decision_id; CommitEstimated reuses this so
+  // audit_outbox per-(tenant, decision_id) outcome uniqueness pairs the
+  // outcome to its preceding decision.
+  string decision_id = 9;
+  google.protobuf.Timestamp ttl_expires_at = 10;
+  // 'reserved' | 'committed' | 'released' | 'overrun_debt'.
+  string current_state = 11;
+  string source_ledger_transaction_id = 12;
+  string tenant_id = 13;
+}

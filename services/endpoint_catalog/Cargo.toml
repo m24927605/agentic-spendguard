@@ -1,0 +1,69 @@
+[package]
+name = "spendguard-endpoint-catalog"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard Endpoint Catalog: signed manifest pointer + versioned immutable catalog (atomic update)"
+
+[[bin]]
+name = "spendguard-endpoint-catalog"
+path = "src/main.rs"
+
+[[bin]]
+name = "spendguard-catalog-publish"
+path = "src/bin/publish.rs"
+
+[dependencies]
+# HTTP server
+axum = { version = "0.7", features = ["macros"] }
+tokio = { version = "1", features = ["full"] }
+# `sync` feature exposes tokio_stream::wrappers::BroadcastStream used by
+# the SSE invalidation channel.
+tokio-stream = { version = "0.1", features = ["sync"] }
+futures = "0.3"
+hyper = "1"
+tower = { version = "0.5", features = ["limit"] }
+tower-http = { version = "0.6", features = ["cors", "set-header", "trace"] }
+async-trait = "0.1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Crypto / signing
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8", "pem"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+rand = "0.8"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# JSON Schema validation (for incoming catalog object validation).
+# 0.20+ exposes the `validator_for` ergonomic API used by publish.rs.
+jsonschema = "0.20"
+
+# UUIDs
+uuid = { version = "1", features = ["v7", "v4", "serde"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Errors / logging
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config
+envy = "0.4"
+
+# Storage backends
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+
+# Filesystem (POC)
+tokio-util = { version = "0.7", features = ["io"] }
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"

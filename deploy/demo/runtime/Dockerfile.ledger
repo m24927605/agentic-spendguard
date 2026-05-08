@@ -1,0 +1,35 @@
+# Multi-stage build for the SpendGuard ledger service.
+# Build context is the workspace root (compose.yaml: `context: ../..`),
+# so source paths are absolute from the repo top.
+
+FROM rust:1.88-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY proto ./proto
+# tonic-build 0.12 calls system protoc with only the include paths we
+# pass via build.rs. The .proto files import `google/protobuf/timestamp.proto`
+# (a well-known type Debian's protobuf-compiler libprotobuf-dev ships at
+# /usr/include/google/protobuf/), but build.rs only adds proto_root.
+# Symlink the system google/ tree into proto_root so protoc resolves
+# the import without touching service code.
+RUN ln -sf /usr/include/google ./proto/google
+COPY services/ledger ./services/ledger
+WORKDIR /build/services/ledger
+RUN cargo build --release --bin spendguard-ledger
+
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/services/ledger/target/release/spendguard-ledger \
+     /usr/local/bin/spendguard-ledger
+
+ENTRYPOINT ["/usr/local/bin/spendguard-ledger"]

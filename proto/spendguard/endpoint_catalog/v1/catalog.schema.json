@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.spendguard.ai/endpoint_catalog/v1/catalog.schema.json",
+  "title": "Endpoint Catalog (versioned, immutable)",
+  "description": "Versioned immutable catalog; URL contains catalog_version_id. CDN-cacheable for 24h. Pulled lazily after manifest pointer indicates a new version.\n\nSpec references:\n  - Sidecar Architecture spec v1alpha1 §8 (endpoint catalog contents), §10 (region affinity), §12.5 (capability flags)\n  - Stage 2 POC Topology spec v1alpha1 §8.2.4 (atomic update model)\n  - Ledger Storage spec v1alpha1 §18 (capability flags)\n\nNote: Decision Journal endpoints are absent — DJ collapsed into ledger transactional outbox in Stage 2 v1alpha1.\n\nCompatibility: additive-only.",
+  "type": "object",
+  "required": [
+    "catalog_version_id",
+    "issued_at",
+    "ledger_endpoints",
+    "canonical_ingest_endpoints",
+    "bundle_registry_endpoints",
+    "regional_ca_endpoints"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "catalog_version_id": {
+      "type": "string",
+      "description": "Format: ctlg-<rfc3339-utc>-<discriminator>, where <discriminator> is either rev<int> or a UUIDv7 in 'simple' (32 hex chars) form.",
+      "pattern": "^ctlg-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z-([0-9a-f]{32}|rev[0-9]+)$"
+    },
+    "issued_at": { "type": "string", "format": "date-time" },
+
+    "ledger_endpoints": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/LedgerEndpoint" }
+    },
+
+    "canonical_ingest_endpoints": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/CanonicalIngestEndpoint" }
+    },
+
+    "bundle_registry_endpoints": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/BundleRegistryEndpoint" }
+    },
+
+    "regional_ca_endpoints": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/RegionalCaEndpoint" }
+    },
+
+    "provider_webhook_receiver_endpoints": {
+      "type": "array",
+      "description": "Optional; informational for ops (sidecars do not call this).",
+      "items": { "$ref": "#/$defs/ProviderWebhookEndpoint" }
+    },
+
+    "revocations": {
+      "type": "array",
+      "description": "Critical revocations active in this catalog version (per Sidecar §7 critical_revocation).",
+      "items": { "$ref": "#/$defs/Revocation" }
+    }
+  },
+
+  "$defs": {
+    "Health": {
+      "type": "string",
+      "enum": ["HEALTHY", "DEGRADED", "DRAINING", "REVOKED"]
+    },
+    "Region": {
+      "type": "string",
+      "description": "Cloud region id (e.g., 'us-west-2', 'eu-west-1')."
+    },
+    "ConsistencyCapability": {
+      "type": "string",
+      "enum": ["strong_global", "single_writer_per_budget", "eventual"],
+      "description": "Per Ledger §18; Phase 1 only advertises single_writer_per_budget."
+    },
+    "DurabilityCapability": {
+      "type": "string",
+      "enum": ["local_fsync", "remote_append_ack", "quorum_ack"],
+      "description": "Per Sidecar §8."
+    },
+    "AckMode": {
+      "type": "string",
+      "enum": ["local_fsync", "remote_append_ack", "quorum_ack"]
+    },
+
+    "LedgerEndpoint": {
+      "type": "object",
+      "required": ["endpoint_url", "region", "consistency_capability", "health"],
+      "additionalProperties": false,
+      "properties": {
+        "endpoint_url": { "type": "string", "format": "uri" },
+        "region": { "$ref": "#/$defs/Region" },
+        "consistency_capability": { "$ref": "#/$defs/ConsistencyCapability" },
+        "health": { "$ref": "#/$defs/Health" },
+        "tenant_scope": {
+          "type": "array",
+          "description": "Optional; per-tenant DB sharding (Stage 2 §9.3 Option A).",
+          "items": { "type": "string" }
+        }
+      }
+    },
+
+    "CanonicalIngestEndpoint": {
+      "type": "object",
+      "required": ["endpoint_url", "region", "ack_mode_capability", "health"],
+      "additionalProperties": false,
+      "properties": {
+        "endpoint_url": { "type": "string", "format": "uri" },
+        "region": { "$ref": "#/$defs/Region" },
+        "ack_mode_capability": { "$ref": "#/$defs/AckMode" },
+        "health": { "$ref": "#/$defs/Health" }
+      }
+    },
+
+    "BundleRegistryEndpoint": {
+      "type": "object",
+      "required": ["endpoint_url", "registry_kind"],
+      "additionalProperties": false,
+      "properties": {
+        "endpoint_url": { "type": "string", "format": "uri" },
+        "registry_kind": {
+          "type": "string",
+          "enum": ["ghcr", "ecr", "gar", "customer_managed"]
+        },
+        "global_replicated": { "type": "boolean" },
+        "namespaces": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["schema_bundle", "contract_bundle", "pricing_bundle"]
+          }
+        }
+      }
+    },
+
+    "RegionalCaEndpoint": {
+      "type": "object",
+      "required": ["endpoint_url", "region"],
+      "additionalProperties": false,
+      "properties": {
+        "endpoint_url": { "type": "string", "format": "uri" },
+        "region": { "$ref": "#/$defs/Region" },
+        "issuer_protocol": {
+          "type": "string",
+          "enum": ["csr_external_issuer", "spiffe_acme"],
+          "description": "How customer cert-manager talks to spendguard CA (Stage 2 §12.1)."
+        }
+      }
+    },
+
+    "ProviderWebhookEndpoint": {
+      "type": "object",
+      "required": ["endpoint_url", "providers"],
+      "additionalProperties": false,
+      "properties": {
+        "endpoint_url": { "type": "string", "format": "uri" },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["stripe", "openai", "anthropic", "azure_openai", "bedrock"]
+          }
+        }
+      }
+    },
+
+    "Revocation": {
+      "type": "object",
+      "description": "Critical revocation entries (per Sidecar §7 critical_revocation). Sidecar fail-closes for enforcement routes if any critical revocation cannot be verified within last_verified_critical_version_age <= 5min.",
+      "required": ["scope_kind", "scope_id", "effective_from", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "scope_kind": {
+          "type": "string",
+          "enum": [
+            "tenant",
+            "contract_bundle",
+            "schema_bundle",
+            "pricing_bundle",
+            "endpoint",
+            "signing_key",
+            "emergency_policy_switch"
+          ],
+          "description": "emergency_policy_switch: platform-wide enforcement-mode switch (e.g., kill all enforcement routes; force fail_closed). Triggers sidecar critical_revocation handling."
+        },
+        "scope_id": { "type": "string" },
+        "effective_from": { "type": "string", "format": "date-time" },
+        "reason": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,203 @@
+// SpendGuard Canonical Ingest service.
+//
+// Spec references:
+//   - Stage 2 POC Topology spec v1alpha1 §4.8 (per-decision_id sequence),
+//     §8.2.2 (gRPC API), §10.3 (POC Tier 2 deliverables)
+//   - Trace Schema spec v1alpha1 §10.1 (sampling pipeline split,
+//     bypass OTel sampling), §10.2 (3 storage classes), §12 (schema bundle
+//     validation), §13 (producer trust)
+//
+// Transport: gRPC over mTLS.
+// POC SLA (per Trace §10.1): best_effort_with_backpressure;
+//   GA SLA: defined SLO before GA.
+// Failure mode (per Trace §10.1):
+//   - enforcement route: fail_closed_or_quarantine
+//   - observability route: buffer_then_retry
+// Per-decision_id sequence: audit.outcome strictly after audit.decision
+//   (quarantine 30s; ORPHAN_OUTCOME alert if decision never arrives).
+// Dedupe: by event_id (UUID v7); idempotent at-least-once.
+//
+// Sources:
+//   - Ledger outbox forwarder (audit_outbox events)
+//   - Sidecar (non-audit canonical events; e.g., ledger lifecycle observation)
+//   - Note: Provider Webhook Receiver does NOT emit directly to CI
+//     (Stage 2 §11; goes through Ledger.audit_outbox).
+//
+// Compatibility: proto3, additive evolution; no field removal pre-GA.
+
+syntax = "proto3";
+
+package spendguard.canonical_ingest.v1;
+
+import "google/protobuf/timestamp.proto";
+import "spendguard/common/v1/common.proto";
+
+// ============================================================================
+// SERVICE
+// ============================================================================
+
+service CanonicalIngest {
+  // Append batch of canonical events; idempotent dedupe by event_id.
+  // Per-(tenant_id, decision_id) sequence enforced for audit.* events.
+  rpc AppendEvents(AppendEventsRequest) returns (AppendEventsResponse);
+
+  // Verify producer's claimed schema_bundle exists in registry; cache result.
+  // Used at producer startup or schema_bundle_id rotation.
+  rpc VerifySchemaBundle(VerifySchemaBundleRequest)
+      returns (VerifySchemaBundleResponse);
+
+  // Stream historical audit chain for a decision (audit_log query).
+  // Reads from immutable_audit_log storage class (per Trace §10.2).
+  rpc QueryAuditChain(QueryAuditChainRequest) returns (stream AuditChainEvent);
+}
+
+// ============================================================================
+// AppendEvents
+// ============================================================================
+
+message AppendEventsRequest {
+  // Producer identity (per Trace §13).
+  string producer_id = 1;
+
+  // Authoritative producer sequence is in each CloudEvent.producer_sequence;
+  // batch-level sequence here is informational (highest in batch).
+  uint64 batch_max_producer_sequence = 2;
+
+  // === Signature model (per Trace §13) ===
+  //
+  // Canonical truth: per-event signature on each CloudEvent, signed over
+  //   (canonical_event_payload, schema_bundle_id, producer_id, producer_sequence).
+  // Fields below are transport-level only:
+  //   - batch_signature: optional; covers the batch envelope to detect
+  //     transport-level tampering.
+  //   - signing_key_id: identifies the key used for any envelope signature.
+  // Ingest verifies per-event signatures (CloudEvent.producer_signature) for
+  // dedupe/admission. Batch signature, when present, is a transport check
+  // only — its absence is allowed for in-cluster forwarders on mTLS.
+  bytes batch_signature = 3;
+  string signing_key_id = 4;
+
+  // Schema bundle reference; ingest validates against this.
+  spendguard.common.v1.SchemaBundleRef schema_bundle = 5;
+
+  repeated spendguard.common.v1.CloudEvent events = 6;
+
+  // Route classification (per Trace §10.7); affects failure handling.
+  enum Route {
+    ROUTE_UNSPECIFIED = 0;
+    ENFORCEMENT = 1;     // fail_closed_or_quarantine on backpressure
+    OBSERVABILITY = 2;   // buffer_then_retry on backpressure
+  }
+  Route route = 7;
+}
+
+message AppendEventsResponse {
+  repeated EventResult results = 1;
+}
+
+message EventResult {
+  // event_id of the CloudEvent (echoed for client correlation).
+  string event_id = 1;
+
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+
+    // Successfully appended to durable storage; assigned ingest_position.
+    APPENDED = 1;
+
+    // Already present (event_id seen previously); idempotent no-op.
+    DEDUPED = 2;
+
+    // audit.outcome event arrived without preceding audit.decision;
+    // held in quarantine queue. Will release when audit.decision arrives
+    // or expire to ORPHAN_OUTCOME after 30s.
+    AWAITING_PRECEDING_DECISION = 3;
+
+    // Schema validation failure; held in quarantine for operator review.
+    QUARANTINED = 4;
+
+    // 30s elapsed without preceding audit.decision; alert triggered.
+    ORPHAN_OUTCOME = 5;
+
+    // Per-decision uniqueness violation (e.g., second audit.decision for
+    // same decision_id) — server rejects with DUPLICATE_DECISION_EVENT.
+    DUPLICATE = 6;
+
+    // Backpressure on enforcement route exhausted ingest capacity.
+    BACKPRESSURE = 7;
+
+    // Producer signature failed verification.
+    SIGNATURE_INVALID = 8;
+  }
+  Status status = 2;
+
+  // For APPENDED: monotonic per (region_id, ingest_shard_id).
+  // Per Trace §10.5: deterministic_replay_order_not_global_happens_before.
+  IngestPosition ingest_position = 3;
+
+  // For QUARANTINED / SIGNATURE_INVALID / etc.
+  spendguard.common.v1.Error error = 4;
+}
+
+// Ingest position (per Trace §10.5).
+message IngestPosition {
+  string region_id = 1;
+  string ingest_shard_id = 2;
+  uint64 ingest_log_offset = 3;
+}
+
+// ============================================================================
+// VerifySchemaBundle
+// ============================================================================
+
+message VerifySchemaBundleRequest {
+  spendguard.common.v1.SchemaBundleRef schema_bundle = 1;
+}
+
+message VerifySchemaBundleResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    KNOWN = 1;
+    UNKNOWN = 2;             // ingest will register with audit event
+    HASH_MISMATCH = 3;
+  }
+  Status status = 1;
+  spendguard.common.v1.Error error = 2;
+}
+
+// ============================================================================
+// QueryAuditChain
+// ============================================================================
+
+message QueryAuditChainRequest {
+  string tenant_id = 1;
+
+  // One of decision_id / run_id / reservation_id (server picks index).
+  oneof anchor {
+    string decision_id = 2;
+    string run_id = 3;
+    string reservation_id = 4;
+  }
+
+  // Optional filters.
+  google.protobuf.Timestamp from = 5;
+  google.protobuf.Timestamp to = 6;
+
+  // Storage class filter (per Trace §10.2).
+  // Default: immutable_audit_log + canonical_raw_log.
+  // profile_payload_blob requires explicit consent + retention check.
+  enum StorageClass {
+    STORAGE_CLASS_UNSPECIFIED = 0;
+    IMMUTABLE_AUDIT_LOG = 1;
+    CANONICAL_RAW_LOG = 2;
+    PROFILE_PAYLOAD_BLOB = 3;
+  }
+  repeated StorageClass storage_classes = 7;
+}
+
+message AuditChainEvent {
+  spendguard.common.v1.CloudEvent event = 1;
+  IngestPosition ingest_position = 2;
+  google.protobuf.Timestamp ingested_at = 3;
+  QueryAuditChainRequest.StorageClass storage_class = 4;
+}

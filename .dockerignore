@@ -1,0 +1,31 @@
+# Speed up `docker build` by keeping the build context small.
+# Each demo service's Dockerfile uses `context: ../..` (workspace root)
+# so without this file the Rust target/ caches + Python virtualenvs +
+# editor metadata would all get sent to the daemon every build.
+
+**/target/
+**/.git/
+**/__pycache__/
+**/.pytest_cache/
+**/.mypy_cache/
+**/.ruff_cache/
+**/node_modules/
+**/.venv/
+**/venv/
+**/.env
+**/.DS_Store
+**/.idea/
+**/.vscode/
+
+# Adapter-specific
+adapters/pydantic-ai/dist/
+adapters/pydantic-ai/build/
+adapters/pydantic-ai/*.egg-info/
+
+# Demo init outputs (volumes hold the live state)
+deploy/demo/init/pki/*.crt
+deploy/demo/init/pki/*.key
+deploy/demo/init/pki/*.hex
+deploy/demo/init/bundles/contract_bundle/
+deploy/demo/init/bundles/schema_bundle/
+deploy/demo/init/manifest/store/

@@ -1,0 +1,285 @@
+# SpendGuard end-to-end POC compose topology.
+#
+# Services (start order enforced via depends_on + healthchecks):
+#   1. postgres                  — PostgreSQL with two DBs (ledger + canonical_ingest)
+#   2. pki-init                  — generates root CA + per-service workload certs (one-shot)
+#   3. bundles-init              — pre-bakes contract / schema bundles + signs manifest (one-shot)
+#   4. endpoint-catalog          — HTTPS server hosting signed manifest (Helm-pinned trust root)
+#   5. ledger                    — Rust mTLS gRPC service over postgres
+#   6. canonical-ingest          — Rust mTLS gRPC service over postgres
+#   7. sidecar                   — Rust UDS gRPC server + mTLS client to ledger / canonical_ingest
+#   8. demo                      — Python adapter + Pydantic-AI agent + Mock LLM model
+#
+# All services share `spendguard-net` for service-to-service communication.
+# UDS is exposed via the `sidecar-uds` named volume mounted into both
+# sidecar and demo containers. Bundles + PKI live in named volumes so that
+# init containers can populate them before runtime containers consume.
+#
+# Bring-up:    `make demo-up` (or `docker compose up --build --abort-on-container-exit demo`)
+# Tear-down:   `make demo-down`
+#
+# Notes:
+#   - Postgres listens on :5433 (host) so it doesn't collide with other
+#     dev containers that already use the default :5432.
+#   - Endpoint catalog HTTPS uses port :8443 internal; certs are signed
+#     by the PKI root CA so reqwest's default trust store (after
+#     update-ca-certificates is run inside the sidecar image) accepts.
+#   - The demo container blocks on adapter→sidecar UDS readiness, runs
+#     the Pydantic-AI agent against a Mock model, prints the gated call,
+#     and exits 0 on success.
+
+name: spendguard-demo
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: spendguard-postgres
+    environment:
+      POSTGRES_USER: spendguard
+      POSTGRES_PASSWORD: spendguard_demo
+      POSTGRES_DB: postgres            # bootstrap; init scripts create the two app DBs
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./init/migrations:/docker-entrypoint-initdb.d:ro
+      - ../../services/ledger/migrations:/var/spendguard/ledger-migrations:ro
+      - ../../services/canonical_ingest/migrations:/var/spendguard/canonical-migrations:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spendguard -d spendguard_ledger"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [spendguard-net]
+
+  pki-init:
+    build:
+      context: ./init/pki
+    container_name: spendguard-pki-init
+    volumes:
+      - pki-data:/pki
+    networks: [spendguard-net]
+
+  bundles-init:
+    build:
+      context: ./init/bundles
+    container_name: spendguard-bundles-init
+    environment:
+      CONTRACT_BUNDLE_ID:    "11111111-1111-4111-8111-111111111111"
+      SCHEMA_BUNDLE_ID:      "22222222-2222-4222-8222-222222222222"
+      PRICING_VERSION:       "demo-pricing-v1"
+      FX_RATE_VERSION:       "demo-fx-v1"
+      UNIT_CONVERSION_VERSION: "demo-units-v1"
+      SIGNING_KEY_ID:        "demo-key-1"
+    volumes:
+      - bundles-data:/bundles
+    networks: [spendguard-net]
+
+  manifest-init:
+    build:
+      context: ./init/manifest
+    container_name: spendguard-manifest-init
+    environment:
+      CATALOG_VERSION_ID:    "ctlg-demo-rev1"
+      CATALOG_SERVE_HOST:    "endpoint-catalog"
+      CATALOG_SERVE_PORT:    "8443"
+      MANIFEST_VALID_HOURS:  "24"
+    volumes:
+      - manifest-data:/manifest
+    depends_on:
+      bundles-init:
+        condition: service_completed_successfully
+    networks: [spendguard-net]
+
+  endpoint-catalog:
+    image: nginx:1.27-alpine
+    container_name: spendguard-endpoint-catalog
+    volumes:
+      - manifest-data:/usr/share/nginx/html:ro
+      - pki-data:/etc/ssl/spendguard:ro
+      - ./init/manifest/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      pki-init:
+        condition: service_completed_successfully
+      manifest-init:
+        condition: service_completed_successfully
+    healthcheck:
+      # Use 127.0.0.1 explicitly: nginx listens on 0.0.0.0:8443 (IPv4
+      # only) per default.conf, but `localhost` inside the container
+      # resolves to ::1 first and wget refuses to fall through.
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O - https://127.0.0.1:8443/v1/catalog/manifest > /dev/null"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+    networks:
+      spendguard-net:
+        aliases: [endpoint-catalog]
+
+  ledger:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.ledger
+    container_name: spendguard-ledger
+    environment:
+      RUST_LOG:                              "info,spendguard_ledger=debug"
+      SPENDGUARD_LEDGER_BIND_ADDR:           "0.0.0.0:50051"
+      SPENDGUARD_LEDGER_DATABASE_URL:        "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
+      SPENDGUARD_LEDGER_TENANT_ID:           "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_LEDGER_REGION:              "demo"
+      SPENDGUARD_LEDGER_WORKLOAD_INSTANCE_ID: "ledger-demo-1"
+      SPENDGUARD_LEDGER_PRODUCER_SIGNING_KEY_ID: "demo-key-1"
+      # mTLS server material (paths inside the container).
+      SPENDGUARD_LEDGER_TLS_CERT_PEM: "/etc/ssl/spendguard/ledger.crt"
+      SPENDGUARD_LEDGER_TLS_KEY_PEM:  "/etc/ssl/spendguard/ledger.key"
+      SPENDGUARD_LEDGER_TLS_CA_PEM:   "/etc/ssl/spendguard/ca.crt"
+      # Demo runs against a single Postgres instance (no sync replica),
+      # so verify_durability_settings would hard-fail without this
+      # opt-out. Production deployments MUST leave this unset and ensure
+      # synchronous_commit + synchronous_standby_names are configured
+      # per Stage 2 §4.2 + Ledger §19.
+      SPENDGUARD_LEDGER_ALLOW_UNSAFE_DURABILITY: "true"
+    volumes:
+      - pki-data:/etc/ssl/spendguard:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pki-init:
+        condition: service_completed_successfully
+    # No healthcheck: tonic's gRPC reflection isn't enabled; readiness
+    # is gated by sidecar's own /readyz which tries the connection.
+    networks:
+      spendguard-net:
+        aliases: [ledger]
+
+  canonical-ingest:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.canonical_ingest
+    container_name: spendguard-canonical-ingest
+    environment:
+      RUST_LOG:                                       "info,spendguard_canonical_ingest=debug"
+      SPENDGUARD_CANONICAL_INGEST_BIND_ADDR:          "0.0.0.0:50052"
+      SPENDGUARD_CANONICAL_INGEST_DATABASE_URL:       "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_canonical?sslmode=disable"
+      SPENDGUARD_CANONICAL_INGEST_TENANT_ID:          "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_CANONICAL_INGEST_REGION:             "demo"
+      SPENDGUARD_CANONICAL_INGEST_WORKLOAD_INSTANCE_ID: "canonical-ingest-demo-1"
+      SPENDGUARD_CANONICAL_INGEST_TLS_CERT_PEM: "/etc/ssl/spendguard/canonical_ingest.crt"
+      SPENDGUARD_CANONICAL_INGEST_TLS_KEY_PEM:  "/etc/ssl/spendguard/canonical_ingest.key"
+      SPENDGUARD_CANONICAL_INGEST_TLS_CA_PEM:   "/etc/ssl/spendguard/ca.crt"
+      # Required by canonical_ingest config (no default in
+      # services/canonical_ingest/src/config.rs).
+      SPENDGUARD_CANONICAL_INGEST_INGEST_SHARD_ID: "demo-shard-0"
+    volumes:
+      - pki-data:/etc/ssl/spendguard:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      pki-init:
+        condition: service_completed_successfully
+    networks:
+      spendguard-net:
+        aliases: [canonical-ingest]
+
+  sidecar:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.sidecar
+    container_name: spendguard-sidecar
+    environment:
+      RUST_LOG: "debug,spendguard_sidecar=trace,tonic=debug,h2=debug,tower=debug"
+      # Identity
+      SPENDGUARD_SIDECAR_TENANT_ID:                "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID:     "sidecar-demo-1"
+      SPENDGUARD_SIDECAR_REGION:                   "demo"
+      # UDS for adapter
+      SPENDGUARD_SIDECAR_UDS_PATH:                 "/var/run/spendguard/adapter.sock"
+      # Endpoint catalog (HTTPS) + manifest verifier
+      SPENDGUARD_SIDECAR_ENDPOINT_CATALOG_MANIFEST_URL: "https://endpoint-catalog:8443/v1/catalog/manifest"
+      SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM:  "/etc/spendguard/manifest_verify_key.pub.pem"
+      # Trust pin + bundle hash are populated at container start by
+      # sidecar-entrypoint.sh, which reads /etc/ssl/spendguard/ca.crt +
+      # /var/lib/spendguard/bundles/runtime.env and exports the right
+      # env vars before exec'ing the binary. The sidecar config schema
+      # requires these but compose can't resolve them at parse time
+      # because they depend on init-container output.
+      SPENDGUARD_SIDECAR_MTLS_BOOTSTRAP_TOKEN:     "demo-bootstrap-token"
+      # Bundle bootstrap
+      SPENDGUARD_SIDECAR_BUNDLE_ROOT:              "/var/lib/spendguard/bundles"
+      SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_ID:       "11111111-1111-4111-8111-111111111111"
+      SPENDGUARD_SIDECAR_SCHEMA_BUNDLE_ID:         "22222222-2222-4222-8222-222222222222"
+      # Fencing bootstrap (operator-pre-provisioned scope; demo seeds via SQL)
+      SPENDGUARD_SIDECAR_FENCING_SCOPE_ID:         "33333333-3333-4333-8333-333333333333"
+      # epoch 1, not 0: post_ledger_transaction() rejects epoch 0 as
+      # "not a valid lease" (a properly-acquired lease has CAS-incremented
+      # at least once). The seed SQL inserts current_epoch=1.
+      SPENDGUARD_SIDECAR_FENCING_INITIAL_EPOCH:    "1"
+      # Upstream URLs (mTLS gRPC over docker DNS)
+      SPENDGUARD_SIDECAR_LEDGER_URL:               "https://ledger:50051"
+      SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL:     "https://canonical-ingest:50052"
+      # Health probe
+      SPENDGUARD_SIDECAR_HEALTH_ADDR:              "0.0.0.0:8080"
+      SPENDGUARD_SIDECAR_METRICS_ADDR:             "0.0.0.0:9090"
+    volumes:
+      - pki-data:/etc/ssl/spendguard:ro
+      - bundles-data:/var/lib/spendguard/bundles:ro
+      - manifest-data:/etc/spendguard:ro
+      - sidecar-uds:/var/run/spendguard
+    depends_on:
+      ledger:
+        condition: service_started
+      canonical-ingest:
+        condition: service_started
+      endpoint-catalog:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz | grep -q ready"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+    networks: [spendguard-net]
+
+  demo:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.adapter
+    container_name: spendguard-demo
+    environment:
+      SPENDGUARD_SIDECAR_UDS:                  "/var/run/spendguard/adapter.sock"
+      SPENDGUARD_TENANT_ID:                    "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_BUDGET_ID:                    "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_WINDOW_INSTANCE_ID:           "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_UNIT_ID:                      "66666666-6666-4666-8666-666666666666"
+      SPENDGUARD_PRICING_VERSION:              "demo-pricing-v1"
+      SPENDGUARD_FX_RATE_VERSION:              "demo-fx-v1"
+      SPENDGUARD_UNIT_CONVERSION_VERSION:      "demo-units-v1"
+      # SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX is sourced from the bundles
+      # volume's runtime.env at container start (see entrypoint).
+      # Phase 2B Step 8: webhook simulator talks directly to ledger gRPC.
+      SPENDGUARD_LEDGER_URL:                   "https://ledger:50051"
+      SPENDGUARD_DEMO_TLS_CERT_PEM:            "/etc/ssl/spendguard/ledger.crt"
+      SPENDGUARD_DEMO_TLS_KEY_PEM:             "/etc/ssl/spendguard/ledger.key"
+      SPENDGUARD_DEMO_TLS_CA_PEM:              "/etc/ssl/spendguard/ca.crt"
+      SPENDGUARD_DEMO_WEBHOOK_FENCING_SCOPE_ID: "00000000-0000-7000-a000-000000000050"
+      SPENDGUARD_DEMO_WEBHOOK_WORKLOAD_INSTANCE_ID: "demo-webhook-receiver"
+    volumes:
+      - sidecar-uds:/var/run/spendguard:ro
+      - bundles-data:/var/lib/spendguard/bundles:ro
+      - pki-data:/etc/ssl/spendguard:ro
+    depends_on:
+      sidecar:
+        condition: service_healthy
+    networks: [spendguard-net]
+
+networks:
+  spendguard-net:
+    driver: bridge
+
+volumes:
+  postgres-data:
+  pki-data:
+  bundles-data:
+  manifest-data:
+  sidecar-uds:
