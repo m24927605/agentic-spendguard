@@ -10,12 +10,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install adapter dev deps (grpcio-tools is needed for `make proto`).
+# httpx added for Step 11 webhook receiver client.
 RUN pip install --no-cache-dir \
     "grpcio>=1.62" \
     "grpcio-tools>=1.62" \
     "protobuf>=4.25,<6" \
     "pydantic>=2.6" \
-    "pydantic-ai>=0.0.20,<0.1.0"
+    "pydantic-ai>=0.0.20,<0.1.0" \
+    "httpx>=0.27"
 
 WORKDIR /build
 COPY proto ./proto

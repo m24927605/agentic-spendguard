@@ -25,7 +25,7 @@ demo-build:
 demo-up:
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init manifest-init endpoint-catalog \
-	    ledger canonical-ingest sidecar
+	    ledger canonical-ingest sidecar webhook-receiver
 	@echo "[demo] core services up; running demo container (DEMO_MODE=$(DEMO_MODE))..."
 	$(COMPOSE) run --rm \
 	    --env SPENDGUARD_DEMO_MODE=$(DEMO_MODE) \

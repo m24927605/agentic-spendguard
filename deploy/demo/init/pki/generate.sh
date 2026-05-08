@@ -22,13 +22,15 @@ set -eu
 OUT=/pki
 mkdir -p "$OUT"
 
-if [ -f "$OUT/ca.crt" ] && [ -f "$OUT/sidecar.crt" ] && [ -f "$OUT/ca.spki.sha256.hex" ]; then
-    echo "[pki] existing CA + workload certs detected, skipping generation"
-    ls -la "$OUT"
-    exit 0
-fi
+# Per-cert idempotency (Codex webhook r2 P2.2):
+#   Top-level skip used to be all-or-nothing. New certs added later
+#   (e.g. webhook_receiver) would never be minted on existing volumes.
+#   Now CA + each workload cert is generated independently if missing.
 
 # 1. Root CA --------------------------------------------------------------
+if [ -f "$OUT/ca.crt" ] && [ -f "$OUT/ca.key" ] && [ -f "$OUT/ca.spki.sha256.hex" ]; then
+    echo "[pki] existing CA detected, skipping CA generation"
+else
 echo "[pki] minting root CA..."
 openssl genrsa -out "$OUT/ca.key" 4096 2>/dev/null
 openssl req -x509 -new -nodes \
@@ -48,9 +50,17 @@ openssl x509 -in "$OUT/ca.crt" -outform DER \
   | tr -d '\n' > "$OUT/ca.spki.sha256.hex"
 
 echo "[pki] CA DER cert sha256 (sidecar trust pin): $(cat $OUT/ca.spki.sha256.hex)"
+fi
 
 # 2. Per-service workload certs ------------------------------------------
-for svc in ledger canonical_ingest sidecar endpoint_catalog; do
+# Per-cert idempotent: skip individual cert if already minted. This lets
+# new services (e.g. webhook_receiver) get certs on existing pki-data
+# volumes without rotating the others.
+for svc in ledger canonical_ingest sidecar endpoint_catalog webhook_receiver; do
+    if [ -f "$OUT/$svc.crt" ] && [ -f "$OUT/$svc.key" ]; then
+        echo "[pki] $svc cert already exists, skipping"
+        continue
+    fi
     echo "[pki] minting $svc workload cert..."
     openssl genrsa -out "$OUT/$svc.key" 2048 2>/dev/null
 
@@ -63,6 +73,7 @@ for svc in ledger canonical_ingest sidecar endpoint_catalog; do
     case "$svc" in
         canonical_ingest) dns_alias="canonical-ingest" ;;
         endpoint_catalog) dns_alias="endpoint-catalog" ;;
+        webhook_receiver) dns_alias="webhook-receiver" ;;
         *)                dns_alias="$svc" ;;
     esac
 
@@ -113,6 +124,7 @@ EOF
 done
 
 # 3. Tighten file permissions --------------------------------------------
+# (Idempotent re-runs are fine: chmod always sets the same target perms.)
 chmod 0644 "$OUT"/*.crt "$OUT/ca.spki.sha256.hex"
 chmod 0640 "$OUT"/*.key
 
