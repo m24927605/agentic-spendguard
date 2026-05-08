@@ -117,7 +117,7 @@ class MockLLM:
 # ---------------------------------------------------------------------------
 
 
-async def run_decision_mode() -> int:
+async def run_decision_mode(also_invoice: bool = False) -> int:
     from spendguard_pydantic_ai import (
         SpendGuardClient,
         derive_idempotency_key,
@@ -267,6 +267,28 @@ async def run_decision_mode() -> int:
     )
     if rc != 0:
         return rc
+    if also_invoice:
+        # Phase 2B Step 9: simulate webhook receiver InvoiceReconcile.
+        # Chain: reserve(100)→commit(42)→provider_report(38)→invoice(40).
+        # delta = invoice - provider_reported = 40 - 38 = +2.
+        # Final per-account: available=460, committed=40, reserved=0.
+        # Webhook simulator allocates 2 contiguous seqs (decision=2, outcome=3)
+        # in same workload-instance space as provider_report (seq=1).
+        rc = await simulate_webhook_invoice_reconcile(
+            tenant_id=tenant_id,
+            budget_id=budget_id,
+            window_id=window_id,
+            unit_id=unit_id,
+            pricing=pricing,
+            reservation_id=reservation_id,
+            invoice_amount_atomic="40",
+            provider="mock-llm",
+            provider_account="demo-tenant",
+            provider_invoice_id=f"inv-{reservation_id[:8]}",
+            outcome_producer_seq=3,
+        )
+        if rc != 0:
+            return rc
     return 0
 
 
@@ -410,6 +432,154 @@ async def simulate_webhook_provider_report(
     return 7
 
 
+async def simulate_webhook_invoice_reconcile(
+    *,
+    tenant_id: str,
+    budget_id: str,
+    window_id: str,
+    unit_id: str,
+    pricing: "common_pb2.PricingFreeze",  # type: ignore[name-defined]
+    reservation_id: str,
+    invoice_amount_atomic: str,
+    provider: str,
+    provider_account: str,
+    provider_invoice_id: str,
+    outcome_producer_seq: int,
+) -> int:
+    """Step 9 demo: open ledger mTLS gRPC client and call InvoiceReconcile
+    with webhook-namespaced decision_id + idempotency_key derived from
+    sha256("invoice_reconcile:{provider}:{provider_account}:{provider_invoice_id}").
+
+    Wire's audit_event field carries the OUTCOME CloudEvent (FINAL close);
+    handler synthesizes the audit.decision row server-side. Caller pre-
+    allocates 2 contiguous producer_sequence values (decision=N, outcome=N+1)
+    in this workload-instance space and passes N+1 (outcome_producer_seq).
+    SP back-derives decision_seq = N+1 - 1.
+    """
+    import hashlib
+    import grpc.aio
+    from google.protobuf import timestamp_pb2
+    from spendguard_pydantic_ai import new_uuid7
+    from spendguard_pydantic_ai._proto.spendguard.common.v1 import common_pb2 as cpb
+    from spendguard_pydantic_ai._proto.spendguard.ledger.v1 import (
+        ledger_pb2 as lpb,
+        ledger_pb2_grpc as lpb_grpc,
+    )
+
+    ledger_url = _env("SPENDGUARD_LEDGER_URL")
+    cert_path = _env("SPENDGUARD_DEMO_TLS_CERT_PEM")
+    key_path = _env("SPENDGUARD_DEMO_TLS_KEY_PEM")
+    ca_path = _env("SPENDGUARD_DEMO_TLS_CA_PEM")
+    fencing_scope_id = _env("SPENDGUARD_DEMO_WEBHOOK_FENCING_SCOPE_ID")
+    workload_instance_id = _env("SPENDGUARD_DEMO_WEBHOOK_WORKLOAD_INSTANCE_ID")
+
+    target = ledger_url.removeprefix("https://").removeprefix("http://")
+
+    with open(cert_path, "rb") as f:
+        cert_bytes = f.read()
+    with open(key_path, "rb") as f:
+        key_bytes = f.read()
+    with open(ca_path, "rb") as f:
+        ca_bytes = f.read()
+    creds = grpc.ssl_channel_credentials(
+        root_certificates=ca_bytes,
+        private_key=key_bytes,
+        certificate_chain=cert_bytes,
+    )
+    options = [("grpc.ssl_target_name_override", "ledger.spendguard.internal")]
+
+    # Webhook-namespaced identity (mirror Step 8 M2.1).
+    namespaced = f"invoice_reconcile:{provider}:{provider_account}:{provider_invoice_id}"
+    digest = hashlib.sha256(namespaced.encode()).digest()
+    decision_id_bytes = bytearray(digest[:16])
+    decision_id_bytes[6] = (decision_id_bytes[6] & 0x0F) | 0x40  # v4
+    decision_id_bytes[8] = (decision_id_bytes[8] & 0x3F) | 0x80
+    decision_id = (
+        decision_id_bytes[0:4].hex()
+        + "-"
+        + decision_id_bytes[4:6].hex()
+        + "-"
+        + decision_id_bytes[6:8].hex()
+        + "-"
+        + decision_id_bytes[8:10].hex()
+        + "-"
+        + decision_id_bytes[10:16].hex()
+    )
+    outcome_audit_event_id = str(new_uuid7())
+
+    ts = timestamp_pb2.Timestamp()
+    ts.GetCurrentTime()
+
+    # Outcome CloudEvent (FINAL close; caller-signed in production —
+    # POC uses empty signature). data MUST be non-empty (Step 9 v7 invariant).
+    outcome_cloud_event = cpb.CloudEvent(
+        specversion="1.0",
+        type="spendguard.audit.outcome",
+        source=f"webhook-receiver://{provider}/{provider_account}",
+        id=outcome_audit_event_id,
+        time=ts,
+        datacontenttype="application/json",
+        data=(
+            '{"kind":"invoice_reconcile","provider":"' + provider + '",'
+            '"provider_account":"' + provider_account + '",'
+            '"provider_invoice_id":"' + provider_invoice_id + '",'
+            '"invoice_amount_atomic":"' + invoice_amount_atomic + '"}'
+        ).encode(),
+        tenant_id=tenant_id,
+        decision_id=decision_id,
+        producer_id=f"demo-webhook-receiver:{workload_instance_id}",
+        producer_sequence=outcome_producer_seq,
+    )
+
+    request = lpb.InvoiceReconcileRequest(
+        tenant_id=tenant_id,
+        provider_invoice_id=namespaced,
+        invoice_reconciled_amount_atomic=invoice_amount_atomic,
+        unit=cpb.UnitRef(unit_id=unit_id),
+        reservation_id=reservation_id,
+        idempotency=cpb.Idempotency(key=namespaced, request_hash=b""),
+        pricing=pricing,
+        audit_event=outcome_cloud_event,
+        producer_sequence=outcome_producer_seq,
+        decision_id=decision_id,
+        fencing=cpb.Fencing(
+            epoch=1,
+            scope_id=fencing_scope_id,
+            workload_instance_id=workload_instance_id,
+        ),
+    )
+
+    print(f"[demo] webhook simulator -> ledger InvoiceReconcile target={target}")
+    async with grpc.aio.secure_channel(target, creds, options=options) as channel:
+        stub = lpb_grpc.LedgerStub(channel)
+        try:
+            resp = await stub.InvoiceReconcile(request, timeout=5.0)
+        except grpc.aio.AioRpcError as e:
+            print(
+                f"[demo] FATAL: InvoiceReconcile RPC failed: code={e.code()} details={e.details()}",
+                file=sys.stderr,
+            )
+            return 8
+    outcome = resp.WhichOneof("outcome")
+    if outcome == "success":
+        s = resp.success
+        print(
+            f"[demo] InvoiceReconcile success ledger_tx={s.ledger_transaction_id} "
+            f"reservation={s.reservation_id} delta_to_reserved={s.delta_to_reserved_atomic}"
+        )
+        return 0
+    if outcome == "replay":
+        r = resp.replay
+        print(f"[demo] InvoiceReconcile replay ledger_tx={r.ledger_transaction_id}")
+        return 0
+    err = resp.error
+    print(
+        f"[demo] FATAL: InvoiceReconcile returned Error code={err.code} message={err.message}",
+        file=sys.stderr,
+    )
+    return 9
+
+
 # ---------------------------------------------------------------------------
 # Agent mode (full Pydantic-AI Agent.run() with Mock LLM)
 # ---------------------------------------------------------------------------
@@ -516,6 +686,8 @@ async def run_agent_mode() -> int:
 async def main() -> int:
     if DEMO_MODE == "decision":
         return await run_decision_mode()
+    if DEMO_MODE == "invoice":
+        return await run_decision_mode(also_invoice=True)
     if DEMO_MODE == "release":
         return await run_release_mode()
     return await run_agent_mode()

@@ -33,6 +33,9 @@ demo-up:
 ifeq ($(DEMO_MODE),decision)
 	@echo "[demo] verifying Phase 2B Step 8 (decision-mode commit + provider_report)..."
 	@$(MAKE) demo-verify-step8
+else ifeq ($(DEMO_MODE),invoice)
+	@echo "[demo] verifying Phase 2B Step 9 (invoice-mode reserve+commit+provider_report+invoice_reconcile)..."
+	@$(MAKE) demo-verify-step9
 else ifeq ($(DEMO_MODE),release)
 	@echo "[demo] verifying Phase 2B Step 7.5 (release-mode reserve + release)..."
 	@$(MAKE) demo-verify-step7_5
@@ -64,7 +67,16 @@ demo-verify-step7_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step7_5.sql
 	@echo "[demo] Step 7.5 verification done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5
+# Phase 2B Step 9 verification: full invoice chain (reserve + commit_estimated +
+# provider_report + invoice_reconcile); available=460 / reserved_hold=0 /
+# committed_spend=40; commits.latest_state='invoice_reconciled';
+# delta_to_reserved=-60; dual-row audit (decision+outcome) with :decision /
+# :outcome idempotency_key suffixes in global_keys.
+demo-verify-step9:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step9.sql
+	@echo "[demo] Step 9 verification done"
+
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

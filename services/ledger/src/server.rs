@@ -72,9 +72,10 @@ impl Ledger for LedgerService {
 
     async fn invoice_reconcile(
         &self,
-        _req: Request<InvoiceReconcileRequest>,
+        req: Request<InvoiceReconcileRequest>,
     ) -> Result<Response<InvoiceReconcileResponse>, Status> {
-        Err(Status::unimplemented("InvoiceReconcile: vertical slice expansion in progress"))
+        let resp = handlers::invoice_reconcile::handle(&self.pool, req.into_inner()).await?;
+        Ok(Response::new(resp))
     }
 
     async fn refund_credit(

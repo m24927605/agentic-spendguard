@@ -207,6 +207,15 @@ pub fn map_pg_error(err: sqlx::Error) -> DomainError {
                 "P0001" if msg.contains("OVERRUN_RESERVATION") => {
                     DomainError::OverrunReservation(msg.to_string())
                 }
+                // Step 9 invoice_reconcile SP raises:
+                "P0001" if msg.contains("AUDIT_INVARIANT_VIOLATED") => {
+                    DomainError::AuditInvariantViolated(msg.to_string())
+                }
+                "P0001" if msg.contains("INVALID_PRODUCER_SEQUENCE")
+                    || msg.contains("PRODUCER_SEQUENCE_MISMATCH") =>
+                {
+                    DomainError::AuditInvariantViolated(msg.to_string())
+                }
                 "P0001" if msg.contains("COMMIT_ROW_DIVERGENT") => {
                     DomainError::IdempotencyConflict
                 }

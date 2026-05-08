@@ -1,5 +1,6 @@
 pub mod pool;
 pub mod post_commit_estimated;
+pub mod post_invoice_reconciled;
 pub mod post_provider_reported;
 pub mod post_release;
 pub mod post_transaction;
