@@ -1,1 +1,11 @@
 .ait/
+
+# AIT framework local hook config (absolute paths to user pipx venv).
+.claude/
+.codex/
+
+# direnv local PATH setup (regenerated per checkout).
+.envrc
+
+# AIT per-session context file (regenerated each session).
+.ait-context.md
