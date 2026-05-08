@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.spendguard.ai/endpoint_catalog/v1/manifest.schema.json",
+  "title": "Endpoint Catalog Manifest (v1)",
+  "description": "Signed pointer to current catalog version. Pull endpoint MUST serve with Cache-Control: no-store. Sidecar polls at least every 5 minutes (Sidecar §8 critical_revocation_max_stale).\n\nSpec references:\n  - Sidecar Architecture spec v1alpha1 §8 (endpoint discovery + signed catalog)\n  - Stage 2 POC Topology spec v1alpha1 §8.2.4 (Endpoint Catalog atomic update model), §10.4 (POC Tier 3)\n\nCompatibility: additive-only schema evolution; new fields tolerated at the consumer.",
+  "type": "object",
+  "required": [
+    "manifest_version",
+    "current_catalog_version_id",
+    "current_catalog_url",
+    "current_catalog_hash",
+    "issued_at",
+    "valid_until",
+    "signing_key_id",
+    "signature"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "manifest_version": {
+      "type": "string",
+      "description": "Manifest schema version (semver)",
+      "examples": ["1.0.0"]
+    },
+    "current_catalog_version_id": {
+      "type": "string",
+      "description": "Identifier of the immutable catalog object pointed to. Format: ctlg-<rfc3339-utc>-<discriminator>, where <discriminator> is either rev<int> or a UUIDv7 in 'simple' (32 hex chars) form. UUIDv7 is preferred for collision-free monotonic uniqueness.",
+      "pattern": "^ctlg-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}(:[0-9]{2})?Z-([0-9a-f]{32}|rev[0-9]+)$"
+    },
+    "current_catalog_url": {
+      "type": "string",
+      "format": "uri",
+      "description": "HTTPS URL to fetch the immutable catalog object. CDN-cacheable for 24h."
+    },
+    "current_catalog_hash": {
+      "type": "string",
+      "description": "sha256 hash of the catalog object body (hex lowercase, 64 chars)",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "issued_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "When this manifest was signed."
+    },
+    "valid_until": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Manifest expiry. Sidecar fail-closes for enforcement routes if no valid manifest within last_verified_critical_version_age > 5min (Sidecar §8)."
+    },
+    "signing_key_id": {
+      "type": "string",
+      "description": "Key id used to sign the manifest; sidecar verifies against pinned trust root."
+    },
+    "signature": {
+      "type": "string",
+      "description": "Base64-encoded ed25519 signature over canonical JSON of the manifest body (excluding signature field).",
+      "contentEncoding": "base64"
+    },
+    "tenant_overrides": {
+      "type": "array",
+      "description": "Optional per-tenant catalog override pointers; absent means tenant uses default.",
+      "items": {
+        "type": "object",
+        "required": ["tenant_id", "current_catalog_version_id", "current_catalog_url", "current_catalog_hash"],
+        "properties": {
+          "tenant_id": { "type": "string", "description": "UUID v7" },
+          "current_catalog_version_id": { "type": "string" },
+          "current_catalog_url": { "type": "string", "format": "uri" },
+          "current_catalog_hash": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+        },
+        "additionalProperties": false
+      }
+    }
+  }
+}

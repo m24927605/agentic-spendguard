@@ -1,0 +1,111 @@
+name: Publish Contract Bundle
+
+# Build and publish a tenant's contract bundle, including the frozen
+# pricing snapshot retrieved from the Platform Pricing Authority DB
+# (Stage 2 §9.4 — pricing freeze at build time, NOT hot path).
+
+on:
+  workflow_dispatch:
+    inputs:
+      tenant_id:
+        description: 'Tenant id (UUID v7)'
+        required: true
+      contract_name:
+        description: 'Contract name (e.g. quickstart-daily-budget)'
+        required: true
+      tag:
+        description: 'Bundle version tag (e.g. v1.0.0)'
+        required: true
+      pricing_version:
+        description: 'pricing_version to freeze into bundle'
+        required: true
+      fx_rate_version:
+        description: 'fx_rate_version'
+        required: true
+      unit_conversion_version:
+        description: 'unit_conversion_version'
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      NAMESPACE: ${{ github.repository_owner }}/spendguard/bundles/contract_bundle
+      COSIGN_EXPERIMENTAL: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ORAS + cosign + jq
+        run: |
+          curl -sSL https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz | tar -xz
+          sudo mv oras /usr/local/bin/
+          curl -sSL https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 -o cosign
+          sudo install -m 0755 cosign /usr/local/bin/cosign
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Resolve pricing snapshot from Platform Pricing DB
+        id: pricing
+        env:
+          PLATFORM_PRICING_DSN: ${{ secrets.PLATFORM_PRICING_DSN }}
+          PRICING_VERSION: ${{ inputs.pricing_version }}
+          FX_VERSION: ${{ inputs.fx_rate_version }}
+          UC_VERSION: ${{ inputs.unit_conversion_version }}
+        run: |
+          # Pull pricing schema for the requested versions and emit
+          # canonical hash. Pricing DB read is COLD path (build time).
+          ./services/bundle_registry/tools/fetch-pricing-snapshot.sh \
+            "${PRICING_VERSION}" "${FX_VERSION}" "${UC_VERSION}" > /tmp/pricing.json
+          PRICING_HASH=$(sha256sum /tmp/pricing.json | awk '{print $1}')
+          echo "pricing_hash=${PRICING_HASH}" >> $GITHUB_OUTPUT
+
+      - name: Build contract bundle
+        env:
+          TENANT_ID: ${{ inputs.tenant_id }}
+          CONTRACT_NAME: ${{ inputs.contract_name }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          BUNDLE_DIR=$(mktemp -d)
+          cp -r contracts/${CONTRACT_NAME}/. ${BUNDLE_DIR}/
+          cp /tmp/pricing.json ${BUNDLE_DIR}/pricing-snapshot.json
+          tar -czf /tmp/contract-bundle.tgz -C ${BUNDLE_DIR} .
+          echo "BUNDLE_REF=${{ env.REGISTRY }}/${NAMESPACE}/${TENANT_ID}/${CONTRACT_NAME}:${TAG}" >> $GITHUB_ENV
+
+      - name: Push as OCI artifact
+        run: |
+          oras push "${BUNDLE_REF}" \
+            --artifact-type application/vnd.spendguard.contract-bundle.v1alpha1+tar \
+            --annotation "spendguard.pricing_version=${{ inputs.pricing_version }}" \
+            --annotation "spendguard.fx_rate_version=${{ inputs.fx_rate_version }}" \
+            --annotation "spendguard.unit_conversion_version=${{ inputs.unit_conversion_version }}" \
+            --annotation "spendguard.pricing_hash=${{ steps.pricing.outputs.pricing_hash }}" \
+            /tmp/contract-bundle.tgz:application/gzip
+
+      - name: Cosign sign (keyless)
+        run: cosign sign --yes "${BUNDLE_REF}"
+
+      - name: Verify signature
+        run: |
+          cosign verify "${BUNDLE_REF}" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+      - name: Notify ledger pricing_snapshots cache
+        env:
+          LEDGER_NOTIFY_URL: ${{ secrets.LEDGER_NOTIFY_URL }}
+          LEDGER_NOTIFY_TOKEN: ${{ secrets.LEDGER_NOTIFY_TOKEN }}
+        run: |
+          # POST to control plane internal endpoint that updates the
+          # tenant ledger DB pricing_snapshots cache (Stage 2 §9.4
+          # event-driven update).
+          curl -sf -X POST "${LEDGER_NOTIFY_URL}/internal/pricing-snapshot-updated" \
+            -H "Authorization: Bearer ${LEDGER_NOTIFY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"tenant_id\":\"${{ inputs.tenant_id }}\",\"pricing_version\":\"${{ inputs.pricing_version }}\",\"price_snapshot_hash\":\"${{ steps.pricing.outputs.pricing_hash }}\"}"

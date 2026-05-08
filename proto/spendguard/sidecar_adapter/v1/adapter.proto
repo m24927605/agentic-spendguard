@@ -1,0 +1,467 @@
+// SpendGuard Sidecar ↔ Adapter IPC.
+//
+// Spec references:
+//   - Sidecar Architecture spec v1alpha1 §3 (in_process_adapter +
+//     local_sidecar responsibilities), §5 (UDS peer credentials + handshake),
+//     §11 (lifecycle drain)
+//   - Contract DSL spec v1alpha1 §6 (decision transaction stages),
+//     §11 (effect schema + RFC6902 mutation patches), §15 (trigger points),
+//     §8 (sub-agent budget grant)
+//   - Trace Schema spec v1alpha1 §3.4 (idempotency_key fallback),
+//     §7 (span tree + canonical events)
+//   - Stage 2 POC Topology spec v1alpha1 §4.6 (adapter publish API
+//     idempotency via effect_hash), §11 (adapter UDS gRPC)
+//
+// Transport: gRPC over Unix Domain Socket (Linux/macOS) or named pipe
+// (Windows fallback). Auth: SO_PEERCRED / LOCAL_PEERCRED (per Sidecar §5).
+// No mTLS over UDS (peer credentials suffice).
+//
+// Compatibility: proto3, additive evolution; protocol_handshake negotiates
+// version + capability levels.
+
+syntax = "proto3";
+
+package spendguard.sidecar_adapter.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+import "spendguard/common/v1/common.proto";
+
+// ============================================================================
+// SERVICE
+// ============================================================================
+
+service SidecarAdapter {
+  // -- Handshake (per Sidecar §5 protocol_handshake) ------------------------
+
+  // Initial handshake; mandatory before any other RPC. Negotiates SDK version,
+  // runtime kind, capability level, tenant_id assertion, key epochs.
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+
+  // -- Decision boundary (per Contract §15 trigger points) -----------------
+
+  // Adapter requests a decision at a *.pre trigger point.
+  // Sidecar runs Contract §6 stages 1-5 and returns DecisionResult.
+  // Sidecar may take up to Contract §14 latency budget (50ms p99 warm).
+  rpc RequestDecision(DecisionRequest) returns (DecisionResponse);
+
+  // Adapter confirms publish_effect outcome (per Contract §6 stage 7).
+  // Idempotent via effect_hash (Stage 2 §4.6).
+  rpc ConfirmPublishOutcome(PublishOutcomeRequest)
+      returns (PublishOutcomeResponse);
+
+  // -- Trace events (per Contract §15 *.post triggers; observation only) ---
+
+  // Adapter emits canonical/lifecycle events (agent.run.start, agent.step.post
+  // tool.call.post, llm.call.post for commit, etc.). Server-streamed because
+  // sidecar may emit follow-up acks or correction events.
+  rpc EmitTraceEvents(stream TraceEvent) returns (stream TraceEventAck);
+
+  // -- Sub-agent budget grant (per Contract §8) ----------------------------
+
+  // Parent agent requests budget_grant JWT to delegate to child agent.
+  rpc IssueBudgetGrant(IssueBudgetGrantRequest)
+      returns (IssueBudgetGrantResponse);
+
+  // Parent revokes a previously issued grant.
+  rpc RevokeBudgetGrant(RevokeBudgetGrantRequest)
+      returns (RevokeBudgetGrantResponse);
+
+  // Child agent uses grant to bootstrap budget context.
+  rpc ConsumeBudgetGrant(ConsumeBudgetGrantRequest)
+      returns (ConsumeBudgetGrantResponse);
+
+  // -- Lifecycle drain (per Sidecar §11) -----------------------------------
+
+  // Sidecar signals adapter that drain has begun; adapter should stop
+  // initiating new decision boundaries and let in-flight finish.
+  rpc StreamDrainSignal(DrainSubscribeRequest) returns (stream DrainSignal);
+}
+
+// ============================================================================
+// Handshake
+// ============================================================================
+
+message HandshakeRequest {
+  string sdk_version = 1;
+  string runtime_kind = 2;                  // "pydantic-ai" / "langgraph" / etc.
+  string runtime_version = 3;
+
+  enum CapabilityLevel {
+    CAPABILITY_LEVEL_UNSPECIFIED = 0;
+    L0_INGEST = 0x10;                        // OTel ingest only; no enforcement
+    L1_LLM_CALL = 0x20;
+    L2_STEP = 0x30;
+    L3_POLICY_HOOK = 0x40;                   // full step-boundary enforcement
+    L4_RUNTIME_NATIVE = 0x50;                // research-grade; not Phase 1
+  }
+  CapabilityLevel capability_level = 4;
+
+  // Tenant assertion (sidecar verifies vs SO_PEERCRED + signed manifest).
+  string tenant_id_assertion = 5;
+  string workload_instance_id = 6;          // sidecar's own; echo for sanity
+  uint32 protocol_version = 7;               // 1 for this spec
+}
+
+message HandshakeResponse {
+  string sidecar_version = 1;
+  spendguard.common.v1.SchemaBundleRef schema_bundle = 2;
+  spendguard.common.v1.ContractBundleRef contract_bundle = 3;
+
+  // Capability required by loaded contract (per Sidecar §3.3).
+  // If higher than adapter's capability_level → adapter MUST refuse to load.
+  HandshakeRequest.CapabilityLevel capability_required = 4;
+
+  // Active key epochs (per Sidecar §5 v1.1 patch + Trace §6 dual_read).
+  message KeyEpochs {
+    repeated string producer_signing_key_epochs = 1;
+    repeated string hmac_tenant_salt_epochs = 2;
+  }
+  KeyEpochs active_key_epochs = 5;
+
+  uint32 protocol_version = 6;
+
+  // Negotiated session identifiers; adapter must include in subsequent RPCs.
+  string session_id = 7;
+
+  // === Sidecar announcement signature (per Sidecar §5 + Stage 2 §12.1) ===
+  //
+  // Sidecar signs the canonical encoding of all fields above (sidecar_version,
+  // schema_bundle, contract_bundle, capability_required, active_key_epochs,
+  // protocol_version, session_id) using the platform-issued sidecar workload
+  // key. Adapter verifies against the Helm-pinned root CA bundle chain.
+  // Required for Phase 1; without this the adapter cannot trust handshake
+  // claims about bundle/capability state.
+  string signing_key_id = 8;
+  bytes  announcement_signature = 9;       // ed25519 over canonical encoding
+}
+
+// ============================================================================
+// RequestDecision (per Contract §15 *.pre triggers)
+// ============================================================================
+
+message DecisionRequest {
+  string session_id = 1;
+
+  // Trigger point (per Contract §15).
+  enum Trigger {
+    TRIGGER_UNSPECIFIED = 0;
+    RUN_PRE = 1;
+    AGENT_STEP_PRE = 2;
+    LLM_CALL_PRE = 3;
+    TOOL_CALL_PRE = 4;
+  }
+  Trigger trigger = 2;
+
+  // W3C trace context + spendguard IDs (per Trace §3).
+  spendguard.common.v1.TraceContext trace = 3;
+  spendguard.common.v1.SpendGuardIds ids = 4;
+
+  // Route classification (per Contract §scope).
+  string route = 5;
+
+  // Inputs schema (per Contract §12; pre-normalized to canonical units).
+  // Hot-path: NO Platform Pricing DB query here (Stage 2 §9.4).
+  message Inputs {
+    // Estimated cost projection for this decision boundary.
+    // Sidecar normalized via cached pricing schema (in-process, < 1ms).
+    repeated spendguard.common.v1.BudgetClaim projected_claims = 1;
+
+    // Risk band hints (per Contract §14): p50 / p90 / p95 / p99.
+    string projected_p50_atomic = 2;
+    string projected_p90_atomic = 3;
+    string projected_p95_atomic = 4;
+    string projected_p99_atomic = 5;
+    spendguard.common.v1.UnitRef projected_unit = 6;
+
+    // Free-form runtime metadata (kept opaque server-side).
+    google.protobuf.Struct runtime_metadata = 7;
+  }
+  Inputs inputs = 6;
+
+  // Sub-agent context (per Contract §8) — filled if child agent.
+  string parent_run_id = 7;
+  string budget_grant_jti = 8;
+
+  // Idempotency at the trigger level; sidecar may return same decision twice.
+  spendguard.common.v1.Idempotency idempotency = 9;
+}
+
+message DecisionResponse {
+  string decision_id = 1;
+  string audit_decision_event_id = 2;
+
+  // Final decision (per Contract §11 effect schema).
+  enum Decision {
+    DECISION_UNSPECIFIED = 0;
+    CONTINUE = 1;
+    DEGRADE = 2;
+    SKIP = 3;
+    STOP = 4;
+    REQUIRE_APPROVAL = 5;
+  }
+  Decision decision = 3;
+
+  repeated string reason_codes = 4;
+  repeated string matched_rule_ids = 5;
+
+  // Mutation patch (per Contract §11; RFC 6902 restricted).
+  // Only present if decision == DEGRADE.
+  string mutation_patch_json = 6;
+
+  // Idempotency key for adapter.apply_mutation (per Stage 2 §4.6).
+  // Same effect_hash → same mutation; replay safe.
+  bytes effect_hash = 7;
+
+  // Reservation context — effect already reserved + audit committed.
+  string ledger_transaction_id = 8;
+  repeated string reservation_ids = 9;
+  google.protobuf.Timestamp ttl_expires_at = 10;
+
+  // For REQUIRE_APPROVAL: approval_request_id + ttl + approver scope.
+  string approval_request_id = 11;
+  google.protobuf.Timestamp approval_ttl = 12;
+  string approver_role = 13;
+
+  // For STOP: terminal (per Contract §11).
+  bool terminal = 14;
+
+  spendguard.common.v1.Error error = 15;
+}
+
+// ============================================================================
+// ConfirmPublishOutcome
+// ============================================================================
+
+message PublishOutcomeRequest {
+  string session_id = 1;
+  string decision_id = 2;
+  bytes effect_hash = 3;
+
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    APPLIED = 1;                // mutation applied to runtime request
+    APPLIED_NOOP = 2;            // continue / skip / stop with no mutation
+    APPLY_FAILED = 3;            // adapter could not apply (rolled back)
+    APPROVAL_GRANTED = 4;
+    APPROVAL_DENIED = 5;
+    APPROVAL_TIMED_OUT = 6;
+  }
+  Outcome outcome = 4;
+
+  string adapter_error = 5;     // when APPLY_FAILED
+}
+
+message PublishOutcomeResponse {
+  // Audit outcome event id (CloudEvent recorded in audit_outbox).
+  string audit_outcome_event_id = 1;
+  google.protobuf.Timestamp recorded_at = 2;
+  spendguard.common.v1.Error error = 3;
+}
+
+// ============================================================================
+// EmitTraceEvents (observation; *.post triggers + lifecycle)
+// ============================================================================
+
+message TraceEvent {
+  string session_id = 1;
+  spendguard.common.v1.TraceContext trace = 2;
+  spendguard.common.v1.SpendGuardIds ids = 3;
+
+  enum EventKind {
+    EVENT_KIND_UNSPECIFIED = 0;
+    RUN_START = 1;
+    RUN_END = 2;
+    AGENT_STEP_POST = 3;
+    LLM_CALL_POST = 4;        // also drives commit lifecycle
+    TOOL_CALL_POST = 5;
+    SPAN_DELTA = 6;
+    APPROVAL_LIFECYCLE = 7;
+    ROLLBACK = 8;
+  }
+  EventKind kind = 4;
+
+  google.protobuf.Timestamp event_time = 5;
+
+  // Event-kind-specific payload; oneof guarantees typed schema rather than
+  // free-form Struct (Codex review patch — typed LlmCallPost was missing).
+  oneof payload {
+    google.protobuf.Struct generic = 6;          // RUN_*, AGENT_STEP_POST, TOOL_CALL_POST, SPAN_DELTA
+    LlmCallPostPayload llm_call_post = 8;        // drives commit lifecycle
+    ApprovalLifecyclePayload approval = 9;
+    RollbackPayload rollback = 10;
+  }
+
+  // Provider response metadata blob — kept for raw provider-specific headers
+  // not captured by typed LlmCallPostPayload. Optional; canonical truth is
+  // in `llm_call_post.provider_reported`.
+  string provider_response_metadata = 7;
+}
+
+// LLM call post payload (per Contract §6 stage 7 commit_or_release driver).
+//
+// When sidecar receives this, it triggers either CommitEstimated (if no
+// provider response yet — uses risk.p90), or ProviderReport (when provider
+// response usage is in this payload), against the underlying ledger
+// reservation.
+message LlmCallPostPayload {
+  // Reservation to commit/release; obtained from the sidecar's prior
+  // DecisionResponse for the same llm_call_id.
+  string reservation_id = 1;
+
+  // Provider-reported usage (when available; commit_state == provider_reported).
+  // Atomic amount as decimal string for NUMERIC(38,0).
+  string provider_reported_amount_atomic = 2;
+  spendguard.common.v1.UnitRef unit = 3;
+
+  // Pricing context — should match the cached contract bundle at decision
+  // time. Sidecar validates equality against ledger.pricing_snapshots.
+  spendguard.common.v1.PricingFreeze pricing = 4;
+
+  // Provider raw event id for idempotent dedupe (where applicable).
+  string provider_event_id = 5;
+
+  // Final outcome from the LLM call (success / error / etc.).
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    SUCCESS = 1;
+    PROVIDER_ERROR = 2;
+    CLIENT_TIMEOUT = 3;
+    RUN_ABORTED = 4;
+  }
+  Outcome outcome = 6;
+
+  // Phase 2B Step 7 (Contract §5 commit_state_machine): adapter-supplied
+  // estimated atomic amount that drives the CommitEstimated path. Mutually
+  // exclusive with `provider_reported_amount_atomic` (field 2).
+  //
+  //   * estimated_amount_atomic non-empty + outcome=SUCCESS
+  //       -> sidecar calls Ledger.CommitEstimated with this amount as the
+  //         estimated_amount; ledger transitions reservation 'reserved' ->
+  //         'committed' and releases the residual back to available_budget.
+  //   * provider_reported_amount_atomic non-empty
+  //       -> sidecar calls Ledger.ProviderReport (deferred to Step 8 in this
+  //         POC; sidecar returns UNIMPLEMENTED in TraceEventAck.error).
+  //   * both empty + outcome=SUCCESS
+  //       -> rejected (no commit amount supplied).
+  //   * both non-empty
+  //       -> rejected (mutually exclusive paths).
+  //   * outcome != SUCCESS
+  //       -> rejected (Release path deferred; reservation will TTL-release).
+  //
+  // NUMERIC(38,0) decimal string, same encoding as the provider-reported
+  // field. Required when the caller wants the CommitEstimated path.
+  string estimated_amount_atomic = 7;
+}
+
+message ApprovalLifecyclePayload {
+  string approval_request_id = 1;
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    REQUESTED = 1;
+    GRANTED = 2;
+    DENIED = 3;
+    EXPIRED = 4;
+  }
+  State state = 2;
+  string approver = 3;
+  google.protobuf.Timestamp deadline = 4;
+}
+
+message RollbackPayload {
+  string ledger_transaction_id = 1;
+  string reason_code = 2;
+  string compensating_ledger_transaction_id = 3;
+}
+
+message TraceEventAck {
+  string event_id = 1;                       // generated by sidecar (UUID v7)
+
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    ACCEPTED = 1;
+    QUARANTINED = 2;
+    REJECTED = 3;
+  }
+  Status status = 2;
+
+  spendguard.common.v1.Error error = 3;
+}
+
+// ============================================================================
+// Sub-agent budget grant (per Contract §8)
+// ============================================================================
+
+message IssueBudgetGrantRequest {
+  string session_id = 1;
+  string parent_run_id = 2;
+  string child_workload_kind = 3;            // SPIFFE-id-style or plain string
+
+  // Delegation scope.
+  message Scope {
+    repeated string allowed_routes = 1;
+    repeated string allowed_runtimes = 2;
+    string max_amount_atomic = 3;
+    spendguard.common.v1.UnitRef max_amount_unit = 4;
+    google.protobuf.Timestamp expires_at = 5;
+
+    // Required JWT custom claim per Contract §8 grant.claims.
+    // Identifies the parent reservation backing this delegation; child
+    // agent's first ReserveSet recheck verifies budget headroom against
+    // this reservation's ledger state.
+    string reservation_id = 6;
+  }
+  Scope scope = 4;
+}
+
+message IssueBudgetGrantResponse {
+  // RFC 9068 JWT access token; ed25519-signed.
+  string jwt_grant = 1;
+  string grant_jti = 2;
+  google.protobuf.Timestamp issued_at = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message RevokeBudgetGrantRequest {
+  string session_id = 1;
+  string grant_jti = 2;
+  string reason = 3;
+}
+
+message RevokeBudgetGrantResponse {
+  bool revoked = 1;
+  google.protobuf.Timestamp revoked_at = 2;
+}
+
+message ConsumeBudgetGrantRequest {
+  string session_id = 1;
+  string jwt_grant = 2;
+}
+
+message ConsumeBudgetGrantResponse {
+  bool accepted = 1;
+  string parent_run_id = 2;
+  string parent_tenant_id = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  spendguard.common.v1.Error error = 5;
+}
+
+// ============================================================================
+// Lifecycle drain (per Sidecar §11)
+// ============================================================================
+
+message DrainSubscribeRequest {
+  string session_id = 1;
+}
+
+message DrainSignal {
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    DRAIN_INITIATED = 1;       // stop accepting new decisions
+    DRAIN_TIMEOUT_APPROACHING = 2;
+    DRAIN_COMPLETE = 3;
+  }
+  Phase phase = 1;
+  google.protobuf.Timestamp deadline = 2;
+  string drain_trigger = 3;    // pod_eviction / rolling_restart / spot / ...
+}

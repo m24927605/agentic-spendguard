@@ -1,0 +1,76 @@
+name: Publish Schema Bundle
+
+# Triggered when a schema bundle source under bundles/schema/ changes.
+# Publishes the bundle as an OCI artifact to GHCR and signs with cosign
+# keyless (GitHub OIDC + Rekor public log).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bundles/schema/**'
+      - 'services/bundle_registry/workflows/publish-schema-bundle.yml'
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: 'Schema bundle id (UUID v7)'
+        required: true
+      tag:
+        description: 'Tag, e.g. v1alpha1'
+        required: true
+        default: v1alpha1
+
+permissions:
+  contents: read
+  id-token: write       # OIDC for cosign keyless
+  packages: write       # GHCR push
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      NAMESPACE: ${{ github.repository_owner }}/spendguard/bundles/schema_bundle
+      COSIGN_EXPERIMENTAL: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ORAS + cosign
+        run: |
+          curl -sSL https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz | tar -xz
+          sudo mv oras /usr/local/bin/
+          curl -sSL https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 -o cosign
+          sudo install -m 0755 cosign /usr/local/bin/cosign
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Pack schema bundle
+        run: |
+          BUNDLE_ID="${{ inputs.bundle_id || github.sha }}"
+          TAG="${{ inputs.tag || 'v1alpha1' }}"
+          cd bundles/schema
+          tar -czf "/tmp/schema-bundle-${BUNDLE_ID}.tgz" .
+          echo "BUNDLE_REF=${{ env.REGISTRY }}/${NAMESPACE}/${BUNDLE_ID}:${TAG}" >> $GITHUB_ENV
+
+      - name: Push as OCI artifact
+        run: |
+          BUNDLE_ID="${{ inputs.bundle_id || github.sha }}"
+          TAG="${{ inputs.tag || 'v1alpha1' }}"
+          oras push "${BUNDLE_REF}" \
+            --artifact-type application/vnd.spendguard.schema-bundle.v1alpha1+tar \
+            "/tmp/schema-bundle-${BUNDLE_ID}.tgz:application/gzip"
+
+      - name: Cosign sign (keyless)
+        run: cosign sign --yes "${BUNDLE_REF}"
+
+      - name: Verify signature (sanity)
+        run: |
+          cosign verify "${BUNDLE_REF}" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com"
+
+      - name: Emit catalog-publish hint
+        run: |
+          echo "Schema bundle published: ${BUNDLE_REF}"
+          echo "Update endpoint catalog bundle_registry_endpoints if registry URL changed."

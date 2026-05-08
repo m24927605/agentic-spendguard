@@ -1,0 +1,65 @@
+name: Publish Pricing Bundle
+
+# Publishes a global pricing_bundle (FOCUS v1.2 + provider snapshots).
+# Pricing bundles are immutable additive — new versions, never modify.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'bundles/pricing/**'
+  workflow_dispatch:
+    inputs:
+      pricing_version:
+        description: 'pricing_version (e.g. focus_v1_2_2026_05)'
+        required: true
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    env:
+      REGISTRY: ghcr.io
+      NAMESPACE: ${{ github.repository_owner }}/spendguard/bundles/pricing_bundle
+      COSIGN_EXPERIMENTAL: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install ORAS + cosign
+        run: |
+          curl -sSL https://github.com/oras-project/oras/releases/download/v1.2.0/oras_1.2.0_linux_amd64.tar.gz | tar -xz
+          sudo mv oras /usr/local/bin/
+          curl -sSL https://github.com/sigstore/cosign/releases/download/v2.4.1/cosign-linux-amd64 -o cosign
+          sudo install -m 0755 cosign /usr/local/bin/cosign
+
+      - name: Login to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | oras login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Pack pricing bundle
+        run: |
+          PRICING_VERSION="${{ inputs.pricing_version }}"
+          tar -czf "/tmp/pricing-${PRICING_VERSION}.tgz" -C bundles/pricing/${PRICING_VERSION} .
+          echo "BUNDLE_REF=${{ env.REGISTRY }}/${NAMESPACE}:${PRICING_VERSION}" >> $GITHUB_ENV
+
+      - name: Push as OCI artifact
+        run: |
+          oras push "${BUNDLE_REF}" \
+            --artifact-type application/vnd.spendguard.pricing-bundle.v1alpha1+tar \
+            "/tmp/pricing-${{ inputs.pricing_version }}.tgz:application/gzip"
+
+      - name: Cosign sign (keyless)
+        run: cosign sign --yes "${BUNDLE_REF}"
+
+      - name: Notify Platform Pricing DB
+        env:
+          PLATFORM_PRICING_NOTIFY_URL: ${{ secrets.PLATFORM_PRICING_NOTIFY_URL }}
+          PLATFORM_PRICING_NOTIFY_TOKEN: ${{ secrets.PLATFORM_PRICING_NOTIFY_TOKEN }}
+        run: |
+          curl -sf -X POST "${PLATFORM_PRICING_NOTIFY_URL}/internal/pricing-bundle-published" \
+            -H "Authorization: Bearer ${PLATFORM_PRICING_NOTIFY_TOKEN}" \
+            -H "Content-Type: application/json" \
+            -d "{\"pricing_version\":\"${{ inputs.pricing_version }}\",\"bundle_ref\":\"${BUNDLE_REF}\"}"

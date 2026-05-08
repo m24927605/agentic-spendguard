@@ -1,0 +1,354 @@
+// SpendGuard common types — shared across services.
+//
+// Spec references:
+//   - Contract DSL spec v1alpha1 §12 (Money / Time / Unit schema)
+//   - Trace Schema spec v1alpha1 §3 (Identity Split: W3C + UUID v7)
+//   - Ledger Storage spec v1alpha1 §3 (Per-Unit Balancing, NUMERIC(38,0))
+//   - Stage 2 POC Topology spec v1alpha1 §8 (wire protocol baseline)
+//
+// Conventions:
+//   * UUID v7 IDs:           encoded as RFC 9562 textual string
+//   * W3C trace_id/span_id:  encoded as lowercase hex string
+//   * NUMERIC(38,0) amounts: encoded as decimal string (no scientific notation)
+//   * Timestamps:             RFC 3339 nano via google.protobuf.Timestamp
+//   * Signatures:             raw bytes (ed25519 = 64 bytes)
+//   * Hashes:                 raw bytes (sha256 = 32 bytes)
+//   * Cross-unit comparison:  forbidden in hot path (Contract §12 + Stage 2 §9.4)
+//
+// Compatibility: proto3, additive evolution; no field removal pre-GA.
+
+syntax = "proto3";
+
+package spendguard.common.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Field-number convention:
+//   - 1..15  : latency-hot fields (single-byte varint tag)
+//   - 16..   : additive / cold fields
+//   - reserved: only declared when a field is removed (not pre-GA;
+//               additive evolution per compatibility policy)
+
+// ============================================================================
+// IDENTITY (per Trace spec §3)
+// ============================================================================
+
+// W3C trace context (per Trace §3.1).
+message TraceContext {
+  // 16-byte lowercase hex (e.g., "0af7651916cd43dd8448eb211c80319c").
+  string trace_id = 1;
+  // 8-byte lowercase hex (e.g., "00f067aa0ba902b7").
+  string span_id = 2;
+  // Optional; required when not_root_span.
+  string parent_span_id = 3;
+  // W3C trace state (RFC 9.4); opaque vendor-specific string.
+  string trace_state = 4;
+}
+
+// SpendGuard canonical IDs (per Trace §3.2).
+//
+// All IDs are UUID v7 (RFC 9562) for monotonic time-ordering.
+message SpendGuardIds {
+  string run_id = 1;        // required at run scope
+  string step_id = 2;        // required when span_kind == agent.step
+  string llm_call_id = 3;    // required when span_kind == llm.call
+  string tool_call_id = 4;   // required when span_kind == tool.call
+  string decision_id = 5;    // Contract §6 idempotency key
+  string snapshot_id = 6;
+}
+
+// ============================================================================
+// MONEY / UNIT (per Contract §12.1; Ledger §3)
+// ============================================================================
+
+// Unit reference (per Contract §12.1 Money type).
+//
+// Atomic amounts are interpreted relative to a unit's `scale` from Ledger
+// `ledger_units` (e.g., USD scale=6 -> 1 USD = 1_000_000 atomic).
+//
+// Canonical truth is `unit_id` (FK to ledger_units). Convenience fields below
+// are echoed for client-side validation only; ledger derives semantics from
+// unit_id.
+message UnitRef {
+  // FK to ledger_units.unit_id (UUID v7 string).
+  string unit_id = 1;
+
+  // Convenience kind for client-side validation; canonical truth is unit_id.
+  enum Kind {
+    KIND_UNSPECIFIED = 0;
+    MONETARY = 1;
+    TOKEN = 2;
+    CREDIT = 3;
+    NON_MONETARY = 4;
+  }
+  Kind kind = 2;
+
+  // ISO 4217 (when MONETARY); empty otherwise.
+  string currency = 3;
+
+  // Token / credit / non_monetary unit_name (when not MONETARY).
+  string unit_name = 4;
+
+  // Token-kind discriminator (per Contract §12.1; required when kind == TOKEN).
+  // Examples: "input", "output", "reasoning", "cached_input", "total".
+  string token_kind = 5;
+
+  // Model family (per Contract §12.1; required when kind == TOKEN).
+  // Tokens of different model families are NOT comparable.
+  string model_family = 6;
+
+  // Credit program identifier (per Contract §12.1; required when kind == CREDIT).
+  string credit_program = 7;
+}
+
+// Atomic amount as decimal string for NUMERIC(38,0) precision.
+//
+// Per Ledger §3: cross-unit comparison forbidden; conversion only at
+// explicit normalization step.
+message Amount {
+  // Decimal string, no scientific notation, no thousand separators.
+  // Example: "1000000" (= 1.000000 USD when unit.scale=6).
+  string atomic = 1;
+  UnitRef unit = 2;
+}
+
+// Pricing freeze (per Ledger §13 three-layer freeze).
+message PricingFreeze {
+  string pricing_version = 1;             // FOCUS v1.2 + provider snapshot tag
+  bytes  price_snapshot_hash = 2;          // sha256
+  string fx_rate_version = 3;
+  string unit_conversion_version = 4;
+}
+
+// ============================================================================
+// FENCING (per Sidecar §9; Ledger §9; Stage 2 §4.4)
+// ============================================================================
+
+message Fencing {
+  uint64 epoch = 1;
+  string scope_id = 2;                     // FK to fencing_scopes.fencing_scope_id
+  string workload_instance_id = 3;
+}
+
+// ============================================================================
+// REPLAY MINIMAL RESPONSE (per Ledger §7; Stage 2 §8.2.1)
+// ============================================================================
+
+// Minimal replay response — returned after replay window full payload expired.
+//
+// Per Ledger §7: contains no PII / full prompts / encryption keys; only
+// status code, timestamps, and compact resource references.
+message Replay {
+  string ledger_transaction_id = 1;
+  string operation_kind = 2;
+  string audit_decision_event_id = 3;
+  google.protobuf.Timestamp recorded_at = 4;
+
+  // Operation-specific compact reference; e.g., reservation_set_id for
+  // ReserveSet, refund_credit_event_id for RefundCredit.
+  string operation_id = 5;
+
+  // Status code retained in minimal replay (per Ledger §7 minimal_replay_response).
+  // For terminal states this conveys the final disposition; for in-progress
+  // operations this conveys the latest known posting_state code.
+  enum StatusCode {
+    STATUS_CODE_UNSPECIFIED = 0;
+    POSTED = 1;            // ledger_transactions.posting_state = 'posted'
+    VOIDED = 2;            // ledger_transactions.posting_state = 'voided'
+    PENDING = 3;            // ledger_transactions.posting_state = 'pending'
+  }
+  StatusCode status_code = 6;
+
+  // ORIGINAL decision_id from the first call (per Contract §6 / Ledger §7
+  // idempotency — same idempotency_key MUST surface the same decision_id
+  // across retries). Sidecar uses this on the Replay branch to anchor its
+  // response to the original decision, not its locally-minted retry value.
+  // Not PII; a server-minted UUID7 identifier.
+  string decision_id = 7;
+
+  // ORIGINAL projection-side identifiers from the first call, IN CANONICAL
+  // ORDER (matching the original Success response order — i.e., claim
+  // ordinal). For ReserveSet these are the reservation_ids; for other
+  // operations operation-specific (empty for ones that have no per-row
+  // projection ids). Required so the adapter sees the same set of resource
+  // handles, in the same order, across retries.
+  // Not PII; server-minted UUIDs.
+  repeated string projection_ids = 8;
+
+  // ORIGINAL TTL anchor from the first call. For ReserveSet, this is the
+  // reservation's ttl_expires_at (the wallclock-derived expiry stored at
+  // first-success). The sidecar mirrors this back to the adapter on Replay
+  // so that the loser of a concurrent same-key race observes the same TTL
+  // as the winner instead of recomputing locally and returning a different
+  // wallclock value.
+  google.protobuf.Timestamp ttl_expires_at = 9;
+}
+
+// Full response payload — first-success-only; subject to retention policy.
+//
+// Per Ledger §7: tenant-policy retention (default 24h, max 30d Phase 1).
+message FullResponsePayload {
+  // Operation-specific full payload; opaque protobuf Any encoded here.
+  bytes payload = 1;
+  google.protobuf.Timestamp expires_at = 2;
+}
+
+// ============================================================================
+// ERROR (per Stage 2 §8.2.1)
+// ============================================================================
+
+message Error {
+  enum Code {
+    CODE_UNSPECIFIED = 0;
+    FENCING_EPOCH_STALE = 1;
+    LOCK_ORDER_TOKEN_MISMATCH = 2;
+    PRICING_VERSION_UNKNOWN = 3;
+    UNIT_NORMALIZATION_REQUIRED = 4;
+    BUDGET_EXHAUSTED = 5;
+    DEADLOCK_TIMEOUT = 6;
+    SYNC_REPLICA_UNAVAILABLE = 7;
+    TENANT_DISABLED = 8;
+    SCHEMA_BUNDLE_UNKNOWN = 9;
+    SIGNATURE_INVALID = 10;
+    AUDIT_INVARIANT_VIOLATED = 11;
+    DUPLICATE_DECISION_EVENT = 12;
+    // Phase 2B Step 7: commit lifecycle (Contract §5 / Ledger §10).
+    RESERVATION_STATE_CONFLICT = 13;
+    PRICING_FREEZE_MISMATCH = 14;
+    OVERRUN_RESERVATION = 15;
+    RESERVATION_TTL_EXPIRED = 16;
+    MULTI_RESERVATION_COMMIT_DEFERRED = 17;
+  }
+  Code code = 1;
+  string message = 2;
+  map<string, string> details = 3;
+}
+
+// ============================================================================
+// BUDGET CLAIM (per Stage 2 §8.2.1)
+// ============================================================================
+
+message BudgetClaim {
+  string budget_id = 1;
+  UnitRef unit = 2;
+  // NUMERIC(38,0) decimal string.
+  string amount_atomic = 3;
+
+  enum Direction {
+    DIRECTION_UNSPECIFIED = 0;
+    DEBIT = 1;
+    CREDIT = 2;
+  }
+  Direction direction = 4;
+
+  string window_instance_id = 5;
+}
+
+// ============================================================================
+// LOCK ORDER TOKEN (per Stage 2 §8.2.1.1)
+// ============================================================================
+
+// Server derives if omitted; validates if provided.
+//
+// Derivation:
+//   sorted_tuple = sort_lex_by(claims, key=(budget_id, unit.unit_id))
+//   canonical    = ",".join(f"{c.budget_id}:{c.unit.unit_id}" for c in sorted_tuple)
+//   token        = "v1:" + hex(sha256(canonical))
+message LockOrderToken {
+  string value = 1;
+}
+
+// ============================================================================
+// CLOUDEVENTS 1.0 ENVELOPE (per Trace §7.5; Stage 2 §8.3)
+// ============================================================================
+
+// CloudEvents 1.0 envelope (structured mode).
+//
+// `data` is opaque payload bytes; type-specific schema lives in canonical
+// schema bundle (Trace §12).
+message CloudEvent {
+  // Always "1.0".
+  string specversion = 1;
+
+  // Event type, e.g.:
+  //   spendguard.audit.decision
+  //   spendguard.audit.outcome
+  //   spendguard.ledger.reservation
+  //   spendguard.ledger.commit
+  //   spendguard.ledger.release
+  //   spendguard.approval.requested
+  //   spendguard.approval.granted
+  //   spendguard.approval.denied
+  //   spendguard.approval.expired
+  //   spendguard.rollback
+  //   spendguard.tombstone
+  //   spendguard.refund.credit_received
+  //   spendguard.dispute.requested
+  //   spendguard.dispute.granted
+  //   spendguard.dispute.denied
+  //   spendguard.dispute.withdrawn
+  //   spendguard.dispute.resolved
+  //   spendguard.region_failover_promoted
+  //   spendguard.ledger.invoice_reconciled
+  //   spendguard.ledger.reconciliation_run
+  string type = 2;
+
+  string source = 3;                       // producer URI
+
+  // event_id (UUID v7 string); required to be globally unique for dedupe.
+  string id = 4;
+
+  google.protobuf.Timestamp time = 5;
+
+  // Per Trace §7.5 CloudEvents 1.0 envelope: canonical encoding is
+  // "application/json" for the `data` field. The `data` field is bytes
+  // here (proto3 limitation); content MUST be a JSON document encoded
+  // UTF-8 unless `datacontenttype` advertises a different encoding.
+  string datacontenttype = 6;              // canonical: "application/json"
+
+  bytes data = 7;                           // event-specific payload (UTF-8 JSON)
+
+  // SpendGuard extension attributes (per Trace §7.5 spendguard.* extensions).
+  string tenant_id = 100;
+  string run_id = 101;
+  string decision_id = 102;
+  string schema_bundle_id = 103;            // per Trace §12
+
+  // Producer signing (per Trace §13).
+  string producer_id = 200;
+  uint64 producer_sequence = 201;
+  bytes  producer_signature = 202;          // ed25519
+  string signing_key_id = 203;
+}
+
+// ============================================================================
+// SCHEMA BUNDLE REFERENCE (per Trace §12)
+// ============================================================================
+
+message SchemaBundleRef {
+  string schema_bundle_id = 1;             // UUID v7
+  bytes  schema_bundle_hash = 2;            // sha256
+  string canonical_schema_version = 3;     // e.g., "spendguard.v1alpha1"
+}
+
+// ============================================================================
+// CONTRACT BUNDLE REFERENCE (per Contract §17)
+// ============================================================================
+
+message ContractBundleRef {
+  string bundle_id = 1;                    // UUID v7
+  bytes  bundle_hash = 2;                   // sha256
+  bytes  bundle_signature = 3;              // ed25519
+  string signing_key_id = 4;
+}
+
+// ============================================================================
+// IDEMPOTENCY (per Ledger §7; Stage 2 §8.2.1)
+// ============================================================================
+
+message Idempotency {
+  // Caller-supplied idempotency key; scoped to (tenant_id, operation_kind).
+  string key = 1;
+  // sha256 of canonical request body for replay-on-retry consistency check.
+  bytes  request_hash = 2;
+}
