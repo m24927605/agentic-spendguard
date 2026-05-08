@@ -1,0 +1,70 @@
+[package]
+name = "spendguard-webhook-receiver"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard Provider Webhook Receiver: HTTPS endpoint that translates provider webhooks to Ledger gRPC ops (per Stage 2 §11)"
+
+[[bin]]
+name = "spendguard-webhook-receiver"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server
+axum = { version = "0.7", features = ["json", "tokio", "tracing"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["limit", "trace"] }
+hyper = { version = "1", features = ["server"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# gRPC client (to ledger)
+tonic = { version = "0.12", features = ["tls", "transport", "gzip"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# Postgres
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+] }
+
+# Crypto
+sha2 = "0.10"
+hmac = "0.12"
+subtle = "2"
+hex = "0.4"
+base64 = "0.22"
+num-bigint = "0.4"
+
+# TLS
+rustls = "0.23"
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Identity types
+uuid = { version = "1", features = ["v7", "v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Error / observability
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+envy = "0.4"
+
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"
+
+[dev-dependencies]
+pretty_assertions = "1"

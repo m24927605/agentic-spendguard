@@ -241,6 +241,44 @@ services:
 
     networks: [spendguard-net]
 
+  webhook-receiver:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.webhook_receiver
+    container_name: spendguard-webhook-receiver
+    environment:
+      RUST_LOG:                                                    "info,spendguard_webhook_receiver=debug"
+      SPENDGUARD_WEBHOOK_RECEIVER_BIND_ADDR:                       "0.0.0.0:8443"
+      SPENDGUARD_WEBHOOK_RECEIVER_HEALTH_ADDR:                     "0.0.0.0:8080"
+      SPENDGUARD_WEBHOOK_RECEIVER_DATABASE_URL:                    "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
+      SPENDGUARD_WEBHOOK_RECEIVER_LEDGER_URL:                      "https://ledger:50051"
+      SPENDGUARD_WEBHOOK_RECEIVER_TENANT_ID:                       "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_WEBHOOK_RECEIVER_TLS_SERVER_CERT:                 "/etc/ssl/spendguard/webhook_receiver.crt"
+      SPENDGUARD_WEBHOOK_RECEIVER_TLS_SERVER_KEY:                  "/etc/ssl/spendguard/webhook_receiver.key"
+      SPENDGUARD_WEBHOOK_RECEIVER_TLS_CLIENT_CERT:                 "/etc/ssl/spendguard/webhook_receiver.crt"
+      SPENDGUARD_WEBHOOK_RECEIVER_TLS_CLIENT_KEY:                  "/etc/ssl/spendguard/webhook_receiver.key"
+      SPENDGUARD_WEBHOOK_RECEIVER_TLS_CA_PEM:                      "/etc/ssl/spendguard/ca.crt"
+      SPENDGUARD_WEBHOOK_RECEIVER_FENCING_SCOPE_ID:                "00000000-0000-7000-a000-000000000050"
+      SPENDGUARD_WEBHOOK_RECEIVER_WORKLOAD_INSTANCE_ID:            "demo-webhook-receiver"
+      SPENDGUARD_WEBHOOK_RECEIVER_FENCING_INITIAL_EPOCH:           "1"
+      SPENDGUARD_WEBHOOK_SECRET_MOCK_LLM:                          "demo-secret-not-for-prod"
+    volumes:
+      - pki-data:/etc/ssl/spendguard:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ledger:
+        condition: service_started
+      pki-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/healthz | grep -q ok"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    networks: [spendguard-net]
+
   demo:
     build:
       context: ../..
@@ -264,12 +302,17 @@ services:
       SPENDGUARD_DEMO_TLS_CA_PEM:              "/etc/ssl/spendguard/ca.crt"
       SPENDGUARD_DEMO_WEBHOOK_FENCING_SCOPE_ID: "00000000-0000-7000-a000-000000000050"
       SPENDGUARD_DEMO_WEBHOOK_WORKLOAD_INSTANCE_ID: "demo-webhook-receiver"
+      # Phase 2B Step 11: webhook receiver service replaces in-process simulator.
+      SPENDGUARD_DEMO_WEBHOOK_RECEIVER_URL:    "https://webhook-receiver:8443"
+      SPENDGUARD_WEBHOOK_SECRET_MOCK_LLM:      "demo-secret-not-for-prod"
     volumes:
       - sidecar-uds:/var/run/spendguard:ro
       - bundles-data:/var/lib/spendguard/bundles:ro
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:
       sidecar:
+        condition: service_healthy
+      webhook-receiver:
         condition: service_healthy
     networks: [spendguard-net]
 
