@@ -45,7 +45,7 @@ pub async fn sweep_one(state: &mut AppState, row: ExpiredRow) -> anyhow::Result<
     });
     let data_bytes = serde_json::to_vec(&data_json)?;
 
-    let cloud_event = CloudEvent {
+    let mut cloud_event = CloudEvent {
         specversion: "1.0".into(),
         r#type: "spendguard.audit.outcome".into(),
         source: format!(
@@ -62,9 +62,10 @@ pub async fn sweep_one(state: &mut AppState, row: ExpiredRow) -> anyhow::Result<
         schema_bundle_id: String::new(),
         producer_id: format!("ttl-sweeper:{}", state.config.workload_instance_id),
         producer_sequence: producer_seq,
-        signing_key_id: "ttl-sweeper:demo:v1".into(),
+        signing_key_id: String::new(),
         producer_signature: Vec::new().into(),
     };
+    crate::audit::sign_cloudevent_in_place(&*state.signer, &mut cloud_event).await?;
 
     let req = ReleaseRequest {
         tenant_id: row.tenant_id.to_string(),

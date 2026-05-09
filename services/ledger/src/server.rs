@@ -27,12 +27,16 @@ use crate::{
 };
 
 pub struct LedgerService {
-    pool: PgPool,
+    pub pool: PgPool,
+    /// Phase 5 GA hardening S6: producer signer for server-minted
+    /// audit rows. Currently used only by InvoiceReconcile (which
+    /// synthesizes a decision row that has no client-side originator).
+    pub signer: std::sync::Arc<dyn spendguard_signing::Signer>,
 }
 
 impl LedgerService {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, signer: std::sync::Arc<dyn spendguard_signing::Signer>) -> Self {
+        Self { pool, signer }
     }
 }
 
@@ -93,7 +97,9 @@ impl Ledger for LedgerService {
         &self,
         req: Request<InvoiceReconcileRequest>,
     ) -> Result<Response<InvoiceReconcileResponse>, Status> {
-        let resp = handlers::invoice_reconcile::handle(&self.pool, req.into_inner()).await?;
+        let resp =
+            handlers::invoice_reconcile::handle(&self.pool, &*self.signer, req.into_inner())
+                .await?;
         Ok(Response::new(resp))
     }
 

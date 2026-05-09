@@ -249,7 +249,7 @@ async fn handle_inner(
     let request_outer = match event_kind {
         "provider_report" => {
             let seq = state.seq.next_one();
-            let ce = build_cloudevent(
+            let mut ce = build_cloudevent(
                 state,
                 CloudEventKind::Decision,
                 provider,
@@ -258,6 +258,7 @@ async fn handle_inner(
                 seq,
                 Some(&amount),
             )?;
+            crate::audit::sign_cloudevent_in_place(&*state.signer, &mut ce).await?;
             let req = ProviderReportRequest {
                 tenant_id: parsed.tenant_id.clone(),
                 reservation_id: parsed.reservation_id.clone(),
@@ -290,7 +291,7 @@ async fn handle_inner(
         }
         "invoice_reconcile" => {
             let (_decision_seq, outcome_seq) = state.seq.next_block(2);
-            let ce = build_cloudevent(
+            let mut ce = build_cloudevent(
                 state,
                 CloudEventKind::Outcome,
                 provider,
@@ -299,6 +300,7 @@ async fn handle_inner(
                 outcome_seq,
                 Some(&amount),
             )?;
+            crate::audit::sign_cloudevent_in_place(&*state.signer, &mut ce).await?;
             let req = InvoiceReconcileRequest {
                 tenant_id: parsed.tenant_id.clone(),
                 provider_invoice_id: provenance.clone(),

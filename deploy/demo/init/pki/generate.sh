@@ -125,10 +125,27 @@ EOF
     rm -f "/tmp/$svc.csr" "/tmp/$svc.cnf"
 done
 
-# 3. Tighten file permissions --------------------------------------------
+# 3. Phase 5 GA hardening S6: Ed25519 producer signing keys ---------------
+# One PKCS8 PEM per audit-producing service. Idempotent skip-if-exists.
+# Each service mounts its own pem at /etc/spendguard/signing/<service>.pem.
+SIGN_OUT="$OUT/signing"
+mkdir -p "$SIGN_OUT"
+for svc in ledger sidecar webhook-receiver ttl-sweeper; do
+    if [ -f "$SIGN_OUT/$svc.pem" ]; then
+        echo "[pki] signing key for $svc already present, skipping"
+        continue
+    fi
+    echo "[pki] minting Ed25519 signing key for $svc..."
+    openssl genpkey -algorithm ed25519 -out "$SIGN_OUT/$svc.pem" 2>/dev/null
+    chmod 0640 "$SIGN_OUT/$svc.pem"
+done
+
+# 4. Tighten file permissions --------------------------------------------
 # (Idempotent re-runs are fine: chmod always sets the same target perms.)
 chmod 0644 "$OUT"/*.crt "$OUT/ca.spki.sha256.hex"
 chmod 0640 "$OUT"/*.key
 
 echo "[pki] generated artifacts:"
 ls -la "$OUT"
+echo "[pki] signing keys:"
+ls -la "$SIGN_OUT" 2>/dev/null || true

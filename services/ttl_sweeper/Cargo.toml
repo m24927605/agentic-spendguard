@@ -39,6 +39,9 @@ async-trait = "0.1"
 # Phase 5 S1: shared lease primitive for singleton workers.
 spendguard-leases = { path = "../leases" }
 
+# Phase 5 S6: shared signing crate.
+spendguard-signing = { path = "../signing" }
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"

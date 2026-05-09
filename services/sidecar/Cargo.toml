@@ -76,6 +76,9 @@ parking_lot = "0.12"
 # Async stream macro (used by the UDS incoming connection adapter in main).
 async-stream = "0.3"
 
+# Phase 5 GA hardening S6: shared signing crate (Ed25519 producer signing).
+spendguard-signing = { path = "../signing" }
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"

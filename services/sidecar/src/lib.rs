@@ -1,3 +1,4 @@
+pub mod audit;
 pub mod bootstrap;
 pub mod clients;
 pub mod config;

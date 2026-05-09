@@ -17,6 +17,8 @@ COPY proto ./proto
 # Symlink the system google/ tree into proto_root so protoc resolves
 # the import without touching service code.
 RUN ln -sf /usr/include/google ./proto/google
+# Phase 5 GA hardening S6: signing path-dep crate.
+COPY services/signing ./services/signing
 COPY services/ledger ./services/ledger
 WORKDIR /build/services/ledger
 RUN cargo build --release --bin spendguard-ledger

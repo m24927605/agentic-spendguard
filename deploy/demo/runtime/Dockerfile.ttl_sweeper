@@ -9,6 +9,8 @@ COPY proto ./proto
 RUN ln -sf /usr/include/google ./proto/google
 # Phase 5 S1: shared lease primitive consumed via path dep.
 COPY services/leases ./services/leases
+# Phase 5 S6: shared signing primitive consumed via path dep.
+COPY services/signing ./services/signing
 COPY services/ttl_sweeper ./services/ttl_sweeper
 WORKDIR /build/services/ttl_sweeper
 RUN cargo build --release --bin spendguard-ttl-sweeper

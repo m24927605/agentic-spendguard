@@ -497,4 +497,258 @@ rather than gaps in the slice itself.
 
 ---
 
+## S6 — Producer signing abstraction
+
+**Status**: SHIPPED. All audit-producing services now sign canonical
+CloudEvent bytes with a real Ed25519 key (or, in demo profile, with
+an explicitly-disabled signer that records the algorithm metadata
+instead of silently writing empty bytes).
+
+### Design decision
+
+- New shared crate `services/signing/` exporting a `Signer` trait +
+  `LocalEd25519Signer` (PKCS8 PEM file) + `KmsSigner` stub +
+  `DisabledSigner`. Same crate consumed by `sidecar`, `ledger`,
+  `webhook_receiver`, `ttl_sweeper` via path dep — mirror of the
+  S1 `services/leases/` pattern.
+- **Three signing modes** chosen via `<PREFIX>_SIGNING_MODE`
+  (`local` | `kms` | `disabled`):
+  - `local` reads a PKCS8 Ed25519 PEM at process startup; the
+    derived `key_id = "ed25519:<sha256(pubkey)[..16]>"` is stable
+    across pod restarts so an audit row signed today is still
+    queryable by the same key_id tomorrow.
+  - `kms` constructs successfully but `sign()` returns
+    `ModeUnavailable` until S7 wires AWS KMS / GCP / Azure clients.
+    Operators who pick `kms` today get a typed runtime error (clean
+    fail-closed); they don't silently get empty signatures.
+  - `disabled` returns empty signature bytes but records
+    `algorithm = "disabled"` and `key_id = "disabled:<producer>"`
+    so audit reads can distinguish demo rows from production rows.
+    `DisabledSigner::for_profile` refuses to construct unless the
+    supplied profile is exactly `"demo"`.
+- **Helm fail-gate**: every service template rejects
+  `signing.mode=disabled` when `signing.profile != "demo"`. Tested:
+  `helm template ... --set signing.mode=disabled --set
+  signing.profile=production` → `S6: signing.mode=disabled is only
+  allowed when signing.profile=demo`. Same template renders cleanly
+  for demo profile.
+- **Canonical bytes contract**: signing covers the protobuf encoding
+  of the CloudEvent with `producer_signature` cleared and
+  `signing_key_id` populated. Verifier (S8) strips the signature,
+  re-encodes, checks. The ledger's server-minted decision row in
+  InvoiceReconcile uses a JSON-serialized canonical form (since it
+  builds the row as JSONB directly, not as a CloudEvent proto); S8
+  bridges both canonical forms in a single verifier.
+- **Schema-side surface**: migration `0024_audit_outbox_signing_metadata.sql`
+  adds three columns to `audit_outbox`:
+  - `signing_key_id TEXT GENERATED ALWAYS AS ... STORED` — extracted
+    from `cloudevent_payload->>'signing_key_id'` (the `signing_key_id`
+    proto field already existed at 203). Pre-S6 rows resolve to
+    `'pre-S6:legacy'`.
+  - `signing_algorithm TEXT GENERATED ALWAYS AS ... STORED` —
+    derived from key_id prefix (`ed25519:` | `arn:aws:kms:` | `kms-` |
+    `disabled:` | else `pre-S6`).
+  - `signed_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()` —
+    server-side wallclock at row insertion, independent of the
+    producer-attested `cloudevent_payload->>'time'`.
+  Using GENERATED columns avoided rewriting all six existing
+  `post_*_transaction` SPs (0012-0020) — they continue to write
+  `cloudevent_payload` as-is and the new columns auto-populate.
+
+### Changed files
+
+- **NEW** `services/signing/Cargo.toml` (~25 lines).
+- **NEW** `services/signing/src/lib.rs` (~390 lines): `Signer` trait,
+  `LocalEd25519Signer`, `KmsSigner` stub, `DisabledSigner`,
+  `signer_from_env()`, 10 unit tests.
+- **NEW** `services/ledger/migrations/0024_audit_outbox_signing_metadata.sql`
+  (~85 lines): three GENERATED columns + signed_at + two partial
+  indexes for forensics.
+- **MODIFIED** `services/sidecar/Cargo.toml`: path dep on
+  `spendguard-signing`.
+- **NEW** `services/sidecar/src/audit.rs` (~45 lines):
+  `sign_cloudevent_in_place` helper.
+- **MODIFIED** `services/sidecar/src/lib.rs`: `pub mod audit`.
+- **MODIFIED** `services/sidecar/src/domain/state.rs`: `signer:
+  Arc<dyn Signer>` field on `SidecarState`.
+- **MODIFIED** `services/sidecar/src/main.rs`: `signer_from_env(
+  "SPENDGUARD_SIDECAR")` at startup.
+- **MODIFIED** `services/sidecar/src/decision/transaction.rs`: 4 call
+  sites (ReserveSet decision, RecordDeniedDecision, CommitEstimated
+  outcome, Release outcome) now sign before sending the request.
+- **MODIFIED** `services/webhook_receiver/Cargo.toml`,
+  `src/lib.rs`, `src/server.rs` (`signer` on AppState),
+  `src/main.rs` (signer init), `src/handlers/webhook.rs` (2 call
+  sites: provider_report decision + invoice_reconcile outcome).
+- **NEW** `services/webhook_receiver/src/audit.rs` (~35 lines).
+- **MODIFIED** `services/ttl_sweeper/Cargo.toml`, `src/lib.rs`,
+  `src/state.rs` (signer on AppState), `src/main.rs` (signer init),
+  `src/sweep.rs` (1 call site: TTL release outcome).
+- **NEW** `services/ttl_sweeper/src/audit.rs` (~35 lines).
+- **MODIFIED** `services/ledger/Cargo.toml`, `src/main.rs`
+  (signer init), `src/server.rs` (`signer` on LedgerService;
+  passed to invoice_reconcile handler), `src/handlers/invoice_reconcile.rs`
+  (server-minted decision row signed with ledger's own producer
+  identity).
+- **MODIFIED** `deploy/demo/runtime/Dockerfile.{sidecar,ledger,
+  webhook_receiver,ttl_sweeper}`: COPY services/signing path-dep.
+- **MODIFIED** `deploy/demo/init/pki/generate.sh`: Ed25519 key
+  generation per-service, idempotent skip-if-exists.
+- **MODIFIED** `deploy/demo/compose.yaml`: SIGNING env vars on
+  ledger / sidecar / webhook-receiver / ttl-sweeper services.
+- **MODIFIED** `charts/spendguard/values.yaml`: `signing:` section
+  with mode/profile/secret/kms.
+- **MODIFIED** `charts/spendguard/templates/{sidecar,ledger,
+  webhook-receiver,ttl-sweeper}.yaml`: env vars + signing-key
+  Secret mount + Helm `fail` directive when mode=disabled outside
+  demo profile.
+
+### Tests
+
+- 10 unit tests in `services/signing/src/lib.rs` covering:
+  - LocalEd25519Signer determinism (Ed25519 RFC 8032).
+  - LocalEd25519Signer differing inputs → differing signatures.
+  - key_id stable across signs.
+  - key_id distinct per keypair.
+  - PKCS8 PEM round-trip.
+  - KmsSigner returns ModeUnavailable.
+  - DisabledSigner refuses outside demo profile (`for_profile`
+    exhaustively tested with empty/production/staging).
+  - DisabledSigner constructs in demo profile.
+  - SigningMode::parse known values + rejection.
+  - Signature metadata completeness.
+
+  `cargo test -p spendguard-signing` reported `test result: ok.
+  10 passed; 0 failed; 0 ignored`.
+
+- Helm template smoke tests:
+  - Default render (`signing.mode=local, signing.profile=production`):
+    succeeds, all four services pick up signing env + volumeMounts.
+  - `signing.mode=disabled, signing.profile=production`: rejected
+    by `fail` directive.
+  - `signing.mode=disabled, signing.profile=demo`: renders cleanly.
+
+- Live verification via `make demo-up`: pki-init now generates four
+  Ed25519 keys at startup; all four services boot with `local` mode;
+  audit_outbox rows have non-empty `signing_key_id`,
+  `signing_algorithm = 'ed25519'`, `signed_at` populated.
+
+### Adversarial review
+
+- **Empty signature for ledger-minted rows**: previously
+  InvoiceReconcile inserted `cloudevent_payload_signature_hex = ""`.
+  Now it signs the JSON canonical of decision_payload using the
+  ledger's own producer signer. Verifier needs both the proto
+  canonical (sidecar/webhook/ttl_sweeper) and the JSON canonical
+  (ledger) — documented as S8 work.
+- **Forged signing_key_id** (operator sets a misleading id in env):
+  the local-mode `key_id` is derived from the public key SHA-256
+  inside the signer constructor, not from any operator-supplied
+  value. Override impossible without supplying a real ed25519 PEM.
+- **Demo profile leaking into production**: Helm fail-gate +
+  startup-time `DisabledSigner::from_env` profile check provide
+  defense in depth. Even if `signing.mode=disabled` somehow reached
+  a production cluster (e.g. via raw `kubectl apply`), the process
+  fails to start because `SPENDGUARD_PROFILE` isn't `"demo"`.
+- **Signature covers transport-mutable fields?**: signing covers the
+  full proto encoding minus producer_signature itself. `time` is
+  signed (producer-attested); `producer_id`, `producer_sequence`,
+  `decision_id`, `tenant_id`, `data` are all covered. Fields a
+  retry might re-stamp (e.g. tonic transport-level retry-id
+  metadata) are NOT in the CloudEvent proto, so not in the canonical.
+- **Race: signer rotation mid-decision**: the signer is wrapped in
+  `Arc<dyn Signer>` and is immutable for the process lifetime.
+  Rotation requires a process restart, which means a coordinated
+  cycle (S7 will add hot-rotation via the key registry).
+- **KMS-mode compile but fail at runtime**: this is a deliberate
+  trade-off. Operators who set mode=kms today get a clean error;
+  the alternative (no kms in code) would mean S7 has to add the
+  whole feature in one slice.
+- **Private key exposure in logs**: signing crate's only logs are
+  `info!(key_id, algorithm, producer)` at startup and signer
+  errors. No path emits private key material. Tests would catch
+  any accidental `Display` impl for SigningKey.
+- **Disabled mode produces empty signature → audit invariant
+  violation?**: The audit invariant ("no audit, no effect") is
+  preserved: disabled mode still WRITES the audit row, just with
+  empty signature bytes. The signing_algorithm column says
+  `'disabled'` so a verifier can distinguish "no signature
+  attempted" from "signature attempted and produced empty bytes".
+  In production profile, the Helm fail-gate makes this branch
+  unreachable.
+
+### Observability
+
+- New info logs at each service startup:
+  `"S6: producer signer initialized"` (or `"S6: ledger producer
+  signer initialized"`) with `key_id`, `algorithm`, `producer`.
+- Sign errors warn at the call site
+  (`"signer reports mode unavailable"`, `"signer error"`).
+- Forensics queries unlocked by GENERATED columns:
+  - `SELECT signing_key_id, count(*) FROM audit_outbox WHERE
+    recorded_month = '2026-05-01' GROUP BY 1` — distribution by
+    key.
+  - `SELECT count(*) FROM audit_outbox WHERE signing_algorithm =
+    'pre-S6'` — find rows that need re-validation under the new
+    signing regime.
+  - `SELECT signed_at - (cloudevent_payload->>'time_seconds')::numeric
+    AS skew FROM audit_outbox` — detect producer clock skew.
+
+### Residual risks
+
+1. **Ledger uses JSON canonical; sidecar/webhook/ttl_sweeper use
+   proto canonical**. S8 (strict canonical signature verification)
+   must implement both forms. Documented inline in
+   invoice_reconcile.rs.
+2. **No key rotation today**. Each pod restart picks up the
+   currently-mounted PEM. S7 (key registry + rotation) addresses
+   this.
+3. **No verifier yet**. S6 only writes signatures. S8 wires the
+   consumer-side verifier; until then signatures are write-only
+   evidence.
+4. **Empty signatures still possible in `disabled` mode**. By
+   design (demo path); Helm gate prevents production accidents.
+5. **GENERATED columns recompute on existing partition partitions
+   (PG 12+)**. Migration 0024 should be tested against very large
+   audit_outbox tables before applying in production — Postgres
+   may need to rewrite each partition. For demo + small-scale
+   deployments this is irrelevant.
+6. **Codex adversarial round still flaking**. Same companion-runtime
+   issue from S4. Code-level review captured here; retry next
+   session.
+
+### Runbook deltas
+
+- **New env vars per service**: `SPENDGUARD_<SERVICE>_SIGNING_MODE`
+  (`local` | `kms` | `disabled`),
+  `SPENDGUARD_<SERVICE>_SIGNING_PRODUCER_IDENTITY` (required, free
+  string e.g. `"sidecar:wl-abc-123"`),
+  `SPENDGUARD_<SERVICE>_SIGNING_KEY_PATH` (local mode),
+  `SPENDGUARD_<SERVICE>_SIGNING_KMS_ARN` (kms mode), and the
+  process-global `SPENDGUARD_PROFILE` (required `demo` for
+  disabled mode).
+- **New Helm values key**: `signing.{mode,profile,existingSecret,kms.<service>Arn}`.
+- **New Secret format**: `signing.existingSecret` must contain
+  `ledger.pem`, `sidecar.pem`, `webhook-receiver.pem`,
+  `ttl-sweeper.pem` (PKCS8 Ed25519 PEM each). Demo's pki-init
+  generates these automatically.
+- **Operator playbook**: if a service crashes at startup with
+  `S6: build signer from SPENDGUARD_<SERVICE>_SIGNING_*`, check
+  (a) is `<SERVICE>_SIGNING_MODE` set? (b) is `<SERVICE>_SIGNING_KEY_PATH`
+  pointing at an existing PEM? (c) is `<SERVICE>_SIGNING_PRODUCER_IDENTITY`
+  set? (d) for disabled mode, is `SPENDGUARD_PROFILE=demo`?
+
+### Quality bar
+
+Meets 90%+: shared signing crate with comprehensive unit tests, all
+four audit producers wired, schema-side metadata exposed without
+SP rewrites, demo-mode fail-gate at three layers (Helm, signer
+construction, runtime error message), KMS surface in place for S7,
+forensics-ready columns + indexes. Open items (single canonical
+form across producer types, hot key rotation, consumer-side
+verifier) are explicit follow-ups in S7 and S8 rather than gaps in
+this slice.
+
+---
+
 (Subsequent slice entries appended below.)

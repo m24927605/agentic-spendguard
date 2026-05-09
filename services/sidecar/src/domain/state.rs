@@ -15,6 +15,7 @@ use crate::{
     clients::{canonical_ingest::CanonicalIngestClient, ledger::LedgerClient},
     decision::idempotency::IdempotencyCache,
 };
+use spendguard_signing::Signer;
 
 #[derive(Clone)]
 pub struct SidecarState {
@@ -86,6 +87,12 @@ pub struct SidecarStateInner {
     /// SPENDGUARD_SIDECAR_RESERVATION_TTL_SECONDS at startup; default
     /// 600s. DEMO_MODE=ttl_sweep overrides to 5s.
     pub reservation_ttl_seconds: i64,
+
+    /// Phase 5 GA hardening S6: per-process Ed25519 signer (or stub).
+    /// Shared across all audit-event-producing call sites in
+    /// `decision/transaction.rs` and `server/adapter_uds.rs`. Constructed
+    /// at startup from `SPENDGUARD_SIDECAR_SIGNING_*` env vars.
+    pub signer: Arc<dyn Signer>,
 }
 
 #[derive(Debug, Clone)]
@@ -159,6 +166,7 @@ impl SidecarState {
         idempotency: IdempotencyCache,
         producer_sequence_start: u64,
         reservation_ttl_seconds: i64,
+        signer: Arc<dyn Signer>,
     ) -> Self {
         Self {
             inner: Arc::new(SidecarStateInner {
@@ -175,6 +183,7 @@ impl SidecarState {
                 reservation_cache: Mutex::new(HashMap::new()),
                 decision_id_to_reservation: Mutex::new(HashMap::new()),
                 reservation_ttl_seconds,
+                signer,
             }),
         }
     }

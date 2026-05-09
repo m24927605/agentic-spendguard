@@ -17,6 +17,8 @@ pub struct AppState {
     pub pg: PgPool,
     pub ledger_client: LedgerClient<Channel>,
     pub seq: SequenceAllocator,
+    /// Phase 5 GA hardening S6: producer signer.
+    pub signer: std::sync::Arc<dyn spendguard_signing::Signer>,
 }
 
 pub async fn build_pg_pool(database_url: &str) -> anyhow::Result<PgPool> {

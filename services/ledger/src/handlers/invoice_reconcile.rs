@@ -58,16 +58,17 @@ use crate::{
     },
 };
 
-#[instrument(skip(pool, req), fields(
+#[instrument(skip(pool, signer, req), fields(
     tenant = %req.tenant_id,
     reservation_id = %req.reservation_id,
     decision_id = %req.decision_id,
 ))]
 pub async fn handle(
     pool: &PgPool,
+    signer: &dyn spendguard_signing::Signer,
     req: InvoiceReconcileRequest,
 ) -> Result<InvoiceReconcileResponse, tonic::Status> {
-    match handle_inner(pool, req).await {
+    match handle_inner(pool, signer, req).await {
         Ok(resp) => Ok(resp),
         Err(DomainError::Internal(e)) => Err(tonic::Status::internal(e.to_string())),
         Err(DomainError::Db(e)) => Err(tonic::Status::unavailable(format!("db: {}", e))),
@@ -82,6 +83,7 @@ pub async fn handle(
 
 async fn handle_inner(
     pool: &PgPool,
+    signer: &dyn spendguard_signing::Signer,
     req: InvoiceReconcileRequest,
 ) -> Result<InvoiceReconcileResponse, DomainError> {
     validate(&req)?;
@@ -214,7 +216,13 @@ async fn handle_inner(
 
     let outcome_payload = extract_cloudevent_payload(outcome_audit_event)?;
 
-    let decision_payload = json!({
+    // Phase 5 GA hardening S6: ledger signs the server-minted decision
+    // row with its own producer signer. signing_key_id reflects the
+    // ledger's key; the JSON canonical form (sorted by serde_json key
+    // order) is what we sign over. A successor slice (S8) bridges the
+    // ledger's JSON canonical form and the sidecar's proto canonical
+    // form into a single verifier.
+    let mut decision_payload = json!({
         "specversion":     outcome_audit_event.specversion,
         "type":            "spendguard.audit.decision",
         "source":          outcome_audit_event.source,
@@ -229,8 +237,22 @@ async fn handle_inner(
         "schema_bundle_id": outcome_audit_event.schema_bundle_id,
         "producer_id":     outcome_audit_event.producer_id,
         "producer_sequence": decision_seq,
-        "signing_key_id":  "ledger-server-mint:v1",
+        "signing_key_id":  signer.key_id(),
     });
+    let decision_canonical_bytes = serde_json::to_vec(&decision_payload).map_err(|e| {
+        DomainError::Internal(anyhow::anyhow!("decision payload canonical serialize: {e}"))
+    })?;
+    let decision_signature = signer
+        .sign(&decision_canonical_bytes)
+        .await
+        .map_err(|e| {
+            DomainError::Internal(anyhow::anyhow!(
+                "ledger sign synthesized decision row: {e}"
+            ))
+        })?;
+    // Echo the actual signing_key_id back into the payload so the
+    // GENERATED columns added by migration 0024 see the correct value.
+    decision_payload["signing_key_id"] = json!(decision_signature.key_id);
 
     let pricing_json = json!({
         "pricing_version":         pricing.pricing_version,
@@ -260,8 +282,8 @@ async fn handle_inner(
         "audit_decision_event_id":          derived_decision_event_id.to_string(),
         "event_type":                       "spendguard.audit.decision",
         "cloudevent_payload":               decision_payload,
-        // Empty hex → SP decodes to '\x'::BYTEA (server-minted POC).
-        "cloudevent_payload_signature_hex": "",
+        // S6: signed by the ledger's producer signer above.
+        "cloudevent_payload_signature_hex": hex::encode(&decision_signature.bytes),
     });
 
     let audit_outcome_outbox_json = json!({

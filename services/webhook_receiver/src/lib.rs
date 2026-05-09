@@ -1,6 +1,7 @@
 //! Provider Webhook Receiver — translates provider HTTPS webhooks to
 //! Ledger gRPC ops (Phase 2B Step 11; design /tmp/codex-webhook-r3.txt LOCKED).
 
+pub mod audit;
 pub mod config;
 pub mod domain;
 pub mod handlers;
