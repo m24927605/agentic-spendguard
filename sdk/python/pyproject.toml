@@ -48,6 +48,9 @@ langgraph = [
 openai-agents = [
   "openai-agents>=0.0.7",
 ]
+agt = [
+  "agent-governance-toolkit>=3.4",
+]
 dev = [
   "grpcio-tools>=1.62",
   "pytest>=8",
