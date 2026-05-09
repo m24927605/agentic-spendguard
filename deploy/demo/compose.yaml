@@ -452,6 +452,8 @@ services:
       RUST_LOG: "info,spendguard_dashboard=debug"
       SPENDGUARD_DASHBOARD_BIND_ADDR:    "0.0.0.0:8090"
       SPENDGUARD_DASHBOARD_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
+      # Phase 5 GA hardening S9: optional canonical DB for /api/audit/export.
+      SPENDGUARD_DASHBOARD_CANONICAL_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_canonical?sslmode=disable"
       SPENDGUARD_DASHBOARD_TENANT_ID:    "00000000-0000-4000-8000-000000000001"
       # Phase 5 GA hardening S17: OIDC/SSO foundation. Demo uses
       # static_token mode (allowed only with profile=demo).

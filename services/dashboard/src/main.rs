@@ -43,11 +43,18 @@ use uuid::Uuid;
 struct Config {
     bind_addr: String,
     database_url: String,
+    /// Phase 5 GA hardening S9: optional canonical DB connection for
+    /// audit export endpoint. Empty/missing disables /api/audit/export.
+    #[serde(default)]
+    canonical_database_url: Option<String>,
     tenant_id: String,
 }
 
 struct AppState {
     pg: PgPool,
+    /// Phase 5 GA hardening S9: separate pool for canonical_events
+    /// (lives in spendguard_canonical DB). None when not configured.
+    canonical_pg: Option<PgPool>,
     tenant_id: Uuid,
 }
 
@@ -68,7 +75,26 @@ async fn main() -> anyhow::Result<()> {
         .connect(&cfg.database_url)
         .await?;
 
-    let state = Arc::new(AppState { pg, tenant_id });
+    // Phase 5 GA hardening S9: optional canonical DB pool for audit
+    // export. Skipped if SPENDGUARD_DASHBOARD_CANONICAL_DATABASE_URL
+    // is unset; the export endpoint then returns 503.
+    let canonical_pg = if let Some(url) = &cfg.canonical_database_url {
+        if !url.trim().is_empty() {
+            info!(target = "audit_export", "S9: connecting to canonical DB for audit export");
+            Some(
+                PgPoolOptions::new()
+                    .max_connections(5)
+                    .connect(url)
+                    .await?,
+            )
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let state = Arc::new(AppState { pg, canonical_pg, tenant_id });
 
     // Phase 5 GA hardening S17: build Authenticator (jwt or
     // static_token-with-demo-profile) before binding the listener.
@@ -86,6 +112,8 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/decisions", get(api_decisions))
         .route("/api/deny-stats", get(api_deny_stats))
         .route("/api/outbox-health", get(api_outbox_health))
+        // Phase 5 GA hardening S9: audit export endpoint.
+        .route("/api/audit/export", get(api_audit_export))
         .layer(from_fn_with_state(auth.clone(), spendguard_auth::require_auth));
 
     let app = Router::new()
@@ -387,3 +415,263 @@ async fn api_outbox_health(
     })
     .into_response())
 }
+
+// ============================================================================
+// Phase 5 GA hardening S9: audit export
+// ============================================================================
+//
+// Read-only export of canonical_events scoped to a tenant + time range.
+// Operators stream the JSONL output to object storage / SIEM. Cursor
+// is the last (recorded_month, ingest_log_offset) tuple — clients
+// resume by passing it back as `cursor` query param.
+//
+// RBAC: AuditExport permission (granted to Admin and Auditor roles
+// in S18 policy). Tenant scope: principal.assert_tenant rejects
+// cross-tenant exports.
+//
+// Output format: each line is a JSON object with stable fields:
+//   {
+//     "event_id": "...",
+//     "event_type": "spendguard.audit.decision",
+//     "tenant_id": "...",
+//     "decision_id": "...",
+//     "recorded_at": "2026-05-09T20:00:00Z",
+//     "cloudevent_payload": { ... },
+//     "producer_signature_hex": "...",
+//     "signing_key_id": "...",
+//     "ingest_log_offset": 12345,
+//     "verification_status": "verified" | "pre_s6" | "disabled" | "quarantined"
+//   }
+//
+// Final line is a manifest JSON object:
+//   { "_manifest": { "batch_sha256": "...", "row_count": N,
+//                    "from": "...", "to": "...",
+//                    "next_cursor": "<recorded_month>:<offset>" | null } }
+//
+// The hash is sha256 over the concatenated JSONL lines (excluding the
+// manifest line). Operators can verify integrity by re-streaming and
+// recomputing.
+
+#[derive(Debug, Deserialize)]
+struct ExportQuery {
+    tenant_id: String,
+    /// Inclusive ISO 8601 start time (UTC).
+    from: String,
+    /// Exclusive ISO 8601 end time (UTC).
+    to: String,
+    /// Optional cursor from a previous batch — `<recorded_month>:<offset>`.
+    /// Stable across exports of the same tenant + range.
+    cursor: Option<String>,
+    /// Page size. Defaults to 1000; capped at 10000.
+    #[serde(default)]
+    page_size: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct ExportRow {
+    event_id: String,
+    event_type: String,
+    tenant_id: String,
+    decision_id: Option<String>,
+    recorded_at: chrono::DateTime<chrono::Utc>,
+    cloudevent_payload: serde_json::Value,
+    producer_signature_hex: String,
+    signing_key_id: String,
+    signing_algorithm: String,
+    ingest_log_offset: i64,
+    recorded_month: chrono::NaiveDate,
+}
+
+#[derive(Debug, Serialize)]
+struct ExportManifest {
+    batch_sha256: String,
+    row_count: usize,
+    from: String,
+    to: String,
+    /// Next cursor when more rows exist; null when the export is
+    /// complete. Format: `<recorded_month_yyyy_mm_dd>:<offset>`.
+    next_cursor: Option<String>,
+    tenant_id: String,
+}
+
+async fn api_audit_export(
+    Extension(principal): Extension<Principal>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<ExportQuery>,
+) -> Result<Response, StatusCode> {
+    // S18 RBAC: AuditExport granted to Admin + Auditor.
+    if principal.require(Permission::AuditExport).is_err() {
+        info!(
+            subject = %principal.subject,
+            roles = ?principal.roles,
+            "audit export rejected — missing AuditExport permission"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // S18 cross-tenant guard: principal must be scoped to the
+    // requested tenant. Spec: "tenant A cannot export tenant B".
+    if principal.assert_tenant(&q.tenant_id).is_err() {
+        info!(
+            subject = %principal.subject,
+            requested = %q.tenant_id,
+            scope = ?principal.tenant_ids,
+            "audit export rejected — cross-tenant"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let canonical_pg = match &state.canonical_pg {
+        Some(p) => p,
+        None => {
+            // 503: operator hasn't configured the canonical DB url.
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
+
+    let tenant_uuid = match Uuid::parse_str(&q.tenant_id) {
+        Ok(u) => u,
+        Err(_) => return Err(StatusCode::BAD_REQUEST),
+    };
+    let from_ts = chrono::DateTime::parse_from_rfc3339(&q.from)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .with_timezone(&chrono::Utc);
+    let to_ts = chrono::DateTime::parse_from_rfc3339(&q.to)
+        .map_err(|_| StatusCode::BAD_REQUEST)?
+        .with_timezone(&chrono::Utc);
+    if to_ts <= from_ts {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let page_size = q.page_size.unwrap_or(1000).min(10_000);
+
+    // Cursor parse.
+    let (cursor_month, cursor_offset) = match q.cursor.as_deref() {
+        None => (None::<chrono::NaiveDate>, 0i64),
+        Some(s) => match s.split_once(':') {
+            Some((m, o)) => {
+                let month = chrono::NaiveDate::parse_from_str(m, "%Y-%m-%d")
+                    .map_err(|_| StatusCode::BAD_REQUEST)?;
+                let off: i64 = o.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
+                (Some(month), off)
+            }
+            None => return Err(StatusCode::BAD_REQUEST),
+        },
+    };
+
+    // Query: ordered by (recorded_month, ingest_log_offset) for cursor
+    // stability; bind cursor as a >= predicate.
+    let rows: Vec<ExportRow> = sqlx::query_as::<
+        _,
+        (
+            Uuid,                           // event_id
+            String,                         // event_type
+            Uuid,                           // tenant_id
+            Option<Uuid>,                   // decision_id
+            chrono::DateTime<chrono::Utc>,  // recorded_at
+            serde_json::Value,              // cloudevent_payload
+            Vec<u8>,                        // producer_signature
+            String,                         // signing_key_id
+            String,                         // signing_algorithm
+            i64,                            // ingest_log_offset
+            chrono::NaiveDate,              // recorded_month
+        ),
+    >(
+        r#"
+        SELECT event_id, event_type, tenant_id, decision_id, recorded_at,
+               cloudevent_payload, producer_signature, signing_key_id,
+               signing_algorithm, ingest_log_offset, recorded_month
+          FROM canonical_events
+         WHERE tenant_id = $1
+           AND recorded_at >= $2
+           AND recorded_at < $3
+           AND (
+                 $4::DATE IS NULL
+              OR recorded_month > $4
+              OR (recorded_month = $4 AND ingest_log_offset > $5)
+           )
+         ORDER BY recorded_month, ingest_log_offset
+         LIMIT $6
+        "#,
+    )
+    .bind(tenant_uuid)
+    .bind(from_ts)
+    .bind(to_ts)
+    .bind(cursor_month)
+    .bind(cursor_offset)
+    .bind(page_size as i64)
+    .fetch_all(canonical_pg)
+    .await
+    .map_err(|e| {
+        info!(err = %e, "S9: canonical_events query failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .into_iter()
+    .map(|(eid, et, tid, did, rat, payload, sig, kid, algo, off, mon)| ExportRow {
+        event_id: eid.to_string(),
+        event_type: et,
+        tenant_id: tid.to_string(),
+        decision_id: did.map(|d| d.to_string()),
+        recorded_at: rat,
+        cloudevent_payload: payload,
+        producer_signature_hex: hex::encode(&sig),
+        signing_key_id: kid,
+        signing_algorithm: algo,
+        ingest_log_offset: off,
+        recorded_month: mon,
+    })
+    .collect();
+
+    // Build JSONL body + sha256 over the lines.
+    use sha2::{Digest, Sha256};
+    let mut body = String::with_capacity(rows.len() * 256);
+    let mut hasher = Sha256::new();
+    for row in &rows {
+        let line =
+            serde_json::to_string(row).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        hasher.update(line.as_bytes());
+        hasher.update(b"\n");
+        body.push_str(&line);
+        body.push('\n');
+    }
+    let batch_sha256 = format!("{:x}", hasher.finalize());
+
+    // Cursor for next batch.
+    let next_cursor = rows.last().and_then(|r| {
+        if rows.len() == page_size {
+            Some(format!(
+                "{}:{}",
+                r.recorded_month.format("%Y-%m-%d"),
+                r.ingest_log_offset
+            ))
+        } else {
+            None
+        }
+    });
+
+    let manifest = ExportManifest {
+        batch_sha256,
+        row_count: rows.len(),
+        from: q.from.clone(),
+        to: q.to.clone(),
+        next_cursor,
+        tenant_id: q.tenant_id.clone(),
+    };
+    body.push_str("{\"_manifest\":");
+    body.push_str(
+        &serde_json::to_string(&manifest).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
+    );
+    body.push_str("}\n");
+
+    info!(
+        subject = %principal.subject,
+        tenant = %q.tenant_id,
+        row_count = rows.len(),
+        "S9: audit export served"
+    );
+
+    Ok(([
+        ("content-type", "application/x-ndjson"),
+        ("x-spendguard-audit-export", "v1"),
+    ], body)
+        .into_response())
+}
+
