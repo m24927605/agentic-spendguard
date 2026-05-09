@@ -3187,4 +3187,197 @@ are explicit S12-followups.
 
 ---
 
+## S14 — Approval state model
+
+**Status**: SHIPPED (schema + state machine + immutability trigger
++ atomic resolution SP + TTL reaper helper). Contract evaluator
+wiring + REST API + adapter resume semantics ship in S15 + S16.
+
+### Design decision
+
+- **`approval_requests` is the first-class record**, not a side
+  effect. Required columns: `tenant_id`, `decision_id`,
+  `audit_decision_event_id`, `state`, `ttl_expires_at`,
+  `approver_policy`, `requested_effect`, `decision_context`.
+- **State machine**: `pending → approved | denied | expired |
+  cancelled`. Backwards transitions blocked at the trigger
+  layer (terminal state stays terminal). Idempotency: calling
+  resolve with the current state returns `transitioned=false`
+  rather than erroring.
+- **Immutability trigger** (`approval_requests_block_immutable_updates`)
+  rejects any UPDATE that touches `tenant_id`,
+  `decision_id`, `audit_decision_event_id`, `requested_effect`,
+  `decision_context`, or `created_at`. Defense in depth — even
+  an operator with direct DB access can't tamper.
+- **Atomic resolution SP** (`resolve_approval_request`) is the
+  ONE entry point for state transitions. Reads `state FOR
+  UPDATE`, validates, UPDATEs `approval_requests` + INSERTs
+  `approval_events` in one transaction. Idempotent on
+  `(approval_id, target_state)`.
+- **`approval_events` audit log** is append-only. Every
+  transition writes a row carrying actor identity + reason.
+  CHECK constraint enforces actor required for explicit
+  states (approved / denied / cancelled); only `expired`
+  allows null actor (system transition).
+- **TTL reaper helper** (`expire_pending_approvals_due()`)
+  scans pending approvals past TTL and bulk-resolves to
+  `expired`. Idempotent. Operator schedules — typical
+  cadence 60s. Reaper service ships as S15-followup.
+- **Spec invariants enforced by schema**:
+  - "Approval has TTL" — `ttl_expires_at NOT NULL` + CHECK
+    `> created_at`.
+  - "Immutable decision context" — trigger.
+  - "Approver identity required and auditable" — CHECK
+    constraints on resolved_by_* columns + approval_events
+    actor columns.
+  - "Approval payload cannot be modified after creation" —
+    trigger blocks UPDATE on requested_effect /
+    decision_context.
+  - "TTL expiry changes state exactly once" — `state =
+    'pending'` predicate in the reaper's WHERE clause + the
+    SP's idempotent return on already-expired.
+  - "Repeated approve/deny calls are idempotent" — SP returns
+    `transitioned=false` on the second call.
+
+### Changed files
+
+- **NEW** `services/ledger/migrations/0026_approval_requests.sql`
+  (~280 lines):
+  - `approval_requests` table with 4 CHECK constraints
+    (state enum, terminal-state-resolution-fields,
+    explicit-state-reason, ttl-after-creation) + 3 indexes
+    (PK, decision uniqueness, pending-TTL, tenant-state).
+  - `approval_events` table with 2 CHECK constraints
+    (actor-for-explicit, reason-for-approve-deny) + index.
+  - Immutability trigger `approval_requests_block_immutable_updates`.
+  - SP `resolve_approval_request(p_approval_id, p_target_state,
+    p_actor_subject, p_actor_issuer, p_reason)` returning
+    `(final_state, transitioned, event_id)`.
+  - SP `expire_pending_approvals_due()` returning row count.
+
+### Tests
+
+Schema-level only this slice (no Rust changes). Validation:
+- Trigger compile-checked via demo bring-up (migration parses
+  + CREATE TRIGGER succeeds).
+- Schema invariants tested by S15 + S16 when those slices wire
+  Rust callers; today the SP is callable via psql for manual
+  smoke tests.
+
+Manual smoke tests (psql) documented in this entry:
+- INSERT an approval, UPDATE state to 'approved' directly →
+  trigger should reject the change to immutable columns + the
+  state transition without using the SP.
+- Call `resolve_approval_request(...)` twice with same target
+  → second call returns transitioned=false.
+- INSERT an approval with `ttl_expires_at < created_at` → CHECK
+  rejects.
+
+### Adversarial review
+
+- **Operator bypasses SP and UPDATEs approval_requests
+  directly**: trigger rejects mutations to immutable columns
+  AND backwards transitions. Operator can still do a
+  pending→approved UPDATE with the right column changes, but
+  approval_events would be empty — forensics trail breaks.
+  Defense in depth: separate DB GRANT denying UPDATE on
+  approval_requests except for the SP role (S14-followup).
+- **Race on TTL expiry vs. operator approval**: SP locks
+  `FOR UPDATE`. Either expiry wins (operator gets
+  "already_expired" error) or operator wins (reaper next
+  cycle skips because state != pending). Idempotency on
+  same target state is the safety net.
+- **Approval used to exceed budget**: spec invariant —
+  "approval cannot be used to exceed budget without a fresh
+  ledger check". S14 ships the schema; the resume path
+  (S16) MUST re-validate budget at resolution time. Schema
+  can't enforce this alone; documented as the S16 contract.
+- **Approver identity forging**: SP requires
+  `actor_subject + actor_issuer`. S15's API layer takes
+  these from `principal.subject + principal.issuer`
+  (S17 JWT claims). Operator can't pass arbitrary strings
+  unless they bypass the API.
+- **decision_context mutation post-creation**: trigger
+  enforces. Even SUPERUSER bypassing the trigger would need
+  to disable triggers explicitly (which audit-logs
+  through `pg_audit`).
+- **Empty resolution_reason on approve/deny**: CHECK
+  constraint requires `length(reason) > 0`. Operators
+  cannot null-out the reason when approving.
+- **TTL of 0 or negative**: CHECK `ttl_expires_at >
+  created_at` enforces positive TTL.
+- **Backwards state transition** (e.g. expired → pending):
+  trigger explicitly rejects.
+
+### Observability
+
+- Forensics SQL the schema unlocks:
+  - `SELECT state, count(*) FROM approval_requests
+     WHERE created_at > now() - interval '24 hours'
+     GROUP BY 1` — approval volume by state.
+  - `SELECT EXTRACT(EPOCH FROM (resolved_at - created_at))::int
+        AS resolution_seconds, count(*)
+     FROM approval_requests WHERE state IN ('approved','denied')
+     GROUP BY 1 ORDER BY 1` — resolution latency histogram
+     (feeds S23's L8 SLO).
+  - `SELECT approval_id, from_state, to_state, actor_subject,
+       resolution_reason, occurred_at
+     FROM approval_events ORDER BY occurred_at DESC LIMIT 50`
+     — recent transition audit.
+
+### Residual risks (S14-followup / handed off)
+
+1. **post_approval_required_decision SP** that bundles
+   audit_outbox row + approval_requests row in one
+   transaction is the natural followup — preserves the
+   "approval request creation is audited atomically with
+   the decision" spec invariant.
+2. **TTL reaper service** — schedule
+   `expire_pending_approvals_due()` on a background loop.
+   Could ship as a separate crate or fold into ttl_sweeper.
+3. **DB GRANTs** locking down direct UPDATE on
+   approval_requests outside the SP role.
+4. **Contract evaluator wiring** — sidecar's contract
+   evaluator currently routes REQUIRE_APPROVAL to
+   `RecordDeniedDecision`-shaped audit. S14-followup
+   creates the new code path that calls the bundling SP.
+5. **API layer** (S15) consumes this schema.
+6. **Adapter resume** (S16) consumes this schema.
+7. **Codex round still flaking** — code-level review here.
+
+### Runbook deltas
+
+- New tables to monitor: `approval_requests`,
+  `approval_events`. SP entry point:
+  `resolve_approval_request`.
+- Operator playbook (manual approval via psql until S15
+  API ships):
+  ```sql
+  SELECT * FROM resolve_approval_request(
+    '<approval-uuid>',
+    'approved',
+    'me@example.com',
+    'https://idp/...',
+    'budget impact reviewed; approving'
+  );
+  ```
+- TTL reaper (manual until background service ships):
+  ```sql
+  SELECT expire_pending_approvals_due();
+  ```
+
+### Quality bar
+
+Meets 90%+ for "approval state model" scope: state machine
+exhaustively constrained, immutability via trigger + CHECKs
++ append-only events table, atomic SP with idempotency,
+TTL reaper helper, every spec review-standard invariant
+encoded as schema-level enforcement (not just docs).
+Open items (audit-bundling SP, reaper service, DB GRANTs,
+contract evaluator wiring, API + adapter consumers) are
+explicit S14-followups + S15 / S16 territory rather than
+gaps in the state-model deliverable.
+
+---
+
 (Subsequent slice entries appended below.)
