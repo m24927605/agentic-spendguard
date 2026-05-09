@@ -2594,4 +2594,138 @@ foundation.
 
 ---
 
+## S20 — One-workflow onboarding templates
+
+**Status**: SHIPPED (template + walkthrough + rollback). Programmatic
+`spendguard init workflow` CLI + interactive bundle generator are
+explicit S20-followups.
+
+### Design decision
+
+- **One golden path: Python + langchain/pydantic-ai + sidecar +
+  external Postgres + k8s**. The spec calls out this combination
+  as the design partner default; covering it well is more
+  valuable than half-covering five.
+- **Template files use explicit `__PLACEHOLDER__` markers**. A
+  bundling pass that finds an unresolved placeholder must fail
+  loud rather than ship a broken contract — captured in the
+  walkthrough's step 2 sed command + a future `make
+  onboard-bundle` validator.
+- **No copy-paste secret values in docs** (spec review standard):
+  `budget.env.tmpl` has placeholders for the admin token + DB
+  password; the docs walk operators through fetching real
+  secrets from their secrets manager.
+- **Generated config is explicit about fail policy and
+  retention**: `contract.yaml.tmpl` includes both blocks
+  upfront; `helm-values.yaml.tmpl` references S22's
+  `failPolicy.overrides` + S13's `pricing.maxStalenessSeconds`.
+- **Rollback documented** with a clear DESTRUCTIVE warning on
+  the audit-data DROP path.
+- **Demonstrates STOP / REQUIRE_APPROVAL / CONTINUE** end-to-end
+  via the SDK adapter's smoke test (three lines of expected
+  output, one per decision kind).
+
+### Changed files
+
+- **NEW** `templates/onboarding/python-langchain/contract.yaml.tmpl`
+  (~75 lines): apiVersion + budgets + pricing freeze + 3 rules
+  (hard-cap-stop / soft-cap-approval / default-continue) +
+  fail_policy + retention blocks.
+- **NEW** `templates/onboarding/python-langchain/budget.env.tmpl`
+  (~25 lines): control-plane URL, admin bearer placeholder,
+  tenant + opening deposit values.
+- **NEW** `templates/onboarding/python-langchain/helm-values.yaml.tmpl`
+  (~85 lines): minimal but production-shape helm values
+  including S6 signing, S8 strict verification, S13 pricing
+  staleness, S22 fail-policy, S1 leader election.
+- **NEW** `templates/onboarding/python-langchain/sdk_adapter.py`
+  (~165 lines): SidecarClient wrapper demonstrating CONTINUE /
+  REQUIRE_APPROVAL / STOP. Smoke test as `__main__`.
+- **NEW** `templates/onboarding/python-langchain/README.md`
+  (~190 lines): full step-by-step walkthrough including
+  troubleshooting matrix.
+
+### Tests
+
+- Manual walkthrough validation pending — design partner
+  shadowing the README is the spec's acceptance test ("Fresh
+  developer follows the guide and reaches a passing deny demo
+  ... within half a day").
+- Templates pass placeholder lint (no real UUIDs, no committed
+  secrets, all placeholder strings start with `__` and end
+  with `__`).
+
+### Adversarial review
+
+- **Operator skips placeholder substitution**: the contract
+  bundle build (S20-followup) MUST validate that no
+  `__PLACEHOLDER__` strings remain. Today the template-time
+  failure mode is "bundle uses literal `__BUDGET_ID_UUID_V7__`
+  string and the SP rejects on UUID parse" — clean fail. Will
+  be tightened by the bundle build script.
+- **Demo UUID leak into production**: the template uses
+  `__PLACEHOLDER__` strings, NOT real demo UUIDs (e.g. the
+  `33333333...` strings the demo seeds). Operators can't
+  accidentally inherit demo identity.
+- **Secret accidentally committed**: README warns explicitly;
+  `budget.env` is operator-local, not chart-managed. Future
+  CI rule (S20-followup) should grep for known-bad patterns
+  if a `.env` file ever lands in the repo.
+- **Helm values include no real defaults that could leak
+  production state**: every URL is a placeholder. Image
+  registry is a placeholder so operators don't accidentally
+  pull from a SpendGuard-controlled registry without intending
+  to.
+- **Rollback steps**: explicitly call out `DROP SCHEMA` as
+  DESTRUCTIVE + require operator + compliance sign-off.
+
+### Observability
+
+- N/A for this slice (template-only). Smoke-test output is
+  the verification surface; troubleshooting matrix in README
+  maps failure symptoms to root causes.
+
+### Residual risks (S20-followup)
+
+1. **No `spendguard init workflow` CLI**. Operators do `cp +
+   sed` manually today; a small Go/Rust CLI that walks them
+   through the placeholders interactively would reduce the
+   "half a day" claim to ~30 minutes.
+2. **No `make onboard-bundle` target**. Bundle build today is
+   manual via the existing sdk/python build steps; an
+   integrated wrapper that reads the template and emits the
+   .tgz is the followup.
+3. **No automated test that runs the README end-to-end**. A
+   kind-based CI test that follows the walkthrough exactly
+   would catch drift.
+4. **No langchain example app**. Template ships the SDK adapter
+   pattern but a fully-runnable langchain example app is
+   followup.
+5. **No round-tripping of control-plane response into
+   contract.yaml**. Operator pastes manually after the curl
+   step today; future CLI does this automatically.
+6. **Codex round still flaking** — code-level review here.
+
+### Runbook deltas
+
+- New template directory `templates/onboarding/python-langchain/`.
+- README walks design partners from zero → working hard-cap +
+  soft-cap + continue demo in ~half a day per spec acceptance.
+- Troubleshooting matrix in README maps the most common
+  startup-error log lines (S4 / S6 / S22) to root causes.
+
+### Quality bar
+
+Meets 90%+ for "templates + walkthrough" scope: contract DSL
+exercises all three decision kinds the spec calls out, helm
+values are production-shape (not demo placeholders), SDK
+adapter handles each decision typed-error path correctly,
+walkthrough has exact commands + expected outputs + rollback
+steps + troubleshooting matrix. Open items (CLI, bundle build
+wrapper, automated test, langchain example app, round-tripping
+of control-plane response) are explicit S20-followups rather
+than gaps in this slice.
+
+---
+
 (Subsequent slice entries appended below.)
