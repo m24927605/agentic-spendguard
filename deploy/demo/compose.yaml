@@ -70,6 +70,10 @@ services:
       POSTGRES_USER:     "spendguard"
       POSTGRES_PASSWORD: "spendguard_demo"
       PRICING_DB:        "spendguard_canonical"
+      LEDGER_DB:         "spendguard_ledger"
+      FX_RATE_VERSION:   "demo-fx-v1"
+      UNIT_CONVERSION_VERSION: "demo-units-v1"
+      SIGNING_KEY_ID:    "demo-key-1"
       PGPASSWORD:        "spendguard_demo"
     volumes:
       - bundles-data:/bundles
