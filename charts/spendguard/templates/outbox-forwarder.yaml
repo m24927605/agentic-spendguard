@@ -26,6 +26,14 @@ spec:
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           env:
             - { name: SPENDGUARD_OUTBOX_FORWARDER_TENANT_ID,         value: {{ .Values.global.tenantId | quote }} }
+            # Phase 5 S2: per-pod-unique workload_instance_id via downward API.
+            {{- if .Values.outboxForwarder.workloadInstanceIdOverride }}
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_WORKLOAD_INSTANCE_ID, value: {{ .Values.outboxForwarder.workloadInstanceIdOverride | quote }} }
+            {{- else }}
+            - name: _POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_WORKLOAD_INSTANCE_ID, value: "outbox-forwarder-$(_POD_NAME)" }
+            {{- end }}
             - name: SPENDGUARD_OUTBOX_FORWARDER_DATABASE_URL
               value: {{ .Values.postgres.ledgerUrl | quote }}
             - name: SPENDGUARD_OUTBOX_FORWARDER_CANONICAL_INGEST_URL

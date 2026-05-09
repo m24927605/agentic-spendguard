@@ -65,8 +65,11 @@ canonicalIngest:
 
 sidecar:
   enabled: true
-  # GA gate: multi-pod = producer_sequence races. Keep at 1 for POC.
+  # Phase 5 S1+S2: multi-pod safe via leader-election + per-pod
+  # workload_instance_id (sourced from k8s downward API metadata.name).
+  # Override workloadInstanceIdOverride for non-k8s deployments.
   replicas: 1
+  workloadInstanceIdOverride: ""
   image:
     repository: spendguard/sidecar
     tag: "0.1.0-alpha.1"
@@ -120,6 +123,8 @@ outboxForwarder:
   pollIntervalSeconds: 2
   batchSize: 50
   leaseName: "outbox-forwarder"
+  # Phase 5 S2: pod-unique workload id via downward API by default.
+  workloadInstanceIdOverride: ""
 
 ttlSweeper:
   enabled: true
@@ -128,10 +133,10 @@ ttlSweeper:
     repository: spendguard/ttl-sweeper
     tag: "0.1.0-alpha.1"
   fencingScopeId: "00000000-0000-7000-a000-000000000060"
-  workloadInstanceId: "ttl-sweeper-0"
   pollIntervalSeconds: 2
   batchSize: 10
   leaseName: "ttl-sweeper"
+  workloadInstanceIdOverride: ""
 
 # Migration job (post-install hook).
 migrations:
