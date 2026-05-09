@@ -11,13 +11,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Install adapter dev deps (grpcio-tools is needed for `make proto`).
 # Anthropic SDK added for DEMO_MODE=agent_real_anthropic; httpx for the
-# webhook simulator path.
+# webhook simulator path. LangChain + LangGraph + OpenAI Agents added
+# for the Phase 4 O5 demo modes.
 RUN pip install --no-cache-dir \
     "grpcio>=1.62" \
     "grpcio-tools>=1.62" \
     "protobuf>=4.25,<6" \
     "pydantic>=2.6" \
     "pydantic-ai>=0.0.20,<0.1.0" \
+    "langchain-core>=0.3" \
+    "langchain>=0.3" \
+    "langchain-openai>=0.2" \
+    "langgraph>=0.2" \
     "httpx>=0.27"
 
 WORKDIR /build
@@ -28,10 +33,11 @@ COPY sdk/python ./sdk/python
 WORKDIR /build/sdk/python
 RUN make proto
 
-# Install the SDK with the [pydantic-ai] extra so the demo runner can
-# import spendguard.integrations.pydantic_ai. (LangChain / OpenAI Agents
-# extras are added when those demo modes ship.)
-RUN pip install --no-cache-dir '.[pydantic-ai]'
+# Install the SDK with all integration extras so the demo runner can
+# exercise every mode (pydantic-ai, langchain, langgraph). The
+# openai-agents extra is included only if the SDK is published; the
+# demo's openai_agents mode skips gracefully if missing.
+RUN pip install --no-cache-dir '.[pydantic-ai,langchain,langgraph]'
 
 # Copy the demo runner + entrypoint that sources bundles runtime.env.
 COPY deploy/demo/demo/run_demo.py /usr/local/bin/run_demo.py

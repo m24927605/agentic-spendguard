@@ -583,7 +583,214 @@ async def main() -> int:
         return await run_agent_mode(use_real_openai=True)
     if DEMO_MODE == "agent_real_anthropic":
         return await run_agent_mode(use_real_anthropic=True)
+    if DEMO_MODE == "agent_real_langchain":
+        return await run_langchain_mode()
+    if DEMO_MODE == "agent_real_langgraph":
+        return await run_langgraph_mode()
     return await run_agent_mode()
+
+
+# ---------------------------------------------------------------------------
+# LangChain mode (Phase 4 O5): SpendGuardChatModel wraps ChatOpenAI.
+# ---------------------------------------------------------------------------
+
+
+async def run_langchain_mode() -> int:
+    if not os.environ.get("OPENAI_API_KEY"):
+        print("[demo] FATAL: OPENAI_API_KEY required for agent_real_langchain mode", file=sys.stderr)
+        return 8
+
+    from langchain_core.messages import HumanMessage
+    from langchain_openai import ChatOpenAI
+
+    from spendguard import SpendGuardClient, new_uuid7
+    from spendguard.integrations.langchain import (
+        RunContext as LcRunContext,
+        SpendGuardChatModel,
+        run_context as lc_run_context,
+    )
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+    print("[demo] using real OpenAI gpt-4o-mini via LangChain")
+
+    unit = common_pb2.UnitRef(
+        unit_id=unit_id,
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(
+        pricing_version=pricing_version,
+        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
+        fx_rate_version=fx,
+        unit_conversion_version=unit_conv,
+    )
+
+    def estimate_claims(messages):
+        # Conservative: reserve 500 atomic per call (well above gpt-4o-mini's
+        # ~30 token responses for short prompts; below the 1B contract cap).
+        return [
+            common_pb2.BudgetClaim(
+                budget_id=budget_id,
+                unit=unit,
+                amount_atomic="500",
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id=window_id,
+            ),
+        ]
+
+    guarded = SpendGuardChatModel(
+        inner=ChatOpenAI(model="gpt-4o-mini"),
+        client=client,
+        budget_id=budget_id,
+        window_instance_id=window_id,
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate_claims,
+    )
+
+    run_id = str(new_uuid7())
+    async with lc_run_context(LcRunContext(run_id=run_id)):
+        result = await guarded.ainvoke([HumanMessage(content="Say hello in three words.")])
+
+    output = getattr(result, "content", None) or str(result)
+    print(f"[demo] langchain ainvoke OK output={output!r} run_id={run_id}")
+    await client.close()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# LangGraph mode (Phase 4 O5): same SpendGuardChatModel, driven through
+# a LangGraph create_react_agent. Reservation lifecycle is identical to
+# bare LangChain — LangGraph just orchestrates the model + tools graph.
+# ---------------------------------------------------------------------------
+
+
+async def run_langgraph_mode() -> int:
+    if not os.environ.get("OPENAI_API_KEY"):
+        print("[demo] FATAL: OPENAI_API_KEY required for agent_real_langgraph mode", file=sys.stderr)
+        return 8
+
+    from langchain_core.tools import tool
+    from langchain_openai import ChatOpenAI
+    from langgraph.prebuilt import create_react_agent
+
+    from spendguard import SpendGuardClient, new_uuid7
+    from spendguard.integrations.langchain import (
+        RunContext as LcRunContext,
+        SpendGuardChatModel,
+        run_context as lc_run_context,
+    )
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+    print("[demo] using real OpenAI gpt-4o-mini via LangGraph")
+
+    unit = common_pb2.UnitRef(
+        unit_id=unit_id,
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(
+        pricing_version=pricing_version,
+        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
+        fx_rate_version=fx,
+        unit_conversion_version=unit_conv,
+    )
+
+    def estimate_claims(messages):
+        return [
+            common_pb2.BudgetClaim(
+                budget_id=budget_id,
+                unit=unit,
+                amount_atomic="500",
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id=window_id,
+            ),
+        ]
+
+    guarded = SpendGuardChatModel(
+        inner=ChatOpenAI(model="gpt-4o-mini"),
+        client=client,
+        budget_id=budget_id,
+        window_instance_id=window_id,
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate_claims,
+    )
+
+    @tool
+    def echo(msg: str) -> str:
+        """Echo the input string back."""
+        return msg
+
+    agent = create_react_agent(guarded, tools=[echo])
+
+    run_id = str(new_uuid7())
+    async with lc_run_context(LcRunContext(run_id=run_id)):
+        result = await agent.ainvoke(
+            {"messages": [{"role": "user", "content": "Say hello in three words."}]}
+        )
+
+    final_msg = result["messages"][-1] if result.get("messages") else None
+    output = getattr(final_msg, "content", None) if final_msg is not None else None
+    print(f"[demo] langgraph ainvoke OK output={output!r} run_id={run_id}")
+    await client.close()
+    return 0
 
 
 # ---------------------------------------------------------------------------

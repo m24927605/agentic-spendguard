@@ -151,6 +151,33 @@ SQL
 
 echo "[pricing-seed] loaded pricing_version=$PRICING_VERSION rows=$ROW_COUNT hash=$PRICE_SNAPSHOT_HASH"
 
+# Mirror the pricing snapshot into the ledger DB's pricing_snapshots
+# table. The ledger SP validates `(pricing_version, price_snapshot_hash,
+# fx_rate_version, unit_conversion_version)` against this table on every
+# ReserveSet — without a row, ReserveSet fails with PRICING_VERSION_UNKNOWN.
+LEDGER_DB="${LEDGER_DB:-spendguard_ledger}"
+FX_RATE_VERSION="${FX_RATE_VERSION:-demo-fx-v1}"
+UNIT_CONVERSION_VERSION="${UNIT_CONVERSION_VERSION:-demo-units-v1}"
+SIGNING_KEY_ID="${SIGNING_KEY_ID:-demo-key-1}"
+
+psql -h "${POSTGRES_HOST:-postgres}" -U "${POSTGRES_USER:-spendguard}" -d "$LEDGER_DB" -v ON_ERROR_STOP=1 <<SQL
+INSERT INTO pricing_snapshots (
+    pricing_version, price_snapshot_hash, fx_rate_version,
+    unit_conversion_version, schema_json, signature, signing_key_id,
+    deployed_by
+) VALUES (
+    '$PRICING_VERSION',
+    decode('$PRICE_SNAPSHOT_HASH', 'hex'),
+    '$FX_RATE_VERSION',
+    '$UNIT_CONVERSION_VERSION',
+    '{"source": "pricing-seed-init", "row_count": $ROW_COUNT}'::JSONB,
+    decode('00', 'hex'),
+    '$SIGNING_KEY_ID',
+    'pricing-seed-init'
+) ON CONFLICT DO NOTHING;
+SQL
+echo "[pricing-seed] mirrored pricing_snapshot to ledger DB"
+
 # Hand off to bundles-init via shared volume. generate.sh sources this
 # file (when present) before computing PRICE_SNAPSHOT_HASH itself.
 PRICING_OUT="${PRICING_OUT:-/bundles/pricing.env}"
