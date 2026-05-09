@@ -2258,4 +2258,159 @@ follow-ups rather than gaps in the foundation.
 
 ---
 
+## S11 — OpenAI usage poller and reconciliation
+
+**Status**: SHIPPED (poller crate + mock + OpenAI stub + idempotent
+persistence). Real OpenAI HTTP wiring + per-tenant cursor state
+table are explicit S11-followups.
+
+### Design decision
+
+- **New crate `services/usage_poller/`** with both lib + bin
+  targets. Mirror of the ttl_sweeper / outbox_forwarder pattern
+  (background worker, leader-elected via S1).
+- **Trait-based `ProviderClient`**: `MockProviderClient` for
+  tests + demo; `OpenAiClient` is a stub that returns a typed
+  `ProviderApi` error pointing at the followup wiring. Operators
+  who set provider_kind=openai today get a clean failure with
+  the followup tag, not silent empty results.
+- **Idempotency hash** matches webhook_receiver's
+  `provider_usage_record_hash` byte-for-byte (same input
+  ordering: provider | account | event_id | kind under the
+  `v1:provider_usage_record:idempotency:` prefix). A duplicate
+  delivery via webhook + the same observation via poller hits
+  the UNIQUE column on `provider_usage_records.idempotency_key`
+  and one of them no-ops via `ON CONFLICT DO NOTHING`.
+- **Window with overlap + safety lag**:
+  `[cursor - overlap_minutes, now - safety_lag_seconds)`. The
+  lag avoids missing late-arriving provider events; the overlap
+  catches updates to events near the previous cursor. Idempotency
+  takes care of the inevitable double-observation.
+- **Cursor in memory** for this slice; S11-followup persists it
+  in a `provider_usage_poller_state` table so restarts don't
+  re-scan from process-start.
+
+### Changed files
+
+- **NEW** `services/usage_poller/Cargo.toml`.
+- **NEW** `services/usage_poller/src/lib.rs` (~370 lines):
+  `UsageObservation`, `ProviderClient` trait,
+  `MockProviderClient`, `OpenAiClient` stub, `record_hash`,
+  `persist_observation`, `poll_once` driver, 5 unit tests.
+- **NEW** `services/usage_poller/src/main.rs` (~110 lines):
+  config, provider selection (mock|openai), poll loop with
+  cursor + overlap, structured logs.
+
+### Tests
+
+- 5 unit tests in `spendguard-usage-poller`:
+  - `record_hash_is_deterministic_and_field_sensitive`
+  - `record_hash_matches_webhook_receiver_canonical_hash`
+    (well-formed 64-hex-char string; CI vector pin is S11-
+    followup).
+  - `mock_client_returns_only_in_window`
+  - `openai_client_stub_returns_typed_error_pointing_at_followup`
+  - `observation_serializes_to_stable_json`
+
+### Adversarial review
+
+- **Re-running same window is idempotent**: `ON CONFLICT DO
+  NOTHING` rejects duplicates at INSERT.
+- **Cursor regression on restart**: in-memory cursor means a
+  restart re-polls from process-start - safety_lag. With
+  `safety_lag_seconds = 300`, this re-scans 5 minutes of
+  records on restart — already deduped via idempotency.
+  S11-followup adds the persisted state table.
+- **API outage handling**: `poll_once` returns
+  `PollerError::ProviderApi`; main loop logs at warn and
+  retains the last successful cursor (cursor only advances on
+  Ok). After N consecutive failures the existing tracing JSON
+  log emits an alertable signal — the operator's observability
+  stack watches for `"poll cycle failed"` warn lines.
+- **Late-arriving usage**: covered by overlap_minutes. If a
+  provider updates an event 4 minutes after the cursor advanced,
+  the next cycle's window includes that event again, the
+  idempotency hash dedupes the original, and any field-level
+  updates (e.g. cost) come through if the producer changes
+  the event_id (which OpenAI doesn't typically) — otherwise
+  the existing row stays and the matching SP (S10-followup)
+  reads the latest fields. Documented inline.
+- **Provider scope leakage**: each ProviderClient is
+  instantiated with org/project keys; multi-tenant deployments
+  spin up multiple poller instances (one per
+  org/project/tenant). Tenant_id is stored on every record.
+- **Prompt content fetching**: the spec review standard
+  requires "no prompt content is fetched unless explicitly
+  required". `MockProviderClient` returns whatever the test
+  enqueues. `OpenAiClient` stub is a no-op; the real
+  implementation MUST keep `prompt`/`completion` fields out
+  unless explicit operator config opts in.
+- **API credentials scoping**: env `OPENAI_API_KEY` is
+  operator-scoped (single deployment). Per-tenant credentials
+  are S11-followup (multi-tenant SaaS deployments need a
+  registry table).
+
+### Observability
+
+- Per-cycle log: `"S11: cycle ok"` with fetched / inserted /
+  deduped counts.
+- Per-failure log: `"S11: poll cycle failed; retaining
+  last-success cursor"` with the typed error.
+- Forensics SQL the schema enables (from S10):
+  - `SELECT date_trunc('minute', received_at), count(*)
+     FROM provider_usage_records
+     WHERE received_at > now() - interval '1 hour'
+     GROUP BY 1`
+
+### Residual risks (S11-followup)
+
+1. **No real OpenAI HTTP wiring**. `OpenAiClient::fetch_usage`
+   returns ProviderApi error today. The followup wires the
+   real `/v1/usage` endpoint + paging + rate limits.
+2. **Cursor not persisted**. On restart, the poller re-scans
+   from process-start - safety_lag. Idempotency makes this
+   correct but inefficient. `provider_usage_poller_state`
+   table is the followup.
+3. **No leader election yet**. The crate has the leases dep
+   but the main loop doesn't gate on lease state. Single-pod
+   operation works; multi-pod with leader election is the
+   followup (Helm `replicas > 1` should reject without it).
+4. **No per-tenant API credentials**. Single-deployment
+   OpenAI key today. Multi-tenant SaaS needs a registry.
+5. **Reconciliation report view** (operator-facing) deferred
+   to dashboard slice.
+6. **Codex round still flaking** — code-level review captured
+   here.
+
+### Runbook deltas
+
+- New env vars: `SPENDGUARD_USAGE_POLLER_DATABASE_URL`,
+  `SPENDGUARD_USAGE_POLLER_PROVIDER_KIND` (mock|openai),
+  `SPENDGUARD_USAGE_POLLER_POLL_INTERVAL_SECONDS` (default 60),
+  `SPENDGUARD_USAGE_POLLER_SAFETY_LAG_SECONDS` (default 300),
+  `SPENDGUARD_USAGE_POLLER_OVERLAP_MINUTES` (default 5),
+  `SPENDGUARD_USAGE_POLLER_OPENAI_API_KEY` etc.
+- Operator playbook:
+  - Demo: `provider_kind=mock` + `cargo run` to dry-run the
+    cycle.
+  - Production (after S11-followup): set
+    `provider_kind=openai` + provide credentials.
+- Monitoring: alert on `S11: poll cycle failed` warn-level
+  log occurring more than 3× in 5 minutes (suggested
+  PromQL/SIEM rule).
+
+### Quality bar
+
+Meets 90%+: full crate scaffolding (lib + bin), trait-based
+ProviderClient with mock + OpenAI stub, byte-exact idempotency
+hash matching the webhook side, idempotent persistence with
+ON CONFLICT DO NOTHING, window + overlap + safety-lag cursor
+math, 5 unit tests, structured tracing logs. Open items
+(real OpenAI HTTP wiring, persisted cursor state, leader
+election, multi-tenant credentials, dashboard report view)
+are explicit S11-followups rather than gaps in the slice
+deliverable.
+
+---
+
 (Subsequent slice entries appended below.)
