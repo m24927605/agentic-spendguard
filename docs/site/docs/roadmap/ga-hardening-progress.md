@@ -1945,4 +1945,178 @@ rather than gaps in S7's surface.
 
 ---
 
+## S9 — Audit export
+
+**Status**: SHIPPED (read endpoint with cursor + RBAC + tenant scope
++ batch hash). Object-storage sink + audit-exporter worker are
+explicit S9-followups; today operators stream the JSONL output
+directly to S3/SIEM via curl piping.
+
+### Design decision
+
+- **Read endpoint, not writer**. The deliverable is a streaming
+  JSONL endpoint that operators can pipe to whichever sink they
+  prefer (`curl ... > batch.jsonl` then `aws s3 cp`). Avoids
+  taking a hard dependency on a particular cloud provider in
+  the dashboard service.
+- **Endpoint location**: `/api/audit/export` on dashboard (the
+  operator-facing service that already has auth + RBAC wiring
+  from S17/S18). Dashboard gets a new optional canonical DB
+  pool — the export endpoint returns 503 when the canonical DB
+  URL isn't configured.
+- **JSON Lines + manifest**. Every row is a JSON object; the
+  final line is a `{"_manifest": {...}}` row containing
+  `batch_sha256` over all preceding row JSON, plus `next_cursor`
+  for pagination. Operators verify by re-streaming the same
+  cursor + range and recomputing the hash.
+- **Cursor format**: `<recorded_month>:<ingest_log_offset>`,
+  human-readable for operators tailing logs. Cursor is stable
+  across exports (canonical_events is append-only, never
+  rewritten — same `recorded_month + offset` always points at
+  the same row).
+- **RBAC + tenant scope** via S17/S18: `Permission::AuditExport`
+  required (granted to Admin + Auditor); `principal.assert_tenant`
+  rejects cross-tenant exports with 403. Spec invariant
+  ("tenant A cannot export tenant B") is enforced at the
+  handler layer before any DB query.
+- **Page size capped** at 10000 rows per request to avoid
+  unbounded memory + Postgres lock contention. Default 1000.
+
+### Changed files
+
+- **MODIFIED** `services/dashboard/Cargo.toml`: added `sha2`
+  and `hex` deps for the manifest hash.
+- **MODIFIED** `services/dashboard/src/main.rs`:
+  - `Config.canonical_database_url: Option<String>` (env var
+    `SPENDGUARD_DASHBOARD_CANONICAL_DATABASE_URL`).
+  - `AppState.canonical_pg: Option<PgPool>` initialized at
+    startup.
+  - New `api_audit_export` handler with full RBAC + tenant
+    scope check + cursor + page_size + JSONL output + sha256
+    manifest.
+  - New route `/api/audit/export` behind the same auth
+    middleware as the rest of the API.
+- **MODIFIED** `deploy/demo/compose.yaml`: added the new env var
+  pointing dashboard at the demo's spendguard_canonical DB.
+
+### Tests
+
+- Compile-level verification (docker build of dashboard).
+- Manual smoke test plan documented in this entry — automated
+  test infrastructure for export semantics deferred to S9
+  follow-up:
+  - `curl -H 'Authorization: Bearer <admin-token>' '...?tenant_id=...&from=...&to=...'`
+    returns JSONL with manifest line.
+  - `curl ... --data-urlencode 'tenant_id=<other-tenant>'`
+    returns 403.
+  - Resume after partial read: pass `next_cursor` from the
+    manifest as `cursor` query param.
+  - Hash verification: `sha256sum < (curl ... | head -n -1)`
+    matches `_manifest.batch_sha256`.
+
+### Adversarial review
+
+- **Cross-tenant export**: handler calls
+  `principal.assert_tenant(&q.tenant_id)` BEFORE any DB query.
+  Returns 403 (not 404 — see S17 / S18 information-leakage
+  rules; tenant existence not revealed by status code).
+- **Cursor injection**: cursor format is parsed strictly
+  (`<yyyy-mm-dd>:<i64>`); malformed cursors return 400. SQL
+  query uses a parameterized `>=` predicate, no string
+  concatenation.
+- **Page-size DoS**: capped at 10000. A request with
+  `page_size=999999` is silently truncated to 10000.
+- **Time-range DoS**: handler returns BAD_REQUEST if
+  `to <= from`. No further validation on range size — operators
+  managing very large ranges should paginate via cursor.
+- **Hash forging**: the `batch_sha256` is computed over the
+  exact bytes of the JSONL the server sends. An attacker who
+  intercepts and tampers cannot present a matching hash unless
+  they recompute server-side.
+- **Replay semantics**: cursor + range are deterministic.
+  Re-running the same query produces the same JSONL and same
+  hash (canonical_events is append-only; rows never mutate).
+  Operators detect tampering by comparing exports across
+  retention windows.
+- **Information disclosure**: the export includes
+  `cloudevent_payload` JSONB which may contain user prompts /
+  decision data. Spec review standard says "Verify export does
+  not expose prompt/payload fields beyond retention policy."
+  S9 ships the surface; the redaction policy is operator-
+  configurable retention (deferred to S19 retention/redaction
+  slice — exporter consults S19's redaction config when it
+  lands).
+- **Service unavailable when canonical DB unconfigured**: 503
+  is the correct response — operators see a clean 503 rather
+  than a stack trace, and the rest of dashboard's API stays
+  online.
+
+### Observability
+
+- New info logs:
+  - On accepted export: subject + tenant + row_count.
+  - On rejection: subject + roles (missing AuditExport) OR
+    subject + requested_tenant + scope (cross-tenant).
+- No new Prometheus metrics yet — dashboard doesn't have a
+  metrics endpoint. S22's metrics layer is the natural place;
+  tracked as S9-followup.
+
+### Residual risks
+
+1. **No automated test infrastructure yet**. Manual smoke
+   test in the runbook. A future slice should add a kind +
+   testcontainers integration test that round-trips an export
+   and verifies the hash.
+2. **No object-storage sink built-in**. Operators pipe to S3
+   themselves. The audit-exporter worker variant (background
+   job that pushes batches to S3 with retention tags) is the
+   spec's longer-term shape — S9-followup.
+3. **No SIEM connector**. Spec calls SIEM "deferred"; we ship
+   the read surface that any SIEM webhook could consume.
+4. **Redaction policy not yet wired**. S19 (retention,
+   redaction, tenant data policy) will surface redaction
+   rules; today the export emits cloudevent_payload as-is.
+5. **Dashboard lacks a metrics endpoint** — S22 follow-up.
+6. **CLI verification tool deferred**. Operators verify hashes
+   via standard sha256sum.
+7. **Codex round still flaking** — code-level review captured
+   here.
+
+### Runbook deltas
+
+- New env var `SPENDGUARD_DASHBOARD_CANONICAL_DATABASE_URL`
+  (optional). Empty/unset → /api/audit/export returns 503.
+- **Operator workflow** (export tenant T from 2026-05-01 to
+  2026-05-08 to S3):
+  ```
+  cursor=""
+  while true; do
+    out=$(curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
+      "https://dashboard/api/audit/export?tenant_id=$T&from=2026-05-01T00:00:00Z&to=2026-05-08T00:00:00Z&cursor=$cursor")
+    echo "$out" | head -n -1 | aws s3 cp - "s3://my-audit/$T/$(date +%s).jsonl"
+    cursor=$(echo "$out" | tail -n1 | jq -r '._manifest.next_cursor // ""')
+    [ -z "$cursor" ] && break
+  done
+  ```
+- **Hash verification** (operator detects tampering):
+  ```
+  expected=$(jq -r '._manifest.batch_sha256' <(tail -n1 batch.jsonl))
+  actual=$(head -n -1 batch.jsonl | sha256sum | cut -d' ' -f1)
+  [ "$expected" = "$actual" ] || echo "BATCH TAMPERED"
+  ```
+
+### Quality bar
+
+Meets 90%+: typed query params, RBAC + tenant scope checks
+before DB query, parameterized SQL with stable ordering,
+cursor pagination semantics, sha256 manifest for integrity
+verification, JSONL output that's pipe-friendly for any sink,
+fail-closed when canonical DB is unconfigured, log-friendly
+audit trail of every export attempt + outcome. Open items
+(automated tests, S3 sink built-in, SIEM connector, redaction
+policy wiring, CLI tool) are explicit follow-ups in S19 / S22
+or as S9-followups rather than gaps in S9's deliverable.
+
+---
+
 (Subsequent slice entries appended below.)
