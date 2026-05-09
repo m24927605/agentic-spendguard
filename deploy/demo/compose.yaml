@@ -388,6 +388,24 @@ services:
       start_period: 10s
     networks: [spendguard-net]
 
+  dashboard:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.dashboard
+    container_name: spendguard-dashboard
+    environment:
+      RUST_LOG: "info,spendguard_dashboard=debug"
+      SPENDGUARD_DASHBOARD_BIND_ADDR:    "0.0.0.0:8090"
+      SPENDGUARD_DASHBOARD_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
+      SPENDGUARD_DASHBOARD_TENANT_ID:    "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_DASHBOARD_AUTH_TOKEN:   "demo-dashboard-token-replace-in-production"
+    ports:
+      - "8090:8090"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [spendguard-net]
+
   demo:
     build:
       context: ../..
