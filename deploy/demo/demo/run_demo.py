@@ -589,7 +589,238 @@ async def main() -> int:
         return await run_langgraph_mode()
     if DEMO_MODE == "multi_provider_usd":
         return await run_multi_provider_usd_mode()
+    if DEMO_MODE == "agent_real_openai_agents":
+        return await run_openai_agents_mode()
+    if DEMO_MODE == "agent_real_agt":
+        return await run_agt_composite_mode()
     return await run_agent_mode()
+
+
+# ---------------------------------------------------------------------------
+# Microsoft AGT composite mode (Phase 4 O6 closure):
+# Exercises all 3 paths of SpendGuardCompositeEvaluator:
+#   (1) AGT-deny:                  tool_name='shell' → AGT denies
+#   (2) AGT-allow + SG-allow:      tool_name='web_search', small claim → both allow
+#   (3) AGT-allow + SG-deny:       tool_name='web_search', huge claim → SG hard-cap
+# ---------------------------------------------------------------------------
+
+
+async def run_agt_composite_mode() -> int:
+    from agent_os.policies import (
+        PolicyEvaluator, PolicyDocument, PolicyRule, PolicyCondition,
+        PolicyAction, PolicyOperator, PolicyDefaults,
+    )
+    from spendguard import SpendGuardClient, new_uuid7
+    from spendguard.integrations.agt import (
+        SpendGuardCompositeEvaluator, RunContext as AgtRunContext, run_context as agt_run_context,
+    )
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+
+    unit = common_pb2.UnitRef(unit_id=unit_id, token_kind="output_token", model_family="gpt-4")
+    pricing = common_pb2.PricingFreeze(
+        pricing_version=pricing_version,
+        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
+        fx_rate_version=fx,
+        unit_conversion_version=unit_conv,
+    )
+
+    agt = PolicyEvaluator(policies=[PolicyDocument(
+        name="demo-policy", version="1.0",
+        defaults=PolicyDefaults(action=PolicyAction.ALLOW),
+        rules=[PolicyRule(
+            name="deny-dangerous",
+            condition=PolicyCondition(field="tool_name", operator=PolicyOperator.IN,
+                                      value=["shell", "delete_file"]),
+            action=PolicyAction.DENY, priority=100,
+        )],
+    )])
+
+    # Path-specific composite: each sub-test mints its own composite
+    # so the claim_estimator can return different amounts (small vs
+    # huge) without state leakage.
+    def make_composite(claim_amount_atomic: str):
+        def estimator(_payload):
+            return [
+                common_pb2.BudgetClaim(
+                    budget_id=budget_id,
+                    unit=unit,
+                    amount_atomic=claim_amount_atomic,
+                    direction=common_pb2.BudgetClaim.DEBIT,
+                    window_instance_id=window_id,
+                ),
+            ]
+        return SpendGuardCompositeEvaluator(
+            agt_evaluator=agt,
+            spendguard_client=client,
+            budget_id=budget_id,
+            window_instance_id=window_id,
+            unit=unit,
+            pricing=pricing,
+            claim_estimator=estimator,
+        )
+
+    run_id = str(new_uuid7())
+
+    async with agt_run_context(AgtRunContext(run_id=run_id)):
+        # Path 1: AGT-deny (never reaches sidecar)
+        c1 = make_composite("100")
+        r1 = await c1.evaluate({"tool_name": "shell", "tool_call_id": str(new_uuid7())})
+        print(f"[demo] (1) AGT-deny: allowed={r1.allowed} reason={r1.reason!r} matched={r1.matched_rule_ids}")
+        if r1.allowed or "AGT_DENY" not in r1.reason:
+            print("[demo] FATAL: expected AGT_DENY", file=sys.stderr)
+            return 7
+
+        # Path 2: AGT-allow + SG-allow (small claim, well below cap)
+        c2 = make_composite("100")
+        r2 = await c2.evaluate({"tool_name": "web_search", "tool_call_id": str(new_uuid7())})
+        print(f"[demo] (2) AGT+SG allow: allowed={r2.allowed} reason={r2.reason!r}")
+        if not r2.allowed:
+            print(f"[demo] FATAL: expected ALLOW, got {r2.reason}", file=sys.stderr)
+            return 7
+
+        # Path 3: AGT-allow + SG-deny (huge claim above hard cap 1B)
+        c3 = make_composite("2000000000")
+        r3 = await c3.evaluate({"tool_name": "web_search", "tool_call_id": str(new_uuid7())})
+        print(f"[demo] (3) AGT-allow+SG-deny: allowed={r3.allowed} reason={r3.reason!r}")
+        if r3.allowed or "SPENDGUARD_DENY" not in r3.reason:
+            print(f"[demo] FATAL: expected SPENDGUARD_DENY, got {r3.reason}", file=sys.stderr)
+            return 7
+
+    print("[demo] AGT composite all 3 paths PASS")
+    await client.close()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Agents SDK mode (Phase 4 O5 closure):
+# Uses agents.Agent + Runner with a SpendGuardAgentsModel wrapping the
+# built-in OpenAIChatCompletionsModel.
+# ---------------------------------------------------------------------------
+
+
+async def run_openai_agents_mode() -> int:
+    if not os.environ.get("OPENAI_API_KEY"):
+        print("[demo] FATAL: OPENAI_API_KEY required for agent_real_openai_agents", file=sys.stderr)
+        return 8
+
+    from agents import Agent, Runner
+    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+    from openai import AsyncOpenAI
+
+    from spendguard import SpendGuardClient, new_uuid7
+    from spendguard.integrations.openai_agents import (
+        RunContext as OaiRunContext,
+        SpendGuardAgentsModel,
+        run_context as oai_run_context,
+    )
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+    print("[demo] using real OpenAI gpt-4o-mini via OpenAI Agents SDK")
+
+    unit = common_pb2.UnitRef(
+        unit_id=unit_id,
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(
+        pricing_version=pricing_version,
+        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
+        fx_rate_version=fx,
+        unit_conversion_version=unit_conv,
+    )
+
+    def estimate_claims(_input):
+        return [
+            common_pb2.BudgetClaim(
+                budget_id=budget_id,
+                unit=unit,
+                amount_atomic="500",
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id=window_id,
+            ),
+        ]
+
+    inner_model = OpenAIChatCompletionsModel(
+        model="gpt-4o-mini",
+        openai_client=AsyncOpenAI(),
+    )
+    guarded = SpendGuardAgentsModel(
+        inner=inner_model,
+        client=client,
+        budget_id=budget_id,
+        window_instance_id=window_id,
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate_claims,
+    )
+
+    agent = Agent(name="spendguard-demo", instructions="Reply concisely.", model=guarded)
+
+    run_id = str(new_uuid7())
+    async with oai_run_context(OaiRunContext(run_id=run_id)):
+        result = await Runner.run(agent, "Say hello in three words.")
+
+    output = getattr(result, "final_output", None) or str(result)
+    print(f"[demo] openai-agents Runner.run OK output={output!r} run_id={run_id}")
+    await client.close()
+    return 0
 
 
 # ---------------------------------------------------------------------------

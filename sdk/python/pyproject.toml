@@ -46,10 +46,11 @@ langgraph = [
   "langgraph>=0.2",
 ]
 openai-agents = [
-  "openai-agents>=0.0.7",
+  "openai-agents>=0.17",
 ]
 agt = [
   "agent-governance-toolkit>=3.4",
+  "agent-os-kernel>=3.0",
 ]
 dev = [
   "grpcio-tools>=1.62",
