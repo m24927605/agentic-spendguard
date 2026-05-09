@@ -277,6 +277,53 @@ Meets 90%+: schema enforcement (defense in depth), Helm wires per-pod
 identity via downward API, demo modes preserved, escape hatch
 documented.
 
+## S3 — Ledger AcquireFencingLease RPC
+
+**Status**: SHIPPED (handler + SP + proto). Sidecar wiring is S4.
+
+### Design / impl summary
+
+- New SP `acquire_fencing_lease(scope_id, tenant_id, workload_id,
+  ttl_seconds, force, audit_event_id)` runs CAS atomically inside
+  FOR UPDATE on `fencing_scopes`. Branch logic: renew / takeover /
+  deny. fencing_scope_events history row appended in same tx.
+- Renewal preserves epoch; takeover bumps by exactly 1. Force flag
+  for operator-driven incident recovery (writes 'revoke' history).
+- Action vocabulary: acquire / renew / promote / revoke / recover.
+- Handler enforces TTL bounds (0 < n ≤ 3600s) — operator footgun
+  cap; sidecar's renew loop should pick well under that.
+- Response oneof Success | Denied | Error. Denied carries current
+  holder identity for operator UIs.
+- SP refuses auto-create of `fencing_scopes` row — operator pre-seeds
+  via control plane.
+
+### Changed files
+
+- NEW `services/ledger/migrations/0023_acquire_fencing_lease_sp.sql`
+- MODIFIED `proto/spendguard/ledger/v1/ledger.proto`
+- NEW `services/ledger/src/handlers/acquire_fencing_lease.rs`
+- MODIFIED `services/ledger/src/handlers/mod.rs`,
+  `services/ledger/src/server.rs`
+
+### Adversarial review
+
+- **Race on expired lease**: FOR UPDATE serializes; second contender
+  observes the takeover and falls to Path C (denied).
+- **Caller mints epoch?** SP is sole writer; caller supplies only
+  TTL + identity.
+- **Stale owner writes after takeover?** existing
+  post_ledger_transaction fencing CAS rejects stale epoch; S3 only
+  changes how epoch is set, not how it's gated.
+- **Audit invariant?** fencing_scope_events row atomic with UPDATE.
+- **Tenant boundary**: SP rejects if scope.tenant != caller.tenant.
+
+### Residual risks
+
+1. Sidecar wiring deferred to S4. Until S4, sidecar still uses seeded
+   `current_epoch=1`. RPC callable but no production caller yet.
+2. SDK client method on sidecar deferred to S4.
+3. Build validation deferred to next Docker rebuild.
+
 ---
 
 (Subsequent slice entries appended below.)

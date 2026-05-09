@@ -13,7 +13,8 @@ use tonic::{Request, Response, Status};
 use crate::{
     handlers,
     proto::ledger::v1::{
-        ledger_server::Ledger, CommitEstimatedRequest, CommitEstimatedResponse,
+        ledger_server::Ledger, AcquireFencingLeaseRequest, AcquireFencingLeaseResponse,
+        CommitEstimatedRequest, CommitEstimatedResponse,
         CompensateRequest, CompensateResponse, DisputeAdjustmentRequest,
         DisputeAdjustmentResponse, InvoiceReconcileRequest, InvoiceReconcileResponse,
         ProviderReportRequest, ProviderReportResponse, QueryBudgetStateRequest,
@@ -60,6 +61,15 @@ impl Ledger for LedgerService {
         req: Request<RecordDeniedDecisionRequest>,
     ) -> Result<Response<RecordDeniedDecisionResponse>, Status> {
         let resp = handlers::record_denied_decision::handle(&self.pool, req.into_inner()).await?;
+        Ok(Response::new(resp))
+    }
+
+    async fn acquire_fencing_lease(
+        &self,
+        req: Request<AcquireFencingLeaseRequest>,
+    ) -> Result<Response<AcquireFencingLeaseResponse>, Status> {
+        let resp =
+            handlers::acquire_fencing_lease::handle(&self.pool, req.into_inner()).await?;
         Ok(Response::new(resp))
     }
 
