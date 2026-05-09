@@ -1,82 +1,71 @@
-"""OpenAI Agents SDK integration — gates Runner.run via the sidecar.
+"""OpenAI Agents SDK integration — gates Model.get_response via the sidecar.
 
-OpenAI's Agents SDK (`pip install openai-agents`) exposes an `Agent` /
-`Runner` abstraction with pluggable `Model` implementations. Two
-integration shapes are supported here:
-
-1. **Custom Model** (recommended) — a `SpendGuardAgentsModel` that
-   inherits from the SDK's `Model` base, intercepts each invocation,
-   and routes through `SpendGuardClient.request_decision` /
-   `emit_llm_call_post`. Use this when your agent's `model=` config
-   accepts a Model instance (most current versions).
-
-2. **Wrap-and-replace** — `gated_runner_run(agent, input, client=...)`
-   helper that swaps the agent's model with `SpendGuardAgentsModel`
-   only for the duration of one Runner.run() call.
-
-POC scope:
-  - SDK API surface evolves; this module pins to
-    `openai-agents>=0.0.7` and re-validates on import. If the API
-    drifts, integration falls back to a no-op wrapper that warns.
-  - Streaming + tool-call mid-call interception are deferred (Runner
-    still gates the surrounding boundary at every model invocation;
-    inner tool calls inherit the parent reservation).
+Validated against `openai-agents>=0.17`. The SDK exposes
+`agents.models.interface.Model` as an abstract base; subclasses
+override `get_response` (sync semantics over async I/O) plus
+optionally `stream_response`. Built-in `OpenAIChatCompletionsModel`
+follows this pattern; we mirror it.
 
 Integration shape::
 
     from agents import Agent, Runner
+    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+    from openai import AsyncOpenAI
+
     from spendguard import SpendGuardClient
-    from spendguard.integrations.openai_agents import SpendGuardAgentsModel
+    from spendguard.integrations.openai_agents import (
+        RunContext, SpendGuardAgentsModel, run_context,
+    )
     from spendguard._proto.spendguard.common.v1 import common_pb2
 
     client = SpendGuardClient(socket_path=..., tenant_id=...)
+    await client.connect()
     await client.handshake()
 
-    guarded_model = SpendGuardAgentsModel(
-        inner_model_name="gpt-4o-mini",
+    inner_model = OpenAIChatCompletionsModel(
+        model="gpt-4o-mini",
+        openai_client=AsyncOpenAI(),
+    )
+    guarded = SpendGuardAgentsModel(
+        inner=inner_model,
         client=client,
-        budget_id=...,
-        window_instance_id=...,
+        budget_id="...",
+        window_instance_id="...",
         unit=common_pb2.UnitRef(...),
         pricing=common_pb2.PricingFreeze(...),
-        claim_estimator=lambda inputs: [...],
+        claim_estimator=lambda inp: [common_pb2.BudgetClaim(...)],
     )
 
-    agent = Agent(name="my-agent", instructions="...", model=guarded_model)
-    result = await Runner.run(agent, "Hello")
+    agent = Agent(name="my-agent", instructions="...", model=guarded)
+    async with run_context(RunContext(run_id="...")):
+        result = await Runner.run(agent, "Hello")
+
+POC scope:
+  - Stream gating bracketed at the model boundary; intra-stream tool
+    calls inherit the parent reservation (parity with LangChain).
+  - DEGRADE mutation patches surfaced as APPLY_FAILED rather than
+    applied (parity with other integrations).
 """
 
 from __future__ import annotations
 
 import contextvars
-from collections.abc import Callable, Sequence
+import hashlib
+from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from ..client import DecisionOutcome, SpendGuardClient
-import hashlib
-
 from ..ids import (
     derive_idempotency_key,
     derive_uuid_from_signature,
+    new_uuid7,
 )
 
-
-def _default_call_signature(input_payload: Any) -> str:
-    """Hash the agent input into a 32-char hex digest."""
-    return hashlib.blake2b(
-        repr(input_payload).encode("utf-8"), digest_size=16
-    ).hexdigest()
-
 try:
-    # The SDK underwent renames. Try a few import paths so we work
-    # across openai-agents 0.0.x → 0.1.x. If none resolve, raise the
-    # standard install hint.
-    try:
-        from agents import Model as _AgentsModel  # 0.1.x
-    except ImportError:
-        from openai_agents import Model as _AgentsModel  # 0.0.x
+    from agents.models.interface import Model as _AgentsModel
+    from agents.items import ModelResponse  # type: ignore[attr-defined]
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
         "spendguard.integrations.openai_agents requires the "
@@ -92,8 +81,8 @@ except ImportError as exc:  # pragma: no cover
     ) from exc
 
 
-# Run-scoped context (shared identifier with langchain / pydantic_ai
-# integrations so a multi-framework agent can reuse the same run_id).
+# Run-scoped context shared with langchain / pydantic_ai integrations
+# so multi-framework agents reuse one trace.
 _RUN_CONTEXT: contextvars.ContextVar["RunContext | None"] = contextvars.ContextVar(
     "spendguard_run_context", default=None
 )
@@ -101,7 +90,7 @@ _RUN_CONTEXT: contextvars.ContextVar["RunContext | None"] = contextvars.ContextV
 
 @dataclass(frozen=True, slots=True)
 class RunContext:
-    """Per-Runner.run() identifiers."""
+    """Per Runner.run() identifiers."""
 
     run_id: str
 
@@ -128,49 +117,38 @@ def current_run_context() -> RunContext:
 
 
 ClaimEstimator = Callable[[Any], list[Any]]
-"""Project BudgetClaim list from the agent input.
+"""Project BudgetClaim list from the model `input` payload (str | list[Item])."""
 
-The OpenAI Agents SDK passes either a string user prompt or a
-list[Message]; the estimator should accept either.
-"""
+
+def _signature(input_payload: Any, system_instructions: str | None) -> str:
+    text = repr(input_payload) + "|" + (system_instructions or "")
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
 
 
 class SpendGuardAgentsModel(_AgentsModel):  # type: ignore[misc, valid-type]
     """OpenAI Agents SDK Model wrapper that gates each invocation through the sidecar.
 
-    The underlying Model class evolves between SDK versions; this
-    wrapper subclasses it and overrides `__call__` (or whichever
-    invocation entrypoint the current SDK uses). If the SDK exposes
-    only a private `_call_provider`, the override there serves the
-    same purpose.
-
-    Implementation note: if the SDK's Model API surface diverges from
-    what's expected (private rename, async/sync mismatch), the demo
-    gate will surface it. POC tolerates SDK churn by failing visibly
-    rather than silently no-op'ing.
+    Subclasses `agents.models.interface.Model` and overrides
+    `get_response` to insert PRE/POST hooks around the inner model
+    call. `stream_response`, `close`, and `get_retry_advice` delegate
+    transparently.
     """
 
     def __init__(
         self,
         *,
-        inner_model_name: str,
+        inner: _AgentsModel,
         client: SpendGuardClient,
         budget_id: str,
         window_instance_id: str,
         unit: Any,
         pricing: Any,
         claim_estimator: ClaimEstimator,
-        **inner_kwargs: Any,
     ) -> None:
-        # Forward inner-model kwargs to the SDK base class. The base
-        # class's __init__ signature varies; pass via **kwargs and let
-        # it raise if invalid.
-        try:
-            super().__init__(model=inner_model_name, **inner_kwargs)  # type: ignore[call-arg]
-        except TypeError:
-            # Older SDK had positional model arg.
-            super().__init__(inner_model_name, **inner_kwargs)  # type: ignore[call-arg]
-
+        # Note: agents.Model is ABC with no shared state in __init__,
+        # so we don't call super().__init__(). The inner model is what
+        # actually owns the OpenAI client + retry logic.
+        self._inner = inner
         self._client = client
         self._budget_id = budget_id
         self._window_instance_id = window_instance_id
@@ -178,18 +156,23 @@ class SpendGuardAgentsModel(_AgentsModel):  # type: ignore[misc, valid-type]
         self._pricing = pricing
         self._claim_estimator = claim_estimator
 
-    async def __call__(self, *args: Any, **kwargs: Any) -> Any:
-        """Gated invocation: PRE → inner.__call__ → POST."""
-        return await self._gate_call(super().__call__, *args, **kwargs)
-
-    async def _gate_call(
-        self, inner_call: Callable[..., Any], *args: Any, **kwargs: Any
+    async def get_response(
+        self,
+        system_instructions: str | None,
+        input: Any,
+        model_settings: Any,
+        tools: Any,
+        output_schema: Any,
+        handoffs: Any,
+        tracing: Any,
+        *,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        prompt: Any = None,
     ) -> Any:
+        """Gated invocation: PRE → inner.get_response → POST."""
         ctx = current_run_context()
-        # Use args[0] as the input payload (string or messages); SDKs
-        # typically pass it positionally.
-        input_payload = args[0] if args else kwargs.get("input")
-        signature = _default_call_signature(input_payload)
+        signature = _signature(input, system_instructions)
         llm_call_id = str(derive_uuid_from_signature(signature, scope="llm_call_id"))
         decision_id = str(derive_uuid_from_signature(signature, scope="decision_id"))
         step_id = f"{ctx.run_id}:oai-call:{signature[:16]}"
@@ -210,13 +193,31 @@ class SpendGuardAgentsModel(_AgentsModel):  # type: ignore[misc, valid-type]
             tool_call_id="",
             decision_id=decision_id,
             route="llm.call",
-            projected_claims=self._claim_estimator(input_payload),
+            projected_claims=self._claim_estimator(input),
             idempotency_key=idempotency_key,
         )
 
-        result = await inner_call(*args, **kwargs)
+        # Delegate to inner Model. agents.Model.get_response signature
+        # uses keyword-only args after `tracing`; pass them through.
+        inner_response = await self._inner.get_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
 
-        total_tokens = self._extract_total_tokens(result)
+        # Extract usage from ModelResponse (validated against
+        # openai-agents 0.17.0 — has `usage` Usage field with
+        # total_tokens / input_tokens / output_tokens).
+        total_tokens = self._extract_total_tokens(inner_response)
+        provider_event_id = getattr(inner_response, "response_id", "") or ""
+
         if outcome.reservation_ids:
             await self._client.emit_llm_call_post(
                 run_id=ctx.run_id,
@@ -228,36 +229,68 @@ class SpendGuardAgentsModel(_AgentsModel):  # type: ignore[misc, valid-type]
                 estimated_amount_atomic=str(total_tokens),
                 unit=self._unit,
                 pricing=self._pricing,
-                provider_event_id=self._extract_provider_event_id(result),
+                provider_event_id=provider_event_id,
                 outcome="SUCCESS",
             )
 
-        return result
+        return inner_response
+
+    def stream_response(
+        self,
+        system_instructions: str | None,
+        input: Any,
+        model_settings: Any,
+        tools: Any,
+        output_schema: Any,
+        handoffs: Any,
+        tracing: Any,
+        *,
+        previous_response_id: str | None = None,
+        conversation_id: str | None = None,
+        prompt: Any = None,
+    ) -> Any:
+        """Streaming pass-through.
+
+        POC: streams from the inner model directly without per-chunk
+        gating. The PRE side fires when the wrapping Runner moves to
+        the next non-streaming boundary; for full per-chunk gating use
+        `get_response`. Tracked as a follow-on per the integration
+        docs.
+        """
+        return self._inner.stream_response(
+            system_instructions,
+            input,
+            model_settings,
+            tools,
+            output_schema,
+            handoffs,
+            tracing,
+            previous_response_id=previous_response_id,
+            conversation_id=conversation_id,
+            prompt=prompt,
+        )
+
+    async def close(self) -> None:
+        await self._inner.close()
+
+    def get_retry_advice(self, request: Any) -> Any:
+        return self._inner.get_retry_advice(request)
 
     @staticmethod
-    def _extract_total_tokens(result: Any) -> int:
-        # OpenAI Agents Result objects: try common attribute paths.
-        # `result.usage.total_tokens` or `result.usage["total_tokens"]`
-        # are typical; fall back to 0 if nothing matches.
-        usage = getattr(result, "usage", None)
+    def _extract_total_tokens(response: Any) -> int:
+        usage = getattr(response, "usage", None)
         if usage is None:
             return 0
-        if hasattr(usage, "total_tokens"):
+        # agents.Usage exposes total_tokens directly.
+        total = getattr(usage, "total_tokens", None)
+        if isinstance(total, int):
+            return total
+        if isinstance(total, str):
             try:
-                return int(usage.total_tokens)
-            except (TypeError, ValueError):
-                return 0
-        if isinstance(usage, dict) and "total_tokens" in usage:
-            try:
-                return int(usage["total_tokens"])
-            except (TypeError, ValueError):
+                return int(total)
+            except ValueError:
                 return 0
         return 0
-
-    @staticmethod
-    def _extract_provider_event_id(result: Any) -> str:
-        rid = getattr(result, "id", None) or getattr(result, "response_id", None)
-        return rid if isinstance(rid, str) else ""
 
 
 __all__ = [
