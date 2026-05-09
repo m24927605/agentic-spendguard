@@ -388,6 +388,23 @@ services:
       start_period: 10s
     networks: [spendguard-net]
 
+  control-plane:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.control_plane
+    container_name: spendguard-control-plane
+    environment:
+      RUST_LOG: "info,spendguard_control_plane=debug"
+      SPENDGUARD_CONTROL_PLANE_BIND_ADDR:    "0.0.0.0:8091"
+      SPENDGUARD_CONTROL_PLANE_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
+      SPENDGUARD_CONTROL_PLANE_ADMIN_TOKEN:  "demo-admin-token-replace-in-production"
+    ports:
+      - "8091:8091"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [spendguard-net]
+
   dashboard:
     build:
       context: ../..

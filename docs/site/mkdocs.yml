@@ -1,0 +1,81 @@
+site_name: SpendGuard
+site_description: Runtime safety layer for AI agent budgets
+site_url: https://spendguard.example.io
+repo_url: https://github.com/m24927605/agentic-flow-cost-evaluation
+edit_uri: edit/main/docs/site/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+    - content.action.edit
+
+nav:
+  - Home: index.md
+  - Quickstart: quickstart.md
+  - Concepts:
+      - 6-layer architecture: concepts/architecture.md
+      - Decision lifecycle: concepts/decision-lifecycle.md
+      - Audit chain: concepts/audit-chain.md
+      - Pricing & USD budget: concepts/pricing-and-usd.md
+  - Deployment:
+      - Docker compose (POC): deployment/docker-compose.md
+      - Helm chart (k8s): deployment/helm.md
+      - Terraform (AWS): deployment/terraform-aws.md
+  - Authoring contracts:
+      - Contract YAML reference: contracts/yaml.md
+      - Rule examples: contracts/examples.md
+  - Adapter integrations:
+      - Pydantic-AI: integrations/pydantic-ai.md
+      - LangChain & LangGraph: integrations/langchain.md
+      - OpenAI Agents SDK: integrations/openai-agents.md
+      - Microsoft AGT: integrations/agt.md
+  - Operations:
+      - Dashboard: operations/dashboard.md
+      - Control plane API: operations/control-plane.md
+  - Reference:
+      - Wire protocol (proto): reference/proto.md
+      - Ledger schema: reference/ledger-schema.md
+      - Error codes: reference/error-codes.md
+  - POC vs GA gates: poc-vs-ga.md
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - footnotes
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets:
+      base_path: ['../../']
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+plugins:
+  - search
