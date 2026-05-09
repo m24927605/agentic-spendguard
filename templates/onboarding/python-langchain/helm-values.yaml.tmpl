@@ -1,0 +1,113 @@
+# SpendGuard Helm values — onboarding template (Phase 5 S20).
+#
+# This is the MINIMAL set of values a design partner needs for one
+# real workflow. Replace every __PLACEHOLDER__ + adjust resource
+# limits to your cluster size.
+#
+# Apply with:
+#   helm install spendguard ./charts/spendguard -f values.yaml
+
+global:
+  tenantId: __TENANT_UUID_V4__
+  region: __REGION__              # e.g. us-west-2
+  imagePullPolicy: IfNotPresent
+  imageRegistry: __YOUR_GHCR_OR_ECR__   # e.g. ghcr.io/your-org
+
+# Pre-create these Secrets before installing:
+#   spendguard-tls         (per-service mTLS certs from your CA)
+#   spendguard-bundles     (contract.tgz + schema.tgz)
+#   spendguard-signing-keys (per-service Ed25519 PEMs)
+#   spendguard-webhook-hmac (provider webhook HMAC secret)
+secrets:
+  tls:
+    existingSecret: spendguard-tls
+  bundles:
+    existingSecret: spendguard-bundles
+
+# Postgres. The chart does NOT provision Postgres — point at your
+# managed instance.
+postgres:
+  ledgerUrl: "postgres://__USER__:__PASSWORD__@__HOST__:5432/spendguard_ledger"
+  canonicalUrl: "postgres://__USER__:__PASSWORD__@__HOST__:5432/spendguard_canonical"
+  applyMigrationsOnInstall: true
+
+# Phase 5 S6 + S8: signing config. Production profile rejects
+# disabled mode + non-strict verification; operators MUST mount
+# real signing keys.
+signing:
+  mode: "local"                  # or `kms` once S7 wires AWS KMS
+  profile: "production"
+  existingSecret: spendguard-signing-keys
+  strictVerification: true       # non-negotiable in production
+  kms:
+    ledgerArn: ""                # if mode=kms, fill these in
+    sidecarArn: ""
+    webhookReceiverArn: ""
+    ttlSweeperArn: ""
+
+# Phase 5 S13: pricing staleness policy. Tighten for high-volatility
+# providers; loosen if you control your own pricing rotation cadence.
+pricing:
+  maxStalenessSeconds: 86400     # 24h
+  allowOverride: true            # operators may manually edit
+
+# Phase 5 S22: fail-policy matrix. Default fail-closed everywhere.
+# To opt non-monetary workflows into fail-open, edit overrides
+# (the production profile additionally requires
+# `_acknowledge_risk_of_fail_open: true` in the JSON).
+failPolicy:
+  overrides: ""
+
+# Phase 5 S1: leader election. Production = postgres lease.
+leaderElection:
+  mode: "postgres"
+  region: __REGION__
+  ttlMs: 15000
+  renewIntervalMs: 5000
+  retryIntervalMs: 1000
+
+# Per-service replicas. Sidecar is a DaemonSet (one pod per node);
+# multi-node deployments need to read docs/runbooks/multi-pod.md.
+sidecar:
+  enabled: true
+  replicas: 1
+  workloadInstanceIdOverride: ""
+  acknowledgeMultiPod: false     # flip to true after reading runbook
+  fencingScopeId: __FENCING_SCOPE_UUID_V7__
+  workloadInstanceId: "sidecar-0"
+  reservationTtlSeconds: 600
+
+ledger:
+  enabled: true
+  replicas: 1                    # multi-pod requires PG sync replica
+
+canonicalIngest:
+  enabled: true
+  replicas: 1
+
+webhookReceiver:
+  enabled: true
+  replicas: 1
+  fencingScopeId: __WEBHOOK_FENCING_SCOPE_UUID_V7__
+  workloadInstanceId: "webhook-receiver-0"
+  hmacSecretName: spendguard-webhook-hmac
+
+outboxForwarder:
+  enabled: true
+  replicas: 1                    # set 2+ once leader election proven
+  pollIntervalSeconds: 2
+  batchSize: 50
+  leaseName: "outbox-forwarder"
+
+ttlSweeper:
+  enabled: true
+  replicas: 1
+  fencingScopeId: __TTL_SWEEPER_FENCING_SCOPE_UUID_V7__
+  pollIntervalSeconds: 2
+  batchSize: 10
+  leaseName: "ttl-sweeper"
+
+# S17 / S18 auth — wire to YOUR OIDC issuer. Demo profile may use
+# static_token; production MUST use jwt mode.
+# (No default Helm template for dashboard / control-plane today —
+# pre-existing chart gap; operators run their own k8s manifests.)
