@@ -14,7 +14,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use spendguard_usage_poller::{
-    poll_once, MockProviderClient, OpenAiClient, PollWindow, ProviderClient,
+    poll_once, AnthropicClient, MockProviderClient, OpenAiClient, PollWindow, ProviderClient,
 };
 
 #[derive(Debug, Deserialize)]
@@ -42,6 +42,11 @@ struct Config {
     openai_org_id: Option<String>,
     #[serde(default)]
     openai_project_id: Option<String>,
+    /// Anthropic keys (only when provider_kind=anthropic).
+    #[serde(default)]
+    anthropic_api_key: Option<String>,
+    #[serde(default)]
+    anthropic_workspace_id: Option<String>,
 }
 
 fn default_provider_kind() -> String {
@@ -91,6 +96,13 @@ async fn main() -> anyhow::Result<()> {
                 .clone()
                 .context("SPENDGUARD_USAGE_POLLER_OPENAI_API_KEY required when provider_kind=openai")?;
             Arc::new(OpenAiClient::new(api_key, cfg.openai_org_id.clone(), cfg.openai_project_id.clone()))
+        }
+        "anthropic" => {
+            let api_key = cfg
+                .anthropic_api_key
+                .clone()
+                .context("SPENDGUARD_USAGE_POLLER_ANTHROPIC_API_KEY required when provider_kind=anthropic")?;
+            Arc::new(AnthropicClient::new(api_key, cfg.anthropic_workspace_id.clone()))
         }
         _ => Arc::new(MockProviderClient::new("mock")),
     };

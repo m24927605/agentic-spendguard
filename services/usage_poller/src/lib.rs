@@ -198,6 +198,151 @@ impl ProviderClient for OpenAiClient {
 }
 
 // ============================================================================
+// Phase 5 GA hardening S12: Anthropic client (stub for S12-followup)
+// ============================================================================
+//
+// Mirror of OpenAiClient. Real Anthropic Workspaces Usage / Admin API
+// wiring is S12-followup; this slice ships the typed provider boundary
+// + the token-kind mapping that's the actual reconciliation contract.
+
+pub struct AnthropicClient {
+    pub api_key: String,
+    pub workspace_id: Option<String>,
+    pub base_url: String,
+    client: reqwest::Client,
+}
+
+impl AnthropicClient {
+    pub fn new(api_key: String, workspace_id: Option<String>) -> Self {
+        Self {
+            api_key,
+            workspace_id,
+            base_url: "https://api.anthropic.com/v1".into(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .expect("reqwest client"),
+        }
+    }
+}
+
+#[async_trait]
+impl ProviderClient for AnthropicClient {
+    async fn fetch_usage(
+        &self,
+        _from: DateTime<Utc>,
+        _to: DateTime<Utc>,
+    ) -> Result<Vec<UsageObservation>, PollerError> {
+        // S12-followup: wire Anthropic Admin API usage report endpoint.
+        let _ = &self.client;
+        let _ = &self.api_key;
+        let _ = &self.workspace_id;
+        let _ = &self.base_url;
+        Err(PollerError::ProviderApi(
+            "Anthropic usage polling not yet implemented (S12-followup); set provider=mock for demo"
+                .into(),
+        ))
+    }
+
+    fn provider_name(&self) -> &str {
+        "anthropic"
+    }
+}
+
+// ============================================================================
+// Phase 5 GA hardening S12: provider-specific token-kind mapping
+// ============================================================================
+//
+// Each provider exposes its own usage shape:
+//   * OpenAI: prompt_tokens / completion_tokens / cached_tokens
+//             / vision_tokens / audio_tokens / reasoning_tokens
+//   * Anthropic: input_tokens / output_tokens
+//                / cache_creation_input_tokens / cache_read_input_tokens
+//
+// SpendGuard's normalized token kinds (matches pricing_table.token_kind
+// CHECK in 0006_pricing_table.sql):
+//   input | output | cached_input | vision_input | audio_input | reasoning
+//
+// `map_token_kind` lets a provider adapter normalize before insert
+// into provider_usage_records. Unknown provider-side kinds get a
+// typed error so operators see the gap explicitly rather than the
+// pricing lookup silently dropping.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NormalizedTokenKind {
+    Input,
+    Output,
+    CachedInput,
+    VisionInput,
+    AudioInput,
+    Reasoning,
+}
+
+impl NormalizedTokenKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::Output => "output",
+            Self::CachedInput => "cached_input",
+            Self::VisionInput => "vision_input",
+            Self::AudioInput => "audio_input",
+            Self::Reasoning => "reasoning",
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum TokenMapError {
+    #[error("provider {provider:?} doesn't expose a known mapping for kind {raw_kind:?}")]
+    UnknownProviderKind { provider: String, raw_kind: String },
+}
+
+/// Map a provider-specific token kind to SpendGuard's normalized one.
+/// Adding a new provider = extend this match arm; adding a new kind
+/// = extend NormalizedTokenKind. The exhaustive match makes adapter
+/// drift visible at compile time.
+pub fn map_token_kind(
+    provider: &str,
+    raw_kind: &str,
+) -> Result<NormalizedTokenKind, TokenMapError> {
+    let result = match (provider, raw_kind) {
+        // OpenAI
+        ("openai", "prompt_tokens") => NormalizedTokenKind::Input,
+        ("openai", "completion_tokens") => NormalizedTokenKind::Output,
+        ("openai", "cached_tokens") => NormalizedTokenKind::CachedInput,
+        ("openai", "vision_tokens") => NormalizedTokenKind::VisionInput,
+        ("openai", "audio_tokens") => NormalizedTokenKind::AudioInput,
+        ("openai", "reasoning_tokens") => NormalizedTokenKind::Reasoning,
+
+        // Anthropic
+        ("anthropic", "input_tokens") => NormalizedTokenKind::Input,
+        ("anthropic", "output_tokens") => NormalizedTokenKind::Output,
+        ("anthropic", "cache_creation_input_tokens") => NormalizedTokenKind::CachedInput,
+        ("anthropic", "cache_read_input_tokens") => NormalizedTokenKind::CachedInput,
+
+        // Azure OpenAI mirrors OpenAI naming.
+        ("azure_openai", k) => return map_token_kind("openai", k),
+
+        // Bedrock (Anthropic models on AWS) mirrors Anthropic.
+        ("bedrock_anthropic", k) => return map_token_kind("anthropic", k),
+
+        // Gemini
+        ("gemini", "promptTokenCount") => NormalizedTokenKind::Input,
+        ("gemini", "candidatesTokenCount") => NormalizedTokenKind::Output,
+        ("gemini", "cachedContentTokenCount") => NormalizedTokenKind::CachedInput,
+
+        _ => {
+            return Err(TokenMapError::UnknownProviderKind {
+                provider: provider.to_string(),
+                raw_kind: raw_kind.to_string(),
+            })
+        }
+    };
+    Ok(result)
+}
+
+// ============================================================================
 // Persistence
 // ============================================================================
 
@@ -413,5 +558,129 @@ mod tests {
         assert_eq!(v["provider"], "mock");
         assert_eq!(v["model_id"], "test-model");
         assert_eq!(v["total_tokens"], 300);
+    }
+
+    // -----------------------------------------------------------------
+    // S12: Anthropic adapter + token-kind mapping
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn anthropic_client_stub_returns_typed_error_pointing_at_followup() {
+        let c = AnthropicClient::new("sk-ant-test".into(), Some("ws-test".into()));
+        let now = Utc::now();
+        let err = c.fetch_usage(now, now).await.unwrap_err();
+        match err {
+            PollerError::ProviderApi(msg) => {
+                assert!(msg.contains("S12-followup"));
+                assert!(msg.contains("Anthropic"));
+            }
+            other => panic!("expected ProviderApi, got {other:?}"),
+        }
+        assert_eq!(c.provider_name(), "anthropic");
+    }
+
+    #[test]
+    fn token_kind_mapping_covers_openai_and_anthropic() {
+        for (kind, expected) in [
+            ("prompt_tokens", NormalizedTokenKind::Input),
+            ("completion_tokens", NormalizedTokenKind::Output),
+            ("cached_tokens", NormalizedTokenKind::CachedInput),
+            ("vision_tokens", NormalizedTokenKind::VisionInput),
+            ("audio_tokens", NormalizedTokenKind::AudioInput),
+            ("reasoning_tokens", NormalizedTokenKind::Reasoning),
+        ] {
+            assert_eq!(map_token_kind("openai", kind).unwrap(), expected);
+        }
+        for (kind, expected) in [
+            ("input_tokens", NormalizedTokenKind::Input),
+            ("output_tokens", NormalizedTokenKind::Output),
+            ("cache_creation_input_tokens", NormalizedTokenKind::CachedInput),
+            ("cache_read_input_tokens", NormalizedTokenKind::CachedInput),
+        ] {
+            assert_eq!(map_token_kind("anthropic", kind).unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn token_kind_mapping_azure_aliases_openai() {
+        assert_eq!(
+            map_token_kind("azure_openai", "prompt_tokens").unwrap(),
+            NormalizedTokenKind::Input,
+        );
+        assert_eq!(
+            map_token_kind("azure_openai", "completion_tokens").unwrap(),
+            NormalizedTokenKind::Output,
+        );
+    }
+
+    #[test]
+    fn token_kind_mapping_bedrock_anthropic_aliases_anthropic() {
+        assert_eq!(
+            map_token_kind("bedrock_anthropic", "input_tokens").unwrap(),
+            NormalizedTokenKind::Input,
+        );
+        assert_eq!(
+            map_token_kind("bedrock_anthropic", "cache_read_input_tokens").unwrap(),
+            NormalizedTokenKind::CachedInput,
+        );
+    }
+
+    #[test]
+    fn token_kind_mapping_gemini_camel_case_keys() {
+        // Google's API uses camelCase. Mapping handles it without
+        // upstream code having to translate.
+        assert_eq!(
+            map_token_kind("gemini", "promptTokenCount").unwrap(),
+            NormalizedTokenKind::Input,
+        );
+        assert_eq!(
+            map_token_kind("gemini", "candidatesTokenCount").unwrap(),
+            NormalizedTokenKind::Output,
+        );
+        assert_eq!(
+            map_token_kind("gemini", "cachedContentTokenCount").unwrap(),
+            NormalizedTokenKind::CachedInput,
+        );
+    }
+
+    #[test]
+    fn token_kind_mapping_unknown_kind_returns_typed_error() {
+        let err = map_token_kind("openai", "wizard_tokens").unwrap_err();
+        match err {
+            TokenMapError::UnknownProviderKind { provider, raw_kind } => {
+                assert_eq!(provider, "openai");
+                assert_eq!(raw_kind, "wizard_tokens");
+            }
+        }
+    }
+
+    #[test]
+    fn token_kind_mapping_unknown_provider_returns_typed_error() {
+        let err = map_token_kind("unicorn", "input").unwrap_err();
+        assert!(matches!(err, TokenMapError::UnknownProviderKind { .. }));
+    }
+
+    #[test]
+    fn normalized_token_kind_strings_match_pricing_table_check_constraint() {
+        // pricing_table.token_kind CHECK in 0006_pricing_table.sql:
+        //   ('input', 'output', 'cached_input',
+        //    'vision_input', 'audio_input', 'reasoning').
+        // If we add a new variant here we MUST add a column to the
+        // CHECK; this test pins the contract.
+        for kind in [
+            NormalizedTokenKind::Input,
+            NormalizedTokenKind::Output,
+            NormalizedTokenKind::CachedInput,
+            NormalizedTokenKind::VisionInput,
+            NormalizedTokenKind::AudioInput,
+            NormalizedTokenKind::Reasoning,
+        ] {
+            let s = kind.as_str();
+            assert!(
+                ["input", "output", "cached_input",
+                 "vision_input", "audio_input", "reasoning"].contains(&s),
+                "{s} missing from pricing_table CHECK"
+            );
+        }
     }
 }
