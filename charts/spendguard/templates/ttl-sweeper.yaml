@@ -1,0 +1,42 @@
+{{- if .Values.ttlSweeper.enabled }}
+{{- $component := "ttl-sweeper" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-ttl-sweeper
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.ttlSweeper.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      containers:
+        - name: ttl-sweeper
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.ttlSweeper.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - { name: SPENDGUARD_TTL_SWEEPER_TENANT_ID,            value: {{ .Values.global.tenantId | quote }} }
+            - { name: SPENDGUARD_TTL_SWEEPER_FENCING_SCOPE_ID,     value: {{ .Values.ttlSweeper.fencingScopeId | quote }} }
+            - { name: SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID, value: {{ .Values.ttlSweeper.workloadInstanceId | quote }} }
+            - name: SPENDGUARD_TTL_SWEEPER_LEDGER_URL
+              value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
+            - name: SPENDGUARD_TTL_SWEEPER_DATABASE_URL
+              value: {{ .Values.postgres.ledgerUrl | quote }}
+            - { name: SPENDGUARD_TTL_SWEEPER_POLL_INTERVAL_SECONDS, value: {{ .Values.ttlSweeper.pollIntervalSeconds | quote }} }
+            - { name: SPENDGUARD_TTL_SWEEPER_BATCH_SIZE,            value: {{ .Values.ttlSweeper.batchSize | quote }} }
+            - { name: SPENDGUARD_TTL_SWEEPER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/ttl-sweeper.crt" }
+            - { name: SPENDGUARD_TTL_SWEEPER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/ttl-sweeper.key" }
+            - { name: SPENDGUARD_TTL_SWEEPER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+          volumeMounts:
+            - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.secrets.tls.existingSecret }}
+{{- end }}

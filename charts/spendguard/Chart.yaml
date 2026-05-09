@@ -1,0 +1,27 @@
+apiVersion: v2
+name: spendguard
+description: |
+  SpendGuard runtime safety layer for AI agent budgets. Deploys the
+  full sidecar topology to a Kubernetes cluster: ledger + canonical
+  ingest + sidecar (DaemonSet) + webhook receiver + outbox forwarder
+  + TTL sweeper. Ledger schema migrations run as a post-install hook.
+
+  Postgres + secrets (PKI / contract bundle) are user-provided
+  externals — bring your own RDS / Cloud SQL / managed Postgres, and
+  pre-create the spendguard-tls + spendguard-bundles Secrets per the
+  README.
+type: application
+version: 0.1.0-alpha.1
+appVersion: "0.1.0-alpha.1"
+keywords:
+  - ai
+  - agents
+  - budget
+  - governance
+  - llm
+  - safety
+home: https://github.com/m24927605/agentic-flow-cost-evaluation
+sources:
+  - https://github.com/m24927605/agentic-flow-cost-evaluation
+maintainers:
+  - name: SpendGuard authors

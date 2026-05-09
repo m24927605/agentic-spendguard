@@ -1,0 +1,53 @@
+{{- if .Values.canonicalIngest.enabled }}
+{{- $component := "canonical-ingest" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-canonical-ingest
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.canonicalIngest.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      containers:
+        - name: canonical-ingest
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.canonicalIngest.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - { name: grpc, containerPort: 50052 }
+          env:
+            - { name: SPENDGUARD_CANONICAL_INGEST_BIND_ADDR,    value: "0.0.0.0:50052" }
+            - { name: SPENDGUARD_CANONICAL_INGEST_DATABASE_URL, value: {{ .Values.postgres.canonicalUrl | quote }} }
+            - { name: SPENDGUARD_CANONICAL_INGEST_TENANT_ID,    value: {{ .Values.global.tenantId | quote }} }
+            - { name: SPENDGUARD_CANONICAL_INGEST_TLS_CERT_PEM, value: "/etc/ssl/spendguard/canonical-ingest.crt" }
+            - { name: SPENDGUARD_CANONICAL_INGEST_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/canonical-ingest.key" }
+            - { name: SPENDGUARD_CANONICAL_INGEST_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+          volumeMounts:
+            - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+          resources:
+            {{- toYaml .Values.canonicalIngest.resources | nindent 12 }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.secrets.tls.existingSecret }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spendguard.fullname" . }}-canonical-ingest
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc, port: 50052, targetPort: grpc }
+  selector:
+    {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+{{- end }}

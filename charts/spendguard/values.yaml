@@ -1,0 +1,126 @@
+# Default values for spendguard chart.
+#
+# Required by the operator before install:
+#   - secrets.tls.existingSecret    — Secret with ca.crt + per-service
+#                                     keypairs (ledger.{crt,key}, etc.)
+#   - secrets.bundles.existingSecret— Secret with contract bundle .tgz
+#                                     + metadata.json + runtime.env
+#   - postgres.url                  — postgres://user:pass@host:5432/spendguard_ledger
+#                                     (separate canonical DB inferred via .canonicalUrl)
+#
+# A single-pod replica count is enforced by default for sidecar /
+# outbox-forwarder / ttl-sweeper because multi-pod work distribution is
+# a Phase 5 GA gate (per memory project_overview.md). Override with
+# caution — producer_sequence races corrupt audit_outbox.
+
+global:
+  tenantId: "00000000-0000-4000-8000-000000000001"
+  region: "demo"
+  imagePullPolicy: IfNotPresent
+  imageRegistry: ghcr.io/m24927605
+
+# Secrets
+secrets:
+  tls:
+    # Name of pre-created Secret containing:
+    #   ca.crt, ledger.crt, ledger.key, canonical-ingest.crt,
+    #   canonical-ingest.key, sidecar.crt, sidecar.key,
+    #   webhook-receiver.crt, webhook-receiver.key,
+    #   outbox-forwarder.crt, outbox-forwarder.key,
+    #   ttl-sweeper.crt, ttl-sweeper.key.
+    existingSecret: spendguard-tls
+  bundles:
+    # Name of pre-created Secret with contract / schema bundle data:
+    #   contract_bundle/<id>.tgz, contract_bundle/<id>.metadata.json,
+    #   schema_bundle/<id>.tgz, runtime.env, pricing.env.
+    existingSecret: spendguard-bundles
+
+# Postgres connection (external; chart does NOT provision Postgres).
+postgres:
+  ledgerUrl: "postgres://spendguard:CHANGE_ME@postgres:5432/spendguard_ledger"
+  canonicalUrl: "postgres://spendguard:CHANGE_ME@postgres:5432/spendguard_canonical"
+  # Apply ledger + canonical SQL migrations on chart install via hook.
+  applyMigrationsOnInstall: true
+
+# Per-service overrides
+ledger:
+  enabled: true
+  replicas: 1
+  image:
+    repository: spendguard/ledger
+    tag: "0.1.0-alpha.1"
+  resources:
+    requests: { cpu: "200m", memory: "256Mi" }
+    limits:   { cpu: "1",    memory: "1Gi"   }
+
+canonicalIngest:
+  enabled: true
+  replicas: 1
+  image:
+    repository: spendguard/canonical-ingest
+    tag: "0.1.0-alpha.1"
+  resources:
+    requests: { cpu: "200m", memory: "256Mi" }
+    limits:   { cpu: "1",    memory: "1Gi"   }
+
+sidecar:
+  enabled: true
+  # GA gate: multi-pod = producer_sequence races. Keep at 1 for POC.
+  replicas: 1
+  image:
+    repository: spendguard/sidecar
+    tag: "0.1.0-alpha.1"
+  fencingScopeId: "33333333-3333-4333-8333-333333333333"
+  workloadInstanceId: "sidecar-0"
+  reservationTtlSeconds: 600
+  # Open the UDS adapter socket on a hostPath so apps in other pods can
+  # mount it. Set hostPath.enabled=false for an in-pod-only sidecar.
+  hostPath:
+    enabled: true
+    socketDir: /var/run/spendguard
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+
+webhookReceiver:
+  enabled: true
+  replicas: 1
+  image:
+    repository: spendguard/webhook-receiver
+    tag: "0.1.0-alpha.1"
+  service:
+    type: ClusterIP
+    httpsPort: 8443
+  fencingScopeId: "00000000-0000-7000-a000-000000000050"
+  workloadInstanceId: "webhook-receiver-0"
+  hmacSecretName: spendguard-webhook-hmac
+
+outboxForwarder:
+  enabled: true
+  # GA gate: leader election needed before scaling beyond 1 pod.
+  replicas: 1
+  image:
+    repository: spendguard/outbox-forwarder
+    tag: "0.1.0-alpha.1"
+  pollIntervalSeconds: 2
+  batchSize: 50
+
+ttlSweeper:
+  enabled: true
+  # GA gate: same producer_sequence race; keep at 1.
+  replicas: 1
+  image:
+    repository: spendguard/ttl-sweeper
+    tag: "0.1.0-alpha.1"
+  fencingScopeId: "00000000-0000-7000-a000-000000000060"
+  workloadInstanceId: "ttl-sweeper-0"
+  pollIntervalSeconds: 2
+  batchSize: 10
+
+# Migration job (post-install hook).
+migrations:
+  ledgerImage: postgres:16-alpine
+  canonicalImage: postgres:16-alpine
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "256Mi" }
