@@ -438,7 +438,10 @@ async def simulate_webhook_invoice_reconcile(
 # ---------------------------------------------------------------------------
 
 
-async def run_agent_mode(use_real_openai: bool = False) -> int:
+async def run_agent_mode(
+    use_real_openai: bool = False,
+    use_real_anthropic: bool = False,
+) -> int:
     from pydantic_ai import Agent
 
     from spendguard_pydantic_ai import (
@@ -511,6 +514,20 @@ async def run_agent_mode(use_real_openai: bool = False) -> int:
             # pydantic-ai 0.0.x OpenAIModel takes only the model name.
             inner_model: Any = OpenAIModel("gpt-4o-mini")
             print("[demo] using real OpenAI gpt-4o-mini")
+        elif use_real_anthropic:
+            from pydantic_ai.models.anthropic import AnthropicModel
+
+            if not os.environ.get("ANTHROPIC_API_KEY"):
+                print(
+                    "[demo] FATAL: ANTHROPIC_API_KEY required for agent_real_anthropic mode",
+                    file=sys.stderr,
+                )
+                return 9
+            # Anthropic SDK reads ANTHROPIC_API_KEY from env automatically.
+            # claude-3-5-haiku is the cheapest claude that returns usage in
+            # the response (input_tokens + output_tokens).
+            inner_model = AnthropicModel("claude-haiku-4-5-20251001")
+            print("[demo] using real Anthropic claude-haiku-4-5-20251001")
         else:
             inner_model = MockLLM()
 
@@ -565,6 +582,8 @@ async def main() -> int:
         return await run_deny_mode()
     if DEMO_MODE == "agent_real":
         return await run_agent_mode(use_real_openai=True)
+    if DEMO_MODE == "agent_real_anthropic":
+        return await run_agent_mode(use_real_anthropic=True)
     return await run_agent_mode()
 
 
