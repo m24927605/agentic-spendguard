@@ -121,7 +121,14 @@ demo-verify-deny:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_deny.sql
 	@echo "[demo] Phase 3 DENY verification done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny
+# Phase 4 O3 pricing-table verification: pricing-seed-init loaded the
+# real pricing_table from seed.yaml; pricing_versions has at least one
+# row; coverage spans OpenAI + Anthropic + Azure + Bedrock + Gemini.
+demo-verify-pricing:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_pricing_table.sql
+	@echo "[demo] Phase 4 O3 pricing verification done"
+
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

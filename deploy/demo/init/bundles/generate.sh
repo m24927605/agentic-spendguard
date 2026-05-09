@@ -23,6 +23,17 @@ CONTRACT_DIR="$OUT/contract_bundle"
 SCHEMA_DIR="$OUT/schema_bundle"
 mkdir -p "$CONTRACT_DIR" "$SCHEMA_DIR"
 
+# Phase 4 O3: pricing-seed-init writes /bundles/pricing.env with the
+# real pricing_version + snapshot hash from the canonical DB. If
+# present, source it so the freeze tuple matches what's actually in
+# pricing_table. Falls back to compose env vars (legacy demo path).
+if [ -f "$OUT/pricing.env" ]; then
+    echo "[bundles] sourcing pricing-seed output from $OUT/pricing.env"
+    set -a
+    . "$OUT/pricing.env"
+    set +a
+fi
+
 : "${CONTRACT_BUNDLE_ID:?required}"
 : "${SCHEMA_BUNDLE_ID:?required}"
 : "${PRICING_VERSION:?required}"
@@ -109,9 +120,19 @@ printf 'demo-cosign-placeholder' > "$CONTRACT_DIR/$CONTRACT_BUNDLE_ID.tgz.sig"
 # 3. Bundle metadata (parsed by load_contract_bundle):
 #    pricing_version + price_snapshot_hash + fx_rate_version +
 #    unit_conversion_version + signing_key_id.
-PRICE_SNAPSHOT_INPUT="$PRICING_VERSION:$FX_RATE_VERSION:$UNIT_CONVERSION_VERSION:demo-prices"
-PRICE_SNAPSHOT_HASH=$(printf '%s' "$PRICE_SNAPSHOT_INPUT" | sha256sum | awk '{print $1}')
-echo "[bundles] price_snapshot sha256: $PRICE_SNAPSHOT_HASH"
+#
+# Phase 4 O3: prefer the hash computed by pricing-seed-init from the
+# real canonical DB pricing_table (sourced from /bundles/pricing.env
+# above). Fall back to a synthetic hash for legacy compose runs that
+# don't include pricing-seed-init.
+if [ -n "${PRICE_SNAPSHOT_HASH_HEX:-}" ]; then
+    PRICE_SNAPSHOT_HASH="$PRICE_SNAPSHOT_HASH_HEX"
+    echo "[bundles] price_snapshot from pricing-seed: $PRICE_SNAPSHOT_HASH"
+else
+    PRICE_SNAPSHOT_INPUT="$PRICING_VERSION:$FX_RATE_VERSION:$UNIT_CONVERSION_VERSION:demo-prices"
+    PRICE_SNAPSHOT_HASH=$(printf '%s' "$PRICE_SNAPSHOT_INPUT" | sha256sum | awk '{print $1}')
+    echo "[bundles] price_snapshot computed (legacy fallback): $PRICE_SNAPSHOT_HASH"
+fi
 
 cat > "$CONTRACT_DIR/$CONTRACT_BUNDLE_ID.metadata.json" <<EOF
 {

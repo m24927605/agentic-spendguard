@@ -1,0 +1,66 @@
+# Demo pricing seed — Phase 4 O3.
+#
+# Source: each provider's public pricing page as of 2026-05.
+# These numbers feed into the canonical_ingest.pricing_table at compose
+# init time. A real production deployment would refresh via a periodic
+# pricing_sync job (deferred follow-on); the demo refreshes only on
+# `docker compose down -v`.
+#
+# Token kinds:
+#   input            — non-cached prompt tokens
+#   output           — completion tokens (usually most expensive)
+#   cached_input     — prompt tokens that hit provider-side prefix cache
+#   vision_input     — image / vision payload tokens
+#   audio_input      — audio payload tokens (if supported)
+#   reasoning        — reasoning-mode tokens (o1, o3, claude extended thinking)
+
+pricing_version: "v2026.05.09-1"
+cut_by: "manual:demo-seed"
+sources_used:
+  - manual
+
+prices:
+  # ============== OpenAI ==============
+  - { provider: openai, model: gpt-4o-mini,         token_kind: input,        price_usd_per_million: 0.15  }
+  - { provider: openai, model: gpt-4o-mini,         token_kind: cached_input, price_usd_per_million: 0.075 }
+  - { provider: openai, model: gpt-4o-mini,         token_kind: output,       price_usd_per_million: 0.60  }
+  - { provider: openai, model: gpt-4o,              token_kind: input,        price_usd_per_million: 2.50  }
+  - { provider: openai, model: gpt-4o,              token_kind: cached_input, price_usd_per_million: 1.25  }
+  - { provider: openai, model: gpt-4o,              token_kind: output,       price_usd_per_million: 10.00 }
+  - { provider: openai, model: o1,                  token_kind: input,        price_usd_per_million: 15.00 }
+  - { provider: openai, model: o1,                  token_kind: cached_input, price_usd_per_million: 7.50  }
+  - { provider: openai, model: o1,                  token_kind: output,       price_usd_per_million: 60.00 }
+  - { provider: openai, model: o1,                  token_kind: reasoning,    price_usd_per_million: 60.00 }
+  - { provider: openai, model: o3-mini,             token_kind: input,        price_usd_per_million: 1.10  }
+  - { provider: openai, model: o3-mini,             token_kind: cached_input, price_usd_per_million: 0.55  }
+  - { provider: openai, model: o3-mini,             token_kind: output,       price_usd_per_million: 4.40  }
+  - { provider: openai, model: o3-mini,             token_kind: reasoning,    price_usd_per_million: 4.40  }
+
+  # ============== Anthropic ==============
+  - { provider: anthropic, model: claude-haiku-4-5-20251001,    token_kind: input,        price_usd_per_million: 1.00  }
+  - { provider: anthropic, model: claude-haiku-4-5-20251001,    token_kind: cached_input, price_usd_per_million: 0.10  }
+  - { provider: anthropic, model: claude-haiku-4-5-20251001,    token_kind: output,       price_usd_per_million: 5.00  }
+  - { provider: anthropic, model: claude-sonnet-4-5-20250929,   token_kind: input,        price_usd_per_million: 3.00  }
+  - { provider: anthropic, model: claude-sonnet-4-5-20250929,   token_kind: cached_input, price_usd_per_million: 0.30  }
+  - { provider: anthropic, model: claude-sonnet-4-5-20250929,   token_kind: output,       price_usd_per_million: 15.00 }
+  - { provider: anthropic, model: claude-opus-4-7,              token_kind: input,        price_usd_per_million: 15.00 }
+  - { provider: anthropic, model: claude-opus-4-7,              token_kind: cached_input, price_usd_per_million: 1.50  }
+  - { provider: anthropic, model: claude-opus-4-7,              token_kind: output,       price_usd_per_million: 75.00 }
+
+  # ============== Azure OpenAI (mirrors OpenAI public; differs by region) ==============
+  - { provider: azure_openai, model: gpt-4o-mini, token_kind: input,        price_usd_per_million: 0.15  }
+  - { provider: azure_openai, model: gpt-4o-mini, token_kind: cached_input, price_usd_per_million: 0.075 }
+  - { provider: azure_openai, model: gpt-4o-mini, token_kind: output,       price_usd_per_million: 0.60  }
+  - { provider: azure_openai, model: gpt-4o,      token_kind: input,        price_usd_per_million: 2.50  }
+  - { provider: azure_openai, model: gpt-4o,      token_kind: output,       price_usd_per_million: 10.00 }
+
+  # ============== AWS Bedrock (Claude family via Bedrock) ==============
+  - { provider: bedrock, model: anthropic.claude-haiku-4-5,  token_kind: input,  price_usd_per_million: 1.00  }
+  - { provider: bedrock, model: anthropic.claude-haiku-4-5,  token_kind: output, price_usd_per_million: 5.00  }
+  - { provider: bedrock, model: anthropic.claude-sonnet-4-5, token_kind: input,  price_usd_per_million: 3.00  }
+  - { provider: bedrock, model: anthropic.claude-sonnet-4-5, token_kind: output, price_usd_per_million: 15.00 }
+
+  # ============== Google Gemini ==============
+  - { provider: gemini, model: gemini-2.0-flash,    token_kind: input,        price_usd_per_million: 0.10  }
+  - { provider: gemini, model: gemini-2.0-flash,    token_kind: cached_input, price_usd_per_million: 0.025 }
+  - { provider: gemini, model: gemini-2.0-flash,    token_kind: output,       price_usd_per_million: 0.40  }
