@@ -89,6 +89,11 @@ async fn main() -> anyhow::Result<()> {
     let v1_routes = Router::new()
         .route("/v1/tenants", post(create_tenant))
         .route("/v1/tenants/:id", get(get_tenant).delete(tombstone_tenant))
+        // Phase 5 GA hardening S15: approval REST API. List, detail,
+        // resolve. RBAC + tenant scope checks live in each handler.
+        .route("/v1/approvals", get(list_approvals))
+        .route("/v1/approvals/:id", get(get_approval))
+        .route("/v1/approvals/:id/resolve", post(resolve_approval))
         .layer(from_fn_with_state(auth.clone(), spendguard_auth::require_auth));
 
     let app = Router::new()
@@ -598,4 +603,323 @@ fn base64_encode(bytes: &[u8]) -> String {
         i += 3;
     }
     String::from_utf8(out).expect("base64 table is ASCII")
+}
+
+// ============================================================================
+// Phase 5 GA hardening S15: approval REST API
+// ============================================================================
+//
+// GET  /v1/approvals?tenant_id=...&state=...  — list pending or resolved
+// GET  /v1/approvals/:id                      — full record + recent events
+// POST /v1/approvals/:id/resolve              — { target_state, reason }
+//
+// Every handler enforces:
+//   * Permission::ApprovalResolve via principal.require()
+//   * principal.assert_tenant() against the row's tenant_id (after lookup)
+//   * Cross-tenant attempts return 403, never 404 (tenant existence not leaked).
+
+#[derive(Debug, Deserialize)]
+struct ListApprovalsQuery {
+    tenant_id: String,
+    /// Optional state filter. Default = pending.
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApprovalSummary {
+    approval_id: Uuid,
+    tenant_id: Uuid,
+    decision_id: Uuid,
+    state: String,
+    ttl_expires_at: chrono::DateTime<chrono::Utc>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn list_approvals(
+    Extension(principal): Extension<Principal>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<ListApprovalsQuery>,
+) -> Result<Response, StatusCode> {
+    if principal.require(Permission::ApprovalResolve).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if principal.assert_tenant(&q.tenant_id).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let tenant_uuid = Uuid::parse_str(&q.tenant_id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let state_filter = q.state.unwrap_or_else(|| "pending".into());
+    if !["pending", "approved", "denied", "expired", "cancelled"].contains(&state_filter.as_str())
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let limit = q.limit.unwrap_or(50).clamp(1, 200);
+
+    let rows = sqlx::query_as::<
+        _,
+        (Uuid, Uuid, Uuid, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+    >(
+        r#"
+        SELECT approval_id, tenant_id, decision_id, state,
+               ttl_expires_at, created_at
+          FROM approval_requests
+         WHERE tenant_id = $1 AND state = $2
+         ORDER BY created_at DESC
+         LIMIT $3
+        "#,
+    )
+    .bind(tenant_uuid)
+    .bind(&state_filter)
+    .bind(limit)
+    .fetch_all(&state.pg)
+    .await
+    .map_err(|e| {
+        info!(err = %e, "S15: list_approvals query failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .into_iter()
+    .map(|(aid, tid, did, st, ttl, ct)| ApprovalSummary {
+        approval_id: aid,
+        tenant_id: tid,
+        decision_id: did,
+        state: st,
+        ttl_expires_at: ttl,
+        created_at: ct,
+    })
+    .collect::<Vec<_>>();
+    Ok(Json(rows).into_response())
+}
+
+#[derive(Debug, Serialize)]
+struct ApprovalDetail {
+    approval_id: Uuid,
+    tenant_id: Uuid,
+    decision_id: Uuid,
+    audit_decision_event_id: Uuid,
+    state: String,
+    ttl_expires_at: chrono::DateTime<chrono::Utc>,
+    approver_policy: serde_json::Value,
+    requested_effect: serde_json::Value,
+    decision_context: serde_json::Value,
+    resolved_at: Option<chrono::DateTime<chrono::Utc>>,
+    resolved_by_subject: Option<String>,
+    resolution_reason: Option<String>,
+    created_at: chrono::DateTime<chrono::Utc>,
+    recent_events: Vec<ApprovalEventOut>,
+}
+
+#[derive(Debug, Serialize)]
+struct ApprovalEventOut {
+    event_id: Uuid,
+    from_state: String,
+    to_state: String,
+    actor_subject: Option<String>,
+    resolution_reason: Option<String>,
+    occurred_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[allow(clippy::type_complexity)]
+async fn get_approval(
+    Extension(principal): Extension<Principal>,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Response, StatusCode> {
+    if principal.require(Permission::ApprovalResolve).is_err()
+        && principal.require(Permission::ReadView).is_err()
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let approval_uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let detail: Option<(
+        Uuid,
+        Uuid,
+        Uuid,
+        Uuid,
+        String,
+        chrono::DateTime<chrono::Utc>,
+        serde_json::Value,
+        serde_json::Value,
+        serde_json::Value,
+        Option<chrono::DateTime<chrono::Utc>>,
+        Option<String>,
+        Option<String>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        r#"
+        SELECT approval_id, tenant_id, decision_id, audit_decision_event_id,
+               state, ttl_expires_at, approver_policy, requested_effect,
+               decision_context, resolved_at, resolved_by_subject,
+               resolution_reason, created_at
+          FROM approval_requests
+         WHERE approval_id = $1
+        "#,
+    )
+    .bind(approval_uuid)
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(|e| {
+        info!(err = %e, "S15: get_approval query failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    let detail = match detail {
+        Some(d) => d,
+        // Information leak avoidance: return 403 not 404 so an
+        // attacker can't probe approval_id existence.
+        None => return Err(StatusCode::FORBIDDEN),
+    };
+
+    // Tenant scope check uses the row's tenant_id (NOT a query param)
+    // so an attacker can't claim cross-tenant access.
+    let row_tenant = detail.1.to_string();
+    if principal.assert_tenant(&row_tenant).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let events: Vec<ApprovalEventOut> = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            Option<String>,
+            Option<String>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
+        r#"
+        SELECT event_id, from_state, to_state, actor_subject,
+               resolution_reason, occurred_at
+          FROM approval_events
+         WHERE approval_id = $1
+         ORDER BY occurred_at DESC
+         LIMIT 20
+        "#,
+    )
+    .bind(approval_uuid)
+    .fetch_all(&state.pg)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .into_iter()
+    .map(|(eid, fs, ts, sub, rsn, ts_at)| ApprovalEventOut {
+        event_id: eid,
+        from_state: fs,
+        to_state: ts,
+        actor_subject: sub,
+        resolution_reason: rsn,
+        occurred_at: ts_at,
+    })
+    .collect();
+
+    Ok(Json(ApprovalDetail {
+        approval_id: detail.0,
+        tenant_id: detail.1,
+        decision_id: detail.2,
+        audit_decision_event_id: detail.3,
+        state: detail.4,
+        ttl_expires_at: detail.5,
+        approver_policy: detail.6,
+        requested_effect: detail.7,
+        decision_context: detail.8,
+        resolved_at: detail.9,
+        resolved_by_subject: detail.10,
+        resolution_reason: detail.11,
+        created_at: detail.12,
+        recent_events: events,
+    })
+    .into_response())
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolveApprovalReq {
+    target_state: String,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ResolveApprovalResp {
+    final_state: String,
+    transitioned: bool,
+    event_id: Option<Uuid>,
+}
+
+async fn resolve_approval(
+    Extension(principal): Extension<Principal>,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<ResolveApprovalReq>,
+) -> Result<Response, StatusCode> {
+    if principal.require(Permission::ApprovalResolve).is_err() {
+        info!(
+            subject = %principal.subject,
+            roles = ?principal.roles,
+            "resolve_approval rejected — missing ApprovalResolve permission"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let approval_uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if !["approved", "denied", "cancelled"].contains(&req.target_state.as_str()) {
+        // 'expired' is system-only; not exposed via API.
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if req.reason.trim().is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Fetch tenant_id first (read-only) to enforce cross-tenant guard
+    // BEFORE issuing the SP. Same return-403-not-404 semantics.
+    let row_tenant: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT tenant_id FROM approval_requests WHERE approval_id = $1",
+    )
+    .bind(approval_uuid)
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let Some((row_tenant,)) = row_tenant else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if principal.assert_tenant(&row_tenant.to_string()).is_err() {
+        info!(
+            subject = %principal.subject,
+            requested = %row_tenant,
+            scope = ?principal.tenant_ids,
+            "resolve_approval rejected — cross-tenant"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    info!(
+        subject = %principal.subject,
+        approval_id = %approval_uuid,
+        target_state = %req.target_state,
+        "S15: resolve_approval invoked"
+    );
+
+    let row: (String, bool, Option<Uuid>) = sqlx::query_as(
+        "SELECT * FROM resolve_approval_request($1, $2, $3, $4, $5)",
+    )
+    .bind(approval_uuid)
+    .bind(&req.target_state)
+    .bind(&principal.subject)
+    .bind(&principal.issuer)
+    .bind(&req.reason)
+    .fetch_one(&state.pg)
+    .await
+    .map_err(|e| {
+        info!(err = %e, "S15: resolve_approval SP failed");
+        // SP raises 22023 / P0002 for invalid transitions / missing
+        // approval. Both surface here as 422-ish; keep the public
+        // mapping conservative.
+        StatusCode::CONFLICT
+    })?;
+
+    Ok(Json(ResolveApprovalResp {
+        final_state: row.0,
+        transitioned: row.1,
+        event_id: row.2,
+    })
+    .into_response())
 }
