@@ -120,7 +120,7 @@ module "rds" {
   backup_window           = "03:00-06:00"
   backup_retention_period = var.rds_backup_retention_days
 
-  performance_insights_enabled    = true
+  performance_insights_enabled          = true
   performance_insights_retention_period = 7
 
   parameters = [
