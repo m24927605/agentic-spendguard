@@ -1,5 +1,9 @@
 {{- if .Values.outboxForwarder.enabled }}
 {{- $component := "outbox-forwarder" }}
+{{- /* Phase 5 S1 multi-pod safety gate */ -}}
+{{- if and (gt (int .Values.outboxForwarder.replicas) 1) (eq .Values.leaderElection.mode "disabled") -}}
+{{- fail "outboxForwarder.replicas > 1 requires leaderElection.mode != 'disabled' (S1 multi-pod safety gate)" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -31,6 +35,13 @@ spec:
             - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/outbox-forwarder.crt" }
             - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/outbox-forwarder.key" }
             - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # Phase 5 S1 — leader election config.
+            - { name: SPENDGUARD_LEADER_ELECTION_MODE,    value: {{ .Values.leaderElection.mode | quote }} }
+            - { name: SPENDGUARD_LEADER_LEASE_NAME,        value: {{ .Values.outboxForwarder.leaseName | quote }} }
+            - { name: SPENDGUARD_LEADER_REGION,            value: {{ .Values.leaderElection.region | quote }} }
+            - { name: SPENDGUARD_LEADER_LEASE_TTL_MS,      value: {{ .Values.leaderElection.ttlMs | quote }} }
+            - { name: SPENDGUARD_LEADER_RENEW_INTERVAL_MS, value: {{ .Values.leaderElection.renewIntervalMs | quote }} }
+            - { name: SPENDGUARD_LEADER_RETRY_INTERVAL_MS, value: {{ .Values.leaderElection.retryIntervalMs | quote }} }
           volumeMounts:
             - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
             - { name: bundles, mountPath: /var/lib/spendguard/bundles, readOnly: true }
