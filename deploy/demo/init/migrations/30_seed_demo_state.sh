@@ -31,6 +31,12 @@ FENCING_SCOPE_ID="33333333-3333-4333-8333-333333333333"
 UNIT_ID="66666666-6666-4666-8666-666666666666"
 BUDGET_ID="44444444-4444-4444-8444-444444444444"
 WINDOW_INSTANCE_ID="55555555-5555-4555-8555-555555555555"
+
+# Phase 4 O4: USD-denominated unit + opening deposit. Same budget +
+# window so cross-provider claims (OpenAI + Anthropic) net against
+# one budget; only the unit_id differs from the token-denominated path.
+USD_UNIT_ID="88888888-8888-4888-8888-888888888888"
+USD_OPENING_BALANCE="100000"  # 100_000 µUSD = $0.10
 PRICING_VERSION="demo-pricing-v1"
 FX_RATE_VERSION="demo-fx-v1"
 UNIT_CONVERSION_VERSION="demo-units-v1"
@@ -71,6 +77,22 @@ INSERT INTO ledger_units (
     'truncate',
     'output_token',
     'gpt-4'
+) ON CONFLICT DO NOTHING;
+
+-- 1b) Phase 4 O4: USD-monetary unit (scale=6 → 1 atomic = 1 µUSD).
+-- unit_kind='monetary' + currency='USD' per the schema CHECK
+-- (allowed values: monetary / token / credit / non_monetary).
+-- Multiple providers' tokens net against the same dollar budget once
+-- the adapter converts via the pricing table.
+INSERT INTO ledger_units (
+    unit_id, tenant_id, unit_kind, currency, scale, rounding_mode
+) VALUES (
+    '${USD_UNIT_ID}'::UUID,
+    '${TENANT_ID}'::UUID,
+    'monetary',
+    'USD',
+    6,
+    'half_up'
 ) ON CONFLICT DO NOTHING;
 
 -- 2) Pricing snapshot. schema_json carries the demo's price table —
@@ -140,6 +162,7 @@ INSERT INTO ledger_accounts (
     ledger_account_id, tenant_id, budget_id, window_instance_id,
     account_kind, unit_id
 ) VALUES (
+    -- Token unit accounts (existing).
     gen_random_uuid(), '${TENANT_ID}'::UUID, '${BUDGET_ID}'::UUID,
     '${WINDOW_INSTANCE_ID}'::UUID, 'available_budget', '${UNIT_ID}'::UUID
 ), (
@@ -151,6 +174,19 @@ INSERT INTO ledger_accounts (
 ), (
     gen_random_uuid(), '${TENANT_ID}'::UUID, '${BUDGET_ID}'::UUID,
     '${WINDOW_INSTANCE_ID}'::UUID, 'adjustment', '${UNIT_ID}'::UUID
+), (
+    -- Phase 4 O4: USD-micros unit accounts (cross-provider USD budget).
+    gen_random_uuid(), '${TENANT_ID}'::UUID, '${BUDGET_ID}'::UUID,
+    '${WINDOW_INSTANCE_ID}'::UUID, 'available_budget', '${USD_UNIT_ID}'::UUID
+), (
+    gen_random_uuid(), '${TENANT_ID}'::UUID, '${BUDGET_ID}'::UUID,
+    '${WINDOW_INSTANCE_ID}'::UUID, 'reserved_hold', '${USD_UNIT_ID}'::UUID
+), (
+    gen_random_uuid(), '${TENANT_ID}'::UUID, '${BUDGET_ID}'::UUID,
+    '${WINDOW_INSTANCE_ID}'::UUID, 'committed_spend', '${USD_UNIT_ID}'::UUID
+), (
+    gen_random_uuid(), '${TENANT_ID}'::UUID, '${BUDGET_ID}'::UUID,
+    '${WINDOW_INSTANCE_ID}'::UUID, 'adjustment', '${USD_UNIT_ID}'::UUID
 ) ON CONFLICT DO NOTHING;
 
 -- 6) Phase 2B Step 7: opening deposit so available_budget starts at 500.
@@ -283,4 +319,77 @@ SELECT post_ledger_transaction(
 );
 EOSQL
 
-echo "[init] demo seed inserted into spendguard_ledger"
+# Phase 4 O4: USD opening deposit. Mirrors the token deposit but
+# debits to USD-denominated unit. Uses a fresh fencing scope row /
+# decision_id so the SP's UNIQUE invariants don't collide with the
+# token deposit above.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" \
+     --dbname spendguard_ledger <<EOSQL
+SELECT post_ledger_transaction(
+    jsonb_build_object(
+        'tenant_id',                '${TENANT_ID}',
+        'operation_kind',           'adjustment',
+        'idempotency_key',          'demo-seed-deposit-usd-1',
+        'request_hash_hex',         encode(digest('demo-seed-deposit-usd-1', 'sha256'), 'hex'),
+        'decision_id',              '00000000-0000-7000-a000-000000000120',
+        'audit_decision_event_id',  '00000000-0000-7000-a000-000000000121',
+        'fencing_scope_id',         '00000000-0000-7000-a000-000000000010',
+        'fencing_epoch',            1,
+        'workload_instance_id',     'demo-seed-runner',
+        'effective_at',             now()::text,
+        'ledger_transaction_id',    '00000000-0000-7000-a000-000000000122',
+        'minimal_replay_response',  '{}'::jsonb
+    ),
+    jsonb_build_array(
+        jsonb_build_object(
+            'budget_id',                '${BUDGET_ID}',
+            'window_instance_id',       '${WINDOW_INSTANCE_ID}',
+            'unit_id',                  '${USD_UNIT_ID}',
+            'account_kind',             'available_budget',
+            'direction',                'credit',
+            'amount_atomic',            '${USD_OPENING_BALANCE}',
+            'pricing_version',          '${PRICING_VERSION}',
+            'price_snapshot_hash_hex',  '${PRICE_SNAPSHOT_HASH_HEX}',
+            'fx_rate_version',          '${FX_RATE_VERSION}',
+            'unit_conversion_version',  '${UNIT_CONVERSION_VERSION}',
+            'ledger_entry_id',          '00000000-0000-7000-a000-000000000130',
+            'ledger_shard_id',          1
+        ),
+        jsonb_build_object(
+            'budget_id',                '${BUDGET_ID}',
+            'window_instance_id',       '${WINDOW_INSTANCE_ID}',
+            'unit_id',                  '${USD_UNIT_ID}',
+            'account_kind',             'adjustment',
+            'direction',                'debit',
+            'amount_atomic',            '${USD_OPENING_BALANCE}',
+            'pricing_version',          '${PRICING_VERSION}',
+            'price_snapshot_hash_hex',  '${PRICE_SNAPSHOT_HASH_HEX}',
+            'fx_rate_version',          '${FX_RATE_VERSION}',
+            'unit_conversion_version',  '${UNIT_CONVERSION_VERSION}',
+            'ledger_entry_id',          '00000000-0000-7000-a000-000000000131',
+            'ledger_shard_id',          1
+        )
+    ),
+    NULL,
+    jsonb_build_object(
+        'audit_outbox_id',                  '00000000-0000-7000-a000-000000000140',
+        'event_type',                       'spendguard.audit.decision',
+        'cloudevent_payload',               jsonb_build_object(
+            'specversion',  '1.0',
+            'type',         'spendguard.audit.decision',
+            'id',           '00000000-0000-7000-a000-000000000121',
+            'source',       'demo-seed-runner',
+            'tenantid',     '${TENANT_ID}',
+            'data_b64',     encode(convert_to(
+                '{"kind":"operator_adjustment","reason":"demo_seed_usd_opening_balance","amount_atomic":"${USD_OPENING_BALANCE}"}',
+                'utf8'), 'base64'),
+            'producer_sequence', 2
+        ),
+        'cloudevent_payload_signature_hex', '',
+        'producer_sequence',                2
+    ),
+    NULL
+);
+EOSQL
+
+echo "[init] demo seed inserted into spendguard_ledger (token + USD units)"

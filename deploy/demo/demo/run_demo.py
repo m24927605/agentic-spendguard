@@ -587,7 +587,204 @@ async def main() -> int:
         return await run_langchain_mode()
     if DEMO_MODE == "agent_real_langgraph":
         return await run_langgraph_mode()
+    if DEMO_MODE == "multi_provider_usd":
+        return await run_multi_provider_usd_mode()
     return await run_agent_mode()
+
+
+# ---------------------------------------------------------------------------
+# Multi-provider USD mode (Phase 4 O4): single USD-denominated budget
+# debited by both OpenAI and Anthropic in one session. Proves cross-
+# provider netting works end-to-end (real LLM usage → token→USD
+# conversion → ledger commit in µUSD).
+# ---------------------------------------------------------------------------
+
+
+async def run_multi_provider_usd_mode() -> int:
+    if not os.environ.get("OPENAI_API_KEY") or not os.environ.get("ANTHROPIC_API_KEY"):
+        print(
+            "[demo] FATAL: multi_provider_usd needs both OPENAI_API_KEY + ANTHROPIC_API_KEY",
+            file=sys.stderr,
+        )
+        return 8
+
+    from openai import AsyncOpenAI
+    from anthropic import AsyncAnthropic
+
+    from spendguard import SpendGuardClient, derive_idempotency_key, new_uuid7
+    from spendguard.pricing import PricingLookup, USD_MICROS_PER_USD
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+    # USD unit_id mirrors the demo seed (deploy/demo/init/migrations/30_seed_demo_state.sh).
+    usd_unit_id = "88888888-8888-4888-8888-888888888888"
+
+    # Pricing table (subset; mirrors deploy/demo/init/pricing/seed.yaml).
+    # Production adapters would receive this via the sidecar handshake or
+    # control plane API.
+    pricing_table = PricingLookup({
+        ("openai", "gpt-4o-mini", "input"):  0.15,
+        ("openai", "gpt-4o-mini", "output"): 0.60,
+        ("anthropic", "claude-haiku-4-5-20251001", "input"):  1.00,
+        ("anthropic", "claude-haiku-4-5-20251001", "output"): 5.00,
+    })
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+
+    usd_unit = common_pb2.UnitRef(
+        unit_id=usd_unit_id,
+        token_kind="usd_micros",
+        model_family="n/a",
+    )
+    pricing = common_pb2.PricingFreeze(
+        pricing_version=pricing_version,
+        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
+        fx_rate_version=fx,
+        unit_conversion_version=unit_conv,
+    )
+
+    async def _gated_provider_call(
+        provider: str,
+        model: str,
+        prompt: str,
+        run_id: str,
+        step_label: str,
+    ) -> tuple[int, int, int]:
+        """Reserve → real LLM call → commit. Returns (input_t, output_t, charged_usd_micros)."""
+        # Conservative pre-claim: 100 µUSD per call (covers up to ~17K
+        # output tokens of gpt-4o-mini @ $0.60/1M, much more than
+        # "Say hello in three words." would ever produce).
+        projected_micros = 100
+        claim = common_pb2.BudgetClaim(
+            budget_id=budget_id,
+            unit=usd_unit,
+            amount_atomic=str(projected_micros),
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id=window_id,
+        )
+        decision_id = str(new_uuid7())
+        llm_call_id = str(new_uuid7())
+        step_id = f"{run_id}:{step_label}"
+        idempotency_key = derive_idempotency_key(
+            tenant_id=tenant_id,
+            session_id=client.session_id,
+            run_id=run_id,
+            step_id=step_id,
+            llm_call_id=llm_call_id,
+            trigger="LLM_CALL_PRE",
+        )
+
+        outcome = await client.request_decision(
+            trigger="LLM_CALL_PRE",
+            run_id=run_id,
+            step_id=step_id,
+            llm_call_id=llm_call_id,
+            tool_call_id="",
+            decision_id=decision_id,
+            route="llm.call",
+            projected_claims=[claim],
+            idempotency_key=idempotency_key,
+        )
+
+        # Real provider call.
+        if provider == "openai":
+            oai = AsyncOpenAI()
+            resp = await oai.chat.completions.create(
+                model=model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=20,
+            )
+            in_t = resp.usage.prompt_tokens
+            out_t = resp.usage.completion_tokens
+        elif provider == "anthropic":
+            ant = AsyncAnthropic()
+            resp = await ant.messages.create(
+                model=model,
+                max_tokens=20,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            in_t = resp.usage.input_tokens
+            out_t = resp.usage.output_tokens
+        else:
+            raise ValueError(f"unknown provider {provider}")
+
+        actual_micros = pricing_table.usd_micros_for_call(
+            provider=provider, model=model,
+            input_tokens=in_t, output_tokens=out_t,
+        )
+
+        if outcome.reservation_ids:
+            await client.emit_llm_call_post(
+                run_id=run_id,
+                step_id=step_id,
+                llm_call_id=llm_call_id,
+                decision_id=outcome.decision_id,
+                reservation_id=outcome.reservation_ids[0],
+                provider_reported_amount_atomic="",
+                estimated_amount_atomic=str(actual_micros),
+                unit=usd_unit,
+                pricing=pricing,
+                provider_event_id=getattr(resp, "id", "") or "",
+                outcome="SUCCESS",
+            )
+
+        return (in_t, out_t, actual_micros)
+
+    run_id = str(new_uuid7())
+
+    oai_in, oai_out, oai_micros = await _gated_provider_call(
+        "openai", "gpt-4o-mini",
+        "Say hello in three words.",
+        run_id, "openai-call",
+    )
+    print(
+        f"[demo] OpenAI: input={oai_in} output={oai_out} "
+        f"charged={oai_micros} µUSD (~${oai_micros / USD_MICROS_PER_USD:.6f})"
+    )
+
+    ant_in, ant_out, ant_micros = await _gated_provider_call(
+        "anthropic", "claude-haiku-4-5-20251001",
+        "Say hello in three words.",
+        run_id, "anthropic-call",
+    )
+    print(
+        f"[demo] Anthropic: input={ant_in} output={ant_out} "
+        f"charged={ant_micros} µUSD (~${ant_micros / USD_MICROS_PER_USD:.6f})"
+    )
+
+    total_micros = oai_micros + ant_micros
+    print(
+        f"[demo] cross-provider total: {total_micros} µUSD "
+        f"(~${total_micros / USD_MICROS_PER_USD:.6f}) "
+        f"against single USD budget"
+    )
+
+    await client.close()
+    return 0
 
 
 # ---------------------------------------------------------------------------
