@@ -424,7 +424,12 @@ services:
       RUST_LOG: "info,spendguard_control_plane=debug"
       SPENDGUARD_CONTROL_PLANE_BIND_ADDR:    "0.0.0.0:8091"
       SPENDGUARD_CONTROL_PLANE_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
-      SPENDGUARD_CONTROL_PLANE_ADMIN_TOKEN:  "demo-admin-token-replace-in-production"
+      # Phase 5 GA hardening S17: OIDC/SSO foundation. Demo runs in
+      # static_token mode (allowed only with profile=demo).
+      SPENDGUARD_PROFILE:                                     "demo"
+      SPENDGUARD_CONTROL_PLANE_AUTH_MODE:                     "static_token"
+      SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN:                  "demo-admin-token-replace-in-production"
+      SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN_SUBJECT:          "demo-operator"
     ports:
       - "8091:8091"
     depends_on:
@@ -442,7 +447,12 @@ services:
       SPENDGUARD_DASHBOARD_BIND_ADDR:    "0.0.0.0:8090"
       SPENDGUARD_DASHBOARD_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
       SPENDGUARD_DASHBOARD_TENANT_ID:    "00000000-0000-4000-8000-000000000001"
-      SPENDGUARD_DASHBOARD_AUTH_TOKEN:   "demo-dashboard-token-replace-in-production"
+      # Phase 5 GA hardening S17: OIDC/SSO foundation. Demo uses
+      # static_token mode (allowed only with profile=demo).
+      SPENDGUARD_PROFILE:                          "demo"
+      SPENDGUARD_DASHBOARD_AUTH_MODE:              "static_token"
+      SPENDGUARD_DASHBOARD_STATIC_TOKEN:           "demo-dashboard-token-replace-in-production"
+      SPENDGUARD_DASHBOARD_STATIC_TOKEN_SUBJECT:   "demo-viewer"
     ports:
       - "8090:8090"
     depends_on:
