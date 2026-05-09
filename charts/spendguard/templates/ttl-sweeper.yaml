@@ -27,7 +27,14 @@ spec:
           env:
             - { name: SPENDGUARD_TTL_SWEEPER_TENANT_ID,            value: {{ .Values.global.tenantId | quote }} }
             - { name: SPENDGUARD_TTL_SWEEPER_FENCING_SCOPE_ID,     value: {{ .Values.ttlSweeper.fencingScopeId | quote }} }
-            - { name: SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID, value: {{ .Values.ttlSweeper.workloadInstanceId | quote }} }
+            # Phase 5 S2: per-pod-unique workload_instance_id via downward API.
+            {{- if .Values.ttlSweeper.workloadInstanceIdOverride }}
+            - { name: SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID, value: {{ .Values.ttlSweeper.workloadInstanceIdOverride | quote }} }
+            {{- else }}
+            - name: _POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID, value: "ttl-sweeper-$(_POD_NAME)" }
+            {{- end }}
             - name: SPENDGUARD_TTL_SWEEPER_LEDGER_URL
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
             - name: SPENDGUARD_TTL_SWEEPER_DATABASE_URL

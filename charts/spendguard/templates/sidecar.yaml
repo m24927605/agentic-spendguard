@@ -29,7 +29,19 @@ spec:
             - { name: SPENDGUARD_SIDECAR_TENANT_ID,            value: {{ .Values.global.tenantId | quote }} }
             - { name: SPENDGUARD_SIDECAR_REGION,               value: {{ .Values.global.region | quote }} }
             - { name: SPENDGUARD_SIDECAR_FENCING_SCOPE_ID,     value: {{ .Values.sidecar.fencingScopeId | quote }} }
-            - { name: SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID, value: {{ .Values.sidecar.workloadInstanceId | quote }} }
+            # Phase 5 S2: producer_instance_id (==workload_instance_id) MUST
+            # be per-pod unique. Use the k8s downward API to inject the
+            # pod name + a service prefix so two replicas can never collide.
+            # Operator can override with sidecar.workloadInstanceIdOverride
+            # for non-k8s deployments where pod identity comes from
+            # elsewhere (must still be per-instance unique).
+            {{- if .Values.sidecar.workloadInstanceIdOverride }}
+            - { name: SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID, value: {{ .Values.sidecar.workloadInstanceIdOverride | quote }} }
+            {{- else }}
+            - name: _POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID, value: "sidecar-$(_POD_NAME)" }
+            {{- end }}
             - { name: SPENDGUARD_SIDECAR_RESERVATION_TTL_SECONDS, value: {{ .Values.sidecar.reservationTtlSeconds | quote }} }
             - name: SPENDGUARD_SIDECAR_LEDGER_URL
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"

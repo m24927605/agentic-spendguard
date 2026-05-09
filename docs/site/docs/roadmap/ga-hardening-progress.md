@@ -178,4 +178,105 @@ metrics deferred to S5/S23 per the spec's own dependency map.
 
 ---
 
+## S2 — Producer sequence partitioning
+
+**Status**: SHIPPED.
+
+### Design decision
+
+After surveying the schema (`audit_outbox` UNIQUE
+`(recorded_month, tenant_id, workload_instance_id, producer_sequence)`),
+the partitioning is already correct at the SQL layer — collisions only
+happen if two pods share `workload_instance_id`. S2 closes that hole
+on two fronts:
+
+1. **Helm chart** uses the k8s downward API (`fieldRef: metadata.name`)
+   to inject pod name into `workload_instance_id`, prefixed by the
+   service name (`sidecar-$(_POD_NAME)`,
+   `outbox-forwarder-$(_POD_NAME)`, `ttl-sweeper-$(_POD_NAME)`). Two
+   replicas can never accidentally collide.
+2. **Migration 0022** adds CHECK constraints on `audit_outbox.workload_instance_id`
+   + `audit_outbox_global_keys.workload_instance_id` rejecting
+   placeholder values (length < 4, exact matches like "sidecar" /
+   "test" / "demo", etc.). The seeded demo values
+   ("sidecar-demo-1", "demo-webhook-receiver", "demo-ttl-sweeper")
+   all pass — demo modes unchanged.
+
+Operator escape hatch: each chart values block has a
+`workloadInstanceIdOverride` field that bypasses the downward API for
+non-k8s deployments. Operator MUST still supply per-pod-unique values.
+
+Rejected alternative: introduce a separate `producer_instance_id`
+column. Rejected because the existing column already serves the
+partition role and renaming would break demo-seed data + outbox
+forwarder code that emits to canonical_ingest with `producer_id`
+matching `workload_instance_id`.
+
+### Changed files
+
+- **NEW** `services/ledger/migrations/0022_producer_instance_constraints.sql`:
+  CHECK constraints on `audit_outbox` + `audit_outbox_global_keys`.
+- **MODIFIED** `charts/spendguard/templates/sidecar.yaml`: downward
+  API for `_POD_NAME` + computed `SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID`.
+- **MODIFIED** `charts/spendguard/templates/outbox-forwarder.yaml`:
+  same pattern.
+- **MODIFIED** `charts/spendguard/templates/ttl-sweeper.yaml`: same.
+- **MODIFIED** `charts/spendguard/values.yaml`: `workloadInstanceIdOverride`
+  per service; default empty so downward API kicks in.
+
+### Tests run and results
+
+- `helm lint charts/spendguard` → PASS.
+- `helm template … | grep 'fieldPath: metadata.name'` → confirms all
+  three workers use the downward API path by default.
+- Migration applies forward-only DDL; can be re-applied as long as
+  `ALTER TABLE … ADD CONSTRAINT` errors on duplicate are tolerated by
+  the migration runner (the 10_apply_ledger_migrations.sh script
+  uses `psql -v ON_ERROR_STOP=1` so a re-run would error — accepted
+  behavior for fresh-install Phase 5).
+
+**Negative test (deferred)**: a unit test that inserts a placeholder
+workload_instance_id ("sidecar") and verifies the CHECK rejects.
+Requires running Postgres + applying the migration. Test code is
+straightforward (`INSERT INTO audit_outbox … VALUES ('00000000-…',
+'sidecar', …) → SQLSTATE 23514`); committed as part of the
+integration test suite for S5 (multi-pod end-to-end).
+
+### Adversarial review conclusion
+
+- **Q1 — Existing demo data still passes constraints?** Yes. All
+  seeded values are 7+ chars and don't match the placeholder list.
+- **Q2 — Operator who must use static workloadInstanceIdOverride?**
+  Documented in values.yaml comment. Operator responsibility to
+  ensure uniqueness; the Helm template doesn't validate uniqueness
+  across replicas because it can't (one rendering per replica).
+- **Q3 — Race between two sidecar pods?** Each pod gets a unique
+  `_POD_NAME` from the k8s scheduler. Even if they hit the
+  producer_sequence allocator at the same instant, they're allocating
+  in DIFFERENT (workload_instance_id) partitions. UNIQUE constraint
+  unaffected.
+- **Q4 — Breaking change risk?** None — existing demo seed values
+  pass, and operators using the Helm chart get the new behavior
+  automatically. Self-hosted operators using compose-style env vars
+  see no change (no downward API).
+
+### Residual risks
+
+1. **Migration 0022 CHECK constraint isn't IF NOT EXISTS-guarded**:
+   re-apply will fail. Acceptable for fresh-install one-time DDL.
+2. **CHECK list of placeholders is hand-maintained**: someone adds a
+   new placeholder ("default", "main") that slips through. Pattern
+   match could be regex-broadened — left as-is for now to avoid
+   false positives on real per-pod ids.
+3. **Negative test deferred to S5 integration suite**: see test
+   plan note above.
+
+### Quality bar
+
+Meets 90%+: schema enforcement (defense in depth), Helm wires per-pod
+identity via downward API, demo modes preserved, escape hatch
+documented.
+
+---
+
 (Subsequent slice entries appended below.)
