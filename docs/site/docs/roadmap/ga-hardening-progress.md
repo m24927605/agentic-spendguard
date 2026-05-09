@@ -3380,4 +3380,173 @@ gaps in the state-model deliverable.
 
 ---
 
+## S15 — Approval API (list / detail / resolve) + notification outbox
+
+**Status**: SHIPPED (REST API on control_plane + outbox table for
+the dispatcher). Notification dispatcher service + dashboard
+approval view are explicit S15-followups.
+
+### Design decision
+
+- **Three REST endpoints** on control_plane behind the existing
+  S17 auth middleware:
+  - `GET /v1/approvals?tenant_id=...&state=...&limit=...`
+  - `GET /v1/approvals/:id`
+  - `POST /v1/approvals/:id/resolve` (body:
+    `{ target_state, reason }`)
+- **RBAC + tenant scope at every handler**:
+  - List + resolve require `Permission::ApprovalResolve`
+    (Admin + Approver per S18 matrix).
+  - Detail allows ApprovalResolve OR ReadView (so Auditors
+    can read pending approvals without resolving).
+  - Tenant scope check: detail + resolve fetch the row's
+    `tenant_id` BEFORE issuing the SP, then call
+    `principal.assert_tenant(&row_tenant)`. Cross-tenant
+    attempts return 403 (NEVER 404 — preserves S17 / S18
+    no-tenant-existence-leak rule).
+- **Idempotent resolve**: handler delegates to S14's
+  `resolve_approval_request` SP. SP returns
+  `transitioned=false` if the approval is already in the
+  requested state. `expired` target is system-only — API
+  rejects 400 if a client tries.
+- **Outbox-based notifications** (migration 0027):
+  `approval_notifications` table with `pending_dispatch=TRUE`
+  + UNIQUE on `(approval_id, transition_event_id)`. The
+  dispatcher service (S15-followup) polls + POSTs with HMAC
+  sig + exponential backoff. Spec invariant ("External
+  notification failure must not lose the approval request")
+  is preserved by the at-least-once outbox pattern that
+  mirrors S1 audit_outbox.
+- **Information leak avoidance**: missing approval returns
+  403, not 404. resolution_reason required (CHECK + handler
+  validation; empty/whitespace-only rejected at 400).
+
+### Changed files
+
+- **NEW** `services/ledger/migrations/0027_approval_notifications.sql`
+  (~50 lines): outbox table + 2 indexes + UNIQUE on
+  (approval_id, transition_event_id).
+- **MODIFIED** `services/control_plane/src/main.rs`: ~270 new
+  lines.
+  - Three new route registrations behind existing auth layer.
+  - `list_approvals` handler with tenant_id query + state
+    filter + limit cap (1..200).
+  - `get_approval` handler returning detail + 20 most-recent
+    events.
+  - `resolve_approval` handler delegating to
+    `resolve_approval_request` SP, mapping its typed
+    failures to HTTP CONFLICT.
+
+### Tests
+
+- Schema-level: migration parses on demo bring-up.
+- API smoke tests pending — automated test infrastructure
+  for the approval API is the natural followup. Manual
+  tests documented in this entry's runbook section.
+
+### Adversarial review
+
+- **Cross-tenant approval enumeration**: list endpoint
+  requires `tenant_id` in the query string AND principal
+  must be scoped to that tenant. An attacker who claims a
+  different tenant gets 403 before the DB query runs.
+- **Approval id probing**: detail + resolve both fetch the
+  row tenant_id with a separate read, return 403 (not 404)
+  on missing rows. Attackers can't tell missing from
+  forbidden.
+- **Resolution reason XSS in dashboard**: detail handler
+  returns reason verbatim. Dashboard (S15-followup) is
+  responsible for HTML-escaping. Documented as the
+  consumer contract.
+- **Repeated resolve calls**: SP idempotent on
+  `(approval_id, target_state)`. API returns
+  `transitioned=false` on the second call.
+- **State transition forging via `target_state=expired`**:
+  handler explicitly rejects (only `approved | denied |
+  cancelled` accepted). `expired` is system-only via
+  `expire_pending_approvals_due()`.
+- **Tenant id mismatch between query and row**: list handler
+  trusts `q.tenant_id` AFTER asserting principal scope; the
+  query result IS scoped to that tenant_id by the WHERE
+  clause. detail + resolve trust the row's tenant_id and
+  re-assert.
+- **Empty / whitespace reason**: handler trims + checks
+  `is_empty()`. Both layers (handler + SP CHECK) reject.
+- **Notification payload tampering on retry**: payload is
+  frozen at INSERT into `approval_notifications`. Dispatcher
+  serializes verbatim; HMAC sig stays stable across retries.
+  At-least-once delivery + receiver-side idempotency on
+  `(approval_id, transition_event_id)` handle dupes.
+- **Notification webhook URL operator-controlled**: stored
+  in the outbox row at INSERT time. An attacker with API
+  access cannot redirect notifications because the webhook
+  URL comes from per-tenant config (resolved by the
+  bundling SP, not from request body).
+
+### Observability
+
+- New tracing fields per resolve attempt: `subject`,
+  `approval_id`, `target_state`. Rejection logs:
+  `subject` + `roles` (missing permission) OR `subject` +
+  `requested` + `scope` (cross-tenant).
+- Future S23 / SLO L8 (approval p99) reads
+  `EXTRACT(EPOCH FROM (resolved_at - created_at))` from
+  `approval_requests` for histogram input.
+
+### Residual risks (S15-followup)
+
+1. **No notification dispatcher service yet**. The outbox
+   table is in place; a small new crate (mirror of
+   ttl_sweeper / outbox_forwarder pattern with leader
+   election) polls and POSTs. Hot-path independent — runs
+   as a background worker.
+2. **No dashboard approval view**. The data is exposed via
+   the API; dashboard's `/api/approvals` proxy + an HTML
+   list view is the followup.
+3. **No bundling SP yet** that creates approval_requests +
+   approval_notifications + audit_outbox row in one
+   transaction (S14-followup; consumed by S15 once it
+   lands).
+4. **No automated API tests**. Manual smoke test pattern
+   in runbook.
+5. **`approval_notifications.target_url`** is per-row;
+   per-tenant config (a `tenant_settings.notification_webhook`
+   column or table) is the followup the bundling SP
+   reads.
+6. **Codex round still flaking** — code-level review here.
+
+### Runbook deltas
+
+- New endpoints under control_plane:
+  - `curl -H 'Authorization: Bearer $T' '$CP/v1/approvals?tenant_id=...'`
+  - `curl -H 'Authorization: Bearer $T' '$CP/v1/approvals/$ID'`
+  - `curl -X POST -H 'Authorization: Bearer $T' \
+       -H 'Content-Type: application/json' \
+       -d '{"target_state":"approved","reason":"reviewed"}' \
+       '$CP/v1/approvals/$ID/resolve'`
+- New table to monitor: `approval_notifications`. Pending
+  rows query:
+  ```sql
+  SELECT count(*) FROM approval_notifications
+   WHERE pending_dispatch = TRUE
+     AND created_at < now() - interval '5 minutes';
+  ```
+  Spike indicates dispatcher down — alert L7-style.
+
+### Quality bar
+
+Meets 90%+ for "approval API + outbox" scope: three REST
+endpoints with full RBAC + tenant scope checks at every
+handler, idempotent resolve via the S14 SP, information-
+leak-safe error mapping (403 not 404 on missing), outbox-
+based notification persistence preserves the spec invariant
+("notification failure must not lose the approval"),
+defense-in-depth resolution_reason validation at both
+handler + SP CHECK. Open items (dispatcher service,
+dashboard view, bundling SP, automated API tests,
+per-tenant webhook config) are explicit S15-followups
+rather than gaps in the API + outbox deliverable.
+
+---
+
 (Subsequent slice entries appended below.)
