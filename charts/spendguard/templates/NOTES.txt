@@ -1,0 +1,37 @@
+SpendGuard {{ .Chart.AppVersion }} installed in namespace "{{ .Release.Namespace }}".
+
+Components deployed:
+{{- if .Values.ledger.enabled }}
+  ✓ ledger              (gRPC :50051)
+{{- end }}
+{{- if .Values.canonicalIngest.enabled }}
+  ✓ canonical-ingest    (gRPC :50052)
+{{- end }}
+{{- if .Values.sidecar.enabled }}
+  ✓ sidecar             (DaemonSet, UDS at {{ .Values.sidecar.hostPath.socketDir }}/adapter.sock)
+{{- end }}
+{{- if .Values.webhookReceiver.enabled }}
+  ✓ webhook-receiver    (HTTPS :{{ .Values.webhookReceiver.service.httpsPort }})
+{{- end }}
+{{- if .Values.outboxForwarder.enabled }}
+  ✓ outbox-forwarder    (no port; polls audit_outbox)
+{{- end }}
+{{- if .Values.ttlSweeper.enabled }}
+  ✓ ttl-sweeper         (no port; polls expired reservations)
+{{- end }}
+
+Sanity check:
+  kubectl --namespace {{ .Release.Namespace }} get pods -l app.kubernetes.io/name=spendguard
+
+Application pods that want to talk to the sidecar should mount:
+  - hostPath: {{ .Values.sidecar.hostPath.socketDir }}/adapter.sock  (UDS gRPC)
+
+POC limits in this chart (call out before scaling):
+  - sidecar.replicas / outboxForwarder.replicas / ttlSweeper.replicas
+    must stay at 1 until the GA gates land (multi-pod producer_sequence
+    races). Override only after reading project_overview.md GA gates §3.1.
+  - PKI: requires pre-created Secret "{{ .Values.secrets.tls.existingSecret }}".
+    For cert-manager + ClusterIssuer, see the README.
+  - Postgres: external (RDS / Cloud SQL); apply migrations via the
+    operator's chosen tool — the chart's migration hook is a no-op
+    placeholder (see templates/migrations.yaml).

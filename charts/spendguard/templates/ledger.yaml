@@ -1,0 +1,56 @@
+{{- if .Values.ledger.enabled }}
+{{- $component := "ledger" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-ledger
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.ledger.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      containers:
+        - name: ledger
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.ledger.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - { name: grpc, containerPort: 50051 }
+          env:
+            - { name: SPENDGUARD_LEDGER_BIND_ADDR,           value: "0.0.0.0:50051" }
+            - { name: SPENDGUARD_LEDGER_DATABASE_URL,        value: {{ .Values.postgres.ledgerUrl | quote }} }
+            - { name: SPENDGUARD_LEDGER_TENANT_ID,           value: {{ .Values.global.tenantId | quote }} }
+            - { name: SPENDGUARD_LEDGER_REGION,              value: {{ .Values.global.region | quote }} }
+            - { name: SPENDGUARD_LEDGER_WORKLOAD_INSTANCE_ID, value: "ledger-helm-1" }
+            - { name: SPENDGUARD_LEDGER_PRODUCER_SIGNING_KEY_ID, value: "demo-key-1" }
+            - { name: SPENDGUARD_LEDGER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/ledger.crt" }
+            - { name: SPENDGUARD_LEDGER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/ledger.key" }
+            - { name: SPENDGUARD_LEDGER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+          volumeMounts:
+            - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
+          resources:
+            {{- toYaml .Values.ledger.resources | nindent 12 }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.secrets.tls.existingSecret }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spendguard.fullname" . }}-ledger
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc, port: 50051, targetPort: grpc }
+  selector:
+    {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+{{- end }}

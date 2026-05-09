@@ -1,0 +1,44 @@
+{{- if .Values.outboxForwarder.enabled }}
+{{- $component := "outbox-forwarder" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-outbox-forwarder
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.outboxForwarder.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      containers:
+        - name: outbox-forwarder
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.outboxForwarder.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_TENANT_ID,         value: {{ .Values.global.tenantId | quote }} }
+            - name: SPENDGUARD_OUTBOX_FORWARDER_DATABASE_URL
+              value: {{ .Values.postgres.ledgerUrl | quote }}
+            - name: SPENDGUARD_OUTBOX_FORWARDER_CANONICAL_INGEST_URL
+              value: "https://{{ include "spendguard.fullname" . }}-canonical-ingest:50052"
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_POLL_INTERVAL_SECONDS, value: {{ .Values.outboxForwarder.pollIntervalSeconds | quote }} }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_BATCH_SIZE,            value: {{ .Values.outboxForwarder.batchSize | quote }} }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/outbox-forwarder.crt" }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/outbox-forwarder.key" }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+          volumeMounts:
+            - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
+            - { name: bundles, mountPath: /var/lib/spendguard/bundles, readOnly: true }
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.secrets.tls.existingSecret }}
+        - name: bundles
+          secret:
+            secretName: {{ .Values.secrets.bundles.existingSecret }}
+{{- end }}

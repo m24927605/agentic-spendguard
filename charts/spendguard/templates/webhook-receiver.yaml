@@ -1,0 +1,66 @@
+{{- if .Values.webhookReceiver.enabled }}
+{{- $component := "webhook-receiver" }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-webhook-receiver
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.webhookReceiver.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      containers:
+        - name: webhook-receiver
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.webhookReceiver.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - { name: https, containerPort: {{ .Values.webhookReceiver.service.httpsPort }} }
+            - { name: health, containerPort: 8080 }
+          env:
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TENANT_ID,            value: {{ .Values.global.tenantId | quote }} }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_FENCING_SCOPE_ID,     value: {{ .Values.webhookReceiver.fencingScopeId | quote }} }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_WORKLOAD_INSTANCE_ID, value: {{ .Values.webhookReceiver.workloadInstanceId | quote }} }
+            - name: SPENDGUARD_WEBHOOK_RECEIVER_LEDGER_URL
+              value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
+            - name: SPENDGUARD_WEBHOOK_RECEIVER_DATABASE_URL
+              value: {{ .Values.postgres.ledgerUrl | quote }}
+            - name: SPENDGUARD_WEBHOOK_RECEIVER_HMAC_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.webhookReceiver.hmacSecretName }}
+                  key: hmac
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/webhook-receiver.crt" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/webhook-receiver.key" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+          volumeMounts:
+            - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.secrets.tls.existingSecret }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spendguard.fullname" . }}-webhook-receiver
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  type: {{ .Values.webhookReceiver.service.type }}
+  ports:
+    - { name: https,  port: {{ .Values.webhookReceiver.service.httpsPort }}, targetPort: https }
+    - { name: health, port: 8080,  targetPort: health }
+  selector:
+    {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+{{- end }}

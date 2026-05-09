@@ -1,0 +1,63 @@
+{{- if .Values.sidecar.enabled }}
+{{- $component := "sidecar" }}
+{{- /*
+Sidecar deployed as DaemonSet so the UDS socket lives on each node's
+hostPath; application pods that mount the same hostPath get the
+sidecar locally. For an in-pod sidecar (single application pod)
+disable hostPath in values and use shared emptyDir volume.
+*/ -}}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "spendguard.fullname" . }}-sidecar
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      containers:
+        - name: sidecar
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.sidecar.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          env:
+            - { name: SPENDGUARD_SIDECAR_TENANT_ID,            value: {{ .Values.global.tenantId | quote }} }
+            - { name: SPENDGUARD_SIDECAR_REGION,               value: {{ .Values.global.region | quote }} }
+            - { name: SPENDGUARD_SIDECAR_FENCING_SCOPE_ID,     value: {{ .Values.sidecar.fencingScopeId | quote }} }
+            - { name: SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID, value: {{ .Values.sidecar.workloadInstanceId | quote }} }
+            - { name: SPENDGUARD_SIDECAR_RESERVATION_TTL_SECONDS, value: {{ .Values.sidecar.reservationTtlSeconds | quote }} }
+            - name: SPENDGUARD_SIDECAR_LEDGER_URL
+              value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
+            - name: SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL
+              value: "https://{{ include "spendguard.fullname" . }}-canonical-ingest:50052"
+            - { name: SPENDGUARD_SIDECAR_TLS_CERT_PEM, value: "/etc/ssl/spendguard/sidecar.crt" }
+            - { name: SPENDGUARD_SIDECAR_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/sidecar.key" }
+            - { name: SPENDGUARD_SIDECAR_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            - { name: SPENDGUARD_SIDECAR_UDS_PATH,     value: "/var/run/spendguard/adapter.sock" }
+          volumeMounts:
+            - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
+            - { name: bundles, mountPath: /var/lib/spendguard/bundles, readOnly: true }
+            {{- if .Values.sidecar.hostPath.enabled }}
+            - { name: uds,     mountPath: /var/run/spendguard }
+            {{- end }}
+          resources:
+            {{- toYaml .Values.sidecar.resources | nindent 12 }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.secrets.tls.existingSecret }}
+        - name: bundles
+          secret:
+            secretName: {{ .Values.secrets.bundles.existingSecret }}
+        {{- if .Values.sidecar.hostPath.enabled }}
+        - name: uds
+          hostPath:
+            path: {{ .Values.sidecar.hostPath.socketDir }}
+            type: DirectoryOrCreate
+        {{- end }}
+{{- end }}

@@ -1,0 +1,36 @@
+{{- if .Values.postgres.applyMigrationsOnInstall }}
+{{- $component := "migrations" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "spendguard.fullname" . }}-migrate
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: {{ .Values.migrations.ledgerImage }}
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              echo "[migrate] Phase 4 O2: ledger + canonical migrations placeholder"
+              echo "[migrate] Production deployments should mount the SQL files via"
+              echo "[migrate] a Secret/ConfigMap and run psql against postgres.ledgerUrl"
+              echo "[migrate] + postgres.canonicalUrl. The chart leaves this as an"
+              echo "[migrate] explicit operator step to keep the chart distribution-"
+              echo "[migrate] agnostic (sqitch / flyway / golang-migrate are all valid)."
+          resources:
+            {{- toYaml .Values.migrations.resources | nindent 12 }}
+{{- end }}
