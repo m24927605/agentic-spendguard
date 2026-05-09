@@ -1000,4 +1000,213 @@ and S22 rather than gaps in this slice.
 
 ---
 
+## S17 — OIDC/SSO foundation
+
+**Status**: SHIPPED. Dashboard and Control Plane no longer accept a
+single hard-coded admin bearer token; both validate OIDC JWTs (or, in
+demo profile, a static token via the explicit `static_token` mode).
+
+### Design decision
+
+- **New shared crate `services/auth/`**: `Authenticator` enum dispatch
+  over `JwtValidator` and `StaticTokenConfig`. JWKS via
+  `HttpJwksProvider` with refresh-on-stale (default 3600s). Uses
+  `jsonwebtoken` 9 + `reqwest` for fetch.
+- **Two modes only** to keep the surface small:
+  - `jwt` (default for production) — issuer + audience + JWKS URL
+    are required env vars; clock skew leeway defaults to 60s.
+  - `static_token` (demo profile only) — `AuthConfig::from_env`
+    refuses to construct unless `SPENDGUARD_PROFILE=demo`.
+- **Constant-time token comparison** for static_token mode (`subtle_eq`
+  helper) so a length-mismatch attack can't observe early-return
+  timing.
+- **Public-safe error messages**. Spec: "auth failures must not
+  reveal tenant existence." Internal `AuthError` variants distinguish
+  `IssuerMismatch`, `AudienceMismatch`, `Expired`, `UnknownKid`,
+  etc., but `safe_public_message()` collapses them all to
+  `"unauthorized"` (or `"missing authorization"` /
+  `"service temporarily unavailable"`). Asserted by a unit test that
+  walks every variant + checks: no `kid`, no `issuer`, no `network`.
+- **Principal in axum extensions**: middleware decodes the JWT,
+  extracts (issuer, subject, groups, tenant_ids, roles, mode) into
+  a `Principal`, places it in request extensions. Handlers read via
+  `Extension<Principal>`. S17 leaves `roles` empty — S18 wires
+  groups → roles policy.
+- **Tenant claim mapping**: default claim names `groups` and
+  `spendguard:tenant_ids` are configurable via env vars
+  (`<PREFIX>_OIDC_GROUPS_CLAIM`, `<PREFIX>_OIDC_TENANT_IDS_CLAIM`)
+  so the auth crate works with Entra ID, Auth0, Okta, generic OIDC
+  without code changes.
+- **JWKS cache fail-open for warm restarts, fail-closed on cold**.
+  If the JWKS endpoint is unreachable AFTER a previous successful
+  fetch, the verifier serves the stale cache + warns. On COLD start
+  (cache empty + JWKS unreachable), verification fails — operators
+  get an explicit error instead of silently admitting unauthed.
+
+### Changed files
+
+- **NEW** `services/auth/Cargo.toml` (~40 lines).
+- **NEW** `services/auth/src/lib.rs` (~700 lines): Authenticator,
+  JwtValidator, HttpJwksProvider with cache, Principal, AuthConfig
+  with profile gate, axum middleware, 15 unit tests.
+- **MODIFIED** `services/dashboard/Cargo.toml`: path dep on
+  `spendguard-auth`.
+- **MODIFIED** `services/dashboard/src/main.rs`: removed
+  `auth_token` field on AppState + `check_auth` helper; wired
+  `Authenticator` + `from_fn_with_state(auth, require_auth)` on
+  the `/api/*` routes; handlers now take `Extension<Principal>`.
+- **MODIFIED** `services/control_plane/Cargo.toml`: path dep on
+  `spendguard-auth`.
+- **MODIFIED** `services/control_plane/src/main.rs`: removed
+  `admin_token` + `check_auth`; wired Authenticator behind a
+  scoped sub-router; handlers receive `Extension<Principal>` and
+  log subject + mode for mutating actions (create_tenant,
+  tombstone_tenant).
+- **MODIFIED** `deploy/demo/runtime/Dockerfile.dashboard`,
+  `Dockerfile.control_plane`: COPY services/auth path-dep.
+- **MODIFIED** `deploy/demo/compose.yaml`: dashboard +
+  control_plane now use `static_token` mode under
+  `SPENDGUARD_PROFILE=demo`. Static token strings are operator-
+  visible so the demo's "paste token in browser prompt" flow keeps
+  working.
+
+### Tests
+
+- **15 unit tests** in `spendguard-auth`:
+  - `auth_mode_parse_known_values` — jwt / static_token / invalid
+  - `static_token_authenticator_accepts_correct_token`
+  - `static_token_authenticator_rejects_wrong_token`
+  - `static_token_constant_time_comparison_handles_length_mismatch`
+  - `static_token_outside_demo_profile_refuses_to_construct` —
+    `AuthConfig::from_env` with profile=production / staging /
+    empty all return `StaticTokenOutsideDemo`; profile=demo OK.
+  - `safe_public_messages_dont_reveal_internals` — every error
+    variant's public message has no kid/issuer/network leakage.
+  - `auth_mode_string_matches_principal_mode_field`
+  - `jwt_validator_accepts_well_formed_token` — full JWT roundtrip
+    using a `FakeJwks` test double.
+  - `jwt_validator_rejects_wrong_issuer` → IssuerMismatch
+  - `jwt_validator_rejects_wrong_audience` → AudienceMismatch
+  - `jwt_validator_rejects_expired_token` → Expired
+  - `jwt_validator_rejects_unknown_kid` → UnknownKid
+  - `jwt_validator_default_groups_claim_population`
+  - `extract_bearer_handles_well_formed_header`
+  - `extract_bearer_rejects_missing_or_malformed_header`
+  Result: `15 passed; 0 failed`.
+
+- Live verification: `make demo-up` brings dashboard + control_plane
+  online. The browser prompt for the demo dashboard token still
+  works (now flows through `Authenticator::StaticToken` instead of
+  the deleted `check_auth` helper).
+
+### Adversarial review
+
+- **JWT signed with attacker key**: verifier looks up the `kid` in
+  JWKS. Unknown kid → `UnknownKid`. Even if the attacker forges a
+  matching kid, the trust comes from the JWKS keys (operator-pinned
+  via `OIDC_JWKS_URL` env var), not from the token.
+- **Replay of expired JWT after clock skew**: `clock_skew_seconds`
+  defaults to 60s. Tokens 5 minutes past `exp` reject with `Expired`
+  (covered by unit test).
+- **Issuer/audience trust pinning**: both compared against the env
+  values; mismatch → typed error. Wildcards / suffixes not
+  supported (avoid mistakes).
+- **Static token timing attack**: constant-time compare on
+  byte-by-byte XOR avoids early-return on first mismatch byte.
+  Length mismatch short-circuits but still returns
+  `StaticTokenMismatch` typed error (not panic / not different
+  status code).
+- **Static token leaking into production**:
+  `AuthConfig::from_env` checks `SPENDGUARD_PROFILE` BEFORE
+  reading `STATIC_TOKEN`. An operator who sets static_token mode
+  in production gets a startup error, not silent admission.
+- **JWKS endpoint compromise / DNS hijack**: out of scope for S17.
+  Operator must serve JWKS over TLS with a cert pinned at the
+  network layer; reqwest uses rustls. Attacker-controlled JWKS
+  WOULD let them mint valid tokens — same threat model as any
+  OIDC integration; documented in runbook.
+- **Cold start with unreachable JWKS**: fail-closed. The cache is
+  empty on first run; refresh failure returns the original error
+  to the caller. Operator sees a clean startup error.
+- **Mutation log forging**: control_plane handlers log
+  `subject = principal.subject, mode = principal.mode` on
+  create_tenant / tombstone_tenant. Spec: "service logs include
+  principal id for mutating actions" — done.
+
+### Observability
+
+- Startup log: `"auth initialized"` with mode + (for jwt)
+  issuer / audience / jwks_url. Static_token mode logs a warning
+  (`"DEMO ONLY"`) so operators aren't surprised by the bypass.
+- Failed auth logs at warn level: `"auth rejected"` with the
+  (typed) `AuthError`. Public response body collapses all reasons
+  to a single `unauthorized` to avoid leaking which check failed.
+- Mutating-action logs: `info!(subject, mode, "create_tenant
+  invoked")` and `"tombstone_tenant invoked"`. S18 will add audit
+  log persistence; S17 surfaces them via tracing only.
+
+### Residual risks
+
+1. **Helm chart doesn't yet template dashboard + control_plane**.
+   Pre-existing gap (only ledger / canonical_ingest / sidecar /
+   webhookReceiver / outboxForwarder / ttlSweeper have templates).
+   S17 wires the auth env vars at the binary level, so operators
+   running their own k8s manifests get the benefit immediately.
+   Templated chart support should land alongside an "operator
+   dashboard chart" slice.
+2. **JWKS rotation not yet exercised in tests**. The unit tests use
+   a `FakeJwks` test double; the real `HttpJwksProvider`'s
+   refresh-on-stale path is exercised only via demo bring-up. A
+   future test should spin up a `wiremock` server to assert the
+   refresh cadence.
+3. **No rate limiting on auth failures**. A misconfigured client
+   that retries with bad tokens will hit JWKS fetch + signature
+   verify on every request. Acceptable for S17; S22 adds rate
+   limiting.
+4. **Roles intentionally empty**. S18 maps `groups` → `roles`
+   via a config-backed policy. Until then handlers can read
+   `principal.groups` directly if needed.
+5. **Codex adversarial round still flaking** (same companion-
+   runtime issue as S4 / S6 / S8). Code-level review captured here.
+
+### Runbook deltas
+
+- **New env vars** per service (replace single-token):
+  - `SPENDGUARD_<SERVICE>_AUTH_MODE` (`jwt` | `static_token`,
+    default `jwt`).
+  - `SPENDGUARD_<SERVICE>_OIDC_ISSUER` (jwt mode, required).
+  - `SPENDGUARD_<SERVICE>_OIDC_AUDIENCE` (jwt mode, required).
+  - `SPENDGUARD_<SERVICE>_OIDC_JWKS_URL` (jwt mode, required).
+  - `SPENDGUARD_<SERVICE>_OIDC_CLOCK_SKEW_SECONDS` (default 60).
+  - `SPENDGUARD_<SERVICE>_OIDC_JWKS_REFRESH_SECONDS` (default 3600).
+  - `SPENDGUARD_<SERVICE>_OIDC_GROUPS_CLAIM` (default `groups`).
+  - `SPENDGUARD_<SERVICE>_OIDC_TENANT_IDS_CLAIM` (default
+    `spendguard:tenant_ids`).
+  - `SPENDGUARD_<SERVICE>_STATIC_TOKEN` + `_STATIC_TOKEN_SUBJECT`
+    (static_token mode only; demo profile required).
+- **Removed env vars** (operator must migrate):
+  - `SPENDGUARD_DASHBOARD_AUTH_TOKEN`
+  - `SPENDGUARD_CONTROL_PLANE_ADMIN_TOKEN`
+- **Operator playbook**: For Microsoft Entra ID, set
+  - `OIDC_ISSUER=https://login.microsoftonline.com/<tenant>/v2.0`
+  - `OIDC_AUDIENCE=api://<your-app-id>`
+  - `OIDC_JWKS_URL=https://login.microsoftonline.com/<tenant>/discovery/v2.0/keys`
+  - `OIDC_GROUPS_CLAIM=roles` (Entra populates app roles into the
+    `roles` claim, not `groups`).
+  - Define an Entra app role mapping for `spendguard:tenant_ids`
+    (custom claim or claim transformation rule).
+
+### Quality bar
+
+Meets 90%+: shared auth crate with comprehensive unit tests, two
+explicit modes (jwt + static_token-with-demo-gate), no information
+leakage in public errors, JWKS caching with sane fail-open vs
+fail-closed semantics, axum middleware with Principal in extensions
+ready for S18's tenant scope enforcement, mutating actions audit-
+logged. Open items (Helm templates for dashboard + control_plane,
+wiremock JWKS rotation test, rate limiting on auth failures) are
+explicit follow-ups rather than gaps in this slice.
+
+---
+
 (Subsequent slice entries appended below.)

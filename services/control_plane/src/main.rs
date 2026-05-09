@@ -9,12 +9,14 @@
 //!   DELETE /v1/tenants/:id           — soft-delete (mark tombstoned;
 //!                                      audit chain stays immutable)
 //!
-//! Auth: Authorization: Bearer <token>. Single admin token per
-//! instance for POC. Production maps to Microsoft Entra ID JWT
-//! claims → tenant scope.
+//! Auth (Phase 5 GA hardening S17): OIDC JWT or static_token (demo
+//! profile only) via the shared `spendguard-auth` crate. Subject +
+//! tenant scope come from the authenticated Principal in axum
+//! extensions. S18 will wire role-aware tenant scoping and per-route
+//! authorization checks.
 //!
 //! NOT YET wired:
-//!   - Microsoft Entra OIDC verification (just bearer-string compare)
+//!   - Per-route RBAC (S18)
 //!   - Contract YAML upload + bundle build pipeline
 //!   - Stripe / billing integration
 //!   - Per-tenant rate limiting
@@ -29,12 +31,14 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Path, State},
-    http::{header, HeaderMap, StatusCode},
+    http::StatusCode,
+    middleware::from_fn_with_state,
     response::{IntoResponse, Response},
     routing::{get, post},
-    Json, Router,
+    Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use spendguard_auth::{AuthConfig, Authenticator, Principal};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tracing::info;
@@ -45,12 +49,10 @@ use uuid::Uuid;
 struct Config {
     bind_addr: String,
     database_url: String,
-    admin_token: String,
 }
 
 struct AppState {
     pg: PgPool,
-    admin_token: String,
 }
 
 #[tokio::main]
@@ -68,15 +70,30 @@ async fn main() -> anyhow::Result<()> {
         .connect(&cfg.database_url)
         .await?;
 
-    let state = Arc::new(AppState {
-        pg,
-        admin_token: cfg.admin_token,
-    });
+    let state = Arc::new(AppState { pg });
+
+    // Phase 5 GA hardening S17: build Authenticator before binding
+    // listener so misconfig (missing OIDC issuer, static_token outside
+    // demo profile) crashes startup rather than admitting unauthed
+    // requests.
+    let profile = std::env::var("SPENDGUARD_PROFILE").unwrap_or_default();
+    let auth_cfg = AuthConfig::from_env("SPENDGUARD_CONTROL_PLANE", &profile)
+        .map_err(|e| anyhow::anyhow!("S17: build control_plane auth config: {e}"))?;
+    let auth = Arc::new(
+        Authenticator::from_config(auth_cfg)
+            .await
+            .map_err(|e| anyhow::anyhow!("S17: init authenticator: {e}"))?,
+    );
+
+    // Auth-required routes go behind the middleware; /healthz stays open.
+    let v1_routes = Router::new()
+        .route("/v1/tenants", post(create_tenant))
+        .route("/v1/tenants/:id", get(get_tenant).delete(tombstone_tenant))
+        .layer(from_fn_with_state(auth.clone(), spendguard_auth::require_auth));
 
     let app = Router::new()
         .route("/healthz", get(healthz))
-        .route("/v1/tenants", post(create_tenant))
-        .route("/v1/tenants/:id", get(get_tenant).delete(tombstone_tenant))
+        .merge(v1_routes)
         .with_state(state);
 
     let addr: SocketAddr = cfg.bind_addr.parse()?;
@@ -90,17 +107,6 @@ async fn healthz() -> &'static str {
     "ok"
 }
 
-fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode> {
-    let auth = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let expected = format!("Bearer {}", state.admin_token);
-    if auth != expected {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    Ok(())
-}
 
 #[derive(Deserialize)]
 struct CreateTenantReq {
@@ -131,11 +137,11 @@ struct CreateTenantResp {
 }
 
 async fn create_tenant(
+    Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Json(req): Json<CreateTenantReq>,
 ) -> Result<Response, StatusCode> {
-    check_auth(&state, &headers)?;
+    info!(subject = %principal.subject, mode = %principal.mode, "create_tenant invoked");
 
     if req.name.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
@@ -423,11 +429,11 @@ struct BudgetSummary {
 }
 
 async fn get_tenant(
+    Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, StatusCode> {
-    check_auth(&state, &headers)?;
+    let _ = principal; // S18 will scope to principal.tenant_ids
 
     let tenant_id =
         Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -483,11 +489,11 @@ struct TombstoneResp {
 }
 
 async fn tombstone_tenant(
+    Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> Result<Response, StatusCode> {
-    check_auth(&state, &headers)?;
+    info!(subject = %principal.subject, mode = %principal.mode, "tombstone_tenant invoked");
 
     let tenant_id =
         Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;

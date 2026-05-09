@@ -11,22 +11,28 @@
 //!   GET /api/outbox-health     — pending_forward / forwarded counts +
 //!                                oldest pending row age
 //!
-//! Auth: bearer token via Authorization header. Single token for the
-//! whole instance (POC); production maps to per-tenant Entra ID.
-//! Tenant is fixed via SPENDGUARD_DASHBOARD_TENANT_ID env (POC
-//! single-tenant); production resolves from JWT claim.
+//! Auth (Phase 5 GA hardening S17): OIDC JWT or static-token (demo
+//! profile only) via `spendguard-auth` middleware. Bearer token in the
+//! `Authorization` header. Subject + tenant scope come from the
+//! authenticated Principal in axum extensions.
+//!
+//! Tenant resolution is still env-based at the dashboard level
+//! (`SPENDGUARD_DASHBOARD_TENANT_ID`); S18 will switch to deriving
+//! tenant scope from the Principal's `tenant_ids` claim.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
     extract::State,
-    http::{header, HeaderMap, StatusCode},
+    http::StatusCode,
+    middleware::from_fn_with_state,
     response::{Html, IntoResponse, Response},
     routing::get,
-    Json, Router,
+    Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
+use spendguard_auth::{AuthConfig, Authenticator, Principal};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tracing::info;
@@ -38,13 +44,11 @@ struct Config {
     bind_addr: String,
     database_url: String,
     tenant_id: String,
-    auth_token: String,
 }
 
 struct AppState {
     pg: PgPool,
     tenant_id: Uuid,
-    auth_token: String,
 }
 
 #[tokio::main]
@@ -64,19 +68,30 @@ async fn main() -> anyhow::Result<()> {
         .connect(&cfg.database_url)
         .await?;
 
-    let state = Arc::new(AppState {
-        pg,
-        tenant_id,
-        auth_token: cfg.auth_token,
-    });
+    let state = Arc::new(AppState { pg, tenant_id });
 
-    let app = Router::new()
-        .route("/", get(index))
-        .route("/healthz", get(healthz))
+    // Phase 5 GA hardening S17: build Authenticator (jwt or
+    // static_token-with-demo-profile) before binding the listener.
+    let profile = std::env::var("SPENDGUARD_PROFILE").unwrap_or_default();
+    let auth_cfg = AuthConfig::from_env("SPENDGUARD_DASHBOARD", &profile)
+        .map_err(|e| anyhow::anyhow!("S17: build dashboard auth config: {e}"))?;
+    let auth = Arc::new(
+        Authenticator::from_config(auth_cfg)
+            .await
+            .map_err(|e| anyhow::anyhow!("S17: init authenticator: {e}"))?,
+    );
+
+    let api_routes = Router::new()
         .route("/api/budgets", get(api_budgets))
         .route("/api/decisions", get(api_decisions))
         .route("/api/deny-stats", get(api_deny_stats))
         .route("/api/outbox-health", get(api_outbox_health))
+        .layer(from_fn_with_state(auth.clone(), spendguard_auth::require_auth));
+
+    let app = Router::new()
+        .route("/", get(index))
+        .route("/healthz", get(healthz))
+        .merge(api_routes)
         .with_state(state);
 
     let addr: SocketAddr = cfg.bind_addr.parse()?;
@@ -158,18 +173,6 @@ const INDEX_HTML: &str = r#"<!doctype html>
 </body>
 </html>"#;
 
-fn check_auth(state: &AppState, headers: &HeaderMap) -> Result<(), StatusCode> {
-    let auth = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let expected = format!("Bearer {}", state.auth_token);
-    if auth != expected {
-        return Err(StatusCode::UNAUTHORIZED);
-    }
-    Ok(())
-}
-
 #[derive(Serialize)]
 struct BudgetRow {
     budget_id: Uuid,
@@ -182,10 +185,10 @@ struct BudgetRow {
 }
 
 async fn api_budgets(
+    Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    check_auth(&state, &headers)?;
+    let _ = principal; // S18 will scope queries to principal.tenant_ids
 
     let rows = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>, Option<sqlx::types::BigDecimal>, Option<sqlx::types::BigDecimal>, Option<sqlx::types::BigDecimal>)>(
         r#"
@@ -239,10 +242,10 @@ struct DecisionRow {
 }
 
 async fn api_decisions(
+    Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    check_auth(&state, &headers)?;
+    let _ = principal; // S18 will scope queries to principal.tenant_ids
 
     let rows = sqlx::query_as::<_, (Uuid, String, String, Option<Uuid>, chrono::DateTime<chrono::Utc>)>(
         r#"
@@ -280,10 +283,10 @@ struct DenyStatRow {
 }
 
 async fn api_deny_stats(
+    Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    check_auth(&state, &headers)?;
+    let _ = principal; // S18 will scope queries to principal.tenant_ids
 
     let rows = sqlx::query_as::<_, (chrono::DateTime<chrono::Utc>, i64)>(
         r#"
@@ -317,10 +320,10 @@ struct OutboxHealth {
 }
 
 async fn api_outbox_health(
+    Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    check_auth(&state, &headers)?;
+    let _ = principal; // S18 will scope queries to principal.tenant_ids
 
     let (pending, forwarded): (i64, i64) = sqlx::query_as(
         r#"
