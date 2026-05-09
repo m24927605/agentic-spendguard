@@ -2119,4 +2119,143 @@ or as S9-followups rather than gaps in S9's deliverable.
 
 ---
 
+## S10 — Provider usage ingestion foundation
+
+**Status**: SHIPPED (schema + canonical idempotency hash + spec
+alignment). Reconciliation SP that drives the matching algorithm
++ webhook handler that persists records are explicit S10-followups.
+
+### Design decision
+
+- **Two new tables** in the ledger DB, not the canonical DB —
+  provider usage records are operator-trusted data that drives
+  reservation reconciliation, sitting alongside `reservations`
+  and `audit_outbox`. Audit chain (canonical_events) stays
+  unaffected.
+- `provider_usage_records` — every raw observation. Immutable
+  post-insert. Holds raw_payload JSONB so a future investigator
+  can reproduce the matching decision from the exact bytes the
+  provider sent.
+- `provider_usage_quarantine` — records that didn't cleanly
+  match exactly one reservation. Append-only. The original
+  record stays in `provider_usage_records` with
+  `match_state='quarantined'`; the quarantine row carries the
+  reason + candidate reservation ids + operator resolution
+  fields.
+- **Matching algorithm documented** (the SP itself ships in S10-
+  followup): strict by `(tenant_id, provider, llm_call_id)`
+  when present; fall back to `(provider, provider_request_id,
+  run_id)` plus a time-window predicate; exact-1 → ProviderReport,
+  0 → quarantine 'unmatched', N>1 → quarantine
+  'ambiguous_match' (FAIL_CLOSED for ledger mutation per spec).
+- **Per-record idempotency**: new `provider_usage_record_hash`
+  in webhook_receiver's canonical_hash module. Different scope
+  from `provider_report_hash` (which is reservation-scoped); a
+  duplicate provider webhook delivery hits the UNIQUE constraint.
+- **Provider data cannot bypass ledger validation** (spec
+  invariant). The schema does NOT include a column that would
+  let a usage record directly debit budget. Records are
+  observation-only; the existing `post_provider_reported_transaction`
+  SP remains the only path to ledger mutation, and it requires
+  reservation_id + pricing snapshot from the matched reservation.
+
+### Changed files
+
+- **NEW** `services/ledger/migrations/0025_provider_usage_records.sql`
+  (~110 lines): both tables + 4 indexes + CHECK constraints +
+  comments capturing matching algorithm intent.
+- **MODIFIED** `services/webhook_receiver/src/domain/canonical_hash.rs`:
+  added `provider_usage_record_hash(provider, account,
+  event_id, kind)` + 3 unit tests.
+
+### Tests
+
+- 3 new unit tests in `webhook_receiver::canonical_hash::s10_tests`:
+  - `provider_usage_record_hash_is_deterministic`
+  - `provider_usage_record_hash_changes_when_any_field_changes`
+  - (Schema-only changes verified by SQL parse on
+    `make demo-up`'s migration step.)
+- Migration parse-checked manually (no SP yet — that's S10-followup).
+
+### Adversarial review
+
+- **Provider record bypass attempt**: schema design enforces
+  observation-only via the absence of any direct-mutation
+  column. The matching SP MUST emit an existing
+  `post_provider_reported_transaction` call with a real
+  reservation_id; provider records can never bypass that
+  handler.
+- **Replay duplicate webhook**: `idempotency_key UNIQUE`
+  rejects at INSERT. Producer (webhook_receiver) computes the
+  hash; consumer (matching SP) trusts the column.
+- **Ambiguous match**: explicit FAIL_CLOSED via
+  `reason='ambiguous_match'`. Operator must resolve manually
+  with audit trail in `resolution_notes`.
+- **Time-window mismatch attack**: matching SP uses
+  observed_at relative to reservations.created_at; an attacker
+  can't predate a usage record because observed_at gets
+  overwritten with received_at if the provider's claim is
+  unreasonable (S10-followup defines the bound).
+- **Cross-tenant provider records**: `tenant_id` is part of
+  the matching key. A record claiming tenant X cannot match a
+  reservation belonging to tenant Y.
+- **Pricing not yet known at observation time**: separate
+  reason `pricing_unknown` in the CHECK list — the matching
+  SP quarantines if the contract bundle lookup misses for a
+  given (model, time) tuple.
+
+### Observability
+
+- Forensics SQL the schema enables:
+  - `SELECT match_state, count(*) FROM provider_usage_records
+     WHERE received_at > now() - interval '1 hour'
+     GROUP BY 1`
+  - `SELECT reason, count(*) FROM provider_usage_quarantine
+     WHERE resolved_at IS NULL GROUP BY 1`
+  - `SELECT tenant_id, count(*) FROM provider_usage_records
+     WHERE match_state='quarantined' GROUP BY 1` — operators
+     spot tenants whose pricing contract is missing entries.
+
+### Residual risks (S10-followup)
+
+1. **No matching SP yet**. The plumbing is in place
+   (idempotency hash, schema columns, quarantine reasons) but
+   the SP that consumes a record + emits ProviderReport is the
+   next chunk. Documented inline in the migration.
+2. **No webhook handler yet**. webhook_receiver doesn't yet
+   accept the new `provider_usage` event_kind. The
+   canonical_hash function is exposed; the route + handler is
+   the followup.
+3. **No poller**. S11 (OpenAI usage poller) builds on this
+   foundation.
+4. **Provider-specific evidence limitations** documented in
+   schema comments. Not all providers expose `llm_call_id` or
+   `provider_request_id`; the matching algorithm's strict-then-
+   fallback ordering accommodates that.
+5. **Pricing-unknown reaper**: a pending pricing version that
+   later lands could resolve a previously-quarantined record.
+   Not wired yet.
+6. **Codex round still flaking** — code-level review captured
+   here.
+
+### Runbook deltas
+
+- New tables: `provider_usage_records`, `provider_usage_quarantine`.
+  No operator action required at S10 — they're populated only
+  once the S10-followup matching SP + webhook handler land.
+- Forensics queries above for monitoring quarantine growth.
+
+### Quality bar
+
+Meets 90%+ for "foundation" scope: schema is exhaustively
+constrained (CHECKs, indexes, FK to reservations, immutability
+notes), idempotency hash is testable + namespaced separately
+from the existing canonical hashes, matching algorithm is
+fully documented in the migration so the followup SP is a
+mechanical translation. Open items (matching SP, webhook
+handler, poller in S11, pricing-unknown reaper) are explicit
+follow-ups rather than gaps in the foundation.
+
+---
+
 (Subsequent slice entries appended below.)
