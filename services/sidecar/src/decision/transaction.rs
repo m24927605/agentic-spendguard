@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 use crate::{
     config::Config,
+    contract,
     domain::{
         error::DomainError,
         state::{ReservationCtx, SidecarState},
@@ -34,15 +35,16 @@ use crate::{
         ledger::v1::{
             commit_estimated_response::Outcome as CommitOutcome,
             query_reservation_context_response::Outcome as QrcOutcome,
+            record_denied_decision_response::Outcome as DeniedOutcome,
             release_request::Reason as ReleaseReasonProto,
             release_response::Outcome as ReleaseOutcome,
             reserve_set_response::Outcome, CommitEstimatedRequest, CommitEstimatedResponse,
-            QueryReservationContextRequest, ReleaseRequest, ReleaseResponse, ReserveSetRequest,
+            QueryReservationContextRequest, RecordDeniedDecisionRequest,
+            RecordDeniedDecisionResponse, ReleaseRequest, ReleaseResponse, ReserveSetRequest,
             ReserveSetResponse,
         },
         sidecar_adapter::v1::{
-            decision_request::Inputs, decision_response::Decision, DecisionRequest,
-            DecisionResponse, LlmCallPostPayload,
+            decision_response::Decision, DecisionRequest, DecisionResponse, LlmCallPostPayload,
         },
     },
 };
@@ -64,7 +66,12 @@ pub struct DecisionOutput {
     pub reservation_ids: Vec<String>,
     pub ledger_transaction_id: String,
     /// Reservation TTL — adapter MUST commit/release before this deadline.
+    /// None when decision != CONTINUE (no reservation).
     pub ttl_expires_at: Option<prost_types::Timestamp>,
+    /// Phase 3 wedge: contract evaluator outputs. Carried through to
+    /// DecisionResponse so adapter sees which rules fired and why.
+    pub matched_rule_ids: Vec<String>,
+    pub reason_codes: Vec<String>,
 }
 
 /// Drive the decision transaction end-to-end through stage 4 (reserve +
@@ -83,27 +90,15 @@ pub async fn run_through_reserve(
     crate::bootstrap::catalog::enforce_freshness_gate(state, cfg)?;
 
     // Stage 1: snapshot
-    let snapshot_id = Uuid::now_v7();
+    let _snapshot_id = Uuid::now_v7();
     let snapshot_hash = compute_snapshot_hash(req, &ctx.tenant_id);
 
-    // Stage 2: evaluate
-    // POC: deterministic CONTINUE for the quickstart shadow contract.
-    // The CEL evaluator + lattice combiner lives in a future module; this
-    // stub keeps stage ordering testable.
-    let decision_kind = Decision::Continue;
-    let matched_rules: Vec<String> = vec!["quickstart-shadow:continue".to_string()];
-
-    // Stage 3: prepare_effect (pure)
-    let effect_hash = compute_effect_hash(&snapshot_hash, decision_kind);
-
-    // Stage 4: reserve (Ledger atomic with audit_decision via audit_outbox).
-    let decision_id = Uuid::now_v7();
-    let audit_decision_event_id = Uuid::now_v7();
-    // Producer sequence is bootstrapped from ledger replay at startup so
-    // a restart does NOT collide with previously-emitted audit_outbox rows
-    // (Stage 2 §4.3 — UNIQUE per (tenant, workload_instance_id, sequence)).
-    let producer_sequence = state.next_producer_sequence();
-
+    // Stage 2: evaluate (Phase 3 wedge — real contract evaluator).
+    //
+    // Reads parsed Contract DSL from the cached bundle and applies rules
+    // to the incoming claims. Open-by-default: no rule matches → CONTINUE.
+    // Restrictive rules opt-in via explicit when/then blocks (POC subset
+    // of §6 / §7; CEL deferred).
     let claims = build_budget_claims(req)?;
     let bundle = state
         .inner
@@ -111,6 +106,22 @@ pub async fn run_through_reserve(
         .read()
         .clone()
         .ok_or_else(|| DomainError::DecisionStage("no contract bundle loaded".into()))?;
+
+    let eval_outcome = contract::evaluate(&bundle.parsed, &claims);
+    let decision_kind = eval_outcome.decision;
+    let matched_rules = eval_outcome.matched_rule_ids;
+    let reason_codes = eval_outcome.reason_codes;
+
+    // Stage 3: prepare_effect (pure)
+    let effect_hash = compute_effect_hash(&snapshot_hash, decision_kind);
+
+    // Stage 4: split on decision kind.
+    let decision_id = Uuid::now_v7();
+    let audit_decision_event_id = Uuid::now_v7();
+    // Producer sequence is bootstrapped from ledger replay at startup so
+    // a restart does NOT collide with previously-emitted audit_outbox rows
+    // (Stage 2 §4.3 — UNIQUE per (tenant, workload_instance_id, sequence)).
+    let producer_sequence = state.next_producer_sequence();
 
     let pricing = PricingFreeze {
         pricing_version: bundle.pricing_version.clone(),
@@ -143,6 +154,32 @@ pub async fn run_through_reserve(
             "DecisionRequest.idempotency.key required".into(),
         ));
     }
+
+    // Phase 3 wedge: branch CONTINUE vs DENY before building the
+    // reserve-specific payload. DENY skips Reserve entirely but still
+    // emits an audit_decision row via Ledger.RecordDeniedDecision so
+    // Contract §6.1 invariant 「無 audit 則無 effect」 holds.
+    if decision_kind != Decision::Continue {
+        return run_record_denied_decision(
+            state,
+            ctx,
+            &decision_id,
+            &audit_decision_event_id,
+            producer_sequence,
+            &snapshot_hash,
+            decision_kind,
+            &matched_rules,
+            &reason_codes,
+            &claims,
+            &pricing,
+            &fencing,
+            &bundle,
+            &adapter_idempotency.key,
+            effect_hash,
+        )
+        .await;
+    }
+
     let idempotency = Idempotency {
         key: adapter_idempotency.key.clone(),
         // Leave empty so the ledger computes its canonical hash server-side
@@ -227,6 +264,8 @@ pub async fn run_through_reserve(
                 reservation_ids: s.reservations.iter().map(|r| r.reservation_id.clone()).collect(),
                 ledger_transaction_id: s.ledger_transaction_id,
                 ttl_expires_at: ttl_from_server,
+                matched_rule_ids: matched_rules.clone(),
+                reason_codes: reason_codes.clone(),
             })
         }
         Some(Outcome::Replay(r)) => {
@@ -266,6 +305,8 @@ pub async fn run_through_reserve(
                 // Original TTL anchor from first call (mirrored from the
                 // server-stored value, not recomputed).
                 ttl_expires_at: r.ttl_expires_at.clone(),
+                matched_rule_ids: matched_rules.clone(),
+                reason_codes: reason_codes.clone(),
             })
         }
         Some(Outcome::Error(e)) => Err(DomainError::DecisionStage(format!(
@@ -360,15 +401,188 @@ fn build_audit_decision_cloudevent(
 // (Producer sequence now lives on SidecarState, initialized from ledger
 // replay at startup so restarts don't collide with prior sequences.)
 
+// =====================================================================
+// Phase 3 wedge — DENY lane.
+// =====================================================================
+
+/// Stage 4 (DENY branch). Skips Reserve and writes only an audit_decision
+/// row via Ledger.RecordDeniedDecision. Preserves Contract §6.1
+/// invariant 「無 audit 則無 effect」 — every decision (even «no
+/// effect») produces exactly one spendguard.audit.decision row.
+#[allow(clippy::too_many_arguments)]
+async fn run_record_denied_decision(
+    state: &SidecarState,
+    ctx: &DecisionContext,
+    decision_id: &Uuid,
+    audit_decision_event_id: &Uuid,
+    producer_sequence: u64,
+    snapshot_hash: &[u8; 32],
+    decision_kind: Decision,
+    matched_rules: &[String],
+    reason_codes: &[String],
+    claims: &[BudgetClaim],
+    pricing: &PricingFreeze,
+    fencing: &Fencing,
+    bundle: &crate::domain::state::CachedContractBundle,
+    adapter_idempotency_key: &str,
+    effect_hash: [u8; 32],
+) -> Result<DecisionOutput, DomainError> {
+    let final_decision_str = match decision_kind {
+        Decision::Stop => "STOP",
+        Decision::RequireApproval => "REQUIRE_APPROVAL",
+        Decision::Degrade => "DEGRADE",
+        Decision::Skip => "SKIP",
+        // Continue is filtered out by caller; Unspecified should not flow.
+        _ => {
+            return Err(DomainError::DecisionStage(format!(
+                "run_record_denied_decision called with unsupported decision {:?}",
+                decision_kind
+            )))
+        }
+    };
+
+    // Use the adapter-supplied idempotency_key directly (no namespacing).
+    // The new SP performs a cross-kind exclusivity check: if the same key
+    // already won a `reserve` row, the SP refuses with IDEMPOTENCY_CONFLICT.
+    // This prevents bundle hot-reload mid-retry from producing both a
+    // reserve AND a denied_decision row for the same logical request
+    // (Codex R1 P0). The reverse direction (DENY→CONTINUE retry) is the
+    // companion gap deferred to GA — POC has no hot-reload.
+    let denied_idempotency_key = adapter_idempotency_key.to_string();
+
+    // Build CloudEvent payload. matched_rules + reason_codes + final
+    // decision live inside `data` so canonical_events keeps the
+    // forensics without schema changes.
+    let payload = serde_json::json!({
+        "snapshot_hash":     hex::encode(snapshot_hash),
+        "matched_rules":     matched_rules,
+        "reason_codes":      reason_codes,
+        "final_decision":    final_decision_str,
+        "session_id":        ctx.session_id,
+        "attempted_claims":  claims.iter().map(|c| serde_json::json!({
+            "budget_id":          c.budget_id,
+            "amount_atomic":      c.amount_atomic,
+            "window_instance_id": c.window_instance_id,
+            "unit_id":            c.unit.as_ref().map(|u| u.unit_id.clone()).unwrap_or_default(),
+        })).collect::<Vec<_>>(),
+    });
+    let payload_bytes = serde_json::to_vec(&payload)
+        .expect("denied decision json serialization is infallible");
+    let cloudevent = CloudEvent {
+        specversion: "1.0".into(),
+        r#type: "spendguard.audit.decision".into(),
+        source: format!("sidecar://{}/{}", ctx.region, ctx.workload_instance_id),
+        id: audit_decision_event_id.to_string(),
+        time: Some(prost_types::Timestamp {
+            seconds: Utc::now().timestamp(),
+            nanos: Utc::now().timestamp_subsec_nanos() as i32,
+        }),
+        datacontenttype: "application/json".into(),
+        data: payload_bytes.into(),
+        tenant_id: ctx.tenant_id.clone(),
+        run_id: String::new(),
+        decision_id: decision_id.to_string(),
+        schema_bundle_id: String::new(),
+        producer_id: format!("sidecar:{}", ctx.workload_instance_id),
+        producer_sequence,
+        producer_signature: vec![].into(),
+        signing_key_id: String::new(),
+    };
+
+    let request = RecordDeniedDecisionRequest {
+        tenant_id: ctx.tenant_id.clone(),
+        decision_id: decision_id.to_string(),
+        audit_decision_event_id: audit_decision_event_id.to_string(),
+        producer_sequence,
+        idempotency: Some(Idempotency {
+            key: denied_idempotency_key,
+            request_hash: Vec::new().into(),
+        }),
+        fencing: Some(fencing.clone()),
+        attempted_claims: claims.to_vec(),
+        matched_rule_ids: matched_rules.to_vec(),
+        reason_codes: reason_codes.to_vec(),
+        final_decision: final_decision_str.into(),
+        audit_event: Some(cloudevent),
+        contract_bundle: Some(ContractBundleRef {
+            bundle_id: bundle.bundle_id.to_string(),
+            bundle_hash: bundle.bundle_hash.clone().into(),
+            bundle_signature: vec![].into(),
+            signing_key_id: bundle.signing_key_id.clone(),
+        }),
+        pricing: Some(pricing.clone()),
+    };
+
+    let response: RecordDeniedDecisionResponse =
+        state.inner.ledger.record_denied_decision(request).await?;
+
+    match response.outcome {
+        Some(DeniedOutcome::Success(s)) => Ok(DecisionOutput {
+            decision_id: *decision_id,
+            audit_decision_event_id: *audit_decision_event_id,
+            effect_hash,
+            decision: decision_kind,
+            reservation_set_id: String::new(),
+            reservation_ids: vec![],
+            ledger_transaction_id: s.ledger_transaction_id,
+            ttl_expires_at: None,
+            matched_rule_ids: matched_rules.to_vec(),
+            reason_codes: reason_codes.to_vec(),
+        }),
+        Some(DeniedOutcome::Replay(r)) => {
+            // Codex R1 P1 — known POC gap: Replay path returns the
+            // freshly-computed `decision_kind` from THIS call's
+            // evaluator, not the kind stored on the original row.
+            // Risk only triggers if a bundle hot-reload changed the
+            // rule outcome between the original call and this retry.
+            // POC has no hot-reload, so decision_kind is stable across
+            // retries within a session. GA path: surface
+            // final_decision in RecordDeniedDecisionResponse.Replay
+            // and propagate through DecisionOutput.
+            let original_decision_id = uuid::Uuid::parse_str(&r.decision_id)
+                .map_err(|e| DomainError::DecisionStage(format!(
+                    "ledger denied replay returned malformed decision_id '{}': {}",
+                    r.decision_id, e
+                )))?;
+            let original_audit_id = uuid::Uuid::parse_str(&r.audit_decision_event_id)
+                .map_err(|e| DomainError::DecisionStage(format!(
+                    "ledger denied replay returned malformed audit_decision_event_id '{}': {}",
+                    r.audit_decision_event_id, e
+                )))?;
+            Ok(DecisionOutput {
+                decision_id: original_decision_id,
+                audit_decision_event_id: original_audit_id,
+                effect_hash,
+                decision: decision_kind,
+                reservation_set_id: String::new(),
+                reservation_ids: vec![],
+                ledger_transaction_id: r.ledger_transaction_id,
+                ttl_expires_at: None,
+                matched_rule_ids: matched_rules.to_vec(),
+                reason_codes: reason_codes.to_vec(),
+            })
+        }
+        Some(DeniedOutcome::Error(e)) => Err(DomainError::DecisionStage(format!(
+            "RecordDeniedDecision error code={} msg={}",
+            e.code, e.message
+        ))),
+        None => Err(DomainError::DecisionStage(
+            "RecordDeniedDecision response empty oneof".into(),
+        )),
+    }
+}
+
 /// Build a DecisionResponse for the adapter. Wraps the ledger output
-/// with effect_hash + decision kind + reservation context.
+/// with effect_hash + decision kind + reservation context. Phase 3:
+/// surfaces matched_rule_ids + reason_codes from the contract evaluator
+/// so the adapter sees which rules fired and why.
 pub fn build_response(out: DecisionOutput) -> DecisionResponse {
     DecisionResponse {
         decision_id: out.decision_id.to_string(),
         audit_decision_event_id: out.audit_decision_event_id.to_string(),
         decision: out.decision as i32,
-        reason_codes: vec![],
-        matched_rule_ids: vec![],
+        reason_codes: out.reason_codes,
+        matched_rule_ids: out.matched_rule_ids,
         mutation_patch_json: String::new(),
         effect_hash: out.effect_hash.to_vec().into(),
         ledger_transaction_id: out.ledger_transaction_id,

@@ -16,7 +16,8 @@ use crate::{
     proto::ledger::v1::{
         ledger_client::LedgerClient as LedgerProtoClient, CommitEstimatedRequest,
         CommitEstimatedResponse, QueryDecisionOutcomeRequest, QueryDecisionOutcomeResponse,
-        QueryReservationContextRequest, QueryReservationContextResponse, ReleaseRequest,
+        QueryReservationContextRequest, QueryReservationContextResponse,
+        RecordDeniedDecisionRequest, RecordDeniedDecisionResponse, ReleaseRequest,
         ReleaseResponse, ReplayAuditFromCursorRequest, ReserveSetRequest, ReserveSetResponse,
     },
 };
@@ -69,6 +70,18 @@ impl LedgerClient {
             .release(req)
             .await
             .map_err(|e| DomainError::LedgerClient(format!("Release: {e}")))?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn record_denied_decision(
+        &self,
+        req: RecordDeniedDecisionRequest,
+    ) -> Result<RecordDeniedDecisionResponse, DomainError> {
+        let mut client = (*self.inner).clone();
+        let resp = client
+            .record_denied_decision(req)
+            .await
+            .map_err(|e| DomainError::LedgerClient(format!("RecordDeniedDecision: {e}")))?;
         Ok(resp.into_inner())
     }
 

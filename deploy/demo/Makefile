@@ -43,6 +43,9 @@ else ifeq ($(DEMO_MODE),release)
 else ifeq ($(DEMO_MODE),ttl_sweep)
 	@echo "[demo] verifying TTL Sweeper (reserve+TTL=5s -> sweeper auto-release)..."
 	@$(MAKE) demo-verify-ttl-sweep
+else ifeq ($(DEMO_MODE),deny)
+	@echo "[demo] verifying Phase 3 wedge (contract evaluator STOP path)..."
+	@$(MAKE) demo-verify-deny
 else
 	@echo "[demo] verifying Phase 2B Step 7 (agent-mode commit_estimated only)..."
 	@$(MAKE) demo-verify-step7
@@ -109,7 +112,16 @@ demo-verify-outbox-closure:
 		 END; \$$\$$;"
 	@echo "[demo] outbox closure verification done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure
+# Phase 3 wedge DENY verification: contract evaluator STOP path emits
+# 1 denied_decision ledger_transactions row (no entries) + 1
+# audit_outbox row (event_type=spendguard.audit.decision); zero
+# reservations; payload includes matched_rules.hard-cap-deny +
+# reason_codes.BUDGET_EXHAUSTED for canonical_events forensics.
+demo-verify-deny:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_deny.sql
+	@echo "[demo] Phase 3 DENY verification done"
+
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

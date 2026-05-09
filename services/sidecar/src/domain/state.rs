@@ -131,6 +131,9 @@ pub struct CachedContractBundle {
     pub price_snapshot_hash: Vec<u8>,
     pub fx_rate_version: String,
     pub unit_conversion_version: String,
+    /// Phase 3 wedge: parsed Contract DSL ready for hot-path evaluator.
+    /// Populated by `contract::parse_from_tgz` after bundle hash verifies.
+    pub parsed: crate::contract::SharedContract,
 }
 
 #[derive(Debug, Clone)]

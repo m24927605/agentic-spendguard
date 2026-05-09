@@ -3,6 +3,7 @@ pub mod invoice_reconcile;
 pub mod provider_report;
 pub mod query_budget_state;
 pub mod query_reservation_context;
+pub mod record_denied_decision;
 pub mod release;
 pub mod replay;
 pub mod reserve_set;
