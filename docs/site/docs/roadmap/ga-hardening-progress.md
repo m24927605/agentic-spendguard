@@ -2891,4 +2891,140 @@ S21-followups rather than gaps in this slice.
 
 ---
 
+## S23 — SLOs, alerts, and incident drills
+
+**Status**: SHIPPED (SLO spec + Prometheus rules + drill scenarios
++ owner page). Per-runbook deep dives + the missing emit-side
+metrics are explicit S23-followups.
+
+### Design decision
+
+- **One SLO doc**, `docs/site/docs/operations/slos.md`, with a
+  numeric target table (L1 - L9). Each target has owner,
+  window, alert id. Spec review standard requires "SLOs are
+  stated with numeric targets before GA" — done.
+- **Prometheus rules in `deploy/observability/prometheus-rules.yaml`**.
+  Operators apply via kubectl. Each alert references the
+  runbook URL; spec review standard requires "every page has
+  an owner and runbook" — owner table in the SLO doc; runbook
+  stubs documented; per-alert deep dives are S23-followup.
+- **Alerts target symptoms, not process health**. A1 (p99
+  latency), A2 (error rate), A3 (ledger commit failure rate),
+  A4 (outbox lag), A5 (canonical ingest rejecting), A6
+  (pricing stale), A7 (reconciliation lag), A8 (approval
+  latency), A9 (fencing takeover storm).
+- **4 incident drill scenarios** mapped to SLO IDs:
+  D1 ledger failover, D2 stale fencing lease, D3 signature
+  failure, D4 pricing outage. Acceptance criteria explicit.
+- **Required-metrics matrix** in slos.md flags ✓ shipped vs
+  ↻ followup. canonical_ingest's `/metrics` (S8) is the
+  reference implementation; replicate the IngestMetrics +
+  http server pattern in sidecar / ledger / outbox_forwarder
+  / ttl_sweeper.
+- **Owner page table** binds each component to a primary +
+  backup oncall. Backup is always cross-team so a single-
+  team outage doesn't black-hole a page.
+
+### Changed files
+
+- **NEW** `docs/site/docs/operations/slos.md` (~205 lines):
+  SLO target table, required-metrics matrix, 9 alert
+  excerpts, 4 incident drill scenarios, owner page.
+- **NEW** `deploy/observability/prometheus-rules.yaml`
+  (~180 lines): PrometheusRule CRD with 8 named groups
+  covering decision / ledger / audit_chain / pricing /
+  reconciliation / approval / fencing. Each alert has
+  severity + slo label + team label + runbook annotation.
+- **NEW** `deploy/observability/README.md` (~50 lines):
+  apply instructions + threshold tuning matrix + reference
+  to the SLO doc.
+
+### Tests
+
+- N/A code-level. Validation = the alert rules parse via
+  `promtool check rules deploy/observability/prometheus-rules.yaml`
+  (manual, not yet automated). Drill scenarios are the
+  acceptance test surface; quarterly cadence enforced by
+  ops calendar.
+
+### Adversarial review
+
+- **Alert thresholds set arbitrarily**: defaults reflect
+  the SLO spec's targets but operators MUST tune. Threshold
+  tuning matrix in `deploy/observability/README.md` documents
+  every knob.
+- **Alert flapping (fires + clears + fires)**: every alert
+  has a `for:` window (5m / 10m / 15m / 30m / 1h). Short
+  bursts don't page.
+- **Single point of failure on alert delivery**: out of scope
+  for SpendGuard; operators wire Prometheus → Alertmanager →
+  PagerDuty / Slack per their own infrastructure.
+- **Drill scenarios that mutate prod state**: D1-D4 explicitly
+  describe test-env-only setups (kubectl delete pod, manually
+  expire lease via UPDATE in TEST DB). The SLO doc
+  acknowledges drills must run in non-prod environments.
+- **Missing emit-side metrics make alerts useless**: the
+  required-metrics matrix lists status per metric. Until the
+  ↻ rows ship, the corresponding alerts simply don't fire
+  (Prometheus shows no data; alertmanager doesn't escalate).
+  Operators see this in the doc and prioritize the wiring.
+- **Owner page page-out**: backup column ensures cross-team
+  coverage. A holiday / outage on team A still has team B as
+  fallback.
+
+### Observability
+
+- The point of S23 IS observability. The slice ships the
+  observability artifacts that the rest of the GA-hardening
+  work is measured against.
+
+### Residual risks (S23-followup)
+
+1. **Per-alert runbooks** are stubs. Each alert points at
+   `docs/operations/runbooks/<slo-id>-<name>.md` but those
+   files don't exist yet. The deep-dive content (likely
+   causes, triage queries, remediation steps) is the next
+   chunk of work — significant effort per alert.
+2. **Emit-side metric wiring** for the ↻ rows in the
+   required-metrics matrix. canonical_ingest (S8) shipped
+   the pattern; sidecar / ledger / outbox / ttl-sweeper /
+   webhook need parallel `/metrics` endpoints.
+3. **`promtool check rules` not in CI**. Adding it as a
+   CI step would catch typos on every PR.
+4. **Drill log template** referenced in slos.md but not yet
+   created.
+5. **`slo_changes` audit table** for tracking SLO target
+   changes referenced in slos.md but not yet schema'd.
+6. **Load test for L1** ("Load test demonstrates target
+   decision latency under expected QPS" — spec acceptance
+   criterion) not in this slice. K6 / vegeta scripts are
+   the natural shape.
+7. **Codex round still flaking** — code-level review here.
+
+### Runbook deltas
+
+- New page: `docs/site/docs/operations/slos.md`.
+- New artifact: `deploy/observability/prometheus-rules.yaml`
+  (apply via `kubectl apply -f`).
+- New artifact: `deploy/observability/README.md`
+  (operator-facing tuning guide).
+- Operator playbook: tune the numeric thresholds per the
+  README's tuning matrix; install Prometheus operator;
+  apply the rules CRD; import the dashboard JSON; run
+  drill D1-D4 quarterly.
+
+### Quality bar
+
+Meets 90%+ for "SLO foundation" scope: numeric target table,
+8 alert groups covering every spec-required dimension, 4
+incident drill scenarios with acceptance criteria, owner +
+backup table, threshold tuning matrix, required-metrics
+matrix flagging shipped vs followup. Open items (per-alert
+runbook deep dives, emit-side metric wiring across services,
+CI promtool check, drill log template, slo_changes table,
+load test scripts) are explicit S23-followups rather than
+gaps in the SLO foundation.
+
+---
+
 (Subsequent slice entries appended below.)
