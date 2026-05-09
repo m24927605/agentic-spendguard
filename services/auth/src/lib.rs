@@ -25,6 +25,9 @@
 //! Out of scope for S17 (S18 covers): per-route role enforcement,
 //! tenant-scoped DB queries, audit log of mutating actions.
 
+pub mod rbac;
+pub use rbac::{GroupPolicy, Permission, Role};
+
 use async_trait::async_trait;
 use axum::{
     body::Body,
@@ -196,16 +199,45 @@ pub struct StaticTokenConfig {
 }
 
 #[derive(Debug, Clone)]
-pub enum AuthConfig {
+pub struct AuthConfig {
+    pub kind: AuthConfigKind,
+    /// Phase 5 GA hardening S18: group→roles policy applied to
+    /// every authenticated principal. Empty by default
+    /// (fail-closed for unconfigured prod). Demo profile defaults
+    /// to `GroupPolicy::demo_default`.
+    pub policy: GroupPolicy,
+    /// S18: static-token principals get this tenant scope (since
+    /// they have no JWT claims). Comma-separated list from the
+    /// `STATIC_TOKEN_TENANT_IDS` env var. Empty list means
+    /// "demo principal sees no tenants" — fail-closed.
+    pub static_token_tenant_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub enum AuthConfigKind {
     Jwt(JwtConfig),
     StaticToken(StaticTokenConfig),
 }
 
 impl AuthConfig {
     /// Construct from prefixed env vars. Mode defaults to `jwt`.
+    /// Loads S18 group→roles policy from `<PREFIX>_GROUP_POLICY_JSON`
+    /// (or, in demo profile with no env override, falls back to the
+    /// builtin demo policy that maps `demo-admins` to all roles).
     pub fn from_env(prefix: &str, profile: &str) -> Result<Self, AuthError> {
         let mode = std::env::var(format!("{prefix}_AUTH_MODE")).unwrap_or_else(|_| "jwt".into());
-        match AuthMode::parse(&mode)? {
+        let policy = load_policy(prefix, profile)?;
+        let static_token_tenant_ids = std::env::var(format!("{prefix}_STATIC_TOKEN_TENANT_IDS"))
+            .ok()
+            .map(|s| {
+                s.split(',')
+                    .map(|t| t.trim().to_string())
+                    .filter(|t| !t.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let kind = match AuthMode::parse(&mode)? {
             AuthMode::Jwt => {
                 let issuer = std::env::var(format!("{prefix}_OIDC_ISSUER"))
                     .map_err(|_| AuthError::Infra(format!("{prefix}_OIDC_ISSUER required")))?;
@@ -227,7 +259,7 @@ impl AuthConfig {
                 let tenant_ids_claim =
                     std::env::var(format!("{prefix}_OIDC_TENANT_IDS_CLAIM"))
                         .unwrap_or_else(|_| "spendguard:tenant_ids".into());
-                Ok(Self::Jwt(JwtConfig {
+                AuthConfigKind::Jwt(JwtConfig {
                     issuer,
                     audience,
                     jwks_url,
@@ -235,7 +267,7 @@ impl AuthConfig {
                     jwks_refresh_seconds,
                     groups_claim,
                     tenant_ids_claim,
-                }))
+                })
             }
             AuthMode::StaticToken => {
                 if profile != "demo" {
@@ -246,16 +278,40 @@ impl AuthConfig {
                 })?;
                 let subject = std::env::var(format!("{prefix}_STATIC_TOKEN_SUBJECT"))
                     .unwrap_or_else(|_| "operator".into());
-                Ok(Self::StaticToken(StaticTokenConfig { token, subject }))
+                AuthConfigKind::StaticToken(StaticTokenConfig { token, subject })
             }
-        }
+        };
+
+        Ok(Self {
+            kind,
+            policy,
+            static_token_tenant_ids,
+        })
     }
 
     pub fn mode_str(&self) -> &'static str {
-        match self {
-            Self::Jwt(_) => "jwt",
-            Self::StaticToken(_) => "static_token",
+        match &self.kind {
+            AuthConfigKind::Jwt(_) => "jwt",
+            AuthConfigKind::StaticToken(_) => "static_token",
         }
+    }
+}
+
+fn load_policy(prefix: &str, profile: &str) -> Result<GroupPolicy, AuthError> {
+    if let Ok(raw) = std::env::var(format!("{prefix}_GROUP_POLICY_JSON")) {
+        return GroupPolicy::parse_json(&raw)
+            .map_err(|e| AuthError::Infra(format!("group policy: {e}")));
+    }
+    if profile == "demo" {
+        Ok(GroupPolicy::demo_default())
+    } else {
+        // Production with no policy configured: empty mapping +
+        // no fallback. Every authenticated principal will have
+        // roles=empty and every permission check will deny. This
+        // is the correct fail-closed default — operators must
+        // configure GROUP_POLICY_JSON before enabling auth in
+        // production.
+        Ok(GroupPolicy::empty())
     }
 }
 
@@ -501,49 +557,84 @@ fn extract_string_array(claims: &serde_json::Value, name: &str) -> Vec<String> {
 // Validator dispatch (jwt or static_token)
 // ============================================================================
 
-pub enum Authenticator {
+pub struct Authenticator {
+    inner: AuthenticatorInner,
+    policy: Arc<GroupPolicy>,
+    /// Tenant scope applied to static-token principals (since they
+    /// have no JWT claims). Empty list = no tenant scope =
+    /// fail-closed under `assert_tenant`. Operators set this only
+    /// in demo profile.
+    static_token_tenant_ids: Vec<String>,
+}
+
+enum AuthenticatorInner {
     Jwt(Arc<JwtValidator>),
     StaticToken(Arc<StaticTokenConfig>),
 }
 
 impl Authenticator {
     pub async fn from_config(cfg: AuthConfig) -> Result<Self, AuthError> {
-        match cfg {
-            AuthConfig::Jwt(j) => {
-                let mode = "jwt";
-                info!(mode, issuer = %j.issuer, audience = %j.audience, jwks_url = %j.jwks_url, "auth initialized");
-                Ok(Self::Jwt(Arc::new(JwtValidator::new(j))))
-            }
-            AuthConfig::StaticToken(s) => {
-                warn!(
-                    "auth initialized in static_token mode (DEMO ONLY) — every authenticated request runs as subject={}",
-                    s.subject
+        let policy = Arc::new(cfg.policy);
+        let inner = match cfg.kind {
+            AuthConfigKind::Jwt(j) => {
+                info!(
+                    mode = "jwt",
+                    issuer = %j.issuer,
+                    audience = %j.audience,
+                    jwks_url = %j.jwks_url,
+                    policy_groups = policy.mapping.len(),
+                    "auth initialized"
                 );
-                Ok(Self::StaticToken(Arc::new(s)))
+                AuthenticatorInner::Jwt(Arc::new(JwtValidator::new(j)))
             }
-        }
+            AuthConfigKind::StaticToken(s) => {
+                warn!(
+                    subject = %s.subject,
+                    policy_groups = policy.mapping.len(),
+                    static_tenant_count = cfg.static_token_tenant_ids.len(),
+                    "auth initialized in static_token mode (DEMO ONLY)"
+                );
+                AuthenticatorInner::StaticToken(Arc::new(s))
+            }
+        };
+        Ok(Self {
+            inner,
+            policy,
+            static_token_tenant_ids: cfg.static_token_tenant_ids,
+        })
     }
 
     /// Authenticate a raw `Authorization: Bearer ...` value (without
-    /// the "Bearer " prefix).
+    /// the "Bearer " prefix). Populates `Principal.roles` from the
+    /// configured group policy.
     pub async fn authenticate(&self, token: &str) -> Result<Principal, AuthError> {
-        match self {
-            Self::Jwt(v) => v.validate(token).await,
-            Self::StaticToken(s) => {
+        let mut principal = match &self.inner {
+            AuthenticatorInner::Jwt(v) => v.validate(token).await?,
+            AuthenticatorInner::StaticToken(s) => {
                 if subtle_eq(token.as_bytes(), s.token.as_bytes()) {
-                    Ok(Principal {
+                    let mut p = Principal {
                         issuer: "static-token".into(),
                         subject: s.subject.clone(),
-                        groups: Vec::new(),
-                        tenant_ids: Vec::new(),
+                        // For policy resolution: static-token
+                        // principals belong to a synthetic group
+                        // named "demo-admins" that the demo policy
+                        // maps to all roles.
+                        groups: vec!["demo-admins".to_string()],
+                        tenant_ids: self.static_token_tenant_ids.clone(),
                         roles: Vec::new(),
                         mode: "static_token".into(),
-                    })
+                    };
+                    p.set_roles(self.policy.roles_for_groups(&p.groups));
+                    return Ok(p);
                 } else {
-                    Err(AuthError::StaticTokenMismatch)
+                    return Err(AuthError::StaticTokenMismatch);
                 }
             }
-        }
+        };
+        // S18: apply group policy to populate roles.
+        let roles = self.policy.roles_for_groups(&principal.groups);
+        principal.set_roles(roles);
+        Ok(principal)
     }
 }
 
@@ -630,10 +721,14 @@ mod tests {
 
     #[tokio::test]
     async fn static_token_authenticator_accepts_correct_token() {
-        let auth = Authenticator::from_config(AuthConfig::StaticToken(StaticTokenConfig {
-            token: "abc-123".into(),
-            subject: "operator".into(),
-        }))
+        let auth = Authenticator::from_config(AuthConfig {
+            kind: AuthConfigKind::StaticToken(StaticTokenConfig {
+                token: "abc-123".into(),
+                subject: "operator".into(),
+            }),
+            policy: GroupPolicy::demo_default(),
+            static_token_tenant_ids: vec!["t1".into()],
+        })
         .await
         .unwrap();
 
@@ -645,10 +740,14 @@ mod tests {
 
     #[tokio::test]
     async fn static_token_authenticator_rejects_wrong_token() {
-        let auth = Authenticator::from_config(AuthConfig::StaticToken(StaticTokenConfig {
-            token: "right".into(),
-            subject: "operator".into(),
-        }))
+        let auth = Authenticator::from_config(AuthConfig {
+            kind: AuthConfigKind::StaticToken(StaticTokenConfig {
+                token: "right".into(),
+                subject: "operator".into(),
+            }),
+            policy: GroupPolicy::empty(),
+            static_token_tenant_ids: vec![],
+        })
         .await
         .unwrap();
         let err = auth.authenticate("wrong").await.unwrap_err();
@@ -659,10 +758,14 @@ mod tests {
     async fn static_token_constant_time_comparison_handles_length_mismatch() {
         // Different-length inputs short-circuit but must still
         // return the StaticTokenMismatch error, not panic.
-        let auth = Authenticator::from_config(AuthConfig::StaticToken(StaticTokenConfig {
-            token: "a-much-longer-secret-token-string".into(),
-            subject: "operator".into(),
-        }))
+        let auth = Authenticator::from_config(AuthConfig {
+            kind: AuthConfigKind::StaticToken(StaticTokenConfig {
+                token: "a-much-longer-secret-token-string".into(),
+                subject: "operator".into(),
+            }),
+            policy: GroupPolicy::empty(),
+            static_token_tenant_ids: vec![],
+        })
         .await
         .unwrap();
         let err = auth.authenticate("short").await.unwrap_err();
@@ -713,13 +816,124 @@ mod tests {
     fn auth_mode_string_matches_principal_mode_field() {
         // Operators rely on the mode tag in audit logs being stable.
         assert_eq!(
-            AuthConfig::StaticToken(StaticTokenConfig {
-                token: "x".into(),
-                subject: "x".into()
-            })
+            AuthConfig {
+                kind: AuthConfigKind::StaticToken(StaticTokenConfig {
+                    token: "x".into(),
+                    subject: "x".into()
+                }),
+                policy: GroupPolicy::empty(),
+                static_token_tenant_ids: vec![],
+            }
             .mode_str(),
             "static_token"
         );
+    }
+
+    // --------------------------------------------------------------
+    // S18 integration tests across Authenticator + Principal +
+    // GroupPolicy.
+    // --------------------------------------------------------------
+
+    #[tokio::test]
+    async fn static_token_principal_in_demo_profile_inherits_demo_admin_roles() {
+        let auth = Authenticator::from_config(AuthConfig {
+            kind: AuthConfigKind::StaticToken(StaticTokenConfig {
+                token: "demo-token".into(),
+                subject: "demo-operator".into(),
+            }),
+            policy: GroupPolicy::demo_default(),
+            static_token_tenant_ids: vec!["t1".into(), "t2".into()],
+        })
+        .await
+        .unwrap();
+        let p = auth.authenticate("demo-token").await.unwrap();
+        // Demo policy maps "demo-admins" -> all roles. The
+        // synthetic group is added inside Authenticator.
+        for r in ["admin", "operator", "auditor", "approver", "viewer"] {
+            assert!(p.roles.iter().any(|x| x == r), "missing role: {r}");
+        }
+        assert_eq!(p.tenant_ids, vec!["t1".to_string(), "t2".to_string()]);
+        // Admin can do every permission.
+        for perm in [
+            Permission::ReadView,
+            Permission::TenantWrite,
+            Permission::ApprovalResolve,
+            Permission::AuditExport,
+            Permission::BudgetWrite,
+        ] {
+            assert!(p.has_permission(perm), "demo admin should have {perm:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn static_token_principal_with_empty_policy_has_zero_permissions() {
+        // Production-shaped fail-closed: even though static_token
+        // is admitted in demo profile, an empty policy means the
+        // resulting principal can't do anything.
+        let auth = Authenticator::from_config(AuthConfig {
+            kind: AuthConfigKind::StaticToken(StaticTokenConfig {
+                token: "t".into(),
+                subject: "s".into(),
+            }),
+            policy: GroupPolicy::empty(),
+            static_token_tenant_ids: vec!["t1".into()],
+        })
+        .await
+        .unwrap();
+        let p = auth.authenticate("t").await.unwrap();
+        assert!(p.roles.is_empty());
+        for perm in [
+            Permission::ReadView,
+            Permission::TenantWrite,
+            Permission::ApprovalResolve,
+            Permission::AuditExport,
+            Permission::BudgetWrite,
+        ] {
+            assert!(!p.has_permission(perm));
+        }
+        // Tenant scope still applied.
+        p.assert_tenant("t1").unwrap();
+        assert!(p.assert_tenant("t2").is_err());
+    }
+
+    #[tokio::test]
+    async fn jwt_principal_roles_populated_from_group_policy() {
+        let mut policy_map = HashMap::new();
+        policy_map.insert("eng-readers".to_string(), vec![Role::Viewer]);
+        policy_map.insert(
+            "platform-admins".to_string(),
+            vec![Role::Admin, Role::Operator],
+        );
+        let policy = GroupPolicy {
+            mapping: policy_map,
+            default_viewer_on_miss: false,
+        };
+        let (validator, enc, kid) = make_validator("aud", "iss");
+        let auth = Authenticator {
+            inner: AuthenticatorInner::Jwt(Arc::new(validator)),
+            policy: Arc::new(policy),
+            static_token_tenant_ids: vec![],
+        };
+        let exp = (Utc::now() + chrono::Duration::seconds(60)).timestamp();
+        let token = issue_jwt(
+            &enc,
+            &kid,
+            "iss",
+            "aud",
+            "u@example.com",
+            exp,
+            vec!["platform-admins"],
+            vec!["t1"],
+        );
+        let p = auth.authenticate(&token).await.unwrap();
+        assert!(p.roles.contains(&"admin".to_string()));
+        assert!(p.roles.contains(&"operator".to_string()));
+        assert!(p.has_permission(Permission::TenantWrite));
+        p.assert_tenant("t1").unwrap();
+        assert!(matches!(
+            p.assert_tenant("t-other").unwrap_err(),
+            crate::rbac::AuthzError::CrossTenant { .. }
+        ));
     }
 
     // -----------------------------------------------------------------

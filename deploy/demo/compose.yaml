@@ -430,6 +430,12 @@ services:
       SPENDGUARD_CONTROL_PLANE_AUTH_MODE:                     "static_token"
       SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN:                  "demo-admin-token-replace-in-production"
       SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN_SUBJECT:          "demo-operator"
+      # Phase 5 GA hardening S18: RBAC + tenant isolation. Demo
+      # static-token principal scopes to the seeded demo tenant.
+      # The demo policy auto-grants admin via the synthetic
+      # `demo-admins` group; in production, set GROUP_POLICY_JSON
+      # to map your IdP's group claims to roles.
+      SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN_TENANT_IDS:       "00000000-0000-4000-8000-000000000001"
     ports:
       - "8091:8091"
     depends_on:
@@ -453,6 +459,9 @@ services:
       SPENDGUARD_DASHBOARD_AUTH_MODE:              "static_token"
       SPENDGUARD_DASHBOARD_STATIC_TOKEN:           "demo-dashboard-token-replace-in-production"
       SPENDGUARD_DASHBOARD_STATIC_TOKEN_SUBJECT:   "demo-viewer"
+      # Phase 5 GA hardening S18: tenant scope on the static
+      # principal so the demo dashboard can read the seeded tenant.
+      SPENDGUARD_DASHBOARD_STATIC_TOKEN_TENANT_IDS: "00000000-0000-4000-8000-000000000001"
     ports:
       - "8090:8090"
     depends_on:
