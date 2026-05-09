@@ -438,7 +438,7 @@ async def simulate_webhook_invoice_reconcile(
 # ---------------------------------------------------------------------------
 
 
-async def run_agent_mode() -> int:
+async def run_agent_mode(use_real_openai: bool = False) -> int:
     from pydantic_ai import Agent
 
     from spendguard_pydantic_ai import (
@@ -498,8 +498,24 @@ async def run_agent_mode() -> int:
             return 3
         print(f"[demo] handshake ok session_id={client.session_id}")
 
+        # Phase 3 follow-up: wire real OpenAI model when DEMO_MODE=agent_real.
+        # Confirms SpendGuard's LLM_CALL_PRE/POST + commit_estimated lifecycle
+        # works against a real provider's `usage.total_tokens`, not just MockLLM.
+        if use_real_openai:
+            from pydantic_ai.models.openai import OpenAIModel
+
+            if not os.environ.get("OPENAI_API_KEY"):
+                print("[demo] FATAL: OPENAI_API_KEY required for agent_real mode", file=sys.stderr)
+                return 8
+            # OpenAI SDK reads OPENAI_API_KEY from env automatically;
+            # pydantic-ai 0.0.x OpenAIModel takes only the model name.
+            inner_model: Any = OpenAIModel("gpt-4o-mini")
+            print("[demo] using real OpenAI gpt-4o-mini")
+        else:
+            inner_model = MockLLM()
+
         guarded = SpendGuardModel(
-            inner=MockLLM(),
+            inner=inner_model,
             client=client,
             budget_id=budget_id,
             window_instance_id=window_id,
@@ -547,6 +563,8 @@ async def main() -> int:
         return await run_ttl_sweep_mode()
     if DEMO_MODE == "deny":
         return await run_deny_mode()
+    if DEMO_MODE == "agent_real":
+        return await run_agent_mode(use_real_openai=True)
     return await run_agent_mode()
 
 
