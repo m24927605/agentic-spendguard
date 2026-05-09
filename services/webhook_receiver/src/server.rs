@@ -61,7 +61,7 @@ pub async fn build_ledger_client(config: &Config) -> anyhow::Result<LedgerClient
 
 pub fn build_https_router(state: Arc<AppState>) -> Router {
     Router::new()
-        .route("/v1/webhook/{provider}", post(webhook::handle_webhook))
+        .route("/v1/webhook/:provider", post(webhook::handle_webhook))
         .layer(RequestBodyLimitLayer::new(REQUEST_BODY_LIMIT_BYTES))
         .with_state(state)
 }
