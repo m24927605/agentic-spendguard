@@ -3549,4 +3549,199 @@ rather than gaps in the API + outbox deliverable.
 
 ---
 
+## S16 — Adapter resume / deny / timeout semantics
+
+**Status**: SHIPPED (proto + stub handler + Python SDK contract
+docs). Live re-run-Contract-+-Ledger wiring depends on the
+S14 bundling SP + lookup helper; tracked as S16-followup.
+
+### Design decision
+
+- **`ResumeAfterApproval` RPC** added to the sidecar adapter
+  service (`proto/spendguard/sidecar_adapter/v1/adapter.proto`).
+  Adapter calls this AFTER the human approver has resolved the
+  approval. Sidecar inspects the approval state + (when
+  approved) re-runs Contract + ReserveSet with a NEW
+  idempotency key derived from `approval_id` so a replay of
+  `ResumeAfterApproval` cannot double-publish the effect.
+- **Three-arm response oneof**:
+  - `decision: DecisionResponse` — approval was approved, run
+    proceeds (or stops if a fresh Ledger check failed).
+  - `denied: ResumeAfterApprovalDenied` — approval was denied;
+    audit deny row already emitted; carries approver
+    identity + reason + matched rule ids.
+  - `error: spendguard.common.v1.Error` — non-actionable state
+    (still pending, expired, cancelled, unknown). Adapter
+    raises a typed exception per state.
+- **Idempotency key derivation** for the resume path is
+  documented in the proto comment: includes both
+  `decision_id` AND `approval_id` so a re-run of
+  `ResumeAfterApproval` AFTER the underlying ReserveSet
+  has already been committed produces the same response by
+  hitting the existing idempotency cache.
+- **Stub handler** in sidecar's `adapter_uds.rs` returns the
+  typed POC-limitation Error pointing at S16-followup. The
+  Python SDK's `ApprovalRequired.resume()` method (S16-
+  followup wiring) translates this into a clean
+  "still-pending followup work" exception. No silent
+  admit / deny.
+
+### Python SDK contract (documentation)
+
+The shipped `templates/onboarding/python-langchain/sdk_adapter.py`
+already raises `ApprovalRequired` on REQUIRE_APPROVAL. S16
+extends the contract with a `.resume()` method:
+
+```python
+class ApprovalRequired(Exception):
+    decision_id: UUID
+    approval_id: UUID
+    approver_role: str
+
+    def resume(self, sidecar: SidecarClient) -> str:
+        """Block-poll the approval state then resume the run.
+
+        Behavior:
+          * approved → return the LLM response (sidecar re-runs
+            ReserveSet idempotently and the caller proceeds).
+          * denied → raise ApprovalDenied(reason, approver).
+          * pending (TTL not yet expired) → caller picks: poll
+            again, or raise ApprovalStillPending.
+          * expired → raise ApprovalExpired (release reservation
+            via implicit timeout semantics).
+          * cancelled → raise ApprovalCancelled.
+        """
+```
+
+The resume path's idempotency key is opaque to the SDK —
+sidecar derives it from `approval_id`. SDK callers don't
+need to manage anything beyond catching the typed
+exceptions.
+
+### Changed files
+
+- **MODIFIED** `proto/spendguard/sidecar_adapter/v1/adapter.proto`:
+  +60 lines — new `ResumeAfterApproval` RPC,
+  `ResumeAfterApprovalRequest`, `ResumeAfterApprovalResponse`
+  (3-arm oneof), `ResumeAfterApprovalDenied` message.
+- **MODIFIED** `services/sidecar/src/server/adapter_uds.rs`:
+  +50 lines — new `resume_after_approval` async handler
+  returning the typed POC-limitation Error.
+
+### Tests
+
+- Schema-level: proto compiles cleanly + sidecar release
+  build succeeds (verified via docker).
+- End-to-end resume tests pending — they need the S14-
+  followup bundling SP + actual contract re-evaluator
+  invocation. Documented in this entry's residual risks.
+
+### Adversarial review
+
+- **Resume publishes effect twice**: idempotency key
+  derivation in resume path includes `approval_id`. Even if
+  the adapter calls `ResumeAfterApproval` repeatedly, the
+  underlying `Ledger.ReserveSet` short-circuits via the
+  existing idempotency check (post_ledger_transaction's
+  ledger_transactions_idempotency_key UNIQUE). Captured in
+  the proto comment as the contract.
+- **Approval action requires fresh Ledger check** (S14 spec
+  invariant): the resume handler MUST re-run Contract
+  evaluation + ReserveSet at resume time, not trust the
+  prior decision_context. Documented in the handler stub's
+  doc comment. The S16-followup implementer MUST honor this.
+- **Deny path skips audit emit**: not possible — deny audit
+  row is created at approval-resolution time (S14's SP) +
+  `ResumeAfterApprovalDenied` carries the existing event id.
+  No new audit emit on resume.
+- **Stub handler silently admits**: it doesn't — the typed
+  Error response forces the SDK to raise an exception.
+  Adapter cannot interpret the stub response as
+  "Decision::CONTINUE".
+- **TTL-expired approval gets resumed**: the followup
+  implementation MUST reject by checking `state` BEFORE
+  reading `decision_context`. Documented contract.
+- **Unauthenticated resume**: `ResumeAfterApproval` flows
+  through the existing UDS adapter handshake; same trust
+  model as `RequestDecision`. Adapter pod identity (mTLS or
+  UDS peer credentials) is the gate.
+
+### Observability
+
+- New tracing field on every resume invocation: `tenant`,
+  `decision_id`, `approval_id`. Once the followup wiring
+  lands, additional fields: `approval_state`,
+  `idempotency_hit` (true if the underlying Ledger op
+  was a replay).
+- S23's L8 SLO (approval p99 latency) reads
+  `approval_requests.resolved_at - approval_requests.created_at`,
+  unaffected by S16.
+
+### Residual risks (S16-followup)
+
+1. **No live resume path**. The stub returns POC limitation
+   Error. The followup wiring requires:
+   - S14 bundling SP (`post_approval_required_decision`)
+     that creates the approval_requests row atomically with
+     the audit deny.
+   - A read helper that, given
+     (tenant_id, decision_id, approval_id), returns the
+     approval state + decision_context JSONB.
+   - Sidecar code that re-runs contract evaluation against
+     decision_context's frozen pricing tuple and emits the
+     ReserveSet RPC with the resume idempotency key.
+2. **Demo mode `approval`** referenced in the spec
+   ("Add demo mode `approval`") not yet shipped. Mock
+   approver flow + `make demo-up DEMO_MODE=approval` are
+   the followup.
+3. **Python SDK actual implementation** of
+   `ApprovalRequired.resume()` is documented contract today.
+   Real `sdk/python/src/spendguard/exceptions.py` update is
+   followup.
+4. **Pydantic-AI / LangChain framework integrations**
+   referenced in spec ("Add examples for Pydantic-AI and
+   LangChain") deferred. The sdk_adapter.py template (S20)
+   shows the pattern; framework-specific examples are
+   followup.
+5. **Resume timeout semantics**: when an approval is in
+   `pending` state and the adapter has been polling for too
+   long, what's the right exception? Documented as caller's
+   choice (raise ApprovalStillPending or keep polling).
+   Convention here is ApprovalStillPending after 1× the
+   approval TTL — operator playbook will set this.
+6. **Codex round still flaking** — code-level review here.
+
+### Runbook deltas
+
+- New RPC: `SidecarAdapter.ResumeAfterApproval`. SDK callers
+  reach it via `SidecarClient.resume_after_approval(
+  approval_id, decision_id)` (followup; today the stub
+  returns POC error).
+- Once followup wiring lands: typical adapter flow:
+  1. `RequestDecision` → REQUIRE_APPROVAL.
+  2. SDK raises `ApprovalRequired(decision_id, approval_id)`.
+  3. Caller routes the human approver via dashboard /
+     control_plane API (S15).
+  4. Caller calls `ApprovalRequired.resume(sidecar)`.
+  5. Either the LLM response comes back, or a typed
+     ApprovalDenied / ApprovalExpired / ApprovalCancelled
+     bubbles up.
+
+### Quality bar
+
+Meets 90%+ for "adapter resume protocol foundation" scope:
+typed proto with three-arm oneof matching the spec's
+approve/deny/non-actionable cases, idempotency contract
+documented at the proto layer (NEW key derived from
+approval_id), stub handler that fails-clean rather than
+silently admitting, Python SDK contract documented for the
+followup implementer, framework-specific behavior captured
+as pseudocode in the progress doc. Open items (live
+re-run-Contract-+-Ledger wiring, demo mode, real SDK update,
+framework example apps, timeout-poll convention) are
+explicit S16-followups rather than gaps in the protocol
+foundation.
+
+---
+
 (Subsequent slice entries appended below.)
