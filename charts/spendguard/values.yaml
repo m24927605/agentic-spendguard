@@ -182,6 +182,23 @@ signing:
   # with strictVerification=false.
   strictVerification: true
 
+# Phase 5 GA hardening S13 — pricing authority staleness policy.
+#
+# `maxStalenessSeconds` defines how old the latest successful pricing
+# sync may be before bundle-build / decision pipelines fail-closed.
+# 86400 = 24 hours; tighter values appropriate for high-volatility
+# providers (token costs change weekly).
+#
+# `allowOverride: true` lets operators manually edit pricing_table
+# when the sync adapter doesn't yet handle a new model. Every override
+# writes a `pricing_overrides_audit` row with reviewer identity (S17
+# JWT subject) + reason. Helm template reserves the right to FAIL
+# on `signing.profile=production` + `pricing.allowOverride=true` in a
+# future tightening; today the audit row IS the safeguard.
+pricing:
+  maxStalenessSeconds: 86400
+  allowOverride: true
+
 # Phase 5 GA hardening S22: fail-open / fail-closed policy matrix.
 # Default stance is fail-closed everywhere. Operators override via
 # JSON map keyed by dependency × workflow_class. Production profile

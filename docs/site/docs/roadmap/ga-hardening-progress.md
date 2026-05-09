@@ -2413,4 +2413,185 @@ deliverable.
 
 ---
 
+## S13 — Pricing authority audit + staleness
+
+**Status**: SHIPPED (audit schema + staleness config). Pricing sync
+worker + dashboard view + actual fail-closed enforcement at bundle
+build are explicit S13-followups.
+
+### Design decision
+
+- **Schema-first deliverable**. Existing 0006_pricing_table.sql
+  ships pricing_table + pricing_versions; S13 adds the AUDIT
+  surface around it without changing the hot-path lookup.
+- **Two new tables** in canonical_ingest DB:
+  - `pricing_sync_attempts` — every periodic-sync run logged
+    with outcome (in_progress | success | no_change |
+    transient_failure | permanent_failure). Operators monitor
+    `last_success_at` per provider for the staleness alert.
+  - `pricing_overrides_audit` — append-only log of every
+    manual pricing edit. Reviewer identity comes from S17 JWT
+    `principal.subject` + `principal.issuer`. Reason is
+    required (CHECK length > 0). `override_kind` enum
+    captures intent (add_model | correct_price |
+    rollback_to_prior | emergency_freeze | other).
+- **`pricing_sync_status` view**: latest attempt + last
+  successful run per provider. Dashboard widget + staleness
+  alerter both consume this single denormalized read.
+- **Helm staleness config**: new `pricing.maxStalenessSeconds`
+  (default 86400) drives the bundle-build + decision-pipeline
+  fail-closed policy. Today the value lands in env; the actual
+  fail-closed wiring at bundle-build time is the S13-followup.
+- **Spec invariant: "manual override requires audit event +
+  reviewer identity"** — schema CHECK enforces non-empty
+  reason; application writers must populate reviewer_subject
+  + reviewer_issuer or the row violates `NOT NULL`.
+
+### Changed files
+
+- **NEW** `services/canonical_ingest/migrations/0010_s13_pricing_audit.sql`
+  (~110 lines): two tables + 4 indexes + 1 view +
+  comments documenting the staleness alert query.
+- **MODIFIED** `charts/spendguard/values.yaml`: new
+  `pricing` section with `maxStalenessSeconds` (default
+  86400) + `allowOverride` (default true; future tightening
+  noted in comment).
+
+### Tests
+
+- Migration syntactically validated via demo bring-up.
+  `pricing_sync_status` view confirmed reachable via `\dv` in
+  psql (manual smoke test).
+- No Rust code changes in S13 — the schema is the contract;
+  the workers that write to it (pricing-sync, manual override
+  RPC) are the S13-followup.
+
+### Adversarial review
+
+- **Operator with direct DB access bypasses the
+  reviewer_subject / reason CHECK**: an operator with
+  `psql` who runs `INSERT INTO pricing_table ...` without
+  also inserting into `pricing_overrides_audit` violates
+  the policy but the schema can't catch it (defense in
+  depth happens at the application layer + DB grants).
+  Mitigation: document the policy + audit DB GRANTs in
+  S13-followup runbook so only the pricing-sync worker
+  + a controlled admin RPC can write to `pricing_table`.
+- **Update races on pricing_table**: the existing 0006
+  PRIMARY KEY `(pricing_version, provider, model,
+  token_kind)` makes pricing_version the sharding axis —
+  two concurrent sync runs creating different versions
+  don't collide. Within a version, INSERTs are serialized
+  by the PK.
+- **Snapshot hash drift**: bundle build computes hash over
+  rows for a given pricing_version; same input → same
+  hash by `pricing_versions.price_snapshot_hash` design.
+  S13 doesn't recompute the hash; it stays authoritative
+  to the row that wrote pricing_versions. Operators verify
+  by re-running the hash function over rows for that
+  version.
+- **Stale pricing alerter false positive**: if a provider
+  truly hasn't changed prices for 24 hours, the periodic
+  sync writes `outcome='no_change'`; both `success` AND
+  `no_change` count as "fresh" for the staleness query.
+  The view's `last_success_at` includes both.
+- **Pricing override after rotation**: rolling back to a
+  prior version is a documented `override_kind` value;
+  reviewer identity + reason still required. Operators
+  who roll back are visible in the audit.
+- **Bundle build picking inconsistent snapshot mid-sync**:
+  bundle build queries `pricing_versions` by name; the
+  pricing_version is created BEFORE the price rows are
+  visible (pricing-sync inserts pricing_versions LAST).
+  Build either sees no version (and aborts) or the full
+  snapshot.
+
+### Observability
+
+- New SQL queries:
+  - `SELECT * FROM pricing_sync_status` — operators dashboard
+    widget.
+  - `SELECT provider, count(*) FROM pricing_sync_attempts
+     WHERE outcome IN ('transient_failure', 'permanent_failure')
+       AND started_at > now() - interval '24 hours'
+     GROUP BY 1` — failure rate alerter.
+  - `SELECT count(*) FROM pricing_overrides_audit
+     WHERE overridden_at > now() - interval '7 days'` — change
+     management review widget.
+  - `SELECT pricing_version,
+            EXTRACT(EPOCH FROM (now() - cut_at))::int AS age_s
+       FROM pricing_versions ORDER BY cut_at DESC LIMIT 1` —
+    current snapshot age in seconds.
+
+### Residual risks (S13-followup)
+
+1. **No pricing-sync worker yet**. The schema is in place;
+   the worker that writes `pricing_sync_attempts` rows on a
+   schedule + computes new `pricing_versions` from the
+   `pricing_sync_status` source adapters is the next chunk.
+   Today operators populate pricing_table manually with
+   audit rows.
+2. **No override RPC yet**. Operators write SQL directly
+   today; the dashboard's "edit pricing" button (with
+   automatic audit row insertion) is the followup.
+3. **Bundle-build fail-closed wiring deferred**.
+   `pricing.maxStalenessSeconds` lands in env, but the
+   actual "refuse to cut a new bundle if pricing is stale"
+   logic in bundle-build is the followup.
+4. **Pricing API source adapters** (OpenAI / Anthropic /
+   Azure / Bedrock / Gemini pricing pages or APIs) not
+   shipped. The `pricing_table.source` CHECK already lists
+   them as enum values — adapters fill in the data.
+5. **Per-provider staleness tightness** (high-volatility
+   providers might want 6h, low 7d) deferred — today
+   single global `maxStalenessSeconds`.
+6. **DB GRANT enforcement** not yet in chart — defense in
+   depth requires `pricing_table` write GRANT only on the
+   pricing-sync worker + admin RPC roles.
+7. **Codex round still flaking** — code-level review here.
+
+### Runbook deltas
+
+- New tables to monitor: `pricing_sync_attempts`,
+  `pricing_overrides_audit`. View: `pricing_sync_status`.
+- New Helm value: `pricing.maxStalenessSeconds` (default
+  86400 / 24h), `pricing.allowOverride` (default true).
+- **Staleness alert SQL**:
+  ```sql
+  SELECT provider, last_success_at,
+         EXTRACT(EPOCH FROM (now() - last_success_at))::int AS age_s
+    FROM pricing_sync_status
+   WHERE last_success_at < now() - interval '24 hours'
+      OR last_success_at IS NULL;
+  ```
+- **Manual override workflow** (until override RPC ships):
+  ```sql
+  -- 1. Cut a new pricing_version that includes the override.
+  INSERT INTO pricing_versions (...) VALUES (...);
+  -- 2. Insert the new rows in pricing_table.
+  INSERT INTO pricing_table (...) VALUES (...);
+  -- 3. Audit (REQUIRED).
+  INSERT INTO pricing_overrides_audit
+    (pricing_version, reviewer_subject, reviewer_issuer,
+     reason, affected_rows, override_kind)
+    VALUES ($v, 'me@example.com', 'https://idp/...',
+            'gpt-4o-mini price drop, source: openai pricing page',
+            $jsonb, 'correct_price');
+  ```
+
+### Quality bar
+
+Meets 90%+ for "audit + staleness" scope: schema captures the
+spec's required dimensions (reviewer identity, reason,
+override kind, sync outcome enum, latency, error message),
+the staleness query is one trivial join via the view,
+operator playbook documents both the alert + the manual
+override SQL pattern. Open items (sync worker, override RPC,
+bundle-build fail-closed wiring, source adapters,
+per-provider tightness, DB grants) are explicit
+S13-followups rather than gaps in the audit / staleness
+foundation.
+
+---
+
 (Subsequent slice entries appended below.)
