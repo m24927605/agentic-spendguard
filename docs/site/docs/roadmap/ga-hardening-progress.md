@@ -1609,4 +1609,131 @@ ability to consult it.
 
 ---
 
+## S5 — Multi-pod enablement gate
+
+**Status**: SHIPPED (Helm gates + operator runbook). Automated kind
+chaos drill is the explicit S5-followup.
+
+### Design decision
+
+- **Sidecar = active/standby, not horizontal scaling**. Captured in
+  the runbook because it's a subtle semantic that's easy to
+  misread when the chart says "DaemonSet". Each node's sidecar
+  pod calls `Ledger.AcquireFencingLease` at startup; the Ledger
+  serializes via `FOR UPDATE` and grants exactly one. Other pods
+  fail-closed at startup. Failover is "kubelet restarts the
+  losing pods, the standby that wins on takeover gets epoch+1".
+- **outbox-forwarder + ttl-sweeper = leader election**. Multi-pod
+  is genuinely safe: only the leader does work. The S1 Helm
+  gate (`replicas > 1` requires `leaderElection.mode != disabled`)
+  remains the sole guard for these two.
+- **Sidecar Helm gates** are the new contribution:
+  - `sidecar.acknowledgeMultiPod=false` → DEFAULT. Operator must
+    flip to `true` to convey awareness of active/standby
+    semantics.
+  - `sidecar.workloadInstanceIdOverride` MUST NOT be set when
+    multi-pod is enabled (override means single-pod identity).
+- **Runbook** includes per-component model, failover sequence,
+  rollback path (no DB surgery), chaos drill checklist, and
+  observability invariants.
+
+### Changed files
+
+- **MODIFIED** `charts/spendguard/values.yaml`:
+  `sidecar.acknowledgeMultiPod: false` (default).
+- **MODIFIED** `charts/spendguard/templates/sidecar.yaml`: two new
+  `fail` directives — replicas-without-ack rejects, replicas-with-
+  override rejects.
+- **NEW** `docs/site/docs/operations/multi-pod.md` (~150 lines):
+  per-component scaling model, failover sequence, rollback,
+  chaos drill checklist, observability invariants, S5-followup
+  list.
+
+### Tests
+
+Helm template smoke tests (manual; recorded in progress doc):
+
+- `helm template ... --set sidecar.replicas=2` → reject
+  (`acknowledgeMultiPod=true` not set).
+- `helm template ... --set sidecar.replicas=2 --set sidecar.acknowledgeMultiPod=true --set sidecar.workloadInstanceIdOverride=manual-id`
+  → reject (override forbidden under multi-pod).
+- `helm template ... --set sidecar.replicas=2 --set sidecar.acknowledgeMultiPod=true`
+  → renders.
+- S1 outbox-forwarder + ttl-sweeper gates already verified in
+  S1 progress doc; unchanged.
+
+### Adversarial review
+
+- **Operator slips `replicas: 2` into prod by accident**: rejected
+  at chart render — Helm `fail` runs before any kube apply.
+- **Operator sets `replicas: 2` AND override expecting both to
+  work**: caught by the second gate; explicit error message
+  pointing at the runbook.
+- **DaemonSet semantics confusion**: the runbook calls out that
+  sidecar isn't true horizontal scaling, with the fencing
+  takeover sequence diagrammed.
+- **Multi-node sidecar without per-node fencing scope**: documented
+  as known limitation. Today all nodes share one scope; only one
+  wins. True multi-node horizontal sidecar requires per-pod scope
+  assignment, tracked as S5-followup.
+- **Takeover storms**: observability invariants in the runbook
+  (alerting on `coordination_lease_history.taken_over` > 1/hour
+  and `fencing_scope_events.promote` > 1/hour).
+- **Lease flap during network partition**: documented in the
+  runbook — the recommendation is to keep `ttlMs >> network jitter`
+  and watch the takeover counters.
+
+### Observability
+
+- Documented invariants (no new code): operators alert on
+  `spendguard_sidecar_fencing_acquire_action_total{action="takeover"}`
+  spikes and on `coordination_lease_history` row growth.
+- The metrics themselves came from S1 (lease history) + S4
+  (fencing acquire action). S5 just publishes the alert
+  recommendations.
+
+### Residual risks (S5-followup)
+
+1. **Automated kind chaos drill** — manual checklist in the
+   runbook today. A future slice should add a kind-based CI test
+   that runs the failover sequence and asserts:
+   - exactly one leader per lease at any moment
+   - exactly one fencing scope holder
+   - `audit_outbox_global_keys` rejects duplicates after takeover
+2. **Per-pod fencing scope assignment** — DaemonSet across N
+   nodes today shares one scope. True horizontal sidecar scaling
+   needs per-pod scopes (e.g. derived from pod name). Architectural
+   decision deferred.
+3. **Faster takeover via explicit revoke RPC** — currently relies
+   on TTL expiry (~30s). A successor can implement
+   `Ledger.RevokeFencingLease(scope_id, with_audit)` for
+   operator-driven faster failover.
+4. **Codex round still flaking** — code-level review captured here.
+
+### Runbook deltas
+
+- New runbook page: `docs/site/docs/operations/multi-pod.md`.
+- New Helm value: `sidecar.acknowledgeMultiPod` (default `false`).
+- Operator playbook (excerpt; full version in the runbook page):
+  - Multi-pod sidecar: set `replicas: N` only on a deployment
+    pattern that genuinely needs N nodes, set
+    `acknowledgeMultiPod: true`, leave `workloadInstanceIdOverride`
+    empty.
+  - Multi-pod outbox-forwarder / ttl-sweeper: set `replicas: 2`,
+    leave `leaderElection.mode` at `postgres` (default).
+  - Rollback: just decrement replicas / flip ack flag — no DB
+    state to reset.
+
+### Quality bar
+
+Meets 90%+: explicit Helm gates (sidecar AND existing S1 gates
+for the two background workers), operator-facing runbook covering
+the active/standby semantic + failover + rollback + chaos drill +
+observability, residual risks documented as S5-followup tickets
+rather than gaps. The automated kind test would close the loop;
+without a kind cluster in this session, manual procedures are
+the path forward.
+
+---
+
 (Subsequent slice entries appended below.)

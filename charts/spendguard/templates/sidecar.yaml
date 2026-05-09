@@ -7,6 +7,15 @@
 {{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
 {{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo (set signing.profile=demo in values.yaml or pick mode=local|kms)" }}
 {{- end }}
+{{- /* Phase 5 GA hardening S5: multi-pod safety gates. */ -}}
+{{- if gt (int .Values.sidecar.replicas) 1 }}
+{{- if not .Values.sidecar.acknowledgeMultiPod }}
+{{- fail "S5: sidecar.replicas > 1 requires sidecar.acknowledgeMultiPod=true. Read docs/runbooks/sidecar-multi-pod.md (active/standby semantics, not horizontal scaling) before flipping the flag." }}
+{{- end }}
+{{- if .Values.sidecar.workloadInstanceIdOverride }}
+{{- fail "S5: sidecar.replicas > 1 forbids sidecar.workloadInstanceIdOverride (override means single-pod identity; multi-pod requires the downward-API per-pod metadata.name path)." }}
+{{- end }}
+{{- end }}
 {{- /*
 Sidecar deployed as DaemonSet so the UDS socket lives on each node's
 hostPath; application pods that mount the same hostPath get the
