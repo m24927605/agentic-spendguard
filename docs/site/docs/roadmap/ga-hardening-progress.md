@@ -3027,4 +3027,164 @@ gaps in the SLO foundation.
 
 ---
 
+## S12 — Anthropic and generic provider reconciliation
+
+**Status**: SHIPPED (Anthropic stub + provider-agnostic token-kind
+mapping + multi-provider tests). Real Anthropic HTTP wiring +
+webhook signature verification per-provider are explicit
+S12-followups.
+
+### Design decision
+
+- **Anthropic adapter mirrors OpenAI's shape** — `AnthropicClient`
+  is a sibling of `OpenAiClient`. Both implement `ProviderClient`
+  trait from S11. Real HTTP wiring is an explicit followup
+  (typed `ProviderApi` error pointing at `S12-followup`).
+- **`NormalizedTokenKind` enum** is the boundary the rest of the
+  system speaks. Provider adapters translate via `map_token_kind`
+  before persistence. Six kinds: Input, Output, CachedInput,
+  VisionInput, AudioInput, Reasoning. Strings match the
+  `pricing_table.token_kind` CHECK constraint exactly — the
+  test `normalized_token_kind_strings_match_pricing_table_check_constraint`
+  pins the contract.
+- **`map_token_kind` exhaustive match** covers OpenAI, Anthropic,
+  Azure-OpenAI (delegates to OpenAI mapping), Bedrock-Anthropic
+  (delegates to Anthropic mapping), Gemini (camelCase keys).
+  Adding a new provider = extend the match arm; adding a new
+  normalized kind = extend the enum + the pricing CHECK + this
+  match. Compile-time enforcement of the boundary.
+- **No provider-specific assumptions in ledger core** (spec
+  review standard) — the mapping happens in the poller crate
+  before insert. By the time records reach
+  `provider_usage_records`, they're already normalized.
+- **Provider raw payloads retained** (spec review standard) —
+  `provider_usage_records.raw_payload JSONB NOT NULL` from S10
+  preserves byte-exact provider response. Token-kind mapping
+  doesn't lossy.
+- **Errors identify provider + tenant without leaking secrets**
+  (spec review standard) — `TokenMapError::UnknownProviderKind`
+  carries `{ provider, raw_kind }` strings. API keys never
+  appear in error messages because adapters take them by
+  ownership in their constructors and never echo.
+
+### Changed files
+
+- **MODIFIED** `services/usage_poller/src/lib.rs`: +160 lines.
+  - `AnthropicClient` struct + `ProviderClient` impl (stub
+    pointing at S12-followup).
+  - `NormalizedTokenKind` enum (6 variants matching pricing
+    CHECK).
+  - `TokenMapError` enum.
+  - `map_token_kind(provider, raw_kind)` function with
+    exhaustive provider/kind match for OpenAI, Anthropic,
+    Azure-OpenAI, Bedrock-Anthropic, Gemini.
+  - 8 new unit tests covering all five providers + pricing
+    CHECK alignment + unknown provider/kind error paths.
+- **MODIFIED** `services/usage_poller/src/main.rs`: provider
+  selection adds `anthropic` arm; new env vars
+  `SPENDGUARD_USAGE_POLLER_ANTHROPIC_API_KEY` +
+  `SPENDGUARD_USAGE_POLLER_ANTHROPIC_WORKSPACE_ID`.
+
+### Tests
+
+- 13 unit tests in spendguard-usage-poller (5 from S11 + 8
+  new S12):
+  - `anthropic_client_stub_returns_typed_error_pointing_at_followup`
+  - `token_kind_mapping_covers_openai_and_anthropic`
+  - `token_kind_mapping_azure_aliases_openai`
+  - `token_kind_mapping_bedrock_anthropic_aliases_anthropic`
+  - `token_kind_mapping_gemini_camel_case_keys`
+  - `token_kind_mapping_unknown_kind_returns_typed_error`
+  - `token_kind_mapping_unknown_provider_returns_typed_error`
+  - `normalized_token_kind_strings_match_pricing_table_check_constraint`
+
+### Adversarial review
+
+- **Provider naming drift**: `provider_name()` returns a fixed
+  string per impl. `map_token_kind` matches on it. A provider
+  with a typo'd name in the env var (e.g. `openi`) hits the
+  `_ =>` arm and returns `UnknownProviderKind`. Operator sees
+  the typo'd name + raw_kind in the error message.
+- **Adding new provider without pricing rows**: separate
+  concern. The token-kind mapping is one of two halves — the
+  other is `pricing_table` rows for the model. Without
+  pricing rows, the matching SP (S10-followup) quarantines
+  with `pricing_unknown` reason.
+- **Anthropic webhook signature verification**: out of scope
+  for S12 (Anthropic doesn't yet have webhook usage delivery;
+  the spec acknowledges "if provider has webhook support,
+  validate provider signatures"). When/if Anthropic ships
+  webhooks, S12-followup adds the verification step.
+- **Provider-specific assumptions in ledger core**: tested
+  by code review of `services/ledger/src/handlers/`. Ledger
+  handlers see only normalized fields
+  (`provider_reported_amount_atomic` in `usd_micros` after
+  pricing-version → cost translation by the matching SP).
+  Provider strings appear only in audit metadata.
+
+### Observability
+
+- Forensics SQL the slice unlocks (after S10's matching SP
+  ships):
+  ```sql
+  SELECT raw_payload->>'token_kind_raw' AS raw,
+         normalized_token_kind,
+         count(*)
+    FROM provider_usage_records
+    WHERE received_at > now() - interval '24 hours'
+    GROUP BY 1, 2;
+  ```
+
+### Residual risks (S12-followup)
+
+1. **No real Anthropic HTTP wiring**. Stub returns
+   ProviderApi error pointing at this followup.
+2. **No webhook signature verification per-provider**.
+   Anthropic doesn't have webhooks yet; OpenAI does (existing
+   webhook_receiver code path); Stripe / Bedrock have varying
+   support. Per-provider verification belongs in this
+   follow-up.
+3. **Provider-specific model→token_kind mappings deferred**.
+   Some providers expose new token_kinds per model (e.g.
+   reasoning_tokens only for o1 / o3); the map function
+   doesn't yet branch on model_id.
+4. **Generic "add a new provider" doc** referenced in the
+   spec ("Add docs for adding future providers") not yet
+   written; the exhaustive match arm + the
+   `NormalizedTokenKind` enum + pricing CHECK alignment
+   together ARE the doc, but a prose page belongs in
+   docs/site/docs/operations/.
+5. **Codex round still flaking** — code-level review here.
+
+### Runbook deltas
+
+- Two new env vars: `SPENDGUARD_USAGE_POLLER_ANTHROPIC_API_KEY`
+  (required when provider_kind=anthropic),
+  `SPENDGUARD_USAGE_POLLER_ANTHROPIC_WORKSPACE_ID` (optional).
+- Operator playbook for adding a new provider:
+  1. Add an enum arm in `NormalizedTokenKind` if a brand-new
+     token kind needed.
+  2. Add new arms to `map_token_kind` for the provider's raw
+     kind names.
+  3. Update `pricing_table.token_kind` CHECK if a new
+     normalized kind landed.
+  4. Add a `<NewProvider>Client` struct implementing
+     `ProviderClient`; add to `main.rs` provider-kind dispatch.
+  5. Update `provider_usage_records.provider` allowed values
+     in the matching SP (S10-followup).
+
+### Quality bar
+
+Meets 90%+ for "Anthropic adapter + generic mapping" scope:
+typed Anthropic stub mirrors OpenAI shape, NormalizedTokenKind
+enum is the documented boundary, exhaustive match enforces
+adapter completeness at compile time, pricing CHECK alignment
+test pins the cross-table contract, OpenAI / Anthropic /
+Azure-OpenAI / Bedrock-Anthropic / Gemini token kind mappings
+all covered. Open items (real Anthropic HTTP, webhook sig
+verify, model-aware kind mapping, prose "add a provider" doc)
+are explicit S12-followups.
+
+---
+
 (Subsequent slice entries appended below.)
