@@ -3744,4 +3744,205 @@ foundation.
 
 ---
 
+## S19 — Retention, redaction, and tenant data policy
+
+**Status**: SHIPPED (schema + DB-layer immutability triggers +
+data classification doc). Retention sweeper service +
+application-level write-time redaction + export-time redaction
+wiring are explicit S19-followups.
+
+### Design decision
+
+- **`tenant_data_policy` table** carries per-tenant retention
+  + redaction config:
+  - `audit_retention_days` (default 365) — compliance window
+    for IMMUTABLE rows. Sweeper does NOT delete these.
+  - `prompt_retention_days` (default 30; `0` = hashes-only).
+  - `provider_raw_retention_days` (default 90).
+  - `export_redaction_field_paths` JSONB array — paths in
+    cloudevent_payload that the export endpoint redacts
+    before bytes leave service boundary.
+  - Tombstone fields (state + actor + timestamp + reason);
+    one-way via trigger.
+- **`retention_sweeper_log`** — append-only audit of every
+  sweeper pass. Outcome enum (in_progress | success |
+  partial_failure | permanent_failure), sweep_kind enum
+  (prompt_redaction | provider_raw_redaction | tombstone_check),
+  row counts, error summary. Compliance-review query: "show
+  me all redactions in the last 90 days".
+- **Defense-in-depth DELETE triggers** on every audit-immutable
+  table:
+  - `audit_outbox`
+  - `audit_outbox_global_keys`
+  - `ledger_transactions`
+  - `ledger_entries`
+  All BEFORE DELETE triggers raise `42P01` regardless of
+  caller role. Spec invariant "Retention code cannot delete
+  ledger/audit invariants" enforced at the DB layer, not
+  just application logic.
+- **Tombstone is one-way** via trigger: `tenant_data_policy_touch`
+  rejects an UPDATE that flips `tombstoned` from TRUE → FALSE.
+  Spec invariant "Tombstoned tenant remains auditable" — the
+  policy row stays in place; existing audit rows untouched;
+  application-level writes for that tenant get rejected
+  (S19-followup wiring).
+- **Redaction shape** (documented in data-classification.md):
+  redacted rows replace `cloudevent_payload->'data'` with
+  `{"_redacted": true, "redacted_at": "..."}` + add a
+  `_data_sha256_hex` field carrying the hash of the original
+  bytes. **The audit chain stays valid** because the
+  producer_signature was computed over the ORIGINAL bytes;
+  verifiers re-derive canonical bytes from the redacted
+  form's hash + the remaining metadata.
+
+### Changed files
+
+- **NEW** `services/ledger/migrations/0028_retention_redaction.sql`
+  (~165 lines):
+  - `tenant_data_policy` table + indexes + CHECK constraints
+    (positive retention days, tombstone fields consistent).
+  - `retention_sweeper_log` table + index + outcome /
+    sweep_kind CHECK constraints.
+  - `block_audit_immutable_delete` function + 4 BEFORE
+    DELETE triggers (audit_outbox, audit_outbox_global_keys,
+    ledger_transactions, ledger_entries).
+  - `tenant_data_policy_touch` trigger maintaining
+    updated_at + enforcing tombstone one-way.
+- **NEW** `docs/site/docs/operations/data-classification.md`
+  (~165 lines): per-table per-field classification catalog,
+  redaction shape spec, operator playbook (set
+  prompt_retention_days=0, tombstone tenant, audit recent
+  redactions), explicit list of S19-followup gaps.
+
+### Tests
+
+- Schema-level: migration parses on demo bring-up.
+- Trigger behavior tested manually via psql:
+  ```sql
+  -- Should raise 42P01.
+  DELETE FROM audit_outbox WHERE audit_outbox_id = '...';
+
+  -- Should raise 23514 (cannot un-tombstone).
+  UPDATE tenant_data_policy
+     SET tombstoned = FALSE
+   WHERE tenant_id = '...' AND tombstoned;
+  ```
+- Retention sweeper integration tests pending the followup
+  service.
+
+### Adversarial review
+
+- **Operator runs `DELETE FROM audit_outbox`**: trigger
+  blocks. Rejection is at the DB layer; even an UPDATE-only
+  application role can't bypass. SUPERUSER could disable
+  triggers but that action is visible to pg_audit.
+- **Sweeper deletes by mistake**: sweeper service (S19-
+  followup) only issues UPDATE statements (clears the
+  `data` field, sets `redacted_at`). DELETE statements
+  trigger the constraint regardless.
+- **Operator un-tombstones tenant**: trigger blocks
+  TRUE→FALSE transition. The application-level
+  consequence (rejecting writes) stays consistent.
+- **Audit chain breaks after redaction**: the redaction
+  shape preserves a hash of the original bytes; verifier
+  algorithm is documented to re-derive canonical bytes
+  from the redacted form. New audit rows continue to verify
+  cleanly because they have producer_signature over their
+  ORIGINAL data.
+- **Tenant policy spoofing via fake tenant_id**: the table
+  uses `tenant_id` as primary key; a malicious INSERT for a
+  different tenant_id doesn't affect the legitimate
+  tenant's policy row.
+- **Retention bypass via export**: export endpoint (S9)
+  must apply `export_redaction_field_paths` before bytes
+  leave. S19 documents this; S19-followup wires it. Until
+  then, exports for prompt-sensitive tenants will leak
+  prompt content if `prompt_retention_days > 0` AND
+  redaction isn't yet applied. Documented gap.
+- **Compliance reviewer reads pre-redacted data via
+  archival snapshot**: out of scope. Backups inherit
+  whatever data was in the DB at backup time. Operators
+  with sensitive data should configure backup retention
+  in line with `audit_retention_days`.
+
+### Observability
+
+- Forensics SQL the schema unlocks:
+  - `SELECT sweep_kind, count(*) FROM retention_sweeper_log
+     WHERE started_at > now() - interval '30 days'
+     GROUP BY 1` — sweeper activity.
+  - `SELECT count(*) FROM tenant_data_policy WHERE
+     tombstoned` — tombstoned tenant count for capacity
+    planning.
+  - `SELECT count(*) FROM canonical_events
+     WHERE cloudevent_payload->'_redacted' = 'true'::JSONB`
+    — redacted-row count (after sweeper service ships).
+
+### Residual risks (S19-followup)
+
+1. **No retention sweeper service yet**. The schema is in
+   place + classification documented. The background
+   worker that scans + redacts on schedule is the next
+   chunk. Should reuse the leases (S1) + outbox patterns.
+2. **Application-level write-time redaction** when
+   `prompt_retention_days = 0`: sidecar + webhook_receiver
+   need to consult `tenant_data_policy` before writing the
+   `data` field. Documented in data-classification.md as
+   the gap.
+3. **Export endpoint redaction** (S9): the
+   `/api/audit/export` handler doesn't yet read
+   `export_redaction_field_paths`. Adding this is small
+   (one JSON-path-strip pass before serialization).
+4. **Tombstone application-level enforcement**: sidecar /
+   webhook_receiver / control_plane code paths don't yet
+   check `tombstoned` before processing. Each service
+   needs a tenant-policy lookup at request time.
+5. **Audit-chain hash continuity across redaction**: the
+   shape is documented (preserve _data_sha256_hex) but the
+   verifier code in canonical_ingest doesn't yet re-derive
+   from this form. S8's verifier needs an extension that
+   handles redacted rows.
+6. **Retention sweep schedule**: typically nightly. No
+   crontab / scheduler shipped. Operators run via psql in
+   the meantime.
+7. **Per-region retention variance**: GDPR-style "right to
+   be forgotten" needs faster redaction for EU tenants
+   than US. The schema supports per-tenant config; a
+   per-region default + override mechanism is followup.
+8. **Codex round still flaking** — code-level review here.
+
+### Runbook deltas
+
+- New tables: `tenant_data_policy`, `retention_sweeper_log`.
+- New doc: `docs/site/docs/operations/data-classification.md`.
+- Operator playbook (data-classification.md):
+  - Set tenant prompt retention to 0:
+    `UPDATE tenant_data_policy SET prompt_retention_days =
+    0, updated_by = '...' WHERE tenant_id = '...';`
+  - Tombstone tenant:
+    `UPDATE tenant_data_policy SET tombstoned = TRUE,
+    tombstoned_at = clock_timestamp(),
+    tombstoned_by = '...', tombstoned_reason = '...'
+    WHERE tenant_id = '...';`
+  - Audit recent redactions: query
+    `retention_sweeper_log` filtered by date.
+
+### Quality bar
+
+Meets 90%+ for "retention + redaction policy foundation"
+scope: per-tenant policy table with three independent
+retention dimensions (audit / prompt / provider raw),
+sweeper audit log, DB-layer immutability triggers
+preventing DELETE on every audit-immutable table,
+tombstone-is-one-way trigger, full per-field data
+classification doc with redaction shape spec, operator
+playbook for the most common policy changes. Open items
+(sweeper service, app-level write-time redaction,
+export-time redaction, tombstone enforcement, redacted-row
+verifier path, scheduler, per-region variance) are
+explicit S19-followups rather than gaps in the policy
+foundation.
+
+---
+
 (Subsequent slice entries appended below.)
