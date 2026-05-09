@@ -70,6 +70,14 @@ sidecar:
   # Override workloadInstanceIdOverride for non-k8s deployments.
   replicas: 1
   workloadInstanceIdOverride: ""
+  # Phase 5 S5: explicit acknowledgement that the operator understands
+  # multi-pod sidecar semantics (active/standby model, NOT horizontal
+  # scaling — each pod calls Ledger.AcquireFencingLease at startup;
+  # only one wins, the rest fail-closed waiting for takeover).
+  # Helm template REJECTS replicas > 1 without this flag. Read the
+  # multi-pod runbook in docs/runbooks/sidecar-multi-pod.md before
+  # flipping this.
+  acknowledgeMultiPod: false
   image:
     repository: spendguard/sidecar
     tag: "0.1.0-alpha.1"
