@@ -67,6 +67,11 @@ spec:
             {{- else if eq .Values.signing.mode "kms" }}
             - { name: SPENDGUARD_SIDECAR_SIGNING_KMS_ARN,            value: {{ .Values.signing.kms.sidecarArn | quote }} }
             {{- end }}
+            # Phase 5 GA hardening S22: fail-policy matrix (defaults
+            # to fail-closed everywhere when overrides string is empty).
+            {{- if .Values.failPolicy.overrides }}
+            - { name: SPENDGUARD_SIDECAR_FAIL_POLICY_JSON,           value: {{ .Values.failPolicy.overrides | quote }} }
+            {{- end }}
           volumeMounts:
             - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
             - { name: bundles, mountPath: /var/lib/spendguard/bundles, readOnly: true }

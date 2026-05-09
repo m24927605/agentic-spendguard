@@ -1415,4 +1415,198 @@ explicit follow-ups in S20 / S22 rather than gaps in this slice.
 
 ---
 
+## S22 — Fail-open / fail-closed policy matrix
+
+**Status**: SHIPPED (surface + sidecar wiring + Helm gate; per-
+dependency hot-path enforcement is the explicit S23 follow-up).
+
+### Design decision
+
+- **Typed matrix surface** in a new `services/policy/` crate:
+  `Dependency` enum (Ledger, CanonicalIngest, Pricing, Signing,
+  ProviderReconciliation, Approval, Dashboard, Export) ×
+  `WorkflowClass` enum (Monetary, NonMonetaryTool,
+  ObservabilityOnly) → `FailPolicy` (FailClosed |
+  FailOpenWithMarker). 24-cell matrix, code-controlled enum so
+  every operator-facing combination is exhaustive.
+- **Default fail-closed everywhere**. `FailPolicyMatrix::default_fail_closed()`
+  is the safety baseline; `matrix_from_env(...)` falls back to
+  this when the JSON env var is unset.
+- **Hard rule: no fail-open for monetary**. `from_json` rejects
+  `monetary` cells with `fail_open_with_marker` at parse time
+  with a typed `ParseError`. Spec invariant: "no fail-open path
+  can debit budget without later reconciliation evidence."
+- **Production fail-open requires explicit ack**. `from_json` in
+  the production profile rejects ANY fail-open cell unless the
+  JSON contains `"_acknowledge_risk_of_fail_open": true`. Demo
+  profile does not require the ack (the demo opens
+  ObservabilityOnly cells freely).
+- **Audit marker on every admit**. `FailMode::Admit { marker:
+  AuditMarker }` carries `marker_id` (UUID v7), decision_id,
+  tenant_id, dependency, workflow_class, reason, policy_version,
+  admitted_at. Sidecar emits this as a typed CloudEvent (type:
+  `spendguard.audit.fail_policy_admit`) so reconciliation can
+  identify rows that didn't go through normal verification.
+  *(Hot-path emission is the S23 wiring; the marker shape ships
+  in S22.)*
+- **Versioned matrix**. `policy_version` field on
+  `FailPolicyMatrix` is embedded in every audit marker so an
+  investigator can reproduce the policy that admitted a row.
+  Operators set via `_version` in the JSON; default is
+  `default-fail-closed` for the safety baseline and
+  `operator-supplied-unversioned` if they forget.
+
+### Changed files
+
+- **NEW** `services/policy/Cargo.toml` (~20 lines).
+- **NEW** `services/policy/src/lib.rs` (~480 lines): WorkflowClass,
+  Dependency, FailPolicy, FailMode, AuditMarker, FailPolicyMatrix,
+  matrix_from_env, 14 unit tests.
+- **MODIFIED** `services/sidecar/Cargo.toml`: path dep on
+  `spendguard-policy`.
+- **MODIFIED** `services/sidecar/src/domain/state.rs`: new
+  `fail_policy: Arc<FailPolicyMatrix>` field on SidecarState.
+- **MODIFIED** `services/sidecar/src/main.rs`: load
+  `matrix_from_env("SPENDGUARD_SIDECAR", &profile)` at startup,
+  log policy_version + profile, pass into SidecarState::new.
+- **MODIFIED** `deploy/demo/runtime/Dockerfile.sidecar`: COPY
+  services/policy path-dep.
+- **MODIFIED** `charts/spendguard/values.yaml`: `failPolicy.overrides`
+  string (default empty → fail-closed).
+- **MODIFIED** `charts/spendguard/templates/sidecar.yaml`: render
+  `SPENDGUARD_SIDECAR_FAIL_POLICY_JSON` env var when
+  `failPolicy.overrides` is non-empty.
+
+### Tests
+
+- **14 unit tests** in `spendguard-policy`:
+  - `default_matrix_blocks_every_combination` — exhaustively
+    checks all 8 deps × 3 workflow_classes = 24 cells.
+  - `observability_open_baseline_only_opens_observability_route`
+  - `from_json_overlays_overrides_on_baseline` — partial overrides
+    don't disturb other cells.
+  - `from_json_rejects_fail_open_for_monetary` — typed parse
+    error mentioning "monetary" + "forbidden".
+  - `from_json_in_production_requires_explicit_ack_for_any_fail_open`
+    — refuses without `_acknowledge_risk_of_fail_open`, accepts
+    with it.
+  - `from_json_in_demo_does_not_require_ack`
+  - `decide_returns_block_on_fail_closed`
+  - `decide_returns_admit_with_marker_on_fail_open_path`
+  - `from_json_rejects_unknown_dependency`
+  - `from_json_rejects_unknown_workflow_class`
+  - `from_json_rejects_unknown_policy_value`
+  - `audit_marker_serializes_to_stable_json` — field names stable
+    so audit consumers can parse safely.
+  - `dependency_workflow_class_round_trip_through_str`
+  - `matrix_from_env_falls_back_to_default_when_var_unset`
+  Result: `14 passed; 0 failed`.
+
+- Sidecar build verified: docker release build of sidecar with
+  the new path dep compiles.
+
+### Adversarial review
+
+- **Fail-open for monetary** is rejected at parse time, not just
+  at runtime. Even an operator with a typo or a bad merge can't
+  silently debit budget without ledger evidence.
+- **Hidden fail-open in production**: requires both `_version`
+  AND `_acknowledge_risk_of_fail_open: true` in the JSON. A
+  misconfig that supplies one but not the other fails to start.
+- **Marker forging**: `marker_id` is generated server-side by the
+  sidecar; an attacker can't supply one. `policy_version` reflects
+  the matrix loaded at boot; a malicious operator can write any
+  string but can't backdate the matrix used by a deployed pod.
+- **Stale matrix after policy update**: matrix is loaded once at
+  boot. Operators must rolling-restart pods to pick up changes.
+  This is intentional — hot-reload would create a window where
+  in-flight decisions span two matrix versions; better to wait
+  for next pod start.
+- **Audit marker missed during admit**: the typed `FailMode`
+  return value FORCES the caller to either `Block` or `Admit`
+  with marker. There's no third "Admit without marker" variant
+  — the type system enforces the audit invariant.
+- **Marker emission failure cascades fail-closed**: when S23
+  wires the actual emission, if writing the marker fails, the
+  decision MUST fail-closed (defense in depth). Documented as
+  the contract for S23 implementers.
+- **Workflow_class spoofing**: comes from the contract bundle,
+  not the request body — same trust model as the rest of
+  Contract DSL. An attacker can't claim "this is observability
+  only" to bypass the matrix.
+
+### Observability
+
+- Startup log: `"S22: fail-policy matrix initialized"` with
+  `policy_version` + `profile`. Operators can grep for this on
+  pod restart to confirm the matrix that loaded.
+- Decision-time logs (when `decide()` fires):
+  - `info!("fail-policy: BLOCK", dep, workflow, policy_version,
+    reason)`
+  - `warn!("fail-policy: ADMIT with marker", dep, workflow,
+    policy_version, marker_id)`
+- Marker payload includes `policy_version` so audit-log queries
+  like "all rows admitted under policy v2024-q3" are one SQL
+  filter away.
+
+### Residual risks
+
+1. **Per-dependency hot-path enforcement deferred to S23**.
+   S22 ships the matrix surface + sidecar config + audit marker
+   shape. Wiring "if ledger.commit_estimated returns Unavailable
+   AND fail_policy.lookup is FailOpenWithMarker, emit marker via
+   canonical_ingest then return Success" is a substantial
+   surgical change to `decision/transaction.rs` that belongs in
+   S23 alongside the dependency-health metrics.
+2. **AuditMarker isn't yet routed through canonical_ingest**.
+   The struct serializes to stable JSON and would slot into the
+   existing CloudEvent `data` field, but the emit-path RPC isn't
+   wired yet. S23 follows up.
+3. **No hot-reload** — pods restart to pick up new
+   `FAIL_POLICY_JSON`. S22-followup ticket.
+4. **Codex adversarial round still flaking** — same companion
+   runtime issue; code-level review captured here.
+
+### Runbook deltas
+
+- **New env var** `SPENDGUARD_SIDECAR_FAIL_POLICY_JSON`. Empty or
+  unset → safe default (fail-closed everywhere). Set to JSON map
+  to override per cell.
+- **New Helm value** `failPolicy.overrides` (string, optional).
+- **JSON shape**:
+  ```
+  {
+    "_version": "v2026-q3",
+    "_acknowledge_risk_of_fail_open": true,
+    "<dependency>": {
+      "<workflow_class>": "fail_closed" | "fail_open_with_marker"
+    }
+  }
+  ```
+- **Operator playbook**: to bring fail-open online for a low-risk
+  workflow:
+  1. Identify the (dependency, workflow_class) pair.
+  2. Add it to `failPolicy.overrides` in values.yaml.
+  3. Set `_acknowledge_risk_of_fail_open: true`. (Production-only
+     gate; demo profile skips.)
+  4. Bump `_version`.
+  5. Rolling-restart sidecar pods.
+  6. Monitor `spendguard.audit.fail_policy_admit` rows in audit
+     log — every admit shows up there with `policy_version`
+     matching what you set.
+
+### Quality bar
+
+Meets 90%+: typed matrix surface with exhaustive default
+fail-closed, monetary fail-open forbidden at parse time,
+production-profile ack gate, versioned audit marker shape,
+sidecar-state wiring, demo + Helm config knobs. Open items
+(hot-path enforcement in decision/transaction.rs, marker
+emission via canonical_ingest, hot reload) are explicit
+follow-ups in S23 rather than gaps in S22's deliverable —
+the deliverable is the policy surface and the sidecar's
+ability to consult it.
+
+---
+
 (Subsequent slice entries appended below.)

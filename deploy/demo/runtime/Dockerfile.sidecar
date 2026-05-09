@@ -11,6 +11,8 @@ COPY proto ./proto
 RUN ln -sf /usr/include/google ./proto/google
 # Phase 5 GA hardening S6: signing path-dep crate.
 COPY services/signing ./services/signing
+# Phase 5 GA hardening S22: fail-policy path-dep crate.
+COPY services/policy ./services/policy
 COPY services/sidecar ./services/sidecar
 WORKDIR /build/services/sidecar
 RUN cargo build --release --bin spendguard-sidecar

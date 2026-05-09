@@ -95,6 +95,22 @@ async fn main() -> Result<()> {
         "S6: producer signer initialized"
     );
 
+    // Phase 5 GA hardening S22: fail-open / fail-closed policy matrix.
+    // Defaults to fail-closed everywhere when no env override is
+    // configured. Production profile additionally rejects fail-open
+    // overrides without an explicit `_acknowledge_risk_of_fail_open`
+    // flag in the JSON.
+    let profile = std::env::var("SPENDGUARD_PROFILE").unwrap_or_default();
+    let fail_policy = std::sync::Arc::new(
+        spendguard_policy::matrix_from_env("SPENDGUARD_SIDECAR", &profile)
+            .context("S22: build fail-policy matrix")?,
+    );
+    info!(
+        policy_version = %fail_policy.policy_version,
+        profile = %profile,
+        "S22: fail-policy matrix initialized"
+    );
+
     // Keep a separate handle to `ledger` for the fencing-lease loop below
     // (S4): SidecarState owns one copy, the lease acquire/renewer holds
     // another. LedgerClient wraps Arc<LedgerProtoClient<Channel>>, so the
@@ -107,6 +123,7 @@ async fn main() -> Result<()> {
         producer_sequence_start,
         cfg.reservation_ttl_seconds,
         signer,
+        fail_policy,
     );
 
     // 2b) Install pre-pulled bundles from disk (Helm init container loads
