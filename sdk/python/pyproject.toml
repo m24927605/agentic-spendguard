@@ -3,9 +3,10 @@ requires = ["hatchling>=1.21"]
 build-backend = "hatchling.build"
 
 [project]
-name = "spendguard-pydantic-ai"
+name = "spendguard-sdk"
 version = "0.1.0a1"
-description = "SpendGuard Pydantic-AI adapter — L3 UsageLimits hooks via sidecar UDS gRPC."
+description = "SpendGuard SDK — runtime safety layer client for AI agent frameworks (Pydantic-AI, LangChain, LangGraph, OpenAI Agents SDK)."
+readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [
@@ -18,32 +19,54 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "License :: OSI Approved :: Apache Software License",
   "Topic :: Software Development :: Libraries",
+  "Development Status :: 3 - Alpha",
+  "Operating System :: POSIX :: Linux",
+  "Operating System :: MacOS",
 ]
 
+# Core deps: the SpendGuardClient + proto stubs only. Framework deps
+# are gated behind extras so a user who only writes raw OpenAI SDK code
+# doesn't pull in pydantic-ai / langchain / etc.
 dependencies = [
   "grpcio>=1.62",
   "protobuf>=4.25,<6",
   "pydantic>=2.6",
-  "pydantic-ai>=0.0.20",
 ]
 
 [project.optional-dependencies]
+pydantic-ai = [
+  "pydantic-ai>=0.0.20,<0.1.0",
+]
+langchain = [
+  "langchain-core>=0.3",
+  "langchain>=0.3",
+]
+langgraph = [
+  "langchain-core>=0.3",
+  "langgraph>=0.2",
+]
+openai-agents = [
+  "openai-agents>=0.0.7",
+]
 dev = [
   "grpcio-tools>=1.62",
   "pytest>=8",
   "pytest-asyncio>=0.23",
   "ruff>=0.5",
   "mypy>=1.10",
+  "build>=1.2",
+  "twine>=5",
 ]
 
 [project.urls]
-"Homepage" = "https://github.com/spendguard/spendguard"
+Homepage = "https://github.com/m24927605/agentic-flow-cost-evaluation"
+Repository = "https://github.com/m24927605/agentic-flow-cost-evaluation"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/spendguard_pydantic_ai"]
+packages = ["src/spendguard"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"src/spendguard_pydantic_ai/_proto" = "spendguard_pydantic_ai/_proto"
+"src/spendguard/_proto" = "spendguard/_proto"
 
 [tool.ruff]
 line-length = 100

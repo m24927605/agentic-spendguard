@@ -1,7 +1,7 @@
-# Demo container: builds the spendguard-pydantic-ai adapter from source,
+# Demo container: builds the spendguard-sdk Python package from source,
 # generates Python proto stubs from the workspace `proto/` tree, and
 # drops in the demo runner script. The runner connects to the sidecar
-# via UDS and exercises the gated Pydantic-AI Agent flow with a Mock LLM.
+# via UDS and exercises the gated Pydantic-AI Agent flow.
 
 FROM python:3.12-slim
 
@@ -10,7 +10,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install adapter dev deps (grpcio-tools is needed for `make proto`).
-# httpx added for Step 11 webhook receiver client.
+# Anthropic SDK added for DEMO_MODE=agent_real_anthropic; httpx for the
+# webhook simulator path.
 RUN pip install --no-cache-dir \
     "grpcio>=1.62" \
     "grpcio-tools>=1.62" \
@@ -21,15 +22,16 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /build
 COPY proto ./proto
-COPY adapters/pydantic-ai ./adapters/pydantic-ai
+COPY sdk/python ./sdk/python
 
-# Generate the proto stubs (writes under
-# adapters/pydantic-ai/src/spendguard_pydantic_ai/_proto/).
-WORKDIR /build/adapters/pydantic-ai
+# Generate the proto stubs (writes under sdk/python/src/spendguard/_proto/).
+WORKDIR /build/sdk/python
 RUN make proto
 
-# Install the adapter into site-packages so the demo runner can import.
-RUN pip install --no-cache-dir .
+# Install the SDK with the [pydantic-ai] extra so the demo runner can
+# import spendguard.integrations.pydantic_ai. (LangChain / OpenAI Agents
+# extras are added when those demo modes ship.)
+RUN pip install --no-cache-dir '.[pydantic-ai]'
 
 # Copy the demo runner + entrypoint that sources bundles runtime.env.
 COPY deploy/demo/demo/run_demo.py /usr/local/bin/run_demo.py

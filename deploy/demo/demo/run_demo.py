@@ -118,12 +118,12 @@ class MockLLM:
 
 
 async def run_decision_mode(also_invoice: bool = False) -> int:
-    from spendguard_pydantic_ai import (
+    from spendguard import (
         SpendGuardClient,
         derive_idempotency_key,
         new_uuid7,
     )
-    from spendguard_pydantic_ai._proto.spendguard.common.v1 import common_pb2
+    from spendguard._proto.spendguard.common.v1 import common_pb2
 
     socket_path = _env("SPENDGUARD_SIDECAR_UDS")
     tenant_id = _env("SPENDGUARD_TENANT_ID")
@@ -444,14 +444,13 @@ async def run_agent_mode(
 ) -> int:
     from pydantic_ai import Agent
 
-    from spendguard_pydantic_ai import (
+    from spendguard import SpendGuardClient, new_uuid7
+    from spendguard.integrations.pydantic_ai import (
         RunContext,
-        SpendGuardClient,
         SpendGuardModel,
-        new_uuid7,
         run_context,
     )
-    from spendguard_pydantic_ai._proto.spendguard.common.v1 import common_pb2
+    from spendguard._proto.spendguard.common.v1 import common_pb2
 
     socket_path = _env("SPENDGUARD_SIDECAR_UDS")
     tenant_id = _env("SPENDGUARD_TENANT_ID")
@@ -594,12 +593,12 @@ async def main() -> int:
 
 
 async def run_deny_mode() -> int:
-    from spendguard_pydantic_ai import (
+    from spendguard import (
         SpendGuardClient,
         derive_idempotency_key,
         new_uuid7,
     )
-    from spendguard_pydantic_ai._proto.spendguard.common.v1 import common_pb2
+    from spendguard._proto.spendguard.common.v1 import common_pb2
 
     socket_path = _env("SPENDGUARD_SIDECAR_UDS")
     tenant_id = _env("SPENDGUARD_TENANT_ID")
@@ -667,7 +666,7 @@ async def run_deny_mode() -> int:
     # adapters/pydantic-ai/.../client.py:474). The exception carries
     # decision_id, reason_codes, audit_decision_event_id, and
     # matched_rule_ids — exactly what we want to assert in the wedge demo.
-    from spendguard_pydantic_ai.errors import DecisionStopped
+    from spendguard.errors import DecisionStopped
 
     try:
         outcome = await client.request_decision(
@@ -723,12 +722,12 @@ async def run_deny_mode() -> int:
 
 
 async def run_release_mode() -> int:
-    from spendguard_pydantic_ai import (
+    from spendguard import (
         SpendGuardClient,
         derive_idempotency_key,
         new_uuid7,
     )
-    from spendguard_pydantic_ai._proto.spendguard.common.v1 import common_pb2
+    from spendguard._proto.spendguard.common.v1 import common_pb2
 
     socket_path = _env("SPENDGUARD_SIDECAR_UDS")
     tenant_id = _env("SPENDGUARD_TENANT_ID")
@@ -839,12 +838,12 @@ async def run_ttl_sweep_mode() -> int:
     sweeper background worker auto-releases. verify_step_ttl_sweep.sql
     asserts the release happened.
     """
-    from spendguard_pydantic_ai import (
+    from spendguard import (
         SpendGuardClient,
         derive_idempotency_key,
         new_uuid7,
     )
-    from spendguard_pydantic_ai._proto.spendguard.common.v1 import common_pb2
+    from spendguard._proto.spendguard.common.v1 import common_pb2
 
     socket_path = _env("SPENDGUARD_SIDECAR_UDS")
     tenant_id = _env("SPENDGUARD_TENANT_ID")

@@ -37,15 +37,15 @@ logger = logging.getLogger(__name__)
 # Generated proto stubs — produced by `make proto`. Importing here gives a
 # clear error at module load if the build step was skipped.
 try:
-    from spendguard_pydantic_ai._proto.spendguard.common.v1 import common_pb2
-    from spendguard_pydantic_ai._proto.spendguard.sidecar_adapter.v1 import (
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+    from spendguard._proto.spendguard.sidecar_adapter.v1 import (
         adapter_pb2,
         adapter_pb2_grpc,
     )
 except ImportError as exc:  # pragma: no cover — build configuration error
     raise ImportError(
-        "spendguard_pydantic_ai proto stubs missing. "
-        "Run `make proto` from adapters/pydantic-ai/ first."
+        "spendguard proto stubs missing. "
+        "Run `make proto` from sdk/python/ first."
     ) from exc
 
 from .errors import (

@@ -58,20 +58,20 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 try:
-    from spendguard_pydantic_ai._proto.spendguard.common.v1 import common_pb2
+    from spendguard._proto.spendguard.common.v1 import common_pb2
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
-        "spendguard_pydantic_ai proto stubs missing. Run `make proto` first."
+        "spendguard proto stubs missing. Run `make proto` first."
     ) from exc
 
-from .client import DecisionOutcome, SpendGuardClient
-from .errors import (
+from ..client import DecisionOutcome, SpendGuardClient
+from ..errors import (
     DecisionDenied,
     DecisionSkipped,
     MutationApplyFailed,
     SpendGuardError,
 )
-from .ids import default_call_signature, derive_idempotency_key, derive_uuid_from_signature
+from ..ids import default_call_signature, derive_idempotency_key, derive_uuid_from_signature
 
 # Pydantic-AI's Agent.__init__ does an isinstance(model, Model) check via
 # `models.infer_model`; a duck-typed wrapper falls through and pydantic-ai
@@ -79,7 +79,13 @@ from .ids import default_call_signature, derive_idempotency_key, derive_uuid_fro
 # base class — making `pydantic_ai` a hard runtime dep of this module.
 # (The proto/UDS client modules are unaffected and still importable
 # without pydantic-ai installed.)
-from pydantic_ai.models import Model as _PydanticAIModel
+try:
+    from pydantic_ai.models import Model as _PydanticAIModel
+except ImportError as exc:  # pragma: no cover
+    raise ImportError(
+        "spendguard.integrations.pydantic_ai requires the [pydantic-ai] "
+        "extra. Install with: pip install 'spendguard-sdk[pydantic-ai]'"
+    ) from exc
 
 if TYPE_CHECKING:
     from pydantic_ai.messages import ModelMessage, ModelResponse
@@ -111,7 +117,7 @@ class RunContext:
 
 
 _RUN_CONTEXT: contextvars.ContextVar[RunContext | None] = contextvars.ContextVar(
-    "spendguard_pydantic_ai_run_context", default=None
+    "spendguard_run_context", default=None
 )
 
 
