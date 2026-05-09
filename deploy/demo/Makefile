@@ -24,8 +24,9 @@ demo-build:
 
 demo-up:
 	$(COMPOSE) up -d --build \
-	    postgres pki-init bundles-init manifest-init endpoint-catalog \
-	    ledger canonical-ingest sidecar webhook-receiver ttl-sweeper
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    ttl-sweeper outbox-forwarder
 	@echo "[demo] core services up; running demo container (DEMO_MODE=$(DEMO_MODE))..."
 	$(COMPOSE) run --rm \
 	    --env SPENDGUARD_DEMO_MODE=$(DEMO_MODE) \
@@ -46,6 +47,9 @@ else
 	@echo "[demo] verifying Phase 2B Step 7 (agent-mode commit_estimated only)..."
 	@$(MAKE) demo-verify-step7
 endif
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure
 
 # Phase 2B Step 7 verification: 1 reserve + 1 commit_estimated;
 # available=458 / reserved_hold=0 / committed_spend=42. agent-mode runs
@@ -87,7 +91,25 @@ demo-verify-ttl-sweep:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_ttl_sweep.sql
 	@echo "[demo] TTL Sweeper verification done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep
+# Outbox forwarder closure (Phase 2B audit chain loop). After each
+# demo mode, after a 5s drain wait:
+#   - audit_outbox: at least 1 row pending_forward=FALSE (happy path)
+#   - canonical_events (canonical DB): at least 1 row matches
+demo-verify-outbox-closure:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_outbox_closure.sql
+	@echo "[demo] verifying canonical_events table received forwarded events..."
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_count INT; BEGIN \
+		   SELECT COUNT(*) INTO v_count FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001'; \
+		   IF v_count = 0 THEN \
+		     RAISE EXCEPTION 'OUTBOX_FORWARDER_GATE: canonical_events empty; CI never received any forwarded event'; \
+		   END IF; \
+		   RAISE NOTICE 'canonical_events count=%', v_count; \
+		 END; \$$\$$;"
+	@echo "[demo] outbox closure verification done"
+
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

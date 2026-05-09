@@ -76,6 +76,25 @@ services:
       - bundles-data:/bundles
     networks: [spendguard-net]
 
+  canonical-seed-init:
+    image: postgres:16-alpine
+    container_name: spendguard-canonical-seed-init
+    environment:
+      POSTGRES_HOST: "postgres"
+      POSTGRES_USER: "spendguard"
+      POSTGRES_PASSWORD: "spendguard_demo"
+      SCHEMA_BUNDLE_ID: "22222222-2222-4222-8222-222222222222"
+    volumes:
+      - bundles-data:/var/lib/spendguard/bundles:ro
+      - ./init/canonical_seed/seed_schema_bundle.sh:/seed_schema_bundle.sh:ro
+    entrypoint: ["/bin/sh", "/seed_schema_bundle.sh"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bundles-init:
+        condition: service_completed_successfully
+    networks: [spendguard-net]
+
   manifest-init:
     build:
       context: ./init/manifest
@@ -243,6 +262,37 @@ services:
       retries: 30
       start_period: 10s
 
+    networks: [spendguard-net]
+
+  outbox-forwarder:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.outbox_forwarder
+    container_name: spendguard-outbox-forwarder
+    environment:
+      RUST_LOG:                                                "info,spendguard_outbox_forwarder=debug"
+      SPENDGUARD_OUTBOX_FORWARDER_DATABASE_URL:                "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
+      SPENDGUARD_OUTBOX_FORWARDER_CANONICAL_INGEST_URL:        "https://canonical-ingest:50052"
+      SPENDGUARD_OUTBOX_FORWARDER_TLS_CLIENT_CERT:             "/etc/ssl/spendguard/outbox_forwarder.crt"
+      SPENDGUARD_OUTBOX_FORWARDER_TLS_CLIENT_KEY:              "/etc/ssl/spendguard/outbox_forwarder.key"
+      SPENDGUARD_OUTBOX_FORWARDER_TLS_CA_PEM:                  "/etc/ssl/spendguard/ca.crt"
+      SPENDGUARD_OUTBOX_FORWARDER_WORKLOAD_INSTANCE_ID:        "demo-outbox-forwarder"
+      SPENDGUARD_OUTBOX_FORWARDER_SCHEMA_BUNDLE_ID:            "22222222-2222-4222-8222-222222222222"
+      SPENDGUARD_OUTBOX_FORWARDER_SCHEMA_BUNDLE_HASH_HEX:      "${SPENDGUARD_SCHEMA_BUNDLE_HASH_HEX:-}"
+      SPENDGUARD_OUTBOX_FORWARDER_POLL_INTERVAL_SECONDS:       "2"
+      SPENDGUARD_OUTBOX_FORWARDER_BATCH_SIZE:                  "50"
+    volumes:
+      - pki-data:/etc/ssl/spendguard:ro
+      - bundles-data:/var/lib/spendguard/bundles:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      canonical-ingest:
+        condition: service_started
+      canonical-seed-init:
+        condition: service_completed_successfully
+      pki-init:
+        condition: service_completed_successfully
     networks: [spendguard-net]
 
   ttl-sweeper:

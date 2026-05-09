@@ -1,0 +1,31 @@
+FROM rust:1.88-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY proto ./proto
+RUN ln -sf /usr/include/google ./proto/google
+COPY services/outbox_forwarder ./services/outbox_forwarder
+WORKDIR /build/services/outbox_forwarder
+RUN cargo build --release --bin spendguard-outbox-forwarder
+
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder \
+     /build/services/outbox_forwarder/target/release/spendguard-outbox-forwarder \
+     /usr/local/bin/spendguard-outbox-forwarder
+
+# Entrypoint sources bundles runtime.env (per Codex r2 V2.1) so the
+# schema_bundle_hash matches the one canonical_ingest validates against.
+RUN printf '#!/bin/sh\nset -eu\nif [ -f /var/lib/spendguard/bundles/runtime.env ]; then\n    set -a\n    . /var/lib/spendguard/bundles/runtime.env\n    set +a\nfi\nif [ -z "${SPENDGUARD_OUTBOX_FORWARDER_SCHEMA_BUNDLE_HASH_HEX:-}" ]; then\n    export SPENDGUARD_OUTBOX_FORWARDER_SCHEMA_BUNDLE_HASH_HEX="${SPENDGUARD_SCHEMA_BUNDLE_HASH_HEX:-}"\nfi\nexec /usr/local/bin/spendguard-outbox-forwarder\n' > /usr/local/bin/entrypoint.sh \
+    && chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
