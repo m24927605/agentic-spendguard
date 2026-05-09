@@ -751,4 +751,253 @@ this slice.
 
 ---
 
+## S8 — Strict canonical signature verification
+
+**Status**: SHIPPED. Canonical Ingest now verifies producer signatures
+on every event, rejects/quarantines failures, and exposes Prometheus
+metrics. Strict mode is the default for non-demo profiles.
+
+### Design decision
+
+- **Verifier in the shared signing crate** (`spendguard-signing`):
+  added `Verifier` trait + `LocalEd25519Verifier` (filesystem-backed
+  trust store) + `VerifyFailure` enum + `verifier_from_env()`.
+- **Trust store from a directory of PEM files**. Verifier loads any
+  `.pem` it finds, accepts BOTH PKCS8 private keys and PKCS8 public
+  keys (extracts the public from the private), derives `key_id` from
+  the verifying key bytes (mirrors `LocalEd25519Signer::from_key`).
+  File names are irrelevant — `sidecar.pem`, `ledger.pem`, etc. all
+  work because key_id is content-addressed. This means the same
+  Secret that mounts producer private keys ALSO works as the
+  verifier trust store, simplifying the demo and chart wiring.
+- **Two canonical encodings**, mirroring the producer split from S6:
+  - `proto canonical` — sidecar / webhook_receiver / ttl_sweeper
+    (CloudEvent encoded with `producer_signature` cleared).
+  - `JSON canonical` — ledger's server-minted `InvoiceReconcile`
+    decision row.
+  The verifier picks the right form by `producer_id.starts_with("ledger:")`.
+  Documented in `services/canonical_ingest/src/verifier.rs`. S7 will
+  add a richer per-event canonical_form metadata so the heuristic
+  goes away.
+- **Quarantine table**: new `audit_signature_quarantine` (migration
+  0007) — distinct from the existing `audit_outcome_quarantine` (which
+  holds outcomes awaiting decisions; different semantics). Append-only,
+  CHECK constraint on `reason` IN (`unknown_key`, `invalid_signature`,
+  `pre_s6`, `disabled`, `oversized_canonical`, `schema_failure`).
+  Stores claimed_canonical_bytes (capped at 1 MiB) so a future
+  re-verifier can re-derive truth from the quarantine row alone.
+- **Triage matrix** in `verify_or_handle`:
+  | VerifyFailure | strict mode  | non-strict mode  |
+  |---------------|--------------|------------------|
+  | UnknownKey    | quarantine   | quarantine       |
+  | InvalidSignature | quarantine | quarantine     |
+  | PreS6         | quarantine   | admit + counter  |
+  | Disabled      | quarantine   | admit + counter  |
+  Strict-mode unknown_key + invalid_signature both write the
+  quarantine row AND bump separate metrics; non-strict pre_s6 +
+  disabled admit but bump the dedicated counters so operators can
+  see the legacy tail draining without inspecting log lines.
+- **Strict mode + Helm fail-gate**: `signing.strictVerification=true`
+  is the default. Helm template REJECTS
+  `signing.profile=production` + `signing.strictVerification=false`.
+  Demo profile may set it to false explicitly. Tested via
+  `helm template`.
+- **Metrics surface**: 11 Prometheus counters across
+  `events_accepted{route}`, `events_rejected_invalid_signature{route}`,
+  `events_quarantined{reason}`, `events_pre_s6_admitted`,
+  `events_disabled_admitted`. Rendered by hand-rolled text formatter
+  to keep the dependency tree lean (no `prometheus` crate).
+  Endpoint: `:9091/metrics` by default; configurable via
+  `SPENDGUARD_CANONICAL_INGEST_METRICS_ADDR`.
+
+### Changed files
+
+- **MODIFIED** `services/signing/src/lib.rs`: +200 lines for Verifier
+  trait, LocalEd25519Verifier, VerifyFailure enum, `verifier_from_env`,
+  9 new unit tests.
+- **NEW** `services/canonical_ingest/migrations/0007_audit_signature_quarantine.sql`
+  (~85 lines): table + 4 indexes + size CHECK.
+- **NEW** `services/canonical_ingest/src/metrics.rs` (~225 lines):
+  IngestMetrics + Prometheus text renderer + 4 unit tests.
+- **NEW** `services/canonical_ingest/src/verifier.rs` (~205 lines):
+  `verify_cloudevent`, `canonical_bytes` (proto + JSON forms), 4
+  unit tests.
+- **NEW** `services/canonical_ingest/src/persistence/signature_quarantine.rs`
+  (~75 lines): INSERT helper.
+- **MODIFIED** `services/canonical_ingest/src/lib.rs`: pub modules
+  `metrics` + `verifier`.
+- **MODIFIED** `services/canonical_ingest/src/persistence/mod.rs`:
+  pub `signature_quarantine`.
+- **MODIFIED** `services/canonical_ingest/src/config.rs`: added
+  `trust_store_dir`, `metrics_addr`; updated docstring on
+  `strict_signatures`.
+- **MODIFIED** `services/canonical_ingest/src/server.rs`: signer +
+  metrics on `CanonicalIngestService`; passed into the handler.
+- **MODIFIED** `services/canonical_ingest/src/handlers/append_events.rs`:
+  - replaced the old "strict mode rejects everything" stub with real
+    verification + quarantine + metrics.
+  - new `verify_or_handle` helper triages each event.
+  - new `write_quarantine` helper persists the failure with
+    debug_info JSONB.
+- **MODIFIED** `services/canonical_ingest/src/main.rs`: trust store
+  load at startup, metrics HTTP server on a separate task, fail-fast
+  if `strict_signatures=true` without a trust store.
+- **MODIFIED** `services/canonical_ingest/Cargo.toml`: path dep on
+  `spendguard-signing`; added `hyper` + `hyper-util` +
+  `http-body-util` for the metrics endpoint.
+- **MODIFIED** `deploy/demo/runtime/Dockerfile.canonical_ingest`:
+  COPY services/signing path-dep.
+- **MODIFIED** `deploy/demo/compose.yaml`: canonical-ingest now runs
+  with `SPENDGUARD_CANONICAL_INGEST_STRICT_SIGNATURES=true` against
+  the demo's signing-keys directory.
+- **MODIFIED** `charts/spendguard/values.yaml`: new
+  `signing.strictVerification: true` default.
+- **MODIFIED** `charts/spendguard/templates/canonical-ingest.yaml`:
+  env vars + trust-store volumeMount + metrics port + Helm
+  `fail` directive when production profile + strictVerification=false.
+
+### Tests
+
+- **9 new unit tests** in `spendguard-signing` covering verifier:
+  - real signature roundtrips through signer + verifier
+  - mutated canonical → InvalidSignature
+  - fabricated key_id → UnknownKey
+  - pre-S6 / empty key_id → PreS6
+  - disabled-mode key_id → Disabled
+  - truncated signature bytes → InvalidSignature
+  - filesystem load (regardless of filename — content-addressed)
+  - non-PEM files skipped
+  - VerifyFailure stringification stable
+- **4 new unit tests** in `canonical_ingest::metrics` covering
+  counter increments + Prometheus text format + thread safety.
+- **4 new unit tests** in `canonical_ingest::verifier`:
+  - proto-canonical roundtrip
+  - JSON-canonical roundtrip (ledger-minted)
+  - cross-form mismatch (proto sig with mutated `producer_id` →
+    InvalidSignature)
+  - canonical bytes invariant (independent of signature bytes)
+- **Helm template tests**:
+  - default render: STRICT_SIGNATURES=true env injected.
+  - `signing.profile=production, strictVerification=false` →
+    rejected.
+  - `signing.profile=demo, strictVerification=false` → renders.
+
+### Adversarial review
+
+- **Attacker re-signs an event with their own key**: verifier
+  rejects because the new key_id isn't in the trust store
+  (`UnknownKey`). Quarantine retains the claimed key_id for
+  forensics.
+- **Attacker forges a CloudEvent with a known producer_id but no
+  signature**: signature_bytes is empty/truncated → `InvalidSignature`
+  (Ed25519 sig parsing fails for non-64-byte inputs).
+- **Attacker mutates the payload after a producer signed it**:
+  canonical bytes differ from what producer signed → `InvalidSignature`.
+- **Attacker mutates `producer_id` from `sidecar:...` to
+  `ledger:...`** to swap canonical form: verifier picks JSON form,
+  re-derives a different digest, rejects (covered by the cross-form
+  unit test).
+- **Strict mode bypass via misconfigured trust store**: if the trust
+  store is empty, EVERY event hits `UnknownKey` and quarantines —
+  fail-closed. Operators see the metric spike + the gRPC errors and
+  fix the trust store. The `key_count() = 0` is also logged at
+  startup.
+- **DoS via giant canonical bytes**: capped at 1 MiB per row in the
+  quarantine CHECK constraint; oversized rows are dropped with a
+  metric instead of bloating the table.
+- **Replay of legitimate signed event**: out of scope for S8 (the
+  canonical_events dedup index by event_id rejects replays). S8
+  doesn't touch the dedup path; quarantine entry is also dedup-naive
+  (multiple replays will write multiple quarantine rows, which is
+  what operators want for forensics).
+- **Time-of-check vs time-of-write**: verification happens before
+  the canonical_events INSERT in the same gRPC handler. There's no
+  external mutation window. The quarantine write is a separate INSERT
+  but on a separate table that the handler doesn't read back; even
+  if it were to fail, the canonical_events INSERT is gated by the
+  `Some(EventResult)` early return.
+- **Operator turns off strict mode in production**: Helm fail-gate
+  rejects this combination at deploy time. There's also a startup
+  check (`anyhow::bail!` if strict + no trust store).
+- **Pre-S6 admit-without-verify in non-strict mode is a bypass**:
+  Yes — non-strict mode is for demo + bridging legacy data. The
+  metric `events_pre_s6_admitted_total` exposes the count so
+  operators flip strict ON when the counter stops growing.
+- **Schema bundle attack**: bundle existence + hash already verified
+  by existing schema_bundle::lookup before any per-event verification.
+  S8 doesn't change this — it adds a layer downstream.
+
+### Observability
+
+- New startup logs:
+  - `"S8: trust store loaded"` with `dir`, `keys` count.
+  - `"S8: no trust store configured; signature verification disabled"`
+    when non-strict + no dir.
+- New per-event logs (warn): `"audit_signature_quarantine insert failed"`
+  if the quarantine write itself errors (rare).
+- New 11 counters at `:9091/metrics`:
+  - `spendguard_ingest_events_accepted_total{route}`
+  - `spendguard_ingest_events_rejected_invalid_signature_total{route}`
+  - `spendguard_ingest_events_quarantined_total{reason}` × 6 reasons
+  - `spendguard_ingest_events_pre_s6_admitted_total`
+  - `spendguard_ingest_events_disabled_admitted_total`
+- Forensic SQL the slice unlocks:
+  - `SELECT reason, count(*) FROM audit_signature_quarantine
+    GROUP BY 1` — distribution by failure mode.
+  - `SELECT claimed_signing_key_id, count(*)
+    FROM audit_signature_quarantine
+    WHERE reason = 'unknown_key' GROUP BY 1` — find rotated-but-
+    not-trusted key candidates.
+
+### Residual risks
+
+1. **Producer-id heuristic for canonical form** (`starts_with("ledger:")`).
+   Workable today but fragile. S7 should add a per-event
+   `canonical_form` proto field so the verifier can stop guessing.
+2. **No grant-revocation on quarantine table**. Defense-in-depth would
+   restrict DELETE to a separate forensics role; today we rely on
+   the chart's role bootstrap (which doesn't pin per-table grants
+   yet). Tracked as S8-followup.
+3. **Quarantine reaper not yet implemented**. The table grows
+   unbounded. A separate background job (similar to
+   audit_outcome_quarantine reaper, deferred per S8 spec) should mark
+   rows older than N days as "investigated" and archive to cold
+   storage. Tracked as S8-followup.
+4. **Metrics scrape config** isn't auto-injected into the
+   PodMonitor / ServiceMonitor CRDs. Operators have to configure
+   their Prometheus separately. Will be addressed in S22 (SLO
+   surface).
+5. **Codex adversarial round still flaking** (same companion-runtime
+   issue from S4 + S6). Code-level review captured here.
+
+### Runbook deltas
+
+- **New env vars**: `SPENDGUARD_CANONICAL_INGEST_STRICT_SIGNATURES`
+  (`true` | `false`),
+  `SPENDGUARD_CANONICAL_INGEST_TRUST_STORE_DIR` (path),
+  `SPENDGUARD_CANONICAL_INGEST_METRICS_ADDR` (default `0.0.0.0:9091`).
+- **New Helm value**: `signing.strictVerification` (default `true`).
+- **Operator playbook**: if `events_quarantined_total{reason="unknown_key"}`
+  spikes, check (a) is the producer key in `signing.existingSecret`?
+  (b) was a key rotated without updating the verifier mount? (c) is
+  the trust store directory mounted correctly? — log message
+  `S8: trust store loaded` shows the count of keys recognized at
+  startup.
+- **New table to monitor**:
+  `SELECT count(*), reason FROM audit_signature_quarantine
+   WHERE received_at > now() - interval '1 hour' GROUP BY reason`
+  shows the last-hour failure distribution.
+
+### Quality bar
+
+Meets 90%+: real verification on the hot path, typed quarantine table
+with size cap and reason CHECK, Prometheus metrics for SRE visibility,
+Helm fail-gate at three layers (template, runtime startup, in-band
+gRPC error), comprehensive unit tests across signing crate +
+canonical_ingest. Open items (per-event canonical_form proto field,
+quarantine reaper, monitor injection) are explicit follow-ups in S7
+and S22 rather than gaps in this slice.
+
+---
+
 (Subsequent slice entries appended below.)

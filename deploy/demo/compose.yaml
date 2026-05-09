@@ -220,6 +220,13 @@ services:
       # Required by canonical_ingest config (no default in
       # services/canonical_ingest/src/config.rs).
       SPENDGUARD_CANONICAL_INGEST_INGEST_SHARD_ID: "demo-shard-0"
+      # Phase 5 GA hardening S8: strict signature verification.
+      # Demo runs strict so the demo IS the integration test for
+      # signed-end-to-end. Production sets profile=production +
+      # mounts a real trust store (Helm template).
+      SPENDGUARD_CANONICAL_INGEST_STRICT_SIGNATURES: "true"
+      SPENDGUARD_CANONICAL_INGEST_TRUST_STORE_DIR:   "/etc/ssl/spendguard/signing"
+      SPENDGUARD_CANONICAL_INGEST_METRICS_ADDR:      "0.0.0.0:9091"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:

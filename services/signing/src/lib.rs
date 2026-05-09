@@ -33,9 +33,10 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signer as Ed25519SignerTrait, SigningKey};
+use ed25519_dalek::{Signer as Ed25519SignerTrait, Signature as Ed25519Signature, SigningKey, Verifier as Ed25519VerifierTrait, VerifyingKey};
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 use tracing::{info, warn};
 
@@ -371,6 +372,206 @@ pub fn signer_from_env(prefix: &str) -> Result<Box<dyn Signer>, SignError> {
     }
 }
 
+// ============================================================================
+// Phase 5 GA hardening S8: Verifier trait + LocalEd25519Verifier
+// ============================================================================
+
+/// Reasons a signature can fail verification. The canonical_ingest
+/// quarantine table stores this string verbatim so operators can sort
+/// quarantined rows by failure mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyFailure {
+    /// `signing_key_id` did not match any key in the trust store.
+    UnknownKey,
+    /// Key was found but the signature did not validate against the
+    /// canonical bytes.
+    InvalidSignature,
+    /// `signing_algorithm` is "pre-S6" or empty — row predates S6 and
+    /// cannot be verified. Strict mode rejects; non-strict admits.
+    PreS6,
+    /// `signing_algorithm` is "disabled" — demo-profile row with empty
+    /// signature. Strict mode rejects; non-strict admits.
+    Disabled,
+}
+
+impl VerifyFailure {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            VerifyFailure::UnknownKey => "unknown_key",
+            VerifyFailure::InvalidSignature => "invalid_signature",
+            VerifyFailure::PreS6 => "pre_s6",
+            VerifyFailure::Disabled => "disabled",
+        }
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum VerifyError {
+    #[error("invalid trust store: {0}")]
+    InvalidTrustStore(String),
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Verifier looks up the public key by `signing_key_id` and validates
+/// the canonical bytes against the supplied signature. Returns Ok(())
+/// on match, Err(VerifyFailure) on mismatch / unknown key, Err other
+/// on infrastructure failures.
+pub trait Verifier: Send + Sync {
+    fn verify(
+        &self,
+        signing_key_id: &str,
+        canonical_bytes: &[u8],
+        signature_bytes: &[u8],
+    ) -> Result<(), VerifyFailure>;
+
+    /// Diagnostic: returns the count of registered keys. Useful for the
+    /// canonical_ingest startup log so operators can see "trust store
+    /// has 4 keys loaded".
+    fn key_count(&self) -> usize;
+}
+
+/// File-backed Ed25519 verifier. Loaded at startup from a directory
+/// where each `<key_id-with-colons-replaced>.pem` file holds the PKCS8
+/// **public** key. The key_id-on-disk substitutes `:` with `_` because
+/// most filesystems treat colon as a path separator (POSIX is fine but
+/// macOS HFS+ historically, and tooling commonly assumes no colon).
+///
+/// Naming convention:
+///   * `ed25519:1a2b3c4d5e6f7890` (in CloudEvent.signing_key_id)
+///   * → file `ed25519_1a2b3c4d5e6f7890.pem` (on disk)
+///
+/// This is intentionally simple — S7 will replace it with a registry
+/// table and rotation. S8's filesystem registry is the bootstrap.
+pub struct LocalEd25519Verifier {
+    keys: HashMap<String, VerifyingKey>,
+    /// Directory used for loads; preserved for diagnostics.
+    pub source_dir: PathBuf,
+}
+
+impl LocalEd25519Verifier {
+    /// Construct from a directory of `.pem` files. Each file must hold
+    /// either an Ed25519 PKCS8 PUBLIC key OR an Ed25519 PKCS8 PRIVATE
+    /// key (we extract the public key automatically — convenient for
+    /// demo where the same PEM is mounted to producer and verifier).
+    ///
+    /// Key id is derived from the verifying key bytes (sha256[..16]),
+    /// matching the producer's `LocalEd25519Signer::from_key`. The file
+    /// name is irrelevant to identification — operators can name files
+    /// after the service (`sidecar.pem`) and the verifier still
+    /// resolves `signing_key_id = ed25519:<hex16>` correctly.
+    pub fn from_dir(dir: &Path) -> Result<Self, VerifyError> {
+        use ed25519_dalek::pkcs8::{DecodePrivateKey, DecodePublicKey};
+        let mut keys = HashMap::new();
+        if !dir.exists() {
+            return Err(VerifyError::InvalidTrustStore(format!(
+                "trust store directory does not exist: {}",
+                dir.display()
+            )));
+        }
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("pem") {
+                continue;
+            }
+            let pem = std::fs::read_to_string(&path)?;
+            let verifying = if let Ok(sk) = SigningKey::from_pkcs8_pem(&pem) {
+                sk.verifying_key()
+            } else if let Ok(vk) = VerifyingKey::from_public_key_pem(&pem) {
+                vk
+            } else {
+                warn!(
+                    path = %path.display(),
+                    "trust store: skipping file (not a parseable PKCS8 ed25519 PEM)"
+                );
+                continue;
+            };
+            // Derive key_id matching LocalEd25519Signer::from_key:
+            // `ed25519:<sha256(pubkey_bytes)[..16]>`.
+            let mut hasher = Sha256::new();
+            hasher.update(verifying.to_bytes());
+            let digest = hasher.finalize();
+            let key_id = format!("ed25519:{}", &hex::encode(digest)[..16]);
+            keys.insert(key_id, verifying);
+        }
+        info!(
+            dir = %dir.display(),
+            keys = keys.len(),
+            "trust store loaded"
+        );
+        Ok(Self {
+            keys,
+            source_dir: dir.to_path_buf(),
+        })
+    }
+
+    /// Test-only constructor that takes an in-memory map. Avoids the
+    /// filesystem in unit tests.
+    #[doc(hidden)]
+    pub fn from_keys(keys: HashMap<String, VerifyingKey>) -> Self {
+        Self {
+            keys,
+            source_dir: PathBuf::new(),
+        }
+    }
+}
+
+impl Verifier for LocalEd25519Verifier {
+    fn verify(
+        &self,
+        signing_key_id: &str,
+        canonical_bytes: &[u8],
+        signature_bytes: &[u8],
+    ) -> Result<(), VerifyFailure> {
+        // Triage by signing_algorithm derivable from the key_id prefix
+        // (mirror of migration 0024's CASE expression).
+        if signing_key_id.is_empty() || signing_key_id.starts_with("pre-S6") {
+            return Err(VerifyFailure::PreS6);
+        }
+        if signing_key_id.starts_with("disabled:") {
+            return Err(VerifyFailure::Disabled);
+        }
+
+        let vk = match self.keys.get(signing_key_id) {
+            Some(k) => k,
+            None => return Err(VerifyFailure::UnknownKey),
+        };
+
+        // Mirror of LocalEd25519Signer::sign: the signed bytes are the
+        // SHA-256 digest of canonical_bytes, NOT canonical_bytes itself.
+        let mut hasher = Sha256::new();
+        hasher.update(canonical_bytes);
+        let digest = hasher.finalize();
+
+        let sig = match Ed25519Signature::from_slice(signature_bytes) {
+            Ok(s) => s,
+            Err(_) => return Err(VerifyFailure::InvalidSignature),
+        };
+
+        match vk.verify(&digest, &sig) {
+            Ok(()) => Ok(()),
+            Err(_) => Err(VerifyFailure::InvalidSignature),
+        }
+    }
+
+    fn key_count(&self) -> usize {
+        self.keys.len()
+    }
+}
+
+/// Convenience: build a Verifier from an env-pinned directory.
+/// Used by canonical_ingest at startup when strict mode is enabled.
+pub fn verifier_from_env(prefix: &str) -> Result<Box<dyn Verifier>, VerifyError> {
+    let var = format!("{prefix}_TRUST_STORE_DIR");
+    let dir = std::env::var(&var).map_err(|_| {
+        VerifyError::InvalidTrustStore(format!(
+            "{var} env var required to construct LocalEd25519Verifier"
+        ))
+    })?;
+    Ok(Box::new(LocalEd25519Verifier::from_dir(Path::new(&dir))?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -516,5 +717,125 @@ mod tests {
         // signed_at is recent; allow 5s skew for slow CI.
         let elapsed = (Utc::now() - sig.signed_at).num_seconds();
         assert!((-1..=5).contains(&elapsed), "signed_at must be ~now: {elapsed}s");
+    }
+
+    // ============================================================
+    // S8 Verifier tests
+    // ============================================================
+
+    fn signer_and_verifier() -> (LocalEd25519Signer, LocalEd25519Verifier) {
+        let mut rng = OsRng;
+        let signing_key = SigningKey::generate(&mut rng);
+        let verifying_key = signing_key.verifying_key();
+        let signer = LocalEd25519Signer::from_key(signing_key, "test-producer:v".into());
+        let mut keys = HashMap::new();
+        keys.insert(signer.key_id().to_string(), verifying_key);
+        let verifier = LocalEd25519Verifier::from_keys(keys);
+        (signer, verifier)
+    }
+
+    #[tokio::test]
+    async fn verifier_accepts_real_signature_under_correct_canonical() {
+        let (signer, verifier) = signer_and_verifier();
+        let canonical = b"canonical-cloudevent-bytes-v1";
+        let sig = signer.sign(canonical).await.unwrap();
+        verifier
+            .verify(&sig.key_id, canonical, &sig.bytes)
+            .expect("real signature must verify");
+    }
+
+    #[tokio::test]
+    async fn verifier_rejects_signature_under_mutated_canonical() {
+        let (signer, verifier) = signer_and_verifier();
+        let canonical = b"canonical-cloudevent-bytes-v1";
+        let sig = signer.sign(canonical).await.unwrap();
+        let mutated = b"canonical-cloudevent-bytes-XX";
+        let err = verifier.verify(&sig.key_id, mutated, &sig.bytes).unwrap_err();
+        assert_eq!(err, VerifyFailure::InvalidSignature);
+    }
+
+    #[tokio::test]
+    async fn verifier_rejects_unknown_key_id() {
+        let (signer, verifier) = signer_and_verifier();
+        let canonical = b"x";
+        let sig = signer.sign(canonical).await.unwrap();
+        // Fabricate a different key_id; trust store doesn't know it.
+        let err = verifier
+            .verify("ed25519:deadbeef00000000", canonical, &sig.bytes)
+            .unwrap_err();
+        assert_eq!(err, VerifyFailure::UnknownKey);
+    }
+
+    #[tokio::test]
+    async fn verifier_classifies_pre_s6_legacy_rows() {
+        let verifier = LocalEd25519Verifier::from_keys(HashMap::new());
+        for kid in ["pre-S6:legacy", ""] {
+            let err = verifier.verify(kid, b"x", b"sig").unwrap_err();
+            assert_eq!(err, VerifyFailure::PreS6, "key_id {kid:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn verifier_classifies_disabled_signer_rows() {
+        let verifier = LocalEd25519Verifier::from_keys(HashMap::new());
+        let err = verifier
+            .verify("disabled:test-producer", b"x", b"sig")
+            .unwrap_err();
+        assert_eq!(err, VerifyFailure::Disabled);
+    }
+
+    #[tokio::test]
+    async fn verifier_rejects_truncated_signature_bytes() {
+        let (signer, verifier) = signer_and_verifier();
+        let canonical = b"hello";
+        let sig = signer.sign(canonical).await.unwrap();
+        let truncated = &sig.bytes[..32];
+        let err = verifier.verify(&sig.key_id, canonical, truncated).unwrap_err();
+        assert_eq!(err, VerifyFailure::InvalidSignature);
+    }
+
+    #[tokio::test]
+    async fn verifier_loads_keys_from_filesystem_directory_regardless_of_filename() {
+        use ed25519_dalek::pkcs8::EncodePrivateKey;
+        use std::fs;
+
+        let dir = tempfile::tempdir().unwrap();
+        let mut rng = OsRng;
+        let signing_key = SigningKey::generate(&mut rng);
+        let pem = signing_key
+            .to_pkcs8_pem(ed25519_dalek::pkcs8::spki::der::pem::LineEnding::LF)
+            .unwrap();
+        let signer = LocalEd25519Signer::from_key(signing_key, "fs-producer".into());
+        // File name irrelevant — verifier derives key_id from key bytes.
+        // Use a service-style name like the demo's pki-init writes.
+        fs::write(dir.path().join("sidecar.pem"), pem.as_bytes()).unwrap();
+
+        let verifier = LocalEd25519Verifier::from_dir(dir.path()).unwrap();
+        assert_eq!(verifier.key_count(), 1);
+
+        let sig = signer.sign(b"payload").await.unwrap();
+        verifier
+            .verify(&sig.key_id, b"payload", &sig.bytes)
+            .expect("disk-loaded key must verify regardless of filename");
+    }
+
+    #[test]
+    fn verifier_skips_non_pem_files() {
+        use std::fs;
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("not-a-key.txt"), "garbage").unwrap();
+        fs::write(dir.path().join("another.json"), "{}").unwrap();
+        let verifier = LocalEd25519Verifier::from_dir(dir.path()).unwrap();
+        assert_eq!(verifier.key_count(), 0);
+    }
+
+    #[test]
+    fn verify_failure_stringification_is_stable() {
+        // Quarantine table stores as_str(); stability is part of the
+        // forensics contract.
+        assert_eq!(VerifyFailure::UnknownKey.as_str(), "unknown_key");
+        assert_eq!(VerifyFailure::InvalidSignature.as_str(), "invalid_signature");
+        assert_eq!(VerifyFailure::PreS6.as_str(), "pre_s6");
+        assert_eq!(VerifyFailure::Disabled.as_str(), "disabled");
     }
 }

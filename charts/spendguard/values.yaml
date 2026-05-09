@@ -167,6 +167,12 @@ signing:
     sidecarArn: ""
     webhookReceiverArn: ""
     ttlSweeperArn: ""
+  # Phase 5 GA hardening S8: canonical_ingest strict verification.
+  # When true, canonical_ingest mounts the same Secret as a trust
+  # store and rejects/quarantines events with bad / unknown / pre-S6 /
+  # disabled-mode signatures. Helm template REJECTS profile=production
+  # with strictVerification=false.
+  strictVerification: true
 
 # Migration job (post-install hook).
 migrations:

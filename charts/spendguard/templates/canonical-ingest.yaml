@@ -1,5 +1,11 @@
 {{- if .Values.canonicalIngest.enabled }}
 {{- $component := "canonical-ingest" }}
+{{- /* Phase 5 GA hardening S8: strict signatures gate.
+       production profile MUST run with strict mode on; flipping it
+       off in production silently admits unsigned events. */ -}}
+{{- if and (eq .Values.signing.profile "production") (not .Values.signing.strictVerification) }}
+{{- fail "S8: signing.profile=production requires signing.strictVerification=true (set strictVerification=true or change profile to demo)" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,14 +35,24 @@ spec:
             - { name: SPENDGUARD_CANONICAL_INGEST_TLS_CERT_PEM, value: "/etc/ssl/spendguard/canonical-ingest.crt" }
             - { name: SPENDGUARD_CANONICAL_INGEST_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/canonical-ingest.key" }
             - { name: SPENDGUARD_CANONICAL_INGEST_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # Phase 5 GA hardening S8: strict signature verification.
+            - { name: SPENDGUARD_CANONICAL_INGEST_STRICT_SIGNATURES, value: {{ .Values.signing.strictVerification | quote }} }
+            - { name: SPENDGUARD_CANONICAL_INGEST_TRUST_STORE_DIR,   value: "/etc/spendguard/trust-store" }
+            - { name: SPENDGUARD_CANONICAL_INGEST_METRICS_ADDR,      value: "0.0.0.0:9091" }
+          ports:
+            - { name: metrics, containerPort: 9091 }
           volumeMounts:
             - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+            - { name: trust-store, mountPath: /etc/spendguard/trust-store, readOnly: true }
           resources:
             {{- toYaml .Values.canonicalIngest.resources | nindent 12 }}
       volumes:
         - name: tls
           secret:
             secretName: {{ .Values.secrets.tls.existingSecret }}
+        - name: trust-store
+          secret:
+            secretName: {{ .Values.signing.existingSecret }}
 ---
 apiVersion: v1
 kind: Service
