@@ -1,4 +1,22 @@
-"""SpendGuard Pydantic-AI adapter (L3 — UsageLimits hooks via sidecar UDS)."""
+"""SpendGuard SDK — runtime safety layer client for AI agent frameworks.
+
+Core surface (always available):
+
+    from spendguard import SpendGuardClient, DecisionStopped, derive_idempotency_key
+
+Framework integrations are optional (install via extras):
+
+    pip install spendguard-sdk[pydantic-ai]
+    pip install spendguard-sdk[langchain]
+    pip install spendguard-sdk[langgraph]
+    pip install spendguard-sdk[openai-agents]
+
+After installing the relevant extras::
+
+    from spendguard.integrations.pydantic_ai import SpendGuardModel
+    from spendguard.integrations.langchain   import SpendGuardChatModel
+    # ...
+"""
 
 from .client import (
     DEFAULT_DECISION_TIMEOUT_S,
@@ -24,16 +42,6 @@ from .ids import (
     new_uuid7,
     workload_instance_id,
 )
-from .model import (
-    CallSignatureFn,
-    ClaimEstimator,
-    RunContext,
-    SpendGuardModel,
-    current_run_context,
-    is_spendguard_skip,
-    is_spendguard_terminal,
-    run_context,
-)
 
 __all__ = [
     # client
@@ -57,15 +65,6 @@ __all__ = [
     "derive_uuid_from_signature",
     "new_uuid7",
     "workload_instance_id",
-    # model
-    "CallSignatureFn",
-    "ClaimEstimator",
-    "RunContext",
-    "SpendGuardModel",
-    "current_run_context",
-    "is_spendguard_skip",
-    "is_spendguard_terminal",
-    "run_context",
 ]
 
 __version__ = "0.1.0a1"
