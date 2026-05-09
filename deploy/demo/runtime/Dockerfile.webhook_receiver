@@ -9,6 +9,8 @@ COPY proto ./proto
 # Symlink protobuf well-known types into proto_root so protoc resolves
 # google.protobuf.* imports (matches Dockerfile.canonical_ingest pattern).
 RUN ln -sf /usr/include/google ./proto/google
+# Phase 5 GA hardening S6: signing path-dep crate.
+COPY services/signing ./services/signing
 COPY services/webhook_receiver ./services/webhook_receiver
 WORKDIR /build/services/webhook_receiver
 RUN cargo build --release --bin spendguard-webhook-receiver

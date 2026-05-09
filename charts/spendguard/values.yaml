@@ -138,6 +138,36 @@ ttlSweeper:
   leaseName: "ttl-sweeper"
   workloadInstanceIdOverride: ""
 
+# Phase 5 GA hardening S6 — producer signing config.
+#
+# Modes:
+#   local     — Each service reads a PKCS8 Ed25519 PEM file mounted from
+#               `signing.existingSecret`. Default for non-KMS deploys.
+#   kms       — KMS-backed signing (S7 will wire AWS KMS / GCP / Azure).
+#               Construct succeeds; sign() returns ModeUnavailable until
+#               S7 lands. Operators choosing this mode today get a clean
+#               "not implemented" failure rather than silent empty
+#               signatures.
+#   disabled  — Empty signatures. Helm template REJECTS this mode unless
+#               profile == "demo" (audit invariant: production must not
+#               write unsigned audit rows).
+#
+# Profile gate:
+#   profile=production blocks `mode=disabled` at template render time.
+#   profile=demo allows it but still warns in chart NOTES.
+signing:
+  mode: "local"
+  profile: "production"
+  # Single Secret holding ed25519.pem keys, one per producer service.
+  # Keys: ledger.pem, sidecar.pem, webhook-receiver.pem, ttl-sweeper.pem
+  existingSecret: spendguard-signing-keys
+  # KMS arns per-service (used only when mode=kms; ignored otherwise).
+  kms:
+    ledgerArn: ""
+    sidecarArn: ""
+    webhookReceiverArn: ""
+    ttlSweeperArn: ""
+
 # Migration job (post-install hook).
 migrations:
   ledgerImage: postgres:16-alpine

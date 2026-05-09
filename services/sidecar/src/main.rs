@@ -79,6 +79,22 @@ async fn main() -> Result<()> {
         cfg.idempotency_cache_ttl_secs,
     );
 
+    // Phase 5 GA hardening S6: construct the producer signer from
+    // SPENDGUARD_SIDECAR_SIGNING_* env vars BEFORE binding the UDS
+    // listener so a misconfiguration (missing PEM file, disabled mode
+    // outside demo profile) crashes the pod cleanly rather than letting
+    // it serve unsigned audit events.
+    let signer = std::sync::Arc::<dyn spendguard_signing::Signer>::from(
+        spendguard_signing::signer_from_env("SPENDGUARD_SIDECAR")
+            .context("S6: build signer from SPENDGUARD_SIDECAR_SIGNING_* env")?,
+    );
+    info!(
+        key_id = %signer.key_id(),
+        algorithm = %signer.algorithm(),
+        producer = %signer.producer_identity(),
+        "S6: producer signer initialized"
+    );
+
     // Keep a separate handle to `ledger` for the fencing-lease loop below
     // (S4): SidecarState owns one copy, the lease acquire/renewer holds
     // another. LedgerClient wraps Arc<LedgerProtoClient<Channel>>, so the
@@ -90,6 +106,7 @@ async fn main() -> Result<()> {
         idempotency,
         producer_sequence_start,
         cfg.reservation_ttl_seconds,
+        signer,
     );
 
     // 2b) Install pre-pulled bundles from disk (Helm init container loads

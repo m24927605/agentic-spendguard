@@ -51,11 +51,24 @@ async fn main() -> anyhow::Result<()> {
 
     let ledger_client = build_ledger_client(&config).await?;
 
+    // Phase 5 GA hardening S6: producer signer.
+    let signer = std::sync::Arc::<dyn spendguard_signing::Signer>::from(
+        spendguard_signing::signer_from_env("SPENDGUARD_TTL_SWEEPER")
+            .map_err(|e| anyhow::anyhow!("S6: build signer: {e}"))?,
+    );
+    info!(
+        key_id = %signer.key_id(),
+        algorithm = %signer.algorithm(),
+        producer = %signer.producer_identity(),
+        "S6: producer signer initialized"
+    );
+
     let mut state = AppState {
         config: config.clone(),
         pg: pg.clone(),
         ledger_client,
         seq,
+        signer,
     };
 
     // Phase 5 S1: leader election. Only the leader sweeps expired reservations.

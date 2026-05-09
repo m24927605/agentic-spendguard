@@ -4,6 +4,9 @@
 {{- if and (gt (int .Values.ttlSweeper.replicas) 1) (eq .Values.leaderElection.mode "disabled") -}}
 {{- fail "ttlSweeper.replicas > 1 requires leaderElection.mode != 'disabled' (S1 multi-pod safety gate)" -}}
 {{- end -}}
+{{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
+{{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -51,10 +54,29 @@ spec:
             - { name: SPENDGUARD_LEADER_LEASE_TTL_MS,      value: {{ .Values.leaderElection.ttlMs | quote }} }
             - { name: SPENDGUARD_LEADER_RENEW_INTERVAL_MS, value: {{ .Values.leaderElection.renewIntervalMs | quote }} }
             - { name: SPENDGUARD_LEADER_RETRY_INTERVAL_MS, value: {{ .Values.leaderElection.retryIntervalMs | quote }} }
+            # Phase 5 GA hardening S6: producer signing config.
+            - { name: SPENDGUARD_PROFILE,                                value: {{ .Values.signing.profile | quote }} }
+            - { name: SPENDGUARD_TTL_SWEEPER_SIGNING_MODE,               value: {{ .Values.signing.mode | quote }} }
+            - { name: SPENDGUARD_TTL_SWEEPER_SIGNING_PRODUCER_IDENTITY,  value: "ttl-sweeper:$(SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID)" }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: SPENDGUARD_TTL_SWEEPER_SIGNING_KEY_PATH,           value: "/etc/spendguard/signing/ttl-sweeper.pem" }
+            {{- else if eq .Values.signing.mode "kms" }}
+            - { name: SPENDGUARD_TTL_SWEEPER_SIGNING_KMS_ARN,            value: {{ .Values.signing.kms.ttlSweeperArn | quote }} }
+            {{- end }}
           volumeMounts:
             - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+            {{- end }}
       volumes:
         - name: tls
           secret:
             secretName: {{ .Values.secrets.tls.existingSecret }}
+        {{- if eq .Values.signing.mode "local" }}
+        - name: signing
+          secret:
+            secretName: {{ .Values.signing.existingSecret }}
+            items:
+              - { key: ttl-sweeper.pem, path: ttl-sweeper.pem }
+        {{- end }}
 {{- end }}

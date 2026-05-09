@@ -184,6 +184,11 @@ services:
       # synchronous_commit + synchronous_standby_names are configured
       # per Stage 2 §4.2 + Ledger §19.
       SPENDGUARD_LEDGER_ALLOW_UNSAFE_DURABILITY: "true"
+      # Phase 5 GA hardening S6: producer signing.
+      SPENDGUARD_PROFILE: "demo"
+      SPENDGUARD_LEDGER_SIGNING_MODE: "local"
+      SPENDGUARD_LEDGER_SIGNING_PRODUCER_IDENTITY: "ledger:server-mint"
+      SPENDGUARD_LEDGER_SIGNING_KEY_PATH: "/etc/ssl/spendguard/signing/ledger.pem"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:
@@ -269,6 +274,11 @@ services:
       # Health probe
       SPENDGUARD_SIDECAR_HEALTH_ADDR:              "0.0.0.0:8080"
       SPENDGUARD_SIDECAR_METRICS_ADDR:             "0.0.0.0:9090"
+      # Phase 5 GA hardening S6: producer signing.
+      SPENDGUARD_PROFILE:                          "demo"
+      SPENDGUARD_SIDECAR_SIGNING_MODE:             "local"
+      SPENDGUARD_SIDECAR_SIGNING_PRODUCER_IDENTITY: "sidecar:sidecar-demo-1"
+      SPENDGUARD_SIDECAR_SIGNING_KEY_PATH:         "/etc/ssl/spendguard/signing/sidecar.pem"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
       - bundles-data:/var/lib/spendguard/bundles:ro
@@ -339,6 +349,11 @@ services:
       SPENDGUARD_TTL_SWEEPER_FENCING_INITIAL_EPOCH:      "1"
       SPENDGUARD_TTL_SWEEPER_POLL_INTERVAL_SECONDS:      "2"
       SPENDGUARD_TTL_SWEEPER_BATCH_SIZE:                 "10"
+      # Phase 5 GA hardening S6: producer signing.
+      SPENDGUARD_PROFILE:                                "demo"
+      SPENDGUARD_TTL_SWEEPER_SIGNING_MODE:               "local"
+      SPENDGUARD_TTL_SWEEPER_SIGNING_PRODUCER_IDENTITY:  "ttl-sweeper:demo-ttl-sweeper"
+      SPENDGUARD_TTL_SWEEPER_SIGNING_KEY_PATH:           "/etc/ssl/spendguard/signing/ttl-sweeper.pem"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:
@@ -371,6 +386,11 @@ services:
       SPENDGUARD_WEBHOOK_RECEIVER_WORKLOAD_INSTANCE_ID:            "demo-webhook-receiver"
       SPENDGUARD_WEBHOOK_RECEIVER_FENCING_INITIAL_EPOCH:           "1"
       SPENDGUARD_WEBHOOK_SECRET_MOCK_LLM:                          "demo-secret-not-for-prod"
+      # Phase 5 GA hardening S6: producer signing.
+      SPENDGUARD_PROFILE:                                          "demo"
+      SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_MODE:                    "local"
+      SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_PRODUCER_IDENTITY:       "webhook-receiver:demo-webhook-receiver"
+      SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_KEY_PATH:                "/etc/ssl/spendguard/signing/webhook-receiver.pem"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:

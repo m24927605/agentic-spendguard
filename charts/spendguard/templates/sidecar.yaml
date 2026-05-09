@@ -1,5 +1,12 @@
 {{- if .Values.sidecar.enabled }}
 {{- $component := "sidecar" }}
+{{- /* Phase 5 GA hardening S6: signing-mode fail-gate.
+       production profile MUST NOT allow disabled signing —
+       audit_outbox writes go through this sidecar.
+*/ -}}
+{{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
+{{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo (set signing.profile=demo in values.yaml or pick mode=local|kms)" }}
+{{- end }}
 {{- /*
 Sidecar deployed as DaemonSet so the UDS socket lives on each node's
 hostPath; application pods that mount the same hostPath get the
@@ -51,9 +58,21 @@ spec:
             - { name: SPENDGUARD_SIDECAR_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/sidecar.key" }
             - { name: SPENDGUARD_SIDECAR_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
             - { name: SPENDGUARD_SIDECAR_UDS_PATH,     value: "/var/run/spendguard/adapter.sock" }
+            # Phase 5 GA hardening S6: producer signing config.
+            - { name: SPENDGUARD_PROFILE,                            value: {{ .Values.signing.profile | quote }} }
+            - { name: SPENDGUARD_SIDECAR_SIGNING_MODE,               value: {{ .Values.signing.mode | quote }} }
+            - { name: SPENDGUARD_SIDECAR_SIGNING_PRODUCER_IDENTITY,  value: "sidecar:$(SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID)" }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: SPENDGUARD_SIDECAR_SIGNING_KEY_PATH,           value: "/etc/spendguard/signing/sidecar.pem" }
+            {{- else if eq .Values.signing.mode "kms" }}
+            - { name: SPENDGUARD_SIDECAR_SIGNING_KMS_ARN,            value: {{ .Values.signing.kms.sidecarArn | quote }} }
+            {{- end }}
           volumeMounts:
             - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
             - { name: bundles, mountPath: /var/lib/spendguard/bundles, readOnly: true }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+            {{- end }}
             {{- if .Values.sidecar.hostPath.enabled }}
             - { name: uds,     mountPath: /var/run/spendguard }
             {{- end }}
@@ -66,6 +85,13 @@ spec:
         - name: bundles
           secret:
             secretName: {{ .Values.secrets.bundles.existingSecret }}
+        {{- if eq .Values.signing.mode "local" }}
+        - name: signing
+          secret:
+            secretName: {{ .Values.signing.existingSecret }}
+            items:
+              - { key: sidecar.pem, path: sidecar.pem }
+        {{- end }}
         {{- if .Values.sidecar.hostPath.enabled }}
         - name: uds
           hostPath:

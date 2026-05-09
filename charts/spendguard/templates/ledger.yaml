@@ -1,5 +1,8 @@
 {{- if .Values.ledger.enabled }}
 {{- $component := "ledger" }}
+{{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
+{{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -32,14 +35,33 @@ spec:
             - { name: SPENDGUARD_LEDGER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/ledger.crt" }
             - { name: SPENDGUARD_LEDGER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/ledger.key" }
             - { name: SPENDGUARD_LEDGER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # Phase 5 GA hardening S6: producer signing config.
+            - { name: SPENDGUARD_PROFILE,                           value: {{ .Values.signing.profile | quote }} }
+            - { name: SPENDGUARD_LEDGER_SIGNING_MODE,               value: {{ .Values.signing.mode | quote }} }
+            - { name: SPENDGUARD_LEDGER_SIGNING_PRODUCER_IDENTITY,  value: "ledger:server-mint" }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: SPENDGUARD_LEDGER_SIGNING_KEY_PATH,           value: "/etc/spendguard/signing/ledger.pem" }
+            {{- else if eq .Values.signing.mode "kms" }}
+            - { name: SPENDGUARD_LEDGER_SIGNING_KMS_ARN,            value: {{ .Values.signing.kms.ledgerArn | quote }} }
+            {{- end }}
           volumeMounts:
             - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+            {{- end }}
           resources:
             {{- toYaml .Values.ledger.resources | nindent 12 }}
       volumes:
         - name: tls
           secret:
             secretName: {{ .Values.secrets.tls.existingSecret }}
+        {{- if eq .Values.signing.mode "local" }}
+        - name: signing
+          secret:
+            secretName: {{ .Values.signing.existingSecret }}
+            items:
+              - { key: ledger.pem, path: ledger.pem }
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

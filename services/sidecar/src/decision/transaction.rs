@@ -192,7 +192,7 @@ pub async fn run_through_reserve(
         request_hash: Vec::new().into(),
     };
 
-    let cloudevent = build_audit_decision_cloudevent(
+    let mut cloudevent = build_audit_decision_cloudevent(
         ctx,
         &decision_id,
         &audit_decision_event_id,
@@ -200,6 +200,7 @@ pub async fn run_through_reserve(
         &snapshot_hash,
         &matched_rules,
     );
+    crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
     let request = ReserveSetRequest {
         tenant_id: ctx.tenant_id.clone(),
@@ -468,7 +469,7 @@ async fn run_record_denied_decision(
     });
     let payload_bytes = serde_json::to_vec(&payload)
         .expect("denied decision json serialization is infallible");
-    let cloudevent = CloudEvent {
+    let mut cloudevent = CloudEvent {
         specversion: "1.0".into(),
         r#type: "spendguard.audit.decision".into(),
         source: format!("sidecar://{}/{}", ctx.region, ctx.workload_instance_id),
@@ -488,6 +489,7 @@ async fn run_record_denied_decision(
         producer_signature: vec![].into(),
         signing_key_id: String::new(),
     };
+    crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
     let request = RecordDeniedDecisionRequest {
         tenant_id: ctx.tenant_id.clone(),
@@ -749,7 +751,7 @@ pub async fn run_commit_estimated(
         "estimated_amount_atomic": payload.estimated_amount_atomic,
         "decision_id": resv.decision_id.to_string(),
     });
-    let cloudevent = CloudEvent {
+    let mut cloudevent = CloudEvent {
         specversion: "1.0".into(),
         r#type: "spendguard.audit.outcome".into(),
         source: format!("sidecar://{}/{}", ctx.region, ctx.workload_instance_id),
@@ -769,6 +771,7 @@ pub async fn run_commit_estimated(
         producer_signature: vec![].into(),
         signing_key_id: String::new(),
     };
+    crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
     let request = CommitEstimatedRequest {
         tenant_id: ctx.tenant_id.clone(),
@@ -939,7 +942,7 @@ pub async fn run_release(
         "metadata": payload_metadata_str,
     });
 
-    let cloudevent = CloudEvent {
+    let mut cloudevent = CloudEvent {
         specversion: "1.0".into(),
         r#type: "spendguard.audit.outcome".into(),
         source: format!("sidecar://{}/{}", ctx.region, ctx.workload_instance_id),
@@ -959,6 +962,7 @@ pub async fn run_release(
         producer_signature: vec![].into(),
         signing_key_id: String::new(),
     };
+    crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
     let request = ReleaseRequest {
         tenant_id: ctx.tenant_id.clone(),

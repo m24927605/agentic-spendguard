@@ -59,6 +59,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 # Config (env-driven for POC; richer config later)
 envy = "0.4"
 
+# Phase 5 GA hardening S6: shared signing crate (server-minted audit
+# rows in InvoiceReconcile).
+spendguard-signing = { path = "../signing" }
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"

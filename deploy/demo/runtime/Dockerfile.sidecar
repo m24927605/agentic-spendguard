@@ -9,6 +9,8 @@ COPY proto ./proto
 # Symlink protobuf well-known types into proto_root so protoc resolves
 # google.protobuf.* imports (see Dockerfile.ledger for the rationale).
 RUN ln -sf /usr/include/google ./proto/google
+# Phase 5 GA hardening S6: signing path-dep crate.
+COPY services/signing ./services/signing
 COPY services/sidecar ./services/sidecar
 WORKDIR /build/services/sidecar
 RUN cargo build --release --bin spendguard-sidecar
