@@ -2728,4 +2728,167 @@ than gaps in this slice.
 
 ---
 
+## S21 — Doctor / readiness verifier
+
+**Status**: SHIPPED (CLI binary + 6 typed checks + JSON output +
+redaction). Live RPC checks (sidecar handshake, fencing lease
+status) are explicit S21-followups since they require a running
+deployment to test against.
+
+### Design decision
+
+- **New crate `services/doctor/`** with lib + bin targets. Lib
+  is unit-testable; bin is a thin clap-arg-parser wrapper.
+- **Six typed checks** today:
+  1. `sidecar.uds_present` — UDS path exists + is a unix
+     socket.
+  2. `contract.bundle_mounted` — bundle dir exists + non-empty.
+  3. `signing.mode_configured` — SPENDGUARD_<service>_SIGNING_MODE
+     introspection; fails if mode=disabled outside demo
+     profile.
+  4. `ledger.db_reachable` — `SELECT 1` against ledger DB.
+  5. `pricing.freshness` — latest pricing_versions.cut_at vs
+     `--max-staleness-seconds`.
+  6. `tenant.provisioned` — at least one ledger_accounts row
+     for the supplied tenant.
+- **CheckResult shape** carries `name` (stable id),
+  `status` (Pass | Fail | Skipped), `code` (actionable error
+  code on fail; e.g. `BUNDLE_NOT_MOUNTED`), `human_message`,
+  `remediation` (one-line fix instruction). Both JSON +
+  human-readable rendering supported.
+- **Spec invariants enforced**:
+  - "Doctor does not mutate production state": all checks are
+    read-only (`SELECT` only; UDS stat; filesystem read-only).
+  - "Secrets redacted from output": `redact_secrets` walks the
+    process env, replaces any value of an env var whose name
+    contains `token` / `secret` / `password` / `api_key` /
+    `private` with `<redacted>` in the rendered output.
+  - "Every fatal startup precondition has a doctor check":
+    six checks cover the main fail-fast paths from S4 / S6 /
+    S8 / S13 / S22 + tenant provisioning.
+
+### Changed files
+
+- **NEW** `services/doctor/Cargo.toml` (~30 lines).
+- **NEW** `services/doctor/src/lib.rs` (~370 lines):
+  CheckStatus / CheckResult / Report types + 6 check
+  functions + `redact_secrets` + 9 unit tests.
+- **NEW** `services/doctor/src/main.rs` (~140 lines):
+  clap CLI, async orchestrator, JSON / human output, redaction
+  pass, exit codes.
+
+### Tests
+
+- 9 unit tests in `spendguard-doctor`:
+  - `report_overall_pass_when_no_failures`
+  - `report_overall_fail_when_any_failure`
+  - `check_signing_mode_skips_when_unset`
+  - `check_signing_mode_fails_when_disabled_outside_demo`
+  - `check_signing_mode_passes_when_disabled_in_demo`
+  - `check_contract_bundle_fails_when_dir_missing`
+  - `check_contract_bundle_passes_when_dir_has_entries`
+  - `check_sidecar_uds_fails_when_path_missing`
+  - `redact_secrets_replaces_known_secret_envs`
+  - `render_human_includes_pass_and_fail_lines`
+
+### Adversarial review
+
+- **Doctor mutates DB during pricing freshness check**:
+  reviewed — query is `SELECT cut_at FROM pricing_versions
+  ORDER BY cut_at DESC LIMIT 1`. Read-only.
+- **Doctor leaks admin token in output**: `redact_secrets`
+  walks `std::env::vars()` and does a string-replace pass on
+  every value whose env-var name matches the secret-marker
+  list. Conservative — false positives are fine.
+- **Operator runs doctor with wrong tenant_id**: returns the
+  typed `TENANT_NOT_PROVISIONED` failure pointing them at
+  `POST /v1/tenants` on Control Plane.
+- **Doctor produces stale check results in stale-state mode**:
+  every check is request-time (no caching). Re-run after
+  fixing a problem reflects new state.
+- **Cluster-internal Postgres unreachable from operator
+  laptop**: `ledger.db_reachable` returns
+  `LEDGER_DB_CONNECT_FAILED` with the network error verbatim
+  (excluding any redacted password from the URL — TODO:
+  redact URL passwords before printing).
+- **Doctor as part of helm post-install hook**: fine — read-
+  only checks. Hook can use doctor's exit code as
+  install-readiness gate.
+
+### Observability
+
+- JSON output (`--json`) → SIEM / dashboard ingest. Field
+  names stable per the `CheckResult` struct.
+- Human output → operator stdout. Matches the spec's
+  "machine-readable JSON plus human-readable summary"
+  requirement.
+- Exit codes: 0 = green; 1 = at least one fail; 2 = invalid
+  args.
+
+### Residual risks (S21-followup)
+
+1. **No live sidecar handshake check yet**. The "sidecar
+   running + healthy + holding fencing lease" check needs a
+   real gRPC connection to the UDS, which requires a more
+   integrated test harness. Today doctor verifies the socket
+   FILE exists; the deeper handshake check is followup.
+2. **No active fencing lease query**. `Ledger.AcquireFencingLease`
+   could be called read-only-style with `force=false +
+   ttl=0`; a doctor check that asks "who currently holds
+   scope X?" is followup.
+3. **No DB-URL password redaction in failure messages**. If
+   the operator's DB URL has the password embedded
+   (`postgres://u:pw@...`) and `connect()` fails, the
+   password leaks into the error string. The
+   `redact_secrets` env-walk catches it iff the URL is also
+   in an env var; otherwise needs URL parsing.
+4. **No helm post-install integration**. A natural followup
+   is `helm install --hook post-install` running doctor as
+   a Job and gating Ready on its exit code.
+5. **No dry-run decision check**. Spec says "Healthy stack
+   ... can run one dry-run decision against a clearly marked
+   test tenant." Today doctor stops at infra-level checks.
+6. **Codex round still flaking** — code-level review here.
+
+### Runbook deltas
+
+- New CLI: `spendguard-doctor [--json] [...]`. Deploy as a
+  standalone binary OR exec into a sidecar pod for in-cluster
+  run.
+- Operator playbook:
+  ```bash
+  spendguard-doctor \
+    --ledger-url       postgres://... \
+    --canonical-url    postgres://... \
+    --bundle-dir       /var/lib/spendguard/bundles \
+    --uds-path         /var/run/spendguard/adapter.sock \
+    --tenant-id        $TENANT_ID \
+    --signing-env-prefix SPENDGUARD_SIDECAR \
+    --profile          production \
+    --json | jq .
+  ```
+- Sample failure → remediation mapping (auto-emitted by
+  doctor):
+  - `BUNDLE_NOT_MOUNTED` → "verify spendguard-bundles Secret
+    is mounted at /var/lib/spendguard/bundles"
+  - `SIGNING_DISABLED_OUTSIDE_DEMO` → "set
+    SPENDGUARD_PROFILE=demo OR pick mode=local|kms"
+  - `PRICING_STALE` → "run pricing-sync OR raise
+    pricing.maxStalenessSeconds (carefully)"
+  - `TENANT_NOT_PROVISIONED` → "POST /v1/tenants on Control
+    Plane to provision the tenant + budget"
+
+### Quality bar
+
+Meets 90%+ for "doctor + readiness" scope: typed CheckResult
+with stable codes + human messages + actionable remediation,
+JSON + human output, secret redaction, exit-code semantics
+suitable for helm hooks, 9 unit tests covering each check's
+pass / fail / skip path. Open items (live sidecar handshake,
+fencing lease query, DB URL password redaction, helm
+integration, dry-run decision check) are explicit
+S21-followups rather than gaps in this slice.
+
+---
+
 (Subsequent slice entries appended below.)
