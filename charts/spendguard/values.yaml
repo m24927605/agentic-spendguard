@@ -95,19 +95,34 @@ webhookReceiver:
   workloadInstanceId: "webhook-receiver-0"
   hmacSecretName: spendguard-webhook-hmac
 
+# Phase 5 S1 — leader election for singleton background workers.
+# Modes:
+#   postgres  — Postgres-backed lease via acquire_lease SP (default).
+#               Safe for replicas >= 1.
+#   k8s       — Kubernetes coordination.k8s.io/Lease (S5 wiring).
+#               Safe for replicas >= 1; requires RBAC below.
+#   disabled  — no leader election. Safe ONLY with replicas == 1.
+#               Helm template REJECTS this mode + replicas > 1 (S5 gate).
+leaderElection:
+  mode: "postgres"
+  region: "demo"
+  ttlMs: 15000
+  renewIntervalMs: 5000
+  retryIntervalMs: 1000
+
 outboxForwarder:
   enabled: true
-  # GA gate: leader election needed before scaling beyond 1 pod.
+  # Phase 5 S1 unblocks replicas > 1 when leaderElection.mode != 'disabled'.
   replicas: 1
   image:
     repository: spendguard/outbox-forwarder
     tag: "0.1.0-alpha.1"
   pollIntervalSeconds: 2
   batchSize: 50
+  leaseName: "outbox-forwarder"
 
 ttlSweeper:
   enabled: true
-  # GA gate: same producer_sequence race; keep at 1.
   replicas: 1
   image:
     repository: spendguard/ttl-sweeper
@@ -116,6 +131,7 @@ ttlSweeper:
   workloadInstanceId: "ttl-sweeper-0"
   pollIntervalSeconds: 2
   batchSize: 10
+  leaseName: "ttl-sweeper"
 
 # Migration job (post-install hook).
 migrations:

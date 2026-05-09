@@ -7,6 +7,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /build
 COPY proto ./proto
 RUN ln -sf /usr/include/google ./proto/google
+# Phase 5 S1: shared lease primitive consumed via path dep.
+COPY services/leases ./services/leases
 COPY services/ttl_sweeper ./services/ttl_sweeper
 WORKDIR /build/services/ttl_sweeper
 RUN cargo build --release --bin spendguard-ttl-sweeper
