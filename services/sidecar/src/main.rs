@@ -79,6 +79,11 @@ async fn main() -> Result<()> {
         cfg.idempotency_cache_ttl_secs,
     );
 
+    // Keep a separate handle to `ledger` for the fencing-lease loop below
+    // (S4): SidecarState owns one copy, the lease acquire/renewer holds
+    // another. LedgerClient wraps Arc<LedgerProtoClient<Channel>>, so the
+    // clone is cheap.
+    let ledger_for_lease = ledger.clone();
     let state = SidecarState::new(
         ledger,
         canonical_ingest,
@@ -92,21 +97,65 @@ async fn main() -> Result<()> {
     install_bundles(&cfg, &state)?;
     info!("contract + schema bundles installed");
 
-    // 2c) Install pre-provisioned fencing scope (Phase 2 will use a real
-    //     Ledger.AcquireFencingScope RPC; POC trusts the operator-set epoch).
+    // 2c) Phase 5 S4: acquire fencing lease via Ledger RPC.
+    //     SPENDGUARD_SIDECAR_LEASE_MODE controls behavior:
+    //       rpc    — call Ledger.AcquireFencingLease (production)
+    //       static — install seeded values without RPC (legacy demos
+    //                that pre-seed fencing_scopes with epoch=1)
+    //     Default `rpc`. Static path uses fencing_initial_epoch +
+    //     fencing_ttl_seconds env values like before.
     let fencing_scope_id = uuid::Uuid::parse_str(&cfg.fencing_scope_id)
         .context("parse fencing_scope_id")?;
-    spendguard_sidecar::fencing::install_active(
-        &state,
-        fencing_scope_id,
-        cfg.fencing_initial_epoch,
-        cfg.fencing_ttl_seconds,
-    );
-    info!(
-        scope = %fencing_scope_id,
-        epoch = cfg.fencing_initial_epoch,
-        "fencing scope installed (POC: pre-provisioned via operator)"
-    );
+    let lease_mode = std::env::var("SPENDGUARD_SIDECAR_LEASE_MODE")
+        .unwrap_or_else(|_| "rpc".into());
+    if lease_mode == "static" {
+        spendguard_sidecar::fencing::install_active(
+            &state,
+            fencing_scope_id,
+            cfg.fencing_initial_epoch,
+            cfg.fencing_ttl_seconds,
+        );
+        info!(
+            scope = %fencing_scope_id,
+            epoch = cfg.fencing_initial_epoch,
+            "fencing scope installed (lease_mode=static; legacy demo path)"
+        );
+    } else {
+        let lease_ttl_secs: u32 = cfg
+            .fencing_ttl_seconds
+            .max(1)
+            .min(3600) as u32;
+        spendguard_sidecar::fencing::rpc_acquire(
+            &state,
+            &ledger_for_lease,
+            fencing_scope_id,
+            &cfg.tenant_id,
+            &cfg.workload_instance_id,
+            lease_ttl_secs,
+        )
+        .await
+        .context("acquire fencing lease at startup (S4)")?;
+
+        // Spawn renewer at 1/3 of TTL with 2/3 grace window.
+        let renew_interval = std::time::Duration::from_secs((lease_ttl_secs / 3).max(1) as u64);
+        let grace_window = std::time::Duration::from_secs((lease_ttl_secs * 2 / 3).max(2) as u64);
+        spendguard_sidecar::fencing::spawn_renewer(
+            state.clone(),
+            ledger_for_lease,
+            fencing_scope_id,
+            cfg.tenant_id.clone(),
+            cfg.workload_instance_id.clone(),
+            lease_ttl_secs,
+            renew_interval,
+            grace_window,
+        );
+        info!(
+            scope = %fencing_scope_id,
+            renew_interval_ms = renew_interval.as_millis() as u64,
+            grace_window_ms = grace_window.as_millis() as u64,
+            "fencing scope acquired via Ledger.AcquireFencingLease (S4)"
+        );
+    }
 
     // 3) Endpoint catalog manifest verify + atomic swap.
     let manifest_signing_key = load_manifest_signing_key()

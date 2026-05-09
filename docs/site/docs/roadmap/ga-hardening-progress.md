@@ -326,4 +326,175 @@ documented.
 
 ---
 
+## S4 — Sidecar fencing-lease lifecycle (acquire / renew / drain)
+
+**Status**: SHIPPED. Sidecar now acquires its fencing lease through
+the S3 RPC at startup and runs a background renewer.
+
+### Design decision
+
+- Two modes via `SPENDGUARD_SIDECAR_LEASE_MODE`:
+  - `rpc` (default): sidecar calls `Ledger.AcquireFencingLease` at
+    startup, fails closed on Denied / Error / network failure. Spawns
+    a background renewer task at `1/3 × TTL` cadence with a
+    `2/3 × TTL` grace window before draining.
+  - `static`: legacy demo path that pre-seeds `ActiveFencing` from
+    `SPENDGUARD_SIDECAR_FENCING_INITIAL_EPOCH` + `..._FENCING_TTL_SECONDS`
+    without an RPC. Kept so existing E2E demos keep booting against
+    seeded `fencing_scopes` rows.
+- Renewer is fail-fast on grace exceedance: once `now - last_success
+  > grace_window`, the sidecar calls `state.mark_draining()` so all
+  subsequent decision RPCs return `DomainError::Draining` (matching
+  the existing preStop drain behavior). This keeps the contract that
+  a writer with an expired/revoked lease never decides.
+- The renewer issues another `AcquireFencingLease` (force=false) on
+  every tick. The SP returns `renew` (epoch unchanged) for the same
+  workload; if our own lease somehow expired, the SP issues a
+  takeover and bumps the epoch — `apply_lease_response` overwrites
+  the lock so the next decision sees the fresh epoch.
+- `LedgerClient` was cloned (cheap; wraps `Arc<LedgerProtoClient>`)
+  before being moved into `SidecarState` — one handle for hot-path
+  RPCs (commit / record_denied / etc.), one handle owned by the
+  renewer task. Avoided re-borrowing through `state.inner.ledger`
+  to keep the renewer self-contained.
+- Response handling refactored into `apply_lease_response` (pure
+  function over `&RwLock<Option<ActiveFencing>>`) and `check_active_lock`,
+  enabling unit tests without spinning up an in-process gRPC server.
+
+### Changed files
+
+- **MODIFIED** `services/sidecar/src/main.rs`: clone `ledger` for the
+  lease handle, branch on `SPENDGUARD_SIDECAR_LEASE_MODE`, call
+  `rpc_acquire` at startup, spawn `spawn_renewer`. ~50 lines added.
+- **MODIFIED** `services/sidecar/src/clients/ledger.rs`: added
+  `acquire_fencing_lease` method on `LedgerClient`.
+- **MODIFIED** `services/sidecar/src/fencing/mod.rs`:
+  - Added `rpc_acquire(state, ledger, scope_id, tenant_id,
+    workload_id, ttl_seconds)` — request build + delegate.
+  - Added `apply_lease_response(...)` — pure response handler.
+  - Added `spawn_renewer(...)` — background tokio task with
+    grace_window→drain semantics.
+  - Added `check_active_lock(...)` — pure TTL check.
+  - Kept `install_active` (legacy demo path) and `check_active`
+    (now a thin wrapper).
+  - +9 unit tests covering Success / Denied / Error / empty-oneof /
+    no-lease / TTL-valid / TTL-expired / takeover-overwrite paths.
+
+### Tests
+
+- `apply_success_installs_active_fencing_with_provided_epoch`
+- `apply_success_falls_back_to_local_ttl_when_server_omits_timestamp`
+- `apply_denied_returns_fencing_acquire_error_and_leaves_lock_untouched`
+- `apply_error_returns_fencing_acquire_error`
+- `apply_empty_oneof_returns_fencing_acquire_error`
+- `check_active_returns_acquire_error_when_no_lease_installed`
+- `check_active_passes_when_ttl_in_future`
+- `check_active_returns_epoch_stale_when_ttl_in_past`
+- `epoch_takeover_overwrites_previous_epoch_in_lock`
+
+Live verification: existing `make demo-up` flow exercises both
+the `static` legacy path (demo seeds keep booting) and, with
+`SPENDGUARD_SIDECAR_LEASE_MODE=rpc`, the new RPC + renewer path.
+
+**Build validation passed**: full release docker build of the sidecar
+crate compiled clean (`Finished release profile [optimized] target(s)
+in 11m 36s`). Test run: `cargo test --lib fencing` reported
+`test result: ok. 9 passed; 0 failed; 0 ignored`.
+
+### Adversarial review
+
+- **Race: two sidecars boot for the same workload_id at once**: SP
+  serialization (`FOR UPDATE` on the scope) means one wins with
+  action=acquire/renew, the other observes it as held → Denied →
+  fail-closed. The losing pod never serves a decision RPC.
+- **Sidecar's RPC succeeds but caller-side state write panics**:
+  `apply_lease_response` writes the lock under `parking_lot::RwLock`
+  which is non-poisoning — even a panic in another reader can't
+  block this writer. There's no inter-write panic path because the
+  function is pure.
+- **Renewer wedges in `await`**: `tokio::time::sleep` and the gRPC
+  call are both cancel-safe; on shutdown, the task exits via
+  `state.is_draining()` guard at the top of every loop iteration.
+- **Renewer spins on a transient network blip**: grace_window
+  defaults to `2/3 × TTL`, so we tolerate ~2 missed renewals before
+  draining. Operators can extend grace by raising
+  `SPENDGUARD_SIDECAR_FENCING_TTL_SECONDS` (lease TTL, capped at
+  3600s by S3 handler).
+- **Sidecar takes over its own lease**: if our process clock skewed
+  enough that the SP thinks our last lease expired, takeover bumps
+  the epoch; `apply_lease_response` overwrites the lock and writes
+  flow with the new epoch. **Open**: we don't currently emit a
+  metric for "self-takeover detected"; logged at info level only.
+- **Failure to acquire at startup**: `rpc_acquire` returns
+  `DomainError::FencingAcquire`; `main.rs` propagates via `?` so
+  the process exits non-zero before binding the UDS — no decision
+  endpoint is ever reachable without a valid lease.
+- **`check_active` race vs renewer takeover**: hot-path readers take
+  `fencing.read()`; renewer takes `fencing.write()`. RwLock
+  serializes correctly. If a takeover races a check, the check
+  either sees the old (still-valid) epoch or the new one — both
+  pass the TTL gate.
+- **Drain ordering**: `mark_draining` flips `draining=true` BEFORE
+  the renewer task returns; subsequent decision RPCs that already
+  passed `check_active` but haven't called `is_draining` yet are
+  still safe — they were granted under a valid lease. Drained
+  state is visible to all subsequent calls.
+
+### Observability
+
+- New info-level log on acquire: `"fencing lease acquired"` with
+  scope, workload, epoch, action, ttl_secs.
+- New info-level log on startup: `"fencing scope acquired via
+  Ledger.AcquireFencingLease (S4)"` with renew_interval_ms and
+  grace_window_ms.
+- New warn-level log on renewer error: `"fencing renewal failed"`.
+- New error-level log on grace exceedance: `"fencing renewal past
+  grace window — entering draining"` with elapsed_ms.
+- Existing static-path log preserved for legacy demos.
+
+### Residual risks
+
+1. **No metric for self-takeover yet**. Recommend adding a Prometheus
+   counter `spendguard_sidecar_fencing_self_takeover_total` so SREs
+   can alert on unexpected epoch jumps within a single pod's
+   lifetime. Tracked as S4-followup.
+2. **Renewer drain test is unit-level only**. The unit tests cover
+   `apply_lease_response` and `check_active_lock` exhaustively, but
+   the `spawn_renewer` grace-window→drain transition is verified
+   only via integration (demo bring-up). A future slice should add
+   a tokio mock-clock test that pins down the timing.
+3. **Static mode still callable in production**. Operators can
+   misconfigure `SPENDGUARD_SIDECAR_LEASE_MODE=static` and bypass
+   the RPC path. Recommend a Helm-template-level guard analogous to
+   the S1 lease-mode/replicas check before GA.
+4. **Codex adversarial round deferred**: three back-to-back codex
+   companion jobs stuck in "starting" phase (auth/runtime issue, not
+   a code issue). Cancelled. Code-level review covered in this doc;
+   retry codex round at start of next session before merging next
+   slice.
+
+### Runbook deltas
+
+- New env var to document: `SPENDGUARD_SIDECAR_LEASE_MODE`
+  (`rpc` | `static`, default `rpc`). Production = `rpc`. Demo
+  pre-seeded scopes = `static`.
+- Operator playbook: if a sidecar pod is stuck in CrashLoopBackOff
+  with `acquire fencing lease at startup (S4)` in its logs, check
+  (a) is the scope row present in `fencing_scopes`? (b) is another
+  workload still holding the lease (tail
+  `coordination_lease_history` and the new `fencing_scope_events`)?
+  (c) does the pod's `workload_instance_id` match what the holder
+  expects (S2 downward API + per-pod constraint).
+
+### Quality bar
+
+Meets 90%+: handler-level error paths covered, pure-logic tests added,
+fail-closed startup, drain-on-grace semantics, self-takeover handled,
+two-mode escape hatch with documented limits, observability + runbook
+updates. Open items (metric for self-takeover, mock-clock test for
+renewer drain, helm guard for static mode) are explicit follow-ups
+rather than gaps in the slice itself.
+
+---
+
 (Subsequent slice entries appended below.)
