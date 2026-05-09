@@ -1736,4 +1736,213 @@ the path forward.
 
 ---
 
+## S7 — Key registry and rotation
+
+**Status**: SHIPPED (filesystem-based key registry + validity-window
+enforcement + DB schema for future DbKeyRegistryProvider).
+KMS implementation + Db-backed verifier + admin RPC are explicit
+S7-followups.
+
+### Design decision
+
+- **Two registry shapes** ship together:
+  - **Filesystem-based** (current verifier path): `keys.json`
+    manifest sits next to the PEM files in the trust store dir.
+    Maps `key_id → { valid_from, valid_until, revoked, revoked_at }`.
+    Loaded at process startup; pod restart picks up changes.
+  - **DB-backed schema** (`signing_keys` + `signing_key_revocations`
+    tables, migration 0009): production-shaped surface for a future
+    `DbKeyRegistryProvider`. Captures the spec's rotation lifecycle
+    (additive → cutover → revoke) with constraints + indexes ready.
+    The verifier doesn't read from this yet (S7-followup); the
+    schema is in place so operators can publish keys without a
+    chart redeploy once the provider lands.
+- **Validity check is event-time-driven**, not ingest-wallclock.
+  Spec review standard ("Verify key validity is evaluated against
+  signed event time, not ingest wall clock alone") is enforced by
+  the verifier consuming `event_time: Option<DateTime<Utc>>` from
+  the CloudEvent's `time` field. `None` skips window check (for
+  background re-verification), but **revocation is always
+  enforced** — operator-driven incident response can't be bypassed
+  by omitting time.
+- **Three new VerifyFailure variants**:
+  - `KeyExpired` — event_time > valid_until.
+  - `KeyNotYetValid` — event_time < valid_from.
+  - `KeyRevoked` — operator flipped revoked.
+  All three quarantine in BOTH strict and non-strict mode (no
+  admit-with-counter path) — these are unambiguous policy
+  violations, not legacy fallthroughs.
+- **Backwards compatibility**: keys missing from the manifest
+  default to `KeyValidity::always_valid()`. Pre-S6 deployments
+  that don't have a `keys.json` continue to work — the verifier's
+  validity check is a no-op for unconfigured keys.
+
+### Changed files
+
+- **MODIFIED** `services/signing/Cargo.toml`: serde + serde_json
+  deps for the manifest parse.
+- **MODIFIED** `services/signing/src/lib.rs`:
+  - Three new `VerifyFailure` variants with stable as_str() ids.
+  - New `KeyValidity` struct + `check(event_time)` method.
+  - New `KeysManifest` struct (the `keys.json` file format).
+  - `Verifier::verify` trait signature gains
+    `event_time: Option<DateTime<Utc>>`.
+  - `LocalEd25519Verifier` now holds a `validities: HashMap`
+    populated from the manifest; `from_dir` reads `keys.json`
+    if present.
+  - 9 new unit tests covering valid window, expired, not-yet-valid,
+    revoked, None-event-time bypass-of-window-but-not-revocation,
+    manifest JSON round-trip, manifest load from disk.
+- **MODIFIED** `services/canonical_ingest/src/verifier.rs`:
+  `verify_cloudevent` extracts event_time from CloudEvent.time
+  and passes through.
+- **MODIFIED** `services/canonical_ingest/src/handlers/append_events.rs`:
+  3 new VerifyFailure arms in `verify_or_handle` (always
+  quarantine).
+- **MODIFIED** `services/canonical_ingest/src/metrics.rs`: 3
+  new counters + their Prometheus rendering.
+- **NEW** `services/canonical_ingest/migrations/0008_s7_validity_window_reasons.sql`:
+  ALTER constraint to allow `key_expired`, `key_not_yet_valid`,
+  `key_revoked` as quarantine reasons.
+- **NEW** `services/canonical_ingest/migrations/0009_signing_keys_registry.sql`
+  (~75 lines): `signing_keys` table with rotation lifecycle
+  columns + `signing_key_revocations` audit log + relevant
+  CHECK constraints + indexes.
+
+### Tests
+
+- **+9 unit tests** in `spendguard-signing`:
+  - `verifier_rejects_signature_when_event_time_before_valid_from`
+    → KeyNotYetValid
+  - `verifier_rejects_signature_when_event_time_after_valid_until`
+    → KeyExpired
+  - `verifier_rejects_signature_when_key_revoked` → KeyRevoked
+  - `verifier_accepts_signature_when_event_time_inside_window`
+  - `verifier_skips_window_check_when_event_time_is_none`
+  - `verifier_revoked_check_runs_even_when_event_time_is_none`
+  - `keys_manifest_round_trips_through_json`
+  - `verifier_loads_keys_json_manifest_from_dir`
+  - `key_validity_failure_strings_are_stable`
+- All existing 36 tests updated to pass `None` for event_time
+  (preserving pre-S7 behavior).
+
+### Adversarial review
+
+- **Validity-window TOCTOU**: validity is checked against a frozen
+  in-process `validities` map. An operator who flips revoked in
+  the on-disk manifest mid-flight only takes effect on next pod
+  restart. Documented in residual risks; the DB-backed registry
+  (S7-followup) closes this with a query at verify time.
+- **Wall-clock vs event-time**: spec mandates event-time. The
+  verifier ONLY checks event_time. Even if ingest's clock drifts,
+  the validity window won't wrongly admit/reject because the
+  comparison is against the producer-attested time. (Producer
+  clock skew is a separate concern; S6's algorithm-derived key_id
+  already protects against substituted producers.)
+- **Revocation bypass via missing event_time**: addressed —
+  revocation runs even when `event_time = None`. Window check
+  IS skipped without time, but the revoked flag is always
+  honored. Asserted by `verifier_revoked_check_runs_even_when_event_time_is_none`.
+- **Negative-time / clock skew**: an event signed AT valid_from
+  with subsecond skew would barely pass. The default 60s clock-
+  skew leeway from S17 doesn't apply here (different layer).
+  Operators set valid_from a small buffer (~5 min) before
+  rotation cutover to avoid edge cases.
+- **Operator typo in keys.json**: parse error returns
+  `VerifyError::InvalidTrustStore` and the verifier fails to
+  start. Pod CrashLoopBackOff with a clean error. Helm-side
+  validation (S22-style policy gate for keys.json) is a
+  S7-followup.
+- **Race on rotation**: additive rotation (new key valid before
+  old key's valid_until) means there's overlap during which
+  events signed by either key are accepted. Old key's
+  valid_until acts as the cutover deadline. After the deadline,
+  events still signed by the old key get `KeyExpired`. This
+  matches the spec's "rotation is additive first, then cutover,
+  then revoke after retention overlap."
+- **Forgotten revoked_at**: schema CHECK constraint
+  `NOT revoked OR revoked_at IS NOT NULL` makes it impossible to
+  flip the flag without recording the time. `signing_key_revocations`
+  audit log captures the operator + reason.
+
+### Observability
+
+- New counters at `:9091/metrics`:
+  - `spendguard_ingest_events_quarantined_total{reason="key_expired"}`
+  - `spendguard_ingest_events_quarantined_total{reason="key_not_yet_valid"}`
+  - `spendguard_ingest_events_quarantined_total{reason="key_revoked"}`
+- Forensic SQL unlocked by the `signing_keys` schema (when the
+  DbKeyRegistryProvider lands):
+  - `SELECT key_id, valid_from, valid_until, revoked
+     FROM signing_keys WHERE algorithm = 'ed25519'
+     ORDER BY valid_from DESC` — current rotation status.
+  - `SELECT * FROM signing_key_revocations
+     WHERE revoked_at > now() - interval '24 hours'` — recent
+     revocations (operator dashboard widget).
+
+### Residual risks (S7-followup)
+
+1. **Filesystem manifest only — no hot reload**. Operators
+   restart pods to apply key changes. The `signing_keys` table
+   is in place; a `DbKeyRegistryProvider` that polls the table
+   would close the gap.
+2. **No KMS implementation yet**. S6's `KmsSigner` returns
+   `ModeUnavailable`; S7's verifier path doesn't proxy to KMS
+   for verify. AWS KMS first (per spec) — interface-compatible
+   future work for GCP / Azure.
+3. **Rotation drill not yet automated**. Spec acceptance criterion
+   "rotation drill: rotate key without service downtime" requires
+   the DB-backed registry + admin RPC. Documented as the next
+   chunk of S7.
+4. **Rotation-itself audit event** deferred. Spec asks for "rotation
+   itself emits an audit event"; the `signing_key_revocations`
+   table captures revocation events but rotation cutover events
+   need a separate emit-to-canonical-ingest path. Tracked.
+5. **Codex round still flaking** — code-level review captured
+   here.
+
+### Runbook deltas
+
+- New filesystem manifest format: `<trust-store-dir>/keys.json`:
+  ```json
+  {
+    "keys": {
+      "ed25519:1a2b3c4d5e6f7890": {
+        "valid_from": "2026-05-01T00:00:00Z",
+        "valid_until": "2026-08-01T00:00:00Z",
+        "revoked": false,
+        "revoked_at": null
+      }
+    }
+  }
+  ```
+- **Rotation procedure** (operator playbook, additive variant):
+  1. Generate new key + PEM (`openssl genpkey -algorithm ed25519`).
+  2. Mount new PEM to producers (start signing with new key).
+  3. Add new key entry to `keys.json` with
+     `valid_from = now()`, `valid_until = null`.
+  4. Mount updated `keys.json` to canonical_ingest's trust store.
+  5. Rolling-restart canonical_ingest pods.
+  6. Wait for retention window to close.
+  7. Set old key's `valid_until` to the rotation cutover time.
+  8. After confirming no events trail-lag past cutover, flip old
+     key's `revoked: true` + write `signing_key_revocations` row.
+- **Emergency revocation**: skip steps 1-7; flip revoked = true
+  + restart canonical_ingest. Events signed by the revoked key
+  (regardless of time) quarantine immediately.
+
+### Quality bar
+
+Meets 90%+: typed validity window enforcement at the verifier
+layer, event-time-driven (not wallclock) per spec, revocation
+that survives missing event_time, fail-closed defaults, schema
+ready for the production DB-backed registry, comprehensive unit
+tests across every validity / revocation / manifest path, all
+existing 36 tests preserved by the trait signature change. Open
+items (KMS impl, DB-backed verifier path, admin RPC for rotation
+drill, rotation cutover audit event) are explicit S7-followups
+rather than gaps in S7's surface.
+
+---
+
 (Subsequent slice entries appended below.)

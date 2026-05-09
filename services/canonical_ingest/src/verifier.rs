@@ -32,10 +32,19 @@ pub fn verify_cloudevent(
     evt: &CloudEvent,
 ) -> Result<(), VerifyFailure> {
     let canonical = canonical_bytes(evt);
+    // S7: pass event_time so the verifier can enforce the key's
+    // validity window. We use the CloudEvent's producer-attested
+    // `time` field; if absent (legacy rows), pass None and the
+    // verifier falls back to crypto + revocation only.
+    let event_time = evt
+        .time
+        .as_ref()
+        .and_then(|t| chrono::DateTime::<chrono::Utc>::from_timestamp(t.seconds, t.nanos as u32));
     verifier.verify(
         &evt.signing_key_id,
         &canonical,
         &evt.producer_signature,
+        event_time,
     )
 }
 

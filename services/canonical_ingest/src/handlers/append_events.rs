@@ -598,6 +598,21 @@ async fn verify_or_handle(
             metrics.inc_quarantined(QuarantineReason::InvalidSignature);
             Some(write_quarantine(pool, evt, "invalid_signature", metrics).await)
         }
+        // S7: per-key validity-window failures. Always quarantine
+        // regardless of strict mode — these are unambiguous policy
+        // violations (key was past its window or operator-revoked).
+        Err(VerifyFailure::KeyExpired) => {
+            metrics.inc_quarantined(QuarantineReason::KeyExpired);
+            Some(write_quarantine(pool, evt, "key_expired", metrics).await)
+        }
+        Err(VerifyFailure::KeyNotYetValid) => {
+            metrics.inc_quarantined(QuarantineReason::KeyNotYetValid);
+            Some(write_quarantine(pool, evt, "key_not_yet_valid", metrics).await)
+        }
+        Err(VerifyFailure::KeyRevoked) => {
+            metrics.inc_quarantined(QuarantineReason::KeyRevoked);
+            Some(write_quarantine(pool, evt, "key_revoked", metrics).await)
+        }
     }
 }
 
