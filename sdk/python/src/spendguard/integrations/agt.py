@@ -195,15 +195,26 @@ class SpendGuardCompositeEvaluator:
         # 1) AGT (sync; offload to a thread for async caller correctness).
         agt_result = await asyncio.to_thread(self._agt.evaluate, dict(payload))
 
-        # AGT's result shape varies; try common attributes.
-        agt_action = getattr(agt_result, "action", None) or getattr(agt_result, "decision", None)
-        agt_reason = getattr(agt_result, "reason", "") or getattr(agt_result, "explanation", "")
+        # AGT's PolicyEvaluator returns an object with `.allowed` (bool),
+        # `.action` (lowercase str e.g. 'allow' / 'deny'), `.matched_rule`
+        # (str | None), and `.reason` (str). Validated against
+        # agent-governance-toolkit 3.4. Defensive get() for forward
+        # compat — if a future AGT version drops `allowed` we fall back
+        # to comparing `.action`.
+        agt_allowed = getattr(agt_result, "allowed", None)
+        if agt_allowed is None:
+            agt_action = getattr(agt_result, "action", None)
+            agt_allowed = agt_action != "deny" and agt_action != PolicyAction.DENY
 
-        if agt_action == PolicyAction.DENY:
+        agt_reason = getattr(agt_result, "reason", "")
+        agt_matched = getattr(agt_result, "matched_rule", None)
+        agt_matched_list = [agt_matched] if agt_matched else []
+
+        if not agt_allowed:
             return CompositeResult(
                 allowed=False,
                 reason=f"AGT_DENY: {agt_reason}" if agt_reason else "AGT_DENY",
-                matched_rule_ids=getattr(agt_result, "matched_rules", []),
+                matched_rule_ids=agt_matched_list,
                 decision_id=None,
                 audit_decision_event_id=None,
             )

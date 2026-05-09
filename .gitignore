@@ -9,3 +9,17 @@
 
 # AIT per-session context file (regenerated each session).
 .ait-context.md
+
+# Python build / cache artifacts (Phase 4 O1 SDK + generated proto stubs).
+__pycache__/
+*.pyc
+sdk/python/src/spendguard/_proto/spendguard/
+
+# Terraform local state (Phase 4 O9).
+terraform/**/.terraform/
+terraform/**/.terraform.lock.hcl
+terraform/**/terraform.tfstate
+terraform/**/terraform.tfstate.backup
+
+# mkdocs build output (Phase 4 O10).
+docs/site/site/
