@@ -38,7 +38,7 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use spendguard_auth::{AuthConfig, Authenticator, Principal};
+use spendguard_auth::{AuthConfig, Authenticator, Permission, Principal};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tracing::info;
@@ -141,7 +141,21 @@ async fn create_tenant(
     State(state): State<Arc<AppState>>,
     Json(req): Json<CreateTenantReq>,
 ) -> Result<Response, StatusCode> {
-    info!(subject = %principal.subject, mode = %principal.mode, "create_tenant invoked");
+    // S18: only Admin role grants TenantWrite.
+    if principal.require(Permission::TenantWrite).is_err() {
+        info!(
+            subject = %principal.subject,
+            roles = ?principal.roles,
+            "create_tenant rejected — missing TenantWrite permission"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    info!(
+        subject = %principal.subject,
+        mode = %principal.mode,
+        roles = ?principal.roles,
+        "create_tenant invoked"
+    );
 
     if req.name.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
@@ -433,7 +447,22 @@ async fn get_tenant(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Response, StatusCode> {
-    let _ = principal; // S18 will scope to principal.tenant_ids
+    // S18: any role may read a tenant they're scoped to.
+    if principal.require(Permission::ReadView).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // S18: cross-tenant guard — principal MUST have id in their
+    // tenant_ids claim. Returns generic 403 (no tenant-existence
+    // leak per S17 spec).
+    if principal.assert_tenant(&id).is_err() {
+        info!(
+            subject = %principal.subject,
+            requested_tenant = %id,
+            scope = ?principal.tenant_ids,
+            "get_tenant rejected — cross-tenant"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     let tenant_id =
         Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
@@ -493,7 +522,30 @@ async fn tombstone_tenant(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Response, StatusCode> {
-    info!(subject = %principal.subject, mode = %principal.mode, "tombstone_tenant invoked");
+    // S18: tombstone is admin-only AND tenant-scoped.
+    if principal.require(Permission::TenantWrite).is_err() {
+        info!(
+            subject = %principal.subject,
+            roles = ?principal.roles,
+            "tombstone_tenant rejected — missing TenantWrite permission"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if principal.assert_tenant(&id).is_err() {
+        info!(
+            subject = %principal.subject,
+            requested_tenant = %id,
+            scope = ?principal.tenant_ids,
+            "tombstone_tenant rejected — cross-tenant"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    info!(
+        subject = %principal.subject,
+        mode = %principal.mode,
+        target_tenant = %id,
+        "tombstone_tenant invoked"
+    );
 
     let tenant_id =
         Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;

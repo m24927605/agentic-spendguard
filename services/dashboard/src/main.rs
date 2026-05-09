@@ -32,7 +32,7 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use spendguard_auth::{AuthConfig, Authenticator, Principal};
+use spendguard_auth::{AuthConfig, Authenticator, Permission, Principal};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tracing::info;
@@ -188,7 +188,14 @@ async fn api_budgets(
     Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, StatusCode> {
-    let _ = principal; // S18 will scope queries to principal.tenant_ids
+    // S18: viewer / operator / admin / auditor all have ReadView.
+    if principal.require(Permission::ReadView).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // S18: dashboard's tenant scope is currently env-pinned (single-
+    // tenant POC). Future multi-tenant variant uses
+    // `principal.assert_tenant(state.tenant_id.to_string())` to gate
+    // cross-tenant reads.
 
     let rows = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>, Option<sqlx::types::BigDecimal>, Option<sqlx::types::BigDecimal>, Option<sqlx::types::BigDecimal>)>(
         r#"
@@ -245,7 +252,14 @@ async fn api_decisions(
     Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, StatusCode> {
-    let _ = principal; // S18 will scope queries to principal.tenant_ids
+    // S18: viewer / operator / admin / auditor all have ReadView.
+    if principal.require(Permission::ReadView).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // S18: dashboard's tenant scope is currently env-pinned (single-
+    // tenant POC). Future multi-tenant variant uses
+    // `principal.assert_tenant(state.tenant_id.to_string())` to gate
+    // cross-tenant reads.
 
     let rows = sqlx::query_as::<_, (Uuid, String, String, Option<Uuid>, chrono::DateTime<chrono::Utc>)>(
         r#"
@@ -286,7 +300,14 @@ async fn api_deny_stats(
     Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, StatusCode> {
-    let _ = principal; // S18 will scope queries to principal.tenant_ids
+    // S18: viewer / operator / admin / auditor all have ReadView.
+    if principal.require(Permission::ReadView).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // S18: dashboard's tenant scope is currently env-pinned (single-
+    // tenant POC). Future multi-tenant variant uses
+    // `principal.assert_tenant(state.tenant_id.to_string())` to gate
+    // cross-tenant reads.
 
     let rows = sqlx::query_as::<_, (chrono::DateTime<chrono::Utc>, i64)>(
         r#"
@@ -323,7 +344,14 @@ async fn api_outbox_health(
     Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
 ) -> Result<Response, StatusCode> {
-    let _ = principal; // S18 will scope queries to principal.tenant_ids
+    // S18: viewer / operator / admin / auditor all have ReadView.
+    if principal.require(Permission::ReadView).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // S18: dashboard's tenant scope is currently env-pinned (single-
+    // tenant POC). Future multi-tenant variant uses
+    // `principal.assert_tenant(state.tenant_id.to_string())` to gate
+    // cross-tenant reads.
 
     let (pending, forwarded): (i64, i64) = sqlx::query_as(
         r#"

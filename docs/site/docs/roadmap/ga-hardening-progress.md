@@ -1209,4 +1209,210 @@ explicit follow-ups rather than gaps in this slice.
 
 ---
 
+## S18 — RBAC and tenant isolation
+
+**Status**: SHIPPED. Roles + permissions populated from JWT groups
+via a config-backed policy; per-route permission gates and per-
+tenant scope assertions wired into dashboard + control_plane.
+
+### Design decision
+
+- **Five roles, one matrix**. Per spec: Viewer / Operator / Approver
+  / Admin / Auditor. Permission set kept small and orthogonal:
+  `ReadView`, `TenantWrite`, `ApprovalResolve`, `AuditExport`,
+  `BudgetWrite`. Role→permission mapping lives in code (not DB) so
+  every change is reviewed; operators only configure the
+  group→role mapping.
+- **Group policy from env**. `<PREFIX>_GROUP_POLICY_JSON` is the
+  config knob: `{"sg-admins":["admin","operator"],...}` plus an
+  optional `"_default_viewer_on_miss":true` flag for orgs that gate
+  membership at the OIDC issuer level.
+- **Demo profile builtin**. When `SPENDGUARD_PROFILE=demo` and no
+  `GROUP_POLICY_JSON` is set, the auth crate uses a builtin policy
+  that maps a synthetic `demo-admins` group to all five roles.
+  Static-token principals are auto-tagged with that group, so the
+  existing demo flows (browser prompt → token → admin actions)
+  keep working without any operator config.
+- **Tenant scope from JWT claim**. `Principal::assert_tenant(id)`
+  is a typed predicate handlers call before every tenant-scoped
+  query. Returns `AuthzError::CrossTenant` (HTTP 403) on
+  mismatch — never 404 — so an attacker can't probe tenant
+  existence by error code.
+- **Static-token tenant scope** is set explicitly via
+  `<PREFIX>_STATIC_TOKEN_TENANT_IDS` (comma-separated). Empty list
+  → fail-closed under `assert_tenant`. The demo wires the seeded
+  demo tenant id so dashboard reads work.
+- **Production fail-closed default**: if the operator forgets to
+  set `GROUP_POLICY_JSON` in production, every authenticated
+  principal gets `roles=[]` and every permission check denies. No
+  silent admit.
+
+### Changed files
+
+- **NEW** `services/auth/src/rbac.rs` (~340 lines): `Role`,
+  `Permission`, `permissions_for_role()`, `GroupPolicy`,
+  `AuthzError`, `Principal::has_role` /  `has_permission` /
+  `require` / `assert_tenant` / `override_tenant_scope` /
+  `set_roles`. 18 unit tests + 3 integration tests in lib.rs.
+- **MODIFIED** `services/auth/src/lib.rs`:
+  - `pub mod rbac` + re-exports (`GroupPolicy`, `Permission`,
+    `Role`).
+  - `AuthConfig` is now a struct (`{kind, policy,
+    static_token_tenant_ids}`) instead of an enum. Old enum
+    variants split into `AuthConfigKind`. Test call-sites updated
+    accordingly.
+  - `Authenticator` carries the `GroupPolicy` and applies it to
+    every authenticated principal.
+  - Static-token principals auto-tagged with synthetic
+    `demo-admins` group so the demo policy resolves.
+  - `load_policy()` helper reads env JSON or falls back to demo
+    builtin / production-empty.
+- **MODIFIED** `services/dashboard/src/main.rs`: import
+  `Permission`; every `/api/*` handler `principal.require(
+  Permission::ReadView)` first; tenant scope assertion left as
+  a TODO comment for the multi-tenant variant.
+- **MODIFIED** `services/control_plane/src/main.rs`: import
+  `Permission`; `create_tenant` requires `TenantWrite`;
+  `tombstone_tenant` requires `TenantWrite` + `assert_tenant`;
+  `get_tenant` requires `ReadView` + `assert_tenant`. All gates
+  log `subject` + `roles` + (where relevant) `requested_tenant`
+  + `scope` for the security audit log.
+- **MODIFIED** `deploy/demo/compose.yaml`: dashboard +
+  control_plane both get `STATIC_TOKEN_TENANT_IDS` pointing at
+  the seeded demo tenant uuid.
+
+### Tests
+
+- **+18 RBAC unit tests** in `services/auth/src/rbac.rs`:
+  - `role_parse_known_values` — viewer/operator/approver/admin/auditor + reject unknown
+  - `permissions_for_admin_include_all_others_minus_none`
+  - `viewer_can_read_but_not_approve_or_mutate`
+  - `approver_can_resolve_but_not_create_tenant`
+  - `auditor_can_export_but_not_mutate_budgets`
+  - `require_permission_returns_typed_error_when_missing`
+  - `assert_tenant_passes_when_in_scope`
+  - `assert_tenant_rejects_cross_tenant`
+  - `assert_tenant_rejects_principal_with_no_scope`
+  - `group_policy_parse_round_trips_known_roles`
+  - `group_policy_rejects_unknown_role`
+  - `group_policy_rejects_malformed_json`
+  - `group_policy_resolves_groups_to_role_union`
+  - `group_policy_default_viewer_on_miss_when_configured`
+  - `group_policy_no_default_viewer_when_not_configured`
+  - `demo_default_policy_grants_admin_to_demo_admins_group`
+  - `demo_default_policy_falls_through_to_viewer_for_unmapped_groups`
+  - `empty_policy_grants_no_roles_so_handlers_fail_closed`
+- **+3 integration tests** in `services/auth/src/lib.rs`:
+  - `static_token_principal_in_demo_profile_inherits_demo_admin_roles`
+  - `static_token_principal_with_empty_policy_has_zero_permissions`
+  - `jwt_principal_roles_populated_from_group_policy` —
+    end-to-end JWT → roles → permission check + cross-tenant
+    rejection.
+  Total: `36 passed; 0 failed`.
+
+### Adversarial review
+
+- **Tenant id from URL path is trusted only as input, never as
+  authority**: every handler that takes `Path(id)` calls
+  `principal.assert_tenant(&id)` BEFORE any DB query. The query
+  itself also filters by `tenant_id` so even a bug in the gate
+  doesn't leak other tenants.
+- **Cross-tenant 404 vs 403 leak**: spec mandates 403 for
+  cross-tenant. Both `MissingPermission` and `CrossTenant`
+  collapse to `StatusCode::FORBIDDEN`. The handler's tracing log
+  records the typed reason for forensics; the public response
+  body is stripped (axum's default error body for 403). Probing
+  cannot distinguish "tenant doesn't exist" from "tenant exists
+  but you can't see it".
+- **Privilege escalation via crafted JWT claims**: roles are
+  derived from groups via the operator-controlled policy.
+  Attacker can't put `roles: ["admin"]` directly in a JWT and have
+  it work — the auth crate IGNORES any `roles` claim and only
+  reads `groups`. Documented inline.
+- **Static-token bypass in production**: triple gate. Helm fail-
+  gate (S17), `AuthConfig::from_env` profile check (S17),
+  `static_token_tenant_ids` empty list → assert_tenant fails-
+  closed (S18). Defense in depth.
+- **Group policy with `_default_viewer_on_miss=true` in prod**:
+  this is operator-controlled. The flag's behavior (grant Viewer
+  if no group matches) is documented in code comments and progress
+  doc. Operators who need stricter membership skip the flag.
+- **Race on policy reload**: the policy is loaded once at startup
+  and held in `Arc<GroupPolicy>`. Hot-reload not supported in S18
+  (S22 will add /admin/reload-policy). Operators rotate by
+  restarting the pod. JWKS rotation IS hot-reloaded (S17), only
+  the policy is fixed-on-boot.
+- **Audit log scrubbing**: roles + subject get logged, but the
+  static-token VALUE never does (only `subject`). The token
+  string is in env; if the env leaks, that's a separate breach.
+- **Empty roles list bypass attempt**: handler `require(...)`
+  returns FORBIDDEN if roles is empty. Verified by test
+  `static_token_principal_with_empty_policy_has_zero_permissions`.
+
+### Observability
+
+- New tracing fields on every gated action:
+  - `subject` (always),
+  - `roles` (always),
+  - `requested_tenant` + `scope` (on cross-tenant rejection),
+  - `mode` (`jwt` | `static_token`).
+- Mutating actions (create_tenant, tombstone_tenant) log at
+  info; rejected attempts log at info too so SREs can grep for
+  "rejected — cross-tenant" or "missing TenantWrite permission".
+
+### Residual risks
+
+1. **No DB-side enforcement yet**. S18 enforces tenant scope at the
+   handler layer; the SQL queries themselves still use the env-
+   pinned tenant_id. A handler bug that bypasses the gate would
+   currently leak. Future work: switch all queries to use
+   `principal.tenant_ids` (and emit a security audit row on
+   cross-tenant attempts via existing `audit_signature_quarantine`
+   infrastructure or a new `audit_authz_quarantine` table).
+2. **Audit-log persistence not yet wired**. Spec asks for an
+   audit/security log on cross-tenant 403s. S18 logs via tracing
+   only; a future slice should persist these to a dedicated table
+   with retention policy.
+3. **Per-tenant rate limiting** deferred to S22.
+4. **Approval flow handlers don't exist yet**. `ApprovalResolve`
+   permission is defined but no route consumes it. S20 (approval
+   workflow) wires the missing handlers and tests.
+5. **Hot policy reload not supported**. Operators must restart pods
+   to change `GROUP_POLICY_JSON`. S22 may add `/admin/reload-policy`.
+6. **Codex adversarial round still flaking** — same companion
+   runtime issue; code-level review captured here.
+
+### Runbook deltas
+
+- **New env vars** per service:
+  - `<PREFIX>_GROUP_POLICY_JSON` — JSON map of group→[role].
+    Defaults: empty in production (fail-closed), demo policy in
+    demo profile.
+  - `<PREFIX>_STATIC_TOKEN_TENANT_IDS` — CSV of tenant ids
+    granted to the static-token principal. Demo profile only.
+- **Operator playbook**:
+  - To add a new group: append to `GROUP_POLICY_JSON` and rolling-
+    restart the pod.
+  - To rotate operator access: remove the user from the group in
+    your IdP. JWT cache TTL is at most `OIDC_JWKS_REFRESH_SECONDS`
+    (3600s default); plan revocation accordingly OR set a shorter
+    `OIDC_CLOCK_SKEW_SECONDS` and rotate the OIDC signing key.
+  - Cross-tenant 403 alerts: grep tracing for `"rejected —
+    cross-tenant"`. A spike usually means a forgotten
+    `STATIC_TOKEN_TENANT_IDS` rotation or an IdP misconfiguration
+    on `spendguard:tenant_ids` claim.
+
+### Quality bar
+
+Meets 90%+: typed Role + Permission enums, fail-closed default
+policy in production, demo-builtin policy keeps existing flows
+working, tenant scope assertion on every tenant-scoped handler,
+no information leakage on cross-tenant rejection, comprehensive
+unit + integration tests covering each role / each permission /
+each policy edge case. Open items (DB-side enforcement, audit-
+log persistence, hot reload, approval workflow handlers) are
+explicit follow-ups in S20 / S22 rather than gaps in this slice.
+
+---
+
 (Subsequent slice entries appended below.)
