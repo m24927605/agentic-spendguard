@@ -42,11 +42,16 @@ class DecisionDenied(SpendGuardError):
         decision_id: str,
         reason_codes: list[str] | None = None,
         audit_decision_event_id: str | None = None,
+        matched_rule_ids: list[str] | None = None,
     ) -> None:
         super().__init__(message)
         self.decision_id = decision_id
         self.reason_codes = reason_codes or []
         self.audit_decision_event_id = audit_decision_event_id
+        # Phase 3 wedge: which contract rules fired. Useful for audit
+        # correlation when callers want to know "why was this denied?"
+        # without re-querying canonical_events.
+        self.matched_rule_ids = matched_rule_ids or []
 
 
 class DecisionStopped(DecisionDenied):
@@ -69,12 +74,14 @@ class ApprovalRequired(DecisionDenied):
         approver_role: str | None = None,
         reason_codes: list[str] | None = None,
         audit_decision_event_id: str | None = None,
+        matched_rule_ids: list[str] | None = None,
     ) -> None:
         super().__init__(
             message,
             decision_id=decision_id,
             reason_codes=reason_codes,
             audit_decision_event_id=audit_decision_event_id,
+            matched_rule_ids=matched_rule_ids,
         )
         self.approval_request_id = approval_request_id
         self.approver_role = approver_role

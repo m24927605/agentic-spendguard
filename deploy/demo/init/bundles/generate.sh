@@ -31,24 +31,60 @@ mkdir -p "$CONTRACT_DIR" "$SCHEMA_DIR"
 : "${SIGNING_KEY_ID:?required}"
 
 if [ -f "$OUT/runtime.env" ] && [ -f "$CONTRACT_DIR/$CONTRACT_BUNDLE_ID.tgz" ]; then
-    echo "[bundles] existing bundles detected, skipping regeneration"
-    cat "$OUT/runtime.env"
-    exit 0
+    # Phase 3 wedge: verify the existing bundle includes contract.yaml.
+    # Prior Phase 2B bundles shipped contract.cel as a placeholder; an
+    # upgrade-in-place needs to regenerate so the new sidecar parser
+    # finds something to read.
+    if tar -tzf "$CONTRACT_DIR/$CONTRACT_BUNDLE_ID.tgz" 2>/dev/null \
+            | grep -q '^\./contract\.yaml$\|^contract\.yaml$'; then
+        echo "[bundles] existing bundles detected (contract.yaml present), skipping regeneration"
+        cat "$OUT/runtime.env"
+        exit 0
+    else
+        echo "[bundles] existing bundle is pre-Phase-3 (no contract.yaml); regenerating"
+    fi
 fi
 
-# 1. Build the demo contract bundle payload. POC: a tar of a single
-#    minimal CEL contract. Production carries the full DSL artifact set
-#    + JSON schemas referenced by the contract.
+# 1. Build the demo contract bundle payload.
+#    Phase 3 wedge: ship a real contract.yaml (POC subset of Contract
+#    DSL §6 + §7) that the sidecar's hot-path evaluator parses at
+#    startup. Existing modes (decision/invoice/release/ttl_sweep) all
+#    use claim amounts well below the 1_000_000_000-atomic hard-cap, so
+#    the wedge sits open-by-default for the happy path. DEMO_MODE=deny
+#    sends a claim above the cap to exercise the STOP path.
 echo "[bundles] writing demo contract source..."
 WORK=/tmp/contract.work
 rm -rf "$WORK" && mkdir -p "$WORK"
-cat > "$WORK/contract.cel" <<'EOF'
-// SpendGuard demo contract: allow all decisions, no DEGRADE, no STOP.
-// Production contracts use the full Contract DSL with rules + budgets;
-// this stub exists to satisfy the sidecar bundle-loader's hash + sig check.
-package demo
-allow_all = true
+
+# Demo IDs:
+#   contract.metadata.id     = 33333333-...
+#   contract.spec.budgets[0] = SPENDGUARD_BUDGET_ID (44444444-...)
+DEMO_BUDGET_ID="${DEMO_BUDGET_ID:-44444444-4444-4444-8444-444444444444}"
+CONTRACT_LOGICAL_ID="${CONTRACT_LOGICAL_ID:-33333333-3333-4333-8333-333333333333}"
+
+cat > "$WORK/contract.yaml" <<EOF
+apiVersion: contract.spendguard.io/v1alpha1
+kind: Contract
+metadata:
+  id: $CONTRACT_LOGICAL_ID
+  name: demo-contract
+spec:
+  budgets:
+    - id: $DEMO_BUDGET_ID
+      limit_amount_atomic: "1000000000"
+      currency: USD
+      reservation_ttl_seconds: 600
+      require_hard_cap: true
+  rules:
+    - id: hard-cap-deny
+      when:
+        budget_id: $DEMO_BUDGET_ID
+        claim_amount_atomic_gt: "1000000000"
+      then:
+        decision: STOP
+        reason_code: BUDGET_EXHAUSTED
 EOF
+
 cat > "$WORK/manifest.json" <<EOF
 {
   "name": "demo-contract",

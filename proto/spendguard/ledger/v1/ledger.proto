@@ -36,6 +36,14 @@ service Ledger {
   // success response.
   rpc ReserveSet(ReserveSetRequest) returns (ReserveSetResponse);
 
+  // Phase 3 wedge: record a contract-evaluator-denied decision. Writes
+  // a carrier ledger_transactions row (operation_kind='denied_decision';
+  // no ledger_entries) plus an audit_outbox row preserving the
+  // Contract §6.1 invariant 「無 audit 則無 effect」 even when no
+  // reserve happens.
+  rpc RecordDeniedDecision(RecordDeniedDecisionRequest)
+      returns (RecordDeniedDecisionResponse);
+
   // Release held reservation (TTL expired / runtime error / run aborted).
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
 
@@ -210,6 +218,54 @@ message ReleaseSuccess {
   string ledger_transaction_id = 1;
   repeated string released_reservation_ids = 2;
   google.protobuf.Timestamp recorded_at = 3;
+}
+
+// ============================================================================
+// RecordDeniedDecision (Phase 3 wedge)
+// ============================================================================
+//
+// Writes a non-effect decision into the audit chain so the Contract §6.1
+// invariant 「無 audit 則無 effect」 holds even when the contract evaluator
+// returns STOP / REQUIRE_APPROVAL / DEGRADE / SKIP. The carrier ledger_tx
+// has operation_kind='denied_decision' and zero ledger_entries; balance
+// invariants no-op on tx with no entries.
+
+message RecordDeniedDecisionRequest {
+  string tenant_id = 1;
+  string decision_id = 2;
+  string audit_decision_event_id = 3;
+  uint64 producer_sequence = 4;
+
+  spendguard.common.v1.Idempotency idempotency = 5;
+  spendguard.common.v1.Fencing fencing = 6;
+
+  // What the caller tried to claim (audit forensics; not posted to ledger).
+  repeated spendguard.common.v1.BudgetClaim attempted_claims = 7;
+
+  // Contract evaluator outputs.
+  repeated string matched_rule_ids = 8;
+  repeated string reason_codes = 9;
+  // Final decision name: STOP / REQUIRE_APPROVAL / DEGRADE / SKIP.
+  string final_decision = 10;
+
+  spendguard.common.v1.CloudEvent audit_event = 11;
+  spendguard.common.v1.ContractBundleRef contract_bundle = 12;
+  spendguard.common.v1.PricingFreeze pricing = 13;
+}
+
+message RecordDeniedDecisionResponse {
+  oneof outcome {
+    RecordDeniedDecisionSuccess success = 1;
+    spendguard.common.v1.Replay replay = 2;
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message RecordDeniedDecisionSuccess {
+  string ledger_transaction_id = 1;
+  string audit_decision_event_id = 2;
+  uint64 producer_sequence = 3;
+  google.protobuf.Timestamp recorded_at = 4;
 }
 
 // ============================================================================

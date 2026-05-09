@@ -1,6 +1,7 @@
 pub mod bootstrap;
 pub mod clients;
 pub mod config;
+pub mod contract;
 pub mod decision;
 pub mod domain;
 pub mod drain;

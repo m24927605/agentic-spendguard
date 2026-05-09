@@ -18,7 +18,8 @@ use crate::{
         DisputeAdjustmentResponse, InvoiceReconcileRequest, InvoiceReconcileResponse,
         ProviderReportRequest, ProviderReportResponse, QueryBudgetStateRequest,
         QueryBudgetStateResponse, QueryDecisionOutcomeRequest, QueryDecisionOutcomeResponse,
-        QueryReservationContextRequest, QueryReservationContextResponse, RefundCreditRequest,
+        QueryReservationContextRequest, QueryReservationContextResponse,
+        RecordDeniedDecisionRequest, RecordDeniedDecisionResponse, RefundCreditRequest,
         RefundCreditResponse, ReleaseRequest, ReleaseResponse, ReplayAuditEvent,
         ReplayAuditFromCursorRequest, ReserveSetRequest, ReserveSetResponse,
     },
@@ -51,6 +52,14 @@ impl Ledger for LedgerService {
         // Step 7.5 implemented: handler returns ReleaseSuccess / Replay /
         // typed Error for sidecar-originated release lane.
         let resp = handlers::release::handle(&self.pool, req.into_inner()).await?;
+        Ok(Response::new(resp))
+    }
+
+    async fn record_denied_decision(
+        &self,
+        req: Request<RecordDeniedDecisionRequest>,
+    ) -> Result<Response<RecordDeniedDecisionResponse>, Status> {
+        let resp = handlers::record_denied_decision::handle(&self.pool, req.into_inner()).await?;
         Ok(Response::new(resp))
     }
 

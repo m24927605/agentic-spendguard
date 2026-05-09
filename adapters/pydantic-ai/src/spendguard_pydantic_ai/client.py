@@ -477,6 +477,7 @@ class SpendGuardClient:
                 decision_id=resp.decision_id,
                 reason_codes=list(resp.reason_codes),
                 audit_decision_event_id=resp.audit_decision_event_id,
+                matched_rule_ids=list(resp.matched_rule_ids),
             )
         if decision_name == "SKIP":
             raise DecisionSkipped(
@@ -484,6 +485,7 @@ class SpendGuardClient:
                 decision_id=resp.decision_id,
                 reason_codes=list(resp.reason_codes),
                 audit_decision_event_id=resp.audit_decision_event_id,
+                matched_rule_ids=list(resp.matched_rule_ids),
             )
         if decision_name == "REQUIRE_APPROVAL":
             raise ApprovalRequired(
@@ -493,6 +495,7 @@ class SpendGuardClient:
                 approver_role=resp.approver_role,
                 reason_codes=list(resp.reason_codes),
                 audit_decision_event_id=resp.audit_decision_event_id,
+                matched_rule_ids=list(resp.matched_rule_ids),
             )
         # Unknown decision kind — treat as denial.
         raise DecisionDenied(
@@ -500,6 +503,7 @@ class SpendGuardClient:
             decision_id=resp.decision_id,
             reason_codes=list(resp.reason_codes),
             audit_decision_event_id=resp.audit_decision_event_id,
+            matched_rule_ids=list(resp.matched_rule_ids),
         )
 
     # -------------------------------------------------------------------

@@ -545,7 +545,138 @@ async def main() -> int:
         return await run_release_mode()
     if DEMO_MODE == "ttl_sweep":
         return await run_ttl_sweep_mode()
+    if DEMO_MODE == "deny":
+        return await run_deny_mode()
     return await run_agent_mode()
+
+
+# ---------------------------------------------------------------------------
+# Deny mode (Phase 3 wedge): contract evaluator returns STOP for a claim
+# above the bundle's hard-cap rule.
+# ---------------------------------------------------------------------------
+
+
+async def run_deny_mode() -> int:
+    from spendguard_pydantic_ai import (
+        SpendGuardClient,
+        derive_idempotency_key,
+        new_uuid7,
+    )
+    from spendguard_pydantic_ai._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+
+    run_id = str(new_uuid7())
+    step_id = f"{run_id}:step0"
+    llm_call_id = str(new_uuid7())
+    decision_id = str(new_uuid7())
+
+    # Phase 3 wedge demo: claim 2_000_000_000 atomic ($2000) — twice the
+    # hard-cap rule threshold (1_000_000_000 / $1000) shipped in the
+    # demo contract bundle. Sidecar's contract evaluator matches
+    # `hard-cap-deny` and short-circuits Reserve, calling
+    # Ledger.RecordDeniedDecision instead.
+    claims = [
+        common_pb2.BudgetClaim(
+            budget_id=budget_id,
+            unit=common_pb2.UnitRef(
+                unit_id=unit_id,
+                token_kind="output_token",
+                model_family="gpt-4",
+            ),
+            amount_atomic="2000000000",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id=window_id,
+        ),
+    ]
+    _ = (pricing_version, fx, unit_conv, snapshot_hash_hex)
+    idempotency_key = derive_idempotency_key(
+        tenant_id=tenant_id,
+        session_id=client.session_id,
+        run_id=run_id,
+        step_id=step_id,
+        llm_call_id=llm_call_id,
+        trigger="LLM_CALL_PRE",
+    )
+
+    # Adapter raises DecisionStopped on STOP (per
+    # adapters/pydantic-ai/.../client.py:474). The exception carries
+    # decision_id, reason_codes, audit_decision_event_id, and
+    # matched_rule_ids — exactly what we want to assert in the wedge demo.
+    from spendguard_pydantic_ai.errors import DecisionStopped
+
+    try:
+        outcome = await client.request_decision(
+            trigger="LLM_CALL_PRE",
+            run_id=run_id,
+            step_id=step_id,
+            llm_call_id=llm_call_id,
+            tool_call_id="",
+            decision_id=decision_id,
+            route="llm.call",
+            projected_claims=claims,
+            idempotency_key=idempotency_key,
+        )
+    except DecisionStopped as e:
+        print(
+            f"[demo] DENY raised decision_id={e.decision_id} "
+            f"reason_codes={e.reason_codes} "
+            f"matched_rule_ids={e.matched_rule_ids} "
+            f"audit_decision_event_id={e.audit_decision_event_id}"
+        )
+        if "BUDGET_EXHAUSTED" not in e.reason_codes:
+            print(
+                f"[demo] FATAL: expected reason_code BUDGET_EXHAUSTED, got {e.reason_codes}",
+                file=sys.stderr,
+            )
+            await client.close()
+            return 5
+        if not e.matched_rule_ids:
+            print(
+                "[demo] FATAL: DENY produced empty matched_rule_ids — audit forensics gap",
+                file=sys.stderr,
+            )
+            await client.close()
+            return 7
+        print("[demo] DENY assertions PASS")
+        await client.close()
+        return 0
+
+    # If we get here, sidecar returned CONTINUE/DEGRADE — wedge failure.
+    print(
+        f"[demo] FATAL: expected DecisionStopped (STOP) but got "
+        f"decision={outcome.decision} reservation_ids={list(outcome.reservation_ids)}",
+        file=sys.stderr,
+    )
+    await client.close()
+    return 4
 
 
 # ---------------------------------------------------------------------------

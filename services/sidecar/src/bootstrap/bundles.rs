@@ -86,6 +86,19 @@ pub fn load_contract_bundle(
         DomainError::BundleSignatureInvalid(format!("price_snapshot_hash hex: {e}"))
     })?;
 
+    // Phase 3 wedge: parse contract.yaml out of the bundle tarball so the
+    // hot-path evaluator (`decision/transaction.rs` Stage 2) can read
+    // structured rules. Fail-closed: malformed YAML → sidecar refuses
+    // to start. Silent fallback to "no rules → CONTINUE everything" is
+    // worse than refusing to come up — it would leave decisions
+    // ungated with no audit trace of what should have gated them.
+    let parsed = crate::contract::parse_from_tgz(&raw).map_err(|e| {
+        DomainError::BundleSignatureInvalid(format!(
+            "contract bundle {} parse: {:#}",
+            bundle_id, e
+        ))
+    })?;
+
     Ok(CachedContractBundle {
         bundle_id,
         bundle_hash: actual_hash.to_vec(),
@@ -95,6 +108,7 @@ pub fn load_contract_bundle(
         price_snapshot_hash: snapshot_hash,
         fx_rate_version: meta.fx_rate_version,
         unit_conversion_version: meta.unit_conversion_version,
+        parsed: std::sync::Arc::new(parsed),
     })
 }
 
