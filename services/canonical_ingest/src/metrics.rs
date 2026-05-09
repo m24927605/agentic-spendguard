@@ -34,6 +34,10 @@ pub struct IngestMetricsInner {
     pub pre_s6_admitted: AtomicU64,
     pub disabled_admitted: AtomicU64,
     pub schema_failure: AtomicU64,
+    /// S7: validity-window quarantine reasons.
+    pub quarantined_key_expired: AtomicU64,
+    pub quarantined_key_not_yet_valid: AtomicU64,
+    pub quarantined_key_revoked: AtomicU64,
 }
 
 #[derive(Clone, Default)]
@@ -70,6 +74,9 @@ impl IngestMetrics {
             QuarantineReason::Disabled => &self.inner.quarantined_disabled,
             QuarantineReason::Oversized => &self.inner.quarantined_oversized,
             QuarantineReason::SchemaFailure => &self.inner.schema_failure,
+            QuarantineReason::KeyExpired => &self.inner.quarantined_key_expired,
+            QuarantineReason::KeyNotYetValid => &self.inner.quarantined_key_not_yet_valid,
+            QuarantineReason::KeyRevoked => &self.inner.quarantined_key_revoked,
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -117,6 +124,10 @@ impl IngestMetrics {
             ("disabled", &i.quarantined_disabled),
             ("oversized_canonical", &i.quarantined_oversized),
             ("schema_failure", &i.schema_failure),
+            // S7
+            ("key_expired", &i.quarantined_key_expired),
+            ("key_not_yet_valid", &i.quarantined_key_not_yet_valid),
+            ("key_revoked", &i.quarantined_key_revoked),
         ] {
             out.push_str(&format!(
                 "spendguard_ingest_events_quarantined_total{{reason=\"{}\"}} {}\n",
@@ -157,6 +168,10 @@ pub enum QuarantineReason {
     Disabled,
     Oversized,
     SchemaFailure,
+    /// S7
+    KeyExpired,
+    KeyNotYetValid,
+    KeyRevoked,
 }
 
 #[cfg(test)]
