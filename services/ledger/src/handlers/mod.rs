@@ -1,3 +1,4 @@
+pub mod acquire_fencing_lease;
 pub mod commit_estimated;
 pub mod invoice_reconcile;
 pub mod provider_report;
