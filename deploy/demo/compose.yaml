@@ -383,6 +383,11 @@ services:
       SPENDGUARD_DEMO_TLS_CERT_PEM:            "/etc/ssl/spendguard/ledger.crt"
       SPENDGUARD_DEMO_TLS_KEY_PEM:             "/etc/ssl/spendguard/ledger.key"
       SPENDGUARD_DEMO_TLS_CA_PEM:              "/etc/ssl/spendguard/ca.crt"
+      # Phase 3 follow-up: real LLM keys forwarded from host env for
+      # DEMO_MODE=agent_real. Missing host var → empty string → run_demo.py
+      # FATALs on use (fail-fast).
+      OPENAI_API_KEY:                          "${OPENAI_API_KEY:-}"
+      ANTHROPIC_API_KEY:                       "${ANTHROPIC_API_KEY:-}"
       SPENDGUARD_DEMO_WEBHOOK_FENCING_SCOPE_ID: "00000000-0000-7000-a000-000000000050"
       SPENDGUARD_DEMO_WEBHOOK_WORKLOAD_INSTANCE_ID: "demo-webhook-receiver"
       # Phase 2B Step 11: webhook receiver service replaces in-process simulator.
