@@ -220,10 +220,21 @@ async fn api_budgets(
     if principal.require(Permission::ReadView).is_err() {
         return Err(StatusCode::FORBIDDEN);
     }
-    // S18: dashboard's tenant scope is currently env-pinned (single-
-    // tenant POC). Future multi-tenant variant uses
-    // `principal.assert_tenant(state.tenant_id.to_string())` to gate
-    // cross-tenant reads.
+    // Codex round-12 P2: cross-tenant guard. The dashboard is
+    // currently env-pinned to state.tenant_id, but a JWT principal
+    // scoped to a different tenant (or with no tenant scope at all)
+    // could otherwise read these aggregate views for the env tenant.
+    // Mirror the api_audit_export pattern: assert_tenant against the
+    // env-pinned tenant_id; reject 403 on mismatch / no scope.
+    if principal.assert_tenant(&state.tenant_id.to_string()).is_err() {
+        info!(
+            subject = %principal.subject,
+            requested = %state.tenant_id,
+            scope = ?principal.tenant_ids,
+            "dashboard read rejected — cross-tenant"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     let rows = sqlx::query_as::<_, (Uuid, Uuid, String, Option<String>, Option<sqlx::types::BigDecimal>, Option<sqlx::types::BigDecimal>, Option<sqlx::types::BigDecimal>)>(
         r#"
@@ -284,10 +295,21 @@ async fn api_decisions(
     if principal.require(Permission::ReadView).is_err() {
         return Err(StatusCode::FORBIDDEN);
     }
-    // S18: dashboard's tenant scope is currently env-pinned (single-
-    // tenant POC). Future multi-tenant variant uses
-    // `principal.assert_tenant(state.tenant_id.to_string())` to gate
-    // cross-tenant reads.
+    // Codex round-12 P2: cross-tenant guard. The dashboard is
+    // currently env-pinned to state.tenant_id, but a JWT principal
+    // scoped to a different tenant (or with no tenant scope at all)
+    // could otherwise read these aggregate views for the env tenant.
+    // Mirror the api_audit_export pattern: assert_tenant against the
+    // env-pinned tenant_id; reject 403 on mismatch / no scope.
+    if principal.assert_tenant(&state.tenant_id.to_string()).is_err() {
+        info!(
+            subject = %principal.subject,
+            requested = %state.tenant_id,
+            scope = ?principal.tenant_ids,
+            "dashboard read rejected — cross-tenant"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     let rows = sqlx::query_as::<_, (Uuid, String, String, Option<Uuid>, chrono::DateTime<chrono::Utc>)>(
         r#"
@@ -332,10 +354,21 @@ async fn api_deny_stats(
     if principal.require(Permission::ReadView).is_err() {
         return Err(StatusCode::FORBIDDEN);
     }
-    // S18: dashboard's tenant scope is currently env-pinned (single-
-    // tenant POC). Future multi-tenant variant uses
-    // `principal.assert_tenant(state.tenant_id.to_string())` to gate
-    // cross-tenant reads.
+    // Codex round-12 P2: cross-tenant guard. The dashboard is
+    // currently env-pinned to state.tenant_id, but a JWT principal
+    // scoped to a different tenant (or with no tenant scope at all)
+    // could otherwise read these aggregate views for the env tenant.
+    // Mirror the api_audit_export pattern: assert_tenant against the
+    // env-pinned tenant_id; reject 403 on mismatch / no scope.
+    if principal.assert_tenant(&state.tenant_id.to_string()).is_err() {
+        info!(
+            subject = %principal.subject,
+            requested = %state.tenant_id,
+            scope = ?principal.tenant_ids,
+            "dashboard read rejected — cross-tenant"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     let rows = sqlx::query_as::<_, (chrono::DateTime<chrono::Utc>, i64)>(
         r#"
@@ -376,10 +409,21 @@ async fn api_outbox_health(
     if principal.require(Permission::ReadView).is_err() {
         return Err(StatusCode::FORBIDDEN);
     }
-    // S18: dashboard's tenant scope is currently env-pinned (single-
-    // tenant POC). Future multi-tenant variant uses
-    // `principal.assert_tenant(state.tenant_id.to_string())` to gate
-    // cross-tenant reads.
+    // Codex round-12 P2: cross-tenant guard. The dashboard is
+    // currently env-pinned to state.tenant_id, but a JWT principal
+    // scoped to a different tenant (or with no tenant scope at all)
+    // could otherwise read these aggregate views for the env tenant.
+    // Mirror the api_audit_export pattern: assert_tenant against the
+    // env-pinned tenant_id; reject 403 on mismatch / no scope.
+    if principal.assert_tenant(&state.tenant_id.to_string()).is_err() {
+        info!(
+            subject = %principal.subject,
+            requested = %state.tenant_id,
+            scope = ?principal.tenant_ids,
+            "dashboard read rejected — cross-tenant"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
 
     let (pending, forwarded): (i64, i64) = sqlx::query_as(
         r#"
