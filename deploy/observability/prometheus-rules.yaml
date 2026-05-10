@@ -83,6 +83,7 @@ spec:
           annotations:
             summary: "Lease {{ $labels.lease_name }} > 30s old"
             runbook: "https://docs/operations/runbooks/lease-stale"
+            drill_runbook: "https://docs/operations/drills/lease-lost-mid-batch"
             description: |
               Healthy lease renewal happens at 1/3 of TTL (~5s for the
               default 15s TTL). 30s+ means the leader is wedged or
@@ -105,6 +106,7 @@ spec:
           annotations:
             summary: "Audit outbox p99 lag > 60s for 15m"
             runbook: "https://docs/operations/runbooks/L4-outbox-lag"
+            drill_runbook: "https://docs/operations/drills/audit-chain-forwarder-backlog"
 
         - alert: SpendGuardCanonicalIngestRejecting
           expr: |
@@ -117,6 +119,7 @@ spec:
           annotations:
             summary: "Canonical ingest rejecting > 0.5 events/sec for 10m"
             runbook: "https://docs/operations/runbooks/L5-canonical-rejects"
+            drill_runbook: "https://docs/operations/drills/strict-signature-quarantine-spike"
 
         - alert: SpendGuardSignatureQuarantineSpike
           expr: |
@@ -128,6 +131,7 @@ spec:
           annotations:
             summary: "Signature quarantine reason={{ $labels.reason }} > 1/sec"
             runbook: "https://docs/operations/runbooks/quarantine-spike"
+            drill_runbook: "https://docs/operations/drills/strict-signature-quarantine-spike"
 
     - name: spendguard.pricing
       interval: 60s
@@ -181,6 +185,7 @@ spec:
           annotations:
             summary: "Approval p99 > 5m for 30m"
             runbook: "https://docs/operations/runbooks/L8-approval-latency"
+            drill_runbook: "https://docs/operations/drills/approval-ttl-wave"
 
     - name: spendguard.fencing
       interval: 60s
