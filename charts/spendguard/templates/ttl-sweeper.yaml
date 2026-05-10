@@ -62,9 +62,15 @@ spec:
               value: {{ .Values.postgres.ledgerUrl | quote }}
             - { name: SPENDGUARD_TTL_SWEEPER_POLL_INTERVAL_SECONDS, value: {{ .Values.ttlSweeper.pollIntervalSeconds | quote }} }
             - { name: SPENDGUARD_TTL_SWEEPER_BATCH_SIZE,            value: {{ .Values.ttlSweeper.batchSize | quote }} }
-            - { name: SPENDGUARD_TTL_SWEEPER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/ttl-sweeper.crt" }
-            - { name: SPENDGUARD_TTL_SWEEPER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/ttl-sweeper.key" }
-            - { name: SPENDGUARD_TTL_SWEEPER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # Round-2 #3: Config::from_env() reads TLS_CLIENT_{CERT,KEY}
+            # (not TLS_CERT_PEM / TLS_KEY_PEM). Rename for production
+            # readiness; the file paths are unchanged.
+            - { name: SPENDGUARD_TTL_SWEEPER_TLS_CLIENT_CERT, value: "/etc/ssl/spendguard/ttl-sweeper.crt" }
+            - { name: SPENDGUARD_TTL_SWEEPER_TLS_CLIENT_KEY,  value: "/etc/ssl/spendguard/ttl-sweeper.key" }
+            - { name: SPENDGUARD_TTL_SWEEPER_TLS_CA_PEM,      value: "/etc/ssl/spendguard/ca.crt" }
+            # Round-2 #3: required by Config::from_env(); was missing
+            # from chart (production install would CrashLoopBackOff).
+            - { name: SPENDGUARD_TTL_SWEEPER_FENCING_INITIAL_EPOCH, value: {{ .Values.ttlSweeper.fencingInitialEpoch | quote }} }
             # Phase 5 S1 — leader election config.
             - { name: SPENDGUARD_LEADER_ELECTION_MODE,    value: {{ .Values.leaderElection.mode | quote }} }
             - { name: SPENDGUARD_LEADER_LEASE_NAME,        value: {{ .Values.ttlSweeper.leaseName | quote }} }
