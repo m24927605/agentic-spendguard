@@ -37,6 +37,8 @@
 //!     poller logs at warn on transient errors and at error after
 //!     N consecutive failures (alertable).
 
+pub mod metrics;
+
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
