@@ -133,6 +133,10 @@ webhookReceiver:
   fencingScopeId: "00000000-0000-7000-a000-000000000050"
   workloadInstanceId: "webhook-receiver-0"
   hmacSecretName: spendguard-webhook-hmac
+  # Round-2 #3: required by services/webhook_receiver Config::from_env().
+  # Operator MUST seed `fencing_scopes.current_epoch = N` for the
+  # webhook-receiver scope BEFORE installing. Set to 1 for first install.
+  fencingInitialEpoch: 1
 
 # Phase 5 S1 — leader election for singleton background workers.
 # Modes:
