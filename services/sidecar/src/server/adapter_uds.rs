@@ -15,6 +15,11 @@
 //!     (Stage 7 commit lane). ProviderReport + Release deferred (B2/A3).
 //!   * StreamDrainSignal — emits drain phase events when sidecar marks draining.
 //!
+//! Round-2 #11: every gRPC method records a (handler, outcome) bucket
+//! into `metrics: SidecarMetrics`. The trait impl methods are tiny
+//! wrappers around `*_inner` impls on `AdapterUds` so the inner bodies
+//! keep their existing early-return shape unchanged.
+//!
 //! Deferred to vertical slice expansion:
 //!   * Sub-agent budget grant lifecycle
 //!   * Sidecar announcement signature (HandshakeResponse.announcement_signature)
@@ -31,6 +36,7 @@ use crate::{
     config::Config,
     decision::transaction::{self, DecisionContext},
     domain::{error::DomainError, state::SidecarState},
+    metrics::{Handler, Outcome, SidecarMetrics},
     proto::sidecar_adapter::v1::{
         drain_signal::Phase as DrainPhase, sidecar_adapter_server::SidecarAdapter,
         ConsumeBudgetGrantRequest, ConsumeBudgetGrantResponse, DecisionRequest, DecisionResponse,
@@ -44,11 +50,108 @@ use crate::{
 pub struct AdapterUds {
     pub state: SidecarState,
     pub cfg: Config,
+    /// Round-2 #11: handler call counters surfaced over /metrics.
+    pub metrics: SidecarMetrics,
+}
+
+/// Round-2 #11: increment the (handler, outcome) bucket based on the
+/// `Result<T, Status>` returned by the wrapped handler.
+fn record_outcome<T>(metrics: &SidecarMetrics, handler: Handler, r: &Result<T, Status>) {
+    let outcome = if r.is_ok() { Outcome::Ok } else { Outcome::Err };
+    metrics.inc_handler(handler, outcome);
 }
 
 #[tonic::async_trait]
 impl SidecarAdapter for AdapterUds {
     async fn handshake(
+        &self,
+        req: Request<HandshakeRequest>,
+    ) -> Result<Response<HandshakeResponse>, Status> {
+        let result = self.handshake_inner(req).await;
+        record_outcome(&self.metrics, Handler::Handshake, &result);
+        result
+    }
+
+    async fn request_decision(
+        &self,
+        req: Request<DecisionRequest>,
+    ) -> Result<Response<DecisionResponse>, Status> {
+        let result = self.request_decision_inner(req).await;
+        record_outcome(&self.metrics, Handler::RequestDecision, &result);
+        result
+    }
+
+    async fn confirm_publish_outcome(
+        &self,
+        req: Request<PublishOutcomeRequest>,
+    ) -> Result<Response<PublishOutcomeResponse>, Status> {
+        let result = self.confirm_publish_outcome_inner(req).await;
+        record_outcome(&self.metrics, Handler::ConfirmPublishOutcome, &result);
+        result
+    }
+
+    type EmitTraceEventsStream =
+        ReceiverStream<Result<TraceEventAck, Status>>;
+
+    async fn emit_trace_events(
+        &self,
+        stream: Request<tonic::Streaming<TraceEvent>>,
+    ) -> Result<Response<Self::EmitTraceEventsStream>, Status> {
+        let result = self.emit_trace_events_inner(stream).await;
+        record_outcome(&self.metrics, Handler::EmitTraceEvents, &result);
+        result
+    }
+
+    async fn issue_budget_grant(
+        &self,
+        _req: Request<IssueBudgetGrantRequest>,
+    ) -> Result<Response<IssueBudgetGrantResponse>, Status> {
+        self.metrics.inc_handler(Handler::IssueBudgetGrant, Outcome::Err);
+        Err(Status::unimplemented(
+            "IssueBudgetGrant: vertical slice expansion (Phase 1 sub-agent flow)",
+        ))
+    }
+    async fn revoke_budget_grant(
+        &self,
+        _req: Request<RevokeBudgetGrantRequest>,
+    ) -> Result<Response<RevokeBudgetGrantResponse>, Status> {
+        self.metrics.inc_handler(Handler::RevokeBudgetGrant, Outcome::Err);
+        Err(Status::unimplemented("RevokeBudgetGrant: vertical slice expansion"))
+    }
+    async fn consume_budget_grant(
+        &self,
+        _req: Request<ConsumeBudgetGrantRequest>,
+    ) -> Result<Response<ConsumeBudgetGrantResponse>, Status> {
+        self.metrics.inc_handler(Handler::ConsumeBudgetGrant, Outcome::Err);
+        Err(Status::unimplemented("ConsumeBudgetGrant: vertical slice expansion"))
+    }
+
+    type StreamDrainSignalStream = ReceiverStream<Result<DrainSignal, Status>>;
+
+    async fn stream_drain_signal(
+        &self,
+        req: Request<DrainSubscribeRequest>,
+    ) -> Result<Response<Self::StreamDrainSignalStream>, Status> {
+        let result = self.stream_drain_signal_inner(req).await;
+        record_outcome(&self.metrics, Handler::StreamDrainSignal, &result);
+        result
+    }
+
+    async fn resume_after_approval(
+        &self,
+        req: Request<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalRequest>,
+    ) -> Result<
+        Response<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalResponse>,
+        Status,
+    > {
+        let result = self.resume_after_approval_inner(req).await;
+        record_outcome(&self.metrics, Handler::ResumeAfterApproval, &result);
+        result
+    }
+}
+
+impl AdapterUds {
+    async fn handshake_inner(
         &self,
         req: Request<HandshakeRequest>,
     ) -> Result<Response<HandshakeResponse>, Status> {
@@ -99,7 +202,7 @@ impl SidecarAdapter for AdapterUds {
         Ok(Response::new(response))
     }
 
-    async fn request_decision(
+    async fn request_decision_inner(
         &self,
         req: Request<DecisionRequest>,
     ) -> Result<Response<DecisionResponse>, Status> {
@@ -149,7 +252,7 @@ impl SidecarAdapter for AdapterUds {
         Ok(Response::new(response))
     }
 
-    async fn confirm_publish_outcome(
+    async fn confirm_publish_outcome_inner(
         &self,
         req: Request<PublishOutcomeRequest>,
     ) -> Result<Response<PublishOutcomeResponse>, Status> {
@@ -280,13 +383,10 @@ impl SidecarAdapter for AdapterUds {
         }))
     }
 
-    type EmitTraceEventsStream =
-        ReceiverStream<Result<TraceEventAck, Status>>;
-
-    async fn emit_trace_events(
+    async fn emit_trace_events_inner(
         &self,
         stream: Request<tonic::Streaming<TraceEvent>>,
-    ) -> Result<Response<Self::EmitTraceEventsStream>, Status> {
+    ) -> Result<Response<<Self as SidecarAdapter>::EmitTraceEventsStream>, Status> {
         let (tx, rx) = mpsc::channel::<Result<TraceEventAck, Status>>(8);
         let mut input = stream.into_inner();
         let state = self.state.clone();
@@ -443,33 +543,10 @@ impl SidecarAdapter for AdapterUds {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    async fn issue_budget_grant(
-        &self,
-        _req: Request<IssueBudgetGrantRequest>,
-    ) -> Result<Response<IssueBudgetGrantResponse>, Status> {
-        Err(Status::unimplemented(
-            "IssueBudgetGrant: vertical slice expansion (Phase 1 sub-agent flow)",
-        ))
-    }
-    async fn revoke_budget_grant(
-        &self,
-        _req: Request<RevokeBudgetGrantRequest>,
-    ) -> Result<Response<RevokeBudgetGrantResponse>, Status> {
-        Err(Status::unimplemented("RevokeBudgetGrant: vertical slice expansion"))
-    }
-    async fn consume_budget_grant(
-        &self,
-        _req: Request<ConsumeBudgetGrantRequest>,
-    ) -> Result<Response<ConsumeBudgetGrantResponse>, Status> {
-        Err(Status::unimplemented("ConsumeBudgetGrant: vertical slice expansion"))
-    }
-
-    type StreamDrainSignalStream = ReceiverStream<Result<DrainSignal, Status>>;
-
-    async fn stream_drain_signal(
+    async fn stream_drain_signal_inner(
         &self,
         _req: Request<DrainSubscribeRequest>,
-    ) -> Result<Response<Self::StreamDrainSignalStream>, Status> {
+    ) -> Result<Response<<Self as SidecarAdapter>::StreamDrainSignalStream>, Status> {
         let (tx, rx) = mpsc::channel::<Result<DrainSignal, Status>>(4);
         let state = self.state.clone();
         tokio::spawn(async move {
@@ -516,7 +593,7 @@ impl SidecarAdapter for AdapterUds {
     // adapter SDK (Python: ApprovalRequired.resume()) catches it and
     // surfaces a clean message pointing at the followup ticket. Real
     // wiring lands once the bundling SP + lookup helper are in place.
-    async fn resume_after_approval(
+    async fn resume_after_approval_inner(
         &self,
         req: Request<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalRequest>,
     ) -> Result<
@@ -549,8 +626,8 @@ impl SidecarAdapter for AdapterUds {
 }
 
 /// Build a tower stack for the UDS-bound gRPC server.
-pub fn make_service(state: SidecarState, cfg: Config) -> AdapterUds {
-    AdapterUds { state, cfg }
+pub fn make_service(state: SidecarState, cfg: Config, metrics: SidecarMetrics) -> AdapterUds {
+    AdapterUds { state, cfg, metrics }
 }
 
 // Silence unused warning until vertical slice consumes it.
