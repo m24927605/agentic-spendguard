@@ -107,29 +107,39 @@ async fn main() -> anyhow::Result<()> {
             }
             _ = sleep(poll_dur) => {
                 let s = guard.state_rx.borrow().clone();
-                match s {
-                    LeaseState::Leader { .. } => {
-                        match fetch_expired(&state.pg, tenant_uuid, state.config.batch_size).await {
-                            Ok(rows) => {
-                                if rows.is_empty() {
-                                    tracing::debug!("no expired reservations");
-                                } else {
-                                    info!(count = rows.len(), "found expired reservations (leader)");
-                                    for row in rows {
-                                        if let Err(e) = sweep_one(&mut state, row).await {
-                                            error!(error = ?e, "sweep_one failed");
-                                        }
+                // Codex round-9 P2: use expiry-aware is_leader_now()
+                // instead of plain pattern match. If lease renewal has
+                // stalled past expires_at, the watch channel still
+                // holds the last Leader value; sweeping under stale
+                // leadership lets two pods concurrently UPDATE the
+                // same expired-reservation row.
+                if s.is_leader_now() {
+                    match fetch_expired(&state.pg, tenant_uuid, state.config.batch_size).await {
+                        Ok(rows) => {
+                            if rows.is_empty() {
+                                tracing::debug!("no expired reservations");
+                            } else {
+                                info!(count = rows.len(), "found expired reservations (leader)");
+                                for row in rows {
+                                    if let Err(e) = sweep_one(&mut state, row).await {
+                                        error!(error = ?e, "sweep_one failed");
                                     }
                                 }
                             }
-                            Err(e) => error!(error = ?e, "fetch_expired failed"),
                         }
+                        Err(e) => error!(error = ?e, "fetch_expired failed"),
                     }
-                    LeaseState::Standby { holder_workload_id, .. } => {
-                        tracing::debug!(held_by = %holder_workload_id, "standby — skip sweep");
-                    }
-                    LeaseState::Unknown => {
-                        warn!("lease state Unknown — skip sweep");
+                } else {
+                    match &s {
+                        LeaseState::Leader { expires_at, .. } => {
+                            warn!(expires_at = %expires_at, "lease expired locally; skip sweep until renewed");
+                        }
+                        LeaseState::Standby { holder_workload_id, .. } => {
+                            tracing::debug!(held_by = %holder_workload_id, "standby — skip sweep");
+                        }
+                        LeaseState::Unknown => {
+                            warn!("lease state Unknown — skip sweep");
+                        }
                     }
                 }
             }

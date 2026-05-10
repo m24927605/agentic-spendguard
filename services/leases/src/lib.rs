@@ -50,6 +50,18 @@ impl LeaseState {
     pub fn is_leader(&self) -> bool {
         matches!(self, LeaseState::Leader { .. })
     }
+
+    /// Codex round-9 P2: expiry-aware leader check. Returns true only
+    /// if we're Leader AND the lease has not yet expired. Use this
+    /// before any leader-only side effect (sweep, forward, etc.) so a
+    /// stalled renewal task doesn't keep the worker thinking it's
+    /// still leader after another pod has taken over.
+    pub fn is_leader_now(&self) -> bool {
+        match self {
+            LeaseState::Leader { expires_at, .. } => *expires_at > Utc::now(),
+            _ => false,
+        }
+    }
 }
 
 #[derive(Debug, Error)]
@@ -452,6 +464,37 @@ mod tests {
         }
         .is_leader());
         assert!(!LeaseState::Unknown.is_leader());
+    }
+
+    /// Codex round-9 P2: is_leader_now() must reject expired Leader.
+    #[test]
+    fn is_leader_now_rejects_expired_leader() {
+        let fresh = LeaseState::Leader {
+            token: Uuid::nil(),
+            expires_at: Utc::now() + chrono::Duration::seconds(60),
+            transition_count: 1,
+        };
+        let expired = LeaseState::Leader {
+            token: Uuid::nil(),
+            expires_at: Utc::now() - chrono::Duration::seconds(1),
+            transition_count: 1,
+        };
+        assert!(fresh.is_leader_now(), "fresh leader should be leader-now");
+        assert!(!expired.is_leader_now(), "expired leader must NOT be leader-now");
+        // Plain is_leader is variant-only and does not check expiry —
+        // verifies the new method is genuinely stricter.
+        assert!(expired.is_leader());
+        assert!(!expired.is_leader_now());
+    }
+
+    #[test]
+    fn is_leader_now_false_for_standby_and_unknown() {
+        assert!(!LeaseState::Standby {
+            holder_workload_id: "x".into(),
+            observed_expiry: Utc::now() + chrono::Duration::seconds(60),
+        }
+        .is_leader_now());
+        assert!(!LeaseState::Unknown.is_leader_now());
     }
 
     #[test]
