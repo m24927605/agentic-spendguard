@@ -14,6 +14,7 @@ use spendguard_sidecar::{
     config::Config,
     domain::state::SidecarState,
     drain,
+    metrics::SidecarMetrics,
     proto::sidecar_adapter::v1::sidecar_adapter_server::SidecarAdapterServer,
     server::adapter_uds,
 };
@@ -218,6 +219,17 @@ async fn main() -> Result<()> {
         });
     }
 
+    // 3b) Round-2 #11: Prometheus metrics counter store + HTTP server.
+    let metrics = SidecarMetrics::new();
+    if !cfg.metrics_addr.is_empty() {
+        let metrics_addr = cfg.metrics_addr.clone();
+        let metrics_handle = metrics.clone();
+        tokio::spawn(async move {
+            run_metrics_server(metrics_addr, metrics_handle).await;
+        });
+        info!(addr = %cfg.metrics_addr, "metrics server bound");
+    }
+
     // 4) Bind UDS for the in-process adapter.
     let uds_path = PathBuf::from(&cfg.uds_path);
     if let Some(parent) = uds_path.parent() {
@@ -238,7 +250,7 @@ async fn main() -> Result<()> {
     };
     info!(uds = %uds_path.display(), "adapter UDS listener bound");
 
-    let svc = adapter_uds::make_service(state.clone(), cfg.clone());
+    let svc = adapter_uds::make_service(state.clone(), cfg.clone(), metrics.clone());
     let svc = SidecarAdapterServer::new(svc);
 
     // 5) preStop drain: SIGTERM → mark draining → wait drain_window.
@@ -348,6 +360,62 @@ fn install_bundles(
     install_schema_bundle(state, schema);
 
     Ok(())
+}
+
+/// Round-2 #11: minimal HTTP /metrics endpoint that renders the
+/// SidecarMetrics Prometheus text. Mirrors the canonical_ingest /
+/// ledger pattern — raw hyper, no `prometheus` crate dep. Reuses the
+/// in-process `hyper` already pulled in for the health probe.
+async fn run_metrics_server(addr: String, metrics: SidecarMetrics) {
+    use std::convert::Infallible;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(addr = %addr, err = %e, "metrics bind failed");
+            return;
+        }
+    };
+    info!(addr = %addr, "metrics server listening");
+
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(err = %e, "metrics accept failed");
+                continue;
+            }
+        };
+        let io = TokioIo::new(stream);
+        let metrics = metrics.clone();
+        tokio::spawn(async move {
+            let svc = service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                let metrics = metrics.clone();
+                async move {
+                    let body = if req.uri().path() == "/metrics" {
+                        metrics.render()
+                    } else {
+                        "".to_string()
+                    };
+                    Ok::<_, Infallible>(
+                        hyper::Response::builder()
+                            .header(
+                                "content-type",
+                                "text/plain; version=0.0.4; charset=utf-8",
+                            )
+                            .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            });
+            if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
+                tracing::debug!(err = %e, "metrics conn closed");
+            }
+        });
+    }
 }
 
 async fn run_health_server(addr: String, state: SidecarState) {
