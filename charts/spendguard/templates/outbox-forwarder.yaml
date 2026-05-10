@@ -38,7 +38,10 @@ spec:
             - { name: metrics, containerPort: 9096 }
           env:
             - { name: SPENDGUARD_OUTBOX_FORWARDER_METRICS_ADDR,      value: "0.0.0.0:9096" }
-            - { name: SPENDGUARD_OUTBOX_FORWARDER_TENANT_ID,         value: {{ .Values.global.tenantId | quote }} }
+            # Round-2 #3: outbox_forwarder Config::from_env() does NOT
+            # read TENANT_ID (the binary works against the audit_outbox
+            # table directly, not per-tenant). Removed the unused env
+            # var so the chart matches the binary's actual surface.
             # Phase 5 S2: per-pod-unique workload_instance_id via downward API.
             {{- if .Values.outboxForwarder.workloadInstanceIdOverride }}
             - { name: SPENDGUARD_OUTBOX_FORWARDER_WORKLOAD_INSTANCE_ID, value: {{ .Values.outboxForwarder.workloadInstanceIdOverride | quote }} }
@@ -53,9 +56,18 @@ spec:
               value: "https://{{ include "spendguard.fullname" . }}-canonical-ingest:50052"
             - { name: SPENDGUARD_OUTBOX_FORWARDER_POLL_INTERVAL_SECONDS, value: {{ .Values.outboxForwarder.pollIntervalSeconds | quote }} }
             - { name: SPENDGUARD_OUTBOX_FORWARDER_BATCH_SIZE,            value: {{ .Values.outboxForwarder.batchSize | quote }} }
-            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/outbox-forwarder.crt" }
-            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/outbox-forwarder.key" }
-            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # Round-2 #3: Config::from_env() reads TLS_CLIENT_{CERT,KEY}
+            # (not TLS_CERT_PEM / TLS_KEY_PEM). Rename for production
+            # readiness; the file paths are unchanged.
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CLIENT_CERT, value: "/etc/ssl/spendguard/outbox-forwarder.crt" }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CLIENT_KEY,  value: "/etc/ssl/spendguard/outbox-forwarder.key" }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CA_PEM,      value: "/etc/ssl/spendguard/ca.crt" }
+            # Round-2 #3: required by Config::from_env(); previously
+            # unwired (production install would CrashLoopBackOff). The
+            # bundle ID + hash MUST be byte-exact match for the schema
+            # bundle the operator pre-pulled into bundles-data.
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_SCHEMA_BUNDLE_ID,       value: {{ .Values.outboxForwarder.schemaBundleId | quote }} }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_SCHEMA_BUNDLE_HASH_HEX, value: {{ .Values.outboxForwarder.schemaBundleHashHex | quote }} }
             # Phase 5 S1 — leader election config.
             - { name: SPENDGUARD_LEADER_ELECTION_MODE,    value: {{ .Values.leaderElection.mode | quote }} }
             - { name: SPENDGUARD_LEADER_LEASE_NAME,        value: {{ .Values.outboxForwarder.leaseName | quote }} }

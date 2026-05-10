@@ -155,6 +155,13 @@ outboxForwarder:
   leaseName: "outbox-forwarder"
   # Phase 5 S2: pod-unique workload id via downward API by default.
   workloadInstanceIdOverride: ""
+  # Round-2 #3: required by services/outbox_forwarder Config::from_env().
+  # The forwarder hashes outgoing CloudEvents against the canonical-ingest
+  # service's expected schema bundle; mismatched id/hash → ingest rejects
+  # every event. Set to the bundle id + hex hash the operator pre-pulled
+  # into the `bundles-data` secret. Empty string = chart fail at install.
+  schemaBundleId: "22222222-2222-4222-8222-222222222222"
+  schemaBundleHashHex: ""
 
 ttlSweeper:
   enabled: true
