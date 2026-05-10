@@ -845,6 +845,38 @@ struct ResolveApprovalResp {
     event_id: Option<Uuid>,
 }
 
+/// Extract role restrictions from `approval_requests.approver_policy`.
+/// Returns `None` when the policy is empty / non-restrictive (the
+/// `Permission::ApprovalResolve` check is then the only gate).
+/// Returns `Some(roles)` when the contract scoped the approval to
+/// specific role(s); the caller intersects against `principal.roles`.
+///
+/// Accepted shapes (kept liberal so contract-author conventions can
+/// evolve without redeploying control_plane):
+///   * `{"roles": ["admin","approver"]}`
+///   * `{"required_roles": ["admin"]}`
+///   * `{"role": "admin"}`
+fn required_roles_from_policy(policy: &serde_json::Value) -> Option<Vec<String>> {
+    let obj = policy.as_object()?;
+    for key in ["roles", "required_roles"] {
+        if let Some(v) = obj.get(key).and_then(|x| x.as_array()) {
+            let roles: Vec<String> = v
+                .iter()
+                .filter_map(|s| s.as_str().map(|s| s.to_string()))
+                .collect();
+            if !roles.is_empty() {
+                return Some(roles);
+            }
+        }
+    }
+    if let Some(s) = obj.get("role").and_then(|x| x.as_str()) {
+        if !s.is_empty() {
+            return Some(vec![s.to_string()]);
+        }
+    }
+    None
+}
+
 async fn resolve_approval(
     Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
@@ -869,16 +901,21 @@ async fn resolve_approval(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Fetch tenant_id first (read-only) to enforce cross-tenant guard
-    // BEFORE issuing the SP. Same return-403-not-404 semantics.
-    let row_tenant: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT tenant_id FROM approval_requests WHERE approval_id = $1",
+    // Fetch tenant_id + approver_policy (read-only) to enforce
+    // cross-tenant + per-approval policy guard BEFORE issuing the SP.
+    // Same return-403-not-404 semantics.
+    //
+    // Codex P1#2: a permission-only check would let any approver in
+    // the tenant resolve any approval — bypassing the contract's
+    // per-rule approver scoping (`approver_role` in contract.yaml).
+    let row: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+        "SELECT tenant_id, approver_policy FROM approval_requests WHERE approval_id = $1",
     )
     .bind(approval_uuid)
     .fetch_optional(&state.pg)
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let Some((row_tenant,)) = row_tenant else {
+    let Some((row_tenant, approver_policy)) = row else {
         return Err(StatusCode::FORBIDDEN);
     };
     if principal.assert_tenant(&row_tenant.to_string()).is_err() {
@@ -889,6 +926,19 @@ async fn resolve_approval(
             "resolve_approval rejected — cross-tenant"
         );
         return Err(StatusCode::FORBIDDEN);
+    }
+    if let Some(required) = required_roles_from_policy(&approver_policy) {
+        let satisfied = required.iter().any(|r| principal.roles.iter().any(|p| p == r));
+        if !satisfied {
+            info!(
+                subject = %principal.subject,
+                approval_id = %approval_uuid,
+                required_roles = ?required,
+                principal_roles = ?principal.roles,
+                "resolve_approval rejected — approver_policy role mismatch"
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
     }
 
     info!(
@@ -922,4 +972,70 @@ async fn resolve_approval(
         event_id: row.2,
     })
     .into_response())
+}
+
+#[cfg(test)]
+mod approver_policy_tests {
+    use super::required_roles_from_policy;
+    use serde_json::json;
+
+    #[test]
+    fn empty_object_returns_none() {
+        assert!(required_roles_from_policy(&json!({})).is_none());
+    }
+
+    #[test]
+    fn null_returns_none() {
+        assert!(required_roles_from_policy(&serde_json::Value::Null).is_none());
+    }
+
+    #[test]
+    fn array_string_returns_none() {
+        // Non-object shape: defensively treat as no restriction; the
+        // permission gate is the only check. (Operators who want
+        // strict scoping populate the canonical {"roles":[...]} shape.)
+        assert!(required_roles_from_policy(&json!(["admin"])).is_none());
+    }
+
+    #[test]
+    fn roles_array_extracts() {
+        let p = json!({"roles": ["admin", "approver"]});
+        assert_eq!(
+            required_roles_from_policy(&p),
+            Some(vec!["admin".into(), "approver".into()])
+        );
+    }
+
+    #[test]
+    fn required_roles_alias_extracts() {
+        let p = json!({"required_roles": ["operator"]});
+        assert_eq!(
+            required_roles_from_policy(&p),
+            Some(vec!["operator".into()])
+        );
+    }
+
+    #[test]
+    fn role_singleton_string_extracts() {
+        let p = json!({"role": "admin"});
+        assert_eq!(required_roles_from_policy(&p), Some(vec!["admin".into()]));
+    }
+
+    #[test]
+    fn empty_roles_array_returns_none() {
+        let p = json!({"roles": []});
+        assert!(required_roles_from_policy(&p).is_none());
+    }
+
+    #[test]
+    fn empty_role_string_returns_none() {
+        let p = json!({"role": ""});
+        assert!(required_roles_from_policy(&p).is_none());
+    }
+
+    #[test]
+    fn ignores_non_string_array_entries() {
+        let p = json!({"roles": ["admin", 42, null]});
+        assert_eq!(required_roles_from_policy(&p), Some(vec!["admin".into()]));
+    }
 }

@@ -590,13 +590,33 @@ async fn verify_or_handle(
             }
         }
         Err(VerifyFailure::UnknownKey) => {
-            metrics.inc_quarantined(QuarantineReason::UnknownKey);
-            Some(write_quarantine(pool, evt, "unknown_key", metrics).await)
+            // Codex P2#3: non-strict mode is "audit-only" per the
+            // verifier docstring. Quarantining unknown-key in
+            // non-strict contradicts that contract; mirror the
+            // PreS6/Disabled pattern (admit + counter, no quarantine).
+            // Strict mode (production-mandated by Helm gate) still
+            // quarantines.
+            if cfg.strict_signatures {
+                metrics.inc_quarantined(QuarantineReason::UnknownKey);
+                Some(write_quarantine(pool, evt, "unknown_key", metrics).await)
+            } else {
+                metrics.inc_unknown_key_admitted();
+                None
+            }
         }
         Err(VerifyFailure::InvalidSignature) => {
+            // Codex P2#3: see UnknownKey arm. The
+            // rejected_invalid_signature counter still fires so
+            // operators can detect tamper attempts even in non-strict
+            // mode — only the quarantine + rejection is gated.
             metrics.inc_rejected_invalid_sig(route_to_metric(route));
-            metrics.inc_quarantined(QuarantineReason::InvalidSignature);
-            Some(write_quarantine(pool, evt, "invalid_signature", metrics).await)
+            if cfg.strict_signatures {
+                metrics.inc_quarantined(QuarantineReason::InvalidSignature);
+                Some(write_quarantine(pool, evt, "invalid_signature", metrics).await)
+            } else {
+                metrics.inc_invalid_signature_admitted();
+                None
+            }
         }
         // S7: per-key validity-window failures. Always quarantine
         // regardless of strict mode — these are unambiguous policy

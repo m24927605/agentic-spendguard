@@ -28,6 +28,7 @@ spec:
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           ports:
             - { name: grpc, containerPort: 50052 }
+            - { name: metrics, containerPort: 9091 }
           env:
             - { name: SPENDGUARD_CANONICAL_INGEST_BIND_ADDR,    value: "0.0.0.0:50052" }
             - { name: SPENDGUARD_CANONICAL_INGEST_DATABASE_URL, value: {{ .Values.postgres.canonicalUrl | quote }} }
@@ -39,8 +40,6 @@ spec:
             - { name: SPENDGUARD_CANONICAL_INGEST_STRICT_SIGNATURES, value: {{ .Values.signing.strictVerification | quote }} }
             - { name: SPENDGUARD_CANONICAL_INGEST_TRUST_STORE_DIR,   value: "/etc/spendguard/trust-store" }
             - { name: SPENDGUARD_CANONICAL_INGEST_METRICS_ADDR,      value: "0.0.0.0:9091" }
-          ports:
-            - { name: metrics, containerPort: 9091 }
           volumeMounts:
             - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
             - { name: trust-store, mountPath: /etc/spendguard/trust-store, readOnly: true }

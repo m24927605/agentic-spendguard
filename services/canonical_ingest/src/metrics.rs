@@ -33,6 +33,10 @@ pub struct IngestMetricsInner {
     pub quarantined_oversized: AtomicU64,
     pub pre_s6_admitted: AtomicU64,
     pub disabled_admitted: AtomicU64,
+    /// Codex P2#3: non-strict-mode admit counters for unknown-key and
+    /// invalid-signature paths. In strict mode these still quarantine.
+    pub unknown_key_admitted: AtomicU64,
+    pub invalid_signature_admitted: AtomicU64,
     pub schema_failure: AtomicU64,
     /// S7: validity-window quarantine reasons.
     pub quarantined_key_expired: AtomicU64,
@@ -87,6 +91,18 @@ impl IngestMetrics {
 
     pub fn inc_disabled_admitted(&self) {
         self.inner.disabled_admitted.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_unknown_key_admitted(&self) {
+        self.inner
+            .unknown_key_admitted
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_invalid_signature_admitted(&self) {
+        self.inner
+            .invalid_signature_admitted
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     /// Render the Prometheus text format.
@@ -148,6 +164,20 @@ impl IngestMetrics {
         out.push_str(&format!(
             "spendguard_ingest_events_disabled_admitted_total {}\n",
             i.disabled_admitted.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spendguard_ingest_events_unknown_key_admitted_total Unknown-key rows admitted in non-strict mode.\n");
+        out.push_str("# TYPE spendguard_ingest_events_unknown_key_admitted_total counter\n");
+        out.push_str(&format!(
+            "spendguard_ingest_events_unknown_key_admitted_total {}\n",
+            i.unknown_key_admitted.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spendguard_ingest_events_invalid_signature_admitted_total Invalid-signature rows admitted in non-strict mode.\n");
+        out.push_str("# TYPE spendguard_ingest_events_invalid_signature_admitted_total counter\n");
+        out.push_str(&format!(
+            "spendguard_ingest_events_invalid_signature_admitted_total {}\n",
+            i.invalid_signature_admitted.load(Ordering::Relaxed)
         ));
 
         out
