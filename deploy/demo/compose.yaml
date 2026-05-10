@@ -449,8 +449,11 @@ services:
       # `demo-admins` group; in production, set GROUP_POLICY_JSON
       # to map your IdP's group claims to roles.
       SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN_TENANT_IDS:       "00000000-0000-4000-8000-000000000001"
+      # Round-2 #11: Prometheus /metrics endpoint.
+      SPENDGUARD_CONTROL_PLANE_METRICS_ADDR:                  "0.0.0.0:9094"
     ports:
       - "8091:8091"
+      - "9094:9094"
     depends_on:
       postgres:
         condition: service_healthy
