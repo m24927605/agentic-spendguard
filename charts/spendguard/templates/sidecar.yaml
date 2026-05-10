@@ -49,7 +49,10 @@ spec:
         - name: sidecar
           image: {{ include "spendguard.image" (merge (dict "image" .Values.sidecar.image "global" .Values.global) .) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - { name: metrics, containerPort: 9093 }
           env:
+            - { name: SPENDGUARD_SIDECAR_METRICS_ADDR,         value: "0.0.0.0:9093" }
             - { name: SPENDGUARD_SIDECAR_TENANT_ID,            value: {{ .Values.global.tenantId | quote }} }
             - { name: SPENDGUARD_SIDECAR_REGION,               value: {{ .Values.global.region | quote }} }
             - { name: SPENDGUARD_SIDECAR_FENCING_SCOPE_ID,     value: {{ .Values.sidecar.fencingScopeId | quote }} }
