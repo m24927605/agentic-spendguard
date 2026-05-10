@@ -15,7 +15,10 @@ axum = { version = "0.7", features = ["json", "tokio", "tracing"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 tower = "0.4"
 tower-http = { version = "0.5", features = ["limit", "trace"] }
-hyper = { version = "1", features = ["server"] }
+hyper = { version = "1", features = ["server", "http1"] }
+# Round-2 #11: Prometheus /metrics endpoint dependencies.
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }

@@ -12,9 +12,12 @@ use tracing::info;
 use crate::{
     config::Config,
     handlers::{health, webhook},
+    metrics::{record_metrics, WebhookReceiverMetrics},
     persistence::sequence::SequenceAllocator,
     proto::ledger::v1::ledger_client::LedgerClient,
 };
+
+use axum::middleware::from_fn_with_state;
 
 const REQUEST_BODY_LIMIT_BYTES: usize = 64 * 1024;
 
@@ -62,15 +65,17 @@ pub async fn build_ledger_client(config: &Config) -> anyhow::Result<LedgerClient
     Ok(LedgerClient::new(channel))
 }
 
-pub fn build_https_router(state: Arc<AppState>) -> Router {
+pub fn build_https_router(state: Arc<AppState>, metrics: WebhookReceiverMetrics) -> Router {
     Router::new()
         .route("/v1/webhook/:provider", post(webhook::handle_webhook))
         .layer(RequestBodyLimitLayer::new(REQUEST_BODY_LIMIT_BYTES))
+        .layer(from_fn_with_state(metrics, record_metrics))
         .with_state(state)
 }
 
-pub fn build_health_router(state: Arc<AppState>) -> Router {
+pub fn build_health_router(state: Arc<AppState>, metrics: WebhookReceiverMetrics) -> Router {
     Router::new()
         .route("/healthz", get(health::healthz))
+        .layer(from_fn_with_state(metrics, record_metrics))
         .with_state(state)
 }
