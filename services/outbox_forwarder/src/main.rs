@@ -85,19 +85,29 @@ async fn main() -> anyhow::Result<()> {
                 // S1 invariant: only the leader processes work. Standby
                 // pods sleep + wait for state changes.
                 let s = guard.state_rx.borrow().clone();
-                match s {
-                    LeaseState::Leader { .. } => {
-                        match forward_batch(&mut state).await {
-                            Ok(0) => tracing::debug!("no pending rows"),
-                            Ok(n) => info!(count = n, "batch processed (leader)"),
-                            Err(e) => error!(error = ?e, "forward_batch failed"),
+                // Codex round-9 P2: use expiry-aware is_leader_now()
+                // instead of plain pattern match. A stalled renewal
+                // task could leave the watch channel holding a stale
+                // Leader value; forwarding under expired leadership
+                // would let two pods double-send the same outbox row
+                // to the same downstream sink.
+                if s.is_leader_now() {
+                    match forward_batch(&mut state).await {
+                        Ok(0) => tracing::debug!("no pending rows"),
+                        Ok(n) => info!(count = n, "batch processed (leader)"),
+                        Err(e) => error!(error = ?e, "forward_batch failed"),
+                    }
+                } else {
+                    match &s {
+                        LeaseState::Leader { expires_at, .. } => {
+                            warn!(expires_at = %expires_at, "lease expired locally; skip batch until renewed");
                         }
-                    }
-                    LeaseState::Standby { holder_workload_id, .. } => {
-                        tracing::debug!(held_by = %holder_workload_id, "standby — skip batch");
-                    }
-                    LeaseState::Unknown => {
-                        warn!("lease state Unknown — skip batch");
+                        LeaseState::Standby { holder_workload_id, .. } => {
+                            tracing::debug!(held_by = %holder_workload_id, "standby — skip batch");
+                        }
+                        LeaseState::Unknown => {
+                            warn!("lease state Unknown — skip batch");
+                        }
                     }
                 }
             }
