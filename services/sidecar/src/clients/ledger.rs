@@ -16,10 +16,13 @@ use crate::{
     proto::ledger::v1::{
         ledger_client::LedgerClient as LedgerProtoClient, AcquireFencingLeaseRequest,
         AcquireFencingLeaseResponse, CommitEstimatedRequest,
-        CommitEstimatedResponse, QueryDecisionOutcomeRequest, QueryDecisionOutcomeResponse,
-        QueryReservationContextRequest, QueryReservationContextResponse,
-        RecordDeniedDecisionRequest, RecordDeniedDecisionResponse, ReleaseRequest,
-        ReleaseResponse, ReplayAuditFromCursorRequest, ReserveSetRequest, ReserveSetResponse,
+        CommitEstimatedResponse, GetApprovalForResumeRequest,
+        GetApprovalForResumeResponse, MarkApprovalBundledRequest,
+        MarkApprovalBundledResponse, QueryDecisionOutcomeRequest,
+        QueryDecisionOutcomeResponse, QueryReservationContextRequest,
+        QueryReservationContextResponse, RecordDeniedDecisionRequest,
+        RecordDeniedDecisionResponse, ReleaseRequest, ReleaseResponse,
+        ReplayAuditFromCursorRequest, ReserveSetRequest, ReserveSetResponse,
     },
 };
 
@@ -149,6 +152,32 @@ impl LedgerClient {
             .replay_audit_from_cursor(req)
             .await
             .map_err(|e| DomainError::LedgerClient(format!("ReplayAuditFromCursor: {e}")))?;
+        Ok(resp.into_inner())
+    }
+
+    /// Round-2 #9 part 2 PR 9c: read approval row for resume flow.
+    pub async fn get_approval_for_resume(
+        &self,
+        req: GetApprovalForResumeRequest,
+    ) -> Result<GetApprovalForResumeResponse, DomainError> {
+        let mut client = (*self.inner).clone();
+        let resp = client
+            .get_approval_for_resume(req)
+            .await
+            .map_err(|e| DomainError::LedgerClient(format!("GetApprovalForResume: {e}")))?;
+        Ok(resp.into_inner())
+    }
+
+    /// Round-2 #9 part 2 PR 9c: atomic bundling SP wrapper.
+    pub async fn mark_approval_bundled(
+        &self,
+        req: MarkApprovalBundledRequest,
+    ) -> Result<MarkApprovalBundledResponse, DomainError> {
+        let mut client = (*self.inner).clone();
+        let resp = client
+            .mark_approval_bundled(req)
+            .await
+            .map_err(|e| DomainError::LedgerClient(format!("MarkApprovalBundled: {e}")))?;
         Ok(resp.into_inner())
     }
 }
