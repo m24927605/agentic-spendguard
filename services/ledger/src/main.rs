@@ -38,6 +38,7 @@ async fn main() -> anyhow::Result<()> {
     // audit rows (currently only InvoiceReconcile's synthesized decision).
     let signer = std::sync::Arc::<dyn spendguard_signing::Signer>::from(
         spendguard_signing::signer_from_env("SPENDGUARD_LEDGER")
+            .await
             .context("S6: build signer from SPENDGUARD_LEDGER_SIGNING_* env")?,
     );
     info!(

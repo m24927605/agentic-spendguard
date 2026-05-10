@@ -87,6 +87,7 @@ async fn main() -> Result<()> {
     // it serve unsigned audit events.
     let signer = std::sync::Arc::<dyn spendguard_signing::Signer>::from(
         spendguard_signing::signer_from_env("SPENDGUARD_SIDECAR")
+            .await
             .context("S6: build signer from SPENDGUARD_SIDECAR_SIGNING_* env")?,
     );
     info!(

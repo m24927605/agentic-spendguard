@@ -55,6 +55,7 @@ async fn main() -> anyhow::Result<()> {
     // Phase 5 GA hardening S6: producer signer.
     let signer = std::sync::Arc::<dyn spendguard_signing::Signer>::from(
         spendguard_signing::signer_from_env("SPENDGUARD_TTL_SWEEPER")
+            .await
             .map_err(|e| anyhow::anyhow!("S6: build signer: {e}"))?,
     );
     info!(
