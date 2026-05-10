@@ -58,12 +58,25 @@ async fn main() -> anyhow::Result<()> {
     };
     let manager: Arc<dyn LeaseManager> = match config.leader_election_mode.as_str() {
         "postgres" => Arc::new(PostgresLease::new(pg.clone(), lease_cfg.clone())?),
-        "k8s" => Arc::new(K8sLease {
-            namespace: std::env::var("SPENDGUARD_LEADER_K8S_NAMESPACE")
-                .unwrap_or_else(|_| "default".into()),
-            lease_name: lease_cfg.lease_name.clone(),
-            workload_id: lease_cfg.workload_id.clone(),
-        }),
+        "k8s" => {
+            // Followup #5: K8sLease::new is async — see ttl_sweeper
+            // for context.
+            let namespace = std::env::var("SPENDGUARD_LEADER_K8S_NAMESPACE")
+                .unwrap_or_else(|_| "default".into());
+            let ttl_seconds = std::cmp::max(
+                1,
+                (config.leader_lease_ttl_ms / 1000) as i32,
+            );
+            Arc::new(
+                K8sLease::new(
+                    namespace,
+                    lease_cfg.lease_name.clone(),
+                    lease_cfg.workload_id.clone(),
+                    ttl_seconds,
+                )
+                .await?,
+            )
+        }
         "disabled" => Arc::new(DisabledLease {
             lease_name: lease_cfg.lease_name.clone(),
             workload_id: lease_cfg.workload_id.clone(),
