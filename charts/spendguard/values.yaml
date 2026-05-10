@@ -163,6 +163,10 @@ ttlSweeper:
     repository: spendguard/ttl-sweeper
     tag: "0.1.0-alpha.1"
   fencingScopeId: "00000000-0000-7000-a000-000000000060"
+  # Round-2 #3: required by services/ttl_sweeper Config::from_env().
+  # Operator MUST seed `fencing_scopes.current_epoch = N` for the same
+  # scope BEFORE installing the chart. Set to 1 for first install.
+  fencingInitialEpoch: 1
   pollIntervalSeconds: 2
   batchSize: 10
   leaseName: "ttl-sweeper"
