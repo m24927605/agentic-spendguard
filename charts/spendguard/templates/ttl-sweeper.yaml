@@ -42,7 +42,10 @@ spec:
         - name: ttl-sweeper
           image: {{ include "spendguard.image" (merge (dict "image" .Values.ttlSweeper.image "global" .Values.global) .) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - { name: metrics, containerPort: 9097 }
           env:
+            - { name: SPENDGUARD_TTL_SWEEPER_METRICS_ADDR,         value: "0.0.0.0:9097" }
             - { name: SPENDGUARD_TTL_SWEEPER_TENANT_ID,            value: {{ .Values.global.tenantId | quote }} }
             - { name: SPENDGUARD_TTL_SWEEPER_FENCING_SCOPE_ID,     value: {{ .Values.ttlSweeper.fencingScopeId | quote }} }
             # Phase 5 S2: per-pod-unique workload_instance_id via downward API.

@@ -378,6 +378,10 @@ services:
       SPENDGUARD_TTL_SWEEPER_SIGNING_MODE:               "local"
       SPENDGUARD_TTL_SWEEPER_SIGNING_PRODUCER_IDENTITY:  "ttl-sweeper:demo-ttl-sweeper"
       SPENDGUARD_TTL_SWEEPER_SIGNING_KEY_PATH:           "/etc/ssl/spendguard/signing/ttl-sweeper.pem"
+      # Round-2 #11: Prometheus /metrics endpoint.
+      SPENDGUARD_TTL_SWEEPER_METRICS_ADDR:               "0.0.0.0:9097"
+    ports:
+      - "9097:9097"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:

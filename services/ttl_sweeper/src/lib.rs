@@ -7,6 +7,7 @@
 pub mod audit;
 pub mod config;
 pub mod canonical;
+pub mod metrics;
 pub mod poll;
 pub mod sequence;
 pub mod state;

@@ -54,6 +54,16 @@ pub struct Config {
     #[serde(default = "default_lease_retry_ms")]
     #[serde(rename = "spendguard_leader_retry_interval_ms")]
     pub leader_retry_interval_ms: u64,
+
+    /// Round-2 #11: Prometheus /metrics endpoint bind addr. Defaults
+    /// to `0.0.0.0:9097` per the round-2 port table. Empty disables.
+    #[serde(default = "default_metrics_addr")]
+    #[serde(rename = "spendguard_ttl_sweeper_metrics_addr")]
+    pub metrics_addr: String,
+}
+
+fn default_metrics_addr() -> String {
+    "0.0.0.0:9097".to_string()
 }
 
 fn default_poll_interval() -> u64 {
