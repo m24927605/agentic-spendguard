@@ -579,6 +579,8 @@ async def main() -> int:
         return await run_ttl_sweep_mode()
     if DEMO_MODE == "deny":
         return await run_deny_mode()
+    if DEMO_MODE == "approval":
+        return await run_approval_mode()
     if DEMO_MODE == "agent_real":
         return await run_agent_mode(use_real_openai=True)
     if DEMO_MODE == "agent_real_anthropic":
@@ -1564,6 +1566,151 @@ async def run_ttl_sweep_mode() -> int:
     await asyncio.sleep(12)
     print("[demo] verifying TTL release happened via verify_step_ttl_sweep.sql")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE=approval (Round-2 #9 part 2 PR 9e):
+# Exercises the REQUIRE_APPROVAL → ApprovalRequired → e.resume(client) flow
+# end-to-end. Drives the resume gRPC RPCs added in PR #37 (ledger handlers)
+# + PR #38 (sidecar wiring) + PR #39 (Python SDK).
+#
+# Today the resume path surfaces ApprovalLapsedError with the
+# [PRODUCER_SP_NOT_WIRED] tag because the producer-side
+# post_approval_required_decision SP that writes
+# approval_requests.{decision_context, requested_effect} JSON is a
+# separate workstream. Once that SP lands the demo will assert a
+# successful Continue with a fresh ledger transaction.
+# ---------------------------------------------------------------------------
+
+
+async def run_approval_mode() -> int:
+    from spendguard import (
+        ApprovalDeniedError,
+        ApprovalLapsedError,
+        ApprovalRequired,
+        SpendGuardClient,
+        derive_idempotency_key,
+        new_uuid7,
+    )
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+
+    print(f"[demo] approval-mode connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+
+    run_id = str(new_uuid7())
+    step_id = f"{run_id}:step0"
+    llm_call_id = str(new_uuid7())
+    decision_id = str(new_uuid7())
+
+    # Claim 500_000_000 atomic ($500) — assumes the demo contract has
+    # a REQUIRE_APPROVAL rule keyed on amount > $500. If the seeded
+    # bundle doesn't yet ship such a rule, this DECISION returns
+    # CONTINUE and we report that explicitly so the operator can
+    # follow up with the bundle update.
+    claims = [
+        common_pb2.BudgetClaim(
+            budget_id=budget_id,
+            unit=common_pb2.UnitRef(
+                unit_id=unit_id,
+                token_kind="output_token",
+                model_family="gpt-4",
+            ),
+            amount_atomic="500000000",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id=window_id,
+        ),
+    ]
+    idempotency_key = derive_idempotency_key(
+        tenant_id=tenant_id,
+        session_id=client.session_id,
+        run_id=run_id,
+        step_id=step_id,
+        llm_call_id=llm_call_id,
+        trigger="LLM_CALL_PRE",
+    )
+
+    try:
+        outcome = await client.request_decision(
+            trigger="LLM_CALL_PRE",
+            run_id=run_id,
+            step_id=step_id,
+            llm_call_id=llm_call_id,
+            tool_call_id="",
+            decision_id=decision_id,
+            route="llm.call",
+            projected_claims=claims,
+            idempotency_key=idempotency_key,
+        )
+        print(
+            f"[demo] DEMO_MODE=approval — decision returned CONTINUE without "
+            f"REQUIRE_APPROVAL (decision_id={outcome.decision_id}). The seeded "
+            f"contract bundle does not yet contain a REQUIRE_APPROVAL rule for "
+            f"the demo claim shape. The resume flow surface (sidecar + SDK) is "
+            f"still wired and exercised individually by unit tests in PR #37/#38/#39."
+        )
+        await client.close()
+        return 0
+    except ApprovalRequired as e:
+        print(
+            f"[demo] REQUIRE_APPROVAL raised approval_id={e.approval_request_id} "
+            f"decision_id={e.decision_id}"
+        )
+
+        # Round-2 #9 part 2: in production the approver simulates a
+        # decision via the control_plane REST API
+        # (POST /v1/approvals/{id}/resolve). Here we go straight to
+        # resume() and expect either:
+        #   * ApprovalLapsedError(state='pending') — operator hasn't
+        #     resolved yet (typical demo path until control_plane
+        #     wiring is exercised)
+        #   * ApprovalLapsedError(message containing
+        #     'PRODUCER_SP_NOT_WIRED') — operator approved but the
+        #     producer-side SP that captures decision_context +
+        #     requested_effect hasn't shipped, so resume can't rebuild
+        #     the ReserveSetRequest
+        #   * Continue DecisionOutcome — full path lit up
+        #   * ApprovalDeniedError — operator rejected
+        try:
+            resume_outcome = await e.resume(client)
+            print(
+                f"[demo] resume() returned CONTINUE: "
+                f"decision_id={resume_outcome.decision_id} "
+                f"ledger_transaction_id={resume_outcome.ledger_transaction_id}"
+            )
+        except ApprovalLapsedError as lapsed:
+            print(
+                f"[demo] resume() raised ApprovalLapsedError state={lapsed.state} "
+                f"message={lapsed!s} — expected until producer-side SP lands"
+            )
+        except ApprovalDeniedError as denied:
+            print(
+                f"[demo] resume() raised ApprovalDeniedError "
+                f"approver={denied.approver_subject} reason={denied.approver_reason}"
+            )
+        await client.close()
+        return 0
 
 
 if __name__ == "__main__":
