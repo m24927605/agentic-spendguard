@@ -219,9 +219,15 @@ async fn handle_inner(
     // Phase 5 GA hardening S6: ledger signs the server-minted decision
     // row with its own producer signer. signing_key_id reflects the
     // ledger's key; the JSON canonical form (sorted by serde_json key
-    // order) is what we sign over. A successor slice (S8) bridges the
-    // ledger's JSON canonical form and the sidecar's proto canonical
-    // form into a single verifier.
+    // order) is what we sign over.
+    //
+    // Codex round-11 P2: producer_id must carry the `ledger:` prefix
+    // so the canonical_ingest verifier (services/canonical_ingest/
+    // src/verifier.rs:57 — `producer_id.starts_with("ledger:")`)
+    // routes verification through the JSON canonical-form path rather
+    // than the proto path. Otherwise strict-signature production
+    // quarantines every InvoiceReconcile decision row as
+    // InvalidSignature.
     let mut decision_payload = json!({
         "specversion":     outcome_audit_event.specversion,
         "type":            "spendguard.audit.decision",
@@ -235,7 +241,7 @@ async fn handle_inner(
         "runid":           outcome_audit_event.run_id,
         "decisionid":      outcome_audit_event.decision_id,
         "schema_bundle_id": outcome_audit_event.schema_bundle_id,
-        "producer_id":     outcome_audit_event.producer_id,
+        "producer_id":     "ledger:invoice-reconcile",
         "producer_sequence": decision_seq,
         "signing_key_id":  signer.key_id(),
     });
