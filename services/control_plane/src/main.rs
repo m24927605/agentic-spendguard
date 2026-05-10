@@ -950,6 +950,27 @@ fn parse_approver_policy(policy: &serde_json::Value) -> ApproverPolicyParse {
     ApproverPolicyParse::Restrict(roles)
 }
 
+/// Render a redacted shape descriptor for an `approver_policy`.
+/// Codex round-3 P2: the malformed-fail-closed log path used to dump
+/// the full JSONB; the policy can carry operator-supplied metadata
+/// (e.g. `description`, contract context) that may include sensitive
+/// strings. Operators only need the top-level type + key list to
+/// debug "why was this rejected."
+fn approver_policy_shape(policy: &serde_json::Value) -> String {
+    match policy {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(_) => "bool".to_string(),
+        serde_json::Value::Number(_) => "number".to_string(),
+        serde_json::Value::String(_) => "string".to_string(),
+        serde_json::Value::Array(a) => format!("array(len={})", a.len()),
+        serde_json::Value::Object(m) => {
+            let mut keys: Vec<&str> = m.keys().map(|s| s.as_str()).collect();
+            keys.sort();
+            format!("object(keys=[{}])", keys.join(","))
+        }
+    }
+}
+
 async fn resolve_approval(
     Extension(principal): Extension<Principal>,
     State(state): State<Arc<AppState>>,
@@ -974,21 +995,32 @@ async fn resolve_approval(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Fetch tenant_id + approver_policy (read-only) to enforce
-    // cross-tenant + per-approval policy guard BEFORE issuing the SP.
-    // Same return-403-not-404 semantics.
+    // Fetch tenant_id + approver_policy + ttl_expires_at + state
+    // (read-only) to enforce cross-tenant + per-approval policy +
+    // TTL guard BEFORE issuing the SP. Same return-403-not-404
+    // semantics for tenant; CONFLICT for expired-but-not-swept rows.
     //
     // Codex P1#2: a permission-only check would let any approver in
     // the tenant resolve any approval — bypassing the contract's
     // per-rule approver scoping (`approver_role` in contract.yaml).
-    let row: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
-        "SELECT tenant_id, approver_policy FROM approval_requests WHERE approval_id = $1",
-    )
-    .bind(approval_uuid)
-    .fetch_optional(&state.pg)
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    let Some((row_tenant, approver_policy)) = row else {
+    //
+    // Codex round-3 P1: TTL check at handler level. The SP only
+    // validates `state`, so a stale `pending` row whose
+    // `ttl_expires_at` has passed (sweeper delayed) is otherwise
+    // resolvable, breaking the S14 invariant
+    // ("approver action MUST happen before this wallclock").
+    // SP-level enforcement is an S14-followup migration; this is
+    // the surgical chokepoint for now.
+    let row: Option<(Uuid, serde_json::Value, chrono::DateTime<chrono::Utc>, String)> =
+        sqlx::query_as(
+            "SELECT tenant_id, approver_policy, ttl_expires_at, state \
+             FROM approval_requests WHERE approval_id = $1",
+        )
+        .bind(approval_uuid)
+        .fetch_optional(&state.pg)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let Some((row_tenant, approver_policy, ttl_expires_at, row_state)) = row else {
         return Err(StatusCode::FORBIDDEN);
     };
     if principal.assert_tenant(&row_tenant.to_string()).is_err() {
@@ -999,6 +1031,18 @@ async fn resolve_approval(
             "resolve_approval rejected — cross-tenant"
         );
         return Err(StatusCode::FORBIDDEN);
+    }
+    // TTL check: only relevant for pending rows. Terminal rows fall
+    // through to the SP, which surfaces CONFLICT for invalid
+    // transitions on its own.
+    if row_state == "pending" && ttl_expires_at <= chrono::Utc::now() {
+        info!(
+            subject = %principal.subject,
+            approval_id = %approval_uuid,
+            ttl_expires_at = %ttl_expires_at,
+            "resolve_approval rejected — approval expired (TTL passed; S14 invariant)"
+        );
+        return Err(StatusCode::CONFLICT);
     }
     match parse_approver_policy(&approver_policy) {
         ApproverPolicyParse::NoRestriction => {
@@ -1023,10 +1067,16 @@ async fn resolve_approval(
             // Codex round-2 P1: a policy that looks restrictive but
             // can't be parsed cleanly (wrong types / empty array) is
             // a security boundary failure. Fail closed.
+            //
+            // Codex round-3 P2: log only the shape (top-level type +
+            // keys), not the JSONB value — the policy may carry
+            // operator-supplied metadata fields that contain sensitive
+            // contract details. The shape is enough for operators to
+            // debug "why is this rejected" without leaking content.
             info!(
                 subject = %principal.subject,
                 approval_id = %approval_uuid,
-                approver_policy = %approver_policy,
+                policy_shape = %approver_policy_shape(&approver_policy),
                 "resolve_approval rejected — approver_policy malformed (fail-closed)"
             );
             return Err(StatusCode::FORBIDDEN);
@@ -1204,5 +1254,56 @@ mod approver_policy_tests {
     fn empty_string_array_entry_is_malformed() {
         let p = json!({"roles": ["admin", ""]});
         assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::Malformed);
+    }
+}
+
+#[cfg(test)]
+mod approver_policy_shape_tests {
+    use super::approver_policy_shape;
+    use serde_json::json;
+
+    #[test]
+    fn null_shape() {
+        assert_eq!(approver_policy_shape(&serde_json::Value::Null), "null");
+    }
+
+    #[test]
+    fn object_shows_sorted_keys_only_no_values() {
+        let p = json!({
+            "approver_role": "secret-team-name",
+            "description": "do not leak this string"
+        });
+        let s = approver_policy_shape(&p);
+        // Keys appear, values do NOT.
+        assert_eq!(s, "object(keys=[approver_role,description])");
+        assert!(!s.contains("secret-team-name"));
+        assert!(!s.contains("do not leak"));
+    }
+
+    #[test]
+    fn empty_object_shape() {
+        assert_eq!(approver_policy_shape(&json!({})), "object(keys=[])");
+    }
+
+    #[test]
+    fn array_shape_shows_len_only() {
+        assert_eq!(
+            approver_policy_shape(&json!(["sensitive", "values"])),
+            "array(len=2)"
+        );
+    }
+
+    #[test]
+    fn scalar_string_shape_shows_type_only() {
+        assert_eq!(
+            approver_policy_shape(&json!("sensitive-value")),
+            "string"
+        );
+    }
+
+    #[test]
+    fn number_and_bool_shapes() {
+        assert_eq!(approver_policy_shape(&json!(42)), "number");
+        assert_eq!(approver_policy_shape(&json!(true)), "bool");
     }
 }
