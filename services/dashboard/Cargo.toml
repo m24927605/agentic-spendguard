@@ -31,3 +31,8 @@ spendguard-auth = { path = "../auth" }
 # encoding for the batch manifest.
 sha2 = "0.10"
 hex = "0.4"
+
+# Round-2 #11: Prometheus /metrics endpoint.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
