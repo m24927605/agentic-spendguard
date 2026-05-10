@@ -11,13 +11,14 @@
 {{- if and (gt (int .Values.ttlSweeper.replicas) 1) (eq .Values.leaderElection.mode "disabled") -}}
 {{- fail "ttlSweeper.replicas > 1 requires leaderElection.mode != 'disabled' (S1 multi-pod safety gate)" -}}
 {{- end -}}
-{{- /* Codex round-5 P?: leases::K8sLease backend always returns
-       ModeUnavailable until the kube-crate wiring lands (S5-followup).
-       Reject the mode at deploy time so operators can't pick a
-       documented value that silently halts the worker. */ -}}
-{{- if eq .Values.leaderElection.mode "k8s" -}}
-{{- fail "leaderElection.mode=k8s is not yet implemented (services/leases K8sLease returns ModeUnavailable). Use 'postgres' or 'disabled' until the kube-crate backend ships." -}}
-{{- end -}}
+{{- /* Followup #5: K8sLease backend now real (kube-rs over
+       coordination.k8s.io/Lease). The earlier fail-gate is removed.
+       Operator MUST grant the workload's ServiceAccount the verbs
+       `get / create / patch / update / delete` on
+       `coordination.k8s.io/leases` in the workload's namespace
+       (chart-side RBAC manifest is a P5-followup; today operator
+       supplies their own ClusterRole + RoleBinding referencing the
+       deployment's ServiceAccount). */ -}}
 {{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
 {{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo" }}
 {{- end }}

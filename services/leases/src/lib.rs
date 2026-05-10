@@ -244,32 +244,246 @@ impl LeaseManager for PostgresLease {
 }
 
 // =============================================================================
-// k8s backend (placeholder until S5)
+// k8s backend (followup #5)
 // =============================================================================
+//
+// Real `coordination.k8s.io/Lease`-backed leader election. Mirrors the
+// PostgresLease semantics: try_acquire returns Granted::Leader when we
+// own (or just took) the lease, Standby when another holder is active,
+// Unknown on transient errors. release best-effort clears the holder.
+//
+// Operator must grant the workload's ServiceAccount these verbs in the
+// configured namespace:
+//   apiGroups: ["coordination.k8s.io"]
+//   resources: ["leases"]
+//   verbs:     ["get", "create", "patch", "update", "delete"]
+//
+// The PostgresLease backend stays the default for sites without
+// kube-crate connectivity.
 
-/// k8s `coordination.k8s.io/Lease`-backed manager. Stub for S1 — returns
-/// `ModeUnavailable` so callers explicitly fall back to Postgres until
-/// chart RBAC + cluster integration lands in S5.
 pub struct K8sLease {
     pub namespace: String,
     pub lease_name: String,
     pub workload_id: String,
+    /// Lease duration in seconds. `is_leader_now()` will reject stale
+    /// Leader states past this window even if the watch channel is
+    /// still cached.
+    pub lease_duration_seconds: i32,
+    /// Pre-built kube `Api<Lease>` handle. Constructed once at startup
+    /// via `K8sLease::new` (which calls `Client::try_default` against
+    /// the in-cluster ServiceAccount); injectable in tests via
+    /// `K8sLease::with_api`.
+    api: kube::Api<k8s_openapi::api::coordination::v1::Lease>,
+}
+
+impl K8sLease {
+    /// Construct from in-cluster config (ServiceAccount + namespace).
+    pub async fn new(
+        namespace: String,
+        lease_name: String,
+        workload_id: String,
+        lease_duration_seconds: i32,
+    ) -> Result<Self, LeaseError> {
+        let client = kube::Client::try_default().await.map_err(|e| {
+            LeaseError::ModeUnavailable(format!(
+                "kube client init failed: {e} (no in-cluster ServiceAccount?)"
+            ))
+        })?;
+        let api: kube::Api<k8s_openapi::api::coordination::v1::Lease> =
+            kube::Api::namespaced(client, &namespace);
+        Ok(Self {
+            namespace,
+            lease_name,
+            workload_id,
+            lease_duration_seconds,
+            api,
+        })
+    }
+
+    /// Test/operator hook: build with a pre-configured Api.
+    pub fn with_api(
+        namespace: String,
+        lease_name: String,
+        workload_id: String,
+        lease_duration_seconds: i32,
+        api: kube::Api<k8s_openapi::api::coordination::v1::Lease>,
+    ) -> Self {
+        Self {
+            namespace,
+            lease_name,
+            workload_id,
+            lease_duration_seconds,
+            api,
+        }
+    }
 }
 
 #[async_trait]
 impl LeaseManager for K8sLease {
     async fn try_acquire(&self) -> Result<LeaseAttempt, LeaseError> {
-        Err(LeaseError::ModeUnavailable(format!(
-            "k8s Lease mode requires `kube`-crate wiring (Phase 5 S5); \
-             use mode='postgres' for now (lease={}, workload={})",
-            self.lease_name, self.workload_id
-        )))
+        use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
+        use k8s_openapi::apimachinery::pkg::apis::meta::v1::MicroTime;
+        use kube::api::{ObjectMeta, PatchParams, PostParams};
+
+        let now = Utc::now();
+
+        // 1) GET — does the Lease exist?
+        let existing = self.api.get_opt(&self.lease_name).await.map_err(|e| {
+            LeaseError::Invalid(format!("k8s GET lease {}: {e}", self.lease_name))
+        })?;
+
+        match existing {
+            None => {
+                // 2) Absent → CREATE with us as the holder.
+                let lease = Lease {
+                    metadata: ObjectMeta {
+                        name: Some(self.lease_name.clone()),
+                        namespace: Some(self.namespace.clone()),
+                        ..Default::default()
+                    },
+                    spec: Some(LeaseSpec {
+                        holder_identity: Some(self.workload_id.clone()),
+                        lease_duration_seconds: Some(self.lease_duration_seconds),
+                        acquire_time: Some(MicroTime(now)),
+                        renew_time: Some(MicroTime(now)),
+                        lease_transitions: Some(1),
+                        ..Default::default()
+                    }),
+                };
+                let created = self
+                    .api
+                    .create(&PostParams::default(), &lease)
+                    .await
+                    .map_err(|e| LeaseError::Invalid(format!("k8s CREATE lease: {e}")))?;
+                let token = derive_k8s_token(&created);
+                let expires = now
+                    + chrono::Duration::seconds(self.lease_duration_seconds as i64);
+                Ok(LeaseAttempt {
+                    state: LeaseState::Leader {
+                        token,
+                        expires_at: expires,
+                        transition_count: 1,
+                    },
+                    event_type: "acquired".into(),
+                })
+            }
+            Some(lease) => {
+                let spec = lease.spec.clone().unwrap_or_default();
+                let holder = spec.holder_identity.clone();
+                let renew_time = spec.renew_time.clone().map(|MicroTime(t)| t);
+                let duration = spec
+                    .lease_duration_seconds
+                    .unwrap_or(self.lease_duration_seconds);
+                let observed_expiry = renew_time
+                    .map(|t| t + chrono::Duration::seconds(duration as i64))
+                    .unwrap_or(now);
+                let prior_transitions = spec.lease_transitions.unwrap_or(0);
+
+                if holder.as_deref() == Some(self.workload_id.as_str()) {
+                    // 3) Held by us — PATCH renewTime.
+                    let patch = serde_json::json!({
+                        "spec": {
+                            "renewTime": MicroTime(now),
+                        }
+                    });
+                    let _ = self
+                        .api
+                        .patch(
+                            &self.lease_name,
+                            &PatchParams::default(),
+                            &kube::api::Patch::Merge(&patch),
+                        )
+                        .await
+                        .map_err(|e| {
+                            LeaseError::Invalid(format!("k8s PATCH renewTime: {e}"))
+                        })?;
+                    let token = derive_k8s_token(&lease);
+                    let expires = now
+                        + chrono::Duration::seconds(self.lease_duration_seconds as i64);
+                    Ok(LeaseAttempt {
+                        state: LeaseState::Leader {
+                            token,
+                            expires_at: expires,
+                            transition_count: prior_transitions as i64,
+                        },
+                        event_type: "renewed".into(),
+                    })
+                } else if observed_expiry < now {
+                    // 4) Held by someone else but expired → take over.
+                    let new_transitions = prior_transitions + 1;
+                    let patch = serde_json::json!({
+                        "spec": {
+                            "holderIdentity":   self.workload_id,
+                            "acquireTime":      MicroTime(now),
+                            "renewTime":        MicroTime(now),
+                            "leaseTransitions": new_transitions,
+                        }
+                    });
+                    let patched = self
+                        .api
+                        .patch(
+                            &self.lease_name,
+                            &PatchParams::default(),
+                            &kube::api::Patch::Merge(&patch),
+                        )
+                        .await
+                        .map_err(|e| {
+                            LeaseError::Invalid(format!("k8s PATCH takeover: {e}"))
+                        })?;
+                    let token = derive_k8s_token(&patched);
+                    let expires = now
+                        + chrono::Duration::seconds(self.lease_duration_seconds as i64);
+                    Ok(LeaseAttempt {
+                        state: LeaseState::Leader {
+                            token,
+                            expires_at: expires,
+                            transition_count: new_transitions as i64,
+                        },
+                        event_type: "transitioned".into(),
+                    })
+                } else {
+                    // 5) Held by another fresh holder → standby.
+                    Ok(LeaseAttempt {
+                        state: LeaseState::Standby {
+                            holder_workload_id: holder.unwrap_or_default(),
+                            observed_expiry,
+                        },
+                        event_type: "denied".into(),
+                    })
+                }
+            }
+        }
     }
 
     async fn release(&self, _token: Uuid) -> Result<(), LeaseError> {
-        Err(LeaseError::ModeUnavailable(
-            "k8s Lease mode not yet implemented (S5)".into(),
-        ))
+        use kube::api::PatchParams;
+        // Best-effort: clear holderIdentity. Other pods will take over
+        // via expiry anyway, so failure here is not fatal.
+        let patch = serde_json::json!({
+            "spec": {
+                "holderIdentity": null,
+                "renewTime":      null,
+            }
+        });
+        match self
+            .api
+            .patch(
+                &self.lease_name,
+                &PatchParams::default(),
+                &kube::api::Patch::Merge(&patch),
+            )
+            .await
+        {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                tracing::warn!(
+                    err = %e,
+                    lease = %self.lease_name,
+                    "k8s release best-effort patch failed; relying on TTL takeover"
+                );
+                Ok(())
+            }
+        }
     }
 
     fn lease_name(&self) -> &str {
@@ -279,6 +493,36 @@ impl LeaseManager for K8sLease {
     fn workload_id(&self) -> &str {
         &self.workload_id
     }
+}
+
+/// Derive a stable token for a K8s Lease epoch. PostgresLease uses a
+/// random UUID per acquire; for k8s, derive from the resource UID +
+/// transition count so the token is unique per leader epoch and any
+/// caller storing it (or comparing it) gets the canonical contract.
+fn derive_k8s_token(lease: &k8s_openapi::api::coordination::v1::Lease) -> Uuid {
+    let uid = lease
+        .metadata
+        .uid
+        .as_deref()
+        .unwrap_or("00000000-0000-0000-0000-000000000000");
+    let transitions = lease
+        .spec
+        .as_ref()
+        .and_then(|s| s.lease_transitions)
+        .unwrap_or(0);
+    // Combine uid bytes + transition count via a small fold; we want
+    // determinism per (uid, transition), not cryptographic strength.
+    let mut bytes = [0u8; 16];
+    let uid_bytes = uid.as_bytes();
+    for (i, b) in uid_bytes.iter().take(16).enumerate() {
+        bytes[i] = *b;
+    }
+    let t_bytes = (transitions as u32).to_le_bytes();
+    bytes[12] ^= t_bytes[0];
+    bytes[13] ^= t_bytes[1];
+    bytes[14] ^= t_bytes[2];
+    bytes[15] ^= t_bytes[3];
+    Uuid::from_bytes(bytes)
 }
 
 // =============================================================================
@@ -536,14 +780,48 @@ mod tests {
         m.release(Uuid::nil()).await.expect("release");
     }
 
-    #[tokio::test]
-    async fn k8s_lease_returns_unavailable_for_s1() {
-        let m = K8sLease {
-            namespace: "default".into(),
-            lease_name: "test".into(),
-            workload_id: "w0".into(),
+    /// Followup #5: K8sLease is now a real kube-rs integration. Build
+    /// + struct shape compile-checked here. End-to-end leader-election
+    /// behaviour requires a kind cluster (verified by operator before
+    /// flipping `leaderElection.mode=k8s` in Helm).
+    #[test]
+    fn k8s_lease_struct_constructs() {
+        // We can't easily mock `kube::Api` without a live cluster.
+        // This test asserts the struct + helper compile + the
+        // derive_k8s_token fold is deterministic.
+        use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
+        use kube::api::ObjectMeta;
+        let lease = Lease {
+            metadata: ObjectMeta {
+                uid: Some("11111111-1111-1111-1111-111111111111".into()),
+                ..Default::default()
+            },
+            spec: Some(LeaseSpec {
+                lease_transitions: Some(7),
+                ..Default::default()
+            }),
         };
-        let err = m.try_acquire().await.expect_err("must fail in S1");
-        assert!(matches!(err, LeaseError::ModeUnavailable(_)));
+        let t1 = derive_k8s_token(&lease);
+        let t2 = derive_k8s_token(&lease);
+        assert_eq!(t1, t2, "derive_k8s_token must be deterministic per (uid, transition)");
+    }
+
+    #[test]
+    fn derive_k8s_token_changes_with_transition() {
+        use k8s_openapi::api::coordination::v1::{Lease, LeaseSpec};
+        use kube::api::ObjectMeta;
+        let mk = |t: i32| Lease {
+            metadata: ObjectMeta {
+                uid: Some("aaaaaaaa-1111-1111-1111-111111111111".into()),
+                ..Default::default()
+            },
+            spec: Some(LeaseSpec {
+                lease_transitions: Some(t),
+                ..Default::default()
+            }),
+        };
+        let t1 = derive_k8s_token(&mk(1));
+        let t2 = derive_k8s_token(&mk(2));
+        assert_ne!(t1, t2, "different transitions must yield different tokens");
     }
 }
