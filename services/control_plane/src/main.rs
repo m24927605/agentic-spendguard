@@ -726,9 +726,15 @@ async fn get_approval(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<Response, StatusCode> {
-    if principal.require(Permission::ApprovalResolve).is_err()
-        && principal.require(Permission::ReadView).is_err()
-    {
+    // Codex round-13 P2: detail endpoint exposes approver_policy,
+    // requested_effect, decision_context, and recent event actor
+    // data. The OR with ReadView let any tenant Viewer/Auditor read
+    // sensitive policy details once they obtain or guess an
+    // approval UUID, bypassing the S15 ApprovalResolve boundary that
+    // list_approvals + resolve_approval enforce. Tighten to require
+    // ApprovalResolve specifically, matching the section's stated
+    // invariant ("every approval handler enforces ApprovalResolve").
+    if principal.require(Permission::ApprovalResolve).is_err() {
         return Err(StatusCode::FORBIDDEN);
     }
     let approval_uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
