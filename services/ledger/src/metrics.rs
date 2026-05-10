@@ -33,6 +33,8 @@ pub enum Handler {
     RefundCredit,
     DisputeAdjustment,
     Compensate,
+    GetApprovalForResume,
+    MarkApprovalBundled,
 }
 
 impl Handler {
@@ -52,6 +54,8 @@ impl Handler {
             Self::RefundCredit => "refund_credit",
             Self::DisputeAdjustment => "dispute_adjustment",
             Self::Compensate => "compensate",
+            Self::GetApprovalForResume => "get_approval_for_resume",
+            Self::MarkApprovalBundled => "mark_approval_bundled",
         }
     }
 }
@@ -73,9 +77,9 @@ impl Outcome {
 
 #[derive(Default)]
 pub struct LedgerMetricsInner {
-    /// Per (handler, outcome) call counter. Use a fixed-size array of
-    /// 14 handlers × 2 outcomes = 28 atomics. Cheap; no allocation.
-    counts: [[AtomicU64; 2]; 14],
+    /// Per (handler, outcome) call counter. Fixed-size array of
+    /// 16 handlers × 2 outcomes = 32 atomics. Cheap; no allocation.
+    counts: [[AtomicU64; 2]; 16],
 }
 
 #[derive(Clone, Default)]
@@ -137,6 +141,8 @@ const ALL_HANDLERS: &[Handler] = &[
     Handler::RefundCredit,
     Handler::DisputeAdjustment,
     Handler::Compensate,
+    Handler::GetApprovalForResume,
+    Handler::MarkApprovalBundled,
 ];
 
 fn handler_index(h: Handler) -> usize {
@@ -155,6 +161,8 @@ fn handler_index(h: Handler) -> usize {
         Handler::RefundCredit => 11,
         Handler::DisputeAdjustment => 12,
         Handler::Compensate => 13,
+        Handler::GetApprovalForResume => 14,
+        Handler::MarkApprovalBundled => 15,
     }
 }
 

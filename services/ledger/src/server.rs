@@ -17,9 +17,11 @@ use crate::{
         ledger_server::Ledger, AcquireFencingLeaseRequest, AcquireFencingLeaseResponse,
         CommitEstimatedRequest, CommitEstimatedResponse,
         CompensateRequest, CompensateResponse, DisputeAdjustmentRequest,
-        DisputeAdjustmentResponse, InvoiceReconcileRequest, InvoiceReconcileResponse,
-        ProviderReportRequest, ProviderReportResponse, QueryBudgetStateRequest,
-        QueryBudgetStateResponse, QueryDecisionOutcomeRequest, QueryDecisionOutcomeResponse,
+        DisputeAdjustmentResponse, GetApprovalForResumeRequest,
+        GetApprovalForResumeResponse, InvoiceReconcileRequest, InvoiceReconcileResponse,
+        MarkApprovalBundledRequest, MarkApprovalBundledResponse, ProviderReportRequest,
+        ProviderReportResponse, QueryBudgetStateRequest, QueryBudgetStateResponse,
+        QueryDecisionOutcomeRequest, QueryDecisionOutcomeResponse,
         QueryReservationContextRequest, QueryReservationContextResponse,
         RecordDeniedDecisionRequest, RecordDeniedDecisionResponse, RefundCreditRequest,
         RefundCreditResponse, ReleaseRequest, ReleaseResponse, ReplayAuditEvent,
@@ -196,6 +198,26 @@ impl Ledger for LedgerService {
     ) -> Result<Response<QueryDecisionOutcomeResponse>, Status> {
         let result = handlers::replay::query_decision_outcome(&self.pool, req.into_inner()).await;
         record_outcome(&self.metrics, Handler::QueryDecisionOutcome, &result);
+        result.map(Response::new)
+    }
+
+    async fn get_approval_for_resume(
+        &self,
+        req: Request<GetApprovalForResumeRequest>,
+    ) -> Result<Response<GetApprovalForResumeResponse>, Status> {
+        let result =
+            handlers::get_approval_for_resume::handle(&self.pool, req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::GetApprovalForResume, &result);
+        result.map(Response::new)
+    }
+
+    async fn mark_approval_bundled(
+        &self,
+        req: Request<MarkApprovalBundledRequest>,
+    ) -> Result<Response<MarkApprovalBundledResponse>, Status> {
+        let result =
+            handlers::mark_approval_bundled::handle(&self.pool, req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::MarkApprovalBundled, &result);
         result.map(Response::new)
     }
 }

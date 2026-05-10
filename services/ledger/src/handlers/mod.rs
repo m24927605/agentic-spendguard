@@ -1,6 +1,8 @@
 pub mod acquire_fencing_lease;
 pub mod commit_estimated;
+pub mod get_approval_for_resume;
 pub mod invoice_reconcile;
+pub mod mark_approval_bundled;
 pub mod provider_report;
 pub mod query_budget_state;
 pub mod query_reservation_context;
