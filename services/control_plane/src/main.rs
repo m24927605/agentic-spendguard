@@ -845,36 +845,109 @@ struct ResolveApprovalResp {
     event_id: Option<Uuid>,
 }
 
-/// Extract role restrictions from `approval_requests.approver_policy`.
-/// Returns `None` when the policy is empty / non-restrictive (the
-/// `Permission::ApprovalResolve` check is then the only gate).
-/// Returns `Some(roles)` when the contract scoped the approval to
-/// specific role(s); the caller intersects against `principal.roles`.
+/// Three-way result for `parse_approver_policy`. The third arm is what
+/// makes the gate a real security boundary: a policy that *looks
+/// restrictive* but is malformed (wrong types, empty array, etc.)
+/// is treated as fail-closed — Codex round-2 P1.
+#[derive(Debug, PartialEq, Eq)]
+enum ApproverPolicyParse {
+    /// Empty `{}`, JSON null, or an object that carries only
+    /// non-restrictive metadata (e.g. `{"description": "..."}`).
+    /// Permission gate is the only check.
+    NoRestriction,
+    /// Restrictive policy with at least one valid role name. Caller
+    /// intersects against `principal.roles`.
+    Restrict(Vec<String>),
+    /// One or more restrictive keys are present but the value is
+    /// malformed (non-array where array expected, wrong element type,
+    /// empty list, empty string). Treat as fail-closed: the operator
+    /// *intended* to restrict but the data is unusable, so widening
+    /// access silently is unsafe.
+    Malformed,
+}
+
+/// Parse `approval_requests.approver_policy` JSONB into a typed
+/// outcome. The schema only enforces `JSONB NOT NULL DEFAULT '{}'`,
+/// so the parser is the security boundary.
 ///
-/// Accepted shapes (kept liberal so contract-author conventions can
-/// evolve without redeploying control_plane):
-///   * `{"roles": ["admin","approver"]}`
-///   * `{"required_roles": ["admin"]}`
-///   * `{"role": "admin"}`
-fn required_roles_from_policy(policy: &serde_json::Value) -> Option<Vec<String>> {
-    let obj = policy.as_object()?;
-    for key in ["roles", "required_roles"] {
-        if let Some(v) = obj.get(key).and_then(|x| x.as_array()) {
-            let roles: Vec<String> = v
-                .iter()
-                .filter_map(|s| s.as_str().map(|s| s.to_string()))
-                .collect();
-            if !roles.is_empty() {
-                return Some(roles);
+/// Accepted restrictive keys:
+///   * `roles` / `required_roles`     — array of role-name strings
+///   * `role` / `approver_role`       — single role-name string OR
+///                                       array of role-name strings
+///
+/// `approver_role` matches the canonical contract.yaml /
+/// `ApprovalDecision.approver_role` field name (Codex round-2 P1).
+fn parse_approver_policy(policy: &serde_json::Value) -> ApproverPolicyParse {
+    if policy.is_null() {
+        return ApproverPolicyParse::NoRestriction;
+    }
+    let Some(obj) = policy.as_object() else {
+        // Non-object, non-null shape (array, scalar) — operator likely
+        // intended *something*; fail closed.
+        return ApproverPolicyParse::Malformed;
+    };
+    if obj.is_empty() {
+        return ApproverPolicyParse::NoRestriction;
+    }
+
+    const ARRAY_KEYS: &[&str] = &["roles", "required_roles"];
+    const STRING_OR_ARRAY_KEYS: &[&str] = &["role", "approver_role"];
+
+    let any_restrictive = ARRAY_KEYS
+        .iter()
+        .chain(STRING_OR_ARRAY_KEYS.iter())
+        .any(|k| obj.contains_key(*k));
+    if !any_restrictive {
+        // Object has only metadata-style keys. No restriction.
+        return ApproverPolicyParse::NoRestriction;
+    }
+
+    let mut roles: Vec<String> = Vec::new();
+
+    for key in ARRAY_KEYS {
+        let Some(v) = obj.get(*key) else { continue };
+        let Some(arr) = v.as_array() else {
+            return ApproverPolicyParse::Malformed;
+        };
+        if arr.is_empty() {
+            return ApproverPolicyParse::Malformed;
+        }
+        for item in arr {
+            match item.as_str() {
+                Some(s) if !s.is_empty() => roles.push(s.to_string()),
+                _ => return ApproverPolicyParse::Malformed,
             }
         }
     }
-    if let Some(s) = obj.get("role").and_then(|x| x.as_str()) {
-        if !s.is_empty() {
-            return Some(vec![s.to_string()]);
+
+    for key in STRING_OR_ARRAY_KEYS {
+        let Some(v) = obj.get(*key) else { continue };
+        if let Some(s) = v.as_str() {
+            if s.is_empty() {
+                return ApproverPolicyParse::Malformed;
+            }
+            roles.push(s.to_string());
+        } else if let Some(arr) = v.as_array() {
+            if arr.is_empty() {
+                return ApproverPolicyParse::Malformed;
+            }
+            for item in arr {
+                match item.as_str() {
+                    Some(s) if !s.is_empty() => roles.push(s.to_string()),
+                    _ => return ApproverPolicyParse::Malformed,
+                }
+            }
+        } else {
+            return ApproverPolicyParse::Malformed;
         }
     }
-    None
+
+    if roles.is_empty() {
+        // Restrictive keys present but we somehow extracted no roles.
+        // Defensive: fail closed.
+        return ApproverPolicyParse::Malformed;
+    }
+    ApproverPolicyParse::Restrict(roles)
 }
 
 async fn resolve_approval(
@@ -927,15 +1000,34 @@ async fn resolve_approval(
         );
         return Err(StatusCode::FORBIDDEN);
     }
-    if let Some(required) = required_roles_from_policy(&approver_policy) {
-        let satisfied = required.iter().any(|r| principal.roles.iter().any(|p| p == r));
-        if !satisfied {
+    match parse_approver_policy(&approver_policy) {
+        ApproverPolicyParse::NoRestriction => {
+            // Permission + tenant gates already passed; admit.
+        }
+        ApproverPolicyParse::Restrict(required) => {
+            let satisfied = required
+                .iter()
+                .any(|r| principal.roles.iter().any(|p| p == r));
+            if !satisfied {
+                info!(
+                    subject = %principal.subject,
+                    approval_id = %approval_uuid,
+                    required_roles = ?required,
+                    principal_roles = ?principal.roles,
+                    "resolve_approval rejected — approver_policy role mismatch"
+                );
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+        ApproverPolicyParse::Malformed => {
+            // Codex round-2 P1: a policy that looks restrictive but
+            // can't be parsed cleanly (wrong types / empty array) is
+            // a security boundary failure. Fail closed.
             info!(
                 subject = %principal.subject,
                 approval_id = %approval_uuid,
-                required_roles = ?required,
-                principal_roles = ?principal.roles,
-                "resolve_approval rejected — approver_policy role mismatch"
+                approver_policy = %approver_policy,
+                "resolve_approval rejected — approver_policy malformed (fail-closed)"
             );
             return Err(StatusCode::FORBIDDEN);
         }
@@ -976,66 +1068,141 @@ async fn resolve_approval(
 
 #[cfg(test)]
 mod approver_policy_tests {
-    use super::required_roles_from_policy;
+    use super::{parse_approver_policy, ApproverPolicyParse};
     use serde_json::json;
 
+    fn restrict(items: &[&str]) -> ApproverPolicyParse {
+        ApproverPolicyParse::Restrict(items.iter().map(|s| s.to_string()).collect())
+    }
+
+    // ---- NoRestriction ----------------------------------------------
+
     #[test]
-    fn empty_object_returns_none() {
-        assert!(required_roles_from_policy(&json!({})).is_none());
+    fn empty_object_no_restriction() {
+        assert_eq!(
+            parse_approver_policy(&json!({})),
+            ApproverPolicyParse::NoRestriction
+        );
     }
 
     #[test]
-    fn null_returns_none() {
-        assert!(required_roles_from_policy(&serde_json::Value::Null).is_none());
+    fn json_null_no_restriction() {
+        assert_eq!(
+            parse_approver_policy(&serde_json::Value::Null),
+            ApproverPolicyParse::NoRestriction
+        );
     }
 
     #[test]
-    fn array_string_returns_none() {
-        // Non-object shape: defensively treat as no restriction; the
-        // permission gate is the only check. (Operators who want
-        // strict scoping populate the canonical {"roles":[...]} shape.)
-        assert!(required_roles_from_policy(&json!(["admin"])).is_none());
+    fn metadata_only_object_no_restriction() {
+        // Object carries non-restrictive metadata only.
+        let p = json!({"description": "billing-team approval flow"});
+        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::NoRestriction);
     }
+
+    // ---- Restrict ---------------------------------------------------
 
     #[test]
     fn roles_array_extracts() {
         let p = json!({"roles": ["admin", "approver"]});
-        assert_eq!(
-            required_roles_from_policy(&p),
-            Some(vec!["admin".into(), "approver".into()])
-        );
+        assert_eq!(parse_approver_policy(&p), restrict(&["admin", "approver"]));
     }
 
     #[test]
     fn required_roles_alias_extracts() {
         let p = json!({"required_roles": ["operator"]});
-        assert_eq!(
-            required_roles_from_policy(&p),
-            Some(vec!["operator".into()])
-        );
+        assert_eq!(parse_approver_policy(&p), restrict(&["operator"]));
     }
 
     #[test]
     fn role_singleton_string_extracts() {
         let p = json!({"role": "admin"});
-        assert_eq!(required_roles_from_policy(&p), Some(vec!["admin".into()]));
+        assert_eq!(parse_approver_policy(&p), restrict(&["admin"]));
+    }
+
+    /// Codex round-2 P1: contract.yaml / proto's canonical shape is
+    /// `approver_role: <name>`. Helper MUST recognize it.
+    #[test]
+    fn contract_canonical_approver_role_extracts() {
+        let p = json!({"approver_role": "approver"});
+        assert_eq!(parse_approver_policy(&p), restrict(&["approver"]));
     }
 
     #[test]
-    fn empty_roles_array_returns_none() {
+    fn approver_role_array_extracts() {
+        let p = json!({"approver_role": ["admin", "approver"]});
+        assert_eq!(parse_approver_policy(&p), restrict(&["admin", "approver"]));
+    }
+
+    #[test]
+    fn multiple_restrictive_keys_unioned() {
+        let p = json!({"roles": ["admin"], "approver_role": "approver"});
+        assert_eq!(parse_approver_policy(&p), restrict(&["admin", "approver"]));
+    }
+
+    // ---- Malformed (fail-closed) -----------------------------------
+
+    /// Codex round-2 P1: malformed restrictive shapes must NOT widen.
+    #[test]
+    fn roles_with_non_string_element_is_malformed() {
+        let p = json!({"roles": ["admin", 42]});
+        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::Malformed);
+    }
+
+    #[test]
+    fn roles_string_instead_of_array_is_malformed() {
+        let p = json!({"roles": "approver"});
+        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::Malformed);
+    }
+
+    #[test]
+    fn empty_roles_array_is_malformed() {
+        // Operator declared a restrictive key but with an empty list —
+        // fail closed; do not silently downgrade to "no restriction".
         let p = json!({"roles": []});
-        assert!(required_roles_from_policy(&p).is_none());
+        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::Malformed);
     }
 
     #[test]
-    fn empty_role_string_returns_none() {
+    fn empty_string_role_is_malformed() {
         let p = json!({"role": ""});
-        assert!(required_roles_from_policy(&p).is_none());
+        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::Malformed);
     }
 
     #[test]
-    fn ignores_non_string_array_entries() {
-        let p = json!({"roles": ["admin", 42, null]});
-        assert_eq!(required_roles_from_policy(&p), Some(vec!["admin".into()]));
+    fn empty_string_approver_role_is_malformed() {
+        let p = json!({"approver_role": ""});
+        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::Malformed);
+    }
+
+    #[test]
+    fn role_as_number_is_malformed() {
+        let p = json!({"role": 42});
+        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::Malformed);
+    }
+
+    #[test]
+    fn approver_role_array_with_null_is_malformed() {
+        let p = json!({"approver_role": ["admin", null]});
+        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::Malformed);
+    }
+
+    #[test]
+    fn array_at_top_is_malformed() {
+        // Non-object, non-null — operator likely intended something.
+        let p = json!(["admin"]);
+        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::Malformed);
+    }
+
+    #[test]
+    fn scalar_string_at_top_is_malformed() {
+        let p = json!("admin");
+        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::Malformed);
+    }
+
+    #[test]
+    fn empty_string_array_entry_is_malformed() {
+        let p = json!({"roles": ["admin", ""]});
+        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::Malformed);
     }
 }
