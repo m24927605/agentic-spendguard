@@ -36,7 +36,9 @@ spec:
           ports:
             - { name: https, containerPort: {{ .Values.webhookReceiver.service.httpsPort }} }
             - { name: health, containerPort: 8080 }
+            - { name: metrics, containerPort: 9098 }
           env:
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_METRICS_ADDR,         value: "0.0.0.0:9098" }
             - { name: SPENDGUARD_WEBHOOK_RECEIVER_TENANT_ID,            value: {{ .Values.global.tenantId | quote }} }
             - { name: SPENDGUARD_WEBHOOK_RECEIVER_FENCING_SCOPE_ID,     value: {{ .Values.webhookReceiver.fencingScopeId | quote }} }
             - { name: SPENDGUARD_WEBHOOK_RECEIVER_WORKLOAD_INSTANCE_ID, value: {{ .Values.webhookReceiver.workloadInstanceId | quote }} }

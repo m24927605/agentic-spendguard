@@ -51,6 +51,16 @@ pub struct Config {
     /// HMAC shared secret for the mock-llm provider (POC).
     #[serde(rename = "spendguard_webhook_secret_mock_llm")]
     pub mock_llm_secret: String,
+
+    /// Round-2 #11: Prometheus /metrics endpoint bind addr. Defaults
+    /// to `0.0.0.0:9098` per the round-2 port table. Empty disables.
+    #[serde(default = "default_metrics_addr")]
+    #[serde(rename = "spendguard_webhook_receiver_metrics_addr")]
+    pub metrics_addr: String,
+}
+
+fn default_metrics_addr() -> String {
+    "0.0.0.0:9098".to_string()
 }
 
 impl Config {

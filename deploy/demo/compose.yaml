@@ -419,6 +419,10 @@ services:
       SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_MODE:                    "local"
       SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_PRODUCER_IDENTITY:       "webhook-receiver:demo-webhook-receiver"
       SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_KEY_PATH:                "/etc/ssl/spendguard/signing/webhook-receiver.pem"
+      # Round-2 #11: Prometheus /metrics endpoint.
+      SPENDGUARD_WEBHOOK_RECEIVER_METRICS_ADDR:                    "0.0.0.0:9098"
+    ports:
+      - "9098:9098"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:
