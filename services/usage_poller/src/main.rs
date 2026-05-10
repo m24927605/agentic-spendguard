@@ -89,6 +89,11 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("connecting to Postgres")?;
 
+    // Codex round-10 P2: explicitly enumerate provider kinds. The
+    // previous catch-all fell back to mock on any unrecognized value,
+    // so a typo like `opneai` would silently disable real collection
+    // and emit successful-poll metrics with zero records. Cost
+    // accounting then stays blind until someone notices missing data.
     let client: Arc<dyn ProviderClient> = match cfg.provider_kind.as_str() {
         "openai" => {
             let api_key = cfg
@@ -104,7 +109,11 @@ async fn main() -> anyhow::Result<()> {
                 .context("SPENDGUARD_USAGE_POLLER_ANTHROPIC_API_KEY required when provider_kind=anthropic")?;
             Arc::new(AnthropicClient::new(api_key, cfg.anthropic_workspace_id.clone()))
         }
-        _ => Arc::new(MockProviderClient::new("mock")),
+        "mock" => Arc::new(MockProviderClient::new("mock")),
+        other => anyhow::bail!(
+            "unknown SPENDGUARD_USAGE_POLLER_PROVIDER_KIND={other:?}; \
+             expected one of: mock, openai, anthropic"
+        ),
     };
 
     // Codex round-5 P?: in-memory cursor with `now - safety_lag` seed
