@@ -175,6 +175,30 @@ Quarterly drill rotation. The drill log at
 `docs/operations/drill-log.md` (S23-followup template) records
 results.
 
+### Per-drill deep-dive runbooks
+
+These full-text runbooks (followup #12) walk through symptoms,
+first-check, mitigation, escalation, and a compose-based
+rehearsal for each drill — read them before being primary
+on-call:
+
+- [Lease lost mid-batch](drills/lease-lost-mid-batch.md) —
+  validates round-9 `is_leader_now()` gating in
+  outbox-forwarder + ttl-sweeper.
+- [Audit chain forwarder backlog](drills/audit-chain-forwarder-backlog.md)
+  — validates the L4 SLO (audit-outbox forward lag) + the
+  forwarder's idempotency.
+- [Strict-signature quarantine spike](drills/strict-signature-quarantine-spike.md)
+  — covers the high-level D3 below with the full triage tree
+  for `unknown_key` / `invalid_signature` / `key_expired` /
+  `key_revoked` reasons.
+- [Approval TTL wave](drills/approval-ttl-wave.md) — sweeper
+  burst handling + round-9 atomic TTL guard.
+
+The high-level D1–D4 entries below stay as the executive
+summary; the per-drill docs above are what on-call actually
+reads.
+
 ### D1. Ledger failover
 
 Steps:
