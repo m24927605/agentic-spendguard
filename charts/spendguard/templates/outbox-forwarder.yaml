@@ -4,6 +4,10 @@
 {{- if and (gt (int .Values.outboxForwarder.replicas) 1) (eq .Values.leaderElection.mode "disabled") -}}
 {{- fail "outboxForwarder.replicas > 1 requires leaderElection.mode != 'disabled' (S1 multi-pod safety gate)" -}}
 {{- end -}}
+{{- /* Codex round-5 P?: see ttl-sweeper.yaml — k8s mode not implemented. */ -}}
+{{- if eq .Values.leaderElection.mode "k8s" -}}
+{{- fail "leaderElection.mode=k8s is not yet implemented (services/leases K8sLease returns ModeUnavailable). Use 'postgres' or 'disabled' until the kube-crate backend ships." -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

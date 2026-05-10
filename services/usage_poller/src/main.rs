@@ -107,10 +107,44 @@ async fn main() -> anyhow::Result<()> {
         _ => Arc::new(MockProviderClient::new("mock")),
     };
 
-    // Cursor lives in-memory for this slice. S11-followup persists in
-    // a `provider_usage_poller_state` table so a restart doesn't
-    // re-scan from epoch.
-    let mut cursor = chrono::Utc::now() - chrono::Duration::seconds(cfg.safety_lag_seconds as i64);
+    // Codex round-5 P?: in-memory cursor with `now - safety_lag` seed
+    // would lose every record landed during a restart longer than
+    // safety_lag. The S11-followup persistent `provider_usage_poller_state`
+    // table is still pending; until it ships, seed the cursor from
+    // `MAX(observed_at) WHERE provider = ...` so a restart resumes
+    // from where the last batch landed. ON CONFLICT on the insert
+    // path makes wider re-polls idempotent, so an over-conservative
+    // cursor is safe; an under-conservative one drops data.
+    let max_observed: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT MAX(observed_at) FROM provider_usage_records WHERE provider = $1",
+    )
+    .bind(&cfg.provider_kind)
+    .fetch_one(&pool)
+    .await
+    .unwrap_or(None);
+    let now = chrono::Utc::now();
+    let safety_lag_seed = now - chrono::Duration::seconds(cfg.safety_lag_seconds as i64);
+    let mut cursor = match max_observed {
+        Some(t) => {
+            info!(
+                seed = "max_observed",
+                resume_from = %t,
+                "S11: cursor resumed from prior provider_usage_records"
+            );
+            // Pick the older of (max_observed, now - safety_lag) so we
+            // also catch records the previous instance was actively
+            // polling around its termination.
+            std::cmp::min(t, safety_lag_seed)
+        }
+        None => {
+            info!(
+                seed = "first_run",
+                resume_from = %safety_lag_seed,
+                "S11: no prior records; cursor seeded from now - safety_lag"
+            );
+            safety_lag_seed
+        }
+    };
 
     loop {
         let now = chrono::Utc::now();
