@@ -8,6 +8,7 @@
 pub mod config;
 pub mod decode;
 pub mod forward;
+pub mod metrics;
 pub mod poll;
 pub mod state;
 
