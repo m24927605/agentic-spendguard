@@ -5,6 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
+# Phase 5 GA hardening S17: shared auth crate.
+COPY services/auth ./services/auth
 COPY services/control_plane ./services/control_plane
 WORKDIR /build/services/control_plane
 RUN cargo build --release --bin spendguard-control-plane

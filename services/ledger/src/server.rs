@@ -13,7 +13,8 @@ use tonic::{Request, Response, Status};
 use crate::{
     handlers,
     proto::ledger::v1::{
-        ledger_server::Ledger, CommitEstimatedRequest, CommitEstimatedResponse,
+        ledger_server::Ledger, AcquireFencingLeaseRequest, AcquireFencingLeaseResponse,
+        CommitEstimatedRequest, CommitEstimatedResponse,
         CompensateRequest, CompensateResponse, DisputeAdjustmentRequest,
         DisputeAdjustmentResponse, InvoiceReconcileRequest, InvoiceReconcileResponse,
         ProviderReportRequest, ProviderReportResponse, QueryBudgetStateRequest,
@@ -26,12 +27,16 @@ use crate::{
 };
 
 pub struct LedgerService {
-    pool: PgPool,
+    pub pool: PgPool,
+    /// Phase 5 GA hardening S6: producer signer for server-minted
+    /// audit rows. Currently used only by InvoiceReconcile (which
+    /// synthesizes a decision row that has no client-side originator).
+    pub signer: std::sync::Arc<dyn spendguard_signing::Signer>,
 }
 
 impl LedgerService {
-    pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+    pub fn new(pool: PgPool, signer: std::sync::Arc<dyn spendguard_signing::Signer>) -> Self {
+        Self { pool, signer }
     }
 }
 
@@ -63,6 +68,15 @@ impl Ledger for LedgerService {
         Ok(Response::new(resp))
     }
 
+    async fn acquire_fencing_lease(
+        &self,
+        req: Request<AcquireFencingLeaseRequest>,
+    ) -> Result<Response<AcquireFencingLeaseResponse>, Status> {
+        let resp =
+            handlers::acquire_fencing_lease::handle(&self.pool, req.into_inner()).await?;
+        Ok(Response::new(resp))
+    }
+
     async fn commit_estimated(
         &self,
         req: Request<CommitEstimatedRequest>,
@@ -83,7 +97,9 @@ impl Ledger for LedgerService {
         &self,
         req: Request<InvoiceReconcileRequest>,
     ) -> Result<Response<InvoiceReconcileResponse>, Status> {
-        let resp = handlers::invoice_reconcile::handle(&self.pool, req.into_inner()).await?;
+        let resp =
+            handlers::invoice_reconcile::handle(&self.pool, &*self.signer, req.into_inner())
+                .await?;
         Ok(Response::new(resp))
     }
 

@@ -1,8 +1,10 @@
 pub mod config;
 pub mod domain;
 pub mod handlers;
+pub mod metrics;
 pub mod persistence;
 pub mod server;
+pub mod verifier;
 
 pub mod proto {
     pub mod common {

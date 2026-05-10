@@ -1,5 +1,26 @@
 {{- if .Values.ttlSweeper.enabled }}
 {{- $component := "ttl-sweeper" }}
+{{- /* Codex round-6 P1: chart.profile=production gate. TTL sweeper
+       Config::from_env() reads TLS_CLIENT_CERT/CLIENT_KEY (template
+       uses TLS_CERT_PEM/KEY_PEM) and FENCING_INITIAL_EPOCH — neither
+       wired. Tracked as P5-followup. */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- fail "ttl-sweeper: Helm chart not yet production-ready. Service Config::from_env() requires TLS_CLIENT_CERT/CLIENT_KEY (template uses CERT_PEM/KEY_PEM) and FENCING_INITIAL_EPOCH (not wired). Tracked as P5-followup. Use deploy/demo (compose) for now, or set chart.profile=demo." -}}
+{{- end -}}
+{{- /* Phase 5 S1 multi-pod safety gate */ -}}
+{{- if and (gt (int .Values.ttlSweeper.replicas) 1) (eq .Values.leaderElection.mode "disabled") -}}
+{{- fail "ttlSweeper.replicas > 1 requires leaderElection.mode != 'disabled' (S1 multi-pod safety gate)" -}}
+{{- end -}}
+{{- /* Codex round-5 P?: leases::K8sLease backend always returns
+       ModeUnavailable until the kube-crate wiring lands (S5-followup).
+       Reject the mode at deploy time so operators can't pick a
+       documented value that silently halts the worker. */ -}}
+{{- if eq .Values.leaderElection.mode "k8s" -}}
+{{- fail "leaderElection.mode=k8s is not yet implemented (services/leases K8sLease returns ModeUnavailable). Use 'postgres' or 'disabled' until the kube-crate backend ships." -}}
+{{- end -}}
+{{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
+{{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,7 +44,14 @@ spec:
           env:
             - { name: SPENDGUARD_TTL_SWEEPER_TENANT_ID,            value: {{ .Values.global.tenantId | quote }} }
             - { name: SPENDGUARD_TTL_SWEEPER_FENCING_SCOPE_ID,     value: {{ .Values.ttlSweeper.fencingScopeId | quote }} }
-            - { name: SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID, value: {{ .Values.ttlSweeper.workloadInstanceId | quote }} }
+            # Phase 5 S2: per-pod-unique workload_instance_id via downward API.
+            {{- if .Values.ttlSweeper.workloadInstanceIdOverride }}
+            - { name: SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID, value: {{ .Values.ttlSweeper.workloadInstanceIdOverride | quote }} }
+            {{- else }}
+            - name: _POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID, value: "ttl-sweeper-$(_POD_NAME)" }
+            {{- end }}
             - name: SPENDGUARD_TTL_SWEEPER_LEDGER_URL
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
             - name: SPENDGUARD_TTL_SWEEPER_DATABASE_URL
@@ -33,10 +61,36 @@ spec:
             - { name: SPENDGUARD_TTL_SWEEPER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/ttl-sweeper.crt" }
             - { name: SPENDGUARD_TTL_SWEEPER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/ttl-sweeper.key" }
             - { name: SPENDGUARD_TTL_SWEEPER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # Phase 5 S1 — leader election config.
+            - { name: SPENDGUARD_LEADER_ELECTION_MODE,    value: {{ .Values.leaderElection.mode | quote }} }
+            - { name: SPENDGUARD_LEADER_LEASE_NAME,        value: {{ .Values.ttlSweeper.leaseName | quote }} }
+            - { name: SPENDGUARD_LEADER_REGION,            value: {{ .Values.leaderElection.region | quote }} }
+            - { name: SPENDGUARD_LEADER_LEASE_TTL_MS,      value: {{ .Values.leaderElection.ttlMs | quote }} }
+            - { name: SPENDGUARD_LEADER_RENEW_INTERVAL_MS, value: {{ .Values.leaderElection.renewIntervalMs | quote }} }
+            - { name: SPENDGUARD_LEADER_RETRY_INTERVAL_MS, value: {{ .Values.leaderElection.retryIntervalMs | quote }} }
+            # Phase 5 GA hardening S6: producer signing config.
+            - { name: SPENDGUARD_PROFILE,                                value: {{ .Values.signing.profile | quote }} }
+            - { name: SPENDGUARD_TTL_SWEEPER_SIGNING_MODE,               value: {{ .Values.signing.mode | quote }} }
+            - { name: SPENDGUARD_TTL_SWEEPER_SIGNING_PRODUCER_IDENTITY,  value: "ttl-sweeper:$(SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID)" }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: SPENDGUARD_TTL_SWEEPER_SIGNING_KEY_PATH,           value: "/etc/spendguard/signing/ttl-sweeper.pem" }
+            {{- else if eq .Values.signing.mode "kms" }}
+            - { name: SPENDGUARD_TTL_SWEEPER_SIGNING_KMS_ARN,            value: {{ .Values.signing.kms.ttlSweeperArn | quote }} }
+            {{- end }}
           volumeMounts:
             - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+            {{- end }}
       volumes:
         - name: tls
           secret:
             secretName: {{ .Values.secrets.tls.existingSecret }}
+        {{- if eq .Values.signing.mode "local" }}
+        - name: signing
+          secret:
+            secretName: {{ .Values.signing.existingSecret }}
+            items:
+              - { key: ttl-sweeper.pem, path: ttl-sweeper.pem }
+        {{- end }}
 {{- end }}

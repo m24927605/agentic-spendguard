@@ -43,6 +43,15 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 envy = "0.4"
 
+# Phase 5 GA hardening S8: Verifier trait + LocalEd25519Verifier come
+# from the shared signing crate.
+spendguard-signing = { path = "../signing" }
+
+# S8 metrics surface for Prometheus scraping.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"
@@ -51,3 +60,5 @@ prost-build = "0.13"
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
+# verifier.rs unit tests use rand::rngs::OsRng for ed25519 keypairs.
+rand = "0.8"

@@ -1,5 +1,18 @@
 {{- if .Values.webhookReceiver.enabled }}
 {{- $component := "webhook-receiver" }}
+{{- /* Codex round-6 P1: chart.profile=production gate. Webhook
+       receiver Config::from_env() reads TLS_SERVER_CERT/SERVER_KEY,
+       TLS_CLIENT_CERT/CLIENT_KEY, BIND_ADDR, HEALTH_ADDR,
+       FENCING_INITIAL_EPOCH, plus per-tenant secret keys
+       (SPENDGUARD_WEBHOOK_SECRET_*) — template uses HMAC_SECRET +
+       CERT_PEM/KEY_PEM names, none of the above wired.
+       Tracked as P5-followup. */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- fail "webhook-receiver: Helm chart not yet production-ready. Service Config::from_env() requires TLS_SERVER_CERT/SERVER_KEY, TLS_CLIENT_CERT/CLIENT_KEY, BIND_ADDR, HEALTH_ADDR, FENCING_INITIAL_EPOCH, per-tenant SPENDGUARD_WEBHOOK_SECRET_* — template uses different naming. Tracked as P5-followup. Use deploy/demo (compose) for now, or set chart.profile=demo." -}}
+{{- end -}}
+{{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
+{{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo" }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -39,8 +52,20 @@ spec:
             - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/webhook-receiver.crt" }
             - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/webhook-receiver.key" }
             - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # Phase 5 GA hardening S6: producer signing config.
+            - { name: SPENDGUARD_PROFILE,                                    value: {{ .Values.signing.profile | quote }} }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_MODE,              value: {{ .Values.signing.mode | quote }} }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_PRODUCER_IDENTITY, value: "webhook-receiver:{{ .Values.webhookReceiver.workloadInstanceId }}" }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_KEY_PATH,          value: "/etc/spendguard/signing/webhook-receiver.pem" }
+            {{- else if eq .Values.signing.mode "kms" }}
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_KMS_ARN,           value: {{ .Values.signing.kms.webhookReceiverArn | quote }} }
+            {{- end }}
           volumeMounts:
             - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+            {{- end }}
           readinessProbe:
             httpGet: { path: /healthz, port: health }
             initialDelaySeconds: 5
@@ -49,6 +74,13 @@ spec:
         - name: tls
           secret:
             secretName: {{ .Values.secrets.tls.existingSecret }}
+        {{- if eq .Values.signing.mode "local" }}
+        - name: signing
+          secret:
+            secretName: {{ .Values.signing.existingSecret }}
+            items:
+              - { key: webhook-receiver.pem, path: webhook-receiver.pem }
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service

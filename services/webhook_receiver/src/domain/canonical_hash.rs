@@ -74,3 +74,72 @@ pub fn invoice_reconcile_hash(
     h.update(provenance.as_bytes());
     h.finalize().into()
 }
+
+// ============================================================================
+// Phase 5 GA hardening S10: provider usage record idempotency
+// ============================================================================
+//
+// Per-provider, per-record idempotency. Used as the
+// `provider_usage_records.idempotency_key` UNIQUE column. Two
+// observations of the same provider event (e.g. duplicate webhook
+// delivery, OR poller re-fetching the same window) produce the same
+// hash and a UNIQUE-violation rejection.
+//
+// IMPORTANT: this is a DIFFERENT scope from provider_report_hash.
+// provider_report_hash is reservation-scoped (one report per
+// reservation per amount). This is record-scoped (one observation per
+// provider event id) — multiple records may flow into one report
+// after matching.
+
+pub fn provider_usage_record_hash(
+    provider: &str,
+    provider_account: &str,
+    provider_event_id: &str,
+    event_kind: &str,
+) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(b"v1:provider_usage_record:idempotency:");
+    h.update(provider.as_bytes());
+    h.update(b"|account|");
+    h.update(provider_account.as_bytes());
+    h.update(b"|event_id|");
+    h.update(provider_event_id.as_bytes());
+    h.update(b"|kind|");
+    h.update(event_kind.as_bytes());
+    h.finalize().into()
+}
+
+#[cfg(test)]
+mod s10_tests {
+    use super::*;
+
+    #[test]
+    fn provider_usage_record_hash_is_deterministic() {
+        let a = provider_usage_record_hash(
+            "openai",
+            "acct-1",
+            "evt-abc",
+            "completion",
+        );
+        let b = provider_usage_record_hash(
+            "openai",
+            "acct-1",
+            "evt-abc",
+            "completion",
+        );
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn provider_usage_record_hash_changes_when_any_field_changes() {
+        let base = provider_usage_record_hash("openai", "a", "e", "k");
+        for variant in [
+            provider_usage_record_hash("anthropic", "a", "e", "k"),
+            provider_usage_record_hash("openai", "b", "e", "k"),
+            provider_usage_record_hash("openai", "a", "f", "k"),
+            provider_usage_record_hash("openai", "a", "e", "l"),
+        ] {
+            assert_ne!(base, variant);
+        }
+    }
+}

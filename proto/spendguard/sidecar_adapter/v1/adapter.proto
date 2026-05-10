@@ -76,6 +76,75 @@ service SidecarAdapter {
   // Sidecar signals adapter that drain has begun; adapter should stop
   // initiating new decision boundaries and let in-flight finish.
   rpc StreamDrainSignal(DrainSubscribeRequest) returns (stream DrainSignal);
+
+  // -- Approval resume (Phase 5 GA hardening S16) --------------------------
+
+  // Adapter calls this AFTER the human approver has approved/denied the
+  // pending approval (REQUIRE_APPROVAL outcome from RequestDecision).
+  // Sidecar:
+  //   1. Looks up the approval by (tenant_id, decision_id, approval_id).
+  //   2. Reads the current state (must be `approved` or `denied`).
+  //   3. For `approved`: re-runs Contract evaluation + Ledger.ReserveSet
+  //      with a NEW idempotency key derived from approval_id (so a
+  //      replay can never double-publish the effect).
+  //   4. For `denied`: emits the deny audit row + returns Decision::STOP.
+  //   5. For other states (pending/expired/cancelled): returns the
+  //      typed Error code so the adapter raises the right exception.
+  //
+  // Idempotent: repeated ResumeAfterApproval calls with the same
+  // (decision_id, approval_id) produce the same DecisionResponse
+  // because the idempotency key includes both.
+  rpc ResumeAfterApproval(ResumeAfterApprovalRequest)
+      returns (ResumeAfterApprovalResponse);
+}
+
+// ============================================================================
+// ResumeAfterApproval (Phase 5 S16)
+// ============================================================================
+
+message ResumeAfterApprovalRequest {
+  // Original decision that returned REQUIRE_APPROVAL.
+  string tenant_id = 1;
+  string decision_id = 2;
+  // The approval the adapter is resuming. Must match an existing
+  // approval_requests row scoped to (tenant_id, decision_id).
+  string approval_id = 3;
+
+  // Adapter-supplied identity for fencing + idempotency. Same as
+  // DecisionRequest's analogous fields.
+  string workload_instance_id = 4;
+  string session_id = 5;
+}
+
+message ResumeAfterApprovalResponse {
+  oneof outcome {
+    // Approval was `approved`; sidecar re-ran Contract + Reserve and
+    // returns the standard DecisionResponse (Continue + reservation
+    // ids, OR Stop if a fresh Ledger check failed).
+    DecisionResponse decision = 1;
+
+    // Approval was `denied`; the audit deny-decision row has been
+    // emitted; adapter raises a typed deny exception.
+    ResumeAfterApprovalDenied denied = 2;
+
+    // Approval was in a non-terminal state (pending) OR a terminal
+    // non-actionable state (expired / cancelled). Adapter raises a
+    // typed "still waiting" or "unresolvable" exception.
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message ResumeAfterApprovalDenied {
+  // The deny audit row's event id (so the adapter can correlate
+  // logs).
+  string audit_decision_event_id = 1;
+  // Free-form reason from approver (resolution_reason).
+  string approver_reason = 2;
+  // Approver identity (for application-level audit log).
+  string approver_subject = 3;
+  // Matched contract rules that drove REQUIRE_APPROVAL in the first
+  // place, so the adapter can render a useful error.
+  repeated string matched_rule_ids = 4;
 }
 
 // ============================================================================

@@ -14,7 +14,8 @@ use crate::{
     clients::mtls::{build_client_tls, MTlsPaths},
     domain::error::DomainError,
     proto::ledger::v1::{
-        ledger_client::LedgerClient as LedgerProtoClient, CommitEstimatedRequest,
+        ledger_client::LedgerClient as LedgerProtoClient, AcquireFencingLeaseRequest,
+        AcquireFencingLeaseResponse, CommitEstimatedRequest,
         CommitEstimatedResponse, QueryDecisionOutcomeRequest, QueryDecisionOutcomeResponse,
         QueryReservationContextRequest, QueryReservationContextResponse,
         RecordDeniedDecisionRequest, RecordDeniedDecisionResponse, ReleaseRequest,
@@ -82,6 +83,21 @@ impl LedgerClient {
             .record_denied_decision(req)
             .await
             .map_err(|e| DomainError::LedgerClient(format!("RecordDeniedDecision: {e}")))?;
+        Ok(resp.into_inner())
+    }
+
+    /// Phase 5 S4: acquire / renew fencing lease. Sidecar bootstrap +
+    /// background renewer call this. On Denied or Error response,
+    /// caller drains decision processing.
+    pub async fn acquire_fencing_lease(
+        &self,
+        req: AcquireFencingLeaseRequest,
+    ) -> Result<AcquireFencingLeaseResponse, DomainError> {
+        let mut client = (*self.inner).clone();
+        let resp = client
+            .acquire_fencing_lease(req)
+            .await
+            .map_err(|e| DomainError::LedgerClient(format!("AcquireFencingLease: {e}")))?;
         Ok(resp.into_inner())
     }
 

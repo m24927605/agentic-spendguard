@@ -33,7 +33,20 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("verifying Postgres durability config (Stage 2 §4.2)")?;
 
-    let svc = LedgerService::new(pool);
+    // Phase 5 GA hardening S6: producer signer for ledger-server-minted
+    // audit rows (currently only InvoiceReconcile's synthesized decision).
+    let signer = std::sync::Arc::<dyn spendguard_signing::Signer>::from(
+        spendguard_signing::signer_from_env("SPENDGUARD_LEDGER")
+            .context("S6: build signer from SPENDGUARD_LEDGER_SIGNING_* env")?,
+    );
+    info!(
+        key_id = %signer.key_id(),
+        algorithm = %signer.algorithm(),
+        producer = %signer.producer_identity(),
+        "S6: ledger producer signer initialized"
+    );
+
+    let svc = LedgerService::new(pool, signer);
 
     let addr: SocketAddr = cfg.bind_addr.parse().context("parsing bind addr")?;
 
