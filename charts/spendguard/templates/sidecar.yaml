@@ -1,5 +1,29 @@
 {{- if .Values.sidecar.enabled }}
 {{- $component := "sidecar" }}
+{{- /* Codex round-6 P1: chart.profile=production gate. Sidecar
+       Config::from_env() reads ENDPOINT_CATALOG_MANIFEST_URL,
+       MTLS_BOOTSTRAP_TOKEN, contract / schema bundle IDs and hashes,
+       FENCING_INITIAL_EPOCH, plus several trust-root CA / SPKI fields
+       — none wired by this template. Tracked as P5-followup. */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- fail "sidecar: Helm chart not yet production-ready. Service Config::from_env() requires ENDPOINT_CATALOG_MANIFEST_URL, MTLS_BOOTSTRAP_TOKEN, contract / schema bundle IDs+hashes, FENCING_INITIAL_EPOCH, trust-root CA/SPKI — template does not wire them. Tracked as P5-followup. Use deploy/demo (compose) for now, or set chart.profile=demo." -}}
+{{- end -}}
+{{- /* Phase 5 GA hardening S6: signing-mode fail-gate.
+       production profile MUST NOT allow disabled signing —
+       audit_outbox writes go through this sidecar.
+*/ -}}
+{{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
+{{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo (set signing.profile=demo in values.yaml or pick mode=local|kms)" }}
+{{- end }}
+{{- /* Phase 5 GA hardening S5: multi-pod safety gates. */ -}}
+{{- if gt (int .Values.sidecar.replicas) 1 }}
+{{- if not .Values.sidecar.acknowledgeMultiPod }}
+{{- fail "S5: sidecar.replicas > 1 requires sidecar.acknowledgeMultiPod=true. Read docs/runbooks/sidecar-multi-pod.md (active/standby semantics, not horizontal scaling) before flipping the flag." }}
+{{- end }}
+{{- if .Values.sidecar.workloadInstanceIdOverride }}
+{{- fail "S5: sidecar.replicas > 1 forbids sidecar.workloadInstanceIdOverride (override means single-pod identity; multi-pod requires the downward-API per-pod metadata.name path)." }}
+{{- end }}
+{{- end }}
 {{- /*
 Sidecar deployed as DaemonSet so the UDS socket lives on each node's
 hostPath; application pods that mount the same hostPath get the
@@ -29,7 +53,19 @@ spec:
             - { name: SPENDGUARD_SIDECAR_TENANT_ID,            value: {{ .Values.global.tenantId | quote }} }
             - { name: SPENDGUARD_SIDECAR_REGION,               value: {{ .Values.global.region | quote }} }
             - { name: SPENDGUARD_SIDECAR_FENCING_SCOPE_ID,     value: {{ .Values.sidecar.fencingScopeId | quote }} }
-            - { name: SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID, value: {{ .Values.sidecar.workloadInstanceId | quote }} }
+            # Phase 5 S2: producer_instance_id (==workload_instance_id) MUST
+            # be per-pod unique. Use the k8s downward API to inject the
+            # pod name + a service prefix so two replicas can never collide.
+            # Operator can override with sidecar.workloadInstanceIdOverride
+            # for non-k8s deployments where pod identity comes from
+            # elsewhere (must still be per-instance unique).
+            {{- if .Values.sidecar.workloadInstanceIdOverride }}
+            - { name: SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID, value: {{ .Values.sidecar.workloadInstanceIdOverride | quote }} }
+            {{- else }}
+            - name: _POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID, value: "sidecar-$(_POD_NAME)" }
+            {{- end }}
             - { name: SPENDGUARD_SIDECAR_RESERVATION_TTL_SECONDS, value: {{ .Values.sidecar.reservationTtlSeconds | quote }} }
             - name: SPENDGUARD_SIDECAR_LEDGER_URL
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
@@ -39,9 +75,26 @@ spec:
             - { name: SPENDGUARD_SIDECAR_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/sidecar.key" }
             - { name: SPENDGUARD_SIDECAR_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
             - { name: SPENDGUARD_SIDECAR_UDS_PATH,     value: "/var/run/spendguard/adapter.sock" }
+            # Phase 5 GA hardening S6: producer signing config.
+            - { name: SPENDGUARD_PROFILE,                            value: {{ .Values.signing.profile | quote }} }
+            - { name: SPENDGUARD_SIDECAR_SIGNING_MODE,               value: {{ .Values.signing.mode | quote }} }
+            - { name: SPENDGUARD_SIDECAR_SIGNING_PRODUCER_IDENTITY,  value: "sidecar:$(SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID)" }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: SPENDGUARD_SIDECAR_SIGNING_KEY_PATH,           value: "/etc/spendguard/signing/sidecar.pem" }
+            {{- else if eq .Values.signing.mode "kms" }}
+            - { name: SPENDGUARD_SIDECAR_SIGNING_KMS_ARN,            value: {{ .Values.signing.kms.sidecarArn | quote }} }
+            {{- end }}
+            # Phase 5 GA hardening S22: fail-policy matrix (defaults
+            # to fail-closed everywhere when overrides string is empty).
+            {{- if .Values.failPolicy.overrides }}
+            - { name: SPENDGUARD_SIDECAR_FAIL_POLICY_JSON,           value: {{ .Values.failPolicy.overrides | quote }} }
+            {{- end }}
           volumeMounts:
             - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
             - { name: bundles, mountPath: /var/lib/spendguard/bundles, readOnly: true }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+            {{- end }}
             {{- if .Values.sidecar.hostPath.enabled }}
             - { name: uds,     mountPath: /var/run/spendguard }
             {{- end }}
@@ -54,6 +107,13 @@ spec:
         - name: bundles
           secret:
             secretName: {{ .Values.secrets.bundles.existingSecret }}
+        {{- if eq .Values.signing.mode "local" }}
+        - name: signing
+          secret:
+            secretName: {{ .Values.signing.existingSecret }}
+            items:
+              - { key: sidecar.pem, path: sidecar.pem }
+        {{- end }}
         {{- if .Values.sidecar.hostPath.enabled }}
         - name: uds
           hostPath:

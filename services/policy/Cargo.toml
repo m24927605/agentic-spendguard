@@ -1,0 +1,21 @@
+[package]
+name = "spendguard-policy"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "Phase 5 GA hardening S22: fail-open / fail-closed policy matrix. Defines what every component does when a dependency is unhealthy. Default stance is fail-closed; fail-open requires explicit tenant/workflow opt-in + emits an explicit audit marker."
+
+[lib]
+name = "spendguard_policy"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+tracing = "0.1"
+uuid = { version = "1", features = ["v7", "serde"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }

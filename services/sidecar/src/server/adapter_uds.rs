@@ -498,6 +498,54 @@ impl SidecarAdapter for AdapterUds {
         });
         Ok(Response::new(ReceiverStream::new(rx)))
     }
+
+    // --------------------------------------------------------------------
+    // Phase 5 GA hardening S16: ResumeAfterApproval (stub).
+    // --------------------------------------------------------------------
+    //
+    // The actual resume path requires:
+    //   1. S14-followup bundling SP that creates approval_requests
+    //      atomically with the audit_outbox row.
+    //   2. A look-up function: given (tenant_id, decision_id,
+    //      approval_id), fetch the approval state + decision_context.
+    //   3. Re-running the contract evaluator + Ledger.ReserveSet with
+    //      a NEW idempotency key derived from approval_id (so a replay
+    //      of resume can never double-publish).
+    //
+    // Today this handler returns a typed POC limitation Error. The
+    // adapter SDK (Python: ApprovalRequired.resume()) catches it and
+    // surfaces a clean message pointing at the followup ticket. Real
+    // wiring lands once the bundling SP + lookup helper are in place.
+    async fn resume_after_approval(
+        &self,
+        req: Request<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalRequest>,
+    ) -> Result<
+        Response<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalResponse>,
+        Status,
+    > {
+        use crate::proto::common::v1::error::Code as ProtoCode;
+        let req = req.into_inner();
+        tracing::info!(
+            tenant = %req.tenant_id,
+            decision_id = %req.decision_id,
+            approval_id = %req.approval_id,
+            "S16: resume_after_approval (stub) invoked"
+        );
+        let resp = crate::proto::sidecar_adapter::v1::ResumeAfterApprovalResponse {
+            outcome: Some(
+                crate::proto::sidecar_adapter::v1::resume_after_approval_response::Outcome::Error(
+                    crate::proto::common::v1::Error {
+                        code: ProtoCode::Unspecified as i32,
+                        message: "S16-followup: ResumeAfterApproval not yet wired \
+                                  (depends on S14 bundling SP + lookup helper)"
+                            .into(),
+                        details: Default::default(),
+                    },
+                ),
+            ),
+        };
+        Ok(Response::new(resp))
+    }
 }
 
 /// Build a tower stack for the UDS-bound gRPC server.

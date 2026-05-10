@@ -19,6 +19,28 @@ global:
   imagePullPolicy: IfNotPresent
   imageRegistry: ghcr.io/m24927605
 
+# Codex round-6 P1 acknowledgement.
+#
+# This Helm chart is currently a DEVELOPMENT/DEMO chart, not a
+# production-ready chart. Several services' Config::from_env() read
+# fields the templates don't wire (ENDPOINT_CATALOG_MANIFEST_URL,
+# MTLS_BOOTSTRAP_TOKEN, contract / schema bundle IDs + hashes,
+# FENCING_INITIAL_EPOCH, BIND_ADDR / HEALTH_ADDR for webhook receiver,
+# TLS env naming mismatches, etc.) — affected services
+# (canonical-ingest, sidecar, outbox-forwarder, ttl-sweeper,
+# webhook-receiver) will CrashLoopBackOff on `helm install`.
+#
+# The compose-based demo path (deploy/demo) wires everything correctly
+# and is the supported deploy path until the P5-followup completes the
+# Helm env-mapping work.
+#
+# chart.profile=demo (default) lets `helm template` and dev-cluster
+# experimentation proceed. chart.profile=production triggers an
+# explicit `helm fail` on the affected service templates to prevent
+# footgun deploys.
+chart:
+  profile: "demo"   # demo | production
+
 # Secrets
 secrets:
   tls:
@@ -65,8 +87,19 @@ canonicalIngest:
 
 sidecar:
   enabled: true
-  # GA gate: multi-pod = producer_sequence races. Keep at 1 for POC.
+  # Phase 5 S1+S2: multi-pod safe via leader-election + per-pod
+  # workload_instance_id (sourced from k8s downward API metadata.name).
+  # Override workloadInstanceIdOverride for non-k8s deployments.
   replicas: 1
+  workloadInstanceIdOverride: ""
+  # Phase 5 S5: explicit acknowledgement that the operator understands
+  # multi-pod sidecar semantics (active/standby model, NOT horizontal
+  # scaling — each pod calls Ledger.AcquireFencingLease at startup;
+  # only one wins, the rest fail-closed waiting for takeover).
+  # Helm template REJECTS replicas > 1 without this flag. Read the
+  # multi-pod runbook in docs/runbooks/sidecar-multi-pod.md before
+  # flipping this.
+  acknowledgeMultiPod: false
   image:
     repository: spendguard/sidecar
     tag: "0.1.0-alpha.1"
@@ -95,27 +128,115 @@ webhookReceiver:
   workloadInstanceId: "webhook-receiver-0"
   hmacSecretName: spendguard-webhook-hmac
 
+# Phase 5 S1 — leader election for singleton background workers.
+# Modes:
+#   postgres  — Postgres-backed lease via acquire_lease SP (default).
+#               Safe for replicas >= 1.
+#   k8s       — Kubernetes coordination.k8s.io/Lease (S5 wiring).
+#               Safe for replicas >= 1; requires RBAC below.
+#   disabled  — no leader election. Safe ONLY with replicas == 1.
+#               Helm template REJECTS this mode + replicas > 1 (S5 gate).
+leaderElection:
+  mode: "postgres"
+  region: "demo"
+  ttlMs: 15000
+  renewIntervalMs: 5000
+  retryIntervalMs: 1000
+
 outboxForwarder:
   enabled: true
-  # GA gate: leader election needed before scaling beyond 1 pod.
+  # Phase 5 S1 unblocks replicas > 1 when leaderElection.mode != 'disabled'.
   replicas: 1
   image:
     repository: spendguard/outbox-forwarder
     tag: "0.1.0-alpha.1"
   pollIntervalSeconds: 2
   batchSize: 50
+  leaseName: "outbox-forwarder"
+  # Phase 5 S2: pod-unique workload id via downward API by default.
+  workloadInstanceIdOverride: ""
 
 ttlSweeper:
   enabled: true
-  # GA gate: same producer_sequence race; keep at 1.
   replicas: 1
   image:
     repository: spendguard/ttl-sweeper
     tag: "0.1.0-alpha.1"
   fencingScopeId: "00000000-0000-7000-a000-000000000060"
-  workloadInstanceId: "ttl-sweeper-0"
   pollIntervalSeconds: 2
   batchSize: 10
+  leaseName: "ttl-sweeper"
+  workloadInstanceIdOverride: ""
+
+# Phase 5 GA hardening S6 — producer signing config.
+#
+# Modes:
+#   local     — Each service reads a PKCS8 Ed25519 PEM file mounted from
+#               `signing.existingSecret`. Default for non-KMS deploys.
+#   kms       — KMS-backed signing (S7 will wire AWS KMS / GCP / Azure).
+#               Construct succeeds; sign() returns ModeUnavailable until
+#               S7 lands. Operators choosing this mode today get a clean
+#               "not implemented" failure rather than silent empty
+#               signatures.
+#   disabled  — Empty signatures. Helm template REJECTS this mode unless
+#               profile == "demo" (audit invariant: production must not
+#               write unsigned audit rows).
+#
+# Profile gate:
+#   profile=production blocks `mode=disabled` at template render time.
+#   profile=demo allows it but still warns in chart NOTES.
+signing:
+  mode: "local"
+  profile: "production"
+  # Single Secret holding ed25519.pem keys, one per producer service.
+  # Keys: ledger.pem, sidecar.pem, webhook-receiver.pem, ttl-sweeper.pem
+  existingSecret: spendguard-signing-keys
+  # KMS arns per-service (used only when mode=kms; ignored otherwise).
+  kms:
+    ledgerArn: ""
+    sidecarArn: ""
+    webhookReceiverArn: ""
+    ttlSweeperArn: ""
+  # Phase 5 GA hardening S8: canonical_ingest strict verification.
+  # When true, canonical_ingest mounts the same Secret as a trust
+  # store and rejects/quarantines events with bad / unknown / pre-S6 /
+  # disabled-mode signatures. Helm template REJECTS profile=production
+  # with strictVerification=false.
+  strictVerification: true
+
+# Phase 5 GA hardening S13 — pricing authority staleness policy.
+#
+# `maxStalenessSeconds` defines how old the latest successful pricing
+# sync may be before bundle-build / decision pipelines fail-closed.
+# 86400 = 24 hours; tighter values appropriate for high-volatility
+# providers (token costs change weekly).
+#
+# `allowOverride: true` lets operators manually edit pricing_table
+# when the sync adapter doesn't yet handle a new model. Every override
+# writes a `pricing_overrides_audit` row with reviewer identity (S17
+# JWT subject) + reason. Helm template reserves the right to FAIL
+# on `signing.profile=production` + `pricing.allowOverride=true` in a
+# future tightening; today the audit row IS the safeguard.
+pricing:
+  maxStalenessSeconds: 86400
+  allowOverride: true
+
+# Phase 5 GA hardening S22: fail-open / fail-closed policy matrix.
+# Default stance is fail-closed everywhere. Operators override via
+# JSON map keyed by dependency × workflow_class. Production profile
+# additionally requires `_acknowledge_risk_of_fail_open: true` in the
+# JSON for any fail-open cell to be accepted (defense in depth).
+#
+# Example to allow fail-open on pricing for non-monetary tools:
+#   failPolicy:
+#     overrides: |
+#       {
+#         "_version": "2026-q3",
+#         "_acknowledge_risk_of_fail_open": true,
+#         "pricing": { "non_monetary_tool": "fail_open_with_marker" }
+#       }
+failPolicy:
+  overrides: ""
 
 # Migration job (post-install hook).
 migrations:

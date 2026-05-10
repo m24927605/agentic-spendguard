@@ -184,6 +184,11 @@ services:
       # synchronous_commit + synchronous_standby_names are configured
       # per Stage 2 §4.2 + Ledger §19.
       SPENDGUARD_LEDGER_ALLOW_UNSAFE_DURABILITY: "true"
+      # Phase 5 GA hardening S6: producer signing.
+      SPENDGUARD_PROFILE: "demo"
+      SPENDGUARD_LEDGER_SIGNING_MODE: "local"
+      SPENDGUARD_LEDGER_SIGNING_PRODUCER_IDENTITY: "ledger:server-mint"
+      SPENDGUARD_LEDGER_SIGNING_KEY_PATH: "/etc/ssl/spendguard/signing/ledger.pem"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:
@@ -215,6 +220,13 @@ services:
       # Required by canonical_ingest config (no default in
       # services/canonical_ingest/src/config.rs).
       SPENDGUARD_CANONICAL_INGEST_INGEST_SHARD_ID: "demo-shard-0"
+      # Phase 5 GA hardening S8: strict signature verification.
+      # Demo runs strict so the demo IS the integration test for
+      # signed-end-to-end. Production sets profile=production +
+      # mounts a real trust store (Helm template).
+      SPENDGUARD_CANONICAL_INGEST_STRICT_SIGNATURES: "true"
+      SPENDGUARD_CANONICAL_INGEST_TRUST_STORE_DIR:   "/etc/ssl/spendguard/signing"
+      SPENDGUARD_CANONICAL_INGEST_METRICS_ADDR:      "0.0.0.0:9091"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:
@@ -269,6 +281,11 @@ services:
       # Health probe
       SPENDGUARD_SIDECAR_HEALTH_ADDR:              "0.0.0.0:8080"
       SPENDGUARD_SIDECAR_METRICS_ADDR:             "0.0.0.0:9090"
+      # Phase 5 GA hardening S6: producer signing.
+      SPENDGUARD_PROFILE:                          "demo"
+      SPENDGUARD_SIDECAR_SIGNING_MODE:             "local"
+      SPENDGUARD_SIDECAR_SIGNING_PRODUCER_IDENTITY: "sidecar:sidecar-demo-1"
+      SPENDGUARD_SIDECAR_SIGNING_KEY_PATH:         "/etc/ssl/spendguard/signing/sidecar.pem"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
       - bundles-data:/var/lib/spendguard/bundles:ro
@@ -339,6 +356,11 @@ services:
       SPENDGUARD_TTL_SWEEPER_FENCING_INITIAL_EPOCH:      "1"
       SPENDGUARD_TTL_SWEEPER_POLL_INTERVAL_SECONDS:      "2"
       SPENDGUARD_TTL_SWEEPER_BATCH_SIZE:                 "10"
+      # Phase 5 GA hardening S6: producer signing.
+      SPENDGUARD_PROFILE:                                "demo"
+      SPENDGUARD_TTL_SWEEPER_SIGNING_MODE:               "local"
+      SPENDGUARD_TTL_SWEEPER_SIGNING_PRODUCER_IDENTITY:  "ttl-sweeper:demo-ttl-sweeper"
+      SPENDGUARD_TTL_SWEEPER_SIGNING_KEY_PATH:           "/etc/ssl/spendguard/signing/ttl-sweeper.pem"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:
@@ -371,6 +393,11 @@ services:
       SPENDGUARD_WEBHOOK_RECEIVER_WORKLOAD_INSTANCE_ID:            "demo-webhook-receiver"
       SPENDGUARD_WEBHOOK_RECEIVER_FENCING_INITIAL_EPOCH:           "1"
       SPENDGUARD_WEBHOOK_SECRET_MOCK_LLM:                          "demo-secret-not-for-prod"
+      # Phase 5 GA hardening S6: producer signing.
+      SPENDGUARD_PROFILE:                                          "demo"
+      SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_MODE:                    "local"
+      SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_PRODUCER_IDENTITY:       "webhook-receiver:demo-webhook-receiver"
+      SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_KEY_PATH:                "/etc/ssl/spendguard/signing/webhook-receiver.pem"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:
@@ -397,7 +424,18 @@ services:
       RUST_LOG: "info,spendguard_control_plane=debug"
       SPENDGUARD_CONTROL_PLANE_BIND_ADDR:    "0.0.0.0:8091"
       SPENDGUARD_CONTROL_PLANE_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
-      SPENDGUARD_CONTROL_PLANE_ADMIN_TOKEN:  "demo-admin-token-replace-in-production"
+      # Phase 5 GA hardening S17: OIDC/SSO foundation. Demo runs in
+      # static_token mode (allowed only with profile=demo).
+      SPENDGUARD_PROFILE:                                     "demo"
+      SPENDGUARD_CONTROL_PLANE_AUTH_MODE:                     "static_token"
+      SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN:                  "demo-admin-token-replace-in-production"
+      SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN_SUBJECT:          "demo-operator"
+      # Phase 5 GA hardening S18: RBAC + tenant isolation. Demo
+      # static-token principal scopes to the seeded demo tenant.
+      # The demo policy auto-grants admin via the synthetic
+      # `demo-admins` group; in production, set GROUP_POLICY_JSON
+      # to map your IdP's group claims to roles.
+      SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN_TENANT_IDS:       "00000000-0000-4000-8000-000000000001"
     ports:
       - "8091:8091"
     depends_on:
@@ -414,8 +452,18 @@ services:
       RUST_LOG: "info,spendguard_dashboard=debug"
       SPENDGUARD_DASHBOARD_BIND_ADDR:    "0.0.0.0:8090"
       SPENDGUARD_DASHBOARD_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
+      # Phase 5 GA hardening S9: optional canonical DB for /api/audit/export.
+      SPENDGUARD_DASHBOARD_CANONICAL_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_canonical?sslmode=disable"
       SPENDGUARD_DASHBOARD_TENANT_ID:    "00000000-0000-4000-8000-000000000001"
-      SPENDGUARD_DASHBOARD_AUTH_TOKEN:   "demo-dashboard-token-replace-in-production"
+      # Phase 5 GA hardening S17: OIDC/SSO foundation. Demo uses
+      # static_token mode (allowed only with profile=demo).
+      SPENDGUARD_PROFILE:                          "demo"
+      SPENDGUARD_DASHBOARD_AUTH_MODE:              "static_token"
+      SPENDGUARD_DASHBOARD_STATIC_TOKEN:           "demo-dashboard-token-replace-in-production"
+      SPENDGUARD_DASHBOARD_STATIC_TOKEN_SUBJECT:   "demo-viewer"
+      # Phase 5 GA hardening S18: tenant scope on the static
+      # principal so the demo dashboard can read the seeded tenant.
+      SPENDGUARD_DASHBOARD_STATIC_TOKEN_TENANT_IDS: "00000000-0000-4000-8000-000000000001"
     ports:
       - "8090:8090"
     depends_on:

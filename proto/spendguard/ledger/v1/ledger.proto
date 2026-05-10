@@ -44,6 +44,13 @@ service Ledger {
   rpc RecordDeniedDecision(RecordDeniedDecisionRequest)
       returns (RecordDeniedDecisionResponse);
 
+  // Phase 5 S3: acquire / renew a fencing lease. Replaces seeded
+  // current_epoch=1 with an SP-owned CAS lease lifecycle. Sidecar +
+  // workers MUST hold a non-expired lease before issuing any ledger
+  // mutation. Renewal preserves epoch; takeover bumps it.
+  rpc AcquireFencingLease(AcquireFencingLeaseRequest)
+      returns (AcquireFencingLeaseResponse);
+
   // Release held reservation (TTL expired / runtime error / run aborted).
   rpc Release(ReleaseRequest) returns (ReleaseResponse);
 
@@ -266,6 +273,61 @@ message RecordDeniedDecisionSuccess {
   string audit_decision_event_id = 2;
   uint64 producer_sequence = 3;
   google.protobuf.Timestamp recorded_at = 4;
+}
+
+// ============================================================================
+// AcquireFencingLease (Phase 5 S3)
+// ============================================================================
+
+message AcquireFencingLeaseRequest {
+  // Scope to acquire (existing fencing_scopes row).
+  string fencing_scope_id = 1;
+  string tenant_id = 2;
+  // Per-pod-unique identity (matches workload_instance_id used by
+  // ReserveSet et al.). Two callers with the same workload_id will
+  // RENEW each other's lease; this is a misconfiguration but doesn't
+  // corrupt the audit chain.
+  string workload_instance_id = 3;
+  // How long the granted lease lasts. Caller must renew before this.
+  uint32 ttl_seconds = 4;
+  // Operator-driven force takeover. Default false. When true, takes
+  // over an unexpired lease — bumps epoch and writes a 'revoke'
+  // history row. Use only for incident recovery.
+  bool force = 5;
+  // Optional caller-supplied audit event id (UUID). Default minted
+  // server-side. Useful for adapters that want to correlate the
+  // lease event with an external incident ticket.
+  string audit_event_id = 6;
+}
+
+message AcquireFencingLeaseResponse {
+  oneof outcome {
+    AcquireFencingLeaseSuccess success = 1;
+    AcquireFencingLeaseDenied denied = 2;
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message AcquireFencingLeaseSuccess {
+  // Caller MUST use this epoch in subsequent ReserveSet / Release /
+  // CommitEstimated / RecordDeniedDecision calls. Stale epoch fails
+  // closed at the SP layer.
+  uint64 epoch = 1;
+  // Expiry of the granted lease. Caller renews before this wallclock
+  // time, accounting for clock skew.
+  google.protobuf.Timestamp ttl_expires_at = 2;
+  // What the SP did: "acquire" (first lease), "renew" (no epoch
+  // change), "promote" (took over after expiry), "revoke" (operator
+  // forced takeover), "recover" (same workload reclaiming).
+  string action = 3;
+}
+
+message AcquireFencingLeaseDenied {
+  // Current holder (so caller can show "fencing held by ${who}" in
+  // operator UIs).
+  string current_holder_instance_id = 1;
+  uint64 current_epoch = 2;
+  google.protobuf.Timestamp current_ttl_expires_at = 3;
 }
 
 // ============================================================================

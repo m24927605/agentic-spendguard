@@ -1,0 +1,33 @@
+//! Phase 5 GA hardening S6: helper to populate `producer_signature`
+//! and `signing_key_id` on outgoing CloudEvents before the TTL sweeper
+//! emits them via Ledger.Release. Mirror of sidecar audit.rs.
+
+use prost::Message;
+use spendguard_signing::{SignError, Signer};
+use tracing::warn;
+
+use crate::proto::common::v1::CloudEvent;
+
+pub async fn sign_cloudevent_in_place(
+    signer: &dyn Signer,
+    event: &mut CloudEvent,
+) -> anyhow::Result<()> {
+    event.signing_key_id = signer.key_id().to_string();
+    event.producer_signature = Vec::new().into();
+    let canonical = event.encode_to_vec();
+
+    match signer.sign(&canonical).await {
+        Ok(sig) => {
+            event.producer_signature = sig.bytes.into();
+            Ok(())
+        }
+        Err(SignError::ModeUnavailable(msg)) => {
+            warn!(error = %msg, "signer reports mode unavailable; failing TTL release emission");
+            Err(anyhow::anyhow!("signing mode unavailable: {msg}"))
+        }
+        Err(other) => {
+            warn!(error = ?other, "signer error");
+            Err(anyhow::anyhow!("signing failed: {other}"))
+        }
+    }
+}

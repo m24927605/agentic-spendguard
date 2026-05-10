@@ -1,10 +1,12 @@
 use sqlx::PgPool;
+use std::sync::Arc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
 use crate::{
     config::Config,
     handlers,
+    metrics::IngestMetrics,
     proto::canonical_ingest::v1::{
         canonical_ingest_server::CanonicalIngest, AppendEventsRequest, AppendEventsResponse,
         AuditChainEvent, QueryAuditChainRequest, VerifySchemaBundleRequest,
@@ -15,11 +17,26 @@ use crate::{
 pub struct CanonicalIngestService {
     pool: PgPool,
     cfg: Config,
+    /// Phase 5 GA hardening S8: producer signature verifier. Built at
+    /// startup; `None` only when strict_signatures=false AND no trust
+    /// store dir configured (non-strict pure POC mode).
+    verifier: Option<Arc<dyn spendguard_signing::Verifier>>,
+    metrics: IngestMetrics,
 }
 
 impl CanonicalIngestService {
-    pub fn new(pool: PgPool, cfg: Config) -> Self {
-        Self { pool, cfg }
+    pub fn new(
+        pool: PgPool,
+        cfg: Config,
+        verifier: Option<Arc<dyn spendguard_signing::Verifier>>,
+        metrics: IngestMetrics,
+    ) -> Self {
+        Self {
+            pool,
+            cfg,
+            verifier,
+            metrics,
+        }
     }
 }
 
@@ -29,7 +46,14 @@ impl CanonicalIngest for CanonicalIngestService {
         &self,
         req: Request<AppendEventsRequest>,
     ) -> Result<Response<AppendEventsResponse>, Status> {
-        let resp = handlers::append_events::handle(&self.pool, &self.cfg, req.into_inner()).await?;
+        let resp = handlers::append_events::handle(
+            &self.pool,
+            &self.cfg,
+            self.verifier.as_deref(),
+            &self.metrics,
+            req.into_inner(),
+        )
+        .await?;
         Ok(Response::new(resp))
     }
 

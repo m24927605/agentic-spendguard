@@ -1,0 +1,49 @@
+[package]
+name = "spendguard-usage-poller"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "Phase 5 GA hardening S11: OpenAI usage poller. Reconciles provider usage even when no billing webhook is available. Background worker that polls OpenAI APIs on a schedule + normalizes into S10's provider_usage_records schema."
+
+[[bin]]
+name = "spendguard-usage-poller"
+path = "src/main.rs"
+
+[lib]
+name = "spendguard_usage_poller"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+parking_lot = "0.12"
+
+# Errors / observability.
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+envy = "0.4"
+
+# S1: leader election for singleton background workers (one poller
+# active at a time).
+spendguard-leases = { path = "../leases" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"

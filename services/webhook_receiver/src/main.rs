@@ -45,12 +45,27 @@ async fn main() -> anyhow::Result<()> {
     // 3. Ledger gRPC client.
     let ledger_client = build_ledger_client(&config).await?;
 
-    // 4. Shared state.
+    // 4. Phase 5 GA hardening S6: producer signer. Built BEFORE binding
+    //    listeners so a misconfiguration crashes startup rather than
+    //    serving unsigned audit events.
+    let signer = std::sync::Arc::<dyn spendguard_signing::Signer>::from(
+        spendguard_signing::signer_from_env("SPENDGUARD_WEBHOOK_RECEIVER")
+            .map_err(|e| anyhow::anyhow!("S6: build signer: {e}"))?,
+    );
+    info!(
+        key_id = %signer.key_id(),
+        algorithm = %signer.algorithm(),
+        producer = %signer.producer_identity(),
+        "S6: producer signer initialized"
+    );
+
+    // 5. Shared state.
     let state = Arc::new(AppState {
         config: config.clone(),
         pg,
         ledger_client,
         seq,
+        signer,
     });
 
     // 5. Healthz HTTP server (plain HTTP).

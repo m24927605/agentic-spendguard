@@ -23,6 +23,9 @@ pub struct AppState {
     pub pg: PgPool,
     pub ledger_client: LedgerClient<Channel>,
     pub seq: SequenceAllocator,
+    /// Phase 5 GA hardening S6: producer signing. Constructed at
+    /// startup from `SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_*` env vars.
+    pub signer: Arc<dyn spendguard_signing::Signer>,
 }
 
 pub async fn build_pg_pool(database_url: &str) -> anyhow::Result<PgPool> {

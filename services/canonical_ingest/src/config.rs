@@ -29,13 +29,28 @@ pub struct Config {
     pub backpressure_threshold: u64,
 
     /// When true, ingest requires + verifies per-event ed25519 producer
-    /// signatures (per Trace §13). POC default = false: the keystore +
-    /// producer-key sync from sidecar handshake / Bundle Registry is
-    /// deferred to vertical slice expansion. In POC mode events are admitted
-    /// without signature verification; enabling strict in production
-    /// requires the keystore to be populated.
+    /// signatures (per Trace §13). S8 makes this production-ready:
+    /// strict mode rejects events with unknown_key / invalid_signature
+    /// (typed gRPC error) and quarantines pre_s6 / disabled rows.
+    /// Non-strict mode accepts everything but still records verification
+    /// outcomes via metrics for forensics.
     #[serde(default)]
     pub strict_signatures: bool,
+
+    /// Phase 5 GA hardening S8: filesystem path holding `<key_id>.pem`
+    /// files for the trust store. Required when strict_signatures=true.
+    /// In demo / Helm local mode this is the same Secret that producers
+    /// mount their private keys from (Ed25519 PKCS8 PEM contains both
+    /// the private and the embedded public key; verifier extracts the
+    /// public).
+    #[serde(default)]
+    pub trust_store_dir: Option<String>,
+
+    /// S8: where the Prometheus metrics endpoint binds. Defaults to
+    /// `0.0.0.0:9091` so it doesn't collide with the gRPC server on
+    /// `:50061`. Set to empty string to disable the metrics server.
+    #[serde(default = "default_metrics_addr")]
+    pub metrics_addr: String,
 
     // -- mTLS server bootstrap (Stage 2 §12.1) -----------------------------
     /// Path to the canonical-ingest workload TLS cert PEM. When set
@@ -62,6 +77,9 @@ fn default_orphan_after_seconds() -> u64 {
 }
 fn default_backpressure_threshold() -> u64 {
     10_000
+}
+fn default_metrics_addr() -> String {
+    "0.0.0.0:9091".to_string()
 }
 
 impl Config {

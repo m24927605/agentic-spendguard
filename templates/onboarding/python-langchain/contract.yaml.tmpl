@@ -1,0 +1,91 @@
+# SpendGuard Contract DSL — onboarding template (Phase 5 S20).
+#
+# Copy this file to `contract.yaml` in your workflow dir, then run
+# `make onboard-bundle` (see README.md) to build a signed contract
+# bundle that the sidecar will load at startup.
+#
+# Replace every `__PLACEHOLDER__` value before bundling. The template
+# refuses to bundle unless all placeholders are resolved.
+
+apiVersion: spendguard.dev/v1alpha1
+kind: ContractBundle
+
+metadata:
+  bundle_id: __BUNDLE_ID_UUID_V7__       # `uuidgen` produces this
+  description: "Onboarding workflow — replace with your tenant + workflow name"
+  owner_team: "__OWNER_TEAM__"
+  created_at: "__ISO_8601_TIMESTAMP__"
+
+# Contract DSL §6: budget references. The onboarding walkthrough
+# assumes one budget; production deployments will define multiple.
+budgets:
+  - budget_id: __BUDGET_ID_UUID_V7__
+    name: "monthly-llm-budget"
+    description: "USD cap for all LLM calls in this workflow"
+    unit_kind: usd_micros
+    # Hard cap: STOP every call once `available_atomic` reaches 0.
+    limit_amount_atomic: "10000000000"   # 10,000 USD = 10_000_000_000 micro-USD
+
+# Stage 2 §9.4 frozen pricing tuple. The bundle build script
+# resolves these from the latest pricing_versions row at the time
+# of build; do NOT hand-edit unless you know what you're doing.
+pricing_freeze:
+  pricing_version: __PRICING_VERSION__
+  price_snapshot_hash_hex: __PRICE_SNAPSHOT_HASH_HEX__
+  fx_rate_version: "fx-2026-q2"
+  unit_conversion_version: "units-2026-q2"
+
+# Contract DSL §7: rules. Three rules cover the spec's review
+# standard — hard cap STOP, soft cap REQUIRE_APPROVAL, default
+# CONTINUE.
+rules:
+  # Rule 1: hard cap STOP — refuse the call if it would push the
+  # budget below zero.
+  - rule_id: hard-cap-stop
+    description: "Refuse calls that would exhaust the budget."
+    when:
+      budget_id: __BUDGET_ID_UUID_V7__
+      claim:
+        amount_atomic_gt_available: true
+    then:
+      decision: STOP
+      reason_codes: [BUDGET_EXHAUSTED]
+      audit_route: enforcement
+
+  # Rule 2: soft cap REQUIRE_APPROVAL — calls above the soft
+  # threshold need a human approver. The control_plane (S18+) routes
+  # the approval to the configured approver group.
+  - rule_id: soft-cap-approval
+    description: "Calls > 100 USD require approver sign-off."
+    when:
+      budget_id: __BUDGET_ID_UUID_V7__
+      claim:
+        amount_atomic_gt: "100000000"   # 100 USD
+    then:
+      decision: REQUIRE_APPROVAL
+      approver_role: approver
+      reason_codes: [SOFT_CAP_TRIPPED]
+      audit_route: enforcement
+
+  # Rule 3: CONTINUE default — implicit when no rule fires. Listed
+  # here for clarity.
+  - rule_id: default-continue
+    description: "Default: allow LLM call to proceed."
+    when: { always: true }
+    then:
+      decision: CONTINUE
+      audit_route: enforcement
+
+# S22 fail-policy: monetary budget calls are fail-closed by spec
+# invariant. Operators MAY opt non-monetary tool calls into
+# fail_open_with_marker via `failPolicy.overrides` in helm values
+# (see README.md "Fail policy notes").
+fail_policy:
+  workflow_class: monetary
+
+# S19 retention/redaction (when S19 ships): the onboarding template
+# defaults to "redact prompts beyond 30 days" — operators can tighten.
+# This block is informational today; S19's redaction policy reads it.
+retention:
+  redact_prompts_after_days: 30
+  retain_audit_chain_for_days: 365

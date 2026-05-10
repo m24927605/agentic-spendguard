@@ -1,0 +1,202 @@
+# SpendGuard SLO alert rules — Phase 5 GA hardening S23.
+#
+# Apply with:
+#   kubectl apply -f deploy/observability/prometheus-rules.yaml
+#
+# Operator MUST tune the numeric thresholds to local SLOs before
+# enabling. Defaults reflect the SLO targets in
+# docs/site/docs/operations/slos.md.
+
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: spendguard-slos
+  labels:
+    app.kubernetes.io/part-of: spendguard
+    spendguard.dev/track: G  # SLOs / observability
+spec:
+  groups:
+    - name: spendguard.decision
+      interval: 30s
+      rules:
+        - alert: SpendGuardDecisionLatencyHigh
+          expr: |
+            histogram_quantile(
+              0.99,
+              rate(spendguard_decision_latency_seconds_bucket[5m])
+            ) > 0.25
+          for: 10m
+          labels:
+            severity: page
+            slo: L1
+            team: sidecar
+          annotations:
+            summary: "Decision p99 latency > 250ms for 10m"
+            runbook: "https://docs/operations/runbooks/L1-decision-latency"
+            description: |
+              Sidecar decision RPC p99 has exceeded the 250ms SLO target
+              for 10 minutes. Likely causes: ledger DB pool exhaustion,
+              fencing scope contention, contract evaluator regression.
+
+        - alert: SpendGuardDecisionUnavailable
+          expr: |
+            (
+              sum(rate(spendguard_decision_total{status="error"}[5m]))
+              /
+              sum(rate(spendguard_decision_total[5m]))
+            ) > 0.001
+          for: 5m
+          labels:
+            severity: page
+            slo: L2
+            team: sidecar
+          annotations:
+            summary: "Decision error rate > 0.1% for 5m"
+            runbook: "https://docs/operations/runbooks/L2-decision-availability"
+
+    - name: spendguard.ledger
+      interval: 30s
+      rules:
+        - alert: SpendGuardLedgerCommitFailing
+          expr: |
+            (
+              sum(rate(spendguard_ledger_transaction_total{outcome="error"}[5m]))
+              /
+              sum(rate(spendguard_ledger_transaction_total[5m]))
+            ) > 0.0005
+          for: 5m
+          labels:
+            severity: page
+            slo: L3
+            team: ledger
+          annotations:
+            summary: "Ledger commit error rate > 0.05% for 5m"
+            runbook: "https://docs/operations/runbooks/L3-ledger-commit"
+
+        - alert: SpendGuardLedgerLeaseStale
+          expr: |
+            spendguard_ledger_lease_age_seconds{lease_name=~"outbox-forwarder|ttl-sweeper"} > 30
+          for: 5m
+          labels:
+            severity: warn
+            team: ledger
+          annotations:
+            summary: "Lease {{ $labels.lease_name }} > 30s old"
+            runbook: "https://docs/operations/runbooks/lease-stale"
+            description: |
+              Healthy lease renewal happens at 1/3 of TTL (~5s for the
+              default 15s TTL). 30s+ means the leader is wedged or
+              the renewer task crashed.
+
+    - name: spendguard.audit_chain
+      interval: 30s
+      rules:
+        - alert: SpendGuardOutboxLag
+          expr: |
+            histogram_quantile(
+              0.99,
+              rate(spendguard_outbox_pending_seconds_bucket[15m])
+            ) > 60
+          for: 15m
+          labels:
+            severity: page
+            slo: L4
+            team: platform
+          annotations:
+            summary: "Audit outbox p99 lag > 60s for 15m"
+            runbook: "https://docs/operations/runbooks/L4-outbox-lag"
+
+        - alert: SpendGuardCanonicalIngestRejecting
+          expr: |
+            rate(spendguard_ingest_events_rejected_invalid_signature_total[10m]) > 0.5
+          for: 10m
+          labels:
+            severity: page
+            slo: L5
+            team: platform
+          annotations:
+            summary: "Canonical ingest rejecting > 0.5 events/sec for 10m"
+            runbook: "https://docs/operations/runbooks/L5-canonical-rejects"
+
+        - alert: SpendGuardSignatureQuarantineSpike
+          expr: |
+            sum by (reason) (rate(spendguard_ingest_events_quarantined_total[5m])) > 1
+          for: 10m
+          labels:
+            severity: warn
+            team: platform
+          annotations:
+            summary: "Signature quarantine reason={{ $labels.reason }} > 1/sec"
+            runbook: "https://docs/operations/runbooks/quarantine-spike"
+
+    - name: spendguard.pricing
+      interval: 60s
+      rules:
+        - alert: SpendGuardPricingStale
+          expr: |
+            time() - spendguard_pricing_snapshot_age_seconds > 86400
+          for: 30m
+          labels:
+            severity: page
+            slo: L6
+            team: pricing
+          annotations:
+            summary: "Latest pricing_version > 24h old"
+            runbook: "https://docs/operations/runbooks/L6-pricing-stale"
+            description: |
+              The newest row in pricing_versions is older than the
+              24h staleness budget. Bundle-build will refuse new
+              bundles once the configured maxStalenessSeconds passes.
+              Run pricing-sync OR add an audited override.
+
+    - name: spendguard.reconciliation
+      interval: 60s
+      rules:
+        - alert: SpendGuardProviderReconciliationLag
+          expr: |
+            spendguard_provider_reconciliation_lag_seconds > 14400
+          for: 1h
+          labels:
+            severity: warn
+            slo: L7
+            team: platform
+          annotations:
+            summary: "Provider {{ $labels.provider }} reconciliation > 4h behind"
+            runbook: "https://docs/operations/runbooks/L7-recon-lag"
+
+    - name: spendguard.approval
+      interval: 60s
+      rules:
+        - alert: SpendGuardApprovalLatency
+          expr: |
+            histogram_quantile(
+              0.99,
+              rate(spendguard_approval_latency_seconds_bucket[1h])
+            ) > 300
+          for: 30m
+          labels:
+            severity: warn
+            slo: L8
+            team: approver
+          annotations:
+            summary: "Approval p99 > 5m for 30m"
+            runbook: "https://docs/operations/runbooks/L8-approval-latency"
+
+    - name: spendguard.fencing
+      interval: 60s
+      rules:
+        - alert: SpendGuardFencingTakeoverStorm
+          expr: |
+            increase(spendguard_sidecar_fencing_acquire_total{action="promote"}[1h]) > 1
+          for: 5m
+          labels:
+            severity: page
+            slo: L9
+            team: sidecar
+          annotations:
+            summary: "Fencing takeovers > 1 / hour"
+            runbook: "https://docs/operations/runbooks/L9-fencing-storm"
+            description: |
+              Each `promote` action increments the epoch by 1. More than
+              one per hour means lease flap (TTL too short, network
+              partition, or the active sidecar is OOM-looping).

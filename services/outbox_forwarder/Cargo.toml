@@ -35,6 +35,10 @@ anyhow = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 envy = "0.4"
+async-trait = "0.1"
+
+# Phase 5 S1: shared lease primitive for singleton workers.
+spendguard-leases = { path = "../leases" }
 
 [build-dependencies]
 tonic-build = "0.12"

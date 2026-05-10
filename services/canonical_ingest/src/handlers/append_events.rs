@@ -23,6 +23,7 @@
 use chrono::Utc;
 use prost_types::Timestamp;
 use sqlx::PgPool;
+use spendguard_signing::{VerifyFailure, Verifier};
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
@@ -30,22 +31,24 @@ use crate::{
     config::Config,
     domain::{
         error::DomainError,
-        event_routing::{classify, StorageClass},
+        event_routing::classify,
     },
+    metrics::{IngestMetrics, QuarantineReason, Route as MetricsRoute},
     persistence::{
         append::{self, AppendInput, AppendOutcome},
-        query, schema_bundle,
+        query, schema_bundle, signature_quarantine,
     },
     proto::{
         canonical_ingest::v1::{
             event_result::Status as EventStatus, AppendEventsRequest, AppendEventsResponse,
             EventResult, IngestPosition, append_events_request::Route,
         },
-        common::v1::{CloudEvent, Error as ProtoError, error::Code as ProtoCode, SchemaBundleRef},
+        common::v1::{CloudEvent, Error as ProtoError, error::Code as ProtoCode},
     },
+    verifier::canonical_bytes,
 };
 
-#[instrument(skip(pool, cfg, req), fields(
+#[instrument(skip(pool, cfg, verifier, metrics, req), fields(
     producer_id = %req.producer_id,
     event_count = req.events.len(),
     route = ?req.route()
@@ -53,6 +56,8 @@ use crate::{
 pub async fn handle(
     pool: &PgPool,
     cfg: &Config,
+    verifier: Option<&dyn Verifier>,
+    metrics: &IngestMetrics,
     req: AppendEventsRequest,
 ) -> Result<AppendEventsResponse, tonic::Status> {
     // Validate batch envelope.
@@ -79,15 +84,15 @@ pub async fn handle(
         Err(e) => return Err(e.to_status()),
     };
 
-    // Producer signature verification (per Trace §13).
-    // POC: keystore not populated; strict mode rejects all events. Default
-    // mode admits events with unverified signatures and emits an audit_event
-    // hint via tracing. Phase 1 後段 wires keystore via sidecar handshake.
-    if cfg.strict_signatures {
-        return Err(tonic::Status::unauthenticated(
-            "strict_signatures=true but keystore is not yet integrated; \
-             refusing to admit any events. Set SPENDGUARD_CANONICAL_INGEST_STRICT_SIGNATURES=false \
-             for POC mode.",
+    // Phase 5 GA hardening S8: producer signature verification (per
+    // Trace §13). Strict mode requires a verifier and rejects /
+    // quarantines events that fail. Non-strict mode still records
+    // outcomes via metrics so operators can prepare to flip the flag.
+    if cfg.strict_signatures && verifier.is_none() {
+        return Err(tonic::Status::failed_precondition(
+            "strict_signatures=true but no trust store configured; \
+             set SPENDGUARD_CANONICAL_INGEST_TRUST_STORE_DIR or flip \
+             strict_signatures=false",
         ));
     }
 
@@ -108,16 +113,29 @@ pub async fn handle(
 
     let mut results = Vec::with_capacity(req.events.len());
     for evt in req.events {
-        let res = process_one(pool, cfg, &evt, &bundle, route, backpressure_active).await;
+        let res = process_one(
+            pool,
+            cfg,
+            verifier,
+            metrics,
+            &evt,
+            &bundle,
+            route,
+            backpressure_active,
+        )
+        .await;
         results.push(res);
     }
 
     Ok(AppendEventsResponse { results })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn process_one(
     pool: &PgPool,
     cfg: &Config,
+    verifier: Option<&dyn Verifier>,
+    metrics: &IngestMetrics,
     evt: &CloudEvent,
     bundle: &crate::persistence::schema_bundle::CachedBundle,
     route: Route,
@@ -209,6 +227,14 @@ async fn process_one(
             )
         }
     };
+
+    // Phase 5 GA hardening S8: producer signature verification.
+    // Returns either Continue (event passes; admit) or a typed
+    // EventResult that the caller surfaces directly (reject /
+    // quarantine).
+    if let Some(early) = verify_or_handle(pool, cfg, verifier, metrics, evt, route).await {
+        return early;
+    }
 
     // Backpressure on enforcement route.
     if backpressure_active && route == Route::Enforcement {
@@ -502,4 +528,149 @@ fn error_result(event_id: &str, status: EventStatus, err: DomainError) -> EventR
             details: Default::default(),
         }),
     }
+}
+
+fn route_to_metric(route: Route) -> MetricsRoute {
+    match route {
+        Route::Enforcement => MetricsRoute::Enforcement,
+        _ => MetricsRoute::Observability,
+    }
+}
+
+/// Triage signature verification result. Returns:
+///   * `None` — event passes verification (or is admitted in non-strict
+///     mode); caller continues to append.
+///   * `Some(EventResult)` — caller MUST surface this result instead of
+///     appending. Includes the quarantine-write side effect.
+async fn verify_or_handle(
+    pool: &PgPool,
+    cfg: &Config,
+    verifier: Option<&dyn Verifier>,
+    metrics: &IngestMetrics,
+    evt: &CloudEvent,
+    route: Route,
+) -> Option<EventResult> {
+    // No verifier configured + non-strict mode → fully bypass (POC
+    // path). We still increment "accepted" so the metric is honest.
+    let v = match verifier {
+        Some(v) => v,
+        None => {
+            metrics.inc_accepted(route_to_metric(route));
+            return None;
+        }
+    };
+
+    match crate::verifier::verify_cloudevent(v, evt) {
+        Ok(()) => {
+            metrics.inc_accepted(route_to_metric(route));
+            None
+        }
+        Err(VerifyFailure::PreS6) => {
+            // Pre-S6 backfill row. Strict mode → quarantine. Non-strict
+            // → admit but bump a counter so operators can monitor the
+            // tail of the pre-S6 backlog draining.
+            if cfg.strict_signatures {
+                metrics.inc_quarantined(QuarantineReason::PreS6);
+                Some(write_quarantine(pool, evt, "pre_s6", metrics).await)
+            } else {
+                metrics.inc_pre_s6_admitted();
+                None
+            }
+        }
+        Err(VerifyFailure::Disabled) => {
+            // Demo-profile row signed with the disabled signer. Strict
+            // mode quarantines (production must never see this). Non-
+            // strict admits but counts.
+            if cfg.strict_signatures {
+                metrics.inc_quarantined(QuarantineReason::Disabled);
+                Some(write_quarantine(pool, evt, "disabled", metrics).await)
+            } else {
+                metrics.inc_disabled_admitted();
+                None
+            }
+        }
+        Err(VerifyFailure::UnknownKey) => {
+            // Codex P2#3: non-strict mode is "audit-only" per the
+            // verifier docstring. Quarantining unknown-key in
+            // non-strict contradicts that contract; mirror the
+            // PreS6/Disabled pattern (admit + counter, no quarantine).
+            // Strict mode (production-mandated by Helm gate) still
+            // quarantines.
+            if cfg.strict_signatures {
+                metrics.inc_quarantined(QuarantineReason::UnknownKey);
+                Some(write_quarantine(pool, evt, "unknown_key", metrics).await)
+            } else {
+                metrics.inc_unknown_key_admitted();
+                None
+            }
+        }
+        Err(VerifyFailure::InvalidSignature) => {
+            // Codex P2#3: see UnknownKey arm. The
+            // rejected_invalid_signature counter still fires so
+            // operators can detect tamper attempts even in non-strict
+            // mode — only the quarantine + rejection is gated.
+            metrics.inc_rejected_invalid_sig(route_to_metric(route));
+            if cfg.strict_signatures {
+                metrics.inc_quarantined(QuarantineReason::InvalidSignature);
+                Some(write_quarantine(pool, evt, "invalid_signature", metrics).await)
+            } else {
+                metrics.inc_invalid_signature_admitted();
+                None
+            }
+        }
+        // S7: per-key validity-window failures. Always quarantine
+        // regardless of strict mode — these are unambiguous policy
+        // violations (key was past its window or operator-revoked).
+        Err(VerifyFailure::KeyExpired) => {
+            metrics.inc_quarantined(QuarantineReason::KeyExpired);
+            Some(write_quarantine(pool, evt, "key_expired", metrics).await)
+        }
+        Err(VerifyFailure::KeyNotYetValid) => {
+            metrics.inc_quarantined(QuarantineReason::KeyNotYetValid);
+            Some(write_quarantine(pool, evt, "key_not_yet_valid", metrics).await)
+        }
+        Err(VerifyFailure::KeyRevoked) => {
+            metrics.inc_quarantined(QuarantineReason::KeyRevoked);
+            Some(write_quarantine(pool, evt, "key_revoked", metrics).await)
+        }
+    }
+}
+
+/// Persist the offending event in `audit_signature_quarantine` and
+/// return the EventResult the handler surfaces. On insert failure we
+/// fail-open with a Quarantined status — the audit invariant is
+/// preserved (the row was rejected from the canonical log) even if the
+/// quarantine write fails (operator sees the gRPC status + the metric
+/// counter; row is dropped, which is acceptable at the quarantine
+/// boundary).
+async fn write_quarantine(
+    pool: &PgPool,
+    evt: &CloudEvent,
+    reason: &str,
+    metrics: &IngestMetrics,
+) -> EventResult {
+    let canonical = canonical_bytes(evt);
+    if canonical.len() > 1_048_576 {
+        metrics.inc_quarantined(QuarantineReason::Oversized);
+        warn!(
+            event_id = %evt.id,
+            len = canonical.len(),
+            "quarantine: canonical bytes too large; dropping"
+        );
+        return error_result(
+            &evt.id,
+            EventStatus::Quarantined,
+            DomainError::InvalidRequest("oversized canonical bytes; dropped at quarantine boundary".into()),
+        );
+    }
+    if let Err(e) = signature_quarantine::insert(pool, evt, &canonical, reason).await {
+        warn!(event_id = %evt.id, err = %e, "audit_signature_quarantine insert failed");
+    }
+    error_result(
+        &evt.id,
+        EventStatus::Quarantined,
+        DomainError::InvalidRequest(format!(
+            "signature verification failed ({reason})"
+        )),
+    )
 }
