@@ -81,6 +81,12 @@ canonicalIngest:
   image:
     repository: spendguard/canonical-ingest
     tag: "0.1.0-alpha.1"
+  # Round-2 #3: required by services/canonical_ingest Config::from_env().
+  # The (region, ingest_shard_id) tuple is the canonical ordering scope
+  # per Trace §10.5. Multiple instances can share a shard or own their
+  # own; pick a stable id per replica/scope. The default `default-shard`
+  # is single-shard.
+  ingestShardId: "default-shard"
   resources:
     requests: { cpu: "200m", memory: "256Mi" }
     limits:   { cpu: "1",    memory: "1Gi"   }
