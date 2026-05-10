@@ -40,7 +40,15 @@ spec:
           env:
             - { name: SPENDGUARD_CANONICAL_INGEST_BIND_ADDR,    value: "0.0.0.0:50052" }
             - { name: SPENDGUARD_CANONICAL_INGEST_DATABASE_URL, value: {{ .Values.postgres.canonicalUrl | quote }} }
-            - { name: SPENDGUARD_CANONICAL_INGEST_TENANT_ID,    value: {{ .Values.global.tenantId | quote }} }
+            # Round-2 #3: canonical_ingest Config::from_env() requires
+            # REGION + INGEST_SHARD_ID (no defaults). The (region,
+            # ingest_shard_id) tuple is the canonical ordering scope
+            # per Trace §10.5; missing either → CrashLoopBackOff.
+            # The chart's earlier TENANT_ID env was extraneous —
+            # canonical_ingest is multi-tenant at the row level, not
+            # per-instance, so the binary's Config doesn't read it.
+            - { name: SPENDGUARD_CANONICAL_INGEST_REGION,          value: {{ .Values.global.region | quote }} }
+            - { name: SPENDGUARD_CANONICAL_INGEST_INGEST_SHARD_ID, value: {{ .Values.canonicalIngest.ingestShardId | quote }} }
             - { name: SPENDGUARD_CANONICAL_INGEST_TLS_CERT_PEM, value: "/etc/ssl/spendguard/canonical-ingest.crt" }
             - { name: SPENDGUARD_CANONICAL_INGEST_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/canonical-ingest.key" }
             - { name: SPENDGUARD_CANONICAL_INGEST_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
