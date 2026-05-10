@@ -47,3 +47,7 @@ spendguard-leases = { path = "../leases" }
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
+# Followup #7: wiremock-based HTTP fixtures for OpenAi/Anthropic
+# clients. Lets us exercise real reqwest paths without touching live
+# upstream APIs in CI.
+wiremock = "0.6"
