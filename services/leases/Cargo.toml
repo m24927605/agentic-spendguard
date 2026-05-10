@@ -18,6 +18,12 @@ async-trait = "0.1"
 thiserror = "1"
 anyhow = "1"
 tracing = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Followup #5: real K8sLease via coordination.k8s.io/Lease.
+kube = { version = "0.95", default-features = false, features = ["client", "rustls-tls"] }
+k8s-openapi = { version = "0.23", features = ["latest"] }
 
 [dev-dependencies]
 testcontainers = "0.23"
