@@ -44,6 +44,11 @@ envy = "0.4"
 # active at a time).
 spendguard-leases = { path = "../leases" }
 
+# Round-2 #11: Prometheus /metrics endpoint.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }
 tempfile = "3"
