@@ -90,6 +90,23 @@ service Ledger {
   // Query whether a decision has reached publish/outcome state.
   rpc QueryDecisionOutcome(QueryDecisionOutcomeRequest)
       returns (QueryDecisionOutcomeResponse);
+
+  // -- Approval bundling (Round-2 #9 part 2 PR 9b) ----------------------------
+
+  // Read an approval row's resume context. Sidecar's
+  // ResumeAfterApproval handler calls this after the operator
+  // approves; the response carries `decision_context` +
+  // `requested_effect` so sidecar can rebuild a fresh
+  // RequestDecision and call ReserveSet under a new idempotency key.
+  rpc GetApprovalForResume(GetApprovalForResumeRequest)
+      returns (GetApprovalForResumeResponse);
+
+  // Atomically mark an approval as bundled with a freshly-landed
+  // ledger transaction. Wraps the `mark_approval_bundled` SP from
+  // migration 0036. Idempotent on (approval_id, ledger_transaction_id);
+  // returns IDEMPOTENCY_CONFLICT if a different tx_id is presented.
+  rpc MarkApprovalBundled(MarkApprovalBundledRequest)
+      returns (MarkApprovalBundledResponse);
 }
 
 // ============================================================================
@@ -670,4 +687,70 @@ message ReservationContext {
   string current_state = 11;
   string source_ledger_transaction_id = 12;
   string tenant_id = 13;
+}
+
+// ============================================================================
+// Approval bundling (Round-2 #9 part 2 PR 9b)
+// ============================================================================
+
+// Read an approval row's resume context.
+message GetApprovalForResumeRequest {
+  // UUID hex string. The approval_requests row to look up.
+  string approval_id = 1;
+  // Tenant scope check — server returns Error if the row's tenant_id
+  // doesn't match. Defense in depth against caller-supplied
+  // approval_ids that might come from another tenant.
+  string tenant_id = 2;
+}
+
+message GetApprovalForResumeResponse {
+  oneof outcome {
+    ApprovalResumeContext context = 1;
+    spendguard.common.v1.Error error = 2;
+  }
+}
+
+// Server-derived view of one approval_requests row, scoped to the
+// fields the sidecar needs to rebuild a fresh RequestDecision after
+// the operator approves.
+message ApprovalResumeContext {
+  string approval_id = 1;
+  string tenant_id = 2;
+  string decision_id = 3;
+  // 'pending' | 'approved' | 'denied' | 'expired' | 'cancelled'.
+  string state = 4;
+  // JSON blob — the matched_rule_ids + reason_codes + ContractBundleRef +
+  // PricingFreeze tuple captured at REQUIRE_APPROVAL time. Sidecar uses
+  // this as the seed for a fresh RequestDecision when state='approved'.
+  bytes decision_context_json = 5;
+  // JSON blob — the proposed budget effect (debit/credit envelope).
+  // Sidecar passes through to ReserveSet under a derived idempotency
+  // key.
+  bytes requested_effect_json = 6;
+  // Set when state='approved' and the deferred operation has already
+  // been bundled into a ledger transaction. If present, the sidecar's
+  // resume path is idempotent — it should look up this transaction
+  // rather than creating a new one.
+  string bundled_ledger_transaction_id = 7;
+}
+
+// Mark an approval as bundled with a freshly-landed ledger transaction.
+message MarkApprovalBundledRequest {
+  string approval_id = 1;
+  string ledger_transaction_id = 2;
+}
+
+message MarkApprovalBundledResponse {
+  oneof outcome {
+    MarkApprovalBundledSuccess success = 1;
+    spendguard.common.v1.Error error = 2;
+  }
+}
+
+message MarkApprovalBundledSuccess {
+  // True iff this is the FIRST call to mark_approval_bundled for this
+  // approval. Subsequent retries with the same tx_id return false +
+  // the same ledger_transaction_id (idempotent).
+  bool was_first_bundling = 1;
+  string ledger_transaction_id = 2;
 }
