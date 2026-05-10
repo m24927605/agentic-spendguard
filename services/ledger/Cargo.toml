@@ -63,6 +63,13 @@ envy = "0.4"
 # rows in InvoiceReconcile).
 spendguard-signing = { path = "../signing" }
 
+# Round-2 #11: Prometheus /metrics HTTP endpoint (per-service handler
+# call counters). Mirror canonical_ingest pattern — raw hyper, no
+# `prometheus` crate dependency.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"

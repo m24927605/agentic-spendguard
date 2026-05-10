@@ -46,6 +46,12 @@ pub struct Config {
     /// client certs (sidecar workload certs).
     #[serde(default)]
     pub tls_ca_pem: Option<String>,
+
+    /// Round-2 #11: Prometheus /metrics endpoint bind addr. Defaults to
+    /// `0.0.0.0:9092` (ledger gets 9092; sidecar 9093, etc. — see
+    /// followup #11 port table). Set to empty string to disable.
+    #[serde(default = "default_metrics_addr")]
+    pub metrics_addr: String,
 }
 
 fn default_bind_addr() -> String {
@@ -54,6 +60,10 @@ fn default_bind_addr() -> String {
 
 fn default_db_max_connections() -> u32 {
     32
+}
+
+fn default_metrics_addr() -> String {
+    "0.0.0.0:9092".to_string()
 }
 
 impl Config {
