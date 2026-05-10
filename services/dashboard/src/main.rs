@@ -20,6 +20,8 @@
 //! (`SPENDGUARD_DASHBOARD_TENANT_ID`); S18 will switch to deriving
 //! tenant scope from the Principal's `tenant_ids` claim.
 
+mod metrics;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -33,6 +35,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use spendguard_auth::{AuthConfig, Authenticator, Permission, Principal};
+
+use crate::metrics::DashboardMetrics;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tracing::info;
@@ -48,6 +52,15 @@ struct Config {
     #[serde(default)]
     canonical_database_url: Option<String>,
     tenant_id: String,
+    /// Round-2 #11: Prometheus /metrics endpoint bind addr. Defaults
+    /// to `0.0.0.0:9095` (dashboard gets 9095 per the round-2 port
+    /// table; ledger=9092, sidecar=9093, control_plane=9094).
+    #[serde(default = "default_metrics_addr")]
+    metrics_addr: String,
+}
+
+fn default_metrics_addr() -> String {
+    "0.0.0.0:9095".to_string()
 }
 
 struct AppState {
@@ -107,6 +120,20 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("S17: init authenticator: {e}"))?,
     );
 
+    // Round-2 #11: shared metrics counter store + middleware applied
+    // to the outer Router (so /healthz and /api/* are both covered).
+    let metrics = DashboardMetrics::new();
+    if !cfg.metrics_addr.is_empty() {
+        let metrics_addr = cfg.metrics_addr.clone();
+        let metrics_handle = metrics.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve_metrics(metrics_addr, metrics_handle).await {
+                tracing::warn!(err = %e, "metrics server terminated");
+            }
+        });
+        info!(addr = %cfg.metrics_addr, "metrics server bound");
+    }
+
     let api_routes = Router::new()
         .route("/api/budgets", get(api_budgets))
         .route("/api/decisions", get(api_decisions))
@@ -120,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
         .route("/", get(index))
         .route("/healthz", get(healthz))
         .merge(api_routes)
+        .layer(from_fn_with_state(metrics.clone(), metrics::record_metrics))
         .with_state(state);
 
     let addr: SocketAddr = cfg.bind_addr.parse()?;
@@ -127,6 +155,53 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Round-2 #11: minimal HTTP /metrics endpoint that renders the
+/// DashboardMetrics Prometheus text. Same hyper-based pattern as
+/// canonical_ingest / ledger / sidecar / control_plane.
+async fn serve_metrics(addr: String, metrics: DashboardMetrics) -> anyhow::Result<()> {
+    use std::convert::Infallible;
+    use hyper::body::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+    use http_body_util::Full;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind(&addr).await?;
+    info!(addr = %addr, "dashboard metrics listening");
+
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let metrics = metrics.clone();
+        tokio::task::spawn(async move {
+            let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                let metrics = metrics.clone();
+                async move {
+                    let body = if req.uri().path() == "/metrics" {
+                        metrics.render()
+                    } else {
+                        "".to_string()
+                    };
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .header(
+                                "content-type",
+                                "text/plain; version=0.0.4; charset=utf-8",
+                            )
+                            .body(Full::new(Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            });
+            if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
+                tracing::debug!(err = %e, "metrics conn closed");
+            }
+        });
+    }
 }
 
 async fn healthz() -> &'static str {
