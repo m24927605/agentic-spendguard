@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
     //    serving unsigned audit events.
     let signer = std::sync::Arc::<dyn spendguard_signing::Signer>::from(
         spendguard_signing::signer_from_env("SPENDGUARD_WEBHOOK_RECEIVER")
+            .await
             .map_err(|e| anyhow::anyhow!("S6: build signer: {e}"))?,
     );
     info!(
