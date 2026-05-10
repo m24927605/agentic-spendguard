@@ -9,6 +9,7 @@ use tracing_subscriber::EnvFilter;
 
 use spendguard_ledger::{
     config::Config,
+    metrics::LedgerMetrics,
     persistence,
     proto::ledger::v1::ledger_server::LedgerServer,
     server::LedgerService,
@@ -46,7 +47,24 @@ async fn main() -> anyhow::Result<()> {
         "S6: ledger producer signer initialized"
     );
 
-    let svc = LedgerService::new(pool, signer);
+    // Round-2 #11: Prometheus metrics counter store (handler call totals
+    // broken out by ok/err). Bound shared with the gRPC LedgerService so
+    // every method invocation increments the right bucket.
+    let metrics = LedgerMetrics::new();
+
+    if !cfg.metrics_addr.is_empty() {
+        let metrics_addr: SocketAddr =
+            cfg.metrics_addr.parse().context("parsing metrics addr")?;
+        let metrics_handle = metrics.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve_metrics(metrics_addr, metrics_handle).await {
+                warn!(err = %e, "metrics server terminated");
+            }
+        });
+        info!(addr = %cfg.metrics_addr, "metrics server bound");
+    }
+
+    let svc = LedgerService::with_metrics(pool, signer, metrics);
 
     let addr: SocketAddr = cfg.bind_addr.parse().context("parsing bind addr")?;
 
@@ -79,6 +97,47 @@ async fn main() -> anyhow::Result<()> {
         .context("gRPC server terminated")?;
 
     Ok(())
+}
+
+/// Round-2 #11: minimal HTTP /metrics endpoint that renders the
+/// LedgerMetrics Prometheus text. Mirrors `services/canonical_ingest`
+/// pattern — raw hyper, no `prometheus` crate dep.
+async fn serve_metrics(addr: SocketAddr, metrics: LedgerMetrics) -> anyhow::Result<()> {
+    use hyper::body::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+    use http_body_util::Full;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind(addr).await?;
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let metrics = metrics.clone();
+        tokio::task::spawn(async move {
+            let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                let metrics = metrics.clone();
+                async move {
+                    let body = if req.uri().path() == "/metrics" {
+                        metrics.render()
+                    } else {
+                        "".to_string()
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
+                            .body(Full::new(Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            });
+            if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
+                tracing::debug!(err = %e, "metrics conn closed");
+            }
+        });
+    }
 }
 
 /// Build the server-side TLS config when all three of cert/key/ca paths
