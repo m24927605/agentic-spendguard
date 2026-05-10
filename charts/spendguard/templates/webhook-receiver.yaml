@@ -39,21 +39,42 @@ spec:
             - { name: metrics, containerPort: 9098 }
           env:
             - { name: SPENDGUARD_WEBHOOK_RECEIVER_METRICS_ADDR,         value: "0.0.0.0:9098" }
+            # Round-2 #3: BIND_ADDR + HEALTH_ADDR are required by
+            # Config::from_env() (no defaults). Bind values match
+            # the containerPort declarations above.
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_BIND_ADDR,            value: "0.0.0.0:{{ .Values.webhookReceiver.service.httpsPort }}" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_HEALTH_ADDR,          value: "0.0.0.0:8080" }
             - { name: SPENDGUARD_WEBHOOK_RECEIVER_TENANT_ID,            value: {{ .Values.global.tenantId | quote }} }
             - { name: SPENDGUARD_WEBHOOK_RECEIVER_FENCING_SCOPE_ID,     value: {{ .Values.webhookReceiver.fencingScopeId | quote }} }
             - { name: SPENDGUARD_WEBHOOK_RECEIVER_WORKLOAD_INSTANCE_ID, value: {{ .Values.webhookReceiver.workloadInstanceId | quote }} }
+            # Round-2 #3: required by Config::from_env(); previously
+            # unwired (production install would CrashLoopBackOff).
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_FENCING_INITIAL_EPOCH, value: {{ .Values.webhookReceiver.fencingInitialEpoch | quote }} }
             - name: SPENDGUARD_WEBHOOK_RECEIVER_LEDGER_URL
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
             - name: SPENDGUARD_WEBHOOK_RECEIVER_DATABASE_URL
               value: {{ .Values.postgres.ledgerUrl | quote }}
-            - name: SPENDGUARD_WEBHOOK_RECEIVER_HMAC_SECRET
+            # Round-2 #3: per-tenant HMAC secret for the mock-llm
+            # provider. Config field is `mock_llm_secret`, and
+            # envy::from_env() (NOT prefixed) reads the env var as
+            # SPENDGUARD_WEBHOOK_SECRET_MOCK_LLM. The previous chart
+            # set SPENDGUARD_WEBHOOK_RECEIVER_HMAC_SECRET, which the
+            # binary ignored, leaving Config::from_env() to bail with
+            # "missing field mock_llm_secret".
+            - name: SPENDGUARD_WEBHOOK_SECRET_MOCK_LLM
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.webhookReceiver.hmacSecretName }}
                   key: hmac
-            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/webhook-receiver.crt" }
-            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/webhook-receiver.key" }
-            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # Round-2 #3: Config::from_env() distinguishes server
+            # vs client TLS material (HTTPS server identity vs gRPC
+            # client identity to ledger). Wire both — same files in
+            # the chart, but the binary expects all four env names.
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_SERVER_CERT, value: "/etc/ssl/spendguard/webhook-receiver.crt" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_SERVER_KEY,  value: "/etc/ssl/spendguard/webhook-receiver.key" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CLIENT_CERT, value: "/etc/ssl/spendguard/webhook-receiver.crt" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CLIENT_KEY,  value: "/etc/ssl/spendguard/webhook-receiver.key" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CA_PEM,      value: "/etc/ssl/spendguard/ca.crt" }
             # Phase 5 GA hardening S6: producer signing config.
             - { name: SPENDGUARD_PROFILE,                                    value: {{ .Values.signing.profile | quote }} }
             - { name: SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_MODE,              value: {{ .Values.signing.mode | quote }} }
