@@ -14,6 +14,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use spendguard_usage_poller::{
+    metrics::{CycleOutcome, UsagePollerMetrics},
     poll_once, AnthropicClient, MockProviderClient, OpenAiClient, PollWindow, ProviderClient,
 };
 
@@ -47,6 +48,14 @@ struct Config {
     anthropic_api_key: Option<String>,
     #[serde(default)]
     anthropic_workspace_id: Option<String>,
+    /// Round-2 #11: Prometheus /metrics endpoint bind addr. Defaults
+    /// to `0.0.0.0:9099` per the round-2 port table. Empty disables.
+    #[serde(default = "default_metrics_addr")]
+    metrics_addr: String,
+}
+
+fn default_metrics_addr() -> String {
+    "0.0.0.0:9099".to_string()
 }
 
 fn default_provider_kind() -> String {
@@ -155,6 +164,19 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // Round-2 #11: Prometheus metrics counter store + HTTP server.
+    let metrics = UsagePollerMetrics::new();
+    if !cfg.metrics_addr.is_empty() {
+        let metrics_addr = cfg.metrics_addr.clone();
+        let metrics_handle = metrics.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve_metrics(metrics_addr, metrics_handle).await {
+                warn!(err = %e, "metrics server terminated");
+            }
+        });
+        info!(addr = %cfg.metrics_addr, "metrics server bound");
+    }
+
     loop {
         let now = chrono::Utc::now();
         let window_to = now - chrono::Duration::seconds(cfg.safety_lag_seconds as i64);
@@ -166,6 +188,12 @@ async fn main() -> anyhow::Result<()> {
 
         match poll_once(&*client, &pool, window).await {
             Ok(outcome) => {
+                metrics.inc_cycle(CycleOutcome::Ok);
+                metrics.add_records(
+                    outcome.fetched as u64,
+                    outcome.inserted as u64,
+                    outcome.deduped as u64,
+                );
                 info!(
                     fetched = outcome.fetched,
                     inserted = outcome.inserted,
@@ -175,10 +203,56 @@ async fn main() -> anyhow::Result<()> {
                 cursor = window_to;
             }
             Err(e) => {
+                metrics.inc_cycle(CycleOutcome::Err);
                 warn!(err = %e, "S11: poll cycle failed; retaining last-success cursor");
             }
         }
 
         tokio::time::sleep(Duration::from_secs(cfg.poll_interval_seconds)).await;
+    }
+}
+
+/// Round-2 #11: minimal HTTP /metrics endpoint.
+async fn serve_metrics(addr: String, metrics: UsagePollerMetrics) -> anyhow::Result<()> {
+    use std::convert::Infallible;
+    use hyper::body::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+    use http_body_util::Full;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind(&addr).await?;
+    info!(addr = %addr, "usage-poller metrics listening");
+
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let metrics = metrics.clone();
+        tokio::task::spawn(async move {
+            let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                let metrics = metrics.clone();
+                async move {
+                    let body = if req.uri().path() == "/metrics" {
+                        metrics.render()
+                    } else {
+                        "".to_string()
+                    };
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .header(
+                                "content-type",
+                                "text/plain; version=0.0.4; charset=utf-8",
+                            )
+                            .body(Full::new(Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            });
+            if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
+                tracing::debug!(err = %e, "metrics conn closed");
+            }
+        });
     }
 }
