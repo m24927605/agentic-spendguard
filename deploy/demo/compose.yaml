@@ -480,8 +480,11 @@ services:
       # Phase 5 GA hardening S18: tenant scope on the static
       # principal so the demo dashboard can read the seeded tenant.
       SPENDGUARD_DASHBOARD_STATIC_TOKEN_TENANT_IDS: "00000000-0000-4000-8000-000000000001"
+      # Round-2 #11: Prometheus /metrics endpoint.
+      SPENDGUARD_DASHBOARD_METRICS_ADDR:           "0.0.0.0:9095"
     ports:
       - "8090:8090"
+      - "9095:9095"
     depends_on:
       postgres:
         condition: service_healthy
