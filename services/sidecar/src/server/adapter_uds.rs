@@ -577,22 +577,27 @@ impl AdapterUds {
     }
 
     // --------------------------------------------------------------------
-    // Phase 5 GA hardening S16: ResumeAfterApproval (stub).
+    // Phase 5 GA hardening S16 / Round-2 #9 part 2 PR 9c:
+    // ResumeAfterApproval — gRPC wiring + state branching.
     // --------------------------------------------------------------------
     //
-    // The actual resume path requires:
-    //   1. S14-followup bundling SP that creates approval_requests
-    //      atomically with the audit_outbox row.
-    //   2. A look-up function: given (tenant_id, decision_id,
-    //      approval_id), fetch the approval state + decision_context.
-    //   3. Re-running the contract evaluator + Ledger.ReserveSet with
-    //      a NEW idempotency key derived from approval_id (so a replay
-    //      of resume can never double-publish).
-    //
-    // Today this handler returns a typed POC limitation Error. The
-    // adapter SDK (Python: ApprovalRequired.resume()) catches it and
-    // surfaces a clean message pointing at the followup ticket. Real
-    // wiring lands once the bundling SP + lookup helper are in place.
+    // Flow:
+    //   1. Call Ledger.GetApprovalForResume(approval_id, tenant_id)
+    //   2. Branch on state:
+    //      * approved + bundled_ledger_transaction_id non-empty →
+    //        idempotent replay, return Continue with that tx id
+    //      * approved + bundled_ledger_transaction_id empty →
+    //        Pending implementation. The full path requires the
+    //        producer-side post_approval_required_decision SP to
+    //        capture decision_context_json + requested_effect_json
+    //        in a shape this resume handler can rebuild a
+    //        ReserveSetRequest from. Until that SP lands, return a
+    //        typed [PRODUCER_SP_NOT_WIRED] error so SDK callers see
+    //        a clear "still waiting on producer-side wiring" message.
+    //      * denied → ResumeAfterApprovalDenied (approver fields
+    //        deferred; GetApprovalForResume's response shape will
+    //        grow them in a follow-up)
+    //      * pending / expired / cancelled / other → typed Error
     async fn resume_after_approval_inner(
         &self,
         req: Request<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalRequest>,
@@ -601,27 +606,139 @@ impl AdapterUds {
         Status,
     > {
         use crate::proto::common::v1::error::Code as ProtoCode;
+        use crate::proto::ledger::v1::{
+            get_approval_for_resume_response::Outcome as GetOutcome,
+            GetApprovalForResumeRequest,
+        };
+        use crate::proto::sidecar_adapter::v1::{
+            decision_response::Decision,
+            resume_after_approval_response::Outcome as ResumeOutcome, DecisionResponse,
+            ResumeAfterApprovalDenied, ResumeAfterApprovalResponse,
+        };
+
         let req = req.into_inner();
         tracing::info!(
             tenant = %req.tenant_id,
             decision_id = %req.decision_id,
             approval_id = %req.approval_id,
-            "S16: resume_after_approval (stub) invoked"
+            "S16/9c: resume_after_approval invoked"
         );
-        let resp = crate::proto::sidecar_adapter::v1::ResumeAfterApprovalResponse {
-            outcome: Some(
-                crate::proto::sidecar_adapter::v1::resume_after_approval_response::Outcome::Error(
-                    crate::proto::common::v1::Error {
-                        code: ProtoCode::Unspecified as i32,
-                        message: "S16-followup: ResumeAfterApproval not yet wired \
-                                  (depends on S14 bundling SP + lookup helper)"
-                            .into(),
-                        details: Default::default(),
-                    },
-                ),
-            ),
+
+        // Local helper: package a typed error into the response oneof.
+        let into_err = |msg: String| {
+            Ok(Response::new(ResumeAfterApprovalResponse {
+                outcome: Some(ResumeOutcome::Error(crate::proto::common::v1::Error {
+                    code: ProtoCode::Unspecified as i32,
+                    message: msg,
+                    details: Default::default(),
+                })),
+            }))
         };
-        Ok(Response::new(resp))
+
+        // 1) Fetch the approval row's resume context.
+        let get_resp = match self
+            .state
+            .inner
+            .ledger
+            .get_approval_for_resume(GetApprovalForResumeRequest {
+                approval_id: req.approval_id.clone(),
+                tenant_id: req.tenant_id.clone(),
+            })
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return into_err(format!("[LEDGER_RPC_FAILED] GetApprovalForResume: {e}"));
+            }
+        };
+        let context = match get_resp.outcome {
+            Some(GetOutcome::Context(c)) => c,
+            Some(GetOutcome::Error(e)) => {
+                return into_err(format!(
+                    "[LEDGER_REJECTED] GetApprovalForResume: {}",
+                    e.message
+                ));
+            }
+            None => {
+                return into_err(
+                    "[LEDGER_RESPONSE_EMPTY] GetApprovalForResume returned no oneof"
+                        .into(),
+                );
+            }
+        };
+
+        // 2) Branch on state.
+        match context.state.as_str() {
+            "approved" => {
+                if !context.bundled_ledger_transaction_id.is_empty() {
+                    // Idempotent replay: the approval has already
+                    // been bundled; surface the existing tx without
+                    // re-running ReserveSet.
+                    tracing::info!(
+                        approval_id = %req.approval_id,
+                        ledger_tx = %context.bundled_ledger_transaction_id,
+                        "S16/9c: idempotent replay — approval already bundled"
+                    );
+                    let decision_resp = DecisionResponse {
+                        decision_id: context.decision_id.clone(),
+                        audit_decision_event_id: String::new(),
+                        decision: Decision::Continue as i32,
+                        reason_codes: vec!["resume_idempotent_replay".into()],
+                        matched_rule_ids: vec![],
+                        mutation_patch_json: String::new(),
+                        effect_hash: vec![].into(),
+                        ledger_transaction_id: context
+                            .bundled_ledger_transaction_id
+                            .clone(),
+                        reservation_ids: vec![],
+                        ttl_expires_at: None,
+                        approval_request_id: context.approval_id.clone(),
+                        approval_ttl: None,
+                        approver_role: String::new(),
+                        terminal: false,
+                        error: None,
+                    };
+                    Ok(Response::new(ResumeAfterApprovalResponse {
+                        outcome: Some(ResumeOutcome::Decision(decision_resp)),
+                    }))
+                } else {
+                    // Fresh resume path requires the producer-side
+                    // post_approval_required_decision SP (S14-followup)
+                    // to write decision_context + requested_effect
+                    // JSON in a shape sidecar can rebuild a
+                    // ReserveSetRequest from. The producer wiring
+                    // ships in a follow-up sub-PR; until then,
+                    // surface a clear status message so SDK callers
+                    // know the path is still pending.
+                    into_err(
+                        "[PRODUCER_SP_NOT_WIRED] approval state=approved but resume \
+                         path requires post_approval_required_decision SP to \
+                         capture decision_context + requested_effect — see \
+                         round-2 #9 follow-up"
+                            .into(),
+                    )
+                }
+            }
+            "denied" => {
+                // Round-2 #9 part 2: approver fields (subject, reason,
+                // matched_rule_ids) are not yet exposed by
+                // GetApprovalForResume. Return Denied with empty
+                // fields; SDK callers still raise typed
+                // ApprovalDeniedError. A follow-up extends the proto
+                // to surface approver_subject / approver_reason / etc.
+                Ok(Response::new(ResumeAfterApprovalResponse {
+                    outcome: Some(ResumeOutcome::Denied(ResumeAfterApprovalDenied {
+                        audit_decision_event_id: String::new(),
+                        approver_reason: String::new(),
+                        approver_subject: String::new(),
+                        matched_rule_ids: vec![],
+                    })),
+                }))
+            }
+            other => into_err(format!(
+                "[APPROVAL_NON_TERMINAL] approval state={other:?} is not resumable"
+            )),
+        }
     }
 }
 
