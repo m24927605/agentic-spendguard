@@ -75,6 +75,11 @@ pub enum SignError {
     Io(#[from] std::io::Error),
     #[error("ed25519: {0}")]
     Ed25519(String),
+    /// Round-2 #8 PR 8b: AWS KMS-backed signing failures. Wraps
+    /// aws-sdk-kms's typed errors into a single SignError variant so
+    /// callers don't need to depend on aws-sdk-kms directly.
+    #[error("kms: {0}")]
+    Kms(String),
 }
 
 /// Signer trait. Async because the production KMS implementation
@@ -183,30 +188,119 @@ impl Signer for LocalEd25519Signer {
 }
 
 // ============================================================================
-// KMS stub (S7 will fill in)
+// KMS-backed signer (Round-2 #8 PR 8b)
 // ============================================================================
+//
+// Phase 5 GA hardening S7: real AWS KMS integration. Uses
+// `aws_sdk_kms::Client::sign()` with `MessageType::Digest` +
+// `SigningAlgorithmSpec::EcdsaSha256` so the producer service hashes
+// canonical_bytes locally and KMS only sees a 32-byte sha256. This
+// keeps KMS request/response bandwidth bounded regardless of payload
+// size and matches the "we sign the hash, not the bytes" contract
+// LocalEd25519Signer already follows.
+//
+// Test surface: `KmsSigner::with_client(...)` lets unit tests inject a
+// pre-configured client without touching real AWS. The `from_env`
+// constructor still takes the production path (loads creds + region
+// from environment / IRSA / instance profile via `aws_config`).
+//
+// Algorithm: ECDSA_SHA_256 (P-256). Operators choosing KMS today get
+// ECDSA. Future RSA + Ed25519 KMS keys would extend this enum-style;
+// keeping a single algorithm tightens the verifier-side surface for
+// canonical_ingest's S8 strict mode.
 
 pub struct KmsSigner {
     pub key_arn: String,
     pub producer_identity: String,
+    client: aws_sdk_kms::Client,
 }
 
 impl KmsSigner {
-    pub fn new(key_arn: String, producer_identity: String) -> Self {
+    /// Construct a KMS-backed signer. Loads AWS config from the
+    /// process environment (IRSA / instance profile / static creds).
+    /// Async because `aws_config::load_from_env()` is async.
+    pub async fn new(
+        key_arn: String,
+        producer_identity: String,
+    ) -> Result<Self, SignError> {
+        // `load_defaults` with an explicit BehaviorVersion is the
+        // recommended path; `load_from_env` is deprecated in
+        // aws-config 1.x. Pinning latest behavior so a future
+        // aws-config bump doesn't silently change credential
+        // resolution order.
+        let config = aws_config::load_defaults(
+            aws_config::BehaviorVersion::latest(),
+        )
+        .await;
+        let client = aws_sdk_kms::Client::new(&config);
+        Ok(Self {
+            key_arn,
+            producer_identity,
+            client,
+        })
+    }
+
+    /// Test hook — inject a pre-built client (useful for wiremock
+    /// fixtures that don't touch real AWS endpoints). Production paths
+    /// should always use `KmsSigner::new`.
+    pub fn with_client(
+        client: aws_sdk_kms::Client,
+        key_arn: String,
+        producer_identity: String,
+    ) -> Self {
         Self {
             key_arn,
             producer_identity,
+            client,
         }
     }
 }
 
 #[async_trait]
 impl Signer for KmsSigner {
-    async fn sign(&self, _canonical_bytes: &[u8]) -> Result<Signature, SignError> {
-        Err(SignError::ModeUnavailable(format!(
-            "KMS signing mode is not yet implemented (S7); arn={}",
-            self.key_arn
-        )))
+    async fn sign(&self, canonical_bytes: &[u8]) -> Result<Signature, SignError> {
+        use aws_sdk_kms::primitives::Blob;
+        use aws_sdk_kms::types::{MessageType, SigningAlgorithmSpec};
+
+        // Hash locally (32-byte sha256) and ask KMS to sign the digest.
+        // Matches LocalEd25519Signer's "we sign the hash" contract; the
+        // verifier reproduces the same hash from the stored CloudEvent.
+        let digest = {
+            let mut h = Sha256::new();
+            h.update(canonical_bytes);
+            h.finalize().to_vec()
+        };
+
+        let resp = self
+            .client
+            .sign()
+            .key_id(&self.key_arn)
+            .message(Blob::new(digest))
+            .message_type(MessageType::Digest)
+            .signing_algorithm(SigningAlgorithmSpec::EcdsaSha256)
+            .send()
+            .await
+            .map_err(|e| {
+                SignError::Kms(format!("kms sign call failed (arn={}): {}", self.key_arn, e))
+            })?;
+
+        let sig_bytes = resp
+            .signature
+            .ok_or_else(|| {
+                SignError::Kms(format!(
+                    "kms returned empty signature (arn={})",
+                    self.key_arn
+                ))
+            })?
+            .into_inner();
+
+        Ok(Signature {
+            bytes: sig_bytes,
+            key_id: self.key_arn.clone(),
+            algorithm: "kms-ecdsa-sha256".into(),
+            signed_at: Utc::now(),
+            producer_identity: self.producer_identity.clone(),
+        })
     }
 
     fn key_id(&self) -> &str {
@@ -214,7 +308,7 @@ impl Signer for KmsSigner {
     }
 
     fn algorithm(&self) -> &str {
-        "kms-ed25519"
+        "kms-ecdsa-sha256"
     }
 
     fn producer_identity(&self) -> &str {
@@ -328,7 +422,13 @@ impl SigningMode {
 ///   CloudEvent.producer_id and audit logs.
 ///
 /// `SPENDGUARD_PROFILE=demo` is required if mode=disabled.
-pub fn signer_from_env(prefix: &str) -> Result<Box<dyn Signer>, SignError> {
+///
+/// Round-2 #8 PR 8b: now async because `KmsSigner::new` loads AWS
+/// config from the environment (IRSA / instance profile / static
+/// creds), which is itself async. Local + Disabled paths await on
+/// already-resolved futures so the change is zero-cost for non-KMS
+/// callers.
+pub async fn signer_from_env(prefix: &str) -> Result<Box<dyn Signer>, SignError> {
     let mode_var = format!("{prefix}_SIGNING_MODE");
     let mode = std::env::var(&mode_var).unwrap_or_else(|_| "local".into());
     let mode = SigningMode::parse(&mode)?;
@@ -359,12 +459,12 @@ pub fn signer_from_env(prefix: &str) -> Result<Box<dyn Signer>, SignError> {
                     "{arn_var} env var required when SIGNING_MODE=kms"
                 ))
             })?;
-            // KmsSigner constructs successfully but its sign() returns
-            // ModeUnavailable until S7. That's intentional — operators
-            // who set SIGNING_MODE=kms today get a clear runtime error
-            // pointing at the missing implementation, not silent empty
-            // signatures.
-            Ok(Box::new(KmsSigner::new(arn, producer_identity)))
+            // Round-2 #8 PR 8b: KmsSigner now constructs against
+            // real aws-sdk-kms. The `.await` here loads AWS config
+            // (region + creds via IRSA / instance profile / static
+            // env). The first sign() call hits the real KMS API.
+            let signer = KmsSigner::new(arn, producer_identity).await?;
+            Ok(Box::new(signer))
         }
         SigningMode::Disabled => {
             let signer = DisabledSigner::from_env(producer_identity)?;
@@ -783,20 +883,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn kms_signer_returns_mode_unavailable_until_s7() {
-        let signer = KmsSigner::new("arn:aws:kms:test".into(), "test-producer:kms".into());
-        let result = signer.sign(b"hello").await;
-        match result {
-            Err(SignError::ModeUnavailable(msg)) => {
-                assert!(msg.contains("S7"));
-                assert!(msg.contains("arn:aws:kms:test"));
-            }
-            _ => panic!("expected ModeUnavailable"),
-        }
-        // Even though sign() fails, the signer's metadata is queryable
-        // for diagnostic logs.
-        assert_eq!(signer.algorithm(), "kms-ed25519");
-        assert_eq!(signer.key_id(), "arn:aws:kms:test");
+    async fn kms_signer_metadata_is_queryable_without_calling_aws() {
+        // Round-2 #8 PR 8b: real KmsSigner. Unit tests don't actually
+        // call AWS — they just pin metadata accessors so a future
+        // refactor that swaps the algorithm name (e.g. ECDSA P-384)
+        // surfaces here rather than silently breaking the verifier
+        // contract. The actual sign() path requires either real KMS
+        // creds (integration test) or the `with_client(...)` test
+        // hook with a mocked aws_sdk_kms::Client (out-of-scope here).
+        let arn = "arn:aws:kms:us-west-2:000000000000:key/0000-test".to_string();
+        let signer = KmsSigner::new(arn.clone(), "test-producer:kms".into())
+            .await
+            .expect("KmsSigner::new must succeed under any AWS config");
+        assert_eq!(signer.algorithm(), "kms-ecdsa-sha256");
+        assert_eq!(signer.key_id(), arn);
+        assert_eq!(signer.producer_identity(), "test-producer:kms");
     }
 
     #[tokio::test]

@@ -23,6 +23,11 @@ hex = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Round-2 #8 PR 8b: AWS KMS-backed signing for production deployments.
+# aws-sdk-kms 1.x transitive deps require rustc 1.91 (bumped in PR 8a).
+aws-config = "1"
+aws-sdk-kms = "1"
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
