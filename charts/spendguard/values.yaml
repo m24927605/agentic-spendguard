@@ -19,6 +19,28 @@ global:
   imagePullPolicy: IfNotPresent
   imageRegistry: ghcr.io/m24927605
 
+# Codex round-6 P1 acknowledgement.
+#
+# This Helm chart is currently a DEVELOPMENT/DEMO chart, not a
+# production-ready chart. Several services' Config::from_env() read
+# fields the templates don't wire (ENDPOINT_CATALOG_MANIFEST_URL,
+# MTLS_BOOTSTRAP_TOKEN, contract / schema bundle IDs + hashes,
+# FENCING_INITIAL_EPOCH, BIND_ADDR / HEALTH_ADDR for webhook receiver,
+# TLS env naming mismatches, etc.) — affected services
+# (canonical-ingest, sidecar, outbox-forwarder, ttl-sweeper,
+# webhook-receiver) will CrashLoopBackOff on `helm install`.
+#
+# The compose-based demo path (deploy/demo) wires everything correctly
+# and is the supported deploy path until the P5-followup completes the
+# Helm env-mapping work.
+#
+# chart.profile=demo (default) lets `helm template` and dev-cluster
+# experimentation proceed. chart.profile=production triggers an
+# explicit `helm fail` on the affected service templates to prevent
+# footgun deploys.
+chart:
+  profile: "demo"   # demo | production
+
 # Secrets
 secrets:
   tls:
