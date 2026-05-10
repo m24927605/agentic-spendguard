@@ -75,6 +75,7 @@ class ApprovalRequired(DecisionDenied):
         reason_codes: list[str] | None = None,
         audit_decision_event_id: str | None = None,
         matched_rule_ids: list[str] | None = None,
+        tenant_id: str | None = None,
     ) -> None:
         super().__init__(
             message,
@@ -85,6 +86,93 @@ class ApprovalRequired(DecisionDenied):
         )
         self.approval_request_id = approval_request_id
         self.approver_role = approver_role
+        # Round-2 #9 part 2 PR 9d: tenant_id needed for the resume()
+        # round-trip — sidecar's ResumeAfterApproval RPC requires it
+        # to scope the GetApprovalForResume lookup against tenant.
+        self.tenant_id = tenant_id
+
+    async def resume(self, client: "SpendGuardClient"):  # type: ignore[name-defined]  # noqa: F821
+        """Call sidecar `ResumeAfterApproval` after the operator has
+        approved (or denied) this request.
+
+        Pydantic-AI usage:
+
+            try:
+                await client.request_decision(...)
+            except ApprovalRequired as e:
+                # ... wait for approver via your control plane / Slack ...
+                outcome = await e.resume(client)
+
+        Returns a `DecisionOutcome` on `approved` (the run can continue)
+        and raises one of:
+          * `ApprovalDeniedError` — operator rejected the approval
+          * `ApprovalLapsedError` — pending / expired / cancelled
+          * `SpendGuardError`     — transport / proto error
+        """
+        return await client.resume_after_approval(
+            approval_id=self.approval_request_id,
+            tenant_id=self.tenant_id or "",
+            decision_id=self.decision_id,
+        )
+
+
+class ApprovalDeniedError(DecisionDenied):
+    """Sidecar `ResumeAfterApproval` returned `denied`.
+
+    Round-2 #9 part 2 PR 9d: raised by `ApprovalRequired.resume()` when
+    the approver explicitly rejected the request. Carries the approver
+    identity + reason for caller-side audit logging.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        decision_id: str,
+        approver_subject: str | None = None,
+        approver_reason: str | None = None,
+        audit_decision_event_id: str | None = None,
+        matched_rule_ids: list[str] | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            decision_id=decision_id,
+            reason_codes=["approval_denied"],
+            audit_decision_event_id=audit_decision_event_id,
+            matched_rule_ids=matched_rule_ids,
+        )
+        self.approver_subject = approver_subject
+        self.approver_reason = approver_reason
+
+
+class ApprovalLapsedError(DecisionDenied):
+    """Sidecar `ResumeAfterApproval` returned a non-actionable state.
+
+    Round-2 #9 part 2 PR 9d: raised when the approval is in a state
+    that callers cannot resume from — `pending` (still waiting),
+    `expired` (TTL elapsed), `cancelled` (operator-cancelled), or
+    something the resume handler doesn't recognise.
+
+    The original `decision_id` is preserved so callers can correlate
+    with their audit chain. The `state` attribute carries the
+    sidecar-reported state for adaptive UI / retry logic.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        decision_id: str,
+        state: str,
+        audit_decision_event_id: str | None = None,
+    ) -> None:
+        super().__init__(
+            message,
+            decision_id=decision_id,
+            reason_codes=[f"approval_lapsed_{state}"],
+            audit_decision_event_id=audit_decision_event_id,
+        )
+        self.state = state
 
 
 class MutationApplyFailed(SpendGuardError):
