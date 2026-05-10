@@ -194,6 +194,10 @@ services:
       SPENDGUARD_LEDGER_SIGNING_MODE: "local"
       SPENDGUARD_LEDGER_SIGNING_PRODUCER_IDENTITY: "ledger:server-mint"
       SPENDGUARD_LEDGER_SIGNING_KEY_PATH: "/etc/ssl/spendguard/signing/ledger.pem"
+      # Round-2 #11: Prometheus /metrics endpoint.
+      SPENDGUARD_LEDGER_METRICS_ADDR: "0.0.0.0:9092"
+    ports:
+      - "9092:9092"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:
