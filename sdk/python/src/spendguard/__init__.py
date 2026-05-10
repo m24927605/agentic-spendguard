@@ -26,6 +26,8 @@ from .client import (
     SpendGuardClient,
 )
 from .errors import (
+    ApprovalDeniedError,
+    ApprovalLapsedError,
     ApprovalRequired,
     DecisionDenied,
     DecisionSkipped,
@@ -51,6 +53,8 @@ __all__ = [
     "HandshakeOutcome",
     "SpendGuardClient",
     # errors
+    "ApprovalDeniedError",
+    "ApprovalLapsedError",
     "ApprovalRequired",
     "DecisionDenied",
     "DecisionSkipped",
