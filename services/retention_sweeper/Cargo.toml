@@ -1,0 +1,45 @@
+[package]
+name = "spendguard-retention-sweeper"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "Phase 5 GA hardening S19: background worker that applies tenant_data_policy retention windows to audit_outbox + provider_usage_records. Redacts in place; NEVER deletes (DB triggers from migration 0028 enforce)."
+
+[[bin]]
+name = "spendguard-retention-sweeper"
+path = "src/main.rs"
+
+[lib]
+name = "spendguard_retention_sweeper"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "v7", "serde"] }
+sha2 = "0.10"
+hex = "0.4"
+async-trait = "0.1"
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+envy = "0.4"
+
+# Followup #10: lease primitive — same shape as ttl_sweeper +
+# outbox_forwarder for leader election.
+spendguard-leases = { path = "../leases" }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }
+tempfile = "3"
