@@ -147,7 +147,8 @@ fn default_decision_p99_ms() -> u64 {
     50
 }
 fn default_metrics_addr() -> String {
-    "127.0.0.1:9090".to_string()
+    // Round-2 #11 port table assigns sidecar 9093.
+    "0.0.0.0:9093".to_string()
 }
 fn default_health_addr() -> String {
     "127.0.0.1:8080".to_string()

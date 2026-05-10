@@ -7,6 +7,7 @@ pub mod decision;
 pub mod domain;
 pub mod drain;
 pub mod fencing;
+pub mod metrics;
 pub mod server;
 
 pub mod proto {
