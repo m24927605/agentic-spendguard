@@ -1,5 +1,15 @@
 {{- if .Values.webhookReceiver.enabled }}
 {{- $component := "webhook-receiver" }}
+{{- /* Codex round-6 P1: chart.profile=production gate. Webhook
+       receiver Config::from_env() reads TLS_SERVER_CERT/SERVER_KEY,
+       TLS_CLIENT_CERT/CLIENT_KEY, BIND_ADDR, HEALTH_ADDR,
+       FENCING_INITIAL_EPOCH, plus per-tenant secret keys
+       (SPENDGUARD_WEBHOOK_SECRET_*) — template uses HMAC_SECRET +
+       CERT_PEM/KEY_PEM names, none of the above wired.
+       Tracked as P5-followup. */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- fail "webhook-receiver: Helm chart not yet production-ready. Service Config::from_env() requires TLS_SERVER_CERT/SERVER_KEY, TLS_CLIENT_CERT/CLIENT_KEY, BIND_ADDR, HEALTH_ADDR, FENCING_INITIAL_EPOCH, per-tenant SPENDGUARD_WEBHOOK_SECRET_* — template uses different naming. Tracked as P5-followup. Use deploy/demo (compose) for now, or set chart.profile=demo." -}}
+{{- end -}}
 {{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
 {{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo" }}
 {{- end }}
