@@ -11,6 +11,7 @@ use uuid::Uuid;
 
 use spendguard_ttl_sweeper::{
     config::Config,
+    metrics::{LoopOutcome, SkipReason, TtlSweeperMetrics},
     poll::fetch_expired,
     sequence::{recover_max_seq, SequenceAllocator},
     state::{build_ledger_client, build_pg_pool, AppState},
@@ -112,6 +113,19 @@ async fn main() -> anyhow::Result<()> {
     };
     let guard = spawn_lease_loop(manager, lease_cfg);
 
+    // Round-2 #11: Prometheus metrics counter store + HTTP server.
+    let metrics = TtlSweeperMetrics::new();
+    if !config.metrics_addr.is_empty() {
+        let metrics_addr = config.metrics_addr.clone();
+        let metrics_handle = metrics.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve_metrics(metrics_addr, metrics_handle).await {
+                warn!(err = %e, "metrics server terminated");
+            }
+        });
+        info!(addr = %config.metrics_addr, "metrics server bound");
+    }
+
     let poll_dur = Duration::from_secs(config.poll_interval_seconds);
     info!("entering sweep loop");
 
@@ -132,28 +146,40 @@ async fn main() -> anyhow::Result<()> {
                 if s.is_leader_now() {
                     match fetch_expired(&state.pg, tenant_uuid, state.config.batch_size).await {
                         Ok(rows) => {
+                            metrics.inc_loop(LoopOutcome::Processed);
                             if rows.is_empty() {
                                 tracing::debug!("no expired reservations");
                             } else {
                                 info!(count = rows.len(), "found expired reservations (leader)");
                                 for row in rows {
-                                    if let Err(e) = sweep_one(&mut state, row).await {
-                                        error!(error = ?e, "sweep_one failed");
+                                    match sweep_one(&mut state, row).await {
+                                        Ok(_) => metrics.add_swept(1, true),
+                                        Err(e) => {
+                                            metrics.add_swept(1, false);
+                                            error!(error = ?e, "sweep_one failed");
+                                        }
                                     }
                                 }
                             }
                         }
-                        Err(e) => error!(error = ?e, "fetch_expired failed"),
+                        Err(e) => {
+                            metrics.inc_loop(LoopOutcome::Error);
+                            error!(error = ?e, "fetch_expired failed");
+                        }
                     }
                 } else {
+                    metrics.inc_loop(LoopOutcome::Skipped);
                     match &s {
                         LeaseState::Leader { expires_at, .. } => {
+                            metrics.inc_skip(SkipReason::LeaseExpired);
                             warn!(expires_at = %expires_at, "lease expired locally; skip sweep until renewed");
                         }
                         LeaseState::Standby { holder_workload_id, .. } => {
+                            metrics.inc_skip(SkipReason::Standby);
                             tracing::debug!(held_by = %holder_workload_id, "standby — skip sweep");
                         }
                         LeaseState::Unknown => {
+                            metrics.inc_skip(SkipReason::Unknown);
                             warn!("lease state Unknown — skip sweep");
                         }
                     }
@@ -164,4 +190,49 @@ async fn main() -> anyhow::Result<()> {
 
     guard.shutdown().await;
     Ok(())
+}
+
+/// Round-2 #11: minimal HTTP /metrics endpoint.
+async fn serve_metrics(addr: String, metrics: TtlSweeperMetrics) -> anyhow::Result<()> {
+    use std::convert::Infallible;
+    use hyper::body::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+    use http_body_util::Full;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind(&addr).await?;
+    info!(addr = %addr, "ttl-sweeper metrics listening");
+
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let metrics = metrics.clone();
+        tokio::task::spawn(async move {
+            let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                let metrics = metrics.clone();
+                async move {
+                    let body = if req.uri().path() == "/metrics" {
+                        metrics.render()
+                    } else {
+                        "".to_string()
+                    };
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .header(
+                                "content-type",
+                                "text/plain; version=0.0.4; charset=utf-8",
+                            )
+                            .body(Full::new(Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            });
+            if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
+                tracing::debug!(err = %e, "metrics conn closed");
+            }
+        });
+    }
 }
