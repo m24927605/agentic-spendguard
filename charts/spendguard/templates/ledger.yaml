@@ -25,8 +25,10 @@ spec:
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
           ports:
             - { name: grpc, containerPort: 50051 }
+            - { name: metrics, containerPort: 9092 }
           env:
             - { name: SPENDGUARD_LEDGER_BIND_ADDR,           value: "0.0.0.0:50051" }
+            - { name: SPENDGUARD_LEDGER_METRICS_ADDR,        value: "0.0.0.0:9092" }
             - { name: SPENDGUARD_LEDGER_DATABASE_URL,        value: {{ .Values.postgres.ledgerUrl | quote }} }
             - { name: SPENDGUARD_LEDGER_TENANT_ID,           value: {{ .Values.global.tenantId | quote }} }
             - { name: SPENDGUARD_LEDGER_REGION,              value: {{ .Values.global.region | quote }} }

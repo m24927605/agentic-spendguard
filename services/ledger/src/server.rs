@@ -12,6 +12,7 @@ use tonic::{Request, Response, Status};
 
 use crate::{
     handlers,
+    metrics::{Handler, LedgerMetrics, Outcome},
     proto::ledger::v1::{
         ledger_server::Ledger, AcquireFencingLeaseRequest, AcquireFencingLeaseResponse,
         CommitEstimatedRequest, CommitEstimatedResponse,
@@ -32,12 +33,37 @@ pub struct LedgerService {
     /// audit rows. Currently used only by InvoiceReconcile (which
     /// synthesizes a decision row that has no client-side originator).
     pub signer: std::sync::Arc<dyn spendguard_signing::Signer>,
+    /// Followup #11: Prometheus counters per gRPC method.
+    pub metrics: LedgerMetrics,
 }
 
 impl LedgerService {
     pub fn new(pool: PgPool, signer: std::sync::Arc<dyn spendguard_signing::Signer>) -> Self {
-        Self { pool, signer }
+        Self {
+            pool,
+            signer,
+            metrics: LedgerMetrics::new(),
+        }
     }
+
+    pub fn with_metrics(
+        pool: PgPool,
+        signer: std::sync::Arc<dyn spendguard_signing::Signer>,
+        metrics: LedgerMetrics,
+    ) -> Self {
+        Self {
+            pool,
+            signer,
+            metrics,
+        }
+    }
+}
+
+/// Helper that increments the right (handler, outcome) bucket based on
+/// the result returned by the wrapped handler call.
+fn record_outcome<T>(metrics: &LedgerMetrics, handler: Handler, r: &Result<T, Status>) {
+    let outcome = if r.is_ok() { Outcome::Ok } else { Outcome::Err };
+    metrics.inc_handler(handler, outcome);
 }
 
 #[tonic::async_trait]
@@ -46,8 +72,9 @@ impl Ledger for LedgerService {
         &self,
         req: Request<ReserveSetRequest>,
     ) -> Result<Response<ReserveSetResponse>, Status> {
-        let resp = handlers::reserve_set::handle(&self.pool, req.into_inner()).await?;
-        Ok(Response::new(resp))
+        let result = handlers::reserve_set::handle(&self.pool, req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::ReserveSet, &result);
+        result.map(Response::new)
     }
 
     async fn release(
@@ -56,57 +83,64 @@ impl Ledger for LedgerService {
     ) -> Result<Response<ReleaseResponse>, Status> {
         // Step 7.5 implemented: handler returns ReleaseSuccess / Replay /
         // typed Error for sidecar-originated release lane.
-        let resp = handlers::release::handle(&self.pool, req.into_inner()).await?;
-        Ok(Response::new(resp))
+        let result = handlers::release::handle(&self.pool, req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::Release, &result);
+        result.map(Response::new)
     }
 
     async fn record_denied_decision(
         &self,
         req: Request<RecordDeniedDecisionRequest>,
     ) -> Result<Response<RecordDeniedDecisionResponse>, Status> {
-        let resp = handlers::record_denied_decision::handle(&self.pool, req.into_inner()).await?;
-        Ok(Response::new(resp))
+        let result = handlers::record_denied_decision::handle(&self.pool, req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::RecordDeniedDecision, &result);
+        result.map(Response::new)
     }
 
     async fn acquire_fencing_lease(
         &self,
         req: Request<AcquireFencingLeaseRequest>,
     ) -> Result<Response<AcquireFencingLeaseResponse>, Status> {
-        let resp =
-            handlers::acquire_fencing_lease::handle(&self.pool, req.into_inner()).await?;
-        Ok(Response::new(resp))
+        let result =
+            handlers::acquire_fencing_lease::handle(&self.pool, req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::AcquireFencingLease, &result);
+        result.map(Response::new)
     }
 
     async fn commit_estimated(
         &self,
         req: Request<CommitEstimatedRequest>,
     ) -> Result<Response<CommitEstimatedResponse>, Status> {
-        let resp = handlers::commit_estimated::handle(&self.pool, req.into_inner()).await?;
-        Ok(Response::new(resp))
+        let result = handlers::commit_estimated::handle(&self.pool, req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::CommitEstimated, &result);
+        result.map(Response::new)
     }
 
     async fn provider_report(
         &self,
         req: Request<ProviderReportRequest>,
     ) -> Result<Response<ProviderReportResponse>, Status> {
-        let resp = handlers::provider_report::handle(&self.pool, req.into_inner()).await?;
-        Ok(Response::new(resp))
+        let result = handlers::provider_report::handle(&self.pool, req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::ProviderReport, &result);
+        result.map(Response::new)
     }
 
     async fn invoice_reconcile(
         &self,
         req: Request<InvoiceReconcileRequest>,
     ) -> Result<Response<InvoiceReconcileResponse>, Status> {
-        let resp =
+        let result =
             handlers::invoice_reconcile::handle(&self.pool, &*self.signer, req.into_inner())
-                .await?;
-        Ok(Response::new(resp))
+                .await;
+        record_outcome(&self.metrics, Handler::InvoiceReconcile, &result);
+        result.map(Response::new)
     }
 
     async fn refund_credit(
         &self,
         _req: Request<RefundCreditRequest>,
     ) -> Result<Response<RefundCreditResponse>, Status> {
+        self.metrics.inc_handler(Handler::RefundCredit, Outcome::Err);
         Err(Status::unimplemented("RefundCredit: vertical slice expansion in progress"))
     }
 
@@ -114,6 +148,7 @@ impl Ledger for LedgerService {
         &self,
         _req: Request<DisputeAdjustmentRequest>,
     ) -> Result<Response<DisputeAdjustmentResponse>, Status> {
+        self.metrics.inc_handler(Handler::DisputeAdjustment, Outcome::Err);
         Err(Status::unimplemented("DisputeAdjustment: vertical slice expansion in progress"))
     }
 
@@ -121,6 +156,7 @@ impl Ledger for LedgerService {
         &self,
         _req: Request<CompensateRequest>,
     ) -> Result<Response<CompensateResponse>, Status> {
+        self.metrics.inc_handler(Handler::Compensate, Outcome::Err);
         Err(Status::unimplemented("Compensate: vertical slice expansion in progress"))
     }
 
@@ -128,16 +164,18 @@ impl Ledger for LedgerService {
         &self,
         req: Request<QueryBudgetStateRequest>,
     ) -> Result<Response<QueryBudgetStateResponse>, Status> {
-        let resp = handlers::query_budget_state::handle(&self.pool, req.into_inner()).await?;
-        Ok(Response::new(resp))
+        let result = handlers::query_budget_state::handle(&self.pool, req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::QueryBudgetState, &result);
+        result.map(Response::new)
     }
 
     async fn query_reservation_context(
         &self,
         req: Request<QueryReservationContextRequest>,
     ) -> Result<Response<QueryReservationContextResponse>, Status> {
-        let resp = handlers::query_reservation_context::handle(&self.pool, req.into_inner()).await?;
-        Ok(Response::new(resp))
+        let result = handlers::query_reservation_context::handle(&self.pool, req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::QueryReservationContext, &result);
+        result.map(Response::new)
     }
 
     type ReplayAuditFromCursorStream = ReceiverStream<Result<ReplayAuditEvent, Status>>;
@@ -146,14 +184,18 @@ impl Ledger for LedgerService {
         &self,
         req: Request<ReplayAuditFromCursorRequest>,
     ) -> Result<Response<Self::ReplayAuditFromCursorStream>, Status> {
-        handlers::replay::replay_stream(self.pool.clone(), req.into_inner()).await
+        let result =
+            handlers::replay::replay_stream(self.pool.clone(), req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::ReplayAuditFromCursor, &result);
+        result
     }
 
     async fn query_decision_outcome(
         &self,
         req: Request<QueryDecisionOutcomeRequest>,
     ) -> Result<Response<QueryDecisionOutcomeResponse>, Status> {
-        let resp = handlers::replay::query_decision_outcome(&self.pool, req.into_inner()).await?;
-        Ok(Response::new(resp))
+        let result = handlers::replay::query_decision_outcome(&self.pool, req.into_inner()).await;
+        record_outcome(&self.metrics, Handler::QueryDecisionOutcome, &result);
+        result.map(Response::new)
     }
 }
