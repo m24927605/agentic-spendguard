@@ -23,10 +23,18 @@ demo-build:
 	$(COMPOSE) build
 
 demo-up:
+ifeq ($(DEMO_MODE),ttl_sweep)
+	@echo "[demo] DEMO_MODE=ttl_sweep → exporting SIDECAR_TTL_SECONDS=5 so sidecar issues short-TTL reservations the sweeper can clean."
+	@SIDECAR_TTL_SECONDS=5 $(COMPOSE) up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    ttl-sweeper outbox-forwarder
+else
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    ttl-sweeper outbox-forwarder
+endif
 	@echo "[demo] core services up; running demo container (DEMO_MODE=$(DEMO_MODE))..."
 	$(COMPOSE) run --rm \
 	    --env SPENDGUARD_DEMO_MODE=$(DEMO_MODE) \
