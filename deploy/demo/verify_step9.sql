@@ -12,7 +12,9 @@
 --   commits.delta_to_reserved = 40 - 100 = -60
 --
 -- audit_outbox events:
---   audit.decision: 4 (deposit + reserve + provider_report + invoice_reconcile)
+--   audit.decision: 5 (deposit_token + deposit_usd + reserve + provider_report + invoice_reconcile)
+--                       — Phase 4 O4 added the USD opening deposit; the
+--                       Phase 2B baseline (4 decisions) didn't track it.
 --   audit.outcome:  2 (commit_estimated + invoice_reconcile)
 --
 -- POC limits documented:
@@ -209,10 +211,10 @@ BEGIN
       FROM audit_outbox
      WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
        AND event_type = 'spendguard.audit.outcome';
-    -- 4 audit.decision (deposit + reserve + provider_report + invoice_reconcile)
+    -- 5 audit.decision (deposit_token + deposit_usd + reserve + provider_report + invoice_reconcile)
     -- 2 audit.outcome (commit_estimated + invoice_reconcile)
-    IF v_decision_audit_n <> 4 THEN
-        RAISE EXCEPTION 'EXPECTED 4 audit.decision events; got %', v_decision_audit_n;
+    IF v_decision_audit_n <> 5 THEN
+        RAISE EXCEPTION 'EXPECTED 5 audit.decision events; got %', v_decision_audit_n;
     END IF;
     IF v_outcome_audit_n <> 2 THEN
         RAISE EXCEPTION 'EXPECTED 2 audit.outcome events; got %', v_outcome_audit_n;

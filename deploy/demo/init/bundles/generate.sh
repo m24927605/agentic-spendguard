@@ -84,7 +84,7 @@ spec:
     - id: $DEMO_BUDGET_ID
       limit_amount_atomic: "1000000000"
       currency: USD
-      reservation_ttl_seconds: 600
+      reservation_ttl_seconds: ${CONTRACT_RESERVATION_TTL_SECONDS:-600}
       require_hard_cap: true
   rules:
     - id: hard-cap-deny
