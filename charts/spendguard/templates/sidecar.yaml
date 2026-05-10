@@ -78,6 +78,36 @@ spec:
             - { name: SPENDGUARD_SIDECAR_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/sidecar.key" }
             - { name: SPENDGUARD_SIDECAR_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
             - { name: SPENDGUARD_SIDECAR_UDS_PATH,     value: "/var/run/spendguard/adapter.sock" }
+            # Round-2 #3: Required by services/sidecar Config::from_env().
+            # Without these, Config::from_env() panics with
+            # "missing field <name>" and the pod CrashLoopBackOff's.
+            - { name: SPENDGUARD_SIDECAR_ENDPOINT_CATALOG_MANIFEST_URL, value: {{ .Values.sidecar.endpointCatalogManifestUrl | quote }} }
+            - { name: SPENDGUARD_SIDECAR_FENCING_INITIAL_EPOCH,         value: {{ .Values.sidecar.fencingInitialEpoch | quote }} }
+            # Contract + schema bundle bootstrap. The hashes MUST be
+            # byte-exact matches for the pre-pulled .tgz files in
+            # bundles-data; otherwise the sidecar refuses to install
+            # them at startup.
+            - { name: SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_ID,        value: {{ .Values.sidecar.contractBundleId | quote }} }
+            - { name: SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_HASH_HEX,  value: {{ .Values.sidecar.contractBundleHashHex | quote }} }
+            - { name: SPENDGUARD_SIDECAR_SCHEMA_BUNDLE_ID,          value: {{ .Values.sidecar.schemaBundleId | quote }} }
+            # Trust-root pins. Sourced from the operator-supplied
+            # `spendguard-trust` Secret. trust_root_ca_pem holds the
+            # PEM CONTENTS (not a path); trust_root_spki_sha256_hex
+            # is the sha256 of the root CA SubjectPublicKeyInfo.
+            - name: SPENDGUARD_SIDECAR_TRUST_ROOT_CA_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sidecar.trustSecret.name }}
+                  key: {{ .Values.sidecar.trustSecret.caPemKey | quote }}
+            - { name: SPENDGUARD_SIDECAR_TRUST_ROOT_SPKI_SHA256_HEX, value: {{ .Values.sidecar.trustRootSpkiSha256Hex | quote }} }
+            # mTLS bootstrap token (one-shot, used by cert-manager
+            # external issuer to provision the workload cert at
+            # first boot).
+            - name: SPENDGUARD_SIDECAR_MTLS_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.sidecar.mtlsBootstrapTokenSecret.name }}
+                  key: {{ .Values.sidecar.mtlsBootstrapTokenSecret.tokenKey | quote }}
             # Phase 5 GA hardening S6: producer signing config.
             - { name: SPENDGUARD_PROFILE,                            value: {{ .Values.signing.profile | quote }} }
             - { name: SPENDGUARD_SIDECAR_SIGNING_MODE,               value: {{ .Values.signing.mode | quote }} }

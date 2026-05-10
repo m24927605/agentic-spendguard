@@ -112,6 +112,34 @@ sidecar:
   fencingScopeId: "33333333-3333-4333-8333-333333333333"
   workloadInstanceId: "sidecar-0"
   reservationTtlSeconds: 600
+  # Round-2 #3: Required by services/sidecar Config::from_env(). Operator
+  # MUST seed `fencing_scopes.current_epoch = N` matching this value
+  # before installing. Set to 1 for first install.
+  fencingInitialEpoch: 1
+  # Round-2 #3: Endpoint catalog manifest URL — sidecar pulls + verifies
+  # this manifest at startup + every manifestPullSeconds. The catalog
+  # publisher signs manifests with its ed25519 key; sidecar pins the
+  # corresponding public key under SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM.
+  endpointCatalogManifestUrl: "https://endpoint-catalog.spendguard:8443/v1/catalog/manifest"
+  # Round-2 #3: Contract + schema bundle bootstrap. The chart's bundles
+  # init container pre-pulls these .tgz files into the bundles-data
+  # secret; the sidecar verifies the byte-exact hash before installing.
+  contractBundleId: "11111111-1111-4111-8111-111111111111"
+  contractBundleHashHex: ""
+  schemaBundleId: "22222222-2222-4222-8222-222222222222"
+  # Round-2 #3: Trust-root pins (defense-in-depth against intermediate
+  # compromise). trustSecret.name MUST be the operator-supplied Secret
+  # holding the root CA PEM contents under `caPemKey`. The SPKI hash
+  # is the sha256 of the root CA SubjectPublicKeyInfo, hex-encoded.
+  trustSecret:
+    name: spendguard-trust
+    caPemKey: ca.pem
+  trustRootSpkiSha256Hex: ""
+  # Round-2 #3: mTLS bootstrap token (one-shot, used by cert-manager
+  # external issuer to provision the workload cert at first boot).
+  mtlsBootstrapTokenSecret:
+    name: spendguard-mtls-bootstrap
+    tokenKey: token
   # Open the UDS adapter socket on a hostPath so apps in other pods can
   # mount it. Set hostPath.enabled=false for an in-pod-only sidecar.
   hostPath:
