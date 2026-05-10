@@ -337,6 +337,10 @@ services:
       SPENDGUARD_OUTBOX_FORWARDER_SCHEMA_BUNDLE_HASH_HEX:      "${SPENDGUARD_SCHEMA_BUNDLE_HASH_HEX:-}"
       SPENDGUARD_OUTBOX_FORWARDER_POLL_INTERVAL_SECONDS:       "2"
       SPENDGUARD_OUTBOX_FORWARDER_BATCH_SIZE:                  "50"
+      # Round-2 #11: Prometheus /metrics endpoint.
+      SPENDGUARD_OUTBOX_FORWARDER_METRICS_ADDR:                "0.0.0.0:9096"
+    ports:
+      - "9096:9096"
     volumes:
       - pki-data:/etc/ssl/spendguard:ro
       - bundles-data:/var/lib/spendguard/bundles:ro

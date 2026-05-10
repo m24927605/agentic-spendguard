@@ -34,7 +34,10 @@ spec:
         - name: outbox-forwarder
           image: {{ include "spendguard.image" (merge (dict "image" .Values.outboxForwarder.image "global" .Values.global) .) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - { name: metrics, containerPort: 9096 }
           env:
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_METRICS_ADDR,      value: "0.0.0.0:9096" }
             - { name: SPENDGUARD_OUTBOX_FORWARDER_TENANT_ID,         value: {{ .Values.global.tenantId | quote }} }
             # Phase 5 S2: per-pod-unique workload_instance_id via downward API.
             {{- if .Values.outboxForwarder.workloadInstanceIdOverride }}

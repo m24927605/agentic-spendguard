@@ -40,6 +40,11 @@ async-trait = "0.1"
 # Phase 5 S1: shared lease primitive for singleton workers.
 spendguard-leases = { path = "../leases" }
 
+# Round-2 #11: Prometheus /metrics endpoint.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"

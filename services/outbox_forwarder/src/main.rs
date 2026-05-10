@@ -11,6 +11,7 @@ use tracing::{error, info, warn};
 use spendguard_outbox_forwarder::{
     config::Config,
     forward::forward_batch,
+    metrics::{LoopOutcome, OutboxForwarderMetrics, SkipReason},
     state::{build_canonical_client, build_pg_pool, AppState},
 };
 
@@ -85,6 +86,19 @@ async fn main() -> anyhow::Result<()> {
     };
     let guard = spawn_lease_loop(manager, lease_cfg);
 
+    // Round-2 #11: Prometheus metrics counter store + HTTP server.
+    let metrics = OutboxForwarderMetrics::new();
+    if !config.metrics_addr.is_empty() {
+        let metrics_addr = config.metrics_addr.clone();
+        let metrics_handle = metrics.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve_metrics(metrics_addr, metrics_handle).await {
+                warn!(err = %e, "metrics server terminated");
+            }
+        });
+        info!(addr = %config.metrics_addr, "metrics server bound");
+    }
+
     let poll_dur = Duration::from_secs(config.poll_interval_seconds);
     info!("entering forward loop");
 
@@ -106,19 +120,34 @@ async fn main() -> anyhow::Result<()> {
                 // to the same downstream sink.
                 if s.is_leader_now() {
                     match forward_batch(&mut state).await {
-                        Ok(0) => tracing::debug!("no pending rows"),
-                        Ok(n) => info!(count = n, "batch processed (leader)"),
-                        Err(e) => error!(error = ?e, "forward_batch failed"),
+                        Ok(0) => {
+                            metrics.inc_loop(LoopOutcome::Processed);
+                            tracing::debug!("no pending rows");
+                        }
+                        Ok(n) => {
+                            metrics.inc_loop(LoopOutcome::Processed);
+                            metrics.add_rows_forwarded(n as u64, true);
+                            info!(count = n, "batch processed (leader)");
+                        }
+                        Err(e) => {
+                            metrics.inc_loop(LoopOutcome::Error);
+                            metrics.add_rows_forwarded(1, false);
+                            error!(error = ?e, "forward_batch failed");
+                        }
                     }
                 } else {
+                    metrics.inc_loop(LoopOutcome::Skipped);
                     match &s {
                         LeaseState::Leader { expires_at, .. } => {
+                            metrics.inc_skip(SkipReason::LeaseExpired);
                             warn!(expires_at = %expires_at, "lease expired locally; skip batch until renewed");
                         }
                         LeaseState::Standby { holder_workload_id, .. } => {
+                            metrics.inc_skip(SkipReason::Standby);
                             tracing::debug!(held_by = %holder_workload_id, "standby — skip batch");
                         }
                         LeaseState::Unknown => {
+                            metrics.inc_skip(SkipReason::Unknown);
                             warn!("lease state Unknown — skip batch");
                         }
                     }
@@ -129,4 +158,51 @@ async fn main() -> anyhow::Result<()> {
 
     guard.shutdown().await;
     Ok(())
+}
+
+/// Round-2 #11: minimal HTTP /metrics endpoint that renders the
+/// OutboxForwarderMetrics Prometheus text. Same hyper-based pattern
+/// as the other services.
+async fn serve_metrics(addr: String, metrics: OutboxForwarderMetrics) -> anyhow::Result<()> {
+    use std::convert::Infallible;
+    use hyper::body::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+    use http_body_util::Full;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind(&addr).await?;
+    info!(addr = %addr, "outbox-forwarder metrics listening");
+
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let metrics = metrics.clone();
+        tokio::task::spawn(async move {
+            let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                let metrics = metrics.clone();
+                async move {
+                    let body = if req.uri().path() == "/metrics" {
+                        metrics.render()
+                    } else {
+                        "".to_string()
+                    };
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .header(
+                                "content-type",
+                                "text/plain; version=0.0.4; charset=utf-8",
+                            )
+                            .body(Full::new(Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            });
+            if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
+                tracing::debug!(err = %e, "metrics conn closed");
+            }
+        });
+    }
 }
