@@ -90,6 +90,11 @@ services:
     environment:
       CONTRACT_BUNDLE_ID:    "11111111-1111-4111-8111-111111111111"
       SCHEMA_BUNDLE_ID:      "22222222-2222-4222-8222-222222222222"
+      # ttl_sweep mode exports SIDECAR_TTL_SECONDS=5 before compose up
+      # so the contract bundle gets a 5s TTL (sidecar reads from
+      # contract budget, not from its own env). Default 600 keeps
+      # decision / invoice / release / agent / deny baselines stable.
+      CONTRACT_RESERVATION_TTL_SECONDS: "${SIDECAR_TTL_SECONDS:-600}"
       # Legacy fallback values; pricing-seed-init overrides via /bundles/pricing.env
       PRICING_VERSION:       "demo-pricing-v1"
       FX_RATE_VERSION:       "demo-fx-v1"

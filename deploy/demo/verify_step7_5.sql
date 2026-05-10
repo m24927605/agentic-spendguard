@@ -9,7 +9,9 @@
 --   commits = 0 rows (never committed)
 --
 -- audit_outbox events:
---   audit.decision: 2 (deposit + reserve)
+--   audit.decision: 3 (deposit_token + deposit_usd + reserve)
+--                       — Phase 4 O4 added the USD opening deposit; the
+--                       Phase 2B baseline (2 decisions) didn't track it.
 --   audit.outcome:  1 (release; pairs with reserve's audit.decision)
 
 \echo
@@ -163,8 +165,8 @@ BEGIN
       FROM audit_outbox
      WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
        AND event_type = 'spendguard.audit.outcome';
-    IF v_decision_audit_n <> 2 THEN
-        RAISE EXCEPTION 'EXPECTED 2 audit.decision events (deposit + reserve); got %', v_decision_audit_n;
+    IF v_decision_audit_n <> 3 THEN
+        RAISE EXCEPTION 'EXPECTED 3 audit.decision events (deposit_token + deposit_usd + reserve); got %', v_decision_audit_n;
     END IF;
     IF v_outcome_audit_n <> 1 THEN
         RAISE EXCEPTION 'EXPECTED 1 audit.outcome event (release); got %', v_outcome_audit_n;

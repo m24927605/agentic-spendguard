@@ -131,9 +131,10 @@ BEGIN
       FROM audit_outbox
      WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
        AND event_type = 'spendguard.audit.outcome';
-    -- 2 audit.decision (deposit + reserve) + 1 audit.outcome (release)
-    IF v_decision_audit_n <> 2 THEN
-        RAISE EXCEPTION 'EXPECTED 2 audit.decision events; got %', v_decision_audit_n;
+    -- 3 audit.decision (deposit_token + deposit_usd + reserve) + 1 audit.outcome (release)
+    -- (Phase 4 O4 added the USD opening deposit; baseline used to be 2.)
+    IF v_decision_audit_n <> 3 THEN
+        RAISE EXCEPTION 'EXPECTED 3 audit.decision events; got %', v_decision_audit_n;
     END IF;
     IF v_outcome_audit_n <> 1 THEN
         RAISE EXCEPTION 'EXPECTED 1 audit.outcome event (release); got %', v_outcome_audit_n;
