@@ -49,6 +49,8 @@ except ImportError as exc:  # pragma: no cover — build configuration error
     ) from exc
 
 from .errors import (
+    ApprovalDeniedError,
+    ApprovalLapsedError,
     ApprovalRequired,
     DecisionDenied,
     DecisionSkipped,
@@ -496,6 +498,10 @@ class SpendGuardClient:
                 reason_codes=list(resp.reason_codes),
                 audit_decision_event_id=resp.audit_decision_event_id,
                 matched_rule_ids=list(resp.matched_rule_ids),
+                # Round-2 #9 part 2 PR 9d: propagate tenant_id so the
+                # ApprovalRequired.resume() round-trip can scope the
+                # GetApprovalForResume lookup against tenant.
+                tenant_id=self.tenant_id,
             )
         # Unknown decision kind — treat as denial.
         raise DecisionDenied(
@@ -504,6 +510,102 @@ class SpendGuardClient:
             reason_codes=list(resp.reason_codes),
             audit_decision_event_id=resp.audit_decision_event_id,
             matched_rule_ids=list(resp.matched_rule_ids),
+        )
+
+    # -------------------------------------------------------------------
+    # ResumeAfterApproval (Round-2 #9 part 2 PR 9d)
+    # -------------------------------------------------------------------
+
+    async def resume_after_approval(
+        self,
+        *,
+        approval_id: str,
+        tenant_id: str,
+        decision_id: str,
+        workload_instance_id: str = "",
+    ) -> "DecisionOutcome":
+        """Call sidecar `ResumeAfterApproval` after the operator has
+        approved (or denied) the gating approval request.
+
+        Returns a `DecisionOutcome` if the approval is `approved` and
+        the resume produced (or replayed) a Continue decision. Raises
+        `ApprovalDeniedError` if the operator rejected, or
+        `ApprovalLapsedError` for non-actionable states (pending /
+        expired / cancelled).
+
+        Typical usage from a Pydantic-AI handler:
+
+            try:
+                await client.request_decision(...)
+            except ApprovalRequired as e:
+                # ... wait for approver via Slack / your control plane ...
+                outcome = await e.resume(client)
+        """
+        stub = self._require_stub()
+        session_id = self.session_id
+
+        req = adapter_pb2.ResumeAfterApprovalRequest(
+            tenant_id=tenant_id,
+            decision_id=decision_id,
+            approval_id=approval_id,
+            workload_instance_id=workload_instance_id,
+            session_id=session_id,
+        )
+        try:
+            resp = await stub.ResumeAfterApproval(
+                req, timeout=DEFAULT_DECISION_TIMEOUT_S * 4.0
+            )
+        except grpc.aio.AioRpcError as e:
+            raise self._classify_rpc_error(e, op="resume_after_approval") from e
+
+        kind = resp.WhichOneof("outcome")
+        if kind == "decision":
+            d = resp.decision
+            return DecisionOutcome(
+                decision_id=d.decision_id,
+                audit_decision_event_id=d.audit_decision_event_id,
+                decision=adapter_pb2.DecisionResponse.Decision.Name(d.decision),
+                reason_codes=list(d.reason_codes),
+                matched_rule_ids=list(d.matched_rule_ids),
+                ledger_transaction_id=d.ledger_transaction_id,
+                reservation_ids=list(d.reservation_ids),
+                effect_hash=bytes(d.effect_hash),
+                terminal=d.terminal,
+            )
+        if kind == "denied":
+            denied = resp.denied
+            raise ApprovalDeniedError(
+                f"approval denied by {denied.approver_subject or '<unknown>'}",
+                decision_id=decision_id,
+                approver_subject=denied.approver_subject or None,
+                approver_reason=denied.approver_reason or None,
+                audit_decision_event_id=denied.audit_decision_event_id or None,
+                matched_rule_ids=list(denied.matched_rule_ids),
+            )
+        if kind == "error":
+            err = resp.error
+            # Round-2 #9 PR 9c: sidecar tags the message with bracketed
+            # prefixes like [APPROVAL_NON_TERMINAL], [PRODUCER_SP_NOT_WIRED],
+            # [LEDGER_RPC_FAILED] etc. Map non-terminal → ApprovalLapsedError;
+            # everything else → SpendGuardError.
+            msg = err.message
+            if msg.startswith("[APPROVAL_NON_TERMINAL]"):
+                state = "unknown"
+                # Best-effort parse: "[APPROVAL_NON_TERMINAL] approval state=\"X\" ..."
+                idx = msg.find("state=")
+                if idx >= 0:
+                    tail = msg[idx + 6 :].strip().strip('"')
+                    state = tail.split()[0].strip('"') if tail else "unknown"
+                raise ApprovalLapsedError(
+                    msg,
+                    decision_id=decision_id,
+                    state=state,
+                )
+            raise SpendGuardError(
+                f"sidecar ResumeAfterApproval error: {msg}"
+            )
+        raise SpendGuardError(
+            f"sidecar ResumeAfterApproval returned unknown oneof: {kind!r}"
         )
 
     # -------------------------------------------------------------------
