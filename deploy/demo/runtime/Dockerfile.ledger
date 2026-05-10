@@ -2,7 +2,7 @@
 # Build context is the workspace root (compose.yaml: `context: ../..`),
 # so source paths are absolute from the repo top.
 
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.91-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
