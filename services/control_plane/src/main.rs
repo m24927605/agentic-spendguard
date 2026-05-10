@@ -26,6 +26,8 @@
 //! so audit chain + fencing CAS + per-unit balance invariants are
 //! exercised on every provisioning step.
 
+mod metrics;
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -38,6 +40,8 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::metrics::ControlPlaneMetrics;
 use spendguard_auth::{AuthConfig, Authenticator, Permission, Principal};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -49,6 +53,15 @@ use uuid::Uuid;
 struct Config {
     bind_addr: String,
     database_url: String,
+    /// Round-2 #11: Prometheus /metrics endpoint bind addr. Defaults
+    /// to `0.0.0.0:9094` (control_plane gets 9094 per the round-2
+    /// port table; ledger=9092, sidecar=9093).
+    #[serde(default = "default_metrics_addr")]
+    metrics_addr: String,
+}
+
+fn default_metrics_addr() -> String {
+    "0.0.0.0:9094".to_string()
 }
 
 struct AppState {
@@ -85,6 +98,21 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("S17: init authenticator: {e}"))?,
     );
 
+    // Round-2 #11: shared metrics counter store + middleware applied
+    // to every route. Spawn the /metrics HTTP server before binding
+    // the main listener.
+    let metrics = ControlPlaneMetrics::new();
+    if !cfg.metrics_addr.is_empty() {
+        let metrics_addr = cfg.metrics_addr.clone();
+        let metrics_handle = metrics.clone();
+        tokio::spawn(async move {
+            if let Err(e) = serve_metrics(metrics_addr, metrics_handle).await {
+                tracing::warn!(err = %e, "metrics server terminated");
+            }
+        });
+        info!(addr = %cfg.metrics_addr, "metrics server bound");
+    }
+
     // Auth-required routes go behind the middleware; /healthz stays open.
     let v1_routes = Router::new()
         .route("/v1/tenants", post(create_tenant))
@@ -99,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .route("/healthz", get(healthz))
         .merge(v1_routes)
+        .layer(from_fn_with_state(metrics.clone(), metrics::record_metrics))
         .with_state(state);
 
     let addr: SocketAddr = cfg.bind_addr.parse()?;
@@ -106,6 +135,53 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Round-2 #11: minimal HTTP /metrics endpoint that renders the
+/// ControlPlaneMetrics Prometheus text. Same hyper-based pattern as
+/// canonical_ingest / ledger / sidecar.
+async fn serve_metrics(addr: String, metrics: ControlPlaneMetrics) -> anyhow::Result<()> {
+    use std::convert::Infallible;
+    use hyper::body::Bytes;
+    use hyper::server::conn::http1;
+    use hyper::service::service_fn;
+    use hyper::{Request, Response};
+    use hyper_util::rt::TokioIo;
+    use http_body_util::Full;
+    use tokio::net::TcpListener;
+
+    let listener = TcpListener::bind(&addr).await?;
+    info!(addr = %addr, "control_plane metrics listening");
+
+    loop {
+        let (stream, _peer) = listener.accept().await?;
+        let io = TokioIo::new(stream);
+        let metrics = metrics.clone();
+        tokio::task::spawn(async move {
+            let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                let metrics = metrics.clone();
+                async move {
+                    let body = if req.uri().path() == "/metrics" {
+                        metrics.render()
+                    } else {
+                        "".to_string()
+                    };
+                    Ok::<_, Infallible>(
+                        Response::builder()
+                            .header(
+                                "content-type",
+                                "text/plain; version=0.0.4; charset=utf-8",
+                            )
+                            .body(Full::new(Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
+            });
+            if let Err(e) = http1::Builder::new().serve_connection(io, svc).await {
+                tracing::debug!(err = %e, "metrics conn closed");
+            }
+        });
+    }
 }
 
 async fn healthz() -> &'static str {
