@@ -28,3 +28,10 @@ hex = "0.4"
 
 # Phase 5 GA hardening S17: shared OIDC JWT validator + middleware.
 spendguard-auth = { path = "../auth" }
+
+# Round-2 #11: Prometheus /metrics endpoint. Reuse the same hyper /
+# hyper-util / http-body-util triple as ledger + sidecar so the render
+# server pattern is identical across services.
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
