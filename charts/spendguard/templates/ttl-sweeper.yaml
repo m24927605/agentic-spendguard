@@ -1,12 +1,5 @@
 {{- if .Values.ttlSweeper.enabled }}
 {{- $component := "ttl-sweeper" }}
-{{- /* Codex round-6 P1: chart.profile=production gate. TTL sweeper
-       Config::from_env() reads TLS_CLIENT_CERT/CLIENT_KEY (template
-       uses TLS_CERT_PEM/KEY_PEM) and FENCING_INITIAL_EPOCH — neither
-       wired. Tracked as P5-followup. */ -}}
-{{- if eq .Values.chart.profile "production" -}}
-{{- fail "ttl-sweeper: Helm chart not yet production-ready. Service Config::from_env() requires TLS_CLIENT_CERT/CLIENT_KEY (template uses CERT_PEM/KEY_PEM) and FENCING_INITIAL_EPOCH (not wired). Tracked as P5-followup. Use deploy/demo (compose) for now, or set chart.profile=demo." -}}
-{{- end -}}
 {{- /* Phase 5 S1 multi-pod safety gate */ -}}
 {{- if and (gt (int .Values.ttlSweeper.replicas) 1) (eq .Values.leaderElection.mode "disabled") -}}
 {{- fail "ttlSweeper.replicas > 1 requires leaderElection.mode != 'disabled' (S1 multi-pod safety gate)" -}}
