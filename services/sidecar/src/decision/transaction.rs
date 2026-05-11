@@ -491,6 +491,67 @@ async fn run_record_denied_decision(
     };
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
+    // Round-2 #9 producer SP. When the contract evaluator returns
+    // REQUIRE_APPROVAL, build the decision_context + requested_effect
+    // JSON blobs the ledger's `post_approval_required_decision` SP
+    // needs to write an `approval_requests` row atomically with the
+    // audit_outbox row. Sidecar's resume_after_approval handler later
+    // reads these blobs back to rebuild a fresh ReserveSetRequest.
+    //
+    // Shape mirrors the SQL header comment in migration 0037 + the
+    // `approval_resume_payload` parser in adapter_uds.rs.
+    let (decision_context_json, requested_effect_json, approval_ttl_seconds) =
+        if decision_kind == Decision::RequireApproval {
+            let primary_claim = claims.first();
+            let (unit_id, unit_kind_str, unit_token_kind) = match primary_claim.and_then(|c| c.unit.as_ref()) {
+                Some(u) => (
+                    u.unit_id.clone(),
+                    match u.kind {
+                        x if x == crate::proto::common::v1::unit_ref::Kind::Monetary as i32 => "MONETARY",
+                        x if x == crate::proto::common::v1::unit_ref::Kind::Token as i32 => "TOKEN",
+                        x if x == crate::proto::common::v1::unit_ref::Kind::Credit as i32 => "CREDIT",
+                        x if x == crate::proto::common::v1::unit_ref::Kind::NonMonetary as i32 => "NON_MONETARY",
+                        _ => "MONETARY",
+                    },
+                    u.token_kind.clone(),
+                ),
+                None => (String::new(), "MONETARY", String::new()),
+            };
+            let decision_ctx = serde_json::json!({
+                "tenant_id":                       ctx.tenant_id,
+                "budget_id":                       primary_claim.map(|c| c.budget_id.clone()).unwrap_or_default(),
+                "window_instance_id":              primary_claim.map(|c| c.window_instance_id.clone()).unwrap_or_default(),
+                "fencing_scope_id":                fencing.scope_id,
+                "fencing_epoch":                   fencing.epoch,
+                "decision_id":                     decision_id.to_string(),
+                "matched_rule_ids":                matched_rules,
+                "reason_codes":                    reason_codes,
+                "contract_bundle_id":              bundle.bundle_id.to_string(),
+                "contract_bundle_hash_hex":        hex::encode(&bundle.bundle_hash),
+                "schema_bundle_id":                state.inner.schema_bundle.read().as_ref().map(|s| s.bundle_id.to_string()).unwrap_or_default(),
+                "schema_bundle_canonical_version": state.inner.schema_bundle.read().as_ref().map(|s| s.canonical_schema_version.clone()).unwrap_or_default(),
+            });
+            let amount = primary_claim.map(|c| c.amount_atomic.clone()).unwrap_or_default();
+            let direction = match primary_claim.map(|c| c.direction) {
+                Some(x) if x == crate::proto::common::v1::budget_claim::Direction::Credit as i32 => "CREDIT",
+                _ => "DEBIT",
+            };
+            let requested_eff = serde_json::json!({
+                "unit_id":         unit_id,
+                "unit_kind":       unit_kind_str,
+                "unit_token_kind": unit_token_kind,
+                "amount_atomic":   amount,
+                "direction":       direction,
+            });
+            (
+                serde_json::to_vec(&decision_ctx).unwrap_or_default(),
+                serde_json::to_vec(&requested_eff).unwrap_or_default(),
+                3600_u32,
+            )
+        } else {
+            (Vec::new(), Vec::new(), 0_u32)
+        };
+
     let request = RecordDeniedDecisionRequest {
         tenant_id: ctx.tenant_id.clone(),
         decision_id: decision_id.to_string(),
@@ -513,6 +574,9 @@ async fn run_record_denied_decision(
             signing_key_id: bundle.signing_key_id.clone(),
         }),
         pricing: Some(pricing.clone()),
+        decision_context_json: decision_context_json.into(),
+        requested_effect_json: requested_effect_json.into(),
+        approval_ttl_seconds,
     };
 
     let response: RecordDeniedDecisionResponse =
