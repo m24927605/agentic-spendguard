@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
 authors = [
-  { name = "SpendGuard authors" },
+  { name = "Michael Chen", email = "m24927605@gmail.com" },
 ]
 classifiers = [
   "Programming Language :: Python :: 3",
@@ -63,14 +63,12 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/m24927605/agentic-flow-cost-evaluation"
-Repository = "https://github.com/m24927605/agentic-flow-cost-evaluation"
+Homepage = "https://github.com/m24927605/agentic-spendguard"
+Repository = "https://github.com/m24927605/agentic-spendguard"
+Issues = "https://github.com/m24927605/agentic-spendguard/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spendguard"]
-
-[tool.hatch.build.targets.wheel.force-include]
-"src/spendguard/_proto" = "spendguard/_proto"
 
 [tool.ruff]
 line-length = 100
