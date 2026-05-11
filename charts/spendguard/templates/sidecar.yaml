@@ -1,12 +1,25 @@
 {{- if .Values.sidecar.enabled }}
 {{- $component := "sidecar" }}
-{{- /* Codex round-6 P1: chart.profile=production gate. Sidecar
-       Config::from_env() reads ENDPOINT_CATALOG_MANIFEST_URL,
-       MTLS_BOOTSTRAP_TOKEN, contract / schema bundle IDs and hashes,
-       FENCING_INITIAL_EPOCH, plus several trust-root CA / SPKI fields
-       — none wired by this template. Tracked as P5-followup. */ -}}
+{{- /* chart.profile=production: required-input gates.
+       Values default to empty strings so demo / dev renders cleanly;
+       production install MUST supply real values. Sidecar refuses
+       to install bundles whose hash doesn't match, and the SPKI hash
+       is defense-in-depth against intermediate CA compromise. */ -}}
 {{- if eq .Values.chart.profile "production" -}}
-{{- fail "sidecar: Helm chart not yet production-ready. Service Config::from_env() requires ENDPOINT_CATALOG_MANIFEST_URL, MTLS_BOOTSTRAP_TOKEN, contract / schema bundle IDs+hashes, FENCING_INITIAL_EPOCH, trust-root CA/SPKI — template does not wire them. Tracked as P5-followup. Use deploy/demo (compose) for now, or set chart.profile=demo." -}}
+{{- if eq .Values.sidecar.contractBundleHashHex "" -}}
+{{- fail "sidecar.contractBundleHashHex is required under chart.profile=production (byte-exact hash of the contract bundle .tgz; sidecar refuses to install on mismatch)" -}}
+{{- end -}}
+{{- if eq .Values.sidecar.trustRootSpkiSha256Hex "" -}}
+{{- fail "sidecar.trustRootSpkiSha256Hex is required under chart.profile=production (sha256 of the trust-root CA SubjectPublicKeyInfo, hex-encoded; defense-in-depth pin)" -}}
+{{- end -}}
+{{- if eq .Values.sidecar.manifestVerifyKey.existingSecret "" -}}
+{{- fail "sidecar.manifestVerifyKey.existingSecret is required under chart.profile=production (sidecar main.rs refuses to boot without SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM)" -}}
+{{- end -}}
+{{- /* Catch the chart's placeholder DNS — it doesn't resolve and the
+       chart doesn't render an endpoint-catalog Service for it. */ -}}
+{{- if contains "endpoint-catalog.spendguard:8443" .Values.sidecar.endpointCatalogManifestUrl -}}
+{{- fail "sidecar.endpointCatalogManifestUrl still points at the chart's placeholder DNS; supply a real catalog manifest URL under chart.profile=production (sidecar main.rs awaits catalog::refresh_once() during startup)" -}}
+{{- end -}}
 {{- end -}}
 {{- /* Phase 5 GA hardening S6: signing-mode fail-gate.
        production profile MUST NOT allow disabled signing —
@@ -74,10 +87,18 @@ spec:
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
             - name: SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL
               value: "https://{{ include "spendguard.fullname" . }}-canonical-ingest:50052"
-            - { name: SPENDGUARD_SIDECAR_TLS_CERT_PEM, value: "/etc/ssl/spendguard/sidecar.crt" }
-            - { name: SPENDGUARD_SIDECAR_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/sidecar.key" }
-            - { name: SPENDGUARD_SIDECAR_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # NOTE: sidecar/src/clients/mtls.rs uses MTlsPaths::default()
+            # which hardcodes the workload-cert paths. Files come from the
+            # `tls` volume mounted at /var/run/secrets/spendguard/ below,
+            # with the per-service Secret keys projected to tls.crt / tls.key.
+            # Do NOT wire SPENDGUARD_SIDECAR_TLS_* env vars here — they
+            # are not read by the sidecar boot path.
             - { name: SPENDGUARD_SIDECAR_UDS_PATH,     value: "/var/run/spendguard/adapter.sock" }
+            # Endpoint catalog manifest verify key. Required by
+            # sidecar/src/main.rs at startup (load_manifest_signing_key);
+            # without it the sidecar refuses to boot. File comes from
+            # the operator-supplied `manifestVerifyKey.existingSecret`.
+            - { name: SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM, value: "/etc/spendguard/manifest-verify-key/manifest_verify_key.pub.pem" }
             # Round-2 #3: Required by services/sidecar Config::from_env().
             # Without these, Config::from_env() panics with
             # "missing field <name>" and the pod CrashLoopBackOff's.
@@ -123,23 +144,56 @@ spec:
             - { name: SPENDGUARD_SIDECAR_FAIL_POLICY_JSON,           value: {{ .Values.failPolicy.overrides | quote }} }
             {{- end }}
           volumeMounts:
-            - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
-            - { name: bundles, mountPath: /var/lib/spendguard/bundles, readOnly: true }
+            # sidecar boot path waits for /var/run/secrets/spendguard/{tls.crt,tls.key,ca.crt}
+            # (MTlsPaths::default in services/sidecar/src/clients/mtls.rs).
+            - { name: tls,                 mountPath: /var/run/secrets/spendguard, readOnly: true }
+            - { name: bundles,             mountPath: /var/lib/spendguard/bundles, readOnly: true }
+            - { name: manifest-verify-key, mountPath: /etc/spendguard/manifest-verify-key, readOnly: true }
             {{- if eq .Values.signing.mode "local" }}
-            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+            - { name: signing,             mountPath: /etc/spendguard/signing, readOnly: true }
             {{- end }}
             {{- if .Values.sidecar.hostPath.enabled }}
-            - { name: uds,     mountPath: /var/run/spendguard }
+            - { name: uds,                 mountPath: /var/run/spendguard }
             {{- end }}
           resources:
             {{- toYaml .Values.sidecar.resources | nindent 12 }}
       volumes:
+        # Project the shared TLS Secret's per-service keys (sidecar.crt /
+        # sidecar.key) to the conventional tls.crt / tls.key filenames the
+        # sidecar binary expects at /var/run/secrets/spendguard/. Operator's
+        # Secret structure stays the same; chart adapts.
         - name: tls
           secret:
             secretName: {{ .Values.secrets.tls.existingSecret }}
+            items:
+              - { key: sidecar.crt, path: tls.crt }
+              - { key: sidecar.key, path: tls.key }
+              - { key: ca.crt,      path: ca.crt }
+        # bootstrap/bundles.rs reads four files at fixed sub-paths:
+        #   contract_bundle/<contractBundleId>.tgz
+        #   contract_bundle/<contractBundleId>.tgz.sig
+        #   contract_bundle/<contractBundleId>.metadata.json
+        #   schema_bundle/<schemaBundleId>.tgz
+        # K8s Secret keys cannot contain "/", so we project flat operator-
+        # supplied keys to those paths via items.path.
         - name: bundles
           secret:
             secretName: {{ .Values.secrets.bundles.existingSecret }}
+            items:
+              - key: contract_bundle_tgz
+                path: contract_bundle/{{ .Values.sidecar.contractBundleId }}.tgz
+              - key: contract_bundle_sig
+                path: contract_bundle/{{ .Values.sidecar.contractBundleId }}.tgz.sig
+              - key: contract_bundle_metadata_json
+                path: contract_bundle/{{ .Values.sidecar.contractBundleId }}.metadata.json
+              - key: schema_bundle_tgz
+                path: schema_bundle/{{ .Values.sidecar.schemaBundleId }}.tgz
+        - name: manifest-verify-key
+          secret:
+            secretName: {{ .Values.sidecar.manifestVerifyKey.existingSecret }}
+            items:
+              - key: {{ .Values.sidecar.manifestVerifyKey.pemKey | quote }}
+                path: manifest_verify_key.pub.pem
         {{- if eq .Values.signing.mode "local" }}
         - name: signing
           secret:

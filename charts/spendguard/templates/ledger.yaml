@@ -3,6 +3,8 @@
 {{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
 {{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo" }}
 {{- end }}
+{{- /* postgres.ledgerUrl CHANGE_ME gate lives in templates/validations.yaml
+       (must fire even when ledger.enabled=false but consumers are on). */ -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

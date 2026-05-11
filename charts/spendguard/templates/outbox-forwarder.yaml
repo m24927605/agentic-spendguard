@@ -1,12 +1,11 @@
 {{- if .Values.outboxForwarder.enabled }}
 {{- $component := "outbox-forwarder" }}
-{{- /* Codex round-6 P1: chart.profile=production gate. Outbox
-       forwarder Config::from_env() reads TLS_CLIENT_CERT/CLIENT_KEY
-       (this template uses TLS_CERT_PEM/KEY_PEM names) and
-       SCHEMA_BUNDLE_ID + SCHEMA_BUNDLE_HASH_HEX — neither wired.
-       Tracked as P5-followup. */ -}}
-{{- if eq .Values.chart.profile "production" -}}
-{{- fail "outbox-forwarder: Helm chart not yet production-ready. Service Config::from_env() requires TLS_CLIENT_CERT/CLIENT_KEY (template uses CERT_PEM/KEY_PEM) and SCHEMA_BUNDLE_ID + SCHEMA_BUNDLE_HASH_HEX (not wired). Tracked as P5-followup. Use deploy/demo (compose) for now, or set chart.profile=demo." -}}
+{{- /* chart.profile=production: required-input gate.
+       The forwarder hashes outgoing CloudEvents against the
+       canonical-ingest service's expected schema bundle; mismatched
+       hash → ingest rejects every event. */ -}}
+{{- if and (eq .Values.chart.profile "production") (eq .Values.outboxForwarder.schemaBundleHashHex "") -}}
+{{- fail "outboxForwarder.schemaBundleHashHex is required under chart.profile=production (byte-exact hash of the schema bundle .tgz; mismatch → canonical-ingest rejects every event)" -}}
 {{- end -}}
 {{- /* Phase 5 S1 multi-pod safety gate */ -}}
 {{- if and (gt (int .Values.outboxForwarder.replicas) 1) (eq .Values.leaderElection.mode "disabled") -}}
@@ -75,6 +74,11 @@ spec:
             - { name: SPENDGUARD_LEADER_LEASE_TTL_MS,      value: {{ .Values.leaderElection.ttlMs | quote }} }
             - { name: SPENDGUARD_LEADER_RENEW_INTERVAL_MS, value: {{ .Values.leaderElection.renewIntervalMs | quote }} }
             - { name: SPENDGUARD_LEADER_RETRY_INTERVAL_MS, value: {{ .Values.leaderElection.retryIntervalMs | quote }} }
+            # K8s Lease backend is namespaced. Bind to the release
+            # namespace so multi-namespace installs don't collide on
+            # the "default" namespace fallback.
+            - name: SPENDGUARD_LEADER_K8S_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
           volumeMounts:
             - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
             - { name: bundles, mountPath: /var/lib/spendguard/bundles, readOnly: true }
