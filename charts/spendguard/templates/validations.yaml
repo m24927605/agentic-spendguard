@@ -1,0 +1,19 @@
+{{- /*
+chart.profile=production global validations.
+
+These run regardless of which Deployments are enabled — so disabling
+ledger / canonical-ingest in favour of external services still gates
+the CHANGE_ME placeholder from leaking into the consumer pods
+(ttl-sweeper, outbox-forwarder, webhook-receiver, canonical-ingest).
+
+This file emits no Kubernetes resources; it exists only so Helm
+evaluates the {{- fail -}} directives at template render time.
+*/ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- if contains "CHANGE_ME" .Values.postgres.ledgerUrl -}}
+{{- fail "postgres.ledgerUrl still contains the CHANGE_ME default; supply a real connection string under chart.profile=production (consumed by ledger, ttl-sweeper, outbox-forwarder, webhook-receiver)" -}}
+{{- end -}}
+{{- if contains "CHANGE_ME" .Values.postgres.canonicalUrl -}}
+{{- fail "postgres.canonicalUrl still contains the CHANGE_ME default; supply a real connection string under chart.profile=production (consumed by canonical-ingest)" -}}
+{{- end -}}
+{{- end -}}
