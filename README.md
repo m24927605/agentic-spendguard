@@ -195,6 +195,19 @@ Each service has its own `README.md` linking to specs.
 
 ## SDK
 
+[![PyPI](https://img.shields.io/pypi/v/spendguard-sdk?label=spendguard-sdk)](https://pypi.org/project/spendguard-sdk/)
+[![Python](https://img.shields.io/pypi/pyversions/spendguard-sdk)](https://pypi.org/project/spendguard-sdk/)
+
+```bash
+pip install spendguard-sdk
+# or with a framework integration:
+pip install 'spendguard-sdk[pydantic-ai]'
+pip install 'spendguard-sdk[langchain]'
+pip install 'spendguard-sdk[langgraph]'
+pip install 'spendguard-sdk[openai-agents]'
+pip install 'spendguard-sdk[agt]'
+```
+
 ```python
 from spendguard import SpendGuardClient, ApprovalRequired, DecisionStopped
 
