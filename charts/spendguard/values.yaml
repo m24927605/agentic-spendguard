@@ -143,6 +143,14 @@ sidecar:
   mtlsBootstrapTokenSecret:
     name: spendguard-mtls-bootstrap
     tokenKey: token
+  # Endpoint catalog manifest signing key. Sidecar's main.rs reads
+  # SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM at startup and refuses
+  # to boot without it; the file holds the ed25519 PUBLIC key the
+  # catalog publisher signs manifests with. Operator pre-creates the
+  # Secret holding the PEM contents under `pemKey`.
+  manifestVerifyKey:
+    existingSecret: spendguard-manifest-verify-key
+    pemKey: manifest_verify_key.pub.pem
   # Open the UDS adapter socket on a hostPath so apps in other pods can
   # mount it. Set hostPath.enabled=false for an in-pod-only sidecar.
   hostPath:
