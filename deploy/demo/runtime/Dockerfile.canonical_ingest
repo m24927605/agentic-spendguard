@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM rust:1.91-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -13,7 +14,11 @@ RUN ln -sf /usr/include/google ./proto/google
 COPY services/signing ./services/signing
 COPY services/canonical_ingest ./services/canonical_ingest
 WORKDIR /build/services/canonical_ingest
-RUN cargo build --release --bin spendguard-canonical-ingest
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-canonical-ingest,target=/build/services/canonical_ingest/target,sharing=locked \
+    cargo build --release --bin spendguard-canonical-ingest \
+    && cp target/release/spendguard-canonical-ingest /spendguard-canonical-ingest
 
 # ---------------------------------------------------------------------------
 
@@ -23,8 +28,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder \
-     /build/services/canonical_ingest/target/release/spendguard-canonical-ingest \
-     /usr/local/bin/spendguard-canonical-ingest
+COPY --from=builder /spendguard-canonical-ingest /usr/local/bin/spendguard-canonical-ingest
 
 ENTRYPOINT ["/usr/local/bin/spendguard-canonical-ingest"]
