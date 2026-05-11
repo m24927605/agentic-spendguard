@@ -702,21 +702,115 @@ impl AdapterUds {
                         outcome: Some(ResumeOutcome::Decision(decision_resp)),
                     }))
                 } else {
-                    // Fresh resume path requires the producer-side
-                    // post_approval_required_decision SP (S14-followup)
-                    // to write decision_context + requested_effect
-                    // JSON in a shape sidecar can rebuild a
-                    // ReserveSetRequest from. The producer wiring
-                    // ships in a follow-up sub-PR; until then,
-                    // surface a clear status message so SDK callers
-                    // know the path is still pending.
-                    into_err(
-                        "[PRODUCER_SP_NOT_WIRED] approval state=approved but resume \
-                         path requires post_approval_required_decision SP to \
-                         capture decision_context + requested_effect — see \
-                         round-2 #9 follow-up"
-                            .into(),
-                    )
+                    // Round-2 #9 producer SP: parse the JSON payloads
+                    // captured at REQUIRE_APPROVAL time, rebuild a
+                    // fresh ReserveSetRequest, call Ledger.ReserveSet
+                    // under a derived idempotency_key, then
+                    // MarkApprovalBundled to atomically link the
+                    // approval row → ledger transaction.
+                    let parsed = match approval_resume_payload::parse(&context) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return into_err(format!("[CONTEXT_PARSE_FAILED] {e}"));
+                        }
+                    };
+
+                    let idem_key = {
+                        use sha2::{Digest, Sha256};
+                        let mut h = Sha256::new();
+                        h.update(b"resume:");
+                        h.update(req.approval_id.as_bytes());
+                        hex::encode(h.finalize())
+                    };
+
+                    let reserve_req = match parsed
+                        .into_reserve_set_request(
+                            &self.cfg,
+                            &self.state,
+                            req.session_id.clone(),
+                            req.workload_instance_id.clone(),
+                            idem_key,
+                        )
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return into_err(format!("[RESUME_BUILD_FAILED] {e}"));
+                        }
+                    };
+
+                    let reserve_resp = match self.state.inner.ledger.reserve_set(reserve_req).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return into_err(format!("[LEDGER_RPC_FAILED] ReserveSet: {e}"));
+                        }
+                    };
+
+                    use crate::proto::ledger::v1::reserve_set_response::Outcome as ReserveOutcome;
+                    let (tx_id, audit_event_id, reservation_ids) = match reserve_resp.outcome {
+                        Some(ReserveOutcome::Success(s)) => (
+                            s.ledger_transaction_id.clone(),
+                            s.audit_decision_event_id.clone(),
+                            s.reservations.iter().map(|r| r.reservation_id.clone()).collect::<Vec<_>>(),
+                        ),
+                        Some(ReserveOutcome::Replay(r)) => (
+                            r.ledger_transaction_id.clone(),
+                            r.audit_decision_event_id.clone(),
+                            vec![],
+                        ),
+                        Some(ReserveOutcome::Error(e)) => {
+                            return into_err(format!("[RESERVE_REJECTED] {}", e.message));
+                        }
+                        None => {
+                            return into_err(
+                                "[LEDGER_RESPONSE_EMPTY] ReserveSet returned no oneof".into(),
+                            );
+                        }
+                    };
+
+                    use crate::proto::ledger::v1::{
+                        mark_approval_bundled_response::Outcome as MarkOutcome,
+                        MarkApprovalBundledRequest,
+                    };
+                    let mark_resp = match self
+                        .state
+                        .inner
+                        .ledger
+                        .mark_approval_bundled(MarkApprovalBundledRequest {
+                            approval_id: req.approval_id.clone(),
+                            ledger_transaction_id: tx_id.clone(),
+                        })
+                        .await
+                    {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return into_err(format!("[LEDGER_RPC_FAILED] MarkApprovalBundled: {e}"));
+                        }
+                    };
+                    if let Some(MarkOutcome::Error(e)) = mark_resp.outcome {
+                        return into_err(format!("[BUNDLE_REJECTED] {}", e.message));
+                    }
+
+                    let decision_resp = DecisionResponse {
+                        decision_id: context.decision_id.clone(),
+                        audit_decision_event_id: audit_event_id,
+                        decision: Decision::Continue as i32,
+                        reason_codes: vec!["resume_approved".into()],
+                        matched_rule_ids: vec![],
+                        mutation_patch_json: String::new(),
+                        effect_hash: vec![].into(),
+                        ledger_transaction_id: tx_id,
+                        reservation_ids,
+                        ttl_expires_at: None,
+                        approval_request_id: context.approval_id.clone(),
+                        approval_ttl: None,
+                        approver_role: String::new(),
+                        terminal: false,
+                        error: None,
+                    };
+                    Ok(Response::new(ResumeAfterApprovalResponse {
+                        outcome: Some(ResumeOutcome::Decision(decision_resp)),
+                    }))
                 }
             }
             "denied" => {
@@ -740,6 +834,214 @@ impl AdapterUds {
             )),
         }
     }
+}
+
+/// Round-2 #9 producer SP: shape definitions for `decision_context`
+/// + `requested_effect` JSON blobs in `approval_requests`. Producer
+/// side (post_approval_required_decision SP via
+/// services/sidecar/src/decision/transaction.rs::run_record_denied_decision)
+/// MUST write the same shape. The migration 0037 header comment
+/// pins the contract on the SQL side.
+mod approval_resume_payload {
+    use serde::Deserialize;
+
+    #[derive(Debug, Deserialize)]
+    pub struct DecisionContext {
+        pub tenant_id: String,
+        pub budget_id: String,
+        pub window_instance_id: String,
+        pub fencing_scope_id: String,
+        pub fencing_epoch: u64,
+        pub decision_id: String,
+        #[serde(default)]
+        pub matched_rule_ids: Vec<String>,
+        #[serde(default)]
+        pub reason_codes: Vec<String>,
+        pub contract_bundle_id: String,
+        pub contract_bundle_hash_hex: String,
+        #[serde(default)]
+        pub schema_bundle_id: String,
+        #[serde(default)]
+        pub schema_bundle_canonical_version: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    pub struct RequestedEffect {
+        pub unit_id: String,
+        pub unit_kind: String,
+        #[serde(default)]
+        pub unit_token_kind: String,
+        pub amount_atomic: String,
+        pub direction: String,
+    }
+
+    pub struct Parsed {
+        pub decision: DecisionContext,
+        pub effect: RequestedEffect,
+    }
+
+    pub fn parse(
+        ctx: &crate::proto::ledger::v1::ApprovalResumeContext,
+    ) -> Result<Parsed, String> {
+        let decision: DecisionContext =
+            serde_json::from_slice(&ctx.decision_context_json)
+                .map_err(|e| format!("decision_context_json: {e}"))?;
+        let effect: RequestedEffect =
+            serde_json::from_slice(&ctx.requested_effect_json)
+                .map_err(|e| format!("requested_effect_json: {e}"))?;
+        Ok(Parsed { decision, effect })
+    }
+
+    impl Parsed {
+        /// Build a fresh ReserveSetRequest from the parsed payloads.
+        /// Mints a new decision_id + audit_decision_event_id (the
+        /// resume is a logically new transaction; idempotency_key
+        /// derived from approval_id collapses retries). Signs a
+        /// CloudEvent in place via the sidecar's producer signer.
+        pub async fn into_reserve_set_request(
+            self,
+            cfg: &crate::config::Config,
+            state: &crate::domain::state::SidecarState,
+            _session_id: String,
+            workload_instance_id: String,
+            idempotency_key: String,
+        ) -> Result<crate::proto::ledger::v1::ReserveSetRequest, String> {
+            use crate::proto::common::v1::{
+                budget_claim::Direction, unit_ref::Kind as UnitKind, BudgetClaim,
+                CloudEvent, ContractBundleRef, Fencing, Idempotency, PricingFreeze,
+                UnitRef,
+            };
+            use chrono::Utc;
+            use num_bigint::BigInt;
+            use std::str::FromStr;
+            use uuid::Uuid;
+
+            // Parse + validate amount.
+            BigInt::from_str(&self.effect.amount_atomic)
+                .map_err(|e| format!("amount_atomic parse: {e}"))?;
+
+            let unit_kind = match self.effect.unit_kind.as_str() {
+                "MONETARY" => UnitKind::Monetary,
+                "TOKEN" => UnitKind::Token,
+                "CREDIT" => UnitKind::Credit,
+                "NON_MONETARY" => UnitKind::NonMonetary,
+                _ => UnitKind::Unspecified,
+            };
+            let direction = match self.effect.direction.as_str() {
+                "CREDIT" => Direction::Credit,
+                _ => Direction::Debit,
+            };
+
+            let workload_id = if workload_instance_id.is_empty() {
+                cfg.workload_instance_id.clone()
+            } else {
+                workload_instance_id
+            };
+
+            let claim = BudgetClaim {
+                budget_id: self.decision.budget_id.clone(),
+                unit: Some(UnitRef {
+                    unit_id: self.effect.unit_id.clone(),
+                    kind: unit_kind as i32,
+                    currency: String::new(),
+                    unit_name: String::new(),
+                    token_kind: self.effect.unit_token_kind.clone(),
+                    model_family: String::new(),
+                    credit_program: String::new(),
+                }),
+                amount_atomic: self.effect.amount_atomic.clone(),
+                direction: direction as i32,
+                window_instance_id: self.decision.window_instance_id.clone(),
+            };
+
+            // Mint new audit identifiers for the resume tx; the
+            // resume is a logically new write to the ledger.
+            let decision_id = Uuid::now_v7();
+            let audit_decision_event_id = Uuid::now_v7();
+            let producer_sequence = state.next_producer_sequence();
+
+            // Build + sign a fresh CloudEvent (Contract §6.1: every
+            // ledger write produces exactly one audit row).
+            let payload = serde_json::json!({
+                "resume_of_approval_id": self.decision.decision_id,
+                "amount_atomic":         self.effect.amount_atomic,
+                "budget_id":             self.decision.budget_id,
+                "matched_rule_ids":      self.decision.matched_rule_ids,
+                "reason_codes":          self.decision.reason_codes,
+            });
+            let payload_bytes = serde_json::to_vec(&payload)
+                .map_err(|e| format!("cloudevent payload encode: {e}"))?;
+            let mut cloudevent = CloudEvent {
+                specversion: "1.0".into(),
+                r#type: "spendguard.audit.decision".into(),
+                source: format!("sidecar://{}/{}", cfg.region, workload_id),
+                id: audit_decision_event_id.to_string(),
+                time: Some(prost_types::Timestamp {
+                    seconds: Utc::now().timestamp(),
+                    nanos: Utc::now().timestamp_subsec_nanos() as i32,
+                }),
+                datacontenttype: "application/json".into(),
+                data: payload_bytes.into(),
+                tenant_id: self.decision.tenant_id.clone(),
+                run_id: String::new(),
+                decision_id: decision_id.to_string(),
+                schema_bundle_id: self.decision.schema_bundle_id.clone(),
+                producer_id: format!("sidecar:{}", workload_id),
+                producer_sequence,
+                producer_signature: vec![].into(),
+                signing_key_id: String::new(),
+            };
+            crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent)
+                .await
+                .map_err(|e| format!("sign resume cloudevent: {e}"))?;
+
+            let pricing = PricingFreeze {
+                pricing_version: String::new(),
+                price_snapshot_hash: vec![].into(),
+                fx_rate_version: String::new(),
+                unit_conversion_version: String::new(),
+            };
+
+            // TTL: reuse sidecar's configured reservation TTL.
+            let ttl_expires_at = prost_types::Timestamp {
+                seconds: (Utc::now()
+                    + chrono::Duration::seconds(state.inner.reservation_ttl_seconds))
+                    .timestamp(),
+                nanos: 0,
+            };
+
+            let bundle_hash =
+                hex::decode(&self.decision.contract_bundle_hash_hex).unwrap_or_default();
+
+            Ok(crate::proto::ledger::v1::ReserveSetRequest {
+                tenant_id: self.decision.tenant_id,
+                decision_id: decision_id.to_string(),
+                audit_decision_event_id: audit_decision_event_id.to_string(),
+                producer_sequence,
+                idempotency: Some(Idempotency {
+                    key: idempotency_key,
+                    request_hash: Vec::new().into(),
+                }),
+                fencing: Some(Fencing {
+                    epoch: self.decision.fencing_epoch,
+                    scope_id: self.decision.fencing_scope_id,
+                    workload_instance_id: workload_id,
+                }),
+                claims: vec![claim],
+                lock_order_token: None,
+                ttl_expires_at: Some(ttl_expires_at),
+                audit_event: Some(cloudevent),
+                pricing: Some(pricing),
+                contract_bundle: Some(ContractBundleRef {
+                    bundle_id: self.decision.contract_bundle_id,
+                    bundle_hash: bundle_hash.into(),
+                    bundle_signature: vec![].into(),
+                    signing_key_id: String::new(),
+                }),
+            })
+        }
+    }
+
 }
 
 /// Build a tower stack for the UDS-bound gRPC server.
