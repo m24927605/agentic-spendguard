@@ -15,6 +15,11 @@
 {{- if eq .Values.sidecar.manifestVerifyKey.existingSecret "" -}}
 {{- fail "sidecar.manifestVerifyKey.existingSecret is required under chart.profile=production (sidecar main.rs refuses to boot without SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM)" -}}
 {{- end -}}
+{{- /* Catch the chart's placeholder DNS — it doesn't resolve and the
+       chart doesn't render an endpoint-catalog Service for it. */ -}}
+{{- if contains "endpoint-catalog.spendguard:8443" .Values.sidecar.endpointCatalogManifestUrl -}}
+{{- fail "sidecar.endpointCatalogManifestUrl still points at the chart's placeholder DNS; supply a real catalog manifest URL under chart.profile=production (sidecar main.rs awaits catalog::refresh_once() during startup)" -}}
+{{- end -}}
 {{- end -}}
 {{- /* Phase 5 GA hardening S6: signing-mode fail-gate.
        production profile MUST NOT allow disabled signing —

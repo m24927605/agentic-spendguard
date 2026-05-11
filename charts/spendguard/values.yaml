@@ -132,10 +132,14 @@ sidecar:
   # MUST seed `fencing_scopes.current_epoch = N` matching this value
   # before installing. Set to 1 for first install.
   fencingInitialEpoch: 1
-  # Round-2 #3: Endpoint catalog manifest URL — sidecar pulls + verifies
-  # this manifest at startup + every manifestPullSeconds. The catalog
-  # publisher signs manifests with its ed25519 key; sidecar pins the
-  # corresponding public key under SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM.
+  # Endpoint catalog manifest URL — sidecar pulls + verifies this manifest
+  # at startup + every manifestPullSeconds. The catalog publisher signs
+  # manifests with its ed25519 key; sidecar pins the corresponding public
+  # key under SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM.
+  #
+  # The default below is a PLACEHOLDER DNS that this chart does not render.
+  # chart.profile=production rejects it; operator must supply a real URL
+  # pointing at their endpoint-catalog deployment (not provisioned here).
   endpointCatalogManifestUrl: "https://endpoint-catalog.spendguard:8443/v1/catalog/manifest"
   # Round-2 #3: Contract + schema bundle bootstrap. The chart's bundles
   # init container pre-pulls these .tgz files into the bundles-data
