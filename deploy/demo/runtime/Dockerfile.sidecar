@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM rust:1.91-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -15,7 +16,11 @@ COPY services/signing ./services/signing
 COPY services/policy ./services/policy
 COPY services/sidecar ./services/sidecar
 WORKDIR /build/services/sidecar
-RUN cargo build --release --bin spendguard-sidecar
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-sidecar,target=/build/services/sidecar/target,sharing=locked \
+    cargo build --release --bin spendguard-sidecar \
+    && cp target/release/spendguard-sidecar /spendguard-sidecar
 
 # ---------------------------------------------------------------------------
 
@@ -25,9 +30,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder \
-     /build/services/sidecar/target/release/spendguard-sidecar \
-     /usr/local/bin/spendguard-sidecar
+COPY --from=builder /spendguard-sidecar /usr/local/bin/spendguard-sidecar
 
 COPY deploy/demo/runtime/sidecar-entrypoint.sh /usr/local/bin/sidecar-entrypoint.sh
 RUN chmod +x /usr/local/bin/sidecar-entrypoint.sh

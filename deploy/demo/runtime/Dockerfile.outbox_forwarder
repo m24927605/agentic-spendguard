@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM rust:1.91-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -11,7 +12,11 @@ RUN ln -sf /usr/include/google ./proto/google
 COPY services/leases ./services/leases
 COPY services/outbox_forwarder ./services/outbox_forwarder
 WORKDIR /build/services/outbox_forwarder
-RUN cargo build --release --bin spendguard-outbox-forwarder
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-outbox-forwarder,target=/build/services/outbox_forwarder/target,sharing=locked \
+    cargo build --release --bin spendguard-outbox-forwarder \
+    && cp target/release/spendguard-outbox-forwarder /spendguard-outbox-forwarder
 
 # ---------------------------------------------------------------------------
 
@@ -21,9 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder \
-     /build/services/outbox_forwarder/target/release/spendguard-outbox-forwarder \
-     /usr/local/bin/spendguard-outbox-forwarder
+COPY --from=builder /spendguard-outbox-forwarder /usr/local/bin/spendguard-outbox-forwarder
 
 # Entrypoint sources bundles runtime.env (per Codex r2 V2.1) so the
 # schema_bundle_hash matches the one canonical_ingest validates against.

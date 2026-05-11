@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM rust:1.91-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -13,7 +14,11 @@ RUN ln -sf /usr/include/google ./proto/google
 COPY services/signing ./services/signing
 COPY services/webhook_receiver ./services/webhook_receiver
 WORKDIR /build/services/webhook_receiver
-RUN cargo build --release --bin spendguard-webhook-receiver
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-webhook-receiver,target=/build/services/webhook_receiver/target,sharing=locked \
+    cargo build --release --bin spendguard-webhook-receiver \
+    && cp target/release/spendguard-webhook-receiver /spendguard-webhook-receiver
 
 # ---------------------------------------------------------------------------
 
@@ -23,8 +28,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder \
-     /build/services/webhook_receiver/target/release/spendguard-webhook-receiver \
-     /usr/local/bin/spendguard-webhook-receiver
+COPY --from=builder /spendguard-webhook-receiver /usr/local/bin/spendguard-webhook-receiver
 
 ENTRYPOINT ["/usr/local/bin/spendguard-webhook-receiver"]

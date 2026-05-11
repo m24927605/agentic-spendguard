@@ -1,6 +1,20 @@
+# syntax=docker/dockerfile:1.7
+#
 # Multi-stage build for the SpendGuard ledger service.
 # Build context is the workspace root (compose.yaml: `context: ../..`),
 # so source paths are absolute from the repo top.
+#
+# Optimization (Round-2 followup):
+#   * BuildKit cache mounts for `/usr/local/cargo/{registry,git}` —
+#     shared across ALL services, so the 50+ aws-sdk / p256 / sqlx /
+#     tonic crates land in the registry once and every service-builder
+#     reuses them. Single biggest win for cold demo-up.
+#   * Per-service target/ cache mount (id=cargo-target-ledger) — keeps
+#     incremental compilation artifacts across rebuilds. Saves ~5 min
+#     per warm build.
+#   * Build output is `cp`'d out of the cache mount before the runtime
+#     COPY because cache-mount contents are NOT persisted into image
+#     layers.
 
 FROM rust:1.91-bookworm AS builder
 
@@ -21,7 +35,11 @@ RUN ln -sf /usr/include/google ./proto/google
 COPY services/signing ./services/signing
 COPY services/ledger ./services/ledger
 WORKDIR /build/services/ledger
-RUN cargo build --release --bin spendguard-ledger
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-ledger,target=/build/services/ledger/target,sharing=locked \
+    cargo build --release --bin spendguard-ledger \
+    && cp target/release/spendguard-ledger /spendguard-ledger
 
 # ---------------------------------------------------------------------------
 
@@ -31,7 +49,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/services/ledger/target/release/spendguard-ledger \
-     /usr/local/bin/spendguard-ledger
+COPY --from=builder /spendguard-ledger /usr/local/bin/spendguard-ledger
 
 ENTRYPOINT ["/usr/local/bin/spendguard-ledger"]
