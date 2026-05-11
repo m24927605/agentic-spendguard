@@ -28,6 +28,12 @@ serde_json = "1"
 aws-config = "1"
 aws-sdk-kms = "1"
 
+# Round-2 #8 ECDSA verifier follow-up: P-256 verify for KMS-signed
+# audit rows. `pem` features enable SPKI parse from operator-supplied
+# `keys.json` manifest entries.
+p256 = { version = "0.13", default-features = false, features = ["pkcs8", "ecdsa", "pem", "std"] }
+spki = { version = "0.7", features = ["pem"] }
+
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
