@@ -55,9 +55,22 @@ secrets:
     #   ttl-sweeper.crt, ttl-sweeper.key.
     existingSecret: spendguard-tls
   bundles:
-    # Name of pre-created Secret with contract / schema bundle data:
-    #   contract_bundle/<id>.tgz, contract_bundle/<id>.metadata.json,
-    #   schema_bundle/<id>.tgz, runtime.env, pricing.env.
+    # Name of pre-created Secret with FLAT keys (K8s Secret keys cannot
+    # contain "/", so the sidecar's expected `contract_bundle/<id>.tgz`
+    # subdirectory layout is reconstructed by this chart's `items.path`
+    # projection at mount time).
+    #
+    # Required flat keys (operator-supplied):
+    #   contract_bundle_tgz            — contract bundle .tgz bytes
+    #   contract_bundle_sig            — contract bundle sigstore .sig bytes
+    #   contract_bundle_metadata_json  — contract bundle metadata.json bytes
+    #   schema_bundle_tgz              — schema bundle .tgz bytes
+    #
+    # Chart projects them at /var/lib/spendguard/bundles/ as:
+    #   contract_bundle/<sidecar.contractBundleId>.tgz
+    #   contract_bundle/<sidecar.contractBundleId>.tgz.sig
+    #   contract_bundle/<sidecar.contractBundleId>.metadata.json
+    #   schema_bundle/<sidecar.schemaBundleId>.tgz
     existingSecret: spendguard-bundles
 
 # Postgres connection (external; chart does NOT provision Postgres).
