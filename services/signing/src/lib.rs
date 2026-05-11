@@ -540,6 +540,21 @@ pub struct KeyValidity {
     /// be considered authentic (the key was good at sign time);
     /// events after must be quarantined.
     pub revoked_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Round-2 #8 ECDSA follow-up: optional algorithm tag. When set
+    /// to "kms-ecdsa-sha256" the verifier parses `public_key_pem`
+    /// as a P-256 SubjectPublicKeyInfo and routes verify() through
+    /// the ECDSA path. None / "ed25519" defaults to the existing
+    /// filesystem-scanned Ed25519 trust store path.
+    #[serde(default)]
+    pub algorithm: Option<String>,
+    /// Round-2 #8 ECDSA follow-up: inline public key PEM. Operator
+    /// dumps the KMS key's public material via
+    /// `aws kms get-public-key --key-id <arn> --output text
+    /// --query PublicKey | base64 -d | openssl pkey -pubin
+    /// -inform DER -outform PEM` and pastes the result here.
+    /// Required when `algorithm = Some("kms-ecdsa-sha256")`.
+    #[serde(default)]
+    pub public_key_pem: Option<String>,
 }
 
 impl KeyValidity {
@@ -552,6 +567,8 @@ impl KeyValidity {
             valid_until: None,
             revoked: false,
             revoked_at: None,
+            algorithm: None,
+            public_key_pem: None,
         }
     }
 
@@ -631,6 +648,12 @@ pub trait Verifier: Send + Sync {
 /// table and rotation. S8's filesystem registry is the bootstrap.
 pub struct LocalEd25519Verifier {
     keys: HashMap<String, VerifyingKey>,
+    /// Round-2 #8 ECDSA follow-up: P-256 verifying keys loaded from
+    /// `keys.json` manifest entries that set
+    /// `algorithm = "kms-ecdsa-sha256"` + `public_key_pem`.
+    /// Verifying a CloudEvent with `signing_key_id` that hits this
+    /// map routes through the ECDSA path instead of Ed25519.
+    ecdsa_keys: HashMap<String, p256::ecdsa::VerifyingKey>,
     /// S7: per-key validity windows. Loaded from `keys.json` in the
     /// trust store dir. Keys that aren't in the manifest get
     /// `KeyValidity::always_valid()` (preserves pre-S7 behavior).
@@ -691,14 +714,38 @@ impl LocalEd25519Verifier {
         // always-valid (preserves S6/S8 behavior).
         let validities = load_keys_manifest(dir)?;
 
+        // Round-2 #8 ECDSA follow-up: walk the manifest for entries
+        // that supply inline ECDSA public keys + parse them.
+        let mut ecdsa_keys: HashMap<String, p256::ecdsa::VerifyingKey> = HashMap::new();
+        for (key_id, validity) in &validities {
+            if validity.algorithm.as_deref() == Some("kms-ecdsa-sha256") {
+                let pem = validity.public_key_pem.as_deref().ok_or_else(|| {
+                    VerifyError::InvalidTrustStore(format!(
+                        "keys.json entry {key_id:?}: algorithm=kms-ecdsa-sha256 \
+                         requires non-empty public_key_pem"
+                    ))
+                })?;
+                use p256::pkcs8::DecodePublicKey;
+                let vk = p256::ecdsa::VerifyingKey::from_public_key_pem(pem.trim())
+                    .map_err(|e| {
+                        VerifyError::InvalidTrustStore(format!(
+                            "keys.json entry {key_id:?}: P-256 SPKI parse: {e}"
+                        ))
+                    })?;
+                ecdsa_keys.insert(key_id.clone(), vk);
+            }
+        }
+
         info!(
             dir = %dir.display(),
-            keys = keys.len(),
+            ed25519_keys = keys.len(),
+            ecdsa_keys = ecdsa_keys.len(),
             validities = validities.len(),
             "trust store loaded"
         );
         Ok(Self {
             keys,
+            ecdsa_keys,
             validities,
             source_dir: dir.to_path_buf(),
         })
@@ -710,6 +757,7 @@ impl LocalEd25519Verifier {
     pub fn from_keys(keys: HashMap<String, VerifyingKey>) -> Self {
         Self {
             keys,
+            ecdsa_keys: HashMap::new(),
             validities: HashMap::new(),
             source_dir: PathBuf::new(),
         }
@@ -723,6 +771,22 @@ impl LocalEd25519Verifier {
     ) -> Self {
         Self {
             keys,
+            ecdsa_keys: HashMap::new(),
+            validities,
+            source_dir: PathBuf::new(),
+        }
+    }
+
+    /// Test-only constructor that takes ECDSA keys + validities.
+    /// Used by the round-2 #8 ECDSA verifier unit tests.
+    #[doc(hidden)]
+    pub fn from_ecdsa_keys_with_validity(
+        ecdsa_keys: HashMap<String, p256::ecdsa::VerifyingKey>,
+        validities: HashMap<String, KeyValidity>,
+    ) -> Self {
+        Self {
+            keys: HashMap::new(),
+            ecdsa_keys,
             validities,
             source_dir: PathBuf::new(),
         }
@@ -757,13 +821,8 @@ impl Verifier for LocalEd25519Verifier {
             return Err(VerifyFailure::Disabled);
         }
 
-        let vk = match self.keys.get(signing_key_id) {
-            Some(k) => k,
-            None => return Err(VerifyFailure::UnknownKey),
-        };
-
-        // S7: validity-window check. Falls back to "always valid"
-        // when the manifest doesn't list this key.
+        // Validity check happens before algorithm dispatch so revoked
+        // keys fail closed regardless of which algorithm they use.
         let validity = self
             .validities
             .get(signing_key_id)
@@ -771,25 +830,47 @@ impl Verifier for LocalEd25519Verifier {
             .unwrap_or_else(KeyValidity::always_valid);
         validity.check(event_time)?;
 
-        // Mirror of LocalEd25519Signer::sign: the signed bytes are the
-        // SHA-256 digest of canonical_bytes, NOT canonical_bytes itself.
+        // Mirror of LocalEd25519Signer::sign / KmsSigner::sign: the
+        // signed bytes are the SHA-256 digest of canonical_bytes,
+        // NOT canonical_bytes itself.
         let mut hasher = Sha256::new();
         hasher.update(canonical_bytes);
         let digest = hasher.finalize();
 
-        let sig = match Ed25519Signature::from_slice(signature_bytes) {
-            Ok(s) => s,
-            Err(_) => return Err(VerifyFailure::InvalidSignature),
-        };
-
-        match vk.verify(&digest, &sig) {
-            Ok(()) => Ok(()),
-            Err(_) => Err(VerifyFailure::InvalidSignature),
+        // Round-2 #8 ECDSA follow-up: dispatch on prefix + lookup hit.
+        // - `ed25519:` prefix → Ed25519 path (existing)
+        // - anything that hits ecdsa_keys map → P-256 ECDSA path
+        // - otherwise UnknownKey
+        if let Some(vk) = self.keys.get(signing_key_id) {
+            let sig = match Ed25519Signature::from_slice(signature_bytes) {
+                Ok(s) => s,
+                Err(_) => return Err(VerifyFailure::InvalidSignature),
+            };
+            return match vk.verify(&digest, &sig) {
+                Ok(()) => Ok(()),
+                Err(_) => Err(VerifyFailure::InvalidSignature),
+            };
         }
+
+        if let Some(vk) = self.ecdsa_keys.get(signing_key_id) {
+            use p256::ecdsa::signature::Verifier as EcdsaVerifierTrait;
+            // KMS returns ASN.1 DER-encoded ECDSA signatures. The
+            // p256 crate's DerSignature parses them natively.
+            let sig = match p256::ecdsa::DerSignature::from_bytes(signature_bytes) {
+                Ok(s) => s,
+                Err(_) => return Err(VerifyFailure::InvalidSignature),
+            };
+            return match vk.verify(&digest, &sig) {
+                Ok(()) => Ok(()),
+                Err(_) => Err(VerifyFailure::InvalidSignature),
+            };
+        }
+
+        Err(VerifyFailure::UnknownKey)
     }
 
     fn key_count(&self) -> usize {
-        self.keys.len()
+        self.keys.len() + self.ecdsa_keys.len()
     }
 }
 
@@ -1009,6 +1090,136 @@ mod tests {
         }
     }
 
+    // ----- Round-2 #8 ECDSA verifier follow-up -----
+
+    #[tokio::test]
+    async fn ecdsa_verifier_accepts_real_p256_signature() {
+        use p256::ecdsa::{
+            signature::Signer as EcdsaSignerTrait, Signature, SigningKey as EcdsaSigningKey,
+        };
+        use p256::elliptic_curve::rand_core::OsRng;
+
+        // Generate a P-256 keypair + sign the sha256 digest of a
+        // canonical bytes blob (mirror of KmsSigner::sign hash step).
+        let sk = EcdsaSigningKey::random(&mut OsRng);
+        let vk = *sk.verifying_key();
+        let canonical = b"resume-after-approval payload bytes";
+        let digest = {
+            let mut h = Sha256::new();
+            h.update(canonical);
+            h.finalize()
+        };
+        let sig: Signature = sk.sign(&digest);
+        let sig_der_bytes = sig.to_der().to_bytes().to_vec();
+
+        let arn = "arn:aws:kms:us-west-2:000000000000:key/0000-test".to_string();
+        let mut ecdsa_keys = HashMap::new();
+        ecdsa_keys.insert(arn.clone(), vk);
+        let verifier = LocalEd25519Verifier::from_ecdsa_keys_with_validity(
+            ecdsa_keys,
+            HashMap::new(),
+        );
+
+        verifier
+            .verify(&arn, canonical, &sig_der_bytes, None)
+            .expect("ECDSA verify should succeed");
+    }
+
+    #[tokio::test]
+    async fn ecdsa_verifier_rejects_mutated_canonical() {
+        use p256::ecdsa::{
+            signature::Signer as EcdsaSignerTrait, Signature, SigningKey as EcdsaSigningKey,
+        };
+        use p256::elliptic_curve::rand_core::OsRng;
+
+        let sk = EcdsaSigningKey::random(&mut OsRng);
+        let vk = *sk.verifying_key();
+        let canonical = b"original payload";
+        let digest = {
+            let mut h = Sha256::new();
+            h.update(canonical);
+            h.finalize()
+        };
+        let sig: Signature = sk.sign(&digest);
+        let sig_der_bytes = sig.to_der().to_bytes().to_vec();
+
+        let mut ecdsa_keys = HashMap::new();
+        ecdsa_keys.insert("kms-key".to_string(), vk);
+        let verifier = LocalEd25519Verifier::from_ecdsa_keys_with_validity(
+            ecdsa_keys,
+            HashMap::new(),
+        );
+
+        // Mutate the bytes; sha256 changes; signature should fail.
+        let err = verifier
+            .verify("kms-key", b"tampered payload", &sig_der_bytes, None)
+            .unwrap_err();
+        assert_eq!(err, VerifyFailure::InvalidSignature);
+    }
+
+    #[tokio::test]
+    async fn ecdsa_verifier_rejects_unknown_kms_arn() {
+        let verifier = LocalEd25519Verifier::from_ecdsa_keys_with_validity(
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let err = verifier
+            .verify("arn:aws:kms:us-west-2:0:key/missing", b"x", b"sig", None)
+            .unwrap_err();
+        assert_eq!(err, VerifyFailure::UnknownKey);
+    }
+
+    #[tokio::test]
+    async fn ecdsa_verifier_loads_inline_pem_from_keys_manifest() {
+        use p256::ecdsa::SigningKey as EcdsaSigningKey;
+        use p256::elliptic_curve::rand_core::OsRng;
+        use p256::pkcs8::EncodePublicKey;
+
+        let sk = EcdsaSigningKey::random(&mut OsRng);
+        let vk = *sk.verifying_key();
+        let pem = vk
+            .to_public_key_pem(p256::pkcs8::LineEnding::LF)
+            .expect("encode pubkey pem");
+
+        let dir = tempfile::tempdir().unwrap();
+        let arn = "arn:aws:kms:us-west-2:000:key/inline".to_string();
+        let manifest = KeysManifest {
+            keys: HashMap::from([(
+                arn.clone(),
+                KeyValidity {
+                    valid_from: chrono::DateTime::<chrono::Utc>::MIN_UTC,
+                    valid_until: None,
+                    revoked: false,
+                    revoked_at: None,
+                    algorithm: Some("kms-ecdsa-sha256".into()),
+                    public_key_pem: Some(pem),
+                },
+            )]),
+        };
+        std::fs::write(
+            dir.path().join("keys.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let verifier = LocalEd25519Verifier::from_dir(dir.path()).unwrap();
+        assert_eq!(verifier.key_count(), 1);
+
+        // Sign + verify round-trip.
+        use p256::ecdsa::{signature::Signer as EcdsaSignerTrait, Signature};
+        let canonical = b"manifest-loaded round-trip";
+        let digest = {
+            let mut h = Sha256::new();
+            h.update(canonical);
+            h.finalize()
+        };
+        let sig: Signature = sk.sign(&digest);
+        let sig_der = sig.to_der().to_bytes().to_vec();
+        verifier
+            .verify(&arn, canonical, &sig_der, None)
+            .expect("manifest-loaded ECDSA verify should succeed");
+    }
+
     #[tokio::test]
     async fn verifier_classifies_disabled_signer_rows() {
         let verifier = LocalEd25519Verifier::from_keys(HashMap::new());
@@ -1073,6 +1284,8 @@ mod tests {
                 valid_until: None,
                 revoked: false,
                 revoked_at: None,
+                algorithm: None,
+                public_key_pem: None,
             },
         );
         let verifier = LocalEd25519Verifier::from_keys_with_validity(keys, validities);
@@ -1101,6 +1314,8 @@ mod tests {
                 valid_until: Some(chrono::Utc::now() - chrono::Duration::days(1)),
                 revoked: false,
                 revoked_at: None,
+                algorithm: None,
+                public_key_pem: None,
             },
         );
         let verifier = LocalEd25519Verifier::from_keys_with_validity(keys, validities);
@@ -1129,6 +1344,8 @@ mod tests {
                 valid_until: None,
                 revoked: true,
                 revoked_at: Some(chrono::Utc::now()),
+                algorithm: None,
+                public_key_pem: None,
             },
         );
         let verifier = LocalEd25519Verifier::from_keys_with_validity(keys, validities);
@@ -1156,6 +1373,8 @@ mod tests {
                 valid_until: Some(chrono::Utc::now() + chrono::Duration::days(1)),
                 revoked: false,
                 revoked_at: None,
+                algorithm: None,
+                public_key_pem: None,
             },
         );
         let verifier = LocalEd25519Verifier::from_keys_with_validity(keys, validities);
@@ -1182,6 +1401,8 @@ mod tests {
                 valid_until: Some(chrono::Utc::now() - chrono::Duration::days(1)),
                 revoked: false,
                 revoked_at: None,
+                algorithm: None,
+                public_key_pem: None,
             },
         );
         let verifier = LocalEd25519Verifier::from_keys_with_validity(keys, validities);
@@ -1213,6 +1434,8 @@ mod tests {
                 valid_until: None,
                 revoked: true,
                 revoked_at: Some(chrono::Utc::now()),
+                algorithm: None,
+                public_key_pem: None,
             },
         );
         let verifier = LocalEd25519Verifier::from_keys_with_validity(keys, validities);
@@ -1240,6 +1463,8 @@ mod tests {
                 ),
                 revoked: false,
                 revoked_at: None,
+                algorithm: None,
+                public_key_pem: None,
             },
         );
         let manifest = KeysManifest { keys };
@@ -1270,6 +1495,8 @@ mod tests {
                 valid_until: None,
                 revoked: true,
                 revoked_at: Some(chrono::Utc::now()),
+                algorithm: None,
+                public_key_pem: None,
             },
         );
         let manifest = KeysManifest { keys: validities };
