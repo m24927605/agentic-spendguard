@@ -1,10 +1,8 @@
 {{- if .Values.canonicalIngest.enabled }}
 {{- $component := "canonical-ingest" }}
-{{- /* chart.profile=production: refuse the CHANGE_ME default that
-       ships in values.yaml. Real connection string MUST be supplied. */ -}}
-{{- if and (eq .Values.chart.profile "production") (contains "CHANGE_ME" .Values.postgres.canonicalUrl) -}}
-{{- fail "postgres.canonicalUrl still contains the CHANGE_ME default; supply a real connection string under chart.profile=production" -}}
-{{- end -}}
+{{- /* postgres.canonicalUrl CHANGE_ME gate lives in templates/validations.yaml
+       (must fire even when canonicalIngest.enabled=false but a future
+       external consumer reaches for the URL). */ -}}
 {{- /* Phase 5 GA hardening S8: strict signatures gate.
        production profile MUST run with strict mode on; flipping it
        off in production silently admits unsigned events. */ -}}
