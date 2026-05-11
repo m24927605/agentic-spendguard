@@ -21,7 +21,9 @@ use uuid::Uuid;
 
 use crate::{
     domain::error::DomainError,
-    persistence::post_transaction::{self, PostDeniedInput},
+    persistence::post_transaction::{
+        self, PostApprovalRequiredInput, PostDeniedInput,
+    },
     proto::{
         common::v1::BudgetClaim,
         ledger::v1::{
@@ -121,6 +123,73 @@ async fn handle_inner(
         "producer_sequence":             req.producer_sequence as i64,
     });
 
+    // Round-2 #9 producer SP. When REQUIRE_APPROVAL fires with both
+    // JSON payloads present, route through the new SP that writes
+    // approval_requests + audit_outbox atomically. Other denial
+    // kinds (STOP / DEGRADE / SKIP) take the original
+    // post_denied_decision_transaction path.
+    let want_approval_sp = req.final_decision == "REQUIRE_APPROVAL"
+        && !req.decision_context_json.is_empty()
+        && !req.requested_effect_json.is_empty();
+
+    let producer_sequence = req.producer_sequence;
+
+    if want_approval_sp {
+        let decision_context_value: Value = serde_json::from_slice(&req.decision_context_json)
+            .map_err(|e| {
+                DomainError::InvalidRequest(format!(
+                    "decision_context_json: invalid JSON ({e})"
+                ))
+            })?;
+        let requested_effect_value: Value = serde_json::from_slice(&req.requested_effect_json)
+            .map_err(|e| {
+                DomainError::InvalidRequest(format!(
+                    "requested_effect_json: invalid JSON ({e})"
+                ))
+            })?;
+
+        let approval_ttl_seconds = if req.approval_ttl_seconds == 0 {
+            3600
+        } else {
+            req.approval_ttl_seconds as i32
+        };
+
+        let out = post_transaction::post_approval_required(
+            pool,
+            PostApprovalRequiredInput {
+                transaction: transaction_json,
+                audit_outbox_row: audit_outbox_json,
+                decision_context: decision_context_value,
+                requested_effect: requested_effect_value,
+                approval_ttl_seconds,
+            },
+        )
+        .await?;
+
+        if out.was_first_insert && out.ledger_transaction_id == ledger_transaction_id {
+            return Ok(RecordDeniedDecisionResponse {
+                outcome: Some(Outcome::Success(RecordDeniedDecisionSuccess {
+                    ledger_transaction_id: ledger_transaction_id.to_string(),
+                    audit_decision_event_id: audit_event_id.to_string(),
+                    producer_sequence,
+                    recorded_at: Some(now_ts()),
+                    approval_id: out.approval_id.to_string(),
+                })),
+            });
+        }
+
+        debug!(
+            returned = %out.ledger_transaction_id,
+            approval = %out.approval_id,
+            was_first = out.was_first_insert,
+            "approval_required idempotent replay hit"
+        );
+        let replay = build_replay_response(pool, out.ledger_transaction_id).await?;
+        return Ok(RecordDeniedDecisionResponse {
+            outcome: Some(Outcome::Replay(replay)),
+        });
+    }
+
     let returned_tx_id = post_transaction::post_denied(
         pool,
         PostDeniedInput {
@@ -130,8 +199,6 @@ async fn handle_inner(
     )
     .await?;
 
-    let producer_sequence = req.producer_sequence;
-
     if returned_tx_id == ledger_transaction_id {
         return Ok(RecordDeniedDecisionResponse {
             outcome: Some(Outcome::Success(RecordDeniedDecisionSuccess {
@@ -139,6 +206,7 @@ async fn handle_inner(
                 audit_decision_event_id: audit_event_id.to_string(),
                 producer_sequence,
                 recorded_at: Some(now_ts()),
+                approval_id: String::new(),
             })),
         });
     }

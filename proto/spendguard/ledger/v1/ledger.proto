@@ -275,6 +275,21 @@ message RecordDeniedDecisionRequest {
   spendguard.common.v1.CloudEvent audit_event = 11;
   spendguard.common.v1.ContractBundleRef contract_bundle = 12;
   spendguard.common.v1.PricingFreeze pricing = 13;
+
+  // Round-2 #9 producer SP. When `final_decision == "REQUIRE_APPROVAL"`
+  // and both of these JSON blobs are non-empty, the ledger routes
+  // through `post_approval_required_decision` instead of the plain
+  // `post_denied_decision_transaction` — atomically writing both the
+  // audit_outbox row AND a fresh `approval_requests` row. The sidecar
+  // resume() path then has a row to look up.
+  //
+  // Shape: see `services/ledger/migrations/0037_post_approval_required_decision_sp.sql`
+  // header comment + `services/sidecar/src/server/adapter_uds.rs::approval_resume_payload`.
+  bytes decision_context_json = 14;
+  bytes requested_effect_json = 15;
+  // TTL for the approval_requests row when this is a REQUIRE_APPROVAL
+  // call. Default 3600s (1h) — caller can override per-tenant.
+  uint32 approval_ttl_seconds = 16;
 }
 
 message RecordDeniedDecisionResponse {
@@ -290,6 +305,10 @@ message RecordDeniedDecisionSuccess {
   string audit_decision_event_id = 2;
   uint64 producer_sequence = 3;
   google.protobuf.Timestamp recorded_at = 4;
+  // Round-2 #9 producer SP. Set when final_decision="REQUIRE_APPROVAL"
+  // and the SP wrote (or replayed) an approval_requests row. Empty
+  // string otherwise.
+  string approval_id = 5;
 }
 
 // ============================================================================
