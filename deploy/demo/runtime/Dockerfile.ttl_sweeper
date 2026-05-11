@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.7
 FROM rust:1.91-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -13,7 +14,11 @@ COPY services/leases ./services/leases
 COPY services/signing ./services/signing
 COPY services/ttl_sweeper ./services/ttl_sweeper
 WORKDIR /build/services/ttl_sweeper
-RUN cargo build --release --bin spendguard-ttl-sweeper
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-ttl-sweeper,target=/build/services/ttl_sweeper/target,sharing=locked \
+    cargo build --release --bin spendguard-ttl-sweeper \
+    && cp target/release/spendguard-ttl-sweeper /spendguard-ttl-sweeper
 
 # ---------------------------------------------------------------------------
 
@@ -23,8 +28,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates wget libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder \
-     /build/services/ttl_sweeper/target/release/spendguard-ttl-sweeper \
-     /usr/local/bin/spendguard-ttl-sweeper
+COPY --from=builder /spendguard-ttl-sweeper /usr/local/bin/spendguard-ttl-sweeper
 
 ENTRYPOINT ["/usr/local/bin/spendguard-ttl-sweeper"]
