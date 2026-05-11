@@ -19,25 +19,28 @@ global:
   imagePullPolicy: IfNotPresent
   imageRegistry: ghcr.io/m24927605
 
-# Codex round-6 P1 acknowledgement.
+# chart.profile selects the install posture.
 #
-# This Helm chart is currently a DEVELOPMENT/DEMO chart, not a
-# production-ready chart. Several services' Config::from_env() read
-# fields the templates don't wire (ENDPOINT_CATALOG_MANIFEST_URL,
-# MTLS_BOOTSTRAP_TOKEN, contract / schema bundle IDs + hashes,
-# FENCING_INITIAL_EPOCH, BIND_ADDR / HEALTH_ADDR for webhook receiver,
-# TLS env naming mismatches, etc.) — affected services
-# (canonical-ingest, sidecar, outbox-forwarder, ttl-sweeper,
-# webhook-receiver) will CrashLoopBackOff on `helm install`.
+# demo (default)
+#   Allows empty / placeholder values to render. Suitable for
+#   `helm template`, dev-cluster experimentation, and the compose-based
+#   demo path under deploy/demo.
 #
-# The compose-based demo path (deploy/demo) wires everything correctly
-# and is the supported deploy path until the P5-followup completes the
-# Helm env-mapping work.
+# production
+#   Enforces required-input gates at template render time:
+#     - sidecar.contractBundleHashHex MUST be set
+#     - sidecar.trustRootSpkiSha256Hex MUST be set
+#     - outboxForwarder.schemaBundleHashHex MUST be set
+#     - postgres.ledgerUrl / canonicalUrl MUST NOT contain CHANGE_ME
+#     - signing.mode != "disabled" (enforced per-service)
+#     - canonical-ingest strictVerification MUST be true (S8)
+#   Other invariants (workload_instance_id uniqueness, fencing scope
+#   epoch seeding, Secret existence) are operator-side responsibilities
+#   the chart cannot validate.
 #
-# chart.profile=demo (default) lets `helm template` and dev-cluster
-# experimentation proceed. chart.profile=production triggers an
-# explicit `helm fail` on the affected service templates to prevent
-# footgun deploys.
+# NOTE: production profile is INSTALLABLE but has not yet been
+# validated end-to-end on a real K8s cluster. Tracking: issue #3
+# (real-cluster kind validation, operator-side).
 chart:
   profile: "demo"   # demo | production
 
@@ -52,9 +55,22 @@ secrets:
     #   ttl-sweeper.crt, ttl-sweeper.key.
     existingSecret: spendguard-tls
   bundles:
-    # Name of pre-created Secret with contract / schema bundle data:
-    #   contract_bundle/<id>.tgz, contract_bundle/<id>.metadata.json,
-    #   schema_bundle/<id>.tgz, runtime.env, pricing.env.
+    # Name of pre-created Secret with FLAT keys (K8s Secret keys cannot
+    # contain "/", so the sidecar's expected `contract_bundle/<id>.tgz`
+    # subdirectory layout is reconstructed by this chart's `items.path`
+    # projection at mount time).
+    #
+    # Required flat keys (operator-supplied):
+    #   contract_bundle_tgz            — contract bundle .tgz bytes
+    #   contract_bundle_sig            — contract bundle sigstore .sig bytes
+    #   contract_bundle_metadata_json  — contract bundle metadata.json bytes
+    #   schema_bundle_tgz              — schema bundle .tgz bytes
+    #
+    # Chart projects them at /var/lib/spendguard/bundles/ as:
+    #   contract_bundle/<sidecar.contractBundleId>.tgz
+    #   contract_bundle/<sidecar.contractBundleId>.tgz.sig
+    #   contract_bundle/<sidecar.contractBundleId>.metadata.json
+    #   schema_bundle/<sidecar.schemaBundleId>.tgz
     existingSecret: spendguard-bundles
 
 # Postgres connection (external; chart does NOT provision Postgres).
@@ -116,10 +132,14 @@ sidecar:
   # MUST seed `fencing_scopes.current_epoch = N` matching this value
   # before installing. Set to 1 for first install.
   fencingInitialEpoch: 1
-  # Round-2 #3: Endpoint catalog manifest URL — sidecar pulls + verifies
-  # this manifest at startup + every manifestPullSeconds. The catalog
-  # publisher signs manifests with its ed25519 key; sidecar pins the
-  # corresponding public key under SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM.
+  # Endpoint catalog manifest URL — sidecar pulls + verifies this manifest
+  # at startup + every manifestPullSeconds. The catalog publisher signs
+  # manifests with its ed25519 key; sidecar pins the corresponding public
+  # key under SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM.
+  #
+  # The default below is a PLACEHOLDER DNS that this chart does not render.
+  # chart.profile=production rejects it; operator must supply a real URL
+  # pointing at their endpoint-catalog deployment (not provisioned here).
   endpointCatalogManifestUrl: "https://endpoint-catalog.spendguard:8443/v1/catalog/manifest"
   # Round-2 #3: Contract + schema bundle bootstrap. The chart's bundles
   # init container pre-pulls these .tgz files into the bundles-data
@@ -140,6 +160,14 @@ sidecar:
   mtlsBootstrapTokenSecret:
     name: spendguard-mtls-bootstrap
     tokenKey: token
+  # Endpoint catalog manifest signing key. Sidecar's main.rs reads
+  # SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM at startup and refuses
+  # to boot without it; the file holds the ed25519 PUBLIC key the
+  # catalog publisher signs manifests with. Operator pre-creates the
+  # Secret holding the PEM contents under `pemKey`.
+  manifestVerifyKey:
+    existingSecret: spendguard-manifest-verify-key
+    pemKey: manifest_verify_key.pub.pem
   # Open the UDS adapter socket on a hostPath so apps in other pods can
   # mount it. Set hostPath.enabled=false for an in-pod-only sidecar.
   hostPath:
