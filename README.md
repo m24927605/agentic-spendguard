@@ -250,7 +250,7 @@ Protobuf wire contracts under [`proto/spendguard/`](proto/spendguard/):
 
 **Docker Compose (demo / local dev):** `deploy/demo/compose.yaml` — full stack with PKI bootstrap, manifest signing, mTLS internal, all on one network.
 
-**Kubernetes (Helm):** `charts/spendguard/` — DaemonSet sidecar + Deployments for ledger / canonical_ingest / control_plane / dashboard / webhook_receiver. `chart.profile=production` fail-gate stays asserted until operator validates on a real cluster (see issue [#3](https://github.com/m24927605/agentic-spendguard/issues/3)).
+**Kubernetes (Helm):** `charts/spendguard/` — DaemonSet sidecar + Deployments for ledger / canonical_ingest / control_plane / dashboard / webhook_receiver. `chart.profile=production` enforces required-input gates (bundle hashes, trust-root SPKI, real Postgres URL) at template render time. Real-cluster end-to-end validation still pending (see issue [#3](https://github.com/m24927605/agentic-spendguard/issues/3)).
 
 **Signing modes:**
 - `local` — Ed25519 PKCS8 PEM mounted from K8s Secret (demo / on-prem)

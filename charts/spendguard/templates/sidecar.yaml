@@ -1,12 +1,17 @@
 {{- if .Values.sidecar.enabled }}
 {{- $component := "sidecar" }}
-{{- /* Codex round-6 P1: chart.profile=production gate. Sidecar
-       Config::from_env() reads ENDPOINT_CATALOG_MANIFEST_URL,
-       MTLS_BOOTSTRAP_TOKEN, contract / schema bundle IDs and hashes,
-       FENCING_INITIAL_EPOCH, plus several trust-root CA / SPKI fields
-       — none wired by this template. Tracked as P5-followup. */ -}}
+{{- /* chart.profile=production: required-input gates.
+       Values default to empty strings so demo / dev renders cleanly;
+       production install MUST supply real values. Sidecar refuses
+       to install bundles whose hash doesn't match, and the SPKI hash
+       is defense-in-depth against intermediate CA compromise. */ -}}
 {{- if eq .Values.chart.profile "production" -}}
-{{- fail "sidecar: Helm chart not yet production-ready. Service Config::from_env() requires ENDPOINT_CATALOG_MANIFEST_URL, MTLS_BOOTSTRAP_TOKEN, contract / schema bundle IDs+hashes, FENCING_INITIAL_EPOCH, trust-root CA/SPKI — template does not wire them. Tracked as P5-followup. Use deploy/demo (compose) for now, or set chart.profile=demo." -}}
+{{- if eq .Values.sidecar.contractBundleHashHex "" -}}
+{{- fail "sidecar.contractBundleHashHex is required under chart.profile=production (byte-exact hash of the contract bundle .tgz; sidecar refuses to install on mismatch)" -}}
+{{- end -}}
+{{- if eq .Values.sidecar.trustRootSpkiSha256Hex "" -}}
+{{- fail "sidecar.trustRootSpkiSha256Hex is required under chart.profile=production (sha256 of the trust-root CA SubjectPublicKeyInfo, hex-encoded; defense-in-depth pin)" -}}
+{{- end -}}
 {{- end -}}
 {{- /* Phase 5 GA hardening S6: signing-mode fail-gate.
        production profile MUST NOT allow disabled signing —

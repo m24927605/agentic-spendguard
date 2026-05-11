@@ -19,25 +19,28 @@ global:
   imagePullPolicy: IfNotPresent
   imageRegistry: ghcr.io/m24927605
 
-# Codex round-6 P1 acknowledgement.
+# chart.profile selects the install posture.
 #
-# This Helm chart is currently a DEVELOPMENT/DEMO chart, not a
-# production-ready chart. Several services' Config::from_env() read
-# fields the templates don't wire (ENDPOINT_CATALOG_MANIFEST_URL,
-# MTLS_BOOTSTRAP_TOKEN, contract / schema bundle IDs + hashes,
-# FENCING_INITIAL_EPOCH, BIND_ADDR / HEALTH_ADDR for webhook receiver,
-# TLS env naming mismatches, etc.) — affected services
-# (canonical-ingest, sidecar, outbox-forwarder, ttl-sweeper,
-# webhook-receiver) will CrashLoopBackOff on `helm install`.
+# demo (default)
+#   Allows empty / placeholder values to render. Suitable for
+#   `helm template`, dev-cluster experimentation, and the compose-based
+#   demo path under deploy/demo.
 #
-# The compose-based demo path (deploy/demo) wires everything correctly
-# and is the supported deploy path until the P5-followup completes the
-# Helm env-mapping work.
+# production
+#   Enforces required-input gates at template render time:
+#     - sidecar.contractBundleHashHex MUST be set
+#     - sidecar.trustRootSpkiSha256Hex MUST be set
+#     - outboxForwarder.schemaBundleHashHex MUST be set
+#     - postgres.ledgerUrl / canonicalUrl MUST NOT contain CHANGE_ME
+#     - signing.mode != "disabled" (enforced per-service)
+#     - canonical-ingest strictVerification MUST be true (S8)
+#   Other invariants (workload_instance_id uniqueness, fencing scope
+#   epoch seeding, Secret existence) are operator-side responsibilities
+#   the chart cannot validate.
 #
-# chart.profile=demo (default) lets `helm template` and dev-cluster
-# experimentation proceed. chart.profile=production triggers an
-# explicit `helm fail` on the affected service templates to prevent
-# footgun deploys.
+# NOTE: production profile is INSTALLABLE but has not yet been
+# validated end-to-end on a real K8s cluster. Tracking: issue #3
+# (real-cluster kind validation, operator-side).
 chart:
   profile: "demo"   # demo | production
 

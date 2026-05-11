@@ -1,12 +1,9 @@
 {{- if .Values.canonicalIngest.enabled }}
 {{- $component := "canonical-ingest" }}
-{{- /* Codex round-6 P1: chart.profile=production gate. Service
-       Config::from_env() reads SPENDGUARD_CANONICAL_INGEST_REGION and
-       SPENDGUARD_CANONICAL_INGEST_INGEST_SHARD_ID (no defaults); this
-       template doesn't wire either. Helm install on production profile
-       therefore CrashLoopBackOff. Tracked as P5-followup. */ -}}
-{{- if eq .Values.chart.profile "production" -}}
-{{- fail "canonical-ingest: Helm chart not yet production-ready. Service Config::from_env() requires SPENDGUARD_CANONICAL_INGEST_{REGION,INGEST_SHARD_ID} (no defaults); template does not wire them. Tracked as P5-followup. Use deploy/demo (compose) for now, or set chart.profile=demo to acknowledge this is a dev chart." -}}
+{{- /* chart.profile=production: refuse the CHANGE_ME default that
+       ships in values.yaml. Real connection string MUST be supplied. */ -}}
+{{- if and (eq .Values.chart.profile "production") (contains "CHANGE_ME" .Values.postgres.canonicalUrl) -}}
+{{- fail "postgres.canonicalUrl still contains the CHANGE_ME default; supply a real connection string under chart.profile=production" -}}
 {{- end -}}
 {{- /* Phase 5 GA hardening S8: strict signatures gate.
        production profile MUST run with strict mode on; flipping it
