@@ -82,9 +82,12 @@ spec:
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
             - name: SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL
               value: "https://{{ include "spendguard.fullname" . }}-canonical-ingest:50052"
-            - { name: SPENDGUARD_SIDECAR_TLS_CERT_PEM, value: "/etc/ssl/spendguard/sidecar.crt" }
-            - { name: SPENDGUARD_SIDECAR_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/sidecar.key" }
-            - { name: SPENDGUARD_SIDECAR_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # NOTE: sidecar/src/clients/mtls.rs uses MTlsPaths::default()
+            # which hardcodes the workload-cert paths. Files come from the
+            # `tls` volume mounted at /var/run/secrets/spendguard/ below,
+            # with the per-service Secret keys projected to tls.crt / tls.key.
+            # Do NOT wire SPENDGUARD_SIDECAR_TLS_* env vars here — they
+            # are not read by the sidecar boot path.
             - { name: SPENDGUARD_SIDECAR_UDS_PATH,     value: "/var/run/spendguard/adapter.sock" }
             # Endpoint catalog manifest verify key. Required by
             # sidecar/src/main.rs at startup (load_manifest_signing_key);
@@ -136,7 +139,9 @@ spec:
             - { name: SPENDGUARD_SIDECAR_FAIL_POLICY_JSON,           value: {{ .Values.failPolicy.overrides | quote }} }
             {{- end }}
           volumeMounts:
-            - { name: tls,                 mountPath: /etc/ssl/spendguard, readOnly: true }
+            # sidecar boot path waits for /var/run/secrets/spendguard/{tls.crt,tls.key,ca.crt}
+            # (MTlsPaths::default in services/sidecar/src/clients/mtls.rs).
+            - { name: tls,                 mountPath: /var/run/secrets/spendguard, readOnly: true }
             - { name: bundles,             mountPath: /var/lib/spendguard/bundles, readOnly: true }
             - { name: manifest-verify-key, mountPath: /etc/spendguard/manifest-verify-key, readOnly: true }
             {{- if eq .Values.signing.mode "local" }}
@@ -148,9 +153,17 @@ spec:
           resources:
             {{- toYaml .Values.sidecar.resources | nindent 12 }}
       volumes:
+        # Project the shared TLS Secret's per-service keys (sidecar.crt /
+        # sidecar.key) to the conventional tls.crt / tls.key filenames the
+        # sidecar binary expects at /var/run/secrets/spendguard/. Operator's
+        # Secret structure stays the same; chart adapts.
         - name: tls
           secret:
             secretName: {{ .Values.secrets.tls.existingSecret }}
+            items:
+              - { key: sidecar.crt, path: tls.crt }
+              - { key: sidecar.key, path: tls.key }
+              - { key: ca.crt,      path: ca.crt }
         - name: bundles
           secret:
             secretName: {{ .Values.secrets.bundles.existingSecret }}
