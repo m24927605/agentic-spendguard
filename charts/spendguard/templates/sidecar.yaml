@@ -164,9 +164,25 @@ spec:
               - { key: sidecar.crt, path: tls.crt }
               - { key: sidecar.key, path: tls.key }
               - { key: ca.crt,      path: ca.crt }
+        # bootstrap/bundles.rs reads four files at fixed sub-paths:
+        #   contract_bundle/<contractBundleId>.tgz
+        #   contract_bundle/<contractBundleId>.tgz.sig
+        #   contract_bundle/<contractBundleId>.metadata.json
+        #   schema_bundle/<schemaBundleId>.tgz
+        # K8s Secret keys cannot contain "/", so we project flat operator-
+        # supplied keys to those paths via items.path.
         - name: bundles
           secret:
             secretName: {{ .Values.secrets.bundles.existingSecret }}
+            items:
+              - key: contract_bundle_tgz
+                path: contract_bundle/{{ .Values.sidecar.contractBundleId }}.tgz
+              - key: contract_bundle_sig
+                path: contract_bundle/{{ .Values.sidecar.contractBundleId }}.tgz.sig
+              - key: contract_bundle_metadata_json
+                path: contract_bundle/{{ .Values.sidecar.contractBundleId }}.metadata.json
+              - key: schema_bundle_tgz
+                path: schema_bundle/{{ .Values.sidecar.schemaBundleId }}.tgz
         - name: manifest-verify-key
           secret:
             secretName: {{ .Values.sidecar.manifestVerifyKey.existingSecret }}
