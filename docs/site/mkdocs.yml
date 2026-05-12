@@ -44,6 +44,10 @@ theme:
 nav:
   - Home: index.md
   - Quickstart: quickstart.md
+  - Use cases:
+      - Pre-call budget caps: use-cases/pre-call-budget-cap.md
+      - Stop a runaway agent: use-cases/agent-runaway-protection.md
+      - Reservation pattern: use-cases/reservation-pattern.md
   - Concepts:
       - 6-layer architecture: concepts/architecture.md
       - Decision lifecycle: concepts/decision-lifecycle.md
