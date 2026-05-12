@@ -1,0 +1,73 @@
+name: Deploy docs to GitHub Pages
+
+# Runs on every push that touches the docs site or this workflow.
+# Other paths don't trigger a rebuild — keeps the action minute usage low.
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/site/**'
+      - 'README.md'
+      - '.github/workflows/docs-deploy.yml'
+  workflow_dispatch: {}
+
+# Pages deploy needs id-token for OIDC + pages:write for the artifact.
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# One deploy at a time. cancel-in-progress=false because we want the
+# most recent commit on main to win, not the first started.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # mkdocs-material's `git-revision-date-localized` plugin (if added
+          # later) needs full history. Cheap insurance.
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: docs/site/requirements.txt
+
+      # System deps for mkdocs-material[imaging]: Pillow needs jpeg/zlib;
+      # cairosvg needs Cairo + Pango. Without these, the `social` plugin
+      # fails at build time.
+      - name: Install system imaging libs
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libcairo2-dev libjpeg-dev libpango1.0-dev \
+            libgdk-pixbuf2.0-dev libffi-dev
+
+      - name: Install Python deps
+        run: pip install -r docs/site/requirements.txt
+
+      # Plain `mkdocs build` for now; will tighten to `--strict` in a
+      # follow-up once all internal cross-links are audited.
+      - name: Build site
+        working-directory: docs/site
+        run: mkdocs build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/site/site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
