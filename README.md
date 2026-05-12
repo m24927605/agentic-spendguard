@@ -4,11 +4,14 @@
 
 **Runtime safety rails for AI agents. Stop the bill before it lands.**
 
-[![Status](https://img.shields.io/badge/status-Phase%205%20GA%20hardening-success)](docs/PHASE_4_VALIDATION_REPORT.md)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.91-orange)](deploy/demo/runtime/Dockerfile.ledger)
-[![Postgres](https://img.shields.io/badge/postgres-15%2B-336791)](services/ledger/migrations/)
-[![gRPC](https://img.shields.io/badge/wire-gRPC%20%2B%20mTLS-purple)](proto/)
+Pre-call budget enforcement for LLM API calls. A Stripe-style auth/capture ledger sits between your agent and the upstream provider; over-budget calls are refused **before** the token spend happens, every decision is signed and audit-chained, and operators can require human approval on borderline calls. Framework adapters for **Pydantic-AI**, **LangChain**, **LangGraph**, **OpenAI Agents SDK**, and **Microsoft AGT**.
+
+[![Project status: Phase 5 GA hardening](https://img.shields.io/badge/status-Phase%205%20GA%20hardening-success)](docs/PHASE_4_VALIDATION_REPORT.md)
+[![Licensed under Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+[![Built with Rust 1.91](https://img.shields.io/badge/rust-1.91-orange)](deploy/demo/runtime/Dockerfile.ledger)
+[![Postgres 15+ backed ledger](https://img.shields.io/badge/postgres-15%2B-336791)](services/ledger/migrations/)
+[![gRPC wire with mTLS between every service](https://img.shields.io/badge/wire-gRPC%20%2B%20mTLS-purple)](proto/)
+[![spendguard-sdk on PyPI](https://img.shields.io/pypi/v/spendguard-sdk?label=pypi)](https://pypi.org/project/spendguard-sdk/)
 
 </div>
 
@@ -16,9 +19,9 @@
 
 ## The problem
 
-Your agent runs out of budget at 3 AM. By the time anyone notices, it's already retried the same `gpt-4o` call 47 times, each one charging the provider, none of them returning useful work. Or worse: an LLM-driven tool call leaks a request that costs $400 in tokens, and your post-hoc usage dashboard catches it 6 hours later.
+Stopping runaway LLM costs is the unsolved half of agent operations. Your agent runs out of budget at 3 AM. By the time anyone notices, it's already retried the same `gpt-4o` call 47 times, each one charging the provider, none of them returning useful work. Or worse: an LLM-driven tool call leaks a request that costs $400 in tokens, and your post-hoc usage dashboard catches it 6 hours later.
 
-The standard answer — "track usage, send alerts" — is reconciliation, not control. You see the bill *after* it lands.
+The standard answer — "track usage, send alerts" — is reconciliation, not control. You see the bill *after* it lands. What you actually want is pre-call budget enforcement: the LLM request never goes out if the budget can't cover it.
 
 SpendGuard inverts this. Every decision boundary an agent crosses, a sidecar evaluates first:
 
@@ -231,7 +234,17 @@ async with SpendGuardClient(socket_path="/var/run/spendguard/adapter.sock",
         resume_outcome = await e.resume(sg)
 ```
 
-Framework integrations live under [`sdk/python/src/spendguard/integrations/`](sdk/python/src/spendguard/integrations/): Pydantic-AI, LangChain, LangGraph, OpenAI Agents SDK, Microsoft AGT.
+### Framework integrations
+
+Each adapter wraps the framework's model / tool interface so the sidecar gates every LLM call at the framework's natural boundary — no application code changes beyond a one-line `SpendGuardClient` setup.
+
+| Framework | Module | What gets gated |
+|---|---|---|
+| **Pydantic-AI** | [`spendguard.integrations.pydantic_ai`](sdk/python/src/spendguard/integrations/pydantic_ai.py) | Every `Model.request()` (covers tool loops, retries, multi-step runs) |
+| **LangChain** | [`spendguard.integrations.langchain`](sdk/python/src/spendguard/integrations/langchain.py) | Every `BaseChatModel` invocation |
+| **LangGraph** | same module | Same wrapper covers LangGraph since it builds on LangChain `BaseChatModel` |
+| **OpenAI Agents SDK** | [`spendguard.integrations.openai_agents`](sdk/python/src/spendguard/integrations/openai_agents.py) | Every model call inside an Agent run |
+| **Microsoft AGT** | [`spendguard.integrations.agt`](sdk/python/src/spendguard/integrations/agt.py) | Composite mode: AGT's PolicyEngine + SpendGuard as a policy plugin |
 
 ---
 
@@ -256,6 +269,19 @@ Protobuf wire contracts under [`proto/spendguard/`](proto/spendguard/):
 - `local` — Ed25519 PKCS8 PEM mounted from K8s Secret (demo / on-prem)
 - `kms` — AWS KMS-backed ECDSA P-256 via IRSA (production)
 - `disabled` — empty signatures (refuses to construct outside `SPENDGUARD_PROFILE=demo`)
+
+---
+
+## Documentation
+
+The full docs site is built with MkDocs Material under [`docs/site/`](docs/site/). To preview locally:
+
+```bash
+pip install -r docs/site/requirements.txt
+cd docs/site && mkdocs serve
+```
+
+<!-- TODO: replace with public hosted URL once docs.spendguard.{tld} is live -->
 
 ---
 
