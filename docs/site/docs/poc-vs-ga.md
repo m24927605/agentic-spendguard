@@ -99,5 +99,9 @@ These are the items that block a real production deployment:
   gates need to land first. Expect another major slice of work
   before "I'm betting my agent's budget on this" is true.
 
+See [GA hardening slices](roadmap/ga-hardening-slices.md) for the
+design, implementation, test acceptance, and review gates that split
+these blockers into independently shippable PRs.
+
 We mark every POC limitation in code + docs explicitly so an operator
 who reads end-to-end can audit what they're getting.

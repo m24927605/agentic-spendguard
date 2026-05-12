@@ -62,3 +62,5 @@ SpendGuard is the cross-runtime budget governance layer.
 → [Quickstart](quickstart.md) — zero to a green DENY demo in 5 minutes
 → [Concepts](concepts/architecture.md) — 6-layer architecture
 → [POC vs GA gates](poc-vs-ga.md) — what's production-ready vs not
+→ [GA hardening slices](roadmap/ga-hardening-slices.md) — production
+  design, implementation, test, and review gates
