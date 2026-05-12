@@ -1,3 +1,10 @@
+---
+description: >-
+  Integrate SpendGuard with LangChain or LangGraph agents to enforce per-call
+  token budgets before the LLM request is sent, with signed audit trail and
+  human-approval flow on over-budget calls.
+---
+
 # LangChain & LangGraph integration
 
 Same module covers both since LangGraph operates on LangChain's
