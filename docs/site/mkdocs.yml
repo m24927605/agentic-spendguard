@@ -3,10 +3,11 @@ site_description: >-
   Open-source runtime safety layer that gates every LLM call against a budget
   before the spend lands. Pre-call enforcement, immutable audit chain,
   framework adapters for Pydantic-AI, LangChain, LangGraph, OpenAI Agents, AGT.
-# TODO: replace placeholder with the real public docs URL once deployed.
-# This value drives <link rel="canonical">, sitemap.xml absolute URLs,
-# and OG image absolute URLs. SEO leverage is near-zero until set correctly.
-site_url: https://spendguard.example.io
+# Public docs URL. Used by mkdocs-material to emit <link rel="canonical">
+# tags, absolute sitemap.xml URLs, and absolute OG image URLs. Deployment
+# target: GitHub Pages on the user-pages domain under the agentic-spendguard
+# project path. Update if the docs move to a custom domain.
+site_url: https://m24927605.github.io/agentic-spendguard/
 repo_url: https://github.com/m24927605/agentic-spendguard
 edit_uri: edit/main/docs/site/docs/
 
