@@ -1,3 +1,10 @@
+---
+description: >-
+  Honest assessment of which SpendGuard capabilities are production-ready
+  today versus blocked behind the GA hardening slices, with pointers to
+  every open gate and the roadmap entry that closes it.
+---
+
 # POC vs GA gates
 
 What's production-ready in this POC, and what's explicitly deferred to

@@ -1,3 +1,10 @@
+---
+description: >-
+  Deploy SpendGuard on Kubernetes with the included Helm chart — sidecar
+  DaemonSet, ledger, canonical-ingest, dashboard, and the chart.profile=production
+  input gates that catch CHANGE_ME placeholders before they reach a pod.
+---
+
 # Helm deployment
 
 ```bash

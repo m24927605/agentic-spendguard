@@ -1,0 +1,7 @@
+User-agent: *
+Allow: /
+
+# Sitemap — mkdocs-material emits /sitemap.xml on build using mkdocs.yml's
+# site_url. Update both this line and site_url when the docs site moves to
+# its real public hostname.
+Sitemap: https://spendguard.example.io/sitemap.xml
