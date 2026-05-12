@@ -1,3 +1,10 @@
+---
+description: >-
+  Run the full SpendGuard stack locally in five minutes — Docker Compose brings
+  up the sidecar, ledger, canonical-ingest, dashboard, and a Pydantic-AI agent
+  demo, with a working DENY decision out of the box.
+---
+
 # Quickstart
 
 From `git clone` to a green DENY demo in ≈5 minutes.
