@@ -1,8 +1,19 @@
 site_name: SpendGuard
-site_description: Runtime safety layer for AI agent budgets
+site_description: >-
+  Open-source runtime safety layer that gates every LLM call against a budget
+  before the spend lands. Pre-call enforcement, immutable audit chain,
+  framework adapters for Pydantic-AI, LangChain, LangGraph, OpenAI Agents, AGT.
+# TODO: replace placeholder with the real public docs URL once deployed.
+# This value drives <link rel="canonical">, sitemap.xml absolute URLs,
+# and OG image absolute URLs. SEO leverage is near-zero until set correctly.
 site_url: https://spendguard.example.io
-repo_url: https://github.com/m24927605/agentic-flow-cost-evaluation
+repo_url: https://github.com/m24927605/agentic-spendguard
 edit_uri: edit/main/docs/site/docs/
+
+extra:
+  # Suppress "Made with Material for MkDocs" footer (gives a tiny boost to
+  # crawl efficiency by reducing boilerplate; cosmetic SEO win).
+  generator: false
 
 theme:
   name: material
@@ -81,3 +92,11 @@ markdown_extensions:
 
 plugins:
   - search
+  # Social cards: auto-generates Open Graph + Twitter Card PNGs per page
+  # using the page title + meta.description front-matter. Requires the
+  # mkdocs-material[imaging] extra (Pillow + cairosvg) — see requirements.txt.
+  - social:
+      cards: true
+      cards_layout_options:
+        background_color: "#3F51B5"
+        color: "#FFFFFF"

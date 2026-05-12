@@ -1,0 +1,10 @@
+# Docs site build dependencies.
+#
+# Install:  pip install -r docs/site/requirements.txt
+# Build:    cd docs/site && mkdocs build --strict
+# Serve:    cd docs/site && mkdocs serve
+#
+# The [imaging] extra pulls Pillow + cairosvg for the `social` plugin
+# (auto-generated Open Graph cards). Without this, mkdocs.yml's
+# `plugins: - social:` block will fail at build time.
+mkdocs-material[imaging]>=9.5

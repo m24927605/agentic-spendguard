@@ -1,3 +1,10 @@
+---
+description: >-
+  SpendGuard is an open-source runtime safety layer that gates every LLM call
+  against a budget before the spend lands. Pre-call enforcement, immutable
+  audit chain, framework adapters for Pydantic-AI, LangChain, and more.
+---
+
 # SpendGuard
 
 > Runtime safety layer for AI agent budgets — sub-5ms per decision,
