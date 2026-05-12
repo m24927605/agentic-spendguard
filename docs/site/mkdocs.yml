@@ -52,6 +52,8 @@ nav:
   - Operations:
       - Dashboard: operations/dashboard.md
       - Control plane API: operations/control-plane.md
+  - Roadmap:
+      - GA hardening slices: roadmap/ga-hardening-slices.md
   - Reference:
       - Wire protocol (proto): reference/proto.md
       - Ledger schema: reference/ledger-schema.md
