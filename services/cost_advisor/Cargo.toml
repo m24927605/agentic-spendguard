@@ -9,7 +9,14 @@ description = "SpendGuard Cost Advisor — rule engine that reads the audit chai
 name = "spendguard_cost_advisor"
 path = "src/lib.rs"
 
+[[bin]]
+name = "spendguard-advise"
+path = "src/bin/spendguard_advise.rs"
+
 [dependencies]
+clap = { version = "4", features = ["derive", "env"] }
+bigdecimal = "0.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
 prost-types = "0.13"
