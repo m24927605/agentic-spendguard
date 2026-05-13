@@ -1,0 +1,7 @@
+[demo] handshake ok session_id=019e2064-0816-79e0-9d9d-e13ddda99e40
+[demo] using real OpenAI gpt-4o-mini via LangChain
+[demo] langchain ainvoke OK output='Hello, how are you?' run_id=019e2064-09fc-7169-a573-00d799c9b1f8
+[demo] DEMO_MODE=agent_real_langchain — skipping demo-verify-step7.
+[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)
+[demo] which never match real provider responses (gpt-4o-mini etc. return
+[demo] variable token counts). See SPENDGUARD_VIRAL_PLAYBOOK.todo.md F2.

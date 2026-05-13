@@ -65,12 +65,18 @@
 - **Detail**：[`docs/launches/v1-phase1-bug-report.md`](./launches/v1-phase1-bug-report.md)
 - **預估**：30 min 改 + 30-60 min 重 build + smoke test = ~1.5-2.5 小時
 
-### V1 · Real-stack LangChain end-to-end verification 🔄 Phase 1 done, P2 next
-- **Status**: 🔄 進行中
-- **Phase 1**：✅ 完成 — F1 fix 驗證後，real Rust stack + real OpenAI 整條跑通
-- **Phase 2**：🔴 開放 — 是否新增 `agent_real_langchain` mode（看 `agent_real_langgraph` 是否已涵蓋 LangChain 需求）
-- **Phase 3**：🔴 開放 — 4 個 decision path（CONTINUE / STOP / REQUIRE_APPROVAL / DEGRADE）真 stack 驗證
-- **Phase 4**：🔴 開放 — 寫 `benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.md` + codex review
+### V1 · Real-stack LangChain end-to-end verification ✅ (with caveats)
+- **Status**: ✅ 完成 — `benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.md`
+- **Phase 1**：✅ F1 後 real stack 完整 boot
+- **Phase 2**：✅ `agent_real_langchain` mode 已現成（run_demo.py:1028），verified e2e
+- **Phase 3 矩陣**：
+  - ✅ CONTINUE：real LangChain ChatOpenAI → real gpt-4o-mini → `output='Hello, how are you?'`
+  - ✅ STOP：deny mode，denied_decision posted、0 entries、0 reservations、audit row signed
+  - 🟡 REQUIRE_APPROVAL：dispatch + SDK transit OK，但 seed contract bundle 缺 REQUIRE_APPROVAL rule，resume flow 由 unit tests (PR #37/#38/#39) 覆蓋
+  - ❌ DEGRADE：未在 demo 中 wired
+- **Phase 4 codex review**：🟡 V1 prompt 要求，本次 session 未跑 — 留 separate session
+- **Follow-up**：(a) seed bundle 加 REQUIRE_APPROVAL + DEGRADE rule；(b) 新增 `agent_real_langchain_degrade` mode；(c) codex challenge 本文件
+- **Unblocked**：P2-4 LangChain upstream PR 可基於 CONTINUE + STOP 證據誠實展開
 - **Why**：M1 benchmark 用的是 `spendguard_shim/`（minimal reservation gateway, **不是真的 Rust sidecar**）跑 mock LLM。沒有真 LangChain → 真 sidecar stack → 真 OpenAI 的 e2e 證據前，任何 framework upstream PR (P2-4) 都會被 close 為 premature
 - **Scope**：跑通 `make demo-up DEMO_MODE=agent_real_langchain`（如不存在則新建），對 4 個 decision path（CONTINUE / STOP / REQUIRE_APPROVAL / DEGRADE）都收 evidence
 - **產出**：
