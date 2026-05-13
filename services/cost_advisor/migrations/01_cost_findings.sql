@@ -248,7 +248,7 @@ CREATE OR REPLACE FUNCTION cost_findings_upsert(
     p_estimated_waste     BIGINT,
     p_sample_decision_ids UUID[]
 ) RETURNS TABLE (
-    outcome           TEXT,                -- 'inserted' | 'updated'
+    outcome           TEXT,                -- 'inserted' | 'updated' | 'reinstated'
     finding_id        UUID,
     finding_detected_at TIMESTAMPTZ
 ) LANGUAGE plpgsql AS $$
