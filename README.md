@@ -52,6 +52,70 @@ Continuous-learning auto-optimization is intentionally **out of scope** — it's
 
 ---
 
+## How this compares to other LLM cost tools
+
+There are two questions worth separating:
+
+### 1. Direct head-to-head (benchmark-verified)
+
+[`benchmarks/runaway-loop/`](benchmarks/runaway-loop/) runs an
+identical fixture — 100 attempted calls, $1.00 budget, $0.18 per
+call — through three drop-in budget tools and reports ground-truth
+$ spent against a centralized published-pricing table.
+
+| Capability | **Agentic SpendGuard** | [`agentbudget`](https://github.com/sahiljagtap08/agentbudget) | [`agent-guard`](https://github.com/dipampaul17/AgentGuard) |
+|---|:---:|:---:|:---:|
+| Pre-call dollar reservation (refuse before call) | ✅ | — (post-call only) | — (post-call only) |
+| Mid-stream loop abort (raise on cap) | ✅ | ✅ (`BudgetExhausted`) | ✅ (`AGENTGUARD_LIMIT_EXCEEDED`) |
+| Self-hosted endpoint compatibility (custom OpenAI baseURL) | ✅ | ✅ | — (intercepts only `openai.com` / `anthropic.com`) |
+| Signed append-only audit chain (KMS) | ✅ | — | — |
+| Operator approval flow on borderline calls | ✅ | — | — |
+| Multi-tenant budget scoping (one process, N tenants) | ✅ | — | — |
+| Framework-native wrappers (Pydantic-AI, LangChain, LangGraph, OpenAI Agents, AGT) | ✅ | partial (LangChain callback, CrewAI middleware) | — (HTTP interception only) |
+| Drop-in vs sidecar | sidecar (UDS gRPC) | drop-in (`pip install`) | drop-in (`npm install`) |
+
+Headline benchmark numbers (full results in
+[RESULTS.md](benchmarks/runaway-loop/RESULTS.md)):
+
+- **Agentic SpendGuard**: 5 wire calls, $0.90 spent — **−10% vs $1 budget** (pre-call refusal at call #6)
+- **agentbudget**: 6 wire calls, $1.08 spent — +8% (post-call enforcement lets the 6th call complete first)
+- **agent-guard**: 100 wire calls, $18.00 spent — +1700% (silently bypassed by the self-hosted base URL)
+
+Run `make benchmark` from `benchmarks/runaway-loop/` to reproduce.
+
+### 2. Adjacent categories (different problems)
+
+These tools are sometimes positioned as alternatives but solve a
+different shape of problem. They're not in the head-to-head matrix
+because they're not drop-in pre-call budget enforcement — and we
+haven't run them through the benchmark to make a fair claim.
+
+| Tool | Category | What it does | Why it's not in the matrix |
+|---|---|---|---|
+| [Helicone](https://helicone.ai/) | observability + gateway | request log, cost dashboards, alerts | post-hoc category — alerting is not the same as fail-closed pre-call enforcement |
+| [Portkey](https://portkey.ai/) | gateway + virtual keys | virtual keys with budget caps, rate limits, fallbacks | a gateway your traffic flows through, not a per-agent-step reservation; we'd need to benchmark it before claiming win/lose |
+| [LiteLLM](https://docs.litellm.ai/) | gateway proxy | provider routing + per-key `max_budget` | similar shape to Portkey; gateway-class, would need its own benchmark |
+| [TrueFoundry](https://www.truefoundry.com/) | platform | platform-wide budget rules | platform-class; benchmarking requires running their full stack |
+| [LangSmith](https://smith.langchain.com/) | observability | trace/eval for LangChain agents | tracing-class — solves "what did my agent do" not "stop it before the bill" |
+
+If you're shopping in this space and want a side-by-side that
+includes the gateway/observability tools, file an issue and we'll
+add them to the benchmark properly. Doing it without running their
+real software would just produce another marketing matrix.
+
+> **Honest note** — Helicone Vault, Portkey virtual keys,
+> TrueFoundry budget rules, and LiteLLM `max_budget` all do *some*
+> form of cost gating. The Agentic SpendGuard wedge isn't "we cap
+> spend and they don't." It's the **combination semantics**:
+> reservation-then-commit ledger + signed audit chain + operator
+> approval workflow + multi-tenant scoping, designed for a platform
+> team that has to hand evidence to compliance after the bill
+> lands. If the only thing you need is a per-key dollar cap on a
+> gateway, you should use Portkey or LiteLLM and skip the sidecar
+> overhead.
+
+---
+
 ## Quick start (30 seconds, no AWS needed)
 
 ```bash
