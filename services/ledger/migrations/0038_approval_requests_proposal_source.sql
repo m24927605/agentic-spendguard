@@ -28,6 +28,12 @@
 -- =====================================================================
 -- 1) Add the columns.
 -- =====================================================================
+--
+-- Postgres 16 ADD COLUMN with a constant DEFAULT is metadata-only (no
+-- rewrite, brief ACCESS EXCLUSIVE for the catalog flip). The JSONB +
+-- UUID additions default to NULL (also metadata-only). All three
+-- ADDs together still hold ACCESS EXCLUSIVE for catalog work, but
+-- never rewrite the table.
 
 ALTER TABLE approval_requests
     ADD COLUMN proposal_source TEXT NOT NULL DEFAULT 'sidecar_decision'
@@ -42,18 +48,35 @@ ALTER TABLE approval_requests
 -- Defense in depth: when proposal_source='cost_advisor', the patch +
 -- finding pointer MUST be present. sidecar_decision rows leave both
 -- NULL (the original semantics).
+--
+-- Two-phase pattern (codex r5 P1-3): ADD CONSTRAINT NOT VALID is
+-- metadata-only — no scan, just SHARE UPDATE EXCLUSIVE briefly. Then
+-- VALIDATE CONSTRAINT runs an online scan under SHARE UPDATE EXCLUSIVE
+-- (concurrent reads + writes proceed). Without NOT VALID the ADD
+-- CONSTRAINT would scan under ACCESS EXCLUSIVE — blocking all writers
+-- on hot approval_requests for the scan duration.
 ALTER TABLE approval_requests
     ADD CONSTRAINT approval_requests_cost_advisor_fields_present
     CHECK (
         proposal_source <> 'cost_advisor'
         OR (proposed_dsl_patch IS NOT NULL AND proposing_finding_id IS NOT NULL)
-    );
+    )
+    NOT VALID;
+
+ALTER TABLE approval_requests
+    VALIDATE CONSTRAINT approval_requests_cost_advisor_fields_present;
 
 -- Filter index: the dashboard view that operators consume reads
 -- "all pending cost_advisor proposals for tenant" frequently. The
 -- partial index on (tenant_id, state, proposal_source) keeps that
 -- query cheap as the table grows.
-CREATE INDEX approval_requests_cost_advisor_pending_idx
+--
+-- approval_requests is NOT partitioned (0026 created it as a single
+-- table), so CREATE INDEX CONCURRENTLY is safe + online here.
+-- CREATE INDEX CONCURRENTLY cannot run inside an explicit transaction
+-- block; psql's `-f` runs each statement in its own implicit tx so
+-- this is fine for the demo init script.
+CREATE INDEX CONCURRENTLY approval_requests_cost_advisor_pending_idx
     ON approval_requests (tenant_id, created_at DESC)
     WHERE proposal_source = 'cost_advisor' AND state = 'pending';
 
@@ -68,10 +91,13 @@ COMMENT ON COLUMN approval_requests.proposing_finding_id IS
 -- 2) Strengthen immutability trigger to cover the new columns.
 -- =====================================================================
 --
--- Pattern matches 0029 (strengthen the same function via CREATE OR
--- REPLACE; trigger binding stays untouched). The new columns are
--- "always frozen" — set at INSERT, never mutated. There is no SP that
--- needs to mutate them.
+-- Pattern matches 0029 / 0036 (strengthen the same function via
+-- CREATE OR REPLACE; trigger binding stays untouched). Codex r5 P1-2
+-- caught that an earlier draft of this file dropped the 0036 bundling
+-- protections. This version PORTS FORWARD every guard from the prior
+-- four migrations and ADDS the three new cost_advisor freezes — net
+-- guarantee is: 0026 + 0029 + 0036 + cost_advisor (this file), no
+-- regression.
 
 CREATE OR REPLACE FUNCTION approval_requests_block_immutable_updates()
     RETURNS TRIGGER LANGUAGE plpgsql AS $$
@@ -84,11 +110,12 @@ BEGIN
         OR NEW.requested_effect       IS DISTINCT FROM OLD.requested_effect
         OR NEW.decision_context       IS DISTINCT FROM OLD.decision_context
         OR NEW.created_at             IS DISTINCT FROM OLD.created_at
+        -- 0029 (Codex round-4 P2): TTL + approver_policy frozen.
         OR NEW.ttl_expires_at         IS DISTINCT FROM OLD.ttl_expires_at
         OR NEW.approver_policy        IS DISTINCT FROM OLD.approver_policy
-        -- 0038 (Cost Advisor): freeze proposal provenance + patch body
-        -- so an approve action can never silently substitute a
-        -- different patch than the one that was reviewed.
+        -- 0038 (Cost Advisor P0): proposal provenance frozen so an
+        -- approve action can never silently substitute a different
+        -- patch than the one that was reviewed.
         OR NEW.proposal_source        IS DISTINCT FROM OLD.proposal_source
         OR NEW.proposed_dsl_patch     IS DISTINCT FROM OLD.proposed_dsl_patch
         OR NEW.proposing_finding_id   IS DISTINCT FROM OLD.proposing_finding_id
@@ -99,7 +126,7 @@ BEGIN
             USING ERRCODE = '23514';
     END IF;
 
-    -- (b) State-machine guard, unchanged from 0029.
+    -- (b) State-machine guard (unchanged from 0029).
     IF OLD.state <> 'pending' THEN
         IF NEW.state IS DISTINCT FROM OLD.state THEN
             RAISE EXCEPTION
@@ -117,6 +144,45 @@ BEGIN
                 OLD.approval_id
                 USING ERRCODE = '23514';
         END IF;
+
+        -- (c) Followup #9 / migration 0036: bundling columns are
+        -- once-frozen-once-set on terminal rows. PORTED FORWARD from
+        -- 0036 verbatim — codex r5 P1-2 caught an earlier draft of
+        -- 0038 dropping these guards.
+        --   * NULL → non-NULL: admit (the legal mark_approval_bundled write)
+        --   * non-NULL → anything different: reject (frozen)
+        --   * NULL → NULL: admit (no-op same-value UPDATE)
+        IF OLD.bundled_at IS NOT NULL
+            AND NEW.bundled_at IS DISTINCT FROM OLD.bundled_at
+        THEN
+            RAISE EXCEPTION
+                'approval_requests row %: bundled_at is frozen once set',
+                OLD.approval_id
+                USING ERRCODE = '23514';
+        END IF;
+        IF OLD.bundled_ledger_transaction_id IS NOT NULL
+            AND NEW.bundled_ledger_transaction_id IS DISTINCT FROM OLD.bundled_ledger_transaction_id
+        THEN
+            RAISE EXCEPTION
+                'approval_requests row %: bundled_ledger_transaction_id is frozen once set',
+                OLD.approval_id
+                USING ERRCODE = '23514';
+        END IF;
+        IF (NEW.bundled_at IS NULL) <> (NEW.bundled_ledger_transaction_id IS NULL) THEN
+            RAISE EXCEPTION
+                'approval_requests row %: bundled_at and bundled_ledger_transaction_id must be set together',
+                OLD.approval_id
+                USING ERRCODE = '23514';
+        END IF;
+    ELSE
+        -- Pending row (also from 0036): bundling columns must stay
+        -- NULL until terminal. Cost Advisor doesn't change this.
+        IF NEW.bundled_at IS NOT NULL OR NEW.bundled_ledger_transaction_id IS NOT NULL THEN
+            RAISE EXCEPTION
+                'approval_requests row %: bundling columns can only be set once the approval is terminal',
+                OLD.approval_id
+                USING ERRCODE = '23514';
+        END IF;
     END IF;
 
     RETURN NEW;
@@ -124,7 +190,7 @@ END;
 $$;
 
 COMMENT ON FUNCTION approval_requests_block_immutable_updates IS
-    'S14 + Codex round-4 + Cost Advisor P0: rejects UPDATEs that would mutate any frozen column. Always-frozen now includes proposal_source, proposed_dsl_patch, proposing_finding_id so cost_advisor-authored proposals carry the same forensic guarantees as sidecar decisions.';
+    'S14 + Codex round-4 (0029) + followup #9 (0036) + Cost Advisor P0 (0038): rejects UPDATEs that would mutate any frozen column. Always-frozen: identity + payload + ttl + approver_policy + proposal_source + proposed_dsl_patch + proposing_finding_id. Once-frozen-on-terminal: state, resolution metadata, bundled_at + bundled_ledger_transaction_id. Bundling columns set exactly once via mark_approval_bundled() after row is terminal.';
 
 -- =====================================================================
 -- 3) tenant_data_policy: cost_findings retention windows.
@@ -137,6 +203,11 @@ COMMENT ON FUNCTION approval_requests_block_immutable_updates IS
 -- cost_findings has no immutability trigger (it's a derived artifact,
 -- not an audit row) so DELETE is permitted by design.
 
+-- ADD COLUMN ... NOT NULL DEFAULT <constant> is metadata-only on
+-- Postgres 16; no row rewrite. The inline CHECK is added as part of
+-- the column definition, which Postgres can evaluate online for the
+-- constant default (no scan needed) — safe even on a hot
+-- tenant_data_policy.
 ALTER TABLE tenant_data_policy
     ADD COLUMN cost_findings_retention_days_open INT NOT NULL DEFAULT 90
         CHECK (cost_findings_retention_days_open >= 1);

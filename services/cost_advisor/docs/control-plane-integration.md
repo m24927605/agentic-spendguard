@@ -307,7 +307,7 @@ that publish event is the natural anchor).
 | Q2 | control_plane | Does the existing `Permission::ApprovalResolve` apply uniformly to cost_advisor + sidecar_decision rows, or do operators have different review obligations for the two sources? My read: same permission. Confirm. |
 | Q3 | bundle_registry | What is the exact trigger from "approval_requests.state→approved" to a new contract bundle build? Today the workflow is manually invoked; the cost_advisor loop wants a polling worker or a NOTIFY listener. P3.5 task. |
 | Q4 | bundle_registry | RFC-6902 patches in `proposed_dsl_patch`: which paths are addressable? Need a schema for the contract DSL's JSON Pointer surface so cost_advisor can validate patches at proposal time, not at CD time. |
-| Q5 | security | Cross-database soft FK (`approval_requests.proposing_finding_id → spendguard_canonical.cost_findings.finding_id`): is the cost_advisor service's validate-before-INSERT sufficient, or do we need a periodic reconciler that flags orphan rows? My read: validate-before-INSERT is enough for v0.1; revisit at scale. |
+| Q5 | security + cost_advisor | Cross-database soft FK (`approval_requests.proposing_finding_id → spendguard_canonical.cost_findings.finding_id`): **codex r5 P1-5 rejected my v1 answer**. Validate-before-INSERT has a TOCTOU window — between (validate finding exists, INSERT approval_requests) the retention sweeper can DELETE the finding, leaving a dangling `proposing_finding_id` whose dereference in the dashboard / CD pipeline either silently fails or applies an orphan proposal. The fix is in §9 below (added per r5). |
 
 ---
 
@@ -333,6 +333,60 @@ that publish event is the natural anchor).
 
 Total P3.5 (control_plane + dashboard + bundle_registry trigger): ~3
 days. Matches spec §9 estimate.
+
+---
+
+## 9. Cross-DB referential safety (added per codex r5 P1-5)
+
+The original §0 D2 + §5 design declared `approval_requests.proposing_finding_id → cost_findings.finding_id` a "soft FK enforced by validate-before-INSERT". Codex r5 P1-5 caught two real holes:
+
+1. **TOCTOU race**: between (cost_advisor reads `cost_findings`, validates the finding exists) and (cost_advisor INSERTs `approval_requests` with `proposing_finding_id`), the retention sweeper or an operator can DELETE the finding (`cost_findings` is a derived artifact with no immutability protection). The INSERT then commits with a dangling pointer.
+2. **Retention-driven dangling**: even after a valid INSERT, the retention sweeper can DELETE the originating finding while the proposal is still `pending` (e.g. operator hasn't reviewed in 90 days). The dashboard "view finding details" deep-link from the proposal page then 404s.
+
+### 9.1 Fix: reference-counted retention on cost_findings
+
+Add a `referenced_by_pending_proposal` boolean (or counter) column to `cost_findings`. retention_sweeper refuses to DELETE rows where this is TRUE/>0. The flag is maintained by:
+
+- INSERT into `approval_requests` with `proposal_source='cost_advisor'` → also UPDATE `cost_findings.referenced_by_pending_proposal=TRUE` for that finding_id. Both writes go in one cross-DB orchestration step in `cost_advisor` service (atomic via 2-phase commit OR by serializing: first canonical UPDATE, then ledger INSERT, with rollback compensation if the second fails).
+- approval_requests state→terminal (approved/denied/expired/cancelled) → UPDATE `cost_findings.referenced_by_pending_proposal=FALSE`.
+
+A periodic reconciler (~hourly) sweeps `cost_findings` and corrects drift: a finding flagged TRUE whose referencing approval row is actually terminal gets flipped to FALSE; a finding flagged FALSE whose pending approval still references it gets flipped to TRUE.
+
+### 9.2 Schema delta
+
+To land in P1 (not this P0; this is design intent only):
+
+```sql
+-- In spendguard_canonical
+ALTER TABLE cost_findings
+    ADD COLUMN referenced_by_pending_proposal BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE INDEX cost_findings_referenced_pending_idx
+    ON cost_findings (tenant_id)
+    WHERE referenced_by_pending_proposal = TRUE;
+```
+
+`retention_sweeper`'s future `CostFindingsPurge` sweep kind:
+
+```sql
+DELETE FROM cost_findings
+ WHERE tenant_id = $1
+   AND referenced_by_pending_proposal = FALSE
+   AND (
+        (status = 'open'      AND detected_at < now() - $2::interval)
+     OR (status IN ('dismissed','fixed','superseded')
+         AND detected_at < now() - $3::interval)
+   );
+```
+
+The reconciler runs as a P1 background job in cost_advisor. Out of P0 scope; the safety hole is closed at the design level via this section + the open-item routing in §6 Q5.
+
+### 9.3 Why not a hard FK / single DB
+
+We do NOT move `cost_findings` into `spendguard_ledger` to enforce a real FK because:
+- Audit chain + cost analytics have different scaling profiles. `canonical_events` + `cost_findings` are append-heavy + retention-managed; `spendguard_ledger` is the financial-truth DB with stricter SLOs.
+- Separating preserves the spec invariant "cost_advisor proposals are recommendations, not ledger events" — they reach `audit_outbox` only after operator approval flips a row to `approved` AND the bundle ships, never at proposal-create time.
+
+The cross-DB design stays; the safety hole is closed by the reference flag + reconciler instead.
 
 ---
 
