@@ -1,0 +1,13 @@
+{
+  "name": "agentguard-runner",
+  "version": "0.1.0",
+  "private": true,
+  "main": "runner.js",
+  "scripts": {
+    "start": "node runner.js"
+  },
+  "dependencies": {
+    "agent-guard": "^1.2.2",
+    "openai": "^4.73.0"
+  }
+}
