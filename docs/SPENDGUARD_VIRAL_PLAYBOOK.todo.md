@@ -86,18 +86,12 @@
 
 ## 🟡 Tier 2：playbook P1（兩週內）
 
-### P1-1 · 競品對比矩陣重寫
-- **Why**：codex must-fix #1。原矩陣材料性錯誤
-- **新 columns**（codex 建議）：
-  - agent-step budget reservation
-  - mid-stream abort
-  - signed audit chain
-  - approval pause/resume
-  - framework-native wrappers
-  - self-hosted enforcement
-- **新 rows**：SpendGuard / **AgentGuard** / **AgentBudget** / Portkey / LiteLLM / TrueFoundry / Helicone
-- **加 disclaimer**：「Helicone Vault, Portkey virtual keys, TrueFoundry budget rules, LiteLLM max-budget 等都做某種 budget — SpendGuard 的差異是 reservation/audit/approval 的組合語義，不是『他們不做 cap』」
-- **Block on**：M1 benchmark 完成後可填數字
+### P1-1 · 競品對比矩陣重寫 ✅
+- **Status**: ✅ 完成 — branch `docs/p1-1-competitor-matrix`
+- **位置**: README.md「How this compares to other LLM cost tools」section（Why this exists 與 Quick start 之間）
+- **設計**: 兩段
+  1. **Direct head-to-head（benchmark-verified）**: 只列 SpendGuard / AgentBudget / AgentGuard，因為這三個有 benchmark 數據；codex must-fix #1 的根因（其他 columns 沒實測）規避
+  2. **Adjacent categories（different problems）**: Helicone/Portkey/LiteLLM/TrueFoundry/LangSmith 在獨立 table，每個附「why it's not in the matrix」說明，加 disclaimer「reservation/audit/approval 組合語義不是他們不做 cap」
 
 ### P1-2 · Receipt 截圖（真 demo data）
 - **Block on**：M1 benchmark + B2
