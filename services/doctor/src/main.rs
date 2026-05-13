@@ -61,6 +61,10 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("failed to install rustls aws_lc_rs default provider");
+
     let cli = Cli::parse();
 
     let mut checks = Vec::new();
