@@ -1,0 +1,36 @@
+# Documentation of the active benchmark scenario.
+#
+# IMPORTANT: this file is reference documentation, NOT a config source.
+# The actual benchmark parameters are set as environment variables on
+# each service in compose.yml. If you change compose.yml, update this
+# file to match — the analyzer and runners do not read scenario.yaml.
+
+scenario_name: lumpy-cost-runaway
+
+budget_usd: 1.00
+max_calls: 100
+
+mock_llm:
+  # gpt-4o list pricing × these token counts = $0.18/call.
+  # Budget / cost = 5.55 (deliberately non-integer) so that post-call
+  # enforcement overshoots by one call (+8%) and pre-call reservation
+  # stops cleanly at five (-10%).
+  model: gpt-4o
+  input_tokens: 8000
+  output_tokens: 16000
+  latency_ms: 10
+  base_url: http://mock-llm:8080/v1
+
+spendguard_shim:
+  # Per-call reservation amount. Currently equal to the actual cost,
+  # which is the "exact-cost clairvoyance" limitation noted in
+  # README.md → "Honest critiques of this benchmark". A future
+  # scenario will introduce noisy actual-vs-reservation to exercise
+  # the release path.
+  reservation_usd: 0.18
+  base_url: http://spendguard-shim:8090
+
+pricing_table_source: |
+  Prices in benchmarks/runaway-loop/analyze/analyze.py are public list
+  rates as published by OpenAI/Anthropic as of 2026-05. See README.md
+  → "Pricing table" for the snapshot.

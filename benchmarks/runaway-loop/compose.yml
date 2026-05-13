@@ -1,0 +1,127 @@
+# Runaway-loop benchmark compose.
+#
+# Phase 1A: agentbudget vs agent-guard. Each runner makes up to
+# MAX_CALLS calls against the shared mock LLM until its library
+# enforcement kicks in. The mock LLM logs every call segregated by
+# X-Runner header; the analyzer applies a published-pricing table to
+# compute ground-truth $ spent and writes RESULTS.md.
+#
+# Bring-up:    make benchmark
+# Tear-down:   make benchmark-clean
+
+name: spendguard-benchmark
+
+services:
+  mock-llm:
+    build: ./mock_llm
+    container_name: benchmark-mock-llm
+    environment:
+      MOCK_LLM_LOG: /var/log/mock_llm.jsonl
+      # 8K in + 16K out @ gpt-4o list pricing = $0.18/call.
+      # Budget $1.00 / $0.18 = 5.55 calls — deliberately *not* an
+      # integer so that post-call enforcement (agentbudget) lands
+      # one call past the line, exposing the overshoot a pre-call
+      # reservation (spendguard) would have caught.
+      INPUT_TOKENS: "8000"
+      OUTPUT_TOKENS: "16000"
+      LATENCY_MS: "10"
+    volumes:
+      - mock-llm-log:/var/log
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8080/healthz\")'"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    networks: [benchmark-net]
+
+  agentbudget-runner:
+    build: ./runners/agentbudget
+    container_name: benchmark-agentbudget
+    depends_on:
+      mock-llm:
+        condition: service_healthy
+    environment:
+      OPENAI_BASE_URL: http://mock-llm:8080/v1
+      BUDGET_USD: "1.00"
+      MAX_CALLS: "100"
+      RESULT_PATH: /results/agentbudget.json
+    volumes:
+      - results:/results
+    networks: [benchmark-net]
+
+  agentguard-runner:
+    build: ./runners/agentguard
+    container_name: benchmark-agentguard
+    depends_on:
+      mock-llm:
+        condition: service_healthy
+    environment:
+      OPENAI_BASE_URL: http://mock-llm:8080/v1
+      BUDGET_USD: "1.00"
+      MAX_CALLS: "100"
+      RESULT_PATH: /results/agentguard.json
+    volumes:
+      - results:/results
+    networks: [benchmark-net]
+
+  spendguard-shim:
+    build: ./spendguard_shim
+    container_name: benchmark-spendguard-shim
+    environment:
+      BUDGET_USD: "1.00"
+      SHIM_LEDGER_LOG: /var/log/spendguard_shim.jsonl
+    volumes:
+      - shim-log:/var/log
+    healthcheck:
+      test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8090/healthz\")'"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+    networks: [benchmark-net]
+
+  spendguard-runner:
+    build: ./runners/spendguard
+    container_name: benchmark-spendguard
+    depends_on:
+      mock-llm:
+        condition: service_healthy
+      spendguard-shim:
+        condition: service_healthy
+    environment:
+      OPENAI_BASE_URL: http://mock-llm:8080/v1
+      SPENDGUARD_SHIM_URL: http://spendguard-shim:8090
+      BUDGET_USD: "1.00"
+      RESERVATION_USD: "0.18"
+      MAX_CALLS: "100"
+      RESULT_PATH: /results/spendguard.json
+    volumes:
+      - results:/results
+    networks: [benchmark-net]
+
+  analyzer:
+    build: ./analyze
+    container_name: benchmark-analyzer
+    depends_on:
+      agentbudget-runner:
+        condition: service_completed_successfully
+      agentguard-runner:
+        condition: service_completed_successfully
+      spendguard-runner:
+        condition: service_completed_successfully
+    environment:
+      RESULTS_DIR: /results
+      MOCK_LLM_LOG: /var/log/mock_llm.jsonl
+      OUTPUT_PATH: /results/RESULTS.md
+    volumes:
+      - mock-llm-log:/var/log:ro
+      - results:/results
+      - ./:/host:rw
+    networks: [benchmark-net]
+
+volumes:
+  mock-llm-log:
+  shim-log:
+  results:
+
+networks:
+  benchmark-net:
