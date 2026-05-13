@@ -31,19 +31,23 @@
 
 ## 🔥 Tier 0：真 moat — 多日工作
 
-### M1 · P0-1 Benchmark harness vs AgentGuard / AgentBudget
-- **Why**：codex 的 #1 must-fix。沒這個 launch 會被當場打臉。「Prove the wedge before polishing the wrapper」
-- **Scope**：建立 `benchmarks/runaway-loop/` — fixture multi-step agent runaway scenario，跑在 SpendGuard / AgentGuard / AgentBudget 三個對照組上，記錄 mid-stream abort 時機與成本差異
-- **產出**：
-  - `benchmarks/runaway-loop/scenario.py` — 可重現的 runaway agent
-  - `benchmarks/runaway-loop/configs/{spendguard,agentguard,agentbudget}.yaml`
-  - `benchmarks/runaway-loop/docker-compose.yml`
-  - `benchmarks/runaway-loop/RESULTS.md` — 數字 + 分析
-  - `benchmarks/README.md` — 對外宣告 + 可重現步驟
-- **成功指標**：3 個工具的對照數據可被第三方 reproduce；至少有一個維度 SpendGuard 顯著勝出（預期：approval workflow 或 multi-tenant 場景）
-- **預估工時**：3–5 天（含 token 預算）
-- **Branch**：`feat/benchmark-runaway-loop`
-- **Codex challenge**：完成後對 RESULTS.md 跑一次
+### M1 · P0-1 Benchmark harness vs AgentGuard / AgentBudget ✅
+- **Status**: ✅ 完成 — branch `feat/m1-benchmark-runaway-loop`, 3 commits
+- **產出**:
+  - `benchmarks/runaway-loop/{compose.yml,Makefile,README.md,RESULTS.md,scenario.yaml}`
+  - `benchmarks/runaway-loop/mock_llm/` — FastAPI mock OpenAI endpoint
+  - `benchmarks/runaway-loop/runners/{agentbudget,agentguard,spendguard}/`
+  - `benchmarks/runaway-loop/spendguard_shim/` — minimal reservation gateway
+  - `benchmarks/runaway-loop/analyze/analyze.py` — pricing-table aggregator
+- **Result** ($1.00 budget, $0.18/call, gpt-4o):
+  - SpendGuard: 5 wire calls, $0.90 (**-10%**), ReservationDenied at #6
+  - AgentBudget: 6 wire calls, $1.08 (+8%), BudgetExhausted at #6
+  - AgentGuard: 100 wire calls, $18.00 (+1700%), no abort (self-hosted endpoint bypass)
+- **Codex challenge**: ✅ 跑了 medium reasoning, 20 issues 提出, must-fix subset (9 個) 已修
+- **Follow-up open issues** (separate commits later):
+  - Real-sidecar runner (currently uses shim)
+  - Noisy-reservation scenario (release-path coverage)
+  - Concurrent-agent scenario
 
 ### M2 · P0-4 Platform engineer / CTO outreach list
 - **Why**：codex「real ICP」回饋 — 真受眾不是 CFO，是 platform engineering / AI infra leads
