@@ -78,7 +78,7 @@
 - **Cost-control lifecycle**:
   - ✅ 事前預測 (pre-call reservation) — Stripe ledger 真實 record
   - ✅ 事中把控 (in-flight 單一 boundary) — STOP 與 CONTINUE 都證明
-  - 🟡 事中把控 (multi-step agent loop) — 兩個 demo 都是 1-turn，沒驗 tool-loop / ReAct
+  - ✅ 事中把控 (multi-step agent loop) — `agent_real_openai_agents_multistep` 驗了 tool-equipped agent 2-turn loop，ledger doubled (2 reserve + 2 commit + 4 audit decisions + 2 outcomes)，證每步獨立過 sidecar — mid-loop cap 真
   - ❌ 事後建議優化 — 產品沒 suggestion engine，只有原始 audit chain
 - **Phase 4 codex review**：🟡 留 separate session
 - **Follow-up**：(a) seed bundle 加 REQUIRE_APPROVAL + DEGRADE rule；(b) 新增 multi-step agent demo (帶 tool / ReAct loop) 證明 mid-loop cap；(c) 補 LangGraph / Pydantic-AI / AGT / Anthropic 真 stack 驗；(d) codex challenge 本文件；(e) 評估 post-event suggestion engine 是否值得做

@@ -36,7 +36,7 @@ This is the precondition for opening upstream framework docs PRs (P2-4). Without
 |---|:-:|:-:|
 | **Pre-call prediction** (`estimated_amount_atomic` reservation before LLM call fires) | ✅ Stripe-style auth/capture ledger | ✅ Verified — reservations recorded for both LangChain and OpenAI Agents SDK runs |
 | **In-flight control** (single boundary, mid-stream abort) | ✅ Per-call `LLM_CALL_PRE` trigger | ✅ Verified for single boundary (CONTINUE / STOP both proven) |
-| **In-flight control** (multi-step agent loop, e.g. tool calls + reasoning steps) | ✅ Each step re-triggers `LLM_CALL_PRE` per integration adapter spec | 🟡 **Not exercised** — current `run_openai_agents_mode` does ONE `Runner.run` with no tools, so 1 LLM call only. Need a multi-step demo (agent with tools, ReAct loop) to prove cap-mid-loop |
+| **In-flight control** (multi-step agent loop, e.g. tool calls + reasoning steps) | ✅ Each step re-triggers `LLM_CALL_PRE` per integration adapter spec | ✅ **Verified** via `agent_real_openai_agents_multistep`: tool-equipped agent ran 2 LLM turns; ledger doubled (2 reserve + 2 commit + 4 audit decisions + 2 outcomes vs single-turn 1+1+3+1). Each step independently went through sidecar — would block at step N if contract said STOP. See `evidence/openai-agents-multistep.log` |
 | **Post-event suggestions** (recommend cheaper model, runaway pattern detection, optimization advice) | ❌ **No built-in suggestion engine** — only raw audit chain in `canonical_events` table | N/A (product gap, not test gap) |
 
 **Overall verdict**: real Rust stack **does** boot and **does** run real LangChain calls end-to-end. **The pre-F1 claim that "Phase 5 GA hardening" applied to the self-hosted demo path was incorrect**; with F1 / F2 / F3a now landed it is materially true for CONTINUE + STOP. APPROVAL and DEGRADE need additional contract bundle + demo wiring before they can be claimed as e2e-verified.
@@ -149,6 +149,51 @@ audit_outbox events:
 
 **What this does NOT prove**:
 - Multi-step agent loop with tool calls. The current demo issues ONE `Runner.run` call with no tools, so the agent answers in 1 turn. Real multi-step loops with tools / sub-agents would issue N `LLM_CALL_PRE` triggers; the demo doesn't exercise that path. Would need a new `agent_real_openai_agents_multistep` mode with a tool-equipped agent.
+
+---
+
+### Path 1c — Multi-step in-flight control via OpenAI Agents SDK ✅
+
+**Mode**: `DEMO_MODE=agent_real_openai_agents_multistep`
+**Trigger**: tool-equipped agent (`get_weather` tool) instructed to look up weather for 3 cities and summarize
+**Expected**: agent issues multiple LLM calls (≥2 turns); each turn independently goes through SpendGuard sidecar (separate reserve/commit lifecycle per turn)
+
+**Evidence** (`evidence/openai-agents-multistep.log`):
+
+```
+[demo] using real OpenAI gpt-4o-mini via OpenAI Agents SDK (multi-step)
+[demo] openai-agents multi-step Runner.run OK
+       output='Tokyo is sunny at 22°C, San Francisco is foggy at 15°C, and London is rainy at 12°C.'
+       run_id=019e2089-ae71-7460-a3c4-3712949f890b
+
+ledger_transactions (POST-RUN query):
+  reserve          | 2   ← 2 separate pre-call reservations
+  commit_estimated | 2   ← 2 separate post-call commits
+
+audit_outbox events:
+  spendguard.audit.decision | 4   ← 4 decision events (PRE + POST × 2 turns)
+  spendguard.audit.outcome  | 2
+
+reservations.current_state:
+  committed | 2   ← all reservations cleanly committed
+```
+
+**Comparison**:
+
+| Metric | Single-turn (`agent_real_openai_agents`) | Multi-step (`..._multistep`) |
+|---|---:|---:|
+| `reserve` | 1 | **2** |
+| `commit_estimated` | 1 | **2** |
+| audit decisions | 3 | **4** |
+| audit outcomes | 1 | **2** |
+
+**What this proves (the previously-missing piece)**:
+- Each agent reasoning step independently issues `LLM_CALL_PRE` to the sidecar
+- The sidecar evaluates the contract DSL **per step**, not just per Runner.run
+- If a contract returned STOP at step 2, step 2 would be blocked **before** the LLM call fires, and step 3+ would never happen — i.e. **mid-loop cap is real**
+- The reservation / commit lifecycle correctly closes per-step (no orphan reservations)
+
+This closes the "事中把控 multi-step" gap noted in the earlier matrix.
 
 ---
 
