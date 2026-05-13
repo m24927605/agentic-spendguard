@@ -350,7 +350,16 @@ Add a `referenced_by_pending_proposal` boolean (or counter) column to `cost_find
 - INSERT into `approval_requests` with `proposal_source='cost_advisor'` → also UPDATE `cost_findings.referenced_by_pending_proposal=TRUE` for that finding_id. Both writes go in one cross-DB orchestration step in `cost_advisor` service (atomic via 2-phase commit OR by serializing: first canonical UPDATE, then ledger INSERT, with rollback compensation if the second fails).
 - approval_requests state→terminal (approved/denied/expired/cancelled) → UPDATE `cost_findings.referenced_by_pending_proposal=FALSE`.
 
-A periodic reconciler (~hourly) sweeps `cost_findings` and corrects drift: a finding flagged TRUE whose referencing approval row is actually terminal gets flipped to FALSE; a finding flagged FALSE whose pending approval still references it gets flipped to TRUE.
+A periodic reconciler (~hourly) sweeps `cost_findings` and corrects drift. Codex r6 P1 caught that the v1 design only handled "terminal referenced approvals"; the reconciler must additionally handle every drift state:
+
+| Drift | Detection | Repair |
+|---|---|---|
+| Flagged TRUE, referencing approval is now terminal | LEFT JOIN cost_findings.referenced_by_pending_proposal=TRUE ⨝ approval_requests.proposing_finding_id WHERE approval_requests.state IN ('approved','denied','expired','cancelled') | flip flag to FALSE |
+| Flagged TRUE, but NO approval row references the finding (orphan flag from a half-committed orchestration step) | LEFT JOIN cost_findings TRUE rows ⨝ approval_requests; approval row IS NULL | flip flag to FALSE after a grace window (10 min) so we don't race an in-flight INSERT |
+| Flagged FALSE, but a pending approval row still references the finding (rare: the proposal-write path crashed between approval INSERT and flag UPDATE) | LEFT JOIN approval_requests state='pending' AND proposal_source='cost_advisor' ⨝ cost_findings WHERE referenced_by_pending_proposal=FALSE | flip flag to TRUE so the retention sweeper stops chasing the finding |
+| approval row exists, finding is GONE (the only truly-bad state) | approval_requests state='pending' AND proposal_source='cost_advisor' WHERE proposing_finding_id NOT IN (SELECT finding_id FROM cost_findings) | log + page operator; orphan proposals require manual decision (approve based on the cached evidence in approval_requests.decision_context, or cancel). This state SHOULD be unreachable if the reference flag works; the reconciler treats it as an invariant breach. |
+
+The reconciler runs as a P1 background job in cost_advisor. The 10-minute grace window for orphan flags is the explicit tolerance for half-committed orchestration: if the orchestrator crashes after canonical UPDATE but before ledger INSERT, the proposal-write path retries within 10 minutes (sub-minute on a healthy worker) and the flag stays TRUE; if it never retries, the reconciler clears the flag. Out of P0 scope; the safety hole is closed at the design level via this section + the open-item routing in §6 Q5.
 
 ### 9.2 Schema delta
 

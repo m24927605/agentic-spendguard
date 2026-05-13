@@ -121,6 +121,8 @@ Reverse-engineered from `services/sidecar/src/decision/transaction.rs` + `servic
 
 ## 4. Per-rule fireability under current schema
 
+> ⚠️ **Codex r5 + r6 SUPERSEDED**: the §4 table below claimed `idle_reservation_rate_v1` was fireable today. That was wrong; see §8.1. v0.1 currently has **zero** fireable rules. The §4 table is preserved for the audit-trail of the original analysis only.
+
 | Rule | Status today | Why |
 |---|---|---|
 | `failed_retry_burn_v1` ⭐ | ❌ NOT FIREABLE | Needs `(run_id, prompt_hash)` grouping + per-attempt cost — both missing. Even if we add `failure_class` (this P0), there is no `prompt_hash` to dedupe attempts on. |
@@ -133,6 +135,8 @@ So with no enrichment, exactly **1 of 4 v0 rules** can fire. With minimal enrich
 ---
 
 ## 5. Branch decision (spec §11.5 A2)
+
+> ⚠️ **Codex r5 + r6 SUPERSEDED**: §5 below recommended "ship `idle_reservation_rate_v1` in v0.1". That recommendation is wrong; v0.1 ships **no** rules until P0.5 + P0.6 land. The §5 narrative is preserved for traceability; §8 is authoritative.
 
 The audit hits two §11.5 A2 conditions simultaneously:
 
