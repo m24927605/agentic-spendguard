@@ -1,14 +1,17 @@
 ---
 description: >-
-  SpendGuard is an open-source runtime safety layer that gates every LLM call
-  against a budget before the spend lands. Pre-call enforcement, immutable
-  audit chain, framework adapters for Pydantic-AI, LangChain, and more.
+  Agentic SpendGuard is an open-source, audit-chain spend control layer for
+  LLM agents. KMS-signed decisions, multi-tenant budgets, operator approval
+  workflow. Framework adapters for Pydantic-AI, LangChain, LangGraph,
+  OpenAI Agents SDK, and Microsoft AGT.
 ---
 
-# SpendGuard
+# Agentic SpendGuard
 
-> Runtime safety layer for AI agent budgets — sub-5ms per decision,
-> immutable audit chain, deterministic policy enforcement.
+> Audit-chain spend control for LLM agents — sub-5ms per decision,
+> KMS-signed audit chain, deterministic policy enforcement.
+> Built for platform-engineering teams that need compliance evidence,
+> not just a runtime guardrail.
 
 ## What it does
 
