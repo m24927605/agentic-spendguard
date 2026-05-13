@@ -81,6 +81,18 @@ make benchmark
 That brings up the mock LLM, runs each runner sequentially against
 it, and writes `RESULTS.md` to this directory.
 
+A pre-recorded asciinema of the runner+analyzer phase
+([`cast/runaway-loop.cast`](cast/runaway-loop.cast), ~10 seconds) is
+checked in for embedding in docs / launch posts:
+
+```bash
+asciinema play cast/runaway-loop.cast    # watch in terminal
+bash cast/record.sh                      # re-record after changes
+```
+
+[Receipt artifacts](sample-receipts/) (the spendguard_shim audit
+ledger + the mock LLM call log) are snapshotted on every run.
+
 To wipe state and start over:
 
 ```bash

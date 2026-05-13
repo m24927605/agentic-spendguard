@@ -22,8 +22,12 @@ from pathlib import Path
 
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "/results"))
 MOCK_LLM_LOG = Path(os.environ.get("MOCK_LLM_LOG", "/var/log/mock_llm.jsonl"))
+SHIM_LEDGER_LOG = Path(
+    os.environ.get("SHIM_LEDGER_LOG", "/shim/spendguard_shim.jsonl")
+)
 OUTPUT_PATH = Path(os.environ.get("OUTPUT_PATH", "/results/RESULTS.md"))
 HOST_COPY = Path("/host/RESULTS.md")
+HOST_RECEIPT_DIR = Path("/host/sample-receipts")
 
 # Published USD per 1M tokens. Sources: openai.com/api/pricing,
 # anthropic.com/pricing as of 2026-05.
@@ -229,6 +233,24 @@ def main() -> None:
             shutil.copy(OUTPUT_PATH, HOST_COPY)
         except (OSError, PermissionError) as exc:
             print(f"[analyze] could not copy to host bind: {exc}")
+
+    # Snapshot the spendguard_shim's audit ledger as a "receipt"
+    # artifact — this is the audit-chain dimension teams asked for.
+    if SHIM_LEDGER_LOG.exists() and HOST_RECEIPT_DIR.parent.exists():
+        try:
+            HOST_RECEIPT_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copy(
+                SHIM_LEDGER_LOG, HOST_RECEIPT_DIR / "spendguard-ledger.jsonl"
+            )
+            shutil.copy(
+                MOCK_LLM_LOG, HOST_RECEIPT_DIR / "mock-llm-calls.jsonl"
+            )
+            print(
+                f"[analyze] wrote receipts to {HOST_RECEIPT_DIR}"
+            )
+        except (OSError, PermissionError) as exc:
+            print(f"[analyze] could not snapshot ledger receipts: {exc}")
+
     print(output)
 
 
