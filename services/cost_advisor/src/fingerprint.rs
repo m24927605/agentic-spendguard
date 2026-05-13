@@ -45,6 +45,17 @@ pub fn canonical_scope_repr(scope: &FindingScope) -> String {
 /// still allows the collision at the DB layer, but the semantic
 /// drift is hostile to operators.
 ///
+/// **Migration note** (codex CA-P1 r3 P3): adding `tenant_id` to the
+/// canonical input is a breaking change to the fingerprint algorithm.
+/// Pre-CA-P1 deployments computing fingerprints WITHOUT tenant_id
+/// would write rows under one fingerprint scheme; post-CA-P1 writes
+/// produce different fingerprints for the same logical finding.
+/// Mitigation: cost_findings + cost_findings_fingerprint_keys ship
+/// FRESH in CA-P0 (commit `e52f40a`) — no pre-existing rows to
+/// migrate. Future rule-version bumps (per spec §11.5 A6) cover any
+/// case where existing findings would need a re-fingerprint. New
+/// deployments are unaffected.
+///
 /// `time_bucket` is the rule's time-bucket label (e.g. an ISO-8601
 /// hour string `2026-05-13T07:00:00Z` for `failed_retry_burn_v1`, or
 /// a day string `2026-05-13` for `idle_reservation_rate_v1`). Bucket

@@ -29,6 +29,12 @@ use crate::rules::idle_reservation_rate;
 use crate::sql_rule::SqlCostRule;
 
 /// Single emitted finding row returned to a CLI / future REST caller.
+///
+/// `estimated_waste_micros_usd` is `Option<i64>` so consumers can
+/// distinguish "USD estimate pending" (None / null in JSON) from
+/// "$0 of verified waste" (Some(0)). Codex CA-P1 r3 caught that the
+/// earlier i64-with-unwrap_or(0) flattened these two states into
+/// indistinguishable zeros.
 #[derive(Debug, Serialize)]
 pub struct EmittedFinding {
     pub outcome: String,
@@ -36,7 +42,7 @@ pub struct EmittedFinding {
     pub rule_id: String,
     pub severity: String,
     pub confidence: f64,
-    pub estimated_waste_micros_usd: i64,
+    pub estimated_waste_micros_usd: Option<i64>,
     pub evidence: serde_json::Value,
     pub proposed_dsl_patch: Option<serde_json::Value>,
 }
@@ -86,12 +92,14 @@ pub async fn evaluate_tenant_day(
             rule_id: finding.proto.rule_id.clone(),
             severity: severity_str(finding.proto.severity()).to_string(),
             confidence: finding.confidence,
+            // Codex CA-P1 r3 P2: Option preserves "USD estimate
+            // pending" semantics — None / null in JSON. Some(n)
+            // means a real quantified figure from waste_estimate.
             estimated_waste_micros_usd: finding
                 .proto
                 .waste_estimate
                 .as_ref()
-                .map(|w| w.micros_usd)
-                .unwrap_or(0),
+                .map(|w| w.micros_usd),
             evidence: finding.proto_json.clone(),
             proposed_dsl_patch: proposed_patch,
         });
@@ -321,13 +329,17 @@ async fn upsert_finding(
     .bind::<Option<String>>(None)
     .bind::<Option<String>>(None)
     .bind(&finding.proto_json)
+    // Codex CA-P1 r3 P2: bind Option<i64> so NULL flows into
+    // cost_findings.estimated_waste_micros_usd (nullable per spec
+    // §4.1). Earlier .unwrap_or(0) coerced unquantified findings
+    // to a stored zero — indistinguishable from a real $0
+    // verified-waste row when consumers SUM the column.
     .bind(
         finding
             .proto
             .waste_estimate
             .as_ref()
-            .map(|w| w.micros_usd)
-            .unwrap_or(0),
+            .map(|w| w.micros_usd),
     )
     .bind(&finding.sample_decision_ids)
     .fetch_one(canonical)
