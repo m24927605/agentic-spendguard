@@ -1,10 +1,10 @@
 <div align="center">
 
-# 🛡️ SpendGuard
+# 🛡️ Agentic SpendGuard
 
-**Runtime safety rails for AI agents. Stop the bill before it lands.**
+**Audit-chain spend control for LLM agents. Stop the bill before it lands — and prove what you stopped.**
 
-Pre-call budget enforcement for LLM API calls. A Stripe-style auth/capture ledger sits between your agent and the upstream provider; over-budget calls are refused **before** the token spend happens, every decision is signed and audit-chained, and operators can require human approval on borderline calls. Framework adapters for **Pydantic-AI**, **LangChain**, **LangGraph**, **OpenAI Agents SDK**, and **Microsoft AGT**.
+A Stripe-style auth/capture ledger sits between your agent and the upstream provider. Over-budget calls are refused **before** the token spend happens, every decision is **KMS-signed and audit-chained**, and operators can require human approval on borderline calls. Built for platform-engineering teams that need multi-tenant budgets, compliance evidence, and L0–L3 enforcement strength — not just a runtime guardrail. Framework adapters for **Pydantic-AI**, **LangChain**, **LangGraph**, **OpenAI Agents SDK**, and **Microsoft AGT**.
 
 [![Project status: Phase 5 GA hardening](https://img.shields.io/badge/status-Phase%205%20GA%20hardening-success)](docs/PHASE_4_VALIDATION_REPORT.md)
 [![Licensed under Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)

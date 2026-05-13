@@ -1,9 +1,10 @@
 # spendguard-sdk
 
-Runtime safety layer client for AI agent frameworks. Talks to the
-SpendGuard sidecar over Unix-domain-socket gRPC; gates each LLM /
-tool-call boundary through a Contract DSL evaluator and an atomic
-budget ledger with immutable audit chain.
+Python SDK for **Agentic SpendGuard** — the audit-chain spend control
+layer for LLM agents. Talks to the Agentic SpendGuard sidecar over
+Unix-domain-socket gRPC; gates each LLM / tool-call boundary through
+a Contract DSL evaluator and an atomic budget ledger with KMS-signed,
+immutable audit chain.
 
 ## Install
 
