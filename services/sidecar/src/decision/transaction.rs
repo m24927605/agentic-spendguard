@@ -96,11 +96,22 @@ pub(crate) struct AuditEnrichment {
 ///   "free-form runtime metadata" comment.
 pub(crate) fn extract_enrichment(req: &DecisionRequest) -> AuditEnrichment {
     let ids = req.ids.as_ref();
+
+    // Codex r1 P2-2 fix: run_id flows into canonical_events.run_id
+    // (UUID column). If the adapter sends garbage, canonical_ingest's
+    // strict UUID parser would QUARANTINE the row instead of persisting.
+    // Validate at the sidecar boundary: if parse fails, treat as empty.
     let run_id = ids
         .map(|i| i.run_id.clone())
+        .filter(|s| Uuid::parse_str(s).is_ok())
         .unwrap_or_default();
+
+    // Codex r1 P3-1 fix: step_id whitespace-only would let rules group
+    // findings under " " instead of skipping. Treat whitespace-only as
+    // empty. Exact non-blank step_ids pass through unchanged.
     let agent_id = ids
         .map(|i| i.step_id.clone())
+        .filter(|s| !s.trim().is_empty())
         .unwrap_or_default();
 
     let inputs = req.inputs.as_ref();

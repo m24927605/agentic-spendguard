@@ -391,7 +391,7 @@ class SpendGuardClient:
         projected_p95_atomic: str = "",
         projected_p99_atomic: str = "",
         projected_unit: common_pb2.UnitRef | None = None,
-        prompt_text: str = "",
+        prompt_text: str | None = None,
     ) -> DecisionOutcome:
         """Run a `*.pre` decision boundary through the sidecar.
 
@@ -427,17 +427,22 @@ class SpendGuardClient:
         # Cost Advisor P0.5 enrichment: pass prompt_hash via
         # runtime_metadata. Sidecar reads it back in
         # services/sidecar/src/decision/transaction.rs::extract_enrichment
-        # and threads into the audit.decision CloudEvent. Empty
-        # prompt_text is the documented degraded path — the field stays
-        # NULL on canonical_events and rules skip the row.
+        # and threads into the audit.decision CloudEvent.
+        #
+        # Codex r1 P3 fix: None means "caller didn't pass a prompt"
+        # → skip enrichment. Empty string "" means "caller explicitly
+        # asked to hash empty content" → compute HMAC of empty bytes
+        # (matches Rust prompt_hash::compute behavior on empty input).
         runtime_metadata = None
-        if prompt_text:
+        if prompt_text is not None:
             from google.protobuf import struct_pb2
 
             from .prompt_hash import compute as compute_prompt_hash
 
             runtime_metadata = struct_pb2.Struct()
-            runtime_metadata["prompt_hash"] = compute_prompt_hash(prompt_text)
+            runtime_metadata["prompt_hash"] = compute_prompt_hash(
+                prompt_text, self._tenant_id
+            )
 
         inputs = adapter_pb2.DecisionRequest.Inputs(
             projected_claims=list(projected_claims),
