@@ -20,9 +20,10 @@
 - `agenticspendguard.dev` 註冊 + DNS + GitHub Pages CNAME 設定
 - 全部 commit 已 merge 到 `main`，HEAD: `6a6627e`
 
-### ⏳ 自動進行中（不用人工）
-- **A1**：Let's Encrypt 憑證簽發 → 完成後自動可訪問 `https://agenticspendguard.dev/`
-- **A2**：docs-deploy GitHub Action → 觸發後 5–10 分鐘文件站上線新 brand
+### ✅ 自動完成（已驗證）
+- **A1**：Let's Encrypt 憑證簽發 ✅ — 2026-05-13 完成，apex + www 雙包，2026-08-11 到期自動 renew
+- **A2**：docs-deploy GitHub Action ✅ — 已部署，`<title>Agentic SpendGuard</title>` 確認在線
+- **B3**：文件站新 brand 上線驗證 ✅ — `https://agenticspendguard.dev/` HTTP/2 200，HTTP→HTTPS 301，brand 文字多處出現
 
 ### 🔴 開放工作（依 leverage 排序）
 
