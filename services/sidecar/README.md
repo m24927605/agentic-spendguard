@@ -1,6 +1,6 @@
 # spendguard-sidecar
 
-Per-workload-instance sidecar binary for the SpendGuard Phase 1
+Per-workload-instance sidecar binary for the Agentic SpendGuard Phase 1
 first-customer (K8s SaaS-managed) POC. Runs as a sidecar container in
 the customer's app pod; in-process Pydantic-AI / LangGraph adapters
 connect via Unix Domain Socket (UDS) gRPC.
