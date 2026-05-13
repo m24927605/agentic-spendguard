@@ -39,10 +39,20 @@ PRICING_USD_PER_M = {
 def cost_for(model: str, input_tokens: int, output_tokens: int) -> float:
     p = PRICING_USD_PER_M.get(model)
     if not p:
-        return 0.0
+        # Don't silently zero out unknown models — that would let a
+        # model-name typo make a runner look free. Force the operator
+        # to add the model to the pricing table or rename in the runner.
+        raise KeyError(
+            f"model {model!r} not in PRICING_USD_PER_M — "
+            f"add it to analyze/analyze.py or rename in the runner. "
+            f"Known: {sorted(PRICING_USD_PER_M)}"
+        )
     return (input_tokens / 1_000_000) * p["input"] + (
         output_tokens / 1_000_000
     ) * p["output"]
+
+
+REQUIRED_RUNNERS = {"agentbudget", "agentguard", "spendguard"}
 
 
 def load_runner_records() -> list[dict]:
@@ -52,6 +62,16 @@ def load_runner_records() -> list[dict]:
             continue
         with path.open() as f:
             records.append(json.load(f))
+    seen = {r["runner"] for r in records}
+    missing = REQUIRED_RUNNERS - seen
+    if missing:
+        # A missing runner file means a runner crashed / was skipped.
+        # Better to fail loudly than to publish a partial table that
+        # implies the missing tool wasn't tested.
+        raise RuntimeError(
+            f"missing runner result file(s): {sorted(missing)} — "
+            f"saw only {sorted(seen)}. Did a runner crash?"
+        )
     return records
 
 
@@ -102,8 +122,8 @@ def render_markdown(runners: list[dict], ground: dict[str, dict]) -> str:
     )
     lines.append("## Summary\n")
     lines.append(
-        "| Runner | Budget | Calls succeeded | Ground-truth $ spent | Overshoot vs budget | Aborted at call # | Exception |\n"
-        "|---|---:|---:|---:|---:|---:|---|"
+        "| Runner | Budget | Wire calls¹ | Runner-reported succeeded | Ground-truth $ spent | Overshoot vs budget | Aborted at call # | Exception |\n"
+        "|---|---:|---:|---:|---:|---:|---:|---|"
     )
     for rec in runners:
         runner = rec["runner"]
@@ -118,10 +138,18 @@ def render_markdown(runners: list[dict], ground: dict[str, dict]) -> str:
         exc = rec.get("abort_exception_class") or "—"
         lines.append(
             f"| `{runner}` | ${budget:.2f} | {truth['calls']} | "
+            f"{rec['calls_succeeded']} | "
             f"${spent:.4f} | {ovr_str} | "
             f"{abort_at if abort_at is not None else '—'} | "
             f"`{exc}` |"
         )
+    lines.append(
+        "\n¹ Wire calls = HTTP calls observed by the mock LLM "
+        "(the source of ground-truth $). Runner-reported succeeded is "
+        "what the runner *thinks* completed before its library aborted. "
+        "These can differ if a library lets a call complete on the wire "
+        "before raising (post-call enforcement)."
+    )
 
     lines.append("")
     lines.append("## Per-runner detail\n")

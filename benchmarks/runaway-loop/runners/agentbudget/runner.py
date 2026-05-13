@@ -48,9 +48,13 @@ def main() -> None:
         loop_window_seconds=3600.0,
     )
 
+    # Disable retries so a runner attempt maps 1:1 to a wire call —
+    # otherwise the SDK's auto-retry would inflate the mock LLM's
+    # ground-truth call count without showing up in calls_attempted.
     client = openai.OpenAI(
         base_url=BASE_URL,
         api_key="sk-mock",
+        max_retries=0,
         http_client=httpx.Client(headers={"X-Runner": RUNNER_ID}),
     )
 

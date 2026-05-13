@@ -23,12 +23,18 @@ const RUNNER_ID = 'agentguard';
 async function main() {
   fs.mkdirSync(path.dirname(RESULT_PATH), { recursive: true });
 
-  await agentGuard.init({ limit: BUDGET_USD, mode: 'throw' });
+  // agentGuard.init() returns a guard instance; module-level getSpent /
+  // getRemaining functions don't exist. Capture the instance and probe
+  // its methods (getCost / getStats) for the self-report.
+  const guard = await agentGuard.init({ limit: BUDGET_USD, mode: 'throw' });
 
   const openai = new OpenAI({
     baseURL: BASE_URL,
     apiKey: 'sk-mock',
     defaultHeaders: { 'X-Runner': RUNNER_ID },
+    // Disable retries so a runner attempt maps 1:1 to a wire call —
+    // otherwise SDK auto-retries pollute the mock LLM's call count.
+    maxRetries: 0,
   });
 
   let callsAttempted = 0;
@@ -59,12 +65,23 @@ async function main() {
   let spentSelf = null;
   let remainingSelf = null;
   try {
-    if (typeof agentGuard.getSpent === 'function') spentSelf = agentGuard.getSpent();
-    if (typeof agentGuard.getRemaining === 'function') remainingSelf = agentGuard.getRemaining();
-    if (typeof agentGuard.getStats === 'function') {
-      const stats = agentGuard.getStats();
-      spentSelf = stats.totalSpent ?? stats.spent ?? spentSelf;
+    // Probe the guard instance returned by init() — agent-guard exposes
+    // getCost() / getStats() / getLimit() on the instance, not on the
+    // module.
+    if (guard && typeof guard.getCost === 'function') {
+      spentSelf = guard.getCost();
+    }
+    if (guard && typeof guard.getStats === 'function') {
+      const stats = guard.getStats();
+      spentSelf = stats.totalSpent ?? stats.spent ?? stats.cost ?? spentSelf;
       remainingSelf = stats.remaining ?? remainingSelf;
+    }
+    if (
+      remainingSelf == null
+      && spentSelf != null
+      && typeof spentSelf === 'number'
+    ) {
+      remainingSelf = BUDGET_USD - spentSelf;
     }
   } catch (e) {
     spentSelf = `<error: ${e.message}>`;
