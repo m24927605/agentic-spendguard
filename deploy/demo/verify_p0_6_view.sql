@@ -523,8 +523,9 @@ ROLLBACK TO SAVEPOINT fixture_5;
 -- Direct decoder contract tests (codex P0.6 r2 P3 coverage)
 -- =====================================================================
 -- These hit the helper directly to lock down the contract documented
--- in cost_advisor_safe_release_reason's COMMENT. Each case returns
--- NULL; no exceptions reach the caller.
+-- in cost_advisor_safe_release_reason's COMMENT. Cases A-F + H return
+-- NULL; only case G (kind=release, reason set) returns a non-NULL
+-- value. No exceptions reach the caller.
 SAVEPOINT decoder_contract;
 
 DO $$
