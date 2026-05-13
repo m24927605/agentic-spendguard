@@ -1,13 +1,15 @@
-site_name: SpendGuard
+site_name: Agentic SpendGuard
 site_description: >-
-  Open-source runtime safety layer that gates every LLM call against a budget
-  before the spend lands. Pre-call enforcement, immutable audit chain,
-  framework adapters for Pydantic-AI, LangChain, LangGraph, OpenAI Agents, AGT.
+  Audit-chain spend control for LLM agents. KMS-signed decisions, Stripe-style
+  auth/capture ledger, operator approval workflow, multi-tenant budgets.
+  Framework adapters for Pydantic-AI, LangChain, LangGraph, OpenAI Agents SDK,
+  Microsoft AGT. Built for platform-engineering teams that need compliance
+  evidence, not just a runtime guardrail.
 # Public docs URL. Used by mkdocs-material to emit <link rel="canonical">
-# tags, absolute sitemap.xml URLs, and absolute OG image URLs. Deployment
-# target: GitHub Pages on the user-pages domain under the agentic-spendguard
-# project path. Update if the docs move to a custom domain.
-site_url: https://m24927605.github.io/agentic-spendguard/
+# tags, absolute sitemap.xml URLs, and absolute OG image URLs.
+# Custom domain: agenticspendguard.dev. CNAME file at docs/CNAME ensures
+# GitHub Pages preserves the apex domain across deploys.
+site_url: https://agenticspendguard.dev/
 repo_url: https://github.com/m24927605/agentic-spendguard
 edit_uri: edit/main/docs/site/docs/
 
