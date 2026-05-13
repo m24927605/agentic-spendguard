@@ -1,7 +1,7 @@
 ---
 description: >-
   Pre-call token budget enforcement for OpenAI Agents SDK agents using
-  SpendGuard. Every model call inside Runner.run is reserved against a budget
+  Agentic SpendGuard. Every model call inside Runner.run is reserved against a budget
   before the LLM request is sent, with signed audit trail.
 ---
 

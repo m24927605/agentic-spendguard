@@ -68,7 +68,7 @@ Three properties that make this work:
 
 ## Show me the code
 
-The reservation is one call. The SpendGuard SDK handles the
+The reservation is one call. The Agentic SpendGuard SDK handles the
 auth/commit/release lifecycle:
 
 ```python

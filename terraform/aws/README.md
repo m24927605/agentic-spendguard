@@ -1,4 +1,4 @@
-# SpendGuard on AWS — Terraform module
+# Agentic SpendGuard on AWS — Terraform module
 
 Provisions the AWS infrastructure SpendGuard's Helm chart needs.
 

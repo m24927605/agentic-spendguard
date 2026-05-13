@@ -1,7 +1,7 @@
 ---
 description: >-
   Pre-call token budget enforcement for LangChain and LangGraph agents using
-  SpendGuard. One BaseChatModel wrapper covers both — works with
+  Agentic SpendGuard. One BaseChatModel wrapper covers both — works with
   create_react_agent, tool loops, with_structured_output, and bind_tools.
 ---
 

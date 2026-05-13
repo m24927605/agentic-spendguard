@@ -1,4 +1,4 @@
-# SpendGuard Helm Chart
+# Agentic SpendGuard Helm Chart
 
 Deploy the SpendGuard sidecar topology to a Kubernetes cluster.
 

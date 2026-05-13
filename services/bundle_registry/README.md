@@ -1,6 +1,6 @@
 # spendguard-bundle-registry
 
-OCI-based bundle distribution for the SpendGuard Phase 1 first-customer
+OCI-based bundle distribution for the Agentic SpendGuard Phase 1 first-customer
 (K8s SaaS-managed) POC.
 
 This is **not** a custom service binary. It is a *distribution pipeline*

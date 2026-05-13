@@ -1,6 +1,6 @@
 # Docker Compose deployment (POC)
 
-The fastest path to a working SpendGuard topology.
+The fastest path to a working Agentic SpendGuard topology.
 
 ```bash
 cd deploy/demo
