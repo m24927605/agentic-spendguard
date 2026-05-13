@@ -264,6 +264,60 @@ The compose / Helm chart adds a new TLS cert pair `cost-advisor.crt` /
 identity string: `cost-advisor:<workload_instance_id>`. Same pattern as
 `sidecar:demo-sidecar-1`, `outbox-forwarder:demo-outbox-forwarder`, etc.
 
+### 5.2.1 Trigger + RLS implementation (codex r7 P2)
+
+The hand-wavy "BEFORE INSERT trigger that rejects other values for this role" in §5.1 needs a concrete mechanism. Postgres supports two:
+
+**Mechanism A — Row-level security (preferred):**
+
+```sql
+ALTER TABLE approval_requests ENABLE ROW LEVEL SECURITY;
+ALTER TABLE approval_requests FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY cost_advisor_insert_self_only
+    ON approval_requests
+    FOR INSERT
+    TO cost_advisor_application_role
+    WITH CHECK (proposal_source = 'cost_advisor');
+
+-- Other roles bypass the policy (control_plane / sidecar legacy
+-- callers continue to INSERT with proposal_source='sidecar_decision').
+-- The default-permissive policy is omitted here so the role-scoped
+-- policy is the only INSERT path for cost_advisor.
+```
+
+Caveat: RLS policies are evaluated against the CURRENT role. The
+service must connect with login role `cost_advisor_login` that has
+membership in `cost_advisor_application_role` AND issue
+`SET ROLE cost_advisor_application_role` at session start. Without
+SET ROLE, `current_user` stays as the login role and the policy does
+not match. Document this in the service's connection-init code.
+
+**Mechanism B — BEFORE INSERT trigger (fallback if RLS unavailable):**
+
+```sql
+CREATE OR REPLACE FUNCTION enforce_cost_advisor_proposal_source()
+    RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+    IF pg_has_role(session_user, 'cost_advisor_application_role', 'USAGE')
+       AND NEW.proposal_source <> 'cost_advisor' THEN
+        RAISE EXCEPTION
+            'role % may only INSERT proposals with proposal_source=cost_advisor (got %)',
+            session_user, NEW.proposal_source
+            USING ERRCODE = '42501';   -- insufficient_privilege
+    END IF;
+    RETURN NEW;
+END; $$;
+CREATE TRIGGER cost_advisor_proposal_source_guard
+    BEFORE INSERT ON approval_requests
+    FOR EACH ROW
+    EXECUTE FUNCTION enforce_cost_advisor_proposal_source();
+```
+
+`pg_has_role(session_user, 'cost_advisor_application_role', 'USAGE')` correctly identifies whether the connecting role has membership, regardless of whether `SET ROLE` was issued — more forgiving than the RLS path. The trigger only rejects when the role IS cost_advisor AND it tries to write a non-cost_advisor proposal; other roles pass through unaffected.
+
+Decision: ship **Mechanism A (RLS)** if the runtime can guarantee `SET ROLE` at session start; otherwise ship Mechanism B (trigger). Lands in P1.
+
 ### 5.3 control_plane gate
 
 control_plane today authenticates the operator and gates writes by

@@ -303,6 +303,38 @@ BEGIN
        AND cost_findings.detected_at = v_existing_detected_at
        AND cost_findings.finding_id  = v_existing_finding_id;
 
+    -- Codex r7 P1: stale-mirror hole. If retention / operator deleted
+    -- the canonical row but the mirror survived, the UPDATE above
+    -- silently updates zero rows. Detect via GET DIAGNOSTICS and
+    -- self-heal: re-point the mirror at the caller's NEW
+    -- (finding_id, detected_at) and re-INSERT the canonical row from
+    -- the caller's data. The mirror's UNIQUE (tenant_id, fingerprint)
+    -- holds across the re-point; the surviving guarantee is "every
+    -- fingerprint has exactly one (mirror, canonical) pair".
+    --
+    -- Returns outcome='reinstated' so callers can distinguish a
+    -- self-heal from a normal UPDATE for metrics / alerting.
+    IF NOT FOUND THEN
+        UPDATE cost_findings_fingerprint_keys
+           SET finding_id = p_finding_id,
+               detected_at = p_detected_at
+         WHERE tenant_id = p_tenant_id AND fingerprint = p_fingerprint;
+
+        INSERT INTO cost_findings (
+            finding_id, fingerprint, tenant_id, detected_at,
+            rule_id, rule_version, category, severity, confidence,
+            agent_id, run_id, contract_bundle_id,
+            evidence, estimated_waste_micros_usd, sample_decision_ids
+        ) VALUES (
+            p_finding_id, p_fingerprint, p_tenant_id, p_detected_at,
+            p_rule_id, p_rule_version, p_category, p_severity, p_confidence,
+            p_agent_id, p_run_id, p_contract_bundle_id,
+            p_evidence, p_estimated_waste, p_sample_decision_ids
+        );
+        RETURN QUERY SELECT 'reinstated'::TEXT, p_finding_id, p_detected_at;
+        RETURN;
+    END IF;
+
     RETURN QUERY SELECT 'updated'::TEXT, v_existing_finding_id, v_existing_detected_at;
 END;
 $$;
