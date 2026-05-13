@@ -53,16 +53,24 @@ over UDS.
    │   runner     │   │   runner     │   │   runner     │
    │  (Python)    │   │  (Node.js)   │   │  (Python)    │
    └──────────────┘   └──────────────┘   └──────┬───────┘
-                                                 │ UDS gRPC
+                                                 │ HTTP
                                                  ▼
-                                    +-----------------------+
-                                    │ SpendGuard sidecar +  │
-                                    │ ledger (Phase 1B)     │
-                                    +-----------------------+
+                                    +--------------------------+
+                                    │ spendguard_shim          │
+                                    │ (FastAPI reservation     │
+                                    │  gateway — POC subset)   │
+                                    +--------------------------+
 
    ─► /results/{runner}.json (each runner's self-report)
    ─► analyzer reads both, applies pricing table, writes RESULTS.md
 ```
+
+The `spendguard_shim` is **not** the production sidecar. It is a
+FastAPI service that implements only the reserve/commit/release
+mechanic — see "Honest critiques of this benchmark" below for what
+that means and doesn't mean. The production sidecar (UDS gRPC,
+mTLS to ledger, KMS-signed audit chain, contract DSL, etc.) is
+exercised by `make demo-up` from the repo root.
 
 ## Reproducing
 
@@ -109,19 +117,24 @@ the time it finishes 100 calls.
 The analyzer's ground-truth $ comes from the published list prices
 embedded in [`analyze/analyze.py`](./analyze/analyze.py):
 
-| Model | Input ($/1M) | Output ($/1M) |
-|---|---:|---:|
-| `gpt-4o` | $2.50 | $10.00 |
-| `gpt-4o-mini` | $0.15 | $0.60 |
-| `o1` | $15.00 | $60.00 |
-| `o1-mini` | $1.10 | $4.40 |
-| `claude-3-5-sonnet-20241022` | $3.00 | $15.00 |
+| Model | Input ($/1M) | Output ($/1M) | Source |
+|---|---:|---:|---|
+| `gpt-4o` | $2.50 | $10.00 | https://openai.com/api/pricing/ |
+| `gpt-4o-mini` | $0.15 | $0.60 | https://openai.com/api/pricing/ |
+| `o1` | $15.00 | $60.00 | https://openai.com/api/pricing/ |
+| `o1-mini` | $1.10 | $4.40 | https://openai.com/api/pricing/ |
+| `claude-3-5-sonnet-20241022` | $3.00 | $15.00 | https://www.anthropic.com/pricing |
 
-Prices are the public list rates as of 2026-05. The point of using a
-*centralized* table — instead of trusting each library's internal
-pricing — is so that the "ground truth" number is the same number a
-human would compute from an OpenAI invoice, regardless of how stale
-or partial each library's internal table happens to be.
+Snapshot date: 2026-05. The point of using a *centralized* table —
+instead of trusting each library's internal pricing — is so that the
+"ground truth" number is the same number a human would compute from
+an OpenAI invoice, regardless of how stale or partial each library's
+internal table happens to be.
+
+If a runner sends a model name that isn't in this table, the
+analyzer **errors loudly** rather than silently scoring it as $0.
+That avoids the failure mode where a typo in a runner makes its
+spending look free.
 
 ## Dimensions this benchmark does NOT measure
 
@@ -143,20 +156,77 @@ benchmark intentionally scopes them out so the head-to-head on the
 ² Both ship internal pricing tables; staleness is on the user.
 ³ Confirmed by this benchmark — see results table.
 
-## Known limitations
+## Honest critiques of this benchmark
 
-- **Mock LLM only** — no real provider $$ is spent. The mock returns
-  deterministic usage tokens; the analyzer multiplies by the public
-  pricing table.
-- **AgentGuard's drop-in mode only intercepts calls to `api.openai.com`.**
-  Pointing the OpenAI client at a different base URL (self-hosted
-  proxy, vLLM, Ollama, LiteLLM gateway, mock server) bypasses its
-  HTTP-level interception entirely. The benchmark surfaces this as
-  "no abort, full overshoot."
-- **The SpendGuard runner uses a minimal reservation-gateway shim**,
-  not the full production sidecar. This isolates the reservation
-  dimension; the other dimensions in the table above are documented
-  qualitatively. Follow-up: swap the shim for a real-sidecar runner.
+Reasons a hostile reviewer can — correctly — call this narrow:
+
+1. **The SpendGuard runner uses a shim, not the production sidecar.**
+   `spendguard_shim/app.py` is a FastAPI service that implements the
+   reserve/commit/release mechanic and nothing else. The production
+   sidecar adds UDS gRPC + mTLS, idempotency keys, fencing tokens,
+   pricing freezes, contract DSL evaluation, KMS-signed audit chain,
+   and TTL-managed reservations (see `services/sidecar/`,
+   `services/ledger/`, `sdk/python/src/spendguard/client.py`). Those
+   are documented qualitatively below but **not measured here**. The
+   shim is the headline-finding's lower bound — production behaviour
+   is at least this good plus all the audit-and-correctness work the
+   benchmark doesn't exercise. Follow-up: swap the shim for a runner
+   that talks to the real sidecar over UDS.
+
+2. **The SpendGuard runner has exact-cost clairvoyance.** The
+   reservation amount (`RESERVATION_USD=0.18`) is hardcoded equal to
+   the actual per-call cost. A more honest scenario would jitter
+   actual cost (e.g. ±30% of reservation) and exercise the
+   release-on-overestimate path. With perfect knowledge, a pre-call
+   gate trivially beats a post-call gate; the interesting question
+   is what happens under real-world cost noise. A follow-up scenario
+   will introduce that.
+
+3. **AgentGuard's drop-in HTTP interception is domain-filtered**, not
+   strictly limited to `api.openai.com`. It matches hostnames
+   containing `openai.com` / `anthropic.com` (per the upstream
+   source). Pointing the OpenAI client at a self-hosted proxy /
+   gateway / vLLM endpoint bypasses interception. The benchmark
+   surfaces this as "no abort, full overshoot." Run the same script
+   against `https://api.openai.com/v1` (with a real key) and
+   AgentGuard will track and abort correctly. The finding is that
+   AgentGuard's cost control silently disappears the moment you put a
+   gateway in front of your provider — which most production teams do.
+
+4. **AgentBudget's loop detection is disabled here.** The runner sets
+   `max_repeated_calls=100000` so the benchmark measures budget
+   enforcement, not the heuristic that fires on identical-content
+   loops. Loop detection is a separate, valuable AgentBudget feature
+   that this benchmark doesn't exercise.
+
+5. **Sub-second test, single client, deterministic mock.** No
+   concurrency, no streaming, no provider rate limits, no real
+   network latency, no retry behaviour from the upstream. This is a
+   methodology test, not a production load test. `LATENCY_MS=10` and
+   the mock LLM uses blocking `time.sleep` inside an async route,
+   which would fall apart with concurrent agents.
+
+6. **Mock LLM only — no real $$ is at risk.** Switching to a real
+   provider would cost real money per run; the trade-off is that the
+   ground-truth $ figure is computed by the analyzer rather than
+   billed by the provider.
+
+7. **The "What this doesn't measure" capability table is documentation,
+   not benchmark output.** The "yes" entries for SpendGuard on
+   audit-chain / multi-tenant / approvals reflect what the production
+   sidecar does (see `services/`, `proto/`, the demo) — not what this
+   benchmark exercised.
+
+If any of these limitations would change a decision you're making,
+say so and we'll add a scenario.
+
+## Known limitations (operational)
+
+- The benchmark is sequential, not parallel, to keep the call counts
+  unambiguous. Production-realistic concurrency is a separate
+  scenario.
+- `RESULTS.md` is regenerated every run; commit it to lock in a
+  snapshot.
 
 ## Files
 

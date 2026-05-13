@@ -40,6 +40,7 @@ def main() -> None:
     client = openai.OpenAI(
         base_url=BASE_URL,
         api_key="sk-mock",
+        max_retries=0,
         http_client=httpx.Client(headers={"X-Runner": RUNNER_ID}),
     )
     shim = httpx.Client(base_url=SHIM_URL, timeout=5.0)
@@ -71,17 +72,22 @@ def main() -> None:
             )
             calls_succeeded += 1
         except Exception as exc:
-            shim.post("/release", json={"reservation_id": reservation_id})
+            release = shim.post(
+                "/release", json={"reservation_id": reservation_id}
+            )
+            release.raise_for_status()
             abort_at_call = i + 1
             abort_exception_class = type(exc).__name__
             abort_reason = str(exc)
             break
 
-        # 3. Commit.
-        shim.post(
+        # 3. Commit. Fail loudly if the shim refuses — silent commit
+        # failure would let the runner over-spend.
+        commit = shim.post(
             "/commit",
             json={"reservation_id": reservation_id, "actual_usd": RESERVATION_USD},
         )
+        commit.raise_for_status()
 
     elapsed = time.monotonic() - started
 
