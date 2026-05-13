@@ -1,0 +1,245 @@
+// SpendGuard Cost Advisor — typed evidence schema for cost-waste findings.
+//
+// Spec references:
+//   - cost-advisor-spec.md §4.0 FindingEvidence contract
+//   - cost-advisor-spec.md §5.1 v0 detected_waste rule taxonomy
+//   - cost-advisor-spec.md §5.1.2 failure_class ownership (canonical_ingest)
+//   - cost-advisor-spec.md §11.5 A1 fingerprint composition
+//   - cost-advisor-p0-audit-report.md §5 scope cut for v0.1
+//
+// Codename: cost_advisor (final brand TBD per spec §10).
+// Status: P0 skeleton — no service surface yet. The proto codifies the
+// FindingEvidence shape that rules MUST emit and that
+// `services/cost_advisor` consumes when upserting into `cost_findings`.
+//
+// Compatibility: proto3, additive evolution; no field removal pre-GA.
+// All fields with reserved IDs are placeholders for v0.2+ extensions
+// (multi-rule attribution, embedding cluster id, etc.).
+
+syntax = "proto3";
+
+package spendguard.cost_advisor.v1;
+
+// =============================================================================
+// Enums — closed sets that the §4.0 JSONSchema spelled out as `enum:[...]`.
+// =============================================================================
+
+// Scope of a finding. Per spec §4.0 + audit-report §5: in v0.1 only `RUN`
+// and `TENANT_GLOBAL` are reliably populated; `AGENT` is blocked on the
+// P0.5 enrichment workstream; `TOOL` is blocked on the v0.2 SDK change.
+enum ScopeType {
+  SCOPE_TYPE_UNSPECIFIED = 0;
+  AGENT          = 1;
+  RUN            = 2;
+  TOOL           = 3;
+  TENANT_GLOBAL  = 4;
+}
+
+// Unit allowlist for `Metric.unit` (spec §4.0).
+//
+// `usd_per_week` was caught as a contradiction in codex r3 — see spec
+// §11.5 "Cited metric usd_per_week unit alignment": severity rubric
+// computes that in code, never as a stored metric.
+enum MetricUnit {
+  METRIC_UNIT_UNSPECIFIED = 0;
+  MICROS_USD  = 1;
+  USD         = 2;
+  TOKENS      = 3;
+  CALLS       = 4;
+  SECONDS     = 5;
+  RATIO       = 6;
+  COUNT       = 7;
+  PERCENT     = 8;
+  MULTIPLIER  = 9;
+}
+
+// PII classification per spec §4.0. Anything other than `NONE` or
+// `MODEL_ID` is forbidden from being shipped to the Tier-3 LLM narrative
+// wrapper.
+enum PiiClassification {
+  PII_CLASSIFICATION_UNSPECIFIED = 0;
+  NONE                  = 1;
+  MODEL_ID              = 2;
+  AGENT_ID              = 3;
+  TOOL_NAME             = 4;
+  PROMPT_TEXT_EXCERPT   = 5;
+  TENANT_METADATA       = 6;
+}
+
+// Method by which `WasteEstimate.micros_usd` was computed (spec §11.5 A3).
+enum WasteMethod {
+  WASTE_METHOD_UNSPECIFIED = 0;
+  COUNTERFACTUAL_DIFF  = 1;  // diff vs deduped/cheaper alternative
+  BASELINE_EXCESS      = 2;  // this_period_cost - p95_baseline
+  REDUNDANT_CALL_SUM   = 3;  // sum of provably-wasted committed costs
+  HEURISTIC            = 4;  // optimization_hypothesis only
+}
+
+enum WasteConfidence {
+  WASTE_CONFIDENCE_UNSPECIFIED = 0;
+  HIGH    = 1;
+  MEDIUM  = 2;
+  LOW     = 3;
+}
+
+// Finding category (spec §5 split). Only DETECTED_WASTE ships in v0.1;
+// OPTIMIZATION_HYPOTHESIS is gated behind `--enable-hypothesis-rules`.
+enum FindingCategory {
+  FINDING_CATEGORY_UNSPECIFIED = 0;
+  DETECTED_WASTE           = 1;
+  OPTIMIZATION_HYPOTHESIS  = 2;
+}
+
+// Severity rubric (spec §4.0 "Severity rubric"). Derived in code, not
+// transmitted by rule SQL.
+enum Severity {
+  SEVERITY_UNSPECIFIED = 0;
+  CRITICAL  = 1;
+  WARN      = 2;
+  INFO      = 3;
+}
+
+// Failure taxonomy per spec §5.1.2. Owned by `canonical_ingest` (new
+// `canonical_events.failure_class` column added by this P0). Rules read
+// the column; they do not classify at query time.
+enum FailureClass {
+  FAILURE_CLASS_UNSPECIFIED = 0;  // sentinel; never persisted
+  UNKNOWN                  = 1;   // classifier could not match
+  PROVIDER_5XX             = 2;   // billed; provably wasted
+  PROVIDER_4XX_BILLED      = 3;   // billed; provably wasted
+  PROVIDER_4XX_UNBILLED    = 4;   // not billed; not wasted
+  TOOL_ERROR               = 5;   // conditional waste (downstream LLM)
+  MALFORMED_JSON_RESPONSE  = 6;   // billed; provably wasted
+  TIMEOUT_BILLED           = 7;   // billed; provably wasted
+  TIMEOUT_UNBILLED         = 8;   // not billed; not wasted
+  RETRY_THEN_SUCCESS       = 9;   // first N-1 attempts are wasted
+}
+
+// =============================================================================
+// Messages — FindingEvidence (spec §4.0 contract).
+// =============================================================================
+
+// One typed numeric fact cited by a finding. Narrative validator (spec
+// §7.1.5) string-templates from this; the LLM never emits free-form
+// numeric strings — codex r2 must-fix #1.
+message Metric {
+  // Stable key for narrative templates; pattern `^[a-z_][a-z0-9_]*$`.
+  // Examples: `total_failed_retries`, `wasted_micros_usd`, `tail_ratio`.
+  string name = 1;
+
+  // The numeric value. For monetary metrics use MICROS_USD (integer-ish
+  // value cast to double here for proto wire-compat; rules MUST round
+  // to whole micros before serializing).
+  double value = 2;
+
+  MetricUnit unit = 3;
+
+  // Audit trail for the value. Examples:
+  //   "canonical_events.payload_json->>'estimated_amount_atomic'"
+  //   "derived: SUM(failure_class IN (...).committed_micros_usd)"
+  //   "derived: commits.estimated_amount_atomic * unit.scale * pricing.usd_rate"
+  //
+  // Required when `name` contains `ratio`, `multiplier`, or `delta`
+  // (then `derivation` MUST also be set).
+  string source_field = 4;
+
+  // Defaults to NONE if unset on the wire. Anything other than NONE or
+  // MODEL_ID disqualifies this metric from Tier-3 LLM narrative input.
+  PiiClassification pii_classification = 5;
+
+  // Optional formula for derived metrics. Required if `name` contains
+  // `ratio`, `multiplier`, or `delta`.
+  string derivation = 6;
+
+  // Optional 95% confidence interval for statistical metrics
+  // (baseline_excess findings, etc.). Use sentinel field_presence
+  // (`has_*` accessors) — proto3 doubles default to 0.0 which is a
+  // legitimate value.
+  optional double ci95_low  = 7;
+  optional double ci95_high = 8;
+}
+
+// Quantified $-impact of a finding. Optional: some findings can't
+// quantify (heuristic / optimization_hypothesis rules emit nothing here).
+message WasteEstimate {
+  // Always emit as integer micros_usd; the int64 width handles up to
+  // ~9.2e12 USD which is well beyond the design envelope.
+  int64 micros_usd = 1;
+  WasteMethod method = 2;
+  WasteConfidence confidence = 3;
+  // <= 280 chars per spec §4.0. Used by dashboard "view raw evidence"
+  // and by narrative validator as a structural source-of-truth check.
+  string explanation = 4;
+}
+
+// Scope a finding applies to. Exactly one of the optional id fields
+// SHOULD be set for AGENT/RUN/TOOL; TENANT_GLOBAL leaves all NULL.
+//
+// Audit-report §4: in P0.5 enrichment, sidecar starts populating
+// `run_id`/`agent_id` on `canonical_events`; until then only the
+// TENANT_GLOBAL + RUN (with NULL run_id) shapes can fire reliably.
+message FindingScope {
+  ScopeType scope_type = 1;
+
+  // Optional id fields. proto3 strings default to "" — rule code
+  // treats "" as absent.
+  string agent_id      = 2;  // SpendGuardIds.step_id post-enrichment
+  string run_id        = 3;  // SpendGuardIds.run_id post-enrichment
+  string tool_name     = 4;  // deferred to v0.2 SDK enrichment
+  string model_family  = 5;  // UnitRef.model_family; blocked on P0.5
+
+  reserved 6 to 15;          // reserved for future scope projections
+}
+
+// The canonical evidence record a rule emits. Persisted into
+// `cost_findings.evidence` as JSONB after proto3 → JSON via
+// `serde_json` (proto3 well-known mapping). Idempotency key for the
+// table row is `fingerprint`.
+message FindingEvidence {
+  // `^[a-z0-9_]+_v[0-9]+$` per spec §4.0.
+  string rule_id = 1;
+
+  // Strictly positive. Bumping this MUST bump the trailing `_vN` in
+  // rule_id (spec §11.5 A6). Old findings are NOT auto-migrated.
+  uint32 rule_version = 2;
+
+  // SHA-256 hex of (rule_id || canonical_repr(scope) || time_bucket_iso8601),
+  // per spec §11.5 A1. Stable across nightly re-runs so upserts dedupe.
+  // 64-hex-char string; validated by `cost_findings_fingerprint`
+  // UNIQUE index in the §4.1 schema.
+  string fingerprint = 3;
+
+  FindingCategory category = 4;
+  FindingScope    scope    = 5;
+
+  repeated Metric metrics = 6;
+
+  // Sample `canonical_events.event_id`s the finding traced from.
+  // Cardinality bounded [1, 100]. Rule SHOULD pick a representative
+  // sample (first / last / boundary cases) rather than every match.
+  // String type for wire compatibility — UUIDs come over as canonical
+  // lowercase hex with dashes.
+  repeated string decision_refs = 7;
+
+  // Optional; null for unquantifiable hypothesis findings.
+  WasteEstimate waste_estimate = 8;
+
+  // Derived severity (spec §4.0). Carried for downstream consumers
+  // (dashboard query filters, narrative templates). Rule SQL leaves
+  // this UNSPECIFIED and the `services/cost_advisor` runtime fills it
+  // from the rubric.
+  Severity severity = 9;
+
+  // Optional ISO-8601 time bucket label used in fingerprint composition.
+  // Persisted so debug tools can recompute the fingerprint without
+  // guessing the rule's bucket granularity.
+  string time_bucket = 10;
+
+  // Optional `co_observed_rules` payload set by the §5.1.1 dedup phase.
+  // If non-empty, `rule_id` here is the surviving rule and the listed
+  // rules' suppressed findings carry `status='superseded'` +
+  // `superseded_by=<surviving_finding_id>` in the persisted table row.
+  repeated string co_observed_rules = 11;
+
+  reserved 12 to 31;
+}
