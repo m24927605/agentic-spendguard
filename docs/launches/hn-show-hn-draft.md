@@ -1,10 +1,10 @@
 # Show HN draft — Agentic SpendGuard
 
-**Status**: not yet sent. Hold until **three** preconditions clear:
+**Status**: not yet sent. Hold until **two** remaining preconditions clear:
 
-1. Google Search Console shows the docs site has been crawled (≥1 indexed page in the Coverage report).
-2. At least one framework integration PR (Pydantic-AI / LangChain / OpenAI Agents SDK / Microsoft AGT) has been merged into the upstream repo — gives social proof in the thread comments.
-3. **(NEW, per `docs/SPENDGUARD_VIRAL_PLAYBOOK.md` codex review)** Reproducible benchmark vs AgentGuard / AgentBudget is published under `benchmarks/`. Without this, the launch will be torn apart in comments — those two repos already own "real-time guardrail kills runaway agent loops."
+1. ⏳ Google Search Console shows the docs site (`agenticspendguard.dev`) has been crawled (≥1 indexed page in the Coverage report).
+2. ⏳ At least one framework integration PR (Pydantic-AI / LangChain / OpenAI Agents SDK / Microsoft AGT) has been merged into the upstream repo — gives social proof in the thread comments.
+3. ✅ **Reproducible benchmark vs AgentGuard / AgentBudget published.** Lives at `benchmarks/runaway-loop/` — `make benchmark` reproduces in ~30 seconds. Headline numbers vs the same $1.00 budget / 100-call runaway: SpendGuard −10% (5 calls @ $0.90, ReservationDenied at #6); agentbudget +8% (post-call BudgetExhausted at #6); agent-guard +1700% (silently bypassed by self-hosted endpoint).
 
 Per `docs/seo-plan.md` §1 Lever 4 sequencing: dev.to / Medium technical deep-dive follow-up goes out 1–2 weeks after the HN post, NOT before.
 
@@ -57,6 +57,22 @@ How it works:
 Framework adapters today: Pydantic-AI, LangChain, LangGraph, OpenAI
 Agents SDK, Microsoft AGT.
 
+Reproducible head-to-head benchmark in `benchmarks/runaway-loop/`
+(`make benchmark`, ~30s, no real provider $$ spent — uses a mock
+OpenAI endpoint). Same fixture (100 attempted calls, $1.00 cap,
+$0.18 per call) through three drop-in tools:
+
+  spendguard:   5 calls @ $0.90 (-10% vs $1)  ReservationDenied at #6
+  agentbudget:  6 calls @ $1.08 (+8%)          BudgetExhausted at #6
+  agent-guard:  100 calls @ $18  (+1700%)      no abort
+
+agentbudget overshoots because enforcement is post-call (the 6th
+call lands on the wire, *then* it raises). agent-guard doesn't
+enforce at all because its HTTP-level interception is hardcoded to
+api.openai.com / api.anthropic.com and silently no-ops the moment
+you point an OpenAI client at a self-hosted base URL — which is
+what happens the second you put a gateway in front of your provider.
+
 What it isn't:
 
 - Not a usage dashboard. It gates calls; you still need your own
@@ -66,14 +82,20 @@ What it isn't:
 - Not yet validated end-to-end on a real K8s cluster. Helm chart
   template-renders cleanly, but the kind validation is a tracked
   follow-up.
+- The benchmark uses a reservation-gateway shim, not the full
+  production sidecar (UDS gRPC + KMS-signed audit chain etc.). The
+  shim isolates the reservation dimension; see
+  benchmarks/runaway-loop/README.md → "Honest critiques of this
+  benchmark" for the unvarnished list.
 
 Tech stack: Rust 1.91 sidecar, Postgres 15 ledger with append-only
 audit_outbox and DB-enforced immutability triggers, mTLS gRPC between
 every service, signed CloudEvents, Python SDK on PyPI.
 
-Repo:  https://github.com/m24927605/agentic-spendguard
-Docs:  https://m24927605.github.io/agentic-spendguard/
-PyPI:  https://pypi.org/project/spendguard-sdk/
+Repo:       https://github.com/m24927605/agentic-spendguard
+Docs:       https://agenticspendguard.dev/
+Benchmark:  https://github.com/m24927605/agentic-spendguard/tree/main/benchmarks/runaway-loop
+PyPI:       https://pypi.org/project/spendguard-sdk/
 
 Apache 2.0. Solo project; happy to take feedback on the design,
 especially the contract DSL surface and the reservation TTL semantics
