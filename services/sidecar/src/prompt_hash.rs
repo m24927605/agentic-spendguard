@@ -5,43 +5,45 @@
 //! (which compute it pre-call) AND the Rust sidecar (which carries it
 //! into `canonical_events.payload_json`).
 //!
-//! Normalization rules (v1 — see audit-report §0.1 + CA-P0.5-prompt.md):
+//! Privacy: per codex P0.5 r1 P2, prompt_hash is **tenant-salted HMAC**
+//! not plain SHA-256. HMAC-SHA256 with `tenant_id` as the key defeats
+//! cross-tenant correlation (two tenants asking the same prompt produce
+//! different hashes) and raises the bar against dictionary attacks on
+//! common prompts. Rules dedupe WITHIN a tenant, where the HMAC key is
+//! constant, so behavior is unchanged.
 //!
-//! 1. UTF-8 (any non-UTF8 byte → degraded: return None / empty).
+//! Normalization rules (v1):
+//!
+//! 1. UTF-8 (any non-UTF8 byte → degraded: caller passes empty).
 //! 2. Trim leading + trailing ASCII whitespace ONLY. We do NOT
 //!    collapse internal whitespace because LLMs may be token-boundary-
 //!    sensitive — `"hello world"` ≠ `"hello  world"` for
 //!    fingerprinting purposes.
-//! 3. NO Unicode normalization (NFC) in v1. Most adapters generate
-//!    prompts in normalized form already (Python `str` and Node strings
-//!    default to NFC-equivalent producers). If two prompts that visually
-//!    look identical produce different hashes due to NFC/NFD mismatch,
-//!    that's a v0.2 issue and a unicode-normalization dep will be
-//!    introduced then. Document as a known limit in the spec FAQ.
-//! 4. Output: lowercase hex SHA-256 (matches `FindingEvidence.fingerprint`
-//!    encoding in `services/cost_advisor/src/fingerprint.rs`).
+//! 3. NO Unicode normalization (NFC) in v1.
+//! 4. Output: lowercase hex HMAC-SHA256 (64 chars).
 //!
-//! The Python adapter side (`adapters/pydantic-ai/spendguard_pydantic_ai
-//! /prompt_hash.py`) implements the matching algorithm; test vectors
-//! shared via `tests/prompt_hash_vectors.rs` keep them in lockstep.
+//! The Python adapter side (`sdk/python/src/spendguard/prompt_hash.py`)
+//! implements the matching algorithm; the `SHARED_VECTORS` test set
+//! below mirrors `sdk/python/tests/test_prompt_hash.py` and locks them
+//! byte-equal.
 
-use sha2::{Digest, Sha256};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 
-/// Compute the canonical prompt hash for the given prompt text.
+type HmacSha256 = Hmac<Sha256>;
+
+/// Compute the canonical tenant-salted prompt hash.
 ///
-/// Returns lowercase hex SHA-256 (64 chars). For an empty prompt
-/// (after trim), returns the SHA-256 of empty bytes — caller decides
-/// whether that's a valid identifier or should be skipped.
-pub fn compute(prompt_text: &str) -> String {
+/// `tenant_id` becomes the HMAC key; `prompt_text` is the message.
+/// Returns 64-char lowercase hex string.
+pub fn compute(prompt_text: &str, tenant_id: &str) -> String {
     let trimmed = prompt_text.trim_matches(is_ascii_whitespace);
-    hex::encode(Sha256::digest(trimmed.as_bytes()))
+    let mut mac = HmacSha256::new_from_slice(tenant_id.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(trimmed.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
-/// Same set as Rust's `char::is_ascii_whitespace`, exposed here for
-/// explicit-spec parity with the Python side. Specifically:
-///   space (0x20), tab (0x09), newline (0x0A), form feed (0x0C),
-///   carriage return (0x0D).
-/// Note: this set does NOT include vertical tab (0x0B) or NBSP (0xA0).
 fn is_ascii_whitespace(c: char) -> bool {
     matches!(c, ' ' | '\t' | '\n' | '\x0C' | '\r')
 }
@@ -50,43 +52,43 @@ fn is_ascii_whitespace(c: char) -> bool {
 mod tests {
     use super::*;
 
-    /// Shared test vectors. The Python adapter has identical vectors
-    /// in adapters/pydantic-ai/tests/test_prompt_hash.py — any drift is
-    /// a P0 bug for cost_advisor's run-scoped dedup. Expected hashes
-    /// are the literal SHA-256 of (trimmed) bytes; verified against
-    /// `printf '%s' "..." | shasum -a 256` at vector creation time.
+    const TEST_TENANT: &str = "00000000-0000-4000-8000-000000000001";
+
+    /// Pinned HMAC-SHA256 vectors. Verified against
+    /// `printf '%s' "..." | openssl dgst -sha256 -hmac "$TEST_TENANT"`.
+    /// Mirror in sdk/python tests.
     const SHARED_VECTORS: &[(&str, &str)] = &[
-        // 1. Empty string → SHA-256 of empty bytes (RFC 6234).
+        // 1. Empty string.
         (
             "",
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            "f35cfe956f859804e9c85f0f9b7ab40f754518045f0af59d5d0da0906f000a08",
         ),
         // 2. Simple ASCII prompt.
         (
             "What is the capital of France?",
-            "115049a298532be2f181edb03f766770c0db84c22aff39003fec340deaec7545",
+            "fcc518b02824c4728ab70e698328685894e07a6f1fa1b19886407188425af723",
         ),
         // 3. Leading + trailing whitespace stripped to same hash as 2.
         (
             "  What is the capital of France?\n",
-            "115049a298532be2f181edb03f766770c0db84c22aff39003fec340deaec7545",
+            "fcc518b02824c4728ab70e698328685894e07a6f1fa1b19886407188425af723",
         ),
         // 4. Internal whitespace preserved (DISTINCT from 2).
         (
             "What is  the capital of France?",
-            "4dfda0d35066824cbcb5d92f0345eb3644089840a411f97da9753f66a85bdf2d",
+            "b0c13ce5053c66c6d3883662db65c6ce2034920e3bc4544ff370f070e9ed5bf4",
         ),
-        // 5. Unicode prompt (NFC byte-identical from str/String).
+        // 5. Unicode prompt.
         (
             "Réponds en français.",
-            "7dc9af64dd6ef3f824acb8bf5a6f6e5a7c2b08587f4b0720ddb66a46bc791663",
+            "9a8c1201d05402bad1cb9eea3a6c09ffc6e905aab7dceaa787b5d6e05dadce0e",
         ),
     ];
 
     #[test]
     fn shared_vectors_match_pinned_hashes() {
         for (i, (input, expected)) in SHARED_VECTORS.iter().enumerate() {
-            let got = compute(input);
+            let got = compute(input, TEST_TENANT);
             assert_eq!(
                 got, *expected,
                 "vector {} drift: input={:?} expected={} got={}",
@@ -97,23 +99,27 @@ mod tests {
 
     #[test]
     fn trim_collapses_outer_whitespace() {
-        let canonical = compute("hello");
-        assert_eq!(compute("  hello"), canonical);
-        assert_eq!(compute("hello\n"), canonical);
-        assert_eq!(compute("\t hello \r\n"), canonical);
+        let canonical = compute("hello", TEST_TENANT);
+        assert_eq!(compute("  hello", TEST_TENANT), canonical);
+        assert_eq!(compute("hello\n", TEST_TENANT), canonical);
+        assert_eq!(compute("\t hello \r\n", TEST_TENANT), canonical);
     }
 
     #[test]
     fn internal_whitespace_preserved() {
-        // Two distinct hashes — internal whitespace is semantically
-        // load-bearing for LLM tokenization.
-        assert_ne!(compute("hello world"), compute("hello  world"));
-        assert_ne!(compute("hello\nworld"), compute("hello world"));
+        assert_ne!(
+            compute("hello world", TEST_TENANT),
+            compute("hello  world", TEST_TENANT)
+        );
+        assert_ne!(
+            compute("hello\nworld", TEST_TENANT),
+            compute("hello world", TEST_TENANT)
+        );
     }
 
     #[test]
     fn output_is_lowercase_hex() {
-        let h = compute("anything");
+        let h = compute("anything", TEST_TENANT);
         assert_eq!(h.len(), 64);
         for c in h.chars() {
             assert!(c.is_ascii_digit() || ('a'..='f').contains(&c), "got {}", c);
@@ -121,14 +127,14 @@ mod tests {
     }
 
     #[test]
-    fn empty_prompt_is_sha256_of_empty() {
-        // RFC 6234 test vector: SHA-256("") =
-        // e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
-        assert_eq!(
-            compute(""),
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    fn different_tenants_produce_different_hashes() {
+        // P0.5 r1 P2 fix: cross-tenant linkability defeated.
+        let same_prompt = "What is the capital of France?";
+        let tenant_a = "11111111-1111-4111-8111-111111111111";
+        let tenant_b = "22222222-2222-4222-8222-222222222222";
+        assert_ne!(
+            compute(same_prompt, tenant_a),
+            compute(same_prompt, tenant_b)
         );
-        // After trim, "  " also is empty bytes.
-        assert_eq!(compute("  "), compute(""));
     }
 }

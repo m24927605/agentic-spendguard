@@ -184,6 +184,31 @@ or cross-runtime portable signatures should provide their own.
 """
 
 
+def _flatten_messages_to_prompt(messages: "Sequence[ModelMessage]") -> str:
+    """Cost Advisor P0.5: flatten Pydantic-AI messages into one prompt
+    string for HMAC-SHA256 fingerprinting.
+
+    Uses pydantic v2 ``model_dump_json(exclude_none=True)`` when
+    available so two semantically-identical message sequences produce
+    byte-equal output. Falls back to ``repr()`` for non-pydantic items.
+
+    The sidecar's ``prompt_hash`` is computed over the result; rules
+    dedupe retried LLM calls by ``(run_id, prompt_hash)``. Two calls
+    with bit-identical message bodies produce the same hash — which is
+    what makes ``failed_retry_burn_v1`` etc. work.
+    """
+    parts = []
+    for msg in messages:
+        if hasattr(msg, "model_dump_json"):
+            try:
+                parts.append(msg.model_dump_json(exclude_none=True))
+                continue
+            except Exception:  # noqa: BLE001
+                pass
+        parts.append(repr(msg))
+    return "\n".join(parts)
+
+
 # -------------------------------------------------------------------------
 # SpendGuardModel
 # -------------------------------------------------------------------------
@@ -501,6 +526,11 @@ class SpendGuardModel(_PydanticAIModel):
         model_settings: "ModelSettings | None",
     ) -> DecisionOutcome:
         projected_claims = self._claim_estimator(messages, model_settings)
+        # Cost Advisor P0.5: flatten messages into canonical prompt text
+        # so the sidecar can emit prompt_hash on the audit.decision
+        # CloudEvent. Used for run-scope dedup in cost_advisor rules
+        # (failed_retry_burn_v1, runaway_loop_v1 per spec §5.1).
+        prompt_text = _flatten_messages_to_prompt(messages)
         return await self._client.request_decision(
             trigger="LLM_CALL_PRE",
             run_id=ctx.run_id,
@@ -516,6 +546,7 @@ class SpendGuardModel(_PydanticAIModel):
             parent_run_id=ctx.parent_run_id,
             budget_grant_jti=ctx.budget_grant_jti,
             projected_unit=self._unit,
+            prompt_text=prompt_text,
         )
 
     def _apply_mutation_if_any(
