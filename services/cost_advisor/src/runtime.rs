@@ -127,7 +127,9 @@ async fn run_rule(
     };
 
     match rule.rule_id() {
-        "idle_reservation_rate_v1" => decode_idle_reservation_rate(rule, row, bucket_date).map(Some),
+        "idle_reservation_rate_v1" => {
+            decode_idle_reservation_rate(rule, row, tenant_id, bucket_date).map(Some)
+        }
         other => Err(anyhow!("no decoder registered for rule {}", other)),
     }
 }
@@ -135,16 +137,23 @@ async fn run_rule(
 fn decode_idle_reservation_rate(
     rule: &SqlCostRule,
     row: PgRow,
+    tenant_id: Uuid,
     bucket_date: NaiveDate,
 ) -> Result<DecodedFinding> {
     let total: i64 = row.try_get("total_reservations")?;
     let ttl_expired: i64 = row.try_get("ttl_expired_count")?;
     let median_ttl: i32 = row.try_get("median_ttl_seconds")?;
     let p95_ttl: i32 = row.try_get("p95_ttl_seconds")?;
+    // Codex CA-P1 r1 P1: rule SQL now samples decision_ids (not
+    // reservation_ids) so the dashboard "view raw evidence" link
+    // points at canonical_events.decision_id rows.
     let sample_ids: Vec<Uuid> = row
-        .try_get::<Option<Vec<Uuid>>, _>("sample_reservation_ids")?
+        .try_get::<Option<Vec<Uuid>>, _>("sample_decision_ids")?
         .unwrap_or_default();
-    let waste_micros: i64 = row.try_get("estimated_waste_micros_usd")?;
+    // Codex CA-P1 r1 P2: rule SQL returns NULL waste until the P2
+    // baseline_refresher computes a real per-tenant figure. Map
+    // NULL → None and surface heuristic/low confidence.
+    let waste_micros_opt: Option<i64> = row.try_get("estimated_waste_micros_usd")?;
 
     let idle_ratio = if total > 0 {
         ttl_expired as f64 / total as f64
@@ -160,7 +169,11 @@ fn decode_idle_reservation_rate(
         tool_name: String::new(),
         model_family: String::new(),
     };
-    let fingerprint_hex = fingerprint::compute(rule.rule_id(), &scope, &time_bucket);
+    // Codex CA-P1 r1 P2: tenant_id is now part of fingerprint input
+    // so tenant_global findings on the same day for different tenants
+    // produce DISTINCT fingerprints.
+    let fingerprint_hex =
+        fingerprint::compute(rule.rule_id(), &tenant_id.to_string(), &scope, &time_bucket);
 
     let metrics = vec![
         metric("total_reservations", total as f64, MetricUnit::Count, "reservations_with_ttl_status_v1.reservation_id"),
@@ -179,12 +192,22 @@ fn decode_idle_reservation_rate(
         metric("p95_ttl_seconds", p95_ttl as f64, MetricUnit::Seconds, "derived: PERCENTILE_CONT(0.95) of ttl_seconds"),
     ];
 
+    // Codex CA-P1 r1 P2: when the rule SQL returns NULL waste (P1
+    // path; baseline_refresher lands in P2), emit method=heuristic +
+    // confidence=low + micros_usd=0 so the dashboard shows "USD
+    // estimate pending" instead of a misleading figure. Only when a
+    // real USD figure flows from baseline_refresher does this become
+    // method=baseline_excess + confidence=medium.
+    let (waste_method, waste_confidence, waste_micros) = match waste_micros_opt {
+        Some(usd) => (WasteMethod::BaselineExcess, WasteConfidence::Medium, usd),
+        None => (WasteMethod::Heuristic, WasteConfidence::Low, 0),
+    };
     let waste_estimate = Some(WasteEstimate {
         micros_usd: waste_micros,
-        method: WasteMethod::BaselineExcess as i32,
-        confidence: WasteConfidence::Medium as i32,
+        method: waste_method as i32,
+        confidence: waste_confidence as i32,
         explanation: format!(
-            "{} of {} reservations TTL'd (idle ratio {:.0}%); median TTL {}s — contract reservation TTL is held longer than the workload's typical commit latency.",
+            "{} of {} reservations TTL'd (idle ratio {:.0}%); median TTL {}s — contract reservation TTL is held longer than the workload's typical commit latency. USD estimate pending baseline_refresher (P2); current figure is a heuristic placeholder.",
             ttl_expired, total, idle_ratio * 100.0, median_ttl
         ),
     });
@@ -208,12 +231,16 @@ fn decode_idle_reservation_rate(
         co_observed_rules: Vec::new(),
     };
 
+    // Codex CA-P1 r1 P1: spec §4.0 JSONSchema uses LOWERCASE enum
+    // values (detected_waste, tenant_global, baseline_excess, etc.).
+    // Earlier draft emitted SCREAMING_SNAKE proto-style names which
+    // would break any §4.0 schema validator + downstream consumers.
     let proto_json = serde_json::json!({
         "rule_id": proto.rule_id,
         "rule_version": proto.rule_version,
         "fingerprint": proto.fingerprint,
-        "category": "DETECTED_WASTE",
-        "scope": { "scope_type": "TENANT_GLOBAL" },
+        "category": "detected_waste",
+        "scope": { "scope_type": "tenant_global" },
         "metrics": proto.metrics.iter().map(|m| serde_json::json!({
             "name": m.name,
             "value": m.value,
@@ -225,8 +252,8 @@ fn decode_idle_reservation_rate(
         "decision_refs": proto.decision_refs,
         "waste_estimate": proto.waste_estimate.as_ref().map(|w| serde_json::json!({
             "micros_usd": w.micros_usd,
-            "method": "baseline_excess",
-            "confidence": "medium",
+            "method": waste_method_str(w.method),
+            "confidence": waste_confidence_str(w.confidence),
             "explanation": w.explanation,
         })),
         "severity": severity_str(severity),
@@ -318,8 +345,15 @@ async fn upsert_finding(
 fn build_proposed_patch_for_rule(rule_id: &str, finding: &DecodedFinding) -> serde_json::Value {
     match rule_id {
         "idle_reservation_rate_v1" => {
-            // Tighten the contract's reservation TTL to 1.5× the
-            // observed median (per the rule SQL header comment).
+            // Codex CA-P1 r1 P2: idle_reservation_rate_v1 is tenant-
+            // global scope, so we can't reference a specific budget
+            // index (e.g. /budgets/0/...) — that would suggest changes
+            // to the wrong budget. Use a JSON Patch `test` op against
+            // the contract's contract_id followed by guidance-only
+            // metadata (`x-suggestion`) until owner-ack #55 finalizes
+            // the addressable-path schema. The operator dashboard
+            // renders this as "operator review required" instead of
+            // a one-click apply.
             let median = finding
                 .proto
                 .metrics
@@ -329,9 +363,17 @@ fn build_proposed_patch_for_rule(rule_id: &str, finding: &DecodedFinding) -> ser
                 .unwrap_or(60.0);
             let proposed_ttl = (median * 1.5).round() as i64;
             serde_json::json!([{
-                "op": "replace",
-                "path": "/budgets/0/rules/reservation_ttl_seconds",
-                "value": proposed_ttl
+                "op": "test",
+                "path": "/metadata/cost_advisor_suggestion",
+                "value": {
+                    "rule_id": "idle_reservation_rate_v1",
+                    "guidance": "Tighten reservation_ttl_seconds on the affected budget to ~1.5× the observed median TTL. Tenant-global scope means cost_advisor cannot identify the specific budget without owner-ack #55; operator must select the budget before applying.",
+                    "proposed_ttl_seconds": proposed_ttl,
+                    "rationale": format!(
+                        "Observed median TTL was {}s across the tenant. Tightening to {}s keeps headroom for the workload's commit latency while reducing idle reservation hold time.",
+                        median as i64, proposed_ttl
+                    )
+                }
             }])
         }
         _ => serde_json::Value::Null,
@@ -361,5 +403,24 @@ fn severity_str(s: Severity) -> &'static str {
         Severity::Warn => "warn",
         Severity::Info => "info",
         Severity::Unspecified => "warn",
+    }
+}
+
+fn waste_method_str(m: i32) -> &'static str {
+    match WasteMethod::try_from(m).unwrap_or(WasteMethod::Heuristic) {
+        WasteMethod::CounterfactualDiff => "counterfactual_diff",
+        WasteMethod::BaselineExcess => "baseline_excess",
+        WasteMethod::RedundantCallSum => "redundant_call_sum",
+        WasteMethod::Heuristic => "heuristic",
+        WasteMethod::Unspecified => "heuristic",
+    }
+}
+
+fn waste_confidence_str(c: i32) -> &'static str {
+    match WasteConfidence::try_from(c).unwrap_or(WasteConfidence::Low) {
+        WasteConfidence::High => "high",
+        WasteConfidence::Medium => "medium",
+        WasteConfidence::Low => "low",
+        WasteConfidence::Unspecified => "low",
     }
 }
