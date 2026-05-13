@@ -31,8 +31,25 @@
 
 ## 🔥 Tier 0：真 moat — 多日工作
 
-### V1 · Real-stack LangChain end-to-end verification 🔴
-- **Status**: 🔴 開放 — 對外開 framework PR 的 hard gate
+### F1 · Backport rustls CryptoProvider fix to 11 Rust services 🔴
+- **Status**: 🔴 開放 — V1 Phase 1 smoke test 揭露的 P0 blocker
+- **Why**：rustls 0.23.40（PR #35 Rust toolchain bump 帶進來）requires explicit `CryptoProvider::install_default()`。round2 新加的 3 個 service（outbox_forwarder / ttl_sweeper / webhook_receiver）有修；其餘 11 個漏修：auth / canonical_ingest / control_plane / dashboard / doctor / endpoint_catalog / leases / ledger / retention_sweeper / sidecar / usage_poller
+- **Symptom**：`make demo-up DEMO_MODE=agent_real` 失敗，ledger + canonical_ingest 立即 panic
+- **Fix**：每個 service `main()` 第一行加：
+  ```rust
+  rustls::crypto::aws_lc_rs::default_provider()
+      .install_default()
+      .map_err(|_| anyhow::anyhow!("failed to install rustls aws_lc_rs default provider"))?;
+  ```
+- **Branch**：`fix/rustls-crypto-provider-backport`
+- **Block 下游**：V1 必須等 F1 ✅ 才能繼續
+- **Detail**：[`docs/launches/v1-phase1-bug-report.md`](./launches/v1-phase1-bug-report.md)
+- **預估**：30 min 改 + 30-60 min 重 build + smoke test = ~1.5-2.5 小時
+
+### V1 · Real-stack LangChain end-to-end verification ⏳ BLOCKED on F1
+- **Status**: ⏳ Phase 1 smoke test 揭露 F1 bug，必須先修才能繼續
+- **Phase 1 結果**：✅ 成功（揭露 rustls bug — 這正是 V1 任務的價值）
+- **Phase 2-4**：⏳ blocked on F1
 - **Why**：M1 benchmark 用的是 `spendguard_shim/`（minimal reservation gateway, **不是真的 Rust sidecar**）跑 mock LLM。沒有真 LangChain → 真 sidecar stack → 真 OpenAI 的 e2e 證據前，任何 framework upstream PR (P2-4) 都會被 close 為 premature
 - **Scope**：跑通 `make demo-up DEMO_MODE=agent_real_langchain`（如不存在則新建），對 4 個 decision path（CONTINUE / STOP / REQUIRE_APPROVAL / DEGRADE）都收 evidence
 - **產出**：
