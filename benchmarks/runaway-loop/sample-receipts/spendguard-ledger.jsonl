@@ -1,0 +1,11 @@
+{"kind": "reserve", "reservation_id": "7bcfeafd-d7d6-4900-b618-12985bff22d0", "amount_usd": 0.18, "ts": 1778649664.220153}
+{"kind": "commit", "reservation_id": "7bcfeafd-d7d6-4900-b618-12985bff22d0", "actual_usd": 0.18, "spent_after": 0.18, "ts": 1778649664.879736}
+{"kind": "reserve", "reservation_id": "a2eca08a-1949-466b-98a4-72a16dfb14df", "amount_usd": 0.18, "ts": 1778649664.8831513}
+{"kind": "commit", "reservation_id": "a2eca08a-1949-466b-98a4-72a16dfb14df", "actual_usd": 0.18, "spent_after": 0.36, "ts": 1778649664.9032445}
+{"kind": "reserve", "reservation_id": "f820b697-6d28-420e-ba4e-05553af3e3b8", "amount_usd": 0.18, "ts": 1778649664.9131062}
+{"kind": "commit", "reservation_id": "f820b697-6d28-420e-ba4e-05553af3e3b8", "actual_usd": 0.18, "spent_after": 0.54, "ts": 1778649664.9340038}
+{"kind": "reserve", "reservation_id": "a782c062-504a-453e-b5e8-3c1ccbddf264", "amount_usd": 0.18, "ts": 1778649664.9383311}
+{"kind": "commit", "reservation_id": "a782c062-504a-453e-b5e8-3c1ccbddf264", "actual_usd": 0.18, "spent_after": 0.72, "ts": 1778649664.965346}
+{"kind": "reserve", "reservation_id": "595771fb-69eb-43e6-bd6e-356d8022c92f", "amount_usd": 0.18, "ts": 1778649664.9695277}
+{"kind": "commit", "reservation_id": "595771fb-69eb-43e6-bd6e-356d8022c92f", "actual_usd": 0.18, "spent_after": 0.8999999999999999, "ts": 1778649664.9961178}
+{"kind": "reserve_denied", "amount_usd": 0.18, "spent": 0.8999999999999999, "reserved": 0, "budget": 1.0, "ts": 1778649664.9984853}

@@ -23,18 +23,34 @@ Stopping runaway LLM costs is the unsolved half of agent operations. Your agent 
 
 The standard answer — "track usage, send alerts" — is reconciliation, not control. You see the bill *after* it lands. What you actually want is pre-call budget enforcement: the LLM request never goes out if the budget can't cover it.
 
-SpendGuard inverts this. Every decision boundary an agent crosses, a sidecar evaluates first:
+SpendGuard inverts this. Every decision boundary an agent crosses, a sidecar evaluates first; if your agent isn't allowed to spend that much on that model under that contract right now, **the LLM call never happens**. The reservation is reserved. The commit clears it. Errors release it. Every step is an append-only KMS-signed audit row.
 
-```
-agent → SDK → sidecar(UDS gRPC) → ledger ──────► allow
-                                  ↓
-                                  └─► reservation (Stripe-style auth/capture)
-                                  └─► STOP        (audit-chained, signed)
-                                  └─► REQUIRE_APPROVAL  (paused → operator resolves)
-                                  └─► DEGRADE     (mutate-then-allow)
+What that looks like in practice — head-to-head against the two
+closest open-source budget libraries on a 100-call runaway loop with
+a $1.00 cap (full reproducible benchmark in
+[`benchmarks/runaway-loop/`](benchmarks/runaway-loop/)):
+
+```text
+$ make benchmark
+…
+| Runner               | Budget | Wire calls | $ spent | Overshoot |
+|----------------------|--------|-----------:|--------:|----------:|
+| Agentic SpendGuard   |  $1.00 |          5 |   $0.90 |    −10.0% |
+| agentbudget          |  $1.00 |          6 |   $1.08 |     +8.0% |
+| agent-guard          |  $1.00 |        100 |  $18.00 |   +1700%  |
 ```
 
-If your agent isn't allowed to spend that much on that model under that contract right now — **the LLM call never happens**. The reservation is reserved. The commit clears it. Errors release it. Every step is an append-only signed audit row.
+`agentbudget` overshoots by one call because its enforcement is
+**post-call** (the 6th call completes on the wire, *then* it raises
+`BudgetExhausted`). `agent-guard` doesn't enforce at all because its
+HTTP-level interception is hardcoded to `openai.com` / `anthropic.com`
+and silently no-ops the moment you point an OpenAI client at a
+self-hosted base URL — which is what happens the second you put a
+gateway in front of your provider. Agentic SpendGuard does
+**pre-call** reservation against a ledger and refuses call #6 before
+it leaves the runner.
+
+Reproducing: `cd benchmarks/runaway-loop && make benchmark`.
 
 ---
 
