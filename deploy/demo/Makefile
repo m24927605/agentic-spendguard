@@ -141,7 +141,17 @@ demo-verify-pricing:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_pricing_table.sql
 	@echo "[demo] Phase 4 O3 pricing verification done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing
+# Cost Advisor P0.6 view verification: 3 fixture scenarios assert
+# reservations_with_ttl_status_v1 derives state + ttl_seconds correctly.
+# Fixtures wrap in SAVEPOINT + ROLLBACK so no persistent state lands.
+# Runs against ledger DB after the demo seed (script 30) is in place;
+# pairs naturally with DEMO_MODE=ttl_sweep to also exercise the real
+# release-with-reason path against the view.
+demo-verify-p0_6:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_p0_6_view.sql
+	@echo "[demo] Cost Advisor P0.6 view verification done"
+
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans
