@@ -876,8 +876,25 @@ pub async fn poll_once(
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Once;
+
+    /// Install rustls aws_lc_rs CryptoProvider once per test process.
+    ///
+    /// Necessary because `main()` does not run under `cargo test` and the
+    /// production HTTP clients (OpenAiClient / AnthropicClient) construct
+    /// reqwest with rustls under the hood. Tests that build a real
+    /// `OpenAiClient::new(...)` / `AnthropicClient::new(...)` should call
+    /// `ensure_crypto_provider()` first to avoid the same panic that the
+    /// service mains hit before F1 landed (see docs/launches/v1-phase1-bug-report.md).
+    static CRYPTO_INIT: Once = Once::new();
+    fn ensure_crypto_provider() {
+        CRYPTO_INIT.call_once(|| {
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        });
+    }
 
     fn make_obs(event_id: &str) -> UsageObservation {
+        ensure_crypto_provider();
         UsageObservation {
             provider: "mock".into(),
             provider_account: "acct-1".into(),
