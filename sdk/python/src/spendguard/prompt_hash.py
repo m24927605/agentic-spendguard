@@ -11,6 +11,12 @@ cross-tenant correlation and raises the bar against dictionary attacks
 on common prompts. Rules dedupe within a tenant where the key is
 constant, so behavior is unchanged.
 
+Tenant canonicalization (codex P0.5 r2 P2): ``tenant_id`` is normalized
+to canonical lowercase-hyphenated UUID form before HMAC keying.
+Otherwise the same tenant calling with "ABC-..." vs "abc-..." would
+compute different HMAC keys and split same-tenant dedup. Non-UUID
+inputs fall back to the raw string verbatim (degraded but stable).
+
 Normalization (v1):
 1. UTF-8 only.
 2. Trim leading + trailing ASCII whitespace (space, tab, newline, FF, CR).
@@ -22,9 +28,17 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import uuid
 
 # Mirror Rust's `char::is_ascii_whitespace` set.
 _ASCII_WHITESPACE = " \t\n\x0c\r"
+
+
+def _canonicalize_tenant(tenant_id: str) -> str:
+    try:
+        return str(uuid.UUID(tenant_id))
+    except ValueError:
+        return tenant_id
 
 
 def compute(prompt_text: str, tenant_id: str) -> str:
@@ -36,9 +50,10 @@ def compute(prompt_text: str, tenant_id: str) -> str:
     vectors. Cross-tenant: two tenants asking the same prompt produce
     different hashes.
     """
+    canonical_tenant = _canonicalize_tenant(tenant_id)
     trimmed = prompt_text.strip(_ASCII_WHITESPACE)
     return hmac.new(
-        tenant_id.encode("utf-8"),
+        canonical_tenant.encode("utf-8"),
         trimmed.encode("utf-8"),
         hashlib.sha256,
     ).hexdigest()
