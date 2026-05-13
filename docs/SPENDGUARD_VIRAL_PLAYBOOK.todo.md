@@ -31,6 +31,22 @@
 
 ## 🔥 Tier 0：真 moat — 多日工作
 
+### V1 · Real-stack LangChain end-to-end verification 🔴
+- **Status**: 🔴 開放 — 對外開 framework PR 的 hard gate
+- **Why**：M1 benchmark 用的是 `spendguard_shim/`（minimal reservation gateway, **不是真的 Rust sidecar**）跑 mock LLM。沒有真 LangChain → 真 sidecar stack → 真 OpenAI 的 e2e 證據前，任何 framework upstream PR (P2-4) 都會被 close 為 premature
+- **Scope**：跑通 `make demo-up DEMO_MODE=agent_real_langchain`（如不存在則新建），對 4 個 decision path（CONTINUE / STOP / REQUIRE_APPROVAL / DEGRADE）都收 evidence
+- **產出**：
+  - `benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.md` — 環境 + 步驟 + 4 path evidence + bug list
+  - `benchmarks/real-stack-e2e/evidence/{continue,stop,approval,degrade}.log`
+  - `benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.review.md` — codex challenge
+  - 可能：`agent_real_langchain` demo mode 新建（如不存在）
+- **可能的失敗結果（也合法）**：跑不通 → STATUS=BLOCKED + bug report，這本身就是價值
+- **Branch**：`feat/v1-real-stack-langchain-e2e`
+- **Codex challenge**：✅ 必做（從 LangChain maintainer 視角）
+- **Block 下游**：P2-4 必須等 V1 ✅ 才能啟動
+- **Prompt**：`docs/launches/v1-real-stack-e2e-prompt.md`
+- **預估**：1-2 天 + ~$1-3 OpenAI token
+
 ### M1 · P0-1 Benchmark harness vs AgentGuard / AgentBudget ✅
 - **Status**: ✅ 完成 — branch `feat/m1-benchmark-runaway-loop`, 3 commits
 - **產出**:

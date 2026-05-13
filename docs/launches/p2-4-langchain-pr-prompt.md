@@ -5,6 +5,14 @@
 > Goal: open a docs PR against `langchain-ai/langchain` adding an Agentic
 > SpendGuard integration page — clears HN launch precondition #2 and
 > borrows LangChain's 100k+ stars credibility.
+>
+> **⚠ HARD DEPENDENCY**: do not run this prompt until V1 (real-stack
+> end-to-end verification) is ✅ in the TODO file. See
+> [`v1-real-stack-e2e-prompt.md`](./v1-real-stack-e2e-prompt.md).
+> Without V1 evidence, the LangChain PR will be closed as premature
+> ("you haven't actually run this against a real LangChain agent + real
+> sidecar + real OpenAI"). The benchmark used a shim, not the real
+> Rust sidecar — that gap must close first.
 
 ---
 
