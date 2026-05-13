@@ -1,6 +1,8 @@
 # Cost Advisor — Design Spec
 
-> **Status**: v2 (2026-05-13, post-codex round 2). v0 → v1 → v2 changelog at §14.
+> **Status**: v3 (2026-05-13, post-codex round 3 — **fundamental rescope**). v0 → v1 → v2 → v3 changelog at §14.
+>
+> **v3 thesis change**: Cost Advisor is no longer framed as a separate product with its own dashboard / gRPC / SDK / digest. It is a **feature** of SpendGuard's existing closed-loop control: rules detect waste in the audit chain → proposed contract DSL patches → existing operator approval queue → operator approves → next sidecar reload picks up the new contract. This eliminates ~40% of the previously-planned surface area.
 > **Codename**: `cost-advisor` (final brand TBD; see §10).
 > **Owner**: Agentic SpendGuard
 > **Closes**: post-event suggestion gap noted in `benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.md` (the "事後建議優化" row flagged ❌)
@@ -13,16 +15,54 @@
 
 After SpendGuard caps and audits LLM spend, customers still need to know:
 
-- **What patterns are wasting money?** (e.g., runaway loops, oversized prompts, model overprovision)
-- **Why?** (root-cause hypothesis, not just an alert)
-- **What to do?** (concrete fix — ideally a contract DSL snippet or code change)
+- **What patterns are wasting money?** (e.g., runaway loops, redundant tool calls, idle reservations)
+- **Why?** (root-cause hypothesis tied to a specific incident, not a generic alert)
+- **What to do?** (concrete contract DSL patch, ideally one approve-click away from being live)
 
 Today the product produces an immutable audit chain (`canonical_events`) but no analysis layer on top. Customers must:
 - Write their own SQL queries against `canonical_events`
 - Or buy a separate observability tool (LangSmith, Helicone, Langfuse)
 - Or just guess
 
-This is the "事後建議優化" gap. **Cost Advisor** closes it.
+This is the "事後建議優化" gap. **Cost Advisor closes the loop**: detected waste in the audit chain → proposed contract DSL patches → operator approves via existing approval workflow → patches take effect at next sidecar reload. The customer's experience is **one new screen** (the proposed-patches queue, which is just a view filter on the existing approval queue), not a parallel analytics product.
+
+### 1.1 The closed loop
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│  agent run                                                        │
+│  → sidecar enforces contract (existing)                           │
+│  → audit row written to canonical_events (existing)               │
+│                                                                   │
+│              ▼ (post-event, async)                                │
+│                                                                   │
+│  cost_advisor rule engine reads canonical_events (NEW)            │
+│  → detects waste pattern                                          │
+│  → emits FindingEvidence + a proposed contract DSL patch          │
+│                                                                   │
+│              ▼                                                    │
+│                                                                   │
+│  proposal queued in control_plane approval queue (EXISTING        │
+│  workflow that operators already use for REQUIRE_APPROVAL paths)  │
+│                                                                   │
+│              ▼                                                    │
+│                                                                   │
+│  operator reviews proposal in existing dashboard approval tab     │
+│  (no new dashboard tab — just a filter for `proposal_source =     │
+│  cost_advisor`)                                                   │
+│                                                                   │
+│              ▼ approve                                            │
+│                                                                   │
+│  contract_bundle CD pipeline picks up patch (existing)            │
+│  → next sidecar reload enforces new contract                      │
+│                                                                   │
+│              ▼ enforced                                           │
+│                                                                   │
+│  next agent run is now capped/redirected/throttled per the patch  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**Why this framing is better** (codex r3 insight): the customer is already trained on the approval workflow. Adding a parallel "Cost Advisor dashboard" doubles the surface area to learn. Routing proposals through the existing queue means: zero new operator UI, zero new RBAC story, zero new audit chain (proposals already go through audit), zero new gRPC API.
 
 ---
 
@@ -31,7 +71,8 @@ This is the "事後建議優化" gap. **Cost Advisor** closes it.
 - **Not a real-time abort tool**. SpendGuard sidecar already does that (Tier 0 of the stack). Cost Advisor runs **after the fact** on the audit chain.
 - **Not a generic LLM observability platform**. We don't store prompts, completions, or traces beyond what SpendGuard already keeps in `canonical_events`. Helicone / Langfuse are stronger here; we don't compete.
 - **Not a billing reconciler**. Provider invoices reconcile via the existing `usage_poller` + `webhook_receiver` services.
-- **Not autonomous remediation**. Findings recommend; humans (or operators with explicit policy) decide whether to apply.
+- **Not autonomous remediation**. Findings produce *proposals*; the existing operator approval workflow gates whether they take effect.
+- **NOT a separate product surface (codex r3)**. No new dashboard tab, no new gRPC service, no new Python SDK methods, no Slack/email digest. Everything flows through existing control_plane / dashboard / approval primitives. The only NEW user-visible thing is a filter on the existing approval queue (`proposal_source = cost_advisor`) and a CLI subcommand `spendguard advise` for power users.
 
 ---
 
@@ -249,6 +290,21 @@ These are rules where we can **mathematically demonstrate** money was wasted (pa
 | `runaway_loop_v1` | Same `(run_id, prompt_hash)` retried > 5 in 60s with no terminal output AND no failure-class match | Loop without completion = zero value (orthogonal to failed_retry_burn — this is the "infinite agent loop" case where each call individually succeeds but the agent never converges) | Add max_iterations cap; convergence criterion |
 | `tool_call_repeated_v1` | Same `tool_name + tool_args_hash` invoked > 3 in one run, where tool is declared `idempotent: true` in contract DSL | Idempotent tool call repeated = redundant compute paid for (note: requires `idempotent` flag in contract; absent → rule does NOT fire to avoid false positives on intentionally-repeated tool calls) | Add tool result cache |
 | `idle_reservation_rate_v1` | TTL'd reservations / total > 20% in 7 days, AND median TTL <= configured `min_ttl_for_finding` | Reservations expired without commit = paid contention with no spend reflected (gated on min TTL to avoid flagging short-TTL test environments) | Fix release path; tighten estimator |
+
+### 5.1.2 Failure classification ownership (codex r3 must-fix #1)
+
+The 8-class failure taxonomy raises the question: WHO assigns a class to a given audit event? Answer (v3 decision):
+
+- **Owner**: `canonical_ingest` service (existing). When a `spendguard.audit.outcome` event is ingested, a new `failure_class` field is computed and persisted on the canonical event itself. This means rules read `canonical_events.failure_class` instead of doing classification at query time.
+- **Classifier logic**: lives in a new module `services/canonical_ingest/src/classify.rs` with table-driven rules:
+  - HTTP status + presence/absence of `usage` field in provider response → maps to one of `provider_5xx` / `provider_4xx_billed` / `provider_4xx_unbilled`
+  - Tool error vs malformed_json vs timeout: matched against framework-specific signatures (LangChain `ToolException`, OpenAI Agents SDK `ToolCallError`, etc.)
+  - Default fallback: `unknown` (never fires waste rules)
+- **Test fixtures**: ship 30+ provider/framework response samples per class as JSON fixtures in `services/canonical_ingest/tests/fixtures/failure_classes/` — verified against real OpenAI/Anthropic/Bedrock response shapes.
+- **Schema migration**: add `failure_class TEXT` column to `canonical_events`; default `NULL`; populate going forward; backfill existing rows in batch (~10 min for 1M rows per benchmark).
+- **Versioning**: `classify.rs` uses a `CLASSIFIER_VERSION` constant; bumping it triggers a re-classification job for events ≤ 30 days old.
+
+This means `failed_retry_burn_v1`'s SQL is trivial — just `WHERE failure_class IN ('provider_5xx', 'provider_4xx_billed', 'malformed_json_response', 'timeout_billed')` — and the hard logic is centralized, tested, and versioned in one place.
 
 ### 5.1.1 Incident grouping / dedup (codex r2 #4 — overlap concern)
 
@@ -485,39 +541,48 @@ A post-generation validator (regex + JSON schema) rejects narratives that violat
 
 ---
 
-## 8. Surfaces
+## 8. Surfaces (v3 — collapsed per codex r3 rescope)
 
 | Surface | What it shows | Owner |
 |---|---|---|
-| **CLI** `spendguard advise --tenant X --since 7d` | Open findings + narratives | `cost_advisor` CLI |
-| **Dashboard tab** `/dashboard/findings` | Findings list, filter by severity, mark dismissed | existing `dashboard` service, new tab |
-| **Slack/email digest** (opt-in) | Daily/weekly digest of new ≥ warn findings | new `digest_dispatcher` worker |
-| **gRPC API** `cost_advisor.v1.ListFindings` | For embedding in customer dashboards | new proto |
+| **CLI** `spendguard advise --tenant X --since 7d` | Open findings + their proposed contract patches in JSON or markdown | `cost_advisor` CLI subcommand on existing `spendguard` binary |
+| **Existing approval queue** (filter) | Cost-advisor-sourced proposed contract patches, alongside REQUIRE_APPROVAL items operators already review | existing `dashboard` + `control_plane` services; ONE new query filter `proposal_source IN ('cost_advisor', 'require_approval', ...)` |
+| **Existing audit chain** | Approve / deny / modify decisions on cost-advisor proposals are audited the same way other contract changes are | no new infra |
+| **Optional: Slack/email digest** (DEFERRED to v1.0 only if customers ask) | Daily list of unreviewed proposals | reuse existing alerting infrastructure (e.g. dashboard webhook) |
+
+Cut from v0/v1 (per rescope):
+- ❌ Standalone `/dashboard/findings` tab (was P4)
+- ❌ Standalone `cost_advisor.v1.ListFindings` gRPC service (was P6)
+- ❌ Python SDK methods for cost_advisor (was P6)
+- ❌ Standalone `digest_dispatcher` worker (was P5)
+
+These would have been ~10 days of build + maintenance for surface area that duplicates what `control_plane` + `dashboard` already provide.
 
 ---
 
-## 9. Implementation phasing — honest timeline (codex r1)
+## 9. Implementation phasing — v3 collapsed plan
 
-Codex challenged the original 3–5 day P1 estimate as optimistic. Revised:
+Per codex r3 rescope: cut P4 (dashboard), P5 (digest), P6 (separate gRPC). Reuse existing approval queue.
 
 | Phase | Scope | Estimated work |
 |---|---|---|
-| **P0 (prep)** | Define + ratify `FindingEvidence` schema (§4.0); ship as proto in `proto/spendguard/cost_advisor/v1/`; add `cost_findings` + `cost_baselines` migrations; integrate with `retention_sweeper` for auto-purge | 3 days |
-| **P1 (skinny)** | New `services/cost_advisor/` Rust crate skeleton; ONE rule (`failed_retry_burn_v1`); CLI `spendguard advise --tenant X --since 7d` returning JSON findings (no narrative); idempotent insert via fingerprint UPSERT; tenant isolation; integration test against real benchmark fixtures | 5 days |
-| **P2** | Rest of Tier-1 detected_waste rules (3 more); Tier-2 baseline refresher with seasonality (7d AND 28d windows); outlier rule | 5 days |
-| **P3** | Tier-3 LLM narrative behind `--narrative` flag; structured output schema (§7.1.5); validation pipeline with all 5 unit-test fixtures | 4 days |
-| **P4** | Dashboard `/findings` tab; feedback (👍/👎) UI; dismissal scope-picker (per-fingerprint vs per-rule vs per-agent — codex r1 Q5) | 4 days |
-| **P5** | Slack/email digest dispatcher with per-tenant rate limit (default 100 narratives/day) | 3 days |
-| **P6** | gRPC API + proto + Python SDK methods; CLA enforcement on rule contributions | 3 days |
-| **P7** | `optimization_hypothesis` rules behind feature flag (the 2 from §5.2) | 2 days |
-| **P8 (defer to v2)** | Tier 4 embedding clustering (requires opt-in `prompt_archive` extension) | 3+ weeks |
+| **P0 (prep)** | Schema reality check audit (§11.5 A2); define + ratify `FindingEvidence` schema (§4.0); proto in `proto/spendguard/cost_advisor/v1/`; `cost_findings` + `cost_baselines` migrations; integrate with `retention_sweeper`; integrate with `control_plane.proposed_contract_patches` table (extend existing schema, don't fork) | 4 days (was 3 — added control_plane integration design) |
+| **P1 (skinny)** | New `services/cost_advisor/` Rust crate skeleton; `failed_retry_burn_v1` rule; CLI `spendguard advise --tenant X` returning JSON findings AND proposed contract patches; idempotent UPSERT; tenant isolation; failure classifier owned by `canonical_ingest` (see §5.1.2 below); integration tests against real benchmark fixtures | 6 days (was 5 — added classifier ownership work) |
+| **P2** | Rest of Tier-1 detected_waste rules (3 more); Tier-2 baseline refresher with seasonality; outlier rule; incident-grouping/dedup phase (§5.1.1) | 5 days |
+| **P3** | Tier-3 LLM narrative behind `--narrative` flag; structured output schema (§7.1.5); server-side number rendering; validation pipeline with all 5 unit-test fixtures | 4 days |
+| **P3.5 (NEW)** | Wire `cost_advisor` proposals into existing `control_plane` approval queue: extend approval queue schema to include `proposal_source` enum and `proposed_dsl_patch` field; teach existing dashboard to filter by `proposal_source` | 3 days |
+| **P4 (DEFERRED to v1.0 only if asked)** | Slack/email digest reusing existing alerting infra | 2 days |
+| **P5** | `optimization_hypothesis` rules behind feature flag | 2 days |
+| **P6 (defer to v2)** | Tier 4 embedding clustering (requires opt-in `prompt_archive` extension) | 3+ weeks |
 
-**Revised critical path to v0.1**: P0 + P1 + P3 = **12 days**, not 5–7. Original "P1+P3 = 5–7 days" was wrong because:
-- Skipped P0 (schema + migrations)
-- Underestimated test fixture work (integration tests against real `canonical_events` shape)
-- Underestimated tenant isolation, idempotency, and dedup edge cases
+**Critical path to v0.1**: P0 + P1 + P3 + P3.5 = **17 days**. Up from v2's 12 days because P3.5 is a new but necessary integration; net effect vs. v2 plan = wash because we cut P4/P5/P6 (~10 days saved).
 
-**Aggressive cut option** (if 5 days is the only budget): ship ONLY `failed_retry_burn_v1` + CLI + JSON output, no dashboard, no narrative, no digest. Customers query findings via SQL or CLI. Document this as v0.0.1 (research preview) rather than v0.1.
+**Net build savings vs. v2**: ~10 days (cut P4, P5, P6) − 5 days (added P3.5 + extra P0/P1 work for integration + classifier ownership) = **~5 days net cheaper** AND a much tighter product surface.
+
+**Schedule contingency for A2 audit failure** (codex r3 valid concern):
+- If audit reveals 1-2 missing fields → P0 + 3 days = 7 days, total = 20 days
+- If audit reveals 3+ missing fields → P0 + 5 days + rule re-design → 22+ days
+- Branch decision happens at end of P0; if 22+ days is unacceptable, scope reduces to ONE rule + ONE proposal type + JSON-only CLI (research preview).
 
 ---
 
@@ -606,6 +671,26 @@ When `failed_retry_burn_v1` evolves to `_v2`:
 
 For breaking schema changes within a major version: bump rule_id (`failed_retry_burn_v2`), don't quietly mutate v1's evidence shape.
 
+**A7. Storage strategy for cost_findings at scale (codex r3 concern)**:
+
+Estimate: 1k tenants × 100 findings/day × 700-byte JSONB = ~70 MB/day = ~25 GB/year.
+
+Storage plan:
+- **Hot tier** (postgres): last 90 days only (≈6 GB at 1k-tenant scale). Indexed for dashboard queries.
+- **Cold tier** (S3): findings older than 90 days archived as Parquet partitioned by tenant + month. Reads possible via `aws athena` for compliance / audit.
+- **Partitioning**: `cost_findings` PostgreSQL-natively partitioned by `(tenant_id, range(detected_at))` monthly. Drop old partitions to S3 monthly.
+- **Aggregation queries**: nightly baseline computation runs on a read replica (existing pattern in repo per `usage_poller` setup). 25 GB on a properly indexed PG read replica is well within scaling envelope; no new infra needed for this scale.
+- **Beyond 10k tenants**: revisit. Likely sharded postgres or columnar store (e.g. ClickHouse for analytics layer). Out of scope for v0/v1.
+
+**Cited metric `usd_per_week` unit alignment** (codex r3 contradiction caught in §4.0):
+The §4.0 unit allowlist is `[micros_usd, usd, tokens, calls, seconds, ratio, count, percent, multiplier]`. Severity rubric uses "$100/week per agent" — this is a derived metric expressed via two cited metrics: `total_waste_usd` (unit `usd`) + `time_window_days` (unit `count`). The severity rubric is computed in code, not stored as a single metric. Fixed.
+
+**Per-tenant rate-limit precedence** (codex r3 contradiction):
+- `CostRule.per_tenant_daily_cap()` = rule's intrinsic max
+- Tenant-level admin override = enforced ceiling (admin-only setting in control_plane, default = unset = use rule's cap)
+- **Effective cap = MIN(rule_cap, admin_override)** if admin sets one; otherwise rule_cap applies.
+- Documented in §11.5 dismissal scope (extending A5).
+
 ---
 
 ## 12. Risks & mitigations
@@ -663,6 +748,21 @@ Codex review verdict: 5/6/4/4/5/3 across 6 dimensions. Changes:
 **Implementation timeline (codex dim 6)**: §9 totally redone. Original P1 = 3-5 days was wrong. Now P0 + P1 + P3 = 12 days for v0.1. Aggressive cut to 5 days = 1 rule + JSON CLI only (`v0.0.1` research preview).
 
 **5 questions spec ducked**: new §11.5 with concrete answers to all 5 (idempotency, schema audit, waste calc methods, baseline seasonality, dismissal scope).
+
+### v3 (2026-05-13, post-codex round 3 — fundamental rescope)
+
+Round 3 verdict: 6/5/6/5/4/4 (avg 5.0, regressed from r2's 5.2). Codex declared **FUNDAMENTAL_RESCOPE**: stop building a parallel product, integrate into SpendGuard's existing closed loop.
+
+**Big change — product framing**:
+Cost Advisor is now a *feature* of SpendGuard's closed loop: rule engine reads audit chain → emits proposed contract DSL patches → existing `control_plane` approval queue → operator approves via existing dashboard → `contract_bundle` CD pipeline → next sidecar reload enforces new contract. Eliminates ~40% of previously-planned surface area.
+
+**Cut**: standalone `/dashboard/findings` tab, standalone `cost_advisor.v1.ListFindings` gRPC, separate Python SDK methods, standalone `digest_dispatcher` worker. (~10 days saved.)
+
+**Added**: §1.1 closed-loop diagram; §5.1.2 failure classification owned by `canonical_ingest` service (with versioned classifier + 30+ test fixtures); §11.5 A7 storage strategy (hot postgres / cold S3 / partitioned by tenant+month); P3.5 phase to wire proposals into existing approval queue.
+
+**Net schedule**: 17 days for v0.1 (vs v2's 12). +5 days for proper integration & classification, but net-cheaper than v2 because cut surfaces saved more.
+
+**Open**: round 4 to validate rescope holds; if green → implement, if not → consider escalation.
 
 ### v2 (2026-05-13, post-codex round 2)
 
