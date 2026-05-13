@@ -42,34 +42,14 @@
 ### F3 · rustls fix follow-ups (codex challenge findings) 🟡
 - **Status**: 🟡 follow-up — 不阻擋 production runtime
 - **Source**: codex challenge on F1 commit `b3b1abf` flagged 3 items; #1 immediately patched (publish.rs binary). 2 items remain:
-- **F3a · usage_poller tests need provider setup**: `services/usage_poller/src/lib.rs` 內 ~15 個 `#[tokio::test]` 構造 `reqwest::Client`。`main()` 在 `cargo test` 時不跑，所以 install 沒生效。建議模式：
-  ```rust
-  #[cfg(test)]
-  mod tests {
-      use std::sync::Once;
-      static CRYPTO_INIT: Once = Once::new();
-      fn ensure_crypto_provider() {
-          CRYPTO_INIT.call_once(|| {
-              let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-          });
-      }
-      // call from each test or from make_obs() helper
-  }
-  ```
-  Note: 目前測試是否真 fail 未知（可能 mock 是 HTTP-only 沒觸發 rustls init）。需要 `cargo test -p spendguard-usage-poller` 驗證
+- **F3a · usage_poller tests need provider setup ✅**: `services/usage_poller/src/lib.rs` 加了 `static CRYPTO_INIT: Once` + `ensure_crypto_provider()` helper 在 `mod tests`，並從 `make_obs()` 呼叫保護常用測試路徑。直接構造 `OpenAiClient::new()` / `AnthropicClient::new()` 的 tests 仍應自行加 `ensure_crypto_provider();` 呼叫（doc-comment 提示）。Branch: `fix/rustls-followups-f2-f3a`
 - **F3b · rustls pin 寬鬆 `"0.23"`**：理論上 0.23.x 將來可能再 break。Round-2 服務也是 `"0.23"`，先保持一致；如果未來真因小版本 bump 出事再考慮 commit Cargo.lock 或改成 `"=0.23.40"`
 - **Branch**: `fix/usage-poller-tests-rustls-init`（單獨）或合併到 F1 merge 後的 main hotfix
 
-### F2 · `make demo-verify-step7` brittleness with real OpenAI 🟡
-- **Status**: 🟡 follow-up — 不阻擋 V1 後續，product behavior 正常
-- **Symptom**: `ERROR: EXPECTED available_budget balance 458; got 482` (差 24 atomic units)
-- **Root cause**: verify-step7 SQL 寫死 Mock LLM 回 ~42 token 的預期值，real gpt-4o-mini 變動回應
-- **Fix options**:
-  1. Makefile guard：`DEMO_MODE=agent_real` 時 skip verify-step7（一行）
-  2. SQL assertion 改 range（>0、合理上界）
-  3. 寫獨立 `verify-step7-real`
-- **Recommended**: option 1 短期解、option 3 長期
-- **Branch**: `fix/verify-step7-real-openai` 或合併到 P2-4 prep
+### F2 · `make demo-verify-step7` brittleness with real OpenAI ✅
+- **Status**: ✅ 完成 — branch `fix/rustls-followups-f2-f3a`
+- **Fix**: `deploy/demo/Makefile` 加 `else ifneq (,$(findstring agent_real,$(DEMO_MODE)))` guard，skip verify-step7 with informative message。涵蓋 agent_real / agent_real_anthropic / agent_real_langgraph / agent_real_openai_agents / agent_real_agt
+- **長期 follow-up**：寫 `verify-step7-real` 用 range assertion（committed > 0, available 在合理範圍），但目前 skip 已足以 unblock V1 Phase 2-4
 
 ### V1 · Real-stack LangChain end-to-end verification ⏳ BLOCKED on F1
 - **Why**：rustls 0.23.40（PR #35 Rust toolchain bump 帶進來）requires explicit `CryptoProvider::install_default()`。round2 新加的 3 個 service（outbox_forwarder / ttl_sweeper / webhook_receiver）有修；其餘 11 個漏修：auth / canonical_ingest / control_plane / dashboard / doctor / endpoint_catalog / leases / ledger / retention_sweeper / sidecar / usage_poller
