@@ -75,7 +75,7 @@ pub async fn evaluate_tenant_day(
         let outcome = upsert_finding(canonical, tenant_id, &finding).await?;
 
         let proposed_patch = if propose_patches {
-            Some(build_proposed_patch_for_rule(rule.rule_id(), &finding))
+            build_proposed_patch_for_rule(rule.rule_id(), &finding)
         } else {
             None
         };
@@ -192,22 +192,20 @@ fn decode_idle_reservation_rate(
         metric("p95_ttl_seconds", p95_ttl as f64, MetricUnit::Seconds, "derived: PERCENTILE_CONT(0.95) of ttl_seconds"),
     ];
 
-    // Codex CA-P1 r1 P2: when the rule SQL returns NULL waste (P1
-    // path; baseline_refresher lands in P2), emit method=heuristic +
-    // confidence=low + micros_usd=0 so the dashboard shows "USD
-    // estimate pending" instead of a misleading figure. Only when a
-    // real USD figure flows from baseline_refresher does this become
-    // method=baseline_excess + confidence=medium.
-    let (waste_method, waste_confidence, waste_micros) = match waste_micros_opt {
-        Some(usd) => (WasteMethod::BaselineExcess, WasteConfidence::Medium, usd),
-        None => (WasteMethod::Heuristic, WasteConfidence::Low, 0),
-    };
-    let waste_estimate = Some(WasteEstimate {
-        micros_usd: waste_micros,
-        method: waste_method as i32,
-        confidence: waste_confidence as i32,
+    // Codex CA-P1 r2 P2: when the rule SQL returns NULL waste (P1
+    // path; baseline_refresher lands in P2), emit NO WasteEstimate
+    // at all. Proto §4.0 makes WasteEstimate nullable
+    // ("Optional; null for unquantifiable hypothesis findings");
+    // emitting micros_usd=0 silently sums to "no waste detected" in
+    // any consumer that totals findings. Only when a real USD
+    // figure flows from baseline_refresher (P2) do we attach a
+    // WasteEstimate (method=baseline_excess + confidence=medium).
+    let waste_estimate = waste_micros_opt.map(|usd| WasteEstimate {
+        micros_usd: usd,
+        method: WasteMethod::BaselineExcess as i32,
+        confidence: WasteConfidence::Medium as i32,
         explanation: format!(
-            "{} of {} reservations TTL'd (idle ratio {:.0}%); median TTL {}s — contract reservation TTL is held longer than the workload's typical commit latency. USD estimate pending baseline_refresher (P2); current figure is a heuristic placeholder.",
+            "{} of {} reservations TTL'd (idle ratio {:.0}%); median TTL {}s — contract reservation TTL is held longer than the workload's typical commit latency.",
             ttl_expired, total, idle_ratio * 100.0, median_ttl
         ),
     });
@@ -342,42 +340,52 @@ async fn upsert_finding(
     })
 }
 
-fn build_proposed_patch_for_rule(rule_id: &str, finding: &DecodedFinding) -> serde_json::Value {
-    match rule_id {
-        "idle_reservation_rate_v1" => {
-            // Codex CA-P1 r1 P2: idle_reservation_rate_v1 is tenant-
-            // global scope, so we can't reference a specific budget
-            // index (e.g. /budgets/0/...) — that would suggest changes
-            // to the wrong budget. Use a JSON Patch `test` op against
-            // the contract's contract_id followed by guidance-only
-            // metadata (`x-suggestion`) until owner-ack #55 finalizes
-            // the addressable-path schema. The operator dashboard
-            // renders this as "operator review required" instead of
-            // a one-click apply.
-            let median = finding
-                .proto
-                .metrics
-                .iter()
-                .find(|m| m.name == "median_ttl_seconds")
-                .map(|m| m.value)
-                .unwrap_or(60.0);
-            let proposed_ttl = (median * 1.5).round() as i64;
-            serde_json::json!([{
-                "op": "test",
-                "path": "/metadata/cost_advisor_suggestion",
-                "value": {
-                    "rule_id": "idle_reservation_rate_v1",
-                    "guidance": "Tighten reservation_ttl_seconds on the affected budget to ~1.5× the observed median TTL. Tenant-global scope means cost_advisor cannot identify the specific budget without owner-ack #55; operator must select the budget before applying.",
-                    "proposed_ttl_seconds": proposed_ttl,
-                    "rationale": format!(
-                        "Observed median TTL was {}s across the tenant. Tightening to {}s keeps headroom for the workload's commit latency while reducing idle reservation hold time.",
-                        median as i64, proposed_ttl
-                    )
-                }
-            }])
-        }
-        _ => serde_json::Value::Null,
+/// Build the optional `proposed_dsl_patch` for a rule's emitted finding.
+///
+/// Codex CA-P1 r2 P1: proposed_dsl_patch is consumed downstream by
+/// bundle_registry's apply pipeline as a real RFC-6902 DSL delta.
+/// Emitting a non-mutating `test` op against a non-existent metadata
+/// path would FAIL when applied. For tenant-global scope findings
+/// (no specific budget identified), there is no safe RFC-6902 patch
+/// in P1 because:
+///   * The contract DSL's addressable-path schema is unresolved
+///     (owner-ack #55).
+///   * Tenant-global rules don't pick a specific budget — the
+///     operator must do that before any patch is applicable.
+///
+/// So P1 returns None for tenant-global scope. The
+/// EmittedFinding.evidence carries the human-readable
+/// recommendation in waste_estimate.explanation + metrics; a future
+/// P3.5 owner-ack resolution unlocks real-patch emission for
+/// budget/agent-scoped rules.
+///
+/// Returns None for tenant_global scope. Returns Some(patch) for
+/// budget/agent/run/tool-scoped findings (none of which exist in P1
+/// — placeholder for P1.5).
+fn build_proposed_patch_for_rule(
+    _rule_id: &str,
+    finding: &DecodedFinding,
+) -> Option<serde_json::Value> {
+    let scope_type = finding
+        .proto
+        .scope
+        .as_ref()
+        .map(|s| s.scope_type)
+        .unwrap_or(0);
+    let is_tenant_global = ScopeType::try_from(scope_type)
+        .map(|s| matches!(s, ScopeType::TenantGlobal))
+        .unwrap_or(true);
+    if is_tenant_global {
+        // No safe patch in P1; the EmittedFinding's evidence /
+        // explanation guides the operator to manually review the
+        // affected budgets.
+        return None;
     }
+
+    // Reserved for P1.5: rules with agent/run/tool scope can emit
+    // budget-specific patches. None of those ship in P1; this branch
+    // never fires today.
+    None
 }
 
 // ---- enum → string helpers --------------------------------------
