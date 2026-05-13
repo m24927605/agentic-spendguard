@@ -56,6 +56,76 @@ pub struct DecisionContext {
     pub region: String,
 }
 
+/// Cost Advisor P0.5 enrichment fields threaded from `DecisionRequest`
+/// into the emitted audit.decision CloudEvent. All four fields default
+/// to empty string when absent — this is a degraded-but-valid state
+/// (Cost Advisor rules treat empty strings as "field not enriched" and
+/// don't fire on those rows; see
+/// `docs/specs/cost-advisor-p0-audit-report.md` §8.5).
+///
+/// Only the audit.decision emission carries enrichment in P0.5. The
+/// audit.outcome (commit_estimated / release) emissions stay sparse:
+/// Cost Advisor rules JOIN by decision_id to pull enrichment from the
+/// matching decision row, so duplicating fields on outcome would waste
+/// payload bytes without changing rule behavior.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct AuditEnrichment {
+    pub run_id: String,
+    pub agent_id: String,
+    pub model_family: String,
+    pub prompt_hash: String,
+}
+
+/// Extract the four enrichment fields from a `DecisionRequest`. Any
+/// missing field becomes empty string (degraded path).
+///
+/// - `run_id` ← `req.ids.run_id` (SpendGuardIds proto, common.v1).
+/// - `agent_id` ← `req.ids.step_id` — Cost Advisor uses step_id as
+///   the agent identifier; "step_id" is the canonical name in
+///   SpendGuard's trace schema, but cost_advisor rules group by
+///   "agent_id" (the customer-facing term per spec §4.0). The
+///   mapping is intentional.
+/// - `model_family` ← `req.inputs.projected_unit.model_family`
+///   (TOKEN units carry it per `common.v1.UnitRef` proto). MONETARY
+///   units leave it empty — cost_advisor only meaningfully reasons
+///   about model_family for token-scoped rules.
+/// - `prompt_hash` ← `req.inputs.runtime_metadata.fields["prompt_hash"]`
+///   if present and `string_value`. Adapters (Pydantic-AI etc.)
+///   compute via `services/sidecar/src/prompt_hash.rs::compute` and
+///   pass through `runtime_metadata` per the proto's
+///   "free-form runtime metadata" comment.
+pub(crate) fn extract_enrichment(req: &DecisionRequest) -> AuditEnrichment {
+    let ids = req.ids.as_ref();
+    let run_id = ids
+        .map(|i| i.run_id.clone())
+        .unwrap_or_default();
+    let agent_id = ids
+        .map(|i| i.step_id.clone())
+        .unwrap_or_default();
+
+    let inputs = req.inputs.as_ref();
+    let model_family = inputs
+        .and_then(|i| i.projected_unit.as_ref())
+        .map(|u| u.model_family.clone())
+        .unwrap_or_default();
+
+    let prompt_hash = inputs
+        .and_then(|i| i.runtime_metadata.as_ref())
+        .and_then(|m| m.fields.get("prompt_hash"))
+        .and_then(|v| match v.kind.as_ref() {
+            Some(prost_types::value::Kind::StringValue(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    AuditEnrichment {
+        run_id,
+        agent_id,
+        model_family,
+        prompt_hash,
+    }
+}
+
 #[derive(Debug)]
 pub struct DecisionOutput {
     pub decision_id: Uuid,
@@ -155,6 +225,11 @@ pub async fn run_through_reserve(
         ));
     }
 
+    // Cost Advisor P0.5 enrichment: extract run_id / agent_id /
+    // model_family / prompt_hash from the request ONCE; thread into
+    // both CONTINUE + DENY audit.decision emissions below.
+    let enrichment = extract_enrichment(req);
+
     // Phase 3 wedge: branch CONTINUE vs DENY before building the
     // reserve-specific payload. DENY skips Reserve entirely but still
     // emits an audit_decision row via Ledger.RecordDeniedDecision so
@@ -176,6 +251,7 @@ pub async fn run_through_reserve(
             &bundle,
             &adapter_idempotency.key,
             effect_hash,
+            &enrichment,
         )
         .await;
     }
@@ -199,6 +275,7 @@ pub async fn run_through_reserve(
         producer_sequence,
         &snapshot_hash,
         &matched_rules,
+        &enrichment,
     );
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
@@ -369,11 +446,19 @@ fn build_audit_decision_cloudevent(
     producer_sequence: u64,
     snapshot_hash: &[u8; 32],
     matched_rules: &[String],
+    enrichment: &AuditEnrichment,
 ) -> CloudEvent {
     let payload = serde_json::json!({
         "snapshot_hash":   hex::encode(snapshot_hash),
         "matched_rules":   matched_rules,
         "session_id":      ctx.session_id,
+        // Cost Advisor P0.5 enrichment fields. Empty strings indicate
+        // the SDK adapter did not provide enrichment for this call —
+        // rules treat empties as "not classified" and don't fire on
+        // those rows. See audit-report §8.5.
+        "agent_id":        enrichment.agent_id,
+        "model_family":    enrichment.model_family,
+        "prompt_hash":     enrichment.prompt_hash,
     });
     let payload_bytes =
         serde_json::to_vec(&payload).expect("snapshot json serialization is infallible");
@@ -389,7 +474,11 @@ fn build_audit_decision_cloudevent(
         datacontenttype: "application/json".into(),
         data: payload_bytes.into(),
         tenant_id: ctx.tenant_id.clone(),
-        run_id: String::new(),
+        // Cost Advisor P0.5: was String::new(); now sourced from
+        // SpendGuardIds.run_id. canonical_events.run_id COLUMN is
+        // populated downstream by canonical_ingest from this envelope
+        // field, unblocking run-scoped rule grouping.
+        run_id: enrichment.run_id.clone(),
         decision_id: decision_id.to_string(),
         schema_bundle_id: String::new(),
         producer_id: format!("sidecar:{}", ctx.workload_instance_id),
@@ -427,6 +516,7 @@ async fn run_record_denied_decision(
     bundle: &crate::domain::state::CachedContractBundle,
     adapter_idempotency_key: &str,
     effect_hash: [u8; 32],
+    enrichment: &AuditEnrichment,
 ) -> Result<DecisionOutput, DomainError> {
     let final_decision_str = match decision_kind {
         Decision::Stop => "STOP",
@@ -466,6 +556,14 @@ async fn run_record_denied_decision(
             "window_instance_id": c.window_instance_id,
             "unit_id":            c.unit.as_ref().map(|u| u.unit_id.clone()).unwrap_or_default(),
         })).collect::<Vec<_>>(),
+        // Cost Advisor P0.5 enrichment (DENY path). Even denied
+        // decisions need run_id + agent_id + prompt_hash so cost_advisor
+        // can group retries that hit STOP/REQUIRE_APPROVAL — a runaway-
+        // loop pattern that hammers the same prompt against a maxed-
+        // out budget is still wasteful behavior worth flagging.
+        "agent_id":          enrichment.agent_id,
+        "model_family":      enrichment.model_family,
+        "prompt_hash":       enrichment.prompt_hash,
     });
     let payload_bytes = serde_json::to_vec(&payload)
         .expect("denied decision json serialization is infallible");
@@ -481,7 +579,10 @@ async fn run_record_denied_decision(
         datacontenttype: "application/json".into(),
         data: payload_bytes.into(),
         tenant_id: ctx.tenant_id.clone(),
-        run_id: String::new(),
+        // Cost Advisor P0.5 (DENY path): was String::new(); now
+        // sourced from SpendGuardIds.run_id so canonical_events.run_id
+        // is populated downstream.
+        run_id: enrichment.run_id.clone(),
         decision_id: decision_id.to_string(),
         schema_bundle_id: String::new(),
         producer_id: format!("sidecar:{}", ctx.workload_instance_id),
