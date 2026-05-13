@@ -983,6 +983,20 @@ mod approval_resume_payload {
                 datacontenttype: "application/json".into(),
                 data: payload_bytes.into(),
                 tenant_id: self.decision.tenant_id.clone(),
+                // Cost Advisor P0.5 — resume path enrichment is
+                // DEFERRED. The CONTINUE + DENY emissions in
+                // services/sidecar/src/decision/transaction.rs already
+                // carry run_id / agent_id / model_family / prompt_hash;
+                // the resume path mints a NEW decision_id and has no
+                // DecisionRequest in scope, so source fields must come
+                // from approval_requests.decision_context JSONB.
+                // Threading them through requires post_approval_
+                // required_decision SP (migration 0037) to persist
+                // the original enrichment alongside the proposal —
+                // open as a P3.5 follow-on. For now this emission
+                // stays sparse; cost_advisor's rules group by original
+                // decision_id (not the resume decision_id) so the
+                // gap doesn't break run-scope dedup.
                 run_id: String::new(),
                 decision_id: decision_id.to_string(),
                 schema_bundle_id: self.decision.schema_bundle_id.clone(),

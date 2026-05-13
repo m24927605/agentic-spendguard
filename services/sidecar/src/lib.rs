@@ -8,6 +8,7 @@ pub mod domain;
 pub mod drain;
 pub mod fencing;
 pub mod metrics;
+pub mod prompt_hash;
 pub mod server;
 
 pub mod proto {
