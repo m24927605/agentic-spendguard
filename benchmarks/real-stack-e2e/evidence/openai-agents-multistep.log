@@ -1,0 +1,24 @@
+=== demo output (agent_real_openai_agents_multistep) ===
+[demo] using real OpenAI gpt-4o-mini via OpenAI Agents SDK (multi-step)
+[demo] openai-agents multi-step Runner.run OK output='Tokyo is sunny at 22°C, San Francisco is foggy at 15°C, and London is rainy at 12°C.'
+  run_id=019e2089-ae71-7460-a3c4-3712949f890b
+
+Tool: get_weather called 3 times (Tokyo, SF, London)
+
+=== ledger evidence (post-run) ===
+operation_kind   | n
+-----------------+---
+adjustment       | 2
+commit_estimated | 2   ← 2 separate post-call commits (per turn)
+reserve          | 2   ← 2 separate pre-call reservations (per turn)
+
+audit_outbox events:
+spendguard.audit.decision | 4   ← 4 decision events (PRE + POST × 2 turns)
+spendguard.audit.outcome  | 2   ← 2 outcomes (one per turn)
+
+reservations.current_state:
+committed | 2   ← all 2 reservations cleanly committed
+
+Comparison vs single-turn agent_real_openai_agents:
+  single-turn: 1 reserve + 1 commit + 3 audit decisions + 1 outcome
+  multi-step:  2 reserve + 2 commit + 4 audit decisions + 2 outcome  ← doubled, proves per-step intercept

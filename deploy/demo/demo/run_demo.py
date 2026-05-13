@@ -593,6 +593,8 @@ async def main() -> int:
         return await run_multi_provider_usd_mode()
     if DEMO_MODE == "agent_real_openai_agents":
         return await run_openai_agents_mode()
+    if DEMO_MODE == "agent_real_openai_agents_multistep":
+        return await run_openai_agents_multistep_mode()
     if DEMO_MODE == "agent_real_agt":
         return await run_agt_composite_mode()
     return await run_agent_mode()
@@ -821,6 +823,140 @@ async def run_openai_agents_mode() -> int:
 
     output = getattr(result, "final_output", None) or str(result)
     print(f"[demo] openai-agents Runner.run OK output={output!r} run_id={run_id}")
+    await client.close()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Agents SDK multi-step mode: tool-calling agent that must invoke
+# a tool multiple times, forcing ≥2 LLM calls in one Runner.run. Verifies
+# in-flight cap fires per LLM_CALL_PRE step (mid-loop), not just per run.
+# Wired post-V1 to close the "events 中把控 / multi-step in-flight" gap
+# noted in benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.md.
+# ---------------------------------------------------------------------------
+
+
+async def run_openai_agents_multistep_mode() -> int:
+    if not os.environ.get("OPENAI_API_KEY"):
+        print(
+            "[demo] FATAL: OPENAI_API_KEY required for agent_real_openai_agents_multistep",
+            file=sys.stderr,
+        )
+        return 8
+
+    from agents import Agent, Runner, function_tool
+    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+    from openai import AsyncOpenAI
+
+    from spendguard import SpendGuardClient, new_uuid7
+    from spendguard.integrations.openai_agents import (
+        RunContext as OaiRunContext,
+        SpendGuardAgentsModel,
+        run_context as oai_run_context,
+    )
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+    print("[demo] using real OpenAI gpt-4o-mini via OpenAI Agents SDK (multi-step)")
+
+    unit = common_pb2.UnitRef(
+        unit_id=unit_id,
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(
+        pricing_version=pricing_version,
+        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
+        fx_rate_version=fx,
+        unit_conversion_version=unit_conv,
+    )
+
+    def estimate_claims(_input):
+        return [
+            common_pb2.BudgetClaim(
+                budget_id=budget_id,
+                unit=unit,
+                amount_atomic="500",
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id=window_id,
+            ),
+        ]
+
+    inner_model = OpenAIChatCompletionsModel(
+        model="gpt-4o-mini",
+        openai_client=AsyncOpenAI(),
+    )
+    guarded = SpendGuardAgentsModel(
+        inner=inner_model,
+        client=client,
+        budget_id=budget_id,
+        window_instance_id=window_id,
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate_claims,
+    )
+
+    @function_tool
+    def get_weather(city: str) -> str:
+        """Return current weather for a city (mocked for demo)."""
+        weather_db = {
+            "Tokyo": "Sunny, 22°C, light wind",
+            "San Francisco": "Foggy, 15°C, marine layer",
+            "London": "Rainy, 12°C, overcast",
+        }
+        return weather_db.get(city, f"Unknown weather for {city}")
+
+    agent = Agent(
+        name="spendguard-multistep-demo",
+        instructions=(
+            "You are a weather assistant. Use the get_weather tool to look up "
+            "weather for each city the user mentions. After collecting all "
+            "results, return a one-line summary."
+        ),
+        model=guarded,
+        tools=[get_weather],
+    )
+
+    run_id = str(new_uuid7())
+    async with oai_run_context(OaiRunContext(run_id=run_id)):
+        result = await Runner.run(
+            agent,
+            "Get the weather for Tokyo, San Francisco, and London. Then summarize in one line.",
+        )
+
+    output = getattr(result, "final_output", None) or str(result)
+    print(f"[demo] openai-agents multi-step Runner.run OK output={output!r} run_id={run_id}")
+    print(
+        "[demo] (verify multi-step in-flight cap by querying postgres after demo: "
+        "expect >1 reserve transactions and >1 spendguard.audit.decision events)"
+    )
     await client.close()
     return 0
 
