@@ -40,6 +40,23 @@
 - **P0 後**：P1 (5-6 天) 實作 failed_retry_burn_v1 第一條 rule
 - **Total to v0.1**：17 天 per §9 phasing
 
+### CA-P0 · Cost Advisor P0 prep phase complete ✅
+- **Status**: ✅ done — branch `feat/cost-advisor-p0` (4 commits, 1671 insertions)
+- **Step 1 (schema audit)**：✅ `docs/specs/cost-advisor-p0-audit-report.md`. Verdict: **§11.5 A2 scenario 3** (3+ fields missing + fundamental shape mismatch). 6/7 rule-input fields (prompt_hash, agent_id, run_id, tool_name, tool_args_hash, model_family) are **0% populated** in canonical_events; cost data lives in ledger.commits not in audit payload. **No PII blocker** (no prompt text in audit chain — avoided +5-10d branch).
+- **Scope cut (revised §5.1)**：v0.1 ships ONLY `idle_reservation_rate_v1` (fireable via ledger.reservations join). Other 3 rules deferred to P1.5 (after P0.5 sidecar enrichment).
+- **Step 2 (proto + crate)**：✅ `proto/spendguard/cost_advisor/v1/cost_advisor.proto` (FindingEvidence + 8 enums per spec §4.0); `services/cost_advisor/` Rust crate with CostRule trait, SqlCostRule adapter, fingerprint::compute (SHA-256 per §11.5 A1, with unit tests), placeholder rule. `cargo check` passes on rust:1.91.
+- **Step 3 (migrations)**：✅ 4 migrations:
+  - `canonical_ingest/0011_add_failure_class.sql` (column + CHECK + partial index)
+  - `cost_advisor/01_cost_findings.sql` (partitioned table per §11.5 A7)
+  - `cost_advisor/02_cost_baselines.sql` (28d default window per §11.5 A4)
+  - `ledger/0038_approval_requests_proposal_source.sql` (proposal_source + proposed_dsl_patch + proposing_finding_id; strengthened immutability trigger; tenant_data_policy retention windows for cost_findings)
+  - new init script + compose mount for cost_advisor migrations
+- **Verified**：all migrations apply cleanly against postgres:16-alpine; 4 smoke tests pass (NULL failure_class admitted, cost_findings INSERT works, cost_advisor CHECK rejects missing patch, immutability trigger blocks UPDATE on proposed_dsl_patch).
+- **Step 4 (integration design)**：✅ `services/cost_advisor/docs/control-plane-integration.md` — closed loop, schema delta, lifecycle state machine, dashboard filter (no new tab — one URL parameter), service identity + mTLS + DB role, 5 open items routed to control_plane / dashboard / bundle_registry / security owners.
+- **New schedule**：v0.1 critical path 17d → 20d (P0 4d + **NEW P0.5 enrichment 5d** + P1 4d + P3 4d + P3.5 3d). Within §11.5 A2 +5d envelope.
+- **P0.5 (NEW workstream)**：sidecar threads SpendGuardIds.run_id into CloudEvent.run_id + adds agent_id / model_family / prompt_hash to payload_json on every emission site. Unblocks 3 of 4 rules. Proto already carries the fields (just unwired). ~5 days sidecar+adapter work.
+- **P1 readiness verdict**: ✅ YES, P1 (skinny rule + CLI) **can start immediately**. Step 2/3/4 outputs are unchanged by the audit's scope cut. P0.5 runs in parallel; P1.5 (the other 3 rules at run-scope) lands after P0.5 + classifier ship.
+
 ### F1 · Backport rustls CryptoProvider fix to 9 Rust services ✅
 - **Status**: ✅ 完成 — branch `fix/rustls-crypto-provider-backport` (commit `b3b1abf`)
 - **Result**: 真 Rust stack 完全 boot；real gpt-4o-mini 呼叫 OK：`output='Hello there, friend!'`
