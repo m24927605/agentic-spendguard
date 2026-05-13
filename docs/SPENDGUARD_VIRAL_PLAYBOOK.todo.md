@@ -39,6 +39,27 @@
 - **Notes**: auth + leases lib-only，無需動。9 patched: canonical_ingest / control_plane / dashboard / doctor / endpoint_catalog / ledger / retention_sweeper / sidecar / usage_poller
 - **次要 follow-up**: F2 — verify-step7 SQL 寫死 Mock LLM token 數，real OpenAI 變動 → 見下方
 
+### F3 · rustls fix follow-ups (codex challenge findings) 🟡
+- **Status**: 🟡 follow-up — 不阻擋 production runtime
+- **Source**: codex challenge on F1 commit `b3b1abf` flagged 3 items; #1 immediately patched (publish.rs binary). 2 items remain:
+- **F3a · usage_poller tests need provider setup**: `services/usage_poller/src/lib.rs` 內 ~15 個 `#[tokio::test]` 構造 `reqwest::Client`。`main()` 在 `cargo test` 時不跑，所以 install 沒生效。建議模式：
+  ```rust
+  #[cfg(test)]
+  mod tests {
+      use std::sync::Once;
+      static CRYPTO_INIT: Once = Once::new();
+      fn ensure_crypto_provider() {
+          CRYPTO_INIT.call_once(|| {
+              let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+          });
+      }
+      // call from each test or from make_obs() helper
+  }
+  ```
+  Note: 目前測試是否真 fail 未知（可能 mock 是 HTTP-only 沒觸發 rustls init）。需要 `cargo test -p spendguard-usage-poller` 驗證
+- **F3b · rustls pin 寬鬆 `"0.23"`**：理論上 0.23.x 將來可能再 break。Round-2 服務也是 `"0.23"`，先保持一致；如果未來真因小版本 bump 出事再考慮 commit Cargo.lock 或改成 `"=0.23.40"`
+- **Branch**: `fix/usage-poller-tests-rustls-init`（單獨）或合併到 F1 merge 後的 main hotfix
+
 ### F2 · `make demo-verify-step7` brittleness with real OpenAI 🟡
 - **Status**: 🟡 follow-up — 不阻擋 V1 後續，product behavior 正常
 - **Symptom**: `ERROR: EXPECTED available_budget balance 458; got 482` (差 24 atomic units)
