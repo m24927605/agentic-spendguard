@@ -22,13 +22,20 @@ tools concrete and reproducible, instead of a marketing-page table.
 
 | Runner | Library | Language | Mode |
 |---|---|---|---|
-| `agentbudget` | [`agentbudget`](https://github.com/sahiljagtap08/agentbudget) | Python | drop-in `init("$1.00")` |
-| `agentguard` | [`agent-guard`](https://github.com/dipampaul17/AgentGuard) | Node.js | drop-in `init({ limit: 1 })` |
-| `spendguard` | this repo's SDK + sidecar | Python (SDK) + Rust (sidecar) | pre-call reservation against a real ledger |
+| `agentbudget` | [`agentbudget`](https://github.com/sahiljagtap08/agentbudget) | Python | drop-in `init("$1.00")` (post-call enforcement) |
+| `agentguard` | [`agent-guard`](https://github.com/dipampaul17/AgentGuard) | Node.js | drop-in `init({ limit: 1 })` (HTTP-level interception) |
+| `spendguard` | this repo (reservation-gateway shim) | Python | **pre-call** reservation against a ledger |
 
-The SpendGuard runner lives in [`compose.spendguard.yml`](./compose.spendguard.yml)
-because it depends on the demo sidecar/ledger stack. See "SpendGuard
-runner" below.
+The SpendGuard runner uses a minimal reservation-gateway shim
+([`spendguard_shim/`](./spendguard_shim/)) that isolates the
+**pre-call reservation** dimension of the production SpendGuard
+sidecar. Other dimensions the production sidecar provides — KMS-signed
+audit chain, contract DSL, multi-tenant scoping, L0–L3 capability
+levels, approval workflow — are out of scope for this benchmark and
+documented qualitatively below. The full sidecar is exercised by
+`make demo-up` from the repo root; a future iteration of this
+benchmark will run the SpendGuard runner against the real sidecar
+over UDS.
 
 ## How it's wired
 
@@ -116,6 +123,26 @@ pricing — is so that the "ground truth" number is the same number a
 human would compute from an OpenAI invoice, regardless of how stale
 or partial each library's internal table happens to be.
 
+## Dimensions this benchmark does NOT measure
+
+The SpendGuard production sidecar provides these capabilities; this
+benchmark intentionally scopes them out so the head-to-head on the
+**reservation vs post-call** axis stays apples-to-apples:
+
+| Capability | SpendGuard | AgentBudget | AgentGuard |
+|---|:---:|:---:|:---:|
+| KMS-signed append-only audit chain | yes | no | no |
+| Contract DSL (declarative budget rules) | yes | no | no |
+| Multi-tenant budget scoping in one process | yes | no¹ | no¹ |
+| L0–L3 capability levels (handshake) | yes | no | no |
+| Approval pause/resume workflow | yes | no | no |
+| Pricing-freeze with signed snapshot hash | yes | no² | no² |
+| Self-hosted endpoint compatibility | yes | yes | **no³** |
+
+¹ Library-style enforcement is per-process and not tenant-aware.
+² Both ship internal pricing tables; staleness is on the user.
+³ Confirmed by this benchmark — see results table.
+
 ## Known limitations
 
 - **Mock LLM only** — no real provider $$ is spent. The mock returns
@@ -126,15 +153,10 @@ or partial each library's internal table happens to be.
   proxy, vLLM, Ollama, LiteLLM gateway, mock server) bypasses its
   HTTP-level interception entirely. The benchmark surfaces this as
   "no abort, full overshoot."
-- **SpendGuard runner (Phase 1B) is a separate compose layer** because
-  it requires the sidecar/ledger stack from `deploy/demo`.
-
-## SpendGuard runner
-
-> Phase 1B — TODO. Will use `compose.spendguard.yml` to bring up a
-> minimal sidecar + ledger + Postgres subset alongside the mock LLM
-> and run [`runners/spendguard/runner.py`](./runners/spendguard/) for
-> head-to-head numbers.
+- **The SpendGuard runner uses a minimal reservation-gateway shim**,
+  not the full production sidecar. This isolates the reservation
+  dimension; the other dimensions in the table above are documented
+  qualitatively. Follow-up: swap the shim for a real-sidecar runner.
 
 ## Files
 
@@ -143,7 +165,8 @@ or partial each library's internal table happens to be.
   per-call ground-truth log.
 - [`runners/agentbudget/`](./runners/agentbudget/) — Python runner.
 - [`runners/agentguard/`](./runners/agentguard/) — Node.js runner.
-- [`runners/spendguard/`](./runners/spendguard/) — Phase 1B.
+- [`runners/spendguard/`](./runners/spendguard/) — Python runner; reserve → call → commit.
+- [`spendguard_shim/`](./spendguard_shim/) — minimal reservation gateway used by the SpendGuard runner.
 - [`analyze/`](./analyze/) — pricing-table aggregation + RESULTS.md
   generator.
 - [`compose.yml`](./compose.yml) — Phase 1A orchestration.
