@@ -280,10 +280,25 @@ CREATE POLICY cost_advisor_insert_self_only
     TO cost_advisor_application_role
     WITH CHECK (proposal_source = 'cost_advisor');
 
--- Other roles bypass the policy (control_plane / sidecar legacy
--- callers continue to INSERT with proposal_source='sidecar_decision').
--- The default-permissive policy is omitted here so the role-scoped
--- policy is the only INSERT path for cost_advisor.
+-- Codex r8 P2 correction: with FORCE ROW LEVEL SECURITY, ALL roles are
+-- subject to RLS (the table owner is no longer auto-exempt). For
+-- legacy callers (control_plane, sidecar) to continue inserting
+-- sidecar_decision proposals, ship ONE of these alongside the policy
+-- above:
+--
+--   (i)  A complementary permissive policy for those roles:
+--        CREATE POLICY legacy_insert_self_only
+--            ON approval_requests
+--            FOR INSERT
+--            TO control_plane_application_role, sidecar_application_role
+--            WITH CHECK (proposal_source = 'sidecar_decision');
+--   (ii) Grant BYPASSRLS to those roles (less safe; loses defense-in-
+--        depth for them).
+--   (iii) Skip FORCE on the table and let the table owner remain
+--         exempt; rely on RLS only for cost_advisor_application_role.
+--
+-- The cleanest path is (i): explicit policies make the access matrix
+-- self-documenting.
 ```
 
 Caveat: RLS policies are evaluated against the CURRENT role. The
@@ -299,7 +314,13 @@ not match. Document this in the service's connection-init code.
 CREATE OR REPLACE FUNCTION enforce_cost_advisor_proposal_source()
     RETURNS TRIGGER LANGUAGE plpgsql AS $$
 BEGIN
-    IF pg_has_role(session_user, 'cost_advisor_application_role', 'USAGE')
+    -- Codex r8 P2: use 'MEMBER' not 'USAGE'. USAGE returns true only
+    -- when the role's privileges are immediately available without
+    -- SET ROLE; a login role granted membership WITHOUT INHERIT would
+    -- bypass a USAGE-keyed check. MEMBER tests bare membership
+    -- regardless of inheritance — what we actually want for this
+    -- guard. (PG16 docs: pg_has_role accepts MEMBER | USAGE | SET.)
+    IF pg_has_role(session_user, 'cost_advisor_application_role', 'MEMBER')
        AND NEW.proposal_source <> 'cost_advisor' THEN
         RAISE EXCEPTION
             'role % may only INSERT proposals with proposal_source=cost_advisor (got %)',

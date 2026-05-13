@@ -205,8 +205,12 @@ message FindingEvidence {
 
   // SHA-256 hex of (rule_id || canonical_repr(scope) || time_bucket_iso8601),
   // per spec §11.5 A1. Stable across nightly re-runs so upserts dedupe.
-  // 64-hex-char string; validated by `cost_findings_fingerprint`
-  // UNIQUE index in the §4.1 schema.
+  // 64-hex-char string; idempotency key. The §4.1 canonical
+  // `cost_findings` table is partitioned by `detected_at` so the
+  // UNIQUE constraint lives on the non-partitioned mirror table
+  // `cost_findings_fingerprint_keys (tenant_id, fingerprint)`. All
+  // writes flow through `cost_findings_upsert()` SP — see migration
+  // `services/cost_advisor/migrations/01_cost_findings.sql`.
   string fingerprint = 3;
 
   FindingCategory category = 4;
