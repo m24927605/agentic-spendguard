@@ -17,6 +17,10 @@ use spendguard_ledger::{
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("failed to install rustls aws_lc_rs default provider"))?;
+
     init_tracing();
 
     let cfg = Config::from_env().context("loading config")?;

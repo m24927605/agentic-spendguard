@@ -14,6 +14,9 @@ name = "spendguard-catalog-publish"
 path = "src/bin/publish.rs"
 
 [dependencies]
+
+# Direct rustls dep so main() can call CryptoProvider::install_default()
+rustls = "0.23"
 # HTTP server
 axum = { version = "0.7", features = ["macros"] }
 tokio = { version = "1", features = ["full"] }
