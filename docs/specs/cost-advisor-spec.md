@@ -1,6 +1,8 @@
 # Cost Advisor — Design Spec
 
-> **Status**: v3 (2026-05-13, post-codex round 3 — **fundamental rescope**). v0 → v1 → v2 → v3 changelog at §14.
+> **Status**: v3 (2026-05-13, post-codex round 3 — fundamental rescope; round 4 verdict: **GREEN_LIGHT_FOR_P0**). v0 → v1 → v2 → v3 changelog at §14.
+>
+> **Codex round 4 verdict (2026-05-13, attempt 2 — shorter prompt after attempt 1 deadlocked at 15 min)**: GREEN_LIGHT_FOR_P0. Cited reason: "v3 now has a coherent closed-loop MVP that reuses existing SpendGuard control-plane primitives instead of creating a parallel product surface." Both Q1 (did rescope collapse surface area?) and Q2 (is canonical_ingest the right classifier home?) confirmed yes.
 >
 > **v3 thesis change**: Cost Advisor is no longer framed as a separate product with its own dashboard / gRPC / SDK / digest. It is a **feature** of SpendGuard's existing closed-loop control: rules detect waste in the audit chain → proposed contract DSL patches → existing operator approval queue → operator approves → next sidecar reload picks up the new contract. This eliminates ~40% of the previously-planned surface area.
 > **Codename**: `cost-advisor` (final brand TBD; see §10).
@@ -748,6 +750,17 @@ Codex review verdict: 5/6/4/4/5/3 across 6 dimensions. Changes:
 **Implementation timeline (codex dim 6)**: §9 totally redone. Original P1 = 3-5 days was wrong. Now P0 + P1 + P3 = 12 days for v0.1. Aggressive cut to 5 days = 1 rule + JSON CLI only (`v0.0.1` research preview).
 
 **5 questions spec ducked**: new §11.5 with concrete answers to all 5 (idempotency, schema audit, waste calc methods, baseline seasonality, dismissal scope).
+
+### v3 + r4 verdict (2026-05-13)
+
+**Codex round 4 (attempt 2): GREEN_LIGHT_FOR_P0** ✅
+
+- Round 1: avg 4.5/10. 3 must-fix items (FindingEvidence schema, validator, rule split). All addressed in v1.
+- Round 2: avg 5.2/10. 3 must-fix items (typed metrics, server-side rendering, failure taxonomy). All addressed in v2.
+- Round 3: avg 5.0/10. FUNDAMENTAL_RESCOPE: stop building parallel product. Addressed in v3 by collapsing surface area into existing approval workflow.
+- Round 4: GREEN. "Coherent closed-loop MVP that reuses existing SpendGuard control-plane primitives instead of creating a parallel product surface."
+
+Iteration converged in 4 rounds. User's "5-round max → Staff team escalation" trigger NOT activated. Spec is ready for P0 implementation per §9 phasing (17 days for v0.1).
 
 ### v3 (2026-05-13, post-codex round 3 — fundamental rescope)
 
