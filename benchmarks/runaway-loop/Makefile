@@ -12,9 +12,10 @@
 benchmark:
 	docker compose -f compose.yml down -v
 	docker compose -f compose.yml build
-	docker compose -f compose.yml up -d mock-llm
+	docker compose -f compose.yml up -d mock-llm spendguard-shim
 	docker compose -f compose.yml run --rm --no-deps agentbudget-runner
 	docker compose -f compose.yml run --rm --no-deps agentguard-runner
+	docker compose -f compose.yml run --rm --no-deps spendguard-runner
 	docker compose -f compose.yml run --rm --no-deps analyzer
 	docker compose -f compose.yml down
 
