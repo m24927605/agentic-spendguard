@@ -1,0 +1,2 @@
+[demo] approval-mode connecting to sidecar at /var/run/spendguard/adapter.sock
+[demo] DEMO_MODE=approval — decision returned CONTINUE without REQUIRE_APPROVAL (decision_id=019e206f-9575-7bc1-ba61-e502ca6c34e0). The seeded contract bundle does not yet contain a REQUIRE_APPROVAL rule for the demo claim shape. The resume flow surface (sidecar + SDK) is still wired and exercised individually by unit tests in PR #37/#38/#39.

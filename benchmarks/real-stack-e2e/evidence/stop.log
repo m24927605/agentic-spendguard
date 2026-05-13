@@ -1,0 +1,6 @@
+=== ledger_transactions (denied_decision) ===
+ denied_decision | posted        | 019e2066-6473-7a23-8293-6a13b2165b2e | t
+=== ledger_entries for denied_decision (must be 0) ===
+=== reservations whose source tx is a denied_decision (must be 0) ===
+ spendguard.audit.decision | spendguard.audit.decision | t            | t
+NOTICE:  Phase 3 wedge DENY lifecycle PASS: denied_tx=1 audit_rows=1
