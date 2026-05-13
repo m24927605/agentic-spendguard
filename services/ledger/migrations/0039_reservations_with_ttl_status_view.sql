@@ -68,7 +68,16 @@ BEGIN
     -- Only return reason for release outcomes; nulls out other kinds
     -- (commit_estimated, etc.) so the view's CASE doesn't see them
     -- as a release.
-    IF v_jsonb->>'kind' <> 'release' THEN
+    --
+    -- Codex P0.6 r2 P2 fix: use IS DISTINCT FROM, not `<>`. If `kind`
+    -- is absent OR JSON null, `v_jsonb->>'kind'` returns SQL NULL, and
+    -- `NULL <> 'release'` evaluates to NULL — IF NULL THEN doesn't
+    -- fire, so the function would fall through and return whatever
+    -- `reason` says, promoting a malformed-but-decodable payload like
+    -- `{"reason":"TTL_EXPIRED"}` (no kind) to a real release. IS
+    -- DISTINCT FROM treats NULL as distinct from 'release', so
+    -- missing/null kind correctly returns NULL.
+    IF v_jsonb->>'kind' IS DISTINCT FROM 'release' THEN
         RETURN NULL;
     END IF;
     RETURN v_jsonb->>'reason';

@@ -519,6 +519,66 @@ END $$;
 
 ROLLBACK TO SAVEPOINT fixture_5;
 
+-- =====================================================================
+-- Direct decoder contract tests (codex P0.6 r2 P3 coverage)
+-- =====================================================================
+-- These hit the helper directly to lock down the contract documented
+-- in cost_advisor_safe_release_reason's COMMENT. Each case returns
+-- NULL; no exceptions reach the caller.
+SAVEPOINT decoder_contract;
+
+DO $$
+DECLARE
+    v TEXT;
+BEGIN
+    -- A: invalid base64.
+    SELECT cost_advisor_safe_release_reason('!!!not-base64@@@') INTO v;
+    IF v IS NOT NULL THEN RAISE EXCEPTION 'decoder_A FAIL: invalid base64 returned %', v; END IF;
+    RAISE NOTICE 'decoder_A: PASS (invalid base64 → NULL)';
+
+    -- B: invalid UTF8 inside valid base64. Bytes 0x80, 0x81, 0x82 are
+    -- not valid UTF8 lead bytes outside continuation contexts. We use
+    -- decode('808182', 'hex') here because the bytea hex-escape
+    -- literal `\x...` would be re-interpreted by the dollar-quoted
+    -- string parser.
+    SELECT cost_advisor_safe_release_reason(encode(decode('808182', 'hex'), 'base64')) INTO v;
+    IF v IS NOT NULL THEN RAISE EXCEPTION 'decoder_B FAIL: invalid UTF8 returned %', v; END IF;
+    RAISE NOTICE 'decoder_B: PASS (invalid UTF8 → NULL)';
+
+    -- C: valid UTF8 but invalid JSON.
+    SELECT cost_advisor_safe_release_reason(encode('not json at all'::bytea, 'base64')) INTO v;
+    IF v IS NOT NULL THEN RAISE EXCEPTION 'decoder_C FAIL: invalid JSON returned %', v; END IF;
+    RAISE NOTICE 'decoder_C: PASS (invalid JSON → NULL)';
+
+    -- D: valid JSON, kind absent, reason set. P2 r2 fix: must NOT
+    -- promote to release.
+    SELECT cost_advisor_safe_release_reason(encode('{"reason":"TTL_EXPIRED"}'::bytea, 'base64')) INTO v;
+    IF v IS NOT NULL THEN RAISE EXCEPTION 'decoder_D FAIL: missing kind returned %', v; END IF;
+    RAISE NOTICE 'decoder_D: PASS (missing kind → NULL despite reason set)';
+
+    -- E: valid JSON, kind=null, reason set. Same as D but explicit JSON null.
+    SELECT cost_advisor_safe_release_reason(encode('{"kind":null,"reason":"TTL_EXPIRED"}'::bytea, 'base64')) INTO v;
+    IF v IS NOT NULL THEN RAISE EXCEPTION 'decoder_E FAIL: kind=null returned %', v; END IF;
+    RAISE NOTICE 'decoder_E: PASS (kind=null → NULL despite reason set)';
+
+    -- F: kind=other (non-release).
+    SELECT cost_advisor_safe_release_reason(encode('{"kind":"commit_estimated","reason":"X"}'::bytea, 'base64')) INTO v;
+    IF v IS NOT NULL THEN RAISE EXCEPTION 'decoder_F FAIL: non-release kind returned %', v; END IF;
+    RAISE NOTICE 'decoder_F: PASS (kind=commit_estimated → NULL)';
+
+    -- G: happy path.
+    SELECT cost_advisor_safe_release_reason(encode('{"kind":"release","reason":"TTL_EXPIRED"}'::bytea, 'base64')) INTO v;
+    IF v <> 'TTL_EXPIRED' THEN RAISE EXCEPTION 'decoder_G FAIL: happy path returned %', v; END IF;
+    RAISE NOTICE 'decoder_G: PASS (kind=release reason=TTL_EXPIRED → TTL_EXPIRED)';
+
+    -- H: NULL input → STRICT short-circuit.
+    SELECT cost_advisor_safe_release_reason(NULL) INTO v;
+    IF v IS NOT NULL THEN RAISE EXCEPTION 'decoder_H FAIL: NULL input returned %', v; END IF;
+    RAISE NOTICE 'decoder_H: PASS (NULL → NULL via STRICT)';
+END $$;
+
+ROLLBACK TO SAVEPOINT decoder_contract;
+
 SELECT 'all_fixtures: PASS' AS final_status;
 
 ROLLBACK;   -- parent tx: leave no persistent state, no deferred trigger fires
