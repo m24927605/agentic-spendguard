@@ -67,12 +67,10 @@
 - **改了**: 20 files (有 first user-facing mention 的)
 - **沒改的對應**: 18 files 沒有 standalone "SpendGuard"（純 component docs / 全是 code identifier）— 不需要動
 
-### B2 · README 第一屏視覺改善
-- **Why**：playbook P0-2，但等 benchmark 才能用真實數字
-- **現況**：README:28-35 是 ASCII 流程圖
-- **改成什麼**：暫時用 `<pre>` 包的 terminal screenshot（真 demo 跑出來的，非假數字）；正式 receipt 截圖等 M1 benchmark 完成
-- **Branch**：`docs/readme-first-screen`
-- **Block on**：M1 完成才能用真數字
+### B2 · README 第一屏視覺改善 ✅
+- **Status**: ✅ 完成 — branch `docs/p1-2-3-b2-receipts-demo`
+- **改了什麼**: README.md 第 26-50 行的 ASCII flow diagram 換成真 benchmark headline table（Agentic SpendGuard −10% / agentbudget +8% / agent-guard +1700%），引向 `benchmarks/runaway-loop/`
+- **不用假 screenshot**: code block 形式更 diff-friendly，數字直接從 RESULTS.md 抄
 
 ### B3 · 文件站新 brand 上線驗證
 - **Why**：確認自動化沒壞
@@ -93,11 +91,21 @@
   1. **Direct head-to-head（benchmark-verified）**: 只列 SpendGuard / AgentBudget / AgentGuard，因為這三個有 benchmark 數據；codex must-fix #1 的根因（其他 columns 沒實測）規避
   2. **Adjacent categories（different problems）**: Helicone/Portkey/LiteLLM/TrueFoundry/LangSmith 在獨立 table，每個附「why it's not in the matrix」說明，加 disclaimer「reservation/audit/approval 組合語義不是他們不做 cap」
 
-### P1-2 · Receipt 截圖（真 demo data）
-- **Block on**：M1 benchmark + B2
+### P1-2 · Receipt 截圖（真 demo data）✅
+- **Status**: ✅ 完成 — branch `docs/p1-2-3-b2-receipts-demo`
+- **產出**:
+  - `benchmarks/runaway-loop/sample-receipts/spendguard-ledger.jsonl` — 真 ledger reserve→commit→reserve_denied 序列
+  - `benchmarks/runaway-loop/sample-receipts/mock-llm-calls.jsonl` — wire calls source-of-truth
+  - `benchmarks/runaway-loop/sample-receipts/README.md` — 解釋 receipts，含 ASCII rendering
+- **自動化**: analyzer 每次 `make benchmark` 自動 snapshot 到 sample-receipts/
 
-### P1-3 · 12 秒 GIF demo
-- **Block on**：M1 benchmark
+### P1-3 · 12 秒 GIF demo ✅
+- **Status**: ✅ 完成 — branch `docs/p1-2-3-b2-receipts-demo`
+- **產出**:
+  - `benchmarks/runaway-loop/cast/runaway-loop.cast` — asciinema cast (~10s, 2.5 KB)
+  - `benchmarks/runaway-loop/cast/record.sh` — re-recording script (pre-builds，只錄 runner+analyzer phase)
+  - `benchmarks/runaway-loop/cast/README.md` — play / GIF 轉檔指引
+- **GIF 生成**: `brew install agg && agg cast/runaway-loop.cast cast/runaway-loop.gif`（user 本地跑，repo 不存 binary）
 
 ### P1-4 · From-Scratch 7 章 TOC + 前 3 章內文
 - **Why**：playbook §4 P1-3，Raschka 模式

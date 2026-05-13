@@ -111,9 +111,11 @@ services:
     environment:
       RESULTS_DIR: /results
       MOCK_LLM_LOG: /var/log/mock_llm.jsonl
+      SHIM_LEDGER_LOG: /shim/spendguard_shim.jsonl
       OUTPUT_PATH: /results/RESULTS.md
     volumes:
       - mock-llm-log:/var/log:ro
+      - shim-log:/shim:ro
       - results:/results
       - ./:/host:rw
     networks: [benchmark-net]
