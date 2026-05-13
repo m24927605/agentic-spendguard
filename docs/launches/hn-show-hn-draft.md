@@ -1,24 +1,27 @@
-# Show HN draft — SpendGuard
+# Show HN draft — Agentic SpendGuard
 
-**Status**: not yet sent. Hold until two preconditions clear:
+**Status**: not yet sent. Hold until **three** preconditions clear:
 
 1. Google Search Console shows the docs site has been crawled (≥1 indexed page in the Coverage report).
 2. At least one framework integration PR (Pydantic-AI / LangChain / OpenAI Agents SDK / Microsoft AGT) has been merged into the upstream repo — gives social proof in the thread comments.
+3. **(NEW, per `docs/SPENDGUARD_VIRAL_PLAYBOOK.md` codex review)** Reproducible benchmark vs AgentGuard / AgentBudget is published under `benchmarks/`. Without this, the launch will be torn apart in comments — those two repos already own "real-time guardrail kills runaway agent loops."
 
 Per `docs/seo-plan.md` §1 Lever 4 sequencing: dev.to / Medium technical deep-dive follow-up goes out 1–2 weeks after the HN post, NOT before.
 
+> **Positioning shift required before sending**: drop "pre-call budget caps" framing (AgentGuard wedge). Lead with **enterprise infra differentiation**: KMS-signed audit chain, Stripe-style auth/capture, operator approval workflow, multi-tenant control plane, L0–L3 enforcement strength. See playbook §5 for full naming/positioning context.
+
 ---
 
-## Title options
+## Title options (rebrand-safe, ≤80 chars)
 
 HN truncates titles around 80 characters. Pick one when ready to send.
 
-1. **`Show HN: SpendGuard – stop the LLM bill before it lands`** *(55 chars; tight, mirrors README tagline)*
-2. **`Show HN: SpendGuard – pre-call budget caps for AI agent LLM spend`** *(62 chars; keyword-loaded, less punchy)*
-3. **`Show HN: I built a runtime gate after my agent burned $400 overnight`** *(70 chars; story-shaped)*
-4. **`Show HN: Stripe-style auth/capture for LLM budgets`** *(51 chars; abstract, intriguing to infra readers)*
+1. **`Show HN: Agentic SpendGuard – audit-chain spend control for LLM agents`** *(70 chars; new lead per playbook §5)*
+2. **`Show HN: Agentic SpendGuard – KMS-signed budget gate for AI agent runs`** *(70 chars; emphasizes compliance moat)*
+3. **`Show HN: I built a runtime gate after my agent burned $400 overnight`** *(70 chars; story-shaped, brand-neutral)*
+4. **`Show HN: Agentic SpendGuard – Stripe-style auth/capture for LLM budgets`** *(71 chars; abstract, intriguing to infra readers)*
 
-**Recommended**: #1. Falls back to #3 if you want to A/B the story-shaped variant on a different day.
+**Recommended**: #1 or #4 — both lead on the differentiated wedge (audit chain / Stripe ledger). Avoid the original #2 ("pre-call budget caps") — that wedge is now owned by AgentGuard / AgentBudget.
 
 ---
 
