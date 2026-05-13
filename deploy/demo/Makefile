@@ -54,6 +54,11 @@ else ifeq ($(DEMO_MODE),ttl_sweep)
 else ifeq ($(DEMO_MODE),deny)
 	@echo "[demo] verifying Phase 3 wedge (contract evaluator STOP path)..."
 	@$(MAKE) demo-verify-deny
+else ifneq (,$(findstring agent_real,$(DEMO_MODE)))
+	@echo "[demo] DEMO_MODE=$(DEMO_MODE) — skipping demo-verify-step7."
+	@echo "[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)"
+	@echo "[demo] which never match real provider responses (gpt-4o-mini etc. return"
+	@echo "[demo] variable token counts). See SPENDGUARD_VIRAL_PLAYBOOK.todo.md F2."
 else
 	@echo "[demo] verifying Phase 2B Step 7 (agent-mode commit_estimated only)..."
 	@$(MAKE) demo-verify-step7
