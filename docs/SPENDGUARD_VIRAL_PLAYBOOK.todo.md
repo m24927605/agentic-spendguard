@@ -31,6 +31,15 @@
 
 ## 🔥 Tier 0：真 moat — 多日工作
 
+### CA · Cost Advisor product spec + P0 prompt ready ✅
+- **Status**: ✅ spec GREEN (codex r4) — `docs/specs/cost-advisor-spec.md` (822 lines, v3 after 4 rounds adversarial review)
+- **Codex iteration**：r1=4.5 → r2=5.2 → r3=5.0(rescope) → r4=GREEN_LIGHT_FOR_P0。Staff escalation 未觸發
+- **核心 rescope** (codex r3)：cost advisor 是 closed-loop feature，不是 separate product；findings → proposed contract patches → 既有 approval queue → operator approve → next sidecar reload
+- **P0 prompt ready**：`docs/launches/cost-advisor-p0-prompt.md` — 4 步驟（schema audit / proto+trait / migrations / integration design）
+- **P0 預估**：4 天（A2 audit 結果可能 +3-10 天 contingency）
+- **P0 後**：P1 (5-6 天) 實作 failed_retry_burn_v1 第一條 rule
+- **Total to v0.1**：17 天 per §9 phasing
+
 ### F1 · Backport rustls CryptoProvider fix to 9 Rust services ✅
 - **Status**: ✅ 完成 — branch `fix/rustls-crypto-provider-backport` (commit `b3b1abf`)
 - **Result**: 真 Rust stack 完全 boot；real gpt-4o-mini 呼叫 OK：`output='Hello there, friend!'`
