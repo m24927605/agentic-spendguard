@@ -49,7 +49,9 @@ v3 §3 + §6 examples implied `payload_json->>'kind'` and `payload_json->>'commi
 
 Rule SQL must decode `data_b64` via `convert_from(decode(payload_json->>'data_b64', 'base64'), 'UTF8')::jsonb` to reach inner fields. Tier-2 baseline SQL example in v3 §6 is wrong as written.
 
-Per-call cost data (`committed_micros_usd`, `estimated_amount_atomic`) lives in `ledger.commits` and `ledger_entries` in the `spendguard_ledger` database — NOT in `canonical_events.payload_json`. Rules that quantify waste in USD MUST join `canonical_events.decision_id ⨝ ledger_transactions.decision_id ⨝ commits` + `ledger_units` + `pricing_snapshots` for unit/currency normalization.
+Cost-data nuance (codex r9 P2 correction): `estimated_amount_atomic` IS present inside the decoded `data_b64` payload for `commit_estimated` audit outcomes (per `services/sidecar/src/decision/transaction.rs:812-817` CloudEvent payload). But it's in **unit-atomic form** (e.g. token counts, or `micros_usd` × some scale factor depending on the unit), NOT directly in USD micros. To get a USD-normalized waste figure, rules MUST join `canonical_events.decision_id ⨝ ledger_transactions.decision_id ⨝ commits` + `ledger_units.scale` + `pricing_snapshots` for unit/currency normalization. `committed_micros_usd` as v3 §5.1 imagined it is a derived metric, not a raw column.
+
+The CloudEvent envelope is serialized into `payload_json` by `services/canonical_ingest/src/handlers/append_events.rs` (the `cloudevent_to_json` helper); `services/canonical_ingest/src/persistence/append.rs` only persists the already-built JSON.
 
 ### 0.3 §4.1 `cost_findings` uses mirror + upsert SP, not direct UNIQUE INDEX
 
@@ -355,6 +357,8 @@ Rules ship as `services/cost_advisor/rules/<category>/<rule_id>.sql` files. Each
 
 ### 5.1 v0 ships ONLY `detected_waste` rules (codex r1 must-fix #3, refined r2)
 
+> ⚠️ **v4 superseded by §0.1**: the 4 rules below were the v3 plan. v0.1 actually ships ZERO rules until P0.5 + P0.6 land. `idle_reservation_rate_v1` becomes the v0.1 candidate after P0.6 view ships; the other 3 are gated on P0.5 enrichment. The §5.1 narrative below is preserved for the rule-design rationale.
+
 These are rules where we can **mathematically demonstrate** money was wasted (paid for something with no value).
 
 **Failure taxonomy (codex r2 must-fix #3)**: "failed" was previously overloaded. v2 defines explicit failure classes and which ones count as `detected_waste`:
@@ -467,6 +471,8 @@ V0 ships SQL-only `CostRule` impls (a generic `SqlCostRule` adapter wraps any `.
 ---
 
 ## 6. Tier 2 baseline computation
+
+> ⚠️ **v4 superseded by §0.2**: the SQL example below reads `payload->>'committed_micros_usd'` and direct-inserts into `cost_findings`. Both are wrong per the verified canonical_events shape (base64 `data_b64`) and the implementation reality (writes go through `cost_findings_upsert()` SP). The §6 narrative is preserved for the seasonality + window-size rationale (§11.5 A4); the SQL example is illustrative only — P2 will write the actual baseline SQL against the decoded envelope + ledger join.
 
 Nightly batch job (`baseline_refresher` worker):
 
@@ -650,6 +656,8 @@ These would have been ~10 days of build + maintenance for surface area that dupl
 
 ## 9. Implementation phasing — v3 collapsed plan
 
+> ⚠️ **v4 superseded by §0.5**: the v3 phasing table below has `P0=4d, P1=6d, total=17d`. Reality shipped: P0=4d (done in commit `42cb787`), then NEW P0.5 (5d) + NEW P0.6 (2d) required before P1 can start, then P1 cut to 4d. New v0.1 critical path = **20 days** elapsed. See §0.5 for the canonical table. The §9 narrative below is preserved for the v3 rationale.
+
 Per codex r3 rescope: cut P4 (dashboard), P5 (digest), P6 (separate gRPC). Reuse existing approval queue.
 
 | Phase | Scope | Estimated work |
@@ -796,12 +804,16 @@ The §4.0 unit allowlist is `[micros_usd, usd, tokens, calls, seconds, ratio, co
 
 ## 13. Success criteria
 
+> ⚠️ **v4 superseded by §0.1 + §0.5**: the v3 v0.1 criteria assumed 4 rules + multiple framework-specific implementations. Reality: v0.1 ships ONE rule (`idle_reservation_rate_v1`) after P0.5 + P0.6 land. "At least 2 framework-specific rules" is a v1.0 criterion, not v0.1.
+
 For v0.1 (P1 + P3 shipped):
 - [ ] At least 1 design partner runs `spendguard advise` against their real `canonical_events` and finds 1+ true-positive finding
 - [ ] At least 1 narrative is rated 👍 by a real customer
 - [ ] Tier 3 cost per tenant per day < $0.05 in the partner cohort
 - [ ] Zero hallucinated dollar amounts (validated by post-generation validator + audit)
-- [ ] At least 2 framework-specific rules ship (one for LangChain agent loop, one for OpenAI Agents SDK tool loop)
+- [ ] At least 2 framework-specific rules ship (one for LangChain agent loop, one for OpenAI Agents SDK tool loop) <!-- v4: deferred to v1.0 -->
+- [ ] (v4 added) `idle_reservation_rate_v1` fires on a real TTL-burning agent in the demo benchmark
+- [ ] (v4 added) Operator approves a cost_advisor proposal via existing `/v1/approvals/:id/resolve` REST endpoint and the closed loop demo shows the patch flowing to the next contract bundle
 
 For v1.0 (all P1–P6 shipped, codex challenge round complete):
 - [ ] 4 detected_waste Tier-1 rules + 1 baseline outlier rule shipping (model_burn cut per codex r1)

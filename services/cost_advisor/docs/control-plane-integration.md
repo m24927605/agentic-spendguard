@@ -335,7 +335,7 @@ CREATE TRIGGER cost_advisor_proposal_source_guard
     EXECUTE FUNCTION enforce_cost_advisor_proposal_source();
 ```
 
-`pg_has_role(session_user, 'cost_advisor_application_role', 'USAGE')` correctly identifies whether the connecting role has membership, regardless of whether `SET ROLE` was issued — more forgiving than the RLS path. The trigger only rejects when the role IS cost_advisor AND it tries to write a non-cost_advisor proposal; other roles pass through unaffected.
+`pg_has_role(session_user, 'cost_advisor_application_role', 'MEMBER')` correctly tests bare membership regardless of inheritance — the right guard for "is this login role a member of the cost_advisor role?" (Codex r8 caught an earlier draft using `'USAGE'`, which would have missed login roles granted membership WITHOUT INHERIT — `USAGE` only matches privileges immediately available.) The trigger only rejects when the role IS a cost_advisor member AND it tries to write a non-cost_advisor proposal; other roles pass through unaffected.
 
 Decision: ship **Mechanism A (RLS)** if the runtime can guarantee `SET ROLE` at session start; otherwise ship Mechanism B (trigger). Lands in P1.
 
