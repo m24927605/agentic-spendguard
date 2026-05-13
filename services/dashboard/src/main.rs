@@ -73,6 +73,10 @@ struct AppState {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("failed to install rustls aws_lc_rs default provider"))?;
+
     let envfilter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,spendguard_dashboard=debug"));
     tracing_subscriber::registry()

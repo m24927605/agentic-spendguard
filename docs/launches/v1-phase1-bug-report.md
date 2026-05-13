@@ -123,6 +123,43 @@ forward with V1 Phase 2-4.
 After the fix lands, V1 can resume from Phase 1 (re-test) → Phase 2
 (LangChain pure mode if missing) → Phase 3 (4 decision paths).
 
+---
+
+## Update 2026-05-13 — Fix Verified ✅
+
+Branch `fix/rustls-crypto-provider-backport` (commit `b3b1abf`) applies the
+3-line `install_default()` block to 9 services + adds `rustls = "0.23"` direct
+dep to 9 Cargo.toml files. Re-running `make demo-up DEMO_MODE=agent_real`:
+
+**What now works**:
+- ✅ `spendguard-sidecar` boots without panic
+- ✅ `spendguard-ledger` boots without panic
+- ✅ `spendguard-canonical-ingest` boots without panic
+- ✅ Demo container connects to sidecar via UDS
+- ✅ Handshake succeeds (real session_id)
+- ✅ Real `gpt-4o-mini` OpenAI call: `output='Hello there, friend!'`
+- ✅ Reservation + commit lifecycle records correctly in postgres
+
+**Build performance**: cargo cache + Docker BuildKit cache reduced rebuild
+from ~30 min (sidecar from scratch) to ~3 min (sidecar incremental).
+
+**Secondary issue surfaced — F2 follow-up needed**:
+After the agent completes, `make demo-verify-step7` (a `psql` assertion) fails:
+```
+ERROR: EXPECTED available_budget balance 458; got 482
+```
+The verify SQL has hardcoded expected token amounts calibrated for the Mock
+LLM (which returns ~42 atomic units). Real OpenAI gpt-4o-mini returned 18
+units instead (variable per call). This is test brittleness, not a product
+bug — the actual reservation + commit math is correct.
+
+Options for F2:
+1. Skip verify-step7 when DEMO_MODE=agent_real (one-line guard in Makefile)
+2. Loosen assertion from exact-equal to range or > 0
+3. Add a separate verify-step7-real that knows tokens are variable
+
+Recommended: option 1 (guard) for fastest fix; option 3 long-term.
+
 ## Related
 
 - Strategic plan: `../SPENDGUARD_VIRAL_PLAYBOOK.md`

@@ -14,6 +14,9 @@ name = "spendguard_retention_sweeper"
 path = "src/lib.rs"
 
 [dependencies]
+
+# Direct rustls dep so main() can call CryptoProvider::install_default()
+rustls = "0.23"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = [
     "runtime-tokio",
