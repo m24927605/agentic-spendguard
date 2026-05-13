@@ -29,6 +29,7 @@
 
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
+use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -36,12 +37,26 @@ type HmacSha256 = Hmac<Sha256>;
 ///
 /// `tenant_id` becomes the HMAC key; `prompt_text` is the message.
 /// Returns 64-char lowercase hex string.
+///
+/// Codex P0.5 r2 P2: `tenant_id` is normalized to canonical
+/// lowercase-hyphenated UUID form before HMAC keying. Without this,
+/// the same tenant calling with `"ABC-...".to_uppercase()` vs
+/// `"abc-..."` would compute different HMAC keys and split same-
+/// tenant dedup across adapters. If `tenant_id` doesn't parse as a
+/// UUID, we use the raw input verbatim — degraded but stable.
 pub fn compute(prompt_text: &str, tenant_id: &str) -> String {
+    let canonical_tenant = canonicalize_tenant(tenant_id);
     let trimmed = prompt_text.trim_matches(is_ascii_whitespace);
-    let mut mac = HmacSha256::new_from_slice(tenant_id.as_bytes())
+    let mut mac = HmacSha256::new_from_slice(canonical_tenant.as_bytes())
         .expect("HMAC accepts any key length");
     mac.update(trimmed.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+fn canonicalize_tenant(tenant_id: &str) -> String {
+    Uuid::parse_str(tenant_id)
+        .map(|u| u.hyphenated().to_string())
+        .unwrap_or_else(|_| tenant_id.to_string())
 }
 
 fn is_ascii_whitespace(c: char) -> bool {
@@ -135,6 +150,34 @@ mod tests {
         assert_ne!(
             compute(same_prompt, tenant_a),
             compute(same_prompt, tenant_b)
+        );
+    }
+
+    #[test]
+    fn tenant_id_canonicalization_collapses_case_and_format() {
+        // P0.5 r2 P2 fix: same UUID in different string forms should
+        // produce the same hash so dedup doesn't split.
+        let prompt = "What is the capital of France?";
+        let dashed_lower = "00000000-0000-4000-8000-000000000001";
+        let dashed_upper = "00000000-0000-4000-8000-000000000001".to_uppercase();
+        let simple_no_dashes = "00000000000040008000000000000001";
+        assert_eq!(compute(prompt, dashed_lower), compute(prompt, &dashed_upper));
+        assert_eq!(compute(prompt, dashed_lower), compute(prompt, simple_no_dashes));
+    }
+
+    #[test]
+    fn non_uuid_tenant_falls_back_to_raw_string() {
+        // Degraded path: a non-UUID tenant_id (e.g., test fixture)
+        // still works deterministically. Two callers using the same
+        // non-UUID string get the same hash.
+        let prompt = "hello";
+        assert_eq!(
+            compute(prompt, "test-tenant"),
+            compute(prompt, "test-tenant")
+        );
+        assert_ne!(
+            compute(prompt, "test-tenant-a"),
+            compute(prompt, "test-tenant-b")
         );
     }
 }
