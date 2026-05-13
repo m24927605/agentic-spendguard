@@ -1,6 +1,6 @@
 # 6-layer architecture
 
-SpendGuard organizes its concerns into 6 primitive layers, executed
+Agentic SpendGuard organizes its concerns into 6 primitive layers, executed
 in this strict order on every decision:
 
 ```

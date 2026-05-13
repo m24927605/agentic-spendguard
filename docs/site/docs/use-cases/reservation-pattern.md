@@ -12,7 +12,7 @@ description: >-
 > years old in feature flags. It's not yet a primitive for LLM spend,
 > but it should be — the same shape solves the same class of problem.
 > This page explains the pattern from first principles and shows how
-> SpendGuard implements it.
+> Agentic SpendGuard implements it.
 
 ## Why the standard answer doesn't work
 

@@ -1,7 +1,7 @@
 # spendguard-ledger
 
 Append-only double-entry ledger + audit transactional outbox for the
-SpendGuard Phase 1 first-customer (K8s SaaS-managed) POC.
+Agentic SpendGuard Phase 1 first-customer (K8s SaaS-managed) POC.
 
 ## Spec map
 

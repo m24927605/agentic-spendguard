@@ -1,6 +1,6 @@
 # Pricing & USD-denominated budgets
 
-A SpendGuard tenant can spend a single USD budget across multiple
+A Agentic SpendGuard tenant can spend a single USD budget across multiple
 LLM providers (OpenAI, Anthropic, Bedrock, Azure OpenAI, Gemini).
 The flow:
 

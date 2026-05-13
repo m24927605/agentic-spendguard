@@ -1,6 +1,6 @@
 # spendguard-endpoint-catalog
 
-Atomic-update endpoint catalog for the SpendGuard Phase 1 first-customer
+Atomic-update endpoint catalog for the Agentic SpendGuard Phase 1 first-customer
 (K8s SaaS-managed) POC.
 
 Sidecars discover ledger / canonical_ingest / bundle_registry / regional CA

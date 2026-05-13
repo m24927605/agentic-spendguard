@@ -1,6 +1,6 @@
 ---
 description: >-
-  Pre-call token budget enforcement for Pydantic-AI agents using SpendGuard.
+  Pre-call token budget enforcement for Pydantic-AI agents using Agentic SpendGuard.
   Every Model.request() is reserved against a budget before the LLM call is
   sent, with signed audit trail and human-approval flow on over-budget calls.
 ---
