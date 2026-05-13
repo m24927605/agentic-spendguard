@@ -2957,7 +2957,7 @@ metrics are explicit S23-followups.
   has a `for:` window (5m / 10m / 15m / 30m / 1h). Short
   bursts don't page.
 - **Single point of failure on alert delivery**: out of scope
-  for SpendGuard; operators wire Prometheus → Alertmanager →
+  for Agentic SpendGuard; operators wire Prometheus → Alertmanager →
   PagerDuty / Slack per their own infrastructure.
 - **Drill scenarios that mutate prod state**: D1-D4 explicitly
   describe test-env-only setups (kubectl delete pod, manually

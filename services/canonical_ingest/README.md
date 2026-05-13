@@ -1,6 +1,6 @@
 # spendguard-canonical-ingest
 
-Per-decision sequence-enforced canonical event ingest for the SpendGuard
+Per-decision sequence-enforced canonical event ingest for the Agentic SpendGuard
 Phase 1 first-customer (K8s SaaS-managed) POC.
 
 ## Spec map

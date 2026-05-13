@@ -1,6 +1,6 @@
 ---
 description: >-
-  Honest assessment of which SpendGuard capabilities are production-ready
+  Honest assessment of which Agentic SpendGuard capabilities are production-ready
   today versus blocked behind the GA hardening slices, with pointers to
   every open gate and the roadmap entry that closes it.
 ---

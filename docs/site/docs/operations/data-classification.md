@@ -1,6 +1,6 @@
 # Data classification (Phase 5 S19)
 
-Catalog of every event field SpendGuard records, with its data
+Catalog of every event field Agentic SpendGuard records, with its data
 class. Operators consult this when configuring
 `tenant_data_policy.export_redaction_field_paths` and when
 running compliance reviews.

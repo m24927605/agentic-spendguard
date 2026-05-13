@@ -1,7 +1,7 @@
 ---
 description: >-
   Composite policy evaluator combining Microsoft AGT (Agent Governance Toolkit)
-  with SpendGuard. AGT's deterministic access check runs first; SpendGuard's
+  with Agentic SpendGuard. AGT's deterministic access check runs first; SpendGuard's
   budget reservation runs on AGT-allowed actions only — no wasted reservations
   on AGT denies.
 ---
