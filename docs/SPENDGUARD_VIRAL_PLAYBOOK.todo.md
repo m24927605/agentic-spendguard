@@ -49,35 +49,23 @@
   - Noisy-reservation scenario (release-path coverage)
   - Concurrent-agent scenario
 
-### M2 · P0-4 Platform engineer / CTO outreach list
-- **Why**：codex「real ICP」回饋 — 真受眾不是 CFO，是 platform engineering / AI infra leads
-- **Scope**：列 10 個目標公司 + 對應 platform engineer / AI infra lead 連絡人 + 一份冷郵範本
-- **產出**：
-  - `docs/launches/outreach-list.md`（**不要進 git** — 含個資；放本地或 1Password）
-  - `docs/launches/cold-email-template.md`（公開可進 git，去個資化）
-- **預估工時**：1 天研究 + 0.5 天寫範本
+### M2 · P0-4 Platform engineer / CTO outreach list ✅
+- **Status**: ✅ 完成 — branch `docs/m2-outreach`
+- **產出**:
+  - `docs/launches/cold-email-template.md` — 公開模板（≤180 字 cold-email + channel guidance）
+  - `docs/launches/outreach-list.template.md` — schema 模板進 git
+  - `.gitignore`: `docs/launches/outreach-list.md` 阻擋實際 list 進 git
+- **下一步（user fills locally）**: 用 schema 填 10 個 trigger-driven 目標到本地 `outreach-list.md`
 
 ---
 
 ## ⚡ Tier 1：brand & launch hygiene — 30 分鐘
 
-### B1 · 35 個剩餘 .md 檔案 brand sweep
-- **Why**：brand 一致性。已掃 5 個高曝光面，內部還有 35 個用 bare「SpendGuard」
-- **Scope**：以下範疇的檔案，把 H1 / 開頭段 / page title 改用「Agentic SpendGuard」全名（內文後續「SpendGuard」OK）：
-  - `docs/site/docs/use-cases/*.md` (3 files)
-  - `docs/site/docs/integrations/*.md` (4 files)
-  - `docs/site/docs/concepts/*.md` (4 files)
-  - `docs/site/docs/deployment/*.md` (2 files)
-  - `docs/site/docs/operations/*.md` (含 drills) (~8 files)
-  - `docs/site/docs/reference/*.md` (~3 files)
-  - `docs/site/docs/poc-vs-ga.md`
-  - `docs/site/docs/roadmap/*.md`
-  - `services/*/README.md` (8 files)
-  - `terraform/aws/README.md`、`charts/spendguard/README.md`
-  - 跳過：CHANGELOG.md（歷史性質）、PHASE_4_*.md（內部報告）
-- **不要動**：code identifiers (`SpendGuardClient` etc.)、PyPI package name、Helm chart name、Docker images、proto messages
-- **Branch**：`docs/brand-sweep-internal`
-- **Codex challenge**：不需要
+### B1 · 35 個剩餘 .md 檔案 brand sweep ✅
+- **Status**: ✅ 完成 — branch `docs/brand-sweep-internal`, merged
+- **方法**: `perl -i -0pe 's/\bSpendGuard\b(?![a-zA-Z0-9_-])/Agentic SpendGuard/'` — 只改第一個 standalone-word，保護所有 code identifier
+- **改了**: 20 files (有 first user-facing mention 的)
+- **沒改的對應**: 18 files 沒有 standalone "SpendGuard"（純 component docs / 全是 code identifier）— 不需要動
 
 ### B2 · README 第一屏視覺改善
 - **Why**：playbook P0-2，但等 benchmark 才能用真實數字
