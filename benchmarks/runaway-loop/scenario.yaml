@@ -1,0 +1,38 @@
+# Runaway-loop benchmark scenario.
+#
+# A deliberately-overshooting agent: budget is $10, the agent wants to
+# make 100 LLM calls each costing $0.50 (so it would land at $50 if
+# unchecked — 5x the budget). The runner stops as soon as it hits the
+# tool's enforcement boundary. We measure how close to $10 each tool
+# lands, whether mid-stream calls leak through, and what evidence each
+# tool produces.
+#
+# Prices are USD per call, deterministic. The mock LLM serves a fixed
+# response and reports cost in its X-Spendguard-Cost-Usd response header
+# (and in its append-only ledger at /var/log/mock_llm.jsonl).
+
+budget_usd: 1.00
+max_calls: 100
+
+mock_llm:
+  # gpt-4o list pricing × these token counts = $0.18/call.
+  # Budget / cost = 5.55 (deliberately non-integer) so that post-call
+  # enforcement overshoots by one call.
+  model: gpt-4o
+  input_tokens: 8000
+  output_tokens: 16000
+  latency_ms: 10
+  base_url: http://mock-llm:8080/v1
+
+runner_seed: 42
+
+# Multi-tenant variant: same budget, but split across two logical
+# tenants. Tools that don't support multi-tenant in one process score
+# 0 on this dimension.
+multi_tenant:
+  enabled: true
+  tenants:
+    - tenant_id: tenant_a
+      budget_usd: 6.00
+    - tenant_id: tenant_b
+      budget_usd: 4.00
