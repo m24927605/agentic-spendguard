@@ -31,8 +31,26 @@
 
 ## 🔥 Tier 0：真 moat — 多日工作
 
-### F1 · Backport rustls CryptoProvider fix to 11 Rust services 🔴
-- **Status**: 🔴 開放 — V1 Phase 1 smoke test 揭露的 P0 blocker
+### F1 · Backport rustls CryptoProvider fix to 9 Rust services ✅
+- **Status**: ✅ 完成 — branch `fix/rustls-crypto-provider-backport` (commit `b3b1abf`)
+- **Result**: 真 Rust stack 完全 boot；real gpt-4o-mini 呼叫 OK：`output='Hello there, friend!'`
+- **Build perf**: cargo cache 把 rebuild 從 30 min 縮到 3 min
+- **Modified**: 9 services × (main.rs + Cargo.toml) = 18 files, 63 insertions
+- **Notes**: auth + leases lib-only，無需動。9 patched: canonical_ingest / control_plane / dashboard / doctor / endpoint_catalog / ledger / retention_sweeper / sidecar / usage_poller
+- **次要 follow-up**: F2 — verify-step7 SQL 寫死 Mock LLM token 數，real OpenAI 變動 → 見下方
+
+### F2 · `make demo-verify-step7` brittleness with real OpenAI 🟡
+- **Status**: 🟡 follow-up — 不阻擋 V1 後續，product behavior 正常
+- **Symptom**: `ERROR: EXPECTED available_budget balance 458; got 482` (差 24 atomic units)
+- **Root cause**: verify-step7 SQL 寫死 Mock LLM 回 ~42 token 的預期值，real gpt-4o-mini 變動回應
+- **Fix options**:
+  1. Makefile guard：`DEMO_MODE=agent_real` 時 skip verify-step7（一行）
+  2. SQL assertion 改 range（>0、合理上界）
+  3. 寫獨立 `verify-step7-real`
+- **Recommended**: option 1 短期解、option 3 長期
+- **Branch**: `fix/verify-step7-real-openai` 或合併到 P2-4 prep
+
+### V1 · Real-stack LangChain end-to-end verification ⏳ BLOCKED on F1
 - **Why**：rustls 0.23.40（PR #35 Rust toolchain bump 帶進來）requires explicit `CryptoProvider::install_default()`。round2 新加的 3 個 service（outbox_forwarder / ttl_sweeper / webhook_receiver）有修；其餘 11 個漏修：auth / canonical_ingest / control_plane / dashboard / doctor / endpoint_catalog / leases / ledger / retention_sweeper / sidecar / usage_poller
 - **Symptom**：`make demo-up DEMO_MODE=agent_real` 失敗，ledger + canonical_ingest 立即 panic
 - **Fix**：每個 service `main()` 第一行加：
@@ -46,10 +64,12 @@
 - **Detail**：[`docs/launches/v1-phase1-bug-report.md`](./launches/v1-phase1-bug-report.md)
 - **預估**：30 min 改 + 30-60 min 重 build + smoke test = ~1.5-2.5 小時
 
-### V1 · Real-stack LangChain end-to-end verification ⏳ BLOCKED on F1
-- **Status**: ⏳ Phase 1 smoke test 揭露 F1 bug，必須先修才能繼續
-- **Phase 1 結果**：✅ 成功（揭露 rustls bug — 這正是 V1 任務的價值）
-- **Phase 2-4**：⏳ blocked on F1
+### V1 · Real-stack LangChain end-to-end verification 🔄 Phase 1 done, P2 next
+- **Status**: 🔄 進行中
+- **Phase 1**：✅ 完成 — F1 fix 驗證後，real Rust stack + real OpenAI 整條跑通
+- **Phase 2**：🔴 開放 — 是否新增 `agent_real_langchain` mode（看 `agent_real_langgraph` 是否已涵蓋 LangChain 需求）
+- **Phase 3**：🔴 開放 — 4 個 decision path（CONTINUE / STOP / REQUIRE_APPROVAL / DEGRADE）真 stack 驗證
+- **Phase 4**：🔴 開放 — 寫 `benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.md` + codex review
 - **Why**：M1 benchmark 用的是 `spendguard_shim/`（minimal reservation gateway, **不是真的 Rust sidecar**）跑 mock LLM。沒有真 LangChain → 真 sidecar stack → 真 OpenAI 的 e2e 證據前，任何 framework upstream PR (P2-4) 都會被 close 為 premature
 - **Scope**：跑通 `make demo-up DEMO_MODE=agent_real_langchain`（如不存在則新建），對 4 個 decision path（CONTINUE / STOP / REQUIRE_APPROVAL / DEGRADE）都收 evidence
 - **產出**：
