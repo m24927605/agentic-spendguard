@@ -1,0 +1,3 @@
+agentbudget>=0.1.0
+openai>=1.51.0
+httpx>=0.27.0
