@@ -318,6 +318,207 @@ END $$;
 
 ROLLBACK TO SAVEPOINT fixture_3;
 
+-- =====================================================================
+-- Fixture 4: malformed data_b64 → view returns release_reason IS NULL
+--            (codex P0.6 r1 P1 fix: degraded path instead of abort)
+-- =====================================================================
+SAVEPOINT fixture_4;
+
+INSERT INTO ledger_transactions (
+    ledger_transaction_id, tenant_id, operation_kind, posting_state,
+    idempotency_key, request_hash, lock_order_token, decision_id,
+    audit_decision_event_id, effective_at, fencing_scope_id, fencing_epoch_at_post
+) VALUES (
+    'aaaa4444-0000-7000-8000-000000000001'::uuid,
+    '00000000-0000-4000-8000-000000000001', 'reserve', 'posted',
+    'reserve-key-fixture-4', '\x05'::bytea, 'lock-6',
+    'dec00004-0000-7000-8000-000000000001'::uuid,
+    'aad00004-0000-7000-8000-000000000001'::uuid,
+    now() - interval '10 minutes',
+    '33333333-3333-4333-8333-333333333333', 1
+);
+
+INSERT INTO audit_outbox (
+    audit_outbox_id, audit_decision_event_id, decision_id, tenant_id,
+    ledger_transaction_id, event_type, cloudevent_payload,
+    cloudevent_payload_signature, ledger_fencing_epoch, workload_instance_id,
+    recorded_at, recorded_month, producer_sequence, idempotency_key
+) VALUES (
+    'aaaa0004-0000-7000-8000-000000000001'::uuid,
+    'aad00004-0000-7000-8000-000000000001'::uuid,
+    'dec00004-0000-7000-8000-000000000001'::uuid,
+    '00000000-0000-4000-8000-000000000001',
+    'aaaa4444-0000-7000-8000-000000000001'::uuid,
+    'spendguard.audit.decision',
+    ('{"specversion":"1.0","type":"spendguard.audit.decision","data_b64":"' ||
+        encode('{"kind":"reserve"}'::bytea, 'base64') || '"}')::jsonb,
+    '\x00'::bytea, 1, 'demo-sidecar',
+    now() - interval '10 minutes', '2026-05-01', 6, 'reserve-key-fixture-4'
+);
+
+INSERT INTO reservations (
+    reservation_id, tenant_id, budget_id, window_instance_id, current_state,
+    source_ledger_transaction_id, ttl_expires_at, idempotency_key, created_at
+) VALUES (
+    'cccc0004-0000-7000-8000-000000000001'::uuid,
+    '00000000-0000-4000-8000-000000000001',
+    '44444444-4444-4444-8444-444444444444',
+    '55555555-5555-4555-8555-555555555555',
+    'released',
+    'aaaa4444-0000-7000-8000-000000000001'::uuid,
+    now() - interval '5 minutes',
+    'reserve-key-fixture-4',
+    now() - interval '10 minutes'
+);
+
+-- Release tx — but its audit_outbox row has GARBAGE data_b64.
+INSERT INTO ledger_transactions (
+    ledger_transaction_id, tenant_id, operation_kind, posting_state,
+    idempotency_key, request_hash, lock_order_token, decision_id,
+    audit_decision_event_id, effective_at, fencing_scope_id, fencing_epoch_at_post
+) VALUES (
+    'bbbb4444-0000-7000-8000-000000000001'::uuid,
+    '00000000-0000-4000-8000-000000000001', 'release', 'posted',
+    'release-key-fixture-4', '\x06'::bytea, 'lock-7',
+    'dec00004-0000-7000-8000-000000000001'::uuid,
+    'aae00004-0000-7000-8000-000000000001'::uuid,
+    now() - interval '5 minutes',
+    '33333333-3333-4333-8333-333333333333', 1
+);
+
+-- data_b64 here is non-base64 garbage. Bare convert_from(decode(...))
+-- would RAISE EXCEPTION; cost_advisor_safe_release_reason swallows it
+-- and returns NULL.
+INSERT INTO audit_outbox (
+    audit_outbox_id, audit_decision_event_id, decision_id, tenant_id,
+    ledger_transaction_id, event_type, cloudevent_payload,
+    cloudevent_payload_signature, ledger_fencing_epoch, workload_instance_id,
+    recorded_at, recorded_month, producer_sequence, idempotency_key
+) VALUES (
+    'aaab0004-0000-7000-8000-000000000001'::uuid,
+    'aae00004-0000-7000-8000-000000000001'::uuid,
+    'dec00004-0000-7000-8000-000000000001'::uuid,
+    '00000000-0000-4000-8000-000000000001',
+    'bbbb4444-0000-7000-8000-000000000001'::uuid,
+    'spendguard.audit.outcome',
+    '{"specversion":"1.0","type":"spendguard.audit.outcome","data_b64":"!!!not-base64@@@"}'::jsonb,
+    '\x00'::bytea, 1, 'demo-ttl-sweeper',
+    now() - interval '5 minutes', '2026-05-01', 7, 'release-key-fixture-4'
+);
+
+DO $$
+DECLARE
+    v_state TEXT;
+    v_reason TEXT;
+    v_row_count INT;
+BEGIN
+    SELECT derived_state, release_reason
+      INTO v_state, v_reason
+      FROM reservations_with_ttl_status_v1
+     WHERE reservation_id = 'cccc0004-0000-7000-8000-000000000001'::uuid;
+
+    GET DIAGNOSTICS v_row_count = ROW_COUNT;
+
+    -- Pass criterion: view returned a row (didn't ABORT) AND
+    -- release_reason is NULL (degraded path: malformed payload).
+    IF v_row_count <> 1 THEN
+        RAISE EXCEPTION 'fixture_4 FAIL: expected 1 row, got %', v_row_count;
+    END IF;
+    IF v_reason IS NOT NULL THEN
+        RAISE EXCEPTION 'fixture_4 FAIL: malformed data_b64 should degrade to NULL release_reason, got %', v_reason;
+    END IF;
+    IF v_state <> 'released' THEN
+        RAISE EXCEPTION 'fixture_4 FAIL: derived_state expected released, got %', v_state;
+    END IF;
+    RAISE NOTICE 'fixture_4: PASS (malformed data_b64 → release_reason IS NULL, derived_state=%)', v_state;
+END $$;
+
+ROLLBACK TO SAVEPOINT fixture_4;
+
+-- =====================================================================
+-- Fixture 5: source_ledger_transaction_id drift to non-reserve tx
+--            → reserve_tx JOIN doesn't match (operation_kind filter),
+--               so derived_state stays 'released' (not promoted to
+--               ttl_expired) even if a release event matches the
+--               decision_id.  (codex P0.6 r1 P2 fix)
+-- =====================================================================
+SAVEPOINT fixture_5;
+
+-- Insert a 'release' tx, then point a reservation's
+-- source_ledger_transaction_id at it (which the bare FK allows, even
+-- though SPs never do this).
+INSERT INTO ledger_transactions (
+    ledger_transaction_id, tenant_id, operation_kind, posting_state,
+    idempotency_key, request_hash, lock_order_token, decision_id,
+    audit_decision_event_id, effective_at, fencing_scope_id, fencing_epoch_at_post
+) VALUES (
+    'aaaa5555-0000-7000-8000-000000000001'::uuid,
+    '00000000-0000-4000-8000-000000000001', 'release', 'posted',  -- NOT reserve
+    'release-key-fixture-5', '\x07'::bytea, 'lock-8',
+    'dec00005-0000-7000-8000-000000000001'::uuid,
+    'aad00005-0000-7000-8000-000000000001'::uuid,
+    now() - interval '10 minutes',
+    '33333333-3333-4333-8333-333333333333', 1
+);
+
+INSERT INTO audit_outbox (
+    audit_outbox_id, audit_decision_event_id, decision_id, tenant_id,
+    ledger_transaction_id, event_type, cloudevent_payload,
+    cloudevent_payload_signature, ledger_fencing_epoch, workload_instance_id,
+    recorded_at, recorded_month, producer_sequence, idempotency_key
+) VALUES (
+    'aaaa0005-0000-7000-8000-000000000001'::uuid,
+    'aad00005-0000-7000-8000-000000000001'::uuid,
+    'dec00005-0000-7000-8000-000000000001'::uuid,
+    '00000000-0000-4000-8000-000000000001',
+    'aaaa5555-0000-7000-8000-000000000001'::uuid,
+    'spendguard.audit.outcome',
+    ('{"specversion":"1.0","type":"spendguard.audit.outcome","data_b64":"' ||
+        encode('{"kind":"release","reason":"TTL_EXPIRED"}'::bytea, 'base64') ||
+     '"}')::jsonb,
+    '\x00'::bytea, 1, 'demo-ttl-sweeper',
+    now() - interval '10 minutes', '2026-05-01', 8, 'release-key-fixture-5'
+);
+
+-- Drift: reservation pointing at the release tx as its source.
+INSERT INTO reservations (
+    reservation_id, tenant_id, budget_id, window_instance_id, current_state,
+    source_ledger_transaction_id, ttl_expires_at, idempotency_key, created_at
+) VALUES (
+    'cccc0005-0000-7000-8000-000000000001'::uuid,
+    '00000000-0000-4000-8000-000000000001',
+    '44444444-4444-4444-8444-444444444444',
+    '55555555-5555-4555-8555-555555555555',
+    'released',
+    'aaaa5555-0000-7000-8000-000000000001'::uuid,  -- bogus drift
+    now() - interval '5 minutes',
+    'reserve-key-fixture-5',
+    now() - interval '10 minutes'
+);
+
+DO $$
+DECLARE
+    v_state TEXT;
+    v_reason TEXT;
+BEGIN
+    SELECT derived_state, release_reason
+      INTO v_state, v_reason
+      FROM reservations_with_ttl_status_v1
+     WHERE reservation_id = 'cccc0005-0000-7000-8000-000000000001'::uuid;
+    -- Drift defense: operation_kind='reserve' filter means
+    -- reserve_tx.decision_id is NULL → LATERAL has nothing to match →
+    -- release_reason is NULL → derived_state passes through.
+    IF v_state <> 'released' THEN
+        RAISE EXCEPTION 'fixture_5 FAIL: drift should NOT promote to ttl_expired; got %', v_state;
+    END IF;
+    IF v_reason IS NOT NULL THEN
+        RAISE EXCEPTION 'fixture_5 FAIL: drift should leave release_reason NULL; got %', v_reason;
+    END IF;
+    RAISE NOTICE 'fixture_5: PASS (drift caught by operation_kind filter; derived_state=%)', v_state;
+END $$;
+
+ROLLBACK TO SAVEPOINT fixture_5;
+
 SELECT 'all_fixtures: PASS' AS final_status;
 
 ROLLBACK;   -- parent tx: leave no persistent state, no deferred trigger fires
