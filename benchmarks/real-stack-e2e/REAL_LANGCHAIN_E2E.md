@@ -10,12 +10,34 @@ This is the precondition for opening upstream framework docs PRs (P2-4). Without
 
 ## TL;DR
 
+### Framework coverage (real Rust stack + real OpenAI gpt-4o-mini)
+
+| Framework | Status | Evidence |
+|---|:-:|---|
+| **LangChain** (`ChatOpenAI` via `agent_real_langchain`) | ✅ Verified | `output='Hello, how are you?'` |
+| **OpenAI Agents SDK** (`Runner.run` via `agent_real_openai_agents`) | ✅ Verified | `output='Greetings to you!'`; ledger recorded 1 reserve + 1 commit_estimated; 3 audit decisions |
+| **LangGraph** | ⏳ Not retested in this V1 | mode exists (`agent_real_langgraph`); pre-F1 broken |
+| **Pydantic-AI** | ⏳ Not retested in this V1 | mode exists (`agent_real`); pre-F1 broken |
+| **Microsoft AGT** | ⏳ Not retested in this V1 | mode exists (`agent_real_agt`); pre-F1 broken |
+| **Anthropic direct** | ⏳ Not retested in this V1 | mode exists (`agent_real_anthropic`); pre-F1 broken |
+
+### Decision path coverage (per framework where verified)
+
 | Decision Path | Status | Evidence |
 |---|:-:|---|
-| **CONTINUE** | ✅ Verified | Real LangChain `ChatOpenAI` → SpendGuard sidecar → real `gpt-4o-mini`: `output='Hello, how are you?'` |
-| **STOP** | ✅ Verified | `deny` mode: sidecar returns STOP, `denied_decision` row written, **0 ledger entries**, **0 reservations**, **audit row signed** |
+| **CONTINUE** | ✅ Verified | LangChain + OpenAI Agents SDK both completed real `gpt-4o-mini` calls and got real responses |
+| **STOP** | ✅ Verified | `deny` mode: sidecar returns STOP, `denied_decision` row written, **0 ledger entries**, **0 reservations**, **audit row signed** (uses Mock LLM but sidecar decision is independent of LLM choice) |
 | **REQUIRE_APPROVAL** | 🟡 Partial | Dispatch + SDK transit OK; demo seed contract bundle does **not** ship a REQUIRE_APPROVAL rule for the demo claim shape, so decision returns CONTINUE. Resume-flow code paths are covered by unit tests (PRs #37/#38/#39) |
 | **DEGRADE** | ❌ Not exercised | No DEMO_MODE wired for DEGRADE; would require adding a new mode + a DEGRADE rule in seed bundle. SDK path exists (`spendguard.errors.DegradeApplied`) but no e2e demo |
+
+### Cost-control lifecycle coverage (the user-facing question)
+
+| Lifecycle stage | Product supports? | V1 verified? |
+|---|:-:|:-:|
+| **Pre-call prediction** (`estimated_amount_atomic` reservation before LLM call fires) | ✅ Stripe-style auth/capture ledger | ✅ Verified — reservations recorded for both LangChain and OpenAI Agents SDK runs |
+| **In-flight control** (single boundary, mid-stream abort) | ✅ Per-call `LLM_CALL_PRE` trigger | ✅ Verified for single boundary (CONTINUE / STOP both proven) |
+| **In-flight control** (multi-step agent loop, e.g. tool calls + reasoning steps) | ✅ Each step re-triggers `LLM_CALL_PRE` per integration adapter spec | 🟡 **Not exercised** — current `run_openai_agents_mode` does ONE `Runner.run` with no tools, so 1 LLM call only. Need a multi-step demo (agent with tools, ReAct loop) to prove cap-mid-loop |
+| **Post-event suggestions** (recommend cheaper model, runaway pattern detection, optimization advice) | ❌ **No built-in suggestion engine** — only raw audit chain in `canonical_events` table | N/A (product gap, not test gap) |
 
 **Overall verdict**: real Rust stack **does** boot and **does** run real LangChain calls end-to-end. **The pre-F1 claim that "Phase 5 GA hardening" applied to the self-hosted demo path was incorrect**; with F1 / F2 / F3a now landed it is materially true for CONTINUE + STOP. APPROVAL and DEGRADE need additional contract bundle + demo wiring before they can be claimed as e2e-verified.
 
@@ -92,6 +114,41 @@ Each `make demo-up` cycle:
 - Sidecar handshake completes via UDS
 - Real OpenAI call goes through and returns a real model response
 - Audit outbox forwarder closes the loop after the call
+
+---
+
+### Path 1b — CONTINUE via OpenAI Agents SDK ✅
+
+**Mode**: `DEMO_MODE=agent_real_openai_agents`
+**Trigger**: `Agent` with `Runner.run` against real `gpt-4o-mini`
+**Expected**: real OpenAI response; ledger records reservation + commit
+
+**Evidence** (`evidence/openai-agents-sdk.log`):
+
+```
+[demo] handshake ok session_id=019e2082-cf34-73c2-b5f6-76762a6e2d04
+[demo] using real OpenAI gpt-4o-mini via OpenAI Agents SDK
+[demo] openai-agents Runner.run OK output='Greetings to you!'
+       run_id=019e2082-d027-71a3-8fbd-3f48fd1f2c00
+
+ledger_transactions:
+  adjustment       | 2
+  commit_estimated | 1   ← post-call commit of actual usage
+  reserve          | 1   ← pre-call reservation
+
+audit_outbox events:
+  spendguard.audit.decision | 3
+  spendguard.audit.outcome  | 1
+```
+
+**What this proves**:
+- OpenAI Agents SDK integration adapter (`spendguard.integrations.openai_agents`) works
+- `SpendGuardAgentsModel` correctly wraps `OpenAIChatCompletionsModel`
+- The full pre-call → call → post-call lifecycle records correctly (reserve / commit_estimated)
+- 3 audit decision events recorded with proper signing chain
+
+**What this does NOT prove**:
+- Multi-step agent loop with tool calls. The current demo issues ONE `Runner.run` call with no tools, so the agent answers in 1 turn. Real multi-step loops with tools / sub-agents would issue N `LLM_CALL_PRE` triggers; the demo doesn't exercise that path. Would need a new `agent_real_openai_agents_multistep` mode with a tool-equipped agent.
 
 ---
 

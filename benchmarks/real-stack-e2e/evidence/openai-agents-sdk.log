@@ -1,0 +1,28 @@
+=== demo output (agent_real_openai_agents) ===
+[demo] core services up; running demo container (DEMO_MODE=agent_real_openai_agents)...
+[demo] connecting to sidecar at /var/run/spendguard/adapter.sock
+[demo] handshake ok session_id=019e2082-cf34-73c2-b5f6-76762a6e2d04
+[demo] using real OpenAI gpt-4o-mini via OpenAI Agents SDK
+[demo] openai-agents Runner.run OK output='Greetings to you!' run_id=019e2082-d027-71a3-8fbd-3f48fd1f2c00
+[demo] DEMO_MODE=agent_real_openai_agents — skipping demo-verify-step7.
+[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)
+[demo] which never match real provider responses (gpt-4o-mini etc. return
+[demo] variable token counts). See SPENDGUARD_VIRAL_PLAYBOOK.todo.md F2.
+[demo] waiting 5s for outbox forwarder to drain audit chain...
+[demo] verifying canonical_events table received forwarded events...
+[demo] outbox closure verification done
+
+=== ledger transactions after run ===
+operation_kind  | n
+----------------+---
+adjustment      | 2
+commit_estimated| 1
+reserve         | 1
+
+=== audit_outbox events ===
+event_type                | n
+--------------------------+---
+spendguard.audit.decision | 3
+spendguard.audit.outcome  | 1
+
+(SQL queries above run after demo container exited; demo did 1 Runner.run -> 1 LLM call)

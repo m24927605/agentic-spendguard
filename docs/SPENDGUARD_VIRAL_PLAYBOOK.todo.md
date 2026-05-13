@@ -65,18 +65,24 @@
 - **Detail**：[`docs/launches/v1-phase1-bug-report.md`](./launches/v1-phase1-bug-report.md)
 - **預估**：30 min 改 + 30-60 min 重 build + smoke test = ~1.5-2.5 小時
 
-### V1 · Real-stack LangChain end-to-end verification ✅ (with caveats)
+### V1 · Real-stack framework + cost-control end-to-end verification ✅ (with caveats)
 - **Status**: ✅ 完成 — `benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.md`
-- **Phase 1**：✅ F1 後 real stack 完整 boot
-- **Phase 2**：✅ `agent_real_langchain` mode 已現成（run_demo.py:1028），verified e2e
-- **Phase 3 矩陣**：
-  - ✅ CONTINUE：real LangChain ChatOpenAI → real gpt-4o-mini → `output='Hello, how are you?'`
-  - ✅ STOP：deny mode，denied_decision posted、0 entries、0 reservations、audit row signed
-  - 🟡 REQUIRE_APPROVAL：dispatch + SDK transit OK，但 seed contract bundle 缺 REQUIRE_APPROVAL rule，resume flow 由 unit tests (PR #37/#38/#39) 覆蓋
-  - ❌ DEGRADE：未在 demo 中 wired
-- **Phase 4 codex review**：🟡 V1 prompt 要求，本次 session 未跑 — 留 separate session
-- **Follow-up**：(a) seed bundle 加 REQUIRE_APPROVAL + DEGRADE rule；(b) 新增 `agent_real_langchain_degrade` mode；(c) codex challenge 本文件
-- **Unblocked**：P2-4 LangChain upstream PR 可基於 CONTINUE + STOP 證據誠實展開
+- **Frameworks verified**:
+  - ✅ LangChain (ChatOpenAI) — real gpt-4o-mini → `output='Hello, how are you?'`
+  - ✅ OpenAI Agents SDK (Runner.run) — real gpt-4o-mini → `output='Greetings to you!'` + reserve/commit recorded
+- **Decision paths**:
+  - ✅ CONTINUE (兩個 framework 都驗)
+  - ✅ STOP (deny mode)
+  - 🟡 REQUIRE_APPROVAL (dispatch OK，seed bundle 缺 rule)
+  - ❌ DEGRADE (未 wired)
+- **Cost-control lifecycle**:
+  - ✅ 事前預測 (pre-call reservation) — Stripe ledger 真實 record
+  - ✅ 事中把控 (in-flight 單一 boundary) — STOP 與 CONTINUE 都證明
+  - 🟡 事中把控 (multi-step agent loop) — 兩個 demo 都是 1-turn，沒驗 tool-loop / ReAct
+  - ❌ 事後建議優化 — 產品沒 suggestion engine，只有原始 audit chain
+- **Phase 4 codex review**：🟡 留 separate session
+- **Follow-up**：(a) seed bundle 加 REQUIRE_APPROVAL + DEGRADE rule；(b) 新增 multi-step agent demo (帶 tool / ReAct loop) 證明 mid-loop cap；(c) 補 LangGraph / Pydantic-AI / AGT / Anthropic 真 stack 驗；(d) codex challenge 本文件；(e) 評估 post-event suggestion engine 是否值得做
+- **Unblocked**：P2-4 LangChain / OpenAI Agents SDK upstream PR 可基於 CONTINUE + STOP 證據誠實展開（不要 over-claim multi-step in-flight 或 post-event suggestions）
 - **Why**：M1 benchmark 用的是 `spendguard_shim/`（minimal reservation gateway, **不是真的 Rust sidecar**）跑 mock LLM。沒有真 LangChain → 真 sidecar stack → 真 OpenAI 的 e2e 證據前，任何 framework upstream PR (P2-4) 都會被 close 為 premature
 - **Scope**：跑通 `make demo-up DEMO_MODE=agent_real_langchain`（如不存在則新建），對 4 個 decision path（CONTINUE / STOP / REQUIRE_APPROVAL / DEGRADE）都收 evidence
 - **產出**：
