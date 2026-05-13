@@ -38,11 +38,14 @@ struct Cli {
     #[arg(long, value_name = "YYYY-MM-DD")]
     date: Option<NaiveDate>,
 
-    /// Also emit RFC-6902 contract DSL patch suggestions alongside
-    /// each finding. Does NOT write to approval_requests (deferred
-    /// to control_plane integration per issue #53/#54).
+    /// Also include RFC-6902 contract DSL patch SUGGESTIONS in the
+    /// output JSON. This does NOT write to approval_requests — that's
+    /// gated on owner-ack #53/#54. The flag is named explicitly to
+    /// avoid the impression that running with it submits proposals
+    /// for operator review (codex CA-P1 r1 P3 caught the earlier
+    /// `--propose-patches` name as misleading).
     #[arg(long)]
-    propose_patches: bool,
+    show_proposed_patches: bool,
 
     /// ledger DB connection string (spendguard_ledger).
     #[arg(
@@ -92,7 +95,7 @@ async fn main() -> Result<()> {
         &canonical,
         cli.tenant,
         bucket_date,
-        cli.propose_patches,
+        cli.show_proposed_patches,
     )
     .await?;
 

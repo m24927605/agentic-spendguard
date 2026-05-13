@@ -35,13 +35,30 @@ pub fn canonical_scope_repr(scope: &FindingScope) -> String {
 
 /// Compute the canonical fingerprint hex for a candidate finding.
 ///
+/// `tenant_id` is included in the canonical bytes so two tenants
+/// computing the "same" tenant-global finding on the same day
+/// produce DIFFERENT fingerprints (codex CA-P1 r1 P2). Without
+/// tenant in the input, both tenants would emit fingerprint X and
+/// any downstream code that looks up findings by fingerprint alone
+/// (logging, CLI output, dashboard cross-tenant analytics) would
+/// conflate them. The mirror table UNIQUE on (tenant_id, fingerprint)
+/// still allows the collision at the DB layer, but the semantic
+/// drift is hostile to operators.
+///
 /// `time_bucket` is the rule's time-bucket label (e.g. an ISO-8601
 /// hour string `2026-05-13T07:00:00Z` for `failed_retry_burn_v1`, or
 /// a day string `2026-05-13` for `idle_reservation_rate_v1`). Bucket
 /// granularity is the rule's choice (spec §11.5 A1).
-pub fn compute(rule_id: &str, scope: &FindingScope, time_bucket: &str) -> String {
+pub fn compute(
+    rule_id: &str,
+    tenant_id: &str,
+    scope: &FindingScope,
+    time_bucket: &str,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(rule_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(tenant_id.as_bytes());
     hasher.update(b"|");
     hasher.update(canonical_scope_repr(scope).as_bytes());
     hasher.update(b"|");
@@ -64,10 +81,14 @@ mod tests {
         }
     }
 
+    const T1: &str = "00000000-0000-4000-8000-000000000001";
+    const T2: &str = "00000000-0000-4000-8000-000000000002";
+
     #[test]
     fn fingerprint_is_64_hex_chars() {
         let fp = compute(
             "idle_reservation_rate_v1",
+            T1,
             &scope(ScopeType::TenantGlobal, ""),
             "2026-05-13",
         );
@@ -79,11 +100,13 @@ mod tests {
     fn fingerprint_is_deterministic() {
         let fp1 = compute(
             "failed_retry_burn_v1",
+            T1,
             &scope(ScopeType::Run, "r1"),
             "2026-05-13T07:00:00Z",
         );
         let fp2 = compute(
             "failed_retry_burn_v1",
+            T1,
             &scope(ScopeType::Run, "r1"),
             "2026-05-13T07:00:00Z",
         );
@@ -93,8 +116,19 @@ mod tests {
     #[test]
     fn fingerprint_changes_with_time_bucket() {
         let s = scope(ScopeType::Run, "r1");
-        let fp1 = compute("failed_retry_burn_v1", &s, "2026-05-13T07:00:00Z");
-        let fp2 = compute("failed_retry_burn_v1", &s, "2026-05-13T08:00:00Z");
+        let fp1 = compute("failed_retry_burn_v1", T1, &s, "2026-05-13T07:00:00Z");
+        let fp2 = compute("failed_retry_burn_v1", T1, &s, "2026-05-13T08:00:00Z");
+        assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_differs_across_tenants() {
+        // Codex CA-P1 r1 P2 fix: tenant_global findings on the same
+        // day for two tenants must produce DISTINCT fingerprints so
+        // logs / CLI / dashboard never conflate them.
+        let s = scope(ScopeType::TenantGlobal, "");
+        let fp1 = compute("idle_reservation_rate_v1", T1, &s, "2026-05-13");
+        let fp2 = compute("idle_reservation_rate_v1", T2, &s, "2026-05-13");
         assert_ne!(fp1, fp2);
     }
 }
