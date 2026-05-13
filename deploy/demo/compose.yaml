@@ -45,6 +45,7 @@ services:
       - ./init/migrations:/docker-entrypoint-initdb.d:ro
       - ../../services/ledger/migrations:/var/spendguard/ledger-migrations:ro
       - ../../services/canonical_ingest/migrations:/var/spendguard/canonical-migrations:ro
+      - ../../services/cost_advisor/migrations:/var/spendguard/cost-advisor-migrations:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U spendguard -d spendguard_ledger"]
       interval: 2s
