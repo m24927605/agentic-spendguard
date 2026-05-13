@@ -1,15 +1,101 @@
 # Cost Advisor — Design Spec
 
-> **Status**: v3 (2026-05-13, post-codex round 3 — fundamental rescope; round 4 verdict: **GREEN_LIGHT_FOR_P0**). v0 → v1 → v2 → v3 changelog at §14.
+> **Status**: **v4** (2026-05-13, post-CA-P0 implementation + codex r5-r8 adversarial audit on the P0 branch). v0 → v1 → v2 → v3 → v4 changelog at §14. Codex audit log at §15.
 >
-> **Codex round 4 verdict (2026-05-13, attempt 2 — shorter prompt after attempt 1 deadlocked at 15 min)**: GREEN_LIGHT_FOR_P0. Cited reason: "v3 now has a coherent closed-loop MVP that reuses existing SpendGuard control-plane primitives instead of creating a parallel product surface." Both Q1 (did rescope collapse surface area?) and Q2 (is canonical_ingest the right classifier home?) confirmed yes.
+> **v4 thesis**: implementation reality on the CA-P0 branch (commit `42cb787`) revealed that v3's scope assumptions were partially wrong. Codex rounds 5-8 closed the gap. v4 reconciles spec text with what actually shipped + what the P1 path actually requires. §0 below summarizes the corrections; the original v3 narrative is preserved in §1-§13 for traceability. **Where v3 narrative conflicts with §0, §0 is authoritative.**
 >
-> **v3 thesis change**: Cost Advisor is no longer framed as a separate product with its own dashboard / gRPC / SDK / digest. It is a **feature** of SpendGuard's existing closed-loop control: rules detect waste in the audit chain → proposed contract DSL patches → existing operator approval queue → operator approves → next sidecar reload picks up the new contract. This eliminates ~40% of the previously-planned surface area.
+> **Codex audit history**: r1 4.5/10 → r2 5.2/10 → r3 5.0/10 (rescope) → r4 GREEN_LIGHT_FOR_P0 → r5 RED (7 P1) → r6 RED (3 P1) → r7 RED (1 P1) → r8 **GREEN** (P1 readiness gate cleared). Full log §15.
+>
 > **Codename**: `cost-advisor` (final brand TBD; see §10).
 > **Owner**: Agentic SpendGuard
 > **Closes**: post-event suggestion gap noted in `benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.md` (the "事後建議優化" row flagged ❌)
->
-> **Codex review log**: round 1 verdict 5/6/4/4/5/3 across 6 dimensions. v1 addresses all 3 must-fix items + the 5 questions the spec ducked. Defended Tier 2's role and the 4-tier cost taxonomy. Open: round 2 to verify fixes hold.
+
+---
+
+## 0. v4 corrections summary (authoritative)
+
+This section reconciles the v3 narrative with what the CA-P0 implementation + codex r5-r8 verified. Where any section below the line conflicts with §0, §0 wins.
+
+### 0.1 Scope cut: v0.1 ships ZERO rules (was: 4 rules)
+
+v3 §5.1 listed 4 rules for v0.1. Reality:
+
+- `idle_reservation_rate_v1`: blocked. Column is `reservations.current_state`, not `latest_state`; allowed values do NOT include `ttl_expired` (TTL expiry is in `audit_outbox` release event `reason='TTL_EXPIRED'`); no `ttl_seconds` column. Requires new `reservations_with_ttl_status_v1` view (workstream P0.6, issue #49).
+- `failed_retry_burn_v1`, `runaway_loop_v1`, `tool_call_repeated_v1`: all blocked on `canonical_events.payload_json` lacking `prompt_hash`, `agent_id`, `run_id`, `tool_name`, `tool_args_hash`, `model_family` (5 of 6 fields are 0% populated). Requires sidecar enrichment (workstream P0.5, issue #48). `tool_*` requires SDK extension (deferred to v0.2).
+
+**Net**: v0.1 has zero fireable rules until P0.5 + P0.6 land. P1 (issue #50) then ships `idle_reservation_rate_v1` as the first fireable rule. P1.5 (issue #51) ships the other 3 at run-scope (after P0.5).
+
+### 0.2 `canonical_events.payload_json` shape (was: decoded `{kind, ...}`)
+
+v3 §3 + §6 examples implied `payload_json->>'kind'` and `payload_json->>'committed_micros_usd'` work directly. Reality (per `services/canonical_ingest/src/persistence/append.rs`):
+
+```json
+{
+  "specversion":     "1.0",
+  "type":            "spendguard.audit.outcome",
+  "source":          "sidecar://...",
+  "id":              "<uuid>",
+  "time_seconds":    1234567890,
+  "datacontenttype": "application/json",
+  "data_b64":        "<base64-encoded JSON>",
+  "tenantid":        "<uuid>",
+  "runid":           "<uuid or empty until P0.5>",
+  "decisionid":      "<uuid>",
+  "producer_id":     "sidecar:...",
+  "producer_sequence": 42,
+  "signing_key_id":  "..."
+}
+```
+
+Rule SQL must decode `data_b64` via `convert_from(decode(payload_json->>'data_b64', 'base64'), 'UTF8')::jsonb` to reach inner fields. Tier-2 baseline SQL example in v3 §6 is wrong as written.
+
+Per-call cost data (`committed_micros_usd`, `estimated_amount_atomic`) lives in `ledger.commits` and `ledger_entries` in the `spendguard_ledger` database — NOT in `canonical_events.payload_json`. Rules that quantify waste in USD MUST join `canonical_events.decision_id ⨝ ledger_transactions.decision_id ⨝ commits` + `ledger_units` + `pricing_snapshots` for unit/currency normalization.
+
+### 0.3 §4.1 `cost_findings` uses mirror + upsert SP, not direct UNIQUE INDEX
+
+v3 §4.1 (line 237 of the v3 file) showed `CREATE UNIQUE INDEX cost_findings_fingerprint ON cost_findings (tenant_id, fingerprint)`. Reality (post-codex r6 P1-3): Postgres requires UNIQUE constraints on partitioned tables to include the partition key. The implementation uses a non-partitioned mirror table:
+
+```sql
+CREATE TABLE cost_findings_fingerprint_keys (
+    tenant_id   UUID NOT NULL,
+    fingerprint CHAR(64) NOT NULL,
+    finding_id  UUID NOT NULL,
+    detected_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY (tenant_id, fingerprint)
+);
+```
+
+Writes go through `cost_findings_upsert()` stored procedure (the SOLE legal writer) which atomically claims the mirror slot, then INSERTs / UPDATEs / self-heals an orphan canonical row. Returns `outcome ∈ {inserted, updated, reinstated}`. Direct INSERTs that skip the SP risk orphan mirror rows or duplicate findings.
+
+### 0.4 §5.1.2 failure classifier — column landed, code pending
+
+`canonical_events.failure_class TEXT` column + CHECK enum + partial index landed in CA-P0 (`services/canonical_ingest/migrations/0011_add_failure_class.sql`). Classifier code (`services/canonical_ingest/src/classify.rs` per spec §5.1.2) is gated on the P1 / P1.5 issue cycle (#50 / #51). Pre-migration rows stay NULL (canonical_events is append-only — backfill requires out-of-band trigger drop). Rules read NULL as "not classified" and don't fire — degraded launch is mechanically supported.
+
+### 0.5 §9 phasing table revision
+
+Add P0.5 (5d) + P0.6 (2d) rows. Revise P1 (was 6d, now 4d) — was "skinny rule" assuming the rule was fireable; reality is "runtime + first rule wired against P0.5/P0.6 outputs". P1.5 stays at 5d.
+
+**New v0.1 critical path**: P0 4d (done) + max(P0.5 5d, P0.6 2d) + P1 4d + P3 4d + P3.5 3d = **20 days** elapsed. (v3 said 17.) Schedule contingency consumed: hit the spec §11.5 A2 "scenario 3: 3+ fields missing OR fundamental shape mismatch" branch (+5 days envelope).
+
+### 0.6 §11.5 A2 branch decision recorded
+
+The audit-report `docs/specs/cost-advisor-p0-audit-report.md` is the authoritative scenario-3 record. v3 §11.5 A2 contingency table planned for this case; v4 confirms the case is what happened.
+
+### 0.7 §11.5 Q5 retention — now schema-backed
+
+v3 Q5 said "90 days for `open`; 30 days for `dismissed` / `fixed`; auto-purge with `retention_sweeper`". CA-P0 landed the schema (`tenant_data_policy.cost_findings_retention_days_open` default 90, `tenant_data_policy.cost_findings_retention_days_resolved` default 30, in `services/ledger/migrations/0038_*.sql`). The retention sweeper sweep kind itself + reconciler (per integration doc §9) is P1 work.
+
+### 0.8 Cross-DB referential safety — reconciler design
+
+Cross-DB soft FK from `approval_requests.proposing_finding_id → cost_findings.finding_id`. Codex r5 P1-5 + r6 P1-2 rejected "validate-before-INSERT" as insufficient. v4 design (per integration doc §9): `cost_findings.referenced_by_pending_proposal` flag maintained by the proposal-write path; retention sweeper refuses DELETE when TRUE; periodic reconciler covers 4 drift states with a 10-minute grace window. Lands in P1.
+
+### 0.9 Service identity + INSERT scope — concrete mechanism
+
+v3 hand-waved "column-level INSERT scoped to proposal_source='cost_advisor' via a BEFORE INSERT trigger". v4 integration doc §5.2.1 spells out two implementable mechanisms: RLS with FORCE ROW LEVEL SECURITY + per-role policies, OR a BEFORE INSERT trigger using `pg_has_role(session_user, 'cost_advisor_application_role', 'MEMBER')`. Decision: RLS if the runtime can guarantee `SET ROLE` at session start, otherwise trigger.
+
+### 0.10 §1.1 closed loop still holds
+
+The fundamental v3 rescope (cost_advisor is a feature, not a parallel product; proposals flow through existing approval queue; no new dashboard tab) is unchanged by v4. The closed-loop diagram in §1.1 remains correct.
 
 ---
 
@@ -729,6 +815,32 @@ For v1.0 (all P1–P6 shipped, codex challenge round complete):
 
 ## 14. Changelog
 
+### v4 (2026-05-13, post-CA-P0 implementation + codex r5-r8)
+
+CA-P0 prep phase shipped (branch `feat/cost-advisor-p0`, 9 commits, merged in `42cb787`). Four codex adversarial rounds on the branch: r5 RED (7 P1) → r6 RED (3 P1) → r7 RED (1 P1) → r8 **GREEN**. v4 reconciles the spec text with the verified-reality findings. §0 above summarizes all 10 corrections; details:
+
+**§0.1 v0.1 scope cut**: zero fireable rules until P0.5 + P0.6 land (was: 4 rules). `idle_reservation_rate_v1` blocked by missing `reservations_with_ttl_status_v1` view; other 3 rules blocked by missing payload enrichment.
+
+**§0.2 payload_json shape**: actually base64-encoded CloudEvent envelope (`data_b64`), not decoded `{kind, ...}`. Tier-2 baseline SQL in §6 must decode + join ledger.commits for cost; spec §6 example as written is wrong.
+
+**§0.3 cost_findings idempotency**: mirror table (`cost_findings_fingerprint_keys`) + `cost_findings_upsert()` SP, not direct UNIQUE INDEX (Postgres partitioning constraint). Stale-mirror self-heal returns `outcome='reinstated'`.
+
+**§0.4 failure_class column landed**, classifier code pending (P1).
+
+**§0.5 §9 phasing revision**: +P0.5 (5d) +P0.6 (2d), P1 cut to 4d. New v0.1 critical path = 20 days.
+
+**§0.6 §11.5 A2 scenario 3 triggered**: audit-report is authoritative record.
+
+**§0.7 Retention schema-backed**: tenant_data_policy gains two retention-day columns (CA-P0 commit `e52f40a`).
+
+**§0.8 Cross-DB FK reconciler**: 4-state drift table + 10-min grace window. Lands P1.
+
+**§0.9 Service identity mechanism**: RLS or `pg_has_role(MEMBER)` BEFORE INSERT trigger, integration doc §5.2.1.
+
+**§0.10 closed loop unchanged** — v3 rescope still correct.
+
+GitHub tracking issues opened: #48 (CA-P0.5), #49 (CA-P0.6), #50 (CA-P1), #51 (CA-P1.5), #52-#56 (owner-acks Q1-Q5), #57 (this spec v4 patch).
+
 ### v1 (2026-05-13, post-codex round 1)
 
 Codex review verdict: 5/6/4/4/5/3 across 6 dimensions. Changes:
@@ -820,3 +932,28 @@ Codex review verdict: 5/6/4/4/5/3 across 6 dimensions. Changes:
 ### v0 (2026-05-13, original draft)
 
 Initial 4-tier architecture; 6 Tier-1 rules; LLM narrative wrapper sketch; 6-phase rollout; 10 open questions.
+
+---
+
+## 15. Codex iteration log
+
+Adversarial review history. Spec rounds 1-4 are in §14 changelog; implementation rounds 5-8 fire on the CA-P0 branch (`feat/cost-advisor-p0`, merged in `42cb787`).
+
+| Round | Scope | Verdict | Major findings | Where addressed |
+|---|---|---|---|---|
+| r1 | spec v0 draft | 4.5/10 | 3 must-fix: FindingEvidence schema, validator, rule split | v1 (§14) |
+| r2 | spec v1 | 5.2/10 | 3 must-fix: typed metrics, server-side rendering, failure taxonomy | v2 (§14) |
+| r3 | spec v2 | 5.0/10 | FUNDAMENTAL_RESCOPE: stop building parallel product | v3 (§14) |
+| r4 | spec v3 | **GREEN_LIGHT_FOR_P0** | "Coherent closed-loop MVP" | proceed to CA-P0 |
+| r5 | CA-P0 branch | RED (7 P1) | (1) idle_reservation_rate not actually fireable — wrong column name; (2) 0038 immutability trigger wiped 0036 bundling protections; (3) CHECK lacked NOT VALID; (4) CREATE INDEX not CONCURRENT on hot canonical_events; (5) payload_json shape wrong (data_b64); (6) missed webhook_receiver emitter; (7) cross-DB FK unsafe | branch commit `39bac29` + §0 corrections |
+| r6 | CA-P0 + r5 fixes | RED (3 P1) | (1) partition-creator SP TOCTOU race; (2) reconciler missed orphan-flag drift state; (3) fingerprint mirror needed transactional writer SP | branch commit `994ed74` |
+| r7 | CA-P0 + r6 fixes | RED (1 P1) | cost_findings_upsert stale-mirror hole — UPDATE returns 0 rows silently if canonical was deleted | branch commit `91ea451` (self-heal via outcome='reinstated') |
+| r8 | CA-P0 + r7 fixes | **GREEN** | 2 P2 doc-accuracy (RLS bypass wording; pg_has_role USAGE vs MEMBER), 2 P3 stale comments | branch commit `42cb787` (this v4 changelog) |
+
+Iteration converged in 4 implementation rounds (8 total spec+impl). Total CA-P0 work: 9 commits, 18 files, 1688 + 86 + 33 = ~1800 line insertions across schema migrations, proto, Rust crate skeleton, integration design doc, and audit-report.
+
+**Stopping rule met**: r8 GREEN with 0 P1 → P1 readiness gate cleared.
+
+**Codex usage pattern**: each round used `medium` reasoning effort and a focused prompt with the specific fixes-to-verify + 2-3 new attack vectors. Earlier (r5) used `high` reasoning + comprehensive 6-thesis attack prompt; that round ran longer but produced the largest finding set. The pattern that worked: bound the diff via `/tmp/cap0-diff-r*.patch` ranging from 1449-2446 lines so codex didn't need to recursively read the whole repo.
+
+**Memory pattern confirmed** (project memory `feedback_codex_review.md`): every spec must run multiple codex rounds in adversarial mode; irreversible decisions must trigger a second round. The CA-P0 implementation hit BOTH gates: spec-level decisions stayed locked from r1-r4 work, AND adversarial review on the implementation caught what static spec review couldn't.
