@@ -1,9 +1,11 @@
 # Cost Advisor — Design Spec
 
-> **Status**: v0 draft (2026-05-13). To be reviewed via codex challenge cycle.
+> **Status**: v1 (2026-05-13, post-codex round 1). v0 → v1 changelog at §14.
 > **Codename**: `cost-advisor` (final brand TBD; see §10).
 > **Owner**: Agentic SpendGuard
 > **Closes**: post-event suggestion gap noted in `benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.md` (the "事後建議優化" row flagged ❌)
+>
+> **Codex review log**: round 1 verdict 5/6/4/4/5/3 across 6 dimensions. v1 addresses all 3 must-fix items + the 5 questions the spec ducked. Defended Tier 2's role and the 4-tier cost taxonomy. Open: round 2 to verify fixes hold.
 
 ---
 
@@ -34,6 +36,8 @@ This is the "事後建議優化" gap. **Cost Advisor** closes it.
 ---
 
 ## 3. Architecture — 4 layers, each independently togglable
+
+> **Naming clarification (codex r1)**: the 4 tiers describe **marginal cost ramp** (free → free → ~$0.02/tenant/day → premium), not lifecycle phase. Some tiers will reuse infrastructure (e.g. Tier 2 is rule-class with materialized aggregates). Tier 4 is conditional on opt-in **prompt-retention extension** that is OUT of scope for the base "we don't store prompts" non-goal — to use Tier 4, customers must explicitly enable a separate retention policy on a separate `prompt_archive` table.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -74,6 +78,74 @@ This is the "事後建議優化" gap. **Cost Advisor** closes it.
 
 ## 4. Data model
 
+### 4.0 `FindingEvidence` contract (added codex r1, Must-Fix #1)
+
+Every finding produced by ANY rule MUST emit evidence conforming to this contract. Stable shape so dashboard / CLI / narrative validator / dedup all depend on the same fields.
+
+```jsonschema
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CostFindingEvidence",
+  "type": "object",
+  "required": ["rule_id", "rule_version", "fingerprint", "scope", "metrics", "decision_refs"],
+  "properties": {
+    "rule_id": {"type": "string", "pattern": "^[a-z0-9_]+_v[0-9]+$"},
+    "rule_version": {"type": "integer", "minimum": 1},
+    "fingerprint": {
+      "type": "string",
+      "description": "Deterministic SHA-256 hex of (rule_id, scope.canonical_repr, time_bucket). MUST be stable across nightly re-runs of the same underlying data so UPSERTs idempotently mark the same finding rather than insert duplicates.",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "scope": {
+      "type": "object",
+      "required": ["scope_type"],
+      "properties": {
+        "scope_type": {"enum": ["agent", "run", "tool", "tenant_global"]},
+        "agent_id": {"type": ["string", "null"]},
+        "run_id": {"type": ["string", "null"]},
+        "tool_name": {"type": ["string", "null"]},
+        "model_family": {"type": ["string", "null"]}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "All numeric values that downstream narratives MAY cite. Narrative validator rejects any number in narrative text not present here (per allowlist).",
+      "additionalProperties": {
+        "oneOf": [
+          {"type": "number"},
+          {"type": "object", "required": ["value", "unit"], "properties": {"value": {"type": "number"}, "unit": {"type": "string"}, "ci95_low": {"type": "number"}, "ci95_high": {"type": "number"}}}
+        ]
+      }
+    },
+    "decision_refs": {
+      "type": "array",
+      "description": "Sample decision_ids from canonical_events that this finding is derived from. Used by dashboard 'view raw evidence' link and by validator to confirm narrative claims trace back to real data.",
+      "items": {"type": "string", "format": "uuid"},
+      "minItems": 1,
+      "maxItems": 100
+    },
+    "waste_estimate": {
+      "type": ["object", "null"],
+      "required": ["micros_usd", "method", "confidence"],
+      "properties": {
+        "micros_usd": {"type": "integer"},
+        "method": {"enum": ["counterfactual_diff", "baseline_excess", "redundant_call_sum", "heuristic"]},
+        "confidence": {"enum": ["high", "medium", "low"]},
+        "explanation": {"type": "string", "maxLength": 280}
+      }
+    },
+    "category": {"enum": ["detected_waste", "optimization_hypothesis"], "description": "Per codex r1: SHIP V0 ONLY WITH detected_waste rules. optimization_hypothesis rules ship behind a feature flag."}
+  }
+}
+```
+
+**Severity rubric**:
+- `critical`: waste_estimate.confidence=high AND micros_usd > $100/week per agent
+- `warn`: waste_estimate.confidence ≥ medium AND any quantified waste
+- `info`: optimization_hypothesis category OR waste_estimate=null but pattern matched
+
+**Idempotency**: `fingerprint` is the natural unique key for upserts. Re-runs of the same rule on the same time bucket UPDATE in place (refreshing metrics + evidence) rather than inserting duplicates.
+
 ### 4.1 New table: `cost_findings`
 
 Lives in the same `spendguard_canonical` database as `canonical_events`.
@@ -81,10 +153,12 @@ Lives in the same `spendguard_canonical` database as `canonical_events`.
 ```sql
 CREATE TABLE cost_findings (
     finding_id          UUID PRIMARY KEY,           -- UUIDv7
+    fingerprint         CHAR(64) NOT NULL,          -- SHA-256 hex from FindingEvidence (idempotency key, codex r1)
     tenant_id           UUID NOT NULL,
     detected_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     rule_id             TEXT NOT NULL,              -- e.g. 'runaway_loop_v1'
     rule_version        INT NOT NULL DEFAULT 1,
+    category            TEXT NOT NULL,              -- 'detected_waste' / 'optimization_hypothesis' (codex r1)
     severity            TEXT NOT NULL,              -- 'critical' / 'warn' / 'info'
     confidence          NUMERIC(3,2) NOT NULL,      -- 0.00–1.00
     -- Scope (one of these is set)
@@ -108,6 +182,7 @@ CREATE TABLE cost_findings (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+CREATE UNIQUE INDEX cost_findings_fingerprint ON cost_findings (tenant_id, fingerprint);  -- idempotency
 CREATE INDEX cost_findings_tenant_detected ON cost_findings (tenant_id, detected_at DESC);
 CREATE INDEX cost_findings_open ON cost_findings (tenant_id, severity) WHERE status = 'open';
 ```
@@ -132,23 +207,59 @@ Refreshed nightly by a `baseline_refresher` worker (~10 min/night for 1k tenants
 
 ---
 
-## 5. Tier 1 rule library — initial 6 rules
+## 5. Tier 1 rule library — split per codex r1 must-fix #3
 
-Rules ship as `services/cost_advisor/rules/<rule_id>.sql` files. Each file MUST:
-- Be a `SELECT` returning rows shaped to populate `cost_findings` (or a thin SQL wrapper does the insert)
-- Document the pattern in a top-of-file comment with: what it detects, why it costs money, recommended fix
+Rules ship as `services/cost_advisor/rules/<category>/<rule_id>.sql` files. Each file MUST:
+- Be a `SELECT` returning rows shaped to populate `cost_findings` AND emit `FindingEvidence` JSONB (per §4.0 contract)
+- Document the pattern in a top-of-file comment: what it detects, **why it provably costs money** (vs. a heuristic guess), recommended fix
 - Include unit tests with synthetic `canonical_events` fixtures
+- Declare its `category`: `detected_waste` (provable, ships in v0) or `optimization_hypothesis` (heuristic, ships behind feature flag)
 
-| `rule_id` | Detects | Trigger condition | Recommended fix |
+### 5.1 v0 ships ONLY `detected_waste` rules (codex r1 must-fix #3)
+
+These are rules where we can **mathematically demonstrate** money was wasted (paid for something with no value):
+
+| `rule_id` | Detects | Why provably wasted | Recommended fix |
 |---|---|---|---|
-| `runaway_loop_v1` | Same `(run_id, prompt_hash)` retried > 5 in 60s | retry count + window | Cap retries; add error logging |
-| `tool_call_repeated_v1` | Same `tool_name + tool_args_hash` invoked > 3 in one run | dedup count | Add tool result cache |
-| `prompt_completion_ratio_v1` | `prompt_tokens / completion_tokens > 50` (sustained over 7 days) | rolling avg | Trim system prompt; use few-shot |
-| `over_reservation_v1` | `avg(estimated / committed)` per agent > 5× over 7 days | ratio | Tighten estimator |
-| `idle_reservation_rate_v1` | TTL'd reservations / total > 20% in 7 days | ratio | Loosen quota OR fix release path |
-| `model_burn_v1` | gpt-4 family used for runs where `completion_tokens < 50` | model + size | Switch to gpt-4o-mini for short tasks |
+| `failed_retry_burn_v1` ⭐ | Same prompt retried after a 4xx/5xx provider response or tool error → all retries billed | Provider-acknowledged failure; retries paid for zero useful output | Cap retries; backoff |
+| `runaway_loop_v1` | Same `(run_id, prompt_hash)` retried > 5 in 60s with no terminal output | Loop without completion = zero value | Cap retries; add error logging |
+| `tool_call_repeated_v1` | Same `tool_name + tool_args_hash` invoked > 3 in one run | Idempotent tool call repeated = redundant compute paid for | Add tool result cache |
+| `idle_reservation_rate_v1` | TTL'd reservations / total > 20% in 7 days | Reservations expired without commit = paid contention with no spend reflected | Fix release path; tighten estimator |
 
-**Open question**: do we enforce a license on contributed rules? Default ASL-2.0 like the rest of the repo? See §11 open question Q3.
+### 5.2 v0.1 (behind `--enable-hypothesis-rules` flag): `optimization_hypothesis`
+
+These are heuristics where the action is **probably** beneficial but not provable from audit data alone:
+
+| `rule_id` | Detects | Confidence caveat |
+|---|---|---|
+| `prompt_completion_ratio_v1` | `prompt_tokens / completion_tokens > 50` sustained 7d | High ratio MAY indicate bloated system prompt OR may be correct for the task type. Surface, don't auto-recommend |
+| `over_reservation_v1` | `avg(estimated / committed)` per agent > 5× over 7d | Estimator might be conservative for safety reasons; not all over-reservation is waste |
+
+### 5.3 Cut from v0 (codex r1 attack on `model_burn_v1`)
+
+`model_burn_v1` (gpt-4 used for short responses) is **removed** from v0. Rationale: completion_tokens < 50 does NOT prove a cheaper model would suffice — could be a binary classification, JSON schema extraction, or quality-critical short-form task. Without an eval signal (success rate, downstream agent satisfaction, user reaction), we cannot recommend model downgrade. Defer until we have a separate `eval_signal` data source (out of scope for v0).
+
+### 5.4 Patterns that need Rust plugin (not pure SQL — codex r1 Q1)
+
+The following patterns are genuinely hard or impossible to express in vanilla postgres SQL and justify a Rust plugin trait in v0 (see §11 Q1 update):
+
+- **Cross-run causal chain**: "Run A produced output that Run B consumed and which caused Run B's loop" — requires graph traversal
+- **Suppression / cooldown**: "Don't fire `failed_retry_burn` if the same agent already got it in the last 24h AND user dismissed it"
+- **Multi-stage retry narrative**: "Tool call → 5xx → retry → 4xx → switch model → retry → success" sequencing across reservation lifecycle
+- **Statistical sampling joins**: "For agents in cohort X, compare cost trajectory vs cohort Y over rolling 28d window with seasonality adjustment"
+
+Plugin trait stub:
+```rust
+pub trait CostRule {
+    fn rule_id(&self) -> &str;
+    fn category(&self) -> Category;
+    fn evaluate(&self, ctx: &EvaluationContext) -> Vec<FindingEvidence>;
+}
+```
+
+V0 ships SQL-only rules; trait exists so v0.1 can add plugins without churn.
+
+**Open question (now closed)**: contributed rules license — Apache-2.0; require CLA on PR (see §11 Q3 unchanged).
 
 ---
 
@@ -209,6 +320,47 @@ Two modes:
 - **On-demand**: user opens the Cost Advisor dashboard → if `narrative_md IS NULL` for an open finding, lazily generate it. Cap: max 1 narrative per finding per 24h.
 - **Daily digest**: opt-in cron job generates narratives for all unread findings of severity ≥ `warn`, packages into a digest email/Slack.
 
+### 7.1.5 Structured output (codex r1 must-fix #2)
+
+The narrative is generated via gpt-4o-mini's **structured output mode** (JSON schema enforced by the API). Free-form prose is rejected. Schema:
+
+```jsonschema
+{
+  "title": "FindingNarrative",
+  "type": "object",
+  "required": ["summary", "root_cause", "recommended_action", "contract_dsl_yaml", "cited_metrics"],
+  "properties": {
+    "summary": {"type": "string", "maxLength": 200, "description": "ONE sentence with specific dollar amount + pattern name"},
+    "root_cause": {"type": "string", "maxLength": 200, "description": "ONE sentence on the most likely cause"},
+    "recommended_action": {"type": "string", "maxLength": 240, "description": "ONE concrete action; no 'consider'/'might'"},
+    "contract_dsl_yaml": {"type": "string", "description": "YAML snippet using when:/then:/reason: keys; MUST compile against current contract DSL schema"},
+    "cited_metrics": {
+      "type": "array",
+      "items": {"type": "object", "required": ["key", "value"], "properties": {"key": {"type": "string"}, "value": {"type": "number"}}},
+      "description": "Every numeric value mentioned in summary/root_cause/recommended_action MUST appear here, and every key MUST resolve to a field in the source FindingEvidence.metrics. Validator enforces this."
+    }
+  }
+}
+```
+
+**Validation pipeline** (replaces vague "regex" in v0):
+1. Parse JSON output (fails if not valid JSON → retry once, then fall back to no-narrative)
+2. For each `cited_metrics[i]`: assert `key` exists in `FindingEvidence.metrics` AND `value` matches (within 1% rounding tolerance)
+3. Extract all numeric tokens from `summary` + `root_cause` + `recommended_action` (regex `\b[\d,.]+(?:%|x|×)?\b`); assert each is either:
+   - In `cited_metrics`
+   - Or a derived form (`X×` of a base metric) — explicitly declared via `cited_metrics[i].derivation` field
+4. Compile `contract_dsl_yaml` against the current contract DSL schema (`spendguard_contract_dsl::compile()`); reject if it doesn't compile
+5. Reject if any banned phrase appears in any string field (`consider`, `might`, `potentially`, `you may want to`, `it would be wise`)
+
+If any of these checks fail, the system retries up to 2 times. If all retries fail, **the finding is surfaced WITHOUT narrative** (no Tier-3 enrichment) — never with a low-quality narrative.
+
+**Pre-flight validator unit tests** ship as part of P3, with fixtures for:
+- Valid narrative passing
+- Narrative with hallucinated dollar amount (must reject)
+- Narrative with banned phrase (must reject)
+- Narrative with uncompiled DSL (must reject)
+- Narrative referencing percentages / ratios / multipliers (must validate via derivation)
+
 ### 7.2 Prompt template (per finding)
 
 ```
@@ -230,14 +382,28 @@ Be terse. No marketing language. No "consider" or "you might want to" — say
 exactly what to do. Use the customer's actual numbers.
 ```
 
-### 7.3 Cost budget
+### 7.3 Cost budget — honest version (codex r1)
 
-Per finding: ~500 input tokens (system + evidence) + ~200 output tokens (narrative).
-- gpt-4o-mini: $0.150/M input + $0.600/M output → **$0.000195/finding**.
-- 100 findings/tenant/day = $0.0195/tenant/day = $0.59/tenant/month.
-- 1,000 tenants = $585/month total Tier 3 inference cost.
+Per finding (single attempt):
+- ~500 input tokens (system + evidence) + ~200 output tokens (narrative)
+- gpt-4o-mini: $0.150/M input + $0.600/M output → **$0.000195/finding**
 
-This is well within "low cost" territory.
+Per finding **with worst-case overhead**:
+- 1 base call + up to 2 retries (validation failures) = up to 3× = **~$0.0006/finding**
+- Plus dashboard re-render on user view (cached for 24h, so amortized to ~1.05× over a week) = +5% ≈ negligible
+- Plus daily digest LLM summarization (1 extra call per tenant per day, ~1k tokens) = +$0.0006/tenant/day
+
+Realistic per-tenant numbers (NOT the optimistic floor):
+- **Quiet tenant** (10 findings/day, no digest, no narratives): ~$0
+- **Typical tenant** (30 findings/day, narratives on, daily digest): 30 × $0.0006 + $0.0006 = **~$0.019/tenant/day = $0.57/month**
+- **Heavy tenant** (200 findings/day, narratives on, hourly digest): 200 × $0.0006 + 24 × $0.0006 = **~$0.13/tenant/day = $4/month**
+
+For 1,000 tenants average mix: **~$30–80/month** total Tier-3 inference + retry budget. Still cheap, but the v0 spec's "$0.01/tenant/day" headline was hand-wavy. The honest range is $0.005 (quiet) to $0.13 (heavy).
+
+**Cost we're NOT counting** (and should disclose):
+- Postgres CPU for nightly baseline computation (~10–60 min depending on tenant count) — runs on existing infra
+- DB storage growth from `cost_findings` and `cost_baselines` tables (estimated ~10MB/tenant/month at heavy load)
+- Embedding cost for Tier 4 (deferred to v2; would add ~$0.0001/decision × 10k decisions/day = $1/tenant/day at the heavy end — premium tier only)
 
 ### 7.4 Quality bar
 
@@ -269,19 +435,28 @@ A post-generation validator (regex + JSON schema) rejects narratives that violat
 
 ---
 
-## 9. Implementation phasing
+## 9. Implementation phasing — honest timeline (codex r1)
+
+Codex challenged the original 3–5 day P1 estimate as optimistic. Revised:
 
 | Phase | Scope | Estimated work |
 |---|---|---|
-| **P1** | New `services/cost_advisor/` Rust crate; `cost_findings` + `cost_baselines` tables; first 3 rules (`runaway_loop`, `tool_call_repeated`, `over_reservation`); CLI `spendguard advise --tenant X` returning structured findings (no narrative) | 3–5 days |
-| **P2** | All 6 Tier-1 rules; Tier-2 baseline refresher; outlier finding rule | 2 days |
-| **P3** | Tier-3 LLM narrative (opt-in flag in tenant config); on-demand only | 1–2 days |
-| **P4** | Dashboard `/findings` tab; feedback (👍/👎) UI | 2 days |
-| **P5** | Slack/email digest dispatcher | 2 days |
-| **P6** | gRPC API + proto + Python SDK methods | 2 days |
-| **P7** (defer) | Tier 4 embedding clustering (premium) | 2+ weeks |
+| **P0 (prep)** | Define + ratify `FindingEvidence` schema (§4.0); ship as proto in `proto/spendguard/cost_advisor/v1/`; add `cost_findings` + `cost_baselines` migrations; integrate with `retention_sweeper` for auto-purge | 3 days |
+| **P1 (skinny)** | New `services/cost_advisor/` Rust crate skeleton; ONE rule (`failed_retry_burn_v1`); CLI `spendguard advise --tenant X --since 7d` returning JSON findings (no narrative); idempotent insert via fingerprint UPSERT; tenant isolation; integration test against real benchmark fixtures | 5 days |
+| **P2** | Rest of Tier-1 detected_waste rules (3 more); Tier-2 baseline refresher with seasonality (7d AND 28d windows); outlier rule | 5 days |
+| **P3** | Tier-3 LLM narrative behind `--narrative` flag; structured output schema (§7.1.5); validation pipeline with all 5 unit-test fixtures | 4 days |
+| **P4** | Dashboard `/findings` tab; feedback (👍/👎) UI; dismissal scope-picker (per-fingerprint vs per-rule vs per-agent — codex r1 Q5) | 4 days |
+| **P5** | Slack/email digest dispatcher with per-tenant rate limit (default 100 narratives/day) | 3 days |
+| **P6** | gRPC API + proto + Python SDK methods; CLA enforcement on rule contributions | 3 days |
+| **P7** | `optimization_hypothesis` rules behind feature flag (the 2 from §5.2) | 2 days |
+| **P8 (defer to v2)** | Tier 4 embedding clustering (requires opt-in `prompt_archive` extension) | 3+ weeks |
 
-**Critical path to v0.1**: P1+P3 = 5–7 days for an MVP that produces real narratives on real benchmark data.
+**Revised critical path to v0.1**: P0 + P1 + P3 = **12 days**, not 5–7. Original "P1+P3 = 5–7 days" was wrong because:
+- Skipped P0 (schema + migrations)
+- Underestimated test fixture work (integration tests against real `canonical_events` shape)
+- Underestimated tenant isolation, idempotency, and dedup edge cases
+
+**Aggressive cut option** (if 5 days is the only budget): ship ONLY `failed_retry_burn_v1` + CLI + JSON output, no dashboard, no narrative, no digest. Customers query findings via SQL or CLI. Document this as v0.0.1 (research preview) rather than v0.1.
 
 ---
 
@@ -305,16 +480,51 @@ The repo already has `services/doctor/` for the diagnostics CLI, so we cannot re
 
 | # | Question | Default answer if no objection |
 |---|---|---|
-| Q1 | Should rules be SQL-only or do we allow Python/Rust rule plugins for complex patterns (e.g. cross-run state machines)? | SQL-only for v0; revisit if a real pattern can't be expressed |
+| Q1 | Should rules be SQL-only or do we allow Python/Rust rule plugins for complex patterns (e.g. cross-run state machines)? | **REVISED post-codex-r1**: define `CostRule` trait in v0 (Rust); v0 ships only SQL-backed implementations of the trait, but the trait surface is stable so v0.1 can add native-Rust plugins (cross-run state machines, suppression/cooldown logic) without breaking changes. See §5.4 |
 | Q2 | Where do narratives get persisted long-term? (`cost_findings.narrative_md` is fine for ≤ 1k findings/tenant; what about 1M?) | `narrative_md` in cost_findings; archive to S3 after 90 days |
 | Q3 | License for contributed rules in `services/cost_advisor/rules/`? | Apache-2.0 like rest of repo; require CLA on PR |
-| Q4 | Do we expose Tier 3 narratives in the **free tier** or paywall it? | Free tier: structured findings only; narratives = paid (or self-host with own OpenAI key) |
+| Q4 | Do we expose Tier 3 narratives in the **free tier** or paywall it? | **REVISED post-codex-r1**: free tier gets up to 5 narratives/day (so users can see the value); paid gates volume, daily digest, custom rules, retention beyond 30d, team workflows. Self-host with own OpenAI key always works without quota. The pure-paywall version was a competitive risk per codex |
 | Q5 | What's the data-retention policy for `cost_findings`? | 90 days for `open`; 30 days for `dismissed` / `fixed`; auto-purge with `retention_sweeper` |
 | Q6 | Could `cost-advisor` be the **first paid feature** of SpendGuard's hosted offering? | Yes — frame it as "free OSS = cap & audit; paid hosted = advice & analytics" |
 | Q7 | If a rule's `evidence` includes prompt text snippets, do we redact PII? | Yes — reuse `retention_sweeper`'s redaction utilities; store only token counts + prompt_hash, not raw text |
 | Q8 | Should narratives be cacheable across tenants for shared rule patterns? | No — narratives reference specific tenant data; sharing risks data leak |
 | Q9 | Failure mode: if Tier-3 LLM is down, do we still surface Tier 1+2 findings? | Yes — narrative is enrichment, not gating |
 | Q10 | Multi-tenant noisy-neighbor: one tenant generating 10k findings/day shouldn't starve others' Tier-3 budget. Per-tenant rate limit? | Yes — 100 narratives/tenant/day default; configurable per-tenant in control plane |
+
+---
+
+## 11.5 Answers to codex r1's "5 questions spec avoids"
+
+**A1. Idempotency / unique constraint preventing duplicate findings on nightly re-runs**:
+`fingerprint = SHA-256(rule_id || canonical_repr(scope) || time_bucket_iso8601)`. UNIQUE index on `(tenant_id, fingerprint)` (see §4.1). UPSERT-on-conflict updates `evidence` + `updated_at`, leaves `created_at` immutable. Time-bucket granularity per rule: e.g. `failed_retry_burn_v1` = 1-hour buckets, `idle_reservation_rate_v1` = 1-day buckets.
+
+**A2. Are required fields actually consistently in `canonical_events.payload`?**
+Audit needed. v0 P0 includes a "schema reality check": run a `SELECT` against current `canonical_events` to enumerate which fields rules need (`agent_id`, `run_id`, `prompt_hash`, `tool_name`, `model_family`, etc.) and which are NULL or missing. If `prompt_hash` isn't currently in the payload, we either:
+(a) backfill via a one-time `canonical_events` enrichment job (computed from the prompt text already there), OR
+(b) restrict v0 rules to fields confirmed present.
+This audit is a prerequisite gate to P1 implementation, NOT a vague TBD.
+
+**A3. How is "estimated waste" computed; what's the confidence interval?**
+Per `WasteEstimate.method`:
+- `redundant_call_sum` (e.g. `failed_retry_burn`): sum of `committed_micros_usd` for the failed calls. Confidence: **high** — these are paid bytes for known-failed responses.
+- `counterfactual_diff` (e.g. `tool_call_repeated`): `committed_micros_usd × (n_repeated - 1) / n_repeated`. Confidence: **medium** — assumes deduped call would have produced same outcome.
+- `baseline_excess` (e.g. baseline_outlier): `this_period_cost - baseline_p95`. Confidence: **medium** if sample_count ≥ 30, **low** otherwise.
+- `heuristic` (optimization_hypothesis category): NULL — these rules don't claim quantified waste.
+
+**A4. Baselines under seasonality / batch jobs / weekly spikes**:
+Default baseline window = 28 days (rolling), NOT 7. Rationale: 28d covers ~4 weekly cycles. Outlier rule requires BOTH:
+- This week > 3× p95 of 28d window
+- Same day-of-week vs 4-week-ago day-of-week > 2× (catches Monday spikes that are normal Mondays)
+
+For tenants with < 28 days of data: outlier rule does not fire (`info` finding only: "insufficient baseline").
+
+**A5. Dismissal scope (rule / fingerprint / agent / tenant)**:
+UI dismissal modes (per finding):
+- `dismiss_this_one`: only this fingerprint, this finding, dismissed
+- `dismiss_this_pattern_for_agent`: this rule_id + this agent for 30 days
+- `dismiss_this_rule_for_tenant`: this rule_id, all agents, until manually re-enabled (admin-only)
+
+Default: `dismiss_this_one`. Bulk-dismiss requires explicit confirmation. Reactivation logged in audit chain (cost_findings.audit_outbox or equivalent).
 
 ---
 
@@ -341,8 +551,39 @@ For v0.1 (P1 + P3 shipped):
 - [ ] At least 2 framework-specific rules ship (one for LangChain agent loop, one for OpenAI Agents SDK tool loop)
 
 For v1.0 (all P1–P6 shipped, codex challenge round complete):
-- [ ] 6 Tier-1 rules + 1 baseline outlier rule shipping
+- [ ] 4 detected_waste Tier-1 rules + 1 baseline outlier rule shipping (model_burn cut per codex r1)
+- [ ] 2 optimization_hypothesis rules behind feature flag
 - [ ] Dashboard tab live behind feature flag
 - [ ] Slack/email digest opt-in available
 - [ ] At least 5 design partners using it weekly
 - [ ] First community-contributed rule merged
+
+---
+
+## 14. Changelog
+
+### v1 (2026-05-13, post-codex round 1)
+
+Codex review verdict: 5/6/4/4/5/3 across 6 dimensions. Changes:
+
+**Must-Fix #1 (FindingEvidence contract)**: added §4.0 with full JSONSchema, fingerprint-based idempotency, severity rubric, and waste-estimate confidence levels.
+
+**Must-Fix #2 (validator hand-waviness)**: added §7.1.5 with structured output schema, 5-step validation pipeline (JSON parse → metric cross-check → numeric token extraction → DSL compile → banned phrase regex), and 5 required unit-test fixtures.
+
+**Must-Fix #3 (mixed waste vs. hypothesis)**: split §5 into §5.1 `detected_waste` (4 rules ship in v0) and §5.2 `optimization_hypothesis` (2 rules behind feature flag). Cut `model_burn_v1` entirely (§5.3) — needs eval signal we don't have. Replaced with `failed_retry_burn_v1` (codex's recommendation).
+
+**Cost model honesty (codex dim 2)**: §7.3 rewritten with quiet/typical/heavy tenant tiers, retry overhead, and an explicit "cost we're NOT counting" disclosure.
+
+**Architecture taxonomy clarity (codex dim 1)**: §3 added clarification that the 4 tiers describe marginal cost ramp, not lifecycle phase. Also flagged Tier 4's prompt-retention requirement that contradicts a non-goal — Tier 4 needs explicit opt-in.
+
+**Plugin trait (Q1 revision)**: §5.4 added explicit `CostRule` Rust trait stub; v0 ships SQL-backed impls but trait is stable.
+
+**Free tier narrative quota (Q4 revision)**: per codex, paywalling all narratives is competitive risk. Free tier now gets 5 narratives/day; paid gates volume + digest + custom rules.
+
+**Implementation timeline (codex dim 6)**: §9 totally redone. Original P1 = 3-5 days was wrong. Now P0 + P1 + P3 = 12 days for v0.1. Aggressive cut to 5 days = 1 rule + JSON CLI only (`v0.0.1` research preview).
+
+**5 questions spec ducked**: new §11.5 with concrete answers to all 5 (idempotency, schema audit, waste calc methods, baseline seasonality, dismissal scope).
+
+### v0 (2026-05-13, original draft)
+
+Initial 4-tier architecture; 6 Tier-1 rules; LLM narrative wrapper sketch; 6-phase rollout; 10 open questions.
