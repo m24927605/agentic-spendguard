@@ -20,6 +20,7 @@ pub mod proto {
 
 pub mod fingerprint;
 pub mod rule;
+pub mod runtime;
 pub mod sql_rule;
 pub mod rules;
 

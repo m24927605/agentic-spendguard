@@ -45,18 +45,17 @@ pub const DECLARED_INPUT_FIELDS: &[&str] = &[
     "canonical_events.decision_id",
 ];
 
-/// Placeholder SQL. The real SQL goes in
-/// `rules/detected_waste/idle_reservation_rate_v1.sql` in P1 and is
-/// loaded via `include_str!`. The marker comment must match
-/// [`crate::sql_rule::PLACEHOLDER_SQL_MARKER`] so the runtime
-/// recognizes this rule as not-ready and refuses to register it.
-const RULE_SQL: &str = "-- placeholder; real SQL lands in P1\nSELECT 1 WHERE FALSE;\n";
+/// Real rule SQL (P1). Loaded at compile time via `include_str!` so
+/// the rule body ships alongside the binary and there's no runtime
+/// filesystem dependency. The .sql file is canonical; this constant
+/// is just the in-binary copy.
+const RULE_SQL: &str = include_str!(
+    "../../rules/detected_waste/idle_reservation_rate_v1.sql"
+);
 
-/// Static descriptor for the rule. **Not registered in P0** — the P1
-/// runtime calls [`SqlCostRule::is_ready`] before registering and the
-/// placeholder fails that gate. The descriptor exists so the rule's
-/// metadata (id, version, declared fields, category) is testable and
-/// available for documentation tooling.
+/// Static descriptor for the rule. With P1 the SQL is non-placeholder
+/// so [`SqlCostRule::is_ready`] returns `true` and the runtime
+/// registers + evaluates this rule.
 pub fn descriptor() -> SqlCostRule {
     SqlCostRule::new(
         "idle_reservation_rate_v1",
@@ -95,16 +94,28 @@ mod tests {
     }
 
     #[test]
-    fn placeholder_rule_is_not_ready() {
-        // Codex r5 P1-7: P0 placeholder MUST NOT pass is_ready.
-        // The P1 runtime gates registration on this — if it ever
-        // flips to true here without real SQL, the runtime would
-        // register a rule whose evaluate() returns Err.
+    fn p1_rule_is_ready() {
+        // P1: real SQL ships via include_str!; is_ready() flips to
+        // true and the runtime registers + evaluates this rule.
         let r = descriptor();
         assert!(
-            !r.is_ready(),
-            "P0 placeholder rule must report is_ready()=false; \
-             ensure RULE_SQL contains PLACEHOLDER_SQL_MARKER"
+            r.is_ready(),
+            "P1 rule MUST report is_ready()=true; check that \
+             RULE_SQL does NOT contain PLACEHOLDER_SQL_MARKER"
+        );
+    }
+
+    #[test]
+    fn rule_sql_references_view() {
+        // Lock the contract: the SQL must read from
+        // reservations_with_ttl_status_v1 (CA-P0.6 view). If a future
+        // edit drops this reference, the rule would silently start
+        // hitting the raw reservations table again and the
+        // derived_state column wouldn't exist.
+        let r = descriptor();
+        assert!(
+            r.sql().contains("reservations_with_ttl_status_v1"),
+            "rule SQL must read from the CA-P0.6 view"
         );
     }
 }

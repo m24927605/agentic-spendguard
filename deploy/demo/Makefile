@@ -151,7 +151,16 @@ demo-verify-p0_6:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_p0_6_view.sql
 	@echo "[demo] Cost Advisor P0.6 view verification done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6
+# Cost Advisor P1 rule fixture: synthesizes 10 reservations (7 TTL'd
+# at 30s) on 2026-05-13, then runs idle_reservation_rate_v1's SQL
+# inline and asserts the expected aggregate (total=10, ttl_expired=7,
+# median_ttl=30s, idle_ratio=70%, waste=700_000 μUSD). Rolls back so
+# no state lands.
+demo-verify-p1:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_p1_cost_advisor.sql
+	@echo "[demo] Cost Advisor P1 rule fixture done"
+
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans
