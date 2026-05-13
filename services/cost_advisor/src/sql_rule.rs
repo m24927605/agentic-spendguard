@@ -43,8 +43,13 @@ pub struct SqlRuleRow {
 ///      + UPSERT into `cost_findings`.
 ///
 /// Today (P0): the struct compiles standalone; rows-to-proto decode and
-/// the actual `sqlx::query` invocation land in P1 (kept here as `todo!()`
-/// stubs so `cargo check` passes).
+/// the actual `sqlx::query` invocation land in P1.
+///
+/// Readiness gate (codex r5 P1-7): a rule is only "ready" if its SQL
+/// is non-placeholder. The runtime checks [`is_ready`] before
+/// registering — a placeholder rule never reaches the evaluation tick,
+/// so a stub like `SELECT 1 WHERE FALSE` cannot trip health checks or
+/// produce confusing empty findings.
 pub struct SqlCostRule {
     rule_id: &'static str,
     rule_version: u32,
@@ -52,6 +57,11 @@ pub struct SqlCostRule {
     declared_input_fields: &'static [&'static str],
     sql: &'static str,
 }
+
+/// Marker comment that the rule loader matches to decide whether the
+/// SQL body is a placeholder. P1's runtime refuses to register any
+/// rule whose SQL contains this marker (see [`SqlCostRule::is_ready`]).
+pub const PLACEHOLDER_SQL_MARKER: &str = "-- placeholder; real SQL lands in P1";
 
 impl SqlCostRule {
     pub const fn new(
@@ -74,6 +84,13 @@ impl SqlCostRule {
     /// executes the query.
     pub fn sql(&self) -> &'static str {
         self.sql
+    }
+
+    /// `true` once the rule has real (non-placeholder) SQL wired.
+    /// The P1 runtime gates registration on this — a placeholder rule
+    /// never reaches the evaluation tick.
+    pub fn is_ready(&self) -> bool {
+        !self.sql.contains(PLACEHOLDER_SQL_MARKER)
     }
 }
 
@@ -101,14 +118,24 @@ impl CostRule for SqlCostRule {
     }
 
     async fn evaluate(&self, _ctx: &EvaluationContext) -> anyhow::Result<Vec<FindingEvidence>> {
+        // Codex r5 P1-7: if the runtime ever evaluates a placeholder
+        // rule, log + return Ok(empty) rather than Err. The runtime's
+        // registration path SHOULD have gated on `is_ready()` first,
+        // but defense-in-depth here keeps a misconfigured runtime
+        // from tripping health checks on a stub.
+        if !self.is_ready() {
+            tracing::warn!(
+                rule_id = self.rule_id,
+                "SqlCostRule::evaluate called on placeholder rule; returning no findings. \
+                 P1 runtime should gate registration on SqlCostRule::is_ready()."
+            );
+            return Ok(Vec::new());
+        }
+
         // P1: execute self.sql() against ctx.pool, decode rows into
         // FindingEvidence per the `SqlRuleRow` shape, return.
-        //
-        // P0 leaves this as an explicit not-implemented so the rule
-        // skeleton can register at startup but a misconfigured runtime
-        // can't silently emit empty findings.
         Err(anyhow::anyhow!(
-            "SqlCostRule::evaluate not wired in P0; runtime lands in P1 (rule_id={})",
+            "SqlCostRule::evaluate is_ready() but row decode lands in P1 (rule_id={})",
             self.rule_id
         ))
     }

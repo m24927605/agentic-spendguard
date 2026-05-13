@@ -5,7 +5,14 @@
 > **Date**: 2026-05-13
 > **Method**: static code audit of sidecar audit-emission paths + ledger / canonical_ingest schemas (no running stack available in this workspace; postgres image is part of `deploy/demo/compose.yaml` but not currently up). Static evidence is conclusive — see §3 rationale.
 > **Verdict**: **SCENARIO 3 — "3+ fields missing AND fundamental shape mismatch"** per §11.5 A2.
-> **Branch decision**: restrict v0 rules to a single fireable rule + start an enrichment workstream (P0.5) before P1 expands rule coverage. Schedule impact: **+5 days** vs. the v3 baseline (matches §11.5 A2's worst-case-minus-PII row).
+> **Branch decision**: v0.1 ships **zero rules** until two workstreams complete (P0.5 sidecar enrichment AND P0.6 ledger projection view; see §5 for the post-codex-r5 revision). Schedule impact: **+5 days** vs. the v3 baseline (matches §11.5 A2's worst-case-minus-PII row).
+>
+> **Codex r5 corrections applied 2026-05-13** (see §8 Codex r5 corrections at the end of this file):
+> - The v1 conclusion "1 of 4 rules fireable today (idle_reservation_rate_v1)" was wrong.
+> - The v1 description of `canonical_events.payload_json` shape was wrong.
+> - The v1 emitter set was incomplete.
+>
+> The bullets below preserve the v1 narrative for traceability; the §8 corrections at the bottom of the file are authoritative where they conflict.
 
 ---
 
@@ -204,4 +211,77 @@ P2-P5                       unchanged from spec §9.
 - 🟡 Step 3 (migrations) is unchanged in scope; `failure_class` column still lands, `cost_findings` + `cost_baselines` tables still land, control_plane extensions still land. None of those depend on the rule-set scope decision.
 - 🟡 Step 4 (control_plane integration design doc) is unchanged in scope.
 
-**Recommendation for the human**: approve scope-cut to v0.1=one-rule, commit P0.5 as a follow-on workstream, and proceed to Step 2. The spec revision items in §5 above should be folded into a `cost-advisor-spec.md` v4 patch when Step 2 starts (so the proto reflects the revised scope).
+**Recommendation for the human** (v1, superseded by §8): approve scope-cut to v0.1=one-rule, commit P0.5 as a follow-on workstream, and proceed to Step 2. The spec revision items in §5 above should be folded into a `cost-advisor-spec.md` v4 patch when Step 2 starts (so the proto reflects the revised scope).
+
+---
+
+## 8. Codex r5 corrections (authoritative)
+
+Codex adversarial review on the P0 branch (2026-05-13) caught four real errors in §3, §4, and §5 of the original audit. Where the corrections below conflict with the earlier text, **the corrections are authoritative**. The original narrative is preserved for traceability — do not rely on it standalone.
+
+### 8.1 idle_reservation_rate_v1 is NOT fireable today (kill shot)
+
+The original §4 conclusion "1 of 4 rules fireable" was wrong. Per `services/ledger/migrations/0010_projections.sql:42-50`:
+
+- The column is `reservations.current_state`, **not** `latest_state`. The original report used the wrong name.
+- The CHECK allows `('reserved', 'committed', 'released', 'overrun_debt')`. There is **no** `ttl_expired` state. TTL expiry is encoded as a `release` event with `reason='TTL_EXPIRED'` on the audit chain (the `release.rs` handler in `services/ledger`), not projected onto the `reservations` row's state.
+- There is **no** `ttl_seconds` column. The table has `ttl_expires_at TIMESTAMPTZ` and `created_at TIMESTAMPTZ`; "TTL seconds" must be derived as `EXTRACT(EPOCH FROM (ttl_expires_at - created_at))`.
+- There is no config home for the rule's `min_ttl_for_finding` threshold; the contract DSL today has no "rule_config" extensible surface.
+
+**Revised verdict**: v0.1 has **zero rules** fireable today. The rule list in spec §5.1 cannot ship as-written.
+
+### 8.2 Required new workstream: P0.6 ledger projection view
+
+Before any rule (including `idle_reservation_rate_v1`) can fire, the ledger needs a derived view that surfaces the (reservation, derived_state, ttl_seconds, release_reason) tuple by joining `reservations` with `audit_outbox` release events. Suggested name: `reservations_with_ttl_status_v1` view. Owner: ledger team. Estimated work: ~2 days. Lands as P0.6, parallel to P0.5 sidecar enrichment.
+
+### 8.3 canonical_events.payload_json shape was wrong
+
+The original §3 dump of the audit.outcome payload shape (e.g. `{kind: "commit_estimated", reservation_id, ...}`) is what the sidecar puts on the CloudEvent `data` field. But `canonical_ingest` does NOT decode that field when persisting. Per `services/canonical_ingest/src/persistence/append.rs` and the `extract_cloudevent_payload()` helpers in the ledger handlers, the actual `canonical_events.payload_json` shape is:
+
+```json
+{
+  "specversion":     "1.0",
+  "type":            "spendguard.audit.outcome",
+  "source":          "sidecar://...",
+  "id":              "<uuid>",
+  "time_seconds":    1234567890,
+  "time_nanos":      0,
+  "datacontenttype": "application/json",
+  "data_b64":        "<base64 of the JSON above>",
+  "tenantid":        "<uuid>",
+  "runid":           "",
+  "decisionid":      "<uuid>",
+  "schema_bundle_id": "<uuid>",
+  "producer_id":     "sidecar:...",
+  "producer_sequence": 42,
+  "signing_key_id":  "..."
+}
+```
+
+Rules cannot do `payload_json->>'kind'` or `payload_json->>'estimated_amount_atomic'` directly — those keys are nested inside the base64-encoded `data_b64`. To extract, rules must `convert_from(decode(payload_json->>'data_b64', 'base64'), 'UTF8')::jsonb->>'estimated_amount_atomic'` — a `LATERAL` join is the clean Postgres pattern.
+
+**Implication**: spec §6's Tier-2 baseline computation example using `(payload->>'committed_micros_usd')::bigint` is also wrong as written. The Tier-2 worker will need to decode `data_b64` or, better, JOIN to `ledger_transactions` / `commits` directly for cost data (which is what the original audit recommended anyway).
+
+### 8.4 Emitter set was incomplete
+
+The original §1 claim "the set of CloudEvent payloads that ever land in `canonical_events` is bounded to sidecar + ledger via audit_outbox" missed `services/webhook_receiver/src/handlers/webhook.rs`. That service constructs `spendguard.audit.decision` and `spendguard.audit.outcome` CloudEvents (lines 563-577) when a provider webhook lands a `provider_report` or `invoice_reconcile` operation. Those CloudEvents flow through the ledger's `audit_outbox` → `outbox_forwarder` → `canonical_ingest` chain, so they end up in `canonical_events` the same way sidecar emissions do.
+
+The webhook_receiver emissions still do NOT carry `prompt_hash` / `agent_id` / `run_id` / `tool_name` / `tool_args_hash` / `model_family` (they only carry billing identifiers + provider event id), so the §4 conclusion that those fields are 0% populated remains correct. But the methodology claim that the static audit covered the entire emitter set was overconfident.
+
+### 8.5 Revised workstream summary
+
+| Workstream | Owner | Status | Purpose |
+|---|---|---|---|
+| P0 | cost_advisor | ✅ shipped (this branch) | proto + crate skeleton + migrations + integration design |
+| P0.5 (NEW) | sidecar + adapter | open | thread `run_id`/`step_id` into CloudEvent + add `agent_id`/`model_family`/`prompt_hash` to `payload_json`'s `data` field. ~5 days. |
+| P0.6 (NEW per codex r5 §8.1) | ledger | open | `reservations_with_ttl_status_v1` view joining reservations + release-event audit chain. ~2 days. |
+| P1 (skinny) | cost_advisor | gated on P0.5 + P0.6 | runtime + `idle_reservation_rate_v1` rule SQL + CLI. ~4 days. |
+| P1.5 | cost_advisor | gated on P0.5 + P0.6 | the other 3 rules (`failed_retry_burn_v1`, `runaway_loop_v1`, `tool_call_repeated_v1`) at run-scope. ~5 days. |
+
+**Net new critical path to v0.1**: P0 (4d, done) + max(P0.5 5d, P0.6 2d) + P1 4d + P3 4d + P3.5 3d = **20 days** elapsed (16 days remaining). P0.5 and P0.6 run in parallel; the longer one (5d) sets the critical path. Matches §11.5 A2's +5-day envelope.
+
+### 8.6 P1 readiness verdict (revised)
+
+**🟡 P1 IS NOT ready to start immediately.** P1 is gated on both P0.5 and P0.6 landing. The original audit's "P1 can start immediately" claim was wrong — it presumed `idle_reservation_rate_v1` was fireable, which the schema review above shows it is not.
+
+The P0 deliverables (proto + crate skeleton + 4 migrations + integration design doc) remain valid and useful — they are infrastructure that P1 / P0.5 / P0.6 all consume. But the runtime + first rule cannot land until the dependencies do.
