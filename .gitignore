@@ -33,3 +33,6 @@ proto/google
 *.swp
 *.swo
 .DS_Store
+
+# M2 — local outreach list with personal contacts (template lives in outreach-list.template.md)
+docs/launches/outreach-list.md
