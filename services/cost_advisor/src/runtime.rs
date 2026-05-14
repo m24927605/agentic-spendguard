@@ -49,6 +49,12 @@ pub struct EmittedFinding {
     pub estimated_waste_micros_usd: Option<i64>,
     pub evidence: serde_json::Value,
     pub proposed_dsl_patch: Option<serde_json::Value>,
+    /// CA-P3: outcome of writing this finding's patch to
+    /// approval_requests. `None` if --write-proposals was off OR if
+    /// the rule didn't emit a patch. `Some({outcome: "inserted", ...})`
+    /// or `{outcome: "already_exists", ...}` otherwise.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_outcome: Option<serde_json::Value>,
 }
 
 /// Build the P1 rule registry. Returns only rules whose
@@ -67,28 +73,34 @@ pub fn build_registry() -> Vec<SqlCostRule> {
 
 /// Single-tenant evaluation entry point. Runs every registered rule
 /// against the (tenant, date) bucket, UPSERTs findings, optionally
-/// emits proposed DSL patches.
+/// emits proposed DSL patches, and optionally writes them to
+/// approval_requests.
 ///
 /// `propose_patches=true` returns the RFC-6902 patch in the result
-/// row so a CLI caller can show it; it does NOT write an
-/// `approval_requests` row in P1 (gated on owner-ack #53/#54).
+/// row so a CLI caller can show it.
+///
+/// `write_proposals=true` (CA-P3) also INSERTs an approval_requests
+/// row for each finding with a non-None patch, gated by the DB-side
+/// allowlist CHECK. Idempotent via deterministic decision_id derived
+/// from finding_id + rule_version.
 ///
 /// CA-P1.6: cost_findings now lives in `spendguard_ledger` (issue
 /// #56 — moved to get a real FK with approval_requests). All
-/// WRITES (cost_findings_upsert SP) go to the ledger pool. READS
-/// still dispatch by rule's target_db() because P1.5 rules read
-/// canonical_events from the canonical pool.
+/// WRITES (cost_findings_upsert SP + approval_requests INSERT) go to
+/// the ledger pool. READS still dispatch by rule's target_db()
+/// because P1.5 rules read canonical_events from the canonical pool.
 pub async fn evaluate_tenant_day(
     ledger: &PgPool,
     canonical: &PgPool,
     tenant_id: Uuid,
     bucket_date: NaiveDate,
     propose_patches: bool,
+    write_proposals: bool,
 ) -> Result<Vec<EmittedFinding>> {
     let mut emitted = Vec::new();
+    let proposal_config = crate::proposal_writer::ProposalConfig::default();
 
     for rule in build_registry() {
-        // Per-rule READ pool (codex CA-P1.5 r1 P1).
         let target_pool = match rule.target_db() {
             TargetDb::Ledger => ledger,
             TargetDb::Canonical => canonical,
@@ -97,12 +109,33 @@ pub async fn evaluate_tenant_day(
             continue;
         };
 
-        // WRITE pool is always ledger (CA-P1.6: cost_findings is
-        // ledger-resident; cost_findings_upsert lives in ledger DB).
         let outcome = upsert_finding(ledger, tenant_id, &finding).await?;
 
-        let proposed_patch = if propose_patches {
-            build_proposed_patch_for_rule(rule.rule_id(), &finding)
+        // The patch is needed if EITHER flag is set: we report it to
+        // the caller (propose_patches) and/or we INSERT into
+        // approval_requests (write_proposals).
+        let proposed_patch = if propose_patches || write_proposals {
+            build_proposed_patch_for_rule(&finding)
+        } else {
+            None
+        };
+
+        let proposal_outcome = if let (true, Some(patch)) = (write_proposals, &proposed_patch) {
+            // CA-P3: write to approval_requests. The DB CHECK
+            // `approval_requests_cost_advisor_patch_allowlist`
+            // re-validates; the Rust-side validator gives a
+            // structured error for caller observability.
+            let outcome = crate::proposal_writer::write_proposal(
+                ledger,
+                tenant_id,
+                outcome.finding_id,
+                finding.proto.rule_version as i32,
+                patch,
+                &proposal_config,
+            )
+            .await
+            .with_context(|| format!("write proposal for rule {}", rule.rule_id()))?;
+            Some(outcome)
         } else {
             None
         };
@@ -113,20 +146,37 @@ pub async fn evaluate_tenant_day(
             rule_id: finding.proto.rule_id.clone(),
             severity: severity_str(finding.proto.severity()).to_string(),
             confidence: finding.confidence,
-            // Codex CA-P1 r3 P2: Option preserves "USD estimate
-            // pending" semantics — None / null in JSON. Some(n)
-            // means a real quantified figure from waste_estimate.
             estimated_waste_micros_usd: finding
                 .proto
                 .waste_estimate
                 .as_ref()
                 .map(|w| w.micros_usd),
             evidence: finding.proto_json.clone(),
-            proposed_dsl_patch: proposed_patch,
+            proposed_dsl_patch: if propose_patches { proposed_patch } else { None },
+            proposal_outcome: proposal_outcome.map(format_proposal_outcome),
         });
     }
 
     Ok(emitted)
+}
+
+fn format_proposal_outcome(outcome: crate::proposal_writer::ProposalOutcome) -> serde_json::Value {
+    match outcome {
+        crate::proposal_writer::ProposalOutcome::Inserted {
+            approval_id,
+            decision_id,
+        } => serde_json::json!({
+            "outcome": "inserted",
+            "approval_id": approval_id.to_string(),
+            "decision_id": decision_id.to_string(),
+        }),
+        crate::proposal_writer::ProposalOutcome::AlreadyExists { decision_id } => {
+            serde_json::json!({
+                "outcome": "already_exists",
+                "decision_id": decision_id.to_string(),
+            })
+        }
+    }
 }
 
 struct DecodedFinding {
@@ -136,6 +186,11 @@ struct DecodedFinding {
     finding_id: Uuid,
     detected_at: DateTime<Utc>,
     sample_decision_ids: Vec<Uuid>,
+    /// CA-P3: the rule-specific proposed RFC-6902 patch, ready for
+    /// the validator + writer. None when the rule has no
+    /// well-defined remediation patch (e.g., the P1.5 retry-burn
+    /// rule which needs operator judgment on which rule to tighten).
+    proposed_patch: Option<serde_json::Value>,
 }
 
 async fn run_rule(
@@ -244,6 +299,10 @@ fn decode_failed_retry_burn(
         finding_id: Uuid::now_v7(),
         detected_at: Utc::now(),
         sample_decision_ids: sample_ids,
+        // CA-P3: failed_retry_burn doesn't emit a generic patch
+        // because the right remediation depends on which rule's
+        // retry threshold to tighten — operator judgment.
+        proposed_patch: None,
     })
 }
 
@@ -312,6 +371,7 @@ fn decode_runaway_loop(
         finding_id: Uuid::now_v7(),
         detected_at: Utc::now(),
         sample_decision_ids: sample_ids,
+        proposed_patch: None,
     })
 }
 
@@ -433,6 +493,29 @@ fn decode_idle_reservation_rate(
     let detected_at = Utc::now();
     let decision_refs: Vec<String> = sample_ids.iter().map(|u| u.to_string()).collect();
 
+    // CA-P3: NO patch emitted for v0.1.
+    //
+    // The rule's SQL header recommends "tighten reserve.ttl_seconds
+    // to 1.5× median ttl_seconds". But this is a tenant_global
+    // finding — cost_advisor doesn't know WHICH budget to target.
+    // Emitting `/budgets/0/reservation_ttl_seconds` would mutate
+    // budget index 0 whether or not it's the offending one (codex
+    // CA-P3 r2 P1: positional patches without identity pinning can
+    // mutate the wrong budget).
+    //
+    // The closed-loop infrastructure (validator + writer + SP +
+    // allowlist + NOTIFY) ships ready. When P3.5+ work makes the
+    // rule budget-scoped (so it carries `budget_id` in scope), the
+    // decoder can emit a patch with a `test` op pinning identity:
+    //   [
+    //     {"op":"test","path":"/budgets/<i>/budget_id","value":"<uuid>"},
+    //     {"op":"replace","path":"/budgets/<i>/reservation_ttl_seconds","value":N}
+    //   ]
+    // — which requires adding `test` ops to the allowlist. That's
+    // P3.5 scope. For now the EmittedFinding's
+    // waste_estimate.explanation guides operators to manually fix.
+    let proposed_patch: Option<serde_json::Value> = None;
+
     let proto = FindingEvidence {
         rule_id: rule.rule_id().into(),
         rule_version: rule.rule_version(),
@@ -482,6 +565,7 @@ fn decode_idle_reservation_rate(
         confidence: 0.75,
         finding_id,
         detected_at,
+        proposed_patch,
         sample_decision_ids: sample_ids,
     })
 }
@@ -566,48 +650,18 @@ async fn upsert_finding(
 ///
 /// Codex CA-P1 r2 P1: proposed_dsl_patch is consumed downstream by
 /// bundle_registry's apply pipeline as a real RFC-6902 DSL delta.
-/// Emitting a non-mutating `test` op against a non-existent metadata
-/// path would FAIL when applied. For tenant-global scope findings
-/// (no specific budget identified), there is no safe RFC-6902 patch
-/// in P1 because:
-///   * The contract DSL's addressable-path schema is unresolved
-///     (owner-ack #55).
-///   * Tenant-global rules don't pick a specific budget — the
-///     operator must do that before any patch is applicable.
+/// CA-P3: each rule's decoder fills in `DecodedFinding.proposed_patch`
+/// with a concrete patch when a well-defined identity-pinned
+/// remediation exists. Validation happens via
+/// [`patch_validator::validate`] (Rust-side) AND the DB CHECK
+/// constraint `approval_requests_cost_advisor_patch_allowlist`
+/// (authoritative).
 ///
-/// So P1 returns None for tenant-global scope. The
-/// EmittedFinding.evidence carries the human-readable
-/// recommendation in waste_estimate.explanation + metrics; a future
-/// P3.5 owner-ack resolution unlocks real-patch emission for
-/// budget/agent-scoped rules.
-///
-/// Returns None for tenant_global scope. Returns Some(patch) for
-/// budget/agent/run/tool-scoped findings (none of which exist in P1
-/// — placeholder for P1.5).
-fn build_proposed_patch_for_rule(
-    _rule_id: &str,
-    finding: &DecodedFinding,
-) -> Option<serde_json::Value> {
-    let scope_type = finding
-        .proto
-        .scope
-        .as_ref()
-        .map(|s| s.scope_type)
-        .unwrap_or(0);
-    let is_tenant_global = ScopeType::try_from(scope_type)
-        .map(|s| matches!(s, ScopeType::TenantGlobal))
-        .unwrap_or(true);
-    if is_tenant_global {
-        // No safe patch in P1; the EmittedFinding's evidence /
-        // explanation guides the operator to manually review the
-        // affected budgets.
-        return None;
-    }
-
-    // Reserved for P1.5: rules with agent/run/tool scope can emit
-    // budget-specific patches. None of those ship in P1; this branch
-    // never fires today.
-    None
+/// All v0.1 rules return None — tenant_global / run-scope findings
+/// can't safely emit positional-only patches (codex CA-P3 r2 P1).
+/// Budget-scoped rules + `test`-op support land in P3.5+.
+fn build_proposed_patch_for_rule(finding: &DecodedFinding) -> Option<serde_json::Value> {
+    finding.proposed_patch.clone()
 }
 
 // ---- enum → string helpers --------------------------------------

@@ -10,7 +10,7 @@
 //!
 //! Usage:
 //!   spendguard-advise --tenant <UUID> --date YYYY-MM-DD
-//!                     [--propose-patches] [--format json|table]
+//!                     [--show-proposed-patches] [--write-proposals]
 //!                     [--ledger-db URL] [--canonical-db URL]
 //!
 //! Env vars supersede the CLI defaults so docker compose / k8s can
@@ -39,13 +39,30 @@ struct Cli {
     date: Option<NaiveDate>,
 
     /// Also include RFC-6902 contract DSL patch SUGGESTIONS in the
-    /// output JSON. This does NOT write to approval_requests — that's
-    /// gated on owner-ack #53/#54. The flag is named explicitly to
+    /// output JSON. This does NOT write to approval_requests — pass
+    /// --write-proposals for that. The flag is named explicitly to
     /// avoid the impression that running with it submits proposals
     /// for operator review (codex CA-P1 r1 P3 caught the earlier
     /// `--propose-patches` name as misleading).
     #[arg(long)]
     show_proposed_patches: bool,
+
+    /// CA-P3 + owner-ack #55: actually INSERT into approval_requests
+    /// for every finding with a non-None proposed patch. Patches are
+    /// validated against the allowlist (5 specific RFC-6902 paths;
+    /// see `patch_validator` module + migration 0043). decision_id is
+    /// derived deterministically from finding_id so re-runs are
+    /// idempotent.
+    ///
+    /// v0.1 note: no shipped rule currently emits a `proposed_patch`
+    /// — they're all tenant_global/run-scope and would need
+    /// budget-identity pinning (codex CA-P3 r2 P1) before positional
+    /// patches are safe to apply. The flag is wired forward-looking
+    /// so future budget-scoped rules light up the path immediately.
+    /// `--write-proposals` today produces 0 INSERTs but exercises the
+    /// validation pipeline. A stderr summary line reports the count.
+    #[arg(long)]
+    write_proposals: bool,
 
     /// ledger DB connection string (spendguard_ledger).
     #[arg(
@@ -96,8 +113,21 @@ async fn main() -> Result<()> {
         cli.tenant,
         bucket_date,
         cli.show_proposed_patches,
+        cli.write_proposals,
     )
     .await?;
+
+    if cli.write_proposals {
+        let proposals_written = emitted
+            .iter()
+            .filter(|f| f.proposal_outcome.is_some())
+            .count();
+        eprintln!(
+            "write-proposals: {} proposals written ({} findings emitted).",
+            proposals_written,
+            emitted.len()
+        );
+    }
 
     let out = serde_json::json!({
         "tenant_id": cli.tenant.to_string(),
