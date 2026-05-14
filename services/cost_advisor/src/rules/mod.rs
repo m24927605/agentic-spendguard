@@ -1,11 +1,13 @@
 //! Concrete `CostRule` implementations.
 //!
-//! P0 ships one placeholder rule so the trait surface, the proto
-//! contract, and the `SqlCostRule` adapter can be compiled and
-//! type-checked together. The real v0.1 rule
-//! (`idle_reservation_rate_v1`, the only one fireable under current
-//! schema per cost-advisor-p0-audit-report §4) lands in P1 alongside
-//! the runtime that executes the SQL.
+//! v0.1 ships 3 of 4 planned rules:
+//!   * `idle_reservation_rate_v1` — budget-scoped (CA-P3.1);
+//!     emits a 2-op identity-pinned RFC-6902 patch.
+//!   * `failed_retry_burn_v1` (CA-P1.5) — run-scope; no patch yet.
+//!   * `runaway_loop_v1` (CA-P1.5) — run-scope; no patch yet.
+//!
+//! `tool_call_repeated_v1` is deferred to v0.2 (requires SDK
+//! extension to carry `tool_name` + `tool_args_hash`).
 
 pub mod failed_retry_burn;
 pub mod idle_reservation_rate;

@@ -12,9 +12,11 @@
 //!      a real Postgres FK with approval_requests; see spec §0.3 +
 //!      integration-doc §9).
 //!
-//! P1 ships exactly one rule (`idle_reservation_rate_v1`). The
-//! registry pattern lets P1.5 add the other 3 rules without touching
-//! this file.
+//! v0.1 registry (post-CA-P3.1) ships 3 rules:
+//! `idle_reservation_rate_v1` (budget-scoped, emits a 2-op
+//! identity-pinned patch), `failed_retry_burn_v1`, and
+//! `runaway_loop_v1` (the latter two emit no patch in v0.1).
+//! `tool_call_repeated_v1` is deferred to v0.2.
 
 use anyhow::{anyhow, Context, Result};
 use bigdecimal::BigDecimal;
@@ -105,56 +107,50 @@ pub async fn evaluate_tenant_day(
             TargetDb::Ledger => ledger,
             TargetDb::Canonical => canonical,
         };
-        let Some(finding) = run_rule(target_pool, &rule, tenant_id, bucket_date).await? else {
-            continue;
-        };
+        // CA-P3.1: rules can return 0..N findings (idle_reservation_rate
+        // is per-budget). Fan out the upsert + proposal write.
+        let findings = run_rule(target_pool, &rule, tenant_id, bucket_date).await?;
+        for finding in findings {
+            let outcome = upsert_finding(ledger, tenant_id, &finding).await?;
 
-        let outcome = upsert_finding(ledger, tenant_id, &finding).await?;
+            let proposed_patch = if propose_patches || write_proposals {
+                build_proposed_patch_for_rule(&finding)
+            } else {
+                None
+            };
 
-        // The patch is needed if EITHER flag is set: we report it to
-        // the caller (propose_patches) and/or we INSERT into
-        // approval_requests (write_proposals).
-        let proposed_patch = if propose_patches || write_proposals {
-            build_proposed_patch_for_rule(&finding)
-        } else {
-            None
-        };
+            let proposal_outcome = if let (true, Some(patch)) = (write_proposals, &proposed_patch) {
+                let outcome = crate::proposal_writer::write_proposal(
+                    ledger,
+                    tenant_id,
+                    outcome.finding_id,
+                    finding.proto.rule_version as i32,
+                    patch,
+                    &proposal_config,
+                )
+                .await
+                .with_context(|| format!("write proposal for rule {}", rule.rule_id()))?;
+                Some(outcome)
+            } else {
+                None
+            };
 
-        let proposal_outcome = if let (true, Some(patch)) = (write_proposals, &proposed_patch) {
-            // CA-P3: write to approval_requests. The DB CHECK
-            // `approval_requests_cost_advisor_patch_allowlist`
-            // re-validates; the Rust-side validator gives a
-            // structured error for caller observability.
-            let outcome = crate::proposal_writer::write_proposal(
-                ledger,
-                tenant_id,
-                outcome.finding_id,
-                finding.proto.rule_version as i32,
-                patch,
-                &proposal_config,
-            )
-            .await
-            .with_context(|| format!("write proposal for rule {}", rule.rule_id()))?;
-            Some(outcome)
-        } else {
-            None
-        };
-
-        emitted.push(EmittedFinding {
-            outcome: outcome.outcome,
-            finding_id: outcome.finding_id.to_string(),
-            rule_id: finding.proto.rule_id.clone(),
-            severity: severity_str(finding.proto.severity()).to_string(),
-            confidence: finding.confidence,
-            estimated_waste_micros_usd: finding
-                .proto
-                .waste_estimate
-                .as_ref()
-                .map(|w| w.micros_usd),
-            evidence: finding.proto_json.clone(),
-            proposed_dsl_patch: if propose_patches { proposed_patch } else { None },
-            proposal_outcome: proposal_outcome.map(format_proposal_outcome),
-        });
+            emitted.push(EmittedFinding {
+                outcome: outcome.outcome,
+                finding_id: outcome.finding_id.to_string(),
+                rule_id: finding.proto.rule_id.clone(),
+                severity: severity_str(finding.proto.severity()).to_string(),
+                confidence: finding.confidence,
+                estimated_waste_micros_usd: finding
+                    .proto
+                    .waste_estimate
+                    .as_ref()
+                    .map(|w| w.micros_usd),
+                evidence: finding.proto_json.clone(),
+                proposed_dsl_patch: if propose_patches { proposed_patch } else { None },
+                proposal_outcome: proposal_outcome.map(format_proposal_outcome),
+            });
+        }
     }
 
     Ok(emitted)
@@ -198,30 +194,33 @@ async fn run_rule(
     rule: &SqlCostRule,
     tenant_id: Uuid,
     bucket_date: NaiveDate,
-) -> Result<Option<DecodedFinding>> {
-    let row_opt: Option<PgRow> = sqlx::query(rule.sql())
+) -> Result<Vec<DecodedFinding>> {
+    // CA-P3.1: rules can now return 0..N rows (idle_reservation_rate
+    // is per-budget). fetch_all + iterate; decoders run per row.
+    let rows: Vec<PgRow> = sqlx::query(rule.sql())
         .bind(tenant_id)
         .bind(bucket_date)
-        .fetch_optional(ledger)
+        .fetch_all(ledger)
         .await
         .with_context(|| format!("execute rule {}", rule.rule_id()))?;
 
-    let Some(row) = row_opt else {
-        return Ok(None);
-    };
-
-    match rule.rule_id() {
-        "idle_reservation_rate_v1" => {
-            decode_idle_reservation_rate(rule, row, tenant_id, bucket_date).map(Some)
-        }
-        "failed_retry_burn_v1" => {
-            decode_failed_retry_burn(rule, row, tenant_id, bucket_date).map(Some)
-        }
-        "runaway_loop_v1" => {
-            decode_runaway_loop(rule, row, tenant_id, bucket_date).map(Some)
-        }
-        other => Err(anyhow!("no decoder registered for rule {}", other)),
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let decoded = match rule.rule_id() {
+            "idle_reservation_rate_v1" => {
+                decode_idle_reservation_rate(rule, row, tenant_id, bucket_date)?
+            }
+            "failed_retry_burn_v1" => {
+                decode_failed_retry_burn(rule, row, tenant_id, bucket_date)?
+            }
+            "runaway_loop_v1" => {
+                decode_runaway_loop(rule, row, tenant_id, bucket_date)?
+            }
+            other => return Err(anyhow!("no decoder registered for rule {}", other)),
+        };
+        out.push(decoded);
     }
+    Ok(out)
 }
 
 fn decode_failed_retry_burn(
@@ -255,6 +254,7 @@ fn decode_failed_retry_burn(
         run_id: String::new(), // tenant-bucket aggregate across runs
         tool_name: String::new(),
         model_family: String::new(),
+        budget_id: String::new(),
     };
     let fingerprint_hex =
         fingerprint::compute(rule.rule_id(), &tenant_id.to_string(), &scope, &time_bucket);
@@ -333,6 +333,7 @@ fn decode_runaway_loop(
         run_id: String::new(),
         tool_name: String::new(),
         model_family: String::new(),
+        budget_id: String::new(),
     };
     let fingerprint_hex =
         fingerprint::compute(rule.rule_id(), &tenant_id.to_string(), &scope, &time_bucket);
@@ -418,19 +419,17 @@ fn decode_idle_reservation_rate(
     tenant_id: Uuid,
     bucket_date: NaiveDate,
 ) -> Result<DecodedFinding> {
+    // CA-P3.1: rule SQL now GROUPs by (tenant_id, budget_id) and
+    // returns budget_id as the first projected column. Each row is
+    // one finding; the runtime iterates.
+    let budget_id_str: String = row.try_get("budget_id")?;
     let total: i64 = row.try_get("total_reservations")?;
     let ttl_expired: i64 = row.try_get("ttl_expired_count")?;
     let median_ttl: i32 = row.try_get("median_ttl_seconds")?;
     let p95_ttl: i32 = row.try_get("p95_ttl_seconds")?;
-    // Codex CA-P1 r1 P1: rule SQL now samples decision_ids (not
-    // reservation_ids) so the dashboard "view raw evidence" link
-    // points at canonical_events.decision_id rows.
     let sample_ids: Vec<Uuid> = row
         .try_get::<Option<Vec<Uuid>>, _>("sample_decision_ids")?
         .unwrap_or_default();
-    // Codex CA-P1 r1 P2: rule SQL returns NULL waste until the P2
-    // baseline_refresher computes a real per-tenant figure. Map
-    // NULL → None and surface heuristic/low confidence.
     let waste_micros_opt: Option<i64> = row.try_get("estimated_waste_micros_usd")?;
 
     let idle_ratio = if total > 0 {
@@ -440,16 +439,17 @@ fn decode_idle_reservation_rate(
     };
     let time_bucket = bucket_date.format("%Y-%m-%d").to_string();
 
+    // CA-P3.1: ScopeType::Budget with budget_id populated. Used by
+    // both the fingerprint canonical_repr AND the proposed patch's
+    // `test` op (identity pinning).
     let scope = FindingScope {
-        scope_type: ScopeType::TenantGlobal as i32,
+        scope_type: ScopeType::Budget as i32,
         agent_id: String::new(),
         run_id: String::new(),
         tool_name: String::new(),
         model_family: String::new(),
+        budget_id: budget_id_str.clone(),
     };
-    // Codex CA-P1 r1 P2: tenant_id is now part of fingerprint input
-    // so tenant_global findings on the same day for different tenants
-    // produce DISTINCT fingerprints.
     let fingerprint_hex =
         fingerprint::compute(rule.rule_id(), &tenant_id.to_string(), &scope, &time_bucket);
 
@@ -493,28 +493,46 @@ fn decode_idle_reservation_rate(
     let detected_at = Utc::now();
     let decision_refs: Vec<String> = sample_ids.iter().map(|u| u.to_string()).collect();
 
-    // CA-P3: NO patch emitted for v0.1.
+    // CA-P3.1: emit a 2-op identity-pinned patch.
     //
-    // The rule's SQL header recommends "tighten reserve.ttl_seconds
-    // to 1.5× median ttl_seconds". But this is a tenant_global
-    // finding — cost_advisor doesn't know WHICH budget to target.
-    // Emitting `/budgets/0/reservation_ttl_seconds` would mutate
-    // budget index 0 whether or not it's the offending one (codex
-    // CA-P3 r2 P1: positional patches without identity pinning can
-    // mutate the wrong budget).
-    //
-    // The closed-loop infrastructure (validator + writer + SP +
-    // allowlist + NOTIFY) ships ready. When P3.5+ work makes the
-    // rule budget-scoped (so it carries `budget_id` in scope), the
-    // decoder can emit a patch with a `test` op pinning identity:
     //   [
-    //     {"op":"test","path":"/budgets/<i>/budget_id","value":"<uuid>"},
-    //     {"op":"replace","path":"/budgets/<i>/reservation_ttl_seconds","value":N}
+    //     {"op":"test","path":"/spec/budgets/0/id","value":"<budget_uuid>"},
+    //     {"op":"replace","path":"/spec/budgets/0/reservation_ttl_seconds","value":N}
     //   ]
-    // — which requires adding `test` ops to the allowlist. That's
-    // P3.5 scope. For now the EmittedFinding's
-    // waste_estimate.explanation guides operators to manually fix.
-    let proposed_patch: Option<serde_json::Value> = None;
+    //
+    // Paths under /spec/ match the contract YAML schema parsed by
+    // services/sidecar/src/contract/parse.rs. The identity field is
+    // `id` (not `budget_id`); codex CA-P3.1 r1 caught this mismatch
+    // against an earlier draft.
+    //
+    // We guess array index `0` because cost_advisor doesn't load
+    // contract bundles. The `test` op pins identity: bundle_registry's
+    // apply pipeline FAILS the whole patch if budget at index 0 has a
+    // different `id` than this finding's. Operators see the apply
+    // failure, reject the proposal, and either fix the bundle
+    // manually or wait for cost_advisor to re-propose against a new
+    // finding (idempotency blocks re-proposal under the same
+    // (finding_id, rule_version) — see proposal_writer.rs).
+    //
+    // For single-budget contracts (v0.1 demo), the index-0 guess is
+    // provably right. For multi-budget contracts, the apply fails
+    // loudly rather than silently mutating the wrong budget.
+    //
+    // recommended_ttl = 1.5× observed median (rule SQL header); clamp
+    // to allowlist bounds [1, 86400].
+    //
+    // Guard against median_ttl ≤ 0 (corrupt evidence): the rule SQL
+    // HAVING clause already filters median ≤ 60, but doesn't enforce
+    // > 0. Skip patch emission rather than emit a degenerate value.
+    let proposed_patch: Option<serde_json::Value> = if median_ttl > 0 {
+        let recommended_ttl = ((median_ttl as i64) * 3 / 2).clamp(1, 86_400);
+        Some(serde_json::json!([
+            {"op":"test","path":"/spec/budgets/0/id","value": budget_id_str},
+            {"op":"replace","path":"/spec/budgets/0/reservation_ttl_seconds","value": recommended_ttl},
+        ]))
+    } else {
+        None
+    };
 
     let proto = FindingEvidence {
         rule_id: rule.rule_id().into(),
@@ -539,7 +557,9 @@ fn decode_idle_reservation_rate(
         "rule_version": proto.rule_version,
         "fingerprint": proto.fingerprint,
         "category": "detected_waste",
-        "scope": { "scope_type": "tenant_global" },
+        // CA-P3.1: scope_type=budget + budget_id surfaced in the
+        // serialized evidence JSON (spec §4.0 lowercase enums).
+        "scope": { "scope_type": "budget", "budget_id": budget_id_str },
         "metrics": proto.metrics.iter().map(|m| serde_json::json!({
             "name": m.name,
             "value": m.value,
@@ -650,16 +670,17 @@ async fn upsert_finding(
 ///
 /// Codex CA-P1 r2 P1: proposed_dsl_patch is consumed downstream by
 /// bundle_registry's apply pipeline as a real RFC-6902 DSL delta.
-/// CA-P3: each rule's decoder fills in `DecodedFinding.proposed_patch`
-/// with a concrete patch when a well-defined identity-pinned
-/// remediation exists. Validation happens via
-/// [`patch_validator::validate`] (Rust-side) AND the DB CHECK
-/// constraint `approval_requests_cost_advisor_patch_allowlist`
+/// CA-P3 + CA-P3.1: each rule's decoder fills in
+/// `DecodedFinding.proposed_patch` with a concrete patch when a
+/// well-defined identity-pinned remediation exists. Validation
+/// happens via [`patch_validator::validate`] (Rust-side) AND the DB
+/// CHECK constraint `approval_requests_cost_advisor_patch_allowlist`
 /// (authoritative).
 ///
-/// All v0.1 rules return None — tenant_global / run-scope findings
-/// can't safely emit positional-only patches (codex CA-P3 r2 P1).
-/// Budget-scoped rules + `test`-op support land in P3.5+.
+/// In CA-P3.1, `idle_reservation_rate_v1` emits a 2-op patch
+/// (test+replace pinning the budget's `id` at array index 0). The
+/// other two P1.5 rules still return None (no well-defined patch
+/// without further scope work).
 fn build_proposed_patch_for_rule(finding: &DecodedFinding) -> Option<serde_json::Value> {
     finding.proposed_patch.clone()
 }

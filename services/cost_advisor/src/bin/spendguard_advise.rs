@@ -47,20 +47,19 @@ struct Cli {
     #[arg(long)]
     show_proposed_patches: bool,
 
-    /// CA-P3 + owner-ack #55: actually INSERT into approval_requests
-    /// for every finding with a non-None proposed patch. Patches are
-    /// validated against the allowlist (5 specific RFC-6902 paths;
-    /// see `patch_validator` module + migration 0043). decision_id is
-    /// derived deterministically from finding_id so re-runs are
-    /// idempotent.
+    /// CA-P3 + CA-P3.1 + owner-ack #55: actually INSERT into
+    /// approval_requests for every finding with a non-None proposed
+    /// patch. Patches are validated against the allowlist (5 replace
+    /// paths + 1 test path under /spec/, see `patch_validator`
+    /// module + migrations 0043 + 0044). decision_id is derived
+    /// deterministically from finding_id so re-runs are idempotent.
     ///
-    /// v0.1 note: no shipped rule currently emits a `proposed_patch`
-    /// — they're all tenant_global/run-scope and would need
-    /// budget-identity pinning (codex CA-P3 r2 P1) before positional
-    /// patches are safe to apply. The flag is wired forward-looking
-    /// so future budget-scoped rules light up the path immediately.
-    /// `--write-proposals` today produces 0 INSERTs but exercises the
-    /// validation pipeline. A stderr summary line reports the count.
+    /// v0.1 note (CA-P3.1): `idle_reservation_rate_v1` emits a
+    /// budget-identity-pinned 2-op patch (test on /spec/budgets/0/id
+    /// + replace on /spec/budgets/0/reservation_ttl_seconds). The
+    /// other two P1.5 rules don't emit patches yet (operator
+    /// judgment needed on which rule to tighten). A stderr summary
+    /// line reports the count of proposals written.
     #[arg(long)]
     write_proposals: bool,
 

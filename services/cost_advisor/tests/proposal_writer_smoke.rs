@@ -1,6 +1,6 @@
 //! CA-P3 integration smoke for the proposal writer.
 //!
-//! Requires a Postgres instance with migrations 0000→0043 applied to
+//! Requires a Postgres instance with migrations 0000→0044 applied to
 //! a `spendguard_ledger` DB reachable at the URL in
 //! `SPENDGUARD_TEST_LEDGER_URL` (default
 //! `postgres://postgres:test@localhost:25440/spendguard_ledger`).
@@ -66,7 +66,7 @@ async fn proposal_writer_round_trip() {
     insert_finding(&pool, tenant, finding_id, 'a').await;
 
     let patch = json!([
-        {"op":"replace","path":"/rules/0/then/decision","value":"REQUIRE_APPROVAL"}
+        {"op":"replace","path":"/spec/rules/0/then/decision","value":"REQUIRE_APPROVAL"}
     ]);
     let cfg = ProposalConfig::default();
 
@@ -124,7 +124,7 @@ async fn db_check_rejects_bypass() {
     // Bypass the Rust validator and call the SQL directly with a bad
     // patch. The DB-side CHECK constraint MUST reject it.
     let bad_patch = serde_json::json!([
-        {"op":"add","path":"/budgets/0/limit_amount_atomic","value":"99999"}
+        {"op":"add","path":"/spec/budgets/0/limit_amount_atomic","value":"99999"}
     ]);
     let result = sqlx::query(
         r#"
@@ -164,6 +164,47 @@ async fn db_check_rejects_bypass() {
 }
 
 #[tokio::test]
+async fn test_op_pinning_round_trip() {
+    // CA-P3.1: verify the 2-op test+replace patch shape goes through
+    // the SECURITY DEFINER SP + CHECK constraint cleanly.
+    let Some(pool) = try_connect().await else {
+        eprintln!("[skip] no DB reachable at {}", ledger_url());
+        return;
+    };
+    ensure_partition(&pool).await;
+
+    let tenant = Uuid::new_v4();
+    let finding_id = Uuid::new_v4();
+    insert_finding(&pool, tenant, finding_id, 'p').await;
+
+    // 2-op test+replace patch — CA-P3.1 happy path.
+    let patch = json!([
+        {"op":"test","path":"/spec/budgets/0/id","value":"a1b2c3d4-e5f6-7890-abcd-ef0123456789"},
+        {"op":"replace","path":"/spec/budgets/0/reservation_ttl_seconds","value":60}
+    ]);
+    let cfg = ProposalConfig::default();
+
+    let outcome =
+        proposal_writer::write_proposal(&pool, tenant, finding_id, 1, &patch, &cfg)
+            .await
+            .expect("write proposal with test+replace patch");
+    assert!(
+        matches!(outcome, ProposalOutcome::Inserted { .. }),
+        "expected Inserted, got {:?}",
+        outcome
+    );
+
+    // Verify the stored patch round-trips.
+    let stored: (serde_json::Value,) =
+        sqlx::query_as("SELECT proposed_dsl_patch FROM approval_requests WHERE proposing_finding_id = $1")
+            .bind(finding_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch stored patch");
+    assert_eq!(stored.0, patch);
+}
+
+#[tokio::test]
 async fn db_validator_value_schema_edges() {
     // Codex CA-P3 r2 P2 explicit-DB-test request: verify the
     // SQL-side cost_advisor_validate_proposed_dsl_patch agrees with
@@ -182,97 +223,93 @@ async fn db_validator_value_schema_edges() {
         assert_eq!(row.0, expect_valid, "{}: patch={}", label, patch);
     }
 
-    // TTL value cases.
-    check(
-        &pool,
-        json!([{"op":"replace","path":"/budgets/0/reservation_ttl_seconds","value":1.5}]),
-        false,
-        "ttl decimal 1.5 rejected",
-    )
-    .await;
-    check(
-        &pool,
-        json!([{"op":"replace","path":"/budgets/0/reservation_ttl_seconds","value":"60"}]),
-        false,
-        "ttl string \"60\" rejected (must be JSON number)",
-    )
-    .await;
-    check(
-        &pool,
-        json!([{"op":"replace","path":"/budgets/0/reservation_ttl_seconds","value":-1}]),
-        false,
-        "ttl -1 rejected (out of range)",
-    )
-    .await;
-    check(
-        &pool,
-        json!([{"op":"replace","path":"/budgets/0/reservation_ttl_seconds","value":86401}]),
-        false,
-        "ttl 86401 rejected (out of range)",
-    )
-    .await;
+    // Helper: build a 2-op patch with the test pin already in place,
+    // so we can probe the value-schema gate (not the pinning gate).
+    fn pinned_budget_replace(leaf: &str, value: serde_json::Value) -> serde_json::Value {
+        json!([
+            {"op":"test","path":"/spec/budgets/0/id","value":"a1b2c3d4-e5f6-7890-abcd-ef0123456789"},
+            {"op":"replace","path":format!("/spec/budgets/0/{}", leaf),"value":value}
+        ])
+    }
+
+    // TTL value cases (all pinned to isolate the value-schema gate).
+    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!(1.5)), false,
+        "ttl decimal 1.5 rejected").await;
+    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!("60")), false,
+        "ttl string \"60\" rejected (must be JSON number)").await;
+    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!(-1)), false,
+        "ttl -1 rejected (out of range)").await;
+    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!(86401)), false,
+        "ttl 86401 rejected (out of range)").await;
     // JSON Number with scientific notation: serde_json normalizes
     // `1e2` to `100.0` on the wire; PG's jsonb stores it as a
     // numeric and the `#>> '{}'` text extraction returns `"100.0"`,
-    // which fails `::BIGINT` cast. Net: the validator rejects
-    // scientific-notation forms even when mathematically integral.
-    // This is the desired strictness — callers send integer JSON.
-    check(
-        &pool,
-        json!([{"op":"replace","path":"/budgets/0/reservation_ttl_seconds","value": 1e2}]),
-        false,
-        "ttl 1e2 rejected (normalized to 100.0 by serde_json; non-integer text)",
-    )
-    .await;
-    check(
-        &pool,
-        json!([{"op":"replace","path":"/budgets/0/reservation_ttl_seconds","value":100}]),
-        true,
-        "ttl 100 accepted (plain integer)",
-    )
-    .await;
+    // which fails `::BIGINT` cast. Validator rejects.
+    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!(1e2)), false,
+        "ttl 1e2 rejected (normalized to 100.0 by serde_json)").await;
+    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!(100)), true,
+        "ttl 100 accepted (plain integer)").await;
 
     // Atomic amount: must be string of digits.
-    check(
-        &pool,
-        json!([{"op":"replace","path":"/budgets/0/limit_amount_atomic","value":100}]),
+    check(&pool, pinned_budget_replace("limit_amount_atomic", json!(100)), false,
+        "limit_amount_atomic number 100 rejected (must be string)").await;
+    check(&pool, pinned_budget_replace("limit_amount_atomic", json!("1.5")), false,
+        "limit_amount_atomic 1.5 rejected (must be digit-only)").await;
+    check(&pool, pinned_budget_replace("limit_amount_atomic", json!("")), false,
+        "limit_amount_atomic empty string rejected").await;
+
+    // Same-index pinning invariant: budget replace WITHOUT a
+    // preceding test op MUST fail (codex CA-P3.1 r1 P2).
+    check(&pool,
+        json!([{"op":"replace","path":"/spec/budgets/0/reservation_ttl_seconds","value":60}]),
         false,
-        "limit_amount_atomic number 100 rejected (must be string)",
-    )
-    .await;
-    check(
-        &pool,
-        json!([{"op":"replace","path":"/budgets/0/limit_amount_atomic","value":"1.5"}]),
+        "budget replace without test pin rejected (same-index invariant)",
+    ).await;
+
+    // CA-P3.1 r1 P1 regression: explicit DB-side rejection of the
+    // old (pre-CA-P3.1) path shapes. The Rust validator has these
+    // covered; mirror them at the SQL gate so the authoritative
+    // layer is regression-protected.
+    check(&pool,
+        json!([{"op":"replace","path":"/budgets/0/reservation_ttl_seconds","value":60}]),
         false,
-        "limit_amount_atomic 1.5 rejected (must be digit-only)",
-    )
-    .await;
-    check(
-        &pool,
-        json!([{"op":"replace","path":"/budgets/0/limit_amount_atomic","value":""}]),
+        "old shape /budgets/0/... (no /spec/) rejected",
+    ).await;
+    check(&pool,
+        json!([{"op":"test","path":"/spec/budgets/0/budget_id","value":"a1b2c3d4-e5f6-7890-abcd-ef0123456789"}]),
         false,
-        "limit_amount_atomic empty string rejected",
-    )
-    .await;
+        "old field name budget_id rejected (real field is `id`)",
+    ).await;
+
+    // Pinned at index 0 but replace targets index 1 — wrong-index
+    // mismatch MUST fail.
+    check(&pool,
+        json!([
+            {"op":"test","path":"/spec/budgets/0/id","value":"a1b2c3d4-e5f6-7890-abcd-ef0123456789"},
+            {"op":"replace","path":"/spec/budgets/1/reservation_ttl_seconds","value":60}
+        ]),
+        false,
+        "budget replace at index 1 with test at index 0 rejected",
+    ).await;
 
     // Decision: must be enum.
     check(
         &pool,
-        json!([{"op":"replace","path":"/rules/0/then/decision","value":"WAT"}]),
+        json!([{"op":"replace","path":"/spec/rules/0/then/decision","value":"WAT"}]),
         false,
         "decision WAT rejected",
     )
     .await;
     check(
         &pool,
-        json!([{"op":"replace","path":"/rules/0/then/decision","value":null}]),
+        json!([{"op":"replace","path":"/spec/rules/0/then/decision","value":null}]),
         false,
         "decision null rejected",
     )
     .await;
     check(
         &pool,
-        json!([{"op":"replace","path":"/rules/0/then/decision","value":"STOP"}]),
+        json!([{"op":"replace","path":"/spec/rules/0/then/decision","value":"STOP"}]),
         true,
         "decision STOP accepted",
     )
@@ -281,14 +318,14 @@ async fn db_validator_value_schema_edges() {
     // Leading zero in array index — RFC 6901 rejects.
     check(
         &pool,
-        json!([{"op":"replace","path":"/rules/01/then/decision","value":"STOP"}]),
+        json!([{"op":"replace","path":"/spec/rules/01/then/decision","value":"STOP"}]),
         false,
         "leading-zero index 01 rejected",
     )
     .await;
     check(
         &pool,
-        json!([{"op":"replace","path":"/rules/0/then/decision","value":"STOP"}]),
+        json!([{"op":"replace","path":"/spec/rules/0/then/decision","value":"STOP"}]),
         true,
         "single-zero index 0 accepted",
     )
@@ -316,7 +353,7 @@ async fn notify_fires_on_state_change() {
     let finding_id = Uuid::new_v4();
     insert_finding(&pool, tenant, finding_id, 'c').await;
 
-    let patch = json!([{"op":"replace","path":"/rules/0/then/decision","value":"STOP"}]);
+    let patch = json!([{"op":"replace","path":"/spec/rules/0/then/decision","value":"STOP"}]);
     let outcome =
         proposal_writer::write_proposal(&pool, tenant, finding_id, 1, &patch, &ProposalConfig::default())
             .await

@@ -8,7 +8,7 @@
 //   - cost-advisor-p0-audit-report.md §5 scope cut for v0.1
 //
 // Codename: cost_advisor (final brand TBD per spec §10).
-// Status: P0 skeleton — no service surface yet. The proto codifies the
+// Status: v0.1 shipping (CA-P0..CA-P3.1). The proto codifies the
 // FindingEvidence shape that rules MUST emit and that
 // `services/cost_advisor` consumes when upserting into `cost_findings`.
 //
@@ -24,15 +24,23 @@ package spendguard.cost_advisor.v1;
 // Enums — closed sets that the §4.0 JSONSchema spelled out as `enum:[...]`.
 // =============================================================================
 
-// Scope of a finding. Per spec §4.0 + audit-report §5: in v0.1 only `RUN`
-// and `TENANT_GLOBAL` are reliably populated; `AGENT` is blocked on the
-// P0.5 enrichment workstream; `TOOL` is blocked on the v0.2 SDK change.
+// Scope of a finding. Per spec §4.0 + audit-report §5: in v0.1 `RUN`,
+// `TENANT_GLOBAL`, and `BUDGET` (added CA-P3.1) are reliably populated;
+// `AGENT` is backed by CA-P0.5 sidecar enrichment (run_id/step_id are
+// now populated on canonical_events); `TOOL` is blocked on the v0.2
+// SDK change.
 enum ScopeType {
   SCOPE_TYPE_UNSPECIFIED = 0;
   AGENT          = 1;
   RUN            = 2;
   TOOL           = 3;
   TENANT_GLOBAL  = 4;
+  // CA-P3.1: per-budget findings carry budget_id in FindingScope.
+  // Lets the rule emit identity-pinned DSL patches (test op on
+  // /spec/budgets/<i>/id) so the apply pipeline fails-loud when
+  // array layout has shifted, instead of silently mutating the
+  // wrong budget.
+  BUDGET         = 5;
 }
 
 // Unit allowlist for `Metric.unit` (spec §4.0).
@@ -173,22 +181,30 @@ message WasteEstimate {
 }
 
 // Scope a finding applies to. Exactly one of the optional id fields
-// SHOULD be set for AGENT/RUN/TOOL; TENANT_GLOBAL leaves all NULL.
+// SHOULD be set for AGENT/RUN/TOOL/BUDGET; TENANT_GLOBAL leaves all NULL.
 //
-// Audit-report §4: in P0.5 enrichment, sidecar starts populating
-// `run_id`/`agent_id` on `canonical_events`; until then only the
-// TENANT_GLOBAL + RUN (with NULL run_id) shapes can fire reliably.
+// CA-P0.5 shipped sidecar enrichment so `run_id` / `step_id` /
+// `prompt_hash` / `model_family` now populate canonical_events.
+// CA-P3.1 added BUDGET scope so per-budget findings emit
+// identity-pinned patches.
 message FindingScope {
   ScopeType scope_type = 1;
 
   // Optional id fields. proto3 strings default to "" — rule code
   // treats "" as absent.
-  string agent_id      = 2;  // SpendGuardIds.step_id post-enrichment
-  string run_id        = 3;  // SpendGuardIds.run_id post-enrichment
+  string agent_id      = 2;  // SpendGuardIds.step_id (CA-P0.5 enrichment)
+  string run_id        = 3;  // SpendGuardIds.run_id (CA-P0.5 enrichment)
   string tool_name     = 4;  // deferred to v0.2 SDK enrichment
-  string model_family  = 5;  // UnitRef.model_family; blocked on P0.5
+  string model_family  = 5;  // UnitRef.model_family (CA-P0.5 enrichment)
+  // CA-P3.1: budget_id for ScopeType::BUDGET findings. UUID string
+  // (lowercase, hyphenated). cost_advisor populates this from the
+  // rule SQL's GROUP BY budget_id column. The resulting proposed
+  // DSL patch carries a `test` op on /spec/budgets/<i>/id with this
+  // value so the bundle_registry apply pipeline rejects the patch
+  // if the budget at array position <i> doesn't match.
+  string budget_id     = 6;
 
-  reserved 6 to 15;          // reserved for future scope projections
+  reserved 7 to 15;          // reserved for future scope projections
 }
 
 // The canonical evidence record a rule emits. Persisted into
