@@ -19,6 +19,8 @@ pub mod proto {
 }
 
 pub mod fingerprint;
+pub mod patch_validator;
+pub mod proposal_writer;
 pub mod rule;
 pub mod runtime;
 pub mod sql_rule;

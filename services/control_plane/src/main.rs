@@ -777,7 +777,10 @@ struct ApprovalDetail {
     approval_id: Uuid,
     tenant_id: Uuid,
     decision_id: Uuid,
-    audit_decision_event_id: Uuid,
+    // CA-P3 (codex r4 P2): nullable because cost_advisor proposals
+    // have no originating audit.decision event (migration 0043 made
+    // the column nullable + gated NOT NULL on proposal_source).
+    audit_decision_event_id: Option<Uuid>,
     state: String,
     ttl_expires_at: chrono::DateTime<chrono::Utc>,
     approver_policy: serde_json::Value,
@@ -787,6 +790,10 @@ struct ApprovalDetail {
     resolved_by_subject: Option<String>,
     resolution_reason: Option<String>,
     created_at: chrono::DateTime<chrono::Utc>,
+    // CA-P3 (integration-doc §4.2): cost_advisor proposal review surface.
+    proposal_source: String,
+    proposed_dsl_patch: Option<serde_json::Value>,
+    proposing_finding_id: Option<Uuid>,
     recent_events: Vec<ApprovalEventOut>,
 }
 
@@ -823,7 +830,7 @@ async fn get_approval(
         Uuid,
         Uuid,
         Uuid,
-        Uuid,
+        Option<Uuid>,
         String,
         chrono::DateTime<chrono::Utc>,
         serde_json::Value,
@@ -833,12 +840,16 @@ async fn get_approval(
         Option<String>,
         Option<String>,
         chrono::DateTime<chrono::Utc>,
+        String,
+        Option<serde_json::Value>,
+        Option<Uuid>,
     )> = sqlx::query_as(
         r#"
         SELECT approval_id, tenant_id, decision_id, audit_decision_event_id,
                state, ttl_expires_at, approver_policy, requested_effect,
                decision_context, resolved_at, resolved_by_subject,
-               resolution_reason, created_at
+               resolution_reason, created_at,
+               proposal_source, proposed_dsl_patch, proposing_finding_id
           FROM approval_requests
          WHERE approval_id = $1
         "#,
@@ -913,6 +924,9 @@ async fn get_approval(
         resolved_by_subject: detail.10,
         resolution_reason: detail.11,
         created_at: detail.12,
+        proposal_source: detail.13,
+        proposed_dsl_patch: detail.14,
+        proposing_finding_id: detail.15,
         recent_events: events,
     })
     .into_response())

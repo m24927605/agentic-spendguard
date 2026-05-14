@@ -226,14 +226,20 @@ Out of P0 scope.)
 
 ## 5. Service identity + auth (mTLS)
 
-`cost_advisor` runtime needs **write access** to:
-- `spendguard_ledger.cost_findings` — INSERT + UPDATE via `cost_findings_upsert()` SP (lifecycle). **CA-P1.6**: cost_findings moved from canonical to ledger so a real FK from approval_requests is enforceable; the SP is the SOLE legal writer.
-- `spendguard_ledger.cost_baselines` — INSERT + UPDATE (nightly baseline refresher in P2).
-- `spendguard_ledger.approval_requests` — INSERT only, scoped to
-  `proposal_source='cost_advisor'`.
+`cost_advisor` runtime needs **write access** via SECURITY DEFINER
+SPs (never direct table DML):
+
+- `spendguard_ledger.cost_findings` — written via `cost_findings_upsert()` SP (CA-P1.6 — sole legal writer).
+- `spendguard_ledger.cost_baselines` — INSERT + UPDATE for the nightly baseline refresher (P2).
+- `spendguard_ledger.approval_requests` — written via `cost_advisor_create_proposal()` SP (CA-P3). The SP hard-codes `state='pending'` + NULL resolution fields so the caller cannot bypass `resolve_approval_request`. NO direct INSERT grant.
 
 And **read access** to:
 - `spendguard_canonical.canonical_events` — SELECT only (rule SQL).
+- `spendguard_ledger.approval_requests` — SELECT for status checks.
+
+**Migration chain** (codex CA-P3 r3 P2):
+1. **0043 (this PR)** — creates `cost_advisor_create_proposal()` SECURITY DEFINER SP + `REVOKE ALL FROM PUBLIC`. No role exists yet; only the function owner (postgres / migration runner) can invoke.
+2. **Future P1-role migration** — `CREATE ROLE cost_advisor_application_role` + `GRANT EXECUTE` on the SPs listed above. Until then the cost_advisor service connects as the migration runner.
 
 ### 5.1 Database role
 
@@ -242,8 +248,11 @@ Mirrors the existing pattern (`canonical_ingest_application_role` in
 `outbox_forwarder` etc.):
 
 ```sql
--- Will be added in P1 alongside the runtime; included here so reviewers
--- can sign off on the surface now.
+-- DEFERRED TO P1 ROLE MIGRATION (NOT shipped in 0043).
+-- 0043 creates the SP + REVOKEs from PUBLIC; the future P1 role
+-- migration creates the role + grants EXECUTE. Until P1 ships,
+-- the cost_advisor service connects as the migration runner.
+--
 -- CA-P1.6: cost_findings now lives in spendguard_ledger (was canonical).
 -- Single role, single DB for the writer surface.
 CREATE ROLE cost_advisor_application_role NOINHERIT;
@@ -269,12 +278,20 @@ GRANT SELECT, INSERT, UPDATE ON cost_baselines
                               TO cost_advisor_application_role;
 GRANT SELECT ON commits, ledger_entries, ledger_transactions, reservations
                               TO cost_advisor_application_role;
-GRANT INSERT ON approval_requests
-                              TO cost_advisor_application_role;
--- column-level restriction: the role can only INSERT rows whose
--- proposal_source = 'cost_advisor'. Enforced by a row-security
--- policy + a BEFORE INSERT trigger that rejects other values for this
--- role.
+
+-- approval_requests: NO direct INSERT/UPDATE/DELETE. The
+-- cost_advisor_create_proposal SECURITY DEFINER SP (migration 0043)
+-- is the SOLE legal writer for cost_advisor proposals. It
+-- hard-codes state='pending' + NULL resolution fields so a
+-- compromised writer cannot bypass the resolve_approval_request
+-- transition (which fires approval_events + the pg_notify trigger
+-- on AFTER UPDATE OF state). Codex CA-P3 r1 P1 + r2 P1 closed this
+-- bypass.
+GRANT EXECUTE ON FUNCTION cost_advisor_create_proposal(
+    UUID, UUID, JSONB, UUID, TIMESTAMPTZ
+)                             TO cost_advisor_application_role;
+GRANT SELECT ON approval_requests
+                              TO cost_advisor_application_role;  -- read-only for status checks
 ```
 
 `UPDATE` / `DELETE` on `cost_findings` is gated behind the
@@ -291,80 +308,49 @@ The compose / Helm chart adds a new TLS cert pair `cost-advisor.crt` /
 identity string: `cost-advisor:<workload_instance_id>`. Same pattern as
 `sidecar:demo-sidecar-1`, `outbox-forwarder:demo-outbox-forwarder`, etc.
 
-### 5.2.1 Trigger + RLS implementation (codex r7 P2)
+### 5.2.1 Write-path enforcement — SECURITY DEFINER SP (CA-P3 final)
 
-The hand-wavy "BEFORE INSERT trigger that rejects other values for this role" in §5.1 needs a concrete mechanism. Postgres supports two:
+> **Status**: replaced RLS / BEFORE-INSERT-trigger approach (v1/v2/v3
+> drafts below preserved as historical) with the
+> `cost_advisor_create_proposal` SECURITY DEFINER SP shipped in
+> migration 0043. Codex CA-P3 r1 P1 + r2 P1 closed this loop.
 
-**Mechanism A — Row-level security (preferred):**
-
-```sql
-ALTER TABLE approval_requests ENABLE ROW LEVEL SECURITY;
-ALTER TABLE approval_requests FORCE ROW LEVEL SECURITY;
-
-CREATE POLICY cost_advisor_insert_self_only
-    ON approval_requests
-    FOR INSERT
-    TO cost_advisor_application_role
-    WITH CHECK (proposal_source = 'cost_advisor');
-
--- Codex r8 P2 correction: with FORCE ROW LEVEL SECURITY, ALL roles are
--- subject to RLS (the table owner is no longer auto-exempt). For
--- legacy callers (control_plane, sidecar) to continue inserting
--- sidecar_decision proposals, ship ONE of these alongside the policy
--- above:
---
---   (i)  A complementary permissive policy for those roles:
---        CREATE POLICY legacy_insert_self_only
---            ON approval_requests
---            FOR INSERT
---            TO control_plane_application_role, sidecar_application_role
---            WITH CHECK (proposal_source = 'sidecar_decision');
---   (ii) Grant BYPASSRLS to those roles (less safe; loses defense-in-
---        depth for them).
---   (iii) Skip FORCE on the table and let the table owner remain
---         exempt; rely on RLS only for cost_advisor_application_role.
---
--- The cleanest path is (i): explicit policies make the access matrix
--- self-documenting.
-```
-
-Caveat: RLS policies are evaluated against the CURRENT role. The
-service must connect with login role `cost_advisor_login` that has
-membership in `cost_advisor_application_role` AND issue
-`SET ROLE cost_advisor_application_role` at session start. Without
-SET ROLE, `current_user` stays as the login role and the policy does
-not match. Document this in the service's connection-init code.
-
-**Mechanism B — BEFORE INSERT trigger (fallback if RLS unavailable):**
+The cost_advisor write path uses **only** the SECURITY DEFINER SP:
 
 ```sql
-CREATE OR REPLACE FUNCTION enforce_cost_advisor_proposal_source()
-    RETURNS TRIGGER LANGUAGE plpgsql AS $$
-BEGIN
-    -- Codex r8 P2: use 'MEMBER' not 'USAGE'. USAGE returns true only
-    -- when the role's privileges are immediately available without
-    -- SET ROLE; a login role granted membership WITHOUT INHERIT would
-    -- bypass a USAGE-keyed check. MEMBER tests bare membership
-    -- regardless of inheritance — what we actually want for this
-    -- guard. (PG16 docs: pg_has_role accepts MEMBER | USAGE | SET.)
-    IF pg_has_role(session_user, 'cost_advisor_application_role', 'MEMBER')
-       AND NEW.proposal_source <> 'cost_advisor' THEN
-        RAISE EXCEPTION
-            'role % may only INSERT proposals with proposal_source=cost_advisor (got %)',
-            session_user, NEW.proposal_source
-            USING ERRCODE = '42501';   -- insufficient_privilege
-    END IF;
-    RETURN NEW;
-END; $$;
-CREATE TRIGGER cost_advisor_proposal_source_guard
-    BEFORE INSERT ON approval_requests
-    FOR EACH ROW
-    EXECUTE FUNCTION enforce_cost_advisor_proposal_source();
+-- Migration 0043:
+GRANT EXECUTE ON FUNCTION cost_advisor_create_proposal(
+    UUID, UUID, JSONB, UUID, TIMESTAMPTZ
+)                             TO cost_advisor_application_role;
+
+-- No direct INSERT/UPDATE/DELETE grants on approval_requests for
+-- cost_advisor. The SP is hardened:
+--   * SECURITY DEFINER (runs as the migration owner, has INSERT perms)
+--   * search_path = pg_catalog, pg_temp (defeats temp-shadow attacks)
+--   * REVOKE ALL FROM PUBLIC (only granted roles can invoke)
+--   * Hard-codes state='pending' + NULL resolution fields so the
+--     caller can't write a fake-approved row, skipping
+--     resolve_approval_request and the pg_notify trigger.
 ```
 
-`pg_has_role(session_user, 'cost_advisor_application_role', 'MEMBER')` correctly tests bare membership regardless of inheritance — the right guard for "is this login role a member of the cost_advisor role?" (Codex r8 caught an earlier draft using `'USAGE'`, which would have missed login roles granted membership WITHOUT INHERIT — `USAGE` only matches privileges immediately available.) The trigger only rejects when the role IS a cost_advisor member AND it tries to write a non-cost_advisor proposal; other roles pass through unaffected.
+Why this beats the RLS/trigger approach: with role-based gates, the
+gate exists at the GRANT layer (revocable, fallible). With the SP,
+the gate is built into the only callable surface — any future role
+that gets EXECUTE on this SP inherits all the safety properties
+without further configuration.
 
-Decision: ship **Mechanism A (RLS)** if the runtime can guarantee `SET ROLE` at session start; otherwise ship Mechanism B (trigger). Lands in P1.
+#### Historical drafts (RLS / BEFORE INSERT trigger)
+
+The v1 doc proposed RLS or a BEFORE INSERT trigger to constrain
+which `proposal_source` value a cost_advisor role could INSERT.
+That approach worked but had two operational issues:
+  1. RLS required `SET ROLE` at every session start.
+  2. The BEFORE INSERT trigger needed `pg_has_role(session_user,
+     'cost_advisor_application_role', 'MEMBER')` checks that broke
+     if role inheritance changed.
+
+The SP approach replaces both: no role-membership introspection
+needed; the SP body is the gate.
 
 ### 5.3 control_plane gate
 
