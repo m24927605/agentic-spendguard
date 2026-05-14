@@ -88,13 +88,34 @@ pub fn classify_audit_outcome(
     let kind = data.get("kind").and_then(|v| v.as_str());
 
     // Check for explicit framework signatures FIRST (independent of
-    // HTTP status). ToolException + ToolCallError are surfaced by
-    // LangChain / OpenAI Agents adapters when a tool raised.
+    // HTTP status). Precedence rationale (codex CA-P1.5 r1 P3):
+    // when a framework error fires AND the underlying provider also
+    // returned a status code, the framework error is the PROXIMAL
+    // cause — what the agent actually saw. Classifying as tool_error
+    // here keeps the rule SQL's billed/unbilled accounting correct
+    // (tool_error is conditional waste, not unconditional billed
+    // waste). Provider HTTP status checks come AFTER this block.
+    //
+    // Codex CA-P1.5 r1 P3: match a closed allowlist of fully-
+    // qualified framework class names instead of suffix `ends_with`
+    // (which would misclassify app-specific classes like
+    // CustomToolException). Update this list as new adapters land.
     if let Some(err_type) = data.get("error_type").and_then(|v| v.as_str()) {
-        if err_type.ends_with("ToolException") || err_type.ends_with("ToolCallError") {
+        const TOOL_ERROR_TYPES: &[&str] = &[
+            "langchain_core.exceptions.ToolException",
+            "openai.agents.ToolCallError",
+            "pydantic_ai.tools.ToolException",
+        ];
+        const MALFORMED_JSON_TYPES: &[&str] = &[
+            "MalformedJsonError",
+            "JSONDecodeError",
+            "json.JSONDecodeError",
+            "langchain_core.exceptions.OutputParserException",
+        ];
+        if TOOL_ERROR_TYPES.contains(&err_type) {
             return Some(FailureClass::ToolError);
         }
-        if err_type == "MalformedJsonError" || err_type == "JSONDecodeError" {
+        if MALFORMED_JSON_TYPES.contains(&err_type) {
             return Some(FailureClass::MalformedJsonResponse);
         }
     }
@@ -133,13 +154,25 @@ pub fn classify_audit_outcome(
         }
     }
 
-    // Timeouts: kind='timeout' OR error_type=='Timeout' check the
-    // `usage` field presence.
+    // Timeouts: kind='timeout' OR error_type is an exact-match
+    // timeout class name. Codex CA-P1.5 r1 P3: `contains("Timeout")`
+    // would misclassify names like `OperationTimeoutLog` or
+    // `TimeoutConfig`. Use allowlisted exact names instead.
+    const TIMEOUT_ERROR_TYPES: &[&str] = &[
+        "TimeoutError",
+        "asyncio.TimeoutError",
+        "httpx.TimeoutException",
+        "httpx.ReadTimeout",
+        "httpx.ConnectTimeout",
+        "concurrent.futures.TimeoutError",
+        "openai.APITimeoutError",
+        "anthropic.APITimeoutError",
+    ];
     let is_timeout = kind == Some("timeout")
         || data
             .get("error_type")
             .and_then(|v| v.as_str())
-            .map(|s| s.contains("Timeout"))
+            .map(|s| TIMEOUT_ERROR_TYPES.contains(&s))
             .unwrap_or(false);
     if is_timeout {
         return Some(if has_usage {
@@ -230,6 +263,15 @@ mod tests {
     }
 
     #[test]
+    fn custom_tool_exception_NOT_classified_as_tool_error() {
+        // Codex CA-P1.5 r1 P3 fix: exact-match allowlist prevents
+        // app-specific class names from being misclassified.
+        let data = json!({"error_type": "my_app.weird.CustomToolException"});
+        let c = classify_audit_outcome("spendguard.audit.outcome", Some(&data));
+        assert_eq!(c, Some(FailureClass::Unknown));
+    }
+
+    #[test]
     fn malformed_json_classified() {
         let data = json!({"error_type": "MalformedJsonError"});
         let c = classify_audit_outcome("spendguard.audit.outcome", Some(&data));
@@ -248,6 +290,30 @@ mod tests {
         let data = json!({"kind": "timeout"});
         let c = classify_audit_outcome("spendguard.audit.outcome", Some(&data));
         assert_eq!(c, Some(FailureClass::TimeoutUnbilled));
+    }
+
+    #[test]
+    fn timeout_lookalike_NOT_classified() {
+        // Codex CA-P1.5 r1 P3 fix: contains() would have matched
+        // "OperationTimeoutLog" or "TimeoutConfig" as timeout.
+        // Exact-allowlist rejects them.
+        let data = json!({"error_type": "OperationTimeoutLog"});
+        let c = classify_audit_outcome("spendguard.audit.outcome", Some(&data));
+        assert_eq!(c, Some(FailureClass::Unknown));
+    }
+
+    #[test]
+    fn precedence_tool_error_beats_provider_status() {
+        // When both fire, tool_error wins (proximal cause that the
+        // agent observed). Codex CA-P1.5 r1 P3 noted this is a
+        // judgment call; lock it via test.
+        let data = json!({
+            "error_type": "langchain_core.exceptions.ToolException",
+            "provider_http_status": 500,
+            "usage": {"input_tokens": 100}
+        });
+        let c = classify_audit_outcome("spendguard.audit.outcome", Some(&data));
+        assert_eq!(c, Some(FailureClass::ToolError));
     }
 
     #[test]

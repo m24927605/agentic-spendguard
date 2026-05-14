@@ -24,7 +24,7 @@ use crate::proto::cost_advisor::v1::{
     FindingCategory, FindingEvidence, FindingScope, Metric, MetricUnit, PiiClassification,
     ScopeType, Severity, WasteConfidence, WasteEstimate, WasteMethod,
 };
-use crate::rule::CostRule;
+use crate::rule::{CostRule, TargetDb};
 use crate::rules::{failed_retry_burn, idle_reservation_rate, runaway_loop};
 use crate::sql_rule::SqlCostRule;
 
@@ -78,7 +78,14 @@ pub async fn evaluate_tenant_day(
     let mut emitted = Vec::new();
 
     for rule in build_registry() {
-        let Some(finding) = run_rule(ledger, &rule, tenant_id, bucket_date).await? else {
+        // Codex CA-P1.5 r1 P1: dispatch each rule to the right pool.
+        // P1's idle_reservation_rate reads ledger; P1.5 rules read
+        // canonical.
+        let target_pool = match rule.target_db() {
+            TargetDb::Ledger => ledger,
+            TargetDb::Canonical => canonical,
+        };
+        let Some(finding) = run_rule(target_pool, &rule, tenant_id, bucket_date).await? else {
             continue;
         };
 
@@ -161,8 +168,17 @@ fn decode_failed_retry_burn(
     let affected: i64 = row.try_get("affected_run_prompt_groups")?;
     let total_attempts: i64 = row.try_get("total_attempts")?;
     let total_billed_failures: i64 = row.try_get("total_billed_failures")?;
-    let total_atomic_sum: Option<bigdecimal::BigDecimal> =
+    let total_atomic_sum_bd: Option<bigdecimal::BigDecimal> =
         row.try_get("total_failed_atomic_sum").ok();
+    // Codex CA-P1.5 r1 P2: surface the atomic total in metrics.
+    // BigDecimal → f64 loses precision for huge values but matches
+    // Metric.value's wire type. Range fine for realistic atomic
+    // sums (< 2^53).
+    use bigdecimal::ToPrimitive;
+    let total_atomic_sum_f = total_atomic_sum_bd
+        .as_ref()
+        .and_then(|bd| bd.to_f64())
+        .unwrap_or(0.0);
     let sample_ids: Vec<Uuid> = row
         .try_get::<Option<Vec<Uuid>>, _>("sample_decision_ids")?
         .unwrap_or_default();
@@ -182,6 +198,11 @@ fn decode_failed_retry_burn(
         metric("affected_run_prompt_groups", affected as f64, MetricUnit::Count, "derived: COUNT(DISTINCT run_id, prompt_hash) in step3"),
         metric("total_attempts", total_attempts as f64, MetricUnit::Calls, "derived: SUM(attempt_count) across groups"),
         metric("total_billed_failures", total_billed_failures as f64, MetricUnit::Calls, "derived: SUM(billed_failure_count) across groups"),
+        // Atomic-units waste exposed so operators see magnitude even
+        // before baseline_refresher converts to USD. Unit is the
+        // ledger's per-budget atomic (e.g. tokens × scale_factor);
+        // pricing snapshot converts to USD during P2.
+        metric("total_failed_atomic_sum", total_atomic_sum_f, MetricUnit::Count, "derived: SUM(estimated_amount_atomic) of wasted attempts; ledger-unit-atomic"),
     ];
 
     // P1 contract: estimated_amount_atomic is unit-atomic, not USD
@@ -204,8 +225,6 @@ fn decode_failed_retry_burn(
         co_observed_rules: Vec::new(),
     };
 
-    let _ = total_atomic_sum; // pre-USD atomic figure surfaced via metrics in P2
-
     let proto_json = build_proto_json(&proto, "warn");
 
     Ok(DecodedFinding {
@@ -227,6 +246,13 @@ fn decode_runaway_loop(
     let affected: i64 = row.try_get("affected_run_prompt_groups")?;
     let total_calls: i64 = row.try_get("total_calls")?;
     let max_depth: i64 = row.try_get("max_loop_depth")?;
+    let total_atomic_sum_bd: Option<bigdecimal::BigDecimal> =
+        row.try_get("total_atomic_sum").ok();
+    use bigdecimal::ToPrimitive;
+    let total_atomic_sum_f = total_atomic_sum_bd
+        .as_ref()
+        .and_then(|bd| bd.to_f64())
+        .unwrap_or(0.0);
     let sample_ids: Vec<Uuid> = row
         .try_get::<Option<Vec<Uuid>>, _>("sample_decision_ids")?
         .unwrap_or_default();
@@ -246,6 +272,9 @@ fn decode_runaway_loop(
         metric("affected_run_prompt_groups", affected as f64, MetricUnit::Count, "derived: COUNT(DISTINCT run_id, prompt_hash) in step3"),
         metric("total_calls", total_calls as f64, MetricUnit::Calls, "derived: SUM(call_count) across groups"),
         metric("max_loop_depth", max_depth as f64, MetricUnit::Count, "derived: MAX(call_count) across groups"),
+        // Codex CA-P1.5 r1 P2: surface atomic-units magnitude so
+        // operators see the size of the loop's spend.
+        metric("total_atomic_sum", total_atomic_sum_f, MetricUnit::Count, "derived: SUM(estimated_amount_atomic) across looping calls; ledger-unit-atomic"),
     ];
 
     let waste_estimate: Option<WasteEstimate> = None;

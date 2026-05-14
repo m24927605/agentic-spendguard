@@ -53,9 +53,21 @@ step2 AS (
         run_id,
         inner_data->>'prompt_hash'                              AS prompt_hash,
         COUNT(*)                                                AS call_count,
-        SUM(COALESCE(
-            (inner_data->>'estimated_amount_atomic')::NUMERIC, 0
-        ))                                                      AS atomic_sum,
+        -- Codex CA-P1.5 r1 P2 fix: safe numeric cast — strip non-
+        -- digits via regex before ::NUMERIC so a malformed payload
+        -- degrades to 0 instead of aborting the rule.
+        SUM(
+            COALESCE(
+                NULLIF(
+                    regexp_replace(
+                        inner_data->>'estimated_amount_atomic',
+                        '[^0-9]', '', 'g'
+                    ),
+                    ''
+                )::NUMERIC,
+                0
+            )
+        )                                                       AS atomic_sum,
         (array_agg(decision_id ORDER BY event_time DESC))[1:5]  AS sample_decision_ids,
         MIN(event_time)                                         AS first_event_time,
         MAX(event_time)                                         AS last_event_time

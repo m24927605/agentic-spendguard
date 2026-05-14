@@ -18,6 +18,21 @@ pub enum Category {
     OptimizationHypothesis,
 }
 
+/// Which database the rule's SQL targets. Codex CA-P1.5 r1 P1
+/// caught the runtime always passing the ledger pool — but some
+/// rules (the canonical-events-driven ones) read from
+/// `spendguard_canonical` instead. The runtime dispatches based on
+/// this value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetDb {
+    /// `spendguard_ledger` — reservations, ledger_transactions,
+    /// commits, audit_outbox.
+    Ledger,
+    /// `spendguard_canonical` — canonical_events,
+    /// canonical_events_global_keys.
+    Canonical,
+}
+
 /// Evaluation context handed to each rule per evaluation cycle. Carries
 /// the tenant + database handle + time bucket so the rule SQL can
 /// parameterize without each rule re-deriving these.
@@ -44,6 +59,15 @@ pub trait CostRule: Send + Sync {
     fn rule_version(&self) -> u32;
 
     fn category(&self) -> Category;
+
+    /// Which DB the rule's SQL targets. Defaults to Ledger because
+    /// the first shipped rule (idle_reservation_rate_v1) reads
+    /// ledger-side reservations + audit_outbox via the
+    /// reservations_with_ttl_status_v1 view. P1.5 rules override to
+    /// Canonical (they read canonical_events).
+    fn target_db(&self) -> TargetDb {
+        TargetDb::Ledger
+    }
 
     /// Fields the rule reads from `canonical_events` / ledger joins.
     /// Validated at startup against the schema audit (spec §11.5 A2);
