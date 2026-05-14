@@ -68,7 +68,14 @@ mod tests {
     }
 
     #[test]
-    fn sql_uses_60_second_window() {
-        assert!(descriptor().sql().contains("60 seconds"));
+    fn sql_uses_per_minute_tumbling_window() {
+        // Codex CA-P1.5 r2 P1 fix: runtime invokes once-per-day with
+        // bucket_date; rule SQL must internally tumble per-minute
+        // windows so loops in ANY minute fire (not only midnight).
+        let sql = descriptor().sql();
+        assert!(
+            sql.contains("date_trunc('minute', c.event_time)"),
+            "runaway_loop must tumble per-minute, not a single 60s window"
+        );
     }
 }

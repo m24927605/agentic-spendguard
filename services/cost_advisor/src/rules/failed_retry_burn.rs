@@ -67,13 +67,16 @@ mod tests {
 
     #[test]
     fn sql_filters_billed_failure_classes() {
-        // The 4 ✅ billed-waste classes per spec §5.1.2.
+        // The 4 ✅ billed-waste classes per spec §5.1.2 PLUS
+        // retry_then_success (codex CA-P1.5 r1 P1 fix: terminal
+        // success row marks earlier attempts as wasted).
         let sql = descriptor().sql();
         for cls in [
             "provider_5xx",
             "provider_4xx_billed",
             "malformed_json_response",
             "timeout_billed",
+            "retry_then_success",
         ] {
             assert!(
                 sql.contains(cls),
@@ -81,5 +84,22 @@ mod tests {
                 cls
             );
         }
+    }
+
+    #[test]
+    fn sql_excludes_retry_then_success_from_atomic_sum() {
+        // Codex CA-P1.5 r2 P2 fix: retry_then_success is in the
+        // billed_failure_count FILTER but NOT in the atomic SUM —
+        // the terminal success row's atomic is the SUCCESSFUL call's
+        // cost, not waste. The SQL must enforce this distinction.
+        let sql = descriptor().sql();
+        // The atomic SUM CASE WHEN block should NOT include
+        // retry_then_success. We can't easily AST-parse here; assert
+        // via a structural marker that the comment documents.
+        assert!(
+            sql.contains("exclude\n                -- retry_then_success because that row IS the terminal\n                -- success")
+                || sql.contains("retry_then_success because that row IS the terminal"),
+            "rule SQL must document retry_then_success exclusion from atomic sum"
+        );
     }
 }

@@ -2,33 +2,20 @@
 -- runaway_loop_v1 — Cost Advisor v0.1 third rule (P1.5)
 -- =====================================================================
 --
--- Detects: same (run_id, prompt_hash) retried > 5 times in 60s WITHOUT
--- a failure_class match — i.e. each individual call SUCCEEDED at the
--- provider layer but the agent never converged (e.g. ReAct loop that
--- keeps re-querying the same prompt indefinitely). This is orthogonal
--- to failed_retry_burn_v1 (which fires on billed-failures); the same
--- agent could trigger BOTH rules and the §5.1.1 dedup phase decides
--- which one survives.
+-- Detects: same (run_id, prompt_hash) called > 5 times in any single
+-- 60-second tumbling window — i.e. the provider succeeded but the
+-- agent never converged. Orthogonal to failed_retry_burn_v1.
 --
--- Provably wasted because:
---   N calls to the same prompt that produce N similar outputs with
---   no termination = N-1 are redundant (the first call's output
---   could have been used). The waste figure is N-1 × per-call cost.
+-- Scope:
+--   * `$1 tenant_id` (UUID)
+--   * `$2 bucket_date` (DATE) — runtime invokes once-per-day. The
+--     SQL scans the FULL 24h interval and tumbles 60-second windows
+--     internally so loops in any single minute fire even though the
+--     runtime scheduler only runs daily (codex CA-P1.5 r2 P1 fix).
+--     Cross-minute loops are split; spec §5.1.1 dedup in P2 collapses.
 --
--- Read shape:
---   * canonical_events with event_type='spendguard.audit.outcome'
---   * Decoded payload_json.data_b64 → prompt_hash
---   * run_id (envelope column, CA-P0.5)
---   * failure_class IS NULL OR failure_class IN ('unknown') — to
---     exclude billed-failure retries (those go to failed_retry_burn_v1)
---
--- Bound parameters:
---   $1 tenant_id
---   $2 bucket_start — 60-second window
---
--- Time granularity: 60-second windows. Anything tighter is just
--- agent step latency; anything looser misses the "tight ReAct loop"
--- pattern. Aligns with spec §5.1 "retried > 5 in 60s".
+-- Rule fires when, for any (run_id, prompt_hash, minute_window):
+--   * call_count > 5
 
 WITH step1 AS (
     SELECT
@@ -37,12 +24,13 @@ WITH step1 AS (
         c.event_time,
         c.decision_id,
         c.failure_class,
-        cost_advisor_safe_decode_payload(c.payload_json)        AS inner_data
+        cost_advisor_safe_decode_payload(c.payload_json)        AS inner_data,
+        date_trunc('minute', c.event_time)                      AS minute_window
       FROM canonical_events c
      WHERE c.tenant_id = $1
        AND c.event_type = 'spendguard.audit.outcome'
-       AND c.event_time >= $2
-       AND c.event_time < $2 + INTERVAL '60 seconds'
+       AND c.event_time >= $2::date
+       AND c.event_time <  $2::date + INTERVAL '1 day'
        AND c.run_id IS NOT NULL
        -- Exclude billed-failure attempts: those belong to
        -- failed_retry_burn_v1. We want "successful loops" only.
@@ -52,10 +40,8 @@ step2 AS (
     SELECT
         run_id,
         inner_data->>'prompt_hash'                              AS prompt_hash,
+        minute_window,
         COUNT(*)                                                AS call_count,
-        -- Codex CA-P1.5 r1 P2 fix: safe numeric cast — strip non-
-        -- digits via regex before ::NUMERIC so a malformed payload
-        -- degrades to 0 instead of aborting the rule.
         SUM(
             COALESCE(
                 NULLIF(
@@ -73,21 +59,14 @@ step2 AS (
         MAX(event_time)                                         AS last_event_time
       FROM step1
      WHERE inner_data->>'prompt_hash' IS NOT NULL
-     GROUP BY run_id, inner_data->>'prompt_hash'
+     GROUP BY run_id, inner_data->>'prompt_hash', minute_window
 ),
-step3 AS (
-    SELECT *
-      FROM step2
-     -- Spec §5.1: "Same (run_id, prompt_hash) retried > 5 in 60s with
-     -- no terminal output". We use `> 5` (strict) so 6+ calls fire.
-     WHERE call_count > 5
-)
+step3 AS (SELECT * FROM step2 WHERE call_count > 5)
 SELECT
     COUNT(*)::BIGINT                                            AS affected_run_prompt_groups,
     SUM(call_count)::BIGINT                                     AS total_calls,
     MAX(call_count)::BIGINT                                     AS max_loop_depth,
     SUM(atomic_sum)::NUMERIC                                    AS total_atomic_sum,
-    -- Sample decision_refs from the most-aggressive loop group.
     (SELECT sample_decision_ids
        FROM step3 ORDER BY call_count DESC LIMIT 1)             AS sample_decision_ids,
     MIN(first_event_time)                                       AS bucket_first_event_time,

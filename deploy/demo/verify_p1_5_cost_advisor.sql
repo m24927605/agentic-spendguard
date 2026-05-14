@@ -162,6 +162,8 @@ END $$;
 
 -- =====================================================================
 -- Run failed_retry_burn_v1 + assert it fires.
+-- Mirrors rules/detected_waste/failed_retry_burn_v1.sql but with
+-- concrete bindings — single-tenant, single-day, tumbling hour windows.
 -- =====================================================================
 DO $$
 DECLARE
@@ -171,30 +173,31 @@ BEGIN
     WITH step1 AS (
         SELECT
             c.event_id, c.run_id, c.event_time, c.decision_id, c.failure_class,
-            cost_advisor_safe_decode_payload(c.payload_json) AS inner_data
+            cost_advisor_safe_decode_payload(c.payload_json) AS inner_data,
+            date_trunc('hour', c.event_time) AS hour_window
           FROM canonical_events c
          WHERE c.tenant_id = '00000000-0000-4000-8000-000000000001'
            AND c.event_type = 'spendguard.audit.outcome'
-           AND c.event_time >= '2026-05-13 12:00:00+00'::timestamptz
-           AND c.event_time < '2026-05-13 13:00:00+00'::timestamptz
+           AND c.event_time >= '2026-05-13'::date
+           AND c.event_time <  '2026-05-13'::date + INTERVAL '1 day'
            AND c.run_id IS NOT NULL
            AND c.failure_class IS NOT NULL
     ),
     step2 AS (
         SELECT
-            run_id, inner_data->>'prompt_hash' AS prompt_hash,
+            run_id, inner_data->>'prompt_hash' AS prompt_hash, hour_window,
             COUNT(*) AS attempt_count,
             COUNT(*) FILTER (WHERE failure_class IN (
-                'provider_5xx','provider_4xx_billed','malformed_json_response','timeout_billed')) AS billed_failure_count,
+                'provider_5xx','provider_4xx_billed','malformed_json_response','timeout_billed','retry_then_success')) AS billed_failure_count,
             (array_agg(decision_id ORDER BY event_time DESC) FILTER (
                 WHERE failure_class IN (
                     'provider_5xx','provider_4xx_billed','malformed_json_response','timeout_billed')))[1:5] AS sample_decision_ids
           FROM step1
          WHERE inner_data->>'prompt_hash' IS NOT NULL
-         GROUP BY run_id, inner_data->>'prompt_hash'
+         GROUP BY run_id, inner_data->>'prompt_hash', hour_window
     ),
     step3 AS (
-        SELECT * FROM step2 WHERE attempt_count >= 2 AND billed_failure_count >= 2
+        SELECT * FROM step2 WHERE attempt_count >= 2 AND billed_failure_count >= 1
     )
     SELECT
         COUNT(*), SUM(attempt_count), SUM(billed_failure_count),
@@ -225,22 +228,23 @@ BEGIN
     WITH step1 AS (
         SELECT
             c.event_id, c.run_id, c.event_time, c.decision_id, c.failure_class,
-            cost_advisor_safe_decode_payload(c.payload_json) AS inner_data
+            cost_advisor_safe_decode_payload(c.payload_json) AS inner_data,
+            date_trunc('minute', c.event_time) AS minute_window
           FROM canonical_events c
          WHERE c.tenant_id = '00000000-0000-4000-8000-000000000001'
            AND c.event_type = 'spendguard.audit.outcome'
-           AND c.event_time >= '2026-05-13 13:00:00+00'::timestamptz
-           AND c.event_time < '2026-05-13 13:01:00+00'::timestamptz
+           AND c.event_time >= '2026-05-13'::date
+           AND c.event_time <  '2026-05-13'::date + INTERVAL '1 day'
            AND c.run_id IS NOT NULL
            AND (c.failure_class IS NULL OR c.failure_class = 'unknown')
     ),
     step2 AS (
         SELECT
-            run_id, inner_data->>'prompt_hash' AS prompt_hash,
+            run_id, inner_data->>'prompt_hash' AS prompt_hash, minute_window,
             COUNT(*) AS call_count
           FROM step1
          WHERE inner_data->>'prompt_hash' IS NOT NULL
-         GROUP BY run_id, inner_data->>'prompt_hash'
+         GROUP BY run_id, inner_data->>'prompt_hash', minute_window
     ),
     step3 AS (SELECT * FROM step2 WHERE call_count > 5)
     SELECT
