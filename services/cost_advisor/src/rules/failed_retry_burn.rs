@@ -4,7 +4,7 @@
 //! for the rule body. Runtime decoder lives in
 //! `services/cost_advisor/src/runtime.rs` (decode_failed_retry_burn).
 
-use crate::rule::Category;
+use crate::rule::{Category, TargetDb};
 use crate::sql_rule::SqlCostRule;
 
 pub const DECLARED_INPUT_FIELDS: &[&str] = &[
@@ -23,10 +23,11 @@ const RULE_SQL: &str = include_str!(
 );
 
 pub fn descriptor() -> SqlCostRule {
-    SqlCostRule::new(
+    SqlCostRule::new_with_db(
         "failed_retry_burn_v1",
         1,
         Category::DetectedWaste,
+        TargetDb::Canonical,
         DECLARED_INPUT_FIELDS,
         RULE_SQL,
     )

@@ -64,36 +64,53 @@ step2 AS (
         run_id,
         inner_data->>'prompt_hash'                              AS prompt_hash,
         COUNT(*)                                                AS attempt_count,
+        -- Codex CA-P1.5 r1 P1 fix: include `retry_then_success` in
+        -- the billed-class set. Per spec §5.1.2: "first N-1 attempts
+        -- are wasted" for retry_then_success — the terminal SUCCESS
+        -- row's failure_class is set to `retry_then_success` by
+        -- classify.rs to anchor the run, but the wasted-attempts
+        -- count INCLUDES the earlier billed failures it summed.
         COUNT(*) FILTER (WHERE failure_class IN (
             'provider_5xx',
             'provider_4xx_billed',
             'malformed_json_response',
-            'timeout_billed'
+            'timeout_billed',
+            'retry_then_success'
         ))                                                      AS billed_failure_count,
-        -- Sum estimated_amount_atomic across all failed attempts.
-        -- This is the "raw atomic" figure; rule does NOT convert to
-        -- USD here — see runtime decoder + WasteEstimate proto note
-        -- about pending USD conversion until baseline_refresher.
+        -- Sum estimated_amount_atomic across all wasted attempts.
+        -- Codex CA-P1.5 r1 P2 fix: safe numeric cast — convert via
+        -- NULLIF + COALESCE so a malformed atomic value degrades to
+        -- 0 instead of aborting the whole rule. The pg_typeof
+        -- precheck guards against type-cast exceptions.
         SUM(
             CASE WHEN failure_class IN (
                 'provider_5xx',
                 'provider_4xx_billed',
                 'malformed_json_response',
-                'timeout_billed'
+                'timeout_billed',
+                'retry_then_success'
             )
-            THEN COALESCE(
-                (inner_data->>'estimated_amount_atomic')::NUMERIC,
-                0
-            )
+            THEN
+                COALESCE(
+                    NULLIF(
+                        regexp_replace(
+                            inner_data->>'estimated_amount_atomic',
+                            '[^0-9]', '', 'g'
+                        ),
+                        ''
+                    )::NUMERIC,
+                    0
+                )
             ELSE 0 END
         )                                                       AS failed_atomic_sum,
-        -- Sample decision_ids of the failed attempts for evidence.
+        -- Sample decision_ids of the wasted attempts for evidence.
         (array_agg(decision_id ORDER BY event_time DESC) FILTER (
             WHERE failure_class IN (
                 'provider_5xx',
                 'provider_4xx_billed',
                 'malformed_json_response',
-                'timeout_billed'
+                'timeout_billed',
+                'retry_then_success'
             )
         ))[1:5]                                                  AS sample_decision_ids,
         MIN(event_time)                                         AS first_event_time,
@@ -106,11 +123,11 @@ step3 AS (
     SELECT *
       FROM step2
      WHERE attempt_count >= 2
-       -- Codex pattern from CA-P1 r1 P2: require at least 2 billed
-       -- failures (else the retry might be a one-off blip not a
-       -- pattern; also avoids noise on transient flakes that
-       -- happened to commit billing once).
-       AND billed_failure_count >= 2
+       -- Codex CA-P1.5 r1 P1 fix: lower to >= 1 so spec §5.1
+       -- "at least 1 retry" semantics hold. A 2-attempt sequence
+       -- (1 billed-fail + 1 terminal success/failure) fires.
+       -- attempt_count >= 2 above ensures retry actually happened.
+       AND billed_failure_count >= 1
 )
 SELECT
     COUNT(*)::BIGINT                                            AS affected_run_prompt_groups,

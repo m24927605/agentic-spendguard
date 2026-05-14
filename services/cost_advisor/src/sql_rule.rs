@@ -15,7 +15,7 @@
 use std::time::Duration;
 
 use crate::proto::cost_advisor::v1::FindingEvidence;
-use crate::rule::{Category, CostRule, EvaluationContext};
+use crate::rule::{Category, CostRule, EvaluationContext, TargetDb};
 
 /// One row decoded from a rule's `.sql` SELECT result. Each column maps
 /// directly onto a `FindingEvidence` proto field. Implementation lives
@@ -54,6 +54,7 @@ pub struct SqlCostRule {
     rule_id: &'static str,
     rule_version: u32,
     category: Category,
+    target_db: TargetDb,
     declared_input_fields: &'static [&'static str],
     sql: &'static str,
 }
@@ -64,6 +65,8 @@ pub struct SqlCostRule {
 pub const PLACEHOLDER_SQL_MARKER: &str = "-- placeholder; real SQL lands in P1";
 
 impl SqlCostRule {
+    /// Construct with default target_db = Ledger. Used by P1's
+    /// idle_reservation_rate_v1.
     pub const fn new(
         rule_id: &'static str,
         rule_version: u32,
@@ -75,6 +78,27 @@ impl SqlCostRule {
             rule_id,
             rule_version,
             category,
+            target_db: TargetDb::Ledger,
+            declared_input_fields,
+            sql,
+        }
+    }
+
+    /// Construct with explicit target_db. Used by P1.5 rules that
+    /// read canonical_events from `spendguard_canonical`.
+    pub const fn new_with_db(
+        rule_id: &'static str,
+        rule_version: u32,
+        category: Category,
+        target_db: TargetDb,
+        declared_input_fields: &'static [&'static str],
+        sql: &'static str,
+    ) -> Self {
+        Self {
+            rule_id,
+            rule_version,
+            category,
+            target_db,
             declared_input_fields,
             sql,
         }
@@ -106,6 +130,10 @@ impl CostRule for SqlCostRule {
 
     fn category(&self) -> Category {
         self.category
+    }
+
+    fn target_db(&self) -> TargetDb {
+        self.target_db
     }
 
     fn declared_input_fields(&self) -> &'static [&'static str] {
