@@ -282,6 +282,19 @@ pub async fn release_quarantined_outcomes(
         };
         let payload_json = payload_json_opt.unwrap_or(serde_json::Value::Null);
 
+        // Codex CA-P1.5 r2 P2: release-from-quarantine path lost
+        // failure_class — the quarantine table didn't carry it, so
+        // a previously-classified outcome would land with
+        // failure_class=NULL and disappear from rule queries. Re-
+        // classify here from the same payload we're about to
+        // persist (idempotent: classify.rs is pure).
+        let decoded_data = crate::classify::decode_payload_data(&payload_json);
+        let release_failure_class = crate::classify::classify_audit_outcome(
+            &event_type,
+            decoded_data.as_ref(),
+        )
+        .map(|c| c.as_db_str());
+
         // Append into canonical_events + global_keys + ingest_positions in
         // the SAME tx as the quarantine SELECT/UPDATE. We inline the insert
         // SQL (rather than calling append_event which begins its own tx)
@@ -318,7 +331,7 @@ pub async fn release_quarantined_outcomes(
                     specversion, source, event_time, datacontenttype,
                     payload_json, payload_blob_ref,
                     region_id, ingest_shard_id, ingest_log_offset, ingest_at,
-                    recorded_month
+                    recorded_month, failure_class
                  ) VALUES (
                     $1, $2, $3, $4, $5,
                     $6,
@@ -327,7 +340,7 @@ pub async fn release_quarantined_outcomes(
                     $13, $14, $15, $16,
                     $17, $18,
                     $19, $20, $21, clock_timestamp(),
-                    date_trunc('month', $15)::DATE
+                    date_trunc('month', $15)::DATE, $22
                  )",
             )
             .bind(event_id)
@@ -351,6 +364,7 @@ pub async fn release_quarantined_outcomes(
             .bind(region_id)
             .bind(ingest_shard_id)
             .bind(offset)
+            .bind(release_failure_class)
             .execute(&mut *tx)
             .await
             .map_err(map_pg_error)?;
