@@ -1,9 +1,13 @@
--- Cost Advisor P0: cost_baselines table.
+-- Cost Advisor cost_baselines table (CA-P0 + CA-P1.6).
 --
 -- Spec: docs/specs/cost-advisor-spec.md §6 (Tier 2 baseline computation).
 -- Default window = 28 days per §11.5 A4 (seasonality), not 7.
 --
--- Applied against `spendguard_canonical`. Nightly `baseline_refresher`
+-- CA-P1.6 relocation: moved from `spendguard_canonical` to
+-- `spendguard_ledger` alongside cost_findings (issue #56). Single
+-- DB ownership of cost_advisor's derived state.
+--
+-- Applied against `spendguard_ledger`. Nightly `baseline_refresher`
 -- worker (P2 deliverable) populates rows by issuing:
 --
 --   INSERT ... ON CONFLICT (tenant_id, agent_id, metric, window_days)

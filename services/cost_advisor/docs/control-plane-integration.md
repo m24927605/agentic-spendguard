@@ -14,7 +14,7 @@
 | # | Decision | Status | Owner |
 |---|---|---|---|
 | D1 | Reuse `approval_requests` table; add a `proposal_source` discriminator + `proposed_dsl_patch` + `proposing_finding_id` columns. No new "proposed_contract_patches" table. | ✅ landed in migration `0038_approval_requests_proposal_source.sql` | this PR |
-| D2 | `cost_findings.finding_id` is a soft FK pointer from `approval_requests.proposing_finding_id`. Cross-database (ledger ⨝ canonical) so unenforced by Postgres; the writing service MUST validate. | ✅ landed in 0038 | this PR |
+| D2 | `cost_findings.finding_id` is a real FK target from `approval_requests.proposing_finding_id`. **CA-P1.6**: `cost_findings` was relocated from `spendguard_canonical` to `spendguard_ledger` (migrations 0040/0041/0042) so the FK is Postgres-enforced. Soft-FK + reconciler design from §9 is HISTORICAL — superseded by the real FK. | ✅ landed in 0038 + 0042 | this PR |
 | D3 | The dashboard does NOT get a new tab. The existing approval list page learns one new URL query parameter `proposal_source=cost_advisor`. | open — needs dashboard owner ack | dashboard |
 | D4 | Cost Advisor service identity = `cost-advisor:<workload_instance_id>`. It mTLS-authenticates to control_plane and only receives an `ApprovalCreate` permission scoped to `proposal_source='cost_advisor'`. | open — needs control_plane owner ack | control_plane |
 | D5 | Approval → CD pipeline: an `approved` cost_advisor row gates a `bundle_registry/workflows/publish-contract-bundle.yml` invocation that consumes `proposed_dsl_patch` as the DSL delta. No new CD job; just a new trigger condition. | open — needs bundle_registry owner ack | bundle_registry |
@@ -24,33 +24,41 @@
 ## 1. Closed loop, end-to-end
 
 ```
-                            spendguard_canonical                       spendguard_ledger
-  ┌───────────────────┐    ┌────────────────────────┐                ┌─────────────────────────────┐
-  │ canonical_events  │    │ cost_findings           │                │ approval_requests           │
-  │ (audit chain)     │    │ status='open'           │                │ proposal_source='cost_      │
-  └───────────────────┘    │ + evidence JSONB        │                │   advisor'                  │
-           │                │ + sample_decision_ids  │                │ + proposed_dsl_patch        │
-           │                └────────────────────────┘                │ + proposing_finding_id      │
-           │ rule SQL                  │                              │ state pending → approved    │
-           ▼                            │                              │       → CD trigger          │
-  ┌───────────────────┐                │                              └─────────────────────────────┘
-  │ services/         │                │ INSERT  (cost_advisor             ▲              │
-  │ cost_advisor      │────────────────┴─ service, mTLS) ──────────────────┘              │
-  │   rule engine     │                                                                   │ resolve_approval
-  │   (P1)            │       ────────────────────────────────────────────────────────────┤   _request SP
-  └───────────────────┘                                                                   │
-                                                                              ┌───────────┴───────────┐
-                                                                              │ operator              │
-                                                                              │ (dashboard ?proposal_ │
-                                                                              │  source=cost_advisor) │
-                                                                              └───────────────────────┘
-                                                                                          │ approve
-                                                                                          ▼
-                                                                  bundle_registry/publish-contract-bundle.yml
-                                                                          │
-                                                                          ▼
-                                                          new contract bundle hash → next sidecar reload
+       spendguard_canonical                        spendguard_ledger
+  ┌───────────────────┐                ┌──────────────────────────────────────────┐
+  │ canonical_events  │                │ cost_findings (CA-P1.6: relocated here)  │
+  │ (audit chain)     │                │ + cost_findings_id_keys (FK target)      │
+  └───────────────────┘                │ + cost_baselines                         │
+           │                            └──────────────────────────────────────────┘
+           │ rule SQL (READ-only,                          │ FK
+           │  canonical pool)                              ▼
+           │                            ┌──────────────────────────────────────────┐
+           │                            │ approval_requests                        │
+           │                            │ + proposal_source='cost_advisor'         │
+           │                            │ + proposed_dsl_patch                     │
+           │                            │ + proposing_finding_id (real FK)         │
+           │                            │ state pending → approved → CD trigger    │
+           │                            └──────────────────────────────────────────┘
+           ▼                                          ▲              │
+  ┌───────────────────┐                              │              │
+  │ services/         │  WRITE (ledger pool, mTLS)   │              │
+  │ cost_advisor      │──────────────────────────────┘              │ resolve_
+  │ rule engine (P1)  │                                             │ approval_
+  └───────────────────┘                                             │ request SP
+                                                       ┌────────────┴────────────┐
+                                                       │ operator                │
+                                                       │ (dashboard ?proposal_   │
+                                                       │  source=cost_advisor)   │
+                                                       └─────────────────────────┘
+                                                                    │ approve
+                                                                    ▼
+                                            bundle_registry/publish-contract-bundle.yml
+                                                                    │
+                                                                    ▼
+                                            new contract bundle hash → next sidecar reload
 ```
+
+**CA-P1.6 note**: `cost_findings`/`cost_findings_id_keys`/`cost_baselines` now live in `spendguard_ledger`. The cost_advisor runtime reads canonical_events from the canonical pool (rule SQL) and writes findings + reads baselines on the ledger pool. The `approval_requests.proposing_finding_id` FK is real (Postgres-enforced) — see §9.
 
 Properties this preserves vs. forking a new approval queue:
 - Single audit trail (`approval_events` already captures every state transition).
@@ -134,7 +142,7 @@ new column additions beyond those already in 0038.
 
 | Event | Actor | Effect |
 |---|---|---|
-| 1. Rule detects waste | `cost_advisor` runtime | UPSERT into `spendguard_canonical.cost_findings` with `status='open'` |
+| 1. Rule detects waste | `cost_advisor` runtime | UPSERT into `spendguard_ledger.cost_findings` (via `cost_findings_upsert()` SP) with `status='open'`. CA-P1.6: was canonical, now ledger. |
 | 2. Rule produces a proposed patch | `cost_advisor` runtime | INSERT into `spendguard_ledger.approval_requests` with `proposal_source='cost_advisor'`, `proposed_dsl_patch=<rfc6902>`, `proposing_finding_id=<finding>`, `state='pending'`. Idempotency: composite UNIQUE `(tenant_id, decision_id)` already exists; cost_advisor generates a deterministic `decision_id` for each proposal as `uuid_v5(finding_id || rule_version)` so a re-fired finding does not double-insert. |
 | 3. Operator views proposal | dashboard → control_plane `GET /v1/approvals?proposal_source=cost_advisor&state=pending` | reads, no DB write |
 | 4. Operator approves | control_plane `POST /v1/approvals/:id/resolve` with `{ target_state: "approved", reason: "..." }` | calls existing `resolve_approval_request` SP — same path the sidecar_decision flow uses |
@@ -200,9 +208,10 @@ Dashboard UI: on the detail page, when `proposal_source == cost_advisor`,
 render the RFC-6902 patch as a syntax-highlighted JSON diff (mostly a
 front-end concern; backend just hands over the JSON). The
 `proposing_finding_id` is rendered as a deep link to the cost_findings
-row (dashboard needs read access to spendguard_canonical for this —
-already configured for the audit-export endpoint per
-`SPENDGUARD_DASHBOARD_CANONICAL_DATABASE_URL`).
+row. **CA-P1.6**: cost_findings now lives in `spendguard_ledger`, so
+the dashboard reads it from the ledger pool (the same pool it already
+uses to read `approval_requests`). The previous canonical-DB read path
+for findings is no longer needed.
 
 ### 4.3 No new POST endpoint
 
@@ -218,9 +227,13 @@ Out of P0 scope.)
 ## 5. Service identity + auth (mTLS)
 
 `cost_advisor` runtime needs **write access** to:
-- `spendguard_canonical.cost_findings` — INSERT + UPDATE (lifecycle).
+- `spendguard_ledger.cost_findings` — INSERT + UPDATE via `cost_findings_upsert()` SP (lifecycle). **CA-P1.6**: cost_findings moved from canonical to ledger so a real FK from approval_requests is enforceable; the SP is the SOLE legal writer.
+- `spendguard_ledger.cost_baselines` — INSERT + UPDATE (nightly baseline refresher in P2).
 - `spendguard_ledger.approval_requests` — INSERT only, scoped to
   `proposal_source='cost_advisor'`.
+
+And **read access** to:
+- `spendguard_canonical.canonical_events` — SELECT only (rule SQL).
 
 ### 5.1 Database role
 
@@ -231,17 +244,29 @@ Mirrors the existing pattern (`canonical_ingest_application_role` in
 ```sql
 -- Will be added in P1 alongside the runtime; included here so reviewers
 -- can sign off on the surface now.
+-- CA-P1.6: cost_findings now lives in spendguard_ledger (was canonical).
+-- Single role, single DB for the writer surface.
 CREATE ROLE cost_advisor_application_role NOINHERIT;
 
--- canonical DB grants:
-GRANT INSERT, UPDATE, DELETE ON cost_findings
-                              TO cost_advisor_application_role;
-GRANT INSERT, UPDATE ON cost_findings_fingerprint_keys
-                              TO cost_advisor_application_role;
-GRANT SELECT ON canonical_events, ledger_units (read-only join targets)
+-- canonical DB grants (READ-only — rule SQL reads canonical_events):
+GRANT SELECT ON canonical_events
                               TO cost_advisor_application_role;
 
 -- ledger DB grants:
+-- Direct INSERT/UPDATE/DELETE on cost_findings + the mirrors is NOT
+-- granted. The SP is the SOLE legal writer (spec §11.5 A1) and the
+-- role only gets EXECUTE on it. Writes that bypass the SP would skip
+-- the mirror maintenance and could violate the FK chain.
+GRANT EXECUTE ON FUNCTION cost_findings_upsert
+                              TO cost_advisor_application_role;
+-- Lifecycle transitions (status='open' → 'fixed' / 'dismissed') run
+-- via narrower SPs not yet shipped; for P0/P1 the runtime only INSERTs
+-- via the upsert SP.
+GRANT SELECT ON cost_findings, cost_findings_fingerprint_keys,
+                cost_findings_id_keys, cost_baselines
+                              TO cost_advisor_application_role;
+GRANT SELECT, INSERT, UPDATE ON cost_baselines
+                              TO cost_advisor_application_role;
 GRANT SELECT ON commits, ledger_entries, ledger_transactions, reservations
                               TO cost_advisor_application_role;
 GRANT INSERT ON approval_requests
@@ -252,9 +277,11 @@ GRANT INSERT ON approval_requests
 -- role.
 ```
 
-`DELETE` on `cost_findings` is allowed (it's a derived artifact, not
-audit). `UPDATE` on `cost_findings` for lifecycle transitions
-(`open → dismissed | fixed | superseded`); the `cost_findings_touch`
+`UPDATE` / `DELETE` on `cost_findings` is gated behind the
+`cost_findings_upsert()` SP (and future lifecycle SPs covering
+`open → dismissed | fixed | superseded`); direct table access is
+intentionally NOT granted so writers cannot bypass the
+mirror-maintenance + FK-chain invariants. The `cost_findings_touch`
 trigger handles `updated_at`.
 
 ### 5.2 mTLS workload identity
@@ -382,7 +409,7 @@ that publish event is the natural anchor).
 | Q2 | control_plane | Does the existing `Permission::ApprovalResolve` apply uniformly to cost_advisor + sidecar_decision rows, or do operators have different review obligations for the two sources? My read: same permission. Confirm. |
 | Q3 | bundle_registry | What is the exact trigger from "approval_requests.state→approved" to a new contract bundle build? Today the workflow is manually invoked; the cost_advisor loop wants a polling worker or a NOTIFY listener. P3.5 task. |
 | Q4 | bundle_registry | RFC-6902 patches in `proposed_dsl_patch`: which paths are addressable? Need a schema for the contract DSL's JSON Pointer surface so cost_advisor can validate patches at proposal time, not at CD time. |
-| Q5 | security + cost_advisor | Cross-database soft FK (`approval_requests.proposing_finding_id → spendguard_canonical.cost_findings.finding_id`): **codex r5 P1-5 rejected my v1 answer**. Validate-before-INSERT has a TOCTOU window — between (validate finding exists, INSERT approval_requests) the retention sweeper can DELETE the finding, leaving a dangling `proposing_finding_id` whose dereference in the dashboard / CD pipeline either silently fails or applies an orphan proposal. The fix is in §9 below (added per r5). |
+| Q5 | RESOLVED via CA-P1.6 (2026-05-14) | Cross-database soft FK was identified by codex r5 P1-5 as having TOCTOU + retention-dangling holes. **Resolution**: greenfield no-backcompat decision allowed moving `cost_findings` from `spendguard_canonical` to `spendguard_ledger` (migrations 0040/0041/0042). The FK is now real and Postgres-enforced via the `cost_findings_id_keys` mirror (cost_findings PK is partitioned so can't be the FK target directly). The reconciler/reference-flag design from §9 is HISTORICAL — superseded. |
 
 ---
 
@@ -411,66 +438,63 @@ days. Matches spec §9 estimate.
 
 ---
 
-## 9. Cross-DB referential safety (added per codex r5 P1-5)
+## 9. Cross-DB referential safety — RESOLVED via CA-P1.6 (real FK)
 
-The original §0 D2 + §5 design declared `approval_requests.proposing_finding_id → cost_findings.finding_id` a "soft FK enforced by validate-before-INSERT". Codex r5 P1-5 caught two real holes:
+> **Status (2026-05-14)**: this section is HISTORICAL. The reconciler design described below was never implemented. Codex r5 P1-5 + r6 P1 identified holes in the soft-FK + reconciler approach; the v0.1 greenfield-no-backcompat property let us pick a simpler fix: move `cost_findings` into `spendguard_ledger` and use a real Postgres FK.
 
-1. **TOCTOU race**: between (cost_advisor reads `cost_findings`, validates the finding exists) and (cost_advisor INSERTs `approval_requests` with `proposing_finding_id`), the retention sweeper or an operator can DELETE the finding (`cost_findings` is a derived artifact with no immutability protection). The INSERT then commits with a dangling pointer.
-2. **Retention-driven dangling**: even after a valid INSERT, the retention sweeper can DELETE the originating finding while the proposal is still `pending` (e.g. operator hasn't reviewed in 90 days). The dashboard "view finding details" deep-link from the proposal page then 404s.
+### 9.0 Current design (CA-P1.6, what actually ships)
 
-### 9.1 Fix: reference-counted retention on cost_findings
-
-Add a `referenced_by_pending_proposal` boolean (or counter) column to `cost_findings`. retention_sweeper refuses to DELETE rows where this is TRUE/>0. The flag is maintained by:
-
-- INSERT into `approval_requests` with `proposal_source='cost_advisor'` → also UPDATE `cost_findings.referenced_by_pending_proposal=TRUE` for that finding_id. Both writes go in one cross-DB orchestration step in `cost_advisor` service (atomic via 2-phase commit OR by serializing: first canonical UPDATE, then ledger INSERT, with rollback compensation if the second fails).
-- approval_requests state→terminal (approved/denied/expired/cancelled) → UPDATE `cost_findings.referenced_by_pending_proposal=FALSE`.
-
-A periodic reconciler (~hourly) sweeps `cost_findings` and corrects drift. Codex r6 P1 caught that the v1 design only handled "terminal referenced approvals"; the reconciler must additionally handle every drift state:
-
-| Drift | Detection | Repair |
-|---|---|---|
-| Flagged TRUE, referencing approval is now terminal | LEFT JOIN cost_findings.referenced_by_pending_proposal=TRUE ⨝ approval_requests.proposing_finding_id WHERE approval_requests.state IN ('approved','denied','expired','cancelled') | flip flag to FALSE |
-| Flagged TRUE, but NO approval row references the finding (orphan flag from a half-committed orchestration step) | LEFT JOIN cost_findings TRUE rows ⨝ approval_requests; approval row IS NULL | flip flag to FALSE after a grace window (10 min) so we don't race an in-flight INSERT |
-| Flagged FALSE, but a pending approval row still references the finding (rare: the proposal-write path crashed between approval INSERT and flag UPDATE) | LEFT JOIN approval_requests state='pending' AND proposal_source='cost_advisor' ⨝ cost_findings WHERE referenced_by_pending_proposal=FALSE | flip flag to TRUE so the retention sweeper stops chasing the finding |
-| approval row exists, finding is GONE (the only truly-bad state) | approval_requests state='pending' AND proposal_source='cost_advisor' WHERE proposing_finding_id NOT IN (SELECT finding_id FROM cost_findings) | log + page operator; orphan proposals require manual decision (approve based on the cached evidence in approval_requests.decision_context, or cancel). This state SHOULD be unreachable if the reference flag works; the reconciler treats it as an invariant breach. |
-
-The reconciler runs as a P1 background job in cost_advisor. The 10-minute grace window for orphan flags is the explicit tolerance for half-committed orchestration: if the orchestrator crashes after canonical UPDATE but before ledger INSERT, the proposal-write path retries within 10 minutes (sub-minute on a healthy worker) and the flag stays TRUE; if it never retries, the reconciler clears the flag. Out of P0 scope; the safety hole is closed at the design level via this section + the open-item routing in §6 Q5.
-
-### 9.2 Schema delta
-
-To land in P1 (not this P0; this is design intent only):
+`cost_findings`, `cost_findings_fingerprint_keys`, `cost_findings_id_keys`, and `cost_baselines` all live in `spendguard_ledger` (migrations 0040, 0041, 0042). The FK is:
 
 ```sql
--- In spendguard_canonical
-ALTER TABLE cost_findings
-    ADD COLUMN referenced_by_pending_proposal BOOLEAN NOT NULL DEFAULT FALSE;
-CREATE INDEX cost_findings_referenced_pending_idx
-    ON cost_findings (tenant_id)
-    WHERE referenced_by_pending_proposal = TRUE;
+-- Composite tenant-scoped FK (codex CA-P1.6 r1 P2) so cross-tenant
+-- pointers are rejected at write time.
+ALTER TABLE approval_requests
+    ADD CONSTRAINT approval_requests_proposing_finding_id_fkey
+    FOREIGN KEY (tenant_id, proposing_finding_id)
+    REFERENCES cost_findings_id_keys (tenant_id, finding_id)
+    ON DELETE RESTRICT
+    NOT VALID;
+ALTER TABLE approval_requests
+    VALIDATE CONSTRAINT approval_requests_proposing_finding_id_fkey;
+
+-- Back-FK so retention DELETE on cost_findings cascades through the
+-- mirror — and is blocked by the RESTRICT step above if any
+-- approval_requests references the finding.
+-- (Declared on cost_findings_id_keys itself in migration 0042.)
+-- cost_findings_id_keys (tenant_id, detected_at, finding_id)
+--     REFERENCES cost_findings (tenant_id, detected_at, finding_id)
+--     ON DELETE CASCADE
 ```
 
-`retention_sweeper`'s future `CostFindingsPurge` sweep kind:
+Why a mirror (`cost_findings_id_keys`) instead of a direct FK on `cost_findings.finding_id`: cost_findings is partitioned on `(tenant_id, detected_at)`, so its PK must include the partition key — `(tenant_id, detected_at, finding_id)`. Postgres FKs can only target a UNIQUE-on-FK-columns target; a single-column FK on `finding_id` therefore needs a non-partitioned mirror with `PRIMARY KEY (finding_id)`. The mirror is maintained in lockstep by `cost_findings_upsert()` (inserted/updated/reinstated paths all touch it).
 
-```sql
-DELETE FROM cost_findings
- WHERE tenant_id = $1
-   AND referenced_by_pending_proposal = FALSE
-   AND (
-        (status = 'open'      AND detected_at < now() - $2::interval)
-     OR (status IN ('dismissed','fixed','superseded')
-         AND detected_at < now() - $3::interval)
-   );
-```
+**ON DELETE RESTRICT semantics** (the FK default): retention_sweeper can DELETE unreferenced findings (no approval ever proposed) but is blocked from deleting findings that any approval_request points at. That preserves the audit anchor — every proposal that ever existed has its originating evidence preserved alongside it — without any reconciler.
 
-The reconciler runs as a P1 background job in cost_advisor. Out of P0 scope; the safety hole is closed at the design level via this section + the open-item routing in §6 Q5.
+The stale-mirror self-heal path in `cost_findings_upsert()` (reinstated outcome) issues a `DELETE FROM cost_findings_id_keys WHERE finding_id = <dead-id>`. If any approval_requests row references that finding_id, the DELETE is rejected by the FK, the SP aborts, and the invariant breach is surfaced loudly instead of being silently overwritten.
 
-### 9.3 Why not a hard FK / single DB
+### 9.1 What was wrong with the v1 soft-FK design (historical, for traceability)
 
-We do NOT move `cost_findings` into `spendguard_ledger` to enforce a real FK because:
-- Audit chain + cost analytics have different scaling profiles. `canonical_events` + `cost_findings` are append-heavy + retention-managed; `spendguard_ledger` is the financial-truth DB with stricter SLOs.
-- Separating preserves the spec invariant "cost_advisor proposals are recommendations, not ledger events" — they reach `audit_outbox` only after operator approval flips a row to `approved` AND the bundle ships, never at proposal-create time.
+Codex r5 P1-5 caught two holes:
 
-The cross-DB design stays; the safety hole is closed by the reference flag + reconciler instead.
+1. **TOCTOU race**: between (cost_advisor reads `cost_findings`, validates the finding exists) and (cost_advisor INSERTs `approval_requests` with `proposing_finding_id`), the retention sweeper or an operator could DELETE the finding (cost_findings is a derived artifact with no immutability protection). The INSERT would then commit with a dangling pointer.
+2. **Retention-driven dangling**: even after a valid INSERT, the retention sweeper could DELETE the originating finding while the proposal was still `pending` (e.g. operator hadn't reviewed in 90 days). The dashboard "view finding details" deep-link would 404.
+
+### 9.2 The reconciler design that was rejected (historical)
+
+The original §9 proposed a `referenced_by_pending_proposal` flag column maintained by cross-DB orchestration, plus an hourly reconciler with 4 drift states and a 10-minute grace window. Codex r6 P1 specifically flagged that this still had race windows. We retained the design intent until CA-P1.6 made it unnecessary by relocating the table.
+
+### 9.3 Why we DID move cost_findings into spendguard_ledger (reversed from v1)
+
+The v1 doc argued AGAINST moving cost_findings into ledger:
+> "Audit chain + cost analytics have different scaling profiles."
+> "Separating preserves the spec invariant 'cost_advisor proposals are recommendations, not ledger events'."
+
+Both are wrong with the benefit of CA-P1.6 perspective:
+- **Scaling profile**: cost_findings is small (one row per detected waste pattern per tenant per day; bounded by `tenant_data_policy.cost_findings_retention_days_*`). It does NOT have canonical_events' append-rate or retention surface. It's also write-heavy from a single writer (cost_advisor) — same profile as ledger_transactions. Living in ledger costs nothing.
+- **Invariant**: "proposals are recommendations not ledger events" is preserved by the proposal_source discriminator + the approval-resolve workflow, not by physical DB separation. cost_findings rows are NOT audit events; they're derived analytics. The audit chain (canonical_events) still lives where it always did.
+
+CA-P1.6 was a strict simplification: it deleted ~60 lines of reconciler design, ~80 lines of cross-DB orchestration plumbing, and replaced them with a 90-line migration. Net code reduction. Net invariant strengthening.
 
 ---
 
