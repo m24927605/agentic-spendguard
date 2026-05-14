@@ -160,7 +160,16 @@ demo-verify-p1:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_p1_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1 rule fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1
+# Cost Advisor P1.5 fixture: synthesizes canonical_events for run A
+# (3× provider_5xx → failed_retry_burn_v1) + run B (7× successful
+# calls in 60s → runaway_loop_v1). Asserts both rules fire with
+# expected aggregates. Runs against spendguard_canonical (where
+# canonical_events lives). Rolls back; no state lands.
+demo-verify-p1_5:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
+	@echo "[demo] Cost Advisor P1.5 rules fixture done"
+
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

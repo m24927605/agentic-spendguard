@@ -45,6 +45,14 @@ pub struct AppendInput<'a> {
 
     pub region_id: &'a str,
     pub ingest_shard_id: &'a str,
+
+    /// Cost Advisor P1.5 (issue #51, spec §5.1.2): failure
+    /// classification for audit.outcome events. NULL when (a) the
+    /// event is NOT an audit.outcome, (b) the payload couldn't be
+    /// decoded, or (c) the classifier didn't match any rule (which
+    /// is `Some("unknown")` actually, not None — see classify.rs).
+    /// Caller computes via `crate::classify::classify_audit_outcome`.
+    pub failure_class: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,6 +112,8 @@ pub async fn append_event(
     .map_err(map_pg_error)?;
 
     // 3) Insert into the partitioned canonical_events table.
+    // failure_class column added in CA-P0 (migration 0011). Classifier
+    // populates it for audit.outcome events; NULL for all others.
     sqlx::query(
         "INSERT INTO canonical_events (
             event_id, tenant_id, decision_id, run_id, event_type,
@@ -113,7 +123,7 @@ pub async fn append_event(
             specversion, source, event_time, datacontenttype,
             payload_json, payload_blob_ref,
             region_id, ingest_shard_id, ingest_log_offset, ingest_at,
-            recorded_month
+            recorded_month, failure_class
          ) VALUES (
             $1, $2, $3, $4, $5,
             $6,
@@ -122,7 +132,7 @@ pub async fn append_event(
             $13, $14, $15, $16,
             $17, $18,
             $19, $20, $21, clock_timestamp(),
-            date_trunc('month', $15)::DATE
+            date_trunc('month', $15)::DATE, $22
          )",
     )
     .bind(input.event_id)
@@ -146,6 +156,7 @@ pub async fn append_event(
     .bind(input.region_id)
     .bind(input.ingest_shard_id)
     .bind(offset)
+    .bind(input.failure_class)
     .execute(&mut *tx)
     .await
     .map_err(map_pg_error)?;
