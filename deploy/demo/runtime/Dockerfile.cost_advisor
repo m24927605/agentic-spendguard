@@ -1,0 +1,35 @@
+# syntax=docker/dockerfile:1.7
+FROM rust:1.91-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY proto ./proto
+RUN ln -sf /usr/include/google ./proto/google
+COPY services/cost_advisor ./services/cost_advisor
+WORKDIR /build/services/cost_advisor
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-cost-advisor,target=/build/services/cost_advisor/target,sharing=locked \
+    cargo build --release --bin spendguard-advise \
+    && cp target/release/spendguard-advise /spendguard-advise
+
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim
+
+# postgresql-client → psql for seed + verify SQL.
+# jq               → parse spendguard-advise's JSON stdout in the driver script.
+# python3          → cross-platform date math in the driver script (BSD vs GNU date).
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libssl3 postgresql-client jq python3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /spendguard-advise /usr/local/bin/spendguard-advise
+
+# The default entrypoint is the CLI itself (matches the ttl_sweeper /
+# ledger Dockerfile pattern). DEMO_MODE=cost_advisor overrides this
+# with the driver script via compose `entrypoint:`.
+ENTRYPOINT ["/usr/local/bin/spendguard-advise"]

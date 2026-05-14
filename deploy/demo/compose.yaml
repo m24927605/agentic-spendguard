@@ -544,6 +544,44 @@ services:
         condition: service_healthy
     networks: [spendguard-net]
 
+  # ---------------------------------------------------------------------
+  # DEMO_MODE=cost_advisor — closed-loop driver. One-shot container
+  # (like `demo`) that:
+  #   step 0. pre-check for prior demo state (fail-loud if not fresh)
+  #   step 1. seeds 10 budget-scoped TTL'd reservations
+  #   step 2. invokes spendguard-advise --write-proposals
+  #   step 3. verifies cost_findings + approval_requests + NOTIFY trigger
+  #   step 4. resolves the approval via resolve_approval_request SP
+  # Wire-level NOTIFY delivery is covered by the Rust integration test
+  # `proposal_writer_smoke.rs::notify_fires_on_state_change`.
+  # ---------------------------------------------------------------------
+  cost-advisor-demo:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.cost_advisor
+    container_name: spendguard-cost-advisor-demo
+    environment:
+      SPENDGUARD_COST_ADVISOR_LEDGER_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
+      SPENDGUARD_COST_ADVISOR_CANONICAL_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_canonical?sslmode=disable"
+      # Allow caller-side env to override the demo tenant/budget/date.
+      # Defaults match `30_seed_demo_state.sh` so the cost_advisor seed
+      # joins cleanly with the pre-existing fencing_scope + budget rows.
+      SPENDGUARD_DEMO_TENANT_ID: "${SPENDGUARD_DEMO_TENANT_ID:-00000000-0000-4000-8000-000000000001}"
+      SPENDGUARD_DEMO_BUDGET_ID: "${SPENDGUARD_DEMO_BUDGET_ID:-44444444-4444-4444-8444-444444444444}"
+      SPENDGUARD_DEMO_DATE: "${SPENDGUARD_DEMO_DATE:-}"
+      # psql respects PGPASSWORD if a URL component is missing.
+      PGPASSWORD: "spendguard_demo"
+    entrypoint: ["/bin/bash", "/demo/cost_advisor_demo.sh"]
+    volumes:
+      - ../../deploy/demo/cost_advisor_demo.sh:/demo/cost_advisor_demo.sh:ro
+      - ../../deploy/demo/cost_advisor_demo_seed.sql:/demo/cost_advisor_demo_seed.sql:ro
+      - ../../deploy/demo/cost_advisor_demo_verify.sql:/demo/cost_advisor_demo_verify.sql:ro
+      - ../../deploy/demo/cost_advisor_demo_resolve.sql:/demo/cost_advisor_demo_resolve.sql:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [spendguard-net]
+
 networks:
   spendguard-net:
     driver: bridge

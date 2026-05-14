@@ -29,12 +29,26 @@ ifeq ($(DEMO_MODE),ttl_sweep)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    ttl-sweeper outbox-forwarder
+else ifeq ($(DEMO_MODE),cost_advisor)
+	@echo "[demo] DEMO_MODE=cost_advisor → minimal core (postgres + ledger only)."
+	@echo "[demo] cost_advisor reads ledger directly; doesn't need sidecar / outbox / canonical-ingest."
+	$(COMPOSE) up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger
 else
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    ttl-sweeper outbox-forwarder
 endif
+ifeq ($(DEMO_MODE),cost_advisor)
+	@echo "[demo] running cost_advisor demo container (full closed loop)..."
+	$(COMPOSE) run --rm cost-advisor-demo
+	@echo "[demo] cost_advisor closed loop PASS — skipping outbox-forwarder check"
+	@echo "[demo]   (the cost_advisor write path doesn't produce forwardable audit"
+	@echo "[demo]    events; fixture rows in audit_outbox are marked"
+	@echo "[demo]    pending_forward=FALSE so the forwarder skips them)"
+else
 	@echo "[demo] core services up; running demo container (DEMO_MODE=$(DEMO_MODE))..."
 	$(COMPOSE) run --rm \
 	    --env SPENDGUARD_DEMO_MODE=$(DEMO_MODE) \
@@ -66,6 +80,7 @@ endif
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure
+endif
 
 # Phase 2B Step 7 verification: 1 reserve + 1 commit_estimated;
 # available=458 / reserved_hold=0 / committed_spend=42. agent-mode runs
