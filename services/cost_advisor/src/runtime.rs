@@ -25,7 +25,7 @@ use crate::proto::cost_advisor::v1::{
     ScopeType, Severity, WasteConfidence, WasteEstimate, WasteMethod,
 };
 use crate::rule::CostRule;
-use crate::rules::idle_reservation_rate;
+use crate::rules::{failed_retry_burn, idle_reservation_rate, runaway_loop};
 use crate::sql_rule::SqlCostRule;
 
 /// Single emitted finding row returned to a CLI / future REST caller.
@@ -51,10 +51,14 @@ pub struct EmittedFinding {
 /// `is_ready()` returns true so the runtime never invokes a
 /// placeholder.
 pub fn build_registry() -> Vec<SqlCostRule> {
-    [idle_reservation_rate::descriptor()]
-        .into_iter()
-        .filter(|r| r.is_ready())
-        .collect()
+    [
+        idle_reservation_rate::descriptor(),
+        failed_retry_burn::descriptor(),
+        runaway_loop::descriptor(),
+    ]
+    .into_iter()
+    .filter(|r| r.is_ready())
+    .collect()
 }
 
 /// Single-tenant evaluation entry point. Runs every registered rule
@@ -138,8 +142,175 @@ async fn run_rule(
         "idle_reservation_rate_v1" => {
             decode_idle_reservation_rate(rule, row, tenant_id, bucket_date).map(Some)
         }
+        "failed_retry_burn_v1" => {
+            decode_failed_retry_burn(rule, row, tenant_id, bucket_date).map(Some)
+        }
+        "runaway_loop_v1" => {
+            decode_runaway_loop(rule, row, tenant_id, bucket_date).map(Some)
+        }
         other => Err(anyhow!("no decoder registered for rule {}", other)),
     }
+}
+
+fn decode_failed_retry_burn(
+    rule: &SqlCostRule,
+    row: PgRow,
+    tenant_id: Uuid,
+    bucket_date: NaiveDate,
+) -> Result<DecodedFinding> {
+    let affected: i64 = row.try_get("affected_run_prompt_groups")?;
+    let total_attempts: i64 = row.try_get("total_attempts")?;
+    let total_billed_failures: i64 = row.try_get("total_billed_failures")?;
+    let total_atomic_sum: Option<bigdecimal::BigDecimal> =
+        row.try_get("total_failed_atomic_sum").ok();
+    let sample_ids: Vec<Uuid> = row
+        .try_get::<Option<Vec<Uuid>>, _>("sample_decision_ids")?
+        .unwrap_or_default();
+
+    let time_bucket = bucket_date.format("%Y-%m-%d").to_string();
+    let scope = FindingScope {
+        scope_type: ScopeType::Run as i32,
+        agent_id: String::new(),
+        run_id: String::new(), // tenant-bucket aggregate across runs
+        tool_name: String::new(),
+        model_family: String::new(),
+    };
+    let fingerprint_hex =
+        fingerprint::compute(rule.rule_id(), &tenant_id.to_string(), &scope, &time_bucket);
+
+    let metrics = vec![
+        metric("affected_run_prompt_groups", affected as f64, MetricUnit::Count, "derived: COUNT(DISTINCT run_id, prompt_hash) in step3"),
+        metric("total_attempts", total_attempts as f64, MetricUnit::Calls, "derived: SUM(attempt_count) across groups"),
+        metric("total_billed_failures", total_billed_failures as f64, MetricUnit::Calls, "derived: SUM(billed_failure_count) across groups"),
+    ];
+
+    // P1 contract: estimated_amount_atomic is unit-atomic, not USD
+    // micros. Same nullable-waste pattern as idle_reservation_rate_v1
+    // — emit WasteEstimate only when baseline_refresher computes a
+    // real USD figure. P1.5 first cut returns NULL waste.
+    let waste_estimate: Option<WasteEstimate> = None;
+
+    let proto = FindingEvidence {
+        rule_id: rule.rule_id().into(),
+        rule_version: rule.rule_version(),
+        fingerprint: fingerprint_hex,
+        category: FindingCategory::DetectedWaste as i32,
+        scope: Some(scope),
+        metrics,
+        decision_refs: sample_ids.iter().map(|u| u.to_string()).collect(),
+        waste_estimate,
+        severity: Severity::Warn as i32,
+        time_bucket,
+        co_observed_rules: Vec::new(),
+    };
+
+    let _ = total_atomic_sum; // pre-USD atomic figure surfaced via metrics in P2
+
+    let proto_json = build_proto_json(&proto, "warn");
+
+    Ok(DecodedFinding {
+        proto,
+        proto_json,
+        confidence: 0.85, // high-medium: billed failures are deterministic
+        finding_id: Uuid::now_v7(),
+        detected_at: Utc::now(),
+        sample_decision_ids: sample_ids,
+    })
+}
+
+fn decode_runaway_loop(
+    rule: &SqlCostRule,
+    row: PgRow,
+    tenant_id: Uuid,
+    bucket_date: NaiveDate,
+) -> Result<DecodedFinding> {
+    let affected: i64 = row.try_get("affected_run_prompt_groups")?;
+    let total_calls: i64 = row.try_get("total_calls")?;
+    let max_depth: i64 = row.try_get("max_loop_depth")?;
+    let sample_ids: Vec<Uuid> = row
+        .try_get::<Option<Vec<Uuid>>, _>("sample_decision_ids")?
+        .unwrap_or_default();
+
+    let time_bucket = bucket_date.format("%Y-%m-%d").to_string();
+    let scope = FindingScope {
+        scope_type: ScopeType::Run as i32,
+        agent_id: String::new(),
+        run_id: String::new(),
+        tool_name: String::new(),
+        model_family: String::new(),
+    };
+    let fingerprint_hex =
+        fingerprint::compute(rule.rule_id(), &tenant_id.to_string(), &scope, &time_bucket);
+
+    let metrics = vec![
+        metric("affected_run_prompt_groups", affected as f64, MetricUnit::Count, "derived: COUNT(DISTINCT run_id, prompt_hash) in step3"),
+        metric("total_calls", total_calls as f64, MetricUnit::Calls, "derived: SUM(call_count) across groups"),
+        metric("max_loop_depth", max_depth as f64, MetricUnit::Count, "derived: MAX(call_count) across groups"),
+    ];
+
+    let waste_estimate: Option<WasteEstimate> = None;
+
+    let proto = FindingEvidence {
+        rule_id: rule.rule_id().into(),
+        rule_version: rule.rule_version(),
+        fingerprint: fingerprint_hex,
+        category: FindingCategory::DetectedWaste as i32,
+        scope: Some(scope),
+        metrics,
+        decision_refs: sample_ids.iter().map(|u| u.to_string()).collect(),
+        waste_estimate,
+        severity: Severity::Warn as i32,
+        time_bucket,
+        co_observed_rules: Vec::new(),
+    };
+
+    let proto_json = build_proto_json(&proto, "warn");
+
+    Ok(DecodedFinding {
+        proto,
+        proto_json,
+        confidence: 0.65, // loops are heuristic: tight retry could be intentional
+        finding_id: Uuid::now_v7(),
+        detected_at: Utc::now(),
+        sample_decision_ids: sample_ids,
+    })
+}
+
+/// Common JSON builder for FindingEvidence — same shape as the
+/// idle_reservation_rate decoder's inline json! but factored so all
+/// rule decoders use one canonical layout.
+fn build_proto_json(proto: &FindingEvidence, severity: &str) -> serde_json::Value {
+    let scope_type_str = match proto.scope.as_ref().map(|s| s.scope_type).unwrap_or(0) {
+        x if x == ScopeType::TenantGlobal as i32 => "tenant_global",
+        x if x == ScopeType::Run as i32 => "run",
+        x if x == ScopeType::Agent as i32 => "agent",
+        x if x == ScopeType::Tool as i32 => "tool",
+        _ => "unspecified",
+    };
+    serde_json::json!({
+        "rule_id": proto.rule_id,
+        "rule_version": proto.rule_version,
+        "fingerprint": proto.fingerprint,
+        "category": "detected_waste",
+        "scope": { "scope_type": scope_type_str },
+        "metrics": proto.metrics.iter().map(|m| serde_json::json!({
+            "name": m.name,
+            "value": m.value,
+            "unit": metric_unit_str(m.unit),
+            "source_field": m.source_field,
+            "pii_classification": "none",
+            "derivation": m.derivation,
+        })).collect::<Vec<_>>(),
+        "decision_refs": proto.decision_refs,
+        "waste_estimate": proto.waste_estimate.as_ref().map(|w| serde_json::json!({
+            "micros_usd": w.micros_usd,
+            "method": waste_method_str(w.method),
+            "confidence": waste_confidence_str(w.confidence),
+            "explanation": w.explanation,
+        })),
+        "severity": severity,
+        "time_bucket": proto.time_bucket,
+    })
 }
 
 fn decode_idle_reservation_rate(

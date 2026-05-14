@@ -7,4 +7,6 @@
 //! schema per cost-advisor-p0-audit-report §4) lands in P1 alongside
 //! the runtime that executes the SQL.
 
+pub mod failed_retry_burn;
 pub mod idle_reservation_rate;
+pub mod runaway_loop;

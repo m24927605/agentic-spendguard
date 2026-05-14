@@ -293,6 +293,20 @@ async fn process_one(
     // Build append input.
     let payload_json =
         serde_json::to_value(cloudevent_to_json(evt)).unwrap_or(serde_json::Value::Null);
+
+    // Cost Advisor P1.5 (issue #51, spec §5.1.2): classify audit
+    // .outcome events into one of the 9 failure_class enum values.
+    // For non-outcome events the classifier returns None and we
+    // persist NULL in canonical_events.failure_class. The classifier
+    // is fault-tolerant: malformed data_b64 maps to FailureClass
+    // ::Unknown rather than aborting the INSERT.
+    let decoded_data = crate::classify::decode_payload_data(&payload_json);
+    let failure_class = crate::classify::classify_audit_outcome(
+        &evt.r#type,
+        decoded_data.as_ref(),
+    )
+    .map(|c| c.as_db_str());
+
     let input = AppendInput {
         event_id,
         tenant_id,
@@ -314,6 +328,7 @@ async fn process_one(
         payload_blob_ref: None,
         region_id: &cfg.region,
         ingest_shard_id: &cfg.ingest_shard_id,
+        failure_class,
     };
 
     // Per-decision sequence enforcement: audit.outcome with no preceding decision.
@@ -421,6 +436,13 @@ async fn process_one(
             // Rebuild input — original was moved.
             let payload_json = serde_json::to_value(cloudevent_to_json(evt))
                 .unwrap_or(serde_json::Value::Null);
+            // Re-classify for the quarantine path's audit row.
+            let decoded_data = crate::classify::decode_payload_data(&payload_json);
+            let failure_class = crate::classify::classify_audit_outcome(
+                &evt.r#type,
+                decoded_data.as_ref(),
+            )
+            .map(|c| c.as_db_str());
             let input = AppendInput {
                 event_id,
                 tenant_id,
@@ -442,6 +464,7 @@ async fn process_one(
                 payload_blob_ref: None,
                 region_id: &cfg.region,
                 ingest_shard_id: &cfg.ingest_shard_id,
+                failure_class,
             };
             if let Err(e) = append::quarantine_audit_outcome(pool, input, orphan_after).await {
                 return error_result(&evt.id, EventStatus::Quarantined, e);
