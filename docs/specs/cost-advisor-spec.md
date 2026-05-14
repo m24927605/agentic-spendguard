@@ -16,14 +16,15 @@
 
 This section reconciles the v3 narrative with what the CA-P0 implementation + codex r5-r8 verified. Where any section below the line conflicts with §0, §0 wins.
 
-### 0.1 Scope cut: v0.1 ships ZERO rules (was: 4 rules)
+### 0.1 Scope cut: v0.1 ships 3 of 4 rules (was: 4 rules at v3; was ZERO during P0 audit)
 
-v3 §5.1 listed 4 rules for v0.1. Reality:
+v3 §5.1 listed 4 rules for v0.1. As of CA-P3.1 (2026-05-14): 3 are shipped + 1 deferred to v0.2.
 
-- `idle_reservation_rate_v1`: blocked. Column is `reservations.current_state`, not `latest_state`; allowed values do NOT include `ttl_expired` (TTL expiry is in `audit_outbox` release event `reason='TTL_EXPIRED'`); no `ttl_seconds` column. Requires new `reservations_with_ttl_status_v1` view (workstream P0.6, issue #49).
-- `failed_retry_burn_v1`, `runaway_loop_v1`, `tool_call_repeated_v1`: all blocked on `canonical_events.payload_json` lacking `prompt_hash`, `agent_id`, `run_id`, `tool_name`, `tool_args_hash`, `model_family` (5 of 6 fields are 0% populated). Requires sidecar enrichment (workstream P0.5, issue #48). `tool_*` requires SDK extension (deferred to v0.2).
+- `idle_reservation_rate_v1`: **shipped** (CA-P0.6 + CA-P1 + CA-P3.1). Reads from `reservations_with_ttl_status_v1` view (CA-P0.6 unblocked the original schema gap); CA-P3.1 made it budget-scoped (`GROUP BY (tenant_id, budget_id)`) and emits a 2-op identity-pinned RFC-6902 patch (test on `/spec/budgets/<i>/id`, replace on `/spec/budgets/<i>/reservation_ttl_seconds`).
+- `failed_retry_burn_v1`, `runaway_loop_v1`: **shipped** (CA-P1.5). Read enriched `canonical_events.payload_json` (CA-P0.5 threaded `run_id`/`step_id`/`prompt_hash`/`model_family`). No proposed patch yet — operator judgment needed on which rule to tighten.
+- `tool_call_repeated_v1`: still blocked — requires SDK extension to carry `tool_name` + `tool_args_hash`. Deferred to v0.2.
 
-**Net**: v0.1 has zero fireable rules until P0.5 + P0.6 land. P1 (issue #50) then ships `idle_reservation_rate_v1` as the first fireable rule. P1.5 (issue #51) ships the other 3 at run-scope (after P0.5).
+**Net** (as of CA-P3.1, 2026-05-14): v0.1 ships 3 of 4 rules. `idle_reservation_rate_v1` (CA-P0.6 unblocked + CA-P1 wired + CA-P3.1 budget-scoped) + `failed_retry_burn_v1`/`runaway_loop_v1` (CA-P1.5, after CA-P0.5 enrichment) are live; `tool_call_repeated_v1` deferred to v0.2. The CA-P0 audit's "ZERO" finding reflected the schema state BEFORE P0.5/P0.6 shipped.
 
 ### 0.2 `canonical_events.payload_json` shape (was: decoded `{kind, ...}`)
 
@@ -261,11 +262,12 @@ Every finding produced by ANY rule MUST emit evidence conforming to this contrac
       "type": "object",
       "required": ["scope_type"],
       "properties": {
-        "scope_type": {"enum": ["agent", "run", "tool", "tenant_global"]},
+        "scope_type": {"enum": ["agent", "run", "tool", "tenant_global", "budget"]},
         "agent_id": {"type": ["string", "null"]},
         "run_id": {"type": ["string", "null"]},
         "tool_name": {"type": ["string", "null"]},
-        "model_family": {"type": ["string", "null"]}
+        "model_family": {"type": ["string", "null"]},
+        "budget_id": {"type": ["string", "null"], "description": "UUID (lowercase hyphenated). Required when scope_type == 'budget' (CA-P3.1)."}
       }
     },
     "metrics": {
@@ -391,7 +393,7 @@ Rules ship as `services/cost_advisor/rules/<category>/<rule_id>.sql` files. Each
 
 ### 5.1 v0 ships ONLY `detected_waste` rules (codex r1 must-fix #3, refined r2)
 
-> ⚠️ **v4 superseded by §0.1**: the 4 rules below were the v3 plan. v0.1 actually ships ZERO rules until P0.5 + P0.6 land. `idle_reservation_rate_v1` becomes the v0.1 candidate after P0.6 view ships; the other 3 are gated on P0.5 enrichment. The §5.1 narrative below is preserved for the rule-design rationale.
+> ⚠️ **v4.1 update (CA-P3.1)**: 3 of the 4 rules below shipped to v0.1. `idle_reservation_rate_v1` (CA-P0.6 + CA-P1 + CA-P3.1), `failed_retry_burn_v1` + `runaway_loop_v1` (CA-P1.5, after CA-P0.5 enrichment). `tool_call_repeated_v1` deferred to v0.2 (SDK extension). The CA-P0 audit's "ZERO fireable" assessment reflected the schema state before P0.5/P0.6 unblocked it. The §5.1 narrative below is the rule-design rationale.
 
 These are rules where we can **mathematically demonstrate** money was wasted (paid for something with no value).
 
@@ -838,7 +840,7 @@ The §4.0 unit allowlist is `[micros_usd, usd, tokens, calls, seconds, ratio, co
 
 ## 13. Success criteria
 
-> ⚠️ **v4 superseded by §0.1 + §0.5**: the v3 v0.1 criteria assumed 4 rules + multiple framework-specific implementations. Reality: v0.1 ships ONE rule (`idle_reservation_rate_v1`) after P0.5 + P0.6 land. "At least 2 framework-specific rules" is a v1.0 criterion, not v0.1.
+> ⚠️ **v4.1 (CA-P3.1) update**: v0.1 ships 3 rules — `idle_reservation_rate_v1` (budget-scoped, emits a 2-op identity-pinned RFC-6902 patch) + `failed_retry_burn_v1` + `runaway_loop_v1` (no patches yet — operator judgment needed). `tool_call_repeated_v1` deferred to v0.2. "At least 2 framework-specific rules" is a v1.0 criterion, not v0.1.
 
 For v0.1 (P1 + P3 shipped):
 - [ ] At least 1 design partner runs `spendguard advise` against their real `canonical_events` and finds 1+ true-positive finding
@@ -861,11 +863,15 @@ For v1.0 (all P1–P6 shipped, codex challenge round complete):
 
 ## 14. Changelog
 
+### v4.1 (2026-05-14, CA-P3.1 budget-scoped patches)
+
+CA-P3.1 shipped (commit pending). Made `idle_reservation_rate_v1` budget-scoped and added `test`-op identity pinning to the DSL allowlist. Migration 0044 supersedes 0043's path shapes — all paths now under `/spec/` matching the contract YAML schema (`docs/site/docs/contracts/yaml.md` + `services/sidecar/src/contract/parse.rs`). Codex 3 rounds: r1 RED (wrong DSL shape + immutability gridlock) → r2 YELLOW (doc drift) → r3 **YELLOW→GREEN** (spec + comment scrub). Closed-loop infrastructure now fires end-to-end for single-budget contracts.
+
 ### v4 (2026-05-13, post-CA-P0 implementation + codex r5-r8)
 
 CA-P0 prep phase shipped (branch `feat/cost-advisor-p0`, 9 commits, merged in `42cb787`). Four codex adversarial rounds on the branch: r5 RED (7 P1) → r6 RED (3 P1) → r7 RED (1 P1) → r8 **GREEN**. v4 reconciles the spec text with the verified-reality findings. §0 above summarizes all 10 corrections; details:
 
-**§0.1 v0.1 scope cut**: zero fireable rules until P0.5 + P0.6 land (was: 4 rules). `idle_reservation_rate_v1` blocked by missing `reservations_with_ttl_status_v1` view; other 3 rules blocked by missing payload enrichment.
+**§0.1 v0.1 scope cut**: at CA-P3.1 (2026-05-14), 3 of 4 rules shipped: `idle_reservation_rate_v1` (CA-P0.6+P1+P3.1), `failed_retry_burn_v1` + `runaway_loop_v1` (CA-P1.5). `tool_call_repeated_v1` deferred to v0.2 (SDK extension). v3 listed 4 rules; CA-P0 audit found ZERO fireable; CA-P0.5 + CA-P0.6 + CA-P1 + CA-P1.5 + CA-P3.1 unblocked 3.
 
 **§0.2 payload_json shape**: actually base64-encoded CloudEvent envelope (`data_b64`), not decoded `{kind, ...}`. Tier-2 baseline SQL in §6 must decode + join ledger.commits for cost; spec §6 example as written is wrong.
 

@@ -18,18 +18,26 @@ use crate::proto::cost_advisor::v1::FindingScope;
 ///
 /// proto3 lacks a canonical JSON spec strong enough for hashing
 /// (field ordering / default-presence quirks). We encode our own
-/// stable form: `scope_type|agent_id|run_id|tool_name|model_family`
+/// stable form:
+///   `scope_type|agent_id|run_id|tool_name|model_family|budget_id`
 /// with empty strings for absent fields. New scope projections are
-/// added at the tail (proto `reserved 6..15`) so old fingerprints
-/// remain stable across schema additions.
+/// appended at the tail (proto `reserved 7..15` after CA-P3.1) so
+/// old fingerprints can extend cleanly.
+///
+/// **CA-P3.1 migration note**: budget_id was added as the 6th field
+/// for budget-scoped findings. v0.1 is greenfield — no production
+/// cost_findings rows exist yet — so the trailing `|` change is a
+/// safe one-time fingerprint bump. Future extensions follow the
+/// same tail-append pattern + rule_version bump per spec §11.5 A6.
 pub fn canonical_scope_repr(scope: &FindingScope) -> String {
     format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}",
         scope.scope_type,
         scope.agent_id,
         scope.run_id,
         scope.tool_name,
         scope.model_family,
+        scope.budget_id,
     )
 }
 
@@ -89,6 +97,7 @@ mod tests {
             run_id: run_id.to_string(),
             tool_name: String::new(),
             model_family: String::new(),
+            budget_id: String::new(),
         }
     }
 
@@ -130,6 +139,26 @@ mod tests {
         let fp1 = compute("failed_retry_burn_v1", T1, &s, "2026-05-13T07:00:00Z");
         let fp2 = compute("failed_retry_burn_v1", T1, &s, "2026-05-13T08:00:00Z");
         assert_ne!(fp1, fp2);
+    }
+
+    #[test]
+    fn fingerprint_differs_across_budgets() {
+        // CA-P3.1 r2 P3: two Budget-scoped findings with different
+        // budget_ids must produce DIFFERENT fingerprints so the
+        // mirror table dedupes per-budget, not per-tenant-day.
+        let mk = |bid: &str| FindingScope {
+            scope_type: ScopeType::Budget as i32,
+            agent_id: String::new(),
+            run_id: String::new(),
+            tool_name: String::new(),
+            model_family: String::new(),
+            budget_id: bid.to_string(),
+        };
+        let s1 = mk("11111111-1111-4111-8111-111111111111");
+        let s2 = mk("22222222-2222-4222-8222-222222222222");
+        let fp1 = compute("idle_reservation_rate_v1", T1, &s1, "2026-05-14");
+        let fp2 = compute("idle_reservation_rate_v1", T1, &s2, "2026-05-14");
+        assert_ne!(fp1, fp2, "different budget_ids must yield distinct fingerprints");
     }
 
     #[test]

@@ -1,15 +1,10 @@
-//! `idle_reservation_rate_v1` — placeholder rule definition.
+//! `idle_reservation_rate_v1` — fireable rule descriptor.
 //!
-//! This is the ONE rule the P0 audit report
-//! (`docs/specs/cost-advisor-p0-audit-report.md` §4) found fireable
-//! under the current schema. The real SQL body lives in
-//! `services/cost_advisor/rules/detected_waste/idle_reservation_rate_v1.sql`
-//! and lands in P1.
-//!
-//! P0 declares the rule as a [`crate::SqlCostRule`] constant so that:
-//!   * Its `declared_input_fields()` set is reviewed alongside the
-//!     migrations (Step 3) and won't silently drift.
-//!   * `cargo check` exercises the trait + proto types end-to-end.
+//! SQL body lives in
+//! `services/cost_advisor/rules/detected_waste/idle_reservation_rate_v1.sql`.
+//! CA-P0.6 unblocked it by shipping `reservations_with_ttl_status_v1`.
+//! CA-P1 wired it into the runtime. CA-P3.1 made it budget-scoped
+//! (per-budget grouping + identity-pinned RFC-6902 patch emission).
 
 use crate::rule::Category;
 use crate::sql_rule::SqlCostRule;
@@ -25,20 +20,14 @@ use crate::sql_rule::SqlCostRule;
 ///     `ttl_expires_at` and `created_at`.
 ///   * There is no config home for `min_ttl_for_finding`.
 ///
-/// So this rule is **blocked**, just like the other three. The P1
-/// path: build a ledger view (call it P0.6) that surfaces
-/// `(reservation_id, derived_state, ttl_seconds)` by joining
-/// `reservations` with `audit_outbox` release events. The rule SQL
-/// then reads the view, not the raw projection.
-///
-/// declared_input_fields below tracks fields the rule WILL read once
-/// the view exists. Today the rule registers as non-ready and the P1
-/// runtime never schedules it.
+/// P0.6 shipped the derived view; this rule reads from it. CA-P3.1
+/// added per-budget grouping (codex CA-P3 r2 P1: positional patches
+/// without budget identity were unsafe) so the rule now projects
+/// `budget_id` and the decoder emits an identity-pinned 2-op patch.
 pub const DECLARED_INPUT_FIELDS: &[&str] = &[
-    // From the P0.6 derived view (NOT yet built):
+    "reservations_with_ttl_status_v1.budget_id",
     "reservations_with_ttl_status_v1.derived_state",
     "reservations_with_ttl_status_v1.ttl_seconds",
-    // Direct columns:
     "ledger.reservations.current_state",
     "ledger.reservations.ttl_expires_at",
     "ledger.reservations.created_at",
@@ -116,6 +105,23 @@ mod tests {
         assert!(
             r.sql().contains("reservations_with_ttl_status_v1"),
             "rule SQL must read from the CA-P0.6 view"
+        );
+    }
+
+    #[test]
+    fn rule_sql_groups_by_budget() {
+        // CA-P3.1: rule must GROUP BY budget_id so each row maps to
+        // exactly one budget. The decoder reads `budget_id` from the
+        // row and pins identity in the proposed patch's test op.
+        let r = descriptor();
+        let sql = r.sql();
+        assert!(
+            sql.contains("GROUP BY v.tenant_id, v.budget_id"),
+            "rule SQL must GROUP BY budget for per-budget findings"
+        );
+        assert!(
+            sql.contains("v.budget_id::TEXT"),
+            "rule SQL must project budget_id"
         );
     }
 }

@@ -1,14 +1,17 @@
-//! SpendGuard Cost Advisor — P0 skeleton.
+//! SpendGuard Cost Advisor — v0.1 crate.
 //!
-//! See `docs/specs/cost-advisor-spec.md` (the bible) and
-//! `docs/specs/cost-advisor-p0-audit-report.md` (the audit that revised
-//! v0.1 scope to a single rule + a P0.5 enrichment workstream).
+//! See `docs/specs/cost-advisor-spec.md` (the bible),
+//! `docs/specs/cost-advisor-p0-audit-report.md` (the audit that drove
+//! the v0.1 scope cut + P0.5/P0.6 workstreams), and
+//! `services/cost_advisor/docs/control-plane-integration.md`.
 //!
-//! Public surface today is the [`rule::CostRule`] trait + the
-//! [`sql_rule::SqlCostRule`] adapter that wraps a `.sql` file into a
-//! `CostRule` impl. The runtime that orchestrates rule evaluation
-//! lands in P1; this crate exists in P0 so the trait surface can be
-//! frozen alongside the proto contract.
+//! Public surface:
+//!   * [`rule::CostRule`] trait + [`sql_rule::SqlCostRule`] adapter
+//!     wrap a `.sql` file into a `CostRule` impl.
+//!   * [`runtime::evaluate_tenant_day`] runs the rule registry for
+//!     one (tenant, date) bucket and UPSERTs into cost_findings.
+//!   * [`patch_validator`] + [`proposal_writer`] (CA-P3 + P3.1)
+//!     handle the cost_advisor → approval_requests write path.
 
 pub mod proto {
     pub mod cost_advisor {
