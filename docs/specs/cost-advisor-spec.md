@@ -53,7 +53,11 @@ Cost-data nuance (codex r9 P2 correction): `estimated_amount_atomic` IS present 
 
 The CloudEvent envelope is serialized into `payload_json` by `services/canonical_ingest/src/handlers/append_events.rs` (the `cloudevent_to_json` helper); `services/canonical_ingest/src/persistence/append.rs` only persists the already-built JSON.
 
-### 0.3 §4.1 `cost_findings` uses mirror + upsert SP, not direct UNIQUE INDEX
+### 0.3 §4.1 `cost_findings` uses mirror + upsert SP, not direct UNIQUE INDEX — AND lives in `spendguard_ledger` (CA-P1.6)
+
+**v3 → v4 (CA-P1.6)**: §4.1 originally said cost_findings lives in `spendguard_canonical` alongside canonical_events. **That changed 2026-05-14**: it now lives in `spendguard_ledger` next to `approval_requests`. The driver was codex r5 P1-5 + r6 P1, which identified that the cross-DB soft FK from `approval_requests.proposing_finding_id → cost_findings.finding_id` had TOCTOU + retention-driven dangling holes. Greenfield (no migration cost) allowed the simpler fix: relocate, then use a real Postgres FK.
+
+Migrations are now ledger-stream: `services/ledger/migrations/0040_cost_findings.sql`, `0041_cost_baselines.sql`, `0042_approval_requests_cost_findings_fk.sql`. There is no `services/cost_advisor/migrations/` dir.
 
 v3 §4.1 (line 237 of the v3 file) showed `CREATE UNIQUE INDEX cost_findings_fingerprint ON cost_findings (tenant_id, fingerprint)`. Reality (post-codex r6 P1-3): Postgres requires UNIQUE constraints on partitioned tables to include the partition key. The implementation uses a non-partitioned mirror table:
 
@@ -67,7 +71,27 @@ CREATE TABLE cost_findings_fingerprint_keys (
 );
 ```
 
-Writes go through `cost_findings_upsert()` stored procedure (the SOLE legal writer) which atomically claims the mirror slot, then INSERTs / UPDATEs / self-heals an orphan canonical row. Returns `outcome ∈ {inserted, updated, reinstated}`. Direct INSERTs that skip the SP risk orphan mirror rows or duplicate findings.
+For the real FK target (CA-P1.6), a second mirror exists:
+
+```sql
+CREATE TABLE cost_findings_id_keys (
+    finding_id   UUID NOT NULL PRIMARY KEY,
+    tenant_id    UUID NOT NULL,
+    detected_at  TIMESTAMPTZ NOT NULL,
+    UNIQUE (tenant_id, finding_id),
+    -- Back-FK: retention DELETE on cost_findings cascades here, then
+    -- hits the RESTRICT FK on approval_requests below if referenced.
+    FOREIGN KEY (tenant_id, detected_at, finding_id)
+      REFERENCES cost_findings (tenant_id, detected_at, finding_id)
+      ON DELETE CASCADE
+);
+-- Tenant-scoped composite FK (cross-tenant pointers rejected):
+-- approval_requests (tenant_id, proposing_finding_id)
+--   REFERENCES cost_findings_id_keys (tenant_id, finding_id)
+--   ON DELETE RESTRICT
+```
+
+Writes go through `cost_findings_upsert()` stored procedure (the SOLE legal writer) which atomically claims the fingerprint mirror slot, then INSERTs / UPDATEs / self-heals an orphan canonical row, AND maintains the id_keys mirror in lockstep. Returns `outcome ∈ {inserted, updated, reinstated}`. The reinstated path's DELETE on id_keys is blocked by the FK if any approval_requests still references the stale finding — surfacing the invariant breach loudly. Direct INSERTs that skip the SP risk orphan mirror rows, duplicate findings, or FK violations.
 
 ### 0.4 §5.1.2 failure classifier — column landed, code pending
 
@@ -85,11 +109,17 @@ The audit-report `docs/specs/cost-advisor-p0-audit-report.md` is the authoritati
 
 ### 0.7 §11.5 Q5 retention — now schema-backed
 
-v3 Q5 said "90 days for `open`; 30 days for `dismissed` / `fixed`; auto-purge with `retention_sweeper`". CA-P0 landed the schema (`tenant_data_policy.cost_findings_retention_days_open` default 90, `tenant_data_policy.cost_findings_retention_days_resolved` default 30, in `services/ledger/migrations/0038_*.sql`). The retention sweeper sweep kind itself + reconciler (per integration doc §9) is P1 work.
+v3 Q5 said "90 days for `open`; 30 days for `dismissed` / `fixed`; auto-purge with `retention_sweeper`". CA-P0 landed the schema (`tenant_data_policy.cost_findings_retention_days_open` default 90, `tenant_data_policy.cost_findings_retention_days_resolved` default 30, in `services/ledger/migrations/0038_*.sql`). **CA-P1.6**: retention semantics are now Postgres-enforced via the FK chain (see §0.8). The retention sweeper can DELETE unreferenced findings; referenced findings are kept by ON DELETE RESTRICT on the approval_requests FK.
 
-### 0.8 Cross-DB referential safety — reconciler design
+### 0.8 Cross-DB referential safety — RESOLVED via CA-P1.6 (real FK chain)
 
-Cross-DB soft FK from `approval_requests.proposing_finding_id → cost_findings.finding_id`. Codex r5 P1-5 + r6 P1-2 rejected "validate-before-INSERT" as insufficient. v4 design (per integration doc §9): `cost_findings.referenced_by_pending_proposal` flag maintained by the proposal-write path; retention sweeper refuses DELETE when TRUE; periodic reconciler covers 4 drift states with a 10-minute grace window. Lands in P1.
+The original cross-DB soft FK from `approval_requests.proposing_finding_id → cost_findings.finding_id` (Codex r5 P1-5 + r6 P1-2 rejected "validate-before-INSERT" as insufficient) is **resolved 2026-05-14** by relocating `cost_findings` into `spendguard_ledger` (migrations 0040/0041/0042). The protection chain is now:
+
+```
+approval_requests --FK ON DELETE RESTRICT--> cost_findings_id_keys --FK ON DELETE CASCADE--> cost_findings
+```
+
+The `referenced_by_pending_proposal` flag + reconciler design from earlier v4 drafts was NEVER implemented — superseded by the Postgres-enforced chain. Greenfield no-backcompat made this the right tradeoff.
 
 ### 0.9 Service identity + INSERT scope — concrete mechanism
 
@@ -288,7 +318,11 @@ Every finding produced by ANY rule MUST emit evidence conforming to this contrac
 
 ### 4.1 New table: `cost_findings`
 
-Lives in the same `spendguard_canonical` database as `canonical_events`.
+**CA-P1.6 (2026-05-14)**: lives in `spendguard_ledger` (NOT canonical — see §0.3 for the rationale). The narrative below is from v3 and reads "lives next to canonical_events"; that's now wrong. The cost_advisor runtime reads canonical_events on the canonical pool and writes findings via `cost_findings_upsert()` on the ledger pool.
+
+Historical v3 narrative (preserved for traceability):
+
+> Lives in the same `spendguard_canonical` database as `canonical_events`.
 
 ```sql
 CREATE TABLE cost_findings (

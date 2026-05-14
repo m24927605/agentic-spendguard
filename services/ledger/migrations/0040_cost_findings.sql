@@ -1,19 +1,28 @@
--- Cost Advisor P0: cost_findings table.
+-- Cost Advisor cost_findings table (CA-P0 + CA-P1.6).
 --
 -- Spec: docs/specs/cost-advisor-spec.md §4.1 (table) + §4.0
 -- (FindingEvidence shape carried in `evidence` JSONB).
 --
--- Applied against the `spendguard_canonical` database alongside
--- `canonical_events`. Wired in via
--- `deploy/demo/init/migrations/21_apply_cost_advisor_migrations.sh`.
+-- CA-P1.6 relocation (issue #56): originally landed in
+-- `spendguard_canonical` (migration 01_cost_findings.sql) to live
+-- alongside canonical_events. Codex r6 P1-5 found that the resulting
+-- cross-DB soft FK from approval_requests.proposing_finding_id was
+-- unsafe; the reconciler design (referenced_by_pending_proposal +
+-- 10-min grace + 4 drift states) was non-trivial operational
+-- surface. Decision: move to `spendguard_ledger` to get a real
+-- Postgres FK, eliminate the reconciler entirely. Same DB as
+-- approval_requests + reservations. Greenfield product — no
+-- back-compat cost.
 --
 -- Partitioning per §11.5 A7 (storage strategy): monthly partitions on
 -- `detected_at`. Hot-tier (postgres) keeps the last 90 days; older
 -- partitions archive to S3 as Parquet + DETACH. The retention sweeper
 -- (P1 work; tenant_data_policy.cost_findings_retention_days_open /
--- _resolved drive policy) DELETEs rows past the per-tenant window.
--- Per-tenant DELETEs are allowed here (no immutability trigger) —
--- cost_findings are derived artifacts, not the audit chain.
+-- _resolved drive policy) DELETEs rows past the per-tenant window —
+-- IF AND ONLY IF no approval_requests row references the finding
+-- (enforced by the real FK with ON DELETE RESTRICT in migration
+-- 0042). cost_findings are derived artifacts; they don't carry the
+-- immutability triggers that audit-chain tables do.
 
 CREATE TABLE cost_findings (
     finding_id          UUID NOT NULL,                  -- UUID v7 from rule emitter

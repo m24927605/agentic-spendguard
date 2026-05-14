@@ -289,3 +289,39 @@ The webhook_receiver emissions still do NOT carry `prompt_hash` / `agent_id` / `
 **🟡 P1 IS NOT ready to start immediately.** P1 is gated on both P0.5 and P0.6 landing. The original audit's "P1 can start immediately" claim was wrong — it presumed `idle_reservation_rate_v1` was fireable, which the schema review above shows it is not.
 
 The P0 deliverables (proto + crate skeleton + 4 migrations + integration design doc) remain valid and useful — they are infrastructure that P1 / P0.5 / P0.6 all consume. But the runtime + first rule cannot land until the dependencies do.
+
+---
+
+## 8.7 CA-P1.6 — cost_findings relocated to spendguard_ledger (added 2026-05-14)
+
+After P1 + P1.5 shipped, the lingering Q5 owner-ack from the integration doc (cross-DB soft FK between `approval_requests.proposing_finding_id` and `cost_findings.finding_id`) was answered by relocating `cost_findings` (and `cost_baselines` and the supporting SPs) from `spendguard_canonical` to `spendguard_ledger`. This let us replace the §9 reconciler design with a real Postgres FK.
+
+**Drivers**:
+- Codex r5 P1-5 + r6 P1 had identified TOCTOU + retention-driven dangling holes in the soft-FK + reconciler approach.
+- v0.1 is greenfield — no backcompat constraints — so the relocation cost is just running new migrations against a fresh DB.
+- The reconciler design was ~60 lines of doc + would have been ~200 lines of code + a background job. The relocation is ~90 lines across three migrations and zero new background jobs.
+
+**What shipped (migrations 0040 + 0041 + 0042 in `services/ledger/migrations/`)**:
+- `0040_cost_findings.sql`: partitioned cost_findings + cost_findings_fingerprint_keys mirror + cost_findings_upsert SP + cost_findings_touch trigger + cost_findings_ensure_next_month_partition SP. (Moved verbatim from `services/cost_advisor/migrations/01_cost_findings.sql`; only the header was updated.)
+- `0041_cost_baselines.sql`: cost_baselines table for the nightly baseline refresher. (Moved verbatim; only the header.)
+- `0042_approval_requests_cost_findings_fk.sql`: NEW — adds `cost_findings_id_keys` mirror (PK = finding_id alone, needed because partitioned cost_findings PK is (tenant_id, detected_at, finding_id) and Postgres FKs need a UNIQUE target on FK columns), then adds the real FK from approval_requests, then replaces `cost_findings_upsert()` to maintain the new mirror in all three paths (inserted/updated/reinstated).
+
+**What was DELETED**:
+- `services/cost_advisor/migrations/` (directory removed; git mv to the ledger stream).
+- `deploy/demo/init/migrations/21_apply_cost_advisor_migrations.sh` (no longer needed).
+- The bind mount for cost_advisor migrations in `deploy/demo/compose.yaml`.
+- ~60 lines of reconciler design in integration-doc §9 (replaced with a "RESOLVED via CA-P1.6" historical note).
+
+**Invariants now Postgres-enforced** (was reconciler-enforced or unenforced):
+- `approval_requests.proposing_finding_id` must point at a row in `cost_findings_id_keys`. FK with ON DELETE RESTRICT (default).
+- Retention sweeper cannot DELETE a cost_findings row that has any approval_request referencing it; rejected by the FK at DELETE time.
+- The stale-mirror self-heal path in `cost_findings_upsert()` aborts via FK violation if any approval_requests still references the stale finding_id — invariant breach surfaces loudly instead of silently overwriting.
+
+**Why we changed our mind about the "scaling profile" argument**:
+
+The v1 integration-doc §9.3 argued AGAINST relocation:
+> "Audit chain + cost analytics have different scaling profiles."
+
+That was a thin argument even at the time. cost_findings is a small derived analytic — one row per detected waste pattern per tenant per day, bounded by retention policy. It's append-only from a single writer (cost_advisor), which is exactly ledger_transactions' profile. canonical_events is the high-volume append-only table; cost_findings is not. Living in ledger costs nothing.
+
+**Verdict**: net code reduction, net invariant strengthening, net design simplification. Codex r5/r6's identified holes are closed by Postgres FK semantics rather than by application-level reconciliation. v0.1 ships with this layout.

@@ -3,10 +3,14 @@
 //! Orchestrates rule execution for a (tenant, date) bucket:
 //!   1. Build registry from compiled-in rules (registers only those
 //!      whose `is_ready()` returns true so placeholders never run).
-//!   2. For each ready rule, execute its SQL against the ledger DB.
+//!   2. For each ready rule, execute its SQL against the appropriate
+//!      pool (P1 idle_reservation_rate reads ledger; P1.5 rules read
+//!      canonical) via `rule.target_db()`.
 //!   3. Decode result into [`FindingEvidence`] proto + JSONB shape.
-//!   4. UPSERT via `cost_findings_upsert()` SP on the canonical DB
-//!      (spec §11.5 A1 idempotency).
+//!   4. UPSERT via `cost_findings_upsert()` SP on the ledger DB
+//!      (CA-P1.6: cost_findings moved from canonical to ledger to get
+//!      a real Postgres FK with approval_requests; see spec §0.3 +
+//!      integration-doc §9).
 //!
 //! P1 ships exactly one rule (`idle_reservation_rate_v1`). The
 //! registry pattern lets P1.5 add the other 3 rules without touching
@@ -68,6 +72,12 @@ pub fn build_registry() -> Vec<SqlCostRule> {
 /// `propose_patches=true` returns the RFC-6902 patch in the result
 /// row so a CLI caller can show it; it does NOT write an
 /// `approval_requests` row in P1 (gated on owner-ack #53/#54).
+///
+/// CA-P1.6: cost_findings now lives in `spendguard_ledger` (issue
+/// #56 — moved to get a real FK with approval_requests). All
+/// WRITES (cost_findings_upsert SP) go to the ledger pool. READS
+/// still dispatch by rule's target_db() because P1.5 rules read
+/// canonical_events from the canonical pool.
 pub async fn evaluate_tenant_day(
     ledger: &PgPool,
     canonical: &PgPool,
@@ -78,9 +88,7 @@ pub async fn evaluate_tenant_day(
     let mut emitted = Vec::new();
 
     for rule in build_registry() {
-        // Codex CA-P1.5 r1 P1: dispatch each rule to the right pool.
-        // P1's idle_reservation_rate reads ledger; P1.5 rules read
-        // canonical.
+        // Per-rule READ pool (codex CA-P1.5 r1 P1).
         let target_pool = match rule.target_db() {
             TargetDb::Ledger => ledger,
             TargetDb::Canonical => canonical,
@@ -89,7 +97,9 @@ pub async fn evaluate_tenant_day(
             continue;
         };
 
-        let outcome = upsert_finding(canonical, tenant_id, &finding).await?;
+        // WRITE pool is always ledger (CA-P1.6: cost_findings is
+        // ledger-resident; cost_findings_upsert lives in ledger DB).
+        let outcome = upsert_finding(ledger, tenant_id, &finding).await?;
 
         let proposed_patch = if propose_patches {
             build_proposed_patch_for_rule(rule.rule_id(), &finding)
