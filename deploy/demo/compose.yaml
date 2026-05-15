@@ -609,6 +609,10 @@ services:
       SPENDGUARD_DEMO_DATE: "${SPENDGUARD_DEMO_DATE:-}"
       # psql respects PGPASSWORD if a URL component is missing.
       PGPASSWORD: "spendguard_demo"
+      # CA-P3.6: dashboard endpoint — driver POSTs to the operator
+      # UI's REST surface instead of resolve_approval_request via psql.
+      SPENDGUARD_DASHBOARD_URL: "http://dashboard:8090"
+      SPENDGUARD_DASHBOARD_TOKEN: "demo-dashboard-token-replace-in-production"
     entrypoint: ["/bin/bash", "/demo/cost_advisor_demo.sh"]
     volumes:
       - ../../deploy/demo/cost_advisor_demo.sh:/demo/cost_advisor_demo.sh:ro
@@ -621,6 +625,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      dashboard:
+        condition: service_started
     networks: [spendguard-net]
 
 networks:

@@ -162,10 +162,73 @@ log "step 3 OK"
 # ---------------------------------------------------------------------
 # Step 4: resolve approval + verify state transition + trigger
 # ---------------------------------------------------------------------
-log "step 4: resolve approval via resolve_approval_request SP..."
-$PSQL_LEDGER \
-    -v approval_id="$APPROVAL_ID" \
-    -f /demo/cost_advisor_demo_resolve.sql
+log "step 4 (CA-P3.6): resolve approval via dashboard REST API..."
+# Was psql resolve_approval_request — now POSTs to the operator UI's
+# /api/approvals/:id/resolve endpoint so the full operator-facing
+# path is exercised end-to-end. Dashboard handler ultimately calls
+# the same SP under the hood.
+DASHBOARD_URL="${SPENDGUARD_DASHBOARD_URL:?missing SPENDGUARD_DASHBOARD_URL}"
+DASHBOARD_TOKEN="${SPENDGUARD_DASHBOARD_TOKEN:?missing SPENDGUARD_DASHBOARD_TOKEN}"
+
+# Pre-check: detail endpoint should return the row.
+DETAIL=$(curl -sS \
+    -H "Authorization: Bearer $DASHBOARD_TOKEN" \
+    "${DASHBOARD_URL}/api/approvals/${APPROVAL_ID}")
+DETAIL_STATE=$(echo "$DETAIL" | jq -r '.state // "missing"')
+[ "$DETAIL_STATE" = "pending" ] || \
+    fail "dashboard detail says state=$DETAIL_STATE (expected pending); response=$DETAIL"
+DETAIL_SOURCE=$(echo "$DETAIL" | jq -r '.proposal_source // "missing"')
+[ "$DETAIL_SOURCE" = "cost_advisor" ] || \
+    fail "dashboard detail proposal_source=$DETAIL_SOURCE (expected cost_advisor)"
+# Assert evidence is actually returned (codex CA-P3.6 r1 P3 — was
+# just logged 'finding evidence ✓' without checking the field exists).
+EVIDENCE_NULL=$(echo "$DETAIL" | jq -r '.finding_evidence == null')
+[ "$EVIDENCE_NULL" = "false" ] || \
+    fail "dashboard detail.finding_evidence is null (expected the cost_findings.evidence JSONB)"
+EVIDENCE_SCOPE=$(echo "$DETAIL" | jq -r '.finding_evidence.scope.scope_type // "missing"')
+[ "$EVIDENCE_SCOPE" = "budget" ] || \
+    fail "expected finding_evidence.scope.scope_type=budget, got $EVIDENCE_SCOPE"
+log "  dashboard GET /api/approvals/${APPROVAL_ID} returned state=pending + finding_evidence.scope.scope_type=budget ✓"
+
+# Resolve via POST.
+RESOLVE_BODY='{"target_state":"approved","reason":"cost-advisor demo: auto-approve the rotated patch"}'
+RESOLVE_RESP=$(curl -sS \
+    -X POST \
+    -H "Authorization: Bearer $DASHBOARD_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "$RESOLVE_BODY" \
+    "${DASHBOARD_URL}/api/approvals/${APPROVAL_ID}/resolve")
+RESOLVE_FINAL=$(echo "$RESOLVE_RESP" | jq -r '.final_state // "missing"')
+RESOLVE_TRANS=$(echo "$RESOLVE_RESP" | jq -r '.transitioned')
+[ "$RESOLVE_FINAL" = "approved" ] || \
+    fail "dashboard resolve final_state=$RESOLVE_FINAL (expected approved); response=$RESOLVE_RESP"
+[ "$RESOLVE_TRANS" = "true" ] || \
+    fail "dashboard resolve transitioned=$RESOLVE_TRANS (expected true)"
+log "  dashboard POST /api/approvals/${APPROVAL_ID}/resolve → approved (transitioned=true) ✓"
+
+# Verify the DB-level state changed + approval_events audit row written.
+# Psql variable interpolation doesn't penetrate DO $$ blocks (wire bug
+# from the CA-demo work — see cost_advisor_demo_seed.sql); inline the
+# approval_id as a literal via shell instead.
+$PSQL_LEDGER -c "
+DO \$\$
+DECLARE
+    v_state TEXT;
+    v_events INT;
+BEGIN
+    SELECT state INTO v_state FROM approval_requests
+     WHERE approval_id = '${APPROVAL_ID}'::uuid;
+    IF v_state <> 'approved' THEN
+        RAISE EXCEPTION 'expected state=approved after dashboard resolve, got %', v_state;
+    END IF;
+    SELECT COUNT(*) INTO v_events FROM approval_events
+     WHERE approval_id = '${APPROVAL_ID}'::uuid AND to_state = 'approved';
+    IF v_events = 0 THEN
+        RAISE EXCEPTION 'approval_events missing the pending→approved audit row';
+    END IF;
+    RAISE NOTICE 'DB state confirmed: approved + % audit row(s)', v_events;
+END \$\$;
+"
 
 log "step 4 OK"
 
@@ -217,6 +280,7 @@ log "step 5 OK: contract.yaml has reservation_ttl_seconds=45 + demo budget id pr
 
 log "PASS — Cost Advisor closed loop verified end-to-end."
 log "      seed → cost_advisor binary → cost_findings → approval_requests"
-log "      → resolve_approval_request → state=approved + approval_events audit"
+log "      → dashboard GET (operator UI lists + shows evidence)"
+log "      → dashboard POST /api/approvals/:id/resolve → state=approved"
 log "      → bundle_registry LISTEN → patched bundle + new hash published"
 log "      (wire-level NOTIFY delivery also covered by proposal_writer_smoke.rs)"

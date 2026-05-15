@@ -23,8 +23,9 @@ FROM debian:bookworm-slim
 # postgresql-client → psql for seed + verify SQL.
 # jq               → parse spendguard-advise's JSON stdout in the driver script.
 # python3          → cross-platform date math in the driver script (BSD vs GNU date).
+# curl             → POST to dashboard's /api/approvals/:id/resolve (CA-P3.6).
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates libssl3 postgresql-client jq python3 \
+    ca-certificates libssl3 postgresql-client jq python3 curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /spendguard-advise /usr/local/bin/spendguard-advise
