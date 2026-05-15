@@ -393,6 +393,44 @@ services:
         condition: service_completed_successfully
     networks: [spendguard-net]
 
+  # CA-P3.5: bundle_registry LISTENs on approval_requests_state_change,
+  # picks up cost_advisor proposals that transitioned to 'approved',
+  # applies the RFC-6902 patch to the active contract bundle YAML, and
+  # publishes the new .tgz + sig + runtime.env hash back to the
+  # bundles-data volume.
+  #
+  # Sidecar reload semantics (codex CA-P3.5 r1 P1): the sidecar in
+  # v0.1 loads bundles ONLY at startup; bundle_registry's job is to
+  # publish the new bytes + hash. Picking up the new contract
+  # requires a sidecar restart (operator CD pipeline). Hot-reload is
+  # P3.6+ scope.
+  #
+  # Durability: LISTEN/NOTIFY is not durable across restarts; on
+  # startup bundle_registry scans approved cost_advisor proposals and
+  # re-applies them (patch is idempotent — replay-safe).
+  #
+  # Mounts bundles-data READ-WRITE (the only writer besides bundles-init).
+  bundle-registry:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.bundle_registry
+    container_name: spendguard-bundle-registry
+    environment:
+      RUST_LOG:                                                "info,spendguard_bundle_registry=debug"
+      SPENDGUARD_BUNDLE_REGISTRY_LEDGER_DB:                    "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
+      SPENDGUARD_BUNDLE_REGISTRY_CONTRACT_BUNDLE_DIR:          "/var/lib/spendguard/bundles/contract_bundle"
+      SPENDGUARD_BUNDLE_REGISTRY_CONTRACT_BUNDLE_ID:           "${CONTRACT_BUNDLE_ID:-11111111-1111-4111-8111-111111111111}"
+      SPENDGUARD_BUNDLE_REGISTRY_RUNTIME_ENV_PATH:             "/var/lib/spendguard/bundles/runtime.env"
+      SPENDGUARD_BUNDLE_REGISTRY_NOTIFY_CHANNEL:               "approval_requests_state_change"
+    volumes:
+      - bundles-data:/var/lib/spendguard/bundles
+    depends_on:
+      postgres:
+        condition: service_healthy
+      bundles-init:
+        condition: service_completed_successfully
+    networks: [spendguard-net]
+
   webhook-receiver:
     build:
       context: ../..
@@ -577,6 +615,9 @@ services:
       - ../../deploy/demo/cost_advisor_demo_seed.sql:/demo/cost_advisor_demo_seed.sql:ro
       - ../../deploy/demo/cost_advisor_demo_verify.sql:/demo/cost_advisor_demo_verify.sql:ro
       - ../../deploy/demo/cost_advisor_demo_resolve.sql:/demo/cost_advisor_demo_resolve.sql:ro
+      # CA-P3.5: read the rotated bundle to assert bundle_registry
+      # applied the patch. Read-only — only bundle_registry writes here.
+      - bundles-data:/var/lib/spendguard/bundles:ro
     depends_on:
       postgres:
         condition: service_healthy
