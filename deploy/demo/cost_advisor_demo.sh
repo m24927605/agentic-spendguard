@@ -86,6 +86,28 @@ read_hash() {
 OLD_HASH=$(read_hash)
 log "  baseline bundle hash (pre-write-path): ${OLD_HASH:-<unset>}"
 
+# CA-P3.7: also capture the sidecar's reported hash NOW (pre-resolve
+# AND pre-bundle_registry-rotation) so step 6 can assert the sidecar
+# actually rolled forward. bundle_registry's apply latency is ~1s in
+# the demo, so capturing this *after* step 4's resolve was too late —
+# the sidecar's hot_reload watcher (poll cadence 500ms) had already
+# converged by the time step 6 ran, making the "did the sidecar
+# change?" question vacuous.
+SIDECAR_URL="${SPENDGUARD_SIDECAR_HEALTH_URL:-http://sidecar:8080}"
+SIDECAR_BASELINE_HASH=$(curl -sS --max-time 2 "${SIDECAR_URL}/contract" 2>/dev/null \
+    | jq -r '.hash_hex // ""' 2>/dev/null || echo "")
+if [ -z "$SIDECAR_BASELINE_HASH" ] || [ "$SIDECAR_BASELINE_HASH" = "null" ]; then
+    fail "sidecar /contract baseline read failed (sidecar unreachable or no contract loaded). URL=${SIDECAR_URL}"
+fi
+log "  baseline sidecar /contract hash (pre-rotation): ${SIDECAR_BASELINE_HASH}"
+# The sidecar's loaded hash MUST equal OLD_HASH right now — otherwise
+# something else rotated the bundle out from under us before the demo
+# started, which would make the convergence assertion in step 6 fall
+# through trivially.
+if [ "$SIDECAR_BASELINE_HASH" != "$OLD_HASH" ]; then
+    fail "sidecar baseline hash ($SIDECAR_BASELINE_HASH) != runtime.env hash ($OLD_HASH) at demo entry — environment is dirty"
+fi
+
 # ---------------------------------------------------------------------
 # Step 2: invoke spendguard-advise --write-proposals
 # ---------------------------------------------------------------------
@@ -278,9 +300,75 @@ rm -rf "$EXTRACTED_YAML"
 
 log "step 5 OK: contract.yaml has reservation_ttl_seconds=45 + demo budget id preserved"
 
+# ---------------------------------------------------------------------
+# Step 6 (CA-P3.7): verify sidecar hot-reloaded the new contract
+# ---------------------------------------------------------------------
+# Pre-CA-P3.7, this is where the loop terminated — the sidecar would
+# still be running the OLD contract until the operator restarted the
+# pod. CA-P3.7 added a runtime.env watcher (services/sidecar/src/
+# bootstrap/hot_reload.rs) that polls the file every 500ms and
+# atomically swaps the cached bundle when it sees a new hash. This
+# step polls the sidecar's /contract endpoint (added in the same
+# slice) and asserts the reported bundle hash converges to NEW_HASH
+# within ~5s end-to-end (NOTIFY → bundle_registry write → watcher
+# poll → atomic swap).
+log "step 6 (CA-P3.7): poll sidecar /contract until hot-reload converges..."
+
+# Poll for up to 5s. Watcher cadence is 500ms; sub-second convergence
+# is typical once the file write commits. Note that bundle_registry's
+# apply path is fast enough that the sidecar may have ALREADY swapped
+# by the time we read /contract for the first time — that's a valid
+# pass and we don't fail on it. What matters is:
+#   * The sidecar's reported hash NOW equals NEW_HASH (loop body), AND
+#   * SIDECAR_BASELINE_HASH captured pre-rotation differs from NEW_HASH
+#     (asserted below) — which together prove the swap actually
+#     happened against this run's rotation.
+WAIT_SECS=0
+RELOAD_OK=""
+SIDECAR_HASH=""
+while [ "$WAIT_SECS" -lt 10 ]; do
+    SIDECAR_RESP=$(curl -sS --max-time 2 "${SIDECAR_URL}/contract" 2>/dev/null || echo "")
+    SIDECAR_HASH=$(echo "$SIDECAR_RESP" | jq -r '.hash_hex // "missing"' 2>/dev/null || echo "missing")
+    if [ "$SIDECAR_HASH" = "$NEW_HASH" ]; then
+        RELOAD_OK="yes"
+        break
+    fi
+    # 500ms granularity matches the watcher's poll cadence.
+    sleep 0.5
+    WAIT_SECS=$(awk "BEGIN { printf \"%.1f\", $WAIT_SECS + 0.5 }")
+done
+
+if [ -z "$RELOAD_OK" ]; then
+    fail "sidecar did not hot-reload within ~${WAIT_SECS}s (current=${SIDECAR_HASH} expected=${NEW_HASH})"
+fi
+log "  sidecar /contract reports hash=${NEW_HASH} after ~${WAIT_SECS}s"
+
+# No-op rotation guard: bit-identical-bytes rotations are already
+# filtered upstream by `bundle_registry::apply::process_approval`
+# (services/bundle_registry/src/apply.rs ~L88: "Idempotent re-run...
+# skipping write"). That means runtime.env is never touched on a
+# no-op, so step 5's `NEW_HASH != OLD_HASH` poll either succeeds
+# (genuine rotation) or fails (no rotation happened in 10s). By
+# transitivity with step-1's `SIDECAR_BASELINE_HASH == OLD_HASH`
+# precondition, reaching this line proves SIDECAR_BASELINE_HASH !=
+# NEW_HASH without a redundant check (codex CA-P3.7 r1 P2-4).
+
+# Belt-and-suspenders cross-check: the sidecar's reported hash must
+# match what's currently on disk in runtime.env (defends against the
+# sidecar racing a half-written runtime.env that bundle_registry then
+# overwrote again — extremely unlikely in v0.1 single-writer mode but
+# cheap to assert).
+ON_DISK_HASH=$(read_hash)
+[ "$ON_DISK_HASH" = "$SIDECAR_HASH" ] || \
+    fail "sidecar /contract hash ($SIDECAR_HASH) differs from runtime.env hash ($ON_DISK_HASH)"
+
+log "step 6 OK: sidecar hot-reloaded the rotated contract bundle"
+log "         (pre-rotation sidecar hash=$SIDECAR_BASELINE_HASH; post-rotation=$NEW_HASH)"
+
 log "PASS — Cost Advisor closed loop verified end-to-end."
 log "      seed → cost_advisor binary → cost_findings → approval_requests"
 log "      → dashboard GET (operator UI lists + shows evidence)"
 log "      → dashboard POST /api/approvals/:id/resolve → state=approved"
 log "      → bundle_registry LISTEN → patched bundle + new hash published"
+log "      → sidecar runtime.env watcher → atomic bundle swap (CA-P3.7)"
 log "      (wire-level NOTIFY delivery also covered by proposal_writer_smoke.rs)"

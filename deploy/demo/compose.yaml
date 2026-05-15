@@ -627,6 +627,12 @@ services:
         condition: service_healthy
       dashboard:
         condition: service_started
+      # CA-P3.7 step 6 polls sidecar:8080/contract to assert the
+      # hot-reload watcher swapped the rotated bundle. The /readyz
+      # healthcheck waits for contract_bundle + fencing + manifest,
+      # which is exactly what /contract needs to return a real hash.
+      sidecar:
+        condition: service_healthy
     networks: [spendguard-net]
 
 networks:
