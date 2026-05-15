@@ -19,15 +19,17 @@
 use anyhow::{Context, Result};
 use axum::{
     response::{IntoResponse, Json},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use serde::Deserialize;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+mod forward;
 mod redacted_auth;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -64,7 +66,9 @@ async fn main() -> Result<()> {
 
     info!(bind_addr = %cfg.bind_addr, "spendguard-egress-proxy starting (slice 2 skeleton)");
 
-    let app = build_app();
+    let forward_state =
+        Arc::new(forward::ForwardState::new().context("build reqwest client")?);
+    let app = build_app(forward_state);
     let addr: SocketAddr = cfg.bind_addr.parse().context("parse bind_addr")?;
 
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -93,9 +97,11 @@ fn init_tracing() {
         .init();
 }
 
-fn build_app() -> Router {
+fn build_app(forward_state: Arc<forward::ForwardState>) -> Router {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/v1/chat/completions", post(forward::chat_completions))
+        .with_state(forward_state)
         .layer(
             // Defense layer 1 per spec §8: do NOT include headers in
             // request spans. RedactedAuth (defense layer 2) is the
@@ -118,9 +124,14 @@ mod tests {
     };
     use tower::ServiceExt;
 
+    fn test_app() -> Router {
+        let state = Arc::new(forward::ForwardState::new().expect("reqwest client"));
+        build_app(state)
+    }
+
     #[tokio::test]
     async fn healthz_returns_ok() {
-        let app = build_app();
+        let app = test_app();
         let req = Request::builder()
             .method(Method::GET)
             .uri("/healthz")
@@ -137,7 +148,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_route_returns_404() {
-        let app = build_app();
+        let app = test_app();
         let req = Request::builder()
             .method(Method::GET)
             .uri("/nonexistent")
