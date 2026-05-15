@@ -583,6 +583,33 @@ services:
     networks: [spendguard-net]
 
   # ---------------------------------------------------------------------
+  # Auto-instrument egress proxy (Slice 2 skeleton). Spec:
+  # docs/specs/auto-instrument-egress-proxy-spec.md v7. v0.1 binds
+  # 127.0.0.1 inside container; compose exposes 9000:9000 for host
+  # OPENAI_BASE_URL=http://localhost:9000/v1 testing. Future slices
+  # add sidecar UDS client + OpenAI forwarding.
+  # ---------------------------------------------------------------------
+  egress-proxy:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.egress_proxy
+    container_name: spendguard-egress-proxy
+    environment:
+      RUST_LOG:                                "info,spendguard_egress_proxy=debug"
+      # Slice 2: bind 0.0.0.0 inside container; compose port-mapping
+      # exposes to host loopback only. Production deployments override.
+      SPENDGUARD_EGRESS_PROXY_BIND_ADDR:        "0.0.0.0:9000"
+    ports:
+      - "127.0.0.1:9000:9000"
+    networks: [spendguard-net]
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:9000/healthz | grep -q '\"ok\":true'"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  # ---------------------------------------------------------------------
   # DEMO_MODE=cost_advisor — closed-loop driver. One-shot container
   # (like `demo`) that:
   #   step 0. pre-check for prior demo state (fail-loud if not fresh)
