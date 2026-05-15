@@ -1,20 +1,25 @@
 //! `spendguard-egress-proxy` — auto-instrument HTTP proxy for SpendGuard.
 //!
-//! Slice 2 deliverable: crate skeleton + /healthz. NO SpendGuard
-//! gating logic yet; slice 4 wires the sidecar UDS client + 429-on-STOP.
+//! Slices 2-3 shipped:
+//! - Slice 2: crate skeleton + /healthz + RedactedAuth newtype +
+//!   tracing config + spendguard-ids shared crate
+//! - Slice 3: POST /v1/chat/completions forwarder (byte-identical body,
+//!   stream=true → 501, upstream SSE response → 502, header allowlist).
+//!   NO SpendGuard gating yet — slice 4 wires the sidecar UDS client +
+//!   429-on-STOP fail-closed routing.
 //!
 //! See `docs/specs/auto-instrument-egress-proxy-spec.md` v7 for the
-//! full design. Slice 2 implementer's reading list per §15 row 2:
-//! §0 + §2 + §3 + §4.1/§4.1.5 + §8 + §15 row 2.
+//! full design.
 //!
-//! Acceptance criteria (codex r6 §10 + slice 2 row):
-//! - `cargo check -p spendguard-egress-proxy` returns 0
-//! - `cargo test -p spendguard-egress-proxy` returns 0
-//! - rustls::crypto::aws_lc_rs::default_provider().install_default()
+//! Acceptance criteria invariants enforced here:
+//! - `rustls::crypto::aws_lc_rs::default_provider().install_default()`
 //!   invoked before any TLS construction (F1 backport pattern)
-//! - tracing layer config drops Authorization header from spans
-//! - RedactedAuth newtype prevents Display/Debug leak (structural)
-//! - GET /healthz returns 200 + `{"ok": true}`
+//! - tracing layer drops Authorization header from spans
+//!   (`DefaultMakeSpan::new().include_headers(false)`)
+//! - RedactedAuth newtype prevents Display/Debug/Serialize leak
+//!   (structural compile-time guarantee — see redacted_auth.rs)
+//! - `expose_secret()` called exactly once (audit grep target;
+//!   forward.rs upstream HTTP request construction)
 
 use anyhow::{Context, Result};
 use axum::{
