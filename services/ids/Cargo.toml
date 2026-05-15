@@ -1,0 +1,18 @@
+[package]
+name = "spendguard-ids"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "Cross-language deterministic ID derivation for SpendGuard: blake2b-128 signatures + UUIDv4-shape derive_uuid_from_signature. Byte-equivalent with sdk/python/src/spendguard/ids.py."
+
+[lib]
+name = "spendguard_ids"
+path = "src/lib.rs"
+
+[dependencies]
+blake2 = "0.10"
+uuid = { version = "1", features = ["v4", "serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+thiserror = "1"
+hex = "0.4"
