@@ -7,7 +7,7 @@ use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
 use spendguard_sidecar::{
-    bootstrap::{catalog, trust},
+    bootstrap::{catalog, hot_reload, trust},
     clients::{
         canonical_ingest::CanonicalIngestClient, ledger::LedgerClient, mtls::MTlsPaths,
     },
@@ -136,6 +136,22 @@ async fn main() -> Result<()> {
     //     them; Phase 2 will pull from Bundle Registry at startup).
     install_bundles(&cfg, &state)?;
     info!("contract + schema bundles installed");
+
+    // 2b.1) CA-P3.7: spawn the runtime.env hot-reload watcher. Tracks
+    //       bundle_registry rotations and atomically swaps the cached
+    //       Contract DSL bundle when a new hash is published. Set
+    //       SPENDGUARD_SIDECAR_HOT_RELOAD_POLL_MS=0 to disable.
+    //
+    //       Fail-fast on misconfig (codex CA-P3.7 r1 P1-2): a bad
+    //       SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_ID would otherwise
+    //       silently disable the watcher, leaving a closed-loop
+    //       rotation visible only on /contract diff vs runtime.env.
+    if cfg.hot_reload_poll_ms > 0 {
+        hot_reload::spawn_loop(&cfg, state.clone())
+            .context("CA-P3.7: failed to start hot-reload watcher")?;
+    } else {
+        info!("CA-P3.7: hot-reload watcher disabled (hot_reload_poll_ms=0)");
+    }
 
     // 2c) Phase 5 S4: acquire fencing lease via Ledger RPC.
     //     SPENDGUARD_SIDECAR_LEASE_MODE controls behavior:
@@ -453,24 +469,44 @@ async fn run_health_server(addr: String, state: SidecarState) {
                 let state = state.clone();
                 async move {
                     let path = req.uri().path();
-                    let (status, body) = match path {
-                        "/healthz" => (200, "ok"),
+                    let (status, content_type, body) = match path {
+                        "/healthz" => (200, "text/plain; charset=utf-8", "ok".to_string()),
                         "/readyz" => {
                             if state.inner.contract_bundle.read().is_some()
                                 && state.inner.fencing.read().is_some()
                                 && state.inner.last_manifest_verified_at.read().is_some()
                                 && !state.is_draining()
                             {
-                                (200, "ready")
+                                (200, "text/plain; charset=utf-8", "ready".to_string())
                             } else {
-                                (503, "not ready")
+                                (503, "text/plain; charset=utf-8", "not ready".to_string())
                             }
                         }
-                        _ => (404, "not found"),
+                        // CA-P3.7: surface the currently-loaded contract
+                        // bundle's id + hash so external observers
+                        // (cost_advisor demo, operator dashboards) can
+                        // tell when a hot-reload has converged. Reads
+                        // are non-blocking — they clone the cached
+                        // values out from under a `parking_lot::RwLock`
+                        // read guard, never the gRPC-hot-path
+                        // `decision/transaction.rs` clone.
+                        "/contract" => {
+                            let body = match state.inner.contract_bundle.read().as_ref() {
+                                Some(b) => format!(
+                                    "{{\"bundle_id\":\"{}\",\"hash_hex\":\"{}\"}}",
+                                    b.bundle_id,
+                                    hex::encode(&b.bundle_hash)
+                                ),
+                                None => "{\"bundle_id\":null,\"hash_hex\":null}".to_string(),
+                            };
+                            (200, "application/json", body)
+                        }
+                        _ => (404, "text/plain; charset=utf-8", "not found".to_string()),
                     };
                     Ok::<_, Infallible>(
                         hyper::Response::builder()
                             .status(status)
+                            .header("content-type", content_type)
                             .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
                             .unwrap(),
                     )
