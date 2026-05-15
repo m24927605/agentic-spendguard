@@ -30,12 +30,13 @@ ifeq ($(DEMO_MODE),ttl_sweep)
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    ttl-sweeper outbox-forwarder
 else ifeq ($(DEMO_MODE),cost_advisor)
-	@echo "[demo] DEMO_MODE=cost_advisor → minimal core (postgres + ledger + bundle-registry)."
+	@echo "[demo] DEMO_MODE=cost_advisor → minimal core (postgres + ledger + bundle-registry + dashboard)."
 	@echo "[demo] cost_advisor reads ledger directly. bundle-registry LISTENs on NOTIFY"
-	@echo "[demo] and applies the approved patch to the contract bundle YAML."
+	@echo "[demo] and applies the approved patch. dashboard exposes the operator-facing"
+	@echo "[demo] approval UI; the demo driver POSTs to /api/approvals/:id/resolve."
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
-	    endpoint-catalog ledger bundle-registry
+	    endpoint-catalog ledger bundle-registry dashboard
 else
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \

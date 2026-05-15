@@ -30,6 +30,12 @@ pub enum Route {
     ApiDenyStats,
     ApiOutboxHealth,
     ApiAuditExport,
+    /// CA-P3.6: GET /api/approvals (list pending cost_advisor).
+    ApiApprovalsList,
+    /// CA-P3.6: GET /api/approvals/:id (detail w/ patch + evidence).
+    ApiApprovalsDetail,
+    /// CA-P3.6: POST /api/approvals/:id/resolve (operator resolve).
+    ApiApprovalsResolve,
     Other,
 }
 
@@ -43,6 +49,9 @@ impl Route {
             Self::ApiDenyStats => "api_deny_stats",
             Self::ApiOutboxHealth => "api_outbox_health",
             Self::ApiAuditExport => "api_audit_export",
+            Self::ApiApprovalsList => "api_approvals_list",
+            Self::ApiApprovalsDetail => "api_approvals_detail",
+            Self::ApiApprovalsResolve => "api_approvals_resolve",
             Self::Other => "other",
         }
     }
@@ -56,6 +65,11 @@ impl Route {
             (&Method::GET, "/api/deny-stats") => Self::ApiDenyStats,
             (&Method::GET, "/api/outbox-health") => Self::ApiOutboxHealth,
             (&Method::GET, "/api/audit/export") => Self::ApiAuditExport,
+            // CA-P3.6: axum's matched-path emits the route template
+            // (`:id`) verbatim — see http://docs.rs/axum/.../MatchedPath.
+            (&Method::GET, "/api/approvals") => Self::ApiApprovalsList,
+            (&Method::GET, "/api/approvals/:id") => Self::ApiApprovalsDetail,
+            (&Method::POST, "/api/approvals/:id/resolve") => Self::ApiApprovalsResolve,
             _ => Self::Other,
         }
     }
@@ -76,7 +90,8 @@ impl Outcome {
     }
 }
 
-const ROUTE_COUNT: usize = 8;
+// CA-P3.6: +3 for the approval endpoints (List, Detail, Resolve).
+const ROUTE_COUNT: usize = 11;
 
 #[derive(Default)]
 pub struct DashboardMetricsInner {
@@ -134,6 +149,9 @@ const ALL_ROUTES: &[Route] = &[
     Route::ApiDenyStats,
     Route::ApiOutboxHealth,
     Route::ApiAuditExport,
+    Route::ApiApprovalsList,
+    Route::ApiApprovalsDetail,
+    Route::ApiApprovalsResolve,
     Route::Other,
 ];
 
@@ -146,7 +164,11 @@ fn route_index(r: Route) -> usize {
         Route::ApiDenyStats => 4,
         Route::ApiOutboxHealth => 5,
         Route::ApiAuditExport => 6,
-        Route::Other => 7,
+        // CA-P3.6: approval endpoints.
+        Route::ApiApprovalsList => 7,
+        Route::ApiApprovalsDetail => 8,
+        Route::ApiApprovalsResolve => 9,
+        Route::Other => 10,
     }
 }
 

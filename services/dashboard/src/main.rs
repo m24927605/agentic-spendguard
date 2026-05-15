@@ -30,7 +30,7 @@ use axum::{
     http::StatusCode,
     middleware::from_fn_with_state,
     response::{Html, IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -145,6 +145,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/outbox-health", get(api_outbox_health))
         // Phase 5 GA hardening S9: audit export endpoint.
         .route("/api/audit/export", get(api_audit_export))
+        // CA-P3.6: cost_advisor approval rendering + operator resolve.
+        .route("/api/approvals", get(api_approvals_list))
+        .route("/api/approvals/:id", get(api_approval_detail))
+        .route("/api/approvals/:id/resolve", post(api_approval_resolve))
         .layer(from_fn_with_state(auth.clone(), spendguard_auth::require_auth));
 
     let app = Router::new()
@@ -255,6 +259,41 @@ const INDEX_HTML: &str = r#"<!doctype html>
   <h2>4. Outbox forwarder health</h2>
   <section><pre id="outbox-health" class="stale">loading…</pre></section>
 
+  <h2>5. Cost Advisor approvals (pending)</h2>
+  <section>
+    <div id="approvals-list" class="stale">loading…</div>
+    <div id="approval-detail" style="display:none; margin-top:1rem;
+         padding-top:1rem; border-top:1px solid #ddd;">
+      <h3 style="font-size:0.9rem; margin:0 0 0.5rem 0;">
+        Selected approval <code id="approval-detail-id"></code>
+      </h3>
+      <pre id="approval-detail-body"></pre>
+      <div style="margin-top:0.75rem;">
+        <label style="display:block; font-size:0.85rem; margin-bottom:0.25rem;">
+          Reason (required, max 1024 chars):
+        </label>
+        <input id="approval-reason" type="text"
+               style="width:100%; padding:0.4rem; font-size:0.85rem;
+                      box-sizing:border-box; border:1px solid #ccc;
+                      border-radius:3px;">
+      </div>
+      <div style="margin-top:0.5rem;">
+        <button id="btn-approve" type="button"
+                style="background:#2a7; color:white; border:0; padding:0.4rem 1rem;
+                       border-radius:3px; cursor:pointer; margin-right:0.5rem;">
+          Approve
+        </button>
+        <button id="btn-deny" type="button"
+                style="background:#c33; color:white; border:0; padding:0.4rem 1rem;
+                       border-radius:3px; cursor:pointer;">
+          Deny
+        </button>
+        <span id="approval-action-result" style="margin-left:1rem;
+              font-size:0.85rem;"></span>
+      </div>
+    </div>
+  </section>
+
   <script>
     const token = window.prompt("Bearer token (one-time, not stored):");
     const headers = token
@@ -276,6 +315,106 @@ const INDEX_HTML: &str = r#"<!doctype html>
     load("/api/decisions",    "decisions");
     load("/api/deny-stats",   "deny-stats");
     load("/api/outbox-health","outbox-health");
+
+    // ---- CA-P3.6: approvals listing + resolve ----------------------
+    let selectedApproval = null;
+
+    async function loadApprovals() {
+      const el = document.getElementById("approvals-list");
+      try {
+        const r = await fetch("/api/approvals", { headers });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        if (!Array.isArray(j) || j.length === 0) {
+          el.textContent = "(no pending cost_advisor approvals)";
+          el.classList.remove("stale", "fail");
+          return;
+        }
+        const rows = j.map(a =>
+          `<div style="margin-bottom:0.4rem; font-family:ui-monospace,monospace;
+                       font-size:0.8rem;">
+             <button type="button" data-id="${a.approval_id}"
+                     class="approval-view-btn"
+                     style="background:#fff; border:1px solid #aaa;
+                            padding:0.2rem 0.6rem; cursor:pointer;
+                            margin-right:0.5rem;">View</button>
+             <code>${a.approval_id}</code> — finding
+             <code>${a.proposing_finding_id || "(none)"}</code> —
+             created ${a.created_at}
+           </div>`
+        ).join("");
+        el.innerHTML = rows;
+        el.classList.remove("stale", "fail");
+        document.querySelectorAll(".approval-view-btn").forEach(b => {
+          b.addEventListener("click", () => viewApproval(b.dataset.id));
+        });
+      } catch (e) {
+        el.textContent = "error: " + e;
+        el.classList.add("fail");
+      }
+    }
+
+    async function viewApproval(id) {
+      const wrap = document.getElementById("approval-detail");
+      const body = document.getElementById("approval-detail-body");
+      const idEl = document.getElementById("approval-detail-id");
+      const resultEl = document.getElementById("approval-action-result");
+      idEl.textContent = id;
+      body.textContent = "loading…";
+      wrap.style.display = "block";
+      resultEl.textContent = "";
+      selectedApproval = id;
+      try {
+        const r = await fetch("/api/approvals/" + encodeURIComponent(id),
+                              { headers });
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        const j = await r.json();
+        body.textContent = JSON.stringify(j, null, 2);
+      } catch (e) {
+        body.textContent = "error: " + e;
+      }
+    }
+
+    async function resolveApproval(targetState) {
+      if (!selectedApproval) return;
+      const reason = document.getElementById("approval-reason").value.trim();
+      if (!reason) {
+        document.getElementById("approval-action-result").textContent =
+          "reason required";
+        return;
+      }
+      try {
+        const r = await fetch(
+          "/api/approvals/" + encodeURIComponent(selectedApproval) + "/resolve",
+          {
+            method: "POST",
+            headers: { ...headers, "Content-Type": "application/json" },
+            body: JSON.stringify({ target_state: targetState, reason }),
+          }
+        );
+        const j = await r.json();
+        document.getElementById("approval-action-result").textContent =
+          r.ok ? `→ ${j.final_state} (transitioned=${j.transitioned})`
+               : `error: HTTP ${r.status}`;
+        if (r.ok) {
+          await loadApprovals();
+          if (j.transitioned) {
+            document.getElementById("approval-detail").style.display = "none";
+            selectedApproval = null;
+          }
+        }
+      } catch (e) {
+        document.getElementById("approval-action-result").textContent =
+          "error: " + e;
+      }
+    }
+
+    document.getElementById("btn-approve")
+      .addEventListener("click", () => resolveApproval("approved"));
+    document.getElementById("btn-deny")
+      .addEventListener("click", () => resolveApproval("denied"));
+
+    loadApprovals();
   </script>
 </body>
 </html>"#;
@@ -796,5 +935,335 @@ async fn api_audit_export(
         ("x-spendguard-audit-export", "v1"),
     ], body)
         .into_response())
+}
+
+// =====================================================================
+// CA-P3.6: cost_advisor approval rendering — list / detail / resolve.
+// =====================================================================
+//
+// The dashboard reads approval_requests + cost_findings directly from
+// the ledger DB (same pattern as the other /api/* endpoints). Auth:
+// `Permission::ApprovalResolve` required for ALL three endpoints
+// (codex round-13 P2 tightened these on control_plane; dashboard
+// follows the same boundary).
+//
+// The resolve endpoint invokes the `resolve_approval_request` SP —
+// the canonical state-transition path that fires the
+// `approval_requests_state_change_notify` trigger, which
+// bundle_registry picks up via PgListener.
+
+#[derive(Serialize)]
+struct ApprovalSummary {
+    approval_id: Uuid,
+    decision_id: Uuid,
+    state: String,
+    proposing_finding_id: Option<Uuid>,
+    ttl_expires_at: chrono::DateTime<chrono::Utc>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn api_approvals_list(
+    Extension(principal): Extension<Principal>,
+    State(state): State<Arc<AppState>>,
+) -> Result<Response, StatusCode> {
+    if principal.require(Permission::ApprovalResolve).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if principal.assert_tenant(&state.tenant_id.to_string()).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            Option<Uuid>,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
+        r#"
+        SELECT approval_id, decision_id, state, proposing_finding_id,
+               ttl_expires_at, created_at
+          FROM approval_requests
+         WHERE tenant_id = $1
+           AND proposal_source = 'cost_advisor'
+           AND state = 'pending'
+         ORDER BY created_at DESC
+         LIMIT 50
+        "#,
+    )
+    .bind(state.tenant_id)
+    .fetch_all(&state.pg)
+    .await
+    .map_err(|e| {
+        info!(err = %e, "approvals_list query failed");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let out: Vec<ApprovalSummary> = rows
+        .into_iter()
+        .map(
+            |(aid, did, st, finding, ttl, ct)| ApprovalSummary {
+                approval_id: aid,
+                decision_id: did,
+                state: st,
+                proposing_finding_id: finding,
+                ttl_expires_at: ttl,
+                created_at: ct,
+            },
+        )
+        .collect();
+    Ok(Json(out).into_response())
+}
+
+#[derive(Serialize)]
+struct ApprovalDetail {
+    approval_id: Uuid,
+    tenant_id: Uuid,
+    decision_id: Uuid,
+    state: String,
+    proposal_source: String,
+    proposed_dsl_patch: Option<serde_json::Value>,
+    proposing_finding_id: Option<Uuid>,
+    /// Finding evidence joined from cost_findings (NULL when the
+    /// approval is sidecar_decision-sourced or the finding has been
+    /// retention-swept).
+    finding_evidence: Option<serde_json::Value>,
+    ttl_expires_at: chrono::DateTime<chrono::Utc>,
+    created_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn api_approval_detail(
+    Extension(principal): Extension<Principal>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Response, StatusCode> {
+    if principal.require(Permission::ApprovalResolve).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let approval_uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    let row: Option<(
+        Uuid,
+        Uuid,
+        Uuid,
+        String,
+        String,
+        Option<serde_json::Value>,
+        Option<Uuid>,
+        chrono::DateTime<chrono::Utc>,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        r#"
+        SELECT approval_id, tenant_id, decision_id, state, proposal_source,
+               proposed_dsl_patch, proposing_finding_id,
+               ttl_expires_at, created_at
+          FROM approval_requests
+         WHERE approval_id = $1
+        "#,
+    )
+    .bind(approval_uuid)
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let Some(detail) = row else {
+        // Information-leak avoidance: 403 rather than 404 so an
+        // attacker can't probe approval_id existence (mirrors
+        // control_plane's `get_approval` handler).
+        return Err(StatusCode::FORBIDDEN);
+    };
+
+    // Tenant scope check uses the row's tenant_id (NOT a query param).
+    if principal.assert_tenant(&detail.1.to_string()).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    // Join with cost_findings for the evidence JSON (cost_advisor rows
+    // carry this; sidecar_decision rows don't).
+    let finding_evidence: Option<serde_json::Value> = if let Some(fid) = detail.6 {
+        sqlx::query_scalar::<_, serde_json::Value>(
+            "SELECT evidence FROM cost_findings WHERE finding_id = $1",
+        )
+        .bind(fid)
+        .fetch_optional(&state.pg)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    } else {
+        None
+    };
+
+    Ok(Json(ApprovalDetail {
+        approval_id: detail.0,
+        tenant_id: detail.1,
+        decision_id: detail.2,
+        state: detail.3,
+        proposal_source: detail.4,
+        proposed_dsl_patch: detail.5,
+        proposing_finding_id: detail.6,
+        finding_evidence,
+        ttl_expires_at: detail.7,
+        created_at: detail.8,
+    })
+    .into_response())
+}
+
+#[derive(Deserialize)]
+struct ResolveBody {
+    target_state: String,
+    reason: String,
+}
+
+#[derive(Serialize)]
+struct ResolveResp {
+    approval_id: Uuid,
+    final_state: String,
+    transitioned: bool,
+    event_id: Option<Uuid>,
+}
+
+/// Resolve a cost_advisor approval via the dashboard UI.
+///
+/// **Scope (codex CA-P3.6 r1 P1)**: this endpoint is restricted to
+/// `proposal_source='cost_advisor'` rows. sidecar_decision approvals
+/// have non-trivial `approver_policy` (per-rule approver_role from
+/// the contract DSL) and tighter TTLs that control_plane's resolve
+/// handler enforces. cost_advisor proposals are inserted by
+/// `cost_advisor_create_proposal` SP with `approver_policy='{}'`
+/// (no per-policy restriction) so the policy-check gap that would
+/// exist for sidecar_decision doesn't apply here. Any sidecar_decision
+/// row will return 404 from this endpoint; operators resolve those
+/// via `control_plane.POST /v1/approvals/:id/resolve`.
+///
+/// TTL guard: mirrors control_plane's r3 P1 — reject 409 if
+/// state=pending and ttl_expires_at has passed.
+///
+/// Error mapping: SP transition errors → 409 Conflict (not 500),
+/// matching control_plane semantics.
+async fn api_approval_resolve(
+    Extension(principal): Extension<Principal>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    Json(body): Json<ResolveBody>,
+) -> Result<Response, StatusCode> {
+    if principal.require(Permission::ApprovalResolve).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let approval_uuid = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+
+    if body.target_state != "approved" && body.target_state != "denied" {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let reason_trimmed = body.reason.trim();
+    if reason_trimmed.is_empty() || reason_trimmed.len() > 1024 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    // Pre-check: cost_advisor scope + tenant + state + TTL.
+    let row: Option<(
+        Uuid,
+        String,
+        String,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT tenant_id, state, proposal_source, ttl_expires_at \
+           FROM approval_requests WHERE approval_id = $1",
+    )
+    .bind(approval_uuid)
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let Some((row_tenant, row_state, row_source, ttl_expires_at)) = row else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if principal.assert_tenant(&row_tenant.to_string()).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if row_source != "cost_advisor" {
+        // Out of scope for this endpoint. Return 403 (same as for
+        // missing rows + cross-tenant) to avoid leaking existence
+        // info to a probe.
+        info!(
+            subject = %principal.subject,
+            approval_id = %approval_uuid,
+            row_source = %row_source,
+            "dashboard resolve rejected — non-cost_advisor proposal must resolve via control_plane"
+        );
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // Idempotency: if already terminal AND target matches, return
+    // 200 transitioned=false. If target differs from current terminal
+    // state, that's a conflict (409).
+    if row_state != "pending" {
+        if row_state == body.target_state {
+            return Ok(Json(ResolveResp {
+                approval_id: approval_uuid,
+                final_state: row_state,
+                transitioned: false,
+                event_id: None,
+            })
+            .into_response());
+        }
+        return Err(StatusCode::CONFLICT);
+    }
+    // TTL guard for pending rows (mirrors control_plane r3 P1).
+    if ttl_expires_at <= chrono::Utc::now() {
+        info!(
+            subject = %principal.subject,
+            approval_id = %approval_uuid,
+            ttl_expires_at = %ttl_expires_at,
+            "dashboard resolve rejected — approval expired (TTL passed)"
+        );
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let result: Result<
+        (String, bool, Option<Uuid>),
+        sqlx::Error,
+    > = sqlx::query_as(
+        r#"
+        SELECT final_state, transitioned, event_id
+          FROM resolve_approval_request($1::uuid, $2::text, $3::text, $4::text, $5::text)
+        "#,
+    )
+    .bind(approval_uuid)
+    .bind(&body.target_state)
+    .bind(&principal.subject)
+    .bind(&principal.issuer)
+    .bind(reason_trimmed)
+    .fetch_one(&state.pg)
+    .await;
+
+    let (final_state, transitioned, event_id) = match result {
+        Ok(row) => row,
+        Err(e) => {
+            // SP signals invalid-state-transition via a typed error.
+            // Map to 409 (not 500) so the client knows the row state
+            // changed under them. control_plane uses the same pattern.
+            info!(err = %e, approval_id = %approval_uuid, "resolve_approval_request SP error");
+            return Err(StatusCode::CONFLICT);
+        }
+    };
+
+    info!(
+        subject = %principal.subject,
+        approval_id = %approval_uuid,
+        target_state = %body.target_state,
+        final_state = %final_state,
+        transitioned,
+        "CA-P3.6: cost_advisor approval resolved via dashboard"
+    );
+
+    Ok(Json(ResolveResp {
+        approval_id: approval_uuid,
+        final_state,
+        transitioned,
+        event_id,
+    })
+    .into_response())
 }
 
