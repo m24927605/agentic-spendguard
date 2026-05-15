@@ -1,13 +1,38 @@
 # spendguard-bundle-registry
 
+Two concerns live in this directory:
+
+1. **Closed-loop applicator service binary (v0.1, CA-P3.5)** — the
+   Rust crate at `src/` builds `spendguard-bundle-registry` which
+   LISTENs on Postgres channel `approval_requests_state_change`,
+   picks up approved cost_advisor proposals, applies their RFC-6902
+   patches to the active contract bundle YAML, and re-publishes the
+   new .tgz + sha256 to the bundles volume. Run by docker compose
+   as the `bundle-registry` service in `DEMO_MODE=cost_advisor`.
+   See the Rust crate's module docs for full semantics: no
+   hot-reload in v0.1 (sidecar restart picks up new contract),
+   durability via startup recovery scan, etc.
+2. **OCI distribution pipeline (v0.2+ design surface)** — bundles
+   signed in CI, published to OCI registry, sidecars pull + verify
+   cosign signatures. Documented below. Not yet implemented.
+
+The legacy OCI-pipeline description below is the v0.2+ target. The
+v0.1 closed loop ships ahead of OCI plumbing because it's the only
+piece that turns approved cost_advisor proposals into actual
+contract changes on disk.
+
+---
+
+## v0.2+ OCI distribution pipeline (design only — not yet implemented)
+
 OCI-based bundle distribution for the Agentic SpendGuard Phase 1 first-customer
 (K8s SaaS-managed) POC.
 
-This is **not** a custom service binary. It is a *distribution pipeline*
-built on existing OCI registry + Sigstore cosign infrastructure. The
-SpendGuard control plane signs bundles in CI and publishes them to a
-registry; sidecars pull + verify cosign signatures against a Helm-pinned
-trust root.
+This is **not** a custom service binary in the OCI design — it's a
+*distribution pipeline* built on existing OCI registry + Sigstore
+cosign infrastructure. The SpendGuard control plane signs bundles in
+CI and publishes them to a registry; sidecars pull + verify cosign
+signatures against a Helm-pinned trust root.
 
 ## Spec map
 

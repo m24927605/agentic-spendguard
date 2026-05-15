@@ -1,0 +1,45 @@
+[package]
+name = "spendguard-bundle-registry"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard Bundle Registry: LISTENs on approval_requests_state_change for approved cost_advisor proposals; applies the RFC-6902 contract DSL patch to the active bundle YAML; re-bundles deterministically; publishes the new bytes + sha256 to the bundles volume. In v0.1 the sidecar loads bundles only at startup, so picking up the new contract requires a sidecar restart via the operator's CD pipeline (hot-reload is P3.6+ scope). Closes the Cost Advisor v0.1 publish surface (CA-P3.5)."
+
+[[bin]]
+name = "spendguard-bundle-registry"
+path = "src/main.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+# RFC-6902 patch application. v3.x handles test/replace/add/remove/copy/move.
+json-patch = "3"
+
+# Bundle .tgz handling — matches the deterministic flags in
+# deploy/demo/init/bundles/generate.sh (--sort=name --owner=0 --group=0
+# --mtime='UTC 1970-01-01').
+tar = "0.4"
+flate2 = "1"
+
+sha2 = "0.10"
+hex = "0.4"
+
+uuid = { version = "1", features = ["v7", "v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+envy = "0.4"

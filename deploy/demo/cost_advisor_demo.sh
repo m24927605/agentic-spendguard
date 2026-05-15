@@ -72,6 +72,20 @@ $PSQL_LEDGER \
     -v budget="$DEMO_BUDGET" \
     -f /demo/cost_advisor_demo_seed.sql
 
+# Capture the bundle hash BEFORE any write path runs (codex CA-P3.5
+# r3 P3 — was captured after the resolve, racing bundle_registry's
+# fast-rotation). Step 5 polls this value for change.
+CONTRACT_BUNDLE_ID="${CONTRACT_BUNDLE_ID:-11111111-1111-4111-8111-111111111111}"
+BUNDLE_TGZ="/var/lib/spendguard/bundles/contract_bundle/${CONTRACT_BUNDLE_ID}.tgz"
+RUNTIME_ENV="/var/lib/spendguard/bundles/runtime.env"
+HASH_KEY="SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_HASH_HEX"
+HASH_KEY_PREFIX="${HASH_KEY}="
+read_hash() {
+    awk -v p="$HASH_KEY_PREFIX" 'index($0, p)==1 {print substr($0, length(p)+1)}' "$RUNTIME_ENV"
+}
+OLD_HASH=$(read_hash)
+log "  baseline bundle hash (pre-write-path): ${OLD_HASH:-<unset>}"
+
 # ---------------------------------------------------------------------
 # Step 2: invoke spendguard-advise --write-proposals
 # ---------------------------------------------------------------------
@@ -155,20 +169,54 @@ $PSQL_LEDGER \
 
 log "step 4 OK"
 
-# Note on wire-level NOTIFY verification: the
-# `approval_requests_state_change_notify` trigger is verified to exist
-# in step 3, and step 4 demonstrated a real state transition through
-# `resolve_approval_request` that fires it. Wire-level NOTIFY delivery
-# is independently proved by the Rust integration test
-# `services/cost_advisor/tests/proposal_writer_smoke.rs::notify_fires_on_state_change`,
-# which uses `sqlx::PgListener` to round-trip the actual payload.
-# Re-proving it here would require either staging a second pending
-# approval (which the cleanup logic can't reset because terminal
-# approvals are audit-protected) or running a parallel LISTEN session
-# from the demo container — both of which add wire complexity for no
-# new evidence. We don't claim what we don't demonstrate.
+# ---------------------------------------------------------------------
+# Step 5 (CA-P3.5): verify bundle_registry applied the patch
+# ---------------------------------------------------------------------
+# bundle_registry is LISTENing on approval_requests_state_change.
+# Step 4's resolve fired the trigger; bundle_registry should now be
+# extracting the active bundle, applying the 2-op test+replace patch,
+# re-packing the .tgz, and updating runtime.env. Poll the bundle file
+# for the patched value (reservation_ttl_seconds: 45).
+log "step 5: poll bundle file for bundle_registry's applied patch..."
+
+# Use the OLD_HASH captured at step-2 entry (pre-write-path).
+log "  baseline bundle hash (re-display): ${OLD_HASH:-<unset>}"
+
+# Poll for up to 10s (bundle_registry latency is dominated by
+# postgres NOTIFY dispatch + a few file syscalls, typically <1s).
+WAIT_SECS=0
+NEW_HASH=""
+while [ "$WAIT_SECS" -lt 10 ]; do
+    sleep 1
+    WAIT_SECS=$((WAIT_SECS + 1))
+    NEW_HASH=$(read_hash)
+    if [ -n "$NEW_HASH" ] && [ "$NEW_HASH" != "$OLD_HASH" ]; then
+        break
+    fi
+done
+
+if [ -z "$NEW_HASH" ] || [ "$NEW_HASH" = "$OLD_HASH" ]; then
+    fail "bundle_registry did not rotate the bundle within ${WAIT_SECS}s (old hash unchanged: $OLD_HASH)"
+fi
+log "  bundle hash rotated: $OLD_HASH → $NEW_HASH (after ${WAIT_SECS}s)"
+
+# Extract the new contract.yaml from the rotated bundle and assert
+# the patched value landed.
+EXTRACTED_YAML=$(mktemp -d)
+tar -xzf "$BUNDLE_TGZ" -C "$EXTRACTED_YAML"
+NEW_TTL=$(grep -E 'reservation_ttl_seconds:' "$EXTRACTED_YAML/contract.yaml" | head -1 | awk '{print $2}')
+NEW_BUDGET=$(grep -E '^\s+id:' "$EXTRACTED_YAML/contract.yaml" | grep -F "$DEMO_BUDGET" | head -1)
+rm -rf "$EXTRACTED_YAML"
+
+[ "$NEW_TTL" = "45" ] || \
+    fail "bundle_registry's patched contract.yaml has reservation_ttl_seconds=$NEW_TTL, expected 45"
+[ -n "$NEW_BUDGET" ] || \
+    fail "patched contract.yaml does not contain the demo budget id (test op identity should have preserved it)"
+
+log "step 5 OK: contract.yaml has reservation_ttl_seconds=45 + demo budget id preserved"
 
 log "PASS — Cost Advisor closed loop verified end-to-end."
 log "      seed → cost_advisor binary → cost_findings → approval_requests"
 log "      → resolve_approval_request → state=approved + approval_events audit"
-log "      pg_notify trigger present (wire-level delivery: see proposal_writer_smoke.rs)"
+log "      → bundle_registry LISTEN → patched bundle + new hash published"
+log "      (wire-level NOTIFY delivery also covered by proposal_writer_smoke.rs)"
