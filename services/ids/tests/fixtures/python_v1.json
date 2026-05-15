@@ -1,0 +1,77 @@
+[
+  {
+    "signature": "abc123",
+    "scope": "decision_id",
+    "expected_uuid": "4021eae4-5882-4d4f-9965-5bda31ed90e3"
+  },
+  {
+    "signature": "abc123",
+    "scope": "llm_call_id",
+    "expected_uuid": "50713168-9362-4d1e-b3d0-e7011ab84150"
+  },
+  {
+    "signature": "abc123",
+    "scope": "step_id",
+    "expected_uuid": "f4ce12e1-0466-41ba-9277-ae470affc64a"
+  },
+  {
+    "signature": "",
+    "scope": "decision_id",
+    "expected_uuid": "938025bf-d785-41ee-b273-ce4a10474327"
+  },
+  {
+    "signature": "a",
+    "scope": "scope",
+    "expected_uuid": "7c048165-f188-4010-a4fd-59a60546bcca"
+  },
+  {
+    "signature": "aaaa",
+    "scope": "scope",
+    "expected_uuid": "f2d59e6d-0802-4063-8f58-56d8deb8938a"
+  },
+  {
+    "signature": "d4f2c1e8f4f2c1e8",
+    "scope": "llm_call_id",
+    "expected_uuid": "a3394da2-bd74-4a6e-b635-4f380121ab94"
+  },
+  {
+    "signature": "d4f2c1e8f4f2c1e8",
+    "scope": "decision_id",
+    "expected_uuid": "fef095eb-5d6e-4fa2-b452-a365b828e876"
+  },
+  {
+    "signature": "Xabc",
+    "scope": "scope1",
+    "expected_uuid": "ae331330-620c-4f88-88a6-8be2819518c0"
+  },
+  {
+    "signature": "abc",
+    "scope": "scope1X",
+    "expected_uuid": "fcded00d-8c4a-4ba9-84a8-a742761859ca"
+  },
+  {
+    "signature": "emoji-🚀-test",
+    "scope": "scope",
+    "expected_uuid": "58e4720f-4800-49b6-81ae-fba99b6d4fcc"
+  },
+  {
+    "signature": "scope-🚀",
+    "scope": "abc",
+    "expected_uuid": "12eaf03b-025e-4fc6-8d49-68aa15ba776d"
+  },
+  {
+    "signature": "a|b|c",
+    "scope": "scope",
+    "expected_uuid": "916ae42a-e394-432b-8270-270d8fd36635"
+  },
+  {
+    "signature": "abc",
+    "scope": "scope|with|pipe",
+    "expected_uuid": "bd989a80-11df-4362-8c89-b108df7caab5"
+  },
+  {
+    "signature": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    "scope": "llm_call_id",
+    "expected_uuid": "b01d1b64-8baa-4d58-8e54-e9ca1b5a9387"
+  }
+]

@@ -1,0 +1,47 @@
+[package]
+name = "spendguard-egress-proxy"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "Auto-instrument HTTP proxy for SpendGuard: drop-in OpenAI-compatible endpoint that gates LLM calls via the sidecar before forwarding. See docs/specs/auto-instrument-egress-proxy-spec.md."
+
+[[bin]]
+name = "spendguard-egress-proxy"
+path = "src/main.rs"
+
+[dependencies]
+# HTTP server
+axum = "0.7"
+tower-http = { version = "0.6", features = ["trace"] }
+tower = "0.5"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# rustls — must install_default before any TLS use (F1 backport pattern)
+rustls = "0.23"
+
+# Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Errors
+anyhow = "1"
+thiserror = "1"
+
+# JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Shared crates
+spendguard-ids = { path = "../ids" }
+
+# Outbound HTTP client (forward to OpenAI). rustls backend matches the
+# main() install_default() pattern; no native-tls to avoid OpenSSL dep.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
+
+# Config
+envy = "0.4"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
