@@ -68,11 +68,35 @@ WORK=/tmp/contract.work
 rm -rf "$WORK" && mkdir -p "$WORK"
 
 # Demo IDs:
-#   contract.metadata.id     = 33333333-...
-#   contract.spec.budgets[0] = SPENDGUARD_BUDGET_ID (44444444-...)
+#   contract.metadata.id      = 33333333-...
+#   contract.spec.budgets[0]  = PLACEHOLDER (aaaaaaaa-...) — inert; no ledger rows, no rule references. Sole purpose: shift the real demo budget off index 0 so cost_advisor's naive `/spec/budgets/0/...` patch must be remapped (services/bundle_registry/src/apply.rs::remap_budget_indices) before apply.
+#   contract.spec.budgets[1]  = SPENDGUARD_BUDGET_ID (44444444-...) — the actual demo budget; all DB seed + reservations + rule references target this UUID
 DEMO_BUDGET_ID="${DEMO_BUDGET_ID:-44444444-4444-4444-8444-444444444444}"
+DEMO_BUDGET_PLACEHOLDER_ID="${DEMO_BUDGET_PLACEHOLDER_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"
 CONTRACT_LOGICAL_ID="${CONTRACT_LOGICAL_ID:-33333333-3333-4333-8333-333333333333}"
 
+# CA-P3.8: the contract ships with TWO budgets so cost_advisor's
+# transparent index-remap path (services/bundle_registry/src/apply.rs::
+# remap_budget_indices) is exercised end-to-end on every cost_advisor
+# demo run.
+#
+# Pre-CA-P3.8: cost_advisor emitted patches at hardcoded
+# /spec/budgets/0/ paths. If the offending budget wasn't at index 0
+# in the actual contract, the `test` op fired against the wrong UUID
+# and the whole patch failed (apply-time error → operator stuck).
+#
+# Post-CA-P3.8: bundle_registry reads the contract YAML, locates the
+# pinned UUID by scanning spec.budgets[], and rewrites patch paths
+# from the emitter's source index to the real index. cost_advisor
+# stays bundle-unaware; patch_validator's same-index test+replace
+# invariant survives the rewrite (both ops are remapped together).
+#
+# Putting the real demo budget at index 1 (not index 0) is the
+# minimum-blast-radius design that exercises the remap on every
+# cost_advisor demo run without touching the DB seed or any other
+# demo mode. Other modes (decision/invoice/release/ttl_sweep/deny)
+# reference budgets by UUID in their rules + reservations so the
+# array reorder is invisible to them.
 cat > "$WORK/contract.yaml" <<EOF
 apiVersion: contract.spendguard.io/v1alpha1
 kind: Contract
@@ -81,6 +105,11 @@ metadata:
   name: demo-contract
 spec:
   budgets:
+    - id: $DEMO_BUDGET_PLACEHOLDER_ID
+      limit_amount_atomic: "100000000"
+      currency: USD
+      reservation_ttl_seconds: 600
+      require_hard_cap: false
     - id: $DEMO_BUDGET_ID
       limit_amount_atomic: "1000000000"
       currency: USD

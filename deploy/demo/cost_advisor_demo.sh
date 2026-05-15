@@ -286,19 +286,64 @@ fi
 log "  bundle hash rotated: $OLD_HASH → $NEW_HASH (after ${WAIT_SECS}s)"
 
 # Extract the new contract.yaml from the rotated bundle and assert
-# the patched value landed.
+# the patched value landed on the CORRECT budget.
+#
+# CA-P3.8 multi-budget topology:
+#   budgets[0] = placeholder (aaaaaaaa-…) — must be UNCHANGED (TTL=600)
+#   budgets[1] = $DEMO_BUDGET (44444444-…) — must be PATCHED (TTL=45)
+#
+# This is the regression test for the bundle_registry index-remap:
+# cost_advisor emitted a patch with /spec/budgets/0/... paths +
+# `test` op pinning $DEMO_BUDGET. Pre-CA-P3.8 the apply would have
+# failed (test op vs contract[0].id mismatch) OR (worse) silently
+# mutated the placeholder. Post-CA-P3.8 bundle_registry locates
+# $DEMO_BUDGET at index 1 and rewrites the patch paths transparently.
 EXTRACTED_YAML=$(mktemp -d)
 tar -xzf "$BUNDLE_TGZ" -C "$EXTRACTED_YAML"
-NEW_TTL=$(grep -E 'reservation_ttl_seconds:' "$EXTRACTED_YAML/contract.yaml" | head -1 | awk '{print $2}')
-NEW_BUDGET=$(grep -E '^\s+id:' "$EXTRACTED_YAML/contract.yaml" | grep -F "$DEMO_BUDGET" | head -1)
+
+# Read each budget's TTL by walking the YAML. serde_yaml's output is
+# NOT format-preserving (per apply.rs comment): keys are emitted in
+# alphabetical order so `id:` may not be the first field of a budget
+# entry. We scan for `id: <uuid>` directly (since UUIDs don't collide
+# with metadata.id or rule.id values), then take the next
+# `reservation_ttl_seconds:` line within that budget block.
+DEMO_BUDGET_PLACEHOLDER="${DEMO_BUDGET_PLACEHOLDER:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"
+read_budget_ttl() {
+    local target="$1"
+    # Codex CA-P3.8 r1 P3-2: this awk depends on `serde_yaml` emitting
+    # map keys in alphabetical order (currency, id, limit_amount_atomic,
+    # require_hard_cap, reservation_ttl_seconds), so within a budget
+    # block `id:` always precedes `reservation_ttl_seconds:`. If a
+    # future serde_yaml version changes that ordering, this assertion
+    # would silently misfire — switch to `yq` (not currently a demo
+    # dep) at that point. Demo also tolerates extra unrelated fields
+    # because `found` flips on first id-match and never resets within
+    # a single match window.
+    awk -v target="$target" '
+        $1 == "id:" && $2 == target          { found = 1; next }
+        found && /reservation_ttl_seconds:/  { print $NF; exit }
+    ' "$EXTRACTED_YAML/contract.yaml"
+}
+TTL_PLACEHOLDER=$(read_budget_ttl "$DEMO_BUDGET_PLACEHOLDER")
+TTL_DEMO=$(read_budget_ttl "$DEMO_BUDGET")
+# Also assert both budget ids are present (the test op identity
+# preservation — bundle_registry must not have dropped a budget
+# from the array during the JSON round-trip).
+HAS_PLACEHOLDER=$(grep -F "$DEMO_BUDGET_PLACEHOLDER" "$EXTRACTED_YAML/contract.yaml" || true)
+HAS_DEMO=$(grep -F "$DEMO_BUDGET" "$EXTRACTED_YAML/contract.yaml" || true)
 rm -rf "$EXTRACTED_YAML"
 
-[ "$NEW_TTL" = "45" ] || \
-    fail "bundle_registry's patched contract.yaml has reservation_ttl_seconds=$NEW_TTL, expected 45"
-[ -n "$NEW_BUDGET" ] || \
-    fail "patched contract.yaml does not contain the demo budget id (test op identity should have preserved it)"
+[ -n "$HAS_PLACEHOLDER" ] || \
+    fail "patched contract.yaml missing placeholder budget ($DEMO_BUDGET_PLACEHOLDER)"
+[ -n "$HAS_DEMO" ] || \
+    fail "patched contract.yaml missing demo budget ($DEMO_BUDGET)"
+[ "$TTL_DEMO" = "45" ] || \
+    fail "demo budget ($DEMO_BUDGET) reservation_ttl_seconds=$TTL_DEMO, expected 45 — bundle_registry's CA-P3.8 remap did not route the patch to index 1"
+[ "$TTL_PLACEHOLDER" = "600" ] || \
+    fail "placeholder budget ($DEMO_BUDGET_PLACEHOLDER) reservation_ttl_seconds=$TTL_PLACEHOLDER, expected 600 — the patch leaked to the WRONG budget (CA-P3.8 regression: index-remap is mutating budget[0] instead of budget[1])"
 
-log "step 5 OK: contract.yaml has reservation_ttl_seconds=45 + demo budget id preserved"
+log "step 5 OK: CA-P3.8 remap routed patch to demo budget at index 1 (TTL=45);"
+log "         placeholder at index 0 untouched (TTL=600)"
 
 # ---------------------------------------------------------------------
 # Step 6 (CA-P3.7): verify sidecar hot-reloaded the new contract
