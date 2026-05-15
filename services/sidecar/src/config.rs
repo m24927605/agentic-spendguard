@@ -123,6 +123,24 @@ pub struct Config {
     /// Phase 2 derives from contract rule reservation.ttl per Contract §7.
     #[serde(default = "default_reservation_ttl_seconds")]
     pub reservation_ttl_seconds: i64,
+
+    // -- Hot-reload watcher (CA-P3.7) -------------------------------------
+    /// Path to `runtime.env` — the authoritative pointer to the
+    /// currently-published contract bundle hash. `bundle_registry`
+    /// rewrites this file LAST in its atomic publish sequence so a
+    /// new hash value implies the matching `.tgz` is already durable
+    /// on disk. The hot-reload watcher polls this file.
+    /// Default `/var/lib/spendguard/bundles/runtime.env`.
+    #[serde(default = "default_runtime_env_path")]
+    pub runtime_env_path: String,
+
+    /// Hot-reload watcher poll interval in milliseconds. 500ms keeps
+    /// the watcher well below the upstream NOTIFY → bundle_registry
+    /// rotation latency floor (~1s in the demo) so end-to-end
+    /// approve → hot-load typically converges in ~2s.
+    /// Set to 0 to disable the watcher (legacy behavior pre-CA-P3.7).
+    #[serde(default = "default_hot_reload_poll_ms")]
+    pub hot_reload_poll_ms: u64,
 }
 
 fn default_uds_path() -> String {
@@ -170,6 +188,12 @@ fn default_idempotency_cache_ttl_secs() -> i64 {
 }
 fn default_reservation_ttl_seconds() -> i64 {
     600
+}
+fn default_runtime_env_path() -> String {
+    "/var/lib/spendguard/bundles/runtime.env".to_string()
+}
+fn default_hot_reload_poll_ms() -> u64 {
+    500
 }
 
 impl Config {
