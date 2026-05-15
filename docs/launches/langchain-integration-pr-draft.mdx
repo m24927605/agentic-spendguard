@@ -1,0 +1,165 @@
+---
+title: "Agentic SpendGuard integrations"
+description: "Integrate with Agentic SpendGuard using LangChain Python."
+---
+
+This page covers how to use [Agentic SpendGuard](https://agenticspendguard.dev)
+with LangChain.
+
+## What is Agentic SpendGuard?
+
+[Agentic SpendGuard](https://github.com/m24927605/agentic-spendguard) is an
+open-source runtime gate that refuses LLM API calls which would exceed a
+budget — *before* the request goes to the provider. Think Stripe-style
+auth/capture, but for token spend, backed by a Postgres ledger and a
+KMS-signed audit chain.
+
+A per-pod sidecar (Rust, gRPC over a Unix Domain Socket) holds the
+ledger; SDK adapters wrap the framework's model object. Over-budget
+calls raise `DecisionStopped` and the upstream HTTP request never ships.
+
+This is enforcement-side tooling. For tracing, custom properties, and
+analytics dashboards, the [Helicone](./helicone) and
+[Langfuse](./langfuse) integrations are the natural fit and compose
+cleanly with this one.
+
+## Installation
+
+```bash
+pip install 'spendguard-sdk[langchain]'
+```
+
+You also need the sidecar running. The fastest path is the Docker
+Compose stack:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard
+cd agentic-spendguard
+make demo-up DEMO_MODE=decision
+```
+
+The sidecar binds a Unix Domain Socket at
+`/var/run/spendguard/adapter.sock` inside the demo network; production
+deployments mount it from a Kubernetes pod sidecar. See the
+[quickstart](https://agenticspendguard.dev/quickstart) for a non-Docker
+walkthrough.
+
+## Quick start
+
+Wrap any `BaseChatModel` (ChatOpenAI, ChatAnthropic, etc.) in
+`SpendGuardChatModel`. The wrapper inherits from `BaseChatModel`
+directly, so LangGraph and any LangChain Runnable that takes a chat
+model accepts it without changes.
+
+```python
+from langchain_openai import ChatOpenAI
+from langchain_core.messages import HumanMessage
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.langchain import SpendGuardChatModel
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+# 1. Connect to the sidecar.
+client = SpendGuardClient(
+    socket_path="/var/run/spendguard/adapter.sock",
+    tenant_id="<your-tenant-uuid>",
+)
+await client.connect()
+await client.handshake()
+
+# 2. Wrap an existing ChatOpenAI.
+guarded = SpendGuardChatModel(
+    inner=ChatOpenAI(model="gpt-4o-mini"),
+    client=client,
+    budget_id="<budget-uuid>",
+    window_instance_id="<window-uuid>",
+    unit=common_pb2.UnitRef(
+        unit_id="<unit-uuid>",
+        token_kind="output_token",
+        model_family="gpt-4",
+    ),
+    pricing=common_pb2.PricingFreeze(...),
+    claim_estimator=lambda messages: [
+        common_pb2.BudgetClaim(
+            budget_id="<budget-uuid>",
+            amount_atomic="500",
+            unit=common_pb2.UnitRef(unit_id="<unit-uuid>"),
+        )
+    ],
+)
+
+# 3. Use anywhere a ChatOpenAI works.
+response = await guarded.ainvoke([HumanMessage(content="Hello")])
+```
+
+## Use with LangGraph
+
+`SpendGuardChatModel` is a regular `BaseChatModel`, so it composes
+directly into LangGraph state machines:
+
+```python
+from langgraph.prebuilt import create_react_agent
+
+agent = create_react_agent(guarded, tools=[...])
+result = await agent.ainvoke({"messages": [...]})
+```
+
+Every step of the ReAct loop independently passes through the sidecar.
+If the budget runs out mid-agent-loop, the next step raises
+`DecisionStopped` instead of letting the agent keep burning tokens.
+
+## Handle DecisionStopped
+
+When the sidecar refuses a call, the wrapper raises
+`spendguard.errors.DecisionStopped`:
+
+```python
+from spendguard.errors import DecisionStopped
+
+try:
+    response = await guarded.ainvoke([HumanMessage(content="...")])
+except DecisionStopped as e:
+    # e.matched_rule_ids / e.reason_codes carry which contract rule fired
+    # and why (e.g. ["BUDGET_EXHAUSTED"]).
+    print(f"Refused by {e.matched_rule_ids}: {e.reason_codes}")
+```
+
+`DecisionStopped` is raised *before* the upstream provider call, so no
+HTTP request is in flight and no tokens are billed.
+
+## What's verified end-to-end
+
+The repository ships a real-stack benchmark at
+[`benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.md`](https://github.com/m24927605/agentic-spendguard/blob/main/benchmarks/real-stack-e2e/REAL_LANGCHAIN_E2E.md).
+`make demo-up DEMO_MODE=agent_real_langchain` runs `ChatOpenAI` against
+the real OpenAI API through the real Rust sidecar and Postgres ledger.
+
+| Decision path     | Status        |
+|-------------------|---------------|
+| CONTINUE          | Verified      |
+| STOP              | Verified      |
+| REQUIRE_APPROVAL  | SDK path only |
+| DEGRADE           | Not wired     |
+
+REQUIRE_APPROVAL and DEGRADE have SDK-side code paths and unit tests,
+but no end-to-end demo wiring. They are not "ready to use" without
+authoring a contract bundle that exercises them.
+
+## How this composes with other LangChain integrations
+
+| Tool                                | What it does                                        | Layer            |
+|-------------------------------------|-----------------------------------------------------|------------------|
+| [Helicone](./helicone)              | Proxy + cache + analytics dashboard                 | Observability    |
+| [Langfuse](./langfuse)              | Trace, evaluate, debug LangChain runs               | Observability    |
+| [LangSmith](https://smith.langchain.com) | Trace, evaluate, debug LangChain runs          | Observability    |
+| Agentic SpendGuard                  | Refuse over-budget calls *before* the provider call | Enforcement      |
+
+The integrations don't conflict. Helicone or Langfuse observe what
+happened; Agentic SpendGuard prevents the next call from happening.
+
+## Links
+
+- Docs: [agenticspendguard.dev](https://agenticspendguard.dev)
+- Source: [github.com/m24927605/agentic-spendguard](https://github.com/m24927605/agentic-spendguard)
+- LangChain integration source:
+  [`sdk/python/src/spendguard/integrations/langchain.py`](https://github.com/m24927605/agentic-spendguard/blob/main/sdk/python/src/spendguard/integrations/langchain.py)
