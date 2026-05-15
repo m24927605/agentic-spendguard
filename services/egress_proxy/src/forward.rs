@@ -213,12 +213,22 @@ pub async fn chat_completions(
 
 /// Allowlist of request headers forwarded to OpenAI.
 ///
-/// Skip:
-/// - host / content-length (reqwest computes)
-/// - x-spendguard-* (internal, slice 6 reads these but they don't go upstream)
-/// - authorization (forwarded via explicit RedactedAuth boundary above)
+/// Codex slice-3 r1 P2-S3.B fix: explicit denylist (defensive vs the
+/// allowlist growing to include `authorization` in a future PR that
+/// would silently bypass the single-expose_secret invariant).
 fn should_forward_header(name: &HeaderName) -> bool {
     let lower = name.as_str().to_ascii_lowercase();
+    // Explicit deny: even if a future allowlist entry would match,
+    // these are NEVER forwarded by this function:
+    // - authorization: forwarded ONLY at the explicit RedactedAuth.expose_secret()
+    //   boundary, not via generic header iteration
+    // - host / content-length / content-type: reqwest sets these itself
+    if matches!(
+        lower.as_str(),
+        "authorization" | "host" | "content-length" | "content-type"
+    ) {
+        return false;
+    }
     if lower.starts_with("x-spendguard-") {
         return false;
     }
