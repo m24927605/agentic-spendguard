@@ -34,6 +34,7 @@ use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+mod decision;
 mod forward;
 mod proto;
 mod redacted_auth;

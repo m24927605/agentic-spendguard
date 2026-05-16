@@ -50,6 +50,7 @@ uuid = { version = "1", features = ["v7", "v4", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 hex = "0.4"
 arc-swap = "1"
+blake2 = "0.10"
 
 # Config
 envy = "0.4"
