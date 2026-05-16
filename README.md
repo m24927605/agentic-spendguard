@@ -132,11 +132,44 @@ real software would just produce another marketing matrix.
 
 ---
 
-## Quick start (30 seconds, no AWS needed)
+## Quick start — auto-instrument, **1 env var**, no SDK install
+
+The fastest path to "my existing OpenAI agent is now budget-gated". Set `OPENAI_BASE_URL` to point at a local egress proxy that fail-closes STOP decisions **before** any HTTP request reaches `api.openai.com`.
 
 ```bash
 git clone git@github.com:m24927605/agentic-spendguard.git
 cd agentic-spendguard
+export OPENAI_API_KEY=sk-...
+make demo-up DEMO_MODE=proxy
+```
+
+That brings up Postgres + ledger + canonical_ingest + sidecar + the egress proxy, then runs a smoke driver against real `gpt-4o-mini`. **Your application code stays unchanged:**
+
+```python
+from openai import OpenAI
+client = OpenAI(
+    base_url="http://localhost:9000/v1",     # ← only change
+    api_key=os.environ["OPENAI_API_KEY"],     # ← your real OpenAI key
+)
+client.chat.completions.create(model="gpt-4o-mini", messages=[...])
+```
+
+What you get out of the box, verified end-to-end against real OpenAI:
+
+| Decision | Status | Body |
+|---|---|---|
+| CONTINUE (budget available) | 200 | OpenAI's response byte-identical; ledger reservation + `commit_estimated` audit row |
+| STOP (over hard-cap) | 429 + `Retry-After: 86400` | `{"error":{"code":"spendguard_blocked","details":{"reason_codes":["BUDGET_EXHAUSTED"],...}}}`; **HTTP request never reaches OpenAI** |
+
+Spec: [`docs/specs/auto-instrument-egress-proxy-spec.md`](docs/specs/auto-instrument-egress-proxy-spec.md) (v7 LOCKED).
+
+**vs Helicone / Portkey** — those proxy your traffic too, but their decision model is observability (log + alert post-hoc). SpendGuard's egress proxy fail-closes the STOP path before any byte leaves: no HTTP request to OpenAI, no token spend, structured `reason_codes` your client can branch on. See [§11 of the spec](docs/specs/auto-instrument-egress-proxy-spec.md#11-capability-level-honest) for the honest L1.5 / L2 capability matrix.
+
+### Quick start — full stack with Pydantic-AI agent
+
+For the wrapper-mode demo (sidecar + framework integration with REQUIRE_APPROVAL / DEGRADE paths, which proxy mode doesn't yet support):
+
+```bash
 make demo-up
 ```
 
