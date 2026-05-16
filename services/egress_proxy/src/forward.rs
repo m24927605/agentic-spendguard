@@ -275,16 +275,29 @@ pub async fn chat_completions(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    // Slice 6: per-request X-SpendGuard-Tenant-Id header overrides
+    // the proxy-startup default (Path B multi-tenant proxy). Default
+    // is the sidecar's handshake tenant_id (Path A: 1-env-var launch
+    // claim).
+    let tenant_id = headers
+        .get("x-spendguard-tenant-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+        .unwrap_or_else(|| app.sidecar.tenant_id.clone());
+    let budget_id = resolve_budget_id(&headers);
+    let window_instance_id = resolve_window_instance_id(&headers);
+    let unit_id = resolve_unit_id(&headers);
+
     let inputs = DecisionInputs {
-        tenant_id: &app.sidecar.tenant_id,
-        budget_id: &resolve_budget_id(&headers),
-        window_instance_id: &resolve_window_instance_id(&headers),
+        tenant_id: &tenant_id,
+        budget_id: &budget_id,
+        window_instance_id: &window_instance_id,
         run_id: run_id.clone(),
         body_bytes: &body,
         model_family: decision::parse_model_family(&parsed),
         estimated_tokens: header_int(&headers, "x-spendguard-estimated-tokens")
             .unwrap_or_else(|| decision::estimate_tokens(&parsed, None)),
-        unit_id: &resolve_unit_id(&headers),
+        unit_id: &unit_id,
     };
     if inputs.budget_id.is_empty()
         || inputs.window_instance_id.is_empty()
