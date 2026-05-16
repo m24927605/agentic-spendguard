@@ -34,8 +34,11 @@ use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
+mod decision;
 mod forward;
+mod proto;
 mod redacted_auth;
+mod sidecar_client;
 
 #[derive(Debug, Deserialize, Clone)]
 struct Config {
@@ -71,9 +74,24 @@ async fn main() -> Result<()> {
 
     info!(bind_addr = %cfg.bind_addr, "spendguard-egress-proxy starting (slice 2 skeleton)");
 
+    // Slice 4a: connect to sidecar UDS + handshake with retry-with-backoff.
+    // Spec §9: fail-fast if 30s elapses without successful handshake.
+    let sidecar_cfg = sidecar_client::SidecarConfig::from_env()
+        .context("loading sidecar client config")?;
+    info!(
+        uds = %sidecar_cfg.uds_path.display(),
+        tenant = %sidecar_cfg.tenant_id,
+        workload = %sidecar_cfg.workload_instance_id,
+        "connecting to sidecar UDS"
+    );
+    let sidecar = sidecar_client::connect_with_retry(&sidecar_cfg)
+        .await
+        .context("sidecar UDS handshake at startup")?;
+    info!(session_id = %sidecar.session_id, "sidecar handshake complete");
+
     let forward_state =
         Arc::new(forward::ForwardState::new().context("build reqwest client")?);
-    let app = build_app(forward_state);
+    let app = build_app(forward_state, sidecar);
     let addr: SocketAddr = cfg.bind_addr.parse().context("parse bind_addr")?;
 
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -102,11 +120,43 @@ fn init_tracing() {
         .init();
 }
 
-fn build_app(forward_state: Arc<forward::ForwardState>) -> Router {
+/// Combined app state: HTTP client for upstream forward + sidecar
+/// handle for decision gating + pricing cache (slice 4b). All
+/// cheaply-clonable; axum requires `Clone` on the state extractor's
+/// bound type.
+#[derive(Clone)]
+pub struct AppState {
+    pub forward: Arc<forward::ForwardState>,
+    pub sidecar: sidecar_client::SidecarHandle,
+    pub pricing_cache: Option<decision::PricingCache>,
+}
+
+fn build_app(forward_state: Arc<forward::ForwardState>, sidecar: sidecar_client::SidecarHandle) -> Router {
+    let pricing_cache = std::env::var("SPENDGUARD_PROXY_RUNTIME_ENV_PATH")
+        .ok()
+        .or_else(|| Some("/var/lib/spendguard/bundles/runtime.env".to_string()))
+        .and_then(|path| {
+            let pb = std::path::PathBuf::from(path);
+            match decision::PricingCache::load(pb.clone()) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!(err = %e, path = %pb.display(),
+                        "pricing cache disabled (runtime.env unreadable); commits will send empty pricing");
+                    None
+                }
+            }
+        });
+
+    let state = AppState {
+        forward: forward_state.clone(),
+        sidecar: sidecar.clone(),
+        pricing_cache,
+    };
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/v1/chat/completions", post(forward::chat_completions))
-        .with_state(forward_state)
+        .with_state(state)
         .layer(
             // Defense layer 1 per spec §8: do NOT include headers in
             // request spans. RedactedAuth (defense layer 2) is the
@@ -120,6 +170,27 @@ async fn healthz() -> impl IntoResponse {
     Json(serde_json::json!({ "ok": true, "service": "egress-proxy", "version": env!("CARGO_PKG_VERSION") }))
 }
 
+/// Slice 4a: /readyz reflects sidecar handshake state.
+/// Returns 200 only after `connect_with_retry` has handed us a ready
+/// `SidecarHandle`. Pre-handshake (during startup race) this would
+/// 503; but since main() awaits the handshake before binding the
+/// listener, /readyz is effectively always 200 once the listener is
+/// up. The `ready` AtomicBool still guards against a future "set
+/// false on disconnect" extension.
+async fn readyz(axum::extract::State(state): axum::extract::State<AppState>) -> impl IntoResponse {
+    if state.sidecar.is_ready() {
+        (axum::http::StatusCode::OK, Json(serde_json::json!({
+            "ready": true,
+            "sidecar_session_id": state.sidecar.session_id,
+        })))
+    } else {
+        (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
+            "ready": false,
+            "reason": "sidecar handshake not complete",
+        })))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,9 +201,38 @@ mod tests {
     use tower::ServiceExt;
 
     fn test_app() -> Router {
-        let state = Arc::new(forward::ForwardState::new().expect("reqwest client"));
-        build_app(state)
+        let forward = Arc::new(forward::ForwardState::new().expect("reqwest client"));
+        // Test build: skip real sidecar handshake. Provide a stub
+        // handle with `ready=true` so unit tests that only hit
+        // /healthz / /readyz don't need a real UDS server.
+        let sidecar = make_stub_sidecar_handle();
+        build_app(forward, sidecar)
     }
+
+    /// Helper: produce a SidecarHandle without a real UDS server.
+    /// The client field uses a tonic channel that points at a
+    /// never-reachable URI; this works for unit tests that don't
+    /// actually call gRPC methods.
+    fn make_stub_sidecar_handle() -> sidecar_client::SidecarHandle {
+        use tonic::transport::Endpoint;
+        let channel = Endpoint::try_from("http://[::1]:1")
+            .unwrap()
+            .connect_lazy();
+        let client =
+            crate::proto::sidecar_adapter::v1::sidecar_adapter_client::SidecarAdapterClient::new(
+                channel,
+            );
+        sidecar_client::SidecarHandle {
+            client,
+            ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            session_id: "test-session".to_string(),
+            tenant_id: "00000000-0000-4000-8000-000000000001".to_string(),
+        }
+    }
+
+    // Allow the test_app helper to compile without a real pricing
+    // cache. The pricing_cache field is Option<PricingCache>; tests
+    // that don't go through chat_completions don't exercise it.
 
     #[tokio::test]
     async fn healthz_returns_ok() {

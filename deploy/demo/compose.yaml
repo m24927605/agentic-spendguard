@@ -595,19 +595,57 @@ services:
       dockerfile: deploy/demo/runtime/Dockerfile.egress_proxy
     container_name: spendguard-egress-proxy
     environment:
-      RUST_LOG:                                "info,spendguard_egress_proxy=debug"
-      # Slice 2: bind 0.0.0.0 inside container; compose port-mapping
-      # exposes to host loopback only. Production deployments override.
-      SPENDGUARD_EGRESS_PROXY_BIND_ADDR:        "0.0.0.0:9000"
+      RUST_LOG:                                          "info,spendguard_egress_proxy=debug"
+      # Bind 0.0.0.0 inside container; compose port-mapping exposes to
+      # host loopback only.
+      SPENDGUARD_EGRESS_PROXY_BIND_ADDR:                  "0.0.0.0:9000"
+      # Slice 4a: sidecar UDS handshake
+      SPENDGUARD_PROXY_SIDECAR_UDS_PATH:                  "/var/run/spendguard/adapter.sock"
+      # Slice 6: 1-env-var Path A defaults (demo seed IDs from
+      # 30_seed_demo_state.sh + bundles-init contract.yaml)
+      SPENDGUARD_PROXY_DEFAULT_TENANT_ID:                 "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_PROXY_DEFAULT_BUDGET_ID:                 "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_PROXY_DEFAULT_WINDOW_INSTANCE_ID:        "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_PROXY_DEFAULT_UNIT_ID:                   "66666666-6666-4666-8666-666666666666"
+      # Slice 4b/5: pricing freeze source for LLM_CALL_POST commits
+      SPENDGUARD_PROXY_RUNTIME_ENV_PATH:                  "/var/lib/spendguard/bundles/runtime.env"
     ports:
       - "127.0.0.1:9000:9000"
+    volumes:
+      # Slice 4a: sidecar UDS shared via named volume (same pattern as
+      # the in-container Python SDK adapter accesses /var/run/spendguard)
+      - sidecar-uds:/var/run/spendguard
+      # Slice 4b: pricing freeze from runtime.env (read-only)
+      - bundles-data:/var/lib/spendguard/bundles:ro
     networks: [spendguard-net]
+    depends_on:
+      sidecar:
+        condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:9000/healthz | grep -q '\"ok\":true'"]
       interval: 3s
       timeout: 5s
       retries: 30
       start_period: 5s
+
+  # ---------------------------------------------------------------------
+  # DEMO_MODE=proxy — egress proxy e2e smoke driver.
+  # Requires OPENAI_API_KEY env on the host (real OpenAI call).
+  # ---------------------------------------------------------------------
+  egress-proxy-smoke:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.egress_proxy_smoke
+    container_name: spendguard-egress-proxy-smoke
+    environment:
+      OPENAI_API_KEY:                "${OPENAI_API_KEY:?missing OPENAI_API_KEY for DEMO_MODE=proxy}"
+      SPENDGUARD_EGRESS_PROXY_URL:   "http://egress-proxy:9000"
+    volumes:
+      - ../../deploy/demo/proxy_smoke.sh:/demo/proxy_smoke.sh:ro
+    depends_on:
+      egress-proxy:
+        condition: service_healthy
+    networks: [spendguard-net]
 
   # ---------------------------------------------------------------------
   # DEMO_MODE=cost_advisor — closed-loop driver. One-shot container
