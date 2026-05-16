@@ -34,7 +34,10 @@ pub struct AppState {
 pub async fn build_pg_pool(database_url: &str) -> anyhow::Result<PgPool> {
     let pool = PgPoolOptions::new()
         .max_connections(10)
-        .acquire_timeout(Duration::from_secs(5))
+        // 5s → 30s to match the fleet-wide fix (ledger / canonical_ingest /
+        // outbox_forwarder / ttl_sweeper). Demo bring-up races: pg init
+        // scripts hold connections briefly during their work.
+        .acquire_timeout(Duration::from_secs(30))
         .connect(database_url)
         .await?;
     Ok(pool)
