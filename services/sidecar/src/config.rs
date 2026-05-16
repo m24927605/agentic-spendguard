@@ -40,7 +40,11 @@ pub struct Config {
     pub capability_level: String,
 
     /// Enforcement strength advertised to contracts.
-    /// advisory_sdk / semantic_adapter / egress_proxy_hard_block / provider_key_gateway.
+    /// Accepted strings (documentation only — no validation):
+    ///   advisory_sdk / semantic_adapter / egress_proxy_opt_in (v0.1
+    ///   egress proxy, per docs/specs/auto-instrument-egress-proxy-spec.md
+    ///   §11) / egress_proxy_hard_block (aspirational, needs NetworkPolicy)
+    ///   / provider_key_gateway.
     /// POC default semantic_adapter.
     #[serde(default = "default_enforcement_strength")]
     pub enforcement_strength: String,
