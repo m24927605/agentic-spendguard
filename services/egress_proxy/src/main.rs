@@ -121,18 +121,36 @@ fn init_tracing() {
 }
 
 /// Combined app state: HTTP client for upstream forward + sidecar
-/// handle for decision gating. Both cheaply-clonable; axum requires
-/// `Clone` on the state extractor's bound type.
+/// handle for decision gating + pricing cache (slice 4b). All
+/// cheaply-clonable; axum requires `Clone` on the state extractor's
+/// bound type.
 #[derive(Clone)]
 pub struct AppState {
     pub forward: Arc<forward::ForwardState>,
     pub sidecar: sidecar_client::SidecarHandle,
+    pub pricing_cache: Option<decision::PricingCache>,
 }
 
 fn build_app(forward_state: Arc<forward::ForwardState>, sidecar: sidecar_client::SidecarHandle) -> Router {
+    let pricing_cache = std::env::var("SPENDGUARD_PROXY_RUNTIME_ENV_PATH")
+        .ok()
+        .or_else(|| Some("/var/lib/spendguard/bundles/runtime.env".to_string()))
+        .and_then(|path| {
+            let pb = std::path::PathBuf::from(path);
+            match decision::PricingCache::load(pb.clone()) {
+                Ok(c) => Some(c),
+                Err(e) => {
+                    tracing::warn!(err = %e, path = %pb.display(),
+                        "pricing cache disabled (runtime.env unreadable); commits will send empty pricing");
+                    None
+                }
+            }
+        });
+
     let state = AppState {
         forward: forward_state.clone(),
         sidecar: sidecar.clone(),
+        pricing_cache,
     };
     Router::new()
         .route("/healthz", get(healthz))
@@ -211,6 +229,10 @@ mod tests {
             tenant_id: "00000000-0000-4000-8000-000000000001".to_string(),
         }
     }
+
+    // Allow the test_app helper to compile without a real pricing
+    // cache. The pricing_cache field is Option<PricingCache>; tests
+    // that don't go through chat_completions don't exercise it.
 
     #[tokio::test]
     async fn healthz_returns_ok() {
