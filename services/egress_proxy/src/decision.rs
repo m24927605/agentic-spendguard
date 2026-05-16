@@ -53,6 +53,11 @@ pub struct DecisionInputs<'a> {
     pub model_family: String,     // parsed from request.model
     pub estimated_tokens: i64,    // heuristic or X-SpendGuard-Estimated-Tokens
     pub unit_id: &'a str,
+    /// Final-sweep P2 fix: caller may supply explicit
+    /// X-SpendGuard-Idempotency-Key for retry-collapse semantics
+    /// (spec §3.2 + §7). When None, per-attempt nanos-based key
+    /// is used (default; prevents OpenAI double-bill on SDK retry).
+    pub explicit_idempotency_key: Option<String>,
 }
 
 /// Build a `DecisionRequest` for the sidecar.
@@ -77,19 +82,24 @@ pub fn build_decision_request(
     let llm_call_id = spendguard_ids::derive_uuid_from_signature(&signature, "llm_call_id");
     let decision_id = Uuid::now_v7();
 
-    // Per-attempt idempotency key (default; spec §3.2 + §7).
-    // Includes nanos so SDK auto-retry doesn't double-bill on OpenAI.
-    let nanos = SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos().to_string())
-        .unwrap_or_default();
-    let idempotency_key = {
-        let mut combined = signature.clone();
-        combined.push('|');
-        combined.push_str(&nanos);
-        // Use blake2b for consistency with other signatures
-        let bytes = blake2_helper(combined.as_bytes());
-        hex::encode(&bytes[..8])
+    // Idempotency key resolution (spec §3.2 + §7):
+    // 1. Explicit X-SpendGuard-Idempotency-Key header → use verbatim
+    //    (retry-collapse opt-in)
+    // 2. Default: per-attempt sha256(sig || nanos)[..16] (prevents
+    //    OpenAI double-bill on SDK auto-retry)
+    let idempotency_key = match &inputs.explicit_idempotency_key {
+        Some(k) if !k.is_empty() => k.clone(),
+        _ => {
+            let nanos = SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos().to_string())
+                .unwrap_or_default();
+            let mut combined = signature.clone();
+            combined.push('|');
+            combined.push_str(&nanos);
+            let bytes = blake2_helper(combined.as_bytes());
+            hex::encode(&bytes[..8])
+        }
     };
 
     let unit = common_pb::UnitRef {
@@ -310,6 +320,7 @@ mod tests {
             model_family: "gpt-4o-mini".to_string(),
             estimated_tokens: 500,
             unit_id: "66666666-6666-4666-8666-666666666666",
+            explicit_idempotency_key: None,
         }
     }
 
@@ -386,5 +397,24 @@ mod tests {
     fn parse_model_family_missing_returns_unknown() {
         let body = json!({});
         assert_eq!(parse_model_family(&body), "unknown");
+    }
+
+    #[test]
+    fn explicit_idempotency_key_overrides_default() {
+        let body = br#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}"#;
+        let mut inputs = fixture_inputs(body);
+        inputs.explicit_idempotency_key = Some("user-provided-key-123".to_string());
+        let req = build_decision_request(&inputs).unwrap();
+        assert_eq!(req.idempotency.unwrap().key, "user-provided-key-123");
+    }
+
+    #[test]
+    fn empty_explicit_idempotency_falls_back_to_default() {
+        let body = br#"{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}"#;
+        let mut inputs = fixture_inputs(body);
+        inputs.explicit_idempotency_key = Some("".to_string()); // explicitly empty
+        let req = build_decision_request(&inputs).unwrap();
+        // Empty string should fall through to nanos-based default
+        assert_ne!(req.idempotency.unwrap().key, "");
     }
 }
