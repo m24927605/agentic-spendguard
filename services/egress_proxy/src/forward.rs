@@ -241,13 +241,11 @@ impl IntoResponse for ForwardError {
 /// Slice 3: forward byte-identically to OpenAI. NO SpendGuard gating
 /// (slice 4 adds the sidecar UDS call before this forward).
 pub async fn chat_completions(
-    State(state): State<AppState>,
+    State(app): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ForwardError> {
-    // Slice 3 path: just forwards. Slice 4c will branch on sidecar
-    // decision BEFORE this forward block runs.
-    let state = &state.forward;
+    let state = app.forward.as_ref();
     // 16 MB body limit (spec §9).
     if body.len() > MAX_BODY_BYTES {
         return Err(ForwardError::BodyTooLarge {
@@ -269,6 +267,76 @@ pub async fn chat_completions(
         .and_then(|v| v.to_str().ok())
         .map(RedactedAuth::new)
         .ok_or(ForwardError::MissingAuth)?;
+
+    // ===== Slice 4c — SpendGuard gating (fail-closed) =====
+    // Spec §4.2: ONLY Decision::Continue calls OpenAI.
+    let run_id = headers
+        .get("x-spendguard-run-id")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+    let inputs = DecisionInputs {
+        tenant_id: &app.sidecar.tenant_id,
+        budget_id: &resolve_budget_id(&headers),
+        window_instance_id: &resolve_window_instance_id(&headers),
+        run_id: run_id.clone(),
+        body_bytes: &body,
+        model_family: decision::parse_model_family(&parsed),
+        estimated_tokens: header_int(&headers, "x-spendguard-estimated-tokens")
+            .unwrap_or_else(|| decision::estimate_tokens(&parsed, None)),
+        unit_id: &resolve_unit_id(&headers),
+    };
+    if inputs.budget_id.is_empty()
+        || inputs.window_instance_id.is_empty()
+        || inputs.unit_id.is_empty()
+    {
+        return Err(ForwardError::MissingIdentification);
+    }
+    let decision_req = decision::build_decision_request(&inputs)
+        .map_err(|e| ForwardError::Internal(e.to_string()))?;
+
+    debug!(run_id = %run_id, "calling sidecar request_decision");
+    let mut client = app.sidecar.client.clone();
+    let decision_resp = match client.request_decision(decision_req).await {
+        Ok(r) => r.into_inner(),
+        Err(status) => {
+            warn!(code = ?status.code(), err = %status.message(), "sidecar request_decision error");
+            return Err(ForwardError::SidecarUnavailable(status.to_string()));
+        }
+    };
+
+    let decision_variant =
+        Decision::try_from(decision_resp.decision).unwrap_or(Decision::Unspecified);
+    match decision_variant {
+        Decision::Continue => {
+            // Fall through to upstream forward below. This is the ONLY
+            // branch that calls OpenAI per spec §4.2 invariant.
+            debug!(decision_id = %decision_resp.decision_id, "Decision::Continue → forwarding");
+        }
+        Decision::Stop => {
+            return Err(ForwardError::Blocked {
+                decision_id: decision_resp.decision_id,
+                reason_codes: decision_resp.reason_codes,
+                matched_rule_ids: decision_resp.matched_rule_ids,
+            });
+        }
+        Decision::RequireApproval | Decision::Degrade => {
+            return Err(ForwardError::UnsupportedDecision {
+                decision_id: decision_resp.decision_id,
+                reason_codes: decision_resp.reason_codes,
+            });
+        }
+        Decision::Skip => {
+            return Err(ForwardError::Skipped { decision_id: decision_resp.decision_id });
+        }
+        Decision::Unspecified => {
+            warn!(decision_value = decision_resp.decision, "unknown decision variant");
+            return Err(ForwardError::SidecarUnavailable(format!(
+                "unknown decision variant: {}", decision_resp.decision
+            )));
+        }
+    }
+    // ===== End Slice 4c gating =====
 
     // Forward to OpenAI. We use reqwest's `bytes()` body to preserve
     // byte-identity (no serde re-encode in the request path).
