@@ -25,11 +25,11 @@ use axum::{
     Json,
 };
 use serde_json::{json, Value};
-use std::sync::Arc;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
 use crate::redacted_auth::RedactedAuth;
+use crate::AppState;
 
 const UPSTREAM_URL: &str = "https://api.openai.com/v1/chat/completions";
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -126,10 +126,13 @@ impl IntoResponse for ForwardError {
 /// Slice 3: forward byte-identically to OpenAI. NO SpendGuard gating
 /// (slice 4 adds the sidecar UDS call before this forward).
 pub async fn chat_completions(
-    State(state): State<Arc<ForwardState>>,
+    State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ForwardError> {
+    // Slice 3 path: just forwards. Slice 4c will branch on sidecar
+    // decision BEFORE this forward block runs.
+    let state = &state.forward;
     // 16 MB body limit (spec §9).
     if body.len() > MAX_BODY_BYTES {
         return Err(ForwardError::BodyTooLarge {
