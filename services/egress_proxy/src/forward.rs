@@ -294,6 +294,13 @@ pub async fn chat_completions(
     }
     let decision_req = decision::build_decision_request(&inputs)
         .map_err(|e| ForwardError::Internal(e.to_string()))?;
+    // Stash the IDs we minted so slice 5 commit lane can thread them
+    // back through to LLM_CALL_POST. DecisionResponse doesn't carry
+    // SpendGuardIds back (verified vs proto).
+    let req_ids = decision_req
+        .ids
+        .clone()
+        .unwrap_or_default();
 
     debug!(run_id = %run_id, "calling sidecar request_decision");
     let mut client = app.sidecar.client.clone();
@@ -365,10 +372,58 @@ pub async fn chat_completions(
 
     debug!(upstream = UPSTREAM_URL, body_bytes = body.len(), "forwarding to OpenAI");
 
-    let resp = req.send().await?;
+    // Build reservation context for slice 5 commit lane.
+    // Pricing FROZEN here at PRE; never re-read until POST (spec §4.1.5).
+    let reservation_id = decision_resp
+        .reservation_ids
+        .first()
+        .cloned()
+        .unwrap_or_default();
+    let decision_id_for_post = decision_resp.decision_id.clone();
+    let effect_hash_for_post = decision_resp.effect_hash.to_vec();
+    // IDs come from the request we sent, not the response (DecisionResponse
+    // lacks SpendGuardIds — verified vs proto).
+    let llm_call_id_for_post = req_ids.llm_call_id.clone();
+    let run_id_for_post = req_ids.run_id.clone();
+    let step_id_for_post = req_ids.step_id.clone();
+    let unit_for_post = crate::proto::common::v1::UnitRef {
+        unit_id: inputs.unit_id.to_string(),
+        kind: crate::proto::common::v1::unit_ref::Kind::Token as i32,
+        token_kind: "output_token".to_string(),
+        model_family: inputs.model_family.clone(),
+        ..Default::default()
+    };
+    let pricing_for_post = match &app.pricing_cache {
+        Some(cache) => cache.get_fresh(),
+        None => Default::default(),
+    };
+    let session_id_for_post = format!("egress-proxy:{}", run_id);
+
+    let upstream_result = req.send().await;
+    let resp = match upstream_result {
+        Ok(r) => r,
+        Err(e) => {
+            // Spec §4.4: emit LLM_CALL_POST(PROVIDER_ERROR) — single RPC.
+            warn!(err = %e, "upstream reqwest error; releasing reservation");
+            release_on_upstream_error(
+                &app,
+                &session_id_for_post,
+                &run_id_for_post,
+                &step_id_for_post,
+                &llm_call_id_for_post,
+                &decision_id_for_post,
+                &reservation_id,
+                &unit_for_post,
+                &pricing_for_post,
+                LlmCallOutcome::ProviderError,
+            )
+            .await;
+            return Err(ForwardError::Upstream(e));
+        }
+    };
     let upstream_status = resp.status();
     let upstream_headers = resp.headers().clone();
-    let upstream_body = resp.bytes().await?;
+    let upstream_body = resp.bytes().await.map_err(ForwardError::Upstream)?;
 
     // Codex slice-1 r2 P2-r2.B: verify upstream Content-Type before
     // returning. SSE upgrades (even with stream:false in request)
@@ -377,8 +432,40 @@ pub async fn chat_completions(
         let ct_str = ct.to_str().unwrap_or("");
         if ct_str.starts_with("text/event-stream") {
             warn!(content_type = ct_str, "upstream returned SSE unexpectedly");
+            release_on_upstream_error(
+                &app,
+                &session_id_for_post,
+                &run_id_for_post,
+                &step_id_for_post,
+                &llm_call_id_for_post,
+                &decision_id_for_post,
+                &reservation_id,
+                &unit_for_post,
+                &pricing_for_post,
+                LlmCallOutcome::ProviderError,
+            )
+            .await;
             return Err(ForwardError::UnexpectedContentType(ct_str.to_string()));
         }
+    }
+
+    // Upstream 4xx / 5xx: release with PROVIDER_ERROR, forward status verbatim.
+    if !upstream_status.is_success() {
+        warn!(status = upstream_status.as_u16(), "upstream non-success; releasing");
+        release_on_upstream_error(
+            &app,
+            &session_id_for_post,
+            &run_id_for_post,
+            &step_id_for_post,
+            &llm_call_id_for_post,
+            &decision_id_for_post,
+            &reservation_id,
+            &unit_for_post,
+            &pricing_for_post,
+            LlmCallOutcome::ProviderError,
+        )
+        .await;
+        return Ok(build_passthrough(upstream_status, &upstream_headers, upstream_body));
     }
 
     info!(
@@ -387,14 +474,227 @@ pub async fn chat_completions(
         "forwarded"
     );
 
-    // Build response with upstream status + content-type.
+    // Parse usage block for commit_estimated.
+    let usage_tokens = parse_usage_tokens(&upstream_body).unwrap_or(inputs.estimated_tokens);
+
+    // Slice 5 commit lane — pydantic_ai pattern (LLM_CALL_POST first, then ConfirmPublishOutcome).
+    // Per spec §4.1 step 12a/12b + codex r3 P1-r3.1 verification.
+    if let Err(e) = commit_on_success(
+        &app,
+        &session_id_for_post,
+        &run_id_for_post,
+        &step_id_for_post,
+        &llm_call_id_for_post,
+        &decision_id_for_post,
+        &effect_hash_for_post,
+        &reservation_id,
+        &unit_for_post,
+        &pricing_for_post,
+        usage_tokens,
+    )
+    .await
+    {
+        // Proxy-internal commit failure (e.g., sidecar disconnect mid-POST).
+        // Spec §4.4: single-RPC release via ConfirmPublishOutcome(APPLY_FAILED).
+        warn!(err = %e, "commit lane failed; emitting APPLY_FAILED");
+        release_on_proxy_internal_error(
+            &app,
+            &session_id_for_post,
+            &decision_id_for_post,
+            &effect_hash_for_post,
+        )
+        .await;
+        // Still forward upstream response to client (the LLM did
+        // successfully return). Operator sees the orphan reservation
+        // in audit_outbox via the APPLY_FAILED row.
+    }
+
+    Ok(build_passthrough(upstream_status, &upstream_headers, upstream_body))
+}
+
+/// LLM_CALL_POST outcome enum mirror — typed wrapper used by error path.
+#[derive(Debug, Clone, Copy)]
+enum LlmCallOutcome {
+    Success,
+    ProviderError,
+    #[allow(dead_code)]
+    ClientTimeout,
+    #[allow(dead_code)]
+    RunAborted,
+}
+
+impl LlmCallOutcome {
+    fn to_proto(self) -> i32 {
+        use crate::proto::sidecar_adapter::v1::llm_call_post_payload::Outcome as O;
+        (match self {
+            Self::Success => O::Success,
+            Self::ProviderError => O::ProviderError,
+            Self::ClientTimeout => O::ClientTimeout,
+            Self::RunAborted => O::RunAborted,
+        }) as i32
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn commit_on_success(
+    app: &AppState,
+    session_id: &str,
+    run_id: &str,
+    step_id: &str,
+    llm_call_id: &str,
+    decision_id: &str,
+    effect_hash: &[u8],
+    reservation_id: &str,
+    unit: &crate::proto::common::v1::UnitRef,
+    pricing: &crate::proto::common::v1::PricingFreeze,
+    usage_tokens: i64,
+) -> anyhow::Result<()> {
+    use crate::proto::sidecar_adapter::v1::{
+        publish_outcome_request::Outcome as ConfirmOutcome, trace_event,
+        LlmCallPostPayload, PublishOutcomeRequest, TraceEvent,
+    };
+
+    // 12a: EmitTraceEvents/LLM_CALL_POST (verified order per pydantic_ai.py:615-634).
+    let payload = LlmCallPostPayload {
+        reservation_id: reservation_id.to_string(),
+        provider_reported_amount_atomic: String::new(),
+        unit: Some(unit.clone()),
+        pricing: Some(pricing.clone()),
+        provider_event_id: String::new(),
+        outcome: LlmCallOutcome::Success.to_proto(),
+        estimated_amount_atomic: usage_tokens.to_string(),
+        ..Default::default()
+    };
+    let event = TraceEvent {
+        session_id: session_id.to_string(),
+        ids: Some(crate::proto::common::v1::SpendGuardIds {
+            run_id: run_id.to_string(),
+            step_id: step_id.to_string(),
+            llm_call_id: llm_call_id.to_string(),
+            decision_id: decision_id.to_string(),
+            ..Default::default()
+        }),
+        kind: trace_event::EventKind::LlmCallPost as i32,
+        event_time: Some(prost_types::Timestamp {
+            seconds: chrono::Utc::now().timestamp(),
+            nanos: chrono::Utc::now().timestamp_subsec_nanos() as i32,
+        }),
+        payload: Some(trace_event::Payload::LlmCallPost(payload)),
+        ..Default::default()
+    };
+
+    let mut client = app.sidecar.client.clone();
+    let stream = async_stream::stream! { yield event; };
+    let mut stream_resp = client.emit_trace_events(stream).await?.into_inner();
+    // Drain one ack (sidecar acknowledges then ends stream).
+    let _ = (&mut stream_resp).message().await?;
+
+    // 12b: ConfirmPublishOutcome(APPLIED).
+    let confirm = PublishOutcomeRequest {
+        session_id: session_id.to_string(),
+        decision_id: decision_id.to_string(),
+        effect_hash: effect_hash.to_vec().into(),
+        outcome: ConfirmOutcome::Applied as i32,
+        adapter_error: String::new(),
+    };
+    client.confirm_publish_outcome(confirm).await?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn release_on_upstream_error(
+    app: &AppState,
+    session_id: &str,
+    run_id: &str,
+    step_id: &str,
+    llm_call_id: &str,
+    decision_id: &str,
+    reservation_id: &str,
+    unit: &crate::proto::common::v1::UnitRef,
+    pricing: &crate::proto::common::v1::PricingFreeze,
+    outcome: LlmCallOutcome,
+) {
+    use crate::proto::sidecar_adapter::v1::{
+        trace_event, LlmCallPostPayload, TraceEvent,
+    };
+    let payload = LlmCallPostPayload {
+        reservation_id: reservation_id.to_string(),
+        unit: Some(unit.clone()),
+        pricing: Some(pricing.clone()),
+        outcome: outcome.to_proto(),
+        estimated_amount_atomic: String::new(),
+        provider_reported_amount_atomic: String::new(),
+        provider_event_id: String::new(),
+        ..Default::default()
+    };
+    let event = TraceEvent {
+        session_id: session_id.to_string(),
+        ids: Some(crate::proto::common::v1::SpendGuardIds {
+            run_id: run_id.to_string(),
+            step_id: step_id.to_string(),
+            llm_call_id: llm_call_id.to_string(),
+            decision_id: decision_id.to_string(),
+            ..Default::default()
+        }),
+        kind: trace_event::EventKind::LlmCallPost as i32,
+        event_time: Some(prost_types::Timestamp {
+            seconds: chrono::Utc::now().timestamp(),
+            nanos: chrono::Utc::now().timestamp_subsec_nanos() as i32,
+        }),
+        payload: Some(trace_event::Payload::LlmCallPost(payload)),
+        ..Default::default()
+    };
+    let mut client = app.sidecar.client.clone();
+    let stream = async_stream::stream! { yield event; };
+    match client.emit_trace_events(stream).await {
+        Ok(resp) => {
+            let _ = resp.into_inner().message().await;
+        }
+        Err(e) => {
+            warn!(err = %e, "release LLM_CALL_POST failed; reservation will TTL-release");
+        }
+    }
+}
+
+async fn release_on_proxy_internal_error(
+    app: &AppState,
+    session_id: &str,
+    decision_id: &str,
+    effect_hash: &[u8],
+) {
+    use crate::proto::sidecar_adapter::v1::{
+        publish_outcome_request::Outcome as ConfirmOutcome, PublishOutcomeRequest,
+    };
+    let confirm = PublishOutcomeRequest {
+        session_id: session_id.to_string(),
+        decision_id: decision_id.to_string(),
+        effect_hash: effect_hash.to_vec().into(),
+        outcome: ConfirmOutcome::ApplyFailed as i32,
+        adapter_error: "proxy-internal commit failure".to_string(),
+    };
+    let mut client = app.sidecar.client.clone();
+    if let Err(e) = client.confirm_publish_outcome(confirm).await {
+        warn!(err = %e, "APPLY_FAILED confirm failed; reservation will TTL-release");
+    }
+}
+
+fn build_passthrough(
+    upstream_status: axum::http::StatusCode,
+    upstream_headers: &axum::http::HeaderMap,
+    upstream_body: Bytes,
+) -> Response {
     let mut response = Response::builder().status(upstream_status);
     if let Some(ct) = upstream_headers.get(axum::http::header::CONTENT_TYPE) {
         response = response.header(axum::http::header::CONTENT_TYPE, ct);
     }
-    Ok(response
-        .body(axum::body::Body::from(upstream_body))
-        .unwrap())
+    response.body(axum::body::Body::from(upstream_body)).unwrap()
+}
+
+fn parse_usage_tokens(body: &[u8]) -> Option<i64> {
+    let v: Value = serde_json::from_slice(body).ok()?;
+    v.get("usage")
+        .and_then(|u| u.get("total_tokens"))
+        .and_then(|t| t.as_i64())
 }
 
 /// Header helpers used by slice 4c routing. Slice 6 will refactor
