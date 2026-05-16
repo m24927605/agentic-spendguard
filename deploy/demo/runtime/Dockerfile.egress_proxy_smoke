@@ -1,0 +1,8 @@
+# Minimal smoke driver container: curl + jq.
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl jq \
+    && rm -rf /var/lib/apt/lists/*
+
+ENTRYPOINT ["/bin/bash", "/demo/proxy_smoke.sh"]

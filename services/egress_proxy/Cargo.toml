@@ -40,8 +40,24 @@ spendguard-ids = { path = "../ids" }
 # main() install_default() pattern; no native-tls to avoid OpenSSL dep.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 
+# Slice 4a: sidecar UDS gRPC client (mirrors services/ttl_sweeper)
+tonic = { version = "0.12", features = ["transport", "gzip"] }
+prost = "0.13"
+prost-types = "0.13"
+hyper-util = { version = "0.1", features = ["tokio"] }
+async-stream = "0.3"
+uuid = { version = "1", features = ["v7", "v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+arc-swap = "1"
+blake2 = "0.10"
+
 # Config
 envy = "0.4"
+
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
