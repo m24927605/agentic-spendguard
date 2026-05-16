@@ -28,6 +28,8 @@ use serde_json::{json, Value};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+use crate::decision::{self, DecisionInputs};
+use crate::proto::sidecar_adapter::v1::decision_response::Decision;
 use crate::redacted_auth::RedactedAuth;
 use crate::AppState;
 
@@ -69,55 +71,168 @@ pub enum ForwardError {
     #[error("missing Authorization header")]
     MissingAuth,
 
+    #[error("missing identification — set SPENDGUARD_PROXY_DEFAULT_* env or X-SpendGuard-* headers")]
+    MissingIdentification,
+
     #[error("upstream HTTP error: {0}")]
     Upstream(#[from] reqwest::Error),
 
     #[error("upstream returned unexpected Content-Type: {0}")]
     UnexpectedContentType(String),
+
+    // Slice 4c — fail-closed decision routing per spec §4.2
+    #[error("SpendGuard sidecar unavailable: {0}")]
+    SidecarUnavailable(String),
+
+    #[error("SpendGuard blocked: {reason_codes:?}")]
+    Blocked {
+        decision_id: String,
+        reason_codes: Vec<String>,
+        matched_rule_ids: Vec<String>,
+    },
+
+    #[error("SpendGuard returned unsupported decision (REQUIRE_APPROVAL/DEGRADE): {reason_codes:?}")]
+    UnsupportedDecision {
+        decision_id: String,
+        reason_codes: Vec<String>,
+    },
+
+    #[error("SpendGuard decision SKIP: this trigger boundary skipped")]
+    Skipped { decision_id: String },
+
+    #[error("internal: {0}")]
+    Internal(String),
 }
 
 impl IntoResponse for ForwardError {
     fn into_response(self) -> Response {
-        let (status, code, message) = match &self {
+        let (status, code, message, retry_after, extra_details): (
+            StatusCode,
+            &'static str,
+            String,
+            Option<&'static str>,
+            Option<Value>,
+        ) = match &self {
             Self::BodyTooLarge { .. } => (
                 StatusCode::PAYLOAD_TOO_LARGE,
                 "spendguard_body_too_large",
                 self.to_string(),
+                None,
+                None,
             ),
             Self::MalformedJson(_) => (
                 StatusCode::BAD_REQUEST,
                 "spendguard_malformed_json",
                 self.to_string(),
+                None,
+                None,
             ),
             Self::StreamingUnsupported => (
                 StatusCode::NOT_IMPLEMENTED,
                 "spendguard_streaming_unsupported",
                 "set stream=false until v0.2".to_string(),
+                None,
+                None,
             ),
             Self::MissingAuth => (
                 StatusCode::UNAUTHORIZED,
                 "spendguard_missing_authorization",
                 self.to_string(),
+                None,
+                None,
+            ),
+            Self::MissingIdentification => (
+                StatusCode::BAD_REQUEST,
+                "spendguard_missing_identification",
+                self.to_string(),
+                None,
+                None,
             ),
             Self::Upstream(_) => (
                 StatusCode::BAD_GATEWAY,
                 "spendguard_upstream_failure",
                 self.to_string(),
+                None,
+                None,
             ),
             Self::UnexpectedContentType(_) => (
                 StatusCode::BAD_GATEWAY,
                 "spendguard_unexpected_streaming_response",
                 self.to_string(),
+                None,
+                None,
+            ),
+            Self::SidecarUnavailable(_) => (
+                StatusCode::BAD_GATEWAY,
+                "spendguard_sidecar_unavailable",
+                self.to_string(),
+                None,
+                None,
+            ),
+            Self::Blocked {
+                decision_id,
+                reason_codes,
+                matched_rule_ids,
+            } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "spendguard_blocked",
+                "request blocked by SpendGuard policy".to_string(),
+                // Spec §3.3: hard-cap STOP gets Retry-After: 86400.
+                // openai-python's clamp (~60s) renders this informational.
+                // Real retry control is client-side max_retries=0.
+                Some("86400"),
+                Some(json!({
+                    "decision_id": decision_id,
+                    "reason_codes": reason_codes,
+                    "matched_rule_ids": matched_rule_ids,
+                })),
+            ),
+            Self::UnsupportedDecision {
+                decision_id,
+                reason_codes,
+            } => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "spendguard_unsupported_decision",
+                "egress-proxy mode does not support REQUIRE_APPROVAL/DEGRADE; use SDK wrapper".to_string(),
+                None,
+                Some(json!({
+                    "decision_id": decision_id,
+                    "reason_codes": reason_codes,
+                    "hint": "use SDK wrapper for approval / degrade flows",
+                })),
+            ),
+            Self::Skipped { decision_id } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "spendguard_skipped",
+                "SpendGuard returned SKIP for this trigger boundary".to_string(),
+                None,
+                Some(json!({"decision_id": decision_id})),
+            ),
+            Self::Internal(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "spendguard_internal_error",
+                self.to_string(),
+                None,
+                None,
             ),
         };
-        let body = Json(json!({
-            "error": {
-                "code": code,
-                "type": code,
-                "message": message,
-            }
-        }));
-        (status, body).into_response()
+
+        let mut error_obj = json!({
+            "code": code,
+            "type": code,
+            "message": message,
+        });
+        if let (Some(details), Some(obj)) = (extra_details, error_obj.as_object_mut()) {
+            obj.insert("details".to_string(), details);
+        }
+        let body = Json(json!({"error": error_obj}));
+
+        let mut builder = axum::response::Response::builder().status(status);
+        if let Some(retry) = retry_after {
+            builder = builder.header("Retry-After", retry);
+        }
+        builder = builder.header(axum::http::header::CONTENT_TYPE, "application/json");
+        builder.body(axum::body::Body::from(serde_json::to_vec(&body.0).unwrap())).unwrap()
     }
 }
 
@@ -212,6 +327,44 @@ pub async fn chat_completions(
     Ok(response
         .body(axum::body::Body::from(upstream_body))
         .unwrap())
+}
+
+/// Header helpers used by slice 4c routing. Slice 6 will refactor
+/// these into a dedicated identification module with full env-default
+/// + override semantics.
+
+fn header_int(headers: &HeaderMap, name: &str) -> Option<i64> {
+    headers
+        .get(name)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<i64>().ok())
+}
+
+fn resolve_budget_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-spendguard-budget-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+        .or_else(|| std::env::var("SPENDGUARD_PROXY_DEFAULT_BUDGET_ID").ok())
+        .unwrap_or_default()
+}
+
+fn resolve_window_instance_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-spendguard-window-instance-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+        .or_else(|| std::env::var("SPENDGUARD_PROXY_DEFAULT_WINDOW_INSTANCE_ID").ok())
+        .unwrap_or_default()
+}
+
+fn resolve_unit_id(headers: &HeaderMap) -> String {
+    headers
+        .get("x-spendguard-unit-id")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+        .or_else(|| std::env::var("SPENDGUARD_PROXY_DEFAULT_UNIT_ID").ok())
+        .unwrap_or_default()
 }
 
 /// Allowlist of request headers forwarded to OpenAI.
