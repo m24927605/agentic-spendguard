@@ -60,7 +60,7 @@ STOP_RESP=$(curl -sS --max-time 10 -w "HTTPSTATUS:%{http_code}" \
     -X POST "${PROXY_URL}/v1/chat/completions" \
     -H "Authorization: Bearer ${OPENAI_API_KEY}" \
     -H "Content-Type: application/json" \
-    -H "X-SpendGuard-Estimated-Tokens: 999999999" \
+    -H "X-SpendGuard-Estimated-Tokens: 2000000000" \
     -d '{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}],"max_tokens":5}')
 
 HTTP_CODE=$(echo "$STOP_RESP" | sed -n 's/.*HTTPSTATUS:\([0-9]*\)$/\1/p')
