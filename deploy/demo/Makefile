@@ -29,6 +29,16 @@ ifeq ($(DEMO_MODE),ttl_sweep)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    ttl-sweeper outbox-forwarder
+else ifeq ($(DEMO_MODE),proxy)
+	@echo "[demo] DEMO_MODE=proxy → postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]                  + egress-proxy (auto-instrument HTTP proxy)."
+	@echo "[demo] Validates the 1-env-var launch claim:"
+	@echo "[demo]   OPENAI_BASE_URL=http://localhost:9000/v1"
+	@echo "[demo]   + 4 SPENDGUARD_PROXY_DEFAULT_* env vars"
+	@echo "[demo]   No code change to the user's openai-python."
+	$(COMPOSE) up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar egress-proxy
 else ifeq ($(DEMO_MODE),cost_advisor)
 	@echo "[demo] DEMO_MODE=cost_advisor → postgres + ledger + canonical-ingest + sidecar"
 	@echo "[demo]                          + bundle-registry + dashboard."
@@ -46,7 +56,10 @@ else
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    ttl-sweeper outbox-forwarder
 endif
-ifeq ($(DEMO_MODE),cost_advisor)
+ifeq ($(DEMO_MODE),proxy)
+	@echo "[demo] running egress-proxy smoke test..."
+	$(COMPOSE) run --rm egress-proxy-smoke
+else ifeq ($(DEMO_MODE),cost_advisor)
 	@echo "[demo] running cost_advisor demo container (full closed loop)..."
 	$(COMPOSE) run --rm cost-advisor-demo
 	@echo "[demo] cost_advisor closed loop PASS — skipping outbox-forwarder check"
