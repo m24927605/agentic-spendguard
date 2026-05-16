@@ -100,6 +100,9 @@ pub enum ForwardError {
     #[error("SpendGuard decision SKIP: this trigger boundary skipped")]
     Skipped { decision_id: String },
 
+    #[error("X-SpendGuard-Tenant-Id does not match proxy startup tenant; set SPENDGUARD_PROXY_MULTI_TENANT=true for multi-tenant deployments")]
+    TenantSpoofing,
+
     #[error("internal: {0}")]
     Internal(String),
 }
@@ -208,6 +211,13 @@ impl IntoResponse for ForwardError {
                 None,
                 Some(json!({"decision_id": decision_id})),
             ),
+            Self::TenantSpoofing => (
+                StatusCode::FORBIDDEN,
+                "spendguard_tenant_spoofing_rejected",
+                self.to_string(),
+                None,
+                None,
+            ),
             Self::Internal(_) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "spendguard_internal_error",
@@ -275,18 +285,50 @@ pub async fn chat_completions(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())
         .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
-    // Slice 6: per-request X-SpendGuard-Tenant-Id header overrides
-    // the proxy-startup default (Path B multi-tenant proxy). Default
-    // is the sidecar's handshake tenant_id (Path A: 1-env-var launch
-    // claim).
-    let tenant_id = headers
+    // Slice 6 + final-sweep P1: X-SpendGuard-Tenant-Id resolution.
+    //
+    // Tenant attribution is process-trusted in v0.1 (spec §11 honest
+    // matrix row 3) BUT only under "Path A single-tenant proxy" —
+    // proxy is per-pod, all requests use the startup tenant.
+    //
+    // Path B (multi-tenant proxy) accepts per-request header but
+    // requires explicit opt-in (`SPENDGUARD_PROXY_MULTI_TENANT=true`),
+    // because without it ANY local process can spoof the header to
+    // gate against another tenant's budget — DoS vector.
+    //
+    // Default (env unset): reject mismatched X-SpendGuard-Tenant-Id
+    // with 400. Sidecar's `tenant_id_assertion` in handshake bound
+    // the proxy to its startup tenant; per-request override violates
+    // that contract.
+    let multi_tenant = std::env::var("SPENDGUARD_PROXY_MULTI_TENANT")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let tenant_id = match headers
         .get("x-spendguard-tenant-id")
         .and_then(|v| v.to_str().ok())
-        .map(String::from)
-        .unwrap_or_else(|| app.sidecar.tenant_id.clone());
+    {
+        Some(header_tid) if header_tid != app.sidecar.tenant_id => {
+            if !multi_tenant {
+                warn!(
+                    proxy_tenant = %app.sidecar.tenant_id,
+                    spoofed_tenant = %header_tid,
+                    "rejected X-SpendGuard-Tenant-Id mismatch (single-tenant proxy mode)"
+                );
+                return Err(ForwardError::TenantSpoofing);
+            }
+            header_tid.to_string()
+        }
+        Some(_) => app.sidecar.tenant_id.clone(),
+        None => app.sidecar.tenant_id.clone(),
+    };
     let budget_id = resolve_budget_id(&headers);
     let window_instance_id = resolve_window_instance_id(&headers);
     let unit_id = resolve_unit_id(&headers);
+
+    let explicit_idempotency_key = headers
+        .get("x-spendguard-idempotency-key")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
 
     let inputs = DecisionInputs {
         tenant_id: &tenant_id,
@@ -298,6 +340,7 @@ pub async fn chat_completions(
         estimated_tokens: header_int(&headers, "x-spendguard-estimated-tokens")
             .unwrap_or_else(|| decision::estimate_tokens(&parsed, None)),
         unit_id: &unit_id,
+        explicit_idempotency_key,
     };
     if inputs.budget_id.is_empty()
         || inputs.window_instance_id.is_empty()
