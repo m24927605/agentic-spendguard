@@ -11,9 +11,15 @@ use crate::config::Config;
 pub async fn connect(cfg: &Config) -> Result<PgPool, sqlx::Error> {
     let opts: PgConnectOptions = cfg.database_url.parse()?;
 
+    // acquire_timeout bumped from 5s → 30s to match the parallel bump in
+    // services/outbox_forwarder + services/ttl_sweeper (commit a539c27).
+    // Ledger startup races with bundles-init + canonical-seed-init for
+    // postgres connections during the demo bring-up burst; 5s wasn't
+    // enough for ledger to acquire its first connection when those init
+    // scripts hold connections.
     PgPoolOptions::new()
         .max_connections(cfg.db_max_connections)
-        .acquire_timeout(std::time::Duration::from_secs(5))
+        .acquire_timeout(std::time::Duration::from_secs(30))
         .connect_with(opts)
         .await
 }

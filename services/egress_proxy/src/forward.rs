@@ -611,11 +611,30 @@ async fn commit_on_success(
     };
 
     // 12a: EmitTraceEvents/LLM_CALL_POST (verified order per pydantic_ai.py:615-634).
+    //
+    // E2E-validation P1 fix: pricing is OPTIONAL in LlmCallPostPayload
+    // (sidecar's `transaction.rs::run_commit_estimated` line 881-891
+    // skips the freeze-mismatch check when `payload.pricing` is None).
+    //
+    // Why we send None instead of our cached value: proxy reads pricing
+    // from runtime.env SPENDGUARD_SIDECAR_PRICING_VERSION etc., but the
+    // sidecar stores reservation pricing from `bundles/contract_bundle/
+    // <id>.metadata.json` (different source of truth). When the two
+    // diverge (which they do in the demo because runtime.env has the
+    // bundle hash, not the pricing tuple), the sidecar rejects with
+    // PricingFreezeMismatch.
+    //
+    // Sending None is correct: the reservation row already carries the
+    // canonical pricing the sidecar wrote at PRE time. Proxy doesn't
+    // need to echo it back. The proxy's pricing_cache is now vestigial
+    // for v0.1 — left in place for spec §4.1.5 traceability + potential
+    // v0.2 use (if proto adds a pricing-supplied-by-caller path).
+    let _ = pricing; // keep parameter for slice-5 trace; future use TBD
     let payload = LlmCallPostPayload {
         reservation_id: reservation_id.to_string(),
         provider_reported_amount_atomic: String::new(),
         unit: Some(unit.clone()),
-        pricing: Some(pricing.clone()),
+        pricing: None,
         provider_event_id: String::new(),
         outcome: LlmCallOutcome::Success.to_proto(),
         estimated_amount_atomic: usage_tokens.to_string(),
@@ -673,10 +692,12 @@ async fn release_on_upstream_error(
     use crate::proto::sidecar_adapter::v1::{
         trace_event, LlmCallPostPayload, TraceEvent,
     };
+    // Same pricing-None fix as commit_on_success above.
+    let _ = pricing;
     let payload = LlmCallPostPayload {
         reservation_id: reservation_id.to_string(),
         unit: Some(unit.clone()),
-        pricing: Some(pricing.clone()),
+        pricing: None,
         outcome: outcome.to_proto(),
         estimated_amount_atomic: String::new(),
         provider_reported_amount_atomic: String::new(),
