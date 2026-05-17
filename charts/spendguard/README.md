@@ -17,20 +17,36 @@ Deploy the SpendGuard sidecar topology to a Kubernetes cluster.
 - **Postgres**. Bring your own RDS / Cloud SQL / Azure DB / managed
   Postgres. Pass connection strings via `postgres.ledgerUrl` and
   `postgres.canonicalUrl`.
-- **PKI certificates**. Pre-create a Secret matching
-  `secrets.tls.existingSecret` with these keys:
-    `ca.crt`, `ledger.crt`, `ledger.key`, `canonical-ingest.crt`,
-    `canonical-ingest.key`, `sidecar.crt`, `sidecar.key`,
-    `webhook-receiver.crt`, `webhook-receiver.key`,
-    `outbox-forwarder.crt`, `outbox-forwarder.key`,
-    `ttl-sweeper.crt`, `ttl-sweeper.key`.
-  Use cert-manager + ClusterIssuer for production rotation.
-- **Contract bundle**. Pre-create the bundles Secret (matching
-  `secrets.bundles.existingSecret`) with
-    `contract_bundle/<id>.tgz`, `contract_bundle/<id>.metadata.json`,
-    `schema_bundle/<id>.tgz`, `runtime.env`, `pricing.env`.
-- **Webhook HMAC secret**. Pre-create a Secret named per
-  `webhookReceiver.hmacSecretName` with key `hmac`.
+
+## Operator-supplied Secrets
+
+The chart consumes seven Secrets that the operator must pre-create.
+Each row lists the default name (overridable via `values.yaml`), the
+required keys, and the producer / verifier role.
+
+| Secret (default name)             | Required keys                                                                                                                                                                                                                                                  | Why                                                                                                                                       |
+|-----------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------|
+| `spendguard-tls`                  | `ca.crt`, `ledger.crt`, `ledger.key`, `canonical-ingest.crt`, `canonical-ingest.key`, `sidecar.crt`, `sidecar.key`, `webhook-receiver.crt`, `webhook-receiver.key`, `outbox-forwarder.crt`, `outbox-forwarder.key`, `ttl-sweeper.crt`, `ttl-sweeper.key` | mTLS workload certs. Production: provision via cert-manager + a workload-identity ClusterIssuer so rotation is automatic.                |
+| `spendguard-bundles`              | `contract_bundle_tgz`, `contract_bundle_sig`, `contract_bundle_metadata_json`, `schema_bundle_tgz`, `runtime.env`, `pricing.env`                                                                                                                                | Pre-pulled signed contract + schema bundles + the env files sidecar/canonical-ingest read at startup.                                    |
+| `spendguard-webhook-hmac`         | `hmac` (binary, ≥32 bytes)                                                                                                                                                                                                                                     | Webhook receiver verifies provider POSTs with this shared secret.                                                                        |
+| `spendguard-manifest-verify-key`  | `manifest_verify_key.pub.pem` (ed25519 public key)                                                                                                                                                                                                             | Sidecar pins the endpoint-catalog manifest signer's public key here; refuses to boot without it.                                          |
+| `spendguard-signing-keys`         | `ledger.pem`, `sidecar.pem`, `webhook-receiver.pem`, `ttl-sweeper.pem` (ed25519 private keys, PKCS8 PEM)                                                                                                                                                       | Per-producer signing keys for the audit chain. KMS-backed mode (S6) replaces this with `signing.kms.kmsKeyArn` per service.              |
+| `spendguard-trust`                | `ca.pem`                                                                                                                                                                                                                                                       | Trust-root pin. The chart additionally checks `sidecar.trustRootSpkiSha256Hex` against this PEM's SubjectPublicKeyInfo sha256.            |
+| `spendguard-mtls-bootstrap`       | `token` (binary, one-shot, ≥32 bytes)                                                                                                                                                                                                                          | Bootstrap token consumed by the cert-manager external issuer at first boot to provision workload certs.                                  |
+
+Secret names are overridable via:
+- `secrets.tls.existingSecret`
+- `secrets.bundles.existingSecret`
+- `webhookReceiver.hmacSecretName`
+- `sidecar.manifestVerifyKey.existingSecret`
+- `signing.existingSecret`
+- `sidecar.trustSecret.name`
+- `sidecar.mtlsBootstrapTokenSecret.name`
+
+For a working example of all seven Secrets being created with structurally-valid contents (self-signed CA + ed25519 keys + deterministic bundle .tgz), see
+[`../../scripts/helm-validate-kind.sh`](../../scripts/helm-validate-kind.sh).
+That script is also wired into CI via
+[`.github/workflows/helm-validate.yml`](../../.github/workflows/helm-validate.yml).
 
 ## Quickstart (local kind cluster)
 
