@@ -894,7 +894,7 @@ async def run_openai_agents_proxy_mode() -> int:
     print("[demo]   1 env var (OPENAI_BASE_URL) → hard-cap gate active end-to-end")
     print("[demo] NOTE: openai-agents defaults to Responses API; users on the")
     print("[demo]   default path need OpenAIChatCompletionsModel explicit until")
-    print("[demo]   v0.3 ships /v1/responses passthrough (issue TBD).")
+    print("[demo]   v0.3 ships /v1/responses passthrough (issue #65).")
     return 0
 
 
