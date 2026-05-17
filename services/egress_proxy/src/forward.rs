@@ -65,9 +65,6 @@ pub enum ForwardError {
     #[error("malformed JSON body: {0}")]
     MalformedJson(String),
 
-    #[error("streaming requests (stream=true) unsupported in v0.1")]
-    StreamingUnsupported,
-
     #[error("missing Authorization header")]
     MissingAuth,
 
@@ -127,13 +124,6 @@ impl IntoResponse for ForwardError {
                 StatusCode::BAD_REQUEST,
                 "spendguard_malformed_json",
                 self.to_string(),
-                None,
-                None,
-            ),
-            Self::StreamingUnsupported => (
-                StatusCode::NOT_IMPLEMENTED,
-                "spendguard_streaming_unsupported",
-                "set stream=false until v0.2".to_string(),
                 None,
                 None,
             ),
@@ -264,12 +254,46 @@ pub async fn chat_completions(
         });
     }
 
-    // Parse body to inspect `stream` field. We don't modify it.
+    // Parse body to inspect `stream` field.
+    //
+    // v0.2 SSE: if `stream:true`, auto-inject `stream_options.include_usage=true`
+    // when missing so the proxy can capture `usage.total_tokens` from the
+    // final SSE event for commit_estimated. Without include_usage, OpenAI
+    // omits the usage block entirely on streaming responses and the proxy
+    // has no real token count to commit.
+    //
+    // Spec: docs/specs/egress-proxy-v0.2-streaming-sse.md §2.2.
     let parsed: Value =
         serde_json::from_slice(&body).map_err(|e| ForwardError::MalformedJson(e.to_string()))?;
-    if parsed.get("stream").and_then(|v| v.as_bool()).unwrap_or(false) {
-        return Err(ForwardError::StreamingUnsupported);
-    }
+    let is_streaming = parsed
+        .get("stream")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let body_for_upstream: bytes::Bytes = if is_streaming {
+        let mut mutated = parsed.clone();
+        let opts_obj = mutated
+            .as_object_mut()
+            .ok_or_else(|| ForwardError::MalformedJson("body root not an object".into()))?;
+        let stream_options = opts_obj
+            .entry("stream_options".to_string())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+        let stream_options_obj = stream_options.as_object_mut().ok_or_else(|| {
+            ForwardError::MalformedJson("stream_options is not an object".into())
+        })?;
+        let already_set = stream_options_obj
+            .get("include_usage")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if !already_set {
+            stream_options_obj.insert("include_usage".to_string(), Value::Bool(true));
+            tracing::debug!("v0.2 SSE: injected stream_options.include_usage=true");
+        }
+        serde_json::to_vec(&mutated)
+            .map_err(|e| ForwardError::Internal(format!("re-encode streaming body: {e}")))?
+            .into()
+    } else {
+        body.clone()
+    };
 
     // Extract + wrap Authorization. Per spec §3.4: forwarded byte-identical.
     let auth = headers
@@ -410,7 +434,7 @@ pub async fn chat_completions(
             axum::http::header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
         )
-        .body(body.clone());
+        .body(body_for_upstream.clone());
 
     // The ONLY call site of expose_secret() — codex audit grep
     // target. RedactedAuth's compile-time guarantee depends on this
@@ -426,7 +450,12 @@ pub async fn chat_completions(
         }
     }
 
-    debug!(upstream = UPSTREAM_URL, body_bytes = body.len(), "forwarding to OpenAI");
+    debug!(
+        upstream = UPSTREAM_URL,
+        body_bytes = body_for_upstream.len(),
+        is_streaming = is_streaming,
+        "forwarding to OpenAI"
+    );
 
     // Build reservation context for slice 5 commit lane.
     // Pricing FROZEN here at PRE; never re-read until POST (spec §4.1.5).
@@ -479,31 +508,60 @@ pub async fn chat_completions(
     };
     let upstream_status = resp.status();
     let upstream_headers = resp.headers().clone();
-    let upstream_body = resp.bytes().await.map_err(ForwardError::Upstream)?;
 
-    // Codex slice-1 r2 P2-r2.B: verify upstream Content-Type before
-    // returning. SSE upgrades (even with stream:false in request)
-    // would break downstream usage parsing.
-    if let Some(ct) = upstream_headers.get(axum::http::header::CONTENT_TYPE) {
-        let ct_str = ct.to_str().unwrap_or("");
-        if ct_str.starts_with("text/event-stream") {
-            warn!(content_type = ct_str, "upstream returned SSE unexpectedly");
-            release_on_upstream_error(
-                &app,
-                &session_id_for_post,
-                &run_id_for_post,
-                &step_id_for_post,
-                &llm_call_id_for_post,
-                &decision_id_for_post,
-                &reservation_id,
-                &unit_for_post,
-                &pricing_for_post,
-                LlmCallOutcome::ProviderError,
-            )
-            .await;
-            return Err(ForwardError::UnexpectedContentType(ct_str.to_string()));
-        }
+    // v0.2 SSE branch — if upstream returned SSE, route to streaming forwarder.
+    // Spec: docs/specs/egress-proxy-v0.2-streaming-sse.md §2.3 / §3.3.
+    let upstream_is_sse = upstream_headers
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|ct| ct.to_str().ok())
+        .map(|s| s.starts_with("text/event-stream"))
+        .unwrap_or(false);
+
+    if is_streaming && upstream_is_sse && upstream_status.is_success() {
+        return forward_streaming_response(
+            app,
+            resp,
+            upstream_status,
+            upstream_headers,
+            session_id_for_post,
+            run_id_for_post,
+            step_id_for_post,
+            llm_call_id_for_post,
+            decision_id_for_post,
+            effect_hash_for_post,
+            reservation_id,
+            unit_for_post,
+            pricing_for_post,
+        )
+        .await;
     }
+
+    if !is_streaming && upstream_is_sse {
+        // Client did NOT ask for streaming but upstream sent SSE. Spec §3.5
+        // fail-closed — proxy can't parse usage from a stream we're not
+        // consuming as SSE.
+        let ct_str = upstream_headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|c| c.to_str().ok())
+            .unwrap_or("");
+        warn!(content_type = ct_str, "upstream returned SSE unexpectedly");
+        release_on_upstream_error(
+            &app,
+            &session_id_for_post,
+            &run_id_for_post,
+            &step_id_for_post,
+            &llm_call_id_for_post,
+            &decision_id_for_post,
+            &reservation_id,
+            &unit_for_post,
+            &pricing_for_post,
+            LlmCallOutcome::ProviderError,
+        )
+        .await;
+        return Err(ForwardError::UnexpectedContentType(ct_str.to_string()));
+    }
+
+    let upstream_body = resp.bytes().await.map_err(ForwardError::Upstream)?;
 
     // Upstream 4xx / 5xx: release with PROVIDER_ERROR, forward status verbatim.
     if !upstream_status.is_success() {
@@ -842,6 +900,234 @@ fn should_forward_header(name: &HeaderName) -> bool {
             | "user-agent"
             | "accept"
     )
+}
+
+// =====================================================================
+// v0.2 SSE streaming pass-through.
+// Spec: docs/specs/egress-proxy-v0.2-streaming-sse.md.
+// =====================================================================
+
+/// Subset of upstream response headers that pass through to the client
+/// for SSE streaming. Drops hop-by-hop headers (axum manages those)
+/// and `Content-Length` (chunked transfer encoding).
+fn should_forward_sse_response_header(name: &axum::http::HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "content-type"
+            | "cache-control"
+            | "openai-organization"
+            | "openai-version"
+            | "openai-processing-ms"
+            | "x-request-id"
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn forward_streaming_response(
+    app: AppState,
+    resp: reqwest::Response,
+    upstream_status: StatusCode,
+    upstream_headers: HeaderMap,
+    session_id: String,
+    run_id: String,
+    step_id: String,
+    llm_call_id: String,
+    decision_id: String,
+    effect_hash: Vec<u8>,
+    reservation_id: String,
+    unit: crate::proto::common::v1::UnitRef,
+    pricing: crate::proto::common::v1::PricingFreeze,
+) -> Result<Response, ForwardError> {
+    use bytes::Bytes;
+    use futures_util::StreamExt;
+
+    info!(upstream_status = upstream_status.as_u16(), "forwarding SSE stream");
+
+    // Channel parser ← tee. Bounded: backpressure propagates if parser
+    // lags behind the network read so memory doesn't grow unbounded
+    // (codex review focus per spec §7 r1 backpressure).
+    let (parser_tx, parser_rx) =
+        tokio::sync::mpsc::channel::<Result<Bytes, String>>(64);
+    // Channel commit ← parser (last usage observed, or None).
+    let (usage_tx, usage_rx) =
+        tokio::sync::oneshot::channel::<Option<i64>>();
+
+    // Spawn parser task.
+    tokio::spawn(parse_usage_from_sse_stream(parser_rx, usage_tx));
+
+    // Spawn commit lane task. Holds an Arc<AppState> so the sidecar
+    // handle stays alive past the request handler's return.
+    let app_for_commit = app.clone();
+    tokio::spawn(async move {
+        match usage_rx.await {
+            Ok(Some(tokens)) => {
+                debug!(tokens, "SSE stream end; committing");
+                if let Err(e) = commit_on_success(
+                    &app_for_commit,
+                    &session_id,
+                    &run_id,
+                    &step_id,
+                    &llm_call_id,
+                    &decision_id,
+                    &effect_hash,
+                    &reservation_id,
+                    &unit,
+                    &pricing,
+                    tokens,
+                )
+                .await
+                {
+                    warn!(err = %e, "SSE commit lane failed; emitting APPLY_FAILED");
+                    release_on_proxy_internal_error(
+                        &app_for_commit,
+                        &session_id,
+                        &decision_id,
+                        &effect_hash,
+                    )
+                    .await;
+                }
+            }
+            Ok(None) | Err(_) => {
+                // Parser saw no usage (malformed stream or upstream cut
+                // off before the final usage event). Spec §4.4: single-
+                // RPC release via LLM_CALL_POST(PROVIDER_ERROR).
+                warn!("SSE stream ended without usage; releasing");
+                release_on_upstream_error(
+                    &app_for_commit,
+                    &session_id,
+                    &run_id,
+                    &step_id,
+                    &llm_call_id,
+                    &decision_id,
+                    &reservation_id,
+                    &unit,
+                    &pricing,
+                    LlmCallOutcome::ProviderError,
+                )
+                .await;
+            }
+        }
+    });
+
+    // Build the tee'd stream that:
+    //   1. forwards each upstream chunk to the client (Body::from_stream)
+    //   2. sends a clone of each chunk to the parser via mpsc
+    //
+    // Bytes clones are cheap (Arc-backed). The bounded mpsc channel
+    // propagates backpressure: if the parser falls behind, the tee
+    // awaits before pulling the next upstream chunk.
+    let upstream_stream = resp.bytes_stream();
+    let tee_stream = upstream_stream.then(move |chunk_result| {
+        let parser_tx = parser_tx.clone();
+        async move {
+            match chunk_result {
+                Ok(b) => {
+                    let _ = parser_tx.send(Ok(b.clone())).await;
+                    Ok::<_, std::io::Error>(b)
+                }
+                Err(e) => {
+                    let msg = format!("upstream stream error: {e}");
+                    let _ = parser_tx.send(Err(msg.clone())).await;
+                    Err(std::io::Error::new(std::io::ErrorKind::Other, msg))
+                }
+            }
+        }
+    });
+
+    // Build the response with the streaming body.
+    let mut response = Response::builder().status(upstream_status);
+    for (name, value) in &upstream_headers {
+        if should_forward_sse_response_header(name) {
+            response = response.header(name, value);
+        }
+    }
+    // Force Cache-Control: no-cache,no-transform if upstream didn't set it.
+    if upstream_headers
+        .get(axum::http::header::CACHE_CONTROL)
+        .is_none()
+    {
+        response = response.header(axum::http::header::CACHE_CONTROL, "no-cache, no-transform");
+    }
+
+    response
+        .body(axum::body::Body::from_stream(tee_stream))
+        .map_err(|e| ForwardError::Internal(format!("build SSE response: {e}")))
+}
+
+/// Drain an SSE chunk stream, parse events one at a time, and capture
+/// the last `usage.total_tokens` observed.
+async fn parse_usage_from_sse_stream(
+    mut rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, String>>,
+    tx: tokio::sync::oneshot::Sender<Option<i64>>,
+) {
+    use bytes::BytesMut;
+    let mut buffer = BytesMut::new();
+    let mut last_usage: Option<i64> = None;
+    let mut stream_errored = false;
+
+    while let Some(chunk_result) = rx.recv().await {
+        match chunk_result {
+            Ok(chunk) => buffer.extend_from_slice(&chunk),
+            Err(_) => {
+                stream_errored = true;
+                break;
+            }
+        }
+        while let Some(boundary) = find_event_boundary(&buffer) {
+            let event_bytes = buffer.split_to(boundary);
+            // Drop the boundary separator (\n\n or \r\n\r\n).
+            let sep_len = if boundary < buffer.len()
+                && buffer.get(0..2).map(|s| s == b"\r\n").unwrap_or(false)
+            {
+                4
+            } else {
+                2
+            };
+            let to_advance = sep_len.min(buffer.len());
+            let _ = buffer.split_to(to_advance);
+            if let Some(usage) = parse_usage_from_event(&event_bytes) {
+                last_usage = Some(usage);
+            }
+        }
+    }
+    if stream_errored {
+        let _ = tx.send(None);
+    } else {
+        let _ = tx.send(last_usage);
+    }
+}
+
+/// Find the first SSE event boundary (`\n\n` or `\r\n\r\n`) in the
+/// buffer; returns the byte offset BEFORE the boundary (where the
+/// event payload ends).
+fn find_event_boundary(buf: &[u8]) -> Option<usize> {
+    let lf = buf.windows(2).position(|w| w == b"\n\n");
+    let crlf = buf.windows(4).position(|w| w == b"\r\n\r\n");
+    match (lf, crlf) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+/// Parse a single SSE event's accumulated `data:` payload. Returns
+/// `usage.total_tokens` if the JSON payload has it.
+fn parse_usage_from_event(event: &[u8]) -> Option<i64> {
+    let s = std::str::from_utf8(event).ok()?;
+    let mut payload = String::new();
+    for line in s.lines() {
+        let l = line.strip_prefix("data:")?;
+        let l = l.trim_start();
+        if l == "[DONE]" {
+            return None;
+        }
+        payload.push_str(l);
+    }
+    let v: Value = serde_json::from_str(&payload).ok()?;
+    v.get("usage")
+        .and_then(|u| u.get("total_tokens"))
+        .and_then(|t| t.as_i64())
 }
 
 #[cfg(test)]

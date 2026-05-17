@@ -89,7 +89,35 @@ fi
 # Skipped because the proxy is started with SPENDGUARD_PROXY_DEFAULT_*
 # env in compose.yaml, so identification is always present.
 
-log "PASS — Auto-instrument egress proxy v0.1 closed loop verified:"
+# ---------------------------------------------------------------------
+# Step 4 (v0.2): SSE streaming pass-through
+# ---------------------------------------------------------------------
+# Proxy auto-injects stream_options.include_usage=true so the final SSE
+# event carries usage.total_tokens; commit lane fires post-stream from
+# the captured value. Spec: docs/specs/egress-proxy-v0.2-streaming-sse.md.
+log "step 4 (STREAMING): real OpenAI streaming call via proxy..."
+STREAM_TMP=$(mktemp)
+curl -sS -N --max-time 30 \
+    -X POST "${PROXY_URL}/v1/chat/completions" \
+    -H "Authorization: Bearer ${OPENAI_API_KEY}" \
+    -H "Content-Type: application/json" \
+    -d '{"model":"gpt-4o-mini","stream":true,"messages":[{"role":"user","content":"Say hi in three words."}],"max_tokens":20}' \
+    > "${STREAM_TMP}" || fail "streaming curl failed"
+
+grep -q "^data: " "${STREAM_TMP}" || fail "no SSE data events"
+EVENT_COUNT=$(grep -c "^data: " "${STREAM_TMP}")
+log "  STREAMING received ${EVENT_COUNT} SSE events"
+
+grep -q "^data: \[DONE\]$" "${STREAM_TMP}" || fail "no [DONE] sentinel"
+
+grep -q '"total_tokens"' "${STREAM_TMP}" || fail "no usage block in stream — include_usage injection broken?"
+STREAM_TOKENS=$(grep -oE '"total_tokens":[0-9]+' "${STREAM_TMP}" | head -1 | grep -oE '[0-9]+')
+log "  STREAMING usage.total_tokens=${STREAM_TOKENS} captured for commit lane"
+
+rm -f "${STREAM_TMP}"
+
+log "PASS — Auto-instrument egress proxy v0.2 (streaming SSE) closed loop verified:"
 log "      OpenAI base_url=${PROXY_URL}/v1 (1 env var, no SDK install)"
 log "      → proxy → sidecar → ledger → real OpenAI gpt-4o-mini"
 log "      → commit_estimated audit chain via LLM_CALL_POST + APPLIED"
+log "      → SSE streaming: ${EVENT_COUNT} events, total_tokens=${STREAM_TOKENS} captured"

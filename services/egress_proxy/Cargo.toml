@@ -55,6 +55,10 @@ blake2 = "0.10"
 # Config
 envy = "0.4"
 
+# v0.2 SSE streaming pass-through
+futures-util = "0.3"
+bytes = "1"
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"
