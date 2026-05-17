@@ -146,6 +146,11 @@ pub struct DecisionOutput {
     pub reservation_set_id: String,
     pub reservation_ids: Vec<String>,
     pub ledger_transaction_id: String,
+    /// Round-2 #9 part 2: when decision = REQUIRE_APPROVAL, the
+    /// approval_id minted (or replayed) by the ledger's
+    /// `post_approval_required_decision` SP. Empty for other decision
+    /// kinds.
+    pub approval_request_id: String,
     /// Reservation TTL — adapter MUST commit/release before this deadline.
     /// None when decision != CONTINUE (no reservation).
     pub ttl_expires_at: Option<prost_types::Timestamp>,
@@ -352,6 +357,7 @@ pub async fn run_through_reserve(
                 reservation_set_id: s.reservation_set_id,
                 reservation_ids: s.reservations.iter().map(|r| r.reservation_id.clone()).collect(),
                 ledger_transaction_id: s.ledger_transaction_id,
+                approval_request_id: String::new(),
                 ttl_expires_at: ttl_from_server,
                 matched_rule_ids: matched_rules.clone(),
                 reason_codes: reason_codes.clone(),
@@ -391,6 +397,7 @@ pub async fn run_through_reserve(
                 // ordinal order — non-empty for ReserveSet replays.
                 reservation_ids: r.projection_ids.clone(),
                 ledger_transaction_id: r.ledger_transaction_id,
+                approval_request_id: String::new(),
                 // Original TTL anchor from first call (mirrored from the
                 // server-stored value, not recomputed).
                 ttl_expires_at: r.ttl_expires_at.clone(),
@@ -703,6 +710,7 @@ async fn run_record_denied_decision(
             reservation_set_id: String::new(),
             reservation_ids: vec![],
             ledger_transaction_id: s.ledger_transaction_id,
+            approval_request_id: s.approval_id,
             ttl_expires_at: None,
             matched_rule_ids: matched_rules.to_vec(),
             reason_codes: reason_codes.to_vec(),
@@ -735,6 +743,12 @@ async fn run_record_denied_decision(
                 reservation_set_id: String::new(),
                 reservation_ids: vec![],
                 ledger_transaction_id: r.ledger_transaction_id,
+                // Round-2 #9 part 2 POC: shared Replay proto doesn't
+                // carry approval_id; the resume path can recover it
+                // via the decision_id index when needed. GA work item
+                // is to extend Replay with operation_id semantics for
+                // approval kind.
+                approval_request_id: String::new(),
                 ttl_expires_at: None,
                 matched_rule_ids: matched_rules.to_vec(),
                 reason_codes: reason_codes.to_vec(),
@@ -766,7 +780,7 @@ pub fn build_response(out: DecisionOutput) -> DecisionResponse {
         ledger_transaction_id: out.ledger_transaction_id,
         reservation_ids: out.reservation_ids,
         ttl_expires_at: out.ttl_expires_at,
-        approval_request_id: String::new(),
+        approval_request_id: out.approval_request_id,
         approval_ttl: None,
         approver_role: String::new(),
         terminal: matches!(out.decision, Decision::Stop),

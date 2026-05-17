@@ -587,12 +587,17 @@ class SpendGuardClient:
                 decision_id=d.decision_id,
                 audit_decision_event_id=d.audit_decision_event_id,
                 decision=adapter_pb2.DecisionResponse.Decision.Name(d.decision),
-                reason_codes=list(d.reason_codes),
-                matched_rule_ids=list(d.matched_rule_ids),
-                ledger_transaction_id=d.ledger_transaction_id,
-                reservation_ids=list(d.reservation_ids),
+                mutation_patch_json=d.mutation_patch_json,
                 effect_hash=bytes(d.effect_hash),
-                terminal=d.terminal,
+                ledger_transaction_id=d.ledger_transaction_id,
+                reservation_ids=tuple(d.reservation_ids),
+                ttl_expires_at_seconds=(
+                    d.ttl_expires_at.seconds
+                    if d.HasField("ttl_expires_at")
+                    else 0
+                ),
+                reason_codes=tuple(d.reason_codes),
+                matched_rule_ids=tuple(d.matched_rule_ids),
             )
         if kind == "denied":
             denied = resp.denied

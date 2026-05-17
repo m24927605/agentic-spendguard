@@ -1009,11 +1009,25 @@ mod approval_resume_payload {
                 .await
                 .map_err(|e| format!("sign resume cloudevent: {e}"))?;
 
+            // POC pricing: read from the sidecar's currently-installed
+            // contract bundle metadata. Frozen-at-PRE semantics would
+            // require capturing pricing_version + price_snapshot_hash
+            // in decision_context_json at REQUIRE_APPROVAL time; that
+            // is a P3.5+ followup. For the closed-loop demo, the
+            // contract_bundle_hash_hex stored in decision_context
+            // pins the bundle identity, so a hot-reload between
+            // approval and resume would surface via the hash check.
+            let bundle = state
+                .inner
+                .contract_bundle
+                .read()
+                .clone()
+                .ok_or_else(|| "no contract bundle installed".to_string())?;
             let pricing = PricingFreeze {
-                pricing_version: String::new(),
-                price_snapshot_hash: vec![].into(),
-                fx_rate_version: String::new(),
-                unit_conversion_version: String::new(),
+                pricing_version: bundle.pricing_version.clone(),
+                price_snapshot_hash: bundle.price_snapshot_hash.clone().into(),
+                fx_rate_version: bundle.fx_rate_version.clone(),
+                unit_conversion_version: bundle.unit_conversion_version.clone(),
             };
 
             // TTL: reuse sidecar's configured reservation TTL.
