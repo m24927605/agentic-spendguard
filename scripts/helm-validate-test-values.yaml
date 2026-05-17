@@ -1,0 +1,36 @@
+# =====================================================================
+# Helm chart validation: minimum values that satisfy every fail-gate.
+# =====================================================================
+#
+# Used by `.github/workflows/helm-validate.yml` to prove that
+# chart.profile=production renders cleanly when every required value
+# is supplied. Pair with `helm template` to catch regressions in the
+# fail-gates' coverage (a gate that doesn't actually fire on bad input
+# is worse than no gate).
+#
+# Real operators should NOT use these values verbatim — they are
+# structurally valid placeholders, not secrets, not real URLs.
+# =====================================================================
+
+chart:
+  profile: production
+
+postgres:
+  ledgerUrl: "postgres://spendguard:test-pass@postgres.spendguard.svc.cluster.local:5432/spendguard_ledger?sslmode=require"
+  canonicalUrl: "postgres://spendguard:test-pass@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical?sslmode=require"
+
+sidecar:
+  # Byte-exact hash of the contract bundle .tgz (sha256 hex). Real value
+  # comes from the operator's bundle-publisher. Placeholder hex for CI.
+  contractBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  # sha256(SubjectPublicKeyInfo) of the trust-root CA, hex.
+  trustRootSpkiSha256Hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  # Real endpoint-catalog manifest URL (not the chart placeholder).
+  endpointCatalogManifestUrl: "https://endpoint-catalog.example.invalid/v1/catalog/manifest"
+
+outboxForwarder:
+  # Byte-exact hash of the schema bundle .tgz (sha256 hex).
+  schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+
+# signing defaults: mode=local, profile=production, strictVerification=true
+# all satisfy their gates. No override needed here.
