@@ -123,6 +123,14 @@ spec:
       then:
         decision: STOP
         reason_code: BUDGET_EXHAUSTED
+    - id: require-approval-large
+      when:
+        budget_id: $DEMO_BUDGET_ID
+        claim_amount_atomic_gt: "400000000"
+      then:
+        decision: REQUIRE_APPROVAL
+        reason_code: LARGE_CLAIM_REQUIRES_APPROVAL
+        approver_role: finance-approver
 EOF
 
 cat > "$WORK/manifest.json" <<EOF

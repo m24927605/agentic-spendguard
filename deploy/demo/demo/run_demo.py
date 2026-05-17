@@ -1800,34 +1800,57 @@ async def run_approval_mode() -> int:
             idempotency_key=idempotency_key,
         )
         print(
-            f"[demo] DEMO_MODE=approval — decision returned CONTINUE without "
-            f"REQUIRE_APPROVAL (decision_id={outcome.decision_id}). The seeded "
-            f"contract bundle does not yet contain a REQUIRE_APPROVAL rule for "
-            f"the demo claim shape. The resume flow surface (sidecar + SDK) is "
-            f"still wired and exercised individually by unit tests in PR #37/#38/#39."
+            f"[demo] FATAL: DEMO_MODE=approval expected REQUIRE_APPROVAL but "
+            f"got CONTINUE (decision_id={outcome.decision_id}). The seeded "
+            f"contract bundle should contain the `require-approval-large` rule "
+            f"firing on claim_amount_atomic_gt 400_000_000.",
+            file=sys.stderr,
         )
         await client.close()
-        return 0
+        return 7
     except ApprovalRequired as e:
         print(
             f"[demo] REQUIRE_APPROVAL raised approval_id={e.approval_request_id} "
             f"decision_id={e.decision_id}"
         )
 
-        # Round-2 #9 part 2: in production the approver simulates a
-        # decision via the control_plane REST API
-        # (POST /v1/approvals/{id}/resolve). Here we go straight to
-        # resume() and expect either:
-        #   * ApprovalLapsedError(state='pending') — operator hasn't
-        #     resolved yet (typical demo path until control_plane
-        #     wiring is exercised)
-        #   * ApprovalLapsedError(message containing
-        #     'PRODUCER_SP_NOT_WIRED') — operator approved but the
-        #     producer-side SP that captures decision_context +
-        #     requested_effect hasn't shipped, so resume can't rebuild
-        #     the ReserveSetRequest
-        #   * Continue DecisionOutcome — full path lit up
-        #   * ApprovalDeniedError — operator rejected
+        # Round-2 #9 part 2 closed loop: simulate the operator
+        # approving the request via the control-plane REST surface
+        # before calling resume().
+        import httpx
+
+        control_plane_url = os.environ.get(
+            "SPENDGUARD_CONTROL_PLANE_URL", "http://control-plane:8091"
+        )
+        control_plane_token = os.environ.get(
+            "SPENDGUARD_CONTROL_PLANE_TOKEN",
+            "demo-admin-token-replace-in-production",
+        )
+        resolve_url = f"{control_plane_url}/v1/approvals/{e.approval_request_id}/resolve"
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            resp = await http.post(
+                resolve_url,
+                headers={"Authorization": f"Bearer {control_plane_token}"},
+                json={"target_state": "approved", "reason": "demo operator approves"},
+            )
+            if resp.status_code >= 400:
+                print(
+                    f"[demo] FATAL: control-plane resolve returned "
+                    f"HTTP {resp.status_code}: {resp.text}",
+                    file=sys.stderr,
+                )
+                await client.close()
+                return 4
+            print(
+                f"[demo] control-plane resolved approval_id={e.approval_request_id} "
+                f"-> {resp.json().get('final_state')}"
+            )
+
+        # Now resume — the sidecar's ResumeAfterApproval handler
+        # reads the resolved row via GetApprovalForResume, rebuilds
+        # the ReserveSetRequest from the captured decision_context +
+        # requested_effect JSON, calls Ledger.ReserveSet, and
+        # atomically links the approval row via MarkApprovalBundled.
         try:
             resume_outcome = await e.resume(client)
             print(
@@ -1837,14 +1860,21 @@ async def run_approval_mode() -> int:
             )
         except ApprovalLapsedError as lapsed:
             print(
-                f"[demo] resume() raised ApprovalLapsedError state={lapsed.state} "
-                f"message={lapsed!s} — expected until producer-side SP lands"
+                f"[demo] FATAL: resume() raised ApprovalLapsedError state={lapsed.state} "
+                f"message={lapsed!s} — expected CONTINUE after control-plane resolve",
+                file=sys.stderr,
             )
+            await client.close()
+            return 5
         except ApprovalDeniedError as denied:
             print(
-                f"[demo] resume() raised ApprovalDeniedError "
-                f"approver={denied.approver_subject} reason={denied.approver_reason}"
+                f"[demo] FATAL: resume() raised ApprovalDeniedError "
+                f"approver={denied.approver_subject} reason={denied.approver_reason} — "
+                f"expected CONTINUE after target_state=approved",
+                file=sys.stderr,
             )
+            await client.close()
+            return 6
         await client.close()
         return 0
 

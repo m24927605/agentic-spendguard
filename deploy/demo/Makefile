@@ -50,6 +50,18 @@ else ifeq ($(DEMO_MODE),cost_advisor)
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar bundle-registry dashboard
+else ifeq ($(DEMO_MODE),approval)
+	@echo "[demo] DEMO_MODE=approval → postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]                       + control-plane + outbox-forwarder."
+	@echo "[demo] Closes Round-2 #9 part 2: exercises the REQUIRE_APPROVAL →"
+	@echo "[demo]   POST /v1/approvals/:id/resolve → ResumeAfterApproval round-trip."
+	@echo "[demo] control-plane provides the operator REST surface; outbox-forwarder"
+	@echo "[demo] drains the audit chain so verify_step_approval.sql sees the"
+	@echo "[demo] approval + resume rows."
+	$(COMPOSE) up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    control-plane outbox-forwarder
 else
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
@@ -86,6 +98,9 @@ else ifeq ($(DEMO_MODE),ttl_sweep)
 else ifeq ($(DEMO_MODE),deny)
 	@echo "[demo] verifying Phase 3 wedge (contract evaluator STOP path)..."
 	@$(MAKE) demo-verify-deny
+else ifeq ($(DEMO_MODE),approval)
+	@echo "[demo] verifying Round-2 #9 part 2 (REQUIRE_APPROVAL → resolve → resume)..."
+	@$(MAKE) demo-verify-approval
 else ifneq (,$(findstring agent_real,$(DEMO_MODE)))
 	@echo "[demo] DEMO_MODE=$(DEMO_MODE) — skipping demo-verify-step7."
 	@echo "[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)"
@@ -166,6 +181,16 @@ demo-verify-outbox-closure:
 demo-verify-deny:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_deny.sql
 	@echo "[demo] Phase 3 DENY verification done"
+
+# Round-2 #9 part 2 closed-loop verification: full REQUIRE_APPROVAL
+# round-trip — contract evaluator emits REQUIRE_APPROVAL, demo runner
+# POSTs to control-plane /v1/approvals/:id/resolve, sidecar
+# ResumeAfterApproval calls Ledger.ReserveSet + MarkApprovalBundled.
+# Asserts approval_requests.state='approved' AND
+# bundled_ledger_transaction_id IS NOT NULL.
+demo-verify-approval:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_approval.sql
+	@echo "[demo] Round-2 #9 part 2 approval verification done"
 
 # Phase 4 O3 pricing-table verification: pricing-seed-init loaded the
 # real pricing_table from seed.yaml; pricing_versions has at least one

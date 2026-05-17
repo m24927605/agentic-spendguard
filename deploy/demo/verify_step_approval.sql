@@ -1,60 +1,139 @@
 -- =====================================================================
--- Round-2 #9 part 2 PR 9e: DEMO_MODE=approval verify SQL.
+-- Round-2 #9 part 2: DEMO_MODE=approval closed-loop verify SQL.
 --
 -- Asserts the post-conditions after the demo runner exercises the
--- REQUIRE_APPROVAL → ApprovalRequired → e.resume(client) round-trip.
+-- full REQUIRE_APPROVAL → control-plane resolve → ResumeAfterApproval
+-- round-trip:
+--   1. Sidecar's contract evaluator emits REQUIRE_APPROVAL on the
+--      demo's 500_000_000 claim (the bundle's `require-approval-large`
+--      rule fires on claim_amount_atomic_gt 400_000_000).
+--   2. post_approval_required_decision SP (migration 0037) writes a
+--      'pending' approval_requests row with non-empty
+--      decision_context + requested_effect JSON.
+--   3. Demo runner POSTs target_state=approved to control-plane's
+--      /v1/approvals/:id/resolve — approval row transitions
+--      pending → approved.
+--   4. SDK e.resume(client) calls ResumeAfterApproval; sidecar
+--      reads the resolved row, calls Ledger.ReserveSet, then
+--      MarkApprovalBundled atomically links the approval row to
+--      the new ledger_transaction.
 --
--- TODAY (PR 9e shipped, producer-side SP not yet wired):
---   * approval_requests row in 'pending' state — passes
---   * audit_outbox decision row exists with decision='REQUIRE_APPROVAL' — passes
---   * No ledger_transactions row tied to the approval — expected (resume
---     surface returns ApprovalLapsedError until producer SP lands)
---
--- WHEN producer-side post_approval_required_decision SP ships:
---   * Update §B to require approval_requests.state='approved'
---   * Update §C to require approval_requests.bundled_ledger_transaction_id
---     IS NOT NULL after resume
---   * Update §D to require a Continue audit_outbox row tied to the
---     resume idempotency_key (sha256("resume:" + approval_id))
+-- Asserts:
+--   * §A: at least one spendguard.audit.decision row exists
+--   * §B: approval_requests row reached state='approved' with
+--         non-empty decision_context + requested_effect AND
+--         bundled_ledger_transaction_id IS NOT NULL
+--   * §C: NO 'pending' approval_requests row left over from the run
+--   * §D: ledger_transactions row corresponding to the bundled
+--         resume reservation exists (operation_kind='reserve')
 -- =====================================================================
 
--- §A: At least one decision row exists for the demo run.
-\echo '[verify] §A: decision row exists for the demo claim'
-SELECT
-    COUNT(*) AS decision_rows,
-    bool_or(operation_kind = 'spendguard.audit.decision') AS has_decision_kind
-FROM ledger_transactions
-WHERE recorded_at > now() - interval '5 minutes';
+\set ON_ERROR_STOP on
 
--- §B: approval_requests has at least one pending row from the run.
--- (Once producer SP lands this also asserts decision_context_json /
--- requested_effect_json are non-empty.)
-\echo '[verify] §B: approval_requests has a pending row'
-SELECT
-    COUNT(*) AS pending_approvals,
-    COALESCE(MAX(LENGTH(decision_context::text)), 0) AS decision_context_bytes,
-    COALESCE(MAX(LENGTH(requested_effect::text)), 0) AS requested_effect_bytes
-FROM approval_requests
-WHERE created_at > now() - interval '5 minutes'
-  AND state = 'pending';
+-- §A: ledger_transactions has both a denied_decision row (from the
+-- post_approval_required_decision SP wrapping post_denied_decision_transaction)
+-- AND a reserve row (from the resume path's Ledger.ReserveSet call).
+\echo '[verify] §A: denied_decision + reserve rows exist for the demo run'
+DO $$
+DECLARE
+    denied_rows INT;
+    reserve_rows INT;
+BEGIN
+    SELECT
+        COUNT(*) FILTER (WHERE operation_kind = 'denied_decision'),
+        COUNT(*) FILTER (WHERE operation_kind = 'reserve')
+      INTO denied_rows, reserve_rows
+      FROM ledger_transactions
+     WHERE recorded_at > now() - interval '5 minutes';
+    RAISE NOTICE '[verify] §A denied_rows=% reserve_rows=%',
+                 denied_rows, reserve_rows;
+    IF denied_rows < 1 THEN
+        RAISE EXCEPTION '§A FAIL: expected at least 1 denied_decision row (from REQUIRE_APPROVAL)';
+    END IF;
+    IF reserve_rows < 1 THEN
+        RAISE EXCEPTION '§A FAIL: expected at least 1 reserve row (from resume ReserveSet)';
+    END IF;
+END$$;
 
--- §C: bundled_ledger_transaction_id is currently NULL — expected
--- until producer SP wiring lands.
-\echo '[verify] §C: bundled_ledger_transaction_id IS NULL (expected today)'
-SELECT
-    COUNT(*) AS unbundled_pending,
-    COALESCE(MAX(approval_id::text), '<none>') AS sample_approval_id
-FROM approval_requests
-WHERE created_at > now() - interval '5 minutes'
-  AND state = 'pending'
-  AND bundled_ledger_transaction_id IS NULL;
+-- §B: approval_requests row reached state='approved' with non-empty
+--     decision_context + requested_effect AND bundled_ledger_transaction_id NOT NULL.
+\echo '[verify] §B: approval_requests row approved + bundled'
+DO $$
+DECLARE
+    approved_rows INT;
+    sample_id TEXT;
+    sample_bundled_tx TEXT;
+    decision_context_bytes INT;
+    requested_effect_bytes INT;
+BEGIN
+    SELECT
+        COUNT(*),
+        MAX(approval_id::text),
+        MAX(bundled_ledger_transaction_id::text),
+        COALESCE(MAX(LENGTH(decision_context::text)), 0),
+        COALESCE(MAX(LENGTH(requested_effect::text)), 0)
+      INTO approved_rows, sample_id, sample_bundled_tx,
+           decision_context_bytes, requested_effect_bytes
+      FROM approval_requests
+     WHERE created_at > now() - interval '5 minutes'
+       AND state = 'approved'
+       AND bundled_ledger_transaction_id IS NOT NULL;
+    RAISE NOTICE '[verify] §B approved_bundled_rows=% sample_approval=% sample_bundled_tx=% decision_context_bytes=% requested_effect_bytes=%',
+                 approved_rows, sample_id, sample_bundled_tx,
+                 decision_context_bytes, requested_effect_bytes;
+    IF approved_rows < 1 THEN
+        RAISE EXCEPTION '§B FAIL: expected at least 1 approval_requests row state=approved AND bundled_ledger_transaction_id IS NOT NULL';
+    END IF;
+    IF decision_context_bytes < 50 OR requested_effect_bytes < 50 THEN
+        RAISE EXCEPTION '§B FAIL: decision_context (% B) or requested_effect (% B) too short — producer SP did not capture them',
+                        decision_context_bytes, requested_effect_bytes;
+    END IF;
+END$$;
 
--- §D: When the producer SP ships, this query should return >= 1 row
--- with operation_kind='spendguard.audit.outcome.resume_continue'.
--- Today it returns 0 (no resume yet); commented to keep the verify
--- output noise-free.
---
--- \echo '[verify] §D (deferred): resume continuation audit_outbox row'
--- SELECT COUNT(*) FROM audit_outbox
--- WHERE cloudevent_type = 'spendguard.audit.outcome.resume_continue'
---   AND recorded_at > now() - interval '5 minutes';
+-- §C: No leftover pending approval_requests from the run.
+\echo '[verify] §C: no pending approval_requests left from this run'
+DO $$
+DECLARE
+    pending_rows INT;
+BEGIN
+    SELECT COUNT(*) INTO pending_rows
+      FROM approval_requests
+     WHERE created_at > now() - interval '5 minutes'
+       AND state = 'pending';
+    RAISE NOTICE '[verify] §C pending_rows=%', pending_rows;
+    IF pending_rows > 0 THEN
+        RAISE EXCEPTION '§C FAIL: % approval_requests still pending — control-plane resolve did not transition them',
+                        pending_rows;
+    END IF;
+END$$;
+
+-- §D: ledger_transactions has a row matching the bundled resume reservation.
+\echo '[verify] §D: bundled ledger_transactions row exists'
+DO $$
+DECLARE
+    bundled_tx_id UUID;
+    found_in_ledger INT;
+BEGIN
+    SELECT bundled_ledger_transaction_id
+      INTO bundled_tx_id
+      FROM approval_requests
+     WHERE created_at > now() - interval '5 minutes'
+       AND state = 'approved'
+       AND bundled_ledger_transaction_id IS NOT NULL
+     ORDER BY created_at DESC
+     LIMIT 1;
+    IF bundled_tx_id IS NULL THEN
+        RAISE EXCEPTION '§D FAIL: no approved+bundled approval to cross-check';
+    END IF;
+    SELECT COUNT(*) INTO found_in_ledger
+      FROM ledger_transactions
+     WHERE ledger_transaction_id = bundled_tx_id;
+    RAISE NOTICE '[verify] §D bundled_tx_id=% found_in_ledger=%',
+                 bundled_tx_id, found_in_ledger;
+    IF found_in_ledger != 1 THEN
+        RAISE EXCEPTION '§D FAIL: bundled_ledger_transaction_id % not found in ledger_transactions',
+                        bundled_tx_id;
+    END IF;
+END$$;
+
+\echo '[verify] Round-2 #9 part 2 closed-loop verification PASS'
