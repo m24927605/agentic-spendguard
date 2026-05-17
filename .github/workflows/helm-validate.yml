@@ -65,12 +65,30 @@ jobs:
           test -s /tmp/rendered-production.yaml
           echo "✓ profile=production with full values rendered $(wc -l < /tmp/rendered-production.yaml) lines"
 
-      - name: kubectl apply --dry-run=client (catches missing CRDs / typed errors)
+      - name: kubeval-style YAML validation (no cluster needed)
         run: |
-          curl -sL https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl
-          chmod +x /usr/local/bin/kubectl
-          kubectl apply --dry-run=client -f /tmp/rendered-production.yaml > /dev/null
-          echo "✓ dry-run apply clean"
+          # Skip kubectl apply --dry-run=client; it requires a live API
+          # server to fetch OpenAPI. Real K8s validation happens in the
+          # kind job. Here we just confirm the rendered YAML parses as
+          # a multi-document YAML stream and every doc has apiVersion +
+          # kind (typed-resource sanity).
+          python3 <<'PY'
+          import sys, yaml
+          with open("/tmp/rendered-production.yaml") as f:
+              docs = list(yaml.safe_load_all(f))
+          docs = [d for d in docs if d]  # strip empties from --- separators
+          if not docs:
+              print("::error::no documents in rendered YAML")
+              sys.exit(1)
+          bad = [i for i, d in enumerate(docs) if not (d.get("apiVersion") and d.get("kind"))]
+          if bad:
+              print(f"::error::documents missing apiVersion/kind: indices={bad}")
+              sys.exit(1)
+          kinds = {}
+          for d in docs:
+              kinds[d["kind"]] = kinds.get(d["kind"], 0) + 1
+          print(f"✓ {len(docs)} documents parsed; kinds={kinds}")
+          PY
 
   kind:
     name: kind cluster install (demo profile)
