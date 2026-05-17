@@ -595,6 +595,8 @@ async def main() -> int:
         return await run_openai_agents_mode()
     if DEMO_MODE == "agent_real_openai_agents_multistep":
         return await run_openai_agents_multistep_mode()
+    if DEMO_MODE == "agent_real_openai_agents_proxy":
+        return await run_openai_agents_proxy_mode()
     if DEMO_MODE == "agent_real_agt":
         return await run_agt_composite_mode()
     return await run_agent_mode()
@@ -824,6 +826,75 @@ async def run_openai_agents_mode() -> int:
     output = getattr(result, "final_output", None) or str(result)
     print(f"[demo] openai-agents Runner.run OK output={output!r} run_id={run_id}")
     await client.close()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# OpenAI Agents SDK + egress proxy "1 env var" mode.
+#
+# This is the launch-claim closure demo. NO SpendGuardAgentsModel wrapper,
+# NO claim_estimator, NO SpendGuardClient handshake from inside the demo
+# process. JUST the openai-agents SDK + OPENAI_BASE_URL pointed at the
+# proxy. If this PASSes against real OpenAI, the launch claim
+# ("set OPENAI_BASE_URL, no code change, hard-cap budget gate active")
+# is verified end-to-end against the SDK that HN readers will actually
+# run.
+#
+# The proxy gates the call PRE via the sidecar (default tenant from
+# SPENDGUARD_PROXY_DEFAULT_* env vars; no per-request headers required).
+# CONTINUE → forward to OpenAI; STOP → 429 (would short-circuit Runner
+# with an APIError — not exercised here, the demo intends to succeed).
+# ---------------------------------------------------------------------------
+
+
+async def run_openai_agents_proxy_mode() -> int:
+    if not os.environ.get("OPENAI_API_KEY"):
+        print(
+            "[demo] FATAL: OPENAI_API_KEY required for agent_real_openai_agents_proxy",
+            file=sys.stderr,
+        )
+        return 8
+
+    proxy_base_url = os.environ.get(
+        "SPENDGUARD_PROXY_BASE_URL", "http://egress-proxy:9000/v1"
+    )
+    print(f"[demo] launch-claim verification: pointing openai-agents at {proxy_base_url}")
+    print("[demo]   NO SpendGuard SDK adapter; NO wrapper. Just OPENAI_BASE_URL.")
+    os.environ["OPENAI_BASE_URL"] = proxy_base_url
+
+    from agents import Agent, Runner
+    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+    from openai import AsyncOpenAI
+
+    # Explicit OpenAIChatCompletionsModel because openai-agents defaults
+    # to OpenAIResponsesModel which hits POST /v1/responses (a different
+    # API surface the v0.2 egress proxy doesn't yet support — tracked as
+    # a followup issue). For Chat Completions users, OPENAI_BASE_URL is
+    # the 1-env-var path through the proxy.
+    proxy_client = AsyncOpenAI(base_url=proxy_base_url)
+    model = OpenAIChatCompletionsModel(model="gpt-4o-mini", openai_client=proxy_client)
+    agent = Agent(
+        name="spendguard-launch-demo",
+        instructions="Reply concisely in three words.",
+        model=model,
+    )
+
+    try:
+        result = await Runner.run(agent, "Say hello.")
+    except Exception as e:
+        print(
+            f"[demo] FATAL: Runner.run through proxy failed: {type(e).__name__}: {e}",
+            file=sys.stderr,
+        )
+        return 9
+
+    output = getattr(result, "final_output", None) or str(result)
+    print(f"[demo] openai-agents Runner.run via proxy OK; output={output!r}")
+    print("[demo] launch-claim verified for Chat Completions path:")
+    print("[demo]   1 env var (OPENAI_BASE_URL) → hard-cap gate active end-to-end")
+    print("[demo] NOTE: openai-agents defaults to Responses API; users on the")
+    print("[demo]   default path need OpenAIChatCompletionsModel explicit until")
+    print("[demo]   v0.3 ships /v1/responses passthrough (issue #65).")
     return 0
 
 

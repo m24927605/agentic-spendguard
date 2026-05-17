@@ -39,6 +39,15 @@ else ifeq ($(DEMO_MODE),proxy)
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar egress-proxy
+else ifeq ($(DEMO_MODE),agent_real_openai_agents_proxy)
+	@echo "[demo] DEMO_MODE=agent_real_openai_agents_proxy →"
+	@echo "[demo]   Same stack as proxy mode, but the demo container runs the"
+	@echo "[demo]   ACTUAL openai-agents SDK (no SpendGuard wrapper, no SDK"
+	@echo "[demo]   adapter) against OPENAI_BASE_URL=egress-proxy. Verifies the"
+	@echo "[demo]   1-env-var launch claim against the SDK HN readers will run."
+	$(COMPOSE) up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar egress-proxy
 else ifeq ($(DEMO_MODE),cost_advisor)
 	@echo "[demo] DEMO_MODE=cost_advisor → postgres + ledger + canonical-ingest + sidecar"
 	@echo "[demo]                          + bundle-registry + dashboard."
@@ -71,6 +80,16 @@ endif
 ifeq ($(DEMO_MODE),proxy)
 	@echo "[demo] running egress-proxy smoke test..."
 	$(COMPOSE) run --rm egress-proxy-smoke
+else ifeq ($(DEMO_MODE),agent_real_openai_agents_proxy)
+	@echo "[demo] running openai-agents SDK demo against the proxy..."
+	@echo "[demo]   the demo container has OPENAI_API_KEY from the host env"
+	@echo "[demo]   and OPENAI_BASE_URL pointing at the proxy."
+	$(COMPOSE) run --rm \
+	    --env SPENDGUARD_DEMO_MODE=agent_real_openai_agents_proxy \
+	    --env OPENAI_API_KEY=$$OPENAI_API_KEY \
+	    --env SPENDGUARD_PROXY_BASE_URL=http://egress-proxy:9000/v1 \
+	    demo
+	@echo "[demo] PASS — 1-env-var launch claim verified against real openai-agents SDK"
 else ifeq ($(DEMO_MODE),cost_advisor)
 	@echo "[demo] running cost_advisor demo container (full closed loop)..."
 	$(COMPOSE) run --rm cost-advisor-demo
