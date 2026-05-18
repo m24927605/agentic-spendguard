@@ -342,9 +342,40 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" exec "${POD}" -- \
     psql -U spendguard -d postgres -c 'CREATE DATABASE spendguard_canonical;'
 
 # ---------------------------------------------------------------------
+# 5.5. (optional) Build chart service images locally + load into kind.
+#
+# Issue #61: without this step pods stay in ImagePullBackOff because
+# spendguard/*:0.1.0-alpha.1 isn't published to docker.io. Set
+# BUILD_IMAGES=1 to build via docker compose + kind load locally.
+# CI uses ghcr.io images instead (see .github/workflows/helm-validate.yml).
+# ---------------------------------------------------------------------
+if [ "${BUILD_IMAGES:-0}" = "1" ]; then
+    log "BUILD_IMAGES=1: building chart service images via docker compose..."
+    (
+        cd "${REPO_ROOT}/deploy/demo"
+        docker compose -f compose.yaml build \
+            ledger canonical-ingest sidecar webhook-receiver \
+            outbox-forwarder ttl-sweeper
+    )
+    for svc in ledger canonical-ingest sidecar webhook-receiver outbox-forwarder ttl-sweeper; do
+        # docker compose tags images as spendguard-demo-<svc>:latest.
+        # The chart's values.yaml expects spendguard/<svc>:0.1.0-alpha.1.
+        docker tag "spendguard-demo-${svc}:latest" "spendguard/${svc}:0.1.0-alpha.1"
+        kind load docker-image "spendguard/${svc}:0.1.0-alpha.1" --name "${CLUSTER_NAME}"
+        log "  loaded spendguard/${svc}:0.1.0-alpha.1 into kind"
+    done
+fi
+
+# ---------------------------------------------------------------------
 # 6. helm install (chart.profile=demo).
 # ---------------------------------------------------------------------
 log "helm install (chart.profile=demo)..."
+
+# Default Helm timeout is 5 minutes; bump to 10 if BUILD_IMAGES=1
+# so the chart pods have time to actually reach Ready (cold pg
+# migrations + rust binary startup ~30-60s each in a single-node kind).
+HELM_TIMEOUT="${HELM_TIMEOUT:-$([ "${BUILD_IMAGES:-0}" = "1" ] && echo "600s" || echo "180s")}"
+log "  helm --wait timeout=${HELM_TIMEOUT}"
 
 cat > "${WORK_DIR}/values.yaml" <<EOF
 chart:
@@ -366,7 +397,7 @@ EOF
 helm --kube-context "${KUBECTL_CTX}" upgrade --install spendguard "${REPO_ROOT}/charts/spendguard" \
     --namespace "${NAMESPACE}" \
     -f "${WORK_DIR}/values.yaml" \
-    --wait --timeout 180s || {
+    --wait --timeout "${HELM_TIMEOUT}" || {
     log "WARN: helm install --wait timed out; collecting pod state below"
 }
 
@@ -398,6 +429,7 @@ EXPECTED_PODS="spendguard-spendguard-ledger spendguard-spendguard-canonical-inge
 MISSING=()
 PHASE_OK=0
 PHASE_FAIL=0
+READY=0
 for prefix in $EXPECTED_PODS; do
     pod=$(kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" get pods \
         -o name 2>/dev/null | grep "/${prefix}-" | head -1)
@@ -409,9 +441,14 @@ for prefix in $EXPECTED_PODS; do
         -o jsonpath='{.status.phase}')
     waiting_reason=$(kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" get "$pod" \
         -o jsonpath='{.status.containerStatuses[0].state.waiting.reason}' 2>/dev/null || echo "")
+    ready=$(kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" get "$pod" \
+        -o jsonpath='{.status.containerStatuses[0].ready}' 2>/dev/null || echo "false")
+    if [ "$ready" = "true" ]; then
+        READY=$((READY + 1))
+    fi
     case "$phase:$waiting_reason" in
         Running:*|Pending:ContainerCreating|Pending:PodInitializing|Pending:ImagePullBackOff|Pending:ErrImagePull|Pending:)
-            log "  ✓ ${prefix} — phase=${phase} reason=${waiting_reason:-none}"
+            log "  ✓ ${prefix} — phase=${phase} reason=${waiting_reason:-none} ready=${ready}"
             PHASE_OK=$((PHASE_OK + 1))
             ;;
         *:CreateContainerConfigError|*:InvalidImageName|*:CreateContainerError|*:RunContainerError)
@@ -424,6 +461,20 @@ for prefix in $EXPECTED_PODS; do
             ;;
     esac
 done
+
+# Issue #61 slice 5: when BUILD_IMAGES=1 (images available), enforce
+# Ready=6/6 strictly. Without BUILD_IMAGES, ImagePullBackOff is OK
+# (structural validation only). CI's kind job uses ghcr.io images +
+# overrides values.yaml's image refs, so it should also reach Ready=6/6.
+STRICT_READY="${STRICT_READY:-$([ "${BUILD_IMAGES:-0}" = "1" ] && echo "1" || echo "0")}"
+if [ "$STRICT_READY" = "1" ]; then
+    log "STRICT_READY=1: requiring Ready=6/6 (BUILD_IMAGES=1 or CI with published images)"
+    if [ "$READY" -ne 6 ]; then
+        log "FAIL: STRICT_READY=1 expected Ready=6/6 chart pods, got Ready=${READY}/6"
+        exit 1
+    fi
+    log "  ✓ all 6 chart pods reached Ready"
+fi
 
 if [ ${#MISSING[@]} -gt 0 ]; then
     log "FAIL: missing chart pods: ${MISSING[*]}"

@@ -118,8 +118,15 @@ jobs:
           chmod +x /usr/local/bin/kubectl
           kubectl version --client
 
-      - name: Run kind validation script
-        run: bash scripts/helm-validate-kind.sh
+      - name: Run kind validation script (BUILD_IMAGES=1, STRICT_READY=1)
+        # Issue #61: build chart service images in the runner's Docker
+        # daemon + kind load them. Sidesteps the registry-auth concern
+        # for PRs from forks (ghcr.io anonymous pulls would need the
+        # repo to be public). Sets STRICT_READY=1 so the kind job
+        # enforces Ready=6/6 (PR #60's lenient ImagePullBackOff=OK
+        # criterion is for the no-images-available local dev path).
+        run: BUILD_IMAGES=1 STRICT_READY=1 bash scripts/helm-validate-kind.sh
+        timeout-minutes: 25
 
       - name: Dump pod state on failure
         if: failure()
