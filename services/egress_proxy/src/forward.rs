@@ -33,7 +33,34 @@ use crate::proto::sidecar_adapter::v1::decision_response::Decision;
 use crate::redacted_auth::RedactedAuth;
 use crate::AppState;
 
-const UPSTREAM_URL: &str = "https://api.openai.com/v1/chat/completions";
+const UPSTREAM_URL_CHAT_COMPLETIONS: &str = "https://api.openai.com/v1/chat/completions";
+const UPSTREAM_URL_RESPONSES: &str = "https://api.openai.com/v1/responses";
+
+/// Which OpenAI API surface a given request targets. v0.3 added the
+/// Responses API alongside the v0.1 Chat Completions endpoint.
+/// Spec: docs/specs/egress-proxy-v0.3-responses-api.md.
+#[derive(Debug, Clone, Copy)]
+enum ApiKind {
+    ChatCompletions,
+    Responses,
+}
+
+impl ApiKind {
+    fn upstream_url(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => UPSTREAM_URL_CHAT_COMPLETIONS,
+            Self::Responses => UPSTREAM_URL_RESPONSES,
+        }
+    }
+
+    /// Chat Completions omits the usage block on streaming responses
+    /// unless `stream_options.include_usage=true` is set in the request.
+    /// Responses API includes usage by default. Proxy injects only for
+    /// Chat Completions.
+    fn needs_include_usage_injection(self) -> bool {
+        matches!(self, Self::ChatCompletions)
+    }
+}
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Clone)]
@@ -241,9 +268,28 @@ impl IntoResponse for ForwardError {
 /// Slice 3: forward byte-identically to OpenAI. NO SpendGuard gating
 /// (slice 4 adds the sidecar UDS call before this forward).
 pub async fn chat_completions(
+    state: State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ForwardError> {
+    forward_openai_request(state, headers, body, ApiKind::ChatCompletions).await
+}
+
+/// v0.3 — POST /v1/responses pass-through. Closes the openai-agents
+/// shorthand gap from issue #65.
+pub async fn responses(
+    state: State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ForwardError> {
+    forward_openai_request(state, headers, body, ApiKind::Responses).await
+}
+
+async fn forward_openai_request(
     State(app): State<AppState>,
     headers: HeaderMap,
     body: Bytes,
+    api_kind: ApiKind,
 ) -> Result<Response, ForwardError> {
     let state = app.forward.as_ref();
     // 16 MB body limit (spec §9).
@@ -269,7 +315,7 @@ pub async fn chat_completions(
         .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let body_for_upstream: bytes::Bytes = if is_streaming {
+    let body_for_upstream: bytes::Bytes = if is_streaming && api_kind.needs_include_usage_injection() {
         let mut mutated = parsed.clone();
         let opts_obj = mutated
             .as_object_mut()
@@ -292,6 +338,9 @@ pub async fn chat_completions(
             .map_err(|e| ForwardError::Internal(format!("re-encode streaming body: {e}")))?
             .into()
     } else {
+        // Either non-streaming (body unchanged) or streaming + Responses
+        // API (no include_usage option exists; usage is always included
+        // in the response.completed event).
         body.clone()
     };
 
@@ -429,7 +478,7 @@ pub async fn chat_completions(
     // byte-identity (no serde re-encode in the request path).
     let mut req = state
         .http_client
-        .post(UPSTREAM_URL)
+        .post(api_kind.upstream_url())
         .header(
             axum::http::header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
@@ -451,7 +500,7 @@ pub async fn chat_completions(
     }
 
     debug!(
-        upstream = UPSTREAM_URL,
+        upstream = api_kind.upstream_url(),
         body_bytes = body_for_upstream.len(),
         is_streaming = is_streaming,
         "forwarding to OpenAI"
@@ -532,6 +581,7 @@ pub async fn chat_completions(
             reservation_id,
             unit_for_post,
             pricing_for_post,
+            api_kind,
         )
         .await;
     }
@@ -937,6 +987,7 @@ async fn forward_streaming_response(
     reservation_id: String,
     unit: crate::proto::common::v1::UnitRef,
     pricing: crate::proto::common::v1::PricingFreeze,
+    api_kind: ApiKind,
 ) -> Result<Response, ForwardError> {
     use bytes::Bytes;
     use futures_util::StreamExt;
@@ -952,8 +1003,9 @@ async fn forward_streaming_response(
     let (usage_tx, usage_rx) =
         tokio::sync::oneshot::channel::<Option<i64>>();
 
-    // Spawn parser task.
-    tokio::spawn(parse_usage_from_sse_stream(parser_rx, usage_tx));
+    // Spawn parser task. Per-API-kind event parser dispatches the
+    // SSE usage-extraction logic (Chat Completions vs Responses).
+    tokio::spawn(parse_usage_from_sse_stream(parser_rx, usage_tx, api_kind));
 
     // Spawn commit lane task. Holds an Arc<AppState> so the sidecar
     // handle stays alive past the request handler's return.
@@ -1055,10 +1107,12 @@ async fn forward_streaming_response(
 }
 
 /// Drain an SSE chunk stream, parse events one at a time, and capture
-/// the last `usage.total_tokens` observed.
+/// the last `usage.total_tokens` observed. Per-API-kind parser
+/// dispatches the JSON-shape-specific extractor.
 async fn parse_usage_from_sse_stream(
     mut rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, String>>,
     tx: tokio::sync::oneshot::Sender<Option<i64>>,
+    api_kind: ApiKind,
 ) {
     use bytes::BytesMut;
     let mut buffer = BytesMut::new();
@@ -1085,7 +1139,11 @@ async fn parse_usage_from_sse_stream(
             };
             let to_advance = sep_len.min(buffer.len());
             let _ = buffer.split_to(to_advance);
-            if let Some(usage) = parse_usage_from_event(&event_bytes) {
+            let parsed = match api_kind {
+                ApiKind::ChatCompletions => parse_usage_from_event(&event_bytes),
+                ApiKind::Responses => parse_usage_from_responses_event(&event_bytes),
+            };
+            if let Some(usage) = parsed {
                 last_usage = Some(usage);
             }
         }
@@ -1126,6 +1184,40 @@ fn parse_usage_from_event(event: &[u8]) -> Option<i64> {
     }
     let v: Value = serde_json::from_str(&payload).ok()?;
     v.get("usage")
+        .and_then(|u| u.get("total_tokens"))
+        .and_then(|t| t.as_i64())
+}
+
+/// v0.3 — parse a Responses API SSE event for `response.usage.total_tokens`.
+///
+/// Responses API SSE shape (from https://platform.openai.com/docs/api-reference/responses):
+///
+///   event: response.completed
+///   data: {"response": {"id": "...", "usage": {"total_tokens": N, ...}, ...}}
+///
+/// Earlier events (response.created, response.in_progress, response.output_text.delta, ...)
+/// don't carry usage; the parser returns None for them and the stream-end
+/// captures the last Some(N) seen.
+fn parse_usage_from_responses_event(event: &[u8]) -> Option<i64> {
+    let s = std::str::from_utf8(event).ok()?;
+    let mut payload = String::new();
+    for line in s.lines() {
+        // Skip `event: ...` header lines; only `data:` lines carry JSON.
+        let l = match line.strip_prefix("data:") {
+            Some(l) => l.trim_start(),
+            None => continue,
+        };
+        if l == "[DONE]" {
+            return None;
+        }
+        payload.push_str(l);
+    }
+    if payload.is_empty() {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&payload).ok()?;
+    v.get("response")
+        .and_then(|r| r.get("usage"))
         .and_then(|u| u.get("total_tokens"))
         .and_then(|t| t.as_i64())
 }

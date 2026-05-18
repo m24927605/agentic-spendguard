@@ -866,20 +866,17 @@ async def run_openai_agents_proxy_mode() -> int:
     os.environ["OPENAI_BASE_URL"] = proxy_base_url
 
     from agents import Agent, Runner
-    from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
-    from openai import AsyncOpenAI
 
-    # Explicit OpenAIChatCompletionsModel because openai-agents defaults
-    # to OpenAIResponsesModel which hits POST /v1/responses (a different
-    # API surface the v0.2 egress proxy doesn't yet support — tracked as
-    # a followup issue). For Chat Completions users, OPENAI_BASE_URL is
-    # the 1-env-var path through the proxy.
-    proxy_client = AsyncOpenAI(base_url=proxy_base_url)
-    model = OpenAIChatCompletionsModel(model="gpt-4o-mini", openai_client=proxy_client)
+    # v0.3: openai-agents default model is OpenAIResponsesModel which
+    # hits POST /v1/responses. The v0.3 egress proxy routes this
+    # endpoint with the same PRE/POST gating + audit chain as
+    # /v1/chat/completions, so the shorthand `Agent(model="...")` form
+    # works through the proxy with NO explicit ChatCompletions
+    # construction (this used to be a workaround required pre-v0.3).
     agent = Agent(
         name="spendguard-launch-demo",
         instructions="Reply concisely in three words.",
-        model=model,
+        model="gpt-4o-mini",
     )
 
     try:
@@ -893,11 +890,10 @@ async def run_openai_agents_proxy_mode() -> int:
 
     output = getattr(result, "final_output", None) or str(result)
     print(f"[demo] openai-agents Runner.run via proxy OK; output={output!r}")
-    print("[demo] launch-claim verified for Chat Completions path:")
-    print("[demo]   1 env var (OPENAI_BASE_URL) → hard-cap gate active end-to-end")
-    print("[demo] NOTE: openai-agents defaults to Responses API; users on the")
-    print("[demo]   default path need OpenAIChatCompletionsModel explicit until")
-    print("[demo]   v0.3 ships /v1/responses passthrough (issue #65).")
+    print("[demo] launch-claim verified end-to-end:")
+    print("[demo]   1 env var (OPENAI_BASE_URL) + shorthand Agent(model='...')")
+    print("[demo]   → hard-cap gate active + audit chain captured")
+    print("[demo] v0.3 closure: openai-agents default Responses API now WORKS.")
     return 0
 
 
