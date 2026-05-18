@@ -630,10 +630,13 @@ class SpendGuardClient:
                     decision_id=decision_id,
                     state=state,
                 )
-            if msg.startswith("[BUNDLE_HOT_RELOADED]"):
-                # Sidecar shape:
-                #   "[BUNDLE_HOT_RELOADED] approval was issued under bundle hash <A> but
-                #    the sidecar's currently-installed bundle is <B>; ..."
+            if "[BUNDLE_HOT_RELOADED]" in msg:
+                # Sidecar shape (may be wrapped by an outer
+                # [RESUME_BUILD_FAILED] tag from adapter_uds.rs's
+                # into_reserve_set_request catch-all; substring match
+                # tolerates the wrap):
+                #   "[BUNDLE_HOT_RELOADED] approval was issued under bundle hash <A>
+                #    but the sidecar's currently-installed bundle is <B>; ..."
                 import re
 
                 hashes = re.findall(r"\b[0-9a-f]{64}\b", msg)

@@ -71,6 +71,18 @@ else ifeq ($(DEMO_MODE),approval)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    control-plane outbox-forwarder
+else ifeq ($(DEMO_MODE),approval_hot_reload)
+	@echo "[demo] DEMO_MODE=approval_hot_reload → same stack as DEMO_MODE=approval."
+	@echo "[demo]   Exercises issue #59 BUNDLE_HOT_RELOADED error path end-to-end:"
+	@echo "[demo]   REQUIRE_APPROVAL @ B0 → rotate bundle to B1 → resolve →"
+	@echo "[demo]   resume() raises ApprovalBundleHotReloadedError."
+	@echo "[demo]   The demo container mounts bundles-data :rw to perform the"
+	@echo "[demo]   rotation; sidecar's runtime.env watcher picks up the new"
+	@echo "[demo]   hash within ~500ms (CA-P3.7 hot-reload poll interval)."
+	$(COMPOSE) up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    control-plane outbox-forwarder
 else
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
@@ -120,6 +132,9 @@ else ifeq ($(DEMO_MODE),deny)
 else ifeq ($(DEMO_MODE),approval)
 	@echo "[demo] verifying Round-2 #9 part 2 (REQUIRE_APPROVAL → resolve → resume)..."
 	@$(MAKE) demo-verify-approval
+else ifeq ($(DEMO_MODE),approval_hot_reload)
+	@echo "[demo] verifying issue #59 hot-reload regression (approval NOT bundled)..."
+	@$(MAKE) demo-verify-approval-hot-reload
 else ifneq (,$(findstring agent_real,$(DEMO_MODE)))
 	@echo "[demo] DEMO_MODE=$(DEMO_MODE) — skipping demo-verify-step7."
 	@echo "[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)"
@@ -210,6 +225,13 @@ demo-verify-deny:
 demo-verify-approval:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_approval.sql
 	@echo "[demo] Round-2 #9 part 2 approval verification done"
+
+# Issue #59 slice 4 (#68): hot-reload regression. Asserts the approval
+# was resolved=approved but NEVER bundled (bundled_ledger_transaction_id
+# IS NULL) because resume failed with BUNDLE_HOT_RELOADED.
+demo-verify-approval-hot-reload:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_approval_hot_reload.sql
+	@echo "[demo] issue #59 hot-reload regression verification done"
 
 # Phase 4 O3 pricing-table verification: pricing-seed-init loaded the
 # real pricing_table from seed.yaml; pricing_versions has at least one
