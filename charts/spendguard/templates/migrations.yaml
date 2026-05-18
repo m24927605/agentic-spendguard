@@ -1,5 +1,20 @@
 {{- if .Values.postgres.applyMigrationsOnInstall }}
 {{- $component := "migrations" }}
+{{- /*
+Issue #61 slice 6: apply ledger + canonical-ingest SQL files from
+operator-supplied ConfigMaps. ConfigMaps are OPTIONAL: if the operator
+hasn't created them, the Job completes as a no-op (helm install
+succeeds; operator runs migrations out-of-band). Kind validation
+script generates the ConfigMaps automatically (see
+scripts/helm-validate-kind.sh).
+
+ConfigMap shape:
+  Name:  {{ .Values.migrations.ledgerConfigMapName }}    (default: spendguard-migrations-ledger)
+  Keys:  one entry per .sql file from services/ledger/migrations/
+         (lexicographic order preserved by the apply loop's `sort`).
+  Same shape for canonical-ingest under
+  {{ .Values.migrations.canonicalConfigMapName }} (default: spendguard-migrations-canonical).
+*/ -}}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -25,12 +40,48 @@ spec:
           args:
             - |
               set -eu
-              echo "[migrate] Phase 4 O2: ledger + canonical migrations placeholder"
-              echo "[migrate] Production deployments should mount the SQL files via"
-              echo "[migrate] a Secret/ConfigMap and run psql against postgres.ledgerUrl"
-              echo "[migrate] + postgres.canonicalUrl. The chart leaves this as an"
-              echo "[migrate] explicit operator step to keep the chart distribution-"
-              echo "[migrate] agnostic (sqitch / flyway / golang-migrate are all valid)."
+              applied=0
+              skipped=0
+              for f in $(ls /etc/migrations/ledger/*.sql 2>/dev/null | sort); do
+                  echo "[migrate] applying $f to spendguard_ledger..."
+                  psql "$PG_LEDGER_URL" -v ON_ERROR_STOP=1 -f "$f"
+                  applied=$((applied + 1))
+              done
+              for f in $(ls /etc/migrations/canonical/*.sql 2>/dev/null | sort); do
+                  echo "[migrate] applying $f to spendguard_canonical..."
+                  psql "$PG_CANONICAL_URL" -v ON_ERROR_STOP=1 -f "$f"
+                  applied=$((applied + 1))
+              done
+              if [ "$applied" -eq 0 ]; then
+                  echo "[migrate] no SQL files found in /etc/migrations/{ledger,canonical}/."
+                  echo "[migrate] Operator must mount the {{ .Values.migrations.ledgerConfigMapName | default "spendguard-migrations-ledger" }} +"
+                  echo "[migrate] {{ .Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical" }} ConfigMaps OR"
+                  echo "[migrate] override migrations.applyMigrationsOnInstall=false + run migrations out-of-band."
+                  echo "[migrate] Job exits 0 so helm install can complete."
+              else
+                  echo "[migrate] PASS — applied ${applied} migration file(s)."
+              fi
+          env:
+            - name: PG_LEDGER_URL
+              value: {{ .Values.postgres.ledgerUrl | quote }}
+            - name: PG_CANONICAL_URL
+              value: {{ .Values.postgres.canonicalUrl | quote }}
+          volumeMounts:
+            - name: migrations-ledger
+              mountPath: /etc/migrations/ledger
+              readOnly: true
+            - name: migrations-canonical
+              mountPath: /etc/migrations/canonical
+              readOnly: true
           resources:
             {{- toYaml .Values.migrations.resources | nindent 12 }}
+      volumes:
+        - name: migrations-ledger
+          configMap:
+            name: {{ .Values.migrations.ledgerConfigMapName | default "spendguard-migrations-ledger" }}
+            optional: true
+        - name: migrations-canonical
+          configMap:
+            name: {{ .Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical" }}
+            optional: true
 {{- end }}

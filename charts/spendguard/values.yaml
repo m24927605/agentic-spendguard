@@ -316,9 +316,25 @@ failPolicy:
   overrides: ""
 
 # Migration job (post-install hook).
+#
+# Issue #61 slice 6: the Job applies SQL files mounted from
+# operator-supplied ConfigMaps. Two ConfigMaps are mounted optionally:
+#   * spendguard-migrations-ledger    — applied to postgres.ledgerUrl
+#   * spendguard-migrations-canonical — applied to postgres.canonicalUrl
+#
+# If either ConfigMap is absent, the Job runs without applying those
+# files and prints a no-op message. Operators who manage migrations
+# out-of-band can set postgres.applyMigrationsOnInstall=false to skip
+# the Job entirely.
+#
+# For kind validation tests, scripts/helm-validate-kind.sh creates
+# both ConfigMaps automatically from services/{ledger,canonical_ingest}
+# /migrations/*.sql before helm install.
 migrations:
   ledgerImage: postgres:16-alpine
   canonicalImage: postgres:16-alpine
+  ledgerConfigMapName: spendguard-migrations-ledger
+  canonicalConfigMapName: spendguard-migrations-canonical
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "256Mi" }
