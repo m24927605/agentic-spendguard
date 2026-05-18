@@ -1,0 +1,99 @@
+name: Publish chart images
+
+# Builds + pushes the six chart service images to GitHub Container
+# Registry (ghcr.io/m24927605/spendguard-*).
+#
+# Triggers:
+#   push tag v*       → publishes :{<tag>,latest}
+#   push main         → publishes :sha-<short>,latest-main
+#   workflow_dispatch → manual; same as main push (sha-<commit>,latest-main)
+#   pull_request      → build-only (no push); validates Dockerfile + cargo build
+#
+# Spec: docs/specs/issue-61-chart-image-publishing.md.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - "deploy/demo/runtime/Dockerfile.*"
+      - "services/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "proto/**"
+      - ".github/workflows/publish-images.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_OWNER: ${{ github.repository_owner }}
+
+jobs:
+  build-and-push:
+    name: ${{ matrix.service }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: ledger
+            dockerfile: deploy/demo/runtime/Dockerfile.ledger
+          - service: canonical-ingest
+            dockerfile: deploy/demo/runtime/Dockerfile.canonical_ingest
+          - service: sidecar
+            dockerfile: deploy/demo/runtime/Dockerfile.sidecar
+          - service: webhook-receiver
+            dockerfile: deploy/demo/runtime/Dockerfile.webhook_receiver
+          - service: outbox-forwarder
+            dockerfile: deploy/demo/runtime/Dockerfile.outbox_forwarder
+          - service: ttl-sweeper
+            dockerfile: deploy/demo/runtime/Dockerfile.ttl_sweeper
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to ${{ env.REGISTRY }}
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata (tags + labels)
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard-${{ matrix.service }}
+          tags: |
+            type=sha,prefix=sha-,format=short,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=raw,value=latest-main,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=ref,event=tag
+            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
+          labels: |
+            org.opencontainers.image.title=spendguard-${{ matrix.service }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.licenses=Apache-2.0
+
+      - name: Build${{ github.event_name != 'pull_request' && ' + push' || '' }}
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=spendguard-${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=spendguard-${{ matrix.service }}
