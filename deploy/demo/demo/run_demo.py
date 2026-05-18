@@ -23,6 +23,7 @@ import sys
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 # Pydantic-AI imports are deliberately deferred so the script also runs
@@ -581,6 +582,8 @@ async def main() -> int:
         return await run_deny_mode()
     if DEMO_MODE == "approval":
         return await run_approval_mode()
+    if DEMO_MODE == "approval_hot_reload":
+        return await run_approval_hot_reload_mode()
     if DEMO_MODE == "agent_real":
         return await run_agent_mode(use_real_openai=True)
     if DEMO_MODE == "agent_real_anthropic":
@@ -1948,6 +1951,294 @@ async def run_approval_mode() -> int:
             return 6
         await client.close()
         return 0
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE=approval_hot_reload (issue #68 — slice 4 of #59):
+# Exercises the BUNDLE_HOT_RELOADED error path end-to-end.
+#
+# Flow:
+#   1. Trigger REQUIRE_APPROVAL @ contract bundle B0 (current).
+#   2. Capture B0's hash + approval_id from the SDK exception.
+#   3. ROTATE the contract bundle in the bundles-data volume:
+#      a. Add a marker file to the .tgz contents (different bytes → different hash).
+#      b. Rewrite the .tgz + update runtime.env's HASH_HEX to the new value.
+#      c. Sidecar's hot-reload watcher polls runtime.env every 500ms and
+#         atomically swaps to the new bundle within ~1s.
+#   4. Poll sidecar's hot-reload state until it has swapped to B1.
+#   5. control-plane resolve = approved (B0's approval still pending).
+#   6. Call e.resume(client) → MUST raise ApprovalBundleHotReloadedError
+#      with original_bundle_hash=B0, current_bundle_hash=B1.
+# ---------------------------------------------------------------------------
+
+
+def _read_runtime_env(path: str) -> dict:
+    return {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in open(path).read().splitlines()
+        if "=" in line and not line.startswith("#")
+    }
+
+
+def _rotate_contract_bundle(bundles_dir: str, contract_bundle_id: str) -> tuple[str, str]:
+    """Rotate the contract bundle by appending a marker file inside the .tgz.
+
+    Returns ``(old_hash_hex, new_hash_hex)``. The sidecar's hot-reload watcher
+    polls ``runtime.env`` every 500ms; the swap should complete within ~1s
+    of this function returning.
+    """
+    import hashlib
+    import io
+    import tarfile
+    import time as _time
+
+    bundles_path = Path(bundles_dir)
+    runtime_env_path = bundles_path / "runtime.env"
+    tgz_path = bundles_path / "contract_bundle" / f"{contract_bundle_id}.tgz"
+
+    old_runtime = runtime_env_path.read_text()
+    old_hash = ""
+    for line in old_runtime.splitlines():
+        if line.startswith("SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_HASH_HEX="):
+            old_hash = line.split("=", 1)[1].strip()
+            break
+    if not old_hash:
+        raise RuntimeError(f"no SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_HASH_HEX in {runtime_env_path}")
+
+    # Read existing tarball contents into memory.
+    with tarfile.open(tgz_path, "r:gz") as tf:
+        members = [(m, tf.extractfile(m).read() if m.isfile() else None) for m in tf.getmembers()]
+
+    # Add a rotation marker. Different content → different sha256.
+    marker_name = ".rotation_marker"
+    marker_data = f"rotated_at={_time.time()}\n".encode()
+
+    # Re-tar deterministically (apart from the marker timestamp).
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz", format=tarfile.USTAR_FORMAT) as tf:
+        # Preserve original files first.
+        for member, data in members:
+            new_info = tarfile.TarInfo(name=member.name)
+            new_info.size = len(data) if data is not None else 0
+            new_info.mtime = 0
+            new_info.uid = 0
+            new_info.gid = 0
+            new_info.uname = ""
+            new_info.gname = ""
+            new_info.mode = 0o644
+            new_info.type = member.type
+            if data is not None:
+                tf.addfile(new_info, io.BytesIO(data))
+            else:
+                tf.addfile(new_info)
+        # Append the marker.
+        marker_info = tarfile.TarInfo(name=marker_name)
+        marker_info.size = len(marker_data)
+        marker_info.mtime = 0
+        marker_info.uid = 0
+        marker_info.gid = 0
+        marker_info.uname = ""
+        marker_info.gname = ""
+        marker_info.mode = 0o644
+        tf.addfile(marker_info, io.BytesIO(marker_data))
+
+    new_tgz = buf.getvalue()
+    new_hash = hashlib.sha256(new_tgz).hexdigest()
+    tgz_path.write_bytes(new_tgz)
+
+    # Update runtime.env atomically: write to .tmp then rename.
+    new_lines = []
+    for line in old_runtime.splitlines():
+        if line.startswith("SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_HASH_HEX="):
+            new_lines.append(f"SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_HASH_HEX={new_hash}")
+        else:
+            new_lines.append(line)
+    new_runtime = "\n".join(new_lines) + "\n"
+    tmp_path = runtime_env_path.with_suffix(".env.tmp")
+    tmp_path.write_text(new_runtime)
+    os.replace(tmp_path, runtime_env_path)
+
+    return old_hash, new_hash
+
+
+async def run_approval_hot_reload_mode() -> int:
+    from spendguard import (
+        ApprovalBundleHotReloadedError,
+        ApprovalRequired,
+        SpendGuardClient,
+        derive_idempotency_key,
+        new_uuid7,
+    )
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+
+    bundles_dir = os.environ.get(
+        "SPENDGUARD_DEMO_BUNDLES_DIR", "/var/lib/spendguard/bundles"
+    )
+    contract_bundle_id = os.environ.get(
+        "SPENDGUARD_DEMO_CONTRACT_BUNDLE_ID",
+        "11111111-1111-4111-8111-111111111111",
+    )
+
+    print(f"[demo] approval_hot_reload: bundles dir={bundles_dir}")
+    print(f"[demo]                      contract bundle id={contract_bundle_id}")
+
+    # 1. Connect + handshake (mirrors run_approval_mode).
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: "SpendGuardClient | None" = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+
+    # 2. Submit a claim that triggers REQUIRE_APPROVAL (same shape as
+    # the existing approval demo).
+    run_id = str(new_uuid7())
+    step_id = f"{run_id}:step0"
+    llm_call_id = str(new_uuid7())
+    decision_id = str(new_uuid7())
+    claims = [
+        common_pb2.BudgetClaim(
+            budget_id=budget_id,
+            unit=common_pb2.UnitRef(
+                unit_id=unit_id,
+                token_kind="output_token",
+                model_family="gpt-4",
+            ),
+            amount_atomic="500000000",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id=window_id,
+        ),
+    ]
+    idempotency_key = derive_idempotency_key(
+        tenant_id=tenant_id,
+        session_id=client.session_id,
+        run_id=run_id,
+        step_id=step_id,
+        llm_call_id=llm_call_id,
+        trigger="LLM_CALL_PRE",
+    )
+    try:
+        await client.request_decision(
+            trigger="LLM_CALL_PRE",
+            run_id=run_id,
+            step_id=step_id,
+            llm_call_id=llm_call_id,
+            tool_call_id="",
+            decision_id=decision_id,
+            route="llm.call",
+            projected_claims=claims,
+            idempotency_key=idempotency_key,
+        )
+        print(
+            "[demo] FATAL: expected REQUIRE_APPROVAL but got CONTINUE",
+            file=sys.stderr,
+        )
+        await client.close()
+        return 7
+    except ApprovalRequired as e:
+        approval_id = e.approval_request_id
+        print(
+            f"[demo] REQUIRE_APPROVAL raised approval_id={approval_id} "
+            f"decision_id={e.decision_id}"
+        )
+
+        # 3. Rotate the contract bundle (changes the .tgz bytes → new hash).
+        old_hash, new_hash = _rotate_contract_bundle(bundles_dir, contract_bundle_id)
+        print(f"[demo] rotated contract bundle: B0={old_hash} -> B1={new_hash}")
+
+        # 4. Sleep > 500ms (sidecar's hot-reload poll interval) so the
+        # watcher picks up the new runtime.env. 2s is comfortable.
+        await asyncio.sleep(2.0)
+        print("[demo] slept 2s; sidecar should now be on the rotated bundle")
+
+        # 5. Resolve the approval via control-plane (B0's approval row).
+        import httpx
+
+        control_plane_url = os.environ.get(
+            "SPENDGUARD_CONTROL_PLANE_URL", "http://control-plane:8091"
+        )
+        control_plane_token = os.environ.get(
+            "SPENDGUARD_CONTROL_PLANE_TOKEN",
+            "demo-admin-token-replace-in-production",
+        )
+        resolve_url = f"{control_plane_url}/v1/approvals/{approval_id}/resolve"
+        async with httpx.AsyncClient(timeout=10.0) as http:
+            resp = await http.post(
+                resolve_url,
+                headers={"Authorization": f"Bearer {control_plane_token}"},
+                json={"target_state": "approved", "reason": "demo operator approves"},
+            )
+            if resp.status_code >= 400:
+                print(
+                    f"[demo] FATAL: control-plane resolve returned HTTP "
+                    f"{resp.status_code}: {resp.text}",
+                    file=sys.stderr,
+                )
+                await client.close()
+                return 4
+            print(
+                f"[demo] control-plane resolved approval_id={approval_id} "
+                f"-> {resp.json().get('final_state')}"
+            )
+
+        # 6. resume() — MUST raise ApprovalBundleHotReloadedError because
+        # the live bundle hash (B1) no longer matches the approval's
+        # captured hash (B0).
+        try:
+            outcome = await e.resume(client)
+            print(
+                f"[demo] FATAL: resume() returned CONTINUE "
+                f"(decision_id={outcome.decision_id}) but expected "
+                f"ApprovalBundleHotReloadedError",
+                file=sys.stderr,
+            )
+            await client.close()
+            return 10
+        except ApprovalBundleHotReloadedError as hr:
+            print(
+                f"[demo] resume() raised ApprovalBundleHotReloadedError "
+                f"original={hr.original_bundle_hash} "
+                f"current={hr.current_bundle_hash}"
+            )
+            if hr.original_bundle_hash != old_hash:
+                print(
+                    f"[demo] FATAL: original_bundle_hash mismatch: expected "
+                    f"{old_hash}, got {hr.original_bundle_hash}",
+                    file=sys.stderr,
+                )
+                await client.close()
+                return 11
+            if hr.current_bundle_hash != new_hash:
+                print(
+                    f"[demo] FATAL: current_bundle_hash mismatch: expected "
+                    f"{new_hash}, got {hr.current_bundle_hash}",
+                    file=sys.stderr,
+                )
+                await client.close()
+                return 12
+            print(
+                "[demo] PASS — frozen-at-PRE invariant verified end-to-end: "
+                "bundle rotated between approval and resume → BUNDLE_HOT_RELOADED"
+            )
+            await client.close()
+            return 0
 
 
 if __name__ == "__main__":

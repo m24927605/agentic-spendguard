@@ -573,7 +573,11 @@ services:
       SPENDGUARD_WEBHOOK_SECRET_MOCK_LLM:      "demo-secret-not-for-prod"
     volumes:
       - sidecar-uds:/var/run/spendguard:ro
-      - bundles-data:/var/lib/spendguard/bundles:ro
+      # Demo-only :rw — needed by DEMO_MODE=approval_hot_reload to write
+      # a rotated bundle that exercises sidecar's hot-reload watcher
+      # (issue #68 slice 4 of #59). Production chart mounts this :ro;
+      # the demo container is the only writer.
+      - bundles-data:/var/lib/spendguard/bundles:rw
       - pki-data:/etc/ssl/spendguard:ro
     depends_on:
       sidecar:
