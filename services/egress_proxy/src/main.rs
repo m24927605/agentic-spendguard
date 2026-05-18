@@ -156,6 +156,9 @@ fn build_app(forward_state: Arc<forward::ForwardState>, sidecar: sidecar_client:
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/v1/chat/completions", post(forward::chat_completions))
+        // v0.3: openai-agents SDK shorthand Agent(model="...") hits this.
+        // Spec: docs/specs/egress-proxy-v0.3-responses-api.md.
+        .route("/v1/responses", post(forward::responses))
         .with_state(state)
         .layer(
             // Defense layer 1 per spec §8: do NOT include headers in

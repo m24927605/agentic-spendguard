@@ -166,20 +166,16 @@ Streaming (`stream:true`) verified e2e in v0.2: [`docs/specs/egress-proxy-v0.2-s
 
 **vs Helicone / Portkey** — those proxy your traffic too, but their decision model is observability (log + alert post-hoc). SpendGuard's egress proxy fail-closes the STOP path before any byte leaves: no HTTP request to OpenAI, no token spend, structured `reason_codes` your client can branch on. See [§11 of the spec](docs/specs/auto-instrument-egress-proxy-spec.md#11-capability-level-honest) for the honest L1.5 / L2 capability matrix.
 
-#### What works today (v0.2) vs what's coming (v0.3)
+#### Verified clients (v0.3)
 
-The 1-env-var claim holds for any client that hits OpenAI's `POST /v1/chat/completions` endpoint:
+The 1-env-var claim is verified end-to-end against:
 
-- ✅ `openai-python` (`from openai import OpenAI`) — verified e2e
-- ✅ LangChain `ChatOpenAI` — verified e2e via `DEMO_MODE=agent_real_langchain`
-- ✅ openai-agents SDK with **explicit** `OpenAIChatCompletionsModel(openai_client=AsyncOpenAI(base_url=...))` — verified e2e via `DEMO_MODE=agent_real_openai_agents_proxy`
-- ✅ LangGraph (uses `ChatOpenAI` under the hood) — verified e2e
+- ✅ `openai-python` (`from openai import OpenAI`) — Chat Completions
+- ✅ LangChain `ChatOpenAI` — Chat Completions (`DEMO_MODE=agent_real_langchain`)
+- ✅ LangGraph (uses `ChatOpenAI` under the hood) — Chat Completions
+- ✅ openai-agents SDK shorthand `Agent(model="gpt-4o-mini")` — Responses API via v0.3 `/v1/responses` passthrough (`DEMO_MODE=agent_real_openai_agents_proxy`)
 
-What requires v0.3 ([issue #65](https://github.com/m24927605/agentic-spendguard/issues/65)):
-
-- ⏳ openai-agents shorthand `Agent(model="gpt-4o-mini")` — defaults to `OpenAIResponsesModel` which hits `POST /v1/responses`, an endpoint the v0.2 proxy doesn't yet route. Until v0.3 ships, openai-agents users on the shorthand path can either:
-  - Construct `OpenAIChatCompletionsModel(openai_client=AsyncOpenAI(base_url=...))` explicitly, or
-  - Stay on openai-python / LangChain / LangGraph until `/v1/responses` lands.
+Both endpoints share the same PRE/POST gate + audit-chain lifecycle. Streaming pass-through (`stream:true`) verified for both. Spec: [`docs/specs/egress-proxy-v0.3-responses-api.md`](docs/specs/egress-proxy-v0.3-responses-api.md).
 
 ### Quick start — full stack with Pydantic-AI agent
 
