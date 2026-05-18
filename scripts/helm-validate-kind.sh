@@ -342,6 +342,21 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" exec "${POD}" -- \
     psql -U spendguard -d postgres -c 'CREATE DATABASE spendguard_canonical;'
 
 # ---------------------------------------------------------------------
+# 5.4. Create migration ConfigMaps (issue #61 slice 6).
+#
+# Chart's migrate Job mounts these optionally. For kind validation we
+# always create them so the Job actually applies SQL.
+# ---------------------------------------------------------------------
+log "creating migration ConfigMaps..."
+kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create configmap spendguard-migrations-ledger \
+    $(for f in "${REPO_ROOT}/services/ledger/migrations"/*.sql; do echo --from-file="$(basename "$f")=$f"; done) \
+    --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" apply -f -
+
+kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create configmap spendguard-migrations-canonical \
+    $(for f in "${REPO_ROOT}/services/canonical_ingest/migrations"/*.sql; do echo --from-file="$(basename "$f")=$f"; done) \
+    --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" apply -f -
+
+# ---------------------------------------------------------------------
 # 5.5. (optional) Build chart service images locally + load into kind.
 #
 # Issue #61: without this step pods stay in ImagePullBackOff because
