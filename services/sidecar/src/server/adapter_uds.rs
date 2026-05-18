@@ -863,6 +863,18 @@ mod approval_resume_payload {
         pub schema_bundle_id: String,
         #[serde(default)]
         pub schema_bundle_canonical_version: String,
+        // Issue #59 — frozen-at-PRE pricing. Captured at REQUIRE_APPROVAL
+        // time in services/sidecar/src/decision/transaction.rs. Reused
+        // here (not re-read from the live bundle) so the resume's
+        // PricingFreeze matches what the operator approved.
+        #[serde(default)]
+        pub pricing_version: String,
+        #[serde(default)]
+        pub price_snapshot_hash_hex: String,
+        #[serde(default)]
+        pub fx_rate_version: String,
+        #[serde(default)]
+        pub unit_conversion_version: String,
     }
 
     #[derive(Debug, Deserialize)]
@@ -1009,25 +1021,50 @@ mod approval_resume_payload {
                 .await
                 .map_err(|e| format!("sign resume cloudevent: {e}"))?;
 
-            // POC pricing: read from the sidecar's currently-installed
-            // contract bundle metadata. Frozen-at-PRE semantics would
-            // require capturing pricing_version + price_snapshot_hash
-            // in decision_context_json at REQUIRE_APPROVAL time; that
-            // is a P3.5+ followup. For the closed-loop demo, the
-            // contract_bundle_hash_hex stored in decision_context
-            // pins the bundle identity, so a hot-reload between
-            // approval and resume would surface via the hash check.
-            let bundle = state
+            // Issue #59 — frozen-at-PRE pricing + bundle-hash hot-reload check.
+            //
+            // Spec: docs/specs/issue-59-approval-resume-frozen-pricing.md §3.2.
+            //
+            // 1. Verify the sidecar's currently-installed bundle matches the
+            //    bundle the operator approved against. If a hot-reload fired
+            //    between approval and resume, the semantic basis for the
+            //    operator's approval is stale. Return a typed error so the
+            //    SDK can surface ApprovalBundleHotReloadedError and the
+            //    caller can re-issue the original DecisionRequest.
+            //
+            // 2. Reconstruct PricingFreeze from decision_context_json (frozen
+            //    at REQUIRE_APPROVAL emit time), NOT from the live bundle.
+            //    Preserves the audit-chain invariant that pricing visible to
+            //    the approver is the pricing used for the bundled
+            //    reservation.
+            let live_bundle = state
                 .inner
                 .contract_bundle
                 .read()
                 .clone()
                 .ok_or_else(|| "no contract bundle installed".to_string())?;
+            let live_hash_hex = hex::encode(&live_bundle.bundle_hash);
+            if !self.decision.contract_bundle_hash_hex.is_empty()
+                && self.decision.contract_bundle_hash_hex != live_hash_hex
+            {
+                return Err(format!(
+                    "[BUNDLE_HOT_RELOADED] approval was issued under bundle hash {} but the sidecar's currently-installed bundle is {}; the operator's approval is no longer semantically tied to this bundle. Reissue the original DecisionRequest to get a fresh approval row tied to the new bundle.",
+                    self.decision.contract_bundle_hash_hex, live_hash_hex
+                ));
+            }
+
+            let price_snapshot_hash =
+                hex::decode(&self.decision.price_snapshot_hash_hex).map_err(|e| {
+                    format!(
+                        "decision_context.price_snapshot_hash_hex decode: {e} (value was {:?})",
+                        self.decision.price_snapshot_hash_hex
+                    )
+                })?;
             let pricing = PricingFreeze {
-                pricing_version: bundle.pricing_version.clone(),
-                price_snapshot_hash: bundle.price_snapshot_hash.clone().into(),
-                fx_rate_version: bundle.fx_rate_version.clone(),
-                unit_conversion_version: bundle.unit_conversion_version.clone(),
+                pricing_version: self.decision.pricing_version.clone(),
+                price_snapshot_hash: price_snapshot_hash.into(),
+                fx_rate_version: self.decision.fx_rate_version.clone(),
+                unit_conversion_version: self.decision.unit_conversion_version.clone(),
             };
 
             // TTL: reuse sidecar's configured reservation TTL.

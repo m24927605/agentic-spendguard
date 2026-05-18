@@ -90,6 +90,30 @@ BEGIN
     END IF;
 END$$;
 
+-- §B+: Issue #59 frozen-at-PRE pricing — decision_context_json must
+-- carry the 4 pricing fields captured at REQUIRE_APPROVAL time.
+\echo '[verify] §B+: decision_context carries the 4 issue-59 pricing fields'
+DO $$
+DECLARE
+    rows_missing_fields INT;
+BEGIN
+    SELECT COUNT(*) INTO rows_missing_fields
+      FROM approval_requests
+     WHERE created_at > now() - interval '5 minutes'
+       AND state = 'approved'
+       AND NOT (
+              decision_context ? 'pricing_version'
+          AND decision_context ? 'price_snapshot_hash_hex'
+          AND decision_context ? 'fx_rate_version'
+          AND decision_context ? 'unit_conversion_version'
+       );
+    RAISE NOTICE '[verify] §B+ rows missing issue-59 pricing fields=%', rows_missing_fields;
+    IF rows_missing_fields > 0 THEN
+        RAISE EXCEPTION '§B+ FAIL: % approval_requests rows missing one or more of pricing_version/price_snapshot_hash_hex/fx_rate_version/unit_conversion_version in decision_context_json',
+                        rows_missing_fields;
+    END IF;
+END$$;
+
 -- §C: No leftover pending approval_requests from the run.
 \echo '[verify] §C: no pending approval_requests left from this run'
 DO $$

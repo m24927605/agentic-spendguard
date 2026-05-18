@@ -26,6 +26,7 @@ from .client import (
     SpendGuardClient,
 )
 from .errors import (
+    ApprovalBundleHotReloadedError,
     ApprovalDeniedError,
     ApprovalLapsedError,
     ApprovalRequired,
@@ -53,6 +54,7 @@ __all__ = [
     "HandshakeOutcome",
     "SpendGuardClient",
     # errors
+    "ApprovalBundleHotReloadedError",
     "ApprovalDeniedError",
     "ApprovalLapsedError",
     "ApprovalRequired",

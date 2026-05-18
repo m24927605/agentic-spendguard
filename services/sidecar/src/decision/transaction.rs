@@ -636,6 +636,11 @@ async fn run_record_denied_decision(
                 ),
                 None => (String::new(), "MONETARY", String::new()),
             };
+            // Issue #59: capture the 4 pricing fields at REQUIRE_APPROVAL
+            // time so resume() can rebuild the ReserveSetRequest with
+            // frozen-at-PRE pricing, not the sidecar's live bundle
+            // (which may have hot-reloaded between approval + resume).
+            // Spec: docs/specs/issue-59-approval-resume-frozen-pricing.md §3.1.
             let decision_ctx = serde_json::json!({
                 "tenant_id":                       ctx.tenant_id,
                 "budget_id":                       primary_claim.map(|c| c.budget_id.clone()).unwrap_or_default(),
@@ -649,6 +654,10 @@ async fn run_record_denied_decision(
                 "contract_bundle_hash_hex":        hex::encode(&bundle.bundle_hash),
                 "schema_bundle_id":                state.inner.schema_bundle.read().as_ref().map(|s| s.bundle_id.to_string()).unwrap_or_default(),
                 "schema_bundle_canonical_version": state.inner.schema_bundle.read().as_ref().map(|s| s.canonical_schema_version.clone()).unwrap_or_default(),
+                "pricing_version":                 bundle.pricing_version,
+                "price_snapshot_hash_hex":         hex::encode(&bundle.price_snapshot_hash),
+                "fx_rate_version":                 bundle.fx_rate_version,
+                "unit_conversion_version":         bundle.unit_conversion_version,
             });
             let amount = primary_claim.map(|c| c.amount_atomic.clone()).unwrap_or_default();
             let direction = match primary_claim.map(|c| c.direction) {

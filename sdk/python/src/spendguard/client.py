@@ -49,6 +49,7 @@ except ImportError as exc:  # pragma: no cover — build configuration error
     ) from exc
 
 from .errors import (
+    ApprovalBundleHotReloadedError,
     ApprovalDeniedError,
     ApprovalLapsedError,
     ApprovalRequired,
@@ -614,6 +615,7 @@ class SpendGuardClient:
             # Round-2 #9 PR 9c: sidecar tags the message with bracketed
             # prefixes like [APPROVAL_NON_TERMINAL], [PRODUCER_SP_NOT_WIRED],
             # [LEDGER_RPC_FAILED] etc. Map non-terminal → ApprovalLapsedError;
+            # bundle hot-reload → ApprovalBundleHotReloadedError (issue #59);
             # everything else → SpendGuardError.
             msg = err.message
             if msg.startswith("[APPROVAL_NON_TERMINAL]"):
@@ -627,6 +629,20 @@ class SpendGuardClient:
                     msg,
                     decision_id=decision_id,
                     state=state,
+                )
+            if msg.startswith("[BUNDLE_HOT_RELOADED]"):
+                # Sidecar shape:
+                #   "[BUNDLE_HOT_RELOADED] approval was issued under bundle hash <A> but
+                #    the sidecar's currently-installed bundle is <B>; ..."
+                import re
+
+                hashes = re.findall(r"\b[0-9a-f]{64}\b", msg)
+                original = hashes[0] if len(hashes) >= 1 else ""
+                current = hashes[1] if len(hashes) >= 2 else ""
+                raise ApprovalBundleHotReloadedError(
+                    msg,
+                    original_bundle_hash=original,
+                    current_bundle_hash=current,
                 )
             raise SpendGuardError(
                 f"sidecar ResumeAfterApproval error: {msg}"

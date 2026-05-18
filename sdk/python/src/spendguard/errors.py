@@ -175,6 +175,35 @@ class ApprovalLapsedError(DecisionDenied):
         self.state = state
 
 
+class ApprovalBundleHotReloadedError(SpendGuardError):
+    """Sidecar `ResumeAfterApproval` refused because the contract bundle
+    rotated between approval and resume.
+
+    Issue #59: the operator's approval is semantically tied to the
+    bundle hash captured at REQUIRE_APPROVAL emit time. If a hot-reload
+    fires (CA-P3.7 closed loop) between approval and resume, the live
+    bundle differs from the approved one — the pricing the operator
+    saw is no longer the pricing the reservation would use. The
+    sidecar refuses to bundle the resume; the caller must reissue the
+    original DecisionRequest to get a fresh approval row tied to the
+    new bundle.
+
+    The two hashes are surfaced so operators can correlate the rotation
+    against bundle_registry logs.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        original_bundle_hash: str,
+        current_bundle_hash: str,
+    ) -> None:
+        super().__init__(message)
+        self.original_bundle_hash = original_bundle_hash
+        self.current_bundle_hash = current_bundle_hash
+
+
 class MutationApplyFailed(SpendGuardError):
     """A DEGRADE decision returned a mutation patch the adapter could not apply.
 
