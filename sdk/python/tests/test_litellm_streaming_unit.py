@@ -170,6 +170,59 @@ async def test_streaming_fallback_to_estimator_when_usage_missing(monkeypatch, c
 
 
 @pytest.mark.asyncio
+async def test_streaming_snapshot_captures_pre_await_value(monkeypatch):
+    """Slice 4 R2 P1: snapshot taken BEFORE request_decision await,
+    so if a shared mutable claim mutates DURING the await window
+    (operator's claim object reused by another concurrent caller),
+    the fallback commits the value the sidecar reserved against, not
+    the post-mutation value."""
+    from spendguard.integrations.litellm import (
+        SpendGuardLiteLLMCallback,
+    )
+    mutable_claim = _claim("500")  # initial estimate
+    cli = _client()
+
+    # Make request_decision mutate the shared claim DURING the await
+    # window (simulating a concurrent task touching the same object).
+    async def _decision_mutates_claim(**_):
+        mutable_claim.amount_atomic = "999999999"  # post-snapshot mutation
+        return SimpleNamespace(
+            decision="CONTINUE",
+            decision_id="dec-1",
+            reservation_ids=("res-1",),
+            audit_decision_event_id="audit-1",
+        )
+
+    cli.request_decision = AsyncMock(side_effect=_decision_mutates_claim)
+    cb = SpendGuardLiteLLMCallback(
+        client=cli,
+        budget_resolver=lambda ctx: _BINDING,
+        claim_estimator=lambda ctx: [mutable_claim],
+        claim_reconciler=lambda ctx, resp: [_claim("NEVER_USED")],
+    )
+
+    # Run the pre-call hook. It snapshots BEFORE await, then sidecar
+    # mutates the original. Then trigger streaming fallback path.
+    await cb.async_pre_call_hook(
+        SimpleNamespace(team_id="t1"),  # user_api_key_dict
+        None,
+        {"litellm_call_id": "mut-during-await", "model": "gpt", "stream": True,
+         "messages": [{"role": "user", "content": "hi"}]},
+        "acompletion",
+    )
+    # Fallback path (no usage on response).
+    await cb.async_log_success_event(
+        _kwargs("mut-during-await"),
+        _stream_response_no_usage(),
+        0, 1,
+    )
+    kw = cli.emit_llm_call_post.call_args.kwargs
+    # Snapshot captured pre-await value "500", not the post-mutation
+    # "999999999". Without the R2 P1 fix, this assertion would fail.
+    assert kw["estimated_amount_atomic"] == "500"
+
+
+@pytest.mark.asyncio
 async def test_streaming_fallback_uses_stashed_snapshot_not_mutated_claim():
     """Slice 4 R1 P1.2 fix: stash should freeze estimator amount, so
     mutating the original claim object after pre-call does NOT change

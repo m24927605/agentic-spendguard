@@ -337,6 +337,24 @@ class SpendGuardLiteLLMCallback(CustomLogger):
         # mis-charge.
         _validate_claim_against_binding(estimator_claims[0], binding, source="claim_estimator")
 
+        # Slice 4 R2 P1 fix: build the primitive snapshot BEFORE the
+        # sidecar await so an in-hook mutation of the operator's
+        # shared mutable claim object (during the await window)
+        # cannot change what the streaming fallback later commits.
+        # Captured here = same primitive values the sidecar will see.
+        _estimator_snapshot = SimpleNamespace(
+            amount_atomic=str(getattr(estimator_claims[0], "amount_atomic", "")),
+            budget_id=str(getattr(estimator_claims[0], "budget_id", "")),
+            window_instance_id=str(
+                getattr(estimator_claims[0], "window_instance_id", "")
+            ),
+            unit=SimpleNamespace(unit_id=str(
+                getattr(
+                    getattr(estimator_claims[0], "unit", None), "unit_id", "",
+                )
+            )),
+        )
+
         try:
             outcome = await self._client.request_decision(
                 trigger="LLM_CALL_PRE",
@@ -410,22 +428,6 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 "(reservations released best-effort)."
             )
 
-        # Slice 4 R1 P1.2 fix: snapshot estimator claim identity +
-        # amount as immutable primitives so a post-pre-call mutation
-        # of the operator's claim object cannot retroactively change
-        # what the streaming fallback commits.
-        _estimator_snapshot = SimpleNamespace(
-            amount_atomic=str(getattr(estimator_claims[0], "amount_atomic", "")),
-            budget_id=str(getattr(estimator_claims[0], "budget_id", "")),
-            window_instance_id=str(
-                getattr(estimator_claims[0], "window_instance_id", "")
-            ),
-            unit=SimpleNamespace(unit_id=str(
-                getattr(
-                    getattr(estimator_claims[0], "unit", None), "unit_id", "",
-                )
-            )),
-        )
         # Stash on side-channel keyed by litellm_call_id (P1.5).
         self._stash[litellm_call_id] = {
             "decision_id": outcome.decision_id,
