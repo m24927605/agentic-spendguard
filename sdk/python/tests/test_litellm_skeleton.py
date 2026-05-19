@@ -259,7 +259,7 @@ async def test_loop_bound_callback_ensure_client_retries_then_fails(monkeypatch)
         claim_estimator=lambda ctx: [],
         claim_reconciler=lambda ctx, resp: [],
     )
-    with pytest.raises(SidecarUnavailable, match="after 5 attempts"):
+    with pytest.raises(SidecarUnavailable, match=r"deadline.*5 attempts"):
         await cb._ensure_client()
 
 

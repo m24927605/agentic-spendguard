@@ -266,6 +266,24 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 f"claim_estimator returned {len(estimator_claims)} claims; "
                 "v1 contract requires exactly 1 (DESIGN.md §6)."
             )
+        # Slice 2 R1 P1.1 fix: validate estimator claim matches the
+        # binding so audit context can't say budget X while we charge
+        # budget Y. Both fields are operator-supplied; mismatch = bug.
+        claim = estimator_claims[0]
+        claim_budget_id = getattr(claim, "budget_id", None)
+        claim_window = getattr(claim, "window_instance_id", None)
+        if claim_budget_id and claim_budget_id != binding.budget_id:
+            raise SpendGuardConfigError(
+                f"claim_estimator returned budget_id={claim_budget_id!r} "
+                f"but resolver bound budget_id={binding.budget_id!r}. "
+                "Audit context would mis-charge."
+            )
+        if claim_window and claim_window != binding.window_instance_id:
+            raise SpendGuardConfigError(
+                f"claim_estimator returned window_instance_id="
+                f"{claim_window!r} but resolver bound "
+                f"window_instance_id={binding.window_instance_id!r}."
+            )
 
         try:
             outcome = await self._client.request_decision(
@@ -292,13 +310,52 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 f"sidecar pre-call failed: {exc}"
             ) from exc
 
+        # Slice 2 R1 P0.1 fix: DEGRADE outcome must fail-closed for
+        # LiteLLM (DESIGN §5 ledger-down row). DEGRADE means the
+        # sidecar couldn't fully evaluate (e.g. Postgres down);
+        # allowing a real-money LLM call under that condition breaks
+        # F2 fail-closed + F4 audit coverage.
+        if getattr(outcome, "decision", "") == "DEGRADE":
+            if self._fail_open_dev:
+                log.warning(
+                    "spendguard: DEGRADE outcome under fail-open; "
+                    "allowing call (DEV ONLY)."
+                )
+                return data
+            raise SidecarUnavailable(
+                "sidecar returned DEGRADE (ledger or dependent service "
+                "unavailable); LiteLLM proxy fails closed on DEGRADE "
+                "(DESIGN.md §5)."
+            )
+
         # R4 P0.2: validate reservation cardinality BEFORE returning.
-        # Multi-reservation v1 contract violation → fail-closed pre-wire.
+        # Slice 2 R1 P1.2 fix: when sidecar returned multi-reservation
+        # outcome (shouldn't happen but defensive), proactively release
+        # each one before raising so TTL-sweep is the backstop, not the
+        # primary path. fire-and-forget; we already know we're failing.
         if len(outcome.reservation_ids) != 1:
+            for rid in outcome.reservation_ids:
+                try:
+                    await self._client.emit_llm_call_post(
+                        run_id=run_id, step_id=step_id, llm_call_id=llm_call_id,
+                        decision_id=outcome.decision_id,
+                        reservation_id=rid,
+                        provider_reported_amount_atomic="0",
+                        unit=binding.unit, pricing=binding.pricing,
+                        provider_event_id="",
+                        outcome="FAILURE",
+                    )
+                except Exception as rel_exc:  # noqa: BLE001
+                    # best-effort; TTL sweep is durable backstop
+                    log.warning(
+                        "spendguard: best-effort release of reservation "
+                        "%s failed: %r", rid, rel_exc,
+                    )
             raise SpendGuardConfigError(
                 f"sidecar returned {len(outcome.reservation_ids)} "
                 "reservations; v1 expects exactly 1 (DESIGN.md §6). "
-                "Failing closed before provider HTTP request."
+                "Failing closed before provider HTTP request "
+                "(reservations released best-effort)."
             )
 
         # Stash on side-channel keyed by litellm_call_id (P1.5).
@@ -367,10 +424,16 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
         self._tenant_id = tenant_id
         self._init_lock: Any = None  # asyncio.Lock — created on first hook
 
+    # Slice 2 R1 P0.2 fix: absolute deadline + no sleep after final
+    # attempt. Earlier loop slept post-final and didn't bound the
+    # per-attempt handshake duration, blowing well past 3.1s in the
+    # worst case. ENSURE_CLIENT_DEADLINE_S is the hard upper bound on
+    # the lazy init; if exceeded, surface SidecarUnavailable.
+    _ENSURE_CLIENT_DEADLINE_S = 5.0  # generous; covers 5 attempts + retries
+    _ENSURE_CLIENT_ATTEMPT_TIMEOUT_S = 1.0  # per-attempt handshake cap
+    _ENSURE_CLIENT_MAX_ATTEMPTS = 5  # cap retries even if deadline allows more
+
     async def _ensure_client(self) -> SpendGuardClient:
-        # Pivot R1 P1.6: bounded retry with exponential backoff so
-        # first inbound request doesn't fail-closed on UDS-vs-sidecar
-        # boot race. Total max wait ≤ 3.1s; longer surfaces typed err.
         if self._client is not None:
             return self._client
         if self._init_lock is None:
@@ -378,22 +441,44 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
         async with self._init_lock:
             if self._client is not None:
                 return self._client
+            loop = asyncio.get_running_loop()
+            deadline = loop.time() + self._ENSURE_CLIENT_DEADLINE_S
             c = SpendGuardClient(
                 socket_path=self._socket_path,
                 tenant_id=self._tenant_id,
             )
             last_exc: Exception | None = None
-            for attempt in range(5):  # 0.1·2^N → 0.1+0.2+0.4+0.8+1.6 = 3.1s
+            attempt = 0
+            while attempt < self._ENSURE_CLIENT_MAX_ATTEMPTS and loop.time() < deadline:
+                attempt += 1
                 try:
-                    await c.connect()
-                    await c.handshake()
+                    # Cap per-attempt cost so a hung handshake doesn't
+                    # consume the whole deadline.
+                    await asyncio.wait_for(
+                        c.connect(),
+                        timeout=self._ENSURE_CLIENT_ATTEMPT_TIMEOUT_S,
+                    )
+                    await asyncio.wait_for(
+                        c.handshake(),
+                        timeout=self._ENSURE_CLIENT_ATTEMPT_TIMEOUT_S,
+                    )
                     self._client = c
                     return c
                 except Exception as exc:  # noqa: BLE001
                     last_exc = exc
-                    await asyncio.sleep(0.1 * (2 ** attempt))
+                # No sleep AFTER the final attempt; only sleep if we
+                # have budget for another retry AND attempt budget left.
+                if attempt >= self._ENSURE_CLIENT_MAX_ATTEMPTS:
+                    break
+                backoff = min(0.1 * (2 ** (attempt - 1)), 1.0)
+                remaining = deadline - loop.time()
+                if remaining <= backoff:
+                    break  # next attempt would breach deadline
+                await asyncio.sleep(backoff)
             raise SidecarUnavailable(
-                f"sidecar handshake failed after 5 attempts: {last_exc}"
+                f"sidecar handshake failed within "
+                f"{self._ENSURE_CLIENT_DEADLINE_S}s deadline "
+                f"({attempt} attempts): {last_exc}"
             ) from last_exc
 
     async def async_pre_call_hook(self, *a: Any, **kw: Any) -> dict[str, Any] | None:

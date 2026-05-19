@@ -213,17 +213,23 @@ async def test_pre_call_hook_wraps_sidecar_error_as_sidecar_unavailable():
 
 
 @pytest.mark.asyncio
-async def test_pre_call_hook_fail_open_env_returns_data(monkeypatch):
-    """SPENDGUARD_LITELLM_FAIL_OPEN=1: sidecar error → log warning +
-    return data; no exception. S6 says WARNING must fire."""
+async def test_pre_call_hook_fail_open_env_returns_data(monkeypatch, caplog):
+    """SPENDGUARD_LITELLM_FAIL_OPEN=1: sidecar error → log WARNING +
+    return data; no exception; no stash entry. S6 says WARNING must
+    fire at both construction AND each fail-open path taken."""
+    import logging as _logging
     monkeypatch.setenv("SPENDGUARD_LITELLM_FAIL_OPEN", "1")
     err = SpendGuardError("sidecar boom")
     client = _make_client_mock(request_decision_side_effect=err)
     cb = _make_callback(client=client)
-    data = _data()
-    result = await cb.async_pre_call_hook(None, None, data, "acompletion")
+    data = _data("real-call-id-77")  # Slice 2 R1 P2.2 fix: use real call id
+    with caplog.at_level(_logging.WARNING, logger="spendguard.integrations.litellm"):
+        result = await cb.async_pre_call_hook(None, None, data, "acompletion")
     assert result is data
-    assert "c1" not in cb._stash  # no stash on fail-open
+    assert "real-call-id-77" not in cb._stash  # no stash on fail-open
+    # S6: runtime WARNING must fire on the fail-open path taken.
+    assert any("FAIL_OPEN=1" in r.message and "allowing call" in r.message
+               for r in caplog.records), "fail-open runtime WARNING missing"
 
 
 @pytest.mark.asyncio

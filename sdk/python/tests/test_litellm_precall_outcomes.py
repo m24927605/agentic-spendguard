@@ -1,0 +1,190 @@
+# ruff: noqa: ANN001, ANN201, ANN202, ANN003, ANN401, S106
+"""Slice 2 R1 follow-up — DEGRADE / multi-reservation / claim-binding
+mismatch outcomes. Per TEST_PLAN §2.2 extensions.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+litellm = pytest.importorskip(
+    "litellm.integrations.custom_logger",
+    reason="LiteLLM not installed; install spendguard-sdk[litellm]",
+)
+
+from spendguard.errors import (  # noqa: E402
+    SidecarUnavailable,
+    SpendGuardConfigError,
+)
+from spendguard.integrations.litellm import (  # noqa: E402
+    BudgetBinding,
+    SpendGuardLiteLLMCallback,
+)
+
+
+@dataclass(frozen=True)
+class _FakePricing:
+    pricing_version: str = "v1"
+    price_snapshot_hash_hex: str = "deadbeef"
+    fx_rate_version: str = "fxv1"
+    unit_conversion_version: str = "uv1"
+
+
+_BINDING = BudgetBinding(
+    budget_id="b1",
+    window_instance_id="w1",
+    unit=SimpleNamespace(unit_id="u1", token_kind="output_token"),
+    pricing=_FakePricing(),
+)
+
+
+def _claim(*, budget_id: str = "b1", window: str = "w1", amount: str = "100"):
+    return SimpleNamespace(
+        budget_id=budget_id, window_instance_id=window, amount_atomic=amount,
+    )
+
+
+def _client(
+    *,
+    decision: str = "CONTINUE",
+    reservation_ids: tuple = ("res-1",),
+):
+    cli = MagicMock()
+    cli.tenant_id = "tenant-1"
+    cli.session_id = "session-1"
+    outcome = SimpleNamespace(
+        decision=decision,
+        decision_id="dec-1",
+        reservation_ids=reservation_ids,
+        audit_decision_event_id="audit-1",
+    )
+    cli.request_decision = AsyncMock(return_value=outcome)
+    cli.emit_llm_call_post = AsyncMock(return_value=None)
+    return cli
+
+
+def _cb(client, *, estimator_claim=None):
+    return SpendGuardLiteLLMCallback(
+        client=client,
+        budget_resolver=lambda ctx: _BINDING,
+        claim_estimator=lambda ctx: [estimator_claim or _claim()],
+        claim_reconciler=lambda ctx, resp: [_claim()],
+    )
+
+
+def _data(call_id: str = "c-1"):
+    return {"litellm_call_id": call_id, "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hi"}]}
+
+
+@pytest.mark.asyncio
+async def test_degrade_outcome_raises_sidecar_unavailable():
+    """Slice 2 R1 P0.1: DEGRADE under fail-closed → SidecarUnavailable
+    (DESIGN §5 ledger-down row). LiteLLM diverges from agt.py."""
+    cli = _client(decision="DEGRADE")
+    cb = _cb(cli)
+    with pytest.raises(SidecarUnavailable, match="DEGRADE"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+
+
+@pytest.mark.asyncio
+async def test_degrade_outcome_allowed_under_fail_open(monkeypatch, caplog):
+    """Slice 2 R1 P0.1: DEGRADE + FAIL_OPEN=1 → log WARNING + return
+    data. Operator-explicit dev-only opt-out."""
+    import logging as _logging
+    monkeypatch.setenv("SPENDGUARD_LITELLM_FAIL_OPEN", "1")
+    cli = _client(decision="DEGRADE")
+    cb = _cb(cli)
+    data = _data()
+    with caplog.at_level(_logging.WARNING, logger="spendguard.integrations.litellm"):
+        result = await cb.async_pre_call_hook(None, None, data, "acompletion")
+    assert result is data
+    assert any("DEGRADE" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_multi_reservation_outcome_releases_then_raises():
+    """Slice 2 R1 P1.2: multi-reservation outcome → best-effort release
+    each reservation BEFORE raising; TTL is the durable backstop."""
+    cli = _client(reservation_ids=("r-a", "r-b", "r-c"))
+    cb = _cb(cli)
+    with pytest.raises(SpendGuardConfigError, match=r"3 reservations"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+    # Each reservation should have been released best-effort.
+    assert cli.emit_llm_call_post.call_count == 3
+    released = [
+        c.kwargs["reservation_id"] for c in cli.emit_llm_call_post.call_args_list
+    ]
+    assert sorted(released) == ["r-a", "r-b", "r-c"]
+    for c in cli.emit_llm_call_post.call_args_list:
+        assert c.kwargs["outcome"] == "FAILURE"
+        assert c.kwargs["provider_reported_amount_atomic"] == "0"
+
+
+@pytest.mark.asyncio
+async def test_multi_reservation_release_errors_are_swallowed():
+    """If best-effort release fails, the original
+    SpendGuardConfigError still surfaces (TTL is the backstop)."""
+    cli = _client(reservation_ids=("r-x", "r-y"))
+    cli.emit_llm_call_post = AsyncMock(side_effect=RuntimeError("net err"))
+    cb = _cb(cli)
+    with pytest.raises(SpendGuardConfigError, match=r"2 reservations"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+    # All releases attempted despite errors.
+    assert cli.emit_llm_call_post.call_count == 2
+
+
+@pytest.mark.asyncio
+async def test_estimator_claim_budget_mismatch_with_binding():
+    """Slice 2 R1 P1.1: claim.budget_id mismatch with binding →
+    SpendGuardConfigError BEFORE the wire. Audit context can't say
+    budget X while we charge budget Y."""
+    cli = _client()
+    cb = _cb(cli, estimator_claim=_claim(budget_id="OTHER_BUDGET"))
+    with pytest.raises(SpendGuardConfigError, match="budget_id"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+    cli.request_decision.assert_not_called()  # never reaches sidecar
+
+
+@pytest.mark.asyncio
+async def test_estimator_claim_window_mismatch_with_binding():
+    """Slice 2 R1 P1.1: claim.window_instance_id mismatch with binding
+    → SpendGuardConfigError BEFORE the wire."""
+    cli = _client()
+    cb = _cb(cli, estimator_claim=_claim(window="OTHER_WINDOW"))
+    with pytest.raises(SpendGuardConfigError, match="window_instance_id"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+    cli.request_decision.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_loop_bound_callback_ensure_client_respects_deadline(monkeypatch):
+    """Slice 2 R1 P0.2: _ensure_client honors absolute deadline.
+    Even if individual handshake attempts hang, the total time is
+    bounded by _ENSURE_CLIENT_DEADLINE_S."""
+    from spendguard.integrations.litellm import _LoopBoundCallback
+
+    # Force a tiny deadline so the test runs fast.
+    monkeypatch.setattr(_LoopBoundCallback, "_ENSURE_CLIENT_DEADLINE_S", 0.2)
+    monkeypatch.setattr(
+        _LoopBoundCallback, "_ENSURE_CLIENT_ATTEMPT_TIMEOUT_S", 0.05,
+    )
+
+    cb = _LoopBoundCallback(
+        socket_path="/tmp/nonexistent-spendguard-deadline-test",  # noqa: S108
+        tenant_id="t1",
+        budget_resolver=lambda ctx: None,
+        claim_estimator=lambda ctx: [],
+        claim_reconciler=lambda ctx, resp: [],
+    )
+    import time
+    start = time.monotonic()
+    with pytest.raises(SidecarUnavailable, match="deadline"):
+        await cb._ensure_client()
+    elapsed = time.monotonic() - start
+    # Should NOT exceed the deadline by much (allow 0.3s slack).
+    assert elapsed < 0.5, f"_ensure_client exceeded deadline: {elapsed:.2f}s"
