@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from spendguard._proto.spendguard.common.v1 import common_pb2
+from spendguard.errors import SidecarUnavailable
 from spendguard.integrations.litellm import (
     BudgetBinding,
     ResolverContext,
@@ -73,13 +74,28 @@ _BINDING = BudgetBinding(
 )
 
 
-def _budget_resolver(ctx: ResolverContext) -> BudgetBinding:
+def _budget_resolver(ctx: ResolverContext) -> BudgetBinding | None:
     """Single-budget demo: every call routes to the seeded demo budget.
 
     Operators with multi-team setups inspect `ctx.user_api_key_dict`
     (LiteLLM team_id / key_alias) to dispatch. Slice 8 documents this
     pattern in PROXY_RECIPE.md.
+
+    Slice 7 demo-only test modes (operators MUST strip before forking):
+    - `spendguard_test_fail_mode=resolver_none`: short-circuits to None
+      → SDK raises `SpendGuardConfigError` (resolver contract violation).
+    - `spendguard_test_fail_mode=sidecar_offline`: raises
+      `SidecarUnavailable` → simulates a gRPC channel failure path
+      end-to-end (LiteLLM returns 5xx, counting provider not hit).
     """
+    data = getattr(ctx, "data", None) or {}
+    fail_mode = str(data.get("spendguard_test_fail_mode", "") or "").lower()
+    if fail_mode == "resolver_none":
+        return None
+    if fail_mode == "sidecar_offline":
+        raise SidecarUnavailable(
+            "demo-only test injection: simulated sidecar UDS unreachable"
+        )
     return _BINDING
 
 

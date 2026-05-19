@@ -604,6 +604,8 @@ async def main() -> int:
         return await run_agt_composite_mode()
     if DEMO_MODE == "litellm_real":
         return await run_litellm_real_mode()
+    if DEMO_MODE == "litellm_deny":
+        return await run_litellm_deny_mode()
     return await run_agent_mode()
 
 
@@ -2501,6 +2503,152 @@ async def run_litellm_real_mode() -> int:
                 return 7
 
         print("[demo] litellm_real steps 1+2 complete (ALLOW + DENY)")
+        return 0
+    finally:
+        if proxy_proc is not None:
+            proxy_proc.terminate()
+            try:
+                await asyncio.wait_for(proxy_proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                proxy_proc.kill()
+                await proxy_proc.wait()
+            print("[demo] LiteLLM proxy subprocess terminated")
+        if drain_task is not None:
+            drain_task.cancel()
+            try:
+                await drain_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
+        if counting_runner is not None:
+            await counting_runner.cleanup()
+            print("[demo] counting provider stopped")
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM deny mode (Slice 7): 3 fail-closed sub-steps per ACCEPTANCE.md §5.2.
+# Reuses Slice 6's harness (counting provider + LiteLLM proxy subprocess).
+# Each sub-step:
+#   - positive-control ALLOW first (proves the counter wires correctly)
+#   - then the deny variant (counting MUST NOT increment)
+# Sub-steps:
+#   (a) budget exhausted — hard-cap STOP via 2B atomic-unit override
+#   (b) sidecar offline — resolver raises SidecarUnavailable (simulated
+#       gRPC channel failure path; same end-to-end shape as the real one)
+#   (c) resolver returns None — SDK raises SpendGuardConfigError
+# ---------------------------------------------------------------------------
+
+
+async def _deny_substep(
+    http: Any, name: str, *, allow_first: bool, body: dict[str, Any],
+) -> int:
+    """Run one deny sub-step. Returns 0 on PASS, 7 on FAIL.
+
+    `body` is the deny-shape POST. Sends a positive-control ALLOW
+    first if allow_first; then the deny variant; asserts counter
+    unchanged after deny. Tolerates either 4xx or 5xx for the deny
+    response (DecisionDenied → 403; resolver/SidecarUnavailable → 500
+    via LiteLLM's default callback-error mapping)."""
+    if allow_first:
+        pre_allow = _COUNTING_PROVIDER_HITS["calls"]
+        r_allow = await http.post("/v1/chat/completions", json={
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": f"allow {name}"}],
+        }, headers={"x-litellm-call-id": f"deny-{name}-allow"})
+        if r_allow.status_code != 200:
+            print(f"[demo] FATAL deny.{name}: positive-control ALLOW "
+                  f"expected 200, got {r_allow.status_code}", file=sys.stderr)
+            return 7
+        if _COUNTING_PROVIDER_HITS["calls"] != pre_allow + 1:
+            print(f"[demo] FATAL deny.{name}: positive-control ALLOW "
+                  f"did NOT reach counting provider (wiring broken)",
+                  file=sys.stderr)
+            return 7
+
+    pre_deny = _COUNTING_PROVIDER_HITS["calls"]
+    try:
+        r_deny = await http.post(
+            "/v1/chat/completions", json=body,
+            headers={"x-litellm-call-id": f"deny-{name}-deny"},
+        )
+    except Exception as e:  # noqa: BLE001 — httpx transport
+        print(f"[demo] FATAL deny.{name}: transport failure: {e!r}",
+              file=sys.stderr)
+        return 7
+    post_deny = _COUNTING_PROVIDER_HITS["calls"]
+    print(f"[demo] deny.{name}: HTTP {r_deny.status_code} "
+          f"counter pre={pre_deny} post={post_deny}")
+    if post_deny != pre_deny:
+        print(f"[demo] FATAL deny.{name}: counting provider WAS hit "
+              f"(pre={pre_deny} post={post_deny}); fail-closed broken",
+              file=sys.stderr)
+        return 7
+    if r_deny.status_code < 400:
+        print(f"[demo] FATAL deny.{name}: proxy returned {r_deny.status_code}; "
+              "expected non-2xx", file=sys.stderr)
+        return 7
+    return 0
+
+
+async def run_litellm_deny_mode() -> int:
+    """3 fail-closed sub-steps per ACCEPTANCE.md §5.2."""
+    if not os.environ.get("SPENDGUARD_BUDGET_ID"):
+        print("[demo] FATAL: budget env vars required", file=sys.stderr)
+        return 8
+
+    proxy_dir = _spendguard_proxy_dir()
+    config_path = proxy_dir / "proxy_config.yaml"
+    if not config_path.exists():
+        print(f"[demo] FATAL: proxy config missing at {config_path}",
+              file=sys.stderr)
+        return 8
+
+    counting_runner = None
+    proxy_proc = None
+    drain_task: asyncio.Task[None] | None = None
+    try:
+        counting_runner = await _start_counting_provider()
+        proxy_proc, drain_task = await _start_litellm_proxy_subprocess(
+            config_path, proxy_dir,
+        )
+        await _wait_for_litellm_health(port=4000)
+
+        import httpx
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:4000",
+            headers={"Authorization": "Bearer sk-demo-litellm-proxy-key"},
+            timeout=15.0,
+        ) as http:
+            substeps = [
+                # (a) budget exhausted via hard-cap (2B > 1B cap).
+                ("exhausted", True, {
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "deny-a"}],
+                    "spendguard_estimate_override": "2000000000",
+                }),
+                # (b) sidecar offline simulation (resolver injects
+                # SidecarUnavailable; same end-to-end fail-closed shape
+                # as a real gRPC channel failure).
+                ("sidecar_offline", True, {
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "deny-b"}],
+                    "spendguard_test_fail_mode": "sidecar_offline",
+                }),
+                # (c) resolver returns None — SDK rejects with
+                # SpendGuardConfigError.
+                ("resolver_none", True, {
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": "deny-c"}],
+                    "spendguard_test_fail_mode": "resolver_none",
+                }),
+            ]
+            for name, allow_first, body in substeps:
+                rc = await _deny_substep(
+                    http, name, allow_first=allow_first, body=body,
+                )
+                if rc != 0:
+                    return rc
+
+        print("[demo] litellm_deny all 3 sub-steps PASS (counting=0 on each deny)")
         return 0
     finally:
         if proxy_proc is not None:

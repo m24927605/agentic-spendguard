@@ -138,6 +138,9 @@ else ifeq ($(DEMO_MODE),approval_hot_reload)
 else ifeq ($(DEMO_MODE),litellm_real)
 	@echo "[demo] verifying Slice 6 (litellm_real ALLOW + DENY)..."
 	@$(MAKE) demo-verify-litellm-real
+else ifeq ($(DEMO_MODE),litellm_deny)
+	@echo "[demo] verifying Slice 7 (litellm_deny 3 fail-closed sub-steps)..."
+	@$(MAKE) demo-verify-litellm-deny
 else ifneq (,$(findstring agent_real,$(DEMO_MODE)))
 	@echo "[demo] DEMO_MODE=$(DEMO_MODE) — skipping demo-verify-step7."
 	@echo "[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)"
@@ -243,6 +246,10 @@ demo-verify-approval-hot-reload:
 # spendguard_canonical` block here (R2 P0-2 fix). The 5s drain
 # before the canonical-DB query gives the outbox forwarder a tick
 # to catch up (R2 P1-1 fix).
+demo-verify-litellm-deny:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_deny.sql
+	@echo "[demo] Slice 7 litellm_deny verification done"
+
 demo-verify-litellm-real:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_real.sql
 	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
