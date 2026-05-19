@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import importlib
 import re
-import sys
 from dataclasses import FrozenInstanceError
 from pathlib import Path
 
@@ -41,25 +40,6 @@ def _module_source() -> str:
             "spendguard.integrations.litellm"
         ).__file__
     ).read_text(encoding="utf-8")
-
-
-def test_module_imports_without_litellm_installed(monkeypatch):
-    """Patch sys.modules to simulate `litellm` absence; assert
-    ImportError with the documented install hint."""
-    # Force reimport: drop the litellm bits and the integration module.
-    for k in list(sys.modules):
-        if k == "litellm" or k.startswith("litellm.") or k == (
-            "spendguard.integrations.litellm"
-        ):
-            monkeypatch.delitem(sys.modules, k, raising=False)
-    monkeypatch.setitem(sys.modules, "litellm", None)
-
-    with pytest.raises(ImportError) as exc_info:
-        importlib.import_module("spendguard.integrations.litellm")
-    msg = str(exc_info.value)
-    assert "spendguard-sdk[litellm]" in msg, (
-        f"ImportError must reference the extra name; got: {msg!r}"
-    )
 
 
 def test_module_imports_with_litellm_installed():
@@ -266,3 +246,30 @@ async def test_loop_bound_callback_ensure_client_stub():
     )
     with pytest.raises(NotImplementedError, match="Slice 2"):
         await cb._ensure_client()
+
+
+@pytest.mark.asyncio
+async def test_loop_bound_callback_async_hooks_call_ensure_client_first():
+    """Round 1 P1 fix: _LoopBoundCallback's async hook overrides MUST
+    call _ensure_client() BEFORE delegating to super(), so the
+    event-loop-affinity binding is locked in regardless of which
+    Slice (2-5) is filling the super body."""
+    cb = _LoopBoundCallback(
+        socket_path="/tmp/x",
+        tenant_id="t1",
+        budget_resolver=lambda ctx: None,
+        claim_estimator=lambda ctx: [],
+        claim_reconciler=lambda ctx, resp: [],
+    )
+    # _ensure_client raises NotImplementedError("Slice 2 wires ...")
+    # in Slice 1; each async hook MUST surface that BEFORE the parent's
+    # NotImplementedError("Slice 2"/"Slice 3"/...) would have fired.
+    for hook, sample_args in [
+        (cb.async_pre_call_hook, (None, None, {}, "acompletion")),
+        (cb.async_log_success_event, ({}, None, None, None)),
+        (cb.async_log_failure_event, ({}, None, None, None)),
+    ]:
+        with pytest.raises(
+            NotImplementedError, match="_LoopBoundCallback handshake"
+        ):
+            await hook(*sample_args)

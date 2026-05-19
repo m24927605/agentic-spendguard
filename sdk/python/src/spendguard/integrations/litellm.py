@@ -184,6 +184,21 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
     async def _ensure_client(self) -> SpendGuardClient:
         raise NotImplementedError("Slice 2 wires _LoopBoundCallback handshake")
 
+    # Round 1 P1 fix: the three async hooks MUST be overridden so
+    # _ensure_client() runs before super() — locks the lazy-bind
+    # contract regardless of which Slice fills the super body.
+    async def async_pre_call_hook(self, *a: Any, **kw: Any) -> dict[str, Any] | None:
+        await self._ensure_client()
+        return await super().async_pre_call_hook(*a, **kw)
+
+    async def async_log_success_event(self, *a: Any, **kw: Any) -> None:
+        await self._ensure_client()
+        await super().async_log_success_event(*a, **kw)
+
+    async def async_log_failure_event(self, *a: Any, **kw: Any) -> None:
+        await self._ensure_client()
+        await super().async_log_failure_event(*a, **kw)
+
 
 def install(
     *,
