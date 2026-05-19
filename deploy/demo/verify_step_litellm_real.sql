@@ -77,12 +77,15 @@ SELECT la.account_kind,
 -- denied_decision >= 1 here):
 \echo
 \echo === ASSERT: ALLOW step produced reserve + commit_estimated ===
+-- Slice 6 R2 P0-2 fix: `canonical_events` lives in the
+-- `spendguard_canonical` DB, not `spendguard_ledger`. The cross-DB
+-- assertions for canonical_events are run via a separate `psql -d
+-- spendguard_canonical -c "DO $$ … $$"` block in the Makefile target
+-- `demo-verify-litellm-real`. Keep ONLY ledger-DB assertions here.
 DO $$
 DECLARE
     v_reserve INT;
     v_commit INT;
-    v_decision_audit INT;
-    v_outcome_audit INT;
 BEGIN
     SELECT COUNT(*) INTO v_reserve
       FROM ledger_transactions
@@ -92,38 +95,16 @@ BEGIN
       FROM ledger_transactions
      WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
        AND operation_kind = 'commit_estimated';
-    SELECT COUNT(*) INTO v_decision_audit
-      FROM canonical_events
-     WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
-       AND event_type = 'spendguard.audit.decision';
-    SELECT COUNT(*) INTO v_outcome_audit
-      FROM canonical_events
-     WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
-       AND event_type = 'spendguard.audit.outcome';
 
-    -- Slice 6 R1 fix: DENY step now drives a per-call estimator
-    -- override (2B atomic units > 1B hard cap) so denied_decision
-    -- should land too.
     IF v_reserve < 1 THEN
         RAISE EXCEPTION 'SLICE6_GATE: ledger_transactions.reserve >= 1 expected, got %', v_reserve;
     END IF;
     IF v_commit < 1 THEN
         RAISE EXCEPTION 'SLICE6_GATE: ledger_transactions.commit_estimated >= 1 expected, got %', v_commit;
     END IF;
-    -- canonical_events forwarding lags ~5s after the demo; the
-    -- Makefile sleeps before calling demo-verify-outbox-closure, so by
-    -- the time this query runs the rows should be present. If empty
-    -- the forwarder is broken (separately covered by
-    -- demo-verify-outbox-closure).
-    IF v_decision_audit < 1 THEN
-        RAISE EXCEPTION 'SLICE6_GATE: canonical_events.decision >= 1 expected, got %', v_decision_audit;
-    END IF;
-    IF v_outcome_audit < 1 THEN
-        RAISE EXCEPTION 'SLICE6_GATE: canonical_events.outcome >= 1 expected, got %', v_outcome_audit;
-    END IF;
 
-    RAISE NOTICE 'SLICE6 OK: reserve=% commit_estimated=% decision_audit=% outcome_audit=%',
-        v_reserve, v_commit, v_decision_audit, v_outcome_audit;
+    RAISE NOTICE 'SLICE6 LEDGER OK: reserve=% commit_estimated=%',
+        v_reserve, v_commit;
 END;
 $$;
 

@@ -33,7 +33,16 @@ class DecisionDenied(SpendGuardError):
     Carries the original `decision_id` and reason codes so callers can
     log + correlate with audit chain. Subclassed for the specific
     decision kind.
+
+    Slice 6 R2 P1-2 hardening: exposes `status_code = 403` so LiteLLM's
+    proxy maps a SpendGuard denial to HTTP 403 Forbidden (a policy
+    refusal — client-side) rather than the default 500 Internal Server
+    Error. The proxy reads `getattr(exc, "status_code", 500)` when
+    converting non-HTTPException callback errors into responses, so
+    setting it as a class attribute is sufficient.
     """
+
+    status_code: int = 403
 
     def __init__(
         self,

@@ -24,7 +24,6 @@ import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 # Pydantic-AI imports are deliberately deferred so the script also runs
@@ -2308,8 +2307,13 @@ async def _drain_proxy_output(proc: "asyncio.subprocess.Process") -> None:
     """Background drain of LiteLLM proxy stdout → demo stderr so the
     proxy's boot banner + uvicorn access logs + any ImportError
     traceback reach the operator, AND the PIPE buffer never fills
-    (Slice 6 R1 Code Reviewer P1)."""
-    assert proc.stdout is not None  # noqa: S101  # set by Popen(stdout=PIPE)
+    (Slice 6 R1 Code Reviewer P1).
+
+    Slice 6 R2 P2-4: explicit None-check (not `assert`) so this still
+    works under `python -O`.
+    """
+    if proc.stdout is None:
+        return
     while True:
         line = await proc.stdout.readline()
         if not line:
@@ -2335,8 +2339,11 @@ async def _start_litellm_proxy_subprocess(
     env = os.environ.copy()
     pp = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{callback_dir}:{pp}" if pp else str(callback_dir)
+    # Slice 6 R2 P0-1 fix: `python -m litellm` fails (litellm has no
+    # `__main__.py`); the actual CLI module is `litellm.proxy.proxy_cli`.
     proc = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "litellm", "--config", str(config_path),
+        sys.executable, "-m", "litellm.proxy.proxy_cli",
+        "--config", str(config_path),
         "--port", str(port), "--num_workers", "1",
         env=env, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -2397,12 +2404,16 @@ async def run_litellm_real_mode() -> int:
             timeout=15.0,
         ) as http:
             # ---- Step 1: ALLOW ----
+            # Slice 6 R2 P1-3 fix: LiteLLM proxy overwrites
+            # `litellm_call_id` from the request body with whatever
+            # the `x-litellm-call-id` header sets (or a fresh UUID).
+            # Pass via header so the friendly ID actually reaches the
+            # callback and audit rows.
             pre_calls = _COUNTING_PROVIDER_HITS["calls"]
             r = await http.post("/v1/chat/completions", json={
                 "model": "gpt-4o-mini",
                 "messages": [{"role": "user", "content": "hello"}],
-                "litellm_call_id": "demo-litellm-allow-1",
-            })
+            }, headers={"x-litellm-call-id": "demo-litellm-allow-1"})
             print(f"[demo] (1) ALLOW step: HTTP {r.status_code} body={r.text[:200]!r}")
             if r.status_code != 200:
                 print(f"[demo] FATAL: ALLOW step expected 200, got {r.status_code}",
@@ -2445,23 +2456,31 @@ async def run_litellm_real_mode() -> int:
                 r_deny = await http.post("/v1/chat/completions", json={
                     "model": "gpt-4o-mini",
                     "messages": [{"role": "user", "content": "trigger deny"}],
-                    "litellm_call_id": "demo-litellm-deny-1",
                     "spendguard_estimate_override": "2000000000",
-                })
-            except Exception as e:  # noqa: BLE001
-                # Some httpx versions surface 4xx as exception shape;
-                # treat as a DENY-signal response we can introspect.
-                r_deny = SimpleNamespace(  # type: ignore[assignment]
-                    status_code=400, text=f"client error: {e!r}",
+                }, headers={"x-litellm-call-id": "demo-litellm-deny-1"})
+            except httpx.RequestError as e:
+                # Slice 6 R2 P2 fix: only TRANSPORT failures (connect
+                # refused / read timeout) raise from httpx.post; 4xx
+                # and 5xx come back as Response. A transport failure
+                # means the proxy is unreachable — that's a demo gate
+                # failure, NOT a DENY signal. Fail loud instead of
+                # synthesising a fake 400.
+                print(
+                    f"[demo] FATAL: DENY step transport failure — "
+                    f"proxy unreachable: {e!r}",
+                    file=sys.stderr,
                 )
+                return 7
             counting_post_deny = _COUNTING_PROVIDER_HITS["calls"]
             print(f"[demo] (2) DENY step: HTTP {r_deny.status_code} "
                   f"body={str(r_deny.text)[:200]!r}")
             print(f"[demo] (2) DENY negative control: counting hits "
                   f"pre={counting_pre_deny} post={counting_post_deny}")
-            # Acceptance: SpendGuard DECLINED → LiteLLM proxy MUST
-            # return 4xx AND counting provider MUST NOT have been hit
-            # (otherwise the budget rejection didn't gate the call).
+            # Acceptance: SpendGuard DECLINED → LiteLLM proxy returns
+            # non-2xx (403 with the R2 P1-2 status_code fix on
+            # DecisionDenied; legacy 500 still acceptable). AND
+            # counting provider MUST NOT have been hit (otherwise the
+            # budget rejection didn't gate the call).
             if counting_post_deny != counting_pre_deny:
                 print(
                     "[demo] FATAL: DENY step did NOT block upstream — "
@@ -2474,9 +2493,9 @@ async def run_litellm_real_mode() -> int:
                 return 7
             if r_deny.status_code < 400:
                 print(
-                    f"[demo] FATAL: DENY step expected HTTP 4xx, got "
-                    f"{r_deny.status_code} — proxy admitted the call "
-                    "even though SpendGuard should have denied.",
+                    f"[demo] FATAL: DENY step expected HTTP non-2xx, "
+                    f"got {r_deny.status_code} — proxy admitted the "
+                    "call even though SpendGuard should have denied.",
                     file=sys.stderr,
                 )
                 return 7
