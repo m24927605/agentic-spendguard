@@ -168,19 +168,24 @@ def _validate_claim_against_binding(
             f"but binding has window_instance_id="
             f"{binding.window_instance_id!r}."
         )
-    # Slice 3 R2 P1 fix: also validate unit.unit_id when claim has a
-    # unit attribute. A claim with different unit would emit amount
-    # under binding.unit semantics (mis-charge).
+    # Slice 3 R2 + R3 P1 fix: validate unit.unit_id MANDATORY and
+    # EXACT. A claim with no unit / empty unit_id would otherwise
+    # silently commit amount under binding.unit semantics (mis-charge).
+    binding_unit = getattr(binding, "unit", None)
+    binding_unit_id = getattr(binding_unit, "unit_id", None) or ""
+    if not binding_unit_id:
+        raise SpendGuardConfigError(
+            "BudgetBinding.unit.unit_id is empty; resolver MUST yield a "
+            "non-empty unit (DESIGN.md §6)."
+        )
     claim_unit = getattr(claim, "unit", None)
-    if claim_unit is not None:
-        claim_unit_id = getattr(claim_unit, "unit_id", None) or ""
-        binding_unit_id = getattr(binding.unit, "unit_id", None) or ""
-        if binding_unit_id and claim_unit_id != binding_unit_id:
-            raise SpendGuardConfigError(
-                f"{source} returned unit.unit_id={claim_unit_id!r} "
-                f"but binding has unit.unit_id={binding_unit_id!r}. "
-                "Amount would be committed under wrong unit semantics."
-            )
+    claim_unit_id = getattr(claim_unit, "unit_id", None) or ""
+    if claim_unit_id != binding_unit_id:
+        raise SpendGuardConfigError(
+            f"{source} returned unit.unit_id={claim_unit_id!r} but "
+            f"binding has unit.unit_id={binding_unit_id!r}. Amount "
+            "would be committed under wrong unit semantics."
+        )
 
 
 def _serialize_messages_for_hash(messages: Any) -> str:

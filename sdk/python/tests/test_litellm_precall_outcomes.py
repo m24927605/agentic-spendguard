@@ -43,9 +43,11 @@ _BINDING = BudgetBinding(
 )
 
 
-def _claim(*, budget_id: str = "b1", window: str = "w1", amount: str = "100"):
+def _claim(*, budget_id: str = "b1", window: str = "w1", amount: str = "100",
+           unit_id: str = "u1"):
     return SimpleNamespace(
         budget_id=budget_id, window_instance_id=window, amount_atomic=amount,
+        unit=SimpleNamespace(unit_id=unit_id),
     )
 
 
@@ -170,6 +172,30 @@ async def test_estimator_claim_missing_attrs_rejected():
     cli = _client()
     cb = _cb(cli, estimator_claim=SimpleNamespace(amount_atomic="100"))
     with pytest.raises(SpendGuardConfigError, match="budget_id"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+    cli.request_decision.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_estimator_claim_missing_unit_rejected():
+    """Slice 3 R3 P1: claim with budget+window but NO unit attr is
+    rejected. Without this guard the helper would silently pass and
+    amount would be committed under wrong unit semantics."""
+    cli = _client()
+    no_unit_claim = SimpleNamespace(
+        amount_atomic="100", budget_id="b1", window_instance_id="w1",
+    )  # no unit attr
+    cb = _cb(cli, estimator_claim=no_unit_claim)
+    with pytest.raises(SpendGuardConfigError, match="unit.unit_id"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+    cli.request_decision.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_estimator_claim_empty_unit_id_rejected():
+    cli = _client()
+    cb = _cb(cli, estimator_claim=_claim(unit_id=""))
+    with pytest.raises(SpendGuardConfigError, match="unit.unit_id"):
         await cb.async_pre_call_hook(None, None, _data(), "acompletion")
     cli.request_decision.assert_not_called()
 

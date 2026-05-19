@@ -42,9 +42,11 @@ _BINDING = BudgetBinding(
 )
 
 
-def _claim(amount: str = "92", budget_id: str = "b1", window: str = "w1"):
+def _claim(amount: str = "92", budget_id: str = "b1", window: str = "w1",
+           unit_id: str = "u1"):
     return SimpleNamespace(
         amount_atomic=amount, budget_id=budget_id, window_instance_id=window,
+        unit=SimpleNamespace(unit_id=unit_id),
     )
 
 
@@ -233,6 +235,19 @@ async def test_success_event_rejects_reconciler_unit_mismatch():
         unit=SimpleNamespace(unit_id="OTHER_UNIT"),
     )
     cb = _cb_with_stash(cli, reconciler=lambda ctx, resp: [wrong_claim])
+    with pytest.raises(SpendGuardConfigError, match="unit.unit_id"):
+        await cb.async_log_success_event(_kwargs(), _response(), 0, 1)
+    cli.emit_llm_call_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_success_event_rejects_reconciler_missing_unit():
+    """Slice 3 R3 P1: reconciler claim with NO unit attribute → reject."""
+    cli = _client()
+    no_unit_claim = SimpleNamespace(
+        amount_atomic="92", budget_id="b1", window_instance_id="w1",
+    )
+    cb = _cb_with_stash(cli, reconciler=lambda ctx, resp: [no_unit_claim])
     with pytest.raises(SpendGuardConfigError, match="unit.unit_id"):
         await cb.async_log_success_event(_kwargs(), _response(), 0, 1)
     cli.emit_llm_call_post.assert_not_called()

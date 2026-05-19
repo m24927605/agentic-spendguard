@@ -79,6 +79,7 @@ _MATCHING_CLAIM = SimpleNamespace(
     budget_id="b1",
     window_instance_id="w1",
     amount_atomic="100",
+    unit=SimpleNamespace(unit_id="u1"),  # matches _FAKE_BINDING.unit
 )
 
 
@@ -125,9 +126,10 @@ async def test_pre_call_hook_builds_resolver_context_with_user_api_key_dict():
 async def test_pre_call_hook_uses_claim_estimator_output_single_claim():
     """v1 contract: estimator returns exactly 1 claim; it lands in
     request_decision(projected_claims=[...]). Claim MUST match
-    binding budget_id + window_instance_id (R1 P1.1 + R2 P1.1)."""
+    binding budget_id + window_instance_id + unit.unit_id."""
     estimator_claim = SimpleNamespace(
         budget_id="b1", window_instance_id="w1", amount_atomic="500",
+        unit=SimpleNamespace(unit_id="u1"),
     )
     client = _make_client_mock()
     cb = _make_callback(client=client, estimator=lambda ctx: [estimator_claim])
