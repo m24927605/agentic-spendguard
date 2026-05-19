@@ -5,6 +5,7 @@ mismatch outcomes. Per TEST_PLAN §2.2 extensions.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -159,6 +160,122 @@ async def test_estimator_claim_window_mismatch_with_binding():
     with pytest.raises(SpendGuardConfigError, match="window_instance_id"):
         await cb.async_pre_call_hook(None, None, _data(), "acompletion")
     cli.request_decision.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_estimator_claim_missing_attrs_rejected():
+    """Slice 2 R3 P2.1 regression: claim WITHOUT budget_id/window_instance_id
+    attrs (e.g. amount-only SimpleNamespace) → SpendGuardConfigError
+    because attrs normalize to "" and binding.budget_id is non-empty."""
+    cli = _client()
+    cb = _cb(cli, estimator_claim=SimpleNamespace(amount_atomic="100"))
+    with pytest.raises(SpendGuardConfigError, match="budget_id"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+    cli.request_decision.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_estimator_claim_empty_budget_id_rejected():
+    cli = _client()
+    cb = _cb(cli, estimator_claim=_claim(budget_id=""))
+    with pytest.raises(SpendGuardConfigError, match="budget_id"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+
+
+@pytest.mark.asyncio
+async def test_estimator_claim_empty_window_id_rejected():
+    cli = _client()
+    cb = _cb(cli, estimator_claim=_claim(window=""))
+    with pytest.raises(SpendGuardConfigError, match="window_instance_id"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+
+
+@pytest.mark.asyncio
+async def test_empty_binding_budget_id_rejected():
+    """Slice 2 R3 P1 regression: BudgetBinding with empty budget_id →
+    SpendGuardConfigError BEFORE the wire (defensive: even matching
+    empty claim would silently pass equality check)."""
+    cli = _client()
+    cb = SpendGuardLiteLLMCallback(
+        client=cli,
+        budget_resolver=lambda ctx: BudgetBinding(
+            budget_id="",  # invalid
+            window_instance_id="w1",
+            unit=SimpleNamespace(unit_id="u1"),
+            pricing=_FakePricing(),
+        ),
+        claim_estimator=lambda ctx: [_claim(budget_id="")],
+        claim_reconciler=lambda ctx, resp: [],
+    )
+    with pytest.raises(SpendGuardConfigError, match="budget_id is empty"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+
+
+@pytest.mark.asyncio
+async def test_empty_binding_window_id_rejected():
+    """Slice 2 R3 P1: BudgetBinding with empty window_instance_id rejected."""
+    cli = _client()
+    cb = SpendGuardLiteLLMCallback(
+        client=cli,
+        budget_resolver=lambda ctx: BudgetBinding(
+            budget_id="b1",
+            window_instance_id="",  # invalid
+            unit=SimpleNamespace(unit_id="u1"),
+            pricing=_FakePricing(),
+        ),
+        claim_estimator=lambda ctx: [_claim(window="")],
+        claim_reconciler=lambda ctx, resp: [],
+    )
+    with pytest.raises(SpendGuardConfigError, match="window_instance_id is empty"):
+        await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+
+
+@pytest.mark.asyncio
+async def test_ensure_client_deadline_bounds_handshake_via_remaining_time(
+    monkeypatch,
+):
+    """Slice 2 R3 P2.2 regression: _ensure_client MUST pass
+    timeout=min(attempt_timeout, remaining) to wait_for. Patch
+    asyncio.wait_for to record timeouts; assert the LAST call has
+    timeout ≤ remaining time, not the full attempt timeout."""
+    from spendguard.integrations.litellm import _LoopBoundCallback
+
+    monkeypatch.setattr(_LoopBoundCallback, "_ENSURE_CLIENT_DEADLINE_S", 0.3)
+    monkeypatch.setattr(
+        _LoopBoundCallback, "_ENSURE_CLIENT_ATTEMPT_TIMEOUT_S", 1.0,
+    )
+
+    recorded_timeouts: list[float] = []
+    original_wait_for = asyncio.wait_for
+
+    async def _recording_wait_for(awaitable, *, timeout):
+        recorded_timeouts.append(timeout)
+        # Cancel the awaitable to avoid coroutine warnings.
+        try:
+            return await original_wait_for(awaitable, timeout=min(timeout, 0.01))
+        except (asyncio.TimeoutError, Exception):
+            raise
+
+    import asyncio as _asyncio
+    monkeypatch.setattr(_asyncio, "wait_for", _recording_wait_for)
+
+    cb = _LoopBoundCallback(
+        socket_path="/tmp/nonexistent-spendguard-r3-test",  # noqa: S108
+        tenant_id="t1",
+        budget_resolver=lambda ctx: None,
+        claim_estimator=lambda ctx: [],
+        claim_reconciler=lambda ctx, resp: [],
+    )
+    with pytest.raises(SidecarUnavailable):
+        await cb._ensure_client()
+    # Each recorded timeout MUST be ≤ ATTEMPT_TIMEOUT (1.0) AND
+    # ≤ DEADLINE (0.3); the bounding by min(attempt, remaining)
+    # means most are well under 1.0.
+    assert recorded_timeouts, "expected at least one wait_for call"
+    for t in recorded_timeouts:
+        assert t <= 0.3 + 0.01, (
+            f"timeout {t} > deadline; recompute-remaining is not enforced"
+        )
 
 
 @pytest.mark.asyncio

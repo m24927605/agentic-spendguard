@@ -219,6 +219,19 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 "budget_resolver returned None; resolver MUST yield a "
                 "BudgetBinding (DESIGN.md ADR-001 — no global default)"
             )
+        # Slice 2 R3 P1: binding fields MUST be non-empty. Empty
+        # binding + empty claim would silently pass the later equality
+        # check and reach the sidecar with an invalid reservation.
+        if not binding.budget_id:
+            raise SpendGuardConfigError(
+                "BudgetBinding.budget_id is empty; resolver MUST yield a "
+                "non-empty budget_id (DESIGN.md §6)."
+            )
+        if not binding.window_instance_id:
+            raise SpendGuardConfigError(
+                "BudgetBinding.window_instance_id is empty; resolver MUST "
+                "yield a non-empty window_instance_id (DESIGN.md §6)."
+            )
 
         litellm_call_id = data.get("litellm_call_id")
         if not litellm_call_id:
