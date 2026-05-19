@@ -82,7 +82,8 @@ def _cb_with_stream_stash(cli, *, call_id: str = "litellm-1",
         "audit_decision_event_id": "audit-1",
         "decision_context": {"integration": "litellm", "mode": "proxy"},
         "stream": True,  # Slice 4 streaming branch
-        "estimator_claims": [_claim(estimator_amount)],
+        # R1 P1.2: stash now uses snapshot key (immutable primitives)
+        "estimator_claims_snapshot": [_claim(estimator_amount)],
         "mode": "proxy",
     }
     return cb
@@ -107,13 +108,21 @@ def _stream_response_no_usage(*, response_id: str = "stream-no-usage"):
 @pytest.mark.asyncio
 async def test_streaming_branch_commits_real_usage_when_present():
     """F7 happy path: response.usage present → reconciler computes
-    real total → emit_llm_call_post with reconciled amount."""
+    real total → emit_llm_call_post with reconciled amount. R1 P2.1
+    fix: reconciler now derives amount from resp.usage so the test
+    actually validates that pathway."""
     cli = _client()
-    cb = _cb_with_stream_stash(cli)
-    await cb.async_log_success_event(_kwargs(), _stream_response(), 0, 1)
+    cb = _cb_with_stream_stash(
+        cli,
+        # P2.1: reconciler derives amount FROM response_obj.usage.
+        reconciler=lambda ctx, resp: [_claim(
+            str(resp.usage.completion_tokens * 2)  # arbitrary fn of usage
+        )],
+    )
+    await cb.async_log_success_event(_kwargs(), _stream_response(completion_tokens=150), 0, 1)
     cli.emit_llm_call_post.assert_called_once()
     kw = cli.emit_llm_call_post.call_args.kwargs
-    assert kw["estimated_amount_atomic"] == "200"  # reconciled
+    assert kw["estimated_amount_atomic"] == "300"  # 150 * 2 — derived from usage
     assert kw["outcome"] == "SUCCESS"
 
 
@@ -135,10 +144,20 @@ async def test_streaming_commit_amount_not_equal_to_estimator():
 @pytest.mark.asyncio
 async def test_streaming_fallback_to_estimator_when_usage_missing(monkeypatch, caplog):
     """R3 P0.7: degraded path — response has no .usage → fall back to
-    stashed estimator_claims + WARNING log. NOT F7 acceptance."""
+    stashed estimator_claims + WARNING log. NOT F7 acceptance.
+    R1 P2.1 fix: assert reconciler was NOT called (we used fallback)."""
     import logging as _logging
+    reconciler_calls: list = []
+
+    def _reconciler_should_not_be_called(ctx, resp):
+        reconciler_calls.append(("called",))
+        return [_claim("NEVER_USED")]
+
     cli = _client()
-    cb = _cb_with_stream_stash(cli, estimator_amount="800")
+    cb = _cb_with_stream_stash(
+        cli, estimator_amount="800",
+        reconciler=_reconciler_should_not_be_called,
+    )
     with caplog.at_level(_logging.WARNING, logger="spendguard.integrations.litellm"):
         await cb.async_log_success_event(
             _kwargs(), _stream_response_no_usage(), 0, 1,
@@ -146,22 +165,80 @@ async def test_streaming_fallback_to_estimator_when_usage_missing(monkeypatch, c
     cli.emit_llm_call_post.assert_called_once()
     kw = cli.emit_llm_call_post.call_args.kwargs
     assert kw["estimated_amount_atomic"] == "800"  # estimator fallback
+    assert reconciler_calls == [], "reconciler should NOT fire on missing usage"
     assert any("no .usage" in r.message for r in caplog.records)
 
 
 @pytest.mark.asyncio
-async def test_streaming_commit_boundary_error_wraps_as_sidecar_unavailable():
-    """R4 P0.6 / NF5: commit-boundary sidecar failure surfaces as
-    SidecarUnavailable (typed exception contract)."""
-    err = SpendGuardError("commit RPC boom")
-    cli = _client(emit_side_effect=err)
+async def test_streaming_fallback_uses_stashed_snapshot_not_mutated_claim():
+    """Slice 4 R1 P1.2 fix: stash should freeze estimator amount, so
+    mutating the original claim object after pre-call does NOT change
+    what fallback commits."""
+    # Build a stash by directly setting estimator_claims_snapshot
+    # (mimics post-pre-call state).
+    cli = _client()
+    original_claim = _claim("500")
+    cb = SpendGuardLiteLLMCallback(
+        client=cli,
+        budget_resolver=lambda ctx: _BINDING,
+        claim_estimator=lambda ctx: [original_claim],
+        claim_reconciler=lambda ctx, resp: [_claim("NEVER")],
+    )
+    # Simulate stash population (mimics Slice 2 snapshot logic).
+    from types import SimpleNamespace as _SN
+    snapshot = _SN(
+        amount_atomic="500", budget_id="b1", window_instance_id="w1",
+        unit=_SN(unit_id="u1"),
+    )
+    cb._stash["sim"] = {
+        "decision_id": "d", "reservation_ids": ("r1",),
+        "llm_call_id": "l", "run_id": "rr", "step_id": "ss",
+        "binding": _BINDING,
+        "audit_decision_event_id": "a",
+        "decision_context": {}, "stream": True,
+        "estimator_claims_snapshot": [snapshot],
+        "mode": "proxy",
+    }
+    # MUTATE the original claim post-stash to a wildly different amount.
+    original_claim.amount_atomic = "999999999"
+    # Fallback path (no usage on response).
+    await cb.async_log_success_event(
+        _kwargs("sim"), _stream_response_no_usage(), 0, 1,
+    )
+    kw = cli.emit_llm_call_post.call_args.kwargs
+    assert kw["estimated_amount_atomic"] == "500"  # snapshot, not mutation
+
+
+@pytest.mark.asyncio
+async def test_streaming_commit_unavailable_wraps_as_sidecar_unavailable():
+    """R4 P0.6 / NF5: actual SidecarUnavailable at commit boundary
+    surfaces as SidecarUnavailable (typed exception contract). R1
+    P1.1 narrowing: ONLY SidecarUnavailable (transport) is wrapped;
+    semantic errors propagate as-is."""
+    cli = _client(emit_side_effect=SidecarUnavailable("UDS gone"))
     cb = _cb_with_stream_stash(cli, call_id="boundary-fail")
     with pytest.raises(SidecarUnavailable, match="commit boundary"):
         await cb.async_log_success_event(
             _kwargs("boundary-fail"), _stream_response(), 0, 1,
         )
-    # Stash kept for retry/TTL.
     assert "boundary-fail" in cb._stash
+
+
+@pytest.mark.asyncio
+async def test_streaming_commit_semantic_error_propagates_as_is():
+    """R1 P1.1 fix: non-availability SpendGuardError (e.g. invariant
+    rejection, sidecar ack-rejected) MUST NOT be wrapped as
+    SidecarUnavailable — that would mask config/invariant bugs as
+    transient outages."""
+    semantic_err = SpendGuardError("ack rejected: state conflict")
+    cli = _client(emit_side_effect=semantic_err)
+    cb = _cb_with_stream_stash(cli, call_id="semantic-err")
+    with pytest.raises(SpendGuardError, match="ack rejected") as exc_info:
+        await cb.async_log_success_event(
+            _kwargs("semantic-err"), _stream_response(), 0, 1,
+        )
+    assert not isinstance(exc_info.value, SidecarUnavailable)
+    assert "semantic-err" in cb._stash  # not popped — retry/TTL backstop
 
 
 @pytest.mark.asyncio
@@ -177,7 +254,11 @@ async def test_streaming_commit_fail_open_keeps_stash(monkeypatch, caplog):
             _kwargs("stream-fo"), _stream_response(), 0, 1,
         )
     assert "stream-fo" in cb._stash
-    assert any("streaming commit failed" in r.message for r in caplog.records)
+    # R1 P1.1 narrowing: semantic SpendGuardError (not SidecarUnavailable)
+    # logs "semantic error" path under fail-open.
+    assert any("streaming commit" in r.message and (
+        "unavailable" in r.message or "semantic error" in r.message
+    ) for r in caplog.records)
 
 
 @pytest.mark.asyncio

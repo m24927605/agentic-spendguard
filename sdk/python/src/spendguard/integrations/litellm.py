@@ -20,6 +20,7 @@ import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 from ..client import SpendGuardClient
@@ -227,6 +228,11 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 "mode active; sidecar errors will allow LLM calls. "
                 "DEV ONLY (DESIGN.md ADR-004)."
             )
+        # Slice 4 R1 P1.3: TTL env var is INFORMATIONAL ONLY in v1.
+        # SpendGuardClient.request_decision has no per-reservation TTL
+        # parameter; reservation TTL is sidecar-side config. We
+        # validate the value but it is NOT plumbed to the sidecar.
+        # Future slice adds `ttl_seconds=` to request_decision.
         try:
             self._ttl_seconds: int = int(
                 os.environ.get("SPENDGUARD_LITELLM_TTL_SECONDS", "300")
@@ -404,8 +410,23 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 "(reservations released best-effort)."
             )
 
+        # Slice 4 R1 P1.2 fix: snapshot estimator claim identity +
+        # amount as immutable primitives so a post-pre-call mutation
+        # of the operator's claim object cannot retroactively change
+        # what the streaming fallback commits.
+        _estimator_snapshot = SimpleNamespace(
+            amount_atomic=str(getattr(estimator_claims[0], "amount_atomic", "")),
+            budget_id=str(getattr(estimator_claims[0], "budget_id", "")),
+            window_instance_id=str(
+                getattr(estimator_claims[0], "window_instance_id", "")
+            ),
+            unit=SimpleNamespace(unit_id=str(
+                getattr(
+                    getattr(estimator_claims[0], "unit", None), "unit_id", "",
+                )
+            )),
+        )
         # Stash on side-channel keyed by litellm_call_id (P1.5).
-        # Includes estimator_claims for Slice 4 streaming fallback (P1.1).
         self._stash[litellm_call_id] = {
             "decision_id": outcome.decision_id,
             "reservation_ids": tuple(outcome.reservation_ids),  # plural
@@ -415,7 +436,8 @@ class SpendGuardLiteLLMCallback(CustomLogger):
             "audit_decision_event_id": outcome.audit_decision_event_id,
             "decision_context": decision_context,
             "stream": decision_context["stream"],
-            "estimator_claims": estimator_claims,
+            # Frozen snapshot for streaming-fallback safety (R1 P1.2).
+            "estimator_claims_snapshot": [_estimator_snapshot],
             "mode": decision_context["mode"],
         }
         # data returned unchanged — NO `spendguard` key on it (P1.5).
@@ -551,7 +573,7 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 "(degraded path; F7 acceptance requires reconciled usage).",
                 stash["llm_call_id"],
             )
-            real_claims = stash["estimator_claims"]
+            real_claims = stash["estimator_claims_snapshot"]
         else:
             real_claims = self._claim_reconciler(rctx, response_obj)
         if len(real_claims) != 1:
@@ -583,20 +605,32 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 provider_event_id=self._provider_event_id(response_obj),
                 outcome="SUCCESS",
             )
-        except SpendGuardError as exc:
+        except SidecarUnavailable as exc:
+            # Slice 4 R1 P1.1 fix: only ACTUAL availability failures
+            # are wrapped (NF5 contract). Semantic errors (Denied,
+            # ConfigError) propagate as-is so callers can distinguish
+            # transport problems from invariant violations.
             if self._fail_open_dev:
                 log.warning(
-                    "spendguard: streaming commit failed under fail-open; "
-                    "reservation will TTL-sweep llm_call_id=%s err=%r",
-                    stash["llm_call_id"], exc,
+                    "spendguard: streaming commit unavailable under "
+                    "fail-open; reservation will TTL-sweep "
+                    "llm_call_id=%s err=%r", stash["llm_call_id"], exc,
                 )
                 return
-            # R4 P0.6: wrap commit-boundary failure as
-            # SidecarUnavailable so NF5 typed-exception contract
-            # holds. Keep stash for retry/TTL.
             raise SidecarUnavailable(
                 f"sidecar unavailable at streaming commit boundary: {exc}"
             ) from exc
+        except SpendGuardError as exc:
+            # Semantic error (e.g. invariant rejection, config). Don't
+            # mask as availability — keep stash for retry visibility.
+            if self._fail_open_dev:
+                log.warning(
+                    "spendguard: streaming commit semantic error under "
+                    "fail-open; reservation will TTL-sweep "
+                    "llm_call_id=%s err=%r", stash["llm_call_id"], exc,
+                )
+                return
+            raise
         self._pop_stash(kwargs)
 
     async def async_log_failure_event(
