@@ -266,19 +266,21 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 f"claim_estimator returned {len(estimator_claims)} claims; "
                 "v1 contract requires exactly 1 (DESIGN.md §6)."
             )
-        # Slice 2 R1 P1.1 fix: validate estimator claim matches the
-        # binding so audit context can't say budget X while we charge
-        # budget Y. Both fields are operator-supplied; mismatch = bug.
+        # Slice 2 R1 P1.1 + R2 P1.1 fix: validate estimator claim
+        # EXACTLY matches the binding. Both fields are operator-
+        # supplied; mismatch (including None/empty when binding is
+        # non-empty) means audit context would mis-charge.
         claim = estimator_claims[0]
-        claim_budget_id = getattr(claim, "budget_id", None)
-        claim_window = getattr(claim, "window_instance_id", None)
-        if claim_budget_id and claim_budget_id != binding.budget_id:
+        claim_budget_id = getattr(claim, "budget_id", None) or ""
+        claim_window = getattr(claim, "window_instance_id", None) or ""
+        if claim_budget_id != binding.budget_id:
             raise SpendGuardConfigError(
                 f"claim_estimator returned budget_id={claim_budget_id!r} "
                 f"but resolver bound budget_id={binding.budget_id!r}. "
-                "Audit context would mis-charge."
+                "Audit context would mis-charge (R1 P1.1 + R2 P1.1: "
+                "exact equality required, no None/empty pass-through)."
             )
-        if claim_window and claim_window != binding.window_instance_id:
+        if claim_window != binding.window_instance_id:
             raise SpendGuardConfigError(
                 f"claim_estimator returned window_instance_id="
                 f"{claim_window!r} but resolver bound "
@@ -449,31 +451,44 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
             )
             last_exc: Exception | None = None
             attempt = 0
-            while attempt < self._ENSURE_CLIENT_MAX_ATTEMPTS and loop.time() < deadline:
+            while attempt < self._ENSURE_CLIENT_MAX_ATTEMPTS:
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    break  # hard deadline already breached
                 attempt += 1
+                # Slice 2 R2 P1.2 fix: recompute remaining BEFORE each
+                # awaited op; bound timeout by min(attempt_timeout,
+                # remaining) so a final attempt with <1s budget cannot
+                # blow past the deadline.
                 try:
-                    # Cap per-attempt cost so a hung handshake doesn't
-                    # consume the whole deadline.
-                    await asyncio.wait_for(
-                        c.connect(),
-                        timeout=self._ENSURE_CLIENT_ATTEMPT_TIMEOUT_S,
+                    connect_timeout = min(
+                        self._ENSURE_CLIENT_ATTEMPT_TIMEOUT_S, remaining,
+                    )
+                    await asyncio.wait_for(c.connect(), timeout=connect_timeout)
+                    # Re-check deadline before second await.
+                    remaining = deadline - loop.time()
+                    if remaining <= 0:
+                        last_exc = SidecarUnavailable(
+                            "deadline expired between connect and handshake"
+                        )
+                        break
+                    handshake_timeout = min(
+                        self._ENSURE_CLIENT_ATTEMPT_TIMEOUT_S, remaining,
                     )
                     await asyncio.wait_for(
-                        c.handshake(),
-                        timeout=self._ENSURE_CLIENT_ATTEMPT_TIMEOUT_S,
+                        c.handshake(), timeout=handshake_timeout,
                     )
                     self._client = c
                     return c
                 except Exception as exc:  # noqa: BLE001
                     last_exc = exc
-                # No sleep AFTER the final attempt; only sleep if we
-                # have budget for another retry AND attempt budget left.
+                # No sleep AFTER the final attempt or near-deadline.
                 if attempt >= self._ENSURE_CLIENT_MAX_ATTEMPTS:
                     break
                 backoff = min(0.1 * (2 ** (attempt - 1)), 1.0)
                 remaining = deadline - loop.time()
                 if remaining <= backoff:
-                    break  # next attempt would breach deadline
+                    break
                 await asyncio.sleep(backoff)
             raise SidecarUnavailable(
                 f"sidecar handshake failed within "

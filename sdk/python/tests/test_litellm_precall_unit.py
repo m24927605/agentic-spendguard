@@ -75,12 +75,19 @@ def _make_client_mock(
     return client
 
 
+_MATCHING_CLAIM = SimpleNamespace(
+    budget_id="b1",
+    window_instance_id="w1",
+    amount_atomic="100",
+)
+
+
 def _make_callback(
     *,
     client=None,
     resolver=lambda ctx: _FAKE_BINDING,
-    estimator=lambda ctx: [SimpleNamespace(amount_atomic="100")],
-    reconciler=lambda ctx, resp: [SimpleNamespace(amount_atomic="100")],
+    estimator=lambda ctx: [_MATCHING_CLAIM],
+    reconciler=lambda ctx, resp: [_MATCHING_CLAIM],
     fail_closed: bool = True,
 ):
     return SpendGuardLiteLLMCallback(
@@ -117,8 +124,11 @@ async def test_pre_call_hook_builds_resolver_context_with_user_api_key_dict():
 @pytest.mark.asyncio
 async def test_pre_call_hook_uses_claim_estimator_output_single_claim():
     """v1 contract: estimator returns exactly 1 claim; it lands in
-    request_decision(projected_claims=[...])."""
-    estimator_claim = SimpleNamespace(amount_atomic="500")
+    request_decision(projected_claims=[...]). Claim MUST match
+    binding budget_id + window_instance_id (R1 P1.1 + R2 P1.1)."""
+    estimator_claim = SimpleNamespace(
+        budget_id="b1", window_instance_id="w1", amount_atomic="500",
+    )
     client = _make_client_mock()
     cb = _make_callback(client=client, estimator=lambda ctx: [estimator_claim])
     await cb.async_pre_call_hook(None, None, _data(), "acompletion")
@@ -298,22 +308,5 @@ async def test_pre_call_hook_derives_distinct_decision_id_per_call_id():
     assert d1 == d1_again
 
 
-def test_init_reads_fail_open_env_at_construction(monkeypatch, caplog):
-    """S6: FAIL_OPEN=1 logs WARNING at construction (not just at use)."""
-    monkeypatch.setenv("SPENDGUARD_LITELLM_FAIL_OPEN", "1")
-    import logging as _logging
-    with caplog.at_level(_logging.WARNING, logger="spendguard.integrations.litellm"):
-        _make_callback()
-    assert any("FAIL_OPEN=1" in rec.message for rec in caplog.records)
-
-
-def test_init_rejects_negative_ttl_seconds(monkeypatch):
-    monkeypatch.setenv("SPENDGUARD_LITELLM_TTL_SECONDS", "-1")
-    with pytest.raises(SpendGuardConfigError, match="non-negative"):
-        _make_callback()
-
-
-def test_init_default_ttl_seconds_is_300(monkeypatch):
-    monkeypatch.delenv("SPENDGUARD_LITELLM_TTL_SECONDS", raising=False)
-    cb = _make_callback()
-    assert cb._ttl_seconds == 300
+# __init__ tests moved to test_litellm_init.py (R2 P2.1 split for
+# ≤200 LOC per-file budget).
