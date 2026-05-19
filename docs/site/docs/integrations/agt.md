@@ -261,4 +261,4 @@ asyncio.run(main())
 
 - [Quickstart](../quickstart.md) — full stack up in 5 minutes
 - [Contract DSL reference](../contracts/yaml.md) — author allow/stop rules
-- Other integrations: [Pydantic-AI](pydantic-ai.md) · [LangChain & LangGraph](langchain.md) · [OpenAI Agents SDK](openai-agents.md)
+- Other integrations: [Pydantic-AI](pydantic-ai.md) · [LangChain & LangGraph](langchain.md) · [OpenAI Agents SDK](openai-agents.md) · [LiteLLM proxy](litellm.md)

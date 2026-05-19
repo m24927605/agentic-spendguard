@@ -147,4 +147,4 @@ python examples/openai-agents-composite/openai_agents_composite_demo.py --mock
 - [Runnable example: `examples/openai-agents-composite/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/openai-agents-composite) — mock + real modes
 - [Quickstart](../quickstart.md) — full stack up in 5 minutes
 - [Contract DSL reference](../contracts/yaml.md) — author allow/stop rules
-- Other integrations: [Pydantic-AI](pydantic-ai.md) · [LangChain & LangGraph](langchain.md) · [Microsoft AGT](agt.md)
+- Other integrations: [Pydantic-AI](pydantic-ai.md) · [LangChain & LangGraph](langchain.md) · [Microsoft AGT](agt.md) · [LiteLLM proxy](litellm.md)

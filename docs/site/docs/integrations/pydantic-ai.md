@@ -139,4 +139,4 @@ can unit-test budget logic without provider keys.
 
 - [Quickstart](../quickstart.md) — full stack up in 5 minutes
 - [Contract DSL reference](../contracts/yaml.md) — author allow/stop rules
-- Other integrations: [LangChain & LangGraph](langchain.md) · [OpenAI Agents SDK](openai-agents.md) · [Microsoft AGT](agt.md)
+- Other integrations: [LangChain & LangGraph](langchain.md) · [OpenAI Agents SDK](openai-agents.md) · [Microsoft AGT](agt.md) · [LiteLLM proxy](litellm.md)
