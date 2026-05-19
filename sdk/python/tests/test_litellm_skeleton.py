@@ -107,15 +107,18 @@ async def test_run_context_async_cm_set_get_reset():
 
 
 @pytest.mark.asyncio
-async def test_async_hooks_raise_notimplementederror_per_slice():
+async def test_unimplemented_hooks_raise_notimplementederror():
+    """Slice 2 implements async_pre_call_hook. Slice 3/4/5 implement
+    success/streaming/failure. This test pins the not-yet-implemented
+    ones; remove asserts as later slices land."""
     cb = SpendGuardLiteLLMCallback(
         client=None,
         budget_resolver=lambda ctx: None,
         claim_estimator=lambda ctx: [],
         claim_reconciler=lambda ctx, resp: [],
     )
-    with pytest.raises(NotImplementedError, match="Slice 2"):
-        await cb.async_pre_call_hook(None, None, {}, "acompletion")
+    # async_pre_call_hook is implemented in Slice 2 (covered by
+    # test_litellm_precall_unit.py tests).
     with pytest.raises(NotImplementedError, match=r"Slice 3 / Slice 4"):
         await cb.async_log_success_event({}, None, None, None)
     with pytest.raises(NotImplementedError, match="Slice 5"):
@@ -218,6 +221,7 @@ def test_module_level_mutable_state_scan():
         "ClaimEstimator",
         "ClaimReconciler",
         "__all__",
+        "log",  # module logger (Slice 2)
     }
     # Anything else that's an assignment must be a class/def line,
     # which the regex won't match (those start with class/def/async).
@@ -237,42 +241,53 @@ def test_module_level_mutable_state_scan():
 
 
 @pytest.mark.asyncio
-async def test_loop_bound_callback_ensure_client_stub():
-    """_LoopBoundCallback._ensure_client is a Slice 1 stub; Slice 2
-    fills in the handshake."""
+async def test_loop_bound_callback_ensure_client_retries_then_fails(monkeypatch):
+    """Slice 2 implementation: _ensure_client retries 5× with
+    exponential backoff. With an unreachable socket and asyncio.sleep
+    monkey-patched to no-op, the 5 attempts surface
+    SidecarUnavailable. Pivot R1 P1.6 startup-race contract."""
+    from spendguard.errors import SidecarUnavailable
+
+    async def _instant_sleep(_) -> None:
+        return None
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
     cb = _LoopBoundCallback(
-        socket_path="/tmp/x",
+        socket_path="/tmp/nonexistent-sock-spendguard-test",
         tenant_id="t1",
         budget_resolver=lambda ctx: None,
         claim_estimator=lambda ctx: [],
         claim_reconciler=lambda ctx, resp: [],
     )
-    with pytest.raises(NotImplementedError, match="Slice 2"):
+    with pytest.raises(SidecarUnavailable, match="after 5 attempts"):
         await cb._ensure_client()
 
 
 @pytest.mark.asyncio
-async def test_loop_bound_callback_async_hooks_call_ensure_client_first():
-    """Round 1 P1 fix: _LoopBoundCallback's async hook overrides MUST
-    call _ensure_client() BEFORE delegating to super(), so the
-    event-loop-affinity binding is locked in regardless of which
-    Slice (2-5) is filling the super body."""
+async def test_loop_bound_callback_async_hooks_call_ensure_client_first(monkeypatch):
+    """Round 1 P1 fix (Slice 1): _LoopBoundCallback's async hook
+    overrides MUST call _ensure_client() BEFORE delegating to
+    super(). With unreachable socket + instant retry, all three
+    async hooks surface SidecarUnavailable rather than reaching the
+    parent body (which would surface NotImplementedError or attempt
+    a real call)."""
+    from spendguard.errors import SidecarUnavailable
+
+    async def _instant_sleep(_) -> None:
+        return None
+    monkeypatch.setattr("asyncio.sleep", _instant_sleep)
+
     cb = _LoopBoundCallback(
-        socket_path="/tmp/x",
+        socket_path="/tmp/nonexistent-sock-spendguard-test",
         tenant_id="t1",
         budget_resolver=lambda ctx: None,
         claim_estimator=lambda ctx: [],
         claim_reconciler=lambda ctx, resp: [],
     )
-    # _ensure_client raises NotImplementedError("Slice 2 wires ...")
-    # in Slice 1; each async hook MUST surface that BEFORE the parent's
-    # NotImplementedError("Slice 2"/"Slice 3"/...) would have fired.
     for hook, sample_args in [
         (cb.async_pre_call_hook, (None, None, {}, "acompletion")),
         (cb.async_log_success_event, ({}, None, None, None)),
         (cb.async_log_failure_event, ({}, None, None, None)),
     ]:
-        with pytest.raises(
-            NotImplementedError, match="_LoopBoundCallback handshake"
-        ):
+        with pytest.raises(SidecarUnavailable):
             await hook(*sample_args)

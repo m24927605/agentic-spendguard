@@ -1,7 +1,10 @@
 # ruff: noqa: ANN401  # LiteLLM's CustomLogger interface uses untyped Any
 """LiteLLM proxy CustomLogger integration. See DESIGN.md §3.4 v1 Path B.
 
-Slice 1: skeleton + dataclasses. Async hook bodies land in Slices 2-5.
+Slice 1: skeleton + dataclasses.
+Slice 2: pre-call hook + reservation lifecycle.
+Slices 3-5: success/streaming/failure hook bodies.
+
 The callback only fires in LiteLLM **proxy** mode (verified against
 litellm source 2026-05-20); direct `litellm.acompletion()` callers
 use Shape A egress proxy (DESIGN §3.4 v1 Path A) — no SDK code here.
@@ -9,14 +12,28 @@ use Shape A egress proxy (DESIGN §3.4 v1 Path A) — no SDK code here.
 
 from __future__ import annotations
 
+import asyncio
 import contextvars
+import json
+import logging
+import os
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
 
 from ..client import SpendGuardClient
-from ..errors import SpendGuardConfigError  # noqa: F401  — used by Slice 2
+from ..errors import (
+    DecisionDenied,
+    SidecarUnavailable,
+    SpendGuardConfigError,
+    SpendGuardError,
+)
+from ..ids import (
+    derive_idempotency_key,
+    derive_uuid_from_signature,
+)
+from ..prompt_hash import compute as compute_prompt_hash
 
 try:
     from litellm.integrations.custom_logger import CustomLogger
@@ -25,6 +42,9 @@ except ImportError as exc:  # pragma: no cover
         "spendguard.integrations.litellm requires LiteLLM. "
         "Install with: pip install 'spendguard-sdk[litellm]'"
     ) from exc
+
+
+log = logging.getLogger("spendguard.integrations.litellm")
 
 
 _RUN_CONTEXT: contextvars.ContextVar[LiteLLMRunContext | None] = (
@@ -77,22 +97,66 @@ class BudgetBinding:
 
 
 BudgetResolver = Callable[[ResolverContext], "BudgetBinding | None"]
-"""Map ResolverContext → BudgetBinding. Returning None raises
-SpendGuardConfigError (no global default fallback — ADR-001)."""
-
 ClaimEstimator = Callable[[ResolverContext], list[Any]]
-"""Project BudgetClaims pre-call. v1 contract: exactly one claim."""
-
 ClaimReconciler = Callable[[ResolverContext, Any], list[Any]]
-"""Compute real claims at commit from ResolverContext + response_obj.
-v1 contract: exactly one claim."""
+
+
+def _build_resolver_ctx(
+    *,
+    user_api_key_dict: Any,
+    data: Mapping[str, Any],
+    call_type: str,
+) -> ResolverContext:
+    return ResolverContext(
+        data=data,
+        user_api_key_dict=user_api_key_dict,
+        call_type=call_type,
+    )
+
+
+def _build_decision_context(
+    *,
+    ctx: ResolverContext,
+    binding: BudgetBinding,
+    litellm_call_id: str,
+    prompt_hash: str,
+) -> dict[str, Any]:
+    """Returns the 12-field dict the sidecar persists into
+    canonical_events (DESIGN.md §8.2a). Until GH #77 lands sidecar
+    enrichment, fields land in runtime_metadata Struct but only
+    prompt_hash is currently extracted by the sidecar."""
+    p = binding.pricing
+    uak = ctx.user_api_key_dict
+    return {
+        "integration": "litellm",
+        "litellm_call_id": litellm_call_id,
+        "model": ctx.data.get("model"),
+        "pricing_version": getattr(p, "pricing_version", ""),
+        "price_snapshot_hash_hex": getattr(p, "price_snapshot_hash_hex", ""),
+        "fx_rate_version": getattr(p, "fx_rate_version", ""),
+        "unit_conversion_version": getattr(p, "unit_conversion_version", ""),
+        "prompt_hash": prompt_hash,
+        "call_type": ctx.call_type,
+        "stream": bool(ctx.data.get("stream", False)),
+        "mode": "proxy",  # v1 always proxy (DESIGN §3.4 v1 Path B)
+        "team_id": getattr(uak, "team_id", None) if uak else None,
+    }
+
+
+def _serialize_messages_for_hash(messages: Any) -> str:
+    """Stable canonical-JSON of LiteLLM messages for prompt_hash input."""
+    if messages is None:
+        return ""
+    try:
+        return json.dumps(messages, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return repr(messages)  # last-resort stable string
 
 
 class SpendGuardLiteLLMCallback(CustomLogger):
     """LiteLLM proxy CustomLogger that reserves/commits via the
     SpendGuard sidecar. Only fires in LiteLLM **proxy** mode (per
-    DESIGN.md §3.4 v1 Path B). Slice 1 skeleton: async hooks raise
-    NotImplementedError; Slices 2-5 fill them in."""
+    DESIGN.md §3.4 v1 Path B)."""
 
     def __init__(
         self,
@@ -108,8 +172,28 @@ class SpendGuardLiteLLMCallback(CustomLogger):
         self._claim_estimator = claim_estimator
         self._claim_reconciler = claim_reconciler
         self._fail_closed = fail_closed
-        # Per-call stash; lives on the callback (P1.5), keyed by
-        # litellm_call_id. Slice 2 populates; Slices 3/4/5 consume.
+        # Read env once at construction (DESIGN §7.1 + S6 fail-open loud).
+        self._fail_open_dev: bool = (
+            os.environ.get("SPENDGUARD_LITELLM_FAIL_OPEN") == "1"
+        )
+        if self._fail_open_dev:
+            log.warning(
+                "spendguard: SPENDGUARD_LITELLM_FAIL_OPEN=1 — fail-open "
+                "mode active; sidecar errors will allow LLM calls. "
+                "DEV ONLY (DESIGN.md ADR-004)."
+            )
+        try:
+            self._ttl_seconds: int = int(
+                os.environ.get("SPENDGUARD_LITELLM_TTL_SECONDS", "300")
+            )
+            if self._ttl_seconds < 0:
+                raise ValueError("must be ≥ 0")
+        except (ValueError, TypeError) as exc:
+            raise SpendGuardConfigError(
+                f"SPENDGUARD_LITELLM_TTL_SECONDS must be a non-negative "
+                f"integer: {exc}"
+            ) from exc
+        # Per-call stash, keyed by litellm_call_id (P1.5 — never on data).
         self._stash: dict[str, dict[str, Any]] = {}
 
     async def async_pre_call_hook(
@@ -119,7 +203,120 @@ class SpendGuardLiteLLMCallback(CustomLogger):
         data: dict[str, Any],
         call_type: str,
     ) -> dict[str, Any] | None:
-        raise NotImplementedError("Slice 2")
+        if self._client is None:
+            raise SpendGuardConfigError(
+                "SpendGuardLiteLLMCallback has no client. "
+                "Direct instantiation: pass client=. Proxy mode: use "
+                "_LoopBoundCallback so the client binds to the serving loop."
+            )
+
+        rctx = _build_resolver_ctx(
+            user_api_key_dict=user_api_key_dict, data=data, call_type=call_type,
+        )
+        binding = self._budget_resolver(rctx)
+        if binding is None:
+            raise SpendGuardConfigError(
+                "budget_resolver returned None; resolver MUST yield a "
+                "BudgetBinding (DESIGN.md ADR-001 — no global default)"
+            )
+
+        litellm_call_id = data.get("litellm_call_id")
+        if not litellm_call_id:
+            # Pivot R0 P1.1: fail-closed when LiteLLM doesn't stamp an ID
+            # (would break commit-lookup + LiteLLM_SpendLogs reconciliation).
+            raise SpendGuardConfigError(
+                "data['litellm_call_id'] missing — LiteLLM did not stamp a "
+                "call id. Verify litellm>=1.50 and callback runs in proxy "
+                "mode (the only path that gates via this hook)."
+            )
+        litellm_call_id = str(litellm_call_id)
+        llm_call_id = str(derive_uuid_from_signature(
+            f"litellm:{litellm_call_id}", scope="llm_call_id"))
+        decision_id = str(derive_uuid_from_signature(
+            f"litellm:{litellm_call_id}", scope="decision_id"))
+
+        ctx_obj = current_run_context()
+        run_id = ctx_obj.run_id if ctx_obj else str(
+            derive_uuid_from_signature(
+                f"litellm:{litellm_call_id}", scope="run_id"))
+        step_id = (ctx_obj.step_id if ctx_obj and ctx_obj.step_id
+                   else f"litellm:{litellm_call_id[:16]}")
+
+        idempotency_key = derive_idempotency_key(
+            tenant_id=self._client.tenant_id,
+            session_id=self._client.session_id,
+            run_id=run_id, step_id=step_id, llm_call_id=llm_call_id,
+            trigger="LLM_CALL_PRE",
+        )
+
+        prompt_hash = compute_prompt_hash(
+            _serialize_messages_for_hash(data.get("messages")),
+            self._client.tenant_id,
+        )
+        decision_context = _build_decision_context(
+            ctx=rctx, binding=binding, litellm_call_id=litellm_call_id,
+            prompt_hash=prompt_hash,
+        )
+
+        # Estimator called ONCE; reused for request + stash (R2 P1.1).
+        estimator_claims = self._claim_estimator(rctx)
+        # R3 P1.2: enforce single-claim contract BEFORE sidecar wire.
+        if len(estimator_claims) != 1:
+            raise SpendGuardConfigError(
+                f"claim_estimator returned {len(estimator_claims)} claims; "
+                "v1 contract requires exactly 1 (DESIGN.md §6)."
+            )
+
+        try:
+            outcome = await self._client.request_decision(
+                trigger="LLM_CALL_PRE",
+                run_id=run_id, step_id=step_id, llm_call_id=llm_call_id,
+                tool_call_id="", decision_id=decision_id, route="llm.call",
+                projected_claims=estimator_claims,
+                idempotency_key=idempotency_key,
+                projected_unit=binding.unit,
+                # R4 P0.1: 12-field bundle. Folded into runtime_metadata
+                # by client.py; sidecar passthrough is GH #77.
+                decision_context_json=decision_context,
+            )
+        except DecisionDenied:
+            raise  # proxy treats raised exception as block
+        except SpendGuardError as exc:
+            if self._fail_open_dev:
+                log.warning(
+                    "spendguard: SPENDGUARD_LITELLM_FAIL_OPEN=1 — allowing "
+                    "call despite sidecar error %r (DEV ONLY).", exc,
+                )
+                return data
+            raise SidecarUnavailable(
+                f"sidecar pre-call failed: {exc}"
+            ) from exc
+
+        # R4 P0.2: validate reservation cardinality BEFORE returning.
+        # Multi-reservation v1 contract violation → fail-closed pre-wire.
+        if len(outcome.reservation_ids) != 1:
+            raise SpendGuardConfigError(
+                f"sidecar returned {len(outcome.reservation_ids)} "
+                "reservations; v1 expects exactly 1 (DESIGN.md §6). "
+                "Failing closed before provider HTTP request."
+            )
+
+        # Stash on side-channel keyed by litellm_call_id (P1.5).
+        # Includes estimator_claims for Slice 4 streaming fallback (P1.1).
+        self._stash[litellm_call_id] = {
+            "decision_id": outcome.decision_id,
+            "reservation_ids": tuple(outcome.reservation_ids),  # plural
+            "llm_call_id": llm_call_id,
+            "run_id": run_id, "step_id": step_id,
+            "binding": binding,
+            "audit_decision_event_id": outcome.audit_decision_event_id,
+            "decision_context": decision_context,
+            "stream": decision_context["stream"],
+            "estimator_claims": estimator_claims,
+            "mode": decision_context["mode"],
+        }
+        # data returned unchanged — NO `spendguard` key on it (P1.5).
+        return data
 
     async def async_log_success_event(
         self,
@@ -139,18 +336,15 @@ class SpendGuardLiteLLMCallback(CustomLogger):
     ) -> None:
         raise NotImplementedError("Slice 5")
 
-    # NO log_pre_api_call override (Slice 1 R2 verified ineffective:
-    # litellm_logging.py:45887 wraps callback invocations in
-    # try/except Exception, exceptions are swallowed via
-    # verbose_logger.exception). Sync direct callers route to Shape A
-    # egress proxy per DESIGN.md §3.4 v1 Path A (no SDK code needed).
+    # NO log_pre_api_call override — verified ineffective (Slice 1 R2).
+    # Sync direct callers route to Shape A egress (DESIGN §3.4 v1 Path A).
 
 
 class _LoopBoundCallback(SpendGuardLiteLLMCallback):
     """Lazy-init wrapper that binds SpendGuardClient to LiteLLM's
     serving event loop (Round 3 P0.3). gRPC/UDS channels are loop-
     affine; the LiteLLM proxy imports modules sync at boot then runs
-    its own ASGI loop. Slice 1 skeleton; Slices 2-5 fill the hooks."""
+    its own ASGI loop."""
 
     def __init__(
         self,
@@ -174,11 +368,34 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
         self._init_lock: Any = None  # asyncio.Lock — created on first hook
 
     async def _ensure_client(self) -> SpendGuardClient:
-        raise NotImplementedError("Slice 2 wires _LoopBoundCallback handshake")
+        # Pivot R1 P1.6: bounded retry with exponential backoff so
+        # first inbound request doesn't fail-closed on UDS-vs-sidecar
+        # boot race. Total max wait ≤ 3.1s; longer surfaces typed err.
+        if self._client is not None:
+            return self._client
+        if self._init_lock is None:
+            self._init_lock = asyncio.Lock()
+        async with self._init_lock:
+            if self._client is not None:
+                return self._client
+            c = SpendGuardClient(
+                socket_path=self._socket_path,
+                tenant_id=self._tenant_id,
+            )
+            last_exc: Exception | None = None
+            for attempt in range(5):  # 0.1·2^N → 0.1+0.2+0.4+0.8+1.6 = 3.1s
+                try:
+                    await c.connect()
+                    await c.handshake()
+                    self._client = c
+                    return c
+                except Exception as exc:  # noqa: BLE001
+                    last_exc = exc
+                    await asyncio.sleep(0.1 * (2 ** attempt))
+            raise SidecarUnavailable(
+                f"sidecar handshake failed after 5 attempts: {last_exc}"
+            ) from last_exc
 
-    # Round 1 P1 fix: the three async hooks MUST be overridden so
-    # _ensure_client() runs before super() — locks the lazy-bind
-    # contract regardless of which Slice fills the super body.
     async def async_pre_call_hook(self, *a: Any, **kw: Any) -> dict[str, Any] | None:
         await self._ensure_client()
         return await super().async_pre_call_hook(*a, **kw)
@@ -192,11 +409,10 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
         await super().async_log_failure_event(*a, **kw)
 
 
-# REMOVED: install() factory. Verified ineffective for direct
-# `litellm.callbacks` registration — async_pre_call_hook is proxy-only
-# (Slice 1 R2 escalation). Proxy users wire `handler_instance =
-# _LoopBoundCallback(...)` in proxy_config.yaml. Direct callers use
-# Shape A (set `litellm.api_base = "http://localhost:9000/v1"`).
+# install() factory REMOVED at pivot — direct litellm.callbacks=[...] was
+# verified ineffective (Slice 1 R2). Proxy users instantiate
+# _LoopBoundCallback in proxy_config.yaml; direct callers use Shape A
+# (set litellm.api_base = "http://localhost:9000/v1").
 
 __all__ = [
     "BudgetBinding",
