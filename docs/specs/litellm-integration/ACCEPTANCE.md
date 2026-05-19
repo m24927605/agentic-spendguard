@@ -219,6 +219,19 @@ the live demo stack. Every criterion is objectively verifiable.
 
 ## 5. Demo acceptance — the bar
 
+> **Scope note (Staff panel adjudication, 2026-05-20).** SQL queries
+> in §5.1 / §5.2 are **provisional** until Slice 6 (first slice that
+> exercises live `canonical_events` against the demo). Acceptance-SQL
+> verification is reviewed under `review-logs/slice-06.md`, not
+> Slice 1's log. Schema ground truth (Backend Architect Staff report):
+> CloudEvent data lives base64-encoded under
+> `payload_json.data_b64`; use `cost_advisor_safe_decode_payload()`
+> decoder; time columns are `event_time` / `ingest_at` (no
+> `recorded_at`); LiteLLM-specific fields land only after GH #77
+> sidecar enrichment extension. Slice 6 rewrites these queries
+> against actual emitted data.
+
+
 Per `feedback_demo_quality_gate.md`: each service must really run the demo
 before "done" can be declared. Two demo modes MUST pass on clean state.
 
