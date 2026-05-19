@@ -390,6 +390,23 @@ class SpendGuardLiteLLMCallback(CustomLogger):
         # data returned unchanged — NO `spendguard` key on it (P1.5).
         return data
 
+    def _get_stash(self, kwargs: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Lookup stash by litellm_call_id WITHOUT popping. Slices 3/5
+        pop only AFTER sidecar ACK so retries can find the stash
+        (Round 3 P0.6 — pop-on-extract lost retry state)."""
+        call_id = kwargs.get("litellm_call_id")
+        return self._stash.get(str(call_id)) if call_id else None
+
+    def _pop_stash(self, kwargs: Mapping[str, Any]) -> None:
+        """Remove stash entry after sidecar acks the commit/release."""
+        call_id = kwargs.get("litellm_call_id")
+        if call_id:
+            self._stash.pop(str(call_id), None)
+
+    @staticmethod
+    def _provider_event_id(response_obj: Any) -> str:
+        return str(getattr(response_obj, "id", "") or "")
+
     async def async_log_success_event(
         self,
         kwargs: dict[str, Any],
@@ -397,7 +414,62 @@ class SpendGuardLiteLLMCallback(CustomLogger):
         start_time: Any,
         end_time: Any,
     ) -> None:
-        raise NotImplementedError("Slice 3 / Slice 4 (streaming)")
+        """Non-streaming commit path. Streaming case → Slice 4."""
+        stash = self._get_stash(kwargs)
+        if stash is None:
+            return  # pre-call didn't fire; silent no-op
+        if stash["stream"]:
+            # Slice 4 streaming reconciler not yet implemented.
+            raise NotImplementedError("Slice 4 (streaming reconciler)")
+        if self._client is None:  # defensive (impossible after pre-call)
+            return
+
+        binding: BudgetBinding = stash["binding"]
+        rctx = _build_resolver_ctx(
+            user_api_key_dict=kwargs.get("user_api_key_dict"),
+            data=kwargs, call_type=kwargs.get("call_type", ""),
+        )
+        real_claims = self._claim_reconciler(rctx, response_obj)
+        if len(real_claims) != 1:
+            raise SpendGuardConfigError(
+                f"claim_reconciler returned {len(real_claims)} claims; "
+                "v1 contract requires exactly 1 (DESIGN.md §6)."
+            )
+        reservation_ids = stash["reservation_ids"]
+        if len(reservation_ids) != 1:
+            # Slice 2 already pre-rejects multi-reservation outcomes,
+            # but defensive check survives spec drift.
+            raise SpendGuardConfigError(
+                f"stash has {len(reservation_ids)} reservation_ids; "
+                "v1 expects exactly 1 (DESIGN.md §6)."
+            )
+
+        real_amount = real_claims[0].amount_atomic
+        try:
+            await self._client.emit_llm_call_post(
+                run_id=stash["run_id"], step_id=stash["step_id"],
+                llm_call_id=stash["llm_call_id"],
+                decision_id=stash["decision_id"],
+                reservation_id=reservation_ids[0],
+                provider_reported_amount_atomic=str(real_amount),
+                unit=binding.unit, pricing=binding.pricing,
+                provider_event_id=self._provider_event_id(response_obj),
+                outcome="SUCCESS",
+            )
+        except SpendGuardError:
+            if self._fail_open_dev:
+                log.warning(
+                    "spendguard: commit failed under fail-open; "
+                    "reservation will TTL-sweep llm_call_id=%s",
+                    stash["llm_call_id"],
+                )
+                # Keep stash for potential retry visibility (R3 P0.6).
+                return
+            # Don't pop stash so a retry can find it; sidecar
+            # idempotency dedupes (same decision_id).
+            raise
+        # Only pop AFTER successful sidecar ACK.
+        self._pop_stash(kwargs)
 
     async def async_log_failure_event(
         self,

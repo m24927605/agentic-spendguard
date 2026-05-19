@@ -108,19 +108,15 @@ async def test_run_context_async_cm_set_get_reset():
 
 @pytest.mark.asyncio
 async def test_unimplemented_hooks_raise_notimplementederror():
-    """Slice 2 implements async_pre_call_hook. Slice 3/4/5 implement
-    success/streaming/failure. This test pins the not-yet-implemented
-    ones; remove asserts as later slices land."""
+    """Slice 3 implements non-streaming success commit (covered by
+    test_litellm_commit_unit.py). Slice 4 streaming + Slice 5 failure
+    still NotImplementedError."""
     cb = SpendGuardLiteLLMCallback(
         client=None,
         budget_resolver=lambda ctx: None,
         claim_estimator=lambda ctx: [],
         claim_reconciler=lambda ctx, resp: [],
     )
-    # async_pre_call_hook is implemented in Slice 2 (covered by
-    # test_litellm_precall_unit.py tests).
-    with pytest.raises(NotImplementedError, match=r"Slice 3 / Slice 4"):
-        await cb.async_log_success_event({}, None, None, None)
     with pytest.raises(NotImplementedError, match="Slice 5"):
         await cb.async_log_failure_event({}, None, None, None)
 
