@@ -18,7 +18,8 @@ litellm = pytest.importorskip(
     reason="LiteLLM not installed; install spendguard-sdk[litellm]",
 )
 
-from spendguard.errors import SpendGuardConfigError  # noqa: E402
+from litellm.integrations.custom_logger import CustomLogger  # noqa: E402
+
 from spendguard.integrations.litellm import (  # noqa: E402
     BudgetBinding,
     BudgetResolver,
@@ -123,18 +124,22 @@ async def test_async_hooks_raise_notimplementederror_per_slice():
         await cb.async_log_failure_event({}, None, None, None)
 
 
-def test_sync_log_pre_api_call_fails_closed():
-    """Round 2 P0.7 / ADR-005: sync pre-wire hook MUST raise loudly
-    before the wire so sync litellm.completion() never bypasses
-    enforcement."""
-    cb = SpendGuardLiteLLMCallback(
-        client=None,
-        budget_resolver=lambda ctx: None,
-        claim_estimator=lambda ctx: [],
-        claim_reconciler=lambda ctx, resp: [],
+def test_no_log_pre_api_call_override():
+    """Slice 1 R2 (2026-05-20): the prior `log_pre_api_call` override
+    was verified ineffective against LiteLLM's logging dispatcher
+    (exceptions swallowed at litellm_logging.py:45887). Confirm the
+    SpendGuard callback does NOT override `log_pre_api_call` — relying
+    on it would silently fail-open. Sync callers route to Shape A
+    egress proxy per DESIGN §3.4 v1 Path A."""
+    # CustomLogger ships a default no-op log_pre_api_call. The
+    # SpendGuardLiteLLMCallback subclass MUST NOT override it.
+    base_method = CustomLogger.log_pre_api_call
+    sg_method = SpendGuardLiteLLMCallback.log_pre_api_call
+    assert sg_method is base_method, (
+        "SpendGuardLiteLLMCallback.log_pre_api_call MUST NOT be "
+        "overridden — Slice 1 R2 verified raising from it is "
+        "ineffective. See DESIGN.md ADR-005 revised."
     )
-    with pytest.raises(SpendGuardConfigError, match="Sync"):
-        cb.log_pre_api_call(model="gpt-4o-mini", messages=[], kwargs={})
 
 
 def test_install_raises_in_slice_1():

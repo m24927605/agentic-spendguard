@@ -385,17 +385,17 @@ make demo-down                             # tear down
 
 ### 7.3 Expected output snippets
 
-**`DEMO_MODE=litellm_real`** (acceptance target; ACCEPTANCE.md §5.1 is
-authoritative — this section mirrors it verbatim). Stdout must contain
-**all four** step lines in this order:
+**`DEMO_MODE=litellm_real`** (acceptance target; ACCEPTANCE.md §5.1
+authoritative; all steps proxy-driven per DESIGN §3.4 v1 Path B).
+Stdout must contain **all four** step lines in this order:
 
 ```
 [demo] DEMO_MODE=litellm_real → litellm proxy + sidecar + ledger ready
 [demo] handshake ok session_id=...
-[demo] step 1: ALLOW — litellm.acompletion → DECISION_ALLOWED → INVOICE_COMMITTED
-[demo] step 2: DENY — over-budget → DecisionDenied raised
-[demo] step 3: STREAM — sse complete → INVOICE_COMMITTED with real usage
-[demo] step 4: PROXY — POST /v1/chat/completions team=t1 → INVOICE_COMMITTED
+[demo] step 1: ALLOW — POST /v1/chat/completions team=t1 → DECISION_ALLOWED → INVOICE_COMMITTED
+[demo] step 2: DENY — POST over-budget → DecisionDenied raised (provider counter delta=0)
+[demo] step 3: STREAM — POST stream=true → sse complete → INVOICE_COMMITTED with real usage
+[demo] step 4: PROXY-MULTI-TEAM — POST team=t2 → DECISION_ALLOWED → INVOICE_COMMITTED (isolated from t1)
 [demo] PASS — all 4 steps OK
 ```
 

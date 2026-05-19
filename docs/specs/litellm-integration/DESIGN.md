@@ -59,10 +59,11 @@ provider abstraction. We layer on top.
   budget-id mapping).
 - **G2.** Fail-closed: if the sidecar is unreachable, the LLM call is
   denied (configurable, default deny).
-- **G3.** Cover async `litellm.acompletion()` (in-process) and the proxy
-  server (multi-worker, multi-tenant). Sync `litellm.completion()` is
-  explicitly out of scope per ADR-005 / NG6; sync users are directed to
-  Shape A or async migration.
+- **G3.** Cover the LiteLLM **proxy server** (multi-worker,
+  multi-tenant) via the SpendGuard CustomLogger (DESIGN §3.4 v1
+  Path B). Direct `litellm.acompletion()` / `litellm.completion()`
+  callers route through the existing SpendGuard egress proxy
+  (DESIGN §3.4 v1 Path A — Shape A); no new SDK code for that path.
 - **G4.** Audit-chain coverage: every LiteLLM call that hits the wire
   produces a `canonical_events` row that joins to LiteLLM's `request_id`.
 - **G5.** A real end-to-end demo: `DEMO_MODE=litellm_real` runs the
@@ -130,10 +131,15 @@ already handles reserve/commit/SSE.
   the LiteLLM client surface returns a `BadRequestError`, not a typed
   `DecisionDenied`. Operator UX is "what does 402 mean here?".
 
-### 3.2 Shape B — LiteLLM CustomLogger callback (in-process gate)
+### 3.2 Shape B — LiteLLM PROXY CustomLogger callback (in-proxy gate)
+
+> **Scope correction (Slice 1 review, 2026-05-20).** Shape B works
+> **only when LiteLLM is run as the proxy server** (`litellm --config
+> proxy_config.yaml`). It does **NOT** gate direct
+> `litellm.acompletion()` / `litellm.completion()` calls.
 
 ```
-litellm.acompletion(...)
+LiteLLM PROXY (litellm --config ...)
         │
         ▼  async_pre_call_hook → SpendGuardCallback
 SpendGuard sidecar (UDS gRPC) ── reserve ──┐
@@ -145,12 +151,26 @@ Upstream LLM provider          Ledger + canonical_events
 SpendGuard sidecar (UDS gRPC) ── commit ──┘
 ```
 
-Implement `litellm.integrations.custom_logger.CustomLogger`:
+**Why proxy-only (verified against LiteLLM source 2026-05-20):**
+- `grep -rn 'async_pre_call_hook(' litellm/` shows hits **only** in
+  `litellm/proxy/hooks/*` modules; **zero** invocations in
+  `litellm/litellm_core_utils/litellm_logging.py` (the direct-mode
+  dispatch path). Direct `acompletion()` callers never invoke this
+  hook.
+- Sync `log_pre_api_call` IS dispatched in direct mode, BUT
+  `litellm_logging.py:45887` wraps every callback invocation in
+  `try / except Exception` and swallows the exception via
+  `verbose_logger.exception()`. Raising from sync log hooks does NOT
+  abort the provider call.
+
+Implement `litellm.integrations.custom_logger.CustomLogger` and
+register via `proxy_config.yaml`'s
+`litellm_settings.callbacks: my_module.handler_instance`:
 
 - `async_pre_call_hook(...)` → call `SpendGuardClient.request_decision(
   trigger="LLM_CALL_PRE", ...)`. On DENY, **raise** `DecisionDenied`
-  (LiteLLM treats raised exceptions as "block the call and surface to
-  client").
+  (the LiteLLM **proxy** treats raised exceptions as "block the call
+  and surface to client" — verified in `litellm/proxy/proxy_server.py`).
 - `async_log_success_event(...)` → `client.emit_llm_call_post(outcome=
   "SUCCESS", ...)` with the real `response_obj.usage` token counts.
 - `async_log_failure_event(...)` → `client.emit_llm_call_post(outcome=
@@ -158,27 +178,27 @@ Implement `litellm.integrations.custom_logger.CustomLogger`:
 
 **Pros (named trade-offs)**
 
-- **Provider-agnostic:** works for Anthropic, Gemini, Bedrock, Cohere,
-  anything LiteLLM speaks — we never touch the wire.
-- **Rich identity:** `user_api_key_dict` gives us `team_id`, `key_alias`,
-  `user_id` — we can map them directly to SpendGuard `budget_id` /
-  `window_instance_id`.
-- **Typed deny:** `DecisionDenied` propagates as a LiteLLM-recognised
-  exception; clients see the actual `reason_codes`.
+- **Provider-agnostic:** the LiteLLM proxy speaks Anthropic, Gemini,
+  Bedrock, Cohere, anything LiteLLM speaks — we never touch the wire.
+- **Rich identity:** `user_api_key_dict` gives us `team_id`,
+  `key_alias`, `user_id` from the proxy auth layer — operator-defined.
+- **Typed deny:** `DecisionDenied` propagates through the proxy as a
+  LiteLLM-recognised exception; clients see the actual `reason_codes`.
 - **Native to LiteLLM:** registered via `litellm_settings.callbacks`,
-  feels like a first-class plugin.
+  feels like a first-class proxy plugin.
 
 **Cons (named trade-offs)**
 
-- **Streaming commit timing:** `async_log_success_event` fires only after
-  the full response is consumed. For SSE this can be 30s+ later — the
-  reservation TTL must cover the longest stream, and a client crash
-  mid-stream leaks the reservation until TTL sweep.
+- **Proxy-only:** does **not** cover direct `litellm.acompletion()`
+  in library mode. Direct-mode users are explicitly routed to Shape A
+  (see §3.4 recommendation).
+- **Streaming commit timing:** `async_log_success_event` fires only
+  after the full response is consumed. For SSE this can be 30s+ later
+  — the reservation TTL must cover the longest stream, and a client
+  crash mid-stream leaks the reservation until TTL sweep.
 - **Per-worker registration:** every proxy worker registers its own
   callback; the sidecar's single-writer-per-budget invariant is what
-  prevents races, **not** LiteLLM. Wins iff sidecar is correct (it is).
-- **No HTTP-layer view:** if a user bypasses LiteLLM (calls OpenAI
-  directly), this shape misses it. Shape A catches that; this does not.
+  prevents races, **not** LiteLLM.
 
 ### 3.3 Shape C — Composite gateway (LiteLLM proxy → SpendGuard sidecar)
 
@@ -200,35 +220,67 @@ braces.
 - **Operator complexity:** two integration surfaces to debug when something
   goes wrong.
 
-### 3.4 Recommendation for v1
+### 3.4 Recommendation for v1 (revised 2026-05-20)
 
-**Ship Shape B (CustomLogger) as the primary surface.** Reasons:
+**Two surfaces shipped, one per deployment model:**
 
-1. It is the most LiteLLM-native shape — operators expect to add an entry
-   to `litellm_settings.callbacks` to plug in governance.
-2. It is **provider-agnostic** — the existing egress proxy only handles
-   OpenAI today; Shape B works for all 100+ LiteLLM providers from day 1.
-3. The typed `DecisionDenied` exception surface is materially better
-   operator UX than "HTTP 402 from somewhere upstream".
+#### v1 Path B — LiteLLM proxy + SpendGuard CustomLogger (Shape B)
 
-**Shape A is documented as a fallback** for users who already run the
-egress proxy and do not want a second integration. We do not ship
-new code for it — we ship a recipe in `IMPLEMENTATION.md` showing
-how to point `litellm.api_base` at the existing proxy.
+For users running `litellm --config proxy_config.yaml`. The
+SpendGuard CustomLogger registers via `litellm_settings.callbacks`,
+the proxy invokes `async_pre_call_hook` BEFORE the wire (verified in
+LiteLLM source — proxy is the documented surface). This is the
+primary v1 integration for serious LiteLLM deployments (the vast
+majority of multi-tenant / production / shared-budget use cases run
+the proxy).
 
-**Shape C is explicitly deferred to v2.** The composite story needs the
-v1 callback shipped and battle-tested first.
+#### v1 Path A — Direct `acompletion()` → SpendGuard egress proxy (Shape A)
+
+For users calling `litellm.acompletion()` / `litellm.completion()`
+directly from Python. They point `litellm.api_base =
+"http://localhost:8088/v1"` at the **existing SpendGuard egress
+proxy** (already ships from `auto-instrument-egress-proxy-spec.md` +
+`egress-proxy-v0.2-streaming-sse-spec.md`). LiteLLM speaks OpenAI to
+the egress proxy, which handles reserve/commit/SSE end-to-end. **Zero
+new SpendGuard code** for this path — recipe + docs only.
+
+#### Why this split (not the prior "Shape B for everything")
+
+Slice 1 Codex review (2026-05-20) verified against LiteLLM source
+that Shape B's `async_pre_call_hook` is invoked only by the proxy
+modules and the sync `log_pre_api_call` exceptions are swallowed by
+the logger try/except. The earlier recommendation "Ship Shape B as
+the primary surface" silently fell back to fail-OPEN for direct mode.
+Pivoting to "proxy = Shape B, direct = Shape A" closes that gap with
+zero monkey-patching, zero new SDK surface for the direct case, and
+each path is wire-verified.
+
+Trade-offs accepted:
+- Shape A direct path covers only OpenAI-compatible providers
+  (whatever SpendGuard egress proxy speaks today). Anthropic /
+  Gemini / Bedrock native direct calls are NOT gated by SpendGuard in
+  v1 — users on those providers MUST use the LiteLLM proxy path.
+- Operators using the proxy path get rich `team_id` identity; direct
+  Shape A users get header-level identity at best.
+
+**Shape C (composite gateway, DESIGN §3.3) remains deferred to v2** —
+the v1 split already gives both deployment models a working gate.
 
 ---
 
 ## 4. Message Flow
 
-### 4.1 Allow path (Shape B, non-streaming)
+### 4.1 Allow path (Shape B = LiteLLM proxy + callback, non-streaming)
+
+> All §4.x flows describe the **LiteLLM proxy** path. Shape A direct
+> mode reuses the existing egress-proxy flows from
+> `auto-instrument-egress-proxy-spec.md`; this DESIGN does not
+> duplicate them.
 
 ```
 ┌──────────┐   ┌──────────────┐  ┌──────────────┐  ┌──────────┐  ┌────────────┐
-│ App / LL │   │ LiteLLM core │  │ SpendGuard   │  │ Sidecar  │  │ Provider   │
-│  proxy   │   │              │  │   Callback   │  │ (gRPC)   │  │ (OpenAI…)  │
+│  HTTP    │   │ LiteLLM      │  │ SpendGuard   │  │ Sidecar  │  │ Provider   │
+│  caller  │   │  proxy core  │  │   Callback   │  │ (gRPC)   │  │ (OpenAI…)  │
 └────┬─────┘   └──────┬───────┘  └──────┬───────┘  └────┬─────┘  └─────┬──────┘
      │ acompletion(.) │                 │               │              │
      ├───────────────►│                 │               │              │
@@ -365,7 +417,9 @@ class ResolverContext:
     `data["user_api_key_dict"]` because that key is not guaranteed
     present in LiteLLM kwargs (P0 fix from Phase 0 review)."""
     data: Mapping[str, Any]
-    user_api_key_dict: Any | None  # litellm.proxy.UserAPIKeyAuth | None
+    user_api_key_dict: Any  # litellm.proxy.UserAPIKeyAuth — always
+                            # populated in proxy mode; the callback only
+                            # fires for proxy mode (DESIGN §3.4 v1 Path B)
     call_type: str
 
 
@@ -373,12 +427,11 @@ BudgetResolver = Callable[[ResolverContext], "BudgetBinding | None"]
 """Map a ResolverContext → which SpendGuard budget to charge against.
 
 Operator-supplied. Typical implementation pulls `team_id`/`key_alias`
-from `ctx.user_api_key_dict` (proxy mode) or
-`ctx.data["metadata"]["spendguard_budget_id"]` (direct mode), and
-returns a `BudgetBinding`. Returning `None` raises
-`SpendGuardConfigError` at the callback boundary (no fallback to a
-global default — see ADR-001). The `| None` in the type is the
-canonical 'no budget found' signal (Round 3 P2.2 fix)."""
+from `ctx.user_api_key_dict` (populated by the LiteLLM **proxy** auth
+layer; always present in proxy mode), and returns a `BudgetBinding`.
+Returning `None` raises `SpendGuardConfigError` at the callback
+boundary (no fallback to a global default — see ADR-001). The
+`| None` in the type is the canonical 'no budget found' signal."""
 
 @dataclass(frozen=True, slots=True)
 class BudgetBinding:
@@ -434,10 +487,17 @@ class SpendGuardLiteLLMCallback(CustomLogger):
             claim_reconciler=lambda ctx, resp: [common_pb2.BudgetClaim(...)],
             fail_closed=True,  # default; can be overridden by env
         )
-        litellm.callbacks = [callback]
-
-        # Now any litellm.acompletion(..., metadata={"spendguard_budget_id": "b1"})
-        # is gated by SpendGuard."""
+        # Proxy-mode registration via proxy_config.yaml (the supported
+        # surface — see DESIGN §3.4 v1 Path B):
+        #
+        #   litellm_settings:
+        #     callbacks: my_module.handler_instance
+        #
+        # The callback is invoked by the LiteLLM PROXY on every inbound
+        # `POST /v1/chat/completions`. Direct in-process
+        # `litellm.acompletion()` callers should use Shape A (point
+        # `litellm.api_base` at the SpendGuard egress proxy) — that
+        # path is NOT gated by this callback."""
 
     def __init__(
         self,
@@ -717,27 +777,26 @@ ACCEPTANCE.md S1–S2 and join query Q2.
 | `prompt_hash` | blake2b 16-byte hash of `messages` JSON | computed by SDK helper |
 | `call_type` | LiteLLM `call_type` (`acompletion`/etc) | `call_type` arg of hook |
 | `stream` | `bool` | `kwargs.get("stream", False)` |
-| `mode` | literal `"direct"` if `user_api_key_dict is None` else `"proxy"` | derived in `_build_decision_context` (Round 2 P0.2 fix: gives ACCEPTANCE.md Q2 a real field to filter on for proxy step) |
-| `team_id` | proxy mode only: `user_api_key_dict.team_id`; otherwise `null` | `user_api_key_dict` |
+| `mode` | literal `"proxy"` in v1 (callback only fires for proxy path). Reserved values: `"direct"` for v2 Shape B direct-mode native gate. | constant in callback |
+| `team_id` | `user_api_key_dict.team_id` (always populated by LiteLLM proxy auth) | `user_api_key_dict` |
 
 Forbidden: `messages` content verbatim, response text verbatim,
 provider API keys. Per ACCEPTANCE.md S4 the row is hashed/redacted.
 
 ### 8.3 LiteLLM_SpendLogs interplay
 
-We do not write to `LiteLLM_SpendLogs`. LiteLLM continues to write its
-own row per call **when running as the LiteLLM proxy** — that is the
-only mode where LiteLLM populates the SpendLogs table.
+We do not write to `LiteLLM_SpendLogs`. LiteLLM writes its own row per
+call **when running as the LiteLLM proxy** — that is the only mode
+where LiteLLM populates the SpendLogs table, and (per §3.4 v1 Path B)
+the only mode where the SpendGuard callback fires at all. **Every
+v1 callback invocation therefore corresponds to a SpendLogs row**;
+the `LiteLLM_SpendLogs ⨝ canonical_events` join (ACCEPTANCE.md §5.1
+Q2) applies to all v1 demo steps, not just one of them.
 
-**Direct `litellm.acompletion()` mode does NOT create `LiteLLM_SpendLogs`
-rows** (LiteLLM's SpendLogs writer is gated on the proxy DB connection;
-direct in-process calls bypass it entirely). The `LiteLLM_SpendLogs ⨝
-canonical_events` join (ACCEPTANCE.md §5.1 Q2) is therefore meaningful
-**only for the proxy-mode demo step** (Slice 9 step 4 PROXY). The
-direct-mode steps (1 ALLOW, 2 DENY, 3 STREAM) assert canonical_events
-chain integrity but do NOT assert SpendLogs presence.
-
-(P0.5 fix from Phase 0 review.)
+Shape A direct callers (DESIGN §3.4 v1 Path A) do NOT populate
+SpendLogs at all and are not gated by this callback; their audit
+chain comes from the SpendGuard egress proxy directly (its existing
+canonical_events emission per `auto-instrument-egress-proxy-spec.md`).
 
 ---
 
@@ -822,28 +881,25 @@ must run sidecar with redundancy. Documented in `OPERATIONS.md`.
 2. Async-only; document that sync users must use Shape A.
 3. Async-only; loudly raise from the sync hooks.
 
-**Decision (Round 2 Phase 0 review P0.7 fix — revised).** **Option 3
-for v1**: async-only at full enforcement, sync `log_pre_api_call` hook
-overridden to **raise `SpendGuardConfigError` BEFORE the provider HTTP
-request**. The earlier "Option 2 + doc" was insufficient: if a user
-installs the callback and calls `litellm.completion()` (sync), the
-async hooks never fire and the provider is billed without budget
-enforcement — silent fail-open. By overriding the sync pre-wire hook
-to raise loudly, the integration stays fail-closed even when used
-incorrectly.
+**Decision (revised 2026-05-20 post-Slice-1 Codex R2).** **Option 2
+restored**: async-only at the proxy callback surface; sync
+`litellm.completion()` is NOT gated by this callback at all. The
+`log_pre_api_call` override attempted in the earlier draft was
+verified ineffective against LiteLLM source — `litellm_logging.py:45887`
+wraps every callback in `try / except Exception` and swallows
+exceptions via `verbose_logger.exception()`; raising from
+`log_pre_api_call` does NOT abort the provider call.
 
-Slice 1 adds the `log_pre_api_call` override raising
-`SpendGuardConfigError("Sync litellm.completion() is not supported;
-use litellm.acompletion() or Shape A egress proxy. See ADR-005.")`.
+Sync `litellm.completion()` users (and async direct
+`litellm.acompletion()` users) are routed to **Shape A egress proxy
+chain** (DESIGN §3.4 v1 Path A — `litellm.api_base =
+"http://localhost:8088/v1"`). That path IS wire-verified to gate
+calls (egress proxy intercepts the HTTP layer) and works for both
+sync and async LiteLLM call surfaces.
 
-The sync log_success / log_failure hooks remain unimplemented (they
-fire post-wire; raising there would only mask the real error and
-double-bill operationally).
-
-**Consequences.** Sync users get a typed error at call time instead
-of silent unbilled requests. Still smaller v1 surface area than full
-sync support; one extra paragraph in README documenting the new
-exception path.
+**Consequences.** Sync support is "use Shape A" rather than "raise
+loudly". One paragraph in PROXY_RECIPE.md + docs/site landing page
+documents the routing.
 
 ---
 
@@ -876,32 +932,35 @@ integration ships **two** demo modes and ACCEPTANCE.md §5 is the
 authoritative shape (REVIEW_STANDARDS.md §7.3 and TEST_PLAN.md §3 must
 mirror it verbatim; any drift is a P0 finding).
 
-**`DEMO_MODE=litellm_real`** — 4-step happy/edge path
-([ACCEPTANCE.md §5.1](./ACCEPTANCE.md#51-demo_modelitell_real-allow-path--audit-chain)):
+**`DEMO_MODE=litellm_real`** — 4-step proxy-driven happy/edge path
+(all steps route through a LiteLLM proxy subprocess + the
+SpendGuard CustomLogger; per §3.4 v1 Path B is the only path the
+callback gates):
 
-1. **ALLOW** — direct `litellm.acompletion()` → DECISION_ALLOWED →
-   INVOICE_COMMITTED. (Slice 6.)
-2. **DENY** — over-budget direct call → `DecisionDenied` raised; no
-   reservation, no invoice. (Slice 6.)
-3. **STREAM** — `litellm.acompletion(stream=True)` → reservation
-   created with worst-case estimate → chunks delivered → end-of-stream
+1. **ALLOW** — `POST /v1/chat/completions` to the proxy → callback
+   `async_pre_call_hook` → DECISION_ALLOWED → upstream provider call
+   → `async_log_success_event` → INVOICE_COMMITTED + LiteLLM_SpendLogs
+   row. (Slice 6.)
+2. **DENY** — over-budget POST → callback raises `DecisionDenied` →
+   proxy surfaces error → counting endpoint stays at 0. (Slice 6.)
+3. **STREAM** — POST with `stream=true` → proxy reserves at start →
+   chunks delivered to HTTP caller → end-of-stream
    `async_log_success_event` → INVOICE_COMMITTED with real usage.
    (Slice 9 + Slice 4 streaming reconciler.)
-4. **PROXY** — LiteLLM proxy subprocess + `proxy_config.yaml` +
-   operator-owned `spendguard_litellm_proxy_callback.py` → HTTP
-   `POST /v1/chat/completions` with `team_id` → DECISION_ALLOWED →
-   INVOICE_COMMITTED → `LiteLLM_SpendLogs ⨝ canonical_events` join
-   produces ≥1 matched row. (Slice 9 + Slice 8 proxy template.)
+4. **PROXY-MULTI-TEAM** — two team-scoped keys; one call per team →
+   each gated against its own SpendGuard budget; no cross-charge;
+   `LiteLLM_SpendLogs ⨝ canonical_events` join produces ≥1 matched
+   row per call. (Slice 9 + Slice 8 proxy template.)
 
-**`DEMO_MODE=litellm_deny`** — 3-step fail-closed coverage
-([ACCEPTANCE.md §5.2](./ACCEPTANCE.md#52-demo_modelitell_deny-fail-closed-verification)):
+**`DEMO_MODE=litellm_deny`** — 3-step fail-closed coverage (all
+proxy-driven; counting endpoint counts upstream provider hits):
 
-1. **Budget exhausted** — sidecar returns DENY; provider HTTP request
-   counter stays at 0. (Slice 7.)
+1. **Budget exhausted** — proxy callback gets sidecar DENY; raises
+   `DecisionDenied`; provider HTTP request counter delta = 0. (Slice 7.)
 2. **Sidecar offline** — UDS path unreachable; callback raises
-   `SidecarUnavailable`; provider counter still 0. (Slice 7.)
+   `SidecarUnavailable`; provider counter delta = 0. (Slice 7.)
 3. **Resolver returns None** — explicit `SpendGuardConfigError`;
-   provider counter still 0. (Slice 7.)
+   provider counter delta = 0. (Slice 7.)
 
 **Counting HTTP endpoint requirement (P0.11 fix).** The deny demo MUST
 use a counting HTTP endpoint (in-process `aiohttp` mock server with a
@@ -924,7 +983,9 @@ docs site coverage that were missing from the pre-Phase-0 draft).
 To keep slices ≤250 lines, the cuts are:
 
 1. SDK skeleton (`integrations/litellm.py` shell, dataclasses, imports,
-   `__all__`, `ResolverContext`, `errors.py` additions).
+   `__all__`, `ResolverContext`, `errors.py` additions). Proxy-only
+   callback class — no sync `log_pre_api_call` override (Slice 1 R2
+   verified it doesn't work; sync users routed to Shape A).
 2. Pre-call hook + reservation path (Slice 6 demo step 1 ALLOW unlocks).
 3. Success-event commit + reconciler (non-streaming) (step 1 ALLOW
    completes end-to-end).

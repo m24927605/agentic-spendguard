@@ -181,17 +181,10 @@ class SpendGuardLiteLLMCallback(CustomLogger):
     async def async_log_failure_event(self, kwargs, response_obj, start_time, end_time):
         raise NotImplementedError("Slice 5")
 
-    # ADR-005 P0.7 fix: sync pre-wire hook MUST fail-closed loudly,
-    # not silently bypass enforcement when the user calls
-    # litellm.completion() (sync) with this callback installed.
-    # log_pre_api_call fires only for sync calls; async path uses
-    # async_pre_call_hook and never reaches this method.
-    def log_pre_api_call(self, model, messages, kwargs):
-        raise SpendGuardConfigError(
-            "Sync litellm.completion() is not supported by the SpendGuard "
-            "callback. Use litellm.acompletion() or Shape A (egress "
-            "proxy chain). See DESIGN.md ADR-005."
-        )
+    # NO log_pre_api_call override (Slice 1 R2 verified ineffective:
+    # litellm_logging.py:45887 wraps every callback in try/except and
+    # swallows exceptions via verbose_logger.exception()). Sync users
+    # are routed to Shape A egress proxy per DESIGN §3.4 v1 Path A.
 
 
 # Round 3 P0.3 fix: _LoopBoundCallback lives in the SDK (not in the
@@ -261,16 +254,12 @@ __all__ = [
 ]
 ```
 
-**Out of scope.** Async hook bodies (Slices 2–5; Slice 1 ships
-stubs raising `NotImplementedError`). `install()` body (Slice 2).
-**Sync hook bodies beyond the fail-closed `log_pre_api_call`
-override**: Slice 1 ships `log_pre_api_call` raising
-`SpendGuardConfigError` (ADR-005 fail-closed override — Round 2
-P0.7); `log_success_event` and `log_failure_event` are NOT
-overridden (post-wire; would only mask errors). NG6 still applies
-for "first-class sync support"; the override is the fail-closed
-guard, not a sync implementation. `prompt_text` enrichment (covered
-in Slice 2's `decision_context_json` work).
+**Out of scope.** Async hook bodies (Slices 2–5; Slice 1 ships stubs
+raising `NotImplementedError`). `install()` body (Slice 2). **Sync
+LiteLLM call gating** — verified ineffective; sync users route to
+Shape A egress proxy (DESIGN §3.4 v1 Path A). No `log_pre_api_call`
+override. `prompt_text` enrichment (covered in Slice 2's
+`decision_context_json` work).
 
 **Tests.** `TEST_PLAN.md#tests-for-slice-1`. Smoke: importable,
 `__all__` complete, dataclasses frozen+slotted, optional-import error
@@ -871,36 +860,49 @@ Cumulative line count Slices 1–5 ≤ 550.
 
 ---
 
-### Slice 6 — Demo `litellm_real` ALLOW + DENY
+### Slice 6 — Demo `litellm_real` ALLOW + DENY (proxy-driven)
 
 **Goal.** Add `DEMO_MODE=litellm_real` to `run_demo.py` with steps 1+2
-of the 4-step demo (ACCEPTANCE.md §5.1): real
-`litellm.acompletion()` ALLOW with end-to-end ledger assertions, plus
-over-budget DENY. **Counting HTTP endpoint mandatory** (P0.11 fix —
-`mock_response` is BANNED for the deny assertion).
+of the 4-step demo (ACCEPTANCE.md §5.1). **All steps proxy-driven**
+(per DESIGN §3.4 v1 Path B — the SpendGuard callback only fires
+through the LiteLLM proxy): the demo boots a `litellm --config
+proxy_config.yaml` subprocess (using the operator template that lands
+in Slice 8 — Slice 6 ships a minimal in-demo version, Slice 8 ships
+the operator-facing template), fires `POST /v1/chat/completions` with
+authenticated team key for the ALLOW step, and `POST` against an
+over-budget team for the DENY step. **Counting HTTP endpoint
+mandatory** for upstream provider (P0.11) — `mock_response` BANNED.
 
 **Files touched.**
 - `deploy/demo/demo/run_demo.py` (edit: `run_litellm_real_mode()`
-  step 1+2 + counting HTTP listener + 1-line dispatch in `main()`).
+  step 1+2 + counting HTTP listener + LiteLLM proxy subprocess
+  bootstrap + 1-line dispatch in `main()`).
 - `deploy/demo/Dockerfile` (verify existing `[all]` extra covers
   `[litellm]`; else 1 line).
 - `deploy/demo/verify_step_litellm_real.sql` (NEW — Q1/Q3 from
   ACCEPTANCE.md §5.1).
+- `deploy/demo/litellm_proxy/proxy_config.yaml` (NEW; minimal
+  config — Slice 8 expands with team seeding).
 
-**Line budget.** 170 lines. Hard cap 250.
+**Line budget.** 200 lines. Hard cap 250. (Up from 170 because the
+proxy subprocess + minimal `proxy_config.yaml` lands here, not
+deferred to Slice 8.)
 
 **Inputs.** All SDK slices (1–5); existing demo plumbing — handshake
 retry loop, env reader `_env()`, Postgres in compose, sidecar UDS;
 `run_agt_composite_mode` shape (line 617).
 
 **Outputs.** `run_litellm_real_mode()` covering steps 1+2 (with hooks
-for Slice 9 to append steps 3+4); `_start_counting_provider(...)`
-helper; `verify_step_litellm_real.sql` with the Q1/Q3 queries from
+for Slice 9 to append steps 3+4); `_start_litellm_proxy_subprocess(...)`
+helper; `_start_counting_provider(...)` helper;
+`verify_step_litellm_real.sql` with the Q1/Q3 queries from
 ACCEPTANCE.md §5.1; `main()` dispatch branch.
 
-**Out of scope.** Steps 3 (STREAM) and 4 (PROXY) — those land in
-Slice 9. Q2 cross-join (depends on proxy mode → Slice 9). Deny-mode
-the litellm_deny variant (Slice 7).
+**Out of scope.** Steps 3 (STREAM) and 4 (PROXY-MULTI-TEAM) — those
+land in Slice 9. Q2 cross-join (asserts on all proxy commits — added
+in Slice 9 since it's a multi-team Q2 case). Deny-mode litellm_deny
+variant (Slice 7). Operator-facing proxy template + PROXY_RECIPE.md
+(Slice 8 — Slice 6 ships only the minimal in-demo `proxy_config.yaml`).
 
 **Tests.** `TEST_PLAN.md#tests-for-slice-6`. The demo IS the test
 (per `feedback_demo_quality_gate.md`).
@@ -925,13 +927,14 @@ log lines absent (deferred to Slice 9). **Demo as quality gate.**
 
 ---
 
-### Slice 7 — Demo `litellm_deny` (3 fail-closed sub-steps)
+### Slice 7 — Demo `litellm_deny` (3 fail-closed sub-steps, proxy-driven)
 
 **Goal.** Add `DEMO_MODE=litellm_deny` covering all three fail-closed
 scenarios per ACCEPTANCE.md §5.2: (a) budget exhausted, (b) sidecar
-offline, (c) resolver returns None. Each sub-step asserts the
-provider-request counter remains at 0. Counting HTTP endpoint
-mandatory (same constraint as Slice 6).
+offline, (c) resolver returns None. **All proxy-driven** (reuse the
+Slice 6 LiteLLM proxy subprocess helper). Each sub-step asserts the
+provider-request counter delta == 0 with a positive-control ALLOW
+first to prove wiring. Counting HTTP endpoint mandatory.
 
 **Files touched.** `deploy/demo/demo/run_demo.py` (edit:
 `run_litellm_deny_mode()` ~140 LOC + 1-line dispatch +
@@ -1037,20 +1040,24 @@ imports; YAML parses. Slice 9 step 4 uses this output.
 
 ---
 
-### Slice 9 — Demo `litellm_real` STREAM + PROXY
+### Slice 9 — Demo `litellm_real` STREAM + PROXY-MULTI-TEAM
 
 **Goal.** Extend `run_litellm_real_mode()` from Slice 6 with steps 3
-(STREAM) and 4 (PROXY), making `DEMO_MODE=litellm_real` a full 4-step
-acceptance demo per ACCEPTANCE.md §5.1. Depends on Slice 4 (streaming
-reconciler) and Slice 8 (proxy template).
+(STREAM via proxy) and 4 (PROXY multi-team isolation), making
+`DEMO_MODE=litellm_real` a full 4-step acceptance demo per
+ACCEPTANCE.md §5.1. All steps proxy-driven (per DESIGN §3.4 v1 Path
+B). Depends on Slice 4 (streaming reconciler), Slice 6 (proxy
+subprocess + minimal config), and Slice 8 (operator-facing
+`spendguard_litellm_proxy_callback.py` template + multi-team seeding
+recipe).
 
 **Files touched.**
 - `deploy/demo/demo/run_demo.py` (edit — append step 3 + step 4 to
   `run_litellm_real_mode()`).
 - `deploy/demo/verify_step_litellm_real.sql` (edit — add Q2 cross-join
-  for the proxy step).
-- `deploy/demo/litellm_proxy/Dockerfile` or compose service (NEW —
-  spin up a LiteLLM proxy subprocess for step 4).
+  asserting all 3 proxy commits have matching SpendLogs rows).
+- `deploy/demo/litellm_proxy/proxy_config.yaml` (edit — extend Slice
+  6's minimal config with 2 team key entries for the multi-team step).
 
 **Line budget.** 200 lines. Hard cap 250. **HIGHEST-RISK SLICE FOR
 LINE BUDGET.** Pre-authorized split if breached: 9a (STREAM step) +

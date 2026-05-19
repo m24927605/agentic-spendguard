@@ -529,15 +529,15 @@ DEMO_MODE=litellm_real make demo-up
 ```
 
 **Expected stdout** (authoritative shape — REVIEW_STANDARDS.md §7.3
-and ACCEPTANCE.md §5.1 MUST match this verbatim):
+and ACCEPTANCE.md §5.1 MUST match this verbatim; all proxy-driven):
 
 ```
 [demo] DEMO_MODE=litellm_real → litellm proxy + sidecar + ledger ready
 [demo] handshake ok session_id=...
-[demo] step 1: ALLOW — litellm.acompletion → DECISION_ALLOWED → INVOICE_COMMITTED
-[demo] step 2: DENY — over-budget → DecisionDenied raised
-[demo] step 3: STREAM — sse complete → INVOICE_COMMITTED with real usage
-[demo] step 4: PROXY — POST /v1/chat/completions team=t1 → INVOICE_COMMITTED
+[demo] step 1: ALLOW — POST /v1/chat/completions team=t1 → DECISION_ALLOWED → INVOICE_COMMITTED
+[demo] step 2: DENY — POST over-budget → DecisionDenied raised (provider counter delta=0)
+[demo] step 3: STREAM — POST stream=true → sse complete → INVOICE_COMMITTED with real usage
+[demo] step 4: PROXY-MULTI-TEAM — POST team=t2 → DECISION_ALLOWED → INVOICE_COMMITTED (isolated from t1)
 [demo] PASS — all 4 steps OK
 ```
 

@@ -1,9 +1,10 @@
 # ruff: noqa: ANN401  # LiteLLM's CustomLogger interface uses untyped Any
-"""LiteLLM CustomLogger integration. See DESIGN.md §3.4 (Shape B).
+"""LiteLLM proxy CustomLogger integration. See DESIGN.md §3.4 v1 Path B.
 
-Slice 1: skeleton + dataclasses + sync-fail-closed override. Async
-hook bodies land in Slices 2-5. Proxy mode: `_LoopBoundCallback` +
-DESIGN.md §7.2 PROXY_RECIPE.
+Slice 1: skeleton + dataclasses. Async hook bodies land in Slices 2-5.
+The callback only fires in LiteLLM **proxy** mode (verified against
+litellm source 2026-05-20); direct `litellm.acompletion()` callers
+use Shape A egress proxy (DESIGN §3.4 v1 Path A) — no SDK code here.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from ..client import SpendGuardClient
-from ..errors import SpendGuardConfigError
+from ..errors import SpendGuardConfigError  # noqa: F401  — used by Slice 2
 
 try:
     from litellm.integrations.custom_logger import CustomLogger
@@ -88,11 +89,10 @@ v1 contract: exactly one claim."""
 
 
 class SpendGuardLiteLLMCallback(CustomLogger):
-    """LiteLLM CustomLogger that reserves/commits via the SpendGuard sidecar.
-
-    Slice 1 skeleton: async hooks raise NotImplementedError; sync
-    log_pre_api_call raises SpendGuardConfigError so sync callers
-    fail-closed BEFORE the wire (DESIGN.md ADR-005)."""
+    """LiteLLM proxy CustomLogger that reserves/commits via the
+    SpendGuard sidecar. Only fires in LiteLLM **proxy** mode (per
+    DESIGN.md §3.4 v1 Path B). Slice 1 skeleton: async hooks raise
+    NotImplementedError; Slices 2-5 fill them in."""
 
     def __init__(
         self,
@@ -139,19 +139,11 @@ class SpendGuardLiteLLMCallback(CustomLogger):
     ) -> None:
         raise NotImplementedError("Slice 5")
 
-    def log_pre_api_call(
-        self,
-        model: str,
-        messages: list[dict[str, Any]],
-        kwargs: dict[str, Any],
-    ) -> None:
-        # Sync pre-wire hook (Round 2 P0.7). LiteLLM dispatches this
-        # for sync litellm.completion() — fail-closed before the wire.
-        raise SpendGuardConfigError(
-            "Sync litellm.completion() is not supported by the "
-            "SpendGuard callback. Use litellm.acompletion() or Shape A. "
-            "See DESIGN.md ADR-005."
-        )
+    # NO log_pre_api_call override (Slice 1 R2 verified ineffective:
+    # litellm_logging.py:45887 wraps callback invocations in
+    # try/except Exception, exceptions are swallowed via
+    # verbose_logger.exception). Sync direct callers route to Shape A
+    # egress proxy per DESIGN.md §3.4 v1 Path A (no SDK code needed).
 
 
 class _LoopBoundCallback(SpendGuardLiteLLMCallback):

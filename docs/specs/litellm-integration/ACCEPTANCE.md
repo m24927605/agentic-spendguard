@@ -28,19 +28,18 @@ reference so they are cross-checkable without re-reading.
 Every bullet is a capability the merged integration MUST demonstrate against
 the live demo stack. Every criterion is objectively verifiable.
 
-- **F1 (G1, drop-in).** Enable SpendGuard with at most three changes:
-  install `spendguard-sdk[litellm]`, register the callback, supply a
-  budget resolver. **Two registration forms exist depending on
-  surface** (Round 3 P2.1 — pick one per surface, no ambiguity):
-  - **Python (direct `acompletion()`):** `litellm.callbacks =
-    [SpendGuardLiteLLMCallback(...)]` (list of instances).
-  - **LiteLLM proxy (`proxy_config.yaml`):**
-    `litellm_settings.callbacks: spendguard_litellm_proxy_callback.handler_instance`
-    (string dotted-path to `handler_instance` in the
-    operator-owned module — LiteLLM's required form for proxy-side
-    callback loading).
-
-  Verified by: the greenfield example in
+- **F1 (G1, drop-in).** Enable SpendGuard with at most three changes
+  on a LiteLLM **proxy** deployment: install `spendguard-sdk[litellm]`,
+  drop `spendguard_litellm_proxy_callback.py` next to
+  `proxy_config.yaml` (operator-owned template from Slice 8), set
+  `litellm_settings.callbacks:
+  spendguard_litellm_proxy_callback.handler_instance` in
+  `proxy_config.yaml` (string dotted-path — LiteLLM's required form
+  for proxy callback loading). For direct in-process callers (Shape A
+  path), the change is a single line:
+  `litellm.api_base = "http://localhost:8088/v1"` pointing at the
+  existing SpendGuard egress proxy (no new SpendGuard code; see
+  DESIGN §3.4 v1 Path A). Verified by: the greenfield example in
   `docs/site/docs/integrations/litellm.md` (Slice 10 ships) runs
   end-to-end with no other code edits.
 - **F2 (G2, fail-closed).** When the sidecar UDS socket does not exist,
@@ -54,28 +53,31 @@ the live demo stack. Every criterion is objectively verifiable.
   `mock_response`), (b) typed exception raised, (c) no `canonical_events`
   row for the pre-call (sidecar never reached; SDK logs the attempt
   locally).
-- **F3 (G3, in-process + proxy).** Both surfaces work against the same
-  callback module: **(in-process)** `litellm.acompletion(...)` from a
-  Python script with `litellm.callbacks = [callback]` set (always the
-  list form — P2 consistency fix), verified by `litellm_real` step 1
-  (Slice 6); **(proxy)** LiteLLM proxy started with the operator-owned
-  `spendguard_litellm_proxy_callback.py` template (DESIGN §7.2 / built
-  by Slice 8); a `POST /v1/chat/completions` with `team_id=...` gated
-  by the matching SpendGuard budget, verified by `litellm_real` step 4
-  (Slice 9). The proxy step is the **only** mode where
-  `LiteLLM_SpendLogs` rows are written (DESIGN §8.3 — direct
-  `acompletion()` mode does not populate that table).
-- **F4 (G4, audit-chain coverage).** Every LiteLLM call that reaches
-  the wire produces a `canonical_events` row whose
+- **F3 (G3, proxy + direct).** Both surfaces work, by different code
+  paths per DESIGN §3.4 (revised 2026-05-20):
+  - **Proxy (Shape B, this integration's primary v1 surface):**
+    LiteLLM proxy with the operator-owned
+    `spendguard_litellm_proxy_callback.py` template (Slice 8).
+    `POST /v1/chat/completions` with authenticated team key gated by
+    the matching SpendGuard budget. Verified by `litellm_real` steps
+    1-4 (Slices 6 + 9).
+  - **Direct (Shape A, existing egress proxy — zero new SDK code):**
+    User sets `litellm.api_base =
+    "http://localhost:8088/v1"` pointing at the SpendGuard egress
+    proxy. `litellm.acompletion()` / `litellm.completion()` route
+    through the egress proxy's existing reserve/commit/SSE
+    infrastructure. Documented in `docs/site/docs/integrations/litellm.md`
+    Path C (Slice 10); no new SpendGuard SDK code for this path.
+- **F4 (G4, audit-chain coverage).** Every LiteLLM **proxy** call
+  that reaches the wire produces a `canonical_events` row whose
   `decision_context_json` carries the 12 fields specified in DESIGN.md
-  §8.2a (including `integration='litellm'` and `litellm_call_id`).
-  For the **proxy demo step only** (Slice 9 step 4), the row joins to
-  `LiteLLM_SpendLogs.request_id` via `litellm_call_id`. Verified by
-  the cross-join query (Q2) in §5.1 — zero unmatched rows on the
-  proxy step's commit row. Q2 is **NOT** asserted on direct
-  `acompletion()` steps (Slice 6 + Slice 9 steps 1+2+3) because
-  LiteLLM only writes `LiteLLM_SpendLogs` in proxy mode (DESIGN.md
-  §8.3 — P0.5 fix from Phase 0 review).
+  §8.2a (including `integration='litellm'`, `mode='proxy'`,
+  `litellm_call_id`, `team_id`). Since all v1 callback invocations
+  fire in proxy mode (per DESIGN §3.4 v1 Path B), every commit also
+  writes a `LiteLLM_SpendLogs` row. The cross-join query (Q2) in §5.1
+  applies to **all** `litellm_real` ALLOW commits — zero unmatched
+  rows across all of steps 1, 3, 4 (step 2 DENY produces no commit;
+  Slice 6 commits 1 row, Slice 9 commits 2 more = 3 total).
 - **F5 (G5, demo is the gate).** `DEMO_MODE=litellm_real` and
   `DEMO_MODE=litellm_deny` both reach the `[demo] PASS` line on a clean
   `make demo-down && make demo-up` cycle. Per
@@ -218,15 +220,16 @@ DEMO_MODE=litellm_real make demo-up
 ```
 
 **Stdout (in order — authoritative shape; REVIEW_STANDARDS.md §7.3
-and TEST_PLAN.md §3.1 mirror this verbatim):**
+and TEST_PLAN.md §3.1 mirror this verbatim. All steps proxy-driven
+per DESIGN §3.4 v1 Path B):**
 
 ```
 [demo] DEMO_MODE=litellm_real → litellm proxy + sidecar + ledger ready
 [demo] handshake ok session_id=...
-[demo] step 1: ALLOW — litellm.acompletion → DECISION_ALLOWED → INVOICE_COMMITTED
-[demo] step 2: DENY — over-budget → DecisionDenied raised
-[demo] step 3: STREAM — sse complete → INVOICE_COMMITTED with real usage
-[demo] step 4: PROXY — POST /v1/chat/completions team=t1 → INVOICE_COMMITTED
+[demo] step 1: ALLOW — POST /v1/chat/completions team=t1 → DECISION_ALLOWED → INVOICE_COMMITTED
+[demo] step 2: DENY — POST over-budget → DecisionDenied raised (provider counter delta=0)
+[demo] step 3: STREAM — POST stream=true → sse complete → INVOICE_COMMITTED with real usage
+[demo] step 4: PROXY-MULTI-TEAM — POST team=t2 → DECISION_ALLOWED → INVOICE_COMMITTED (isolated from t1)
 [demo] PASS — all 4 steps OK
 ```
 
@@ -251,28 +254,24 @@ WHERE session_id = $session_id
   AND decision_context_json->>'integration' = 'litellm'
 GROUP BY event_type;
 
--- Q2: cross-join. ONLY applied to the proxy step (step 4) because
--- LiteLLM_SpendLogs is only populated in proxy mode (DESIGN.md §8.3).
--- INNER JOIN (Round 4 P0.3 fix — earlier LEFT JOIN allowed a row
--- with NULL `ls.request_id` to satisfy ≥1 even when the join key
--- mismatched). Expected: ≥1 row.
+-- Q2: cross-join. Applied to ALL litellm_real proxy commits (v1 only
+-- gates via proxy mode per DESIGN §3.4). INNER JOIN (R4 P0.3 fix).
+-- Expected: 3 rows (steps 1, 3, 4 commits — step 2 is DENY).
 SELECT ce.audit_decision_event_id, ls.request_id
 FROM canonical_events ce
 INNER JOIN "LiteLLM_SpendLogs" ls
   ON ls.request_id = ce.decision_context_json->>'litellm_call_id'
 WHERE ce.event_type = 'INVOICE_COMMITTED'
-  AND ce.decision_context_json->>'integration' = 'litellm'
-  AND ce.decision_context_json->>'mode' = 'proxy';
+  AND ce.decision_context_json->>'integration' = 'litellm';
 
--- Q2b: unmatched-count safety net. Expected: 0 (every proxy commit
--- must join). Catches the silent mismatch class even if a future
--- query refactor reverts Q2 to LEFT JOIN.
+-- Q2b: unmatched-count safety net. Expected: 0 (every commit must
+-- join — proxy-only world means every callback invocation has a
+-- corresponding LiteLLM_SpendLogs row).
 SELECT COUNT(*) FROM canonical_events ce
 LEFT JOIN "LiteLLM_SpendLogs" ls
   ON ls.request_id = ce.decision_context_json->>'litellm_call_id'
 WHERE ce.event_type = 'INVOICE_COMMITTED'
   AND ce.decision_context_json->>'integration' = 'litellm'
-  AND ce.decision_context_json->>'mode' = 'proxy'
   AND ls.request_id IS NULL;
 
 -- Q3: hash chain intact. canonical_events is a tenant-scoped chain
