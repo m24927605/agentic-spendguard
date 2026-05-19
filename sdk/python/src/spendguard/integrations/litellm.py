@@ -143,6 +143,46 @@ def _build_decision_context(
     }
 
 
+def _validate_claim_against_binding(
+    claim: Any, binding: BudgetBinding, *, source: str,
+) -> None:
+    """Validate a BudgetClaim's identity fields match the binding.
+    Used by both pre-call (estimator) and commit (reconciler) paths
+    to fail-closed on mis-attribution.
+
+    Raises SpendGuardConfigError on any mismatch. `source` is the
+    caller name (e.g. "claim_estimator", "claim_reconciler") for
+    error messages.
+    """
+    claim_budget_id = getattr(claim, "budget_id", None) or ""
+    claim_window = getattr(claim, "window_instance_id", None) or ""
+    if claim_budget_id != binding.budget_id:
+        raise SpendGuardConfigError(
+            f"{source} returned budget_id={claim_budget_id!r} but "
+            f"binding has budget_id={binding.budget_id!r}. Audit "
+            "context would mis-charge."
+        )
+    if claim_window != binding.window_instance_id:
+        raise SpendGuardConfigError(
+            f"{source} returned window_instance_id={claim_window!r} "
+            f"but binding has window_instance_id="
+            f"{binding.window_instance_id!r}."
+        )
+    # Slice 3 R2 P1 fix: also validate unit.unit_id when claim has a
+    # unit attribute. A claim with different unit would emit amount
+    # under binding.unit semantics (mis-charge).
+    claim_unit = getattr(claim, "unit", None)
+    if claim_unit is not None:
+        claim_unit_id = getattr(claim_unit, "unit_id", None) or ""
+        binding_unit_id = getattr(binding.unit, "unit_id", None) or ""
+        if binding_unit_id and claim_unit_id != binding_unit_id:
+            raise SpendGuardConfigError(
+                f"{source} returned unit.unit_id={claim_unit_id!r} "
+                f"but binding has unit.unit_id={binding_unit_id!r}. "
+                "Amount would be committed under wrong unit semantics."
+            )
+
+
 def _serialize_messages_for_hash(messages: Any) -> str:
     """Stable canonical-JSON of LiteLLM messages for prompt_hash input."""
     if messages is None:
@@ -279,26 +319,12 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 f"claim_estimator returned {len(estimator_claims)} claims; "
                 "v1 contract requires exactly 1 (DESIGN.md §6)."
             )
-        # Slice 2 R1 P1.1 + R2 P1.1 fix: validate estimator claim
-        # EXACTLY matches the binding. Both fields are operator-
-        # supplied; mismatch (including None/empty when binding is
-        # non-empty) means audit context would mis-charge.
-        claim = estimator_claims[0]
-        claim_budget_id = getattr(claim, "budget_id", None) or ""
-        claim_window = getattr(claim, "window_instance_id", None) or ""
-        if claim_budget_id != binding.budget_id:
-            raise SpendGuardConfigError(
-                f"claim_estimator returned budget_id={claim_budget_id!r} "
-                f"but resolver bound budget_id={binding.budget_id!r}. "
-                "Audit context would mis-charge (R1 P1.1 + R2 P1.1: "
-                "exact equality required, no None/empty pass-through)."
-            )
-        if claim_window != binding.window_instance_id:
-            raise SpendGuardConfigError(
-                f"claim_estimator returned window_instance_id="
-                f"{claim_window!r} but resolver bound "
-                f"window_instance_id={binding.window_instance_id!r}."
-            )
+        # Slice 2 R1 P1.1 + R2 P1.1 + Slice 3 R2 P1 fix: validate
+        # estimator claim EXACTLY matches the binding (budget_id +
+        # window_instance_id + unit). Mismatch (including None/empty
+        # when binding is non-empty) means audit context would
+        # mis-charge.
+        _validate_claim_against_binding(estimator_claims[0], binding, source="claim_estimator")
 
         try:
             outcome = await self._client.request_decision(
@@ -439,25 +465,12 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 f"claim_reconciler returned {len(real_claims)} claims; "
                 "v1 contract requires exactly 1 (DESIGN.md §6)."
             )
-        # Slice 3 R1 P1: mirror pre-call identity check at commit time.
-        # A bad reconciler returning a different budget/window would
-        # otherwise commit semantically wrong usage against the
-        # stashed reservation.
+        # Slice 3 R1 P1 + R2 P1 fix: mirror pre-call identity check
+        # (budget_id + window_instance_id + unit) at commit time.
+        # A bad reconciler returning different budget/window/unit
+        # would otherwise commit semantically wrong usage.
         real_claim = real_claims[0]
-        claim_budget_id = getattr(real_claim, "budget_id", None) or ""
-        claim_window = getattr(real_claim, "window_instance_id", None) or ""
-        if claim_budget_id != binding.budget_id:
-            raise SpendGuardConfigError(
-                f"claim_reconciler returned budget_id={claim_budget_id!r} "
-                f"but stash bound budget_id={binding.budget_id!r}. "
-                "Refusing to commit mis-attributed usage."
-            )
-        if claim_window != binding.window_instance_id:
-            raise SpendGuardConfigError(
-                f"claim_reconciler returned window_instance_id="
-                f"{claim_window!r} but stash bound "
-                f"window_instance_id={binding.window_instance_id!r}."
-            )
+        _validate_claim_against_binding(real_claim, binding, source="claim_reconciler")
 
         reservation_ids = stash["reservation_ids"]
         if len(reservation_ids) != 1:

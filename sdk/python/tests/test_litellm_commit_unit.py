@@ -221,6 +221,24 @@ async def test_success_event_rejects_reconciler_window_mismatch():
 
 
 @pytest.mark.asyncio
+async def test_success_event_rejects_reconciler_unit_mismatch():
+    """Slice 3 R2 P1 fix: reconciler unit.unit_id ≠ binding unit.unit_id
+    → SpendGuardConfigError. Without this, the amount would be
+    committed under wrong unit semantics."""
+    cli = _client()
+    wrong_claim = SimpleNamespace(
+        amount_atomic="92",
+        budget_id="b1",
+        window_instance_id="w1",
+        unit=SimpleNamespace(unit_id="OTHER_UNIT"),
+    )
+    cb = _cb_with_stash(cli, reconciler=lambda ctx, resp: [wrong_claim])
+    with pytest.raises(SpendGuardConfigError, match="unit.unit_id"):
+        await cb.async_log_success_event(_kwargs(), _response(), 0, 1)
+    cli.emit_llm_call_post.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_success_event_client_none_with_stash_raises():
     """Slice 3 R1 P2 fix: stash present + client None → fail-closed
     (not silent no-op). Should be impossible after pre-call hook
