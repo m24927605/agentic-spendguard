@@ -110,7 +110,10 @@ async def test_success_event_calls_emit_with_stashed_ids():
     kw = cli.emit_llm_call_post.call_args.kwargs
     assert kw["decision_id"] == "dec-1"
     assert kw["reservation_id"] == "res-1"
-    assert kw["provider_reported_amount_atomic"] == "92"
+    # Slice 3 R1 P0 fix: emit via estimated_amount_atomic (v1 path)
+    # not provider_reported_amount_atomic (deferred Phase 2B Step 8).
+    assert kw["estimated_amount_atomic"] == "92"
+    assert kw["provider_reported_amount_atomic"] == ""
     assert kw["outcome"] == "SUCCESS"
     assert kw["provider_event_id"] == "chatcmpl-x"
 
@@ -191,6 +194,42 @@ async def test_success_event_fail_open_swallows_error_keeps_stash(monkeypatch, c
         await cb.async_log_success_event(_kwargs("fail-open-1"), _response(), 0, 1)
     assert "fail-open-1" in cb._stash  # not popped under fail-open either
     assert any("commit failed" in r.message for r in caplog.records)
+
+
+@pytest.mark.asyncio
+async def test_success_event_rejects_reconciler_budget_mismatch():
+    """Slice 3 R1 P1 fix: reconciler budget_id ≠ stash binding →
+    SpendGuardConfigError (mirror of pre-call check at commit time)."""
+    cli = _client()
+    cb = _cb_with_stash(
+        cli, reconciler=lambda ctx, resp: [_claim(budget_id="OTHER")],
+    )
+    with pytest.raises(SpendGuardConfigError, match="budget_id"):
+        await cb.async_log_success_event(_kwargs(), _response(), 0, 1)
+    cli.emit_llm_call_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_success_event_rejects_reconciler_window_mismatch():
+    cli = _client()
+    cb = _cb_with_stash(
+        cli, reconciler=lambda ctx, resp: [_claim(window="OTHER")],
+    )
+    with pytest.raises(SpendGuardConfigError, match="window_instance_id"):
+        await cb.async_log_success_event(_kwargs(), _response(), 0, 1)
+    cli.emit_llm_call_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_success_event_client_none_with_stash_raises():
+    """Slice 3 R1 P2 fix: stash present + client None → fail-closed
+    (not silent no-op). Should be impossible after pre-call hook
+    succeeded, but defensive contract."""
+    cli = _client()
+    cb = _cb_with_stash(cli)
+    cb._client = None  # simulate corruption
+    with pytest.raises(SpendGuardConfigError, match="self._client is None"):
+        await cb.async_log_success_event(_kwargs(), _response(), 0, 1)
 
 
 @pytest.mark.asyncio

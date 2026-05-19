@@ -421,8 +421,12 @@ class SpendGuardLiteLLMCallback(CustomLogger):
         if stash["stream"]:
             # Slice 4 streaming reconciler not yet implemented.
             raise NotImplementedError("Slice 4 (streaming reconciler)")
-        if self._client is None:  # defensive (impossible after pre-call)
-            return
+        if self._client is None:  # Slice 3 R1 P2: fail-closed, not silent
+            raise SpendGuardConfigError(
+                "stash present but self._client is None; reservation will "
+                "TTL-sweep but audit row missing. Should be impossible "
+                "after pre-call hook succeeded."
+            )
 
         binding: BudgetBinding = stash["binding"]
         rctx = _build_resolver_ctx(
@@ -435,23 +439,48 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 f"claim_reconciler returned {len(real_claims)} claims; "
                 "v1 contract requires exactly 1 (DESIGN.md §6)."
             )
+        # Slice 3 R1 P1: mirror pre-call identity check at commit time.
+        # A bad reconciler returning a different budget/window would
+        # otherwise commit semantically wrong usage against the
+        # stashed reservation.
+        real_claim = real_claims[0]
+        claim_budget_id = getattr(real_claim, "budget_id", None) or ""
+        claim_window = getattr(real_claim, "window_instance_id", None) or ""
+        if claim_budget_id != binding.budget_id:
+            raise SpendGuardConfigError(
+                f"claim_reconciler returned budget_id={claim_budget_id!r} "
+                f"but stash bound budget_id={binding.budget_id!r}. "
+                "Refusing to commit mis-attributed usage."
+            )
+        if claim_window != binding.window_instance_id:
+            raise SpendGuardConfigError(
+                f"claim_reconciler returned window_instance_id="
+                f"{claim_window!r} but stash bound "
+                f"window_instance_id={binding.window_instance_id!r}."
+            )
+
         reservation_ids = stash["reservation_ids"]
         if len(reservation_ids) != 1:
-            # Slice 2 already pre-rejects multi-reservation outcomes,
-            # but defensive check survives spec drift.
             raise SpendGuardConfigError(
                 f"stash has {len(reservation_ids)} reservation_ids; "
                 "v1 expects exactly 1 (DESIGN.md §6)."
             )
 
-        real_amount = real_claims[0].amount_atomic
+        real_amount = real_claim.amount_atomic
         try:
+            # Slice 3 R1 P0: emit estimated_amount_atomic (the v1
+            # CommitEstimated path) — provider_reported_amount_atomic
+            # targets the deferred ProviderReport path (Phase 2B Step
+            # 8). Existing integrations (langchain, pydantic_ai,
+            # openai_agents) all set provider_reported="" + estimated=
+            # str(amount). Match that contract.
             await self._client.emit_llm_call_post(
                 run_id=stash["run_id"], step_id=stash["step_id"],
                 llm_call_id=stash["llm_call_id"],
                 decision_id=stash["decision_id"],
                 reservation_id=reservation_ids[0],
-                provider_reported_amount_atomic=str(real_amount),
+                provider_reported_amount_atomic="",
+                estimated_amount_atomic=str(real_amount),
                 unit=binding.unit, pricing=binding.pricing,
                 provider_event_id=self._provider_event_id(response_obj),
                 outcome="SUCCESS",
@@ -463,12 +492,8 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                     "reservation will TTL-sweep llm_call_id=%s",
                     stash["llm_call_id"],
                 )
-                # Keep stash for potential retry visibility (R3 P0.6).
                 return
-            # Don't pop stash so a retry can find it; sidecar
-            # idempotency dedupes (same decision_id).
             raise
-        # Only pop AFTER successful sidecar ACK.
         self._pop_stash(kwargs)
 
     async def async_log_failure_event(
