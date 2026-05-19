@@ -145,13 +145,14 @@ async def test_success_event_silently_noop_if_no_stash():
 
 
 @pytest.mark.asyncio
-async def test_success_event_streaming_branch_routes_to_slice4():
-    """If stash['stream'] is True → NotImplementedError (Slice 4)."""
+async def test_success_event_streaming_branch_dispatches_to_streaming():
+    """If stash['stream'] is True → dispatches to streaming branch
+    (Slice 4 — covered by test_litellm_streaming_unit.py)."""
     cli = _client()
     cb = _cb_with_stash(cli, stream=True)
-    with pytest.raises(NotImplementedError, match="Slice 4"):
-        await cb.async_log_success_event(_kwargs(), _response(), 0, 1)
-    cli.emit_llm_call_post.assert_not_called()
+    # Streaming branch IS implemented now; commit succeeds normally.
+    await cb.async_log_success_event(_kwargs(), _response(), 0, 1)
+    cli.emit_llm_call_post.assert_called_once()
 
 
 @pytest.mark.asyncio

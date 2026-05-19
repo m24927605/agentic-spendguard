@@ -17,7 +17,7 @@
 | R1 | 2026-05-20 | 1 | 1 | 1 | not-met (all fixed-here in 597cd0a) |
 | R2 | 2026-05-20 | 0 | 1 | 0 | not-met (fixed-here in 2afbd54) |
 | R3 | 2026-05-20 | 0 | 1 | 0 | not-met (fixed-here in this commit) |
-| R4 | (pending fire) | — | — | — | expected STOPPING-RULE-MET (N=4) |
+| R4 | 2026-05-20 | 0 | 0 | 0 | **STOPPING-RULE-MET (N=4)** zero findings |
 
 ## Findings (chronological summary)
 
@@ -52,7 +52,8 @@
 - H2-H3-H4-H5-H7: PASS (67 tests; ruff + mypy --strict clean)
 - H4 (Codex loop): pending R4 verification. Expected STOPPING-RULE-MET.
 - H6 (demo gate): PASS via §7.1 SDK-module exception (Slice 6 onwards)
-- **Status: PENDING-R4-VERIFICATION** (will mark PASS if R4 clean)
+- **Status: PASS — Slice 3 closed (STOPPING-RULE-MET at R4 with
+  zero new findings)**
 - Implementer: Claude Opus 4.7 acting for m24927605
 - Date: 2026-05-20
 

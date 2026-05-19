@@ -445,13 +445,14 @@ class SpendGuardLiteLLMCallback(CustomLogger):
         start_time: Any,
         end_time: Any,
     ) -> None:
-        """Non-streaming commit path. Streaming case → Slice 4."""
+        """Commit path. Routes to streaming branch when stash['stream']."""
         stash = self._get_stash(kwargs)
         if stash is None:
             return  # pre-call didn't fire; silent no-op
         if stash["stream"]:
-            # Slice 4 streaming reconciler not yet implemented.
-            raise NotImplementedError("Slice 4 (streaming reconciler)")
+            return await self._async_log_success_streaming(
+                stash, kwargs, response_obj,
+            )
         if self._client is None:  # Slice 3 R1 P2: fail-closed, not silent
             raise SpendGuardConfigError(
                 "stash present but self._client is None; reservation will "
@@ -512,6 +513,90 @@ class SpendGuardLiteLLMCallback(CustomLogger):
                 )
                 return
             raise
+        self._pop_stash(kwargs)
+
+    async def _async_log_success_streaming(
+        self,
+        stash: dict[str, Any],
+        kwargs: dict[str, Any],
+        response_obj: Any,
+    ) -> None:
+        """Slice 4 — end-of-stream commit path.
+
+        Difference from non-streaming:
+        - response_obj.usage may be None on some provider/version
+          combos. Callback (NOT reconciler) falls back to stashed
+          estimator_claims and logs WARNING (R3 P0.7).
+        - Commit-boundary sidecar failure is wrapped as
+          `SidecarUnavailable` so NF5 typed-exception contract holds
+          at the commit boundary (R4 P0.6).
+        """
+        if self._client is None:  # defensive (same contract as non-stream)
+            raise SpendGuardConfigError(
+                "stash present but self._client is None; reservation will "
+                "TTL-sweep but audit row missing."
+            )
+        binding: BudgetBinding = stash["binding"]
+        rctx = _build_resolver_ctx(
+            user_api_key_dict=kwargs.get("user_api_key_dict"),
+            data=kwargs, call_type=kwargs.get("call_type", ""),
+        )
+        usage = getattr(response_obj, "usage", None)
+        if usage is None:
+            # R3 P0.7: estimator-fallback degraded path. Not F7
+            # acceptance; logged loudly + commits estimator amount.
+            log.warning(
+                "spendguard: streaming response has no .usage frame; "
+                "falling back to estimator value for llm_call_id=%s "
+                "(degraded path; F7 acceptance requires reconciled usage).",
+                stash["llm_call_id"],
+            )
+            real_claims = stash["estimator_claims"]
+        else:
+            real_claims = self._claim_reconciler(rctx, response_obj)
+        if len(real_claims) != 1:
+            raise SpendGuardConfigError(
+                f"streaming reconciler returned {len(real_claims)} "
+                "claims; v1 contract requires exactly 1 (DESIGN.md §6)."
+            )
+        real_claim = real_claims[0]
+        _validate_claim_against_binding(
+            real_claim, binding, source="streaming claim_reconciler",
+        )
+
+        reservation_ids = stash["reservation_ids"]
+        if len(reservation_ids) != 1:
+            raise SpendGuardConfigError(
+                f"stash has {len(reservation_ids)} reservation_ids; "
+                "v1 expects exactly 1 (DESIGN.md §6)."
+            )
+
+        try:
+            await self._client.emit_llm_call_post(
+                run_id=stash["run_id"], step_id=stash["step_id"],
+                llm_call_id=stash["llm_call_id"],
+                decision_id=stash["decision_id"],
+                reservation_id=reservation_ids[0],
+                provider_reported_amount_atomic="",
+                estimated_amount_atomic=str(real_claim.amount_atomic),
+                unit=binding.unit, pricing=binding.pricing,
+                provider_event_id=self._provider_event_id(response_obj),
+                outcome="SUCCESS",
+            )
+        except SpendGuardError as exc:
+            if self._fail_open_dev:
+                log.warning(
+                    "spendguard: streaming commit failed under fail-open; "
+                    "reservation will TTL-sweep llm_call_id=%s err=%r",
+                    stash["llm_call_id"], exc,
+                )
+                return
+            # R4 P0.6: wrap commit-boundary failure as
+            # SidecarUnavailable so NF5 typed-exception contract
+            # holds. Keep stash for retry/TTL.
+            raise SidecarUnavailable(
+                f"sidecar unavailable at streaming commit boundary: {exc}"
+            ) from exc
         self._pop_stash(kwargs)
 
     async def async_log_failure_event(
