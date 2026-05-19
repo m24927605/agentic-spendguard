@@ -129,8 +129,8 @@ async def test_failure_event_classifies_cancelled_from_exception_obj():
 
 @pytest.mark.asyncio
 async def test_failure_event_classifies_cancelled_from_string():
-    """Some LiteLLM versions pass exception as str → 'cancelled'
-    substring still classifies as CANCELLED."""
+    """Some LiteLLM versions pass exception as str → word-boundary
+    'cancelled' classifies as CANCELLED."""
     cli = _client()
     cb = _cb_with_stash(cli)
     await cb.async_log_failure_event(
@@ -138,6 +138,46 @@ async def test_failure_event_classifies_cancelled_from_string():
         _response(), 0, 1,
     )
     assert cli.emit_llm_call_post.call_args.kwargs["outcome"] == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_failure_event_accepts_canceled_american_spelling():
+    """American spelling 'canceled' (1 L) also classifies as CANCELLED;
+    real provider messages use both forms."""
+    cli = _client()
+    cb = _cb_with_stash(cli, call_id="canceled-us")
+    await cb.async_log_failure_event(
+        _kwargs("canceled-us", exception="operation_canceled by user"),
+        _response(), 0, 1,
+    )
+    assert cli.emit_llm_call_post.call_args.kwargs["outcome"] == "CANCELLED"
+
+
+@pytest.mark.asyncio
+async def test_failure_event_word_boundary_avoids_false_positive():
+    """Slice 5 R1 P2 hardening: 'uncancelled' / 'cancellation' should
+    NOT classify as CANCELLED (word-boundary regex, not substring
+    'in' check). Failure means the prior naive substring test would
+    misclassify these as CANCELLED."""
+    cli = _client()
+    # 'uncancelled' contains the substring 'cancelled' but the call
+    # was NOT cancelled — provider is reporting the opposite.
+    cb = _cb_with_stash(cli, call_id="not-cancelled")
+    await cb.async_log_failure_event(
+        _kwargs("not-cancelled", exception="request was uncancelled but server errored"),
+        _response(), 0, 1,
+    )
+    assert cli.emit_llm_call_post.call_args.kwargs["outcome"] == "FAILURE"
+    # 'cancellation_not_allowed' is a real provider error pattern —
+    # the call was attempted-cancelled and provider refused. The
+    # provider call still happened → this is a FAILURE, not CANCELLED.
+    cli2 = _client()
+    cb2 = _cb_with_stash(cli2, call_id="refused")
+    await cb2.async_log_failure_event(
+        _kwargs("refused", exception="cancellation_not_allowed: provider refused"),
+        _response(), 0, 1,
+    )
+    assert cli2.emit_llm_call_post.call_args.kwargs["outcome"] == "FAILURE"
 
 
 @pytest.mark.asyncio

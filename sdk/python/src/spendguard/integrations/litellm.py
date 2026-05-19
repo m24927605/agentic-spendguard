@@ -17,6 +17,7 @@ import contextvars
 import json
 import logging
 import os
+import re as _re
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -699,17 +700,33 @@ class SpendGuardLiteLLMCallback(CustomLogger):
             return  # keep stash; do NOT re-raise (mask original error)
         self._pop_stash(kwargs)
 
-    @staticmethod
-    def _classify_failure(exception: Any) -> str:
+    # Boundary on either side must be start/end of string OR a
+    # non-letter — `\b` alone is too loose because `_` is a word
+    # character (so `operation_canceled` would NOT match with `\b`).
+    _CANCELLED_TOKEN_RE = _re.compile(
+        r"(?:^|[^A-Za-z])cancell?ed(?:$|[^A-Za-z])", _re.IGNORECASE,
+    )
+
+    @classmethod
+    def _classify_failure(cls, exception: Any) -> str:
         """`CancelledError` → CANCELLED; everything else → FAILURE.
 
         Some LiteLLM versions deliver `kwargs["exception"]` as a string
         repr instead of the actual exception object; the string branch
         defends against that (spec §Slice-5 code skeleton).
+
+        Slice 5 R1 P2 hardening: use a word-boundary regex
+        (`\bcancell?ed\b`) instead of a naive substring `in` check so
+        provider messages like "uncancelled" or "cancellation_not_allowed"
+        don't get misclassified as CANCELLED. Accepts both "cancelled"
+        (British) and "canceled" (American) spellings since both appear
+        in real provider error messages.
         """
         if isinstance(exception, asyncio.CancelledError):
             return "CANCELLED"
-        if isinstance(exception, str) and "cancelled" in exception.lower():
+        if isinstance(exception, str) and cls._CANCELLED_TOKEN_RE.search(
+            exception,
+        ):
             return "CANCELLED"
         return "FAILURE"
 
