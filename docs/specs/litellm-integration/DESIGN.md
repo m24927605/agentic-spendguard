@@ -547,7 +547,7 @@ __all__ = [
     "SpendGuardLiteLLMCallback",
     "_LoopBoundCallback",  # proxy-template helper (Round 2 P0.5 fix)
     "current_run_context",
-    "install",
+    # install REMOVED pivot R1 — direct litellm.callbacks=[...] is ineffective.
     "run_context",
 ]
 ```

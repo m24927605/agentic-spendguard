@@ -77,10 +77,10 @@ the live demo stack. Every criterion is objectively verifiable.
     proxy. `litellm.acompletion()` / `litellm.completion()` route
     through the egress proxy's existing reserve/commit/SSE
     infrastructure. Documented in `docs/site/docs/integrations/litellm.md`
-    Path C (Slice 10); no new SpendGuard SDK code for this path.
+    Path A (Slice 10); no new SpendGuard SDK code for this path.
 - **F4 (G4, audit-chain coverage).** Every LiteLLM **proxy** call
   that reaches the wire produces a `canonical_events` row whose
-  `decision_context_json` carries the 12 fields specified in DESIGN.md
+  `payload_json->'data'` (the CloudEvent payload) carries the 12 fields specified in DESIGN.md
   §8.2a (including `integration='litellm'`, `mode='proxy'`,
   `litellm_call_id`, `team_id`). Since all v1 callback invocations
   fire in proxy mode (per DESIGN §3.4 v1 Path B), every commit also
@@ -167,10 +167,10 @@ the live demo stack. Every criterion is objectively verifiable.
 ## 4. Security & audit-chain acceptance
 
 - **S1 (correlation ID, MANDATORY).** Every `canonical_events` row from
-  this integration carries the 12 `decision_context_json` fields
-  specified in DESIGN.md §8.2a, including `integration='litellm'` and
+  this integration carries the 12 audit-context fields (per DESIGN.md
+  §8.2a) in `payload_json->'data'` §8.2a, including `integration='litellm'` and
   `litellm_call_id`. Verified by:
-  `SELECT COUNT(*) FROM canonical_events WHERE decision_context_json->>'integration'='litellm' AND decision_context_json->>'litellm_call_id' IS NULL;`
+  `SELECT COUNT(*) FROM canonical_events WHERE payload_json->'data'->>'integration'='litellm' AND payload_json->'data'->>'litellm_call_id' IS NULL;`
   → expected `0`. Also verified row-by-row that all 12 fields are
   populated (P0.5 fix from Phase 0 review — `verify_step_litellm_real.sql`
   has the row-level predicate).
@@ -189,10 +189,10 @@ the live demo stack. Every criterion is objectively verifiable.
   question explicitly.
 - **S4 (no log leakage of LLM payloads).** `messages`/`prompt`/response
   content from LiteLLM kwargs MUST NOT be written verbatim into
-  `canonical_events.decision_context_json`. Only a blake2b 16-byte content
+  `canonical_events.payload_json`. Only a blake2b 16-byte content
   hash and token-count metadata are committed. Verified by `grep` for
   unhashed `kwargs["messages"]` flows + sanity check
-  `octet_length(decision_context_json::text) ≤ 4 KiB` per row.
+  `octet_length(payload_json::text) ≤ 4 KiB` per row.
 - **S5 (SBOM, license).** The `spendguard-sdk[litellm]` extra pulls
   `litellm` and its deps. No new transitive brings in a license outside the
   existing allowlist (Apache-2.0, MIT, BSD-3-Clause, BSD-2-Clause, ISC,
@@ -238,9 +238,9 @@ per DESIGN §3.4 v1 Path B):**
 
 ```
 [demo] DEMO_MODE=litellm_real → litellm proxy + sidecar + ledger ready
-[demo] handshake ok session_id=...
+[demo] handshake ok tenant_id=...
 [demo] step 1: ALLOW — POST /v1/chat/completions team=t1 → DECISION_ALLOWED → INVOICE_COMMITTED
-[demo] step 2: DENY — POST over-budget → DecisionDenied raised (provider counter delta=0)
+[demo] step 2: DENY — POST over-budget → HTTP 402 from proxy (counter delta=0; internal DecisionDenied)
 [demo] step 3: STREAM — POST stream=true → sse complete → INVOICE_COMMITTED with real usage
 [demo] step 4: PROXY-MULTI-TEAM — POST team=t2 → DECISION_ALLOWED → INVOICE_COMMITTED (isolated from t1)
 [demo] PASS — all 4 steps OK
@@ -249,9 +249,9 @@ per DESIGN §3.4 v1 Path B):**
 Absent the literal `PASS — all 4 steps OK` line → demo gate **fails**
 regardless of exit code.
 
-**Ledger queries that MUST hold (templated for `$session_id`; event
-types use the **full** canonical names per DESIGN.md §8.2 — no
-abbreviations):**
+**Ledger queries that MUST hold (templated for `$tenant_id` and
+`$demo_start` timestamp; event types are CloudEvent strings per
+canonical_events schema).**
 
 **Schema reality** (pivot R1 P0.1 — schema-verified 2026-05-20
 against `services/canonical_ingest/migrations/0002_canonical_events.sql`
@@ -308,20 +308,23 @@ SELECT COUNT(*)::int AS unmatched
    AND ce.payload_json->'data'->>'integration' = 'litellm'
    AND ls.request_id IS NULL;
 
--- Q3: audit-chain integrity. Each decision has a paired outcome.
--- Uses canonical_events_global_keys for cross-partition uniqueness
--- (per services/canonical_ingest/migrations/0002_canonical_events.sql).
--- Expected: 0 missing outcomes for litellm decisions in this run.
-SELECT COUNT(*)::int AS missing_outcomes
-  FROM canonical_events_global_keys d
-  LEFT JOIN canonical_events_global_keys o
-    ON o.tenant_id = d.tenant_id
-   AND o.decision_id = d.decision_id
-   AND o.event_type = 'spendguard.audit.outcome'
- WHERE d.tenant_id = $tenant_id
+-- Q3: audit-chain orphan-outcome check. The real invariant is
+-- "no spendguard.audit.outcome WITHOUT a preceding
+-- spendguard.audit.decision for the same (tenant, decision_id)".
+-- Deny/skip/transition decisions legitimately have NO outcome row;
+-- asserting every decision has an outcome would force implementers
+-- to emit bogus outcomes (R2 new-in-r2 P0 fix).
+-- Expected: 0 orphan outcomes for litellm decisions in this run.
+SELECT COUNT(*)::int AS orphan_outcomes
+  FROM canonical_events_global_keys o
+  LEFT JOIN canonical_events_global_keys d
+    ON d.tenant_id = o.tenant_id
+   AND d.decision_id = o.decision_id
    AND d.event_type = 'spendguard.audit.decision'
-   AND d.decision_id IS NOT NULL
-   AND o.event_id IS NULL;
+ WHERE o.tenant_id = $tenant_id
+   AND o.event_type = 'spendguard.audit.outcome'
+   AND o.decision_id IS NOT NULL
+   AND d.event_id IS NULL;
 ```
 
 **Schema blocker (pivot R1 P0.1).** Q2 and Q2b depend on the sidecar
@@ -371,8 +374,8 @@ DEMO_MODE=litellm_deny make demo-up
 
 ```
 [demo] DEMO_MODE=litellm_deny → fail-closed scenarios
-[demo] handshake ok session_id=...
-[demo] step 1: budget exhausted — DecisionDenied raised (provider untouched)
+[demo] handshake ok tenant_id=...
+[demo] step 1: budget exhausted — HTTP 402 from proxy (counter delta=0)
 [demo] step 2: sidecar offline — SidecarUnavailable raised (provider untouched)
 [demo] step 3: resolver returns None + no default budget — SpendGuardConfigError raised
 [demo] PASS — all 3 deny paths OK
@@ -381,11 +384,15 @@ DEMO_MODE=litellm_deny make demo-up
 **Ledger / fixture assertions:**
 
 - **Step 2 (sidecar offline):**
-  `SELECT COUNT(*) FROM canonical_events WHERE session_id=$step2_session_id;`
-  → expected `0` (sidecar was never reached).
-- **Step 1 (budget exhausted):** event types for this session are
-  `{DECISION_REQUESTED, DECISION_DENIED}` only — no
-  `RESERVATION_CREATED`, no `INVOICE_COMMITTED`.
+  `SELECT COUNT(*) FROM canonical_events WHERE tenant_id=$tenant_id
+   AND recorded_at >= $step2_start
+   AND payload_json->'data'->>'litellm_call_id' = $step2_call_id;`
+  → expected `0` (sidecar was never reached; no audit row written).
+- **Step 1 (budget exhausted):** the corresponding decision row in
+  `canonical_events` is `event_type = 'spendguard.audit.decision'`
+  with `payload_json->>'decision' = 'STOP'` (or framework-equivalent
+  deny outcome). No `ledger_transactions` row with `operation_kind
+  IN ('reserve', 'invoice_reconcile')` for this `decision_id`.
 
 **Provider-untouched assertion (the marquee G2 demonstration).**
 The **counting HTTP endpoint** (in-process `aiohttp` mock server,
@@ -575,7 +582,7 @@ If a critical bug surfaces post-merge:
 - **R3 (Shape A as fallback).** Per DESIGN §3.1, Shape A (LiteLLM →
   SpendGuard egress proxy chain) needs **zero new SpendGuard code**. Point
   `litellm.api_base` at the existing egress proxy → continue with degraded
-  provider coverage (OpenAI / Responses API only). The docs page Path C
+  provider coverage (OpenAI / Responses API only). The docs page Path A
   carries the recipe.
 - **R4 (data integrity).** Per `project_phase1_ledger.md` + DESIGN §8.2:
   rollback **never** mutates `canonical_events`. In-flight reservations

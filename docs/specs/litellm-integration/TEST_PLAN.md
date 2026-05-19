@@ -484,7 +484,7 @@ The demo IS the test. See §3.1 (now showing all 4 steps).
 
 ### 2.10 tests-for-slice-10 — Docs site + final Codex pass
 
-Scope: `docs/site/docs/integrations/litellm.md` 3-path page + sibling
+Scope: `docs/site/docs/integrations/litellm.md` 2-path page + sibling
 Related-footer updates + README + quickstart + the final
 whole-integration adversarial Codex pass per ACCEPTANCE.md C2.
 
@@ -494,8 +494,9 @@ docs + a one-shot Codex run.
 **Doc tests** (via existing docs site CI):
 
 1. `test_litellm_md_renders` — docs site build succeeds with new page.
-2. `test_three_paths_present` — page contains "Path A", "Path B",
-   "Path C" headings with code snippets.
+2. `test_two_paths_present` — page contains "Path B (proxy)" and
+   "Path A (direct → egress proxy)" headings with code snippets;
+   asserts NO "Path C" heading (deprecated pre-pivot).
 3. `test_quickest_validation_block_matches_acceptance` — the
    "Quickest validation" code block in the docs page matches
    ACCEPTANCE.md §5.1 verbatim (no copy-paste drift).
@@ -540,9 +541,9 @@ and ACCEPTANCE.md §5.1 MUST match this verbatim; all proxy-driven):
 
 ```
 [demo] DEMO_MODE=litellm_real → litellm proxy + sidecar + ledger ready
-[demo] handshake ok session_id=...
+[demo] handshake ok tenant_id=...
 [demo] step 1: ALLOW — POST /v1/chat/completions team=t1 → DECISION_ALLOWED → INVOICE_COMMITTED
-[demo] step 2: DENY — POST over-budget → DecisionDenied raised (provider counter delta=0)
+[demo] step 2: DENY — POST over-budget → HTTP 402 from proxy (counter delta=0; internal DecisionDenied)
 [demo] step 3: STREAM — POST stream=true → sse complete → INVOICE_COMMITTED with real usage
 [demo] step 4: PROXY-MULTI-TEAM — POST team=t2 → DECISION_ALLOWED → INVOICE_COMMITTED (isolated from t1)
 [demo] PASS — all 4 steps OK
@@ -598,8 +599,8 @@ match this verbatim):
 
 ```
 [demo] DEMO_MODE=litellm_deny → fail-closed scenarios
-[demo] handshake ok session_id=...
-[demo] step 1: budget exhausted — DecisionDenied raised (provider untouched)
+[demo] handshake ok tenant_id=...
+[demo] step 1: budget exhausted — HTTP 402 from proxy (counter delta=0)
 [demo] step 2: sidecar offline — SidecarUnavailable raised (provider untouched)
 [demo] step 3: resolver returns None + no default budget — SpendGuardConfigError raised
 [demo] PASS — all 3 deny paths OK

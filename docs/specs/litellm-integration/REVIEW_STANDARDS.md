@@ -391,9 +391,9 @@ Stdout must contain **all four** step lines in this order:
 
 ```
 [demo] DEMO_MODE=litellm_real → litellm proxy + sidecar + ledger ready
-[demo] handshake ok session_id=...
+[demo] handshake ok tenant_id=...
 [demo] step 1: ALLOW — POST /v1/chat/completions team=t1 → DECISION_ALLOWED → INVOICE_COMMITTED
-[demo] step 2: DENY — POST over-budget → DecisionDenied raised (provider counter delta=0)
+[demo] step 2: DENY — POST over-budget → HTTP 402 from proxy (counter delta=0; internal DecisionDenied)
 [demo] step 3: STREAM — POST stream=true → sse complete → INVOICE_COMMITTED with real usage
 [demo] step 4: PROXY-MULTI-TEAM — POST team=t2 → DECISION_ALLOWED → INVOICE_COMMITTED (isolated from t1)
 [demo] PASS — all 4 steps OK
@@ -411,8 +411,8 @@ deferred to slice 9`. During Slice 9 review, ALL four step lines + the
 
 ```
 [demo] DEMO_MODE=litellm_deny → fail-closed scenarios
-[demo] handshake ok session_id=...
-[demo] step 1: budget exhausted — DecisionDenied raised (provider untouched)
+[demo] handshake ok tenant_id=...
+[demo] step 1: budget exhausted — HTTP 402 from proxy (counter delta=0)
 [demo] step 2: sidecar offline — SidecarUnavailable raised (provider untouched)
 [demo] step 3: resolver returns None + no default budget — SpendGuardConfigError raised
 [demo] PASS — all 3 deny paths OK
