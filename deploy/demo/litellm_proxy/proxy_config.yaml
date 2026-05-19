@@ -1,0 +1,35 @@
+# Minimal LiteLLM proxy config for `DEMO_MODE=litellm_real`.
+#
+# Slice 6 ships the minimum to exercise ALLOW + DENY (steps 1+2 of the
+# 4-step demo per ACCEPTANCE.md §5.1). Slice 8 will replace this with
+# the operator-facing template (PROXY_RECIPE.md) covering multi-team
+# seeding + master_key auth + production-shape settings.
+#
+# The proxy routes every model to a local counting HTTP listener that
+# the demo container boots before starting the proxy subprocess
+# (api_base = http://127.0.0.1:8765/v1). The counting listener emits a
+# minimal OpenAI-shaped `/v1/chat/completions` response with non-zero
+# `usage.completion_tokens` so the reconciler has a real number to
+# commit (avoids `mock_response`, which is BANNED for the demo gate
+# per spec line 893 — F7 acceptance requires reconciled usage).
+
+model_list:
+  - model_name: gpt-4o-mini  # callers POST {"model": "gpt-4o-mini", ...}
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_base: http://127.0.0.1:8765/v1  # counting listener
+      api_key: dummy-key-not-used-by-counter
+
+litellm_settings:
+  # Reference the SpendGuard callback instance by module:attr. The
+  # module lives next to this config and is added to PYTHONPATH by
+  # run_demo.py before spawning the proxy subprocess.
+  callbacks: ["spendguard_callback.spendguard_handler"]
+  # Drop request bodies from logs to avoid PII leakage; SpendGuard
+  # itself records only the hashed prompt + token counts.
+  drop_params: true
+
+general_settings:
+  # Master key for proxy auth — Slice 6 uses a fixed demo key; Slice 8
+  # documents per-team key generation. Real operators MUST override.
+  master_key: sk-demo-litellm-proxy-key

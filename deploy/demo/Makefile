@@ -135,6 +135,9 @@ else ifeq ($(DEMO_MODE),approval)
 else ifeq ($(DEMO_MODE),approval_hot_reload)
 	@echo "[demo] verifying issue #59 hot-reload regression (approval NOT bundled)..."
 	@$(MAKE) demo-verify-approval-hot-reload
+else ifeq ($(DEMO_MODE),litellm_real)
+	@echo "[demo] verifying Slice 6 (litellm_real ALLOW + DENY)..."
+	@$(MAKE) demo-verify-litellm-real
 else ifneq (,$(findstring agent_real,$(DEMO_MODE)))
 	@echo "[demo] DEMO_MODE=$(DEMO_MODE) — skipping demo-verify-step7."
 	@echo "[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)"
@@ -232,6 +235,14 @@ demo-verify-approval:
 demo-verify-approval-hot-reload:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_approval_hot_reload.sql
 	@echo "[demo] issue #59 hot-reload regression verification done"
+
+# Slice 6 (litellm_real) verification: ALLOW step produces a
+# reserve + commit_estimated; DENY step produces a denied_decision OR
+# no commit (counting provider not hit). Asserts canonical_events has
+# at least 1 decision row + 1 outcome row (ALLOW path).
+demo-verify-litellm-real:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_real.sql
+	@echo "[demo] Slice 6 litellm_real verification done"
 
 # Phase 4 O3 pricing-table verification: pricing-seed-init loaded the
 # real pricing_table from seed.yaml; pricing_versions has at least one

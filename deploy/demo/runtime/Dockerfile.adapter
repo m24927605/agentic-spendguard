@@ -49,4 +49,11 @@ COPY deploy/demo/demo/run_demo.py /usr/local/bin/run_demo.py
 COPY deploy/demo/runtime/demo-entrypoint.sh /usr/local/bin/demo-entrypoint.sh
 RUN chmod +x /usr/local/bin/run_demo.py /usr/local/bin/demo-entrypoint.sh
 
+# Slice 6 (litellm_real): SpendGuard callback module + proxy config
+# live under /opt/spendguard/litellm_proxy. aiohttp powers the
+# in-process counting HTTP provider so the demo never relies on
+# `mock_response` (spec line 893 — banned for the demo gate).
+RUN pip install --no-cache-dir "aiohttp>=3.9"
+COPY deploy/demo/litellm_proxy /opt/spendguard/litellm_proxy
+
 ENTRYPOINT ["/usr/local/bin/demo-entrypoint.sh"]
