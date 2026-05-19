@@ -393,6 +393,7 @@ class SpendGuardClient:
         projected_p99_atomic: str = "",
         projected_unit: common_pb2.UnitRef | None = None,
         prompt_text: str | None = None,
+        decision_context_json: dict | None = None,
     ) -> DecisionOutcome:
         """Run a `*.pre` decision boundary through the sidecar.
 
@@ -435,15 +436,25 @@ class SpendGuardClient:
         # asked to hash empty content" → compute HMAC of empty bytes
         # (matches Rust prompt_hash::compute behavior on empty input).
         runtime_metadata = None
-        if prompt_text is not None:
+        if prompt_text is not None or decision_context_json is not None:
             from google.protobuf import struct_pb2
 
-            from .prompt_hash import compute as compute_prompt_hash
-
             runtime_metadata = struct_pb2.Struct()
-            runtime_metadata["prompt_hash"] = compute_prompt_hash(
-                prompt_text, self._tenant_id
-            )
+            if prompt_text is not None:
+                from .prompt_hash import compute as compute_prompt_hash
+
+                runtime_metadata["prompt_hash"] = compute_prompt_hash(
+                    prompt_text, self._tenant_id
+                )
+            # LiteLLM integration (DESIGN.md §8.2a): fold caller-supplied
+            # decision context fields into runtime_metadata so they land
+            # in canonical_events.decision_context_json.
+            if decision_context_json is not None:
+                for key, value in decision_context_json.items():
+                    # Struct.update would overwrite prompt_hash if caller
+                    # collides; assign per-key so existing fields win.
+                    if key not in runtime_metadata:
+                        runtime_metadata[key] = value
 
         inputs = adapter_pb2.DecisionRequest.Inputs(
             projected_claims=list(projected_claims),

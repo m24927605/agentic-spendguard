@@ -52,6 +52,9 @@ agt = [
   "agent-governance-toolkit>=3.4",
   "agent-os-kernel>=3.0",
 ]
+litellm = [
+  "litellm>=1.50,<2.0",
+]
 dev = [
   "grpcio-tools>=1.62",
   "pytest>=8",

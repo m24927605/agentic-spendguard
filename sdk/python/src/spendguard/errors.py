@@ -210,3 +210,17 @@ class MutationApplyFailed(SpendGuardError):
     The adapter MUST surface this to the sidecar via ConfirmPublishOutcome
     with `outcome=APPLY_FAILED` so the audit chain records the failure.
     """
+
+
+class SpendGuardConfigError(SpendGuardError):
+    """Adapter-level configuration is invalid.
+
+    Raised when an integration is missing a required parameter the adapter
+    cannot infer (e.g. `budget_resolver` returned None, multi-claim
+    estimator, missing `litellm_call_id`). Distinct from `HandshakeError`
+    (sidecar-side mismatch) so callers can route the two failure classes
+    differently — config errors are operator-fixable; handshake errors
+    usually need the sidecar restarted.
+
+    Added for the LiteLLM integration (DESIGN.md §5).
+    """
