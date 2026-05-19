@@ -96,6 +96,13 @@ BEGIN
      WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
        AND operation_kind = 'commit_estimated';
 
+    -- Slice 6 ships steps 1+2 (1 ALLOW + 1 DENY). Slice 9 adds
+    -- step 3 (STREAM ALLOW) + step 4 (2 multi-team ALLOWs), bringing
+    -- the ALLOW total to 4. Assertion: reserve >= 1 / commit >= 1 is
+    -- the v1 Slice-6 baseline; >= 4 is the post-Slice-9 baseline. We
+    -- keep the relaxed >= 1 here so the Slice 6-only operator gate
+    -- still passes; Slice 9 introduces a stricter assertion via a
+    -- separate verify file if needed.
     IF v_reserve < 1 THEN
         RAISE EXCEPTION 'SLICE6_GATE: ledger_transactions.reserve >= 1 expected, got %', v_reserve;
     END IF;
@@ -103,7 +110,7 @@ BEGIN
         RAISE EXCEPTION 'SLICE6_GATE: ledger_transactions.commit_estimated >= 1 expected, got %', v_commit;
     END IF;
 
-    RAISE NOTICE 'SLICE6 LEDGER OK: reserve=% commit_estimated=%',
+    RAISE NOTICE 'SLICE6/9 LEDGER OK: reserve=% commit_estimated=%',
         v_reserve, v_commit;
 END;
 $$;
