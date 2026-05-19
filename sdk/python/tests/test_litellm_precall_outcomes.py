@@ -180,6 +180,7 @@ async def test_estimator_claim_empty_budget_id_rejected():
     cb = _cb(cli, estimator_claim=_claim(budget_id=""))
     with pytest.raises(SpendGuardConfigError, match="budget_id"):
         await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+    cli.request_decision.assert_not_called()  # R4 P2: pre-wire reject
 
 
 @pytest.mark.asyncio
@@ -188,6 +189,7 @@ async def test_estimator_claim_empty_window_id_rejected():
     cb = _cb(cli, estimator_claim=_claim(window=""))
     with pytest.raises(SpendGuardConfigError, match="window_instance_id"):
         await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+    cli.request_decision.assert_not_called()  # R4 P2: pre-wire reject
 
 
 @pytest.mark.asyncio
@@ -209,6 +211,7 @@ async def test_empty_binding_budget_id_rejected():
     )
     with pytest.raises(SpendGuardConfigError, match="budget_id is empty"):
         await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+    cli.request_decision.assert_not_called()  # R4 P2: pre-wire reject
 
 
 @pytest.mark.asyncio
@@ -228,6 +231,7 @@ async def test_empty_binding_window_id_rejected():
     )
     with pytest.raises(SpendGuardConfigError, match="window_instance_id is empty"):
         await cb.async_pre_call_hook(None, None, _data(), "acompletion")
+    cli.request_decision.assert_not_called()  # R4 P2: pre-wire reject
 
 
 @pytest.mark.asyncio
