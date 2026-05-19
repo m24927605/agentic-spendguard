@@ -47,12 +47,18 @@
   `verbose_logger.exception` and **swallowed**. Provider call proceeds regardless. ADR-005
   fail-closed claim is unenforceable through the documented hook.
 
-**Disposition:** ESCALATED to owner per REVIEW_STANDARDS.md §3.5. Owner decision 2026-05-20:
-**v1 Shape B redesigned to monkey-patch `litellm.acompletion`** at `install()` time; sync
-`litellm.completion()` is rejected (raise-only wrapper). DESIGN.md §3.4 + IMPLEMENTATION.md Slice
-1-7 need rework. The current Slice 1 commit (`a95907a`) ships the CustomLogger skeleton; the
-redesign reuses dataclasses/errors but replaces the hook-based callback class with a wrapper-
-based install.
+**Disposition:** ESCALATED to owner per REVIEW_STANDARDS.md §3.5. **Owner decision 2026-05-20
+(revised — superseded the initial monkey-patch choice):**
+**v1 proxy-only Path B + Shape A egress proxy for direct mode** (DESIGN.md §3.4 v1 revised).
+The earlier "monkey-patch acompletion" option was reconsidered — monkey-patching LiteLLM's
+dispatch is fragile to upstream changes and adds significant SDK code (~250 LOC) to maintain
+a parallel call path. Instead: Shape B (CustomLogger callback) is locked to LiteLLM **proxy
+mode only** (where `async_pre_call_hook` is actually invoked); direct in-process callers route
+through the EXISTING SpendGuard egress proxy via `litellm.api_base = "http://localhost:9000/v1"`
+(zero new SDK code; reuses `auto-instrument-egress-proxy` infrastructure that already ships).
+DESIGN.md §3.4 + IMPLEMENTATION.md Slice 1-9 updated. The current Slice 1 commit (`a95907a`)
+ships dataclasses + skeleton; the pivot commit (`915cf94`) removes `install()` + `log_pre_api_call`
+override; subsequent pivot-R1 fixes update specs + remove `install()` from `__all__`.
 
 ## Disputed findings
 

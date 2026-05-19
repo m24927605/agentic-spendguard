@@ -35,10 +35,16 @@ of bugs the previous tier cannot. **No tier substitutes for another.**
 - **Provider HTTP** is the only mocked layer: `litellm`'s built-in
   `mock_response="..."` kwarg or `respx`/`aioresponses` interception, or real
   localhost ollama on the developer machine.
-- Tests drive `litellm.acompletion(..., metadata={...})` and assert wire
-  results: `RequestDecision` reached the sidecar (verified via canonical
-  events row, not via mock), reservation in `reservations`, commit in
-  `invoices` with reconciled tokens, `RESERVATION_RELEASED` on failure.
+- Tests drive the callback two ways depending on what they verify
+  (pivot R1 P1.2 split):
+  - **Unit-level callback contract tests** invoke
+    `SpendGuardLiteLLMCallback.async_pre_call_hook(...)` directly
+    with synthesized `data` + `user_api_key_dict` (no LiteLLM
+    dispatcher involved). These pin the SDK contract.
+  - **Wire-level tests** POST to a LiteLLM proxy subprocess
+    (`litellm --config minimal_proxy_config.yaml`) via `httpx`. Only
+    proxy mode actually invokes `async_pre_call_hook`; driving
+    `litellm.acompletion()` directly would NOT call our callback.
 - **Tier 2 cannot find**: real LiteLLM proxy multi-worker races, real
   `SpendLogs` ↔ SpendGuard join correctness, fixture-vs-real-provider drift.
 
@@ -51,8 +57,9 @@ caught only by demo bring-up in Phase 2B is the precedent.
 
 - Real Postgres, sidecar, ledger.
 - Real `litellm` proxy (`litellm --config proxy_config.yaml`) for proxy mode;
-  Python entrypoint calling `litellm.acompletion()` for the callback-only
-  variant.
+  Python entrypoint POSTing via `httpx.AsyncClient` to the proxy URL
+  (direct `litellm.acompletion()` is NOT used for callback testing —
+  it bypasses `async_pre_call_hook` per Slice 1 R2 finding).
 - Real `spendguard_litellm_proxy_callback.py` template loaded by the proxy.
 - Provider: **counting HTTP endpoint** (in-process `aiohttp` mock server)
   for both demos. `litellm.acompletion(mock_response="...")` is BANNED
@@ -61,7 +68,7 @@ caught only by demo bring-up in Phase 2B is the precedent.
   "mock_response fallback in CI" wording). Real ollama on localhost is
   also acceptable for `litellm_real` (counts via access log).
 - Invariants from DESIGN.md §11:
-  1. `litellm.acompletion()` succeeds end-to-end.
+  1. `POST /v1/chat/completions` to LiteLLM proxy succeeds end-to-end.
   2. One reserve + one commit canonical event per call.
   3. `LiteLLM_SpendLogs` row also written (LiteLLM-owned, not ours).
   4. `derive_uuid_from_signature("litellm:" + litellm_call_id,

@@ -84,7 +84,7 @@ with `NotImplementedError` bodies, and the two new exception classes in
 `ClaimReconciler`, `SpendGuardLiteLLMCallback`, **`_LoopBoundCallback`**
 (SDK class that lazy-binds `SpendGuardClient` to the serving event
 loop — Round 3 P0.3 fix: now lives in the SDK, not the operator
-template), `install(...)` stub, `run_context()`/`current_run_context()`,
+template), `run_context()`/`current_run_context()`,
 two new exceptions (`SidecarUnavailable`,
 `SpendGuardConfigError`) in `errors.py`. `DecisionDenied` is REUSED
 unchanged (DESIGN.md §5). Slice 1 also extends
@@ -215,6 +215,10 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
         self._init_lock: asyncio.Lock | None = None
 
     async def _ensure_client(self) -> SpendGuardClient:
+        # Round 1 P1.6 fix (proxy startup race): bounded retry with
+        # exponential backoff so first inbound request doesn't fail
+        # closed just because UDS race vs sidecar boot. Total max
+        # wait ≤ 3s; longer waits surface SidecarUnavailable.
         if self._client is not None:
             return self._client
         if self._init_lock is None:
@@ -225,8 +229,19 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
                     socket_path=self._socket_path,
                     tenant_id=self._tenant_id,
                 )
-                await c.connect()
-                await c.handshake()
+                last_exc: Exception | None = None
+                for attempt in range(5):  # 0.1, 0.2, 0.4, 0.8, 1.6 = 3.1s total
+                    try:
+                        await c.connect()
+                        await c.handshake()
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        await asyncio.sleep(0.1 * (2 ** attempt))
+                else:
+                    raise SidecarUnavailable(
+                        f"sidecar handshake failed after 5 attempts: {last_exc}"
+                    ) from last_exc
                 self._client = c
         return self._client
 
@@ -242,24 +257,29 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
         await self._ensure_client()
         return await super().async_log_failure_event(*args, **kwargs)
 
-def install(*, client, budget_resolver, claim_estimator,
-            claim_reconciler, fail_closed: bool = True):
-    raise NotImplementedError("Slice 2")
+# v1 has NO install() public API (Pivot R1 P0.2 fix). Direct
+# `litellm.callbacks = [...]` was verified ineffective (Slice 1 R2).
+# Proxy users wire `handler_instance = _LoopBoundCallback(...)` in
+# their operator-owned module + `proxy_config.yaml`. Direct callers
+# use Shape A: `litellm.api_base = "http://localhost:9000/v1"`.
 
 __all__ = [
     "BudgetBinding", "BudgetResolver", "ClaimEstimator", "ClaimReconciler",
     "LiteLLMRunContext", "ResolverContext", "SpendGuardLiteLLMCallback",
-    "_LoopBoundCallback",  # exported for proxy template (Round 2 P0.5)
-    "current_run_context", "install", "run_context",
+    "_LoopBoundCallback",
+    "current_run_context", "run_context",
 ]
 ```
 
 **Out of scope.** Async hook bodies (Slices 2–5; Slice 1 ships stubs
-raising `NotImplementedError`). `install()` body (Slice 2). **Sync
-LiteLLM call gating** — verified ineffective; sync users route to
-Shape A egress proxy (DESIGN §3.4 v1 Path A). No `log_pre_api_call`
-override. `prompt_text` enrichment (covered in Slice 2's
-`decision_context_json` work).
+raising `NotImplementedError`). Public `install()` factory (REMOVED
+in pivot R1 P0.2 fix — Slice 1 R2 verified `litellm.callbacks=[...]`
+direct registration doesn't gate; proxy users instantiate
+`_LoopBoundCallback` directly). **Sync LiteLLM call gating** —
+verified ineffective; sync users route to Shape A egress proxy
+(DESIGN §3.4 v1 Path A). No `log_pre_api_call` override.
+`prompt_text` enrichment (covered in Slice 2's `decision_context_json`
+work).
 
 **Tests.** `TEST_PLAN.md#tests-for-slice-1`. Smoke: importable,
 `__all__` complete, dataclasses frozen+slotted, optional-import error
@@ -303,11 +323,14 @@ the provider wire (P1.5 fix from Phase 0 review).
 shape (see `client.py:127` — `reservation_ids` is `tuple[str, ...]`,
 NOT a singular `reservation_id`).
 
-**Outputs.** Working pre-call hook; `install()` factory; env reads
+**Outputs.** Working pre-call hook; env reads
 (`SPENDGUARD_LITELLM_FAIL_OPEN`, `SPENDGUARD_LITELLM_TTL_SECONDS`) at
 **construction only** (P1.3 fix); `_build_resolver_ctx(...)` helper;
 `_build_decision_context(...)` helper producing the
-`decision_context_json` field bundle from DESIGN.md §8.2a.
+`decision_context_json` field bundle from DESIGN.md §8.2a. **No
+public `install()` factory** (pivot R1 P0.2 — verified ineffective
+for direct mode); proxy users instantiate `_LoopBoundCallback` per
+the operator template (Slice 8).
 
 **Code skeleton.**
 
@@ -477,15 +500,11 @@ async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
     # nothing on the wire.
     return data
 
-def install(*, client, budget_resolver, claim_estimator,
-            claim_reconciler, fail_closed: bool = True):
-    import litellm
-    cb = SpendGuardLiteLLMCallback(
-        client=client, budget_resolver=budget_resolver,
-        claim_estimator=claim_estimator, claim_reconciler=claim_reconciler,
-        fail_closed=fail_closed)
-    litellm.callbacks = (litellm.callbacks or []) + [cb]
-    return cb
+# REMOVED: install() factory. Verified ineffective for direct
+# `litellm.callbacks` registration — async_pre_call_hook is proxy-only
+# (see Slice 1 R2 escalation). Proxy users wire `handler_instance =
+# _LoopBoundCallback(...)` in proxy_config.yaml. Direct users use
+# Shape A (DESIGN.md §3.4 v1 Path A).
 ```
 
 **Out of scope.** Success commit (Slice 3). Streaming reconciler
@@ -918,8 +937,8 @@ variant (Slice 7). Operator-facing proxy template + PROXY_RECIPE.md
    `DECISION_ALLOWED`/`INVOICE_COMMITTED`).
 4. Env-var coverage — `_env()` raises on missing; enumerate every
    read and add to compose.
-5. `install()` leaks `litellm.callbacks` — explicit tear-down at end
-   of demo.
+5. Proxy subprocess lifecycle — explicit shutdown at end of demo so
+   the LiteLLM proxy's bound port doesn't linger across modes.
 
 **Acceptance.** `ACCEPTANCE.md#slice-6`. `DEMO_MODE=litellm_real
 make demo-up` exits 0 with step-1 + step-2 logs visible. Steps 3+4

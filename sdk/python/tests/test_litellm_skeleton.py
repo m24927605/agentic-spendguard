@@ -30,7 +30,6 @@ from spendguard.integrations.litellm import (  # noqa: E402
     SpendGuardLiteLLMCallback,
     _LoopBoundCallback,
     current_run_context,
-    install,
     run_context,
 )
 
@@ -57,7 +56,6 @@ def test_module_imports_with_litellm_installed():
         "SpendGuardLiteLLMCallback",
         "_LoopBoundCallback",
         "current_run_context",
-        "install",
         "run_context",
     }
     assert set(mod.__all__) == expected
@@ -142,15 +140,15 @@ def test_no_log_pre_api_call_override():
     )
 
 
-def test_install_raises_in_slice_1():
-    """install() body lands in Slice 2."""
-    with pytest.raises(NotImplementedError, match="Slice 2"):
-        install(
-            client=None,  # type: ignore[arg-type]
-            budget_resolver=lambda ctx: None,
-            claim_estimator=lambda ctx: [],
-            claim_reconciler=lambda ctx, resp: [],
-        )
+def test_install_factory_removed_in_pivot():
+    """Pivot R1 P0.2: `install()` was removed because direct
+    `litellm.callbacks=[...]` registration was verified ineffective
+    (Slice 1 R2). Confirm the module does NOT export `install`."""
+    import spendguard.integrations.litellm as mod
+    assert "install" not in mod.__all__
+    assert not hasattr(mod, "install"), (
+        "install() factory must NOT exist in v1; pivot disabled it"
+    )
 
 
 def test_loop_bound_callback_is_subclass():

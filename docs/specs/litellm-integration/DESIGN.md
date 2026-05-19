@@ -97,7 +97,7 @@ follows.
 ### 3.1 Shape A — LiteLLM client → SpendGuard egress proxy chain
 
 ```
-litellm.acompletion(api_base="http://localhost:8088/v1")
+litellm.acompletion(api_base="http://localhost:9000/v1")
         │
         ▼
 SpendGuard egress proxy (existing)  ──► OpenAI / Anthropic
@@ -106,7 +106,7 @@ SpendGuard egress proxy (existing)  ──► OpenAI / Anthropic
 Postgres ledger + canonical_events
 ```
 
-User sets `litellm.api_base = "http://localhost:8088/v1"` (or per-call
+User sets `litellm.api_base = "http://localhost:9000/v1"` (or per-call
 `api_base=...`). LiteLLM speaks OpenAI to our existing egress proxy, which
 already handles reserve/commit/SSE.
 
@@ -238,7 +238,7 @@ the proxy).
 
 For users calling `litellm.acompletion()` / `litellm.completion()`
 directly from Python. They point `litellm.api_base =
-"http://localhost:8088/v1"` at the **existing SpendGuard egress
+"http://localhost:9000/v1"` at the **existing SpendGuard egress
 proxy** (already ships from `auto-instrument-egress-proxy-spec.md` +
 `egress-proxy-v0.2-streaming-sse-spec.md`). LiteLLM speaks OpenAI to
 the egress proxy, which handles reserve/commit/SSE end-to-end. **Zero
@@ -526,17 +526,16 @@ class SpendGuardLiteLLMCallback(CustomLogger):
         self, kwargs: dict, response_obj, start_time, end_time
     ) -> None: ...
 
-# Convenience for non-proxy users who do not want to subclass.
-def install(
-    *,
-    client: SpendGuardClient,
-    budget_resolver: BudgetResolver,
-    claim_estimator: ClaimEstimator,
-    claim_reconciler: ClaimReconciler,
-    fail_closed: bool = True,
-) -> SpendGuardLiteLLMCallback:
-    """Construct the callback and append to litellm.callbacks. Returns it
-    so the caller can detach later."""
+# Note: v1 has NO `install()` factory for direct mode. Direct callers
+# go through Shape A (egress proxy) — set `litellm.api_base =
+# "http://localhost:9000/v1"`. There is no `litellm.callbacks =
+# [callback]` registration path in v1 because Slice 1 R2 verified that
+# CustomLogger hooks do not gate direct calls.
+#
+# Proxy users instantiate `_LoopBoundCallback` as `handler_instance`
+# in the operator-owned `spendguard_litellm_proxy_callback.py` and
+# wire via `proxy_config.yaml`'s `litellm_settings.callbacks: ...`
+# string dotted-path.
 
 __all__ = [
     "BudgetBinding",
@@ -893,7 +892,7 @@ exceptions via `verbose_logger.exception()`; raising from
 Sync `litellm.completion()` users (and async direct
 `litellm.acompletion()` users) are routed to **Shape A egress proxy
 chain** (DESIGN §3.4 v1 Path A — `litellm.api_base =
-"http://localhost:8088/v1"`). That path IS wire-verified to gate
+"http://localhost:9000/v1"`). That path IS wire-verified to gate
 calls (egress proxy intercepts the HTTP layer) and works for both
 sync and async LiteLLM call surfaces.
 

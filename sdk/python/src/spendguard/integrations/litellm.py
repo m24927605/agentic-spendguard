@@ -192,17 +192,11 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
         await super().async_log_failure_event(*a, **kw)
 
 
-def install(
-    *,
-    client: SpendGuardClient,
-    budget_resolver: BudgetResolver,
-    claim_estimator: ClaimEstimator,
-    claim_reconciler: ClaimReconciler,
-    fail_closed: bool = True,
-) -> SpendGuardLiteLLMCallback:
-    """Build the callback and append to litellm.callbacks. Slice 2."""
-    raise NotImplementedError("Slice 2")
-
+# REMOVED: install() factory. Verified ineffective for direct
+# `litellm.callbacks` registration — async_pre_call_hook is proxy-only
+# (Slice 1 R2 escalation). Proxy users wire `handler_instance =
+# _LoopBoundCallback(...)` in proxy_config.yaml. Direct callers use
+# Shape A (set `litellm.api_base = "http://localhost:9000/v1"`).
 
 __all__ = [
     "BudgetBinding",
@@ -214,6 +208,5 @@ __all__ = [
     "SpendGuardLiteLLMCallback",
     "_LoopBoundCallback",
     "current_run_context",
-    "install",
     "run_context",
 ]

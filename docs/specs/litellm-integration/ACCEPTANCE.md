@@ -37,22 +37,32 @@ the live demo stack. Every criterion is objectively verifiable.
   `proxy_config.yaml` (string dotted-path — LiteLLM's required form
   for proxy callback loading). For direct in-process callers (Shape A
   path), the change is a single line:
-  `litellm.api_base = "http://localhost:8088/v1"` pointing at the
+  `litellm.api_base = "http://localhost:9000/v1"` pointing at the
   existing SpendGuard egress proxy (no new SpendGuard code; see
   DESIGN §3.4 v1 Path A). Verified by: the greenfield example in
   `docs/site/docs/integrations/litellm.md` (Slice 10 ships) runs
   end-to-end with no other code edits.
-- **F2 (G2, fail-closed).** When the sidecar UDS socket does not exist,
-  `litellm.acompletion(...)` raises `SidecarUnavailable` and
-  the upstream provider is **never** contacted. The deny path for an
-  over-budget call raises `DecisionDenied` (not `SpendGuardDenied` —
-  P0.8 spec lock decision: the typed-deny exception is `DecisionDenied`
-  everywhere, matching `client.py` + `agt.py` precedent). Verified by
-  `DEMO_MODE=litellm_deny` with sidecar disabled (sub-step 2): (a) the
-  **counting HTTP endpoint** counter stays at zero (P0.11: not
-  `mock_response`), (b) typed exception raised, (c) no `canonical_events`
-  row for the pre-call (sidecar never reached; SDK logs the attempt
-  locally).
+- **F2 (G2, fail-closed).** Two failure surfaces depending on path
+  (pivot R1 P1.1 fix):
+  - **Proxy mode (Shape B):** when the sidecar UDS is unreachable,
+    the callback raises `SidecarUnavailable` **inside the proxy
+    process**. The LiteLLM proxy surfaces this to the HTTP caller as
+    an HTTP error response (typically 5xx with the error reason in
+    the body). The upstream provider is **never** contacted by the
+    proxy. Verified by `DEMO_MODE=litellm_deny` sub-step 2: counting
+    HTTP endpoint delta = 0; proxy returns 5xx; canonical_events row
+    absent (sidecar never reached).
+  - **Direct Shape A:** sync/async `litellm.completion()` /
+    `litellm.acompletion()` calling through `api_base=...` to the
+    SpendGuard egress proxy receives the egress proxy's HTTP error
+    response (DESIGN §3.1 cons: "BadRequestError" surfaces; not a
+    typed `DecisionDenied`). Operator UX is "what does this status
+    mean" — documented in `docs/site/docs/integrations/litellm.md`
+    Path A.
+
+  The typed-deny exception inside the proxy is `DecisionDenied`
+  (matching client.py + agt.py precedent), but callers see HTTP
+  responses, not Python exceptions.
 - **F3 (G3, proxy + direct).** Both surfaces work, by different code
   paths per DESIGN §3.4 (revised 2026-05-20):
   - **Proxy (Shape B, this integration's primary v1 surface):**
@@ -63,7 +73,7 @@ the live demo stack. Every criterion is objectively verifiable.
     1-4 (Slices 6 + 9).
   - **Direct (Shape A, existing egress proxy — zero new SDK code):**
     User sets `litellm.api_base =
-    "http://localhost:8088/v1"` pointing at the SpendGuard egress
+    "http://localhost:9000/v1"` pointing at the SpendGuard egress
     proxy. `litellm.acompletion()` / `litellm.completion()` route
     through the egress proxy's existing reserve/commit/SSE
     infrastructure. Documented in `docs/site/docs/integrations/litellm.md`
@@ -93,7 +103,8 @@ the live demo stack. Every criterion is objectively verifiable.
   retry-injection demo step in v1; the integration test is the
   authoritative gate).
 - **F7 (DESIGN §5, streaming — ADR-003).** A streaming
-  `litellm.acompletion(..., stream=True)` reserves at start (estimator
+  POST /v1/chat/completions to the LiteLLM proxy with `stream=true`
+  in the body reserves at start (estimator
   worst-case), streams chunks to the caller, and commits at
   end-of-stream with the **reconciler-computed** real totals **when
   `response_obj.usage` is present at end-of-stream** (the normal
@@ -119,10 +130,12 @@ the live demo stack. Every criterion is objectively verifiable.
 ## 3. Non-functional acceptance
 
 - **NF1 (latency).** Pre-call hook median ≤ 10 ms, p99 ≤ 25 ms (sidecar
-  healthy, same pod, UDS) over 100 sequential `litellm.acompletion()` calls
-  in the tier-2 integration test. CI captures the histogram artefact.
+  healthy, same pod, UDS) over 100 sequential `POST /v1/chat/completions`
+  requests to the LiteLLM proxy in the tier-2 integration test. CI
+  captures the histogram artefact.
 - **NF2 (concurrency, marquee adversarial scenario).** 50 parallel
-  `asyncio.gather()` of `litellm.acompletion()` against a budget that
+  `asyncio.gather()` of `httpx.AsyncClient.post(proxy_url, ...)`
+  through the LiteLLM proxy against a budget that
   allows exactly 25 produces **exactly 25 ALLOWs and 25 DENYs** — no
   over-commit, no double-allow under contention. Per
   `feedback_codex_review.md` adversarial mode + `project_phase1_ledger.md`
@@ -240,61 +253,88 @@ regardless of exit code.
 types use the **full** canonical names per DESIGN.md §8.2 — no
 abbreviations):**
 
-```sql
--- Q1: event counts qualified by event_type (P0.6 fix from Phase 0 review).
--- Expected for the 4-step litellm_real demo:
---   DECISION_REQUESTED: 4 (one per step)
---   DECISION_ALLOWED:   3 (steps 1, 3, 4 — step 2 is the over-budget DENY)
---   DECISION_DENIED:    1 (step 2 only)
---   RESERVATION_CREATED:3 (one per allowed step)
---   INVOICE_COMMITTED:  3 (steps 1, 3, 4)
---   RESERVATION_RELEASED: 0 (no failures in happy path)
-SELECT event_type, COUNT(*) FROM canonical_events
-WHERE session_id = $session_id
-  AND decision_context_json->>'integration' = 'litellm'
-GROUP BY event_type;
+**Schema reality** (pivot R1 P0.1 — schema-verified 2026-05-20
+against `services/canonical_ingest/migrations/0002_canonical_events.sql`
+and `services/ledger/migrations/`):
 
--- Q2: cross-join. Applied to ALL litellm_real proxy commits (v1 only
--- gates via proxy mode per DESIGN §3.4). INNER JOIN (R4 P0.3 fix).
--- Expected: 3 rows (steps 1, 3, 4 commits — step 2 is DENY).
-SELECT ce.audit_decision_event_id, ls.request_id
-FROM canonical_events ce
-INNER JOIN "LiteLLM_SpendLogs" ls
-  ON ls.request_id = ce.decision_context_json->>'litellm_call_id'
-WHERE ce.event_type = 'INVOICE_COMMITTED'
-  AND ce.decision_context_json->>'integration' = 'litellm';
+- `canonical_events.event_type` is a CloudEvent type string
+  (`spendguard.audit.decision`, `spendguard.audit.outcome`); NOT
+  `INVOICE_COMMITTED`.
+- `canonical_events` has no `session_id`, `decision_context_json`,
+  or `audit_decision_event_id` columns. CloudEvent payload lives in
+  `payload_json` (JSONB).
+- LiteLLM-specific fields land in `payload_json->'data'->>...` via
+  `request_decision(decision_context_json=...)` + sidecar
+  enrichment (extension deferred per GH #77 — Slice 6 demo BLOCKED
+  until #77 lands).
+- Reservation/commit/release lifecycle is tracked on
+  `ledger_transactions.operation_kind` (`reserve`,
+  `invoice_reconcile`, `denied_decision`).
+
+```sql
+-- Q1: ledger_transactions lifecycle counts for the litellm proxy run.
+-- Expected for the full 4-step litellm_real demo:
+--   reserve:            3 (steps 1, 3, 4 — step 2 DENY skips reserve)
+--   invoice_reconcile:  3 (commit on each allowed step)
+--   denied_decision:    1 (step 2 only)
+SELECT operation_kind, COUNT(*)::int AS n
+  FROM ledger_transactions
+ WHERE tenant_id = $tenant_id
+   AND recorded_at >= $demo_start
+ GROUP BY operation_kind
+ ORDER BY operation_kind;
+
+-- Q2: cross-join canonical_events ⨝ LiteLLM_SpendLogs on the
+-- litellm_call_id field embedded in payload_json. Scoped to outcome
+-- events (= commits). Expected: 3 rows for the 4-step demo.
+SELECT ce.event_id, ls.request_id
+  FROM canonical_events ce
+ INNER JOIN "LiteLLM_SpendLogs" ls
+    ON ls.request_id = ce.payload_json->'data'->>'litellm_call_id'
+ WHERE ce.tenant_id = $tenant_id
+   AND ce.event_type = 'spendguard.audit.outcome'
+   AND ce.payload_json->'data'->>'integration' = 'litellm'
+   AND ce.payload_json->'data'->>'mode' = 'proxy';
 
 -- Q2b: unmatched-count safety net. Expected: 0 (every commit must
--- join — proxy-only world means every callback invocation has a
+-- join — proxy-only v1 means every callback invocation has a
 -- corresponding LiteLLM_SpendLogs row).
-SELECT COUNT(*) FROM canonical_events ce
-LEFT JOIN "LiteLLM_SpendLogs" ls
-  ON ls.request_id = ce.decision_context_json->>'litellm_call_id'
-WHERE ce.event_type = 'INVOICE_COMMITTED'
-  AND ce.decision_context_json->>'integration' = 'litellm'
-  AND ls.request_id IS NULL;
+SELECT COUNT(*)::int AS unmatched
+  FROM canonical_events ce
+  LEFT JOIN "LiteLLM_SpendLogs" ls
+    ON ls.request_id = ce.payload_json->'data'->>'litellm_call_id'
+ WHERE ce.tenant_id = $tenant_id
+   AND ce.event_type = 'spendguard.audit.outcome'
+   AND ce.payload_json->'data'->>'integration' = 'litellm'
+   AND ls.request_id IS NULL;
 
--- Q3: hash chain intact. canonical_events is a tenant-scoped chain
--- (not session-scoped), so a session's first event normally points
--- to a prior event in the same tenant. Q3 asserts that EVERY event
--- in this session has a valid prev pointer (event_id + hash matches
--- a real prior row in the same tenant). Expected: 0 broken pointers.
--- (Round 2 P1.6 fix — was asserting 1 genesis row, wrong for
--- tenant-scoped chain.)
-SELECT COUNT(*) FROM canonical_events ce1
-WHERE session_id = $session_id
-  AND ce1.prev_event_id IS NOT NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM canonical_events ce0
-    WHERE ce0.tenant_id = ce1.tenant_id
-      AND ce0.event_id = ce1.prev_event_id
-      AND ce0.event_hash = ce1.prev_event_hash);
+-- Q3: audit-chain integrity. Each decision has a paired outcome.
+-- Uses canonical_events_global_keys for cross-partition uniqueness
+-- (per services/canonical_ingest/migrations/0002_canonical_events.sql).
+-- Expected: 0 missing outcomes for litellm decisions in this run.
+SELECT COUNT(*)::int AS missing_outcomes
+  FROM canonical_events_global_keys d
+  LEFT JOIN canonical_events_global_keys o
+    ON o.tenant_id = d.tenant_id
+   AND o.decision_id = d.decision_id
+   AND o.event_type = 'spendguard.audit.outcome'
+ WHERE d.tenant_id = $tenant_id
+   AND d.event_type = 'spendguard.audit.decision'
+   AND d.decision_id IS NOT NULL
+   AND o.event_id IS NULL;
 ```
 
-**Important: Q1/Q2/Q3 counts assume the 4-step demo. Slice 6 lands
-steps 1+2 only; partial demo counts are: REQUESTED=2, ALLOWED=1,
-DENIED=1, RESERVATION_CREATED=1, INVOICE_COMMITTED=1. Slice 9 adds
-steps 3+4 to reach the full counts above.**
+**Schema blocker (pivot R1 P0.1).** Q2 and Q2b depend on the sidecar
+extracting the 12 LiteLLM fields from `runtime_metadata` into
+`canonical_events.payload_json->data`. GH issue #77 tracks the sidecar
+Rust extension; without it, Q2 returns 0 rows because
+`payload_json->'data'->>'integration'` is NULL. Slice 6 acceptance
+checks that #77 has landed; if not, the slice is BLOCKED on the
+sidecar work.
+
+**Slice 6 vs Slice 9 partial counts.** Slice 6 lands steps 1+2;
+partial Q1: `reserve=1, invoice_reconcile=1, denied_decision=1`.
+Slice 9 adds steps 3+4 → full counts above.
 
 **Failure-mode investigation guide:**
 
@@ -409,19 +449,28 @@ whole-integration scope (substitute DESIGN.md §1–13 for the slice mini-spec).
 
 ## 7. Documentation acceptance
 
-- **D1.** `docs/site/docs/integrations/litellm.md` exists and follows the
-  `docs/site/docs/integrations/agt.md` shape, with: "Why you'd want this"
-  intro; **three paths for existing LiteLLM users** — Path A (primary
-  callback), Path B (proxy `proxy_config.yaml` + operator-owned callback
-  module), Path C (Shape A fallback: `litellm.api_base` → SpendGuard
-  egress proxy, recipe only, no new SpendGuard code); **prerequisites**
-  table (sidecar deployed, Postgres reachable, tenant + budget seeded,
-  contract bundle published, SDK installed); **operational gotchas**
-  (reservation TTL for streams ADR-003, retry over-reservation window
-  ADR-002, proxy-mode `team_id` resolution ADR-001, fail-open dev caveat
-  ADR-004); **quickest validation** (the §5.1 command + expected output
-  verbatim); **greenfield example** (~50–80 lines self-contained Python);
-  **Related** footer linking the four sibling integration pages.
+- **D1.** `docs/site/docs/integrations/litellm.md` exists and follows
+  the `docs/site/docs/integrations/agt.md` shape, with: "Why you'd
+  want this" intro; **two paths for existing LiteLLM users** (pivot
+  R1 P1.4 — was three; the Shape A path replaces the deprecated
+  direct-callback option) —
+  - **Path B (proxy + callback):** `proxy_config.yaml` +
+    operator-owned `spendguard_litellm_proxy_callback.py` template
+    (Slice 8). This is the **primary v1 surface** for multi-tenant
+    LiteLLM deployments.
+  - **Path A (direct → SpendGuard egress proxy):** `litellm.api_base
+    = "http://localhost:9000/v1"`. Zero new SpendGuard SDK code;
+    reuses the existing egress-proxy infrastructure. Works for
+    both sync `litellm.completion()` and async `acompletion()`.
+
+  Plus **prerequisites** table (sidecar deployed, Postgres reachable,
+  tenant + budget seeded, contract bundle published, SDK installed);
+  **operational gotchas** (reservation TTL for streams ADR-003, retry
+  over-reservation window ADR-002, proxy-mode `team_id` resolution
+  ADR-001, fail-open dev caveat ADR-004); **quickest validation**
+  (the §5.1 command + expected output verbatim); **greenfield
+  example** (~50–80 lines self-contained Python); **Related** footer
+  linking the four sibling integration pages.
 - **D2.** Every existing integration page (`agt.md`, `langchain.md`,
   `openai-agents.md`, `pydantic-ai.md`) `Related` footer is updated to
   include the LiteLLM page. Verified by `grep -l "litellm.md"
