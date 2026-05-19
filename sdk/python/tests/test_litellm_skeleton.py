@@ -107,18 +107,20 @@ async def test_run_context_async_cm_set_get_reset():
 
 
 @pytest.mark.asyncio
-async def test_unimplemented_hooks_raise_notimplementederror():
-    """Slice 3 implements non-streaming success commit (covered by
-    test_litellm_commit_unit.py). Slice 4 streaming + Slice 5 failure
-    still NotImplementedError."""
+async def test_failure_hook_no_stash_silent_noop():
+    """Slice 5 shipped: async_log_failure_event with no stash is a
+    silent no-op (pre-call hook never fired → no reservation to
+    release). Full Slice 5 coverage in test_litellm_failure_unit.py."""
     cb = SpendGuardLiteLLMCallback(
         client=None,
         budget_resolver=lambda ctx: None,
         claim_estimator=lambda ctx: [],
         claim_reconciler=lambda ctx, resp: [],
     )
-    with pytest.raises(NotImplementedError, match="Slice 5"):
-        await cb.async_log_failure_event({}, None, None, None)
+    # Must NOT raise even with client=None — silent no-op contract.
+    await cb.async_log_failure_event(
+        {"litellm_call_id": "no-stash"}, None, None, None,
+    )
 
 
 def test_no_log_pre_api_call_override():

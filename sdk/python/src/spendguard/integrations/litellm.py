@@ -642,7 +642,76 @@ class SpendGuardLiteLLMCallback(CustomLogger):
         start_time: Any,
         end_time: Any,
     ) -> None:
-        raise NotImplementedError("Slice 5")
+        """Slice 5 — release reservation on provider failure / cancel.
+
+        LiteLLM fires this on provider exception, internal cancel, and
+        between retry attempts (ADR-002: each attempt has a distinct
+        `litellm_call_id` → distinct `decision_id` → distinct
+        reservation; pre-call reserves, this hook releases). Release
+        errors are SWALLOWED so we never mask the original LiteLLM
+        exception that triggered the callback — TTL sweep is the
+        durable backstop (FAILURE_MODES.md).
+        """
+        stash = self._get_stash(kwargs)
+        if stash is None:
+            return  # pre-call didn't fire — nothing to release
+        if self._client is None:  # defensive, mirrors success branch
+            log.warning(
+                "spendguard: failure event with stash but no client; "
+                "reservation will TTL-sweep llm_call_id=%s",
+                stash["llm_call_id"],
+            )
+            return
+        binding: BudgetBinding = stash["binding"]
+        outcome = self._classify_failure(
+            kwargs.get("exception") or response_obj,
+        )
+        reservation_ids = stash["reservation_ids"]
+        if len(reservation_ids) != 1:
+            log.warning(
+                "spendguard: failure-event has %d reservations; "
+                "v1 expects 1 — releasing first only "
+                "(others will TTL-sweep).",
+                len(reservation_ids),
+            )
+        if not reservation_ids:
+            self._pop_stash(kwargs)
+            return
+        try:
+            await self._client.emit_llm_call_post(
+                run_id=stash["run_id"], step_id=stash["step_id"],
+                llm_call_id=stash["llm_call_id"],
+                decision_id=stash["decision_id"],
+                reservation_id=reservation_ids[0],
+                provider_reported_amount_atomic="0",
+                estimated_amount_atomic="0",
+                unit=binding.unit, pricing=binding.pricing,
+                provider_event_id=self._provider_event_id(response_obj),
+                outcome=outcome,
+            )
+        except SpendGuardError as exc:
+            log.warning(
+                "spendguard: release RPC failed for llm_call_id=%s "
+                "outcome=%s err=%r; reservation will TTL-sweep "
+                "(keeping stash for retry visibility).",
+                stash["llm_call_id"], outcome, exc,
+            )
+            return  # keep stash; do NOT re-raise (mask original error)
+        self._pop_stash(kwargs)
+
+    @staticmethod
+    def _classify_failure(exception: Any) -> str:
+        """`CancelledError` → CANCELLED; everything else → FAILURE.
+
+        Some LiteLLM versions deliver `kwargs["exception"]` as a string
+        repr instead of the actual exception object; the string branch
+        defends against that (spec §Slice-5 code skeleton).
+        """
+        if isinstance(exception, asyncio.CancelledError):
+            return "CANCELLED"
+        if isinstance(exception, str) and "cancelled" in exception.lower():
+            return "CANCELLED"
+        return "FAILURE"
 
     # NO log_pre_api_call override — verified ineffective (Slice 1 R2).
     # Sync direct callers route to Shape A egress (DESIGN §3.4 v1 Path A).
