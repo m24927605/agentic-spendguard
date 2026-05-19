@@ -53,7 +53,11 @@ agt = [
   "agent-os-kernel>=3.0",
 ]
 litellm = [
-  "litellm>=1.50,<2.0",
+  # `[proxy]` sub-extra pulls fastapi/uvicorn/gunicorn that the
+  # `litellm` CLI subprocess needs to boot. Without it,
+  # `python -m litellm --config ...` ImportErrors at startup
+  # (Slice 6 R1 Code Reviewer P0).
+  "litellm[proxy]>=1.50,<2.0",
 ]
 dev = [
   "grpcio-tools>=1.62",

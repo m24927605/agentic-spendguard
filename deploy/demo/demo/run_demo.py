@@ -2304,22 +2304,46 @@ async def _start_counting_provider(host: str = "127.0.0.1", port: int = 8765) ->
     return runner
 
 
+async def _drain_proxy_output(proc: "asyncio.subprocess.Process") -> None:
+    """Background drain of LiteLLM proxy stdout → demo stderr so the
+    proxy's boot banner + uvicorn access logs + any ImportError
+    traceback reach the operator, AND the PIPE buffer never fills
+    (Slice 6 R1 Code Reviewer P1)."""
+    assert proc.stdout is not None  # noqa: S101  # set by Popen(stdout=PIPE)
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            return
+        sys.stderr.write(f"[litellm-proxy] {line.decode(errors='replace')}")
+        sys.stderr.flush()
+
+
 async def _start_litellm_proxy_subprocess(
     config_path: Path, callback_dir: Path, port: int = 4000,
-) -> "asyncio.subprocess.Process":
-    """Spawn `litellm --config ... --port N`. Adds the callback module
-    directory to PYTHONPATH so the proxy can import `spendguard_callback`."""
+) -> tuple["asyncio.subprocess.Process", asyncio.Task[None]]:
+    """Spawn the LiteLLM proxy via `python -m litellm` and a stdout-drain
+    task. Returns (proc, drain_task).
+
+    Uses `sys.executable -m litellm` (not bare `litellm`) so the proxy
+    runs against the same site-packages as the demo (Slice 6 R1 Backend
+    Architect P2 robustness). Adds the callback module directory to
+    PYTHONPATH so the proxy can import `spendguard_callback`. The
+    `SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX` env var is sourced from
+    runtime.env by demo-entrypoint.sh before this function runs, so
+    `os.environ.copy()` propagates it into the subprocess env.
+    """
     env = os.environ.copy()
     pp = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{callback_dir}:{pp}" if pp else str(callback_dir)
     proc = await asyncio.create_subprocess_exec(
-        "litellm", "--config", str(config_path),
+        sys.executable, "-m", "litellm", "--config", str(config_path),
         "--port", str(port), "--num_workers", "1",
         env=env, stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
+    drain_task = asyncio.create_task(_drain_proxy_output(proc))
     print(f"[demo] LiteLLM proxy spawned pid={proc.pid} port={port}")
-    return proc
+    return proc, drain_task
 
 
 async def _wait_for_litellm_health(port: int, timeout_s: float = 30.0) -> None:
@@ -2358,9 +2382,12 @@ async def run_litellm_real_mode() -> int:
 
     counting_runner = None
     proxy_proc = None
+    drain_task: asyncio.Task[None] | None = None
     try:
         counting_runner = await _start_counting_provider()
-        proxy_proc = await _start_litellm_proxy_subprocess(config_path, proxy_dir)
+        proxy_proc, drain_task = await _start_litellm_proxy_subprocess(
+            config_path, proxy_dir,
+        )
         await _wait_for_litellm_health(port=4000)
 
         import httpx
@@ -2381,53 +2408,78 @@ async def run_litellm_real_mode() -> int:
                 print(f"[demo] FATAL: ALLOW step expected 200, got {r.status_code}",
                       file=sys.stderr)
                 return 7
-            # Positive control: counting listener actually hit (no mock_response)
-            assert _COUNTING_PROVIDER_HITS["calls"] == pre_calls + 1, (
-                f"counting provider should have been hit once; "
-                f"pre={pre_calls} post={_COUNTING_PROVIDER_HITS['calls']}"
-            )
+            # Positive control: counting listener actually hit (no
+            # mock_response). Slice 6 R1 Backend Architect P1 fix —
+            # bare `assert` would be stripped under python -O; use
+            # explicit if/return to mirror other demo paths.
+            if _COUNTING_PROVIDER_HITS["calls"] != pre_calls + 1:
+                print(
+                    f"[demo] FATAL: counting provider should have been "
+                    f"hit once; pre={pre_calls} post="
+                    f"{_COUNTING_PROVIDER_HITS['calls']}",
+                    file=sys.stderr,
+                )
+                return 7
             usage = r.json().get("usage", {})
-            assert int(usage.get("completion_tokens", 0)) > 0, (
-                f"F7 acceptance: completion_tokens > 0 required, got {usage}"
-            )
+            if int(usage.get("completion_tokens", 0)) <= 0:
+                print(
+                    f"[demo] FATAL: F7 acceptance requires "
+                    f"completion_tokens > 0; got usage={usage}",
+                    file=sys.stderr,
+                )
+                return 7
             print(f"[demo] (1) ALLOW positive control: counting_calls={_COUNTING_PROVIDER_HITS['calls']} "
                   f"completion_tokens={usage.get('completion_tokens')}")
 
             # ---- Step 2: DENY ----
-            # The DENY step relies on a budget seed configured low enough
-            # that a sufficiently large estimator triggers SPENDGUARD_DENY.
-            # Slice 6 uses the same callback (single budget); a future
-            # over-budget seed (Slice 7 deny variant) will tighten the
-            # cap. For Slice 6 we exercise the hard-cap path by setting
-            # the per-call header that the callback's estimator reads —
-            # see PROXY_RECIPE.md (Slice 8). For now, attempt a 2B
-            # request which the sidecar's hard-cap (1B) will REJECT.
+            # Drive the hard-cap path by sending a per-call
+            # `spendguard_estimate_override=2000000000` (2B atomic
+            # units, above the seeded 1B hard-cap). The callback's
+            # estimator reads this from request data; sidecar policy
+            # then emits SPENDGUARD_DENY pre-call. The counting
+            # provider must NOT be hit on this path (negative
+            # control). Slice 7 will add the over-budget-seed variant
+            # for a complementary DENY shape.
             counting_pre_deny = _COUNTING_PROVIDER_HITS["calls"]
             try:
                 r_deny = await http.post("/v1/chat/completions", json={
                     "model": "gpt-4o-mini",
-                    "messages": [{"role": "user", "content": "x" * 200000}],
+                    "messages": [{"role": "user", "content": "trigger deny"}],
                     "litellm_call_id": "demo-litellm-deny-1",
-                    # Per-call estimator override goes here in Slice 8.
+                    "spendguard_estimate_override": "2000000000",
                 })
             except Exception as e:  # noqa: BLE001
-                # Connection drop / 4xx surfaces as exception from
-                # httpx in some shapes — treat as DENY signal.
+                # Some httpx versions surface 4xx as exception shape;
+                # treat as a DENY-signal response we can introspect.
                 r_deny = SimpleNamespace(  # type: ignore[assignment]
-                    status_code=400, text=f"client error: {e!r}", json=lambda: {},
+                    status_code=400, text=f"client error: {e!r}",
                 )
-            deny_ok = (r_deny.status_code >= 400)
-            print(f"[demo] (2) DENY step: HTTP {r_deny.status_code} body={str(r_deny.text)[:200]!r}")
-            # Negative control: counting provider should NOT have been
-            # hit if SpendGuard denied at PRE — but LiteLLM's behaviour
-            # on a 5xx from a callback varies; we accept either "no
-            # counter increment" OR "explicit 4xx response".
             counting_post_deny = _COUNTING_PROVIDER_HITS["calls"]
+            print(f"[demo] (2) DENY step: HTTP {r_deny.status_code} "
+                  f"body={str(r_deny.text)[:200]!r}")
             print(f"[demo] (2) DENY negative control: counting hits "
                   f"pre={counting_pre_deny} post={counting_post_deny}")
-            if not deny_ok and counting_post_deny != counting_pre_deny:
-                print("[demo] WARN: DENY step neither raised nor blocked counting hit; "
-                      "Slice 7 will tighten this acceptance.")
+            # Acceptance: SpendGuard DECLINED → LiteLLM proxy MUST
+            # return 4xx AND counting provider MUST NOT have been hit
+            # (otherwise the budget rejection didn't gate the call).
+            if counting_post_deny != counting_pre_deny:
+                print(
+                    "[demo] FATAL: DENY step did NOT block upstream — "
+                    f"counting hit pre={counting_pre_deny} "
+                    f"post={counting_post_deny}. Either the override "
+                    "didn't reach the estimator, or the hard-cap rule "
+                    "didn't fire.",
+                    file=sys.stderr,
+                )
+                return 7
+            if r_deny.status_code < 400:
+                print(
+                    f"[demo] FATAL: DENY step expected HTTP 4xx, got "
+                    f"{r_deny.status_code} — proxy admitted the call "
+                    "even though SpendGuard should have denied.",
+                    file=sys.stderr,
+                )
+                return 7
 
         print("[demo] litellm_real steps 1+2 complete (ALLOW + DENY)")
         return 0
@@ -2440,6 +2492,12 @@ async def run_litellm_real_mode() -> int:
                 proxy_proc.kill()
                 await proxy_proc.wait()
             print("[demo] LiteLLM proxy subprocess terminated")
+        if drain_task is not None:
+            drain_task.cancel()
+            try:
+                await drain_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if counting_runner is not None:
             await counting_runner.cleanup()
             print("[demo] counting provider stopped")

@@ -83,16 +83,31 @@ def _budget_resolver(ctx: ResolverContext) -> BudgetBinding:
     return _BINDING
 
 
+_DEFAULT_ESTIMATE = "50"
+
+
 def _claim_estimator(ctx: ResolverContext) -> list[Any]:
-    """Worst-case pre-call claim. For the ALLOW step we use a small
-    estimate (50 atomic units) so a 1B-cap budget admits the call. The
-    DENY step is driven by a different fixture (over-budget seed), not
-    by changing this estimator — the same callback handles both."""
+    """Worst-case pre-call claim.
+
+    Default: 50 atomic units (the ALLOW step's small estimate, well
+    below the 1B hard-cap).
+
+    Per-call override: if the request body contains
+    `spendguard_estimate_override` (string-form integer), use it
+    instead. This lets the demo's DENY step submit a 2B estimate
+    that the hard-cap rule will reject. Operators with multi-team
+    setups should NOT rely on this override path — Slice 8's
+    PROXY_RECIPE.md documents the production pattern (team_id →
+    pricing-table lookup).
+    """
+    data = getattr(ctx, "data", None) or {}
+    override = str(data.get("spendguard_estimate_override", "") or "").strip()
+    amount = override if override.isdigit() else _DEFAULT_ESTIMATE
     return [
         common_pb2.BudgetClaim(
             budget_id=_BUDGET_ID,
             unit=_UNIT_REF,
-            amount_atomic="50",
+            amount_atomic=amount,
             direction=common_pb2.BudgetClaim.DEBIT,
             window_instance_id=_WINDOW_INSTANCE_ID,
         ),
