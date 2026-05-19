@@ -1,0 +1,6 @@
+# For --real mode only. --mock mode runs against an in-process fake
+# and needs nothing beyond the Python stdlib.
+openai-agents>=0.17
+# SpendGuard SDK is currently in alpha — note the --pre when installing:
+#   pip install --pre -r requirements.txt
+spendguard-sdk[openai-agents]>=0.4

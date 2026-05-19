@@ -188,13 +188,13 @@ async with SpendGuardClient(
         resume_outcome = await e.resume(sg)  # waits for operator
 ```
 
-| Framework | Module | What gets gated |
-|---|---|---|
-| **Pydantic-AI** | `spendguard.integrations.pydantic_ai` | Every `Model.request()` |
-| **LangChain** | `spendguard.integrations.langchain` | Every `BaseChatModel` invocation |
-| **LangGraph** | same module | Same wrapper (LangGraph builds on `BaseChatModel`) |
-| **OpenAI Agents SDK** | `spendguard.integrations.openai_agents` | Every model call inside an `Agent` run |
-| **Microsoft AGT** | `spendguard.integrations.agt` | AGT's PolicyEngine + SpendGuard as a policy plugin |
+| Framework | Module | What gets gated | Runnable example |
+|---|---|---|---|
+| **Pydantic-AI** | `spendguard.integrations.pydantic_ai` | Every `Model.request()` | — |
+| **LangChain** | `spendguard.integrations.langchain` | Every `BaseChatModel` invocation | — |
+| **LangGraph** | same module | Same wrapper (LangGraph builds on `BaseChatModel`) | — |
+| **OpenAI Agents SDK** | `spendguard.integrations.openai_agents` | Every model call inside an `Agent` run | [`examples/openai-agents-composite/`](examples/openai-agents-composite/) |
+| **Microsoft AGT** | `spendguard.integrations.agt` | AGT's PolicyEngine + SpendGuard as a policy plugin | [`microsoft/agent-governance-toolkit#2398`](https://github.com/microsoft/agent-governance-toolkit/pull/2398) |
 
 ---
 

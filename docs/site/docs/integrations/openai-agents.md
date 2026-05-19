@@ -44,9 +44,15 @@ cd agentic-spendguard && make demo-up
 import asyncio
 
 from agents import Agent, Runner
+from agents.models.openai_chatcompletions import OpenAIChatCompletionsModel
+from openai import AsyncOpenAI
 
 from spendguard import SpendGuardClient, new_uuid7
-from spendguard.integrations.openai_agents import SpendGuardAgentsModel
+from spendguard.integrations.openai_agents import (
+    RunContext,
+    SpendGuardAgentsModel,
+    run_context,
+)
 from spendguard._proto.spendguard.common.v1 import common_pb2
 
 
@@ -58,22 +64,31 @@ async def main() -> None:
     await client.connect()
     await client.handshake()
 
+    unit = common_pb2.UnitRef(
+        unit_id="66666666-6666-4666-8666-666666666666",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="demo-pricing-v1")
+
+    inner_model = OpenAIChatCompletionsModel(
+        model="gpt-4o-mini",
+        openai_client=AsyncOpenAI(),
+    )
     guarded = SpendGuardAgentsModel(
-        inner_model_name="gpt-4o-mini",
+        inner=inner_model,
         client=client,
-        budget_id="my-budget",
-        window_instance_id="my-window",
-        unit=common_pb2.UnitRef(
-            unit_id="usd_micros",
-            token_kind="usd_micros",
-            model_family="gpt-4",
-        ),
-        pricing=common_pb2.PricingFreeze(pricing_version="2025-q4"),
-        claim_estimator=lambda messages: [
+        budget_id="44444444-4444-4444-8444-444444444444",
+        window_instance_id="55555555-5555-4555-8555-555555555555",
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=lambda _input: [
             common_pb2.BudgetClaim(
-                budget_id="my-budget",
-                window_instance_id="my-window",
-                amount_micros=1_000_000,
+                budget_id="44444444-4444-4444-8444-444444444444",
+                unit=unit,
+                amount_atomic="500",
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id="55555555-5555-4555-8555-555555555555",
             )
         ],
     )
@@ -83,8 +98,10 @@ async def main() -> None:
         instructions="Be terse.",
         model=guarded,
     )
-    result = await Runner.run(agent, "Hello")
-    print(result.output)
+    run_id = str(new_uuid7())
+    async with run_context(RunContext(run_id=run_id)):
+        result = await Runner.run(agent, "Hello")
+    print(result.final_output)
 
 
 asyncio.run(main())
@@ -113,8 +130,21 @@ The OpenAI Agents SDK emits its own trace events. SpendGuard's
 `decision_id` is tagged into the model wrapper's log so you can
 correlate the SDK trace with the SpendGuard audit row after the run.
 
+## Try it without the SDK
+
+Want to see the wrapper invariant without installing anything? The
+[runnable example](https://github.com/m24927605/agentic-spendguard/tree/main/examples/openai-agents-composite)
+has a `--mock` mode that uses zero non-stdlib dependencies and proves the
+core invariant — **SpendGuard DENY ⇒ the inner Model is never invoked** —
+in under five seconds:
+
+```bash
+python examples/openai-agents-composite/openai_agents_composite_demo.py --mock
+```
+
 ## Related
 
+- [Runnable example: `examples/openai-agents-composite/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/openai-agents-composite) — mock + real modes
 - [Quickstart](../quickstart.md) — full stack up in 5 minutes
 - [Contract DSL reference](../contracts/yaml.md) — author allow/stop rules
 - Other integrations: [Pydantic-AI](pydantic-ai.md) · [LangChain & LangGraph](langchain.md) · [Microsoft AGT](agt.md)
