@@ -191,7 +191,7 @@ P1.3 alignment with IMPLEMENTATION P1.5), on DENY raises
    budget; assert `DecisionDenied` with exact
    `reason_codes=["BUDGET_EXCEEDED"]` and no `RESERVATION_CREATED` row.
 3. `test_pre_call_hook_sidecar_unreachable_fails_closed` — bogus socket
-   path; `SpendGuardSidecarUnavailable` raised; no canonical event.
+   path; `SidecarUnavailable` raised; no canonical event.
 4. `test_pre_call_hook_fail_open_env_allows` —
    `SPENDGUARD_LITELLM_FAIL_OPEN=1` and unreachable sidecar; call
    proceeds with WARNING log present (per ACCEPTANCE.md S6); no
@@ -314,7 +314,7 @@ P1.5 fixes — coverage was incomplete; numbering continuous per P2.3):
 9. `test_streaming_sidecar_offline_at_commit_boundary` — sidecar
    killed AFTER the stream completes but BEFORE
    `async_log_success_event` lands; surfaces
-   `SpendGuardSidecarUnavailable` (Round 3 P0.8 — NF5 revised
+   `SidecarUnavailable` (Round 3 P0.8 — NF5 revised
    semantics).
 
 ### 2.5 tests-for-slice-5 — Failure-event release + retry handling
@@ -593,7 +593,7 @@ match this verbatim):
 [demo] DEMO_MODE=litellm_deny → fail-closed scenarios
 [demo] handshake ok session_id=...
 [demo] step 1: budget exhausted — DecisionDenied raised (provider untouched)
-[demo] step 2: sidecar offline — SpendGuardSidecarUnavailable raised (provider untouched)
+[demo] step 2: sidecar offline — SidecarUnavailable raised (provider untouched)
 [demo] step 3: resolver returns None + no default budget — SpendGuardConfigError raised
 [demo] PASS — all 3 deny paths OK
 ```
@@ -620,7 +620,7 @@ has failed its core promise (money already spent).
    We accidentally registered the budget check on `async_log_success_event`
    (post-wire log hook) instead of `async_pre_call_hook` (pre-wire
    gate). Verify the override: `async_pre_call_hook` MUST raise
-   `DecisionDenied`/`SpendGuardSidecarUnavailable` to block; raising
+   `DecisionDenied`/`SidecarUnavailable` to block; raising
    in `async_log_success_event` is too late (provider already paid).
    Note that `log_pre_api_call` is **sync** and also pre-wire, but it
    fires only for sync `litellm.completion()` calls — for the async
@@ -840,7 +840,7 @@ demo step. Coverage was missing in the pre-Phase-0 draft.
 | NF2 50-way concurrency = 25 ALLOW + 25 DENY | `tests/integration/test_litellm_precall_integration.py::test_concurrent_50_way_hard_cap` | `asyncio.gather` 50 hooks against budget=25; exactly 25 `DecisionDenied` raised |
 | NF3 memory leak | `tests/integration/test_litellm_proxy_subprocess.py::test_proxy_restart_no_leak` | tracemalloc snapshots ×5 spin-up/down cycles |
 | NF4 zero module-level mutable state | `tests/test_litellm_skeleton.py::test_module_level_mutable_state_scan` | `ast.parse` source; only `_RUN_CONTEXT` ContextVar permitted |
-| NF5 sidecar mid-stream disconnect | `tests/integration/test_litellm_streaming_integration.py::test_streaming_sidecar_disconnect` | kill sidecar between chunks; surface typed `SpendGuardSidecarUnavailable` |
+| NF5 sidecar mid-stream disconnect | `tests/integration/test_litellm_streaming_integration.py::test_streaming_sidecar_disconnect` | kill sidecar between chunks; surface typed `SidecarUnavailable` |
 | S1 every row has `litellm_call_id` | `verify_step_litellm_real.sql` Q1 + Q3 derived check | `decision_context_json->>'litellm_call_id' IS NULL` returns 0 |
 | S2 frozen pricing tuple present | Same SQL — predicates over `pricing_version` / `price_snapshot_hash_hex` / `fx_rate_version` / `unit_conversion_version` | 4× `IS NULL` predicates return 0 |
 | S3 no provider keys in SDK | `tests/test_litellm_skeleton.py::test_no_provider_api_key_handling` | grep over module source for `OPENAI_API_KEY` etc. → 0 hits |

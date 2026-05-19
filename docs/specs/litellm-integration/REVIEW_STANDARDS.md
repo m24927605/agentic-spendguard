@@ -169,7 +169,7 @@ Mode: ADVERSARIAL. Your job is to BREAK this slice. Look for:
   double-commit, commit after release)
 - Fail-closed inversions (sidecar unreachable should DENY by default
   per DESIGN §5)
-- Typed-exception drift (DecisionDenied / SpendGuardSidecarUnavailable
+- Typed-exception drift (DecisionDenied / SidecarUnavailable
   / SpendGuardConfigError per DESIGN §5 — P0.8 spec lock: typed-deny
   exception is `DecisionDenied` everywhere)
 - Idempotency-key derivation that lets retries double-charge
@@ -413,7 +413,7 @@ deferred to slice 9`. During Slice 9 review, ALL four step lines + the
 [demo] DEMO_MODE=litellm_deny → fail-closed scenarios
 [demo] handshake ok session_id=...
 [demo] step 1: budget exhausted — DecisionDenied raised (provider untouched)
-[demo] step 2: sidecar offline — SpendGuardSidecarUnavailable raised (provider untouched)
+[demo] step 2: sidecar offline — SidecarUnavailable raised (provider untouched)
 [demo] step 3: resolver returns None + no default budget — SpendGuardConfigError raised
 [demo] PASS — all 3 deny paths OK
 ```

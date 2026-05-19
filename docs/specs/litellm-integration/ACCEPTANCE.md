@@ -44,7 +44,7 @@ the live demo stack. Every criterion is objectively verifiable.
   `docs/site/docs/integrations/litellm.md` (Slice 10 ships) runs
   end-to-end with no other code edits.
 - **F2 (G2, fail-closed).** When the sidecar UDS socket does not exist,
-  `litellm.acompletion(...)` raises `SpendGuardSidecarUnavailable` and
+  `litellm.acompletion(...)` raises `SidecarUnavailable` and
   the upstream provider is **never** contacted. The deny path for an
   over-budget call raises `DecisionDenied` (not `SpendGuardDenied` —
   P0.8 spec lock decision: the typed-deny exception is `DecisionDenied`
@@ -140,7 +140,7 @@ the live demo stack. Every criterion is objectively verifiable.
   silent from the SDK's perspective until end-of-stream commit. The
   acceptance criterion is therefore restated: if the sidecar is
   unreachable at the **commit boundary** (end-of-stream), the
-  callback surfaces `SpendGuardSidecarUnavailable` from
+  callback surfaces `SidecarUnavailable` from
   `async_log_success_event`; the reservation TTL-sweeps on the
   ledger side. Chunk-level sidecar interaction is deferred to v2
   with the chunk-commit work (ADR-003). Verified by
@@ -334,7 +334,7 @@ DEMO_MODE=litellm_deny make demo-up
 [demo] DEMO_MODE=litellm_deny → fail-closed scenarios
 [demo] handshake ok session_id=...
 [demo] step 1: budget exhausted — DecisionDenied raised (provider untouched)
-[demo] step 2: sidecar offline — SpendGuardSidecarUnavailable raised (provider untouched)
+[demo] step 2: sidecar offline — SidecarUnavailable raised (provider untouched)
 [demo] step 3: resolver returns None + no default budget — SpendGuardConfigError raised
 [demo] PASS — all 3 deny paths OK
 ```

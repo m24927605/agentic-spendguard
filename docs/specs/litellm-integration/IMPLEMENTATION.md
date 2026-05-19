@@ -66,7 +66,7 @@ with `NotImplementedError` bodies, and the two new exception classes in
   — includes `_LoopBoundCallback` + `decision_context_json` plumbing)
 - `sdk/python/src/spendguard/integrations/__init__.py` (+3 lines doc comment)
 - `sdk/python/src/spendguard/errors.py` (+12 lines:
-  `SpendGuardSidecarUnavailable`, `SpendGuardConfigError`)
+  `SidecarUnavailable`, `SpendGuardConfigError`)
 - `sdk/python/src/spendguard/client.py` (+8 lines: add
   `decision_context_json: dict | None = None` kwarg to
   `request_decision`; fold into `runtime_metadata` Struct via the
@@ -85,7 +85,7 @@ with `NotImplementedError` bodies, and the two new exception classes in
 (SDK class that lazy-binds `SpendGuardClient` to the serving event
 loop — Round 3 P0.3 fix: now lives in the SDK, not the operator
 template), `install(...)` stub, `run_context()`/`current_run_context()`,
-two new exceptions (`SpendGuardSidecarUnavailable`,
+two new exceptions (`SidecarUnavailable`,
 `SpendGuardConfigError`) in `errors.py`. `DecisionDenied` is REUSED
 unchanged (DESIGN.md §5). Slice 1 also extends
 `SpendGuardClient.request_decision` (sdk/python/src/spendguard/client.py
@@ -108,7 +108,7 @@ from typing import Any, AsyncIterator
 from ..client import SpendGuardClient
 from ..errors import (
     DecisionDenied, SpendGuardConfigError, SpendGuardError,
-    SpendGuardSidecarUnavailable,
+    SidecarUnavailable,
 )
 from ..ids import (
     derive_idempotency_key, derive_uuid_from_signature, new_uuid7,
@@ -452,7 +452,7 @@ async def async_pre_call_hook(self, user_api_key_dict, cache, data, call_type):
                 "spendguard: SPENDGUARD_LITELLM_FAIL_OPEN=1 — allowing call "
                 "despite sidecar error %r (DEV ONLY)", exc)
             return data
-        raise SpendGuardSidecarUnavailable(f"sidecar pre-call failed: {exc}") from exc
+        raise SidecarUnavailable(f"sidecar pre-call failed: {exc}") from exc
 
     # Round 4 P0.2 fix: validate reservation_ids cardinality BEFORE
     # returning to LiteLLM. Earlier design validated at commit time,
@@ -507,7 +507,7 @@ is correct here, the SDK's `compute_prompt_hash` helper is reused).
 **Tests.** `TEST_PLAN.md#tests-for-slice-2`. Resolver None →
 `SpendGuardConfigError`; allow → stash populated (including
 `reservation_ids` tuple); deny → `DecisionDenied` propagates; sidecar
-fail + `fail_closed=True` → `SpendGuardSidecarUnavailable`; **`data`
+fail + `fail_closed=True` → `SidecarUnavailable`; **`data`
 returned to LiteLLM contains NO `spendguard` key** (P1.5 invariant).
 
 **Codex review focus.**
@@ -732,9 +732,9 @@ async def _async_log_success_streaming(self, stash, kwargs, response_obj):
                 "reservation will TTL-sweep llm_call_id=%s err=%r",
                 stash["llm_call_id"], exc)
             return
-        # Round 4 P0.6 fix: wrap as SpendGuardSidecarUnavailable
+        # Round 4 P0.6 fix: wrap as SidecarUnavailable
         # so NF5 typed-exception contract holds at the commit boundary.
-        raise SpendGuardSidecarUnavailable(
+        raise SidecarUnavailable(
             f"sidecar unavailable at streaming commit boundary: {exc}"
         ) from exc
     self._pop_stash(kwargs)
@@ -1149,7 +1149,7 @@ Lessons applied from `agt.py`, `langchain.py`, `openai_agents.py`,
   block.** Use the `try / except ImportError / raise with helpful
   message` pattern from `agt.py:99-111`.
 - **Don't `except Exception` in callbacks.** Catch only
-  `DecisionDenied`, `SpendGuardError`, `SpendGuardSidecarUnavailable`;
+  `DecisionDenied`, `SpendGuardError`, `SidecarUnavailable`;
   propagate the rest.
 - **Don't introduce a new abstraction without two existing users.**
   Two operator examples (in-process + proxy) — covered. Anything

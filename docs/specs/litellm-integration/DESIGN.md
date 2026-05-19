@@ -298,8 +298,8 @@ egress-proxy v0.2). Chunk-by-chunk reconciliation deferred to v2.
 
 | Failure | Behaviour | Contract |
 |---|---|---|
-| Sidecar UDS unreachable in pre-call | Raise `SpendGuardSidecarUnavailable` → LiteLLM blocks | Default fail-closed; opt-in `SPENDGUARD_FAIL_OPEN=1` for dev only |
-| Postgres ledger down | **Sidecar returns `DEGRADED`; LiteLLM callback FAIL-CLOSED — raises `SpendGuardSidecarUnavailable` and the LLM call is denied.** Unlike `agt.py` where DEGRADED → ALLOW (tool calls don't spend money the same way), the LiteLLM integration spends real provider $ on each call. Allowing under DEGRADED would break F2 fail-closed AND F4 audit-chain coverage (no canonical_events row because ledger is down). Operators may opt out via `SPENDGUARD_LITELLM_FAIL_OPEN=1` (dev only). This is a **deliberate divergence from `agt.py`** documented here (Round 2 Phase 0 review P0.1 fix). | Fail-closed on ledger outage; metric exposed; alert recommended |
+| Sidecar UDS unreachable in pre-call | Raise `SidecarUnavailable` → LiteLLM blocks | Default fail-closed; opt-in `SPENDGUARD_FAIL_OPEN=1` for dev only |
+| Postgres ledger down | **Sidecar returns `DEGRADED`; LiteLLM callback FAIL-CLOSED — raises `SidecarUnavailable` and the LLM call is denied.** Unlike `agt.py` where DEGRADED → ALLOW (tool calls don't spend money the same way), the LiteLLM integration spends real provider $ on each call. Allowing under DEGRADED would break F2 fail-closed AND F4 audit-chain coverage (no canonical_events row because ledger is down). Operators may opt out via `SPENDGUARD_LITELLM_FAIL_OPEN=1` (dev only). This is a **deliberate divergence from `agt.py`** documented here (Round 2 Phase 0 review P0.1 fix). | Fail-closed on ledger outage; metric exposed; alert recommended |
 | Reservation TTL expires before commit | Sidecar auto-releases; commit becomes no-op idempotent | Long streams must set TTL ≥ stream timeout; default 300s |
 | Partial commit (commit RPC times out after success) | Idempotency key dedupes; retry returns same `invoice_id` | `derive_idempotency_key(...)` matches existing SDK |
 | Hot-reload mid-call | Frozen `PricingFreeze` carries through commit; new pricing takes next call | Already solved by `issue-59-approval-resume-frozen-pricing.md` |
@@ -309,7 +309,7 @@ egress-proxy v0.2). Chunk-by-chunk reconciliation deferred to v2.
 
 Three SDK exceptions used (subclass `SpendGuardError`):
 
-- `SpendGuardSidecarUnavailable` — sidecar UDS not reachable (NEW in
+- `SidecarUnavailable` — sidecar UDS not reachable (NEW in
   `errors.py`, added by Slice 1)
 - `DecisionDenied` — already exists in `errors.py` (raised by
   `SpendGuardClient.request_decision` on DENY); reused unchanged.
@@ -899,7 +899,7 @@ mirror it verbatim; any drift is a P0 finding).
 1. **Budget exhausted** — sidecar returns DENY; provider HTTP request
    counter stays at 0. (Slice 7.)
 2. **Sidecar offline** — UDS path unreachable; callback raises
-   `SpendGuardSidecarUnavailable`; provider counter still 0. (Slice 7.)
+   `SidecarUnavailable`; provider counter still 0. (Slice 7.)
 3. **Resolver returns None** — explicit `SpendGuardConfigError`;
    provider counter still 0. (Slice 7.)
 
