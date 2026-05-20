@@ -1,0 +1,97 @@
+# Runnable example: SpendGuard + LiteLLM proxy minimal compose.
+#
+# This file is INTENTIONALLY a thin slice — it builds only the
+# services strictly needed to demonstrate the gating contract:
+# postgres + sidecar + litellm-proxy. It reuses the demo's
+# Dockerfiles via build context = ../.. (workspace root).
+#
+# For the full audit chain stack (canonical-ingest, outbox-forwarder,
+# ttl-sweeper, etc.), use `deploy/demo/compose.yaml` instead.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: spendguard-example-postgres
+    environment:
+      POSTGRES_USER: spendguard
+      POSTGRES_PASSWORD: spendguard
+      POSTGRES_DB: spendguard_ledger
+    ports:
+      - "5434:5432"  # avoid clash with demo's 5433
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spendguard"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  sidecar:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.sidecar
+    container_name: spendguard-example-sidecar
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      RUST_LOG: "info,spendguard_sidecar=debug"
+      SPENDGUARD_SIDECAR_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID: "sidecar-example-1"
+      SPENDGUARD_SIDECAR_REGION: "example"
+      SPENDGUARD_SIDECAR_UDS_PATH: "/var/run/spendguard/adapter.sock"
+      # NOTE: the sidecar's bundle/PKI/manifest config required by the
+      # full demo stack is omitted here for brevity. The example's
+      # ledger calls run against an unsigned audit chain. For a
+      # production-shape setup, replicate deploy/demo/compose.yaml.
+    volumes:
+      - sidecar-uds:/var/run/spendguard
+    ports:
+      - "9094:9093"  # avoid clash with demo's 9093
+
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: spendguard-example-litellm-proxy
+    depends_on:
+      - sidecar
+    environment:
+      # Forwarded to the SpendGuard callback at import time.
+      SPENDGUARD_SIDECAR_UDS: "/var/run/spendguard/adapter.sock"
+      SPENDGUARD_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_UNIT_ID: "66666666-6666-4666-8666-666666666666"
+      SPENDGUARD_PRICING_VERSION: "example-pricing-v1"
+      SPENDGUARD_FX_RATE_VERSION: "example-fx-v1"
+      SPENDGUARD_UNIT_CONVERSION_VERSION: "example-units-v1"
+      SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX: "deadbeef"
+      LITELLM_MASTER_KEY: "sk-demo-key"
+      # The callback module is at /opt/spendguard/example_callback.py
+      # inside the container (mounted below). PYTHONPATH includes
+      # that directory so the proxy can `import example_callback`.
+      PYTHONPATH: "/opt/spendguard"
+      # Counting stub upstream — see app.py for how requests are
+      # routed.
+      OPENAI_API_KEY: "demo-counting-stub-no-real-key"
+    volumes:
+      - sidecar-uds:/var/run/spendguard:ro
+      - ./proxy_config.yaml:/etc/litellm/proxy_config.yaml:ro
+      - ./spendguard_litellm_proxy_callback.py:/opt/spendguard/example_callback.py:ro
+    ports:
+      - "4001:4000"  # avoid clash with demo's 4000
+    # Install spendguard-sdk[litellm] then launch the proxy.
+    # The base image already has Python + litellm[proxy] (LiteLLM
+    # provides it for free). We just `pip install` the SpendGuard
+    # SDK from local source at boot.
+    command:
+      - "/bin/sh"
+      - "-c"
+      - |
+        pip install --no-cache-dir /opt/spendguard-sdk
+        exec python -m litellm.proxy.proxy_cli \
+          --config /etc/litellm/proxy_config.yaml \
+          --port 4000 --num_workers 1
+
+volumes:
+  postgres-data:
+  sidecar-uds:

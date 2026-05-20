@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import re as _re
+import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -849,6 +850,228 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
 # _LoopBoundCallback in proxy_config.yaml; direct callers use Shape A
 # (set litellm.api_base = "http://localhost:9000/v1").
 
+
+# ---------------------------------------------------------------------------
+# Direct async wrapper (Slice A1) — `acompletion()` for non-proxy callers.
+#
+# Operators who run `await litellm.acompletion(...)` directly (no LiteLLM
+# proxy in the loop) use this wrapper to get reserve→commit gating with the
+# same failure-mode contract as the proxy callback path. ADR-005 stands:
+# sync `litellm.completion()` is NOT supported here because LiteLLM's logging
+# dispatcher swallows exceptions from sync hooks — sync callers must route
+# via Shape A egress proxy (DESIGN §3.4 v1 Path A).
+# ---------------------------------------------------------------------------
+
+
+class SpendGuardDirectAcompletion:
+    """Drop-in async wrapper for `litellm.acompletion()` with budget gating.
+
+    Configure once at module init; call `await wrapper(...)` per request.
+    Internally:
+      1. Stamps a `litellm_call_id` if the caller did not.
+      2. Resolves binding + estimates the worst-case claim.
+      3. Reserves via `client.request_decision(...)`.
+      4. Delegates to `litellm.acompletion(**kwargs)`.
+      5. On success → `emit_llm_call_post(outcome=SUCCESS)` with the
+         reconciler's real amount.
+      6. On exception → best-effort `emit_llm_call_post(outcome=FAILURE)`
+         release, then re-raises the original LiteLLM exception. SpendGuard
+         release errors are swallowed (TTL sweep is the durable backstop).
+
+    Fail-closed by default: `DENY`/`DEGRADE` from sidecar → `DecisionDenied`/
+    `SidecarUnavailable` raised; provider call is NOT attempted. Operators
+    who set `SPENDGUARD_LITELLM_FAIL_OPEN=1` for dev get a warning + the
+    provider call still runs (no audit row).
+    """
+
+    def __init__(
+        self,
+        *,
+        client: SpendGuardClient,
+        budget_resolver: BudgetResolver,
+        claim_estimator: ClaimEstimator,
+        claim_reconciler: ClaimReconciler,
+    ) -> None:
+        self._client = client
+        self._budget_resolver = budget_resolver
+        self._claim_estimator = claim_estimator
+        self._claim_reconciler = claim_reconciler
+        self._fail_open_dev = (
+            os.environ.get("SPENDGUARD_LITELLM_FAIL_OPEN", "").strip() == "1"
+        )
+
+    async def __call__(self, **litellm_kwargs: Any) -> Any:
+        import litellm  # local import — keeps the SDK lightweight at import
+        # Slice A1 architect-noted scope cut: stream=True returns an async
+        # iterator that we cannot reliably reconcile (no .usage frame on
+        # the response object). Streaming direct callers must use the
+        # proxy callback path (which has _async_log_success_streaming).
+        if litellm_kwargs.get("stream"):
+            raise SpendGuardConfigError(
+                "SpendGuardDirectAcompletion does NOT support stream=True; "
+                "use the LiteLLM proxy + SpendGuardLiteLLMCallback path "
+                "instead (DESIGN §3.4 Path B). Streaming direct mode is "
+                "deferred to a future slice.",
+            )
+        litellm_call_id = str(
+            litellm_kwargs.get("litellm_call_id")
+            or derive_uuid_from_signature(
+                # Slice A1 R1 F1 fix: mix urandom into the signature so a
+                # tight asyncio.gather of short-lived kwargs dicts cannot
+                # collide on `id(kwargs):time_ns()` (microsecond-grade
+                # actual resolution + GC'd address reuse).
+                f"direct:{id(litellm_kwargs)}:{time.time_ns()}:"
+                f"{os.urandom(8).hex()}",
+                scope="litellm_call_id",
+            ),
+        )
+        litellm_kwargs["litellm_call_id"] = litellm_call_id
+        data: dict[str, Any] = dict(litellm_kwargs)
+        rctx = _build_resolver_ctx(
+            user_api_key_dict=None, data=data,
+            call_type=str(data.get("call_type", "acompletion")),
+        )
+        binding = self._budget_resolver(rctx)
+        if binding is None or not binding.budget_id or not binding.window_instance_id:
+            raise SpendGuardConfigError(
+                "budget_resolver returned None/empty binding (DESIGN ADR-001)"
+            )
+        estimator_claims = self._claim_estimator(rctx)
+        if len(estimator_claims) != 1:
+            raise SpendGuardConfigError(
+                f"claim_estimator returned {len(estimator_claims)} claims; "
+                "v1 contract requires exactly 1",
+            )
+        _validate_claim_against_binding(
+            estimator_claims[0], binding, source="claim_estimator",
+        )
+        llm_call_id = str(derive_uuid_from_signature(
+            f"litellm-direct:{litellm_call_id}", scope="llm_call_id"))
+        decision_id = str(derive_uuid_from_signature(
+            f"litellm-direct:{litellm_call_id}", scope="decision_id"))
+        ctx_obj = current_run_context()
+        run_id = (ctx_obj.run_id if ctx_obj else str(
+            derive_uuid_from_signature(
+                f"litellm-direct:{litellm_call_id}", scope="run_id")))
+        step_id = (ctx_obj.step_id if ctx_obj and ctx_obj.step_id
+                   else f"litellm-direct:{litellm_call_id[:16]}")
+        prompt_hash = compute_prompt_hash(
+            _serialize_messages_for_hash(data.get("messages")),
+            self._client.tenant_id,
+        )
+        decision_context = _build_decision_context(
+            ctx=rctx, binding=binding, litellm_call_id=litellm_call_id,
+            prompt_hash=prompt_hash,
+        )
+        decision_context["mode"] = "direct"  # vs the proxy-callback path
+        idempotency_key = derive_idempotency_key(
+            tenant_id=self._client.tenant_id,
+            session_id=self._client.session_id,
+            run_id=run_id, step_id=step_id, llm_call_id=llm_call_id,
+            trigger="LLM_CALL_PRE",
+        )
+        try:
+            outcome = await self._client.request_decision(
+                trigger="LLM_CALL_PRE",
+                run_id=run_id, step_id=step_id, llm_call_id=llm_call_id,
+                tool_call_id="", decision_id=decision_id, route="llm.call",
+                projected_claims=estimator_claims,
+                idempotency_key=idempotency_key,
+                projected_unit=binding.unit,
+                decision_context_json=decision_context,
+            )
+        except DecisionDenied:
+            raise
+        except SpendGuardError as exc:
+            if self._fail_open_dev:
+                log.warning(
+                    "spendguard: SPENDGUARD_LITELLM_FAIL_OPEN=1 — direct "
+                    "acompletion bypassing sidecar error %r (DEV ONLY).", exc,
+                )
+                return await litellm.acompletion(**litellm_kwargs)
+            raise SidecarUnavailable(
+                f"sidecar pre-call failed (direct mode): {exc}",
+            ) from exc
+        if getattr(outcome, "decision", "") == "DEGRADE":
+            if self._fail_open_dev:
+                log.warning(
+                    "spendguard: DEGRADE under fail-open (direct mode); "
+                    "allowing call (DEV ONLY).",
+                )
+                return await litellm.acompletion(**litellm_kwargs)
+            raise SidecarUnavailable(
+                "sidecar returned DEGRADE; direct mode fails closed.",
+            )
+        if len(outcome.reservation_ids) != 1:
+            raise SpendGuardConfigError(
+                f"sidecar returned {len(outcome.reservation_ids)} reservations; "
+                "v1 expects exactly 1",
+            )
+        reservation_id = outcome.reservation_ids[0]
+        # Delegate to LiteLLM. Failures bubble through finally → release.
+        try:
+            response = await litellm.acompletion(**litellm_kwargs)
+        except Exception as call_exc:
+            # Best-effort release; SpendGuardError swallowed, others bubble
+            # alongside the original exception via chained traceback.
+            try:
+                await self._client.emit_llm_call_post(
+                    run_id=run_id, step_id=step_id, llm_call_id=llm_call_id,
+                    decision_id=outcome.decision_id,
+                    reservation_id=reservation_id,
+                    provider_reported_amount_atomic="0",
+                    estimated_amount_atomic="0",
+                    unit=binding.unit, pricing=binding.pricing,
+                    provider_event_id="",
+                    outcome=(
+                        "CANCELLED"
+                        if isinstance(call_exc, asyncio.CancelledError)
+                        else "FAILURE"
+                    ),
+                )
+            except SpendGuardError as rel_exc:
+                log.warning(
+                    "spendguard: direct release RPC failed for llm_call_id=%s "
+                    "err=%r; reservation will TTL-sweep.",
+                    llm_call_id, rel_exc,
+                )
+            raise
+        real_claims = self._claim_reconciler(rctx, response)
+        if len(real_claims) != 1:
+            raise SpendGuardConfigError(
+                f"claim_reconciler returned {len(real_claims)} claims; "
+                "v1 contract requires exactly 1",
+            )
+        _validate_claim_against_binding(
+            real_claims[0], binding, source="claim_reconciler",
+        )
+        # Slice A1 architect-noted: commit-time sidecar error MUST NOT
+        # mask a SUCCESSFUL provider call. Caller already paid for the
+        # LLM tokens; swallowing the audit-row failure (with WARN +
+        # TTL sweep backstop) is the right tradeoff. Mirror the
+        # streaming branch's narrow SidecarUnavailable wrap.
+        try:
+            await self._client.emit_llm_call_post(
+                run_id=run_id, step_id=step_id, llm_call_id=llm_call_id,
+                decision_id=outcome.decision_id,
+                reservation_id=reservation_id,
+                provider_reported_amount_atomic="",
+                estimated_amount_atomic=str(real_claims[0].amount_atomic),
+                unit=binding.unit, pricing=binding.pricing,
+                provider_event_id=str(getattr(response, "id", "") or ""),
+                outcome="SUCCESS",
+            )
+        except SpendGuardError as commit_exc:
+            log.warning(
+                "spendguard: direct-mode commit RPC failed for "
+                "llm_call_id=%s err=%r; reservation will TTL-sweep. "
+                "Returning provider response to caller (commit failure "
+                "must not mask a SUCCESSFUL provider call).",
+                llm_call_id, commit_exc,
+            )
+        return response
+
+
 __all__ = [
     "BudgetBinding",
     "BudgetResolver",
@@ -856,6 +1079,7 @@ __all__ = [
     "ClaimReconciler",
     "LiteLLMRunContext",
     "ResolverContext",
+    "SpendGuardDirectAcompletion",
     "SpendGuardLiteLLMCallback",
     "_LoopBoundCallback",
     "current_run_context",

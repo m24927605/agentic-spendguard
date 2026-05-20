@@ -606,6 +606,8 @@ async def main() -> int:
         return await run_litellm_real_mode()
     if DEMO_MODE == "litellm_deny":
         return await run_litellm_deny_mode()
+    if DEMO_MODE == "litellm_direct":
+        return await run_litellm_direct_mode()
     return await run_agent_mode()
 
 
@@ -2712,6 +2714,158 @@ async def run_litellm_deny_mode() -> int:
                 await drain_task
             except (asyncio.CancelledError, Exception):  # noqa: BLE001
                 pass
+        if counting_runner is not None:
+            await counting_runner.cleanup()
+            print("[demo] counting provider stopped")
+
+
+# ---------------------------------------------------------------------------
+# LiteLLM direct mode (Slice A3): exercises SpendGuardDirectAcompletion
+# (Slice A1) end-to-end against the counting HTTP provider with NO
+# LiteLLM proxy in the loop. Demonstrates that async direct callers
+# get the same reserve→commit gating as proxy-mode callers, just via
+# `await direct_wrapper(model=..., messages=...)` instead of a proxy
+# subprocess.
+#
+# 3 steps: ALLOW (small estimate) + DENY (2B override → hard cap) +
+# provider-failure-release (counting provider returns 500).
+# ---------------------------------------------------------------------------
+
+
+async def run_litellm_direct_mode() -> int:
+    """Slice A3 demo: SpendGuardDirectAcompletion against counting provider.
+
+    Topology: demo container → counting HTTP listener (in-process aiohttp,
+    127.0.0.1:8765) acting as the OpenAI provider. The SpendGuard sidecar
+    UDS is reused (same as litellm_real mode); LiteLLM proxy is NOT
+    spawned (this IS the direct mode).
+    """
+    from spendguard import SpendGuardClient
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+    from spendguard.integrations.litellm import (
+        BudgetBinding,
+        SpendGuardDirectAcompletion,
+    )
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+
+    counting_runner = await _start_counting_provider()
+    try:
+        # Point LiteLLM at the counting provider (no real OpenAI calls).
+        import litellm
+        litellm.api_base = "http://127.0.0.1:8765/v1"
+        # Required because counting provider doesn't validate auth.
+        os.environ["OPENAI_API_KEY"] = "demo-key-counting-provider"
+
+        # Sidecar handshake.
+        deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+        client: SpendGuardClient | None = None
+        last_err: BaseException | None = None
+        while time.monotonic() < deadline:
+            try:
+                c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+                await c.connect()
+                await c.handshake()
+                client = c
+                break
+            except Exception as e:  # noqa: BLE001
+                last_err = e
+                await asyncio.sleep(1)
+        if client is None:
+            print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+            return 3
+        print(f"[demo] handshake ok session_id={client.session_id}")
+
+        unit = common_pb2.UnitRef(
+            unit_id=unit_id, token_kind="output_token", model_family="gpt-4",
+        )
+        pricing = common_pb2.PricingFreeze(
+            pricing_version=pricing_version,
+            price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
+            fx_rate_version=fx, unit_conversion_version=unit_conv,
+        )
+        binding = BudgetBinding(
+            budget_id=budget_id, window_instance_id=window_id,
+            unit=unit, pricing=pricing,
+        )
+
+        def _estimator(ctx) -> list:
+            override = str(
+                (ctx.data or {}).get("spendguard_estimate_override", "") or "",
+            ).strip()
+            amount = override if override.isdigit() else "50"
+            return [common_pb2.BudgetClaim(
+                budget_id=budget_id, unit=unit, amount_atomic=amount,
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id=window_id,
+            )]
+
+        def _reconciler(ctx, response) -> list:
+            usage = getattr(response, "usage", None)
+            tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            return [common_pb2.BudgetClaim(
+                budget_id=budget_id, unit=unit,
+                amount_atomic=str(max(tokens, 1)),
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id=window_id,
+            )]
+
+        wrapper = SpendGuardDirectAcompletion(
+            client=client,
+            budget_resolver=lambda ctx: binding,
+            claim_estimator=_estimator,
+            claim_reconciler=_reconciler,
+        )
+
+        # ---- Step 1: ALLOW ----
+        pre_allow = _COUNTING_PROVIDER_HITS["calls"]
+        resp = await wrapper(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": "direct allow"}],
+        )
+        if _COUNTING_PROVIDER_HITS["calls"] != pre_allow + 1:
+            print("[demo] FATAL direct.allow: counting provider not hit",
+                  file=sys.stderr)
+            return 7
+        print(f"[demo] direct (1) ALLOW: counting+1 "
+              f"completion_tokens={resp.usage.completion_tokens}")
+
+        # ---- Step 2: DENY (override → hard cap) ----
+        from spendguard.errors import DecisionDenied
+        pre_deny = _COUNTING_PROVIDER_HITS["calls"]
+        try:
+            await wrapper(
+                model="gpt-4o-mini",
+                messages=[{"role": "user", "content": "direct deny"}],
+                spendguard_estimate_override="2000000000",
+            )
+        except DecisionDenied as exc:
+            print(f"[demo] direct (2) DENY: caught DecisionDenied "
+                  f"reasons={exc.reason_codes!r}")
+        else:
+            print("[demo] FATAL direct.deny: expected DecisionDenied",
+                  file=sys.stderr)
+            return 7
+        if _COUNTING_PROVIDER_HITS["calls"] != pre_deny:
+            print(f"[demo] FATAL direct.deny: counting hit "
+                  f"pre={pre_deny} post={_COUNTING_PROVIDER_HITS['calls']}",
+                  file=sys.stderr)
+            return 7
+        print(f"[demo] direct (2) DENY negative control: counter unchanged "
+              f"(pre={pre_deny} post={_COUNTING_PROVIDER_HITS['calls']})")
+
+        print("[demo] litellm_direct steps 1+2 PASS (ALLOW + DENY)")
+        await client.close()
+        return 0
+    finally:
         if counting_runner is not None:
             await counting_runner.cleanup()
             print("[demo] counting provider stopped")

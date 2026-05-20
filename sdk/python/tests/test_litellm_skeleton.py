@@ -53,6 +53,7 @@ def test_module_imports_with_litellm_installed():
         "ClaimReconciler",
         "LiteLLMRunContext",
         "ResolverContext",
+        "SpendGuardDirectAcompletion",  # Slice A1
         "SpendGuardLiteLLMCallback",
         "_LoopBoundCallback",
         "current_run_context",
