@@ -277,7 +277,27 @@ demo-verify-litellm-real:
 		   END IF; \
 		   RAISE NOTICE 'SLICE6 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
 		 END; \$$\$$;"
-	@echo "[demo] Slice 6 litellm_real verification done"
+	@echo "[demo] Slice C3 — verify GH #77 sidecar enrichment in canonical_events..."
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_with_spendguard INT; v_integration TEXT; BEGIN \
+		   SELECT COUNT(*) INTO v_with_spendguard FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND cost_advisor_safe_decode_payload(payload_json)->'spendguard' IS NOT NULL; \
+		   IF v_with_spendguard < 1 THEN \
+		     RAISE EXCEPTION 'SLICE_C3_GATE: canonical_events with spendguard sub-object >= 1 expected (GH #77 enrichment), got %', v_with_spendguard; \
+		   END IF; \
+		   SELECT (cost_advisor_safe_decode_payload(payload_json)->'spendguard'->>'integration') INTO v_integration FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND cost_advisor_safe_decode_payload(payload_json)->'spendguard' IS NOT NULL \
+		    LIMIT 1; \
+		   IF v_integration <> 'litellm' THEN \
+		     RAISE EXCEPTION 'SLICE_C3_GATE: spendguard.integration expected litellm, got %', v_integration; \
+		   END IF; \
+		   RAISE NOTICE 'SLICE_C3 GH#77 OK: % decision rows with spendguard sub-object; integration=%', v_with_spendguard, v_integration; \
+		 END; \$$\$$;"
+	@echo "[demo] Slice 6 litellm_real verification done (with Slice C3 Q3 reanimation)"
 
 # Phase 4 O3 pricing-table verification: pricing-seed-init loaded the
 # real pricing_table from seed.yaml; pricing_versions has at least one
