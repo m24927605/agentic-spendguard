@@ -4,11 +4,12 @@
 
 **The spend firewall for LLM agents.**
 
-Stops runaway agents *before* they hit your API bill — not after the
-invoice arrives the next morning. Pre-call budget reservations,
-signed audit trail, &lt;5ms per decision. Works with **LiteLLM proxy**,
-**OpenAI Agents SDK**, **LangGraph**, **LangChain**, **Pydantic-AI**,
-and **Microsoft Agent Governance Toolkit** ([merged upstream](https://github.com/microsoft/agent-governance-toolkit/pull/2398)).
+Stops runaway agents *before* the provider is called — not after the
+invoice arrives the next morning. Budget reserved per-call, signed
+audit trail, p50 ≤10ms decision overhead ([Contract §14 SLO](docs/specs/contract-dsl-spec-v1alpha1.md)).
+Works with **LiteLLM proxy**, **OpenAI Agents SDK**, **LangGraph**,
+**LangChain**, **Pydantic-AI**, and **Microsoft Agent Governance
+Toolkit** ([community integration merged upstream](https://github.com/microsoft/agent-governance-toolkit/pull/2398)).
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![PyPI: spendguard-sdk](https://img.shields.io/pypi/v/spendguard-sdk?label=pypi)](https://pypi.org/project/spendguard-sdk/)
@@ -29,20 +30,24 @@ pip install 'spendguard-sdk[litellm]'
 
 ## 💡 Why this exists
 
-Last Tuesday at 2:47am, a customer-support agent hit a rate-limited
-tool. The retry policy kicked in. The agent re-planned, re-prompted,
-re-tried — each retry a fresh `gpt-4o` call with the full conversation
-in context. Forty minutes later, one stuck conversation had consumed
-$380 in tokens. Multiply by the seventeen other tenants doing the
-same during the incident.
+Picture the failure mode SpendGuard is built to stop:
+
+A customer-support agent hits a rate-limited tool at 2:47am. The retry
+policy kicks in. The agent loop re-plans, re-prompts, re-tries — each
+retry a fresh `gpt-4o` call with the full conversation in context.
+Forty minutes later, one stuck conversation has consumed ~$380 in
+tokens. Multiply across the other tenants doing the same during the
+incident.
 
 The post-mortem starts with *"we didn't know until the OpenAI dashboard
 updated the next morning."*
 
 **SpendGuard moves detection from tomorrow to the 11th call.** Every
-request reserves tokens against a per-tenant budget before it leaves
-your process. Budget exhausted → HTTP 403 in &lt;5ms, with a signed
-audit row of why. The provider is never hit.
+request reserves tokens against a per-tenant budget before the provider
+is called. Budget exhausted → the call is refused with a signed audit
+row of why (HTTP 429 from the egress proxy; HTTP 403 from the LiteLLM
+callback — see [adapter integrations](#-adapter-integrations) for which path your
+client takes). The provider is never hit.
 
 The standard answer — *"track usage, send alerts"* — is reconciliation,
 not control. You see the bill **after** it lands. SpendGuard inverts
@@ -170,7 +175,7 @@ Pick the trust model that fits how much your agent's code can be trusted not to 
 | **L2** egress_proxy_hard_block | Network egress proxy rejects un-gated traffic | (none — agent must use the proxy) |
 | **L3** provider_key_gateway | Provider API keys live in a gateway; agent never sees them | (none — provider rotates keys) |
 
-POC default is **L3** for first-customer pilots; lower levels exist for backward-compat with older adapters.
+POC default is **L3** (recommended for any pilot that runs against a real provider key); lower levels exist for backward-compat with older adapters.
 
 ---
 
@@ -252,7 +257,7 @@ make demo-up DEMO_MODE=multi_provider_usd     # multi-provider USD normalization
 
 Those proxy your traffic too, but their decision model is **observability**: log the call, then alert / route / retry. SpendGuard's decision model is **auth/capture**: reserve PRE the call, fail-closed on overrun, commit POST. The audit chain isn't a log — it's a tamper-evident ledger backed by Postgres immutability triggers + KMS-signed CloudEvents.
 
-If you only need a per-key dollar cap on a gateway, Portkey or LiteLLM is simpler. SpendGuard is for the "platform team that has to hand evidence to compliance after the bill lands" shape of problem.
+If you only need a per-key dollar cap on a gateway, Portkey or LiteLLM is simpler. SpendGuard is for anyone who needs the LLM call **refused** the moment the budget is gone — whether that's a 1-person SaaS protecting a free tier, or a platform team that also has to hand evidence to compliance after the bill lands.
 </details>
 
 <details>
@@ -345,7 +350,7 @@ All locked at v1alpha1; schema bumps land via additive proto changes (backwards-
 
 ## 🤝 Contributing
 
-Pilot codebase shipping under active design-partner engagement. PRs welcome but the wire spec + audit invariants are append-only — open an issue first if you're about to touch `proto/` or `migrations/`.
+**Honest status:** Dev Status 4-Beta. Single-maintainer open-source project (Apache 2.0). Solid demo coverage (8+ demo modes, all green) and a signed audit chain — but zero production users yet. PyPI 0.3.0 + Microsoft AGT integration merged 2026-05-19 are the only third-party validation signals. PRs welcome; the wire spec + audit invariants are append-only — open an issue first if you're about to touch `proto/` or `migrations/`.
 
 ---
 
