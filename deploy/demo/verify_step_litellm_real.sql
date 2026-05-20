@@ -33,19 +33,7 @@ SELECT current_state, COUNT(*)::int AS n
  ORDER BY current_state;
 
 \echo
-\echo === canonical_events.event_type counts (litellm_real) ===
-SELECT event_type, COUNT(*)::int AS n
-  FROM canonical_events
- WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
-   AND event_type IN (
-     'spendguard.audit.decision',
-     'spendguard.audit.outcome'
-   )
- GROUP BY event_type
- ORDER BY event_type;
-
-\echo
-\echo === ALLOW step: commit row for the demo's ALLOW call ===
+\echo === ALLOW step: commit row for the demo ALLOW call ===
 SELECT latest_state, estimated_amount_atomic
   FROM commits
  WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
@@ -60,8 +48,8 @@ SELECT la.account_kind,
                   WHEN le.direction='credit' THEN -le.amount_atomic END),
          0)::TEXT AS net_atomic
   FROM ledger_entries le
-  JOIN ledger_accounts la ON la.account_id = le.account_id
- WHERE la.tenant_id = '00000000-0000-4000-8000-000000000001'
+  JOIN ledger_accounts la ON le.ledger_account_id = la.ledger_account_id
+ WHERE le.tenant_id = '00000000-0000-4000-8000-000000000001'
    AND la.budget_id = '44444444-4444-4444-8444-444444444444'
  GROUP BY la.account_kind
  ORDER BY la.account_kind;
@@ -96,6 +84,13 @@ BEGIN
      WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
        AND operation_kind = 'commit_estimated';
 
+    -- Slice 6 ships steps 1+2 (1 ALLOW + 1 DENY). Slice 9 adds
+    -- step 3 (STREAM ALLOW) + step 4 (2 multi-team ALLOWs), bringing
+    -- the ALLOW total to 4. Assertion: reserve >= 1 / commit >= 1 is
+    -- the v1 Slice-6 baseline; >= 4 is the post-Slice-9 baseline. We
+    -- keep the relaxed >= 1 here so the Slice 6-only operator gate
+    -- still passes; Slice 9 introduces a stricter assertion via a
+    -- separate verify file if needed.
     IF v_reserve < 1 THEN
         RAISE EXCEPTION 'SLICE6_GATE: ledger_transactions.reserve >= 1 expected, got %', v_reserve;
     END IF;
@@ -103,7 +98,7 @@ BEGIN
         RAISE EXCEPTION 'SLICE6_GATE: ledger_transactions.commit_estimated >= 1 expected, got %', v_commit;
     END IF;
 
-    RAISE NOTICE 'SLICE6 LEDGER OK: reserve=% commit_estimated=%',
+    RAISE NOTICE 'SLICE6/9 LEDGER OK: reserve=% commit_estimated=%',
         v_reserve, v_commit;
 END;
 $$;

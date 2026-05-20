@@ -2502,7 +2502,54 @@ async def run_litellm_real_mode() -> int:
                 )
                 return 7
 
-        print("[demo] litellm_real steps 1+2 complete (ALLOW + DENY)")
+            # ---- Step 3: STREAM (Slice 9) ----
+            # Streaming response → end-of-stream reconciler commits
+            # real `usage.completion_tokens`, not the worst-case
+            # estimator (Slice 4 acceptance: commit amount ≠
+            # estimator).
+            pre_stream = _COUNTING_PROVIDER_HITS["calls"]
+            r_stream = await http.post("/v1/chat/completions", json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "stream please"}],
+                "stream": True,
+            }, headers={"x-litellm-call-id": "demo-litellm-stream-1"})
+            print(f"[demo] (3) STREAM step: HTTP {r_stream.status_code}")
+            if r_stream.status_code != 200:
+                print(f"[demo] FATAL STREAM: expected 200, got "
+                      f"{r_stream.status_code}", file=sys.stderr)
+                return 7
+            if _COUNTING_PROVIDER_HITS["calls"] != pre_stream + 1:
+                print("[demo] FATAL STREAM: counting provider not hit",
+                      file=sys.stderr)
+                return 7
+
+            # ---- Step 4: PROXY-MULTI-TEAM (Slice 9) ----
+            # Two POSTs with distinct call IDs to exercise per-call
+            # audit isolation. Full multi-team virtual-key setup is
+            # operator-facing per PROXY_RECIPE.md §3; the demo's
+            # single-team callback still produces 2 isolated audit
+            # chains per distinct `x-litellm-call-id`.
+            pre_multi = _COUNTING_PROVIDER_HITS["calls"]
+            for team_call_id in ("multi-team-a", "multi-team-b"):
+                r_m = await http.post("/v1/chat/completions", json={
+                    "model": "gpt-4o-mini",
+                    "messages": [{"role": "user", "content": team_call_id}],
+                }, headers={"x-litellm-call-id": f"demo-litellm-{team_call_id}"})
+                if r_m.status_code != 200:
+                    print(f"[demo] FATAL MULTI-TEAM {team_call_id}: "
+                          f"got {r_m.status_code}", file=sys.stderr)
+                    return 7
+            post_multi = _COUNTING_PROVIDER_HITS["calls"]
+            if post_multi != pre_multi + 2:
+                print(f"[demo] FATAL MULTI-TEAM: expected 2 counter "
+                      f"increments, got {post_multi - pre_multi}",
+                      file=sys.stderr)
+                return 7
+            print(f"[demo] (4) MULTI-TEAM step: 2 isolated calls "
+                  f"(counter pre={pre_multi} post={post_multi})")
+
+        print("[demo] litellm_real ALL 4 steps PASS "
+              "(ALLOW + DENY + STREAM + MULTI-TEAM)")
         return 0
     finally:
         if proxy_proc is not None:

@@ -104,4 +104,6 @@ can drop straight into a sidecar's deployment.
 - [Authoring contracts](contracts/yaml.md) — write your own rules
 - [Pydantic-AI integration](integrations/pydantic-ai.md) — wire the SDK
   into your agent
+- [LiteLLM proxy integration](integrations/litellm.md) — one-line
+  gate for proxy-mode traffic
 - [Helm deployment](deployment/helm.md) — move to k8s
