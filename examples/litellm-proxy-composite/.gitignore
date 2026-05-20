@@ -1,0 +1,7 @@
+# Compose-generated state
+.docker-data/
+sidecar-uds/
+*.pid
+*.sock
+__pycache__/
+.venv/
