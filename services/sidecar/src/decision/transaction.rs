@@ -74,7 +74,35 @@ pub(crate) struct AuditEnrichment {
     pub agent_id: String,
     pub model_family: String,
     pub prompt_hash: String,
+    /// GH #77 — additive JSONB sub-object emitted into
+    /// `payload_json.data.spendguard.*` for the audit.decision
+    /// CloudEvent. Populated from `req.inputs.runtime_metadata`
+    /// fields under the `spendguard.*` namespace via a strict
+    /// 12-key allowlist (no arbitrary PII can be smuggled into the
+    /// signed audit chain). Empty `Value::Null` = SDK didn't send
+    /// enrichment (legacy / non-LiteLLM integration).
+    pub spendguard_context: serde_json::Value,
 }
+
+/// GH #77 — allowlisted enrichment keys that the SDK may pass via
+/// `runtime_metadata.fields`. Values must be string-typed; non-string
+/// or unknown keys are silently dropped (fail-closed against SDK
+/// drift or PII smuggling). See `docs/specs/litellm-integration/
+/// DESIGN.md` §8.2a for the LiteLLM-specific 12-field contract.
+const SPENDGUARD_ENRICHMENT_ALLOWLIST: &[&str] = &[
+    "integration",
+    "litellm_call_id",
+    "model",
+    "pricing_version",
+    "price_snapshot_hash_hex",
+    "fx_rate_version",
+    "unit_conversion_version",
+    "prompt_hash",
+    "call_type",
+    "stream",
+    "mode",
+    "team_id",
+];
 
 /// Extract the four enrichment fields from a `DecisionRequest`. Any
 /// missing field becomes empty string (degraded path).
@@ -129,11 +157,40 @@ pub(crate) fn extract_enrichment(req: &DecisionRequest) -> AuditEnrichment {
         })
         .unwrap_or_default();
 
+    // GH #77 — extract allowlisted spendguard.* enrichment keys.
+    // Only string-typed values are accepted; unknown keys are dropped.
+    // Empty map (no keys present) → spendguard_context = Null so the
+    // CloudEvent payload omits the sub-object (backward compat).
+    let spendguard_context = inputs
+        .and_then(|i| i.runtime_metadata.as_ref())
+        .map(|m| {
+            let mut obj = serde_json::Map::new();
+            for &key in SPENDGUARD_ENRICHMENT_ALLOWLIST {
+                if let Some(v) = m.fields.get(key) {
+                    if let Some(prost_types::value::Kind::StringValue(s)) =
+                        v.kind.as_ref()
+                    {
+                        if !s.is_empty() {
+                            obj.insert(key.into(),
+                                serde_json::Value::String(s.clone()));
+                        }
+                    }
+                }
+            }
+            if obj.is_empty() {
+                serde_json::Value::Null
+            } else {
+                serde_json::Value::Object(obj)
+            }
+        })
+        .unwrap_or(serde_json::Value::Null);
+
     AuditEnrichment {
         run_id,
         agent_id,
         model_family,
         prompt_hash,
+        spendguard_context,
     }
 }
 
@@ -466,7 +523,7 @@ fn build_audit_decision_cloudevent(
     matched_rules: &[String],
     enrichment: &AuditEnrichment,
 ) -> CloudEvent {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "snapshot_hash":   hex::encode(snapshot_hash),
         "matched_rules":   matched_rules,
         "session_id":      ctx.session_id,
@@ -478,6 +535,16 @@ fn build_audit_decision_cloudevent(
         "model_family":    enrichment.model_family,
         "prompt_hash":     enrichment.prompt_hash,
     });
+    // GH #77 — emit the LiteLLM 12-field enrichment as a nested
+    // `spendguard` sub-object iff the SDK sent any allowlisted keys.
+    // Backward compat: legacy adapters that don't send `spendguard.*`
+    // produce Null here, which we skip to keep the payload identical
+    // to pre-GH#77 emissions (no signature drift on cached rows).
+    if !enrichment.spendguard_context.is_null() {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("spendguard".into(), enrichment.spendguard_context.clone());
+        }
+    }
     let payload_bytes =
         serde_json::to_vec(&payload).expect("snapshot json serialization is infallible");
     CloudEvent {
@@ -562,7 +629,7 @@ async fn run_record_denied_decision(
     // Build CloudEvent payload. matched_rules + reason_codes + final
     // decision live inside `data` so canonical_events keeps the
     // forensics without schema changes.
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "snapshot_hash":     hex::encode(snapshot_hash),
         "matched_rules":     matched_rules,
         "reason_codes":      reason_codes,
@@ -583,6 +650,13 @@ async fn run_record_denied_decision(
         "model_family":      enrichment.model_family,
         "prompt_hash":       enrichment.prompt_hash,
     });
+    // GH #77 (DENY path) — emit LiteLLM 12-field enrichment so deny
+    // forensics see WHICH litellm_call / model / team_id was rejected.
+    if !enrichment.spendguard_context.is_null() {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("spendguard".into(), enrichment.spendguard_context.clone());
+        }
+    }
     let payload_bytes = serde_json::to_vec(&payload)
         .expect("denied decision json serialization is infallible");
     let mut cloudevent = CloudEvent {
