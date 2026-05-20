@@ -902,6 +902,17 @@ class SpendGuardDirectAcompletion:
 
     async def __call__(self, **litellm_kwargs: Any) -> Any:
         import litellm  # local import — keeps the SDK lightweight at import
+        # Slice A1 architect-noted scope cut: stream=True returns an async
+        # iterator that we cannot reliably reconcile (no .usage frame on
+        # the response object). Streaming direct callers must use the
+        # proxy callback path (which has _async_log_success_streaming).
+        if litellm_kwargs.get("stream"):
+            raise SpendGuardConfigError(
+                "SpendGuardDirectAcompletion does NOT support stream=True; "
+                "use the LiteLLM proxy + SpendGuardLiteLLMCallback path "
+                "instead (DESIGN §3.4 Path B). Streaming direct mode is "
+                "deferred to a future slice.",
+            )
         litellm_call_id = str(
             litellm_kwargs.get("litellm_call_id")
             or derive_uuid_from_signature(
@@ -1029,16 +1040,30 @@ class SpendGuardDirectAcompletion:
         _validate_claim_against_binding(
             real_claims[0], binding, source="claim_reconciler",
         )
-        await self._client.emit_llm_call_post(
-            run_id=run_id, step_id=step_id, llm_call_id=llm_call_id,
-            decision_id=outcome.decision_id,
-            reservation_id=reservation_id,
-            provider_reported_amount_atomic="",
-            estimated_amount_atomic=str(real_claims[0].amount_atomic),
-            unit=binding.unit, pricing=binding.pricing,
-            provider_event_id=str(getattr(response, "id", "") or ""),
-            outcome="SUCCESS",
-        )
+        # Slice A1 architect-noted: commit-time sidecar error MUST NOT
+        # mask a SUCCESSFUL provider call. Caller already paid for the
+        # LLM tokens; swallowing the audit-row failure (with WARN +
+        # TTL sweep backstop) is the right tradeoff. Mirror the
+        # streaming branch's narrow SidecarUnavailable wrap.
+        try:
+            await self._client.emit_llm_call_post(
+                run_id=run_id, step_id=step_id, llm_call_id=llm_call_id,
+                decision_id=outcome.decision_id,
+                reservation_id=reservation_id,
+                provider_reported_amount_atomic="",
+                estimated_amount_atomic=str(real_claims[0].amount_atomic),
+                unit=binding.unit, pricing=binding.pricing,
+                provider_event_id=str(getattr(response, "id", "") or ""),
+                outcome="SUCCESS",
+            )
+        except SpendGuardError as commit_exc:
+            log.warning(
+                "spendguard: direct-mode commit RPC failed for "
+                "llm_call_id=%s err=%r; reservation will TTL-sweep. "
+                "Returning provider response to caller (commit failure "
+                "must not mask a SUCCESSFUL provider call).",
+                llm_call_id, commit_exc,
+            )
         return response
 
 
