@@ -33,19 +33,7 @@ SELECT current_state, COUNT(*)::int AS n
  ORDER BY current_state;
 
 \echo
-\echo === canonical_events.event_type counts (litellm_real) ===
-SELECT event_type, COUNT(*)::int AS n
-  FROM canonical_events
- WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
-   AND event_type IN (
-     'spendguard.audit.decision',
-     'spendguard.audit.outcome'
-   )
- GROUP BY event_type
- ORDER BY event_type;
-
-\echo
-\echo === ALLOW step: commit row for the demo's ALLOW call ===
+\echo === ALLOW step: commit row for the demo ALLOW call ===
 SELECT latest_state, estimated_amount_atomic
   FROM commits
  WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
@@ -60,8 +48,8 @@ SELECT la.account_kind,
                   WHEN le.direction='credit' THEN -le.amount_atomic END),
          0)::TEXT AS net_atomic
   FROM ledger_entries le
-  JOIN ledger_accounts la ON la.account_id = le.account_id
- WHERE la.tenant_id = '00000000-0000-4000-8000-000000000001'
+  JOIN ledger_accounts la ON le.ledger_account_id = la.ledger_account_id
+ WHERE le.tenant_id = '00000000-0000-4000-8000-000000000001'
    AND la.budget_id = '44444444-4444-4444-8444-444444444444'
  GROUP BY la.account_kind
  ORDER BY la.account_kind;
