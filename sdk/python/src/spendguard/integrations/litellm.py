@@ -916,7 +916,12 @@ class SpendGuardDirectAcompletion:
         litellm_call_id = str(
             litellm_kwargs.get("litellm_call_id")
             or derive_uuid_from_signature(
-                f"direct:{id(litellm_kwargs)}:{time.time_ns()}",
+                # Slice A1 R1 F1 fix: mix urandom into the signature so a
+                # tight asyncio.gather of short-lived kwargs dicts cannot
+                # collide on `id(kwargs):time_ns()` (microsecond-grade
+                # actual resolution + GC'd address reuse).
+                f"direct:{id(litellm_kwargs)}:{time.time_ns()}:"
+                f"{os.urandom(8).hex()}",
                 scope="litellm_call_id",
             ),
         )
