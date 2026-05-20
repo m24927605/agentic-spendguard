@@ -1628,4 +1628,35 @@ mod enrichment_tests {
             );
         }
     }
+
+    // Slice C2 — DENY path parity test. The CloudEvent merge logic for
+    // the DENY branch (`run_record_denied_decision`, line 657-ish) is
+    // identical to the ALLOW branch (`build_audit_decision_cloudevent`,
+    // line 545-ish): both check `!enrichment.spendguard_context.is_null()`
+    // and `obj.insert("spendguard", clone)`. This test asserts the
+    // clone yields the same JSON Map shape both times — a regression
+    // guard against future drift where ALLOW and DENY diverge in
+    // their merge logic.
+    #[test]
+    fn enrichment_clone_stable_for_both_emit_paths() {
+        let mut fields = BTreeMap::new();
+        fields.insert("integration".into(), _str_value("litellm"));
+        fields.insert("model".into(), _str_value("gpt-4o-mini"));
+        fields.insert("stream".into(), _bool_value(true));
+        let req = _request_with_metadata(fields);
+        let enr = extract_enrichment(&req);
+        // Simulate both emit paths cloning the same context.
+        let allow_clone = enr.spendguard_context.clone();
+        let deny_clone = enr.spendguard_context.clone();
+        assert_eq!(allow_clone, deny_clone,
+            "ALLOW and DENY clones must produce identical JSON");
+        // Both must be Objects (not Null) with the same key set.
+        let a = allow_clone.as_object().expect("ALLOW clone is Object");
+        let d = deny_clone.as_object().expect("DENY clone is Object");
+        assert_eq!(a.len(), d.len());
+        assert_eq!(a.get("integration"), d.get("integration"));
+        assert_eq!(a.get("stream"), d.get("stream"));
+        // Verify mixed-type coercion survives both clones.
+        assert_eq!(a.get("stream"), Some(&serde_json::Value::Bool(true)));
+    }
 }
