@@ -33,7 +33,16 @@ class DecisionDenied(SpendGuardError):
     Carries the original `decision_id` and reason codes so callers can
     log + correlate with audit chain. Subclassed for the specific
     decision kind.
+
+    Slice 6 R2 P1-2 hardening: exposes `status_code = 403` so LiteLLM's
+    proxy maps a SpendGuard denial to HTTP 403 Forbidden (a policy
+    refusal — client-side) rather than the default 500 Internal Server
+    Error. The proxy reads `getattr(exc, "status_code", 500)` when
+    converting non-HTTPException callback errors into responses, so
+    setting it as a class attribute is sufficient.
     """
+
+    status_code: int = 403
 
     def __init__(
         self,
@@ -209,4 +218,18 @@ class MutationApplyFailed(SpendGuardError):
 
     The adapter MUST surface this to the sidecar via ConfirmPublishOutcome
     with `outcome=APPLY_FAILED` so the audit chain records the failure.
+    """
+
+
+class SpendGuardConfigError(SpendGuardError):
+    """Adapter-level configuration is invalid.
+
+    Raised when an integration is missing a required parameter the adapter
+    cannot infer (e.g. `budget_resolver` returned None, multi-claim
+    estimator, missing `litellm_call_id`). Distinct from `HandshakeError`
+    (sidecar-side mismatch) so callers can route the two failure classes
+    differently — config errors are operator-fixable; handshake errors
+    usually need the sidecar restarted.
+
+    Added for the LiteLLM integration (DESIGN.md §5).
     """

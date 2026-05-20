@@ -36,6 +36,7 @@ from .errors import (
     HandshakeError,
     MutationApplyFailed,
     SidecarUnavailable,
+    SpendGuardConfigError,
     SpendGuardError,
 )
 from .ids import (
@@ -64,6 +65,7 @@ __all__ = [
     "HandshakeError",
     "MutationApplyFailed",
     "SidecarUnavailable",
+    "SpendGuardConfigError",
     "SpendGuardError",
     # ids
     "default_call_signature",

@@ -135,6 +135,12 @@ else ifeq ($(DEMO_MODE),approval)
 else ifeq ($(DEMO_MODE),approval_hot_reload)
 	@echo "[demo] verifying issue #59 hot-reload regression (approval NOT bundled)..."
 	@$(MAKE) demo-verify-approval-hot-reload
+else ifeq ($(DEMO_MODE),litellm_real)
+	@echo "[demo] verifying Slice 6 (litellm_real ALLOW + DENY)..."
+	@$(MAKE) demo-verify-litellm-real
+else ifeq ($(DEMO_MODE),litellm_deny)
+	@echo "[demo] verifying Slice 7 (litellm_deny 3 fail-closed sub-steps)..."
+	@$(MAKE) demo-verify-litellm-deny
 else ifneq (,$(findstring agent_real,$(DEMO_MODE)))
 	@echo "[demo] DEMO_MODE=$(DEMO_MODE) — skipping demo-verify-step7."
 	@echo "[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)"
@@ -232,6 +238,39 @@ demo-verify-approval:
 demo-verify-approval-hot-reload:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_approval_hot_reload.sql
 	@echo "[demo] issue #59 hot-reload regression verification done"
+
+# Slice 6 (litellm_real) verification: ALLOW step produces a
+# reserve + commit_estimated; DENY step produces a denied_decision.
+# The .sql file holds ONLY ledger-DB assertions; canonical_events
+# assertions are cross-DB and live in a second `psql -d
+# spendguard_canonical` block here (R2 P0-2 fix). The 5s drain
+# before the canonical-DB query gives the outbox forwarder a tick
+# to catch up (R2 P1-1 fix).
+demo-verify-litellm-deny:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_deny.sql
+	@echo "[demo] Slice 7 litellm_deny verification done"
+
+demo-verify-litellm-real:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_real.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 1 THEN \
+		     RAISE EXCEPTION 'SLICE6_GATE: canonical_events.decision >= 1 expected, got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'SLICE6_GATE: canonical_events.outcome >= 1 expected, got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'SLICE6 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@echo "[demo] Slice 6 litellm_real verification done"
 
 # Phase 4 O3 pricing-table verification: pricing-seed-init loaded the
 # real pricing_table from seed.yaml; pricing_versions has at least one
