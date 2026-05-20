@@ -15,6 +15,8 @@ Stripe-style auth/capture for LLM tokens. Built for platform teams that need **p
 
 </div>
 
+> **Ships as a first-party integration in [Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit/blob/main/docs/integrations/spendguard-integration.md)** ([PR #2398](https://github.com/microsoft/agent-governance-toolkit/pull/2398), merged 2026-05-19). The AGT `PolicyEngine` composes cleanly with SpendGuard's out-of-process budget ledger — AGT denies short-circuit before any SpendGuard reservation is created.
+
 ---
 
 ## 🚀 Quick start (30 seconds)
