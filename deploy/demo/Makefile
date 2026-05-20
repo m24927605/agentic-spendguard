@@ -141,6 +141,9 @@ else ifeq ($(DEMO_MODE),litellm_real)
 else ifeq ($(DEMO_MODE),litellm_deny)
 	@echo "[demo] verifying Slice 7 (litellm_deny 3 fail-closed sub-steps)..."
 	@$(MAKE) demo-verify-litellm-deny
+else ifeq ($(DEMO_MODE),litellm_direct)
+	@echo "[demo] verifying Slice A3 (litellm_direct ALLOW + DENY)..."
+	@$(MAKE) demo-verify-litellm-direct
 else ifneq (,$(findstring agent_real,$(DEMO_MODE)))
 	@echo "[demo] DEMO_MODE=$(DEMO_MODE) — skipping demo-verify-step7."
 	@echo "[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)"
@@ -249,6 +252,10 @@ demo-verify-approval-hot-reload:
 demo-verify-litellm-deny:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_deny.sql
 	@echo "[demo] Slice 7 litellm_deny verification done"
+
+demo-verify-litellm-direct:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_direct.sql
+	@echo "[demo] Slice A3 litellm_direct verification done"
 
 demo-verify-litellm-real:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_real.sql
