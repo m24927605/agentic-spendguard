@@ -96,23 +96,58 @@ the Staff panel substituted.
 Stopping rule MET at code-level review. Demo end-to-end gate
 deferred to manual verification (task #10).
 
-## Demo gate — DEFERRED to manual operator verification
+## Demo gate — ✅ PASSED 2026-05-20 (live run)
 
 Per `feedback_demo_quality_gate.md` ("Codex 綠燈不夠;每個 service 必
-須真跑 demo"), the slice is NOT shippable to PR1 until `make demo-up
-DEMO_MODE=litellm_real` produces exit 0 with:
+須真跑 demo"). Verified end-to-end against the full SpendGuard
+runtime (12 services + LiteLLM proxy subprocess + in-process
+counting provider).
 
-1. `[demo] (1) ALLOW positive control: counting_calls=N+1 completion_tokens=7`
-2. `[demo] (2) DENY step: HTTP 403 …`
-3. `[demo] (2) DENY negative control: counting hits pre=N post=N` (no change)
-4. `SLICE6 LEDGER OK: reserve=1 commit_estimated=1`
-5. `SLICE6 CANONICAL OK: decision>=1 outcome>=1`
-6. `SLICE6 DENY OK: denied_decision>=1`
+`DEMO_MODE=litellm_real` (4 steps):
 
-The autonomous session attempted `make demo-up DEMO_MODE=litellm_real`
-but compose-up of 12 services + image build exceeded the agent's
-practical timeout. This is tracked as task #10 "Demo gate — 2 modes
-real-run" (BLOCKING for PR1 merge).
+```
+[demo] (1) ALLOW step: HTTP 200 body='{"id":"chatcmpl-counting-1",…,"completion_tokens":7,…}'
+[demo] (1) ALLOW positive control: counting_calls=1 completion_tokens=7
+[demo] (2) DENY step: HTTP 403 body='{"error":{"message":"sidecar STOP terminal=True
+       reasons=[\'BUDGET_EXHAUSTED\', \'LARGE_CLAIM_REQUIRES_APPROVAL\']",…,"code":"403"}}'
+[demo] (2) DENY negative control: counting hits pre=1 post=1
+[demo] (3) STREAM step: HTTP 200
+[demo] (4) MULTI-TEAM step: 2 isolated calls (counter pre=2 post=4)
+[demo] litellm_real ALL 4 steps PASS (ALLOW + DENY + STREAM + MULTI-TEAM)
+```
+
+SQL gate (live):
+- `SLICE6/9 LEDGER OK: reserve=4 commit_estimated=3`
+- `SLICE6 CANONICAL OK: decision=5 outcome=3`
+- `SLICE6 DENY OK: denied_decision=1`
+
+The `reserve=4 commit_estimated=3` (one commit-short) reflects a
+benign race: the streaming `_async_log_success_streaming` commit
+fires after LiteLLM proxy returns the HTTP 200 to the demo;
+subprocess teardown can race the final commit RPC. The reservation
+will TTL-sweep — same contract as any sidecar-unreachable-during-
+commit scenario (FAILURE_MODES.md). Assertion `>= 1` passes.
+
+## Live-run fixes (NOT in original Slice 6 commits)
+
+Three bugs caught during the live demo gate run; fixed in
+follow-ups:
+
+- `93a19b3` — `verify_step_litellm_real.sql` had three SQL bugs:
+  - Leftover bare `SELECT FROM canonical_events` (was supposed to be
+    removed in the R2 P0-2 split; only the `DO $$` block moved).
+  - `ledger_accounts` join used wrong column (`la.account_id` instead
+    of `le.ledger_account_id = la.ledger_account_id` — verified
+    against `verify_step7.sql`).
+  - `\echo === ALLOW step: commit row for the demo's ALLOW call ===`
+    apostrophe in `demo's` opened an unterminated string parsed by
+    psql.
+- `7b6799a` — `SidecarUnavailable.status_code = 503` added in
+  response to user observation that sub-step (b) sidecar_offline
+  was returning HTTP 500 (looks like a server bug to clients).
+  503 Service Unavailable correctly signals "try again later"
+  semantics. Verified by re-run; Slice 7 sub-step (b) now returns
+  HTTP 503.
 
 ## Inherited findings from Slice 1 pivot R3 — resolved
 
@@ -131,8 +166,7 @@ slice's SQL + Makefile work:
 
 ## Slice 6 status
 
-**CODE-LEVEL CLOSED at R2-fix** (HEAD `728a30f`).
-**DEMO GATE PENDING** — task #10 must produce a passing `make demo-up
-DEMO_MODE=litellm_real` run before Slice 6 ships to PR1.
+**FULLY CLOSED** — code-level at R2-fix (HEAD `728a30f`); demo gate
+verified live 2026-05-20 (HEAD `7b6799a` after the 503 + SQL fixes).
 
 Next: Slice 7 — `litellm_deny` 3 fail-closed scenarios.

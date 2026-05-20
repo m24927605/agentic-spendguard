@@ -76,27 +76,56 @@ v1 ship scope:
   documentation, demo-only branch boot-time guard in
   spendguard_callback.py.
 
-## Demo gate — BLOCKING for PR1 merge (task #10)
+## Demo gate — ✅ PASSED 2026-05-20 (live run)
 
-The autonomous session attempted `make demo-up DEMO_MODE=litellm_real`
-but the 12-service docker compose build + image pull exceeded the
-agent's practical timeout. Both gates remain to be verified by the
-operator:
+Both modes verified end-to-end against the full SpendGuard runtime
+(postgres + ledger + canonical-ingest + sidecar + webhook-receiver
++ ttl-sweeper + outbox-forwarder + endpoint-catalog + all init
+containers + LiteLLM proxy subprocess + in-process counting
+provider).
 
-1. `make demo-up DEMO_MODE=litellm_real` → exit 0 with
-   "litellm_real ALL 4 steps PASS (ALLOW + DENY + STREAM + MULTI-TEAM)"
-   + `SLICE6/9 LEDGER OK` + `SLICE6 CANONICAL OK` + `SLICE6 DENY OK`.
-2. `make demo-up DEMO_MODE=litellm_deny` → exit 0 with all 3
-   sub-step PASS lines + `SLICE7 LEDGER OK: reserve>=3 commit_estimated>=3 denied_decision>=1`.
+`DEMO_MODE=litellm_real` (4 steps):
+- `(1) ALLOW positive control: counting_calls=1 completion_tokens=7`
+- `(2) DENY step: HTTP 403` (BUDGET_EXHAUSTED + LARGE_CLAIM_REQUIRES_APPROVAL)
+- `(2) DENY negative control: counting hits pre=1 post=1`
+- `(3) STREAM step: HTTP 200`
+- `(4) MULTI-TEAM step: 2 isolated calls (counter pre=2 post=4)`
+- `litellm_real ALL 4 steps PASS (ALLOW + DENY + STREAM + MULTI-TEAM)`
+- SQL: `SLICE6/9 LEDGER OK: reserve=4 commit_estimated=3` +
+  `SLICE6 CANONICAL OK: decision=5 outcome=3` +
+  `SLICE6 DENY OK: denied_decision=1`.
 
-Once both gates pass, the branch can ship to PR1 (Slices 1–7) and
-PR2 (Slices 8–10) per the user's two-PR pacing.
+`DEMO_MODE=litellm_deny` (3 fail-closed sub-steps):
+- `deny.exhausted: HTTP 403 counter pre=1 post=1`
+- `deny.sidecar_offline: HTTP 503 counter pre=2 post=2`
+- `deny.resolver_none: HTTP 500 counter pre=3 post=3`
+- `litellm_deny all 3 sub-steps PASS (counting=0 on each deny)`
+- SQL: `SLICE7 LEDGER OK: reserve=7 commit_estimated=6 denied_decision=2`
+  (cumulative from Slice 6 + 7 runs against the same DB)
+
+## Live-run fixes
+
+Three issues caught during the live demo gate run; fixed in
+follow-up commits on the same branch:
+
+- `7b6799a` — `SidecarUnavailable.status_code = 503` (user
+  observed sub-step (b) was returning HTTP 500 — looks like a
+  server bug; 503 Service Unavailable correctly signals infra
+  fail).
+- `93a19b3` — `verify_step_litellm_real.sql` fixes: removed
+  leftover canonical_events SELECT (was supposed to drop in R2 P0-2
+  split but only the DO block moved); fixed wrong ledger_accounts
+  join column (used `la.account_id` instead of
+  `le.ledger_account_id = la.ledger_account_id`); escaped
+  apostrophe in `\echo` line (psql treated `demo's` as
+  unterminated string).
+- (Pre-existing) `728a30f` — `python -m litellm` vs
+  `python -m litellm.proxy.proxy_cli` (Slice 6 R2 P0-1).
 
 ## Final-pass verdict
 
-**ZERO new P0** in the whole-integration shape. All per-slice P0/critical-P1
-findings are addressed. The demo gate (task #10) is a runtime
-verification step that must be executed by the operator with an
-available Docker stack; the code is shippable pending that gate.
+**ZERO new P0** in the whole-integration shape. All per-slice
+P0/critical-P1 findings are addressed. Demo gate verified live
+against full runtime (task #10 closed).
 
-`VERDICT: PASS (pending demo gate task #10)`
+`VERDICT: PASS (demo gate verified live)`
