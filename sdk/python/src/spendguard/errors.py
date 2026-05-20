@@ -24,7 +24,15 @@ class SidecarUnavailable(SpendGuardError):
     Adapters in fail-closed mode should propagate this; fail-open
     deployments may catch and continue. Default per Sidecar §11 is
     fail-closed.
+
+    Slice 6 demo-gate hardening: `status_code = 503` so LiteLLM's
+    proxy maps transient infra failures to HTTP 503 Service
+    Unavailable rather than the default 500 Internal Server Error.
+    503 correctly signals "try again later" semantics for clients;
+    500 implies a server bug.
     """
+
+    status_code: int = 503
 
 
 class DecisionDenied(SpendGuardError):
