@@ -1,0 +1,32 @@
+# LiteLLM proxy config for the runnable example.
+#
+# Operators copy this file as-is, then edit:
+#   - model_list[*].api_base + api_key for your real provider(s).
+#   - general_settings.master_key (rotate per env).
+#   - litellm_settings.callbacks reference path stays unchanged.
+#
+# See ../../docs/specs/litellm-integration/PROXY_RECIPE.md for the
+# full operator template (multi-team, virtual-key auth, audit join).
+
+model_list:
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      # For the example we point at a counting stub — replace with
+      # the real provider URL in production.
+      api_base: http://host.docker.internal:8765/v1
+      api_key: os.environ/OPENAI_API_KEY
+
+litellm_settings:
+  # The SpendGuard callback module is mounted into the container at
+  # /opt/spendguard/example_callback.py; the module exposes
+  # `handler_instance` at module load.
+  callbacks: ["example_callback.handler_instance"]
+  # Drop provider-specific params LiteLLM doesn't recognise.
+  drop_params: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+  # Multi-team virtual keys would need database_url here. For the
+  # example we use master-key auth only (see PROXY_RECIPE.md §3
+  # for production-shape multi-team setup).
