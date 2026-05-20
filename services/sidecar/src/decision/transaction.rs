@@ -158,23 +158,85 @@ pub(crate) fn extract_enrichment(req: &DecisionRequest) -> AuditEnrichment {
         .unwrap_or_default();
 
     // GH #77 — extract allowlisted spendguard.* enrichment keys.
-    // Only string-typed values are accepted; unknown keys are dropped.
-    // Empty map (no keys present) → spendguard_context = Null so the
-    // CloudEvent payload omits the sub-object (backward compat).
+    // Slice C1 R1 P0 fix (Backend Architect): SDK sends bool / None
+    // values through proto Struct as BoolValue / NullValue (verified:
+    // `"stream": bool(...)` in client decision_context_json). The
+    // initial StringValue-only filter silently dropped these, locking
+    // in broken-shape signed CloudEvent payloads.
+    //
+    // Allowed coercions per `100-percent-design.md` §Epic C lines 254-257:
+    //   StringValue   → Value::String
+    //   BoolValue     → Value::Bool
+    //   NumberValue   → Value::from(f64) (architect mandate; no
+    //                   current 12-field uses numbers but forward-compat)
+    //   NullValue     → Value::Null (preserve explicit null semantics)
+    //   StructValue | ListValue → DROP with WARN (PII smuggling guard)
+    //
+    // Unknown keys (outside the 12-key allowlist) → DROP with WARN.
+    // Empty map → Null so the CloudEvent payload omits the sub-object
+    // (backward compat for legacy pre-GH#77 adapters).
     let spendguard_context = inputs
         .and_then(|i| i.runtime_metadata.as_ref())
         .map(|m| {
             let mut obj = serde_json::Map::new();
             for &key in SPENDGUARD_ENRICHMENT_ALLOWLIST {
                 if let Some(v) = m.fields.get(key) {
-                    if let Some(prost_types::value::Kind::StringValue(s)) =
-                        v.kind.as_ref()
-                    {
-                        if !s.is_empty() {
+                    match v.kind.as_ref() {
+                        Some(prost_types::value::Kind::StringValue(s)) => {
                             obj.insert(key.into(),
                                 serde_json::Value::String(s.clone()));
                         }
+                        Some(prost_types::value::Kind::BoolValue(b)) => {
+                            obj.insert(key.into(),
+                                serde_json::Value::Bool(*b));
+                        }
+                        Some(prost_types::value::Kind::NumberValue(n)) => {
+                            // serde_json::Number from f64 — None only
+                            // for NaN/Inf which the SDK never sends.
+                            if let Some(num) =
+                                serde_json::Number::from_f64(*n)
+                            {
+                                obj.insert(key.into(),
+                                    serde_json::Value::Number(num));
+                            }
+                        }
+                        Some(prost_types::value::Kind::NullValue(_)) => {
+                            obj.insert(key.into(), serde_json::Value::Null);
+                        }
+                        Some(other) => {
+                            // StructValue / ListValue — fail-closed
+                            // against PII smuggling per architect NG2.
+                            tracing::warn!(
+                                key = key,
+                                kind = ?std::mem::discriminant(other),
+                                "spendguard enrichment: dropping \
+                                 allowlisted key with non-scalar kind \
+                                 (StructValue/ListValue)",
+                            );
+                        }
+                        None => {
+                            // Empty Value (no kind set) — silently skip.
+                        }
                     }
+                }
+            }
+            // Architect P0: WARN on unknown keys (PII smuggling guard).
+            // We don't iterate the full m.fields map for performance;
+            // adapters that drift add a new field that's known to be
+            // intentional via the spec process. Per architect, debug-
+            // level rate-limited log on unknown keys is sufficient.
+            for (k, _v) in m.fields.iter() {
+                if !SPENDGUARD_ENRICHMENT_ALLOWLIST.contains(&k.as_str())
+                    // Cost Advisor P0.5 keys that DO belong elsewhere
+                    // (already extracted as top-level fields), not a
+                    // smuggling signal:
+                    && k != "prompt_hash"
+                {
+                    tracing::debug!(
+                        unknown_key = %k,
+                        "spendguard enrichment: dropped key not in \
+                         allowlist (DESIGN.md §8.2a)",
+                    );
                 }
             }
             if obj.is_empty() {
@@ -183,7 +245,7 @@ pub(crate) fn extract_enrichment(req: &DecisionRequest) -> AuditEnrichment {
                 serde_json::Value::Object(obj)
             }
         })
-        .unwrap_or(serde_json::Value::Null);
+        .unwrap_or_default();
 
     AuditEnrichment {
         run_id,
@@ -1448,5 +1510,122 @@ fn populate_reservation_cache(
                 current_state: "reserved".to_string(),
             },
         );
+    }
+}
+
+// =====================================================================
+// Slice C1 R1 — extract_enrichment unit tests
+// =====================================================================
+//
+// Architect + Code Reviewer Staff panel R1 P1: irreversible signed
+// CloudEvent payloads (DESIGN NG2) require unit coverage on the
+// allowlist/coercion logic BEFORE merge. Tests cover:
+//   - BoolValue / NullValue coercion (R1 P0 fix)
+//   - Empty runtime_metadata → spendguard_context = Null
+//   - Unknown-key drop
+//   - All-allowlisted-keys round-trip
+// =====================================================================
+
+#[cfg(test)]
+mod enrichment_tests {
+    use super::*;
+    use crate::proto::sidecar_adapter::v1::decision_request::Inputs as DecisionInputs;
+    use prost_types::{value::Kind as PtKind, Struct as PtStruct, Value as PtValue};
+    use std::collections::BTreeMap;
+
+    fn _str_value(s: &str) -> PtValue {
+        PtValue { kind: Some(PtKind::StringValue(s.into())) }
+    }
+    fn _bool_value(b: bool) -> PtValue {
+        PtValue { kind: Some(PtKind::BoolValue(b)) }
+    }
+    fn _null_value() -> PtValue {
+        PtValue { kind: Some(PtKind::NullValue(0)) }
+    }
+    fn _request_with_metadata(fields: BTreeMap<String, PtValue>) -> DecisionRequest {
+        DecisionRequest {
+            inputs: Some(DecisionInputs {
+                runtime_metadata: Some(PtStruct { fields }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_runtime_metadata_yields_null_context() {
+        let req = _request_with_metadata(BTreeMap::new());
+        let enr = extract_enrichment(&req);
+        assert!(enr.spendguard_context.is_null(),
+            "empty fields → Null, got {:?}", enr.spendguard_context);
+    }
+
+    #[test]
+    fn missing_runtime_metadata_yields_null_context() {
+        let req = DecisionRequest { inputs: None, ..Default::default() };
+        let enr = extract_enrichment(&req);
+        assert!(enr.spendguard_context.is_null());
+    }
+
+    #[test]
+    fn bool_value_coerced_to_json_bool() {
+        // Slice C1 R1 P0 (Backend Architect): SDK sends `stream: bool`
+        // as proto BoolValue. Pre-fix: silently dropped. Post-fix:
+        // emitted as JSON boolean.
+        let mut fields = BTreeMap::new();
+        fields.insert("stream".into(), _bool_value(true));
+        let req = _request_with_metadata(fields);
+        let enr = extract_enrichment(&req);
+        let obj = enr.spendguard_context.as_object()
+            .expect("expected Object, got Null");
+        assert_eq!(obj.get("stream"), Some(&serde_json::Value::Bool(true)));
+    }
+
+    #[test]
+    fn null_value_preserved_as_json_null() {
+        // SDK sends `team_id: None` when user_api_key_dict.team_id is
+        // missing → proto NullValue. Architect mandate: preserve as
+        // explicit null in payload (not dropped).
+        let mut fields = BTreeMap::new();
+        fields.insert("team_id".into(), _null_value());
+        let req = _request_with_metadata(fields);
+        let enr = extract_enrichment(&req);
+        let obj = enr.spendguard_context.as_object()
+            .expect("expected Object, got Null");
+        assert_eq!(obj.get("team_id"), Some(&serde_json::Value::Null));
+    }
+
+    #[test]
+    fn unknown_key_dropped_not_in_payload() {
+        // Architect NG2 PII smuggling guard: keys outside the 12-field
+        // allowlist must not flow into the signed payload.
+        let mut fields = BTreeMap::new();
+        fields.insert("integration".into(), _str_value("litellm"));
+        fields.insert("evil_pii".into(), _str_value("ssn:123-45-6789"));
+        let req = _request_with_metadata(fields);
+        let enr = extract_enrichment(&req);
+        let obj = enr.spendguard_context.as_object().unwrap();
+        assert!(obj.contains_key("integration"));
+        assert!(!obj.contains_key("evil_pii"),
+            "PII key must NOT leak into signed payload");
+    }
+
+    #[test]
+    fn all_twelve_keys_round_trip() {
+        let mut fields = BTreeMap::new();
+        for &k in SPENDGUARD_ENRICHMENT_ALLOWLIST {
+            fields.insert(k.into(), _str_value(&format!("val-{}", k)));
+        }
+        let req = _request_with_metadata(fields);
+        let enr = extract_enrichment(&req);
+        let obj = enr.spendguard_context.as_object().unwrap();
+        assert_eq!(obj.len(), SPENDGUARD_ENRICHMENT_ALLOWLIST.len());
+        for &k in SPENDGUARD_ENRICHMENT_ALLOWLIST {
+            assert_eq!(
+                obj.get(k),
+                Some(&serde_json::Value::String(format!("val-{}", k))),
+                "key {k} missing or wrong value",
+            );
+        }
     }
 }
