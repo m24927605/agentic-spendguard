@@ -2,9 +2,13 @@
 
 # 🛡️ Agentic SpendGuard
 
-**One env var. Hard-cap your LLM bill. Audit-chained, fail-closed.**
+**The spend firewall for LLM agents.**
 
-Stripe-style auth/capture for LLM tokens. Built for platform teams that need **pre-call enforcement** + a **KMS-signed audit chain** — not yet another post-hoc usage dashboard.
+Stops runaway agents *before* they hit your API bill — not after the
+invoice arrives the next morning. Pre-call budget reservations,
+signed audit trail, &lt;5ms per decision. Works with **LiteLLM proxy**,
+**OpenAI Agents SDK**, **LangGraph**, **LangChain**, **Pydantic-AI**,
+and **Microsoft Agent Governance Toolkit** ([merged upstream](https://github.com/microsoft/agent-governance-toolkit/pull/2398)).
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![PyPI: spendguard-sdk](https://img.shields.io/pypi/v/spendguard-sdk?label=pypi)](https://pypi.org/project/spendguard-sdk/)
@@ -15,7 +19,35 @@ Stripe-style auth/capture for LLM tokens. Built for platform teams that need **p
 
 </div>
 
-> **Ships as a first-party integration in [Microsoft Agent Governance Toolkit](https://github.com/microsoft/agent-governance-toolkit/blob/main/docs/integrations/spendguard-integration.md)** ([PR #2398](https://github.com/microsoft/agent-governance-toolkit/pull/2398), merged 2026-05-19). The AGT `PolicyEngine` composes cleanly with SpendGuard's out-of-process budget ledger — AGT denies short-circuit before any SpendGuard reservation is created.
+```bash
+pip install 'spendguard-sdk[litellm]'
+```
+
+→ [90-second demo](#-quick-start-30-seconds) · [Microsoft AGT integration](https://github.com/microsoft/agent-governance-toolkit/blob/main/docs/integrations/spendguard-integration.md) · [Architecture](#%EF%B8%8F-how-it-works)
+
+---
+
+## 💡 Why this exists
+
+Last Tuesday at 2:47am, a customer-support agent hit a rate-limited
+tool. The retry policy kicked in. The agent re-planned, re-prompted,
+re-tried — each retry a fresh `gpt-4o` call with the full conversation
+in context. Forty minutes later, one stuck conversation had consumed
+$380 in tokens. Multiply by the seventeen other tenants doing the
+same during the incident.
+
+The post-mortem starts with *"we didn't know until the OpenAI dashboard
+updated the next morning."*
+
+**SpendGuard moves detection from tomorrow to the 11th call.** Every
+request reserves tokens against a per-tenant budget before it leaves
+your process. Budget exhausted → HTTP 403 in &lt;5ms, with a signed
+audit row of why. The provider is never hit.
+
+The standard answer — *"track usage, send alerts"* — is reconciliation,
+not control. You see the bill **after** it lands. SpendGuard inverts
+this: if the agent isn't allowed to spend that much on that model under
+that tenant right now, the LLM call never happens.
 
 ---
 
@@ -45,17 +77,7 @@ client.chat.completions.create(model="gpt-4o-mini", messages=[...])
 | **CONTINUE** (budget available) | 200 | OpenAI's response byte-identical; ledger writes a `commit_estimated` audit row |
 | **STOP** (over hard-cap) | 429 + `Retry-After: 86400` | `{"error":{"code":"spendguard_blocked","details":{"reason_codes":["BUDGET_EXHAUSTED"],...}}}` — **the HTTP request never reaches OpenAI** |
 
-> 💡 **Think of it as**: Stripe authorize/capture for LLM token spend. PRE the call, the proxy reserves the cost against a configured budget; POST the call, it captures the real `usage.total_tokens`. The audit chain captures both, immutably.
-
----
-
-## 💡 Why this exists
-
-Your Pydantic-AI agent runs out of budget at 3 AM. By the time anyone notices, it's already retried the same `gpt-4o` call 47 times — each one charging the provider, none of them returning useful work. Or worse: a tool call leaks a request that costs $400 in tokens, and your post-hoc usage dashboard catches it 6 hours later.
-
-The standard answer — *"track usage, send alerts"* — is reconciliation, not control. You see the bill **after** it lands.
-
-SpendGuard inverts this. Every decision boundary an agent crosses, a sidecar evaluates first; if your agent isn't allowed to spend that much on that model under that contract right now, **the LLM call never happens**. The reservation is reserved. The commit clears it. Errors release it. Every step is an append-only KMS-signed audit row.
+If you've integrated Stripe before: this is **auth/capture, applied to LLM tokens**. PRE the call, the proxy reserves the cost against a configured budget; POST the call, it captures the real `usage.total_tokens`. Idempotent, atomic, fail-closed.
 
 ---
 

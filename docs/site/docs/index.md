@@ -1,76 +1,111 @@
 ---
 description: >-
-  Agentic SpendGuard is an open-source, audit-chain spend control layer for
-  LLM agents. KMS-signed decisions, multi-tenant budgets, operator approval
-  workflow. Framework adapters for Pydantic-AI, LangChain, LangGraph,
-  OpenAI Agents SDK, and Microsoft AGT.
+  The spend firewall for LLM agents — pre-call budget reservations,
+  signed audit trail, <5ms. Works with LiteLLM, OpenAI Agents SDK,
+  LangChain, LangGraph, Pydantic-AI, and Microsoft Agent Governance
+  Toolkit (merged upstream).
 ---
 
 # Agentic SpendGuard
 
-> Audit-chain spend control for LLM agents — sub-5ms per decision,
-> KMS-signed audit chain, deterministic policy enforcement.
-> Built for platform-engineering teams that need compliance evidence,
-> not just a runtime guardrail.
+**The spend firewall for LLM agents.**
 
-## What it does
+Stops runaway agents *before* they hit your API bill — not after the
+invoice arrives the next morning. Pre-call budget reservations, signed
+audit trail, &lt;5ms per decision.
 
-SpendGuard sits between your agent framework and the external actions
-the agent takes (LLM calls, tool calls, sub-agent dispatches). At each
-boundary, the sidecar consults a Contract DSL and the per-tenant budget
-ledger to decide:
+Works with **LiteLLM proxy**, **OpenAI Agents SDK**, **LangGraph**,
+**LangChain**, **Pydantic-AI**, and **Microsoft Agent Governance
+Toolkit** ([merged upstream](https://github.com/microsoft/agent-governance-toolkit/pull/2398)).
 
-- ✅ **CONTINUE** — proceed with the action
-- ⏸ **REQUIRE_APPROVAL** — pause until an operator approves
-- 🔄 **DEGRADE** — apply a mutation patch (e.g. force smaller model)
-- ⏭ **SKIP** — non-fatal skip
-- ⛔ **STOP** — terminate the run
-
-Every decision — `CONTINUE` or `STOP` — produces exactly one immutable
-audit record in `canonical_events`. There is no path that produces an
-effect without a corresponding audit row (Contract §6.1 invariant).
-
-## Where it fits
-
-```
-agent step ─►  sidecar (<5ms) ─► ledger (atomic reserve / commit)
-                  │                  │
-                  │                  └─► audit_outbox ─► canonical_events
-                  └─► contract evaluator (Stage 2 hot path)
+```bash
+pip install 'spendguard-sdk[litellm]'
 ```
 
-## Why it matters
+→ [90-second quickstart](quickstart.md) · [Microsoft AGT integration](https://github.com/microsoft/agent-governance-toolkit/blob/main/docs/integrations/spendguard-integration.md)
 
-Agent runtimes burn money in unbounded ways:
+---
 
-- One bad prompt can drain $10K of GPT-4 quota
-- A retry loop on a rate-limited tool call doesn't know it's draining
-- Compliance teams can't tell *which decision led to which spend*
+## Why this exists
 
-Existing options are vendor-specific (per-OpenAI, per-Anthropic) or
-prompt-only (please-don't-spend-too-much, with a 26.67% violation rate
-in [Microsoft AGT's red-team data](https://github.com/microsoft/agent-governance-toolkit)).
+Last Tuesday at 2:47am, a customer-support agent hit a rate-limited
+tool. The retry policy kicked in. The agent re-planned, re-prompted,
+re-tried — each retry a fresh `gpt-4o` call with the full conversation
+in context. Forty minutes later, one stuck conversation had consumed
+$380 in tokens. Multiply by the seventeen other tenants doing the
+same during the incident.
 
-SpendGuard is the cross-runtime budget governance layer.
+The post-mortem starts with "we didn't know until the OpenAI dashboard
+updated the next morning."
 
-## Status (POC, 2026-05)
+**SpendGuard moves detection from tomorrow to the 11th call.** Every
+request reserves tokens against a per-tenant budget before it leaves
+your process. Budget exhausted → HTTP 403 in &lt;5ms, with a signed
+audit record of why.
 
-| Layer | Status |
-|---|---|
-| T (Trace) | ✅ end-to-end |
-| L (Ledger) | ✅ Postgres SERIALIZABLE + audit_outbox |
-| C (Contract DSL) | 🟡 evaluator hot path live; CEL deferred to v2 |
-| D (Decision) | ✅ 8-stage transaction, end-to-end |
-| E (Evidence) | ✅ audit_outbox → canonical_events |
-| P (Proof) | 🟡 chain durable; per-event signing strict mode deferred |
+---
 
-8 demo modes all green: `decision`, `invoice`, `agent`, `release`,
-`ttl_sweep`, `deny`, `agent_real_*`, `multi_provider_usd`.
+## How it works
 
-## Get started
+Three things happen on every LLM call:
 
-→ [Quickstart](quickstart.md) — zero to a green DENY demo in 5 minutes
-→ [Concepts](concepts/architecture.md) — 6-layer architecture
-→ [POC vs GA gates](poc-vs-ga.md) — what's production-ready vs not
-→ [GA hardening slices](roadmap/ga-hardening-slices.md) — production
-  design, implementation, test, and review gates
+1. **Reserve.** Before the API call, SpendGuard checks the per-tenant
+   budget ledger and reserves the worst-case spend. If the tenant
+   can't afford the call, the provider is never hit.
+2. **Commit.** After the response, SpendGuard reads `response.usage`
+   and commits the real amount. Overshoot is refunded.
+3. **Audit.** Every reserve / commit / reject lands as a signed
+   CloudEvent. When finance asks *"what did tenant X spend on
+   Tuesday?"*, it's a query.
+
+```
+agent → SpendGuard (reserve) → provider → SpendGuard (commit) → ledger
+```
+
+If you've integrated Stripe: this is auth/capture, applied to LLM
+tokens. Idempotent, atomic, fail-closed.
+
+---
+
+## Try it
+
+```bash
+# Install the SDK
+pip install 'spendguard-sdk[litellm]'
+
+# Or run the full demo (~5 min cold start):
+git clone https://github.com/m24927605/agentic-spendguard
+cd agentic-spendguard
+make demo-up DEMO_MODE=litellm_real
+```
+
+Expected output:
+
+```
+[demo] (1) ALLOW: HTTP 200 completion_tokens=7
+[demo] (2) DENY: HTTP 403 reasons=['BUDGET_EXHAUSTED', ...]
+[demo] (3) STREAM: HTTP 200
+[demo] (4) MULTI-TEAM: 2 isolated calls
+[demo] litellm_real ALL 4 steps PASS
+```
+
+---
+
+## Honest about where we are
+
+- **Dev Status 4-Beta.** Single-maintainer open source. Solid demo
+  coverage (8+ demo modes, all green) but zero production users yet.
+- **What's production-ready vs not:** see [POC vs GA gates](poc-vs-ga.md).
+- **What ships and what doesn't:** see the [roadmap](roadmap/ga-hardening-slices.md).
+
+Use alongside Langfuse / Helicone / LangSmith — SpendGuard *prevents*,
+they *observe*. Different category, not a competitor.
+
+---
+
+## Next
+
+- [Quickstart](quickstart.md) — install + run the demo in 5 minutes
+- [Architecture](concepts/architecture.md) — the 6-layer design (only if you care how it works internally)
+- [Adapter integrations](integrations/litellm.md) — wire it into your stack
+- [POC vs GA gates](poc-vs-ga.md) — what's production-ready vs not
