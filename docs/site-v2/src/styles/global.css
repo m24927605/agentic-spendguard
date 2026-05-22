@@ -1,0 +1,503 @@
+/* -----------------------------------------------------------------------
+ * Agentic SpendGuard — landing + docs theme.
+ *
+ * Two surfaces share this stylesheet:
+ *   /          → src/pages/index.astro (custom landing, body.landing)
+ *   /docs/*    → Starlight-rendered docs (default body, Starlight chrome)
+ *
+ * Landing rules are scoped under `.landing` so they cannot bleed into
+ * Starlight pages. Starlight tokens are overridden globally because the
+ * docs surface inherits the indigo palette.
+ * --------------------------------------------------------------------- */
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+/* -----------------------------------------------------------------------
+ * Starlight token overrides (docs surface).
+ * --------------------------------------------------------------------- */
+
+:root {
+  --sl-font:
+    'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --sl-font-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
+  --sl-hue-accent: 232;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #1a1f3a;
+  --sl-color-accent: #3f51b5;
+  --sl-color-accent-high: #c4cbf2;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #f2f2f4;
+  --sl-color-gray-2: #c2c4cc;
+  --sl-color-gray-3: #8a8d99;
+  --sl-color-gray-4: #585b66;
+  --sl-color-gray-5: #2f3038;
+  --sl-color-gray-6: #1a1b22;
+  --sl-color-black: #0a0a0a;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #e2e5f7;
+  --sl-color-accent: #3f51b5;
+  --sl-color-accent-high: #1e2a73;
+}
+
+/* -----------------------------------------------------------------------
+ * Landing page — body.landing.
+ *
+ * Tokens local to the landing (not Starlight). All sizes match the spec
+ * in docs/landing-rebuild-prompt.md.
+ * --------------------------------------------------------------------- */
+
+body.landing {
+  --bg: #0a0a0a;
+  --bg-section: #0d0d0d;
+  --hairline: #1f2028;
+  --text: #c2c4cc;
+  --text-strong: #f2f2f4;
+  --text-white: #ffffff;
+  --muted: #8a8d99;
+  --border: #1f2028;
+  --border-strong: #2f3038;
+  --border-hover: #585b66;
+  --accent: #3f51b5;
+  --accent-hover: #5563cf;
+  --code-bg: #161720;
+
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family:
+    'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  font-size: 1rem;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body.landing * {
+  box-sizing: border-box;
+}
+
+body.landing a {
+  color: var(--text-strong);
+  text-decoration: none;
+}
+
+body.landing a:hover {
+  color: var(--text-white);
+}
+
+/* -----------------------------------------------------------------------
+ * Top nav
+ * --------------------------------------------------------------------- */
+
+.landing .topnav {
+  border-bottom: 1px solid var(--hairline);
+  background: var(--bg);
+}
+
+.landing .topnav-inner {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 1.25rem 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+}
+
+.landing .topnav .logo {
+  font-weight: 700;
+  font-size: 1rem;
+  letter-spacing: -0.01em;
+  color: var(--text-white);
+}
+
+.landing .topnav nav {
+  display: flex;
+  align-items: center;
+  gap: 1.75rem;
+}
+
+.landing .topnav nav a {
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 500;
+  transition: color 0.15s ease;
+}
+
+.landing .topnav nav a:hover {
+  color: var(--text-white);
+}
+
+.landing .topnav nav .github {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5rem;
+  height: 1.5rem;
+  color: var(--text);
+}
+
+.landing .topnav nav .github:hover {
+  color: var(--text-white);
+}
+
+.landing .topnav nav .github svg {
+  width: 1.25rem;
+  height: 1.25rem;
+}
+
+/* -----------------------------------------------------------------------
+ * Main + sections
+ * --------------------------------------------------------------------- */
+
+.landing main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 0 1.5rem;
+}
+
+.landing section {
+  padding-top: 6rem;
+  padding-bottom: 6rem;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.landing section:last-of-type {
+  border-bottom: none;
+}
+
+.landing section h2 {
+  font-size: 2rem;
+  font-weight: 700;
+  letter-spacing: -0.015em;
+  color: var(--text-white);
+  margin: 0 0 2.5rem;
+  text-align: center;
+  line-height: 1.15;
+}
+
+/* -----------------------------------------------------------------------
+ * Hero
+ * --------------------------------------------------------------------- */
+
+.landing .hero {
+  padding-top: 6rem;
+  padding-bottom: 6rem;
+  text-align: center;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.landing .hero h1 {
+  font-size: clamp(2.5rem, 5vw, 4.25rem);
+  font-weight: 800;
+  letter-spacing: -0.025em;
+  line-height: 1.05;
+  color: var(--text-white);
+  margin: 0;
+  max-width: 22ch;
+  margin-inline: auto;
+}
+
+.landing .hero .subhead {
+  margin: 1rem auto 0;
+  font-size: 1.25rem;
+  line-height: 1.5;
+  color: var(--text);
+  max-width: 640px;
+}
+
+.landing .hero .ctas {
+  margin-top: 2rem;
+  display: flex;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.landing .cta {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem 1.5rem;
+  border-radius: 0.5rem;
+  font-weight: 600;
+  font-size: 0.95rem;
+  border: 1px solid transparent;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+  cursor: pointer;
+}
+
+.landing .cta.primary {
+  background: var(--accent);
+  color: var(--text-white);
+  border-color: var(--accent);
+}
+
+.landing .cta.primary:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+  color: var(--text-white);
+}
+
+.landing .cta.secondary {
+  background: transparent;
+  color: var(--text-strong);
+  border-color: var(--border-strong);
+}
+
+.landing .cta.secondary:hover {
+  border-color: var(--border-hover);
+  color: var(--text-white);
+}
+
+.landing .hero-diagram {
+  margin-top: 4rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  color: var(--text);
+}
+
+.landing .hero-diagram .box {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.75rem 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--bg-section);
+  font-family: var(--sl-font-mono);
+  font-size: 0.9rem;
+  color: var(--text-strong);
+}
+
+.landing .hero-diagram .arrow {
+  color: var(--muted);
+  font-family: var(--sl-font-mono);
+  font-size: 1rem;
+}
+
+/* -----------------------------------------------------------------------
+ * How it works — 3 boxes
+ * --------------------------------------------------------------------- */
+
+.landing .how-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+
+.landing .how-box {
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  background: var(--bg-section);
+}
+
+.landing .how-box h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-white);
+  margin: 0 0 0.5rem;
+}
+
+.landing .how-box p {
+  font-size: 0.95rem;
+  color: var(--text);
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* -----------------------------------------------------------------------
+ * Feature cards — 3 cols x 2 rows
+ * --------------------------------------------------------------------- */
+
+.landing .features-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+}
+
+.landing .feature-card {
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 1.5rem;
+  background: transparent;
+}
+
+.landing .feature-card h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text-white);
+  margin: 0 0 0.5rem;
+}
+
+.landing .feature-card p {
+  font-size: 0.95rem;
+  color: var(--text);
+  margin: 0;
+  line-height: 1.5;
+}
+
+/* -----------------------------------------------------------------------
+ * Code sample
+ * --------------------------------------------------------------------- */
+
+.landing .code-sample-wrap {
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.landing pre.code-sample {
+  background: var(--code-bg);
+  border-radius: 0.5rem;
+  padding: 1.5rem;
+  margin: 0;
+  font-family: var(--sl-font-mono);
+  font-size: 0.95rem;
+  line-height: 1.6;
+  color: var(--text-strong);
+  overflow-x: auto;
+}
+
+.landing pre.code-sample .c-keyword { color: #c4cbf2; }
+.landing pre.code-sample .c-comment { color: #585b66; }
+.landing pre.code-sample .c-string  { color: #a3b8e6; }
+.landing pre.code-sample .c-deny    { color: #ff8a8a; }
+
+/* -----------------------------------------------------------------------
+ * Use case categories — 6 single-word tiles
+ * --------------------------------------------------------------------- */
+
+.landing .uc-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 1rem;
+}
+
+.landing .uc-tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.75rem;
+  padding: 1.5rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  color: var(--text-strong);
+  font-size: 0.9rem;
+  font-weight: 500;
+  text-align: center;
+}
+
+.landing .uc-tile svg {
+  width: 1.5rem;
+  height: 1.5rem;
+  color: var(--text);
+  stroke-width: 1.5;
+}
+
+/* -----------------------------------------------------------------------
+ * Testimonials / logo slots
+ * --------------------------------------------------------------------- */
+
+.landing .logo-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1rem;
+  max-width: 720px;
+  margin: 0 auto;
+}
+
+.landing .logo-placeholder {
+  height: 5rem;
+  border: 1px dashed var(--border-strong);
+  border-radius: 0.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.landing .deploy-cta {
+  margin-top: 2rem;
+  text-align: center;
+  color: var(--text);
+}
+
+.landing .deploy-cta a {
+  color: var(--text-white);
+  border-bottom: 1px solid var(--border-hover);
+}
+
+.landing .deploy-cta a:hover {
+  border-color: var(--text-white);
+}
+
+/* -----------------------------------------------------------------------
+ * Footer
+ * --------------------------------------------------------------------- */
+
+.landing footer {
+  border-top: 1px solid var(--hairline);
+  padding: 2rem 1.5rem;
+  text-align: center;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.landing footer a {
+  color: var(--text);
+}
+
+.landing footer a:hover {
+  color: var(--text-white);
+}
+
+/* -----------------------------------------------------------------------
+ * Responsive — collapse grids to 1 column on narrow viewports
+ * --------------------------------------------------------------------- */
+
+@media (max-width: 900px) {
+  .landing .how-grid,
+  .landing .features-grid {
+    grid-template-columns: 1fr;
+  }
+  .landing .uc-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+  .landing .topnav nav {
+    gap: 1rem;
+  }
+  .landing .topnav nav a:not(.github) {
+    display: none;
+  }
+  .landing section {
+    padding-top: 4rem;
+    padding-bottom: 4rem;
+  }
+  .landing .hero {
+    padding-top: 4rem;
+    padding-bottom: 4rem;
+  }
+}
+
+@media (max-width: 540px) {
+  .landing .uc-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
