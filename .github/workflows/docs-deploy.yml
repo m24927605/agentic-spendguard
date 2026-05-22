@@ -2,11 +2,16 @@ name: Deploy docs to GitHub Pages
 
 # Runs on every push that touches the docs site or this workflow.
 # Other paths don't trigger a rebuild — keeps the action minute usage low.
+#
+# 2026-05-22: migrated from MkDocs (`docs/site/`) to Astro Starlight
+# (`docs/site-v2/`). The old MkDocs source stays in git for one release
+# cycle as a rollback parachute; this workflow now only watches the new
+# location.
 on:
   push:
     branches: [main]
     paths:
-      - 'docs/site/**'
+      - 'docs/site-v2/**'
       - 'README.md'
       - '.github/workflows/docs-deploy.yml'
   workflow_dispatch: {}
@@ -28,39 +33,24 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
         with:
-          # mkdocs-material's `git-revision-date-localized` plugin (if added
-          # later) needs full history. Cheap insurance.
-          fetch-depth: 0
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: docs/site-v2/package-lock.json
 
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-          cache: pip
-          cache-dependency-path: docs/site/requirements.txt
+      - name: Install Astro + Starlight deps
+        working-directory: docs/site-v2
+        run: npm ci
 
-      # System deps for mkdocs-material[imaging]: Pillow needs jpeg/zlib;
-      # cairosvg needs Cairo + Pango. Without these, the `social` plugin
-      # fails at build time.
-      - name: Install system imaging libs
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libcairo2-dev libjpeg-dev libpango1.0-dev \
-            libgdk-pixbuf2.0-dev libffi-dev
-
-      - name: Install Python deps
-        run: pip install -r docs/site/requirements.txt
-
-      # Plain `mkdocs build` for now; will tighten to `--strict` in a
-      # follow-up once all internal cross-links are audited.
       - name: Build site
-        working-directory: docs/site
-        run: mkdocs build
+        working-directory: docs/site-v2
+        run: npm run build
 
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/site/site
+          path: docs/site-v2/dist
 
   deploy:
     needs: build

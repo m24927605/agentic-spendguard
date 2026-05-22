@@ -1,0 +1,126 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+ * Agentic SpendGuard — dark-first theme overrides.
+ *
+ * Starlight ships with a hue-based theme system: every color is derived
+ * from `--sl-hue-accent` + a lightness ramp on `--sl-color-{accent,gray}-{1..7}`.
+ * We override the dark palette (which is the default) to swap Starlight's
+ * blue accent for the SpendGuard indigo (#3F51B5, matching the existing
+ * social-card brand) on a near-black charcoal background. The light theme
+ * still works for readers who toggle it; it uses a softer mirror.
+ *
+ * Reference: https://starlight.astro.build/guides/css-and-tailwind/#theming
+ * ------------------------------------------------------------------------- */
+
+:root {
+  --sl-hue-accent: 232;
+  --sl-font:
+    'Inter', ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --sl-font-mono:
+    ui-monospace, 'SF Mono', Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
+}
+
+:root[data-theme='dark'] {
+  --sl-color-accent-low: #1a1f3a;
+  --sl-color-accent: #4f5dbb;
+  --sl-color-accent-high: #c4cbf2;
+  --sl-color-white: #ffffff;
+  --sl-color-gray-1: #f2f2f4;
+  --sl-color-gray-2: #c2c4cc;
+  --sl-color-gray-3: #8a8d99;
+  --sl-color-gray-4: #585b66;
+  --sl-color-gray-5: #2f3038;
+  --sl-color-gray-6: #1a1b22;
+  --sl-color-black: #0a0a0a;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #e2e5f7;
+  --sl-color-accent: #3f51b5;
+  --sl-color-accent-high: #1e2a73;
+}
+
+/* ---------------------------------------------------------------------------
+ * Landing-page hero — only renders for pages whose front-matter sets
+ * `template: splash`. Goal: dark-centered hero with large display type,
+ * generous breathing room, one solid + one outlined CTA — the
+ * agentcontrol-style pairing the user explicitly asked for.
+ * ------------------------------------------------------------------------- */
+
+.hero {
+  padding-top: clamp(2rem, 6vw, 4.5rem);
+  padding-bottom: clamp(2rem, 6vw, 4.5rem);
+}
+
+.hero h1 {
+  font-size: clamp(2.25rem, 5vw, 3.75rem);
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  font-weight: 800;
+}
+
+.hero .tagline {
+  font-size: clamp(1.125rem, 2vw, 1.375rem);
+  line-height: 1.5;
+  color: var(--sl-color-gray-2);
+  max-width: 42rem;
+  margin-inline: auto;
+}
+
+.hero .action.primary {
+  background: var(--sl-color-accent);
+  color: var(--sl-color-white);
+  border: 1px solid var(--sl-color-accent);
+  font-weight: 600;
+}
+.hero .action.primary:hover {
+  background: var(--sl-color-accent-high);
+  border-color: var(--sl-color-accent-high);
+  color: var(--sl-color-black);
+}
+.hero .action.secondary {
+  background: transparent;
+  color: var(--sl-color-gray-1);
+  border: 1px solid var(--sl-color-gray-4);
+}
+.hero .action.secondary:hover {
+  border-color: var(--sl-color-gray-2);
+  background: var(--sl-color-gray-6);
+}
+
+/* ---------------------------------------------------------------------------
+ * Landing-page "card grid" component utility. Used by index.mdx in the
+ * "How it works" + "Features" sections to match the agentcontrol 3-column
+ * card layout. Plain CSS so we do not depend on a runtime utility class
+ * name surviving Tailwind's purge.
+ * ------------------------------------------------------------------------- */
+
+.sg-feature-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  gap: 1rem;
+  margin-block: 2rem;
+}
+
+.sg-feature-card {
+  border: 1px solid var(--sl-color-gray-5);
+  border-radius: 0.75rem;
+  padding: 1.25rem 1.4rem;
+  background: var(--sl-color-gray-6);
+}
+
+.sg-feature-card h3 {
+  margin-top: 0;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+
+.sg-feature-card p {
+  margin-bottom: 0;
+  color: var(--sl-color-gray-2);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}

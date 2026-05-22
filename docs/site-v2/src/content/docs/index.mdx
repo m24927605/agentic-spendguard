@@ -1,0 +1,127 @@
+---
+title: The spend firewall for LLM agents
+description: >-
+  Agentic SpendGuard reserves budget before the provider is called and
+  emits a KMS-signed audit trail. Works with LiteLLM, OpenAI Agents SDK,
+  LangChain, LangGraph, Pydantic-AI, and Microsoft Agent Governance
+  Toolkit.
+template: splash
+hero:
+  title: The spend firewall for LLM agents
+  tagline: >-
+    Stops runaway agents before the provider is called. Budget reserved
+    per-call, KMS-signed audit trail, p50 ≤10ms decision overhead.
+  actions:
+    - text: Get started
+      link: /quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/m24927605/agentic-spendguard
+      icon: external
+      variant: secondary
+---
+
+import { Card, CardGrid } from '@astrojs/starlight/components';
+
+Works with **LiteLLM proxy**, **OpenAI Agents SDK**, **LangGraph**,
+**LangChain**, **Pydantic-AI**, and **Microsoft Agent Governance
+Toolkit** ([community integration merged
+upstream](https://github.com/microsoft/agent-governance-toolkit/pull/2398)).
+
+```bash
+pip install 'spendguard-sdk[litellm]'
+```
+
+---
+
+## How it works
+
+Three things happen on every LLM call:
+
+<div class="sg-feature-grid">
+  <div class="sg-feature-card">
+    <h3>1. Reserve</h3>
+    <p>Before the API call, SpendGuard checks the per-tenant budget ledger and reserves the worst-case spend. If the tenant can't afford the call, the provider is never hit.</p>
+  </div>
+  <div class="sg-feature-card">
+    <h3>2. Commit</h3>
+    <p>After the response, SpendGuard reads <code>response.usage</code> and commits the real amount. Overshoot is refunded.</p>
+  </div>
+  <div class="sg-feature-card">
+    <h3>3. Audit</h3>
+    <p>Every reserve / commit / reject lands as a signed CloudEvent. When finance asks <em>"what did tenant X spend on Tuesday?"</em>, it's a query.</p>
+  </div>
+</div>
+
+```
+agent → SpendGuard (reserve) → provider → SpendGuard (commit) → ledger
+```
+
+If you've integrated Stripe, this is auth/capture applied to LLM tokens.
+Idempotent, atomic, fail-closed.
+
+---
+
+## Why this exists
+
+Picture the failure mode SpendGuard is built to stop:
+
+A customer-support agent hits a rate-limited tool at 2:47am. The retry
+policy kicks in. The agent loop re-plans, re-prompts, re-tries — each
+retry a fresh `gpt-4o` call with the full conversation in context.
+Forty minutes later, one stuck conversation has consumed ~$380 in
+tokens. Multiply across the other tenants doing the same during the
+incident.
+
+The post-mortem starts with *"we didn't know until the OpenAI dashboard
+updated the next morning."*
+
+**SpendGuard moves detection from tomorrow to the 11th call.** Every
+request reserves tokens against a per-tenant budget before the provider
+is called. Budget exhausted → the call is refused with a signed audit
+record of why (HTTP 429 from the egress proxy; HTTP 403 from the
+LiteLLM callback).
+
+---
+
+## Try it
+
+```bash
+# Install the SDK
+pip install 'spendguard-sdk[litellm]'
+
+# Or run the full demo (~5 min cold start):
+git clone https://github.com/m24927605/agentic-spendguard
+cd agentic-spendguard
+make demo-up DEMO_MODE=litellm_real
+```
+
+Expected output:
+
+```
+[demo] (1) ALLOW: HTTP 200 completion_tokens=7
+[demo] (2) DENY: HTTP 403 reasons=['BUDGET_EXHAUSTED', ...]
+[demo] (3) STREAM: HTTP 200
+[demo] (4) MULTI-TEAM: 2 isolated calls
+[demo] litellm_real ALL 4 steps PASS
+```
+
+---
+
+## Honest about where we are
+
+<CardGrid>
+  <Card title="OSS sidecar, Apache 2.0" icon="seti:license">
+    Dev Status 4-Beta. Single maintainer. Solid demo coverage (8+ demo modes, all green) but zero production users yet.
+  </Card>
+  <Card title="What's production-ready" icon="information">
+    See [POC vs GA gates](/poc-vs-ga/) for the exact list of what ships and what doesn't.
+  </Card>
+  <Card title="Roadmap is public" icon="rocket">
+    [GA hardening slices](/roadmap/ga-hardening-slices/) — every commitment with an explicit ship gate.
+  </Card>
+  <Card title="Not a competitor to Langfuse" icon="puzzle">
+    Use alongside observability tools. SpendGuard *prevents*, they *observe*. Different category.
+  </Card>
+</CardGrid>
