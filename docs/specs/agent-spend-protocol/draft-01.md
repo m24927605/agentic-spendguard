@@ -55,7 +55,7 @@ Verbs use the upstream `budget_reservation` canonical names verbatim. Other ASP-
 | **Decision Context** | The set of facts the Authority used and the Decision is bound to via signature. |
 | **Audit Event** | A signed CloudEvent emitted for every `reserve` / `commit` / `release` / `refund` outcome, including the bound Decision Context. |
 
-**Decision values.** The wire-level decision enum is the upstream canonical set verbatim plus one ASP-runtime-specific addition:
+**Decision values.** The wire-level decision enum is the upstream canonical set verbatim — no Draft-01 extensions:
 
 | Decision | Source | Meaning |
 |---|---|---|
@@ -149,7 +149,7 @@ Authorities MUST publish their grace window value via the Authority discovery en
 A Reservation's lifecycle is one-shot. `reservation_id` MAY be used in at most one terminal state transition (commit, release, expired-beyond-grace, or quarantine). After the terminal state is reached:
 
 - A subsequent `commit` against a committed reservation with the **same `(reservation_id, idempotency_key)` pair and identical request body** is treated as an idempotent retry: the Authority returns the original `CommitResponse` without re-running settlement and without emitting a new audit event. This is the standard network-retry safety net.
-- A subsequent `commit` against a committed reservation with a **different `idempotency_key` or a conflicting request body** MUST be rejected with `RESERVATION_SETTLED`. The Authority emits `audit.replay_rejected` with reason `reservation_already_settled`.
+- A subsequent `commit` against a committed reservation with a **different `idempotency_key`** MUST be rejected with `RESERVATION_SETTLED`. The Authority emits `audit.replay_rejected` with reason `reservation_already_settled`. (The case where the same `idempotency_key` is reused with a conflicting body is `REPLAY_CONFLICT`, not `RESERVATION_SETTLED` — see the dedicated bullet below.)
 - A subsequent `commit` against a released reservation MUST be rejected with `RESERVATION_RELEASED`. A commit against an expired-beyond-grace reservation MUST be rejected with `EXPIRED_BEYOND_GRACE`.
 - A subsequent `release` against a committed reservation is a no-op (return success without state change). A release against an already-released reservation with the same `idempotency_key` returns the original response; with a different `idempotency_key` returns success-no-op as well — release-after-release is harmless.
 
@@ -351,7 +351,7 @@ Provider-specific extensions (e.g. for LiteLLM: `litellm_call_id`, `model`, `tea
 | Aspect | Spec (Draft-01) | SpendGuard reference impl today | Resolution path |
 |---|---|---|---|
 | CloudEvent `type` discriminator | Per-verb / per-outcome under `<issuer>.audit.<suffix>` per §5 | Two-event legacy taxonomy: `spendguard.audit.decision` (covers Reserve outcomes) and `spendguard.audit.outcome` (covers Commit + Release outcomes); single types carry the verb in the `data` payload instead of the CloudEvent `type` suffix | SpendGuard migrates to per-suffix events under the `spendguard.audit.*` prefix in a future point release. Spec already permits issuer-prefixed names so the spec form is forward-compatible. |
-| Audit signing format | JCS canonical JSON over `data`, Ed25519 | Canonical protobuf bytes over the proto event, Ed25519 | SpendGuard adds a JCS-form output alongside protobuf so cross-implementation verifiers don't need protobuf tooling. Tracked as a follow-up. |
+| Audit signing scope and format | Full CloudEvent envelope (`id`, `source`, `type`, `datacontenttype`, `time`, `data` together, JCS for `data` payload, lexical field order), Ed25519 | Canonical protobuf bytes over the proto event body only — does not yet bind the CloudEvent envelope fields | SpendGuard widens signed scope to include the envelope fields and adds a JCS-form output alongside protobuf so cross-implementation verifiers don't need protobuf tooling. Tracked as a follow-up. |
 | Commit lane | Single `Commit` RPC carrying `amount_atomic_observed` (provider-reported usage) | Only `CommitEstimated` is implemented today: `services/sidecar/src/decision/transaction.rs:run_commit_estimated` rejects non-empty `provider_reported_amount_atomic` with "ProviderReport path is deferred to a future slice". `adapter_uds.rs` routes all successful LLM post events through that estimated lane. So **SpendGuard does not yet implement the spec's observed-amount commit**; that is a SpendGuard backlog item, not a spec-vs-impl framing difference. | SpendGuard adds the observed-amount commit path. Until then, callers reconcile estimated reservations through the existing `CommitEstimated` RPC; this is an interop limitation against any future ASP-only consumer. |
 | Release wire shape | `ReleaseRequest { reservation_id, idempotency_key, reason_codes }`, response carries only the signed audit event | SpendGuard's ledger-tier `ReleaseRequest` carries `reservation_set_id`, structured `Idempotency`, `Fencing`, `audit_event`, `decision_id`, `producer_sequence`. The adapter-facing Release path wraps this internally and returns success / replay / error. | SpendGuard exposes a Draft-01-shaped Release RPC at the adapter UDS boundary (the richer internal shape stays internal). Tracked as a follow-up. |
 
