@@ -1453,22 +1453,17 @@ fn map_proto_error_to_domain<T>(
         PC::PricingFreezeMismatch => DomainError::PricingFreezeMismatch(message),
         PC::OverrunReservation => DomainError::OverrunReservation(message),
         PC::MultiReservationCommitDeferred => DomainError::MultiReservationCommitDeferred(message),
-        // The ledger encodes IdempotencyConflict as
-        // (code=Unspecified, message="idempotency_key reused with
-        // different request_hash"). Without this branch the conflict
-        // gets mapped to DecisionStage (INTERNAL via gRPC Status),
-        // hiding what is actually a client-side replay error. Pattern-
-        // match the message text to recover the client-error semantics
-        // documented in ASP Draft-01 §3.3 (REPLAY_CONFLICT). This is a
-        // narrow string-sniff but the ledger error shape is stable
-        // (services/ledger/src/domain/error.rs::to_proto).
-        PC::Unspecified
-            if message.contains("idempotency_key reused with different request_hash") =>
-        {
-            DomainError::ReservationStateConflict(format!(
-                "REPLAY_CONFLICT: {message}"
-            ))
-        }
+        // Note: IdempotencyConflict from the ledger comes through as
+        // (code=Unspecified, message=Display-string-from-thiserror).
+        // The Display string differs from the details["summary"]
+        // string, so a text-match here is brittle. Sidecar surfaces
+        // IdempotencyConflict as DecisionStage (INTERNAL) for now —
+        // a known limitation tracked in the §8 deltas. Fixing this
+        // properly requires either a dedicated proto error code on
+        // the ledger side or stable Display text. Until then, the
+        // explicit RPC's design (no request_body_hash sent) ensures
+        // IdempotencyConflict is not reachable from the explicit
+        // release path in practice.
         _ => DomainError::DecisionStage(format!("ledger error code={code} msg={message}")),
     })
 }

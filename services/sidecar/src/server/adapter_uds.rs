@@ -949,20 +949,21 @@ impl AdapterUds {
             Some(req.idempotency_key.as_str())
         };
 
-        // Hash of the canonicalized reason_codes body so the ledger
-        // can detect "same idempotency_key, different body" as
-        // IdempotencyConflict (mapped to REPLAY_CONFLICT) instead of
-        // replaying the original outcome. Canonicalization: codes
-        // joined by '|' in their request order. Adapters that want
-        // strict cross-process reproducibility should sort before
-        // sending; this v1 hash treats order as part of the body
-        // (different orders → different hashes → conflict).
-        let body_for_hash = req.reason_codes.join("|");
-        let body_hash: [u8; 32] = {
-            use sha2::{Digest, Sha256};
-            Sha256::digest(body_for_hash.as_bytes()).into()
-        };
-
+        // request_body_hash: explicit RPC passes None for v1.
+        //
+        // Sending a non-empty hash would require matching the ledger's
+        // private canonical_request_hash function (tenant +
+        // reservation_set + decision + reason — see services/ledger/
+        // src/handlers/release.rs); any other hash makes the ledger
+        // reject every first-time release as IdempotencyConflict.
+        //
+        // Known limitation tracked separately: with empty hash, a
+        // retry that reuses the same idempotency_key but supplies
+        // different reason_codes will REPLAY the first outcome
+        // instead of returning REPLAY_CONFLICT. Acceptable for v1
+        // since the documented adapter pattern derives a stable
+        // idempotency_key per (reservation_id) and varying reason
+        // codes for the same key is a programming error.
         match transaction::run_release(
             &self.cfg,
             &self.state,
@@ -971,7 +972,7 @@ impl AdapterUds {
             reason,
             metadata,
             idempotency_override,
-            Some(&body_hash),
+            None,
         )
         .await
         {
