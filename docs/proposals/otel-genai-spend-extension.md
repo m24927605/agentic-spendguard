@@ -18,12 +18,13 @@ Without semconv coverage, every vendor's enforcement decisions go on the GenAI s
 
 ## Proposed additions
 
-### Three span events
+### Four span events
 
 | Event name | Emitted when | Required attributes |
 |---|---|---|
 | `gen_ai.spend.reserve` | Before the provider call, when an enforcement authority returns a decision | `gen_ai.spend.decision`, `gen_ai.spend.decision_id`, `gen_ai.spend.budget_id`, `gen_ai.spend.unit`, `gen_ai.spend.amount_atomic_reserved` |
 | `gen_ai.spend.commit` | After the provider call, when observed usage is reconciled against the reservation | `gen_ai.spend.decision_id`, `gen_ai.spend.amount_atomic_observed`, `gen_ai.spend.refund_amount_atomic` *or* `gen_ai.spend.charge_amount_atomic` |
+| `gen_ai.spend.release` | When the provider call is aborted, the client times out, or the agent run is cancelled, and the held reservation is returned to the budget before TTL | `gen_ai.spend.decision_id`, `gen_ai.spend.reason_codes` |
 | `gen_ai.spend.audit` | When the enforcement authority emits a signed audit record (typically asynchronous from the GenAI span) | `gen_ai.spend.decision_id`, `gen_ai.spend.audit_event_signature_hash` |
 
 The provider call's own span attributes (`gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.request.model`, …) remain unchanged. The new events sit alongside them on the same span; correlation between the provider call and the enforcement decision is by trace identity, not by ad-hoc key matching.
@@ -32,7 +33,7 @@ The provider call's own span attributes (`gen_ai.usage.input_tokens`, `gen_ai.us
 
 | Attribute | Type | Required | Brief |
 |---|---|---|---|
-| `gen_ai.spend.decision` | string enum | ✓ on `reserve` event | `allow` / `deny` / `degrade` / `require_approval` |
+| `gen_ai.spend.decision` | string enum | ✓ on `reserve` event | `allow` / `allow_with_caps` / `deny` / `degrade` / `require_approval` (first three are canonical from upstream `budget_reservation.yaml`; last two are agent-runtime extensions per the ASP draft) |
 | `gen_ai.spend.decision_id` | string | ✓ | Stable identifier tying `reserve` ↔ `commit` ↔ `audit` |
 | `gen_ai.spend.budget_id` | string | ✓ on `reserve` | Opaque to OTel; e.g. `tenant-3:2026-05:output_token` |
 | `gen_ai.spend.unit` | string | ✓ on `reserve` | e.g. `output_token`, `usd_atomic`, `request` |
