@@ -558,61 +558,79 @@ message DrainSignal {
 // ReleaseReservation (Agent Spend Protocol Draft-01 §4)
 // ============================================================================
 
+// Field-tag layout: ASP Draft-01 §4 canonical fields hold tags 1-3
+// verbatim. SpendGuard extensions (tenant assertion, fencing identity)
+// live at tags 100+ so a Draft-01-generated client wire-serializes
+// identically. Tags 4-99 are reserved for future Draft-01 additions.
 message ReleaseReservationRequest {
-  // Tenant scope. MUST match the sidecar's configured tenant
-  // (validated against cfg.tenant_id, same as Handshake.tenant_id_assertion).
-  string tenant_id = 1;
+  // ── ASP Draft-01 §4 canonical fields ─────────────────────────────────
 
   // The reservation to release. UUIDv7 from a prior ReserveResponse's
   // reservation_ids. Released independently per-reservation: callers
   // holding multiple reservations under one decision MUST call
   // ReleaseReservation once per reservation_id.
-  string reservation_id = 2;
+  string reservation_id = 1;
 
   // Idempotency key for retries. The (reservation_id, idempotency_key)
   // pair is the dedup key per ASP Draft-01 §3.3:
   //   - same pair + identical body  → return original outcome
-  //   - same pair + different body  → REPLAY_CONFLICT (Error)
+  //   - same pair + different body  → REPLAY_CONFLICT (gRPC Status)
   //   - different idempotency_key against a terminal reservation
-  //     → RESERVATION_SETTLED / RESERVATION_RELEASED (Error)
-  string idempotency_key = 3;
+  //     → RESERVATION_SETTLED / RESERVATION_RELEASED (gRPC Status)
+  string idempotency_key = 2;
 
   // Free-form reason codes per ASP Draft-01 §4. Optional but
   // RECOMMENDED. SpendGuard maps known values to its internal
   // ReleaseReason enum; unknown values default to EXPLICIT.
-  // Known mappings:
-  //   "provider_error" | "runtime_error" → RuntimeError
-  //   "client_timeout" | "run_aborted"   → RunAborted
-  //   anything else                      → Explicit
-  repeated string reason_codes = 4;
+  // Known mappings (aligned with the EmitTraceEvents implicit path):
+  //   "provider_error" | "runtime_error" | "client_timeout"
+  //     → RuntimeError
+  //   "run_aborted" | "run_cancelled"
+  //     → RunAborted
+  //   anything else
+  //     → Explicit
+  repeated string reason_codes = 3;
+
+  // ── SpendGuard extensions (additive, MAY be empty) ──────────────────
+  // Tags 4-99 reserved for future Draft-01 additions.
+
+  // Tenant scope assertion. If non-empty MUST match the sidecar's
+  // configured tenant_id (permission_denied on mismatch). If empty the
+  // sidecar's own tenant_id is used implicitly. Same discipline as
+  // Handshake.tenant_id_assertion.
+  string tenant_id = 100;
 
   // Adapter identity for fencing parity with the original Reserve.
-  // Same semantics as DecisionRequest.workload_instance_id /
-  // session_id — fencing epoch is checked inside run_release.
-  string workload_instance_id = 5;
-  string session_id = 6;
+  // If empty, sidecar config defaults are used. Fencing epoch is
+  // checked inside run_release regardless.
+  string workload_instance_id = 101;
+  string session_id = 102;
 }
 
+// Errors are returned via gRPC Status (standard tonic / Draft-01
+// idiom), not embedded in the response body. Maps:
+//   ReservationStateConflict → Status::failed_precondition
+//   ReservationTtlExpired    → Status::failed_precondition
+//   FencingEpochStale        → Status::failed_precondition
+//   (unknown reservation)    → Status::not_found
+//   (tenant mismatch)        → Status::permission_denied
+//   (invalid UUID)           → Status::invalid_argument
 message ReleaseReservationResponse {
-  oneof outcome {
-    ReleaseReservationSuccess success = 1;
+  // ── ASP Draft-01 §4 canonical field ──────────────────────────────────
 
-    // Reservation in terminal state (committed / already released /
-    // expired-beyond-grace), unknown reservation_id, or fencing-epoch
-    // stale. Adapter raises a typed exception based on Error.code.
-    spendguard.common.v1.Error error = 2;
-  }
-}
+  // Detached Ed25519 signature of the emitted audit.release CloudEvent.
+  // The full event lands in the audit chain via canonical_ingest; this
+  // signature lets the adapter pin the response to the receipt.
+  bytes audit_event_signature = 1;
 
-message ReleaseReservationSuccess {
+  // ── SpendGuard extensions (additive) ────────────────────────────────
+  // Tags 2-99 reserved for future Draft-01 additions.
+
   // Ledger transaction that recorded the release.
-  string ledger_transaction_id = 1;
+  string ledger_transaction_id = 100;
+
   // Reservations released by this call (single-element array in the
   // current single-reservation-per-call model; kept as repeated for
-  // forward compatibility with batch release).
-  repeated string released_reservation_ids = 2;
-  // Detached Ed25519 signature of the emitted audit.release CloudEvent
-  // (the full event lands in the audit chain via canonical_ingest;
-  // this signature lets the adapter pin the response to the receipt).
-  bytes audit_event_signature = 3;
+  // forward compatibility with a future batch-release form).
+  repeated string released_reservation_ids = 101;
 }

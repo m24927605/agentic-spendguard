@@ -324,6 +324,7 @@ impl AdapterUds {
                         rid,
                         ReleaseReason::RuntimeError,
                         metadata,
+                        None,
                     )
                     .await
                     {
@@ -506,6 +507,7 @@ impl AdapterUds {
                             } else {
                                 Some(payload.provider_event_id.as_str())
                             },
+                            None,
                         )
                         .await
                         {
@@ -863,14 +865,14 @@ impl AdapterUds {
         Status,
     > {
         use crate::decision::transaction::{self, DecisionContext, ReleaseReason};
-        use crate::proto::sidecar_adapter::v1::{
-            release_reservation_response::Outcome as RrOutcome, ReleaseReservationResponse,
-            ReleaseReservationSuccess,
-        };
+        use crate::proto::sidecar_adapter::v1::ReleaseReservationResponse;
 
         let req = req.into_inner();
 
-        if req.tenant_id != self.cfg.tenant_id {
+        // Tenant assertion: per adapter.proto, the field MAY be empty
+        // (defaults to the sidecar's own tenant_id). If non-empty MUST
+        // match.
+        if !req.tenant_id.is_empty() && req.tenant_id != self.cfg.tenant_id {
             return Err(Status::permission_denied(format!(
                 "tenant_id '{}' does not match sidecar tenant '{}'",
                 req.tenant_id, self.cfg.tenant_id
@@ -885,15 +887,20 @@ impl AdapterUds {
         })?;
 
         // Reason mapping per adapter.proto comment block on
-        // ReleaseReservationRequest.reason_codes. Unknown codes default
-        // to Explicit so adapter intent is preserved in the audit
-        // metadata even when SpendGuard doesn't recognize the code.
+        // ReleaseReservationRequest.reason_codes. Aligned with the
+        // EmitTraceEvents implicit path so audit reason values are
+        // consistent regardless of which release path the adapter took.
+        // Unknown codes default to Explicit so adapter intent is
+        // preserved in the audit metadata even when SpendGuard does
+        // not recognize the code.
         let reason = req
             .reason_codes
             .iter()
             .find_map(|c| match c.as_str() {
-                "provider_error" | "runtime_error" => Some(ReleaseReason::RuntimeError),
-                "client_timeout" | "run_aborted" => Some(ReleaseReason::RunAborted),
+                "provider_error" | "runtime_error" | "client_timeout" => {
+                    Some(ReleaseReason::RuntimeError)
+                }
+                "run_aborted" | "run_cancelled" => Some(ReleaseReason::RunAborted),
                 _ => None,
             })
             .unwrap_or(ReleaseReason::Explicit);
@@ -918,6 +925,18 @@ impl AdapterUds {
             Some(metadata_owned.as_str())
         };
 
+        // Forward the adapter's idempotency key to the ledger so the
+        // (reservation_id, idempotency_key) dedup contract documented
+        // in adapter.proto holds end-to-end. Empty key falls back to
+        // run_release's built-in `release:{uuid}:1` (legacy implicit-
+        // path behavior — preserves replay semantics for adapters that
+        // don't supply a key).
+        let idempotency_override = if req.idempotency_key.is_empty() {
+            None
+        } else {
+            Some(req.idempotency_key.as_str())
+        };
+
         match transaction::run_release(
             &self.cfg,
             &self.state,
@@ -925,6 +944,7 @@ impl AdapterUds {
             reservation_uuid,
             reason,
             metadata,
+            idempotency_override,
         )
         .await
         {
@@ -937,17 +957,9 @@ impl AdapterUds {
                     "ReleaseReservation success"
                 );
                 Ok(Response::new(ReleaseReservationResponse {
-                    outcome: Some(RrOutcome::Success(ReleaseReservationSuccess {
-                        ledger_transaction_id: out.ledger_transaction_id,
-                        released_reservation_ids: out.released_reservation_ids,
-                        // v1: audit_event_signature is empty. The signed
-                        // CloudEvent is emitted to the audit chain via
-                        // canonical_ingest as part of run_release; exposing
-                        // the detached signature back to the adapter
-                        // requires a small refactor of run_release to
-                        // surface the signed bytes. Tracked as follow-up.
-                        audit_event_signature: vec![].into(),
-                    })),
+                    audit_event_signature: out.audit_event_signature.into(),
+                    ledger_transaction_id: out.ledger_transaction_id,
+                    released_reservation_ids: out.released_reservation_ids,
                 }))
             }
             Err(e) => {
@@ -957,9 +969,11 @@ impl AdapterUds {
                     error = %e,
                     "ReleaseReservation failed"
                 );
-                Ok(Response::new(ReleaseReservationResponse {
-                    outcome: Some(RrOutcome::Error(e.to_proto())),
-                }))
+                // Errors surface via gRPC Status (standard tonic / Draft-01
+                // idiom) rather than in the response body — see the
+                // error-mapping comment block in adapter.proto on
+                // ReleaseReservationResponse.
+                Err(e.to_status())
             }
         }
     }

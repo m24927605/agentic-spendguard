@@ -1192,6 +1192,13 @@ pub async fn run_commit_estimated(
 pub struct ReleaseOutput {
     pub ledger_transaction_id: String,
     pub released_reservation_ids: Vec<String>,
+    /// Detached signature of the audit.release CloudEvent emitted by
+    /// this release. Lets explicit ASP callers (ReleaseReservation RPC)
+    /// pin the response to the receipt without re-fetching from the
+    /// audit chain. Implicit callers (APPLY_FAILED, EmitTraceEvents
+    /// drivers) currently ignore it; that's fine — the field is
+    /// additive.
+    pub audit_event_signature: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1225,6 +1232,12 @@ pub async fn run_release(
     reservation_uuid: uuid::Uuid,
     reason: ReleaseReason,
     payload_metadata: Option<&str>,
+    // Adapter-supplied idempotency key for the ledger. None → use the
+    // built-in `release:{uuid}:1` key (the legacy implicit-path
+    // behavior). Some(k) → forward the adapter's key so the
+    // (reservation_id, adapter_key) dedup contract documented in
+    // adapter.proto::ReleaseReservationRequest holds end-to-end.
+    idempotency_key_override: Option<&str>,
 ) -> Result<ReleaseOutput, DomainError> {
     let _ = cfg;
 
@@ -1299,11 +1312,19 @@ pub async fn run_release(
     };
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
+    // Snapshot the audit signature now so we can return it to explicit
+    // ASP callers regardless of which ledger outcome branch fires.
+    let audit_event_signature: Vec<u8> = cloudevent.producer_signature.to_vec();
+
+    let ledger_idempotency_key = idempotency_key_override
+        .map(|k| k.to_string())
+        .unwrap_or_else(|| format!("release:{}:1", reservation_uuid));
+
     let request = ReleaseRequest {
         tenant_id: ctx.tenant_id.clone(),
         reservation_set_id: reservation_set_id.to_string(),
         idempotency: Some(Idempotency {
-            key: format!("release:{}:1", reservation_uuid),
+            key: ledger_idempotency_key,
             request_hash: Vec::new().into(),
         }),
         fencing: Some(Fencing {
@@ -1330,6 +1351,7 @@ pub async fn run_release(
             Ok(ReleaseOutput {
                 ledger_transaction_id: s.ledger_transaction_id,
                 released_reservation_ids: s.released_reservation_ids,
+                audit_event_signature,
             })
         }
         Some(ReleaseOutcome::Replay(r)) => {
@@ -1342,6 +1364,7 @@ pub async fn run_release(
             Ok(ReleaseOutput {
                 ledger_transaction_id: r.ledger_transaction_id,
                 released_reservation_ids: vec![reservation_uuid.to_string()],
+                audit_event_signature,
             })
         }
         Some(ReleaseOutcome::Error(e)) => map_proto_error_to_domain(e.code, e.message),
