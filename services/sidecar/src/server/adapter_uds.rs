@@ -908,9 +908,19 @@ impl AdapterUds {
         // Fencing parity with all other state-mutating RPCs.
         crate::fencing::check_active(&self.state).map_err(|e| e.to_status())?;
 
+        // Honor the request's workload_instance_id when non-empty
+        // (per adapter.proto field semantics — fencing parity with
+        // reservations created under an adapter-supplied identity,
+        // matching the ResumeAfterApproval workload override path).
+        let workload_instance_id = if req.workload_instance_id.is_empty() {
+            self.cfg.workload_instance_id.clone()
+        } else {
+            req.workload_instance_id.clone()
+        };
+
         let dctx = DecisionContext {
             session_id: req.session_id.clone(),
-            workload_instance_id: self.cfg.workload_instance_id.clone(),
+            workload_instance_id,
             tenant_id: self.cfg.tenant_id.clone(),
             region: self.cfg.region.clone(),
         };
