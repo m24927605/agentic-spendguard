@@ -148,6 +148,18 @@ impl SidecarAdapter for AdapterUds {
         record_outcome(&self.metrics, Handler::ResumeAfterApproval, &result);
         result
     }
+
+    async fn release_reservation(
+        &self,
+        req: Request<crate::proto::sidecar_adapter::v1::ReleaseReservationRequest>,
+    ) -> Result<
+        Response<crate::proto::sidecar_adapter::v1::ReleaseReservationResponse>,
+        Status,
+    > {
+        let result = self.release_reservation_inner(req).await;
+        record_outcome(&self.metrics, Handler::ReleaseReservation, &result);
+        result
+    }
 }
 
 impl AdapterUds {
@@ -312,6 +324,8 @@ impl AdapterUds {
                         rid,
                         ReleaseReason::RuntimeError,
                         metadata,
+                        None,
+                        None,
                     )
                     .await
                     {
@@ -494,6 +508,8 @@ impl AdapterUds {
                             } else {
                                 Some(payload.provider_event_id.as_str())
                             },
+                            None,
+                            None,
                         )
                         .await
                         {
@@ -832,6 +848,161 @@ impl AdapterUds {
             other => into_err(format!(
                 "[APPROVAL_NON_TERMINAL] approval state={other:?} is not resumable"
             )),
+        }
+    }
+
+    /// ReleaseReservation — explicit adapter-initiated release of a
+    /// held reservation matching Agent Spend Protocol Draft-01 §4.
+    ///
+    /// Coexists with the implicit release paths (APPLY_FAILED in
+    /// ConfirmPublishOutcome, run-aborted in EmitTraceEvents); this
+    /// wrapper exposes the same `transaction::run_release` core under a
+    /// dedicated RPC for ASP-conformant adapters. Implicit paths keep
+    /// working unchanged.
+    async fn release_reservation_inner(
+        &self,
+        req: Request<crate::proto::sidecar_adapter::v1::ReleaseReservationRequest>,
+    ) -> Result<
+        Response<crate::proto::sidecar_adapter::v1::ReleaseReservationResponse>,
+        Status,
+    > {
+        use crate::decision::transaction::{self, DecisionContext, ReleaseReason};
+        use crate::proto::sidecar_adapter::v1::ReleaseReservationResponse;
+
+        let req = req.into_inner();
+
+        // Tenant assertion: per adapter.proto, the field MAY be empty
+        // (defaults to the sidecar's own tenant_id). If non-empty MUST
+        // match.
+        if !req.tenant_id.is_empty() && req.tenant_id != self.cfg.tenant_id {
+            return Err(Status::permission_denied(format!(
+                "tenant_id '{}' does not match sidecar tenant '{}'",
+                req.tenant_id, self.cfg.tenant_id
+            )));
+        }
+
+        let reservation_uuid = uuid::Uuid::parse_str(&req.reservation_id).map_err(|e| {
+            Status::invalid_argument(format!(
+                "reservation_id '{}' is not a valid UUID: {e}",
+                req.reservation_id
+            ))
+        })?;
+
+        // Reason mapping per adapter.proto comment block on
+        // ReleaseReservationRequest.reason_codes. Aligned with the
+        // EmitTraceEvents implicit path so audit reason values are
+        // consistent regardless of which release path the adapter took.
+        // Unknown codes default to Explicit so adapter intent is
+        // preserved in the audit metadata even when SpendGuard does
+        // not recognize the code.
+        let reason = req
+            .reason_codes
+            .iter()
+            .find_map(|c| match c.as_str() {
+                "provider_error" | "runtime_error" | "client_timeout" => {
+                    Some(ReleaseReason::RuntimeError)
+                }
+                "run_aborted" | "run_cancelled" => Some(ReleaseReason::RunAborted),
+                _ => None,
+            })
+            .unwrap_or(ReleaseReason::Explicit);
+
+        // Fencing parity with all other state-mutating RPCs.
+        crate::fencing::check_active(&self.state).map_err(|e| e.to_status())?;
+
+        // Honor the request's workload_instance_id when non-empty
+        // (per adapter.proto field semantics — fencing parity with
+        // reservations created under an adapter-supplied identity,
+        // matching the ResumeAfterApproval workload override path).
+        let workload_instance_id = if req.workload_instance_id.is_empty() {
+            self.cfg.workload_instance_id.clone()
+        } else {
+            req.workload_instance_id.clone()
+        };
+
+        let dctx = DecisionContext {
+            session_id: req.session_id.clone(),
+            workload_instance_id,
+            tenant_id: self.cfg.tenant_id.clone(),
+            region: self.cfg.region.clone(),
+        };
+
+        // Preserve adapter intent in the audit chain: the joined
+        // reason_codes string lands in the audit.outcome CloudEvent's
+        // `metadata` field. Empty string when no codes provided.
+        let metadata_owned = req.reason_codes.join(",");
+        let metadata = if metadata_owned.is_empty() {
+            None
+        } else {
+            Some(metadata_owned.as_str())
+        };
+
+        // Forward the adapter's idempotency key to the ledger so the
+        // (reservation_id, idempotency_key) dedup contract documented
+        // in adapter.proto holds end-to-end. Empty key falls back to
+        // run_release's built-in `release:{uuid}:1` (legacy implicit-
+        // path behavior — preserves replay semantics for adapters that
+        // don't supply a key).
+        let idempotency_override = if req.idempotency_key.is_empty() {
+            None
+        } else {
+            Some(req.idempotency_key.as_str())
+        };
+
+        // request_body_hash: explicit RPC passes None for v1.
+        //
+        // Sending a non-empty hash would require matching the ledger's
+        // private canonical_request_hash function (tenant +
+        // reservation_set + decision + reason — see services/ledger/
+        // src/handlers/release.rs); any other hash makes the ledger
+        // reject every first-time release as IdempotencyConflict.
+        //
+        // Known limitation tracked separately: with empty hash, a
+        // retry that reuses the same idempotency_key but supplies
+        // different reason_codes will REPLAY the first outcome
+        // instead of returning REPLAY_CONFLICT. Acceptable for v1
+        // since the documented adapter pattern derives a stable
+        // idempotency_key per (reservation_id) and varying reason
+        // codes for the same key is a programming error.
+        match transaction::run_release(
+            &self.cfg,
+            &self.state,
+            &dctx,
+            reservation_uuid,
+            reason,
+            metadata,
+            idempotency_override,
+            None,
+        )
+        .await
+        {
+            Ok(out) => {
+                info!(
+                    reservation_id = %req.reservation_id,
+                    idempotency_key = %req.idempotency_key,
+                    ledger_tx = %out.ledger_transaction_id,
+                    reason = ?reason,
+                    "ReleaseReservation success"
+                );
+                Ok(Response::new(ReleaseReservationResponse {
+                    audit_event_signature: out.audit_event_signature.into(),
+                    ledger_transaction_id: out.ledger_transaction_id,
+                    released_reservation_ids: out.released_reservation_ids,
+                }))
+            }
+            Err(e) => {
+                warn!(
+                    reservation_id = %req.reservation_id,
+                    idempotency_key = %req.idempotency_key,
+                    error = %e,
+                    "ReleaseReservation failed"
+                );
+                // Errors surface via gRPC Status (standard tonic / Draft-01
+                // idiom) rather than in the response body — see the
+                // error-mapping comment block in adapter.proto on
+                // ReleaseReservationResponse.
+                Err(e.to_status())
+            }
         }
     }
 }

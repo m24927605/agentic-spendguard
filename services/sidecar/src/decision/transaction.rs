@@ -1192,6 +1192,13 @@ pub async fn run_commit_estimated(
 pub struct ReleaseOutput {
     pub ledger_transaction_id: String,
     pub released_reservation_ids: Vec<String>,
+    /// Detached signature of the audit.release CloudEvent emitted by
+    /// this release. Lets explicit ASP callers (ReleaseReservation RPC)
+    /// pin the response to the receipt without re-fetching from the
+    /// audit chain. Implicit callers (APPLY_FAILED, EmitTraceEvents
+    /// drivers) currently ignore it; that's fine — the field is
+    /// additive.
+    pub audit_event_signature: Vec<u8>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1225,6 +1232,18 @@ pub async fn run_release(
     reservation_uuid: uuid::Uuid,
     reason: ReleaseReason,
     payload_metadata: Option<&str>,
+    // Adapter-supplied idempotency key for the ledger. None → use the
+    // built-in `release:{uuid}:1` key (the legacy implicit-path
+    // behavior). Some(k) → forward the adapter's key so the
+    // (reservation_id, adapter_key) dedup contract documented in
+    // adapter.proto::ReleaseReservationRequest holds end-to-end.
+    idempotency_key_override: Option<&str>,
+    // Adapter-supplied hash of the raw request body (e.g. SHA-256 of
+    // the joined reason_codes). Lets the ledger detect "same key,
+    // different body" as IdempotencyConflict instead of replaying
+    // the original outcome. None → empty hash (legacy implicit-path
+    // behavior — implicit callers don't have a stable body to hash).
+    request_body_hash: Option<&[u8]>,
 ) -> Result<ReleaseOutput, DomainError> {
     let _ = cfg;
 
@@ -1234,21 +1253,43 @@ pub async fn run_release(
     // 2) Short-circuit on non-`reserved` states (Codex round 1 P1.4
     //    state-check ordering; SP also enforces, but failing fast at
     //    sidecar avoids burning a producer_sequence).
-    if resv.current_state != "reserved" {
+    //
+    //    `released` is intentionally let through: an explicit
+    //    ReleaseReservation retry with the same (reservation_id,
+    //    idempotency_key) MUST be able to reach the ledger so its
+    //    Replay branch can fire and return the original outcome (per
+    //    adapter.proto::ReleaseReservationRequest dedup contract).
+    //    The ledger remains the source of truth — if the retry's
+    //    idempotency key differs from the original, the ledger
+    //    returns RESERVATION_STATE_CONFLICT which maps to the
+    //    "different idempotency_key against terminal reservation"
+    //    error from ASP Draft-01 §3.3.
+    if resv.current_state != "reserved" && resv.current_state != "released" {
         return Err(DomainError::ReservationStateConflict(format!(
-            "reservation {} current_state={} (expected reserved for release)",
+            "reservation {} current_state={} (expected reserved or released for release)",
             reservation_uuid, resv.current_state
         )));
     }
 
     // 3) Fencing epoch parity (DD5 C1).
+    //
+    //    For state == "released" (replay-attempt path) we skip the
+    //    fencing comparison: the ledger SP checks idempotency BEFORE
+    //    fencing, so a same-key retry will replay correctly even if
+    //    the sidecar's fencing lease was renewed/lost between the
+    //    original release and the retry. Forcing a fresh fencing
+    //    check here would turn a legitimate idempotent retry into
+    //    FencingEpochStale instead of the documented Replay outcome.
+    //    We still need a fencing_state to populate the request proto;
+    //    the ledger ignores it on the replay path.
     let fencing_state = state
         .inner
         .fencing
         .read()
         .clone()
         .ok_or_else(|| DomainError::FencingAcquire("no active fencing scope".into()))?;
-    if fencing_state.epoch != resv.fencing_epoch_at_post {
+    let is_replay_attempt = resv.current_state == "released";
+    if !is_replay_attempt && fencing_state.epoch != resv.fencing_epoch_at_post {
         return Err(DomainError::FencingEpochStale(format!(
             "current epoch {} differs from reserve-time epoch {}; reservation will TTL-release",
             fencing_state.epoch, resv.fencing_epoch_at_post
@@ -1299,12 +1340,29 @@ pub async fn run_release(
     };
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
+    // Snapshot the audit signature now so we can return it to explicit
+    // ASP callers regardless of which ledger outcome branch fires.
+    let audit_event_signature: Vec<u8> = cloudevent.producer_signature.to_vec();
+
+    // Namespace the adapter-supplied key by reservation_uuid so the
+    // ledger sees a unique key per (reservation, adapter_key) pair.
+    // The ledger's idempotency dedup is scoped by (tenant, op_kind),
+    // not by reservation_id, so passing the raw adapter key would let
+    // two unrelated reservations using the same retry key collide.
+    // Wrapping in `release:{uuid}:{key}` preserves the documented
+    // Draft-01 (reservation_id, idempotency_key) dedup contract.
+    let ledger_idempotency_key = idempotency_key_override
+        .map(|k| format!("release:{}:{}", reservation_uuid, k))
+        .unwrap_or_else(|| format!("release:{}:1", reservation_uuid));
+
+    let request_hash_vec: Vec<u8> = request_body_hash.map(|h| h.to_vec()).unwrap_or_default();
+
     let request = ReleaseRequest {
         tenant_id: ctx.tenant_id.clone(),
         reservation_set_id: reservation_set_id.to_string(),
         idempotency: Some(Idempotency {
-            key: format!("release:{}:1", reservation_uuid),
-            request_hash: Vec::new().into(),
+            key: ledger_idempotency_key,
+            request_hash: request_hash_vec.into(),
         }),
         fencing: Some(Fencing {
             epoch: fencing_state.epoch,
@@ -1327,9 +1385,16 @@ pub async fn run_release(
                 .decision_id_to_reservation
                 .lock()
                 .remove(&resv.decision_id);
+            // The ledger's `released_reservation_ids` lists
+            // reservation_set_ids, not the caller's reservation_id.
+            // The Replay branch below returns vec![reservation_uuid].
+            // Normalize Success to match so callers see the same
+            // identifier shape across first-success and retry-replay
+            // for the same operation.
             Ok(ReleaseOutput {
                 ledger_transaction_id: s.ledger_transaction_id,
-                released_reservation_ids: s.released_reservation_ids,
+                released_reservation_ids: vec![reservation_uuid.to_string()],
+                audit_event_signature,
             })
         }
         Some(ReleaseOutcome::Replay(r)) => {
@@ -1342,6 +1407,17 @@ pub async fn run_release(
             Ok(ReleaseOutput {
                 ledger_transaction_id: r.ledger_transaction_id,
                 released_reservation_ids: vec![reservation_uuid.to_string()],
+                // The freshly-generated signature above is for THIS
+                // retry's CloudEvent — but on the Replay branch the
+                // ledger returns the original transaction and does not
+                // persist the new event. Returning the fresh signature
+                // would let the adapter pin to a CloudEvent that does
+                // not exist in the audit chain. Return empty bytes
+                // instead; adapter uses ledger_transaction_id as the
+                // canonical replay identifier and can re-fetch the
+                // original audit row by that id if it needs the
+                // original signature.
+                audit_event_signature: Vec::new(),
             })
         }
         Some(ReleaseOutcome::Error(e)) => map_proto_error_to_domain(e.code, e.message),
@@ -1377,6 +1453,17 @@ fn map_proto_error_to_domain<T>(
         PC::PricingFreezeMismatch => DomainError::PricingFreezeMismatch(message),
         PC::OverrunReservation => DomainError::OverrunReservation(message),
         PC::MultiReservationCommitDeferred => DomainError::MultiReservationCommitDeferred(message),
+        // Note: IdempotencyConflict from the ledger comes through as
+        // (code=Unspecified, message=Display-string-from-thiserror).
+        // The Display string differs from the details["summary"]
+        // string, so a text-match here is brittle. Sidecar surfaces
+        // IdempotencyConflict as DecisionStage (INTERNAL) for now —
+        // a known limitation tracked in the §8 deltas. Fixing this
+        // properly requires either a dedicated proto error code on
+        // the ledger side or stable Display text. Until then, the
+        // explicit RPC's design (no request_body_hash sent) ensures
+        // IdempotencyConflict is not reachable from the explicit
+        // release path in practice.
         _ => DomainError::DecisionStage(format!("ledger error code={code} msg={message}")),
     })
 }
