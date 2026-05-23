@@ -8,7 +8,7 @@
 
 The GenAI semantic conventions describe **what happened** during an LLM call (model, prompt tokens, completion tokens, span timing). A growing body of agent-runtime work — gateway-level budget controls (LiteLLM agent iteration budgets, Portkey budgets, Helicone limits), enterprise governance toolkits (Microsoft AGT), and pre-call enforcement protocols (the [Agent Spend Protocol draft](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/agent-spend-protocol/draft-01.md)) — produces a distinct class of events that don't fit any existing OTel attribute group:
 
-- A *decision* (ALLOW / ALLOW_WITH_CAPS / DENY / REQUIRE_APPROVAL) made **before** the provider call, with its own rationale and rule trace.
+- A *decision* (ALLOW / ALLOW_WITH_CAPS / DENY) made **before** the provider call, with its own rationale and rule trace.
 - A *reservation* (a held capacity claim) with a TTL deadline.
 - A *commit* (reconciliation of observed usage against the reservation) emitted **after** the provider response.
 
@@ -33,7 +33,7 @@ The provider call's own span attributes (`gen_ai.usage.input_tokens`, `gen_ai.us
 
 | Attribute | Type | Required | Brief |
 |---|---|---|---|
-| `gen_ai.spend.decision` | string enum | ✓ on `reserve` event | `allow` / `allow_with_caps` / `deny` / `require_approval` (first three are canonical from upstream `budget_reservation.yaml`; `require_approval` is an agent-runtime extension per the ASP draft). The "degrade" pattern is conveyed as `allow_with_caps` plus a `degrade.route_to` cap, not as a separate enum value. |
+| `gen_ai.spend.decision` | string enum | ✓ on `reserve` event | `allow` / `allow_with_caps` / `deny` (the canonical decision set from upstream `budget_reservation.yaml`). The "degrade" pattern is conveyed as `allow_with_caps` plus a `degrade.route_to` cap, not as a separate enum value. Human-in-the-loop approval is conveyed as `deny` with a `reason_codes` entry like `"approval_required"` and is otherwise out of scope for Draft-01 of the underlying ASP draft. |
 | `gen_ai.spend.decision_id` | string | ✓ | Stable identifier tying `reserve` ↔ `commit` ↔ `audit` |
 | `gen_ai.spend.budget_id` | string | ✓ on `reserve` | Opaque to OTel; e.g. `tenant-3:2026-05:output_token` |
 | `gen_ai.spend.unit` | string | ✓ on `reserve` | e.g. `output_token`, `usd_atomic`, `request` |

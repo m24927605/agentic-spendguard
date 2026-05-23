@@ -10,7 +10,7 @@
 
 The Agent Spend Protocol (ASP) defines a wire-level contract between an LLM agent (or agent runtime) and a budget-enforcement authority, enabling **pre-call budget reservation**, **post-call usage reconciliation**, and **signed audit emission** for every provider call an agent attempts. ASP is provider-neutral and framework-neutral: any agent runtime that wants to gate spend before the provider clock starts — instead of after the bill arrives — can implement ASP against any enforcement authority that speaks it.
 
-This document is the **agent-runtime binding** of the upstream `budget_reservation` canonical-verb domain that is currently incubating in [`aeoess/agent-governance-vocabulary`](https://github.com/aeoess/agent-governance-vocabulary). The verb set (`reserve`, `commit`, `release`, `refund`, `query_budget`) is reused verbatim. The decision enum (`ALLOW`, `ALLOW_WITH_CAPS`, `DENY`) is reused verbatim with one agent-runtime extension (`REQUIRE_APPROVAL`) documented in §2; the common "DEGRADE" pattern is folded into `ALLOW_WITH_CAPS` rather than being a separate enum value, also per §2.
+This document is the **agent-runtime binding** of the upstream `budget_reservation` canonical-verb domain that is currently incubating in [`aeoess/agent-governance-vocabulary`](https://github.com/aeoess/agent-governance-vocabulary). The verb set (`reserve`, `commit`, `release`, `refund`, `query_budget`) is reused verbatim. The decision enum (`ALLOW`, `ALLOW_WITH_CAPS`, `DENY`) is reused verbatim with no Draft-01 extensions: the common "DEGRADE" pattern is folded into `ALLOW_WITH_CAPS` per §2, and human-in-the-loop approval is deliberately deferred to Draft-02 per §2.
 
 ## 0. Why this exists
 
@@ -62,7 +62,8 @@ Verbs use the upstream `budget_reservation` canonical names verbatim. Other ASP-
 | `ALLOW` | upstream canonical | Reserve granted in full; provider call MAY proceed. |
 | `ALLOW_WITH_CAPS` | upstream canonical | Reserve granted with structured caps (`{type, params}[]`) the caller MUST honor. ASP defers cap-type vocabulary to upstream v0.2 (`ALLOW_WITH_CAPS_structure`). |
 | `DENY` | upstream canonical | Reserve refused. Provider call MUST NOT proceed. |
-| `REQUIRE_APPROVAL` | **ASP extension** | Reserve held pending human-in-the-loop approval. Returns an `approval_request_id`; subsequent Commit MUST first poll approval status. Structurally distinct from ALLOW_WITH_CAPS because the caller is held rather than proceeding-with-constraints; therefore a distinct enum value rather than a cap type. Marked extension because it is agent-runtime-specific (rails don't hold for approval). |
+
+Human-in-the-loop approval (the pattern where the Authority returns "pending until a human signs off") is **deliberately out of scope for Draft-01**. SpendGuard's reference implementation has an approval flow but the polling / resume / timeout RPCs needed to make it interoperable across implementations are not yet stable enough to specify. A future `REQUIRE_APPROVAL` extension or a dedicated companion spec is anticipated for Draft-02. Until then, Authorities that need human-in-the-loop semantics SHOULD return `DENY` with a `reason_codes` entry like `"approval_required"` and surface the approval workflow through a separate (non-ASP) channel.
 
 **Cap-honoring contract.** When the Authority returns `ALLOW_WITH_CAPS`:
 
@@ -198,9 +199,12 @@ message ReserveResponse {
     ALLOW = 1;
     DENY = 2;
     ALLOW_WITH_CAPS = 3;
-    REQUIRE_APPROVAL = 4;   // ASP extension; see §2
-    // The "DEGRADE" pattern is not a distinct decision value;
-    // it is ALLOW_WITH_CAPS with a `degrade.route_to` cap.
+    // Approval and DEGRADE patterns are NOT separate decision values
+    // in Draft-01:
+    //   - Approval-required: return DENY with reason_code
+    //     "approval_required"; resolve out-of-band; see §2.
+    //   - DEGRADE: return ALLOW_WITH_CAPS with a `degrade.route_to`
+    //     cap; see §2.
   }
   Decision decision = 1;
   string reservation_id = 2;
@@ -208,8 +212,7 @@ message ReserveResponse {
   repeated string reason_codes = 4;
   repeated string matched_rule_ids = 5;
   repeated AllowCap caps = 6;       // populated when decision = ALLOW_WITH_CAPS
-  string approval_request_id = 7;   // populated when decision = REQUIRE_APPROVAL
-  bytes audit_event_signature = 8;  // detached signature of the emitted
+  bytes audit_event_signature = 7;  // detached signature of the emitted
                                     // audit.reserve event for this Reserve
 }
 
@@ -287,7 +290,9 @@ Suffixes outside both sets are not valid ASP CloudEvent types. Adding a new outc
 
 **Issuer identity and JWKS discoverability.** The CloudEvent envelope's `source` attribute (a CloudEvents 1.0 normative field) MUST be set to a URL whose host is the issuer's domain. Verifiers derive the JWKS URL by appending `/.well-known/asp-jwks.json` to the `source` URL's origin. The `kid` field inside `data` selects the specific key in the JWKS. Example: `source = "https://sg.acme.internal/asp"` → JWKS at `https://sg.acme.internal/.well-known/asp-jwks.json`. Issuers whose prefix is not a domain name (e.g. the bare `spendguard` examples above) MUST still set `source` to a discoverable URL — the `type` prefix is a routing convenience, not an identity assertion.
 
-**Signing.** The signed payload is the CloudEvent's `data` field. ASP RECOMMENDS Ed25519 over the JCS (RFC 8785) canonical-JSON form of `data` for cross-implementation verification. Implementations whose wire is natively protobuf MAY sign the canonical protobuf encoding of `data` instead; verification across mixed implementations then requires a documented re-canonicalization, which is the cost of choosing a non-JCS form. See §8 for the reference implementation's current choice.
+**Signing.** The signed payload is the canonical form of the **full CloudEvent envelope** — not just `data`. Signing only `data` would leave `type`, `source`, `id`, and `time` mutable by any relay or SIEM pipeline that re-emits the event, which would let an attacker relabel a signed `audit.overage_rejected` as `audit.commit` (or any other type in the registered set) without invalidating the signature. The semantic outcome lives in the envelope; the envelope MUST be in the signed scope.
+
+The signed-scope canonical form is the CloudEvent's `id`, `source`, `type`, `datacontenttype`, `time`, and `data` fields, serialized in lexical order with the JCS (RFC 8785) canonical-JSON form for the `data` payload. ASP RECOMMENDS Ed25519 over this canonical form for cross-implementation verification. Implementations whose wire is natively protobuf MAY sign the canonical protobuf encoding of the same field set instead; verification across mixed implementations then requires a documented re-canonicalization, which is the cost of choosing a non-JCS form. See §8 for the reference implementation's current choice.
 
 **Key management.** Every CloudEvent envelope MUST carry a `kid` (signing key identifier) in the `data` payload or as a CloudEvent extension attribute. The issuer MUST publish a JWKS document at a well-known URL discoverable from the issuer's domain. After key rotation, **previous verification keys MUST remain published** for at least the retention period of the audit chain they signed (RECOMMENDED ≥ 1 year). Without this, historical audit chains become unverifiable.
 
@@ -307,7 +312,7 @@ Additional fields per suffix:
 
 | Suffix | Required additional fields | Notes |
 |---|---|---|
-| `audit.reserve` | `budget_id`, `unit`, `amount_atomic_reserved`, `decision`, `ttl_expires_at` (if decision ∈ {ALLOW, ALLOW_WITH_CAPS}), `caps` (if decision = ALLOW_WITH_CAPS), `approval_request_id` (if decision = REQUIRE_APPROVAL) | Decision-context capture per §2 |
+| `audit.reserve` | `budget_id`, `unit`, `amount_atomic_reserved`, `decision`, `ttl_expires_at` (if decision ∈ {ALLOW, ALLOW_WITH_CAPS}), `caps` (if decision = ALLOW_WITH_CAPS) | Decision-context capture per §2 |
 | `audit.commit` | `reservation_id`, `amount_atomic_observed`, `refund_amount_atomic` *or* `charge_amount_atomic` *or* `exact_match: true` | Exact-match commits where observed equals reserved set `exact_match: true` instead of `refund`/`charge` |
 | `audit.release` | `reservation_id` | Reason for release goes in `reason_codes` |
 | `audit.refund` | `reservation_id`, `amount_atomic_refunded`, `original_commit_event_id` | Post-commit reversal |
