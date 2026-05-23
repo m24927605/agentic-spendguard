@@ -4,13 +4,13 @@
 > **Editor:** SpendGuard authors (m24927605@gmail.com).
 > **License:** Apache-2.0. Public-domain protocol sketch — not a SpendGuard-specific binding.
 > **Repository:** [github.com/m24927605/agentic-spendguard/blob/main/docs/specs/agent-spend-protocol/draft-01.md](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/agent-spend-protocol/draft-01.md)
-> **Upstream alignment:** SpendGuard binding of the [`crosswalk/budget_reservation.yaml`](https://github.com/aeoess/agent-governance-vocabulary/blob/main/crosswalk/budget_reservation.yaml) canonical-verb-set (`status: INCUBATING`, `crosswalk_type: domain_incubation`, two production implementations as of 2026-05-13). SpendGuard adoption is intended to surface the third production implementation that promotes the candidate verbs (`reserve`, `commit`, `query_budget`) toward canonical, and bring `release` + `refund` to the two-implementation threshold.
+> **Upstream alignment:** SpendGuard binding of the [`crosswalk/budget_reservation.yaml`](https://github.com/aeoess/agent-governance-vocabulary/blob/main/crosswalk/budget_reservation.yaml) canonical-verb-set (`status: INCUBATING`, `crosswalk_type: domain_incubation`, two production implementations as of 2026-05-13). SpendGuard adoption is intended to surface the third production implementation that promotes the candidate verbs (`reserve`, `commit`, `query_budget`) toward canonical, and bring `release` + `refund` to the two-implementation threshold. Upstream `query_reservation` (also `proposed`) is out of scope for ASP Draft-01; SpendGuard does not implement a per-reservation query verb today.
 
 ## Abstract
 
 The Agent Spend Protocol (ASP) defines a wire-level contract between an LLM agent (or agent runtime) and a budget-enforcement authority, enabling **pre-call budget reservation**, **post-call usage reconciliation**, and **signed audit emission** for every provider call an agent attempts. ASP is provider-neutral and framework-neutral: any agent runtime that wants to gate spend before the provider clock starts — instead of after the bill arrives — can implement ASP against any enforcement authority that speaks it.
 
-This document is the **agent-runtime binding** of the upstream `budget_reservation` canonical-verb domain that is currently incubating in [`aeoess/agent-governance-vocabulary`](https://github.com/aeoess/agent-governance-vocabulary). The verb set (`reserve`, `commit`, `release`, `refund`, `query_budget`) is reused verbatim. The decision shape (`ALLOW`, `ALLOW_WITH_CAPS`, `DENY`) is reused verbatim with two agent-runtime extensions (`DEGRADE`, `REQUIRE_APPROVAL`) documented in §2.
+This document is the **agent-runtime binding** of the upstream `budget_reservation` canonical-verb domain that is currently incubating in [`aeoess/agent-governance-vocabulary`](https://github.com/aeoess/agent-governance-vocabulary). The verb set (`reserve`, `commit`, `release`, `refund`, `query_budget`) is reused verbatim. The decision enum (`ALLOW`, `ALLOW_WITH_CAPS`, `DENY`) is reused verbatim with one agent-runtime extension (`REQUIRE_APPROVAL`) documented in §2; the common "DEGRADE" pattern is folded into `ALLOW_WITH_CAPS` rather than being a separate enum value, also per §2.
 
 ## 0. Why this exists
 
@@ -37,6 +37,7 @@ ASP Draft-01 is the **agent-runtime binding** of that domain. Concretely:
 - ASP's `Release` RPC corresponds to upstream `release` (`proposed`; Cycles only). SpendGuard adoption gives `release` its second implementer.
 - ASP's `Refund` (optional, post-commit reversal) corresponds to upstream `refund` (`proposed`; goodmeta only). SpendGuard adoption gives `refund` its second implementer.
 - ASP's optional `QueryBudget` RPC corresponds to upstream `query_budget` (`candidate`).
+- Upstream `query_reservation` (`proposed`, one implementer with the verb multiplexed via `query`) is **deliberately out of scope** for Draft-01. SpendGuard does not yet expose a per-reservation read; if it adds one, Draft-02 will document the binding and the crosswalk will reflect it.
 
 Crosswalk publication — `crosswalk/asp.yaml` in `agent-governance-vocabulary` — is anticipated for Draft-02 once the wire details below settle through public review.
 
@@ -54,15 +55,16 @@ Verbs use the upstream `budget_reservation` canonical names verbatim. Other ASP-
 | **Decision Context** | The set of facts the Authority used and the Decision is bound to via signature. |
 | **Audit Event** | A signed CloudEvent emitted for every `reserve` / `commit` / `release` / `refund` outcome, including the bound Decision Context. |
 
-**Decision values** (verbatim from upstream `budget_reservation.yaml` plus two extensions):
+**Decision values.** The wire-level decision enum is the upstream canonical set verbatim plus one ASP-runtime-specific addition:
 
 | Decision | Source | Meaning |
 |---|---|---|
 | `ALLOW` | upstream canonical | Reserve granted in full; provider call MAY proceed. |
 | `ALLOW_WITH_CAPS` | upstream canonical | Reserve granted with structured caps (`{type, params}[]`) the caller MUST honor. ASP defers cap-type vocabulary to upstream v0.2 (`ALLOW_WITH_CAPS_structure`). |
 | `DENY` | upstream canonical | Reserve refused. Provider call MUST NOT proceed. |
-| `DEGRADE` | **ASP extension** | Reserve refused as-is; the Authority hints an alternative route (cheaper model, smaller context). The routing hint is conveyed as a cap of type `degrade.route_to` under `ALLOW_WITH_CAPS_structure.caps`, so this extension is compatible with the canonical shape. Marked extension because it is agent-runtime-specific (rails don't degrade). |
-| `REQUIRE_APPROVAL` | **ASP extension** | Reserve held pending human-in-the-loop approval. Returns an `approval_request_id`; subsequent Commit MUST first poll approval status. Marked extension for the same reason. |
+| `REQUIRE_APPROVAL` | **ASP extension** | Reserve held pending human-in-the-loop approval. Returns an `approval_request_id`; subsequent Commit MUST first poll approval status. Structurally distinct from ALLOW_WITH_CAPS because the caller is held rather than proceeding-with-constraints; therefore a distinct enum value rather than a cap type. Marked extension because it is agent-runtime-specific (rails don't hold for approval). |
+
+**"DEGRADE" pattern.** The common agent-runtime case where the Authority refuses the requested call but offers a cheaper-route alternative (smaller model, reduced context) is **not** a separate decision value. It is the `ALLOW_WITH_CAPS` decision with `caps = [{type: "degrade.route_to", params: {model: "...", max_tokens: N, ...}}]` and `reason_codes` including `"degrade"`. Callers that don't recognize the `degrade.route_to` cap type MUST treat the decision as `DENY` per the cap-honoring contract.
 
 The protocol is intentionally **agnostic about identity**: who the caller is (`actor`) and which authority signed the receipt (`issuer`) are out of scope. ASP composes with APS, AgentID, x402, ERC-8004, and other identity-layer protocols by accepting them as inputs to Decision Context.
 
@@ -157,8 +159,9 @@ message ReserveResponse {
     ALLOW = 1;
     DENY = 2;
     ALLOW_WITH_CAPS = 3;
-    DEGRADE = 4;            // ASP extension; see §2
-    REQUIRE_APPROVAL = 5;   // ASP extension; see §2
+    REQUIRE_APPROVAL = 4;   // ASP extension; see §2
+    // The "DEGRADE" pattern is not a distinct decision value;
+    // it is ALLOW_WITH_CAPS with a `degrade.route_to` cap.
   }
   Decision decision = 1;
   string reservation_id = 2;
@@ -166,7 +169,8 @@ message ReserveResponse {
   repeated string reason_codes = 4;
   repeated string matched_rule_ids = 5;
   repeated AllowCap caps = 6;       // populated when decision = ALLOW_WITH_CAPS
-  bytes audit_event_signature = 7;  // detached signature of the emitted
+  string approval_request_id = 7;   // populated when decision = REQUIRE_APPROVAL
+  bytes audit_event_signature = 8;  // detached signature of the emitted
                                     // audit.reserve event for this Reserve
 }
 
@@ -213,13 +217,30 @@ message ReleaseResponse {
 
 ASP emits one CloudEvent (v1.0.2) per `reserve`, `commit`, `release`, `refund`, `ttl_expired`, `late_commit`, `overage_rejected`, `overage_charged`, `replay_rejected`, `bypassed`, and `reconciliation_gap` outcome.
 
-**CloudEvent `type` discriminator:** issuer-prefixed, in the form `<authority-domain>.audit.<verb>`. Examples:
+**CloudEvent `type` discriminator:** issuer-prefixed, in the form `<authority-domain>.audit.<suffix>`. The prefix is a routing convenience for SIEMs subscribing to specific issuers. The suffix is one of two disjoint sets:
 
+1. **Canonical-verb outcomes** (one event per successful verb invocation, suffix is the upstream `budget_reservation` verb name verbatim):
+   - `<issuer>.audit.reserve`
+   - `<issuer>.audit.commit`
+   - `<issuer>.audit.release`
+   - `<issuer>.audit.refund`
+
+2. **ASP-defined outcome events** (suffixes registered in this section, NOT canonical verbs — they exist because real authorities have outcomes that are not 1:1 with the upstream verb verbs):
+   - `<issuer>.audit.ttl_expired` — TTL reached without Commit or Release
+   - `<issuer>.audit.late_commit` — Commit honored within grace window after TTL (§3.2)
+   - `<issuer>.audit.overage_rejected` — Commit's `amount_atomic_observed` exceeded reservation, default policy
+   - `<issuer>.audit.overage_charged` — Commit's overage charged under opt-in `CHARGE_OVERAGE` policy
+   - `<issuer>.audit.replay_rejected` — Commit with conflicting body for same `(reservation_id, idempotency_key)` pair
+   - `<issuer>.audit.bypassed` — fail-open mode let a call through without a decision (development only)
+   - `<issuer>.audit.reconciliation_gap` — Commit rejected beyond grace; out-of-band accounting required
+
+Examples:
 - `org.agentspend.audit.reserve`  (vendor-neutral reference prefix)
 - `spendguard.audit.reserve`      (the SpendGuard reference implementation's prefix; see §8)
 - `goodmeta.audit.authorize`      (an upstream implementer's prefix; see §1)
+- `spendguard.audit.ttl_expired`  (ASP-defined outcome under SpendGuard prefix)
 
-The prefix is purely a routing convenience for SIEMs that subscribe to specific issuers. The `verb` suffix (the part after the last `.audit.`) is the binding to the canonical `budget_reservation` verb set.
+Suffixes outside both sets are not valid ASP CloudEvent types. Adding a new outcome suffix requires a Draft revision.
 
 **Signing.** The signed payload is the CloudEvent's `data` field. ASP RECOMMENDS Ed25519 over the JCS (RFC 8785) canonical-JSON form of `data` for cross-implementation verification. Implementations whose wire is natively protobuf MAY sign the canonical protobuf encoding of `data` instead; verification across mixed implementations then requires a documented re-canonicalization, which is the cost of choosing a non-JCS form. See §8 for the reference implementation's current choice.
 
@@ -260,13 +281,14 @@ Provider-specific extensions (e.g. for LiteLLM: `litellm_call_id`, `model`, `tea
 
 ## 8. Reference implementation — status and delta
 
-[SpendGuard](https://github.com/m24927605/agentic-spendguard) (Apache-2.0) is a **partial reference implementation** of Draft-01 — partial meaning it implements the protocol's transaction model and audit chain but with three known deltas from the wire shape above. Both directions of work (spec revision to match SpendGuard, or SpendGuard revision to match spec) are in scope for Draft-02.
+[SpendGuard](https://github.com/m24927605/agentic-spendguard) (Apache-2.0) is a **partial reference implementation** of Draft-01 — partial meaning it implements the protocol's transaction model and audit chain but with four known deltas from the wire shape above. Both directions of work (spec revision to match SpendGuard, or SpendGuard revision to match spec) are in scope for Draft-02.
 
 | Aspect | Spec (Draft-01) | SpendGuard reference impl today | Resolution path |
 |---|---|---|---|
-| CloudEvent `type` prefix | `<issuer-domain>.audit.<verb>` (e.g. `org.agentspend.audit.reserve`) | `spendguard.audit.decision`, `spendguard.audit.outcome` (legacy two-event taxonomy from before the per-verb event split) | SpendGuard will migrate to per-verb events under the `spendguard.audit.` prefix in a future point release; spec already permits issuer-prefixed names so the spec form is forward-compatible. |
+| CloudEvent `type` discriminator | Per-verb / per-outcome under `<issuer>.audit.<suffix>` per §5 | Two-event legacy taxonomy: `spendguard.audit.decision` (covers Reserve outcomes) and `spendguard.audit.outcome` (covers Commit + Release outcomes); single types carry the verb in the `data` payload instead of the CloudEvent `type` suffix | SpendGuard migrates to per-suffix events under the `spendguard.audit.*` prefix in a future point release. Spec already permits issuer-prefixed names so the spec form is forward-compatible. |
 | Audit signing format | JCS canonical JSON over `data`, Ed25519 | Canonical protobuf bytes over the proto event, Ed25519 | SpendGuard adds a JCS-form output alongside protobuf so cross-implementation verifiers don't need protobuf tooling. Tracked as a follow-up. |
-| Commit lane | Single `Commit` RPC with `amount_atomic_observed` | Two lanes: `CommitObserved` (provider-reported usage) and `CommitEstimated` (callers without observed usage, e.g. failed streams). `CommitEstimated` is rejected if `estimated > original_reserved`. | SpendGuard's `CommitObserved` matches the spec; `CommitEstimated` is treated as a vendor extension for now. Spec may incorporate `CommitEstimated` as an optional fallback in Draft-02 if the use case generalizes. |
+| Commit lane | Single `Commit` RPC carrying `amount_atomic_observed` (provider-reported usage) | Only `CommitEstimated` is implemented today: `services/sidecar/src/decision/transaction.rs:run_commit_estimated` rejects non-empty `provider_reported_amount_atomic` with "ProviderReport path is deferred to a future slice". `adapter_uds.rs` routes all successful LLM post events through that estimated lane. So **SpendGuard does not yet implement the spec's observed-amount commit**; that is a SpendGuard backlog item, not a spec-vs-impl framing difference. | SpendGuard adds the observed-amount commit path. Until then, callers reconcile estimated reservations through the existing `CommitEstimated` RPC; this is an interop limitation against any future ASP-only consumer. |
+| Release wire shape | `ReleaseRequest { reservation_id, idempotency_key, reason_codes }`, response carries only the signed audit event | SpendGuard's ledger-tier `ReleaseRequest` carries `reservation_set_id`, structured `Idempotency`, `Fencing`, `audit_event`, `decision_id`, `producer_sequence`. The adapter-facing Release path wraps this internally and returns success / replay / error. | SpendGuard exposes a Draft-01-shaped Release RPC at the adapter UDS boundary (the richer internal shape stays internal). Tracked as a follow-up. |
 
 Adapters for LiteLLM, OpenAI Agents SDK, LangChain, LangGraph, Pydantic-AI, and Microsoft Agent Governance Toolkit ship today. The 12-field LiteLLM `decision_context` extension is implemented and live-verified per [GH #77](https://github.com/m24927605/agentic-spendguard/issues/77).
 

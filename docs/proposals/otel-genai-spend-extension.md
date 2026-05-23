@@ -2,7 +2,7 @@
 
 > **Status:** Draft for discussion at the OpenTelemetry GenAI SIG.
 > **Author:** SpendGuard authors (m24927605@gmail.com), 2026-05-23.
-> **One-line summary:** Add three span events — `gen_ai.spend.reserve`, `gen_ai.spend.commit`, `gen_ai.spend.audit` — and one attribute group (`gen_ai.spend.*`) so that pre-call budget-enforcement decisions become observable on the same GenAI span where the provider call already lives.
+> **One-line summary:** Add four span events — `gen_ai.spend.reserve`, `gen_ai.spend.commit`, `gen_ai.spend.release`, `gen_ai.spend.audit` — and one attribute group (`gen_ai.spend.*`) so that pre-call budget-enforcement decisions become observable on the same GenAI span where the provider call already lives.
 
 ## Why this belongs in OTel GenAI semconv
 
@@ -33,7 +33,7 @@ The provider call's own span attributes (`gen_ai.usage.input_tokens`, `gen_ai.us
 
 | Attribute | Type | Required | Brief |
 |---|---|---|---|
-| `gen_ai.spend.decision` | string enum | ✓ on `reserve` event | `allow` / `allow_with_caps` / `deny` / `degrade` / `require_approval` (first three are canonical from upstream `budget_reservation.yaml`; last two are agent-runtime extensions per the ASP draft) |
+| `gen_ai.spend.decision` | string enum | ✓ on `reserve` event | `allow` / `allow_with_caps` / `deny` / `require_approval` (first three are canonical from upstream `budget_reservation.yaml`; `require_approval` is an agent-runtime extension per the ASP draft). The "degrade" pattern is conveyed as `allow_with_caps` plus a `degrade.route_to` cap, not as a separate enum value. |
 | `gen_ai.spend.decision_id` | string | ✓ | Stable identifier tying `reserve` ↔ `commit` ↔ `audit` |
 | `gen_ai.spend.budget_id` | string | ✓ on `reserve` | Opaque to OTel; e.g. `tenant-3:2026-05:output_token` |
 | `gen_ai.spend.unit` | string | ✓ on `reserve` | e.g. `output_token`, `usd_atomic`, `request` |
@@ -100,7 +100,7 @@ The SRE filter on a 02:47 incident dashboard becomes: `gen_ai.spend.decision = "
 1. **Naming** — is `gen_ai.spend.*` the right group prefix, or does `gen_ai.governance.spend.*` better future-proof for adjacent governance event groups (content moderation, rate gating, data classification)?
 2. **Span vs. metric** — should `gen_ai.spend.commit` ALSO emit a metric (`gen_ai.spend.committed_total{decision=allow}`), or strictly stay event-level? Metrics give dashboards cheap; events give traces deep correlation. Both is possible.
 3. **`decision_id` cardinality** — high (one per call). Acceptable per existing GenAI semconv precedent (`gen_ai.response.id`), but worth confirming.
-4. **DEGRADE semantics** — should DEGRADE carry a structured routing hint (`gen_ai.spend.degrade.routed_model = "gpt-4o-mini"`), or is the routing detail out of scope here?
+4. **Degrade-cap routing hint** — the ASP draft folds the "DEGRADE" pattern into `ALLOW_WITH_CAPS` with a `degrade.route_to` cap. Should this OTel extension surface the routed model as a structured attribute (e.g. `gen_ai.spend.cap.degrade.route_to.model = "gpt-4o-mini"`), or leave it embedded in the cap payload and let the GenAI span pick up the routed model via the actual provider call's `gen_ai.request.model`?
 5. **Stability tier** — propose **experimental** for the first release.
 
 ## Relationship to other emerging work
