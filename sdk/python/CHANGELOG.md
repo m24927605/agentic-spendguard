@@ -1,5 +1,82 @@
 # Changelog
 
+## 0.4.0 — 2026-05-23
+
+Adds the explicit `release_reservation()` SDK method, the first
+adapter caller of the new sidecar `ReleaseReservation` gRPC RPC
+(PR #84). Closes the Agent Spend Protocol Draft-01 §4 Release wire
+surface end-to-end: an ASP-conformant Python adapter can now reserve
+budget, abort the operation, and explicitly release the held
+reservation via the wire shape the spec defines.
+
+### Added
+
+- **`SpendGuardClient.release_reservation()`** — async method that
+  calls the sidecar's new `ReleaseReservation` RPC. Takes
+  `reservation_id`, `idempotency_key`, optional `reason_codes` (free-
+  form per ASP Draft-01 §4; sidecar maps known values to internal
+  release-reason enum, unknown → Explicit). Returns
+  `ReleaseOutcome(audit_event_signature, ledger_transaction_id,
+  released_reservation_ids)`.
+- **`ReleaseOutcome` dataclass** — exported from top-level
+  `spendguard` package. Detached Ed25519 signature of the emitted
+  `audit.release` CloudEvent (non-empty on first success; empty on
+  ledger replay branch — see GH #85).
+- Demo coverage: `DEMO_MODE=decision` now exercises the explicit
+  Release RPC as a smoke step before the main commit flow. Verifies
+  SDK → sidecar → ledger → audit chain end-to-end. Output line:
+  `[demo] release_reservation OK reservation_id=… ledger_tx=…
+  sig_bytes=64`.
+
+### Use it
+
+```python
+from spendguard import SpendGuardClient
+
+async with SpendGuardClient(socket_path=..., tenant_id=...) as c:
+    await c.handshake()
+    outcome = await c.request_decision(...)
+    reservation_id = outcome.reservation_ids[0]
+
+    # ... agent run aborts, provider call cancelled, etc. ...
+
+    release = await c.release_reservation(
+        reservation_id=reservation_id,
+        idempotency_key=f"my-app:{reservation_id}",
+        reason_codes=("run_cancelled",),
+    )
+    # release.ledger_transaction_id — stable across retries
+    # release.audit_event_signature — pin the release receipt
+```
+
+### Spec alignment
+
+- ASP Draft-01 §4 wire shape: SDK request fields match
+  `reservation_id` / `idempotency_key` / `reason_codes` canonical
+  tags 1-3; SpendGuard-specific extensions (`tenant_id`,
+  `workload_instance_id`, `session_id`) ride at proto tags 100+.
+- ASP Draft-01 §8 closed-deltas section now lists this as the first
+  closed delta with end-to-end SDK exercise.
+
+### Known v1 limitations
+
+- Replay branch returns empty `audit_event_signature` —
+  [GH #85](https://github.com/m24927605/agentic-spendguard/issues/85)
+- Retries fail with `FENCING_EPOCH_STALE` if the sidecar's fencing
+  lease changed since the original call —
+  [GH #86](https://github.com/m24927605/agentic-spendguard/issues/86)
+- Ledger `IdempotencyConflict` surfaces as gRPC `INTERNAL` rather
+  than `FailedPrecondition` —
+  [GH #87](https://github.com/m24927605/agentic-spendguard/issues/87)
+
+### Unchanged
+
+- All `0.3.0` LiteLLM / OpenAI Agents / LangChain / LangGraph /
+  Pydantic-AI / AGT integrations carry forward identically.
+- No breaking changes to existing public API.
+
+---
+
 ## 0.3.0 — 2026-05-20
 
 First non-pre-release. Bumps Dev Status from 3-Alpha → 4-Beta.

@@ -158,6 +158,68 @@ async def run_decision_mode(also_invoice: bool = False) -> int:
         return 3
     print(f"[demo] handshake ok session_id={client.session_id}")
 
+    # ── ReleaseReservation smoke (Agent Spend Protocol Draft-01 §4) ──
+    # Exercise the explicit Release RPC added in PR #84 by reserving a
+    # small amount under a throwaway decision and immediately releasing
+    # it via the new wire surface. Verifies the SDK method + sidecar
+    # RPC + audit chain end-to-end before the main decision-commit
+    # flow consumes the test budget.
+    rel_run_id = str(new_uuid7())
+    rel_step_id = f"{rel_run_id}:step0"
+    rel_decision_id = str(new_uuid7())
+    rel_llm_call_id = str(new_uuid7())
+    rel_claims = [
+        common_pb2.BudgetClaim(
+            budget_id=budget_id,
+            unit=common_pb2.UnitRef(
+                unit_id=unit_id,
+                token_kind="output_token",
+                model_family="gpt-4",
+            ),
+            amount_atomic="10",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id=window_id,
+        ),
+    ]
+    rel_idempotency_key = derive_idempotency_key(
+        tenant_id=tenant_id,
+        session_id=client.session_id,
+        run_id=rel_run_id,
+        step_id=rel_step_id,
+        llm_call_id=rel_llm_call_id,
+        trigger="LLM_CALL_PRE",
+    )
+    rel_outcome = await client.request_decision(
+        trigger="LLM_CALL_PRE",
+        run_id=rel_run_id,
+        step_id=rel_step_id,
+        llm_call_id=rel_llm_call_id,
+        tool_call_id="",
+        decision_id=rel_decision_id,
+        route="llm.call",
+        projected_claims=rel_claims,
+        idempotency_key=rel_idempotency_key,
+    )
+    if not rel_outcome.reservation_ids:
+        print("[demo] FATAL: release smoke — no reservation_id returned", file=sys.stderr)
+        return 5
+    rel_reservation_id = list(rel_outcome.reservation_ids)[0]
+    release_outcome = await client.release_reservation(
+        reservation_id=rel_reservation_id,
+        idempotency_key=f"release-smoke:{rel_reservation_id}",
+        reason_codes=("run_cancelled", "demo_release_smoke"),
+    )
+    print(
+        f"[demo] release_reservation OK "
+        f"reservation_id={rel_reservation_id} "
+        f"ledger_tx={release_outcome.ledger_transaction_id} "
+        f"sig_bytes={len(release_outcome.audit_event_signature)}"
+    )
+    if not release_outcome.ledger_transaction_id:
+        print("[demo] FATAL: release smoke — empty ledger_transaction_id", file=sys.stderr)
+        return 6
+    # ── end release smoke ──
+
     run_id = str(new_uuid7())
     step_id = f"{run_id}:step0"
     llm_call_id = str(new_uuid7())

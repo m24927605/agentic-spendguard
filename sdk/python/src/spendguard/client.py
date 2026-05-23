@@ -143,6 +143,29 @@ class DecisionOutcome:
     matched_rule_ids: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class ReleaseOutcome:
+    """Surface of a successful `release_reservation` call.
+
+    Matches the Agent Spend Protocol Draft-01 §4 ReleaseResponse shape
+    (audit_event_signature) plus the SpendGuard-specific extension
+    fields (ledger_transaction_id, released_reservation_ids).
+    """
+
+    # Detached Ed25519 signature of the emitted audit.release CloudEvent.
+    # Empty bytes when the call hit the ledger's idempotent Replay branch
+    # (the freshly-generated signature does not correspond to the
+    # persisted-in-chain original; see GH #85). Non-empty on first
+    # success. Adapters that want the original signature on replay can
+    # re-fetch from the audit chain via ledger_transaction_id.
+    audit_event_signature: bytes
+    # Ledger transaction id for the release (stable across retries).
+    ledger_transaction_id: str
+    # Reservations released by this call. Single-element tuple in the
+    # current single-reservation-per-call model.
+    released_reservation_ids: tuple[str, ...]
+
+
 class SpendGuardClient:
     """Async UDS gRPC client for the spendguard sidecar.
 
@@ -663,6 +686,79 @@ class SpendGuardClient:
             )
         raise SpendGuardError(
             f"sidecar ResumeAfterApproval returned unknown oneof: {kind!r}"
+        )
+
+    # -------------------------------------------------------------------
+    # ReleaseReservation (Agent Spend Protocol Draft-01 §4)
+    # -------------------------------------------------------------------
+
+    async def release_reservation(
+        self,
+        *,
+        reservation_id: str,
+        idempotency_key: str,
+        reason_codes: tuple[str, ...] | list[str] = (),
+        workload_instance_id: str = "",
+        tenant_id: str = "",
+    ) -> "ReleaseOutcome":
+        """Explicit adapter-initiated release of a held reservation.
+
+        Matches Agent Spend Protocol Draft-01 §4 — use when the provider
+        call is aborted, the client times out, or the agent run is
+        cancelled, and the adapter wants to surface that explicitly
+        rather than waiting for the implicit outcome-driven release
+        paths (ConfirmPublishOutcome.APPLY_FAILED, EmitTraceEvents
+        run-aborted / runtime-error).
+
+        Reason-code mapping (sidecar — aligned with the implicit
+        EmitTraceEvents path so audit reason values are consistent):
+
+            "provider_error" | "runtime_error" | "client_timeout"
+                → audit RELEASE reason RuntimeError
+            "run_aborted" | "run_cancelled"
+                → RunAborted
+            anything else
+                → Explicit (adapter intent preserved in the audit
+                  metadata regardless)
+
+        Idempotent: same (reservation_id, idempotency_key) returns the
+        original outcome on retry. Different idempotency_key against an
+        already-released reservation surfaces as a gRPC
+        FailedPrecondition (SpendGuardError with detail mentioning
+        RESERVATION_SETTLED).
+
+        Known v1 limitations (tracked at github.com/m24927605/agentic-
+        spendguard/issues/85, /86, /87):
+          - Replay-branch responses carry empty audit_event_signature
+            (re-fetch via ledger_transaction_id if you need the
+            original receipt)
+          - Retries fail if the sidecar's fencing lease changed since
+            the original call
+          - Ledger IdempotencyConflict surfaces as INTERNAL not
+            FailedPrecondition
+        """
+        stub = self._require_stub()
+        session_id = self.session_id
+
+        req = adapter_pb2.ReleaseReservationRequest(
+            reservation_id=reservation_id,
+            idempotency_key=idempotency_key,
+            reason_codes=list(reason_codes),
+            tenant_id=tenant_id,
+            workload_instance_id=workload_instance_id,
+            session_id=session_id,
+        )
+        try:
+            resp: adapter_pb2.ReleaseReservationResponse = await stub.ReleaseReservation(
+                req, timeout=self._publish_timeout_s
+            )
+        except grpc.aio.AioRpcError as e:
+            raise self._classify_rpc_error(e, op="release_reservation") from e
+
+        return ReleaseOutcome(
+            audit_event_signature=bytes(resp.audit_event_signature),
+            ledger_transaction_id=resp.ledger_transaction_id,
+            released_reservation_ids=tuple(resp.released_reservation_ids),
         )
 
     # -------------------------------------------------------------------

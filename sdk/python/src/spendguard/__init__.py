@@ -23,6 +23,7 @@ from .client import (
     DEFAULT_HANDSHAKE_TIMEOUT_S,
     DecisionOutcome,
     HandshakeOutcome,
+    ReleaseOutcome,
     SpendGuardClient,
 )
 from .errors import (
@@ -53,6 +54,7 @@ __all__ = [
     "DEFAULT_HANDSHAKE_TIMEOUT_S",
     "DecisionOutcome",
     "HandshakeOutcome",
+    "ReleaseOutcome",
     "SpendGuardClient",
     # errors
     "ApprovalBundleHotReloadedError",
