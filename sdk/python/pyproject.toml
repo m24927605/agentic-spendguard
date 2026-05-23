@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "spendguard-sdk"
-version = "0.3.0"
+version = "0.4.0"
 description = "SpendGuard SDK — runtime safety layer client for AI agent frameworks (Pydantic-AI, LangChain, LangGraph, OpenAI Agents SDK)."
 readme = "README.md"
 requires-python = ">=3.10"
