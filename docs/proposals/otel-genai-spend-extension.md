@@ -86,6 +86,8 @@ span: "openai.chat.completions"
 │     gen_ai.spend.decision = "deny"
 │     gen_ai.spend.decision_id = "01J5..."
 │     gen_ai.spend.budget_id = "acme-eng:2026-05:output_token"
+│     gen_ai.spend.unit = "output_token"
+│     gen_ai.spend.amount_atomic_reserved = "200"
 │     gen_ai.spend.reason_codes = ["BUDGET_EXHAUSTED"]
 │     gen_ai.spend.authority = "https://sg.acme.internal"
 └── event: gen_ai.spend.audit (t+2ms)

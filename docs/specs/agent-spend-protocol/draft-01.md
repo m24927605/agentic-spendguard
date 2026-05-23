@@ -145,13 +145,16 @@ Authorities MUST publish their grace window value via the Authority discovery en
 
 ### 3.3 Failure modes and reservation lifecycle
 
-A Reservation's lifecycle is one-shot. `reservation_id` MAY be used in at most one terminal state transition (commit, release, ttl-expiry, or quarantine). After the terminal state is reached:
+A Reservation's lifecycle is one-shot. `reservation_id` MAY be used in at most one terminal state transition (commit, release, expired-beyond-grace, or quarantine). After the terminal state is reached:
 
-- A subsequent `commit` against the same `reservation_id` (regardless of `idempotency_key`) MUST be rejected with `RESERVATION_SETTLED` if the prior terminal state was `COMMITTED`. The Authority emits `audit.replay_rejected` with reason `reservation_already_settled`.
-- A subsequent `commit` against a released or expired-beyond-grace reservation MUST be rejected with `RESERVATION_RELEASED` or `EXPIRED_BEYOND_GRACE` respectively.
-- A subsequent `release` against a committed reservation is a no-op (return success without state change) — release-after-commit is harmless idempotent.
+- A subsequent `commit` against a committed reservation with the **same `(reservation_id, idempotency_key)` pair and identical request body** is treated as an idempotent retry: the Authority returns the original `CommitResponse` without re-running settlement and without emitting a new audit event. This is the standard network-retry safety net.
+- A subsequent `commit` against a committed reservation with a **different `idempotency_key` or a conflicting request body** MUST be rejected with `RESERVATION_SETTLED`. The Authority emits `audit.replay_rejected` with reason `reservation_already_settled`.
+- A subsequent `commit` against a released reservation MUST be rejected with `RESERVATION_RELEASED`. A commit against an expired-beyond-grace reservation MUST be rejected with `EXPIRED_BEYOND_GRACE`.
+- A subsequent `release` against a committed reservation is a no-op (return success without state change). A release against an already-released reservation with the same `idempotency_key` returns the original response; with a different `idempotency_key` returns success-no-op as well — release-after-release is harmless.
 
-The `idempotency_key` disambiguates retries **within** a single open reservation lifecycle; it does not unlock new terminal states for a settled reservation.
+The `idempotency_key` disambiguates retries **within** a single open reservation lifecycle, and lets the Authority distinguish "same caller retrying its own request" from "different caller attempting a fresh settlement". It does not unlock new terminal states for a settled reservation.
+
+**TTL expiry is not strictly terminal during the grace window.** Per §3.2, a `ttl_expired` audit event MAY be followed by a `late_commit` within the grace window. The reservation's logical state during grace is `EXPIRED_IN_GRACE`; the truly terminal post-TTL state (`EXPIRED_BEYOND_GRACE`) is only reached after the grace window closes without a Commit. Implementations MUST emit `audit.ttl_expired` at the TTL boundary regardless of whether a late commit eventually arrives — the boundary is a real event in the audit chain.
 
 Other failure modes:
 
@@ -162,6 +165,26 @@ Other failure modes:
 ## 4. Wire messages
 
 ```protobuf
+// Common types referenced by RPC messages below.
+
+message BudgetClaim {
+  string budget_id = 1;             // opaque, scoped to issuer
+  string window_instance_id = 2;    // billing window the claim hits
+  string unit = 3;                  // e.g. "output_token", "usd_atomic", "request"
+  string amount_atomic = 4;         // decimal string in `unit`
+  enum Direction {
+    DIRECTION_UNSPECIFIED = 0;
+    DEBIT = 1;
+    CREDIT = 2;
+  }
+  Direction direction = 5;
+}
+
+message AllowCap {
+  string type = 1;                  // cap-type vocabulary (see §2)
+  google.protobuf.Struct params = 2; // cap-type-specific parameters
+}
+
 message ReserveRequest {
   BudgetClaim claim = 1;
   google.protobuf.Struct identity = 2;
@@ -195,12 +218,16 @@ message CommitRequest {
   string amount_atomic_observed = 2;     // decimal string, in claim.unit
   google.protobuf.Struct provider_response_facts = 3;
 
-  // Idempotency contract: the (reservation_id, idempotency_key) pair
-  // is the dedup key. A second commit with the same pair but
-  // conflicting amount_atomic_observed or provider_response_facts
-  // is REPLAY_CONFLICT (see §3.3). A second commit with the same
-  // pair and identical body is honored (returns the original
-  // response).
+  // Idempotency contract (see §3.3 for full lifecycle):
+  //   - Same (reservation_id, idempotency_key) pair + identical body
+  //     → idempotent retry; Authority returns the original
+  //       CommitResponse, no new audit event.
+  //   - Same pair + conflicting amount_atomic_observed or
+  //     provider_response_facts → REPLAY_CONFLICT,
+  //     audit.replay_rejected with reason "body_mismatch".
+  //   - Different idempotency_key against an already-committed
+  //     reservation_id → RESERVATION_SETTLED, audit.replay_rejected
+  //     with reason "reservation_already_settled".
   string idempotency_key = 4;
 
   // Hash of the canonicalized request body (excluding this field
