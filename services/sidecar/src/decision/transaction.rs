@@ -1238,6 +1238,12 @@ pub async fn run_release(
     // (reservation_id, adapter_key) dedup contract documented in
     // adapter.proto::ReleaseReservationRequest holds end-to-end.
     idempotency_key_override: Option<&str>,
+    // Adapter-supplied hash of the raw request body (e.g. SHA-256 of
+    // the joined reason_codes). Lets the ledger detect "same key,
+    // different body" as IdempotencyConflict instead of replaying
+    // the original outcome. None → empty hash (legacy implicit-path
+    // behavior — implicit callers don't have a stable body to hash).
+    request_body_hash: Option<&[u8]>,
 ) -> Result<ReleaseOutput, DomainError> {
     let _ = cfg;
 
@@ -1266,13 +1272,24 @@ pub async fn run_release(
     }
 
     // 3) Fencing epoch parity (DD5 C1).
+    //
+    //    For state == "released" (replay-attempt path) we skip the
+    //    fencing comparison: the ledger SP checks idempotency BEFORE
+    //    fencing, so a same-key retry will replay correctly even if
+    //    the sidecar's fencing lease was renewed/lost between the
+    //    original release and the retry. Forcing a fresh fencing
+    //    check here would turn a legitimate idempotent retry into
+    //    FencingEpochStale instead of the documented Replay outcome.
+    //    We still need a fencing_state to populate the request proto;
+    //    the ledger ignores it on the replay path.
     let fencing_state = state
         .inner
         .fencing
         .read()
         .clone()
         .ok_or_else(|| DomainError::FencingAcquire("no active fencing scope".into()))?;
-    if fencing_state.epoch != resv.fencing_epoch_at_post {
+    let is_replay_attempt = resv.current_state == "released";
+    if !is_replay_attempt && fencing_state.epoch != resv.fencing_epoch_at_post {
         return Err(DomainError::FencingEpochStale(format!(
             "current epoch {} differs from reserve-time epoch {}; reservation will TTL-release",
             fencing_state.epoch, resv.fencing_epoch_at_post
@@ -1338,12 +1355,14 @@ pub async fn run_release(
         .map(|k| format!("release:{}:{}", reservation_uuid, k))
         .unwrap_or_else(|| format!("release:{}:1", reservation_uuid));
 
+    let request_hash_vec: Vec<u8> = request_body_hash.map(|h| h.to_vec()).unwrap_or_default();
+
     let request = ReleaseRequest {
         tenant_id: ctx.tenant_id.clone(),
         reservation_set_id: reservation_set_id.to_string(),
         idempotency: Some(Idempotency {
             key: ledger_idempotency_key,
-            request_hash: Vec::new().into(),
+            request_hash: request_hash_vec.into(),
         }),
         fencing: Some(Fencing {
             epoch: fencing_state.epoch,
@@ -1366,9 +1385,15 @@ pub async fn run_release(
                 .decision_id_to_reservation
                 .lock()
                 .remove(&resv.decision_id);
+            // The ledger's `released_reservation_ids` lists
+            // reservation_set_ids, not the caller's reservation_id.
+            // The Replay branch below returns vec![reservation_uuid].
+            // Normalize Success to match so callers see the same
+            // identifier shape across first-success and retry-replay
+            // for the same operation.
             Ok(ReleaseOutput {
                 ledger_transaction_id: s.ledger_transaction_id,
-                released_reservation_ids: s.released_reservation_ids,
+                released_reservation_ids: vec![reservation_uuid.to_string()],
                 audit_event_signature,
             })
         }
@@ -1428,6 +1453,22 @@ fn map_proto_error_to_domain<T>(
         PC::PricingFreezeMismatch => DomainError::PricingFreezeMismatch(message),
         PC::OverrunReservation => DomainError::OverrunReservation(message),
         PC::MultiReservationCommitDeferred => DomainError::MultiReservationCommitDeferred(message),
+        // The ledger encodes IdempotencyConflict as
+        // (code=Unspecified, message="idempotency_key reused with
+        // different request_hash"). Without this branch the conflict
+        // gets mapped to DecisionStage (INTERNAL via gRPC Status),
+        // hiding what is actually a client-side replay error. Pattern-
+        // match the message text to recover the client-error semantics
+        // documented in ASP Draft-01 §3.3 (REPLAY_CONFLICT). This is a
+        // narrow string-sniff but the ledger error shape is stable
+        // (services/ledger/src/domain/error.rs::to_proto).
+        PC::Unspecified
+            if message.contains("idempotency_key reused with different request_hash") =>
+        {
+            DomainError::ReservationStateConflict(format!(
+                "REPLAY_CONFLICT: {message}"
+            ))
+        }
         _ => DomainError::DecisionStage(format!("ledger error code={code} msg={message}")),
     })
 }

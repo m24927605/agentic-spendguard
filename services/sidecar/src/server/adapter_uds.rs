@@ -325,6 +325,7 @@ impl AdapterUds {
                         ReleaseReason::RuntimeError,
                         metadata,
                         None,
+                        None,
                     )
                     .await
                     {
@@ -507,6 +508,7 @@ impl AdapterUds {
                             } else {
                                 Some(payload.provider_event_id.as_str())
                             },
+                            None,
                             None,
                         )
                         .await
@@ -947,6 +949,20 @@ impl AdapterUds {
             Some(req.idempotency_key.as_str())
         };
 
+        // Hash of the canonicalized reason_codes body so the ledger
+        // can detect "same idempotency_key, different body" as
+        // IdempotencyConflict (mapped to REPLAY_CONFLICT) instead of
+        // replaying the original outcome. Canonicalization: codes
+        // joined by '|' in their request order. Adapters that want
+        // strict cross-process reproducibility should sort before
+        // sending; this v1 hash treats order as part of the body
+        // (different orders → different hashes → conflict).
+        let body_for_hash = req.reason_codes.join("|");
+        let body_hash: [u8; 32] = {
+            use sha2::{Digest, Sha256};
+            Sha256::digest(body_for_hash.as_bytes()).into()
+        };
+
         match transaction::run_release(
             &self.cfg,
             &self.state,
@@ -955,6 +971,7 @@ impl AdapterUds {
             reason,
             metadata,
             idempotency_override,
+            Some(&body_hash),
         )
         .await
         {
