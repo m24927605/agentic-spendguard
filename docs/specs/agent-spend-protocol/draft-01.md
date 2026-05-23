@@ -64,7 +64,13 @@ Verbs use the upstream `budget_reservation` canonical names verbatim. Other ASP-
 | `DENY` | upstream canonical | Reserve refused. Provider call MUST NOT proceed. |
 | `REQUIRE_APPROVAL` | **ASP extension** | Reserve held pending human-in-the-loop approval. Returns an `approval_request_id`; subsequent Commit MUST first poll approval status. Structurally distinct from ALLOW_WITH_CAPS because the caller is held rather than proceeding-with-constraints; therefore a distinct enum value rather than a cap type. Marked extension because it is agent-runtime-specific (rails don't hold for approval). |
 
-**"DEGRADE" pattern.** The common agent-runtime case where the Authority refuses the requested call but offers a cheaper-route alternative (smaller model, reduced context) is **not** a separate decision value. It is the `ALLOW_WITH_CAPS` decision with `caps = [{type: "degrade.route_to", params: {model: "...", max_tokens: N, ...}}]` and `reason_codes` including `"degrade"`. Callers that don't recognize the `degrade.route_to` cap type MUST treat the decision as `DENY` per the cap-honoring contract.
+**Cap-honoring contract.** When the Authority returns `ALLOW_WITH_CAPS`:
+
+1. The caller MUST honor every cap in the returned `caps[]` list according to the cap's `type` and `params`.
+2. The caller MUST treat the decision as `DENY` and refuse to proceed if **any** `caps[].type` is unknown to the caller, cannot be applied (e.g. the caller's request shape does not allow the requested modification), or is reported by the caller's local cap-registry as deprecated. Fail-closed is the default; there is no "ignore unknown caps and proceed" path.
+3. Authorities MUST publish their supported cap-type registry (URL discoverable from the Authority's metadata endpoint, out of scope for Draft-01). Callers MUST publish or document the cap types they recognize.
+
+**"DEGRADE" pattern.** The common agent-runtime case where the Authority refuses the requested call but offers a cheaper-route alternative (smaller model, reduced context) is **not** a separate decision value. It is the `ALLOW_WITH_CAPS` decision with `caps = [{type: "degrade.route_to", params: {model: "...", max_tokens: N, ...}}]` and `reason_codes` including `"degrade"`. Because of the fail-closed contract above, callers that don't recognize the `degrade.route_to` cap type correctly refuse the call instead of proceeding without honoring the constraint — that is the entire safety argument for collapsing DEGRADE into ALLOW_WITH_CAPS.
 
 The protocol is intentionally **agnostic about identity**: who the caller is (`actor`) and which authority signed the receipt (`issuer`) are out of scope. ASP composes with APS, AgentID, x402, ERC-8004, and other identity-layer protocols by accepting them as inputs to Decision Context.
 
@@ -137,10 +143,20 @@ The grace window is non-zero by design: at TTL the agent runtime usually has the
 
 Authorities MUST publish their grace window value via the Authority discovery endpoint (out of scope for Draft-01; SHOULD be ≤ 5 minutes).
 
-### 3.3 Failure modes
+### 3.3 Failure modes and reservation lifecycle
 
-- **Authority unreachable** — caller MUST fail-closed (deny the provider call). MAY fail-open under an explicit operator override flag (development only). The audit chain records nothing in fail-closed mode (no decision was rendered); fail-open mode emits a `audit.bypassed` event.
-- **Replay attack on commit** — two distinct commits with the same `reservation_id` but conflicting `amount_atomic_observed` or `idempotency_key` are detected at the Authority. The Authority MUST reject the second commit with `REPLAY_CONFLICT` and emit `audit.replay_rejected`. See §4 for the wire-level idempotency contract.
+A Reservation's lifecycle is one-shot. `reservation_id` MAY be used in at most one terminal state transition (commit, release, ttl-expiry, or quarantine). After the terminal state is reached:
+
+- A subsequent `commit` against the same `reservation_id` (regardless of `idempotency_key`) MUST be rejected with `RESERVATION_SETTLED` if the prior terminal state was `COMMITTED`. The Authority emits `audit.replay_rejected` with reason `reservation_already_settled`.
+- A subsequent `commit` against a released or expired-beyond-grace reservation MUST be rejected with `RESERVATION_RELEASED` or `EXPIRED_BEYOND_GRACE` respectively.
+- A subsequent `release` against a committed reservation is a no-op (return success without state change) — release-after-commit is harmless idempotent.
+
+The `idempotency_key` disambiguates retries **within** a single open reservation lifecycle; it does not unlock new terminal states for a settled reservation.
+
+Other failure modes:
+
+- **Authority unreachable** — caller MUST fail-closed (deny the provider call). MAY fail-open under an explicit operator override flag (development only). The audit chain records nothing in fail-closed mode (no decision was rendered); fail-open mode emits an `audit.bypassed` event.
+- **Replay attack on commit (same reservation, conflicting body)** — two distinct commits with the same `(reservation_id, idempotency_key)` pair but conflicting `amount_atomic_observed` or `provider_response_facts` are detected at the Authority. The Authority MUST reject the second commit with `REPLAY_CONFLICT` and emit `audit.replay_rejected` with reason `body_mismatch`. See §4 for the wire-level idempotency contract.
 - **Double-spend across Reservations** — Budget atomicity at the (Budget, window) granularity prevents two `reserve` operations from both succeeding past the cap. This is an Authority-internal guarantee; ASP requires it but does not prescribe the locking mechanism.
 
 ## 4. Wire messages
@@ -237,27 +253,44 @@ ASP emits one CloudEvent (v1.0.2) per `reserve`, `commit`, `release`, `refund`, 
 Examples:
 - `org.agentspend.audit.reserve`  (vendor-neutral reference prefix)
 - `spendguard.audit.reserve`      (the SpendGuard reference implementation's prefix; see §8)
-- `goodmeta.audit.authorize`      (an upstream implementer's prefix; see §1)
+- `goodmeta.audit.reserve`        (upstream `goodmeta` implementer post-AP2#252 rename; see §1)
 - `spendguard.audit.ttl_expired`  (ASP-defined outcome under SpendGuard prefix)
 
 Suffixes outside both sets are not valid ASP CloudEvent types. Adding a new outcome suffix requires a Draft revision.
+
+**Issuer identity and JWKS discoverability.** The CloudEvent envelope's `source` attribute (a CloudEvents 1.0 normative field) MUST be set to a URL whose host is the issuer's domain. Verifiers derive the JWKS URL by appending `/.well-known/asp-jwks.json` to the `source` URL's origin. The `kid` field inside `data` selects the specific key in the JWKS. Example: `source = "https://sg.acme.internal/asp"` → JWKS at `https://sg.acme.internal/.well-known/asp-jwks.json`. Issuers whose prefix is not a domain name (e.g. the bare `spendguard` examples above) MUST still set `source` to a discoverable URL — the `type` prefix is a routing convenience, not an identity assertion.
 
 **Signing.** The signed payload is the CloudEvent's `data` field. ASP RECOMMENDS Ed25519 over the JCS (RFC 8785) canonical-JSON form of `data` for cross-implementation verification. Implementations whose wire is natively protobuf MAY sign the canonical protobuf encoding of `data` instead; verification across mixed implementations then requires a documented re-canonicalization, which is the cost of choosing a non-JCS form. See §8 for the reference implementation's current choice.
 
 **Key management.** Every CloudEvent envelope MUST carry a `kid` (signing key identifier) in the `data` payload or as a CloudEvent extension attribute. The issuer MUST publish a JWKS document at a well-known URL discoverable from the issuer's domain. After key rotation, **previous verification keys MUST remain published** for at least the retention period of the audit chain they signed (RECOMMENDED ≥ 1 year). Without this, historical audit chains become unverifiable.
 
-**Minimum decision_context fields:**
+**Minimum `data` fields per event type.**
+
+Common to all event types (signed):
 
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `decision_id` | UUID | ✓ | Stable across retries via `idempotency_key` |
-| `budget_id` | string | ✓ | The Budget the Claim hit |
-| `unit` | string | ✓ | e.g. `output_token`, `usd_atomic`, `request` |
-| `amount_atomic_reserved` | decimal string | ✓ | The Claim |
-| `decision` | enum | ✓ | per §2 |
-| `kid` | string | ✓ | Signing key identifier |
+| `kid` | string | ✓ | Signing key identifier; selects key in the issuer's JWKS |
+| `event_time` | RFC 3339 timestamp | ✓ | Authority-clock time of event emission |
 | `reason_codes` | string[] | recommended | machine-readable rationale |
 | `runtime_metadata` | Struct | optional | allowlisted scalar keys |
+
+Additional fields per suffix:
+
+| Suffix | Required additional fields | Notes |
+|---|---|---|
+| `audit.reserve` | `budget_id`, `unit`, `amount_atomic_reserved`, `decision`, `ttl_expires_at` (if decision ∈ {ALLOW, ALLOW_WITH_CAPS}), `caps` (if decision = ALLOW_WITH_CAPS), `approval_request_id` (if decision = REQUIRE_APPROVAL) | Decision-context capture per §2 |
+| `audit.commit` | `reservation_id`, `amount_atomic_observed`, `refund_amount_atomic` *or* `charge_amount_atomic` *or* `exact_match: true` | Exact-match commits where observed equals reserved set `exact_match: true` instead of `refund`/`charge` |
+| `audit.release` | `reservation_id` | Reason for release goes in `reason_codes` |
+| `audit.refund` | `reservation_id`, `amount_atomic_refunded`, `original_commit_event_id` | Post-commit reversal |
+| `audit.ttl_expired` | `reservation_id`, `ttl_expires_at`, `capacity_returned_atomic` | Auto-release at TTL |
+| `audit.late_commit` | `reservation_id`, `amount_atomic_observed`, `grace_window_ms_used`, `over_cap_amount_atomic` (if budget went over-cap) | Honored within grace window per §3.2 |
+| `audit.overage_rejected` | `reservation_id`, `amount_atomic_observed`, `amount_atomic_reserved`, `overage_amount_atomic` | Default overage policy |
+| `audit.overage_charged` | `reservation_id`, `amount_atomic_observed`, `amount_atomic_reserved`, `overage_amount_atomic`, `policy: "charge_overage"` | Opt-in overage policy |
+| `audit.replay_rejected` | `reservation_id`, `idempotency_key`, `conflict_field` (which body field disagreed) | Per §3.3 |
+| `audit.bypassed` | `bypass_reason` (`authority_unreachable`, `fail_open_override`), synthesized `reservation_id` permitted | Fail-open mode (dev only) |
+| `audit.reconciliation_gap` | `reservation_id`, `amount_atomic_observed`, `time_past_grace_ms` | Out-of-band accounting required |
 
 Provider-specific extensions (e.g. for LiteLLM: `litellm_call_id`, `model`, `team_id`, `pricing_version`, `price_snapshot_hash_hex`, `fx_rate_version`, `unit_conversion_version`, `call_type`, `stream`, `mode`, `integration`) are valid `runtime_metadata` keys and are bound by the signature like any other context field.
 

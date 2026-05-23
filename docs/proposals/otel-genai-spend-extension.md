@@ -8,7 +8,7 @@
 
 The GenAI semantic conventions describe **what happened** during an LLM call (model, prompt tokens, completion tokens, span timing). A growing body of agent-runtime work — gateway-level budget controls (LiteLLM agent iteration budgets, Portkey budgets, Helicone limits), enterprise governance toolkits (Microsoft AGT), and pre-call enforcement protocols (the [Agent Spend Protocol draft](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/agent-spend-protocol/draft-01.md)) — produces a distinct class of events that don't fit any existing OTel attribute group:
 
-- A *decision* (ALLOW / DENY / DEGRADE / REQUIRE_APPROVAL) made **before** the provider call, with its own rationale and rule trace.
+- A *decision* (ALLOW / ALLOW_WITH_CAPS / DENY / REQUIRE_APPROVAL) made **before** the provider call, with its own rationale and rule trace.
 - A *reservation* (a held capacity claim) with a TTL deadline.
 - A *commit* (reconciliation of observed usage against the reservation) emitted **after** the provider response.
 
@@ -23,7 +23,7 @@ Without semconv coverage, every vendor's enforcement decisions go on the GenAI s
 | Event name | Emitted when | Required attributes |
 |---|---|---|
 | `gen_ai.spend.reserve` | Before the provider call, when an enforcement authority returns a decision | `gen_ai.spend.decision`, `gen_ai.spend.decision_id`, `gen_ai.spend.budget_id`, `gen_ai.spend.unit`, `gen_ai.spend.amount_atomic_reserved` |
-| `gen_ai.spend.commit` | After the provider call, when observed usage is reconciled against the reservation | `gen_ai.spend.decision_id`, `gen_ai.spend.amount_atomic_observed`, `gen_ai.spend.refund_amount_atomic` *or* `gen_ai.spend.charge_amount_atomic` |
+| `gen_ai.spend.commit` | After the provider call, when observed usage is reconciled against the reservation | `gen_ai.spend.decision_id`, `gen_ai.spend.amount_atomic_observed`; plus `gen_ai.spend.refund_amount_atomic` (when observed < reserved) *or* `gen_ai.spend.charge_amount_atomic` (when observed > reserved). When observed equals reserved exactly, both fields are absent and the consumer infers exact-match from `amount_atomic_observed == amount_atomic_reserved` (which is on the reserve event for the same `decision_id`). |
 | `gen_ai.spend.release` | When the provider call is aborted, the client times out, or the agent run is cancelled, and the held reservation is returned to the budget before TTL | `gen_ai.spend.decision_id`, `gen_ai.spend.reason_codes` |
 | `gen_ai.spend.audit` | When the enforcement authority emits a signed audit record (typically asynchronous from the GenAI span) | `gen_ai.spend.decision_id`, `gen_ai.spend.audit_event_signature_hash` |
 
@@ -39,8 +39,8 @@ The provider call's own span attributes (`gen_ai.usage.input_tokens`, `gen_ai.us
 | `gen_ai.spend.unit` | string | ✓ on `reserve` | e.g. `output_token`, `usd_atomic`, `request` |
 | `gen_ai.spend.amount_atomic_reserved` | string | ✓ on `reserve` | Decimal string in `unit` |
 | `gen_ai.spend.amount_atomic_observed` | string | ✓ on `commit` | Decimal string in `unit` |
-| `gen_ai.spend.refund_amount_atomic` | string | conditional | Non-empty when observed < reserved |
-| `gen_ai.spend.charge_amount_atomic` | string | conditional | Non-empty when observed > reserved |
+| `gen_ai.spend.refund_amount_atomic` | string | conditional | Set only when observed < reserved; absent on exact-match or overage commits |
+| `gen_ai.spend.charge_amount_atomic` | string | conditional | Set only when observed > reserved; absent on exact-match or under-reserved commits |
 | `gen_ai.spend.reason_codes` | string[] | recommended | Machine-readable rationale for the decision |
 | `gen_ai.spend.matched_rule_ids` | string[] | optional | Rule identifiers that fired (vendor-specific) |
 | `gen_ai.spend.authority` | string | recommended | URL or opaque id of the enforcement authority |
