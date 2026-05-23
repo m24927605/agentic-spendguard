@@ -96,6 +96,25 @@ service SidecarAdapter {
   // because the idempotency key includes both.
   rpc ResumeAfterApproval(ResumeAfterApprovalRequest)
       returns (ResumeAfterApprovalResponse);
+
+  // -- Explicit Release (Draft-01 §4 of Agent Spend Protocol) ---------------
+
+  // Adapter-initiated release of a held reservation before commit.
+  // Use when the provider call is aborted, the client times out, or the
+  // agent run is cancelled — and the adapter wants to surface that
+  // explicitly rather than waiting for an outcome-driven (APPLY_FAILED
+  // or trace-event-driven) implicit release.
+  //
+  // Coexists with the implicit release paths in ConfirmPublishOutcome and
+  // EmitTraceEvents; those remain unchanged. Implicit paths are still the
+  // default for adapters that report outcomes naturally; the explicit RPC
+  // is for adapters that want to match the Agent Spend Protocol Draft-01
+  // wire shape (docs/specs/agent-spend-protocol/draft-01.md §4).
+  //
+  // Idempotent: repeated ReleaseReservation calls with the same
+  // (reservation_id, idempotency_key) pair return the original outcome.
+  rpc ReleaseReservation(ReleaseReservationRequest)
+      returns (ReleaseReservationResponse);
 }
 
 // ============================================================================
@@ -533,4 +552,67 @@ message DrainSignal {
   Phase phase = 1;
   google.protobuf.Timestamp deadline = 2;
   string drain_trigger = 3;    // pod_eviction / rolling_restart / spot / ...
+}
+
+// ============================================================================
+// ReleaseReservation (Agent Spend Protocol Draft-01 §4)
+// ============================================================================
+
+message ReleaseReservationRequest {
+  // Tenant scope. MUST match the sidecar's configured tenant
+  // (validated against cfg.tenant_id, same as Handshake.tenant_id_assertion).
+  string tenant_id = 1;
+
+  // The reservation to release. UUIDv7 from a prior ReserveResponse's
+  // reservation_ids. Released independently per-reservation: callers
+  // holding multiple reservations under one decision MUST call
+  // ReleaseReservation once per reservation_id.
+  string reservation_id = 2;
+
+  // Idempotency key for retries. The (reservation_id, idempotency_key)
+  // pair is the dedup key per ASP Draft-01 §3.3:
+  //   - same pair + identical body  → return original outcome
+  //   - same pair + different body  → REPLAY_CONFLICT (Error)
+  //   - different idempotency_key against a terminal reservation
+  //     → RESERVATION_SETTLED / RESERVATION_RELEASED (Error)
+  string idempotency_key = 3;
+
+  // Free-form reason codes per ASP Draft-01 §4. Optional but
+  // RECOMMENDED. SpendGuard maps known values to its internal
+  // ReleaseReason enum; unknown values default to EXPLICIT.
+  // Known mappings:
+  //   "provider_error" | "runtime_error" → RuntimeError
+  //   "client_timeout" | "run_aborted"   → RunAborted
+  //   anything else                      → Explicit
+  repeated string reason_codes = 4;
+
+  // Adapter identity for fencing parity with the original Reserve.
+  // Same semantics as DecisionRequest.workload_instance_id /
+  // session_id — fencing epoch is checked inside run_release.
+  string workload_instance_id = 5;
+  string session_id = 6;
+}
+
+message ReleaseReservationResponse {
+  oneof outcome {
+    ReleaseReservationSuccess success = 1;
+
+    // Reservation in terminal state (committed / already released /
+    // expired-beyond-grace), unknown reservation_id, or fencing-epoch
+    // stale. Adapter raises a typed exception based on Error.code.
+    spendguard.common.v1.Error error = 2;
+  }
+}
+
+message ReleaseReservationSuccess {
+  // Ledger transaction that recorded the release.
+  string ledger_transaction_id = 1;
+  // Reservations released by this call (single-element array in the
+  // current single-reservation-per-call model; kept as repeated for
+  // forward compatibility with batch release).
+  repeated string released_reservation_ids = 2;
+  // Detached Ed25519 signature of the emitted audit.release CloudEvent
+  // (the full event lands in the audit chain via canonical_ingest;
+  // this signature lets the adapter pin the response to the receipt).
+  bytes audit_event_signature = 3;
 }

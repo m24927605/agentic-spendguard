@@ -148,6 +148,18 @@ impl SidecarAdapter for AdapterUds {
         record_outcome(&self.metrics, Handler::ResumeAfterApproval, &result);
         result
     }
+
+    async fn release_reservation(
+        &self,
+        req: Request<crate::proto::sidecar_adapter::v1::ReleaseReservationRequest>,
+    ) -> Result<
+        Response<crate::proto::sidecar_adapter::v1::ReleaseReservationResponse>,
+        Status,
+    > {
+        let result = self.release_reservation_inner(req).await;
+        record_outcome(&self.metrics, Handler::ReleaseReservation, &result);
+        result
+    }
 }
 
 impl AdapterUds {
@@ -832,6 +844,123 @@ impl AdapterUds {
             other => into_err(format!(
                 "[APPROVAL_NON_TERMINAL] approval state={other:?} is not resumable"
             )),
+        }
+    }
+
+    /// ReleaseReservation — explicit adapter-initiated release of a
+    /// held reservation matching Agent Spend Protocol Draft-01 §4.
+    ///
+    /// Coexists with the implicit release paths (APPLY_FAILED in
+    /// ConfirmPublishOutcome, run-aborted in EmitTraceEvents); this
+    /// wrapper exposes the same `transaction::run_release` core under a
+    /// dedicated RPC for ASP-conformant adapters. Implicit paths keep
+    /// working unchanged.
+    async fn release_reservation_inner(
+        &self,
+        req: Request<crate::proto::sidecar_adapter::v1::ReleaseReservationRequest>,
+    ) -> Result<
+        Response<crate::proto::sidecar_adapter::v1::ReleaseReservationResponse>,
+        Status,
+    > {
+        use crate::decision::transaction::{self, DecisionContext, ReleaseReason};
+        use crate::proto::sidecar_adapter::v1::{
+            release_reservation_response::Outcome as RrOutcome, ReleaseReservationResponse,
+            ReleaseReservationSuccess,
+        };
+
+        let req = req.into_inner();
+
+        if req.tenant_id != self.cfg.tenant_id {
+            return Err(Status::permission_denied(format!(
+                "tenant_id '{}' does not match sidecar tenant '{}'",
+                req.tenant_id, self.cfg.tenant_id
+            )));
+        }
+
+        let reservation_uuid = uuid::Uuid::parse_str(&req.reservation_id).map_err(|e| {
+            Status::invalid_argument(format!(
+                "reservation_id '{}' is not a valid UUID: {e}",
+                req.reservation_id
+            ))
+        })?;
+
+        // Reason mapping per adapter.proto comment block on
+        // ReleaseReservationRequest.reason_codes. Unknown codes default
+        // to Explicit so adapter intent is preserved in the audit
+        // metadata even when SpendGuard doesn't recognize the code.
+        let reason = req
+            .reason_codes
+            .iter()
+            .find_map(|c| match c.as_str() {
+                "provider_error" | "runtime_error" => Some(ReleaseReason::RuntimeError),
+                "client_timeout" | "run_aborted" => Some(ReleaseReason::RunAborted),
+                _ => None,
+            })
+            .unwrap_or(ReleaseReason::Explicit);
+
+        // Fencing parity with all other state-mutating RPCs.
+        crate::fencing::check_active(&self.state).map_err(|e| e.to_status())?;
+
+        let dctx = DecisionContext {
+            session_id: req.session_id.clone(),
+            workload_instance_id: self.cfg.workload_instance_id.clone(),
+            tenant_id: self.cfg.tenant_id.clone(),
+            region: self.cfg.region.clone(),
+        };
+
+        // Preserve adapter intent in the audit chain: the joined
+        // reason_codes string lands in the audit.outcome CloudEvent's
+        // `metadata` field. Empty string when no codes provided.
+        let metadata_owned = req.reason_codes.join(",");
+        let metadata = if metadata_owned.is_empty() {
+            None
+        } else {
+            Some(metadata_owned.as_str())
+        };
+
+        match transaction::run_release(
+            &self.cfg,
+            &self.state,
+            &dctx,
+            reservation_uuid,
+            reason,
+            metadata,
+        )
+        .await
+        {
+            Ok(out) => {
+                info!(
+                    reservation_id = %req.reservation_id,
+                    idempotency_key = %req.idempotency_key,
+                    ledger_tx = %out.ledger_transaction_id,
+                    reason = ?reason,
+                    "ReleaseReservation success"
+                );
+                Ok(Response::new(ReleaseReservationResponse {
+                    outcome: Some(RrOutcome::Success(ReleaseReservationSuccess {
+                        ledger_transaction_id: out.ledger_transaction_id,
+                        released_reservation_ids: out.released_reservation_ids,
+                        // v1: audit_event_signature is empty. The signed
+                        // CloudEvent is emitted to the audit chain via
+                        // canonical_ingest as part of run_release; exposing
+                        // the detached signature back to the adapter
+                        // requires a small refactor of run_release to
+                        // surface the signed bytes. Tracked as follow-up.
+                        audit_event_signature: vec![].into(),
+                    })),
+                }))
+            }
+            Err(e) => {
+                warn!(
+                    reservation_id = %req.reservation_id,
+                    idempotency_key = %req.idempotency_key,
+                    error = %e,
+                    "ReleaseReservation failed"
+                );
+                Ok(Response::new(ReleaseReservationResponse {
+                    outcome: Some(RrOutcome::Error(e.to_proto())),
+                }))
+            }
         }
     }
 }

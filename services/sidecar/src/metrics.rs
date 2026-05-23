@@ -27,6 +27,7 @@ pub enum Handler {
     ConsumeBudgetGrant,
     StreamDrainSignal,
     ResumeAfterApproval,
+    ReleaseReservation,
 }
 
 impl Handler {
@@ -41,6 +42,7 @@ impl Handler {
             Self::ConsumeBudgetGrant => "consume_budget_grant",
             Self::StreamDrainSignal => "stream_drain_signal",
             Self::ResumeAfterApproval => "resume_after_approval",
+            Self::ReleaseReservation => "release_reservation",
         }
     }
 }
@@ -62,8 +64,8 @@ impl Outcome {
 
 #[derive(Default)]
 pub struct SidecarMetricsInner {
-    /// Per (handler, outcome) call counter. 9 handlers × 2 outcomes.
-    counts: [[AtomicU64; 2]; 9],
+    /// Per (handler, outcome) call counter. 10 handlers × 2 outcomes.
+    counts: [[AtomicU64; 2]; 10],
 }
 
 #[derive(Clone, Default)]
@@ -120,6 +122,7 @@ const ALL_HANDLERS: &[Handler] = &[
     Handler::ConsumeBudgetGrant,
     Handler::StreamDrainSignal,
     Handler::ResumeAfterApproval,
+    Handler::ReleaseReservation,
 ];
 
 fn handler_index(h: Handler) -> usize {
@@ -133,6 +136,7 @@ fn handler_index(h: Handler) -> usize {
         Handler::ConsumeBudgetGrant => 6,
         Handler::StreamDrainSignal => 7,
         Handler::ResumeAfterApproval => 8,
+        Handler::ReleaseReservation => 9,
     }
 }
 
