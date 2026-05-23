@@ -100,6 +100,19 @@ export default defineConfig({
           ],
         },
         { label: 'POC vs GA gates', slug: 'docs/poc-vs-ga' },
+        {
+          label: 'Specifications',
+          items: [
+            { label: 'Agent Spend Protocol — Draft 01', slug: 'docs/specs/agent-spend-protocol' },
+            { label: 'OTel GenAI extension proposal', slug: 'docs/specs/otel-genai-extension' },
+          ],
+        },
+        {
+          label: 'Posts',
+          items: [
+            { label: 'The Agent Spend Governance Gap', slug: 'docs/posts/agent-spend-governance-gap' },
+          ],
+        },
       ],
     }),
   ],
