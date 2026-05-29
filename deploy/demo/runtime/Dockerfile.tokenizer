@@ -38,4 +38,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /spendguard-tokenizer /usr/local/bin/spendguard-tokenizer
 
+# Round-2 fix M7: drop to a fixed non-root UID. compose.yaml's
+# `user: 65532:65532` and the chart's runAsUser both align with this
+# baked-in default so the binary works under both deployment paths
+# without compose / chart needing to override the in-image identity.
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/spendguard-tokenizer"]

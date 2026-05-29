@@ -191,13 +191,31 @@ tokenizer:
   replicas: 1
   image:
     repository: spendguard/tokenizer
+    # Round-2 fix M5: production profile requires semver (vN.N.N) or
+    # digest pin (@sha256:HEX); demo can use alpha tags as below.
     tag: "0.1.0-alpha.1"
   # Spec §5.3 health invariant: tier 3 hit rate / total tokenize <
   # 0.001 (0.1%). Beyond this threshold the control plane (SLICE-extra)
   # raises a `tokenizer_tier3_hit_high` alert + opens a PR for the
   # missing dispatch entry. Threshold plumbed through Config in
   # SLICE_03; alert wire-up in SLICE-extra.
+  # Round-2 fix M4: production profile bounds-checks this to
+  # (0.00001, 0.05] and tolerates string-from-helm-set.
   tier3AlertThreshold: 0.001
+  # Round-2 fix B3.3: secure-transport gates for production profile.
+  # Set ONE of these under chart.profile=production. Demo profile
+  # leaves both empty and falls back to plaintext TCP (with a loud
+  # warn from main.rs).
+  #
+  # udsHostPath: hostPath on the node for the gRPC UDS socket dir.
+  #              Sidecar pods on the same node mount the same hostPath
+  #              and talk to the tokenizer without an L4 hop (spec
+  #              §10.1 hot-path budget).
+  # mtlsSecretName: name of a pre-created Secret holding ca.crt /
+  #                 tls.crt / tls.key for cross-node mTLS callers
+  #                 (Tier 1 shadow worker, output_predictor).
+  udsHostPath: ""
+  mtlsSecretName: ""
   resources:
     requests: { cpu: "100m", memory: "192Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }

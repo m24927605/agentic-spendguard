@@ -41,13 +41,13 @@ hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
 
-# UDS support — the production deployment exposes the gRPC server on
-# a hostPath UDS so sidecar pods on the same node can reach it
-# without an L4 hop (per spec §10.1 latency budget). The library
-# form is preferred but the gRPC form is the fallback for the
-# Tier 1 shadow worker + calibration / output_predictor consumers.
-tokio-vsock = { version = "0.5", optional = true }
-
+# UDS support: round-2 fix B3.1 (panel finding): tokio-vsock was the
+# wrong crate (VM-socket protocol, not Unix socket). UDS binding now
+# uses tokio::net::UnixListener (already a dep of `tokio = "1"`) +
+# tonic's Server::serve_with_incoming() pattern (precedent:
+# services/sidecar/src/main.rs:262-296). No additional crate dep is
+# needed; tonic-build's transport feature already enables UDS.
+#
 # Errors / logging
 thiserror = "1"
 anyhow = "1"
