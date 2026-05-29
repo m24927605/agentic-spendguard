@@ -83,19 +83,6 @@ spec:
             - { name: SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID, value: "sidecar-$(_POD_NAME)" }
             {{- end }}
             - { name: SPENDGUARD_SIDECAR_RESERVATION_TTL_SECONDS, value: {{ .Values.sidecar.reservationTtlSeconds | quote }} }
-            # SLICE_02 v1alpha2 — documented optional env var per spec
-            # §4.2 + slice §4.2. Inert in SLICE_02: the contract bundle
-            # parser always default-fills v1alpha1 contracts with
-            # STRICT_CEILING (spec §6.4) and refuses to runtime-override
-            # an already-loaded contract's prediction_policy (spec §4.2
-            # forbids runtime override; bundle redeploy only). The env
-            # var is reserved here so operators can advertise a
-            # forward-compatible config map; a future minor version may
-            # consume it for OBSERVABILITY tagging without changing
-            # eval-time behavior.
-            {{- with .Values.sidecar.defaultPredictionPolicy }}
-            - { name: SPENDGUARD_DEFAULT_PREDICTION_POLICY, value: {{ . | quote }} }
-            {{- end }}
             - name: SPENDGUARD_SIDECAR_LEDGER_URL
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
             - name: SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL
