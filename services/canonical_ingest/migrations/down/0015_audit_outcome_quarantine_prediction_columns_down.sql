@@ -15,6 +15,29 @@ BEGIN
     END IF;
 END $$;
 
+-- Round-4 fix M2: drop the sentinel/domain CHECK constraints that 0015's
+-- up-migration installed. ALTER TABLE DROP COLUMN cascades to constraints
+-- that reference the dropped columns, but being explicit is more
+-- self-documenting and resilient to constraint additions on legacy rows.
+ALTER TABLE audit_outcome_quarantine
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_reserved_strategy_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_prediction_strategy_used_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_prediction_policy_used_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_tokenizer_tier_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_prediction_confidence_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_cold_start_layer_used_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_predicted_tokens_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_actual_tokens_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_run_steps_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_run_projection_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_run_projection_int64_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_prediction_sample_size_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_delta_b_ratio_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_delta_c_ratio_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_predicted_b_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_predicted_c_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_cold_start_layer_outcome_chk;
+
 -- Restore the pre-SLICE_01 quarantine immutability trigger function from
 -- services/canonical_ingest/migrations/0005_immutability_triggers.sql.
 CREATE OR REPLACE FUNCTION reject_quarantine_immutable_columns()

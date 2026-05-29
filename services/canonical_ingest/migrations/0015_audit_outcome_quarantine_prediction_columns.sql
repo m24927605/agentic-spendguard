@@ -36,15 +36,59 @@
 -- Fix: mirror the same 18 nullable columns onto the quarantine table so
 -- the release path can carry them forward.
 --
--- ## No backfill, no CHECK constraints on quarantine
+-- ## Round-4 fix M2 design decision: mirror sentinel CHECKs WITH release-path coherence
 --
--- The quarantine table is short-lived staging — rows are released or
--- orphaned within 30s per spec §4.8. We DO NOT mirror the CHECK
--- constraints from 0013 here because:
---   * The producer-side has already validated them BEFORE writing the
---     CloudEvent payload (see crates/spendguard-prediction-mirror).
---   * The canonical_events INSERT at release time will re-validate.
---   * Duplicating CHECKs would force a second VALIDATE pass.
+-- ### What changed in round-4
+--
+-- Round-3 explicitly skipped mirroring the 17 sentinel CHECKs to keep
+-- the quarantine path minimal. Round-4 codex M2 escalated this: if the
+-- producer writes a value that violates a sentinel CHECK
+-- (e.g., predicted_b_tokens >= 0, delta_b_ratio non-NaN), the
+-- canonical_events INSERT at release time fires the CHECK and aborts
+-- the release transaction. The quarantine row gets stuck forever in
+-- 'awaiting_decision' state because the canonical_events_global_keys
+-- INSERT also rolls back. Worse: the bad bytes sit in the quarantine
+-- table's payload_json, indistinguishable from a benign late-arrival.
+--
+-- Decision: mirror the 17 type/range/sentinel CHECKs onto the quarantine
+-- table so producer-side malformation is rejected at the quarantine
+-- INSERT (within 30s of arrival per spec §4.8 SLO) rather than 30s+
+-- later at the release-path INSERT into canonical_events.
+--
+-- ### Sentinel-collision guards: chose (b) "release path preserves
+-- original payload"
+--
+-- Codex flagged three options for the
+-- predicted_b_tokens > 0 WHEN strategy='B' sentinel-collision CHECK:
+--   (a) Drop the > 0 guard and accept the NULL↔0 collision.
+--   (b) Mark the release path "always populates from carried value,
+--       never coerces NULL→0".
+--   (c) Add release-path coercion: if predicted_b_tokens=0 AND strategy='B',
+--       INSERT with NULL.
+--
+-- We pick (b). Rationale: the quarantine release path's invariant is
+-- byte-identical preservation of the original audit.outcome payload.
+-- Option (a) loses sentinel discipline at the SQL boundary and pushes
+-- the burden onto every consumer. Option (c) introduces a silent
+-- producer-malformation rewrite that masks bugs in the upstream
+-- spendguard-prediction-mirror crate.
+--
+-- Concrete implication: a producer that writes
+-- prediction_strategy_used='B' AND predicted_b_tokens=0 fails the
+-- quarantine INSERT with errcode 23514. The producer gets a clear
+-- error at the gRPC boundary; the operator sees a single-event
+-- failure rather than a stuck quarantine row + a late release
+-- abort.
+--
+-- ### What is NOT mirrored: the partial-NOT-NULL CHECKs from 0013 Step 3
+--
+-- Those CHECKs gate event_type×event_time on "all required cols are
+-- populated". The quarantine table is a strict subset of audit.outcome
+-- events; the corresponding NOT-NULL set differs (only actual_*_tokens
+-- are required, not the decision-side columns). Mirroring would force
+-- producer code to populate decision-side columns it doesn't have at
+-- audit.outcome write time. The canonical_events INSERT at release time
+-- re-validates the outcome-side NOT-NULLs anyway.
 --
 -- ## No backfill
 --
@@ -76,6 +120,143 @@ ALTER TABLE audit_outcome_quarantine
     ADD COLUMN actual_output_tokens  BIGINT,
     ADD COLUMN delta_b_ratio         REAL,
     ADD COLUMN delta_c_ratio         REAL;
+
+-- ============================================================================
+-- Round-4 fix M2: sentinel/domain CHECKs (mirror of 0013 Step 2 + Step 3b
+-- minus the partial-NOT-NULL CHECKs that don't apply to quarantine).
+--
+-- Round-4 fix B4: DROP CONSTRAINT IF EXISTS prepended for idempotent
+-- re-application (matches the 0046+0013 convention).
+--
+-- Why: producer-side malformation (e.g., delta_b_ratio = NaN) would pass
+-- the quarantine INSERT but fail the canonical_events INSERT at release
+-- time, leaving the row stuck in 'awaiting_decision'. Mirroring the
+-- CHECKs rejects bad bytes at the quarantine boundary so the producer
+-- gets a synchronous error and the operator never sees a stuck row.
+-- ============================================================================
+
+ALTER TABLE audit_outcome_quarantine
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_reserved_strategy_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_prediction_strategy_used_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_prediction_policy_used_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_tokenizer_tier_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_prediction_confidence_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_cold_start_layer_used_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_predicted_tokens_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_actual_tokens_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_run_steps_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_run_projection_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_run_projection_int64_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_prediction_sample_size_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_delta_b_ratio_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_delta_c_ratio_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_predicted_b_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_predicted_c_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS audit_outcome_quarantine_cold_start_layer_outcome_chk;
+
+ALTER TABLE audit_outcome_quarantine
+    -- Enum-string domain checks.
+    ADD CONSTRAINT audit_outcome_quarantine_reserved_strategy_chk
+        CHECK (reserved_strategy IS NULL OR reserved_strategy IN ('A','B','C'))
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_prediction_strategy_used_chk
+        CHECK (prediction_strategy_used IS NULL
+               OR prediction_strategy_used IN ('A','B','C'))
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_prediction_policy_used_chk
+        CHECK (prediction_policy_used IS NULL OR prediction_policy_used IN (
+            'STRICT_CEILING','EMPIRICAL_RUN_CEILING',
+            'ADAPTIVE_CEILING','SHADOW_ONLY'))
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_tokenizer_tier_chk
+        CHECK (tokenizer_tier IS NULL OR tokenizer_tier IN ('T1','T2','T3'))
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_prediction_confidence_chk
+        CHECK (prediction_confidence IS NULL
+               OR (prediction_confidence >= 0.000
+                   AND prediction_confidence <= 1.000))
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_cold_start_layer_used_chk
+        CHECK (cold_start_layer_used IS NULL
+               OR cold_start_layer_used IN ('L1','L2','L3','L4'))
+        NOT VALID,
+    -- Sentinel discipline.
+    ADD CONSTRAINT audit_outcome_quarantine_predicted_tokens_chk
+        CHECK ((predicted_a_tokens IS NULL OR predicted_a_tokens >= 0)
+           AND (predicted_b_tokens IS NULL OR predicted_b_tokens >= 0)
+           AND (predicted_c_tokens IS NULL OR predicted_c_tokens >= 0))
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_actual_tokens_chk
+        CHECK ((actual_input_tokens IS NULL OR actual_input_tokens >= 0)
+           AND (actual_output_tokens IS NULL OR actual_output_tokens >= 0))
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_run_steps_chk
+        CHECK ((run_predicted_remaining_steps IS NULL
+                  OR run_predicted_remaining_steps >= -1)
+           AND (run_steps_completed_so_far IS NULL
+                  OR run_steps_completed_so_far >= 0))
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_run_projection_chk
+        CHECK (run_projection_at_decision_atomic IS NULL
+               OR run_projection_at_decision_atomic >= 0)
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_run_projection_int64_chk
+        CHECK (run_projection_at_decision_atomic IS NULL
+               OR run_projection_at_decision_atomic <= 9223372036854775807)
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_prediction_sample_size_chk
+        CHECK (prediction_sample_size IS NULL OR prediction_sample_size >= 0)
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_delta_b_ratio_chk
+        CHECK (delta_b_ratio IS NULL
+               OR (delta_b_ratio >= 0.0 AND delta_b_ratio = delta_b_ratio))
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_delta_c_ratio_chk
+        CHECK (delta_c_ratio IS NULL
+               OR (delta_c_ratio >= 0.0 AND delta_c_ratio = delta_c_ratio))
+        NOT VALID,
+    -- Sentinel-collision guards. Note: predicted_a_tokens has no
+    -- corresponding CHECK here because the quarantine table holds
+    -- audit.outcome events only — Strategy A reservation context lives
+    -- on the decision row, not the outcome. The strategy-conditional
+    -- B/C guards still apply because the outcome carries strategy used
+    -- at decision time.
+    ADD CONSTRAINT audit_outcome_quarantine_predicted_b_tokens_nonzero_chk
+        CHECK (prediction_strategy_used IS DISTINCT FROM 'B'
+               OR predicted_b_tokens IS NULL
+               OR predicted_b_tokens > 0)
+        NOT VALID,
+    ADD CONSTRAINT audit_outcome_quarantine_predicted_c_tokens_nonzero_chk
+        CHECK (prediction_strategy_used IS DISTINCT FROM 'C'
+               OR predicted_c_tokens IS NULL
+               OR predicted_c_tokens > 0)
+        NOT VALID,
+    -- Round-4 M3 mirror: cold_start_layer_used is decision-side; the
+    -- quarantine table holds audit.outcome events so the column must be
+    -- NULL on every row. event_type is already constrained to
+    -- 'spendguard.audit.outcome' by the 0003 schema design but we keep
+    -- the check explicit for grep-ability.
+    ADD CONSTRAINT audit_outcome_quarantine_cold_start_layer_outcome_chk
+        CHECK (cold_start_layer_used IS NULL)
+        NOT VALID;
+
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_reserved_strategy_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_prediction_strategy_used_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_prediction_policy_used_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_tokenizer_tier_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_prediction_confidence_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_cold_start_layer_used_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_predicted_tokens_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_actual_tokens_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_run_steps_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_run_projection_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_run_projection_int64_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_prediction_sample_size_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_delta_b_ratio_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_delta_c_ratio_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_predicted_b_tokens_nonzero_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_predicted_c_tokens_nonzero_chk;
+ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantine_cold_start_layer_outcome_chk;
 
 -- ============================================================================
 -- Round-3 fix B2: extend the quarantine immutability trigger to lock
