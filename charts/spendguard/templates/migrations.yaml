@@ -14,7 +14,61 @@ ConfigMap shape:
          (lexicographic order preserved by the apply loop's `sort`).
   Same shape for canonical-ingest under
   {{ .Values.migrations.canonicalConfigMapName }} (default: spendguard-migrations-canonical).
+
+Round-2 fix B2 + M15: SLICE_01 added 4 new migration files
+(ledger 0046+0048, canonical 0013+0014). On chart upgrade the
+operator MUST regenerate the ConfigMaps with the new files included.
+This template now (1) fails the render under chart.profile=production
+when the ConfigMaps are absent, and (2) NOTES.txt warns operators
+loudly before helm upgrade.
+
+The fail-gate prevents the silent no-op path: chart.profile=demo still
+tolerates absent ConfigMaps (the Job exits 0 with a "no SQL files found"
+log line) so out-of-band migration workflows keep working. But under
+chart.profile=production the assumption is "Helm owns migration",
+and a silent no-op there would let a production cluster boot with
+stale schema — masking the SLICE_01 changes until the first decision
+event triggers a "column does not exist" runtime error from the
+ledger.
+
+Cross-DB migration ordering (round-2 fix M16): the apply loop already
+processes the ledger glob before the canonical glob, which is required
+because the canonical_events mirror columns assume the ledger side has
+already accepted the same schema. The lexicographic file ordering
+inside each glob is also load-bearing: 0046 (audit_outbox columns +
+trigger + TRUNCATE guard, all atomic) MUST land before 0048
+(tokenizer_versions + FK) so the FK target table exists; 0013 MUST land
+before 0014 (schema_bundle row insert depends on canonical_events
+schema being prepared).
 */ -}}
+{{- if eq (.Values.chart.profile | default "demo") "production" }}
+{{- $ledgerCm := lookup "v1" "ConfigMap" .Release.Namespace (.Values.migrations.ledgerConfigMapName | default "spendguard-migrations-ledger") }}
+{{- $canonicalCm := lookup "v1" "ConfigMap" .Release.Namespace (.Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical") }}
+{{- if not $ledgerCm }}
+{{- fail (printf "chart.profile=production requires ConfigMap %s/%s with SLICE_01 migrations 0046_audit_outbox_prediction_columns.sql + 0048_tokenizer_versions.sql. Round-2 fix B2: regenerate via scripts/helm-validate-kind.sh or apply migrations out-of-band and set postgres.applyMigrationsOnInstall=false." .Release.Namespace (.Values.migrations.ledgerConfigMapName | default "spendguard-migrations-ledger")) }}
+{{- end }}
+{{- if not $canonicalCm }}
+{{- fail (printf "chart.profile=production requires ConfigMap %s/%s with SLICE_01 migrations 0013_canonical_events_prediction_columns.sql + 0014_schema_bundle_prediction_v1alpha1.sql. Round-2 fix B2: regenerate via scripts/helm-validate-kind.sh or apply migrations out-of-band and set postgres.applyMigrationsOnInstall=false." .Release.Namespace (.Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical")) }}
+{{- end }}
+{{- /*
+File-presence check for the SLICE_01 migrations themselves: even if the
+ConfigMap exists, the operator may have generated it from a pre-SLICE_01
+snapshot. Inspect the ConfigMap.data keys and fail loudly if the new
+files are missing.
+*/ -}}
+{{- $needLedger := list "0046_audit_outbox_prediction_columns.sql" "0048_tokenizer_versions.sql" }}
+{{- range $needLedger }}
+{{- if not (hasKey $ledgerCm.data .) }}
+{{- fail (printf "chart.profile=production: ledger migration ConfigMap missing SLICE_01 file %s. Round-2 fix B2: regenerate the ConfigMap to include all migrations in services/ledger/migrations/ — see CHANGELOG for the SLICE_01 additions." .) }}
+{{- end }}
+{{- end }}
+{{- $needCanonical := list "0013_canonical_events_prediction_columns.sql" "0014_schema_bundle_prediction_v1alpha1.sql" }}
+{{- range $needCanonical }}
+{{- if not (hasKey $canonicalCm.data .) }}
+{{- fail (printf "chart.profile=production: canonical-ingest migration ConfigMap missing SLICE_01 file %s. Round-2 fix B2: regenerate the ConfigMap to include all migrations in services/canonical_ingest/migrations/." .) }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:

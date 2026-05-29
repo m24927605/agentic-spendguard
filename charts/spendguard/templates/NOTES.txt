@@ -35,3 +35,53 @@ POC limits in this chart (call out before scaling):
   - Postgres: external (RDS / Cloud SQL); apply migrations via the
     operator's chosen tool — the chart's migration hook is a no-op
     placeholder (see templates/migrations.yaml).
+
+================================================================================
+SLICE_01 UPGRADE NOTICE — audit chain prediction extension (round-2 fix B2)
+================================================================================
+
+If you are upgrading from a pre-SLICE_01 release, you MUST regenerate the
+migration ConfigMaps BEFORE running `helm upgrade`. The new release ships
+4 additional migration files that the post-install Job will apply:
+
+  Ledger DB:
+    - 0046_audit_outbox_prediction_columns.sql   (schema + trigger + TRUNCATE guard)
+    - 0048_tokenizer_versions.sql                (FK target + immutability)
+
+  Canonical Ingest DB:
+    - 0013_canonical_events_prediction_columns.sql  (mirror schema)
+    - 0014_schema_bundle_prediction_v1alpha1.sql    (rotated bundle row)
+
+CRITICAL ORDERING — apply BOTH ledger migrations BEFORE canonical_ingest
+migrations. The script in templates/migrations.yaml does this automatically
+for ConfigMap-mode installs.
+
+REGENERATE the ConfigMaps:
+  scripts/helm-validate-kind.sh                 # regenerates from on-disk files
+  # OR manually:
+  kubectl --namespace {{ .Release.Namespace }} create configmap \
+    {{ .Values.migrations.ledgerConfigMapName | default "spendguard-migrations-ledger" }} \
+    --from-file=services/ledger/migrations/ \
+    --dry-run=client -o yaml | kubectl apply -f -
+  kubectl --namespace {{ .Release.Namespace }} create configmap \
+    {{ .Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical" }} \
+    --from-file=services/canonical_ingest/migrations/ \
+    --dry-run=client -o yaml | kubectl apply -f -
+
+PROST 0.13 ROLLOUT INVARIANT (audit-chain extension §7.2):
+  prost 0.13 does NOT preserve proto3 unknown fields. To avoid a
+  verify-chain regression mid-upgrade you MUST roll out canonical_ingest
+  pods to the SLICE_01 image BEFORE any sidecar / webhook_receiver /
+  ttl_sweeper pod starts writing tag-300+ CloudEvent fields.
+
+  Order:
+    1. Apply migrations (this Job).
+    2. helm upgrade canonical-ingest first, wait for ready.
+    3. THEN helm upgrade sidecar / webhook_receiver / ttl_sweeper.
+
+  Under chart.profile=production the post-install Job FAILS HARD if the
+  new files are absent from the ConfigMaps — this is intentional to
+  prevent silent stale-schema boots.
+
+  Schema_bundle_id 01999d60-0001-7000-8000-000000000001 (v1alpha1+prediction)
+  is registered by 0014; producers will adopt it in SLICE_06.
