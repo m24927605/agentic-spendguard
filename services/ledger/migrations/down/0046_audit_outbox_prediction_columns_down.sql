@@ -1,5 +1,5 @@
 -- Down-migration: reverse 0046_audit_outbox_prediction_columns.sql
--- (round-2 fix m2).
+-- (round-2 fix m2; round-3 fixes M4 + M10).
 --
 -- Spec ref: docs/slices/SLICE_01_canonical_events_migration.md §11
 --   rollback plan.
@@ -9,7 +9,9 @@
 --   1. Stop all 4 producer services so no new tag-300+ writes happen.
 --   2. Apply this down-migration (drops 18 columns + restores the
 --      pre-SLICE_01 trigger function + removes the TRUNCATE guard +
---      drops the 2026-08 through 2026-10 partitions IF they are empty).
+--      drops the generic TRUNCATE-rejector function +
+--      drops the 2026-08 through 2026-10 partitions IF they are empty
+--      per the row-count guard at top of step 3).
 --   3. Apply 0048's down-migration to drop tokenizer_versions and the FK.
 --   4. Apply 0013's down-migration on the canonical DB.
 --   5. Roll back canonical_ingest pods to the pre-SLICE_01 image.
@@ -18,6 +20,27 @@
 --
 -- All ALTER TABLE ... DROP COLUMN are guarded with IF EXISTS so re-running
 -- after partial rollback is safe. DROP TRIGGER IF EXISTS likewise.
+--
+-- ## Round-3 fix M4: destructive-down guard
+--
+-- This file drops 18 columns + 3 partitions + 2 triggers + 1 function.
+-- To prevent accidental application against production we gate the entire
+-- file on a session-local GUC. Operator must explicitly opt in via:
+--     SET spendguard.allow_destructive_down = on;
+-- BEFORE running the file. Without the GUC the first statement raises an
+-- exception and the migration runner aborts.
+--
+-- ## Round-3 fix M4: partition row-count guards
+--
+-- DROP TABLE on a partition with rows is silently destructive. Before each
+-- partition drop we check row count and refuse if non-zero. Operator must
+-- manually migrate (or accept loss) before running again.
+--
+-- ## Round-3 fix M10: no BEGIN/COMMIT
+--
+-- Migration runner wraps each .sql in its own transaction; explicit
+-- BEGIN/COMMIT was a round-2 artifact that diverged from the up-migration
+-- convention. Removed.
 --
 -- ## Data loss warning
 --
@@ -31,7 +54,15 @@
 -- a producer bug), prefer reverting only the producer image without
 -- touching the schema — the columns sit unused but harmless.
 
-BEGIN;
+-- ============================================================================
+-- Destructive-down guard (round-3 fix M4).
+-- ============================================================================
+DO $$
+BEGIN
+    IF current_setting('spendguard.allow_destructive_down', true) IS DISTINCT FROM 'on' THEN
+        RAISE EXCEPTION 'destructive down-migration 0046 requires `SET spendguard.allow_destructive_down = on` first';
+    END IF;
+END $$;
 
 -- Restore the pre-SLICE_01 trigger function (from
 -- services/ledger/migrations/0011_immutability_triggers.sql).
@@ -58,8 +89,15 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Drop the TRUNCATE guard added in 0046 step 7.
+-- Drop the TRUNCATE guard added in 0046 step 6.
 DROP TRIGGER IF EXISTS audit_outbox_no_truncate ON audit_outbox;
+
+-- Drop the generic TRUNCATE-rejector function (round-3 M6). Note: 0048's
+-- tokenizer_versions_no_truncate trigger reuses this function. We drop
+-- the trigger here and let 0048's own down-migration handle its TRUNCATE
+-- trigger separately. The function itself is dropped here because no
+-- other table uses it after SLICE_01 rollback.
+DROP FUNCTION IF EXISTS reject_truncate_on_immutable_table();
 
 -- Drop CHECK constraints. Order doesn't matter; they are independent.
 ALTER TABLE audit_outbox
@@ -78,18 +116,56 @@ ALTER TABLE audit_outbox
     DROP CONSTRAINT IF EXISTS audit_outbox_delta_b_ratio_chk,
     DROP CONSTRAINT IF EXISTS audit_outbox_delta_c_ratio_chk,
     DROP CONSTRAINT IF EXISTS audit_outbox_decision_required_cols_chk,
-    DROP CONSTRAINT IF EXISTS audit_outbox_outcome_required_cols_chk;
+    DROP CONSTRAINT IF EXISTS audit_outbox_outcome_required_cols_chk,
+    -- Round-3 M13 sentinel-collision guards.
+    DROP CONSTRAINT IF EXISTS audit_outbox_predicted_a_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS audit_outbox_predicted_b_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS audit_outbox_predicted_c_tokens_nonzero_chk;
 
 -- Drop indexes (PG drops them transparently with the columns but
 -- being explicit makes the rollback intent obvious).
 DROP INDEX IF EXISTS audit_outbox_calibration_idx;
 DROP INDEX IF EXISTS audit_outbox_tier_idx;
 DROP INDEX IF EXISTS audit_outbox_outcome_calibration_idx;
+-- Round-3 M7: FK supporting index.
+DROP INDEX IF EXISTS audit_outbox_tokenizer_version_id_idx;
 
--- Drop pre-created partitions (only safe if they are empty; if rows
--- have landed in 2026-08+ the operator must manually move them first).
+-- ============================================================================
+-- Drop pre-created partitions. Round-3 fix M4: per-partition row-count
+-- guard — refuse to drop if any rows landed there. Manual data migration
+-- required first.
+-- ============================================================================
+DO $$
+DECLARE
+    rc BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO rc FROM audit_outbox_2026_10;
+    IF rc > 0 THEN
+        RAISE EXCEPTION 'audit_outbox_2026_10 has % rows; refusing to drop. Manual data migration required first.', rc;
+    END IF;
+END $$;
 DROP TABLE IF EXISTS audit_outbox_2026_10;
+
+DO $$
+DECLARE
+    rc BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO rc FROM audit_outbox_2026_09;
+    IF rc > 0 THEN
+        RAISE EXCEPTION 'audit_outbox_2026_09 has % rows; refusing to drop. Manual data migration required first.', rc;
+    END IF;
+END $$;
 DROP TABLE IF EXISTS audit_outbox_2026_09;
+
+DO $$
+DECLARE
+    rc BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO rc FROM audit_outbox_2026_08;
+    IF rc > 0 THEN
+        RAISE EXCEPTION 'audit_outbox_2026_08 has % rows; refusing to drop. Manual data migration required first.', rc;
+    END IF;
+END $$;
 DROP TABLE IF EXISTS audit_outbox_2026_08;
 
 -- Drop the 18 prediction columns.
@@ -112,5 +188,3 @@ ALTER TABLE audit_outbox
     DROP COLUMN IF EXISTS actual_output_tokens,
     DROP COLUMN IF EXISTS delta_b_ratio,
     DROP COLUMN IF EXISTS delta_c_ratio;
-
-COMMIT;

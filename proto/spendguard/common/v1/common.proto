@@ -358,7 +358,12 @@ message CloudEvent {
   string tokenizer_tier                 = 306;  // "T1" | "T2" | "T3"
   string tokenizer_version_id           = 307;  // UUID v7 text; "" on Tier 3
   float  prediction_confidence          = 308;  // 0.0-1.0; absent = column-NULL on Strategy A row (see audit-chain-prediction-extension-v1alpha1.md §6.3 + round-2 fix M11). Producers MUST NOT use 0.0 as a sentinel here — calibration-report filters `WHERE prediction_confidence IS NOT NULL`.
-  int32  prediction_sample_size         = 309;  // 0 = N/A
+  // Round-3 fix M3: int32 → int64 to match audit_outbox.prediction_sample_size
+  // (BIGINT) and audit_outbox.predicted_b_tokens (BIGINT). Eliminates the
+  // 2^31 overflow surface on multi-year aggregations without a CHECK
+  // constraint workaround. Per round-2 fix M4 the SQL side is already
+  // BIGINT — this aligns the wire to match.
+  int64  prediction_sample_size         = 309;  // 0 = N/A
   string cold_start_layer_used          = 310;  // "L1" | "L2" | "L3" | "L4"; "" = warm
 
   // Run-level projection columns (3 per spec §2.2).

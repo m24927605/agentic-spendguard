@@ -120,12 +120,16 @@ CREATE TRIGGER tokenizer_versions_no_update_delete
 
 -- ============================================================================
 -- Round-2 fix B1 + M13 mirror: TRUNCATE statement-level guard.
+-- Round-3 fix M6: reuse the generic reject_truncate_on_immutable_table()
+-- function defined in 0046 (replaces the ledger-entry-named helper
+-- whose error message lied about the table). TG_TABLE_NAME inside the
+-- function reports 'tokenizer_versions' correctly.
 -- ============================================================================
 
 CREATE TRIGGER tokenizer_versions_no_truncate
     BEFORE TRUNCATE ON tokenizer_versions
     FOR EACH STATEMENT
-    EXECUTE FUNCTION reject_immutable_ledger_entry_mutation();
+    EXECUTE FUNCTION reject_truncate_on_immutable_table();
 
 -- ============================================================================
 -- FK from audit_outbox.tokenizer_version_id -> tokenizer_versions.

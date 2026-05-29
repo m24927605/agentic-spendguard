@@ -1,11 +1,18 @@
 -- Down-migration: reverse 0013_canonical_events_prediction_columns.sql
--- (round-2 fix m2).
+-- (round-2 fix m2; round-3 fixes M4 + M10).
 --
 -- Apply AFTER ledger-side down migrations per SLICE_01 §11. canonical_events
--- has no FK from outside this DB so order between 0013 and 0014 down-migs
--- is independent.
+-- has no FK from outside this DB so down order is internal-only.
+--
+-- Round-3 fix M4: destructive-down guard.
+-- Round-3 fix M10: no explicit BEGIN/COMMIT (matches up-migration).
 
-BEGIN;
+DO $$
+BEGIN
+    IF current_setting('spendguard.allow_destructive_down', true) IS DISTINCT FROM 'on' THEN
+        RAISE EXCEPTION 'destructive down-migration 0013 requires `SET spendguard.allow_destructive_down = on` first';
+    END IF;
+END $$;
 
 ALTER TABLE canonical_events
     DROP CONSTRAINT IF EXISTS canonical_events_reserved_strategy_chk,
@@ -23,14 +30,48 @@ ALTER TABLE canonical_events
     DROP CONSTRAINT IF EXISTS canonical_events_delta_b_ratio_chk,
     DROP CONSTRAINT IF EXISTS canonical_events_delta_c_ratio_chk,
     DROP CONSTRAINT IF EXISTS canonical_events_decision_required_cols_chk,
-    DROP CONSTRAINT IF EXISTS canonical_events_outcome_required_cols_chk;
+    DROP CONSTRAINT IF EXISTS canonical_events_outcome_required_cols_chk,
+    -- Round-3 M13 mirror.
+    DROP CONSTRAINT IF EXISTS canonical_events_predicted_a_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS canonical_events_predicted_b_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS canonical_events_predicted_c_tokens_nonzero_chk;
 
 DROP INDEX IF EXISTS canonical_events_calibration_idx;
 DROP INDEX IF EXISTS canonical_events_tier_idx;
 DROP INDEX IF EXISTS canonical_events_outcome_calibration_idx;
 
+-- Round-3 fix M4: per-partition row-count guard.
+DO $$
+DECLARE
+    rc BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO rc FROM canonical_events_2026_10;
+    IF rc > 0 THEN
+        RAISE EXCEPTION 'canonical_events_2026_10 has % rows; refusing to drop. Manual data migration required first.', rc;
+    END IF;
+END $$;
 DROP TABLE IF EXISTS canonical_events_2026_10;
+
+DO $$
+DECLARE
+    rc BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO rc FROM canonical_events_2026_09;
+    IF rc > 0 THEN
+        RAISE EXCEPTION 'canonical_events_2026_09 has % rows; refusing to drop. Manual data migration required first.', rc;
+    END IF;
+END $$;
 DROP TABLE IF EXISTS canonical_events_2026_09;
+
+DO $$
+DECLARE
+    rc BIGINT;
+BEGIN
+    SELECT COUNT(*) INTO rc FROM canonical_events_2026_08;
+    IF rc > 0 THEN
+        RAISE EXCEPTION 'canonical_events_2026_08 has % rows; refusing to drop. Manual data migration required first.', rc;
+    END IF;
+END $$;
 DROP TABLE IF EXISTS canonical_events_2026_08;
 
 ALTER TABLE canonical_events
@@ -52,5 +93,3 @@ ALTER TABLE canonical_events
     DROP COLUMN IF EXISTS actual_output_tokens,
     DROP COLUMN IF EXISTS delta_b_ratio,
     DROP COLUMN IF EXISTS delta_c_ratio;
-
-COMMIT;

@@ -185,6 +185,39 @@ ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_decision_requi
 ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_outcome_required_cols_chk;
 
 -- ============================================================================
+-- Step 3b: Sentinel-collision guards (round-3 fix M13 mirror).
+--
+-- Mirror of 0046's Step 3b. Without these CHECKs a row with
+-- prediction_strategy_used = 'B' AND predicted_b_tokens = 0 would be
+-- indistinguishable from "Strategy B was null at decision time" once the
+-- proto3 sentinel mapping rewrites column NULL ↔ wire 0. See
+-- crates/spendguard-prediction-mirror/src/lib.rs preamble for the
+-- producer-side precondition.
+-- ============================================================================
+
+ALTER TABLE canonical_events
+    ADD CONSTRAINT canonical_events_predicted_a_tokens_nonzero_chk
+        CHECK (event_type <> 'spendguard.audit.decision'
+               OR event_time < '2026-07-01'::timestamptz
+               OR predicted_a_tokens IS NULL
+               OR predicted_a_tokens > 0)
+        NOT VALID,
+    ADD CONSTRAINT canonical_events_predicted_b_tokens_nonzero_chk
+        CHECK (prediction_strategy_used IS DISTINCT FROM 'B'
+               OR predicted_b_tokens IS NULL
+               OR predicted_b_tokens > 0)
+        NOT VALID,
+    ADD CONSTRAINT canonical_events_predicted_c_tokens_nonzero_chk
+        CHECK (prediction_strategy_used IS DISTINCT FROM 'C'
+               OR predicted_c_tokens IS NULL
+               OR predicted_c_tokens > 0)
+        NOT VALID;
+
+ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_predicted_a_tokens_nonzero_chk;
+ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_predicted_b_tokens_nonzero_chk;
+ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_predicted_c_tokens_nonzero_chk;
+
+-- ============================================================================
 -- Step 4: Calibration-report indexes (round-2 fix M9 — tenant_id-first
 -- composite key + outcome-side covering index).
 --

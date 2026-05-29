@@ -41,6 +41,34 @@
 -- Operators using charts/spendguard/templates/migrations.yaml see this
 -- ordering enforced by the script (ledger glob processed before
 -- canonical glob in the apply loop).
+--
+-- ============================================================================
+-- DESIGN RATIONALE — audit_outbox_global_keys deliberately NOT extended
+-- (round-3 fix M15: moved here from step 8 inline block so the rationale
+-- documents the file as a whole rather than appearing as a step with no
+-- SQL).
+--
+-- The 18 new columns are calibration-aggregation evidence (token counts,
+-- prediction confidence, run-level projections), not dedup keys. The
+-- audit_outbox_global_keys mirror table exists to enforce cross-
+-- partition uniqueness on dedup-relevant fields (decision_id,
+-- producer_sequence, idempotency_key); extending it with prediction
+-- columns would not add any uniqueness invariant and would force every
+-- INSERT to write the same 18 columns twice with no functional benefit.
+--
+-- Cross-storage consistency between audit_outbox and audit_outbox_global_keys
+-- on the dedup keys remains enforced by the post_ledger_transaction
+-- stored proc (services/ledger/migrations/0012_post_ledger_transaction.sql).
+--
+-- ============================================================================
+-- VALIDATE batching note (round-3 m3): the 14 sequential VALIDATE CONSTRAINT
+-- statements in step 2 each take a SHARE UPDATE EXCLUSIVE lock on the table
+-- and scan all rows. On an empty audit_outbox (fresh install) this is
+-- instantaneous. On a production re-run against a populated audit_outbox
+-- with N months of partitions, each VALIDATE scans every partition
+-- sequentially. Operators should run this migration during a low-traffic
+-- window — total elapsed scales linearly with row count × constraint count.
+-- See the M6 deployment-safe NOT VALID + VALIDATE pattern.
 
 -- ============================================================================
 -- Step 1: Add the 18 new columns. INT → BIGINT for token-count columns
@@ -233,6 +261,51 @@ ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_decision_required_cols
 ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_outcome_required_cols_chk;
 
 -- ============================================================================
+-- Step 3b: Sentinel-collision guards (round-3 fix M13).
+--
+-- The proto3 sentinel mapping (`spendguard-prediction-mirror` crate, spec
+-- §6.3) maps SQL NULL ↔ proto-default 0 for token-count fields. This
+-- creates a collision: a populated row with `predicted_b_tokens = 0`
+-- (e.g., misconfigured Strategy B emitted 0 tokens predicted) would be
+-- indistinguishable from "Strategy B was null at decision time" once
+-- re-encoded.
+--
+-- Closing the collision at the SQL boundary: ban 0 token-count values on
+-- rows that explicitly populate the strategy column. The producer-side
+-- precondition is documented in
+-- crates/spendguard-prediction-mirror/src/lib.rs preamble.
+--
+-- predicted_a_tokens is constrained globally on .decision rows because
+-- the Strategy A reservation has no semantic interpretation for 0
+-- (the ceiling is always > 0).
+-- predicted_b_tokens and predicted_c_tokens are constrained only on
+-- rows where prediction_strategy_used is B or C respectively — the
+-- value semantics are strategy-conditional.
+-- ============================================================================
+
+ALTER TABLE audit_outbox
+    ADD CONSTRAINT audit_outbox_predicted_a_tokens_nonzero_chk
+        CHECK (event_type <> 'spendguard.audit.decision'
+               OR recorded_at < '2026-07-01'::timestamptz
+               OR predicted_a_tokens IS NULL
+               OR predicted_a_tokens > 0)
+        NOT VALID,
+    ADD CONSTRAINT audit_outbox_predicted_b_tokens_nonzero_chk
+        CHECK (prediction_strategy_used IS DISTINCT FROM 'B'
+               OR predicted_b_tokens IS NULL
+               OR predicted_b_tokens > 0)
+        NOT VALID,
+    ADD CONSTRAINT audit_outbox_predicted_c_tokens_nonzero_chk
+        CHECK (prediction_strategy_used IS DISTINCT FROM 'C'
+               OR predicted_c_tokens IS NULL
+               OR predicted_c_tokens > 0)
+        NOT VALID;
+
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_predicted_a_tokens_nonzero_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_predicted_b_tokens_nonzero_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_predicted_c_tokens_nonzero_chk;
+
+-- ============================================================================
 -- Step 4: Calibration-report indexes (per spec §4.1, round-2 fix M9
 -- column order + outcome-side covering index).
 --
@@ -270,25 +343,27 @@ CREATE INDEX audit_outbox_outcome_calibration_idx
     WHERE event_type = 'spendguard.audit.outcome'
       AND (delta_b_ratio IS NOT NULL OR delta_c_ratio IS NOT NULL);
 
--- ============================================================================
--- Step 5: Pre-create future partitions through 2026-10 (round-2 fix
--- M14). Baseline 0009 only pre-created up to 2026-07; without these
--- partitions the table would fall through to audit_outbox_default and
--- raise an ops alert as SLICE_06 producers begin writing in 2026-08+.
--- Postgres ranges are half-open; '2026-08-01' to '2026-09-01' captures
--- August 2026 inclusive.
--- ============================================================================
-
-CREATE TABLE audit_outbox_2026_08 PARTITION OF audit_outbox
-    FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
-CREATE TABLE audit_outbox_2026_09 PARTITION OF audit_outbox
-    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
-CREATE TABLE audit_outbox_2026_10 PARTITION OF audit_outbox
-    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+-- Round-3 fix M7: partial index supporting the
+-- audit_outbox_tokenizer_version_id_fk constraint declared in 0048.
+-- Without this index, the FK's RESTRICT semantics would force a
+-- sequential scan of audit_outbox on every DELETE from tokenizer_versions
+-- (even though the delete is blocked by the immutability trigger, the
+-- planner still checks). Partial-WHERE strips the all-NULL legacy rows.
+CREATE INDEX audit_outbox_tokenizer_version_id_idx
+    ON audit_outbox (tokenizer_version_id)
+    WHERE tokenizer_version_id IS NOT NULL;
 
 -- ============================================================================
--- Step 6: Immutability trigger update (round-2 fix M7 — merged from
+-- Step 5: Immutability trigger update (round-2 fix M7 — merged from
 -- the old 0047 to close the trigger-gap window).
+--
+-- Round-3 fix M14: this step now precedes partition pre-creation
+-- (formerly step 5, now step 7). Reason: under partial-apply where
+-- migration runner crashes between steps 5 and 6, the pre-created
+-- partitions would inherit the OLD trigger function. Sequencing the
+-- function update before the partition create ensures any partition —
+-- pre-created here or auto-generated later by a partition-manager
+-- service — sees the new 18-column tuple compare from creation time.
 --
 -- Spec: docs/audit-chain-prediction-extension-v1alpha1.md §5 (critical
 -- surface) and §5.2 verbatim trigger body.
@@ -359,41 +434,57 @@ END;
 $$ LANGUAGE plpgsql;
 
 -- ============================================================================
--- Step 7: TRUNCATE guard (round-2 fix M13).
---
--- The base 0011 BEFORE UPDATE / BEFORE DELETE triggers do not fire on
--- TRUNCATE — Postgres routes TRUNCATE through its own statement-level
--- trigger event. Without an explicit BEFORE TRUNCATE trigger an attacker
--- (or a careless operator) could TRUNCATE audit_outbox and bypass the
--- immutability invariant entirely. This trigger closes that gap by
--- reusing the existing reject_immutable_ledger_entry_mutation function
--- (which RAISEs 42P10) at statement level.
+-- Step 6: TRUNCATE guard (round-2 fix M13). Uses the new generic
+-- reject_truncate_on_immutable_table() function (round-3 fix M6) instead
+-- of the misleading reject_immutable_ledger_entry_mutation(). The new
+-- function reads TG_TABLE_NAME so the error message correctly names
+-- audit_outbox (not ledger_entries).
 -- ============================================================================
+
+-- Round-3 fix M6: generic TRUNCATE-rejector function. Reads TG_TABLE_NAME
+-- so it can be reused for tokenizer_versions and any future immutable
+-- table without duplicating "TRUNCATE on ledger_entries forbidden"
+-- error messages on tables that are not ledger_entries.
+CREATE OR REPLACE FUNCTION reject_truncate_on_immutable_table()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'TRUNCATE forbidden on immutable table %', TG_TABLE_NAME
+        USING ERRCODE = '42501';
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
 
 CREATE TRIGGER audit_outbox_no_truncate
     BEFORE TRUNCATE ON audit_outbox
     FOR EACH STATEMENT
-    EXECUTE FUNCTION reject_immutable_ledger_entry_mutation();
+    EXECUTE FUNCTION reject_truncate_on_immutable_table();
 
 -- ============================================================================
--- Step 8: Design rationale — audit_outbox_global_keys deliberately
--- NOT extended (round-2 fix M17).
+-- Step 7: Pre-create future partitions through 2026-10 (round-2 fix M14,
+-- moved here in round-3 fix M14 — see header rationale). Baseline 0009
+-- only pre-created up to 2026-07; without these partitions the table
+-- would fall through to audit_outbox_default and raise an ops alert as
+-- SLICE_06 producers begin writing in 2026-08+. Postgres ranges are
+-- half-open; '2026-08-01' to '2026-09-01' captures August 2026 inclusive.
 --
--- The 18 new columns are calibration-aggregation evidence (token counts,
--- prediction confidence, run-level projections), not dedup keys. The
--- audit_outbox_global_keys mirror table exists to enforce cross-
--- partition uniqueness on dedup-relevant fields (decision_id,
--- producer_sequence, idempotency_key); extending it with prediction
--- columns would not add any uniqueness invariant and would force every
--- INSERT to write the same 18 columns twice with no functional benefit.
---
--- Cross-storage consistency between audit_outbox and audit_outbox_global_keys
--- on the dedup keys remains enforced by the post_ledger_transaction
--- stored proc (services/ledger/migrations/0012_post_ledger_transaction.sql).
+-- Sequencing: this step runs AFTER step 5 (function update) and step 6
+-- (TRUNCATE guard) so that any partition created here inherits the new
+-- 18-column trigger semantics and the TRUNCATE guard. The parent table's
+-- trigger applies to all child partitions automatically — Postgres
+-- propagates BEFORE-row triggers on the parent to children, so partition
+-- order is not load-bearing for correctness, only for ops safety under
+-- partial-apply.
 -- ============================================================================
 
+CREATE TABLE audit_outbox_2026_08 PARTITION OF audit_outbox
+    FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
+CREATE TABLE audit_outbox_2026_09 PARTITION OF audit_outbox
+    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+CREATE TABLE audit_outbox_2026_10 PARTITION OF audit_outbox
+    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+
 -- ============================================================================
--- Step 9: Column comments. Kept verbose because SLICE_06+ producers will
+-- Step 8: Column comments. Kept verbose because SLICE_06+ producers will
 -- consult these via `\d+ audit_outbox` when wiring up the mirror logic
 -- and the sentinel discipline is non-obvious from column names alone.
 -- ============================================================================
