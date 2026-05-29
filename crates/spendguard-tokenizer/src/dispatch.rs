@@ -124,6 +124,16 @@ const RAW_ENTRIES: &[(&str, EncoderKind, TiktokenEncoder)] = &[
         TiktokenEncoder::O200kBase,
     ),
     // ── cl100k_base ───────────────────────────────────────────
+    // Round-2 fix M1 (panel finding): explicit `gpt-4(-NNNN)-preview`
+    // entry before the broader gpt-4 / gpt-4-turbo patterns so
+    // `gpt-4-1106-preview` and `gpt-4-0125-preview` correctly land on
+    // cl100k_base. Previously they fell through to Tier 3 (5% margin
+    // → ~2x under-count vs legacy heuristic).
+    (
+        r"^gpt-4(-\d{4})?-preview$",
+        EncoderKind::OpenAiTiktoken,
+        TiktokenEncoder::Cl100kBase,
+    ),
     (
         r"^gpt-4-turbo(-preview)?(-\d{4}-\d{2}-\d{2})?$",
         EncoderKind::OpenAiTiktoken,
@@ -140,6 +150,16 @@ const RAW_ENTRIES: &[(&str, EncoderKind, TiktokenEncoder)] = &[
         TiktokenEncoder::Cl100kBase,
     ),
     // ── p50k_base (legacy completion models) ──────────────────
+    // Round-2 fix M1: `gpt-3.5-turbo-instruct` (and dated variants)
+    // uses p50k_base per OpenAI tiktoken cookbook. Was missing →
+    // Tier 3 fallback. The pattern is placed BEFORE the generic
+    // `text-davinci-...` cluster so a future contributor adding
+    // chat-instruct-style suffixes follows the same module order.
+    (
+        r"^gpt-3\.5-turbo-instruct(-\d{4})?$",
+        EncoderKind::OpenAiTiktoken,
+        TiktokenEncoder::P50kBase,
+    ),
     (
         r"^text-davinci-(002|003)$",
         EncoderKind::OpenAiTiktoken,
@@ -320,12 +340,84 @@ mod tests {
 
     #[test]
     fn dispatch_table_has_expected_minimum_entries() {
-        // SLICE_03 ships 7 OpenAI entries. SLICE_04 will add more.
+        // SLICE_03 ships 9 OpenAI entries after R2 M1 added two more
+        // (gpt-4-N-preview, gpt-3.5-turbo-instruct). SLICE_04 will add
+        // more.
         let t = table();
         assert!(
-            t.len() >= 7,
-            "expected >=7 SLICE_03 OpenAI entries, got {}",
+            t.len() >= 9,
+            "expected >=9 SLICE_03 OpenAI entries after R2 M1, got {}",
             t.len()
+        );
+    }
+
+    // ── Round-2 fix M1 — dispatch coverage tests ──────────────────
+
+    #[test]
+    fn gpt_4_1106_preview_routes_to_cl100k() {
+        // R2 M1: previously fell through to Tier 3 (5% margin) →
+        // confirmed coverage now.
+        let t = table();
+        let e = t.lookup("gpt-4-1106-preview").expect("hit");
+        assert_eq!(e.tiktoken, TiktokenEncoder::Cl100kBase);
+        assert_eq!(e.kind, EncoderKind::OpenAiTiktoken);
+    }
+
+    #[test]
+    fn gpt_4_0125_preview_routes_to_cl100k() {
+        // R2 M1: dated preview variant.
+        let t = table();
+        let e = t.lookup("gpt-4-0125-preview").expect("hit");
+        assert_eq!(e.tiktoken, TiktokenEncoder::Cl100kBase);
+    }
+
+    #[test]
+    fn gpt_4_preview_no_date_routes_to_cl100k() {
+        // R2 M1: bare "gpt-4-preview" without dated suffix must also
+        // route via the new pattern (the (-\d{4})? group is optional).
+        let t = table();
+        let e = t.lookup("gpt-4-preview").expect("hit");
+        assert_eq!(e.tiktoken, TiktokenEncoder::Cl100kBase);
+    }
+
+    #[test]
+    fn gpt_3_5_turbo_instruct_routes_to_p50k() {
+        // R2 M1: alphabetic suffix variant (not date). Was T3 fallback.
+        let t = table();
+        let e = t.lookup("gpt-3.5-turbo-instruct").expect("hit");
+        assert_eq!(e.tiktoken, TiktokenEncoder::P50kBase);
+        assert_eq!(e.kind, EncoderKind::OpenAiTiktoken);
+    }
+
+    #[test]
+    fn gpt_3_5_turbo_instruct_0914_routes_to_p50k() {
+        // R2 M1: dated instruct variant (per OpenAI deprecation notes).
+        let t = table();
+        let e = t.lookup("gpt-3.5-turbo-instruct-0914").expect("hit");
+        assert_eq!(e.tiktoken, TiktokenEncoder::P50kBase);
+    }
+
+    #[test]
+    fn new_m1_patterns_dont_collide_with_existing() {
+        // Defense: the new gpt-4-N-preview pattern is more specific
+        // than gpt-4-N — they shouldn't both match the same input.
+        // Tested by confirming the new patterns route as expected
+        // AND that the bare gpt-4 / gpt-3.5-turbo dispatch unchanged.
+        let t = table();
+        assert_eq!(
+            t.lookup("gpt-4").expect("hit").tiktoken,
+            TiktokenEncoder::Cl100kBase
+        );
+        assert_eq!(
+            t.lookup("gpt-3.5-turbo").expect("hit").tiktoken,
+            TiktokenEncoder::Cl100kBase
+        );
+        // Ensure gpt-3.5-turbo-instruct doesn't get caught by the
+        // gpt-3.5-turbo(-N)? pattern (alphabetic suffix wouldn't
+        // satisfy \d{4} anyway, but pin the assertion).
+        assert_eq!(
+            t.lookup("gpt-3.5-turbo-instruct").expect("hit").tiktoken,
+            TiktokenEncoder::P50kBase,
         );
     }
 
