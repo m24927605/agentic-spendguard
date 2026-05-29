@@ -162,6 +162,33 @@ spec:
           secret:
             secretName: {{ .Values.tokenizer.mtlsSecretName | quote }}
         {{- end }}
+{{- /* Round-3 Backend Architect Finding N2 (Major): Service gating.
+
+       Spec §2.1(a) — the tokenizer ships in two transport modes:
+         * UDS hostPath (on-node sidecar callers; kernel-enforced trust)
+         * TCP with mTLS (cross-node callers: Tier 1 shadow worker,
+           output_predictor, calibration_report, SDK fallback)
+
+       In UDS-only mode the pod binds the UDS socket and does NOT
+       listen on TCP 50053 (main.rs:101-105 dispatches one or the
+       other). Exposing a Service with `port: grpc → targetPort: grpc`
+       under UDS-only mode would advertise a TCP endpoint that the
+       pod immediately RSTs. Cross-node callers would see connection
+       resets instead of a clean "TCP transport not configured" signal.
+
+       Gate the entire Service block behind `not udsHostPath`:
+         * UDS-only deploys     → no Service rendered. Operators
+                                  mount the hostPath directly.
+         * mTLS / plaintext     → Service rendered with grpc + metrics.
+
+       Note: the /metrics endpoint runs on a separate hyper server
+       inside the same pod and only binds TCP — Prometheus scrape via
+       a separate Pod-targeted ServiceMonitor or annotations on the
+       Deployment, NOT through this Service. This is consistent with
+       services/canonical_ingest and services/ledger which do not
+       expose /metrics via Service either.
+    */ -}}
+{{- if not .Values.tokenizer.udsHostPath }}
 ---
 apiVersion: v1
 kind: Service
@@ -176,4 +203,19 @@ spec:
     - { name: metrics, port: 9099,  targetPort: metrics }
   selector:
     {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+{{- else }}
+# UDS-only deployment (udsHostPath is set): no TCP Service exposed.
+# main.rs dispatches UDS xor TCP — when SPENDGUARD_TOKENIZER_UDS_PATH
+# is set, the pod does NOT listen on TCP 50053, so rendering a
+# Service would advertise an endpoint that the pod immediately RSTs.
+#
+# Per round-3 Backend Architect Finding N2 — cross-node callers
+# (Tier 1 shadow worker, output_predictor) cannot reach a UDS-only
+# tokenizer. Operators running multi-tier topologies must:
+#   * deploy a SECOND tokenizer release with mtlsSecretName set
+#     (different release name, no udsHostPath), OR
+#   * leave udsHostPath empty and use mtlsSecretName for all callers.
+# Setting both values on the same release results in UDS taking
+# precedence (the pod binds UDS, ignores TCP) and is rejected here.
+{{- end }}
 {{- end }}

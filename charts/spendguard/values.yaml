@@ -202,18 +202,27 @@ tokenizer:
   # Round-2 fix M4: production profile bounds-checks this to
   # (0.00001, 0.05] and tolerates string-from-helm-set.
   tier3AlertThreshold: 0.001
-  # Round-2 fix B3.3: secure-transport gates for production profile.
-  # Set ONE of these under chart.profile=production. Demo profile
-  # leaves both empty and falls back to plaintext TCP (with a loud
-  # warn from main.rs).
+  # Round-2 fix B3.3 + Round-3 Backend N2: secure-transport gates for
+  # production profile. Set EXACTLY ONE of these under
+  # chart.profile=production. Demo profile leaves both empty and falls
+  # back to plaintext TCP (with a loud warn from main.rs).
   #
   # udsHostPath: hostPath on the node for the gRPC UDS socket dir.
   #              Sidecar pods on the same node mount the same hostPath
   #              and talk to the tokenizer without an L4 hop (spec
   #              §10.1 hot-path budget).
+  #              UDS-ONLY DEPLOYMENT NOTE (round-3 Backend N2): when set
+  #              the chart does NOT render the ClusterIP Service —
+  #              main.rs binds the UDS xor TCP, so a Service entry
+  #              would advertise a TCP endpoint that the pod RSTs.
+  #              Cross-node callers (Tier 1 shadow, output_predictor)
+  #              cannot reach a UDS-only tokenizer; deploy a separate
+  #              release with mtlsSecretName for those topologies.
   # mtlsSecretName: name of a pre-created Secret holding ca.crt /
   #                 tls.crt / tls.key for cross-node mTLS callers
-  #                 (Tier 1 shadow worker, output_predictor).
+  #                 (Tier 1 shadow worker, output_predictor). When
+  #                 set, the chart renders the ClusterIP Service so
+  #                 callers can resolve `<release>-spendguard-tokenizer:50053`.
   udsHostPath: ""
   mtlsSecretName: ""
   resources:
