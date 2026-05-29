@@ -1085,6 +1085,154 @@ mod approval_resume_payload {
         Ok(Parsed { decision, effect })
     }
 
+    /// Resolve the `prediction_policy_used` wire value
+    /// (CloudEvent tag 305) for a resume-after-approval
+    /// `spendguard.audit.decision` event.
+    ///
+    /// SLICE_02 round-1 B3 invariant
+    /// ----------------------------
+    ///
+    /// Per `docs/audit-chain-prediction-extension-v1alpha1.md` §2.1 line 122,
+    /// `prediction_policy_used` is NOT NULL on every `.decision` event past
+    /// the 2027-01-01 cutoff and is CHECKed to be in
+    /// (`STRICT_CEILING` | `EMPIRICAL_RUN_CEILING` | `ADAPTIVE_CEILING` |
+    /// `SHADOW_ONLY`). The resume-after-approval path mints a fresh
+    /// `spendguard.audit.decision` event (same type as CONTINUE / DENY) so
+    /// the same column constraint applies; leaving the field at proto3
+    /// default would silently violate the CHECK at the mirror persistence
+    /// boundary.
+    ///
+    /// Source of truth: the live bundle's parsed contract. The caller
+    /// (`Parsed::into_reserve_set_request`) MUST run the bundle-hash
+    /// hot-reload guard BEFORE invoking this helper so the policy value
+    /// reflects the operator's approved bundle.
+    pub(super) fn resume_audit_decision_policy_field(
+        live_bundle: &crate::domain::state::CachedContractBundle,
+    ) -> String {
+        // v1alpha1 contracts default-fill to STRICT_CEILING at parse time
+        // (parse.rs §6.4 default-fill block); v1alpha2 contracts carry
+        // the operator-declared value. Either way the enum's `as_str()`
+        // yields the exact wire token the CHECK constraint accepts.
+        live_bundle.parsed.prediction_policy.as_str().to_string()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::contract::types::{Contract, PredictionPolicy};
+        use crate::domain::state::CachedContractBundle;
+        use std::sync::Arc;
+        use uuid::Uuid;
+
+        fn _fixture_bundle(policy: PredictionPolicy, api_version: &str) -> CachedContractBundle {
+            let parsed = Contract {
+                id: Uuid::nil(),
+                name: "fixture".into(),
+                budgets: vec![],
+                rules: vec![],
+                prediction_policy: policy,
+                api_version: api_version.into(),
+            };
+            CachedContractBundle {
+                bundle_id: Uuid::nil(),
+                bundle_hash: vec![0u8; 32],
+                signing_key_id: "test-key".into(),
+                raw: vec![],
+                pricing_version: "v1".into(),
+                price_snapshot_hash: vec![0u8; 32],
+                fx_rate_version: "v1".into(),
+                unit_conversion_version: "v1".into(),
+                parsed: Arc::new(parsed),
+            }
+        }
+
+        #[test]
+        fn resume_policy_field_strict_ceiling() {
+            // The v1alpha1 default-fill path (parse.rs §6.4) yields
+            // STRICT_CEILING for every v1alpha1 contract; resume CloudEvent
+            // must emit the literal token the CHECK constraint accepts.
+            let b = _fixture_bundle(
+                PredictionPolicy::StrictCeiling,
+                "spendguard.ai/v1alpha1",
+            );
+            assert_eq!(
+                resume_audit_decision_policy_field(&b),
+                "STRICT_CEILING"
+            );
+        }
+
+        #[test]
+        fn resume_policy_field_empirical_run_ceiling() {
+            // v1alpha2 contract with operator-declared
+            // EMPIRICAL_RUN_CEILING — the resume CloudEvent must
+            // carry the value the operator approved under.
+            let b = _fixture_bundle(
+                PredictionPolicy::EmpiricalRunCeiling,
+                "spendguard.ai/v1alpha2",
+            );
+            assert_eq!(
+                resume_audit_decision_policy_field(&b),
+                "EMPIRICAL_RUN_CEILING"
+            );
+        }
+
+        #[test]
+        fn resume_policy_field_adaptive_ceiling() {
+            let b = _fixture_bundle(
+                PredictionPolicy::AdaptiveCeiling,
+                "spendguard.ai/v1alpha2",
+            );
+            assert_eq!(
+                resume_audit_decision_policy_field(&b),
+                "ADAPTIVE_CEILING"
+            );
+        }
+
+        #[test]
+        fn resume_policy_field_shadow_only() {
+            let b = _fixture_bundle(
+                PredictionPolicy::ShadowOnly,
+                "spendguard.ai/v1alpha2",
+            );
+            assert_eq!(resume_audit_decision_policy_field(&b), "SHADOW_ONLY");
+        }
+
+        #[test]
+        fn resume_policy_field_never_empty_string() {
+            // Regression guard for the pre-round-1 behavior where the
+            // CloudEvent was built with `..Default::default()` and the
+            // `prediction_policy_used` field stayed at proto3-default
+            // empty string. The CHECK constraint per
+            // audit-chain-prediction-extension-v1alpha1.md §2.1 forbids
+            // empty string on `.decision` events past 2027-01-01, so
+            // every PredictionPolicy variant must produce a non-empty
+            // CHECK-accepted token.
+            for policy in [
+                PredictionPolicy::StrictCeiling,
+                PredictionPolicy::EmpiricalRunCeiling,
+                PredictionPolicy::AdaptiveCeiling,
+                PredictionPolicy::ShadowOnly,
+            ] {
+                let b = _fixture_bundle(policy, "spendguard.ai/v1alpha2");
+                let s = resume_audit_decision_policy_field(&b);
+                assert!(!s.is_empty(), "policy {:?} produced empty string", policy);
+                // Cross-check that the result is one of the four CHECK-accepted
+                // tokens. Pre-round-1 this would have been "" (proto3 default).
+                assert!(
+                    matches!(
+                        s.as_str(),
+                        "STRICT_CEILING"
+                            | "EMPIRICAL_RUN_CEILING"
+                            | "ADAPTIVE_CEILING"
+                            | "SHADOW_ONLY"
+                    ),
+                    "unexpected policy wire token: {}",
+                    s
+                );
+            }
+        }
+    }
+
     impl Parsed {
         /// Build a fresh ReserveSetRequest from the parsed payloads.
         /// Mints a new decision_id + audit_decision_event_id (the
@@ -1147,6 +1295,52 @@ mod approval_resume_payload {
                 window_instance_id: self.decision.window_instance_id.clone(),
             };
 
+            // Issue #59 — frozen-at-PRE pricing + bundle-hash hot-reload check.
+            //
+            // Spec: docs/specs/issue-59-approval-resume-frozen-pricing.md §3.2.
+            //
+            // 1. Verify the sidecar's currently-installed bundle matches the
+            //    bundle the operator approved against. If a hot-reload fired
+            //    between approval and resume, the semantic basis for the
+            //    operator's approval is stale. Return a typed error so the
+            //    SDK can surface ApprovalBundleHotReloadedError and the
+            //    caller can re-issue the original DecisionRequest.
+            //
+            // 2. Reconstruct PricingFreeze from decision_context_json (frozen
+            //    at REQUIRE_APPROVAL emit time), NOT from the live bundle.
+            //    Preserves the audit-chain invariant that pricing visible to
+            //    the approver is the pricing used for the bundled
+            //    reservation.
+            //
+            // SLICE_02 round-1 B3: read the live bundle BEFORE building the
+            // resume CloudEvent so we can populate the new
+            // `prediction_policy_used` audit column (CloudEvent tag 305).
+            // Spec: docs/audit-chain-prediction-extension-v1alpha1.md §2.1
+            // line 122 — `prediction_policy_used` is NOT NULL on
+            // `.decision` events past the 2027-01-01 cutoff with a
+            // CHECK IN ('STRICT_CEILING', 'EMPIRICAL_RUN_CEILING',
+            // 'ADAPTIVE_CEILING', 'SHADOW_ONLY') constraint. The
+            // resume-after-approval event is a `spendguard.audit.decision`
+            // type (same as CONTINUE / DENY lanes) so the same column
+            // invariant applies. Leaving the field at proto3 default
+            // (empty string) would silently violate the CHECK at the
+            // mirror persistence boundary.
+            let live_bundle = state
+                .inner
+                .contract_bundle
+                .read()
+                .clone()
+                .ok_or_else(|| "no contract bundle installed".to_string())?;
+            let live_hash_hex = hex::encode(&live_bundle.bundle_hash);
+            if !self.decision.contract_bundle_hash_hex.is_empty()
+                && self.decision.contract_bundle_hash_hex != live_hash_hex
+            {
+                return Err(format!(
+                    "[BUNDLE_HOT_RELOADED] approval was issued under bundle hash {} but the sidecar's currently-installed bundle is {}; the operator's approval is no longer semantically tied to this bundle. Reissue the original DecisionRequest to get a fresh approval row tied to the new bundle.",
+                    self.decision.contract_bundle_hash_hex, live_hash_hex
+                ));
+            }
+
             // Mint new audit identifiers for the resume tx; the
             // resume is a logically new write to the ledger.
             let decision_id = Uuid::now_v7();
@@ -1197,51 +1391,20 @@ mod approval_resume_payload {
                 producer_sequence,
                 producer_signature: vec![].into(),
                 signing_key_id: String::new(),
-                // SLICE_02: resume-decision CloudEvent inherits the
-                // contract's prediction_policy. POC: this struct
-                // doesn't yet thread the contract bundle in scope, so
-                // we leave the prediction columns at proto3 default
-                // and SLICE_02 surfaces the value only on the
-                // primary CONTINUE / DENY paths. Follow-up issue:
-                // populate prediction_policy_used here once the resume
-                // payload carries it forward from decision_context.
                 ..Default::default()
             };
+            // SLICE_02 round-1 B3: populate prediction_policy_used (tag 305)
+            // from the live bundle's parsed contract — same source-of-truth
+            // as the CONTINUE / DENY paths in
+            // services/sidecar/src/decision/transaction.rs. The
+            // bundle-hash hot-reload guard above ensures the live bundle
+            // matches the operator's approved bundle, so the policy value
+            // we emit here is the policy the operator approved under.
+            cloudevent.prediction_policy_used =
+                resume_audit_decision_policy_field(&live_bundle);
             crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent)
                 .await
                 .map_err(|e| format!("sign resume cloudevent: {e}"))?;
-
-            // Issue #59 — frozen-at-PRE pricing + bundle-hash hot-reload check.
-            //
-            // Spec: docs/specs/issue-59-approval-resume-frozen-pricing.md §3.2.
-            //
-            // 1. Verify the sidecar's currently-installed bundle matches the
-            //    bundle the operator approved against. If a hot-reload fired
-            //    between approval and resume, the semantic basis for the
-            //    operator's approval is stale. Return a typed error so the
-            //    SDK can surface ApprovalBundleHotReloadedError and the
-            //    caller can re-issue the original DecisionRequest.
-            //
-            // 2. Reconstruct PricingFreeze from decision_context_json (frozen
-            //    at REQUIRE_APPROVAL emit time), NOT from the live bundle.
-            //    Preserves the audit-chain invariant that pricing visible to
-            //    the approver is the pricing used for the bundled
-            //    reservation.
-            let live_bundle = state
-                .inner
-                .contract_bundle
-                .read()
-                .clone()
-                .ok_or_else(|| "no contract bundle installed".to_string())?;
-            let live_hash_hex = hex::encode(&live_bundle.bundle_hash);
-            if !self.decision.contract_bundle_hash_hex.is_empty()
-                && self.decision.contract_bundle_hash_hex != live_hash_hex
-            {
-                return Err(format!(
-                    "[BUNDLE_HOT_RELOADED] approval was issued under bundle hash {} but the sidecar's currently-installed bundle is {}; the operator's approval is no longer semantically tied to this bundle. Reissue the original DecisionRequest to get a fresh approval row tied to the new bundle.",
-                    self.decision.contract_bundle_hash_hex, live_hash_hex
-                ));
-            }
 
             let price_snapshot_hash =
                 hex::decode(&self.decision.price_snapshot_hash_hex).map_err(|e| {
