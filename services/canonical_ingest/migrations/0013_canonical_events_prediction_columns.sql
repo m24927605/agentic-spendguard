@@ -177,7 +177,7 @@ ALTER TABLE canonical_events
 ALTER TABLE canonical_events
     ADD CONSTRAINT canonical_events_decision_required_cols_chk
         CHECK (event_type <> 'spendguard.audit.decision'
-               OR event_time < '2027-01-01'::timestamptz
+               OR event_time < '2027-01-01 00:00:00+00'::timestamptz
                OR (predicted_a_tokens IS NOT NULL
                    AND reserved_strategy IS NOT NULL
                    AND prediction_strategy_used IS NOT NULL
@@ -188,7 +188,7 @@ ALTER TABLE canonical_events
         NOT VALID,
     ADD CONSTRAINT canonical_events_outcome_required_cols_chk
         CHECK (event_type <> 'spendguard.audit.outcome'
-               OR event_time < '2027-01-01'::timestamptz
+               OR event_time < '2027-01-01 00:00:00+00'::timestamptz
                OR (actual_input_tokens IS NOT NULL
                    AND actual_output_tokens IS NOT NULL))
         NOT VALID;
@@ -233,7 +233,7 @@ ALTER TABLE canonical_events
 ALTER TABLE canonical_events
     ADD CONSTRAINT canonical_events_predicted_a_tokens_nonzero_chk
         CHECK (event_type <> 'spendguard.audit.decision'
-               OR event_time < '2027-01-01'::timestamptz
+               OR event_time < '2027-01-01 00:00:00+00'::timestamptz
                OR predicted_a_tokens IS NULL
                OR predicted_a_tokens > 0)
         NOT VALID,

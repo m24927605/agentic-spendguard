@@ -258,7 +258,7 @@ ALTER TABLE audit_outbox
 ALTER TABLE audit_outbox
     ADD CONSTRAINT audit_outbox_decision_required_cols_chk
         CHECK (event_type <> 'spendguard.audit.decision'
-               OR recorded_at < '2027-01-01'::timestamptz
+               OR recorded_at < '2027-01-01 00:00:00+00'::timestamptz
                OR (predicted_a_tokens IS NOT NULL
                    AND reserved_strategy IS NOT NULL
                    AND prediction_strategy_used IS NOT NULL
@@ -269,7 +269,7 @@ ALTER TABLE audit_outbox
         NOT VALID,
     ADD CONSTRAINT audit_outbox_outcome_required_cols_chk
         CHECK (event_type <> 'spendguard.audit.outcome'
-               OR recorded_at < '2027-01-01'::timestamptz
+               OR recorded_at < '2027-01-01 00:00:00+00'::timestamptz
                OR (actual_input_tokens IS NOT NULL
                    AND actual_output_tokens IS NOT NULL))
         NOT VALID;
@@ -335,7 +335,7 @@ ALTER TABLE audit_outbox
 ALTER TABLE audit_outbox
     ADD CONSTRAINT audit_outbox_predicted_a_tokens_nonzero_chk
         CHECK (event_type <> 'spendguard.audit.decision'
-               OR recorded_at < '2027-01-01'::timestamptz
+               OR recorded_at < '2027-01-01 00:00:00+00'::timestamptz
                OR predicted_a_tokens IS NULL
                OR predicted_a_tokens > 0)
         NOT VALID,
