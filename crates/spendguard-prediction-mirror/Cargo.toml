@@ -1,0 +1,14 @@
+[package]
+name = "spendguard-prediction-mirror"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "Shared sentinel helpers for the audit-chain prediction extension column ↔ CloudEvent proto field mirror. Round-2 fix M19 — keeps the NULL↔sentinel translation in one place so every producer (sidecar / webhook_receiver / ttl_sweeper / ledger invoice_reconcile) and the verify-chain mirror cross-check share a single source of truth."
+
+# No path-deps yet — SLICE_06 producers will pull this in as a normal
+# crate dependency. We deliberately keep the crate dep-free at SLICE_01
+# so it compiles trivially in isolation and any future change to its
+# call sites is local to the column type domain.
+
+[dependencies]
+uuid = { version = "1", features = ["v7", "v4", "serde"] }
