@@ -128,6 +128,17 @@ sidecar:
   fencingScopeId: "33333333-3333-4333-8333-333333333333"
   workloadInstanceId: "sidecar-0"
   reservationTtlSeconds: 600
+  # SLICE_02 v1alpha2 (docs/contract-dsl-spec-v1alpha2.md §4 +
+  # docs/slices/SLICE_02_contract_dsl_v1alpha2.md §4.2): optional
+  # operator-side declaration of expected prediction_policy. INERT
+  # in SLICE_02 — the sidecar parser already default-fills v1alpha1
+  # contracts with STRICT_CEILING per spec §6.4, and per spec §4.2
+  # runtime policy override is FORBIDDEN (bundle redeploy only).
+  # Leaving this empty does not change behavior; setting it to
+  # "STRICT_CEILING" advertises operator intent for forward-compat
+  # tagging. Future minor version may use this for observability
+  # without changing eval-time semantics.
+  defaultPredictionPolicy: ""
   # Round-2 #3: Required by services/sidecar Config::from_env(). Operator
   # MUST seed `fencing_scopes.current_epoch = N` matching this value
   # before installing. Set to 1 for first install.
