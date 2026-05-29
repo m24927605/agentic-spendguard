@@ -11,9 +11,11 @@
 --   ledger:    0048_down → 0046_down (this is the correct order)
 --   canonical: 0015_down → 0013_down
 --
--- Round-3 fix M4 + round-4 fix M4: per-file destructive-down guard
--- (spendguard.allow_destructive_down_0048) — see slice §11 for the exact
--- SET LOCAL form.
+-- Round-3 fix M4 + round-4 fix M4 + round-5 fix N12-A: per-file destructive-down
+-- guard (spendguard.allow_destructive_down_0048) — see slice §11 for the exact
+-- SET form. SET (not SET LOCAL) because the migration runner autocommits
+-- each statement; SET LOCAL would die at the next commit boundary before
+-- the destructive DDL runs.
 -- Round-3 fix M10: no explicit BEGIN/COMMIT (matches up-migration).
 -- Round-3 fix m4: drop the explicit REVOKEs — DROP TABLE handles GRANTs
 -- atomically (Postgres cleans up the privilege rows alongside the table).
@@ -21,7 +23,7 @@
 DO $$
 BEGIN
     IF current_setting('spendguard.allow_destructive_down_0048', true) IS DISTINCT FROM 'on' THEN
-        RAISE EXCEPTION 'destructive down-migration 0048 requires `SET LOCAL spendguard.allow_destructive_down_0048 = on` first';
+        RAISE EXCEPTION 'destructive down-migration 0048 requires `SET spendguard.allow_destructive_down_0048 = ''on''` first (session-scoped; runner autocommits so SET LOCAL would die at the commit boundary)';
     END IF;
     RAISE NOTICE 'DESTRUCTIVE down-migration 0048 proceeding (caller: %)', current_user;
 END $$;

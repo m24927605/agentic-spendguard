@@ -26,21 +26,29 @@
 -- All ALTER TABLE ... DROP COLUMN are guarded with IF EXISTS so re-running
 -- after partial rollback is safe. DROP TRIGGER IF EXISTS likewise.
 --
--- ## Round-3 fix M4 + round-4 fix M4: destructive-down guard
+-- ## Round-3 fix M4 + round-4 fix M4 + round-5 fix N12-A: destructive-down guard
 --
 -- This file drops 18 columns + 3 partitions + 2 triggers + 1 function.
 -- To prevent accidental application against production we gate the entire
--- file on a session-local GUC scoped per migration file. Operator must
+-- file on a session-scoped GUC scoped per migration file. Operator must
 -- explicitly opt in via:
---     SET LOCAL spendguard.allow_destructive_down_0046 = on;
+--     SET spendguard.allow_destructive_down_0046 = 'on';
 -- BEFORE running the file. Without the GUC the first statement raises an
 -- exception and the migration runner aborts.
 --
--- Round-4 M4 rename: the GUC name now embeds the migration number so a
--- single SET LOCAL ... = on cannot cascade across multiple destructive
+-- Round-4 M4 rename: the GUC name embeds the migration number so a
+-- single SET ... = 'on' cannot cascade across multiple destructive
 -- down files. Each file requires its own SET. The exact form to use is
 -- documented in docs/slices/SLICE_01_canonical_events_migration.md §11
 -- rollback runbook with the quoting convention.
+--
+-- Round-5 N12-A: SET, NOT SET LOCAL. The migration runner invokes psql
+-- WITHOUT --single-transaction, so SET LOCAL would die at the next
+-- autocommit boundary and the destructive-down guard would fire as if
+-- the operator never opted in. SET scopes to the entire psql session,
+-- which is what we want when the operator runs `\i 0046_..._down.sql`
+-- inside an interactive psql shell. Operator SHOULD RESET the GUC after
+-- the file completes as a hygiene step.
 --
 -- Also emits a RAISE NOTICE 'DESTRUCTIVE down-migration 0046 proceeding
 -- (caller: <role>)' so PG audit / log_min_messages = notice captures
@@ -90,12 +98,12 @@
 
 -- ============================================================================
 -- Destructive-down guard (round-3 fix M4; round-4 fix M4 per-file scope +
--- caller audit notice).
+-- caller audit notice; round-5 fix N12-A SET not SET LOCAL).
 -- ============================================================================
 DO $$
 BEGIN
     IF current_setting('spendguard.allow_destructive_down_0046', true) IS DISTINCT FROM 'on' THEN
-        RAISE EXCEPTION 'destructive down-migration 0046 requires `SET LOCAL spendguard.allow_destructive_down_0046 = on` first';
+        RAISE EXCEPTION 'destructive down-migration 0046 requires `SET spendguard.allow_destructive_down_0046 = ''on''` first (session-scoped; runner autocommits so SET LOCAL would die at the commit boundary)';
     END IF;
     RAISE NOTICE 'DESTRUCTIVE down-migration 0046 proceeding (caller: %)', current_user;
 END $$;
@@ -183,9 +191,9 @@ DECLARE
 BEGIN
     -- Round-5 N12-B: LOCK + COUNT + EXECUTE 'DROP TABLE' all inside one DO
     -- block. The ACCESS EXCLUSIVE lock held by the DO block's implicit
-    -- transaction blocks all concurrent reads + writes from
-    -- LOCK acquisition until END $$ commits, so the count → drop sequence
-    -- cannot be interleaved with a concurrent INSERT.
+    -- transaction blocks all concurrent reads + writes from LOCK
+    -- acquisition until the END of the block commits, so the count then
+    -- drop sequence cannot be interleaved with a concurrent INSERT.
     LOCK TABLE audit_outbox_2026_10 IN ACCESS EXCLUSIVE MODE;
     SELECT COUNT(*) INTO rc FROM audit_outbox_2026_10;
     IF rc > 0 THEN

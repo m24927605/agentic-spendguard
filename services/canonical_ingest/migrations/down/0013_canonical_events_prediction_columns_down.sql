@@ -20,7 +20,7 @@
 DO $$
 BEGIN
     IF current_setting('spendguard.allow_destructive_down_0013', true) IS DISTINCT FROM 'on' THEN
-        RAISE EXCEPTION 'destructive down-migration 0013 requires `SET LOCAL spendguard.allow_destructive_down_0013 = on` first';
+        RAISE EXCEPTION 'destructive down-migration 0013 requires `SET spendguard.allow_destructive_down_0013 = ''on''` first (session-scoped; runner autocommits so SET LOCAL would die at the commit boundary)';
     END IF;
     RAISE NOTICE 'DESTRUCTIVE down-migration 0013 proceeding (caller: %)', current_user;
 END $$;
