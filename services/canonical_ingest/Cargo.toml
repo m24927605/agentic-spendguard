@@ -9,6 +9,15 @@ description = "SpendGuard Canonical Ingest service: per-decision_id sequence enf
 name = "spendguard-canonical-ingest"
 path = "src/main.rs"
 
+# Round-2 fix B3: verify-chain CLI scaffold. SLICE_01 ships the flag
+# (--check-prediction-mirror) + NOT_IMPLEMENTED stub; full per-row scan
+# implementation lands in SLICE_06 alongside producer-side mirror writes.
+# See docs/audit-chain-prediction-extension-v1alpha1.md §11.3 +
+# docs/slices/SLICE_01_canonical_events_migration.md §10.
+[[bin]]
+name = "verify-chain"
+path = "src/bin/verify_chain.rs"
+
 [dependencies]
 
 # Direct rustls dep so main() can call CryptoProvider::install_default()

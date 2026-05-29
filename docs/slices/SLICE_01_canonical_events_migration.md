@@ -104,6 +104,7 @@ Summary:
 | schema_bundle_id rotation not coordinated | gradual rolling deployment | dual_read accept both old + new bundle_ids per `trace-schema-spec-v1alpha1.md` §6 dual_read |
 | ledger migration vs canonical_ingest migration ordering | partial sync | apply both in same maintenance window |
 | forwarder UPDATE path touches new column | unintended write | trigger raises 42P10 (test required) |
+| **prost 0.13 unknown-field rollout invariant** (round-2 M8) | rolling upgrade gap | **canonical_ingest pods 必須全部 upgrade BEFORE 任何 sidecar / webhook_receiver / ttl_sweeper 開始寫 tag-300+ fields**；否則舊 verifier decode 丟掉 unknown fields → re-encode bytes ≠ producer signed bytes → verify FAIL（per audit-chain extension §7.2 round-2 update）|
 
 ---
 
