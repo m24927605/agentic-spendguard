@@ -1,7 +1,7 @@
 # Audit Chain Prediction Extension Specification — v1alpha1 (DRAFT)
 
 > 📝 **Status: DRAFT** (writing in design phase on branch `design/predictor-upgrade`)
-> **DRAFT → LOCKED criteria**: locks together with the predictor-upgrade spec set per `predictor-architecture-spec-v1alpha1.md` §0.2; additionally requires `verify-chain` regression suite green on (a) pre-existing demo audit rows with NULL prediction fields and (b) freshly-written rows with all 17 fields populated, across all 8+ demo modes.
+> **DRAFT → LOCKED criteria**: locks together with the predictor-upgrade spec set per `predictor-architecture-spec-v1alpha1.md` §0.2; additionally requires `verify-chain` regression suite green on (a) pre-existing demo audit rows with NULL prediction fields and (b) freshly-written rows with all 18 fields populated, across all 8+ demo modes.
 > **Companion specs (this set)**: `predictor-architecture-spec-v1alpha1.md` (umbrella), `tokenizer-service-spec-v1alpha1.md`, `output-predictor-service-spec-v1alpha1.md`, `output-predictor-plugin-contract-v1alpha1.md`, `run-cost-projector-spec-v1alpha1.md`, `cold-start-baseline-spec-v1alpha1.md`, `contract-dsl-spec-v1alpha2.md`, `stats-aggregator-spec-v1alpha1.md`, `calibration-report-spec-v1alpha1.md`.
 > **Pre-existing LOCKED dependencies that this spec extends**:
 > - `services/ledger/migrations/0009_audit_outbox.sql` — base schema
@@ -22,8 +22,8 @@
 
 本 spec 是**整套 predictor upgrade 對 audit chain 的全部影響的單一 source of truth**。涵蓋：
 
-1. `audit_outbox` schema 新增 17 個 columns（10 decision-side prediction + 3 run-level + 4 commit-side）
-2. `CloudEvent` proto 同步新增 17 個 extension attribute fields（mirror，為了讓 producer_signature 自然覆蓋新欄位 —— 詳見 §3 與 §6）
+1. `audit_outbox` schema 新增 18 個 columns（11 decision-side prediction + 3 run-level + 4 commit-side；§2.4 reviewer-flagged 把 `cold_start_layer_used` 從 metadata 升為 first-class column → decision-side 從 10 → 11，總計 17 → 18）
+2. `CloudEvent` proto 同步新增 18 個 extension attribute fields（mirror，為了讓 producer_signature 自然覆蓋新欄位 —— 詳見 §3 與 §6）
 3. `reject_audit_outbox_immutable_columns` PostgreSQL trigger 函式更新（防止新欄位被 forwarder UPDATE path 違反 audit immutability —— 此風險已在 HANDOFF Step 4 discrepancy #4 識別）
 4. Canonical bytes derivation 不需改 code（proto3 additive evolution 自動覆蓋新 field）
 5. verify_cloudevent + verify-chain CLI 的 backward / forward 相容性論證
@@ -40,7 +40,7 @@
 進入 LOCKED 之前下列 6 項必達成：
 
 1. SLICE_01 migration（`0044_audit_outbox_prediction_columns.sql` 暫名）run 通過 fresh Postgres + 既有 demo Postgres，無 error
-2. `reject_audit_outbox_immutable_columns` trigger update 在 17 個新欄位上 UPDATE attempt 全部 raise `42P10`
+2. `reject_audit_outbox_immutable_columns` trigger update 在 18 個新欄位上 UPDATE attempt 全部 raise `42P10`
 3. `verify-chain` regression 在 (a) NULL 新欄位的既有 rows + (b) 全填新欄位的新 rows 全綠
 4. 8+ 個 demo modes（`make demo-up DEMO_MODE={proxy,decision,deny,approval,ttl_sweep,agent_real,...}`）audit chain 仍 verify 通過
 5. CloudEvent proto bump 通過 prost / tonic codegen 無 break
@@ -57,7 +57,7 @@
 
 只有以下情況開啟 v2：
 
-- 出現第 18 個 audit chain 必擴欄位且該欄位語意上不適合 nested 進 cloudevent_payload data（罕見）
+- 出現第 19 個 audit chain 必擴欄位且該欄位語意上不適合 nested 進 cloudevent_payload data（罕見）
 - Signing canonical bytes derivation 需要結構性改變（例如改 hash 演算法或加 Merkle tree）
 - Contract DSL 升 v1beta1 時 audit schema 需 break
 
@@ -84,7 +84,7 @@ T (Trace) → L (Ledger) → C (Contract DSL) → D (Decision) → E (Evidence) 
                               ↑           ↑              ↑
                           contract       hot            audit
                           rule eval      path           chain
-                          (沒新增)        新增 17 cols    新增 17 mirror
+                          (沒新增)        新增 18 cols    新增 18 mirror
                                           + 簽章覆蓋     fields in CE proto
 ```
 
@@ -102,11 +102,11 @@ T (Trace) → L (Ledger) → C (Contract DSL) → D (Decision) → E (Evidence) 
 
 ---
 
-## §2. The 17 new columns inventory
+## §2. The 18 new columns inventory
 
 所有新欄位皆 ADD COLUMN nullable（提供 backfill grace + backward compat）。型別選擇優先考慮 calibration-report query 性能。
 
-### 2.1 Decision-side prediction columns (10)
+### 2.1 Decision-side prediction columns (11)
 
 加到 `audit_outbox` table（事件型別 `spendguard.audit.decision`）。
 
@@ -149,10 +149,13 @@ T (Trace) → L (Ledger) → C (Contract DSL) → D (Decision) → E (Evidence) 
 
 註：`delta_a_ratio` 不加 —— A 永遠是 ceiling，`actual / A` 永遠 ≤ 1.0，calibration-report 直接從 `actual_output_tokens / predicted_a_tokens` 算即可，無需 materialize column。`delta_b/c_ratio` materialize 因為 B/C 是 mean estimator，ratio 是 calibration 主要訊號，frequent aggregation 該預先算好。
 
-### 2.4 為什麼這 17 而不是 16 / 18
+### 2.4 為什麼這 18 而不是 17 / 19
 
-- 16 個：合併 `reserved_strategy` 與 `prediction_strategy_used`。**拒絕**：兩者在非 STRICT_CEILING policy 下會分歧；calibration-report 需要兩個 signal 比對。
-- 18 個：加 `delta_a_ratio`。**拒絕**：可從 `actual_output_tokens / predicted_a_tokens` 即時算，無 storage benefit。
+> Round-2 update：原本本節 caption 為「17 而不是 16/18」；現已合併 §2.1 reviewer-flagged 11th column (`cold_start_layer_used`) 的 +1 promotion，column 總數 17 → 18，所以 baseline 對比也 +1 為「18 而不是 17/19」。
+
+- 17 個：合併 `reserved_strategy` 與 `prediction_strategy_used`。**拒絕**：兩者在非 STRICT_CEILING policy 下會分歧；calibration-report 需要兩個 signal 比對。
+- 17 個（alternate）：把 `cold_start_layer_used` 留在 prediction_confidence 的 metadata blob 內。**拒絕**：calibration-report 需要 `WHERE cold_start_layer_used = 'L4'` 高效 query；blob-internal 欄位不能 indexed。
+- 19 個：加 `delta_a_ratio`。**拒絕**：可從 `actual_output_tokens / predicted_a_tokens` 即時算，無 storage benefit。
 
 ---
 
@@ -168,7 +171,7 @@ T (Trace) → L (Ledger) → C (Contract DSL) → D (Decision) → E (Evidence) 
 - 即便 `reject_audit_outbox_immutable_columns` trigger 阻止 UPDATE，DBA 可直接從 Postgres backup 修改 column value 後 restore（trigger 在 backup restore 時不執行的場景）
 - Operator 可主張「我們的 calibration P95 是 1.04」而沒有 cryptographic 證據
 
-**Mirror 解決方案**：CloudEvent proto 新增 17 個對應 fields（與 column 1:1 mirror）。Producer 寫 column 同時也寫 CloudEvent field（同一 transaction）。Canonical_bytes_proto 自動 encode 新 fields（proto3 additive evolution）→ signature 覆蓋新 fields → 任何竄改 column 後不能再讓 verify_cloudevent 過。
+**Mirror 解決方案**：CloudEvent proto 新增 18 個對應 fields（與 column 1:1 mirror）。Producer 寫 column 同時也寫 CloudEvent field（同一 transaction）。Canonical_bytes_proto 自動 encode 新 fields（proto3 additive evolution）→ signature 覆蓋新 fields → 任何竄改 column 後不能再讓 verify_cloudevent 過。
 
 ### 3.2 Proto schema additions
 
@@ -224,7 +227,7 @@ proto3 沒有「field absent」的原生語意（fields with default values are 
 | B. Canonical bytes derivation 改造（從 audit_outbox row 讀 column）| 無 mirror duplication | canonical_bytes_proto 與 canonical_bytes_json 兩個 path 都要改；producer-side（sidecar）與 verifier-side（canonical_ingest）必須完全同步；任何不同步 = 簽章失敗；rollout 風險高 |
 | C. 不簽章新欄位 | 最簡單 | 違反「calibration-grade audit」產品承諾；不可接受 |
 
-選 A。Mirror duplication 的代價是 sidecar producer 多寫 17 個 proto field（內存中），這個 cost negligible vs B 的 rollout 風險。
+選 A。Mirror duplication 的代價是 sidecar producer 多寫 18 個 proto field（內存中），這個 cost negligible vs B 的 rollout 風險。
 
 ---
 
@@ -287,7 +290,7 @@ CREATE TABLE IF NOT EXISTS tokenizer_versions (
 
 **No backfill**。既有 demo rows 與 production rows 的新欄位永遠保持 NULL。理由：
 
-- 既有 rows 的 prediction values 是 historical fact 不可重建（17 行 heuristic 不會回填合理的 B/C 預測值）
+- 既有 rows 的 prediction values 是 historical fact 不可重建（18 個 heuristic 欄位都不會回填合理的 B/C 預測值）
 - `verify-chain` 對 NULL 的 column + proto3 default 的 CloudEvent field 仍能正確 verify（per §7）
 - calibration-report 對 NULL 過濾，只計新 rows
 
@@ -351,11 +354,11 @@ END;
 $$ LANGUAGE plpgsql;
 ```
 
-**SLICE 01 PR 必含此 trigger update。Adversarial review checklist 必驗證**：對 17 個新欄位的 UPDATE attempt（在 demo Postgres 上）全部 raise `42P10`。
+**SLICE 01 PR 必含此 trigger update。Adversarial review checklist 必驗證**：對 18 個新欄位的 UPDATE attempt（在 demo Postgres 上）全部 raise `42P10`。
 
 ### 5.3 Forwarder UPDATE path 仍允許 4 個 forwarder state columns
 
-per `0009_audit_outbox.sql` 註解：「Only forwarder state fields are UPDATE-able」 —— `pending_forward / forwarded_at / forward_attempts / last_forward_error` 仍可被 outbox_forwarder UPDATE。Trigger 邏輯（OLD/NEW IS DISTINCT FROM 整個 tuple）正確處理：forwarder UPDATE 只改 4 個允許欄位時，其他 14+17=31 個 columns 的 OLD 與 NEW 相等 → tuple 整體相等 → trigger 通過。
+per `0009_audit_outbox.sql` 註解：「Only forwarder state fields are UPDATE-able」 —— `pending_forward / forwarded_at / forward_attempts / last_forward_error` 仍可被 outbox_forwarder UPDATE。Trigger 邏輯（OLD/NEW IS DISTINCT FROM 整個 tuple）正確處理：forwarder UPDATE 只改 4 個允許欄位時，其他 14+18=32 個 columns 的 OLD 與 NEW 相等 → tuple 整體相等 → trigger 通過。
 
 ---
 
@@ -386,11 +389,20 @@ per `0009_audit_outbox.sql` 註解：「Only forwarder state fields are UPDATE-a
 | `predicted_b_tokens` | 301 | `0`（proto3 default；calibration-report 過濾 `WHERE predicted_b_tokens IS NOT NULL`） |
 | `predicted_c_tokens` | 302 | `0` |
 | `reserved_strategy` | 303 | (always non-null) |
-| ... | ... | ... |
-| `run_predicted_remaining_steps` | 312 | `-1`（sentinel for "projector unreachable"） |
+| `prediction_strategy_used` | 304 | (always non-null) |
+| `prediction_policy_used` | 305 | (always non-null) |
+| `tokenizer_tier` | 306 | (always non-null) |
 | `tokenizer_version_id` | 307 | `""`（empty string for Tier 3） |
+| `prediction_confidence` | 308 | **0.0-1.0 範圍；absent = column-NULL on Strategy A row**（round-2 fix M11: 原 v1 寫「0.0 = N/A (Strategy A)」是錯的 —— Strategy A row 的 column 是 SQL NULL，proto3 沒有 NULL 概念故 wire 上 encode 為 0.0，但 calibration-report query 必須 filter `WHERE prediction_confidence IS NOT NULL`；0.0 不是 sentinel，是 column-NULL 的 proto3 default。詳見 round-2 spendguard-prediction-mirror crate 的 mapping table。） |
+| `prediction_sample_size` | 309 | `0`（NULL → 0 proto3 default; filter `IS NOT NULL`） |
 | `cold_start_layer_used` | 310 | `""`（empty string for "no cold start"） |
+| `run_projection_at_decision_atomic` | 311 | (always non-null; constrained ≤ int64 max per round-2 M5) |
+| `run_predicted_remaining_steps` | 312 | `-1`（sentinel for "projector unreachable"; distinguishes from "0 steps remaining"） |
+| `run_steps_completed_so_far` | 313 | (always non-null) |
+| `actual_input_tokens` | 314 | (always non-null on .outcome) |
+| `actual_output_tokens` | 315 | (always non-null on .outcome) |
 | `delta_b_ratio` | 316 | `0.0`（sentinel; filter `WHERE delta_b_ratio > 0` in calibration-report） |
+| `delta_c_ratio` | 317 | `0.0`（sentinel; filter `WHERE delta_c_ratio > 0` in calibration-report） |
 
 **Invariant**：寫入後，`audit_outbox` row 的 column 值與 stored CloudEvent 的 proto field 值必須**邏輯一致**（NULL ↔ sentinel 對應）。verify-chain CLI 在 replay 時 enforce 此一致性（§11.2）。
 

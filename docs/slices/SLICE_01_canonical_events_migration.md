@@ -11,7 +11,9 @@
 
 ## §0. TL;DR
 
-Add 17 new audit columns + 1 new tokenizer_versions table + immutability-trigger update + CloudEvent proto mirror at tag 300+. Strictly additive nullable schema; old rows unaffected; `verify-chain` regression must pass. This is the evidence-substrate slice — every subsequent slice depends on these columns existing.
+Add 18 new audit columns + 1 new tokenizer_versions table + immutability-trigger update + CloudEvent proto mirror at tag 300+. Strictly additive nullable schema; old rows unaffected; `verify-chain` regression must pass. This is the evidence-substrate slice — every subsequent slice depends on these columns existing.
+
+> Round-2 note: column count is **18** not 17 per audit-chain-prediction-extension §2.4 — `cold_start_layer_used` promoted from metadata blob to first-class column. Wherever this slice doc previously said "17" it now reads "18" with the same intent.
 
 ---
 
@@ -25,11 +27,11 @@ SLICE 01 serves Q1/Q2/Q3/Q4 of HANDOFF §5 indirectly — every downstream pilla
 
 ## §2. Scope (must-do)
 
-- Add 17 columns to `audit_outbox` table（11 decision-side + 3 run-level + 4 commit-side per audit-chain extension §2.1-§2.3，**含 §2.1 reviewer-flagged 11th column `cold_start_layer_used`**）
+- Add 18 columns to `audit_outbox` table（11 decision-side + 3 run-level + 4 commit-side per audit-chain extension §2.1-§2.3，**含 §2.4 reviewer-flagged 11th decision-side column `cold_start_layer_used`** that brought the total from 17 to 18）
 - Add columns to `canonical_events` table（mirror schema；replicated via outbox_forwarder unchanged）
-- Update `reject_audit_outbox_immutable_columns` trigger to include all 17 new columns in OLD/NEW comparison list
+- Update `reject_audit_outbox_immutable_columns` trigger to include all 18 new columns in OLD/NEW comparison list
 - Create `tokenizer_versions` registry table（per `tokenizer-service-spec-v1alpha1.md` §6.1）
-- Bump `proto/spendguard/common/v1/common.proto` `CloudEvent` message with 17 new fields at tags 300-317
+- Bump `proto/spendguard/common/v1/common.proto` `CloudEvent` message with 18 new fields at tags 300-317
 - Add indexes for calibration-report queries (per audit-chain extension §4.1)
 - Migration file: `services/canonical_ingest/migrations/00XX_audit_outbox_prediction_columns.sql`（編號 per current state）
 - Ledger migration file: `services/ledger/migrations/00XX_audit_outbox_prediction_columns.sql`（same DDL on ledger DB）
@@ -77,8 +79,8 @@ SLICE 01 serves Q1/Q2/Q3/Q4 of HANDOFF §5 indirectly — every downstream pilla
 per `audit-chain-prediction-extension-v1alpha1.md` §4.1 (full SQL DDL block); §3.2 (proto block).
 
 Summary:
-- 11 prediction columns + 3 run-level + 4 commit-side, all nullable
-- Indexes: `audit_outbox_calibration_idx`, `audit_outbox_tier_idx`
+- 11 prediction columns + 3 run-level + 4 commit-side = 18 total, all nullable
+- Indexes: `audit_outbox_calibration_idx`, `audit_outbox_tier_idx`, `audit_outbox_outcome_calibration_idx` (round-2 added)
 - Proto `CloudEvent` adds 18 fields tagged 300-317 (additive evolution)
 - Sentinel values per §6.3 of audit-chain extension
 
@@ -86,9 +88,9 @@ Summary:
 
 ## §6. Audit-chain impact
 
-- **New columns**: 17 total on both `audit_outbox` and `canonical_events`
-- **Canonical bytes**: NO change needed — proto3 additive evolution carries new fields automatically (per audit-chain extension §7.1)
-- **verify_cloudevent compatibility**: 既有 rows verify 仍 OK; new rows verify with new fields populated（proto3 unknown-field round-trip preservation property required）
+- **New columns**: 18 total on both `audit_outbox` and `canonical_events`
+- **Canonical bytes**: NO change needed — proto3 additive evolution carries new fields automatically (per audit-chain extension §7.1). **Round-2 caveat** (per audit-chain extension §7.2 update): prost 0.13 does NOT preserve unknown fields → canonical_ingest pods must be upgraded BEFORE any producer starts writing tag-300+ fields.
+- **verify_cloudevent compatibility**: 既有 rows verify 仍 OK; new rows verify with new fields populated（proto3 unknown-field round-trip preservation property required — see round-2 caveat above）
 - **Immutability trigger**: MUST update `reject_audit_outbox_immutable_columns` to include new columns; **adversarial review must verify UPDATE on each new column raises 42P10**
 - **Storage class**: unchanged; new fields land in `immutable_audit_log` per Trace §10.2
 
@@ -126,7 +128,7 @@ Summary:
 ### 8.3 Property tests
 
 - For any populated combination of new columns + canonical CloudEvent, `verify_cloudevent` succeeds
-- For any UPDATE attempt on the 17 new immutable columns, trigger raises 42P10
+- For any UPDATE attempt on the 18 new immutable columns, trigger raises 42P10
 
 ### 8.4 Benchmarks
 
@@ -153,8 +155,8 @@ Summary:
 
 Layered on top of `docs/review-standards/predictor-review-checklist.md` §1:
 
-1. Is `cold_start_layer_used` properly included as the 11th decision-side column? Spec §2.4 reviewer note: this column was promoted from metadata to first-class. Confirm via spec + migration consistency.
-2. For each of the 17 new columns, what is the corresponding CloudEvent proto field tag and what is the sentinel value mapping (per audit-chain extension §6.3)? Show the table verbatim in the PR description.
+1. Is `cold_start_layer_used` properly included as the 11th decision-side column? Spec §2.4 reviewer note: this column was promoted from metadata to first-class, bringing the total to 18. Confirm via spec + migration consistency.
+2. For each of the 18 new columns, what is the corresponding CloudEvent proto field tag and what is the sentinel value mapping (per audit-chain extension §6.3)? Show the table verbatim in the PR description.
 3. Is the trigger function CREATE OR REPLACE rather than DROP + CREATE? Required to avoid trigger downtime.
 4. What happens if the migration is partially applied (e.g., audit_outbox columns added but trigger not updated)? Show transaction wrapping ensures atomicity within DDL session.
 5. What is the schema_bundle_id rotation plan? Does it coordinate with all 4 producer services (sidecar / webhook_receiver / ttl_sweeper / ledger invoice_reconcile)?
