@@ -90,11 +90,13 @@ async fn main() -> Result<()> {
 
     let svc = TokenizerSvc::new(Arc::clone(&tokenizer));
     let tonic_svc = TokenizerServer::new(svc)
-        // Round-2 fix M6: cap decoded request size at 1 MiB to bound
-        // memory pressure from oversized callers (per-request field
-        // validation in server.rs adds a 2 MiB raw_text ceiling on
-        // top, but the protocol-layer cap rejects bigger frames
-        // before deserialisation cost).
+        // Round-2 fix M6 + Round-3 fix N3: protocol-layer cap matches
+        // the field caps in server.rs (1 MiB raw_text + 1 MiB per
+        // message). Anything bigger is rejected by tonic with
+        // ResourceExhausted before deserialisation; the field caps
+        // are redundant defense-in-depth that also defend the
+        // in-process library form. See server.rs:50 area for the
+        // layered design rationale.
         .max_decoding_message_size(1 << 20);
 
     // ── Bind the gRPC server. ─────────────────────────────────────

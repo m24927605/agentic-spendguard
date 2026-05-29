@@ -49,17 +49,21 @@ service Tokenizer {
   rpc ShadowVerify(ShadowVerifyRequest) returns (ShadowVerifyResponse);
 }
 
-// Round-2 fix M6 (DoS protection): the server-side TokenizerSvc
-// rejects requests that exceed the following per-field caps with
-// gRPC InvalidArgument:
+// Round-2 fix M6 + Round-3 fix N3 (DoS protection): the server-side
+// TokenizerSvc rejects requests that exceed the following per-field
+// caps with gRPC InvalidArgument:
 //   model.len()      <= 256 bytes
-//   raw_text.len()   <= 2 MiB
+//   raw_text.len()   <= 1 MiB
 //   messages.len()   <= 1000 elements
-//   message.content  <= 2 MiB each
+//   message.content  <= 1 MiB each
 // Plus a protocol-layer cap configured in main.rs:
-//   max_decoding_message_size = 1 MiB
-// Real workloads sit far below these caps; they exist as a
-// defense-in-depth guard against buggy or hostile callers.
+//   max_decoding_message_size = 1 MiB     (matches field caps)
+// The protocol cap is the dominant hard cap — anything larger than
+// 1 MiB is rejected by tonic with ResourceExhausted BEFORE proto
+// deserialisation. The field caps are redundant defense-in-depth that
+// also defend the in-process library form (no tonic protocol layer)
+// and provide more specific InvalidArgument errors for callers that
+// want to metric per-field violations. Real workloads sit far below.
 message TokenizeRequest {
   // Required. Model string as appears in the LLM request body
   // (e.g., "gpt-4o-mini", "claude-3-5-sonnet-20240620").
@@ -74,7 +78,7 @@ message TokenizeRequest {
   repeated Message messages = 2;
 
   // Mutually exclusive with messages; for text-completion shape.
-  // Server rejects with InvalidArgument if len > 2 MiB (M6).
+  // Server rejects with InvalidArgument if len > 1 MiB (M6 / R3 N3).
   string raw_text = 3;
 
   // Caller-supplied request_id for tracing/audit; mints UUIDv7 if
@@ -87,7 +91,7 @@ message TokenizeRequest {
 
     // Text content; vision/multimodal v2 will add binary
     // content_parts as a separate additive field.
-    // Server rejects with InvalidArgument if len > 2 MiB (M6).
+    // Server rejects with InvalidArgument if len > 1 MiB (M6 / R3 N3).
     string content = 2;
 
     // Tool call payload tokens count for tool-using agents.

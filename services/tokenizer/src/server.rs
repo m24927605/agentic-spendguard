@@ -8,7 +8,7 @@
 //!     error message. SLICE_05 wires the real shadow worker via
 //!     `services/tokenizer/src/shadow_worker.rs`.
 //!
-//! ## Round-2 fix M6 — DoS protection
+//! ## Round-2 fix M6 + Round-3 fix N3 — DoS protection
 //!
 //! Tokenize requests come from authenticated callers (sidecar +
 //! shadow worker), but defense in depth requires per-field caps so a
@@ -17,14 +17,23 @@
 //! tokenizer library (which would otherwise allocate proportional to
 //! input size for the BPE encode buffer).
 //!
-//! Caps applied at the top of [`TokenizerSvc::tokenize`]:
-//!   - `model.len()`        ≤ 256 bytes
-//!   - `raw_text.len()`     ≤ 2 MiB
-//!   - `messages.len()`     ≤ 1_000 elements
-//!   - `message.content`    ≤ 2 MiB each
+//! Layered caps:
+//!   1. Protocol layer (main.rs `max_decoding_message_size`) — 1 MiB
+//!      hard cap. Anything bigger is rejected by tonic with
+//!      `Status::resource_exhausted` BEFORE proto deserialisation.
+//!   2. Field layer (this module, `TokenizerSvc::tokenize`) — 1 MiB
+//!      `raw_text` / per-message content; 256 B model; 1000 message
+//!      array bound. Rejected with `Status::invalid_argument`.
 //!
-//! Plus the protocol-layer cap configured in main.rs:
-//!   - `max_decoding_message_size` = 1 MiB
+//! Round-3 N3: the field caps and the protocol cap MUST agree.
+//! Previously the protocol layer rejected at 1 MiB while the docs +
+//! field caps advertised 2 MiB → callers catching `InvalidArgument`
+//! never saw the field-layer error, only `ResourceExhausted`. We
+//! tightened the field caps to 1 MiB to match. This is intentionally
+//! redundant: the field validation runs against a value that already
+//! passed the protocol cap, but it provides a stable + named error
+//! distinct from `ResourceExhausted` and makes the in-process library
+//! form (no tonic protocol layer) defend itself with the same bound.
 //!
 //! Violations return `Status::invalid_argument` with a stable code so
 //! callers can distinguish from `internal` (encoder panic).
@@ -41,8 +50,21 @@ use crate::proto::tokenizer::v1::{
 use spendguard_tokenizer::{Tokenizer, TokenizerError};
 
 // ============================================================================
-// Round-2 fix M6 — request-shape caps. Kept as `pub(crate) const` so
-// the test mod (and future calibration tooling) can reference them.
+// Round-2 fix M6 + Round-3 fix N3 — request-shape caps.
+//
+// Field cap == protocol cap == 1 MiB by design. The redundancy is
+// defense-in-depth:
+//   * Protocol cap (main.rs `max_decoding_message_size`) rejects
+//     oversized frames with `ResourceExhausted` before deserialisation.
+//   * Field cap (this module) rejects per-field violations with the
+//     more specific `InvalidArgument` so callers can metric on the
+//     offending field (model vs raw_text vs messages).
+//
+// `MAX_RAW_TEXT_LEN == MAX_MESSAGE_CONTENT_LEN == 1 MiB == 1 << 20`.
+// Tighten the protocol cap in lock-step if the field caps grow.
+//
+// Kept as `pub(crate) const` so the test mod (and future calibration
+// tooling) can reference them.
 // ============================================================================
 
 /// Max bytes accepted in the `model` field. Real-world model strings
@@ -50,13 +72,18 @@ use spendguard_tokenizer::{Tokenizer, TokenizerError};
 pub(crate) const MAX_MODEL_LEN: usize = 256;
 
 /// Max bytes accepted in `raw_text` (the text-completion shape).
-pub(crate) const MAX_RAW_TEXT_LEN: usize = 2 << 20;
+/// Round-3 N3: matches the 1 MiB protocol-layer
+/// `max_decoding_message_size` configured in main.rs so the field
+/// validation error surface is reachable (was previously 2 MiB and
+/// therefore unreachable — the protocol cap fired first).
+pub(crate) const MAX_RAW_TEXT_LEN: usize = 1 << 20;
 
 /// Max number of `Message` elements in the chat-shape array.
 pub(crate) const MAX_MESSAGES: usize = 1_000;
 
-/// Max bytes per individual `message.content`.
-pub(crate) const MAX_MESSAGE_CONTENT_LEN: usize = 2 << 20;
+/// Max bytes per individual `message.content`. See `MAX_RAW_TEXT_LEN`
+/// for the protocol-cap alignment rationale.
+pub(crate) const MAX_MESSAGE_CONTENT_LEN: usize = 1 << 20;
 
 /// Service struct holding a shared library handle. Constructed once
 /// in main(); cloned cheaply on every RPC dispatch because
@@ -236,7 +263,10 @@ mod tests {
         assert!(err.message().contains("SLICE_05"));
     }
 
-    // ── Round-2 fix M6 — DoS protection tests ─────────────────────
+    // ── Round-2 fix M6 + Round-3 fix N3 — DoS protection tests ────
+    // (R3 N3: caps tightened to 1 MiB to match protocol-layer
+    //  `max_decoding_message_size`; tests reference constants so they
+    //  auto-track the boundary.)
 
     #[tokio::test]
     async fn tokenize_rejects_oversize_model() {
