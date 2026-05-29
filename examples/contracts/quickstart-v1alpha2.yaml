@@ -1,0 +1,85 @@
+# Quickstart Contract — Contract DSL v1alpha2 sample.
+#
+# Spec: docs/contract-dsl-spec-v1alpha2.md §11 "Lock 後的下一步 #4".
+# Spec ancestor: docs/contract-dsl-spec-v1alpha1.md §18 (the v1alpha1
+# quickstart this file extends — adds prediction_policy +
+# run_projection_action with sample RUN_BUDGET_PROJECTION_EXCEEDED rule).
+#
+# Use this as the starting point for a v1alpha2 contract that opts into
+# per-run projection enforcement (EMPIRICAL_RUN_CEILING) and asks for
+# human approval on projected overruns. Swap to STRICT_CEILING +
+# BLOCK_NEXT_CALL for regulated workloads (healthcare / finance /
+# government) where projection-based stops should be terminal.
+#
+# IMPORTANT (per spec §4.2): changing prediction_policy on a deployed
+# contract requires:
+#   - new bundle ed25519 signature
+#   - spendguard.contract.policy_changed audit event (CloudEvents 1.0)
+#   - schema_bundle_id rotation
+# Operators MUST NOT runtime-override policy — bundle redeploy only.
+
+apiVersion: spendguard.ai/v1alpha2
+kind: Contract
+
+metadata:
+  id: 99999999-9999-4999-8999-999999999999
+  name: quickstart-v1alpha2
+
+spec:
+  # --- v1alpha2 NEW: contract-wide prediction policy (spec §4) -------
+  # EMPIRICAL_RUN_CEILING: reservation = Strategy B (empirical mean
+  # of recent comparable runs); per-run projection drives RUN_* codes.
+  # Requires ≥30-sample bucket for B to be populated; falls back to
+  # Strategy A (ceiling) reservation on cold start.
+  prediction_policy: EMPIRICAL_RUN_CEILING
+
+  budgets:
+    - id: 11111111-1111-4111-8111-111111111111
+      limit_amount_atomic: "100000000"        # $100.00 / day
+      currency: USD
+      reservation_ttl_seconds: 600
+      require_hard_cap: true
+
+  rules:
+    # --- v1alpha1 per-call hard cap (unchanged from spec §18) --------
+    # Stops the run when the per-call estimated cost would exhaust
+    # the daily budget. This rule's reasonCode is NOT a RUN_* code,
+    # so it routes through the per-call lattice (decision: stop)
+    # exactly as in v1alpha1.
+    - id: stop_when_exhausted
+      when:
+        budget_id: 11111111-1111-4111-8111-111111111111
+        claim_amount_atomic_gt: "99999999"   # near-cap (within $0.01)
+      then:
+        decision: STOP
+        reason_code: BUDGET_EXHAUSTED
+
+    # --- v1alpha2 NEW: per-run projection rule (spec §3.1) -----------
+    # Fires when run_cost_projector decides cumulative_run_cost +
+    # this_call_reservation + predicted_remaining_cost > budget remaining.
+    # Per spec §3.4 the reasonCode is the RUN_* code; the per-rule
+    # run_projection_action drives the projection onto the v1alpha1
+    # lattice (RequireApproval → human approval flow).
+    #
+    # SLICE_02 acceptance note: NO source emits RUN_* codes until
+    # SLICE_09 wires run_cost_projector. Until then this rule sits
+    # dormant. Once SLICE_09 lands, the projector emits matching
+    # BudgetClaim entries on every llm.call.pre and this rule fires.
+    - id: require_approval_on_projected_overrun
+      when:
+        budget_id: 11111111-1111-4111-8111-111111111111
+        # SLICE_02 evaluator wedge keys on amount thresholds; the
+        # real condition will be CEL once SLICE_09 wires
+        # `run_projection.at_decision_micros > budget("daily_usd").remaining.amountMicros`
+        # per spec §6.3 (CEL grammar).
+        claim_amount_atomic_gt: "1"
+      then:
+        decision: REQUIRE_APPROVAL   # placeholder; §3.4 projection wins
+        reason_code: RUN_BUDGET_PROJECTION_EXCEEDED
+        approver_role: tenant-admin
+      # --- v1alpha2 NEW: rule-level projection action --------------
+      # REQUIRE_APPROVAL: route to v1alpha1 §11 approval flow.
+      # Allowed under EMPIRICAL_RUN_CEILING per §5.3 (all 3 actions
+      # permitted). Operator can swap to BLOCK_NEXT_CALL for harder
+      # enforcement or ALERT_ONLY for shadow / observation mode.
+      run_projection_action: REQUIRE_APPROVAL
