@@ -713,6 +713,12 @@ impl AdapterUds {
                         approver_role: String::new(),
                         terminal: false,
                         error: None,
+                        // SLICE_02: resume path never emits RUN_*
+                        // codes (those come from the projector at
+                        // decision time; resume re-evaluates with
+                        // post-approval state). Empty string per
+                        // proto3 default.
+                        run_code_triggered: String::new(),
                     };
                     Ok(Response::new(ResumeAfterApprovalResponse {
                         outcome: Some(ResumeOutcome::Decision(decision_resp)),
@@ -823,6 +829,10 @@ impl AdapterUds {
                         approver_role: String::new(),
                         terminal: false,
                         error: None,
+                        // SLICE_02: see resume_idempotent_replay
+                        // comment above — resume path does not emit
+                        // RUN_* codes.
+                        run_code_triggered: String::new(),
                     };
                     Ok(Response::new(ResumeAfterApprovalResponse {
                         outcome: Some(ResumeOutcome::Decision(decision_resp)),
@@ -1187,6 +1197,15 @@ mod approval_resume_payload {
                 producer_sequence,
                 producer_signature: vec![].into(),
                 signing_key_id: String::new(),
+                // SLICE_02: resume-decision CloudEvent inherits the
+                // contract's prediction_policy. POC: this struct
+                // doesn't yet thread the contract bundle in scope, so
+                // we leave the prediction columns at proto3 default
+                // and SLICE_02 surfaces the value only on the
+                // primary CONTINUE / DENY paths. Follow-up issue:
+                // populate prediction_policy_used here once the resume
+                // payload carries it forward from decision_context.
+                ..Default::default()
             };
             crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent)
                 .await

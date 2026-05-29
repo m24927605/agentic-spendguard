@@ -403,6 +403,12 @@ pub async fn run_through_reserve(
         request_hash: Vec::new().into(),
     };
 
+    // SLICE_02 §6: thread the contract's prediction_policy into the
+    // audit CloudEvent so canonical_ingest mirrors it onto the
+    // audit_outbox.prediction_policy_used column. For v1alpha1
+    // contracts default-filled to STRICT_CEILING this emits the
+    // literal "STRICT_CEILING" (spec §4.1 conservative default).
+    let prediction_policy_str = bundle.parsed.prediction_policy.as_str();
     let mut cloudevent = build_audit_decision_cloudevent(
         ctx,
         &decision_id,
@@ -411,6 +417,7 @@ pub async fn run_through_reserve(
         &snapshot_hash,
         &matched_rules,
         &enrichment,
+        prediction_policy_str,
     );
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
@@ -584,6 +591,7 @@ fn build_audit_decision_cloudevent(
     snapshot_hash: &[u8; 32],
     matched_rules: &[String],
     enrichment: &AuditEnrichment,
+    prediction_policy: &str,
 ) -> CloudEvent {
     let mut payload = serde_json::json!({
         "snapshot_hash":   hex::encode(snapshot_hash),
@@ -609,7 +617,28 @@ fn build_audit_decision_cloudevent(
     }
     let payload_bytes =
         serde_json::to_vec(&payload).expect("snapshot json serialization is infallible");
-    CloudEvent {
+    // SLICE_02 §6 audit-chain impact: populate prediction_policy_used
+    // (CloudEvent proto tag 305) on every spendguard.audit.decision
+    // emission. SLICE_01 added the audit_outbox column; SLICE_02 wires
+    // the value at producer time so canonical_ingest's mirror path
+    // (services/canonical_ingest/src/persistence/append.rs) writes it
+    // to the column, the trigger function reject_audit_outbox_immutable_columns
+    // protects it, and verify-chain confirms it matches the
+    // cloudevent_payload_signature.
+    //
+    // For v1alpha1 contracts default-filled to STRICT_CEILING, this
+    // emits the literal "STRICT_CEILING" — which is the byte-identical
+    // expectation per spec §6.4 ("v1alpha1 contracts produce same
+    // decision_id, reason_codes, mutation_patch_json under v1alpha2
+    // evaluator"). NOTE: the audit-row prediction_policy_used VALUE
+    // changes from NULL (pre-SLICE_02) to "STRICT_CEILING"
+    // (post-SLICE_02). This is the intentional SLICE_02 boundary:
+    // SLICE_01 deferred filling the column to SLICE_02. Per spec §8.2
+    // the byte-identical regression compares the FIELDS spec calls
+    // out (decision_id, reason_codes, mutation_patch_json) — not
+    // every column, since `prediction_policy_used` going from NULL
+    // to STRICT_CEILING is the entire point of this slice.
+    let mut ce = CloudEvent {
         specversion: "1.0".into(),
         r#type: "spendguard.audit.decision".into(),
         source: format!("sidecar://{}/{}", ctx.region, ctx.workload_instance_id),
@@ -632,7 +661,15 @@ fn build_audit_decision_cloudevent(
         producer_sequence,
         producer_signature: vec![].into(), // POC: signing TBD
         signing_key_id: String::new(),
-    }
+        ..Default::default()
+    };
+    // SLICE_02: set tag 305 directly so the mirror path picks it up.
+    // The rest of the tag 300+ prediction fields stay at proto3 default
+    // (= SQL NULL via the prediction-mirror crate) until SLICE_06 wires
+    // the predictor; spec §6 confirms only prediction_policy_used is
+    // populated at this slice.
+    ce.prediction_policy_used = prediction_policy.to_string();
+    ce
 }
 
 // (Producer sequence now lives on SidecarState, initialized from ledger
@@ -743,7 +780,13 @@ async fn run_record_denied_decision(
         producer_sequence,
         producer_signature: vec![].into(),
         signing_key_id: String::new(),
+        ..Default::default()
     };
+    // SLICE_02 §6: DENY-lane CloudEvent emits prediction_policy_used
+    // identical to the ALLOW lane (per §6.4 byte-identical regression
+    // requirement). v1alpha1 contracts get STRICT_CEILING; v1alpha2
+    // contracts pass through whatever they declared.
+    cloudevent.prediction_policy_used = bundle.parsed.prediction_policy.as_str().to_string();
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
     // Round-2 #9 producer SP. When the contract evaluator returns
@@ -930,6 +973,13 @@ pub fn build_response(out: DecisionOutput) -> DecisionResponse {
         approver_role: String::new(),
         terminal: matches!(out.decision, Decision::Stop),
         error: None,
+        // SLICE_02 §6.2: run_code_triggered always "" in this slice
+        // since no source emits RUN_* codes. SLICE_09 populates this
+        // from DecisionOutput.run_code_triggered once the projector
+        // wires through. v1alpha1 clients deserializing a v1alpha2
+        // response see this as the proto3 default empty string,
+        // identical to pre-bump behavior.
+        run_code_triggered: String::new(),
     }
 }
 
@@ -1105,6 +1155,12 @@ pub async fn run_commit_estimated(
         producer_sequence: producer_seq,
         producer_signature: vec![].into(),
         signing_key_id: String::new(),
+        // SLICE_02: tag 300+ prediction columns default to SQL-NULL
+        // sentinels (per audit-chain-prediction-extension-v1alpha1.md
+        // §3.3). spendguard.audit.outcome events only populate the
+        // commit-side actuals (tags 314-317) once the predictor
+        // wires through; SLICE_02 leaves them at proto3 default.
+        ..Default::default()
     };
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
@@ -1337,6 +1393,10 @@ pub async fn run_release(
         producer_sequence: producer_seq,
         producer_signature: vec![].into(),
         signing_key_id: String::new(),
+        // SLICE_02: see commit_estimated CloudEvent comment above —
+        // tag 300+ prediction columns left at proto3 default for the
+        // release-lane spendguard.audit.outcome event.
+        ..Default::default()
     };
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
