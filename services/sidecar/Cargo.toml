@@ -86,6 +86,15 @@ spendguard-signing = { path = "../signing" }
 # Phase 5 GA hardening S22: fail-open / fail-closed policy matrix.
 spendguard-policy = { path = "../policy" }
 
+# SLICE_03 — Tokenizer library (in-process Tier 2 BPE + Tier 3 fallback)
+# per tokenizer-service-spec-v1alpha1.md §2.1(b). Wired as a placeholder
+# dependency here; SLICE_10 replaces the legacy token-estimation path
+# with a real call to `spendguard_tokenizer::Tokenizer::tokenize`. Until
+# SLICE_10 lands, the dep keeps the sidecar's compile graph linked to
+# the library so its public surface (and `tokenizer_versions` registry
+# mapping) is exercised by sidecar's CI build.
+spendguard-tokenizer = { path = "../../crates/spendguard-tokenizer" }
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"

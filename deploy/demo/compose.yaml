@@ -247,6 +247,36 @@ services:
       spendguard-net:
         aliases: [canonical-ingest]
 
+  # SLICE_03 — Tokenizer service (per tokenizer-service-spec-v1alpha1.md §2.1(a)).
+  # Centralised gRPC form; the library form §2.1(b) is linked in-process by
+  # sidecar / egress_proxy for the hot path and is built from the same crate.
+  # The image embeds cl100k_base / o200k_base / p50k_base encoder assets;
+  # no external asset distribution.
+  tokenizer:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.tokenizer
+    container_name: spendguard-tokenizer
+    environment:
+      RUST_LOG:                                  "info,spendguard_tokenizer=debug,spendguard_tokenizer_service=debug"
+      SPENDGUARD_TOKENIZER_LISTEN_ADDR:          "0.0.0.0:50053"
+      SPENDGUARD_TOKENIZER_METRICS_ADDR:         "0.0.0.0:9099"
+      SPENDGUARD_TOKENIZER_REGION:               "demo"
+      # Spec §5.3 health invariant — alerts when tier3_hits / total > 0.001.
+      SPENDGUARD_TOKENIZER_TIER3_ALERT_THRESHOLD: "0.001"
+    ports:
+      - "9099:9099"
+      - "50053:50053"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:9099/healthz | grep -q ok"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [tokenizer]
+
   sidecar:
     build:
       context: ../..

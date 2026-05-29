@@ -40,7 +40,11 @@ pub struct Config {
 }
 
 fn default_metrics_addr() -> String {
-    "0.0.0.0:9098".to_string()
+    // Port 9099 — see deploy/demo/compose.yaml service port table:
+    //   ledger=9092, canonical-ingest=9091, sidecar=9093,
+    //   control-plane=9094, dashboard=9095, outbox=9096,
+    //   ttl-sweeper=9097, webhook-receiver=9098, tokenizer=9099.
+    "0.0.0.0:9099".to_string()
 }
 
 fn default_tier3_alert_threshold() -> f32 {
@@ -68,7 +72,7 @@ mod tests {
         .expect("config loads");
         assert_eq!(cfg.listen_addr, "127.0.0.1:50053");
         assert!(cfg.uds_path.is_none());
-        assert_eq!(cfg.metrics_addr, "0.0.0.0:9098");
+        assert_eq!(cfg.metrics_addr, "0.0.0.0:9099");
         assert!((cfg.tier3_alert_threshold - 0.001).abs() < 1e-6);
     }
 

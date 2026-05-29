@@ -1,0 +1,101 @@
+{{- if .Values.tokenizer.enabled }}
+{{- $component := "tokenizer" }}
+{{- /* chart.profile=production: required-input gates.
+
+       Per tokenizer-service-spec-v1alpha1.md §5.3 health invariant
+       (tier3 hit rate < 0.1%) the operator must explicitly confirm
+       the tier3 alert threshold under production profile — leaving
+       it at chart default in production hides the metric behind a
+       chart placeholder.
+
+       Per spec §8 "Tier 2 encoder load failure" + §7.4 signed bundle:
+       the asset sha256 verification happens inside the library at
+       boot; chart-side we only need to ensure the image tag is
+       pinned (no `latest`).
+
+       Mirrors the sidecar.yaml:8-23 production-profile fail-gate
+       pattern.
+    */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- if eq .Values.tokenizer.image.tag "" -}}
+{{- fail "tokenizer.image.tag is required under chart.profile=production (do not run with mutable tags like `latest`)" -}}
+{{- end -}}
+{{- if eq (toString .Values.tokenizer.image.tag) "latest" -}}
+{{- fail "tokenizer.image.tag=latest is forbidden under chart.profile=production (pin to an immutable SHA-suffixed tag for asset signature audit trail)" -}}
+{{- end -}}
+{{- if not (kindIs "float64" .Values.tokenizer.tier3AlertThreshold) -}}
+{{- if not (kindIs "int" .Values.tokenizer.tier3AlertThreshold) -}}
+{{- fail "tokenizer.tier3AlertThreshold must be numeric under chart.profile=production (per spec §5.3 health invariant default 0.001 = 0.1%)" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- /* Spec §2.1 — the tokenizer ships in two co-existing forms:
+       (a) gRPC service (this Deployment + Service) — used by the
+           Tier 1 shadow worker, output_predictor, calibration_report,
+           SDK fallback.
+       (b) Rust library — sidecar / egress_proxy link directly for
+           the hot path; no chart resource needed.
+       Both forms share the same dispatch table + tokenizer_versions
+       registry, so a service-side encoder refresh + DB seed migration
+       roll out together.
+    */ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-tokenizer
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.tokenizer.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      containers:
+        - name: tokenizer
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.tokenizer.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          ports:
+            - { name: grpc,    containerPort: 50053 }
+            - { name: metrics, containerPort: 9099  }
+          env:
+            - { name: SPENDGUARD_TOKENIZER_LISTEN_ADDR,           value: "0.0.0.0:50053" }
+            - { name: SPENDGUARD_TOKENIZER_METRICS_ADDR,          value: "0.0.0.0:9099"  }
+            - { name: SPENDGUARD_TOKENIZER_REGION,                value: {{ .Values.global.region | quote }} }
+            # Per spec §5.3 health invariant — Tier 3 hit-rate
+            # alerting threshold. SLICE_03 plumbs the value through
+            # Config; the alert wire-up itself lands in SLICE-extra.
+            - { name: SPENDGUARD_TOKENIZER_TIER3_ALERT_THRESHOLD, value: {{ .Values.tokenizer.tier3AlertThreshold | quote }} }
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.tokenizer.resources | nindent 12 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spendguard.fullname" . }}-tokenizer
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc,    port: 50053, targetPort: grpc    }
+    - { name: metrics, port: 9099,  targetPort: metrics }
+  selector:
+    {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+{{- end }}

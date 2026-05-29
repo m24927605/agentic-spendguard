@@ -1,0 +1,41 @@
+# syntax=docker/dockerfile:1.7
+#
+# Build the SpendGuard tokenizer service image.
+#
+# Spec ref `tokenizer-service-spec-v1alpha1.md` §2.1(a) — gRPC
+# centralised form. The image links the in-process library crate
+# (spendguard-tokenizer) which embeds the cl100k_base / o200k_base /
+# p50k_base encoder assets directly into the binary (per spec §7.2
+# asset bundling). No external asset distribution channel needed.
+FROM rust:1.91-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY proto ./proto
+# Symlink protobuf well-known types into proto_root so protoc resolves
+# google.protobuf.* imports (mirrors Dockerfile.ledger / Dockerfile.canonical_ingest).
+RUN ln -sf /usr/include/google ./proto/google
+# Library crate is a path-dep of the service crate; copy both.
+COPY crates/spendguard-tokenizer ./crates/spendguard-tokenizer
+COPY services/tokenizer ./services/tokenizer
+WORKDIR /build/services/tokenizer
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-tokenizer,target=/build/services/tokenizer/target,sharing=locked \
+    cargo build --release --bin spendguard-tokenizer \
+    && cp target/release/spendguard-tokenizer /spendguard-tokenizer
+
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /spendguard-tokenizer /usr/local/bin/spendguard-tokenizer
+
+ENTRYPOINT ["/usr/local/bin/spendguard-tokenizer"]
