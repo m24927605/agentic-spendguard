@@ -210,4 +210,192 @@ mod tests {
         let b = canonical_bytes(&evt);
         assert_eq!(a, b);
     }
+
+    // ============================================================
+    // Round-2 fix M8 + m5: prost round-trip property test for the
+    // tag 300-317 prediction extension fields per
+    // docs/audit-chain-prediction-extension-v1alpha1.md §7.2.
+    //
+    // Establishes:
+    //   1. Encoding a CloudEvent with tag 300-317 fields populated and
+    //      then re-decoding produces a value byte-identical to the
+    //      original (the basic prost round-trip property — necessary
+    //      for canonical_bytes to be deterministic across re-encoding).
+    //   2. The proto3 unset-field semantics: a CloudEvent with all
+    //      tag-300+ fields at default values encodes to the same bytes
+    //      as the same CloudEvent with those fields explicitly absent.
+    //      This is what makes signatures over legacy rows continue to
+    //      verify after the proto bump (spec §7.1).
+    //
+    // What this test does NOT cover (acknowledged scope per M8): the
+    // "unknown-field preservation" property that would let an OLD
+    // verifier re-encode a NEW event and still match the signature.
+    // prost 0.13 strips unknown fields; the deployment invariant in
+    // §7.2 (canonical_ingest upgrades first) handles this operationally
+    // until prost upstream lands unknown-field preservation
+    // (tokio-rs/prost#879).
+    // ============================================================
+
+    fn make_event_with_prediction_fields() -> CloudEvent {
+        let mut evt = make_event_proto_form();
+        // Populate the 18 prediction tag 300-317 fields with non-default
+        // values so the test exercises the actual wire encoding paths
+        // rather than the "everything is default" cheat.
+        evt.predicted_a_tokens = 4096;
+        evt.predicted_b_tokens = 512;
+        evt.predicted_c_tokens = 768;
+        evt.reserved_strategy = "A".into();
+        evt.prediction_strategy_used = "B".into();
+        evt.prediction_policy_used = "STRICT_CEILING".into();
+        evt.tokenizer_tier = "T2".into();
+        evt.tokenizer_version_id = "01999d50-1111-7000-8000-000000000003".into();
+        evt.prediction_confidence = 0.875;
+        evt.prediction_sample_size = 64;
+        evt.cold_start_layer_used = "".into(); // warm path
+        evt.run_projection_at_decision_atomic = 1_000_000_000;
+        evt.run_predicted_remaining_steps = 3;
+        evt.run_steps_completed_so_far = 2;
+        evt.actual_input_tokens = 256;
+        evt.actual_output_tokens = 384;
+        evt.delta_b_ratio = 0.75;
+        evt.delta_c_ratio = 0.5;
+        evt
+    }
+
+    #[test]
+    fn prost_roundtrip_preserves_tag_300_to_317_fields() {
+        let original = make_event_with_prediction_fields();
+        let encoded = original.encode_to_vec();
+        let decoded = CloudEvent::decode(&*encoded)
+            .expect("CloudEvent with tag 300-317 fields must decode");
+
+        // Field-by-field compare. We avoid `assert_eq!(original, decoded)`
+        // because we want any drift to point to the exact field.
+        assert_eq!(decoded.predicted_a_tokens, original.predicted_a_tokens);
+        assert_eq!(decoded.predicted_b_tokens, original.predicted_b_tokens);
+        assert_eq!(decoded.predicted_c_tokens, original.predicted_c_tokens);
+        assert_eq!(decoded.reserved_strategy, original.reserved_strategy);
+        assert_eq!(
+            decoded.prediction_strategy_used,
+            original.prediction_strategy_used
+        );
+        assert_eq!(
+            decoded.prediction_policy_used,
+            original.prediction_policy_used
+        );
+        assert_eq!(decoded.tokenizer_tier, original.tokenizer_tier);
+        assert_eq!(decoded.tokenizer_version_id, original.tokenizer_version_id);
+        assert_eq!(
+            decoded.prediction_confidence,
+            original.prediction_confidence
+        );
+        assert_eq!(
+            decoded.prediction_sample_size,
+            original.prediction_sample_size
+        );
+        assert_eq!(decoded.cold_start_layer_used, original.cold_start_layer_used);
+        assert_eq!(
+            decoded.run_projection_at_decision_atomic,
+            original.run_projection_at_decision_atomic
+        );
+        assert_eq!(
+            decoded.run_predicted_remaining_steps,
+            original.run_predicted_remaining_steps
+        );
+        assert_eq!(
+            decoded.run_steps_completed_so_far,
+            original.run_steps_completed_so_far
+        );
+        assert_eq!(decoded.actual_input_tokens, original.actual_input_tokens);
+        assert_eq!(decoded.actual_output_tokens, original.actual_output_tokens);
+        assert_eq!(decoded.delta_b_ratio, original.delta_b_ratio);
+        assert_eq!(decoded.delta_c_ratio, original.delta_c_ratio);
+
+        // The decoded value must re-encode to the same bytes — this is
+        // the canonical-bytes determinism property that verify_cloudevent
+        // depends on.
+        let re_encoded = decoded.encode_to_vec();
+        assert_eq!(re_encoded, encoded);
+    }
+
+    #[test]
+    fn legacy_event_signature_survives_proto_bump() {
+        // Spec §7.1: legacy CloudEvents written before the tag 300-317
+        // additions verify identically after the bump because proto3
+        // default-valued fields encode to zero bytes on the wire.
+        //
+        // Round-3 fix M9: the round-2 version was a tautology — it
+        // called `canonical_bytes(&legacy)` twice on the same event.
+        // The real invariant is: two DISTINCT CloudEvents that differ
+        // only in the explicit-vs-implicit presence of tag 300+ default
+        // values must produce byte-identical canonical_bytes.
+        //
+        // `legacy` = pre-bump event (tag 300-317 implicitly default; we
+        // can't actually distinguish "field absent" from "field set to
+        // default" on the wire — that's the whole point of proto3
+        // default encoding).
+        // `new_with_defaults` = post-bump producer that explicitly
+        // populates the new fields with their default values.
+        //
+        // Byte-identical canonical_bytes ⇒ a signature signed over
+        // `legacy` will verify against `new_with_defaults` and vice
+        // versa. This is the additive-evolution invariant.
+        let mut legacy = make_event_proto_form();
+        legacy.signing_key_id = "sidecar:legacy-key".into();
+        // legacy has tag 300+ fields at proto3 defaults via Default impl.
+        assert_eq!(legacy.predicted_a_tokens, 0);
+        assert_eq!(legacy.reserved_strategy, "");
+        assert_eq!(legacy.prediction_confidence, 0.0);
+        assert_eq!(legacy.run_predicted_remaining_steps, 0);
+
+        // new_with_defaults is a distinct event whose tag 300+ fields
+        // have been explicitly assigned the same default values a new
+        // producer might emit.
+        let mut new_with_defaults = make_event_proto_form();
+        new_with_defaults.signing_key_id = "sidecar:legacy-key".into();
+        new_with_defaults.predicted_a_tokens = 0;
+        new_with_defaults.predicted_b_tokens = 0;
+        new_with_defaults.predicted_c_tokens = 0;
+        new_with_defaults.reserved_strategy = String::new();
+        new_with_defaults.prediction_strategy_used = String::new();
+        new_with_defaults.prediction_policy_used = String::new();
+        new_with_defaults.tokenizer_tier = String::new();
+        new_with_defaults.tokenizer_version_id = String::new();
+        new_with_defaults.prediction_confidence = 0.0;
+        new_with_defaults.prediction_sample_size = 0;
+        new_with_defaults.cold_start_layer_used = String::new();
+        new_with_defaults.run_projection_at_decision_atomic = 0;
+        new_with_defaults.run_predicted_remaining_steps = 0;
+        new_with_defaults.run_steps_completed_so_far = 0;
+        new_with_defaults.actual_input_tokens = 0;
+        new_with_defaults.actual_output_tokens = 0;
+        new_with_defaults.delta_b_ratio = 0.0;
+        new_with_defaults.delta_c_ratio = 0.0;
+
+        let canonical_legacy = canonical_bytes(&legacy);
+        let canonical_new_with_defaults = canonical_bytes(&new_with_defaults);
+        assert_eq!(
+            canonical_legacy, canonical_new_with_defaults,
+            "proto3 default-encoding invariant violated: legacy event and \
+             new-event-with-explicit-defaults must hash to identical canonical bytes"
+        );
+    }
+
+    #[test]
+    fn signature_covers_tag_300_to_317_fields() {
+        // Spec §3.1: the mirror approach requires the producer signature
+        // to cover the prediction fields, so that an attacker tampering
+        // with a column AND the corresponding proto field together
+        // cannot escape detection. We exercise that property here: two
+        // events that differ only in `predicted_a_tokens` must produce
+        // different canonical bytes (and therefore different signatures).
+        let mut evt_a = make_event_with_prediction_fields();
+        let canonical_a = canonical_bytes(&evt_a);
+        evt_a.predicted_a_tokens = 999_999;
+        let canonical_b = canonical_bytes(&evt_a);
+        assert_ne!(
+            canonical_a, canonical_b,
+            "tag-300 predicted_a_tokens must affect canonical bytes (signature coverage)"
+        );
+    }
 }

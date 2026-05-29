@@ -14,6 +14,54 @@ ConfigMap shape:
          (lexicographic order preserved by the apply loop's `sort`).
   Same shape for canonical-ingest under
   {{ .Values.migrations.canonicalConfigMapName }} (default: spendguard-migrations-canonical).
+
+Cross-DB migration ordering (round-2 fix M16): the apply loop already
+processes the ledger glob before the canonical glob, which is required
+because the canonical_events mirror columns assume the ledger side has
+already accepted the same schema. The lexicographic file ordering
+inside each glob is also load-bearing: 0046 (audit_outbox columns +
+trigger + TRUNCATE guard, all atomic) MUST land before 0048
+(tokenizer_versions + FK) so the FK target table exists; 0013 MUST land
+before 0015 (canonical_events schema must exist before quarantine
+mirror references the same column shape).
+
+Round-4 fix B2: PRODUCTION FAIL-GATE REMOVED.
+=============================================
+
+Round-2/round-3 attempted a chart.profile=production fail-gate via
+`lookup "v1" "ConfigMap"` + `fail` when the ConfigMaps were absent or
+missing SLICE_01 files. Round-3 added `.Release.IsInstall /
+.Release.IsUpgrade` guards to suppress the gate under `helm template`.
+
+That suppression is broken: per Helm docs (helm.sh/docs/chart_template_guide/builtin_objects/)
+`helm template` sets BOTH `.Release.IsInstall = true` AND
+`.Release.IsUpgrade = false` by default. The expression
+`or .Release.IsInstall .Release.IsUpgrade` is therefore ALWAYS true
+during `helm template`, and the lookup-then-fail still fires under
+template-only CI renders — exactly the breakage round-3 tried to fix.
+
+This is the third attempt to make a lookup-based fail-gate behave
+identically under `helm template` (no cluster) and `helm install` (live
+cluster). It's not possible without sentinel values that drift across
+Helm versions. We accept the trade-off:
+
+  * NO compile-time guarantee against an operator forgetting to
+    regenerate ConfigMaps in production. The fail-gate is gone.
+  * Demo-side `[migrate] WARNING` log (kept below) fires when the Job
+    runs against an incomplete ConfigMap mount — visible in helm
+    --wait logs and any kubectl logs query.
+  * .github/workflows/helm-validate.yml runs a real `helm install`
+    inside a kind cluster (job at lines 93-128); that path catches a
+    truly-missing ConfigMap because the Job exits with a non-zero
+    `[migrate]` log line when the SLICE_06+ producer first writes a
+    tag-300+ field.
+  * NOTES.txt loudly warns operators about regenerating ConfigMaps
+    BEFORE helm upgrade. The upgrade notice is the operator's
+    contract.
+
+Operators who want a hard pre-upgrade gate should run
+`scripts/helm-validate-kind.sh --check-only` as a pre-deploy step in
+their CD pipeline — the script enforces what this template cannot.
 */ -}}
 apiVersion: batch/v1
 kind: Job
@@ -42,6 +90,31 @@ spec:
               set -eu
               applied=0
               skipped=0
+              # Round-3 fix m6 + round-4 fix B2: detect SLICE_01-incomplete
+              # ConfigMap and warn loudly. With the production fail-gate
+              # removed (round-4 B2), this is the ONLY signal the operator
+              # gets from the chart that the ConfigMap mount is missing
+              # the SLICE_01 files. Warning is visible in:
+              #   * helm install --wait | --debug
+              #   * kubectl logs -l app.kubernetes.io/component=migrations
+              #   * The kind-cluster job at .github/workflows/helm-validate.yml
+              missing_slice01=""
+              for f in 0046_audit_outbox_prediction_columns.sql 0048_tokenizer_versions.sql; do
+                  if [ -d /etc/migrations/ledger ] && [ ! -f "/etc/migrations/ledger/$f" ]; then
+                      missing_slice01="$missing_slice01 ledger/$f"
+                  fi
+              done
+              for f in 0013_canonical_events_prediction_columns.sql 0015_audit_outcome_quarantine_prediction_columns.sql; do
+                  if [ -d /etc/migrations/canonical ] && [ ! -f "/etc/migrations/canonical/$f" ]; then
+                      missing_slice01="$missing_slice01 canonical/$f"
+                  fi
+              done
+              if [ -n "$missing_slice01" ]; then
+                  echo "[migrate] WARNING: SLICE_01 migration file(s) MISSING from mounted ConfigMaps:$missing_slice01"
+                  echo "[migrate] WARNING: this will cause a 'column does not exist'"
+                  echo "[migrate] WARNING: runtime error once SLICE_06 producers attempt to write tag-300+ fields."
+                  echo "[migrate] WARNING: regenerate ConfigMaps via scripts/helm-validate-kind.sh."
+              fi
               for f in $(ls /etc/migrations/ledger/*.sql 2>/dev/null | sort); do
                   echo "[migrate] applying $f to spendguard_ledger..."
                   psql "$PG_LEDGER_URL" -v ON_ERROR_STOP=1 -f "$f"

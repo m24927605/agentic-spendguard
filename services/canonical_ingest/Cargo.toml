@@ -9,6 +9,15 @@ description = "SpendGuard Canonical Ingest service: per-decision_id sequence enf
 name = "spendguard-canonical-ingest"
 path = "src/main.rs"
 
+# Round-2 fix B3: verify-chain CLI scaffold. SLICE_01 ships the flag
+# (--check-prediction-mirror) + NOT_IMPLEMENTED stub; full per-row scan
+# implementation lands in SLICE_06 alongside producer-side mirror writes.
+# See docs/audit-chain-prediction-extension-v1alpha1.md §11.3 +
+# docs/slices/SLICE_01_canonical_events_migration.md §10.
+[[bin]]
+name = "verify-chain"
+path = "src/bin/verify_chain.rs"
+
 [dependencies]
 
 # Direct rustls dep so main() can call CryptoProvider::install_default()
@@ -27,7 +36,15 @@ sqlx = { version = "0.8", features = [
     "uuid",
     "chrono",
     "json",
+    # Round-3 fix B2: enables BigDecimal binding for NUMERIC(4,3) and
+    # NUMERIC(38,0) prediction-extension columns. Matches the ledger
+    # crate's convention (services/ledger uses bigdecimal feature too).
+    "bigdecimal",
 ] }
+
+# Round-3 fix B2: explicit BigDecimal type for the SQL NUMERIC binding.
+# sqlx re-exports `sqlx::types::BigDecimal` once the feature is on.
+bigdecimal = { version = "0.4", features = ["serde"] }
 
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 sha2 = "0.10"
@@ -65,3 +82,12 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 # verifier.rs unit tests use rand::rngs::OsRng for ed25519 keypairs.
 rand = "0.8"
+# Round-3 fix B4: wire the orphan spendguard-prediction-mirror crate to
+# canonical_ingest as a dev-dependency. This is the minimum-blast-radius
+# fix — adding a root Cargo.toml workspace would touch every service.
+# Dev-deps build in CI (cargo test --workspace catches them indirectly via
+# this crate), the mirror crate compiles + its unit tests run, and
+# SLICE_06 will promote it to a regular dependency when producer-side
+# mirror writes land. See docs/audit-chain-prediction-extension-v1alpha1.md
+# §6.3 + crates/spendguard-prediction-mirror/src/lib.rs preamble.
+spendguard-prediction-mirror = { path = "../../crates/spendguard-prediction-mirror" }

@@ -329,6 +329,10 @@ async fn process_one(
         region_id: &cfg.region,
         ingest_shard_id: &cfg.ingest_shard_id,
         failure_class,
+        // Round-3 fix B2: SLICE_01 callers pass Default (all None → SQL
+        // NULL). SLICE_06 will replace this with a translated decode of
+        // evt.predicted_*_tokens etc. via spendguard-prediction-mirror.
+        prediction: Default::default(),
     };
 
     // Per-decision sequence enforcement: audit.outcome with no preceding decision.
@@ -465,6 +469,10 @@ async fn process_one(
                 region_id: &cfg.region,
                 ingest_shard_id: &cfg.ingest_shard_id,
                 failure_class,
+                // Round-3 fix B2: SLICE_01 trigger-side fallback also
+                // passes Default (SLICE_06 will populate from decoded
+                // CloudEvent tag 300-317 fields).
+                prediction: Default::default(),
             };
             if let Err(e) = append::quarantine_audit_outcome(pool, input, orphan_after).await {
                 return error_result(&evt.id, EventStatus::Quarantined, e);

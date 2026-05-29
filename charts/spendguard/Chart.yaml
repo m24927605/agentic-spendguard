@@ -11,8 +11,17 @@ description: |
   pre-create the spendguard-tls + spendguard-bundles Secrets per the
   README.
 type: application
-version: 0.1.0-alpha.1
-appVersion: "0.1.0-alpha.1"
+# Round-2 fix B2: patch version bump on SLICE_01 to surface the schema
+# migration requirement (4 new migration files added under
+# services/ledger/migrations/ + services/canonical_ingest/migrations/).
+# Operators upgrading from 0.1.0-alpha.1 MUST regenerate the migration
+# ConfigMaps — see templates/NOTES.txt for the upgrade procedure.
+version: 0.1.0-alpha.3
+appVersion: "0.1.0-alpha.3"
+# Round-3 fix m5: declare minimum Kubernetes version. The chart uses
+# `helm.sh/hook` annotations + Job + ConfigMap.optional which are all
+# stable since 1.24. Older clusters silently mis-render the hook order.
+kubeVersion: ">=1.24.0"
 keywords:
   - ai
   - agents

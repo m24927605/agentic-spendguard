@@ -95,7 +95,7 @@ Predictor upgrade 在 **D (Decision)** 階段嵌入：sidecar 在進入 `reserve
 >
 > **Per-run projection 是 differentiation moat**；競品最多做到 per-call atomic（LiteLLM / Portkey）或 per-key cumulative（Helicone / Langfuse），都沒做 per-`run_id` 的 multi-signal projection。
 >
-> **Audit chain 是 calibration 證據**；所有 prediction 欄位（10 prediction + 3 run-level + 4 commit-side = 17 新欄位）都進 audit chain，被簽章、被 replicated、被 `verify-chain` replay。
+> **Audit chain 是 calibration 證據**；所有 prediction 欄位（11 prediction + 3 run-level + 4 commit-side = 18 新欄位 —— 含 `cold_start_layer_used` first-class promotion per audit-chain-prediction-extension §2.4）都進 audit chain，被簽章、被 replicated、被 `verify-chain` replay。
 
 ---
 
@@ -336,7 +336,7 @@ Predictor upgrade 在 **D (Decision)** 階段嵌入：sidecar 在進入 `reserve
 
 ## §6. Audit chain summary
 
-整套 upgrade 對 audit chain 的影響：`audit_outbox` + `canonical_events` 增加 **10 prediction columns + 3 run-level columns + 4 commit-side columns = 17 個 new columns**，全部 additive nullable，全部進 canonical bytes derivation，全部被 `verify_cloudevent` replay。
+整套 upgrade 對 audit chain 的影響：`audit_outbox` + `canonical_events` 增加 **11 prediction columns + 3 run-level columns + 4 commit-side columns = 18 個 new columns**（含 `cold_start_layer_used` first-class promotion per audit-chain-prediction-extension §2.4），全部 additive nullable，全部進 canonical bytes derivation，全部被 `verify_cloudevent` replay。
 
 新欄位的 column-level immutability 必須同步更新 `services/ledger/migrations/0011_immutability_triggers.sql` 的 `reject_audit_outbox_immutable_columns` 函式以避免被 forwarder UPDATE path 違反 audit immutability（此風險在 SLICE 01 已 identify，per HANDOFF Step 4 discrepancy #4）。
 

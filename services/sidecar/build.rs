@@ -1,5 +1,12 @@
 // build.rs — protobuf codegen for adapter UDS server, ledger client,
 // canonical ingest client.
+//
+// Round-2 fix M8 (mirror on sidecar side): prost 0.13 does NOT preserve
+// proto3 unknown fields on decode + re-encode. The SLICE_01 rollout
+// invariant per audit-chain-prediction-extension-v1alpha1.md §7.2 is
+// therefore that all canonical_ingest pods must be upgraded BEFORE any
+// sidecar starts writing tag-300+ prediction fields. See the longer
+// comment in services/canonical_ingest/build.rs for rationale.
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_root = std::path::PathBuf::from("../../proto");
