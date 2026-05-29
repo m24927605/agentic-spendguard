@@ -110,8 +110,15 @@ END $$;
 
 -- Restore the pre-SLICE_01 trigger function (from
 -- services/ledger/migrations/0011_immutability_triggers.sql).
+-- Round-5 Security Finding 1: SECURITY INVOKER + SET search_path =
+-- pg_catalog, pg_temp closes CVE-2018-1058 (a CREATE-privileged
+-- attacker shadowing built-ins on the role's search_path). Matches the
+-- 0046 up-migration's convention (see 0046 step 6 prose).
 CREATE OR REPLACE FUNCTION reject_audit_outbox_immutable_columns()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $$
 BEGIN
     IF (OLD.audit_outbox_id, OLD.audit_decision_event_id, OLD.decision_id,
         OLD.tenant_id, OLD.ledger_transaction_id, OLD.event_type,

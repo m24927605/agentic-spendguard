@@ -270,7 +270,10 @@ ALTER TABLE audit_outcome_quarantine VALIDATE CONSTRAINT audit_outcome_quarantin
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION reject_quarantine_immutable_columns()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $$
 BEGIN
     IF (OLD.quarantine_id, OLD.event_id, OLD.tenant_id, OLD.decision_id,
         OLD.storage_class, OLD.producer_id, OLD.producer_sequence,

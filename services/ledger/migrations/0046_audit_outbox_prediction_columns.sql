@@ -463,7 +463,10 @@ CREATE INDEX audit_outbox_tokenizer_version_id_idx
 -- ============================================================================
 
 CREATE OR REPLACE FUNCTION reject_audit_outbox_immutable_columns()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $$
 BEGIN
     IF (OLD.audit_outbox_id, OLD.audit_decision_event_id, OLD.decision_id,
         OLD.tenant_id, OLD.ledger_transaction_id, OLD.event_type,
