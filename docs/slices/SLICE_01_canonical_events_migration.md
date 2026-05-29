@@ -69,8 +69,12 @@ SLICE 01 serves Q1/Q2/Q3/Q4 of HANDOFF §5 indirectly — every downstream pilla
 
 ### 4.3 Helm / config changes
 
-- `charts/spendguard/templates/migrations-job.yaml` — bumped migration list (if file lists migrations explicitly; else auto-pickup)
-- No new ConfigMap / Secret needed
+- `charts/spendguard/templates/migrations.yaml` — round-2 (B2 + M15): production-profile fail-gate that requires the new migration ConfigMaps + the 4 specific SLICE_01 files; demo-profile keeps the optional-ConfigMap no-op semantics.
+- `charts/spendguard/templates/NOTES.txt` — round-2 (B2): explicit "SLICE_01 UPGRADE NOTICE" block with the regeneration commands + the ledger-before-canonical ordering + the prost rollout invariant warning.
+- `charts/spendguard/Chart.yaml` — round-2 (B2): version bump 0.1.0-alpha.1 → 0.1.0-alpha.2 so the upgrade surfaces in `helm history`.
+- No new ConfigMap / Secret needed by the chart itself; the operator regenerates the existing migration ConfigMaps to include the new files.
+
+**Cross-DB migration ordering** (round-2 fix M16): ledger DB migrations MUST complete before canonical_ingest DB migrations. Reason: the canonical mirror columns assume the ledger side has already accepted them; the outbox_forwarder will not push rows whose ledger row failed to insert. The Helm chart's apply loop enforces this by processing the ledger glob before the canonical glob; out-of-band migration workflows must follow the same order manually. Within each DB the lexicographic file order is also load-bearing: 0046 (audit_outbox columns + trigger + TRUNCATE guard, atomic) MUST land before 0048 (tokenizer_versions + FK) so the FK target exists; 0013 (canonical_events mirror) MUST land before 0014 (schema_bundle row insert).
 
 ---
 
@@ -182,8 +186,18 @@ Layered on top of `docs/review-standards/predictor-review-checklist.md` §1:
 ## §11. Risk / rollback plan
 
 - Worst case: migration runs but trigger update fails → audit chain immutability invariant broken on new columns
-- Mitigation: wrap migration in transaction; trigger CREATE OR REPLACE atomic
-- Rollback: revert migration via down-migration (`ALTER TABLE DROP COLUMN ...` reverse); restore old trigger function from backup
+- Mitigation (round-2 fix M7): 0046 atomically applies schema + CHECK + indexes + trigger + TRUNCATE guard in a single file. The migration runner wraps it in a transaction so partial application is impossible — either every change lands or none does.
+- Rollback: down-migrations live under `services/{ledger,canonical_ingest}/migrations/down/` (round-2 fix m2):
+  - `services/ledger/migrations/down/0046_audit_outbox_prediction_columns_down.sql`
+  - `services/ledger/migrations/down/0048_tokenizer_versions_down.sql`
+  - `services/canonical_ingest/migrations/down/0013_canonical_events_prediction_columns_down.sql`
+  - `services/canonical_ingest/migrations/down/0014_schema_bundle_prediction_v1alpha1_down.sql`
+- **Rollback order** (per round-2 fix M16 cross-DB ordering):
+  1. Stop all 4 producer services (sidecar / webhook_receiver / ttl_sweeper / ledger invoice_reconcile) so no new tag-300+ writes happen.
+  2. Apply canonical_ingest down-migrations: 0014_down → 0013_down (downstream first; canonical_events cannot reference removed columns once 0013_down lands).
+  3. Apply ledger down-migrations: 0048_down → 0046_down (downstream first; the FK on audit_outbox.tokenizer_version_id is dropped in 0048_down before 0046_down drops the column).
+  4. Roll back canonical_ingest pods to the pre-SLICE_01 image (recovers from the prost rollout invariant M8).
+  5. Roll back producer pods to the pre-SLICE_01 image.
 - Demo regression: `make demo-up` should detect immediately if columns missing on producer side
 
 ---
