@@ -492,9 +492,10 @@ per `trace-schema-spec-v1alpha1.md` §10.2，三層 storage class 由 retention 
 
 per `trace-schema-spec-v1alpha1.md` §12，每個 producer 在 startup 註冊 `schema_bundle_id` 給 canonical_ingest。當 CloudEvent proto schema 改變（即便 additive）時，sensible practice 是 rotate schema_bundle_id 並通知 canonical_ingest 註冊新 bundle。
 
-具體：
+具體（round-3 fix B3 update）：
 
-- SLICE 01 / SLICE 02 deployment 時 sidecar / webhook_receiver / ttl_sweeper 採新 `schema_bundle_id`（per Helm chart bump）
+- **SLICE_01 不再** insert 任何 schema_bundle 列。Round-2 曾嘗試 ship `0014_schema_bundle_prediction_v1alpha1.sql` with a placeholder hash + NULL cosign_verified_at，被 round-3 security review (B3) 反向 — placeholder hash 為 `sha256("spendguard.v1alpha1+prediction")` 可逆 + cosign 未驗證 = supply-chain hostile（攻擊者拿 producer signing key 就能 synth events that the placeholder "verifies"）。0014 已被刪除。
+- SLICE_06 producer slice 負責 register the real cosigned bundle row：operator-side bundle builder 對 canonicalized proto bytes 計算實際 sha256 + 記錄 cosign verification。SLICE_06 producers MUST NOT write tag-300+ CloudEvent fields BEFORE this row exists.
 - canonical_ingest 收到第一個新 bundle event 時 emit `schema_bundle_registered` audit event
 - 既有 events 仍引用舊 bundle_id；canonical_ingest 對 mixed bundle stream 已有處理（per Trace §12 conformance test corpus）
 

@@ -55,9 +55,11 @@ SLICE 01 serves Q1/Q2/Q3/Q4 of HANDOFF §5 indirectly — every downstream pilla
 
 ### 4.1 New files
 
-- `services/canonical_ingest/migrations/00XX_audit_outbox_prediction_columns.sql`
-- `services/ledger/migrations/00XX_audit_outbox_prediction_columns.sql` (same DDL)
-- `services/ledger/migrations/00XX_tokenizer_versions.sql` (registry table)
+- `services/ledger/migrations/0046_audit_outbox_prediction_columns.sql`
+- `services/ledger/migrations/0048_tokenizer_versions.sql` (registry table + FK to audit_outbox)
+- `services/canonical_ingest/migrations/0013_canonical_events_prediction_columns.sql`
+- `services/canonical_ingest/migrations/0015_audit_outcome_quarantine_prediction_columns.sql` (round-3 B2: quarantine table mirror so the release path can carry forward the 18 prediction columns)
+- Down-migrations for each (round-2 fix m2; round-3 fixes M4 + M10 + B3)
 
 ### 4.2 Modified files
 
@@ -69,12 +71,12 @@ SLICE 01 serves Q1/Q2/Q3/Q4 of HANDOFF §5 indirectly — every downstream pilla
 
 ### 4.3 Helm / config changes
 
-- `charts/spendguard/templates/migrations.yaml` — round-2 (B2 + M15): production-profile fail-gate that requires the new migration ConfigMaps + the 4 specific SLICE_01 files; demo-profile keeps the optional-ConfigMap no-op semantics.
+- `charts/spendguard/templates/migrations.yaml` — round-2 (B2 + M15): production-profile fail-gate that requires the new migration ConfigMaps + the SLICE_01 files; demo-profile keeps the optional-ConfigMap no-op semantics. **Round-3 (B1)**: fail-gate now wrapped in `.Release.IsInstall / .Release.IsUpgrade` so `helm template` (no cluster) skips the lookup — CI helm-validate.yml dry-render passes; real install/upgrade still enforces. **Round-3 (m6)**: demo profile now emits a multi-line WARNING when ConfigMaps lack the SLICE_01 files (operator observability without aborting demo).
 - `charts/spendguard/templates/NOTES.txt` — round-2 (B2): explicit "SLICE_01 UPGRADE NOTICE" block with the regeneration commands + the ledger-before-canonical ordering + the prost rollout invariant warning.
-- `charts/spendguard/Chart.yaml` — round-2 (B2): version bump 0.1.0-alpha.1 → 0.1.0-alpha.2 so the upgrade surfaces in `helm history`.
+- `charts/spendguard/Chart.yaml` — round-2 (B2): version bump 0.1.0-alpha.1 → 0.1.0-alpha.2. **Round-3 (m5)**: declared `kubeVersion: ">=1.24.0"`; version bumped again 0.1.0-alpha.2 → 0.1.0-alpha.3 to surface the round-3 fixes.
 - No new ConfigMap / Secret needed by the chart itself; the operator regenerates the existing migration ConfigMaps to include the new files.
 
-**Cross-DB migration ordering** (round-2 fix M16): ledger DB migrations MUST complete before canonical_ingest DB migrations. Reason: the canonical mirror columns assume the ledger side has already accepted them; the outbox_forwarder will not push rows whose ledger row failed to insert. The Helm chart's apply loop enforces this by processing the ledger glob before the canonical glob; out-of-band migration workflows must follow the same order manually. Within each DB the lexicographic file order is also load-bearing: 0046 (audit_outbox columns + trigger + TRUNCATE guard, atomic) MUST land before 0048 (tokenizer_versions + FK) so the FK target exists; 0013 (canonical_events mirror) MUST land before 0014 (schema_bundle row insert).
+**Cross-DB migration ordering** (round-2 fix M16): ledger DB migrations MUST complete before canonical_ingest DB migrations. Reason: the canonical mirror columns assume the ledger side has already accepted them; the outbox_forwarder will not push rows whose ledger row failed to insert. The Helm chart's apply loop enforces this by processing the ledger glob before the canonical glob; out-of-band migration workflows must follow the same order manually. Within each DB the lexicographic file order is also load-bearing: 0046 (audit_outbox columns + trigger + TRUNCATE guard, atomic) MUST land before 0048 (tokenizer_versions + FK) so the FK target exists; 0013 (canonical_events mirror) MUST land before 0015 (quarantine table mirror — round-3 B2 added; round-2's 0014 schema_bundle placeholder was deleted in round-3 B3).
 
 ---
 
@@ -163,7 +165,7 @@ Layered on top of `docs/review-standards/predictor-review-checklist.md` §1:
 2. For each of the 18 new columns, what is the corresponding CloudEvent proto field tag and what is the sentinel value mapping (per audit-chain extension §6.3)? Show the table verbatim in the PR description.
 3. Is the trigger function CREATE OR REPLACE rather than DROP + CREATE? Required to avoid trigger downtime.
 4. What happens if the migration is partially applied (e.g., audit_outbox columns added but trigger not updated)? Show transaction wrapping ensures atomicity within DDL session.
-5. What is the schema_bundle_id rotation plan? Does it coordinate with all 4 producer services (sidecar / webhook_receiver / ttl_sweeper / ledger invoice_reconcile)? **Round-2 answer (M10)**: `services/canonical_ingest/migrations/0014_schema_bundle_prediction_v1alpha1.sql` inserts the rotated bundle row `01999d60-0001-7000-8000-000000000001` with `canonical_schema_version = 'spendguard.v1alpha1+prediction'`. Per audit-chain extension §9.2 all 4 producer services must adopt the new bundle_id BEFORE writing tag-300+ fields (same ordering constraint as the prost rollout invariant M8). The bundle_hash is a deterministic placeholder; SLICE_06 will rebuild from real proto bytes via the operator-side bundle builder. canonical_ingest accepts both old and new bundles concurrently per Trace §6 dual_read.
+5. What is the schema_bundle_id rotation plan? Does it coordinate with all 4 producer services (sidecar / webhook_receiver / ttl_sweeper / ledger invoice_reconcile)? **Round-3 answer (B3 reversal of round-2 M10)**: schema_bundle_id rotation is now **deferred to SLICE_06 producer slice**. Round-2 landed `0014_schema_bundle_prediction_v1alpha1.sql` with a placeholder hash + `cosign_verified_at = NULL`; both were security-hostile (the placeholder hash was reversible from a public string — `sha256("spendguard.v1alpha1+prediction")` — so any attacker holding the producer signing key could synthesise events that the placeholder bundle "verified", and the NULL cosign field meant nothing in code enforced "production must have cosign-verified bundles"). Round-3 DELETES 0014 + 0014_down. SLICE_01 ships the schema substrate only; producers MUST register a new **cosigned** bundle row BEFORE writing tag-300+ fields (the operator-side bundle builder per Trace §12 computes the real sha256 of canonicalized proto bytes + records cosign verification). canonical_ingest accepts both old and new bundles concurrently per Trace §6 dual_read.
 6. prost round-trip test: explicitly test old-verifier-on-new-row and new-verifier-on-old-row scenarios.
 7. Is `verify-chain --check-prediction-mirror` flag default true for new versions? What's the upgrade migration for the CLI binary?
 8. Are the new indexes covered for partition-safe (per `0009_audit_outbox.sql` partition convention)?
@@ -187,17 +189,18 @@ Layered on top of `docs/review-standards/predictor-review-checklist.md` §1:
 
 - Worst case: migration runs but trigger update fails → audit chain immutability invariant broken on new columns
 - Mitigation (round-2 fix M7): 0046 atomically applies schema + CHECK + indexes + trigger + TRUNCATE guard in a single file. The migration runner wraps it in a transaction so partial application is impossible — either every change lands or none does.
-- Rollback: down-migrations live under `services/{ledger,canonical_ingest}/migrations/down/` (round-2 fix m2):
+- Rollback: down-migrations live under `services/{ledger,canonical_ingest}/migrations/down/` (round-2 fix m2; round-3 fix B3 deleted 0014 + 0014_down; round-3 fix B2 added 0015 + 0015_down):
   - `services/ledger/migrations/down/0046_audit_outbox_prediction_columns_down.sql`
   - `services/ledger/migrations/down/0048_tokenizer_versions_down.sql`
   - `services/canonical_ingest/migrations/down/0013_canonical_events_prediction_columns_down.sql`
-  - `services/canonical_ingest/migrations/down/0014_schema_bundle_prediction_v1alpha1_down.sql`
-- **Rollback order** (per round-2 fix M16 cross-DB ordering):
+  - `services/canonical_ingest/migrations/down/0015_audit_outcome_quarantine_prediction_columns_down.sql`
+- **Rollback order** (per round-2 fix M16 cross-DB ordering + round-3 B2/B3 updates):
   1. Stop all 4 producer services (sidecar / webhook_receiver / ttl_sweeper / ledger invoice_reconcile) so no new tag-300+ writes happen.
-  2. Apply canonical_ingest down-migrations: 0014_down → 0013_down (downstream first; canonical_events cannot reference removed columns once 0013_down lands).
-  3. Apply ledger down-migrations: 0048_down → 0046_down (downstream first; the FK on audit_outbox.tokenizer_version_id is dropped in 0048_down before 0046_down drops the column).
-  4. Roll back canonical_ingest pods to the pre-SLICE_01 image (recovers from the prost rollout invariant M8).
-  5. Roll back producer pods to the pre-SLICE_01 image.
+  2. `SET spendguard.allow_destructive_down = on;` on the target Postgres session (round-3 fix M4 destructive-down guard).
+  3. Apply canonical_ingest down-migrations: 0015_down → 0013_down. Order rationale (round-3 fix M11 rewrite of round-2 step 2): 0015_down first because the quarantine table's 18 prediction columns reference no foreign keys to canonical_events; dropping them first removes the dependency edge so 0013_down can then drop the canonical_events columns. (Round-2's claim that 0014 had to come first was based on a non-existent FK chain — 0014 only inserted a schema_bundles row.)
+  4. Apply ledger down-migrations: 0048_down → 0046_down (downstream first; the FK on audit_outbox.tokenizer_version_id is dropped in 0048_down before 0046_down drops the column).
+  5. Roll back canonical_ingest pods to the pre-SLICE_01 image (recovers from the prost rollout invariant M8).
+  6. Roll back producer pods to the pre-SLICE_01 image.
 - Demo regression: `make demo-up` should detect immediately if columns missing on producer side
 
 ---

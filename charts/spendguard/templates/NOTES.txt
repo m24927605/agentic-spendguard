@@ -49,8 +49,14 @@ migration ConfigMaps BEFORE running `helm upgrade`. The new release ships
     - 0048_tokenizer_versions.sql                (FK target + immutability)
 
   Canonical Ingest DB:
-    - 0013_canonical_events_prediction_columns.sql  (mirror schema)
-    - 0014_schema_bundle_prediction_v1alpha1.sql    (rotated bundle row)
+    - 0013_canonical_events_prediction_columns.sql           (mirror schema)
+    - 0015_audit_outcome_quarantine_prediction_columns.sql   (round-3 B2: quarantine carries the 18 columns through release-to-canonical_events)
+
+Round-3 B3 NOTE: the round-2 placeholder bundle migration 0014 has been
+REMOVED. SLICE_06 producer slice registers the real cosigned bundle row
+(operator-side bundle builder per Trace §12 computes the real sha256 of
+canonicalized proto bytes + records cosign verification). Until SLICE_06
+lands, producers MUST NOT write tag-300+ CloudEvent fields.
 
 CRITICAL ORDERING — apply BOTH ledger migrations BEFORE canonical_ingest
 migrations. The script in templates/migrations.yaml does this automatically
@@ -83,5 +89,6 @@ PROST 0.13 ROLLOUT INVARIANT (audit-chain extension §7.2):
   new files are absent from the ConfigMaps — this is intentional to
   prevent silent stale-schema boots.
 
-  Schema_bundle_id 01999d60-0001-7000-8000-000000000001 (v1alpha1+prediction)
-  is registered by 0014; producers will adopt it in SLICE_06.
+  Schema_bundle_id rotation deferred to SLICE_06 (round-3 B3): the
+  v1alpha1+prediction bundle row will be inserted by the operator-side
+  bundle builder with a real cosigned hash, NOT by SLICE_01.
