@@ -232,16 +232,21 @@ ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_delta_c_ratio_chk;
 --
 -- These cannot be enforced as SQL `NOT NULL` because the columns are
 -- nullable on the OTHER event_type. Instead we enforce them as
--- event-type-scoped CHECK constraints. The 2026-07-01 cutoff lets
--- SLICE_06 producers backfill writers without breaking SLICE_01-only
--- demo modes; once SLICE_06 lands the cutoff effectively becomes a no-op
--- (all new rows past 2026-07 must populate the required columns).
+-- event-type-scoped CHECK constraints.
+--
+-- Round-3 fix B5: cutoff extended from 2026-07-01 to 2027-01-01. The
+-- 2026-07 cutoff was a calendar bomb — if SLICE_06 slipped past it,
+-- every audit.decision INSERT would start failing the CHECK without any
+-- code change to surface the deadline. 2027-01-01 gives SLICE_06+
+-- producer slices ample runway; SLICE_06 deployment plan MUST land
+-- before then. Recommended ops practice: schedule a recurring calendar
+-- reminder + GitHub issue at 2026-10-01 to verify SLICE_06 status.
 -- ============================================================================
 
 ALTER TABLE audit_outbox
     ADD CONSTRAINT audit_outbox_decision_required_cols_chk
         CHECK (event_type <> 'spendguard.audit.decision'
-               OR recorded_at < '2026-07-01'::timestamptz
+               OR recorded_at < '2027-01-01'::timestamptz
                OR (predicted_a_tokens IS NOT NULL
                    AND reserved_strategy IS NOT NULL
                    AND prediction_strategy_used IS NOT NULL
@@ -252,7 +257,7 @@ ALTER TABLE audit_outbox
         NOT VALID,
     ADD CONSTRAINT audit_outbox_outcome_required_cols_chk
         CHECK (event_type <> 'spendguard.audit.outcome'
-               OR recorded_at < '2026-07-01'::timestamptz
+               OR recorded_at < '2027-01-01'::timestamptz
                OR (actual_input_tokens IS NOT NULL
                    AND actual_output_tokens IS NOT NULL))
         NOT VALID;
@@ -286,7 +291,7 @@ ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_outcome_required_cols_
 ALTER TABLE audit_outbox
     ADD CONSTRAINT audit_outbox_predicted_a_tokens_nonzero_chk
         CHECK (event_type <> 'spendguard.audit.decision'
-               OR recorded_at < '2026-07-01'::timestamptz
+               OR recorded_at < '2027-01-01'::timestamptz
                OR predicted_a_tokens IS NULL
                OR predicted_a_tokens > 0)
         NOT VALID,

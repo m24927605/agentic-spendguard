@@ -158,14 +158,16 @@ ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_delta_c_ratio_
 -- Step 3: Partial NOT-NULL via CHECK on event_type (round-2 fix M2
 -- mirror of ledger side, per spec §2.1-§2.3 "Nullable: NO" columns).
 --
--- The same recorded_at < '2026-07-01' cutoff applies — SLICE_06
--- producers begin populating these columns at that boundary.
+-- The same event_time < '2027-01-01' cutoff applies (round-3 fix B5:
+-- extended from 2026-07-01 calendar bomb) — SLICE_06 producers begin
+-- populating these columns; SLICE_06 deployment plan MUST land before
+-- 2027-01-01.
 -- ============================================================================
 
 ALTER TABLE canonical_events
     ADD CONSTRAINT canonical_events_decision_required_cols_chk
         CHECK (event_type <> 'spendguard.audit.decision'
-               OR event_time < '2026-07-01'::timestamptz
+               OR event_time < '2027-01-01'::timestamptz
                OR (predicted_a_tokens IS NOT NULL
                    AND reserved_strategy IS NOT NULL
                    AND prediction_strategy_used IS NOT NULL
@@ -176,7 +178,7 @@ ALTER TABLE canonical_events
         NOT VALID,
     ADD CONSTRAINT canonical_events_outcome_required_cols_chk
         CHECK (event_type <> 'spendguard.audit.outcome'
-               OR event_time < '2026-07-01'::timestamptz
+               OR event_time < '2027-01-01'::timestamptz
                OR (actual_input_tokens IS NOT NULL
                    AND actual_output_tokens IS NOT NULL))
         NOT VALID;
@@ -198,7 +200,7 @@ ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_outcome_requir
 ALTER TABLE canonical_events
     ADD CONSTRAINT canonical_events_predicted_a_tokens_nonzero_chk
         CHECK (event_type <> 'spendguard.audit.decision'
-               OR event_time < '2026-07-01'::timestamptz
+               OR event_time < '2027-01-01'::timestamptz
                OR predicted_a_tokens IS NULL
                OR predicted_a_tokens > 0)
         NOT VALID,
