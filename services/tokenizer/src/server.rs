@@ -7,6 +7,27 @@
 //!   * `shadow_verify` — returns `Status::unimplemented` with a stable
 //!     error message. SLICE_05 wires the real shadow worker via
 //!     `services/tokenizer/src/shadow_worker.rs`.
+//!
+//! ## Round-2 fix M6 — DoS protection
+//!
+//! Tokenize requests come from authenticated callers (sidecar +
+//! shadow worker), but defense in depth requires per-field caps so a
+//! buggy caller cannot pressure the encoder cache by sending
+//! megabyte-scale text. The hot path validates BEFORE invoking the
+//! tokenizer library (which would otherwise allocate proportional to
+//! input size for the BPE encode buffer).
+//!
+//! Caps applied at the top of [`TokenizerSvc::tokenize`]:
+//!   - `model.len()`        ≤ 256 bytes
+//!   - `raw_text.len()`     ≤ 2 MiB
+//!   - `messages.len()`     ≤ 1_000 elements
+//!   - `message.content`    ≤ 2 MiB each
+//!
+//! Plus the protocol-layer cap configured in main.rs:
+//!   - `max_decoding_message_size` = 1 MiB
+//!
+//! Violations return `Status::invalid_argument` with a stable code so
+//! callers can distinguish from `internal` (encoder panic).
 
 use std::sync::Arc;
 
@@ -18,6 +39,24 @@ use crate::proto::tokenizer::v1::{
     TokenizeRequest, TokenizeResponse,
 };
 use spendguard_tokenizer::{Tokenizer, TokenizerError};
+
+// ============================================================================
+// Round-2 fix M6 — request-shape caps. Kept as `pub(crate) const` so
+// the test mod (and future calibration tooling) can reference them.
+// ============================================================================
+
+/// Max bytes accepted in the `model` field. Real-world model strings
+/// are < 64 chars; 256 leaves runway for vendor prefixes.
+pub(crate) const MAX_MODEL_LEN: usize = 256;
+
+/// Max bytes accepted in `raw_text` (the text-completion shape).
+pub(crate) const MAX_RAW_TEXT_LEN: usize = 2 << 20;
+
+/// Max number of `Message` elements in the chat-shape array.
+pub(crate) const MAX_MESSAGES: usize = 1_000;
+
+/// Max bytes per individual `message.content`.
+pub(crate) const MAX_MESSAGE_CONTENT_LEN: usize = 2 << 20;
 
 /// Service struct holding a shared library handle. Constructed once
 /// in main(); cloned cheaply on every RPC dispatch because
@@ -40,6 +79,39 @@ impl TokenizerSvcTrait for TokenizerSvc {
         request: Request<TokenizeRequest>,
     ) -> Result<Response<TokenizeResponse>, Status> {
         let proto_req = request.into_inner();
+
+        // ── Round-2 fix M6: DoS protection request-shape caps ──────
+        // Reject oversize payloads before the library allocates any
+        // buffers proportional to input size. Stable error codes so
+        // callers (sidecar / shadow worker) can metric on them.
+        if proto_req.model.len() > MAX_MODEL_LEN {
+            return Err(Status::invalid_argument(format!(
+                "model field too long: {} > {} bytes (M6 DoS cap)",
+                proto_req.model.len(),
+                MAX_MODEL_LEN
+            )));
+        }
+        if proto_req.raw_text.len() > MAX_RAW_TEXT_LEN {
+            return Err(Status::invalid_argument(format!(
+                "raw_text exceeds {} bytes (M6 DoS cap)",
+                MAX_RAW_TEXT_LEN
+            )));
+        }
+        if proto_req.messages.len() > MAX_MESSAGES {
+            return Err(Status::invalid_argument(format!(
+                "too many messages: {} > {} (M6 DoS cap)",
+                proto_req.messages.len(),
+                MAX_MESSAGES
+            )));
+        }
+        for (idx, m) in proto_req.messages.iter().enumerate() {
+            if m.content.len() > MAX_MESSAGE_CONTENT_LEN {
+                return Err(Status::invalid_argument(format!(
+                    "messages[{idx}].content exceeds {MAX_MESSAGE_CONTENT_LEN} bytes (M6 DoS cap)"
+                )));
+            }
+        }
+
         let lib_req: spendguard_tokenizer::TokenizeRequest = proto_req.into();
 
         // Per spec §3.5 — the request_id mints UUIDv7 if empty so
@@ -162,6 +234,94 @@ mod tests {
         assert_eq!(err.code(), tonic::Code::Unimplemented);
         assert!(err.message().contains("SLICE_03"));
         assert!(err.message().contains("SLICE_05"));
+    }
+
+    // ── Round-2 fix M6 — DoS protection tests ─────────────────────
+
+    #[tokio::test]
+    async fn tokenize_rejects_oversize_model() {
+        let s = svc();
+        let req = Request::new(TokenizeRequest {
+            model: "x".repeat(MAX_MODEL_LEN + 1),
+            messages: vec![],
+            raw_text: String::new(),
+            request_id: String::new(),
+        });
+        let err = s.tokenize(req).await.expect_err("M6 should reject");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("model field too long"));
+    }
+
+    #[tokio::test]
+    async fn tokenize_rejects_oversize_raw_text() {
+        let s = svc();
+        let req = Request::new(TokenizeRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![],
+            raw_text: "a".repeat(MAX_RAW_TEXT_LEN + 1),
+            request_id: String::new(),
+        });
+        let err = s.tokenize(req).await.expect_err("M6 should reject");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("raw_text exceeds"));
+    }
+
+    #[tokio::test]
+    async fn tokenize_rejects_too_many_messages() {
+        let s = svc();
+        let blank_msg = crate::proto::tokenizer::v1::tokenize_request::Message {
+            role: "user".to_string(),
+            content: "x".to_string(),
+            tool_calls: vec![],
+        };
+        let req = Request::new(TokenizeRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![blank_msg; MAX_MESSAGES + 1],
+            raw_text: String::new(),
+            request_id: String::new(),
+        });
+        let err = s.tokenize(req).await.expect_err("M6 should reject");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("too many messages"));
+    }
+
+    #[tokio::test]
+    async fn tokenize_rejects_oversize_message_content() {
+        let s = svc();
+        let big_msg = crate::proto::tokenizer::v1::tokenize_request::Message {
+            role: "user".to_string(),
+            content: "x".repeat(MAX_MESSAGE_CONTENT_LEN + 1),
+            tool_calls: vec![],
+        };
+        let req = Request::new(TokenizeRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![big_msg],
+            raw_text: String::new(),
+            request_id: String::new(),
+        });
+        let err = s.tokenize(req).await.expect_err("M6 should reject");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err.message().contains("messages[0].content exceeds"));
+    }
+
+    #[tokio::test]
+    async fn tokenize_accepts_at_cap_boundary() {
+        // Boundary check: exactly MAX_MODEL_LEN bytes must succeed.
+        let s = svc();
+        let req = Request::new(TokenizeRequest {
+            // Use a model string that hits a dispatch entry; pad with
+            // suffix to bring up to MAX_MODEL_LEN. We deliberately use
+            // an unknown model to land on Tier 3 (the encode path is
+            // tested elsewhere); the point here is the cap itself
+            // permits up-to-and-including MAX_MODEL_LEN.
+            model: "x".repeat(MAX_MODEL_LEN),
+            messages: vec![],
+            raw_text: "hello".to_string(),
+            request_id: String::new(),
+        });
+        let resp = s.tokenize(req).await.expect("at-cap accepted").into_inner();
+        // Unknown model lands on Tier 3.
+        assert_eq!(resp.tier, "T3");
     }
 
     #[tokio::test]
