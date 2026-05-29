@@ -122,8 +122,9 @@ Summary:
 
 - Migration runs on fresh Postgres → all expected tables / columns / indexes exist
 - Migration runs on existing demo Postgres → existing rows unchanged (NULL new columns)
-- Trigger function with new column list: UPDATE on each new column raises 42P10
+- Trigger function with new column list: UPDATE on each new column raises 42P10 (`services/ledger/tests/migrations/test_prediction_columns_trigger.sql` round-3 fix M8 fixture)
 - Trigger function: forwarder's UPDATE on `pending_forward` etc. passes (no false positive)
+- **Round-3 fix B2**: outcome-before-decision quarantine + release path preserves all 18 prediction columns end-to-end (`services/canonical_ingest/tests/migrations/test_quarantine_release_prediction_cols.sql`)
 
 ### 8.2 Integration tests
 

@@ -50,6 +50,21 @@ EXCEPTION
         NULL;
 END $$;
 
+-- Insert a deterministic test schema_bundle so the canonical_events FK
+-- doesn't reject the test INSERT. Uses a fixed UUID so re-runs are
+-- idempotent (ON CONFLICT swallows the duplicate).
+INSERT INTO schema_bundles (
+    schema_bundle_id, schema_bundle_hash, canonical_schema_version,
+    profile_versions, fetched_at
+) VALUES (
+    '01999d80-0001-7000-8000-0000000000aa'::uuid,
+    '\xe9229188458ed12eb49796cb23422080b9b68ddf571fc7ae7db79bcc3be17576'::bytea,
+    'test-fixture-spendguard.v1alpha1',
+    '{}'::jsonb,
+    clock_timestamp()
+)
+ON CONFLICT (schema_bundle_id) DO NOTHING;
+
 -- ============================================================================
 -- Step 1: Quarantine a synthetic audit.outcome with all 18 prediction
 -- columns populated.
@@ -83,7 +98,7 @@ INSERT INTO audit_outcome_quarantine (
     1,
     '\x00'::bytea,
     'sidecar:test-prod-1:key-1',
-    '01999d60-0001-7000-8000-000000000001'::uuid,
+    '01999d80-0001-7000-8000-0000000000aa'::uuid,
     '\xe9229188458ed12eb49796cb23422080b9b68ddf571fc7ae7db79bcc3be17576'::bytea,
     'spendguard.audit.outcome',
     '1.0',
