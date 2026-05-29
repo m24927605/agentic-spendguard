@@ -95,14 +95,20 @@ struct YamlRule {
     /// `BLOCK_NEXT_CALL` (per spec §5) applies if omitted.
     #[serde(default)]
     run_projection_action: Option<String>,
-    /// SLICE_02 round-1 M3: capture the spec §6.3 CEL `condition:`
-    /// field so we can hard-error on v1alpha2 contracts that use it
-    /// BEFORE SLICE_09 wires the CEL evaluator. Silent-ignore would
-    /// be a worse-than-default foot-gun (operators copying §6.3
-    /// examples would see no enforcement and assume the rule is
-    /// active). v1alpha1 contracts that drop a stray `condition:`
-    /// field also get a hard error (forward-compat hint that would
-    /// never have an effect under v1alpha1 either).
+    /// SLICE_02 round-1 M3 (round-2 revised): capture the spec §6.3
+    /// CEL `condition:` field so we can hard-error on v1alpha2
+    /// contracts that use it BEFORE SLICE_09 wires the CEL evaluator.
+    /// Silent-ignore on v1alpha2 would be a worse-than-default foot-gun
+    /// (operators copying §6.3 examples would see no enforcement and
+    /// assume the rule is active).
+    ///
+    /// Round-2 asymmetric handling: on **v1alpha1** contracts the
+    /// `condition:` field is LEGACY (per v1alpha1 spec §18) and the
+    /// wedge evaluator falls back to the declarative `when:` form —
+    /// a `tracing::warn!` is emitted on parse but the contract loads
+    /// successfully (consistent with M1's forward-compat-hint pattern).
+    /// On **v1alpha2** contracts `condition:` is REJECTED — v1alpha2
+    /// authors explicitly opt into the predictor-aware surface.
     #[serde(default)]
     condition: Option<String>,
 }
@@ -283,26 +289,51 @@ fn parse_yaml(bytes: &[u8]) -> Result<Contract> {
                 )
             })?;
 
-            // SLICE_02 round-1 M3: hard-reject v1alpha2 contracts that
-            // ship a CEL `condition:` field. Per spec §6.3 the v1alpha2
+            // SLICE_02 round-2 M (revises round-1 M3): asymmetric handling
+            // of the CEL `condition:` field per spec §6.3 wiring boundary.
+            //
+            // v1alpha2 contracts → HARD-REJECT. Per spec §6.3 the v1alpha2
             // CEL evaluator is wired in SLICE_09, not SLICE_02 — until
             // then the only honored condition surface is the declarative
             // when.claim_amount_atomic_gt / when.claim_amount_atomic_gte
             // form. Silent-ignore would be the worst possible foot-gun
             // (operators copying §6.3 examples would see no enforcement
-            // and assume the rule was active). v1alpha1 contracts that
-            // drop a stray `condition:` field also error — the field
-            // is not part of v1alpha1 either and would never take
-            // effect, so failing loudly beats silent acceptance.
+            // and assume the rule was active). v1alpha2 contract authors
+            // explicitly opt into the predictor-aware surface so the
+            // strict signal is appropriate.
+            //
+            // v1alpha1 contracts → WARN, do not reject. v1alpha1 spec §18
+            // documents `condition: |` CEL form in rule bodies as part
+            // of the quickstart contract. The §2 row-18 invariant
+            // ("v1alpha1 quickstart 100% 正確") forbids breaking that
+            // surface. The wedge evaluator falls back to the declarative
+            // `when:` form, and a tracing::warn! emits a breadcrumb
+            // consistent with M1's forward-compat-hint pattern at
+            // parse.rs:247-258 above.
             if r.condition.is_some() {
-                return Err(anyhow!(
-                    "bundle_validation_failed: rule '{}' uses CEL `condition:` \
-                     field; CEL conditions wired in SLICE_09 — use \
-                     claim_amount_atomic_gt / claim_amount_atomic_gte under \
-                     `when:` in SLICE_02. See contract-dsl-spec-v1alpha2.md \
-                     §6.3 SLICE_02-vs-SLICE_09 wiring boundary.",
-                    r.id
-                ));
+                match api_version_kind {
+                    ApiVersion::V1alpha2 => {
+                        return Err(anyhow!(
+                            "bundle_validation_failed: rule '{}' uses CEL `condition:` \
+                             field; CEL conditions wired in SLICE_09 — use \
+                             claim_amount_atomic_gt / claim_amount_atomic_gte under \
+                             `when:` in SLICE_02. See contract-dsl-spec-v1alpha2.md \
+                             §6.3 SLICE_02-vs-SLICE_09 wiring boundary.",
+                            r.id
+                        ));
+                    }
+                    ApiVersion::V1alpha1 => {
+                        tracing::warn!(
+                            api_version = %parsed.api_version,
+                            rule_id = %r.id,
+                            "v1alpha1 contract rule carries `condition:` field — CEL \
+                             conditions are not honored by the wedge evaluator; rule \
+                             will use declarative when:/then: form only. See \
+                             docs/contract-dsl-spec-v1alpha2.md §6.3 SLICE_02-vs-SLICE_09 \
+                             wiring boundary."
+                        );
+                    }
+                }
             }
 
             // SLICE_02 round-1 M1: emit a tracing::warn! when a v1alpha1
@@ -676,12 +707,20 @@ spec:
     }
 
     #[test]
-    fn rejects_v1alpha1_contract_with_cel_condition_field() {
-        // v1alpha1 contracts with stray `condition:` also fail loudly
-        // — there's no path under v1alpha1 where the field has any
-        // effect, so silent acceptance would be a worse-than-default
-        // surface even though §6.3 doesn't directly tempt v1alpha1
-        // authors.
+    fn v1alpha1_contract_with_cel_condition_field_parses_with_warn() {
+        // SLICE_02 round-2 M (revises round-1 M3): v1alpha1 contracts
+        // carrying a `condition:` field MUST parse successfully — the
+        // v1alpha1 spec §18 quickstart documents the CEL `condition: |`
+        // form in rule bodies and the §2 row-18 invariant requires that
+        // any v1alpha1 quickstart remains 100% correct under v1alpha2
+        // evaluator. The wedge evaluator falls back to the declarative
+        // `when:` form; a tracing::warn! emits the breadcrumb but does
+        // not abort parse (consistent with M1's forward-compat pattern).
+        //
+        // Note: this test asserts successful parse only. The tracing
+        // crate's default subscriber is no-op in tests, so we don't
+        // attempt to capture the warn line here — the parse-success
+        // assertion is the load-bearing guarantee for §2 row-18.
         let yaml = r#"
 apiVersion: contract.spendguard.io/v1alpha1
 kind: Contract
@@ -704,10 +743,11 @@ spec:
         decision: STOP
         reason_code: BUDGET_EXHAUSTED
 "#;
-        let err = parse_yaml(yaml.as_bytes()).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("bundle_validation_failed"));
-        assert!(msg.contains("CEL"));
+        let c = parse_yaml(yaml.as_bytes())
+            .expect("v1alpha1 contract with `condition:` MUST parse (§2 row 18 invariant)");
+        assert_eq!(c.api_version, "contract.spendguard.io/v1alpha1");
+        assert_eq!(c.rules.len(), 1);
+        assert_eq!(c.rules[0].id, "stray-cel");
     }
 
     #[test]

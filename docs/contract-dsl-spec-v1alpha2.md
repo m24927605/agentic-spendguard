@@ -352,8 +352,21 @@ bundles BEFORE SLICE_09 lands would silently get no enforcement — every
 rule with a CEL condition would be ignored at evaluation time and the
 operator would observe the contract as a no-op without any audit
 breadcrumb. To prevent the silent-ignore foot-gun, **the SLICE_02
-parser rejects any v1alpha2 contract (or v1alpha1 contract) containing
-a `condition:` field with the error**:
+parser asymmetrically handles the `condition:` field**:
+
+**On v1alpha1 contracts**, `condition:` fields are LEGACY (per
+v1alpha1 spec §18 quickstart, which documents the `condition: |` CEL
+form in rule bodies) and the wedge evaluator falls back to declarative
+`when:` form — a `tracing::warn!` is emitted on parse but the contract
+loads successfully. This preserves the §2 row-18 invariant
+("v1alpha1 quickstart 100% 正確") and is consistent with M1's
+forward-compat-hint pattern (parse.rs:247-258).
+
+**On v1alpha2 contracts**, `condition:` fields are REJECTED with
+`bundle_validation_failed` because v1alpha2 explicitly opts into the
+predictor-aware surface; SLICE_09 will wire the CEL accessor surface
+listed above (`run_projection.*`, `prediction.*`). The rejection error
+string:
 
 ```
 bundle_validation_failed: rule '<rule-id>' uses CEL `condition:`
@@ -366,7 +379,7 @@ boundary.
 Cross-reference: enforcement in
 `services/sidecar/src/contract/parse.rs` (rule-iteration block); test
 coverage in `parse.rs::tests::rejects_v1alpha2_contract_with_cel_condition_field`
-and `rejects_v1alpha1_contract_with_cel_condition_field`.
+and `v1alpha1_contract_with_cel_condition_field_parses_with_warn`.
 
 ### 6.4 v1alpha1 contracts 在 v1alpha2 evaluator 下的 default 填充
 
