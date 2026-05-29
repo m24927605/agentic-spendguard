@@ -17,6 +17,32 @@
 #   - spendguard.contract.policy_changed audit event (CloudEvents 1.0)
 #   - schema_bundle_id rotation
 # Operators MUST NOT runtime-override policy — bundle redeploy only.
+#
+# =========================================================================
+# SLICE_02 round-1 m2 — SAFETY NOTE for operators copying this file
+# =========================================================================
+#
+# This sample exposes the v1alpha2 spec surface. The
+# `require_approval_on_projected_overrun` rule near the bottom of this
+# file is DOCUMENTATION-ONLY and is commented out by default.
+# Uncomment it ONLY after the `run_cost_projector` (SLICE_09) ships —
+# see docs/run-cost-projector-spec-v1alpha1.md §3.
+#
+# Why disabled by default: SLICE_02 ships the v1alpha2 spec surface
+# (prediction_policy enum, RUN_* codes, run_projection_action) BEFORE
+# SLICE_09 wires the projector that emits the matching RUN_* codes.
+# The wedge evaluator in SLICE_02 keys on amount thresholds (claim_amount_atomic_gt)
+# rather than projector signals; a rule like
+# `claim_amount_atomic_gt: "1"` therefore matches EVERY non-zero
+# claim and would flag every single LLM call for human approval —
+# a denial-of-service for any operator copy-pasting this sample
+# unchanged before SLICE_09 lands.
+#
+# When SLICE_09 ships, the rule's `when:` block will be a CEL
+# condition referencing `run_projection.at_decision_micros` (per
+# spec §6.3); operators uncommenting this rule then will get
+# projection-driven approval flow, not amount-threshold-driven.
+# =========================================================================
 
 apiVersion: spendguard.ai/v1alpha2
 kind: Contract
@@ -55,6 +81,17 @@ spec:
         reason_code: BUDGET_EXHAUSTED
 
     # --- v1alpha2 NEW: per-run projection rule (spec §3.1) -----------
+    # ===================================================================
+    # DISABLED UNTIL SLICE_09 — uncomment when run_cost_projector is
+    # wired (see docs/run-cost-projector-spec-v1alpha1.md §3).
+    #
+    # See the safety note at the top of this file: SLICE_02 evaluator
+    # wedge keys on amount thresholds (claim_amount_atomic_gt), NOT on
+    # projector signals. Uncommenting this rule BEFORE SLICE_09 lands
+    # would flag every non-zero LLM call for human approval — a
+    # denial-of-service for any operator copying this file unchanged.
+    # ===================================================================
+    #
     # Fires when run_cost_projector decides cumulative_run_cost +
     # this_call_reservation + predicted_remaining_cost > budget remaining.
     # Per spec §3.4 the reasonCode is the RUN_* code; the per-rule
@@ -62,24 +99,29 @@ spec:
     # lattice (RequireApproval → human approval flow).
     #
     # SLICE_02 acceptance note: NO source emits RUN_* codes until
-    # SLICE_09 wires run_cost_projector. Until then this rule sits
-    # dormant. Once SLICE_09 lands, the projector emits matching
-    # BudgetClaim entries on every llm.call.pre and this rule fires.
-    - id: require_approval_on_projected_overrun
-      when:
-        budget_id: 11111111-1111-4111-8111-111111111111
-        # SLICE_02 evaluator wedge keys on amount thresholds; the
-        # real condition will be CEL once SLICE_09 wires
-        # `run_projection.at_decision_micros > budget("daily_usd").remaining.amountMicros`
-        # per spec §6.3 (CEL grammar).
-        claim_amount_atomic_gt: "1"
-      then:
-        decision: REQUIRE_APPROVAL   # placeholder; §3.4 projection wins
-        reason_code: RUN_BUDGET_PROJECTION_EXCEEDED
-        approver_role: tenant-admin
-      # --- v1alpha2 NEW: rule-level projection action --------------
-      # REQUIRE_APPROVAL: route to v1alpha1 §11 approval flow.
-      # Allowed under EMPIRICAL_RUN_CEILING per §5.3 (all 3 actions
-      # permitted). Operator can swap to BLOCK_NEXT_CALL for harder
-      # enforcement or ALERT_ONLY for shadow / observation mode.
-      run_projection_action: REQUIRE_APPROVAL
+    # SLICE_09 wires run_cost_projector. Once SLICE_09 lands, the
+    # projector emits matching BudgetClaim entries on every llm.call.pre
+    # and this rule fires.
+    #
+    # - id: require_approval_on_projected_overrun
+    #   when:
+    #     budget_id: 11111111-1111-4111-8111-111111111111
+    #     # POST-SLICE_09: replace this declarative threshold with the
+    #     # spec §6.3 CEL form:
+    #     #   condition: |
+    #     #     run_projection.at_decision_micros >
+    #     #     budget("daily_usd").remaining.amountMicros
+    #     # Until then this template uses an amount threshold AS A
+    #     # PLACEHOLDER only — see the safety note at the top of this
+    #     # file for why it must stay commented out.
+    #     claim_amount_atomic_gt: "1"
+    #   then:
+    #     decision: REQUIRE_APPROVAL   # placeholder; §3.4 projection wins
+    #     reason_code: RUN_BUDGET_PROJECTION_EXCEEDED
+    #     approver_role: tenant-admin
+    #   # --- v1alpha2 NEW: rule-level projection action --------------
+    #   # REQUIRE_APPROVAL: route to v1alpha1 §11 approval flow.
+    #   # Allowed under EMPIRICAL_RUN_CEILING per §5.3 (all 3 actions
+    #   # permitted). Operator can swap to BLOCK_NEXT_CALL for harder
+    #   # enforcement or ALERT_ONLY for shadow / observation mode.
+    #   run_projection_action: REQUIRE_APPROVAL

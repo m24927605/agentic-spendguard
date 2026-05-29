@@ -711,6 +711,33 @@ spec:
     }
 
     #[test]
+    fn quickstart_v1alpha2_sample_still_parses_after_round1_m2_disable() {
+        // SLICE_02 round-1 m2: the `require_approval_on_projected_overrun`
+        // rule in examples/contracts/quickstart-v1alpha2.yaml is now
+        // commented out (would otherwise flag every non-zero call for
+        // approval before SLICE_09 wires the projector). This test
+        // pins the post-m2 quickstart to ensure:
+        //   1. The remaining structure still parses cleanly.
+        //   2. Only the `stop_when_exhausted` rule is active.
+        //   3. The contract-level prediction_policy is preserved.
+        let yaml = include_bytes!(
+            "../../../../examples/contracts/quickstart-v1alpha2.yaml"
+        );
+        let c = parse_yaml(yaml).expect("quickstart-v1alpha2.yaml parse");
+        assert_eq!(c.api_version, "spendguard.ai/v1alpha2");
+        assert_eq!(c.prediction_policy, PredictionPolicy::EmpiricalRunCeiling);
+        assert_eq!(c.rules.len(), 1, "only stop_when_exhausted should be active");
+        assert_eq!(c.rules[0].id, "stop_when_exhausted");
+        // The active rule has no RUN_* code, so the default
+        // BLOCK_NEXT_CALL applies and is allowed under
+        // EMPIRICAL_RUN_CEILING.
+        assert_eq!(
+            c.rules[0].run_projection_action,
+            RunProjectionAction::BlockNextCall
+        );
+    }
+
+    #[test]
     fn v1alpha2_without_condition_field_still_parses() {
         // Regression: the M3 reject path must NOT fire when `condition:`
         // is absent (which is the only legal SLICE_02 form). Re-uses

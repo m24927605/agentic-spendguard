@@ -81,6 +81,31 @@ pub struct PredictionContext {
 ///
 /// Returns a `Context` ready for `program.execute(&ctx)`.
 ///
+/// # SLICE_09-consumable API
+///
+/// SLICE_02 round-1 m1: this function is the supported entry point for
+/// SLICE_09 (run_cost_projector) callers. The expected wiring sequence
+/// at SLICE_09 time:
+///
+/// 1. The projector populates a `RunProjection` from
+///    `(at_decision_micros, predicted_remaining_steps,
+///    steps_completed_so_far)` per
+///    `docs/run-cost-projector-spec-v1alpha1.md` §3.
+/// 2. The predictor populates a `PredictionContext` from
+///    `(tier, strategy_chosen, confidence)` per
+///    `docs/predictor-architecture-spec-v1alpha1.md` §5.
+/// 3. Call `into_cel_context(&run, &prediction)` to build the binding
+///    `Context`.
+/// 4. Pass the `Context` into `cel_interpreter::Program::execute` for
+///    the rule's `condition: <cel-expr>` per spec §6.3 grammar.
+///
+/// Note: SLICE_02 ships this struct + helper with unit-test coverage
+/// against synthetic data; the hot-path evaluator does NOT call it
+/// (the wedge evaluator uses declarative `when.claim_amount_atomic_gt`
+/// per `evaluate.rs`). Re-exported at `crate::contract::into_cel_context`
+/// (per `mod.rs`) so SLICE_09 callers can `use crate::contract::*`
+/// without reaching into the private module path.
+///
 /// SLICE_02 status: the CEL evaluator is wired but not yet called from
 /// the hot path (the wedge evaluator uses declarative when/then on
 /// claim amounts, per evaluate.rs). The contract author wiring in

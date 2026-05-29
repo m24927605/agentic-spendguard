@@ -117,7 +117,18 @@ pub type SharedContract = Arc<Contract>;
 /// (healthcare / finance / government) cannot have "typical case"
 /// estimates leak into enforcement. v1alpha1 contracts inherit this
 /// value automatically (per §6.4) so backward compat is byte-identical.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// SLICE_02 round-1 M4: derive `serde::Serialize` + `serde::Deserialize`
+/// with `SCREAMING_SNAKE_CASE` so the serde wire form matches the
+/// `as_str()` / `from_str()` tokens. This unifies the future
+/// JSON/YAML serialisation surface (e.g. calibration-report exports,
+/// audit JSON snapshots) on the same canonical strings the existing
+/// `from_str` / `as_str` round-trip already pins.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash,
+    serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PredictionPolicy {
     /// Default. Reservation = Strategy A (ceiling); regulated workloads.
     StrictCeiling,
@@ -166,7 +177,14 @@ impl Default for PredictionPolicy {
 /// Default is `BLOCK_NEXT_CALL` (per spec §5 default) so v1alpha1
 /// contracts that don't know about RUN_* codes get the strictest
 /// behavior when SLICE_09 starts emitting them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// SLICE_02 round-1 M4: serde derives (see `PredictionPolicy` for
+/// rationale).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash,
+    serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RunProjectionAction {
     /// Default. RUN_* triggers → `Decision::Stop` (v1alpha1 lattice).
     BlockNextCall,
@@ -206,13 +224,25 @@ impl Default for RunProjectionAction {
 ///
 /// SLICE_02 routes these through `handle_run_code` (per spec §7.1).
 /// Emission is wired in SLICE_09 (run_cost_projector).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+///
+/// SLICE_02 round-1 M4: serde derives. Each variant uses an explicit
+/// `#[serde(rename = "...")]` so the wire form matches the spec
+/// §3.1/§3.2/§3.3 `RUN_*` prefix exactly (the default
+/// `SCREAMING_SNAKE_CASE` derivation would drop the `RUN_` prefix
+/// since the Rust variant identifiers do not carry it).
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash,
+    serde::Serialize, serde::Deserialize,
+)]
 pub enum RunCode {
     /// Per spec §3.1. Per-run projected cumulative > budget remaining.
+    #[serde(rename = "RUN_BUDGET_PROJECTION_EXCEEDED")]
     BudgetProjectionExceeded,
     /// Per spec §3.2. Run-instance drift (per-step cost rising > 2σ).
+    #[serde(rename = "RUN_DRIFT_DETECTED")]
     DriftDetected,
     /// Per spec §3.3. Step count exceeded `with_run_plan` hint.
+    #[serde(rename = "RUN_STEPS_EXCEEDED")]
     StepsExceeded,
 }
 
@@ -372,6 +402,105 @@ mod tests {
             PredictionPolicy::ShadowOnly,
             RunProjectionAction::RequireApproval
         ));
+    }
+
+    // =================================================================
+    // SLICE_02 round-1 M4 — serde round-trip parity with as_str / from_str.
+    //
+    // The existing `*_round_trip` tests pin the as_str ↔ from_str pair.
+    // These tests pin the serde wire form (YAML / JSON) to the same
+    // canonical SCREAMING_SNAKE_CASE tokens, so the eventual
+    // calibration-report / audit-snapshot path won't drift from the
+    // contract YAML wire form. Per HANDOFF: "Add round-trip unit test"
+    // for all three enums.
+    // =================================================================
+
+    #[test]
+    fn prediction_policy_serde_round_trip() {
+        for (variant, token) in [
+            (PredictionPolicy::StrictCeiling, "STRICT_CEILING"),
+            (PredictionPolicy::EmpiricalRunCeiling, "EMPIRICAL_RUN_CEILING"),
+            (PredictionPolicy::AdaptiveCeiling, "ADAPTIVE_CEILING"),
+            (PredictionPolicy::ShadowOnly, "SHADOW_ONLY"),
+        ] {
+            // YAML round trip.
+            let yaml = serde_yaml::to_string(&variant).expect("yaml encode");
+            assert_eq!(yaml.trim(), token);
+            let back: PredictionPolicy =
+                serde_yaml::from_str(token).expect("yaml decode");
+            assert_eq!(back, variant);
+
+            // JSON round trip.
+            let json = serde_json::to_string(&variant).expect("json encode");
+            assert_eq!(json, format!("\"{}\"", token));
+            let back: PredictionPolicy =
+                serde_json::from_str(&format!("\"{}\"", token)).expect("json decode");
+            assert_eq!(back, variant);
+
+            // Cross-check: serde wire form matches as_str() exactly so
+            // a single canonical token covers YAML, JSON, and the
+            // bespoke from_str / as_str helpers.
+            assert_eq!(variant.as_str(), token);
+        }
+    }
+
+    #[test]
+    fn run_projection_action_serde_round_trip() {
+        for (variant, token) in [
+            (RunProjectionAction::BlockNextCall, "BLOCK_NEXT_CALL"),
+            (RunProjectionAction::RequireApproval, "REQUIRE_APPROVAL"),
+            (RunProjectionAction::AlertOnly, "ALERT_ONLY"),
+        ] {
+            let yaml = serde_yaml::to_string(&variant).expect("yaml encode");
+            assert_eq!(yaml.trim(), token);
+            let back: RunProjectionAction =
+                serde_yaml::from_str(token).expect("yaml decode");
+            assert_eq!(back, variant);
+
+            let json = serde_json::to_string(&variant).expect("json encode");
+            assert_eq!(json, format!("\"{}\"", token));
+            let back: RunProjectionAction =
+                serde_json::from_str(&format!("\"{}\"", token)).expect("json decode");
+            assert_eq!(back, variant);
+
+            assert_eq!(variant.as_str(), token);
+        }
+    }
+
+    #[test]
+    fn run_code_serde_round_trip() {
+        // RunCode variants use explicit #[serde(rename = "...")] because
+        // the spec §3 tokens carry a RUN_ prefix that the Rust variant
+        // identifiers do not.
+        for (variant, token) in [
+            (RunCode::BudgetProjectionExceeded, "RUN_BUDGET_PROJECTION_EXCEEDED"),
+            (RunCode::DriftDetected, "RUN_DRIFT_DETECTED"),
+            (RunCode::StepsExceeded, "RUN_STEPS_EXCEEDED"),
+        ] {
+            let yaml = serde_yaml::to_string(&variant).expect("yaml encode");
+            assert_eq!(yaml.trim(), token);
+            let back: RunCode = serde_yaml::from_str(token).expect("yaml decode");
+            assert_eq!(back, variant);
+
+            let json = serde_json::to_string(&variant).expect("json encode");
+            assert_eq!(json, format!("\"{}\"", token));
+            let back: RunCode =
+                serde_json::from_str(&format!("\"{}\"", token)).expect("json decode");
+            assert_eq!(back, variant);
+
+            assert_eq!(variant.as_str(), token);
+        }
+    }
+
+    #[test]
+    fn enums_reject_lowercase_and_unknown_via_serde() {
+        // Case-sensitivity at the serde boundary mirrors the from_str
+        // helper's case-sensitivity (spec §4 uses uppercase tokens
+        // exclusively; lower-case is operator typo, not a valid form).
+        assert!(serde_yaml::from_str::<PredictionPolicy>("strict_ceiling").is_err());
+        assert!(serde_yaml::from_str::<PredictionPolicy>("BANANA").is_err());
+        assert!(serde_yaml::from_str::<RunProjectionAction>("block_next_call").is_err());
+        assert!(serde_yaml::from_str::<RunCode>("RUN_UNKNOWN").is_err());
     }
 
     #[test]

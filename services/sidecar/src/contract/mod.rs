@@ -24,3 +24,10 @@ pub use types::{
     is_allowed_pair, Action, Budget, Condition, Contract, EvalOutcome, PredictionPolicy, Rule,
     RunCode, RunProjectionAction, SharedContract,
 };
+// SLICE_02 round-1 m1: re-export the CEL helper surface at module
+// boundary so SLICE_09 (run_cost_projector) and downstream services
+// can `use crate::contract::{into_cel_context, RunProjection,
+// PredictionContext}` without reaching into the inner module path.
+// The bindings are SLICE_09-consumable today; SLICE_02 ships them
+// with unit-test coverage against synthetic data per spec §6.3.
+pub use cel_helpers::{into_cel_context, PredictionContext, RunProjection};
