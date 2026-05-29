@@ -370,8 +370,13 @@ message CloudEvent {
   // NUMERIC(38,0) serialized as int64 here (assumes < 2^63 atomic units;
   // for larger budgets a future v2 may switch to string per Money type).
   int64  run_projection_at_decision_atomic = 311;
-  int32  run_predicted_remaining_steps     = 312;  // -1 sentinel for unreachable
-  int32  run_steps_completed_so_far        = 313;
+  int32  run_predicted_remaining_steps     = 312;  // -1 sentinel for unreachable; INT (not BIGINT) on SQL side matches int32 here
+  // Round-4 fix M1: int32 → int64 to match audit_outbox.run_steps_completed_so_far
+  // (BIGINT per round-2 fix M4 anticipating multi-year aggregation). Wire-
+  // compatible with the round-3 int32 encoding because non-negative
+  // values use identical varint wire bytes per proto3 spec; tag 313
+  // therefore stays at 313 without a version bump.
+  int64  run_steps_completed_so_far        = 313;
 
   // Commit-side actual columns (4 per spec §2.3). Only on .outcome events.
   int64  actual_input_tokens            = 314;

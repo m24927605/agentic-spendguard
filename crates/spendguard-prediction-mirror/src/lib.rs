@@ -10,9 +10,11 @@
 //! that writes an audit row — sidecar, webhook_receiver, ttl_sweeper,
 //! ledger invoice_reconcile — and every consumer that compares the two
 //! representations — verify-chain `--check-prediction-mirror`,
-//! calibration-report SQL aggregations — must agree on the 10 mappings
-//! (round-3 fix M2 added the prediction_confidence + prediction_sample_size
-//! pairs that were missed in round-2):
+//! calibration-report SQL aggregations — must agree on the 10 NULL
+//! mappings (round-3 fix M2 added the prediction_confidence +
+//! prediction_sample_size pairs that were missed in round-2; round-4
+//! fix M10 added run_steps_completed_so_far after round-4 M1 promoted
+//! tag 313 from int32 to int64):
 //!
 //!   * `predicted_b_tokens         IS NULL`    ⇔ proto tag 301 = `0`
 //!   * `predicted_c_tokens         IS NULL`    ⇔ proto tag 302 = `0`
@@ -21,11 +23,13 @@
 //!   * `prediction_sample_size     IS NULL`    ⇔ proto tag 309 = `0`
 //!   * `cold_start_layer_used      IS NULL`    ⇔ proto tag 310 = `""`
 //!   * `run_predicted_remaining_steps IS NULL` ⇔ proto tag 312 = `-1`
+//!   * `run_steps_completed_so_far IS NULL`    ⇔ proto tag 313 = `0`
 //!   * `delta_b_ratio              IS NULL`    ⇔ proto tag 316 = `0.0`
 //!   * `delta_c_ratio              IS NULL`    ⇔ proto tag 317 = `0.0`
 //!
 //! Plus `predicted_a_tokens` (tag 300) which has no NULL case but is
-//! included for round-trip symmetry.
+//! included for round-trip symmetry. Total: 10 NULL mappings + 1
+//! no-NULL variant = 11 [`MirrorField`] discriminants.
 //!
 //! If sidecar.rs and webhook_receiver.rs implement the translation
 //! independently, **drift is inevitable** — one service might encode
@@ -48,16 +52,32 @@
 //! Migration 0046 step 3b (round-3) enforces these as CHECK constraints
 //! on the SQL boundary as defense-in-depth.
 //!
-//! ## Round-2 scope
+//! ## Scope (round-2 origin, round-4 current)
 //!
 //! SLICE_01 lands the helper crate with type-erased Rust signatures
-//! that match the spec §6.3 table, plus 7 unit tests covering every
-//! sentinel-bearing column (round-3 fix M2 added 2 tests for
-//! prediction_confidence and prediction_sample_size). SLICE_06
-//! producers will import this crate and replace their inline
-//! NULL↔sentinel translations with [`column_to_proto_sentinel`] /
+//! that match the spec §6.3 table, plus 8 unit tests covering every
+//! sentinel-bearing column (round-3 M2 added 2 tests for
+//! prediction_confidence + prediction_sample_size; round-4 M10 added 1
+//! test for run_steps_completed_so_far). SLICE_06 producers will
+//! import this crate and replace their inline NULL↔sentinel
+//! translations with [`column_to_proto_sentinel`] /
 //! [`proto_to_column_value`] calls. Until then, the crate is dep-free
 //! (only `uuid`) and compiles in isolation.
+//!
+//! ## SLICE_06 extension scope (round-4 fix M15)
+//!
+//! TODO(SLICE_06): extend [`MirrorField`] with the 8 always-populated
+//! variants (`reserved_strategy`, `prediction_strategy_used`,
+//! `prediction_policy_used`, `tokenizer_tier`,
+//! `run_projection_at_decision_atomic`, `actual_input_tokens`,
+//! `actual_output_tokens`, plus `predicted_a_tokens` already present).
+//! Add a `column_to_proto_always_populated()` helper for round-trip
+//! producer validation — these columns are NOT NULL on their event
+//! type per spec §2.1–§2.3, so the helper can assert non-None ColumnValue
+//! and reject the producer call rather than silently mapping to a
+//! proto3 default. This makes producer code self-validating against
+//! the SLICE_06 SQL CHECK boundary and removes the need for each
+//! producer to re-encode the "must be populated" precondition.
 
 use uuid::Uuid;
 
@@ -91,6 +111,14 @@ pub enum MirrorField {
     /// Tag 312 — `run_predicted_remaining_steps` (INT NULL = projector
     /// unreachable).
     RunPredictedRemainingSteps,
+    /// Tag 313 — `run_steps_completed_so_far` (BIGINT NULL = pre-SLICE_06
+    /// producer; semantically a non-negative counter, so the proto3
+    /// default 0 collides with column-NULL by design). Round-4 fix M10
+    /// added the variant after round-4 M1 promoted the proto wire to
+    /// int64 (was int32). Calibration-report filters
+    /// `WHERE run_steps_completed_so_far IS NOT NULL` to skip the
+    /// collision case.
+    RunStepsCompletedSoFar,
     /// Tag 316 — `delta_b_ratio` (REAL NULL = B was null at decision).
     DeltaBRatio,
     /// Tag 317 — `delta_c_ratio` (REAL NULL = C was null at decision).
@@ -180,6 +208,19 @@ pub fn column_to_proto_sentinel(field: MirrorField, col: ColumnValue) -> ProtoVa
         (MirrorField::RunPredictedRemainingSteps, ColumnValue::NullInt) => ProtoValue::I32(-1),
         (MirrorField::RunPredictedRemainingSteps, ColumnValue::Int(v)) => ProtoValue::I32(v),
 
+        // ===== Tag 313: run_steps_completed_so_far — NULL → 0 sentinel.
+        // Round-4 fix M10 + M1. Wire type is I64 (round-4 M1 promoted
+        // from int32). SQL column is BIGINT NULL = "pre-SLICE_06 producer
+        // never populated this row"; proto3 default 0 collides with the
+        // legitimate "step counter is at zero" case at the wire. Per
+        // spec §3.3 we accept the collision because calibration-report
+        // filters `WHERE run_steps_completed_so_far IS NOT NULL` — the
+        // 0 sentinel is unambiguous as "absent" inside the SQL boundary,
+        // and the producer-side write path (audit.decision row) always
+        // populates the column with > 0 for any meaningful agent step.
+        (MirrorField::RunStepsCompletedSoFar, ColumnValue::NullBigInt) => ProtoValue::I64(0),
+        (MirrorField::RunStepsCompletedSoFar, ColumnValue::BigInt(v)) => ProtoValue::I64(v),
+
         // ===== Tag 316/317: delta_b/c_ratio — NULL → 0.0 sentinel.
         (MirrorField::DeltaBRatio, ColumnValue::NullReal) => ProtoValue::F32(0.0),
         (MirrorField::DeltaBRatio, ColumnValue::Real(v)) => ProtoValue::F32(v),
@@ -239,6 +280,11 @@ pub fn proto_to_column_value(field: MirrorField, proto: ProtoValue) -> ColumnVal
 
         (MirrorField::RunPredictedRemainingSteps, ProtoValue::I32(-1)) => ColumnValue::NullInt,
         (MirrorField::RunPredictedRemainingSteps, ProtoValue::I32(v)) => ColumnValue::Int(v),
+
+        // Round-4 fix M10 + M1: RunStepsCompletedSoFar (tag 313) wire 0 ↔ NULL.
+        // Wire type is I64 (M1 promoted from I32).
+        (MirrorField::RunStepsCompletedSoFar, ProtoValue::I64(0)) => ColumnValue::NullBigInt,
+        (MirrorField::RunStepsCompletedSoFar, ProtoValue::I64(v)) => ColumnValue::BigInt(v),
 
         (MirrorField::DeltaBRatio, ProtoValue::F32(v)) if v == 0.0 => ColumnValue::NullReal,
         (MirrorField::DeltaBRatio, ProtoValue::F32(v)) => ColumnValue::Real(v),
@@ -400,6 +446,42 @@ mod tests {
         );
         assert_eq!(p, ProtoValue::I64(big));
         let c = proto_to_column_value(MirrorField::PredictionSampleSize, p);
+        assert_eq!(c, ColumnValue::BigInt(big));
+    }
+
+    #[test]
+    fn run_steps_completed_so_far_int64_zero_sentinel_roundtrip() {
+        // Round-4 fix M10 + M1: run_steps_completed_so_far (tag 313) —
+        // NULL ↔ 0 sentinel; wire type is I64 (M1 promoted from I32 to
+        // match BIGINT SQL column).
+        let p = column_to_proto_sentinel(
+            MirrorField::RunStepsCompletedSoFar,
+            ColumnValue::NullBigInt,
+        );
+        assert_eq!(p, ProtoValue::I64(0));
+        let c = proto_to_column_value(MirrorField::RunStepsCompletedSoFar, p);
+        assert_eq!(c, ColumnValue::NullBigInt);
+
+        // 42 → 42 → 42 (normal step counter)
+        let p = column_to_proto_sentinel(
+            MirrorField::RunStepsCompletedSoFar,
+            ColumnValue::BigInt(42),
+        );
+        assert_eq!(p, ProtoValue::I64(42));
+        let c = proto_to_column_value(MirrorField::RunStepsCompletedSoFar, p);
+        assert_eq!(c, ColumnValue::BigInt(42));
+
+        // 2^33 → 2^33 → 2^33 — exercises the BIGINT range beyond i32
+        // that the round-3 int32 wire type would have silently
+        // truncated. This is the headroom rationale for M1 promoting
+        // tag 313 from int32 to int64.
+        let big: i64 = 1 << 33;
+        let p = column_to_proto_sentinel(
+            MirrorField::RunStepsCompletedSoFar,
+            ColumnValue::BigInt(big),
+        );
+        assert_eq!(p, ProtoValue::I64(big));
+        let c = proto_to_column_value(MirrorField::RunStepsCompletedSoFar, p);
         assert_eq!(c, ColumnValue::BigInt(big));
     }
 
