@@ -524,6 +524,14 @@ Hot-reload 機制：
 
 每個 vendored asset 在 release 時由 SpendGuard release pipeline ed25519 簽章；asset_sha256 + signature 進 `tokenizer_versions` row。`Tokenizer::new` 啟動時 verify signature；篡改 → refuse to load → fail-closed start。
 
+#### 7.4.1 Dual-copy design + cross-check guard (SLICE_03 R2 amendment, 2026-05-30)
+
+實作層面有一個微妙的 soundness gap 需要明確記錄。tiktoken-rs upstream 用 `include_str!` 把 `assets/*.tiktoken` embed 進 crate；我們也用 `include_bytes!` 把 *同樣的* `.tiktoken` files mirror 進 `crates/spendguard-tokenizer/data/`。`asset_sha256` constants 只覆蓋我們這份 copy；hot path 真正執行的是 `tiktoken_rs::*_singleton()`，它讀的是 upstream crate 自己 embed 的 bytes。如果 tiktoken-rs 的 vendor branch 被 tamper（或 supply-chain 攻擊把 upstream crate 換掉），我們的 sha256 check 不會察覺。
+
+為堵住這個 gap，`Tokenizer::new` 在 sha256 check 之後執行 **runtime cross-check**：tokenize 一個固定的 fixture string (`CROSS_CHECK_FIXTURE = "spendguard-cross-check-fixture-v1alpha1"`)，跟 hard-coded `EXPECTED_*` token vectors 比對。任何 mismatch → `TokenizerError::AssetSignatureMismatch` → boot-fail 跟 sha256 mismatch 同 surface。
+
+**Cross-check fixture maintenance**: bumping tiktoken-rs version 時，`cargo run --example discover_fixture_tokens` 重新印出新版的 token vectors，更新 `encoder_cache.rs` 的 `EXPECTED_*` arrays，跟 `asset_sha256` rotation 同時做（per §6.2）。
+
 ---
 
 ## §8. Failure modes
