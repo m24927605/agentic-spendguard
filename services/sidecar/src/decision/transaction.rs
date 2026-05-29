@@ -679,6 +679,38 @@ fn build_audit_decision_cloudevent(
 // Phase 3 wedge — DENY lane.
 // =====================================================================
 
+/// Map a `Decision` enum value to the canonical wire string used in the
+/// DENY-lane `audit_decision.decision` column.
+///
+/// Per `docs/contract-dsl-spec-v1alpha2.md` §3.4 invariant: "v1alpha1
+/// lattice + audit row decision field stays v1alpha1; new RUN_* codes
+/// appear in reason_codes only." Therefore `Decision::StopRunProjection`
+/// maps to the same `"STOP"` audit-row string as `Decision::Stop`; the
+/// run-projection categorisation lives in `reason_codes` (RUN_* code),
+/// not in the column string.
+///
+/// Returns `None` for variants that should never reach the DENY lane
+/// (`Continue` is filtered out by the caller; `Unspecified` would be a
+/// proto-default leak indicating an upstream bug).
+///
+/// Exposed at module visibility so the round-1 fix unit test can assert
+/// the SLICE_02 invariant directly.
+pub(super) fn denied_decision_label(decision_kind: Decision) -> Option<&'static str> {
+    match decision_kind {
+        Decision::Stop => Some("STOP"),
+        // SLICE_02 §3.4: STOP_RUN_PROJECTION is the dashboard / SIEM
+        // categorisation for a run-projection-driven stop; the audit
+        // row `decision` column stays at the v1alpha1 lattice value
+        // ("STOP"). The differentiator lives in `reason_codes` (RUN_*).
+        Decision::StopRunProjection => Some("STOP"),
+        Decision::RequireApproval => Some("REQUIRE_APPROVAL"),
+        Decision::Degrade => Some("DEGRADE"),
+        Decision::Skip => Some("SKIP"),
+        // Continue is filtered out by caller; Unspecified should not flow.
+        Decision::Continue | Decision::Unspecified => None,
+    }
+}
+
 /// Stage 4 (DENY branch). Skips Reserve and writes only an audit_decision
 /// row via Ledger.RecordDeniedDecision. Preserves Contract §6.1
 /// invariant 「無 audit 則無 effect」 — every decision (even «no
@@ -702,19 +734,12 @@ async fn run_record_denied_decision(
     effect_hash: [u8; 32],
     enrichment: &AuditEnrichment,
 ) -> Result<DecisionOutput, DomainError> {
-    let final_decision_str = match decision_kind {
-        Decision::Stop => "STOP",
-        Decision::RequireApproval => "REQUIRE_APPROVAL",
-        Decision::Degrade => "DEGRADE",
-        Decision::Skip => "SKIP",
-        // Continue is filtered out by caller; Unspecified should not flow.
-        _ => {
-            return Err(DomainError::DecisionStage(format!(
-                "run_record_denied_decision called with unsupported decision {:?}",
-                decision_kind
-            )))
-        }
-    };
+    let final_decision_str = denied_decision_label(decision_kind).ok_or_else(|| {
+        DomainError::DecisionStage(format!(
+            "run_record_denied_decision called with unsupported decision {:?}",
+            decision_kind
+        ))
+    })?;
 
     // Use the adapter-supplied idempotency_key directly (no namespacing).
     // The new SP performs a cross-kind exclusivity check: if the same key
@@ -971,7 +996,15 @@ pub fn build_response(out: DecisionOutput) -> DecisionResponse {
         approval_request_id: out.approval_request_id,
         approval_ttl: None,
         approver_role: String::new(),
-        terminal: matches!(out.decision, Decision::Stop),
+        // SLICE_02 §3.4: STOP_RUN_PROJECTION is wire-semantically
+        // identical to STOP ("STOP semantics completely equivalent;
+        // STOP_RUN_PROJECTION is dashboard / SIEM categorisation
+        // only"). The adapter response's `terminal` boolean must
+        // therefore treat both arms identically — otherwise SLICE_09
+        // run-projection stops would leak `terminal=false` and adapter
+        // callers (egress proxy, LiteLLM hook) would attempt to
+        // forward the call instead of halting the run.
+        terminal: matches!(out.decision, Decision::Stop | Decision::StopRunProjection),
         error: None,
         // SLICE_02 §6.2: run_code_triggered always "" in this slice
         // since no source emits RUN_* codes. SLICE_09 populates this
@@ -1805,5 +1838,121 @@ mod enrichment_tests {
         assert_eq!(a.get("stream"), d.get("stream"));
         // Verify mixed-type coercion survives both clones.
         assert_eq!(a.get("stream"), Some(&serde_json::Value::Bool(true)));
+    }
+}
+
+// =====================================================================
+// SLICE_02 round-1 fix — exhaustive Decision match coverage tests.
+//
+// B1: build_response.terminal must collapse Stop + StopRunProjection
+//      into the same `true` arm (per spec §3.4 wire-semantic identity).
+//      Pre-fix `matches!(out.decision, Decision::Stop)` returned `false`
+//      for StopRunProjection, leaking a non-terminal response that adapter
+//      callers (egress proxy, LiteLLM hook) would forward instead of halt.
+//
+// B2: denied_decision_label must categorise StopRunProjection as the
+//      v1alpha1 audit-row string `"STOP"` (per spec §3.4 invariant: the
+//      audit row `decision` column stays v1alpha1; RUN_* lives in
+//      reason_codes). Pre-fix the function returned Err on
+//      StopRunProjection, which would have surfaced as
+//      `DecisionStage` errors when SLICE_09 starts emitting the variant.
+// =====================================================================
+
+#[cfg(test)]
+mod slice_02_decision_match_tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn _fixture_output(decision: Decision) -> DecisionOutput {
+        DecisionOutput {
+            decision_id: Uuid::nil(),
+            audit_decision_event_id: Uuid::nil(),
+            effect_hash: [0u8; 32],
+            decision,
+            reservation_set_id: String::new(),
+            reservation_ids: vec![],
+            ledger_transaction_id: String::new(),
+            approval_request_id: String::new(),
+            ttl_expires_at: None,
+            matched_rule_ids: vec![],
+            reason_codes: vec![],
+        }
+    }
+
+    #[test]
+    fn build_response_terminal_true_for_stop() {
+        let out = _fixture_output(Decision::Stop);
+        let resp = build_response(out);
+        assert!(resp.terminal, "Decision::Stop must produce terminal=true");
+    }
+
+    #[test]
+    fn build_response_terminal_true_for_stop_run_projection() {
+        // SLICE_02 §3.4: STOP_RUN_PROJECTION is wire-semantically
+        // identical to STOP. The adapter response's terminal boolean
+        // must therefore be `true`. Pre-round-1: this returned `false`,
+        // which would silently leak to adapter callers in SLICE_09.
+        let out = _fixture_output(Decision::StopRunProjection);
+        let resp = build_response(out);
+        assert!(
+            resp.terminal,
+            "Decision::StopRunProjection must produce terminal=true \
+             per spec §3.4 STOP-equivalent invariant"
+        );
+    }
+
+    #[test]
+    fn build_response_terminal_false_for_continue_and_other_non_stop() {
+        for kind in [
+            Decision::Continue,
+            Decision::Degrade,
+            Decision::Skip,
+            Decision::RequireApproval,
+        ] {
+            let resp = build_response(_fixture_output(kind));
+            assert!(
+                !resp.terminal,
+                "Decision::{:?} must produce terminal=false",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn denied_decision_label_maps_stop() {
+        assert_eq!(denied_decision_label(Decision::Stop), Some("STOP"));
+    }
+
+    #[test]
+    fn denied_decision_label_maps_stop_run_projection_to_v1alpha1_stop() {
+        // SLICE_02 §3.4 invariant: audit_decision.decision column stays
+        // at v1alpha1 lattice values ("STOP"); the RUN_* differentiator
+        // lives in reason_codes. Pre-round-1 the underlying match arm
+        // would have returned Err(DecisionStage(...)) on this variant,
+        // breaking the DENY-lane path when SLICE_09 emits it.
+        assert_eq!(
+            denied_decision_label(Decision::StopRunProjection),
+            Some("STOP"),
+            "StopRunProjection must categorise as v1alpha1 'STOP' string"
+        );
+    }
+
+    #[test]
+    fn denied_decision_label_maps_other_deny_lane_variants() {
+        assert_eq!(
+            denied_decision_label(Decision::RequireApproval),
+            Some("REQUIRE_APPROVAL")
+        );
+        assert_eq!(denied_decision_label(Decision::Degrade), Some("DEGRADE"));
+        assert_eq!(denied_decision_label(Decision::Skip), Some("SKIP"));
+    }
+
+    #[test]
+    fn denied_decision_label_returns_none_for_non_deny_variants() {
+        // Continue is filtered by caller; Unspecified is a proto-default
+        // leak that should not flow. Both yield None so the caller
+        // surfaces DecisionStage error.
+        assert_eq!(denied_decision_label(Decision::Continue), None);
+        assert_eq!(denied_decision_label(Decision::Unspecified), None);
     }
 }
