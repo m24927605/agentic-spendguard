@@ -95,6 +95,16 @@ struct YamlRule {
     /// `BLOCK_NEXT_CALL` (per spec §5) applies if omitted.
     #[serde(default)]
     run_projection_action: Option<String>,
+    /// SLICE_02 round-1 M3: capture the spec §6.3 CEL `condition:`
+    /// field so we can hard-error on v1alpha2 contracts that use it
+    /// BEFORE SLICE_09 wires the CEL evaluator. Silent-ignore would
+    /// be a worse-than-default foot-gun (operators copying §6.3
+    /// examples would see no enforcement and assume the rule is
+    /// active). v1alpha1 contracts that drop a stray `condition:`
+    /// field also get a hard error (forward-compat hint that would
+    /// never have an effect under v1alpha1 either).
+    #[serde(default)]
+    condition: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -226,6 +236,27 @@ fn parse_yaml(bytes: &[u8]) -> Result<Contract> {
     // even if a v1alpha1 author drops a stray `prediction_policy:
     // EMPIRICAL_RUN_CEILING` line in their YAML (the parse silently
     // discards it; calibration-report sees STRICT_CEILING).
+    //
+    // SLICE_02 round-1 M1: emit a tracing::warn! when a v1alpha1
+    // contract specifies prediction_policy on the wire. Pre-round-1
+    // the value was silently discarded; operators editing the YAML
+    // to opt into EMPIRICAL_RUN_CEILING would see no behavior change
+    // and could not tell whether the hint was honored. The warning
+    // closes the observability gap without changing semantics (still
+    // defaults to STRICT_CEILING under v1alpha1).
+    if api_version_kind == ApiVersion::V1alpha1 {
+        if let Some(hint) = parsed.spec.prediction_policy.as_deref() {
+            tracing::warn!(
+                api_version = %parsed.api_version,
+                ignored_policy = %hint,
+                contract_id = %parsed.metadata.id,
+                "v1alpha1 contract specified prediction_policy hint but \
+                 apiVersion is v1alpha1 — hint discarded; default \
+                 STRICT_CEILING applies. Bump apiVersion to \
+                 spendguard.ai/v1alpha2 to activate the declared policy."
+            );
+        }
+    }
     let prediction_policy = match api_version_kind {
         ApiVersion::V1alpha1 => PredictionPolicy::default(),
         ApiVersion::V1alpha2 => match parsed.spec.prediction_policy.as_deref() {
@@ -251,6 +282,48 @@ fn parse_yaml(bytes: &[u8]) -> Result<Contract> {
                     r.id, r.when.budget_id
                 )
             })?;
+
+            // SLICE_02 round-1 M3: hard-reject v1alpha2 contracts that
+            // ship a CEL `condition:` field. Per spec §6.3 the v1alpha2
+            // CEL evaluator is wired in SLICE_09, not SLICE_02 — until
+            // then the only honored condition surface is the declarative
+            // when.claim_amount_atomic_gt / when.claim_amount_atomic_gte
+            // form. Silent-ignore would be the worst possible foot-gun
+            // (operators copying §6.3 examples would see no enforcement
+            // and assume the rule was active). v1alpha1 contracts that
+            // drop a stray `condition:` field also error — the field
+            // is not part of v1alpha1 either and would never take
+            // effect, so failing loudly beats silent acceptance.
+            if r.condition.is_some() {
+                return Err(anyhow!(
+                    "bundle_validation_failed: rule '{}' uses CEL `condition:` \
+                     field; CEL conditions wired in SLICE_09 — use \
+                     claim_amount_atomic_gt / claim_amount_atomic_gte under \
+                     `when:` in SLICE_02. See contract-dsl-spec-v1alpha2.md \
+                     §6.3 SLICE_02-vs-SLICE_09 wiring boundary.",
+                    r.id
+                ));
+            }
+
+            // SLICE_02 round-1 M1: emit a tracing::warn! when a v1alpha1
+            // contract rule specifies run_projection_action on the wire.
+            // Same observability rationale as the contract-level hint
+            // above — silent-discard hides the operator's mistake.
+            if api_version_kind == ApiVersion::V1alpha1 {
+                if let Some(hint) = r.run_projection_action.as_deref() {
+                    tracing::warn!(
+                        api_version = %parsed.api_version,
+                        rule_id = %r.id,
+                        ignored_action = %hint,
+                        "v1alpha1 contract rule specified \
+                         run_projection_action hint but apiVersion is \
+                         v1alpha1 — hint discarded; default BLOCK_NEXT_CALL \
+                         applies. Bump apiVersion to spendguard.ai/v1alpha2 \
+                         to activate the declared per-rule action."
+                    );
+                }
+            }
+
             let decision = match r.then.decision.as_str() {
                 "CONTINUE" => Decision::Continue,
                 "DEGRADE" => Decision::Degrade,
@@ -558,6 +631,92 @@ spec:
             c.rules[0].run_projection_action,
             RunProjectionAction::AlertOnly
         );
+    }
+
+    #[test]
+    fn rejects_v1alpha2_contract_with_cel_condition_field() {
+        // SLICE_02 round-1 M3: v1alpha2 contract authors writing
+        // `condition: <cel-expr>` per spec §6.3 BEFORE SLICE_09 lands
+        // get a hard error; the silent-ignore foot-gun is closed.
+        let yaml = r#"
+apiVersion: spendguard.ai/v1alpha2
+kind: Contract
+metadata:
+  id: 22222222-2222-4222-8222-222222222222
+  name: demo-contract
+spec:
+  prediction_policy: EMPIRICAL_RUN_CEILING
+  budgets:
+    - id: 11111111-1111-4111-8111-111111111111
+      limit_amount_atomic: "1000000000"
+      currency: USD
+      reservation_ttl_seconds: 600
+      require_hard_cap: true
+  rules:
+    - id: stop_when_projection_exceeded
+      when:
+        budget_id: 11111111-1111-4111-8111-111111111111
+      condition: |
+        run_projection.at_decision_micros > budget("daily_usd").remaining.amountMicros
+      then:
+        decision: STOP
+        reason_code: RUN_BUDGET_PROJECTION_EXCEEDED
+      run_projection_action: BLOCK_NEXT_CALL
+"#;
+        let err = parse_yaml(yaml.as_bytes()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bundle_validation_failed"),
+            "expected bundle_validation_failed marker, got: {msg}");
+        assert!(msg.contains("CEL"),
+            "expected CEL mention, got: {msg}");
+        assert!(msg.contains("SLICE_09"),
+            "expected SLICE_09 mention, got: {msg}");
+        assert!(msg.contains("claim_amount_atomic_gt"),
+            "expected pointer to SLICE_02 condition surface, got: {msg}");
+    }
+
+    #[test]
+    fn rejects_v1alpha1_contract_with_cel_condition_field() {
+        // v1alpha1 contracts with stray `condition:` also fail loudly
+        // — there's no path under v1alpha1 where the field has any
+        // effect, so silent acceptance would be a worse-than-default
+        // surface even though §6.3 doesn't directly tempt v1alpha1
+        // authors.
+        let yaml = r#"
+apiVersion: contract.spendguard.io/v1alpha1
+kind: Contract
+metadata:
+  id: 22222222-2222-4222-8222-222222222222
+  name: demo-contract
+spec:
+  budgets:
+    - id: 11111111-1111-4111-8111-111111111111
+      limit_amount_atomic: "1000000000"
+      currency: USD
+      reservation_ttl_seconds: 600
+      require_hard_cap: true
+  rules:
+    - id: stray-cel
+      when:
+        budget_id: 11111111-1111-4111-8111-111111111111
+      condition: "1 == 1"
+      then:
+        decision: STOP
+        reason_code: BUDGET_EXHAUSTED
+"#;
+        let err = parse_yaml(yaml.as_bytes()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("bundle_validation_failed"));
+        assert!(msg.contains("CEL"));
+    }
+
+    #[test]
+    fn v1alpha2_without_condition_field_still_parses() {
+        // Regression: the M3 reject path must NOT fire when `condition:`
+        // is absent (which is the only legal SLICE_02 form). Re-uses
+        // the existing SAMPLE_YAML_V1alpha2 fixture.
+        let c = parse_yaml(SAMPLE_YAML_V1ALPHA2.as_bytes()).expect("parse");
+        assert_eq!(c.rules.len(), 1);
     }
 
     #[test]

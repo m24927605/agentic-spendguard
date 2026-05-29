@@ -334,6 +334,40 @@ prediction.strategy_chosen  // "A" | "B" | "C"
 prediction.confidence  // 0.0-1.0
 ```
 
+**Wiring boundary (SLICE_02 vs SLICE_09)** — round-1 fix M3:
+
+SLICE_02 ships the CEL helper structs (`RunProjection`,
+`PredictionContext`) and `into_cel_context` in
+`services/sidecar/src/contract/cel_helpers.rs` with unit-test coverage.
+The hot-path evaluator does NOT yet invoke `Program::execute` against
+contract YAML — the v1alpha2 declarative form
+(`when.claim_amount_atomic_gt` / `when.claim_amount_atomic_gte`) remains
+the only honored condition surface in SLICE_02. CEL-condition support
+(`condition: "<cel-expr>"` form in rule body) is wired in SLICE_09 when
+`run_cost_projector` populates `RunProjection` / `PredictionContext`
+per-decision.
+
+v1alpha2 contract authors writing `condition: <cel-expr>` in v1alpha2
+bundles BEFORE SLICE_09 lands would silently get no enforcement — every
+rule with a CEL condition would be ignored at evaluation time and the
+operator would observe the contract as a no-op without any audit
+breadcrumb. To prevent the silent-ignore foot-gun, **the SLICE_02
+parser rejects any v1alpha2 contract (or v1alpha1 contract) containing
+a `condition:` field with the error**:
+
+```
+bundle_validation_failed: rule '<rule-id>' uses CEL `condition:`
+field; CEL conditions wired in SLICE_09 — use claim_amount_atomic_gt /
+claim_amount_atomic_gte under `when:` in SLICE_02. See
+contract-dsl-spec-v1alpha2.md §6.3 SLICE_02-vs-SLICE_09 wiring
+boundary.
+```
+
+Cross-reference: enforcement in
+`services/sidecar/src/contract/parse.rs` (rule-iteration block); test
+coverage in `parse.rs::tests::rejects_v1alpha2_contract_with_cel_condition_field`
+and `rejects_v1alpha1_contract_with_cel_condition_field`.
+
 ### 6.4 v1alpha1 contracts 在 v1alpha2 evaluator 下的 default 填充
 
 當 v1alpha2 evaluator 載入 `apiVersion: spendguard.ai/v1alpha1` contract：
@@ -343,6 +377,23 @@ prediction.confidence  // 0.0-1.0
 - 任何 rule 沒有 `RUN_*` code reference → 不主動套用 RUN_* logic（v1alpha1 不知道 run-level projection）
 
 行為效果：v1alpha1 contract 在 v1alpha2 evaluator 下 produce 與 v1alpha1 evaluator 100% byte-identical audit row（除了新欄位 NULL）。
+
+**Round-1 fix M1 — observability for ignored forward-compat hints**:
+
+When a v1alpha1 contract specifies `spec.prediction_policy` or any rule
+sets `run_projection_action`, the parser default-fills as above AND
+emits a `tracing::warn!` event identifying:
+
+- the source apiVersion (so the operator sees which bundle is on the wire)
+- the ignored hint value
+- the contract id (top-level field) or rule id (per-rule)
+- guidance to bump apiVersion to `spendguard.ai/v1alpha2` to activate the
+  declared value
+
+Behavior is unchanged (v1alpha1 still resolves to
+`STRICT_CEILING + BLOCK_NEXT_CALL` regardless of hint), but the
+observability gap is closed — pre-round-1 the value was silently
+discarded with no log breadcrumb.
 
 ---
 
