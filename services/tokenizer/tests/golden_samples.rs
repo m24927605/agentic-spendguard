@@ -1,26 +1,42 @@
-//! 50 golden-sample integration tests for the tokenizer service.
+//! Golden-sample integration tests for the tokenizer service.
 //!
 //! Spec ref `tokenizer-service-spec-v1alpha1.md` §8.1 acceptance:
 //!
 //! > Tier 2 OpenAI tokenize matches tiktoken Python reference output
 //! > for 50 golden samples.
 //!
+//! ## Round-2 fix m17 (panel finding) — honest provenance disclosure
+//!
+//! The §8.1 acceptance text says "matches Python reference output".
+//! What this file actually asserts is **structural equivalence
+//! against the tiktoken-rs Rust upstream**, NOT a Python-generated
+//! fixture set. Since tiktoken-rs and the Python tiktoken package
+//! both vendor identical `.tiktoken` merges files (sourced from
+//! OpenAI), the Rust output IS byte-identical to the Python output
+//! today — but the assertion path goes through Rust only.
+//!
+//! **SLICE-extra TODO** (R2 m17 residual): generate one canonical
+//! Python-reference fixture (e.g., for the cl100k "Hello, world!"
+//! sample) via `pip install tiktoken && python -c "..."` and bake
+//! the expected count into a third assertion alongside the Rust
+//! count + tiktoken-rs-upstream count. The proof-of-concept makes
+//! the §8.1 wording literally true and would catch a future
+//! tiktoken-rs vendor branch divergence that Python-tiktoken does
+//! not share.
+//!
 //! ## Sample structure
 //!
 //! Each sample fixes `(model, text)` and asserts the expected token
-//! count. The expected counts come from the upstream tiktoken-rs
-//! parity tests + the OpenAI cookbook reference table; since this
-//! crate's library is a thin wrapper around `tiktoken-rs`, our
-//! "Python reference output" is structurally equivalent to the
-//! upstream Rust reference output (both stem from the same BPE
-//! merges file).
+//! count. The expected counts were captured by running this test
+//! file once against the pinned tiktoken-rs 0.11.x release.
 //!
-//! The 50 samples cover:
+//! Coverage breakdown (R2 m17):
 //!
 //!   * 20 cl100k_base raw-text samples (gpt-4 family).
 //!   * 15 o200k_base raw-text samples (gpt-4o family).
 //!   * 10 p50k_base raw-text samples (text-davinci-003).
 //!   * 5 chat-shape samples (envelope token + reply priming).
+//!   * 1 boundary acceptance sample (already inline).
 //!
 //! When tiktoken-rs is bumped (e.g., 0.11 → 0.12) and the encoder
 //! bytes change, these counts may shift slightly. The test asserts

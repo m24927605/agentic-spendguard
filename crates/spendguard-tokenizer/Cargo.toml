@@ -47,6 +47,14 @@ regex = "1"
 sha2 = "0.10"
 hex = "0.4"
 
+# Round-2 fix m14 (panel finding): constant-time sha256 equality
+# comparison to avoid a (theoretical) timing side-channel on the boot
+# integrity check. The asset_sha256 constants live in source so a
+# straight string compare would leak via early-exit timing if an
+# attacker could observe boot latency precisely. Use subtle::
+# ConstantTimeEq on decoded [u8; 32] bytes instead of String::eq.
+subtle = "2"
+
 # UUIDs for tokenizer_versions row ids (UUIDv7 per spec §6.1).
 uuid = { version = "1", features = ["v7"] }
 

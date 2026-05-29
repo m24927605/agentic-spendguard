@@ -64,7 +64,10 @@ per `tokenizer-service-spec-v1alpha1.md` §2.1 (two co-existing deployment forms
 
 - `deploy/demo/compose.yaml` — add tokenizer service entry
 - `services/sidecar/Cargo.toml` — add `spendguard-tokenizer = { path = "../crates/spendguard-tokenizer" }` dependency
-- `services/sidecar/src/decision.rs` — placeholder integration (full integration in SLICE_10)
+- `services/egress_proxy/src/decision.rs:277-295` — legacy heuristic UNCHANGED (`estimate_tokens()` `((total_chars / 4) * 2).max(64)`; SLICE_10 will replace)
+- `services/egress_proxy/src/forward.rs:414` — secondary callsite UNCHANGED (`decision::estimate_tokens(&parsed, None)`; SLICE_10 will replace)
+
+**Round-2 M9 correction (2026-05-30)**: prior draft pointed at `services/sidecar/src/decision.rs` for the placeholder integration; the legacy heuristic actually lives in `services/egress_proxy/src/decision.rs:277-295` (function `estimate_tokens()`) with a secondary callsite at `services/egress_proxy/src/forward.rs:414`. SLICE_10 must rewrite BOTH callsites to invoke `spendguard_tokenizer::Tokenizer::tokenize` instead.
 
 ### 4.3 Helm / config
 
@@ -80,9 +83,14 @@ per `tokenizer-service-spec-v1alpha1.md` §2.2 (proto definition). `tokenizer_ve
 
 ## §6. Audit-chain impact
 
-- Library `tokenize()` writes `tokenizer_tier` + `tokenizer_version_id` to caller's `BudgetClaim` metadata
-- Initial integration only Tier 2 (T2) and Tier 3 (T3); Tier 1 (T1) flag not yet emitted
-- SLICE_01's `tokenizer_versions` registry table populated
+**Round-2 M8 correction (2026-05-30)**: prior draft overstated the integration scope. SLICE_03 ships the library + service; downstream integration into the audit-chain write path happens in SLICE_10:
+
+- Library `tokenize()` **RETURNS** `tokenizer_tier` + `tokenizer_version_id` in the `TokenizeResponse` struct (Rust + proto3)
+- Sidecar / egress_proxy will wire these into `BudgetClaim` metadata in SLICE_10 (SLICE_03 ships the library + service; integration into call paths is SLICE_10)
+- Initial integration covers Tier 2 (T2) and Tier 3 (T3); Tier 1 (T1) flag emission deferred to SLICE_05 (shadow worker)
+- SLICE_01's `tokenizer_versions` registry table populated by migration 0049
+
+The audit-chain extension §2.1 columns `tokenizer_tier` + `tokenizer_version_id` exist (SLICE_01 substrate) and are nullable (per §3.3 sentinel rules). SLICE_03 leaves them as NULL in audit_outbox writes; SLICE_10 fills them with the library's response.
 
 ---
 

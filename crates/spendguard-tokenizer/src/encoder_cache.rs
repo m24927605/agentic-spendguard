@@ -70,7 +70,6 @@ use crate::dispatch::{DispatchEntry, TiktokenEncoder};
 use crate::error::TokenizerError;
 use crate::{Message, TokenizeRequest, TokenizeResponse, ToolCall};
 use sha2::{Digest, Sha256};
-use std::sync::Arc;
 use tiktoken_rs::CoreBPE;
 
 /// Embedded asset bytes. The bytes here are byte-equal to the
@@ -128,17 +127,26 @@ const EXPECTED_P50K_FIXTURE: &[u32] = &[
 /// Per-OpenAI-encoder cache row — a static reference to the
 /// pre-built `CoreBPE` plus identity metadata used to populate the
 /// `TokenizeResponse` audit fields.
+///
+/// Round-2 fix m6 (panel finding): previously `encoder: Arc<&'static
+/// CoreBPE>`. The Arc was load-bearing in an earlier draft that
+/// considered hot-reload, but since SLICE_03 ships with no hot-reload
+/// (deferred to SLICE-extra), the `&'static CoreBPE` reference is the
+/// natural lifetime — Arc wrapping a static reference is redundant
+/// (Arc's reference-counting buys nothing for a 'static borrow).
 struct EncoderRow {
-    encoder: Arc<&'static CoreBPE>,
+    encoder: &'static CoreBPE,
     tiktoken: TiktokenEncoder,
 }
 
 /// Eager-loaded encoder bundle.
 ///
 /// Constructed exactly once per [`crate::Tokenizer`] instance via
-/// [`with_embedded_assets`]. Holds `Arc<&'static CoreBPE>` so
-/// concurrent worker threads can clone the `Arc` cheaply and call
-/// `encoder.encode_with_special_tokens(...)` without locking.
+/// [`with_embedded_assets`]. Holds `&'static CoreBPE` so concurrent
+/// worker threads can copy the reference cheaply (Copy trait on
+/// references) and call `encoder.encode_with_special_tokens(...)`
+/// without locking. When SLICE-extra adds hot-reload, this becomes
+/// `Arc<CoreBPE>` (Arc'd value, not Arc'd reference) for atomic swap.
 pub struct EncoderCache {
     cl100k: Option<EncoderRow>,
     o200k: Option<EncoderRow>,
@@ -179,15 +187,15 @@ impl EncoderCache {
 
         Ok(Self {
             cl100k: Some(EncoderRow {
-                encoder: Arc::new(cl100k_ref),
+                encoder: cl100k_ref,
                 tiktoken: TiktokenEncoder::Cl100kBase,
             }),
             o200k: Some(EncoderRow {
-                encoder: Arc::new(o200k_ref),
+                encoder: o200k_ref,
                 tiktoken: TiktokenEncoder::O200kBase,
             }),
             p50k: Some(EncoderRow {
-                encoder: Arc::new(p50k_ref),
+                encoder: p50k_ref,
                 tiktoken: TiktokenEncoder::P50kBase,
             }),
         })
@@ -256,6 +264,14 @@ impl EncoderCache {
 ///     (3 tokens / message + per-tool overhead) + 3 reply priming.
 ///   * Text-completion shape (raw_text.len() > 0): raw encode only.
 ///   * Both: results from the two branches sum (rare but defensive).
+///
+/// Round-2 fix m1 (panel finding): per OpenAI cookbook, the legacy
+/// gpt-3.5-turbo-0301 snapshot uses tokens_per_message=4 (one extra
+/// for an implicit "name" position that newer snapshots dropped).
+/// All other cl100k / o200k chat models use 3. We special-case the
+/// 0301 snapshot via the request's model string rather than adding
+/// a third TiktokenEncoder variant since the BPE encoder itself is
+/// still cl100k.
 fn count_tokens(row: &EncoderRow, req: &TokenizeRequest) -> Result<usize, TokenizerError> {
     let mut total: usize = 0;
 
@@ -264,9 +280,17 @@ fn count_tokens(row: &EncoderRow, req: &TokenizeRequest) -> Result<usize, Tokeni
         let (per_msg_overhead, reply_priming) = match row.tiktoken {
             // Per OpenAI cookbook tokens_per_message=3, plus 3 for
             // reply priming. Holds for cl100k + o200k families
-            // shipping in SLICE_03. p50k models don't use chat
-            // shape (text-completion only) — see else branch below.
-            TiktokenEncoder::Cl100kBase | TiktokenEncoder::O200kBase => (3usize, 3usize),
+            // shipping in SLICE_03 EXCEPT the legacy 0301 snapshot
+            // (R2 m1 fix). p50k models don't use chat shape
+            // (text-completion only) — see else branch below.
+            TiktokenEncoder::Cl100kBase | TiktokenEncoder::O200kBase => {
+                if req.model == "gpt-3.5-turbo-0301" {
+                    // Legacy snapshot quirk: tokens_per_message=4.
+                    (4usize, 3usize)
+                } else {
+                    (3usize, 3usize)
+                }
+            }
             TiktokenEncoder::P50kBase => {
                 // Per spec §3.4 — text-completion shape only; if a
                 // caller passes messages to p50k, count them as raw
@@ -316,7 +340,10 @@ fn encode_count(row: &EncoderRow, text: &str) -> Result<usize, TokenizerError> {
     // closed reservation"). The wrapper here is a defense-in-depth
     // (tiktoken-rs's encode_with_special_tokens returns Vec<Rank>
     // and is not expected to panic on well-formed UTF-8).
-    let encoder: &CoreBPE = *row.encoder;
+    //
+    // Round-2 fix m6: row.encoder is now `&'static CoreBPE` directly
+    // (was `Arc<&'static CoreBPE>`); no Arc deref needed.
+    let encoder: &CoreBPE = row.encoder;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         encoder.encode_with_special_tokens(text).len()
     }));
@@ -337,22 +364,48 @@ fn encoder_static_name(enc: TiktokenEncoder) -> &'static str {
 /// Compute sha256(bytes) and compare against `expected`. Hex
 /// comparison is case-insensitive (forced lowercase on the actual
 /// side; the `expected` constants live in source as lowercase).
+///
+/// Round-2 fix m14 (panel finding): use `subtle::ConstantTimeEq` on
+/// the decoded `[u8; 32]` bytes instead of `String::eq_ignore_ascii_case`
+/// to avoid a (theoretical) timing side-channel on boot. If hex
+/// decode of `expected` fails (programmer error — the const is
+/// supposed to be a 64-char lowercase hex string), we synthesise an
+/// AssetSignatureMismatch with a placeholder so the surface remains
+/// "boot fails loudly".
 fn verify_asset_sha256(
     encoder: &'static str,
     bytes: &[u8],
     expected: &'static str,
 ) -> Result<(), TokenizerError> {
+    use subtle::ConstantTimeEq;
+
     let mut hasher = Sha256::new();
     hasher.update(bytes);
-    let actual = hex::encode(hasher.finalize());
-    if !actual.eq_ignore_ascii_case(expected) {
-        return Err(TokenizerError::AssetSignatureMismatch {
+    let actual_bytes: [u8; 32] = hasher.finalize().into();
+    let actual_hex = hex::encode(actual_bytes);
+
+    // Decode the expected hex. Bad constants are a hard boot failure.
+    let expected_vec = match hex::decode(expected) {
+        Ok(v) if v.len() == 32 => v,
+        _ => {
+            return Err(TokenizerError::AssetSignatureMismatch {
+                encoder,
+                expected,
+                actual: format!("expected-const-malformed (got {actual_hex})"),
+            });
+        }
+    };
+
+    // Constant-time compare of the 32-byte sha256 digests.
+    if actual_bytes.as_slice().ct_eq(&expected_vec).into() {
+        Ok(())
+    } else {
+        Err(TokenizerError::AssetSignatureMismatch {
             encoder,
             expected,
-            actual,
-        });
+            actual: actual_hex,
+        })
     }
-    Ok(())
 }
 
 /// Round-2 fix B1 (Layer B): cross-check a singleton encoder by
