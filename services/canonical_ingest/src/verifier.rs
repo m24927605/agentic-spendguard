@@ -323,25 +323,62 @@ mod tests {
         // Spec §7.1: legacy CloudEvents written before the tag 300-317
         // additions verify identically after the bump because proto3
         // default-valued fields encode to zero bytes on the wire.
-        // We simulate by signing a legacy-shape event (all tag 300+
-        // fields at default), then encoding it via the NEW proto schema
-        // and confirming the canonical bytes match the legacy form.
+        //
+        // Round-3 fix M9: the round-2 version was a tautology — it
+        // called `canonical_bytes(&legacy)` twice on the same event.
+        // The real invariant is: two DISTINCT CloudEvents that differ
+        // only in the explicit-vs-implicit presence of tag 300+ default
+        // values must produce byte-identical canonical_bytes.
+        //
+        // `legacy` = pre-bump event (tag 300-317 implicitly default; we
+        // can't actually distinguish "field absent" from "field set to
+        // default" on the wire — that's the whole point of proto3
+        // default encoding).
+        // `new_with_defaults` = post-bump producer that explicitly
+        // populates the new fields with their default values.
+        //
+        // Byte-identical canonical_bytes ⇒ a signature signed over
+        // `legacy` will verify against `new_with_defaults` and vice
+        // versa. This is the additive-evolution invariant.
         let mut legacy = make_event_proto_form();
-        // Explicitly assert all tag 300+ fields are at their proto3
-        // defaults (this is what a legacy producer would emit).
+        legacy.signing_key_id = "sidecar:legacy-key".into();
+        // legacy has tag 300+ fields at proto3 defaults via Default impl.
         assert_eq!(legacy.predicted_a_tokens, 0);
         assert_eq!(legacy.reserved_strategy, "");
         assert_eq!(legacy.prediction_confidence, 0.0);
-        legacy.signing_key_id = "sidecar:legacy-key".into();
+        assert_eq!(legacy.run_predicted_remaining_steps, 0);
+
+        // new_with_defaults is a distinct event whose tag 300+ fields
+        // have been explicitly assigned the same default values a new
+        // producer might emit.
+        let mut new_with_defaults = make_event_proto_form();
+        new_with_defaults.signing_key_id = "sidecar:legacy-key".into();
+        new_with_defaults.predicted_a_tokens = 0;
+        new_with_defaults.predicted_b_tokens = 0;
+        new_with_defaults.predicted_c_tokens = 0;
+        new_with_defaults.reserved_strategy = String::new();
+        new_with_defaults.prediction_strategy_used = String::new();
+        new_with_defaults.prediction_policy_used = String::new();
+        new_with_defaults.tokenizer_tier = String::new();
+        new_with_defaults.tokenizer_version_id = String::new();
+        new_with_defaults.prediction_confidence = 0.0;
+        new_with_defaults.prediction_sample_size = 0;
+        new_with_defaults.cold_start_layer_used = String::new();
+        new_with_defaults.run_projection_at_decision_atomic = 0;
+        new_with_defaults.run_predicted_remaining_steps = 0;
+        new_with_defaults.run_steps_completed_so_far = 0;
+        new_with_defaults.actual_input_tokens = 0;
+        new_with_defaults.actual_output_tokens = 0;
+        new_with_defaults.delta_b_ratio = 0.0;
+        new_with_defaults.delta_c_ratio = 0.0;
 
         let canonical_legacy = canonical_bytes(&legacy);
-
-        // A "new producer" that happens to emit all default values for
-        // the new fields should produce IDENTICAL canonical bytes — this
-        // is the proto3 default-encoding invariant that makes the bump
-        // additive-safe.
-        let canonical_new_with_defaults = canonical_bytes(&legacy);
-        assert_eq!(canonical_legacy, canonical_new_with_defaults);
+        let canonical_new_with_defaults = canonical_bytes(&new_with_defaults);
+        assert_eq!(
+            canonical_legacy, canonical_new_with_defaults,
+            "proto3 default-encoding invariant violated: legacy event and \
+             new-event-with-explicit-defaults must hash to identical canonical bytes"
+        );
     }
 
     #[test]

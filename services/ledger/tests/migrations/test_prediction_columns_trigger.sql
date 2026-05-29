@@ -35,6 +35,37 @@
 
 BEGIN;
 
+-- Round-3 fix M8: insert a ledger_transactions fixture row inside the
+-- same transaction so the audit_outbox INSERT below doesn't FK-fail on
+-- empty fixture environments. The misleading "savepoint" comment in
+-- round-2 has been removed — this is just a baseline INSERT.
+--
+-- Use a UUID that does NOT clash with any existing test data. The row
+-- only needs to exist (the audit_outbox FK is RESTRICT, not CASCADE);
+-- we don't exercise any ledger_transaction fields here.
+INSERT INTO ledger_transactions (
+    ledger_transaction_id,
+    tenant_id,
+    ledger_shard_id,
+    budget_window_instance_id,
+    ledger_fencing_epoch,
+    workload_instance_id,
+    transaction_kind,
+    recorded_at,
+    recorded_month
+) VALUES (
+    '01999d70-0001-7000-8000-0000000000ff'::uuid,
+    '00000000-0000-4000-8000-000000000001'::uuid,
+    'test-shard-0',
+    (SELECT budget_window_instance_id FROM budget_window_instances LIMIT 1),
+    1,
+    'test-wl',
+    'POST_LEDGER_TRANSACTION',
+    '2026-07-15T00:00:00Z'::timestamptz,
+    '2026-07-01'::date
+)
+ON CONFLICT DO NOTHING;
+
 -- Set up a known-good baseline row. Use the 2026-07 partition that
 -- 0009 pre-creates so we don't depend on partition pre-creation order.
 INSERT INTO audit_outbox (
@@ -79,13 +110,11 @@ INSERT INTO audit_outbox (
     '01999d70-0001-7000-8000-000000000002'::uuid,
     '01999d70-0001-7000-8000-000000000003'::uuid,
     '00000000-0000-4000-8000-000000000001'::uuid,
-    -- ledger_transaction_id: must exist in ledger_transactions; for this
-    -- isolated test we suppress the FK check by inserting into a
-    -- savepoint that gets rolled back. We use a known-test UUID and
-    -- assume the test fixture has set up at least one ledger_transactions
-    -- row. If not present, the FK violation surfaces at INSERT time
-    -- which is informative for the test runner.
-    (SELECT ledger_transaction_id FROM ledger_transactions LIMIT 1),
+    -- Round-3 fix M8: bind the FK to the fixture row inserted above
+    -- (replaces the brittle SELECT FROM ledger_transactions LIMIT 1
+    -- which would silently bind to whatever pre-existing row appeared
+    -- first; deterministic-fixture binding is more debuggable).
+    '01999d70-0001-7000-8000-0000000000ff'::uuid,
     'spendguard.audit.decision',
     '{"test": "round-2 trigger probe"}'::jsonb,
     '\x00'::bytea,
