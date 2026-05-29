@@ -162,7 +162,17 @@ ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_delta_c_ratio_
 -- extended from 2026-07-01 calendar bomb) — SLICE_06 producers begin
 -- populating these columns; SLICE_06 deployment plan MUST land before
 -- 2027-01-01.
+--
+-- Round-4 fix B4: DROP CONSTRAINT IF EXISTS prepended so re-application
+-- against a database that previously ran the 2026-07-01 form replaces
+-- the CHECK body cleanly. Same-name + different body would error 42710
+-- or silently keep the old body. Drop-then-add inside the same
+-- migration-runner transaction keeps observers in a consistent state.
 -- ============================================================================
+
+ALTER TABLE canonical_events
+    DROP CONSTRAINT IF EXISTS canonical_events_decision_required_cols_chk,
+    DROP CONSTRAINT IF EXISTS canonical_events_outcome_required_cols_chk;
 
 ALTER TABLE canonical_events
     ADD CONSTRAINT canonical_events_decision_required_cols_chk
@@ -187,7 +197,25 @@ ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_decision_requi
 ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_outcome_required_cols_chk;
 
 -- ============================================================================
--- Step 3b: Sentinel-collision guards (round-3 fix M13 mirror).
+-- Step 3a: Outcome-side cold_start_layer_used must be NULL (round-4 fix M3
+-- mirror of ledger 0046). Calibration-report invariant: outcome rows do
+-- not carry the cold-start-fallback-layer column populated.
+-- ============================================================================
+
+ALTER TABLE canonical_events
+    DROP CONSTRAINT IF EXISTS canonical_events_cold_start_layer_outcome_chk;
+
+ALTER TABLE canonical_events
+    ADD CONSTRAINT canonical_events_cold_start_layer_outcome_chk
+        CHECK (event_type <> 'spendguard.audit.outcome'
+               OR cold_start_layer_used IS NULL)
+        NOT VALID;
+
+ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_cold_start_layer_outcome_chk;
+
+-- ============================================================================
+-- Step 3b: Sentinel-collision guards (round-3 fix M13 mirror; round-4
+-- fix B4 idempotent re-application).
 --
 -- Mirror of 0046's Step 3b. Without these CHECKs a row with
 -- prediction_strategy_used = 'B' AND predicted_b_tokens = 0 would be
@@ -196,6 +224,11 @@ ALTER TABLE canonical_events VALIDATE CONSTRAINT canonical_events_outcome_requir
 -- crates/spendguard-prediction-mirror/src/lib.rs preamble for the
 -- producer-side precondition.
 -- ============================================================================
+
+ALTER TABLE canonical_events
+    DROP CONSTRAINT IF EXISTS canonical_events_predicted_a_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS canonical_events_predicted_b_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS canonical_events_predicted_c_tokens_nonzero_chk;
 
 ALTER TABLE canonical_events
     ADD CONSTRAINT canonical_events_predicted_a_tokens_nonzero_chk

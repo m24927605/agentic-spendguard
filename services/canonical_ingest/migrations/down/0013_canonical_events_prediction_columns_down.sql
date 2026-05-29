@@ -34,7 +34,9 @@ ALTER TABLE canonical_events
     -- Round-3 M13 mirror.
     DROP CONSTRAINT IF EXISTS canonical_events_predicted_a_tokens_nonzero_chk,
     DROP CONSTRAINT IF EXISTS canonical_events_predicted_b_tokens_nonzero_chk,
-    DROP CONSTRAINT IF EXISTS canonical_events_predicted_c_tokens_nonzero_chk;
+    DROP CONSTRAINT IF EXISTS canonical_events_predicted_c_tokens_nonzero_chk,
+    -- Round-4 M3 mirror.
+    DROP CONSTRAINT IF EXISTS canonical_events_cold_start_layer_outcome_chk;
 
 DROP INDEX IF EXISTS canonical_events_calibration_idx;
 DROP INDEX IF EXISTS canonical_events_tier_idx;

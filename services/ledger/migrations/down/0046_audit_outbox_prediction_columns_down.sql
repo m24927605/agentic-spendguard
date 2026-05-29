@@ -120,7 +120,9 @@ ALTER TABLE audit_outbox
     -- Round-3 M13 sentinel-collision guards.
     DROP CONSTRAINT IF EXISTS audit_outbox_predicted_a_tokens_nonzero_chk,
     DROP CONSTRAINT IF EXISTS audit_outbox_predicted_b_tokens_nonzero_chk,
-    DROP CONSTRAINT IF EXISTS audit_outbox_predicted_c_tokens_nonzero_chk;
+    DROP CONSTRAINT IF EXISTS audit_outbox_predicted_c_tokens_nonzero_chk,
+    -- Round-4 M3 outcome cold-start layer guard.
+    DROP CONSTRAINT IF EXISTS audit_outbox_cold_start_layer_outcome_chk;
 
 -- Drop indexes (PG drops them transparently with the columns but
 -- being explicit makes the rollback intent obvious).

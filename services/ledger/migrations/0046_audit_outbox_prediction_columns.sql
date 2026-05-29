@@ -241,7 +241,19 @@ ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_delta_c_ratio_chk;
 -- producer slices ample runway; SLICE_06 deployment plan MUST land
 -- before then. Recommended ops practice: schedule a recurring calendar
 -- reminder + GitHub issue at 2026-10-01 to verify SLICE_06 status.
+--
+-- Round-4 fix B4: DROP CONSTRAINT IF EXISTS prepended so the cutoff
+-- tweaks in B5 (2026-07-01 → 2027-01-01) don't error on re-application
+-- against a database that previously ran the round-2 form. Same
+-- constraint name + different CHECK body would either fail with 42710
+-- (duplicate object) or silently keep the old body. The drop-then-add
+-- pair runs inside the migration-runner transaction so the constraint
+-- is never temporarily absent from an observer's perspective.
 -- ============================================================================
+
+ALTER TABLE audit_outbox
+    DROP CONSTRAINT IF EXISTS audit_outbox_decision_required_cols_chk,
+    DROP CONSTRAINT IF EXISTS audit_outbox_outcome_required_cols_chk;
 
 ALTER TABLE audit_outbox
     ADD CONSTRAINT audit_outbox_decision_required_cols_chk
@@ -266,7 +278,30 @@ ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_decision_required_cols
 ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_outcome_required_cols_chk;
 
 -- ============================================================================
--- Step 3b: Sentinel-collision guards (round-3 fix M13).
+-- Step 3a: Outcome-side cold_start_layer_used must be NULL (round-4 fix M3).
+--
+-- Per spec §2.1 cold_start_layer_used describes the cold-start fallback
+-- layer the decision-time predictor used; it is meaningless on outcome
+-- events. Without this CHECK an outcome row could carry a populated
+-- value, masking calibration-report aggregations that assume
+-- "WHERE event_type = '...decision' AND cold_start_layer_used IS NOT NULL"
+-- has full coverage.
+-- ============================================================================
+
+ALTER TABLE audit_outbox
+    DROP CONSTRAINT IF EXISTS audit_outbox_cold_start_layer_outcome_chk;
+
+ALTER TABLE audit_outbox
+    ADD CONSTRAINT audit_outbox_cold_start_layer_outcome_chk
+        CHECK (event_type <> 'spendguard.audit.outcome'
+               OR cold_start_layer_used IS NULL)
+        NOT VALID;
+
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_cold_start_layer_outcome_chk;
+
+-- ============================================================================
+-- Step 3b: Sentinel-collision guards (round-3 fix M13; round-4 fix B4
+-- idempotent re-application).
 --
 -- The proto3 sentinel mapping (`spendguard-prediction-mirror` crate, spec
 -- §6.3) maps SQL NULL ↔ proto-default 0 for token-count fields. This
@@ -286,7 +321,16 @@ ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_outcome_required_cols_
 -- predicted_b_tokens and predicted_c_tokens are constrained only on
 -- rows where prediction_strategy_used is B or C respectively — the
 -- value semantics are strategy-conditional.
+--
+-- Round-4 fix B4: DROP CONSTRAINT IF EXISTS prepended so the
+-- 2027-01-01 cutoff body matches the round-3 decision-required CHECK;
+-- same reason as Step 3.
 -- ============================================================================
+
+ALTER TABLE audit_outbox
+    DROP CONSTRAINT IF EXISTS audit_outbox_predicted_a_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS audit_outbox_predicted_b_tokens_nonzero_chk,
+    DROP CONSTRAINT IF EXISTS audit_outbox_predicted_c_tokens_nonzero_chk;
 
 ALTER TABLE audit_outbox
     ADD CONSTRAINT audit_outbox_predicted_a_tokens_nonzero_chk
@@ -446,12 +490,28 @@ $$ LANGUAGE plpgsql;
 -- audit_outbox (not ledger_entries).
 -- ============================================================================
 
--- Round-3 fix M6: generic TRUNCATE-rejector function. Reads TG_TABLE_NAME
--- so it can be reused for tokenizer_versions and any future immutable
--- table without duplicating "TRUNCATE on ledger_entries forbidden"
--- error messages on tables that are not ledger_entries.
+-- Round-3 fix M6 + round-4 fix B5: generic TRUNCATE-rejector function.
+-- Reads TG_TABLE_NAME so it can be reused for tokenizer_versions and any
+-- future immutable table without duplicating "TRUNCATE on ledger_entries
+-- forbidden" error messages on tables that are not ledger_entries.
+--
+-- SECURITY INVOKER + SET search_path = pg_catalog, pg_temp closes
+-- CVE-2018-1058: without the explicit search_path, an attacker with
+-- CREATE privilege on any schema in the caller's search_path could
+-- shadow `pg_catalog.RAISE` (or any built-in) with a malicious function
+-- and have it executed under the table-owner's role when the trigger
+-- fires. Locking the function's search_path to pg_catalog, pg_temp
+-- forces unqualified references to resolve only to built-ins.
+--
+-- CONVENTION FOR FUTURE FUNCTION ADDITIONS IN THIS MIGRATION FAMILY:
+-- every CREATE OR REPLACE FUNCTION in 0046+ MUST include the same
+-- SECURITY INVOKER + SET search_path = pg_catalog, pg_temp lockdown
+-- so the pattern is uniform and reviewers can grep for the absence.
 CREATE OR REPLACE FUNCTION reject_truncate_on_immutable_table()
-RETURNS TRIGGER AS $$
+RETURNS TRIGGER
+SECURITY INVOKER
+SET search_path = pg_catalog, pg_temp
+AS $$
 BEGIN
     RAISE EXCEPTION 'TRUNCATE forbidden on immutable table %', TG_TABLE_NAME
         USING ERRCODE = '42501';
