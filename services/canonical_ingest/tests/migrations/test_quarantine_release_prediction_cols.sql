@@ -53,12 +53,19 @@ END $$;
 -- Insert a deterministic test schema_bundle so the canonical_events FK
 -- doesn't reject the test INSERT. Uses a fixed UUID so re-runs are
 -- idempotent (ON CONFLICT swallows the duplicate).
+--
+-- Round-4 fix M13: UUID + hash sanitised to obviously-fake patterns so
+-- the fixture cannot accidentally collide with a production bundle row.
+-- The hash is `deadbeef` repeated 8 times (32 bytes hex) — visibly
+-- synthetic on grep and impossible to mistake for sha256 of any real
+-- canonicalized proto bundle.
 INSERT INTO schema_bundles (
     schema_bundle_id, schema_bundle_hash, canonical_schema_version,
     profile_versions, fetched_at
 ) VALUES (
-    '01999d80-0001-7000-8000-0000000000aa'::uuid,
-    '\xe9229188458ed12eb49796cb23422080b9b68ddf571fc7ae7db79bcc3be17576'::bytea,
+    -- TEST FIXTURE; never matches a real bundle.
+    '00000000-0000-1111-2222-333333333333'::uuid,
+    '\xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef'::bytea,
     'test-fixture-spendguard.v1alpha1',
     '{}'::jsonb,
     clock_timestamp()
@@ -98,8 +105,9 @@ INSERT INTO audit_outcome_quarantine (
     1,
     '\x00'::bytea,
     'sidecar:test-prod-1:key-1',
-    '01999d80-0001-7000-8000-0000000000aa'::uuid,
-    '\xe9229188458ed12eb49796cb23422080b9b68ddf571fc7ae7db79bcc3be17576'::bytea,
+    -- Round-4 fix M13: synthetic schema_bundle UUID + hash.
+    '00000000-0000-1111-2222-333333333333'::uuid,
+    '\xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef'::bytea,
     'spendguard.audit.outcome',
     '1.0',
     'sidecar://test/wl-1',
@@ -240,10 +248,148 @@ END $$;
 -- (this was the root failure mode B2 was opened to address — without the
 -- 18 columns on quarantine, the CHECK would fail on release for outcomes
 -- past the cutoff).
+--
+-- Round-4 fix B3: RAISE NOTICE wrapped in DO $$ ... END $$ block. Bare
+-- RAISE at SQL top level is a psql syntax error — the round-3 form
+-- never actually executed under -v ON_ERROR_STOP=1.
 -- ============================================================================
 -- The INSERT above would have failed if the CHECK fired; reaching here
 -- means PASS. Explicit confirmation:
-RAISE NOTICE 'PASS: canonical_events_outcome_required_cols_chk did not fire on quarantine release';
-RAISE NOTICE 'ALL TESTS PASSED: B2 quarantine release path preserves 18 prediction columns end-to-end';
+DO $$
+BEGIN
+    RAISE NOTICE 'PASS: canonical_events_outcome_required_cols_chk did not fire on quarantine release';
+END $$;
+
+-- ============================================================================
+-- Round-4 fix M9 (Step 6 — cutoff coverage). The round-3 test used
+-- event_time = 2026-07-20 which is BEFORE the 2027-01-01 cutoff in
+-- canonical_events_outcome_required_cols_chk. The CHECK is gated on
+-- event_time >= cutoff, so the round-3 case never actually exercised
+-- the constraint — it tested the unconditional pass branch.
+--
+-- This step adds two cases past the cutoff:
+--   (M9 case A) event_time = 2027-02-01 + actual_*_tokens populated.
+--               Expected: PASS (the constraint enforces only that
+--               actual_input_tokens and actual_output_tokens are
+--               populated when event_time >= cutoff).
+--   (M9 case B) event_time = 2027-02-01 + actual_*_tokens NULL.
+--               Expected: FAIL with errcode 23514 (check_violation).
+--
+-- ============================================================================
+
+-- Case A: post-cutoff outcome with required cols populated → PASS.
+-- The pre-decision in canonical_events_global_keys uses a new UUID; we
+-- have to add a matching decision row so the
+-- assert_audit_outcome_has_preceding_decision trigger doesn't reject.
+DO $$
+BEGIN
+    INSERT INTO canonical_events_global_keys (
+        event_id, tenant_id, decision_id, event_type, recorded_month
+    ) VALUES (
+        '01999d80-0001-7000-8000-000000000011'::uuid,
+        '00000000-0000-4000-8000-000000000011'::uuid,
+        '00000000-0000-7000-8000-000000000021'::uuid,
+        'spendguard.audit.decision',
+        '2027-02-01'::date
+    );
+EXCEPTION
+    WHEN unique_violation THEN
+        NULL;
+END $$;
+
+INSERT INTO canonical_events (
+    event_id, tenant_id, decision_id, run_id, event_type,
+    storage_class,
+    producer_id, producer_sequence, producer_signature, signing_key_id,
+    schema_bundle_id, schema_bundle_hash,
+    specversion, source, event_time, datacontenttype,
+    payload_json, payload_blob_ref,
+    region_id, ingest_shard_id, ingest_log_offset, ingest_at,
+    recorded_month, failure_class,
+    actual_input_tokens, actual_output_tokens
+) VALUES (
+    '01999d80-0001-7000-8000-000000000041'::uuid,
+    '00000000-0000-4000-8000-000000000011'::uuid,
+    '00000000-0000-7000-8000-000000000021'::uuid,
+    NULL, 'spendguard.audit.outcome',
+    'immutable_audit_log',
+    'sidecar:test-prod-1', 2, '\x00'::bytea, 'sidecar:test-prod-1:key-1',
+    '00000000-0000-1111-2222-333333333333'::uuid,
+    '\xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef'::bytea,
+    '1.0', 'sidecar://test/wl-1', '2027-02-01T00:00:00Z'::timestamptz, 'application/json',
+    '{"test":"post-cutoff PASS"}'::jsonb, NULL,
+    'us-east-1', 'shard-0', 2::bigint, clock_timestamp(),
+    '2027-02-01'::date, NULL,
+    -- actual_input_tokens + actual_output_tokens populated → CHECK passes.
+    128, 256
+);
+
+DO $$
+BEGIN
+    RAISE NOTICE 'PASS: post-cutoff outcome INSERT accepted with actual_*_tokens populated';
+END $$;
+
+-- Case B: post-cutoff outcome WITHOUT required cols → FAIL with errcode
+-- 23514. We use a savepoint to capture the failure without aborting the
+-- whole transaction (which we still want to ROLLBACK at the end).
+DO $$
+DECLARE
+    sqlstate_caught TEXT;
+BEGIN
+    BEGIN
+        -- Pre-arrange the matching decision row.
+        BEGIN
+            INSERT INTO canonical_events_global_keys (
+                event_id, tenant_id, decision_id, event_type, recorded_month
+            ) VALUES (
+                '01999d80-0001-7000-8000-000000000012'::uuid,
+                '00000000-0000-4000-8000-000000000012'::uuid,
+                '00000000-0000-7000-8000-000000000022'::uuid,
+                'spendguard.audit.decision',
+                '2027-02-01'::date
+            );
+        EXCEPTION WHEN unique_violation THEN NULL;
+        END;
+
+        INSERT INTO canonical_events (
+            event_id, tenant_id, decision_id, run_id, event_type,
+            storage_class,
+            producer_id, producer_sequence, producer_signature, signing_key_id,
+            schema_bundle_id, schema_bundle_hash,
+            specversion, source, event_time, datacontenttype,
+            payload_json, payload_blob_ref,
+            region_id, ingest_shard_id, ingest_log_offset, ingest_at,
+            recorded_month, failure_class,
+            actual_input_tokens, actual_output_tokens
+        ) VALUES (
+            '01999d80-0001-7000-8000-000000000042'::uuid,
+            '00000000-0000-4000-8000-000000000012'::uuid,
+            '00000000-0000-7000-8000-000000000022'::uuid,
+            NULL, 'spendguard.audit.outcome',
+            'immutable_audit_log',
+            'sidecar:test-prod-1', 3, '\x00'::bytea, 'sidecar:test-prod-1:key-1',
+            '00000000-0000-1111-2222-333333333333'::uuid,
+            '\xdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef'::bytea,
+            '1.0', 'sidecar://test/wl-1', '2027-02-01T00:00:00Z'::timestamptz, 'application/json',
+            '{"test":"post-cutoff FAIL"}'::jsonb, NULL,
+            'us-east-1', 'shard-0', 3::bigint, clock_timestamp(),
+            '2027-02-01'::date, NULL,
+            -- actual_input_tokens + actual_output_tokens NULL → CHECK fails.
+            NULL, NULL
+        );
+
+        -- If we reach here the CHECK didn't fire — test fail.
+        RAISE EXCEPTION 'FAIL: post-cutoff outcome INSERT with NULL actual_*_tokens should have raised 23514 but did not';
+    EXCEPTION
+        WHEN check_violation THEN
+            GET STACKED DIAGNOSTICS sqlstate_caught = RETURNED_SQLSTATE;
+            RAISE NOTICE 'PASS: post-cutoff outcome rejected with errcode % as expected', sqlstate_caught;
+    END;
+END $$;
+
+DO $$
+BEGIN
+    RAISE NOTICE 'ALL TESTS PASSED: B2 quarantine release path preserves 18 prediction columns end-to-end + B3 syntax + M9 cutoff coverage';
+END $$;
 
 ROLLBACK;
