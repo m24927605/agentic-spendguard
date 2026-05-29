@@ -1,10 +1,13 @@
--- Audit chain prediction extension (SLICE 01 — schema additions).
+-- Audit chain prediction extension (SLICE 01 — schema additions +
+-- immutability trigger + TRUNCATE guard, atomic).
 --
--- Spec: docs/audit-chain-prediction-extension-v1alpha1.md §2 + §4.1
+-- Spec: docs/audit-chain-prediction-extension-v1alpha1.md §2 + §4.1 + §5
 -- Slice: docs/slices/SLICE_01_canonical_events_migration.md
 --
 -- 18 new nullable columns on audit_outbox:
---   * 11 decision-side prediction columns (§2.1)
+--   * 11 decision-side prediction columns (§2.1) — note: 11 not 10 per
+--     §2.4 reviewer-flagged promotion of cold_start_layer_used to a
+--     first-class column.
 --   * 3 run-level projection columns (§2.2)
 --   * 4 commit-side actual columns (§2.3)
 --
@@ -18,85 +21,385 @@
 --
 -- Producer code that writes these columns lands in SLICE_06+ (sidecar /
 -- webhook_receiver / ttl_sweeper / ledger invoice_reconcile mirror); this
--- migration only adds the schema substrate, the immutability-trigger
--- update follows in 0047, and the tokenizer_versions FK target table is
--- created in 0048.
+-- migration installs the schema substrate AND the immutability-trigger
+-- update AND the TRUNCATE guard in a single atomic step so partial
+-- application can never leave the table with the new columns mutable
+-- (round-2 fix: 0047 merged here per Codex finding M7+m3+M13).
+--
+-- Migration runner wrapping convention: this project's migration runner
+-- wraps each .sql file in its own transaction (per the 57 pre-existing
+-- migrations 0000-0045 / 0001-0012 — none open explicit BEGIN/COMMIT).
+-- Explicit transaction wrapping is deliberately omitted here to match
+-- that convention; the runner's wrap covers ALL statements in this file
+-- including the trigger update and TRUNCATE guard.
+--
+-- Cross-DB deployment ordering (round-2 fix M16): ledger DB migrations
+-- (0046+0047+0048 — though 0047 is now merged here) MUST complete before
+-- canonical_ingest DB migrations (0013) start. Reason: the canonical
+-- mirror columns assume the ledger side has already accepted them; the
+-- outbox_forwarder will not push rows whose ledger row failed to insert.
+-- Operators using charts/spendguard/templates/migrations.yaml see this
+-- ordering enforced by the script (ledger glob processed before
+-- canonical glob in the apply loop).
 
-BEGIN;
+-- ============================================================================
+-- Step 1: Add the 18 new columns. INT → BIGINT for token-count columns
+-- per round-2 finding M4 (anticipates 2^31-overflow over multi-year
+-- aggregation; provider context windows already exceed 1M and BIGINT
+-- costs are negligible vs INT on Postgres TOAST-eligible row paths).
+-- prediction_confidence type is NUMERIC(4,3) per M12 for deterministic
+-- AVG / GROUP BY semantics in calibration-report (REAL allows
+-- non-deterministic IEEE-754 reordering).
+-- ============================================================================
 
 ALTER TABLE audit_outbox
     -- === Decision-side prediction columns (11 total per §2.1) ===
-    ADD COLUMN predicted_a_tokens         INT,
-    ADD COLUMN predicted_b_tokens         INT,
-    ADD COLUMN predicted_c_tokens         INT,
+    ADD COLUMN predicted_a_tokens         BIGINT,
+    ADD COLUMN predicted_b_tokens         BIGINT,
+    ADD COLUMN predicted_c_tokens         BIGINT,
     ADD COLUMN reserved_strategy          TEXT,
     ADD COLUMN prediction_strategy_used   TEXT,
     ADD COLUMN prediction_policy_used     TEXT,
     ADD COLUMN tokenizer_tier             TEXT,
     ADD COLUMN tokenizer_version_id       UUID,
-    ADD COLUMN prediction_confidence      REAL,
-    ADD COLUMN prediction_sample_size     INT,
+    ADD COLUMN prediction_confidence      NUMERIC(4,3),
+    ADD COLUMN prediction_sample_size     BIGINT,
     ADD COLUMN cold_start_layer_used      TEXT,
 
     -- === Run-level projection columns (3 total per §2.2) ===
     ADD COLUMN run_projection_at_decision_atomic NUMERIC(38,0),
     ADD COLUMN run_predicted_remaining_steps     INT,
-    ADD COLUMN run_steps_completed_so_far        INT,
+    ADD COLUMN run_steps_completed_so_far        BIGINT,
 
     -- === Commit-side actual columns (4 total per §2.3) ===
-    ADD COLUMN actual_input_tokens   INT,
-    ADD COLUMN actual_output_tokens  INT,
+    ADD COLUMN actual_input_tokens   BIGINT,
+    ADD COLUMN actual_output_tokens  BIGINT,
     ADD COLUMN delta_b_ratio         REAL,
     ADD COLUMN delta_c_ratio         REAL;
 
 -- ============================================================================
--- CHECK constraints (per spec §4.1 verbatim).
+-- Step 2: Domain CHECK constraints (per spec §4.1 verbatim + round-2
+-- additions M2 / M3 / M5 / M12).
 --
--- Each constraint is NOT VALID-able but we declare them eagerly: the table
--- has no rows that violate them (all NULL on legacy rows; new rows must
--- comply going forward). On the partitioned parent table the constraint
--- applies to every child partition automatically.
+-- All constraints declared NOT VALID first then VALIDATE'd in a second
+-- pass (round-2 fix M6 / M18): keeps lock escalation predictable on
+-- production partitioned tables. Eager validation is safe here because
+-- the table has no rows that violate any constraint (all NULL on legacy
+-- rows), but the two-step form is the deployment-safe pattern for the
+-- 2026-08+ partitions pre-created in step 5 below — those WILL accept
+-- rows once SLICE_06 producers land, so future re-runs against extant
+-- data benefit from the same NOT VALID + VALIDATE pattern.
+--
+-- On the partitioned parent table the constraint applies to every child
+-- partition automatically.
 -- ============================================================================
 
 ALTER TABLE audit_outbox
+    -- Enum-string domain checks (mirror of v1alpha1 §4.1).
     ADD CONSTRAINT audit_outbox_reserved_strategy_chk
-        CHECK (reserved_strategy IS NULL OR reserved_strategy IN ('A','B','C')),
+        CHECK (reserved_strategy IS NULL OR reserved_strategy IN ('A','B','C'))
+        NOT VALID,
     ADD CONSTRAINT audit_outbox_prediction_strategy_used_chk
         CHECK (prediction_strategy_used IS NULL
-               OR prediction_strategy_used IN ('A','B','C')),
+               OR prediction_strategy_used IN ('A','B','C'))
+        NOT VALID,
     ADD CONSTRAINT audit_outbox_prediction_policy_used_chk
         CHECK (prediction_policy_used IS NULL OR prediction_policy_used IN (
             'STRICT_CEILING','EMPIRICAL_RUN_CEILING',
-            'ADAPTIVE_CEILING','SHADOW_ONLY')),
+            'ADAPTIVE_CEILING','SHADOW_ONLY'))
+        NOT VALID,
     ADD CONSTRAINT audit_outbox_tokenizer_tier_chk
-        CHECK (tokenizer_tier IS NULL OR tokenizer_tier IN ('T1','T2','T3')),
+        CHECK (tokenizer_tier IS NULL OR tokenizer_tier IN ('T1','T2','T3'))
+        NOT VALID,
     ADD CONSTRAINT audit_outbox_prediction_confidence_chk
         CHECK (prediction_confidence IS NULL
-               OR (prediction_confidence >= 0.0
-                   AND prediction_confidence <= 1.0)),
+               OR (prediction_confidence >= 0.000
+                   AND prediction_confidence <= 1.000))
+        NOT VALID,
     ADD CONSTRAINT audit_outbox_cold_start_layer_used_chk
         CHECK (cold_start_layer_used IS NULL
-               OR cold_start_layer_used IN ('L1','L2','L3','L4'));
+               OR cold_start_layer_used IN ('L1','L2','L3','L4'))
+        NOT VALID,
+
+    -- === Sentinel discipline (round-2 fix M3, per spec §3.3 + §6.3) ===
+    -- Token counts non-negative. NULL allowed because the column is
+    -- nullable; the sentinel discipline only constrains populated rows.
+    ADD CONSTRAINT audit_outbox_predicted_tokens_chk
+        CHECK ((predicted_a_tokens IS NULL OR predicted_a_tokens >= 0)
+           AND (predicted_b_tokens IS NULL OR predicted_b_tokens >= 0)
+           AND (predicted_c_tokens IS NULL OR predicted_c_tokens >= 0))
+        NOT VALID,
+    ADD CONSTRAINT audit_outbox_actual_tokens_chk
+        CHECK ((actual_input_tokens IS NULL OR actual_input_tokens >= 0)
+           AND (actual_output_tokens IS NULL OR actual_output_tokens >= 0))
+        NOT VALID,
+    -- run_predicted_remaining_steps uses -1 as a sentinel for
+    -- "projector unreachable" per spec §3.3; legal range is therefore
+    -- [-1, ∞). run_steps_completed_so_far is a counter, [0, ∞).
+    ADD CONSTRAINT audit_outbox_run_steps_chk
+        CHECK ((run_predicted_remaining_steps IS NULL
+                  OR run_predicted_remaining_steps >= -1)
+           AND (run_steps_completed_so_far IS NULL
+                  OR run_steps_completed_so_far >= 0))
+        NOT VALID,
+    -- NUMERIC(38,0) field is non-negative AND must not exceed int64 max
+    -- (round-2 fix M5) — the CloudEvent proto mirror is int64 per
+    -- common.proto:367; values beyond 2^63-1 would silently round-trip
+    -- to negative on the wire.
+    ADD CONSTRAINT audit_outbox_run_projection_chk
+        CHECK (run_projection_at_decision_atomic IS NULL
+               OR run_projection_at_decision_atomic >= 0)
+        NOT VALID,
+    ADD CONSTRAINT audit_outbox_run_projection_int64_chk
+        CHECK (run_projection_at_decision_atomic IS NULL
+               OR run_projection_at_decision_atomic <= 9223372036854775807)
+        NOT VALID,
+    -- prediction_sample_size is a sample count, [0, ∞).
+    ADD CONSTRAINT audit_outbox_prediction_sample_size_chk
+        CHECK (prediction_sample_size IS NULL OR prediction_sample_size >= 0)
+        NOT VALID,
+    -- delta_*_ratio: non-negative AND NaN-reject. The
+    -- `delta_b_ratio = delta_b_ratio` clause rejects NaN per IEEE 754
+    -- (NaN never equals itself), keeping calibration-report aggregations
+    -- well-defined.
+    ADD CONSTRAINT audit_outbox_delta_b_ratio_chk
+        CHECK (delta_b_ratio IS NULL
+               OR (delta_b_ratio >= 0.0 AND delta_b_ratio = delta_b_ratio))
+        NOT VALID,
+    ADD CONSTRAINT audit_outbox_delta_c_ratio_chk
+        CHECK (delta_c_ratio IS NULL
+               OR (delta_c_ratio >= 0.0 AND delta_c_ratio = delta_c_ratio))
+        NOT VALID;
+
+-- VALIDATE pass — runs immediately because the table is empty of rows
+-- that could violate. On a future re-run on populated production the
+-- two-step form keeps the share-lock window short (NOT VALID takes
+-- short-duration ACCESS EXCLUSIVE; VALIDATE upgrades to SHARE UPDATE
+-- EXCLUSIVE and scans without blocking writers).
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_reserved_strategy_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_prediction_strategy_used_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_prediction_policy_used_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_tokenizer_tier_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_prediction_confidence_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_cold_start_layer_used_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_predicted_tokens_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_actual_tokens_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_run_steps_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_run_projection_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_run_projection_int64_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_prediction_sample_size_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_delta_b_ratio_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_delta_c_ratio_chk;
 
 -- ============================================================================
--- Calibration-report indexes (per spec §4.1).
+-- Step 3: Partial NOT-NULL via CHECK on event_type (round-2 fix M2,
+-- per spec §2.1-§2.3 "Nullable: NO" columns).
 --
--- Both partial-indexes on (event_type = 'spendguard.audit.decision') to
--- keep them small — outcome rows do not populate these columns. Both are
+-- Spec §2.1 lists 7 columns as "Nullable: NO" on .decision events:
+--   predicted_a_tokens, reserved_strategy, prediction_strategy_used,
+--   prediction_policy_used, tokenizer_tier,
+--   run_projection_at_decision_atomic, run_steps_completed_so_far
+-- Spec §2.3 lists 2 columns as "Nullable: NO" on .outcome events:
+--   actual_input_tokens, actual_output_tokens
+--
+-- These cannot be enforced as SQL `NOT NULL` because the columns are
+-- nullable on the OTHER event_type. Instead we enforce them as
+-- event-type-scoped CHECK constraints. The 2026-07-01 cutoff lets
+-- SLICE_06 producers backfill writers without breaking SLICE_01-only
+-- demo modes; once SLICE_06 lands the cutoff effectively becomes a no-op
+-- (all new rows past 2026-07 must populate the required columns).
+-- ============================================================================
+
+ALTER TABLE audit_outbox
+    ADD CONSTRAINT audit_outbox_decision_required_cols_chk
+        CHECK (event_type <> 'spendguard.audit.decision'
+               OR recorded_at < '2026-07-01'::timestamptz
+               OR (predicted_a_tokens IS NOT NULL
+                   AND reserved_strategy IS NOT NULL
+                   AND prediction_strategy_used IS NOT NULL
+                   AND prediction_policy_used IS NOT NULL
+                   AND tokenizer_tier IS NOT NULL
+                   AND run_projection_at_decision_atomic IS NOT NULL
+                   AND run_steps_completed_so_far IS NOT NULL))
+        NOT VALID,
+    ADD CONSTRAINT audit_outbox_outcome_required_cols_chk
+        CHECK (event_type <> 'spendguard.audit.outcome'
+               OR recorded_at < '2026-07-01'::timestamptz
+               OR (actual_input_tokens IS NOT NULL
+                   AND actual_output_tokens IS NOT NULL))
+        NOT VALID;
+
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_decision_required_cols_chk;
+ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_outcome_required_cols_chk;
+
+-- ============================================================================
+-- Step 4: Calibration-report indexes (per spec §4.1, round-2 fix M9
+-- column order + outcome-side covering index).
+--
+-- Round-1 led the composite key with recorded_month (a low-cardinality
+-- DATE column truncated to the first day of the month). Postgres will
+-- happily use such an index, but on a multi-tenant cluster the leading
+-- column should be tenant_id so per-tenant queries can use an
+-- index-only scan without a Bitmap Heap pass. recorded_month moves to
+-- the second key — calibration-report's monthly aggregation still gets
+-- a tight range scan inside the per-tenant slice.
+--
+-- audit_outbox_outcome_calibration_idx (NEW in round-2): the outcome
+-- side was previously uncovered. The aggregation calibration-report
+-- runs is "delta_b_ratio + delta_c_ratio + actual_output_tokens per
+-- (tenant, month, strategy)" — this index covers it with INCLUDE so
+-- the table heap is not touched on the hot path.
+--
+-- Partial-indexes scoped to (event_type = '...') keep them small —
+-- outcome / decision rows do not populate each other's columns. All
 -- defined on the partitioned parent; Postgres applies them per-partition.
 -- ============================================================================
 
 CREATE INDEX audit_outbox_calibration_idx
-    ON audit_outbox (recorded_month, tenant_id,
+    ON audit_outbox (tenant_id, recorded_month,
                      prediction_strategy_used, prediction_policy_used)
     WHERE event_type = 'spendguard.audit.decision';
 
 CREATE INDEX audit_outbox_tier_idx
-    ON audit_outbox (recorded_month, tenant_id, tokenizer_tier)
+    ON audit_outbox (tenant_id, recorded_month, tokenizer_tier)
     WHERE event_type = 'spendguard.audit.decision';
 
+CREATE INDEX audit_outbox_outcome_calibration_idx
+    ON audit_outbox (tenant_id, recorded_month, prediction_strategy_used)
+    INCLUDE (delta_b_ratio, delta_c_ratio, actual_output_tokens)
+    WHERE event_type = 'spendguard.audit.outcome'
+      AND (delta_b_ratio IS NOT NULL OR delta_c_ratio IS NOT NULL);
+
+-- ============================================================================
+-- Step 5: Pre-create future partitions through 2026-10 (round-2 fix
+-- M14). Baseline 0009 only pre-created up to 2026-07; without these
+-- partitions the table would fall through to audit_outbox_default and
+-- raise an ops alert as SLICE_06 producers begin writing in 2026-08+.
+-- Postgres ranges are half-open; '2026-08-01' to '2026-09-01' captures
+-- August 2026 inclusive.
+-- ============================================================================
+
+CREATE TABLE audit_outbox_2026_08 PARTITION OF audit_outbox
+    FOR VALUES FROM ('2026-08-01') TO ('2026-09-01');
+CREATE TABLE audit_outbox_2026_09 PARTITION OF audit_outbox
+    FOR VALUES FROM ('2026-09-01') TO ('2026-10-01');
+CREATE TABLE audit_outbox_2026_10 PARTITION OF audit_outbox
+    FOR VALUES FROM ('2026-10-01') TO ('2026-11-01');
+
+-- ============================================================================
+-- Step 6: Immutability trigger update (round-2 fix M7 — merged from
+-- the old 0047 to close the trigger-gap window).
+--
+-- Spec: docs/audit-chain-prediction-extension-v1alpha1.md §5 (critical
+-- surface) and §5.2 verbatim trigger body.
+--
+-- Critical risk this closes (HANDOFF Step 4 discrepancy #4): the
+-- original trigger function (migration 0011) only compares the 14 base
+-- columns. Without this update, the 18 new columns are silently mutable
+-- by any UPDATE statement — DBA / forwarder ORM / attacker could
+-- rewrite calibration evidence after INSERT and `verify-chain` would
+-- still see the signature match if mirror was tampered alongside (only
+-- the mirror cross-check from §11.2 would catch it). With this update,
+-- any UPDATE to a prediction column raises Postgres errcode 42P10.
+--
+-- The function is CREATE OR REPLACE — no trigger DROP, no audit
+-- downtime. The existing audit_outbox_immutability trigger continues to
+-- fire BEFORE UPDATE; it just dispatches to the new function body.
+--
+-- Forwarder-state columns (pending_forward, forwarded_at,
+-- forward_attempts, last_forward_error) remain UPDATE-able — they are
+-- intentionally excluded from both OLD and NEW tuples, so a forwarder
+-- UPDATE that only touches those four columns produces tuples that are
+-- still equal under IS DISTINCT FROM, and the trigger passes silently.
+-- See audit-chain-prediction-extension-v1alpha1.md §5.3.
+-- ============================================================================
+
+CREATE OR REPLACE FUNCTION reject_audit_outbox_immutable_columns()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (OLD.audit_outbox_id, OLD.audit_decision_event_id, OLD.decision_id,
+        OLD.tenant_id, OLD.ledger_transaction_id, OLD.event_type,
+        OLD.cloudevent_payload, OLD.cloudevent_payload_signature,
+        OLD.ledger_fencing_epoch, OLD.workload_instance_id,
+        OLD.recorded_at, OLD.recorded_month,
+        OLD.producer_sequence, OLD.idempotency_key,
+        -- === NEW prediction columns (per audit-chain-prediction-extension §5.2) ===
+        OLD.predicted_a_tokens, OLD.predicted_b_tokens, OLD.predicted_c_tokens,
+        OLD.reserved_strategy, OLD.prediction_strategy_used,
+        OLD.prediction_policy_used, OLD.tokenizer_tier, OLD.tokenizer_version_id,
+        OLD.prediction_confidence, OLD.prediction_sample_size,
+        OLD.cold_start_layer_used,
+        OLD.run_projection_at_decision_atomic,
+        OLD.run_predicted_remaining_steps,
+        OLD.run_steps_completed_so_far,
+        OLD.actual_input_tokens, OLD.actual_output_tokens,
+        OLD.delta_b_ratio, OLD.delta_c_ratio)
+       IS DISTINCT FROM
+       (NEW.audit_outbox_id, NEW.audit_decision_event_id, NEW.decision_id,
+        NEW.tenant_id, NEW.ledger_transaction_id, NEW.event_type,
+        NEW.cloudevent_payload, NEW.cloudevent_payload_signature,
+        NEW.ledger_fencing_epoch, NEW.workload_instance_id,
+        NEW.recorded_at, NEW.recorded_month,
+        NEW.producer_sequence, NEW.idempotency_key,
+        NEW.predicted_a_tokens, NEW.predicted_b_tokens, NEW.predicted_c_tokens,
+        NEW.reserved_strategy, NEW.prediction_strategy_used,
+        NEW.prediction_policy_used, NEW.tokenizer_tier, NEW.tokenizer_version_id,
+        NEW.prediction_confidence, NEW.prediction_sample_size,
+        NEW.cold_start_layer_used,
+        NEW.run_projection_at_decision_atomic,
+        NEW.run_predicted_remaining_steps,
+        NEW.run_steps_completed_so_far,
+        NEW.actual_input_tokens, NEW.actual_output_tokens,
+        NEW.delta_b_ratio, NEW.delta_c_ratio) THEN
+        RAISE EXCEPTION 'audit_outbox immutable columns cannot be changed (incl. prediction extension cols)'
+            USING ERRCODE = '42P10';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ============================================================================
+-- Step 7: TRUNCATE guard (round-2 fix M13).
+--
+-- The base 0011 BEFORE UPDATE / BEFORE DELETE triggers do not fire on
+-- TRUNCATE — Postgres routes TRUNCATE through its own statement-level
+-- trigger event. Without an explicit BEFORE TRUNCATE trigger an attacker
+-- (or a careless operator) could TRUNCATE audit_outbox and bypass the
+-- immutability invariant entirely. This trigger closes that gap by
+-- reusing the existing reject_immutable_ledger_entry_mutation function
+-- (which RAISEs 42P10) at statement level.
+-- ============================================================================
+
+CREATE TRIGGER audit_outbox_no_truncate
+    BEFORE TRUNCATE ON audit_outbox
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION reject_immutable_ledger_entry_mutation();
+
+-- ============================================================================
+-- Step 8: Design rationale — audit_outbox_global_keys deliberately
+-- NOT extended (round-2 fix M17).
+--
+-- The 18 new columns are calibration-aggregation evidence (token counts,
+-- prediction confidence, run-level projections), not dedup keys. The
+-- audit_outbox_global_keys mirror table exists to enforce cross-
+-- partition uniqueness on dedup-relevant fields (decision_id,
+-- producer_sequence, idempotency_key); extending it with prediction
+-- columns would not add any uniqueness invariant and would force every
+-- INSERT to write the same 18 columns twice with no functional benefit.
+--
+-- Cross-storage consistency between audit_outbox and audit_outbox_global_keys
+-- on the dedup keys remains enforced by the post_ledger_transaction
+-- stored proc (services/ledger/migrations/0012_post_ledger_transaction.sql).
+-- ============================================================================
+
+-- ============================================================================
+-- Step 9: Column comments. Kept verbose because SLICE_06+ producers will
+-- consult these via `\d+ audit_outbox` when wiring up the mirror logic
+-- and the sentinel discipline is non-obvious from column names alone.
+-- ============================================================================
+
 COMMENT ON COLUMN audit_outbox.predicted_a_tokens IS
-    'Strategy A token ceiling at decision time (always populated on .decision events). Per audit-chain-prediction-extension-v1alpha1.md §2.1.';
+    'Strategy A token ceiling at decision time (always populated on .decision events; BIGINT for multi-year aggregation headroom). Per audit-chain-prediction-extension-v1alpha1.md §2.1.';
 COMMENT ON COLUMN audit_outbox.predicted_b_tokens IS
     'Strategy B (empirical) prediction; NULL when sample bucket < 30. §2.1.';
 COMMENT ON COLUMN audit_outbox.predicted_c_tokens IS
@@ -112,24 +415,22 @@ COMMENT ON COLUMN audit_outbox.tokenizer_tier IS
 COMMENT ON COLUMN audit_outbox.tokenizer_version_id IS
     'FK to tokenizer_versions(tokenizer_version_id). NULL on Tier 3 fallback. §2.1.';
 COMMENT ON COLUMN audit_outbox.prediction_confidence IS
-    'Predictor confidence for Strategy B/C (0.0-1.0); NULL for Strategy A. §2.1.';
+    'Predictor confidence for Strategy B/C (NUMERIC(4,3) range 0.000-1.000 for deterministic AVG semantics — round-2 fix M12); NULL for Strategy A. CloudEvent proto field 308 mirrors as float with absent = column-NULL on Strategy A row (round-2 fix M11; see audit-chain-prediction-extension-v1alpha1.md §6.3). §2.1.';
 COMMENT ON COLUMN audit_outbox.prediction_sample_size IS
-    'Sample count behind Strategy B/C; NULL for cold-start / A. §2.1.';
+    'Sample count behind Strategy B/C; NULL for cold-start / A. BIGINT per round-2 fix M4 for multi-year aggregation headroom. §2.1.';
 COMMENT ON COLUMN audit_outbox.cold_start_layer_used IS
     'Cold-start fallback layer (L1-L4) when B/C fell through; NULL when warm. Promoted from metadata to first-class per §2.4 reviewer note. §2.1.';
 COMMENT ON COLUMN audit_outbox.run_projection_at_decision_atomic IS
-    'Per-run projected cumulative cost (NUMERIC(38,0)) at decision time. §2.2.';
+    'Per-run projected cumulative cost (NUMERIC(38,0)) at decision time. Constrained to <= int64 max (round-2 fix M5) so the CloudEvent proto int64 mirror at tag 311 round-trips losslessly. §2.2.';
 COMMENT ON COLUMN audit_outbox.run_predicted_remaining_steps IS
-    'Predicted remaining run steps; NULL when run_cost_projector unreachable. §2.2.';
+    'Predicted remaining run steps; NULL when run_cost_projector unreachable. Wire-level mirror at proto tag 312 uses -1 sentinel for unreachable; SQL side keeps NULL. §2.2.';
 COMMENT ON COLUMN audit_outbox.run_steps_completed_so_far IS
-    'Step counter from sidecar in-process state cache. §2.2.';
+    'Step counter from sidecar in-process state cache. BIGINT per round-2 fix M4. §2.2.';
 COMMENT ON COLUMN audit_outbox.actual_input_tokens IS
     'Provider-reported input tokens at commit_estimated / provider_report time. §2.3.';
 COMMENT ON COLUMN audit_outbox.actual_output_tokens IS
     'Provider-reported output tokens at commit_estimated / provider_report time. §2.3.';
 COMMENT ON COLUMN audit_outbox.delta_b_ratio IS
-    'actual_output_tokens / predicted_b_tokens; NULL when prediction B was null at decision time. §2.3.';
+    'actual_output_tokens / predicted_b_tokens; NULL when prediction B was null at decision time. CHECK guards NaN per IEEE 754 (round-2 fix M3). §2.3.';
 COMMENT ON COLUMN audit_outbox.delta_c_ratio IS
-    'actual_output_tokens / predicted_c_tokens; NULL when prediction C was null at decision time. §2.3.';
-
-COMMIT;
+    'actual_output_tokens / predicted_c_tokens; NULL when prediction C was null at decision time. CHECK guards NaN per IEEE 754 (round-2 fix M3). §2.3.';
