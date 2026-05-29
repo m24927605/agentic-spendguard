@@ -386,11 +386,35 @@ CREATE INDEX audit_outbox_tier_idx
     ON audit_outbox (tenant_id, recorded_month, tokenizer_tier)
     WHERE event_type = 'spendguard.audit.decision';
 
+-- Round-4 fix M14: WHERE clause relaxed from
+--   WHERE event_type = '...outcome'
+--     AND (delta_b_ratio IS NOT NULL OR delta_c_ratio IS NOT NULL)
+-- to just `WHERE event_type = '...outcome'`. Per PostgreSQL docs the
+-- planner only considers a partial index when the query WHERE implies
+-- the index predicate. If SLICE_13's calibration-report omits the
+-- `OR delta_b_ratio IS NOT NULL OR delta_c_ratio IS NOT NULL` clause
+-- — likely, because the natural query is "all outcomes per
+-- (tenant, month, strategy)" — the planner would skip this index even
+-- though it covers the requested columns.
+--
+-- Cost of relaxation: the index grows by however many outcome rows
+-- have both delta_*_ratio NULL. Per spec §6.3 this corresponds to
+-- Strategy A outcomes (predictions B/C were null at decision time so
+-- ratios are NULL). On a fresh cluster with 100% Strategy A traffic
+-- the index doubles in size; on a tenant with mixed strategies the
+-- delta is smaller. The PG planner-friendliness wins because the
+-- alternative is a sequential heap scan on every calibration-report
+-- query that forgets the IS NOT NULL clause.
+--
+-- DROP INDEX IF EXISTS prepended so re-application against a database
+-- that already has the round-3 form (the strict WHERE) replaces it
+-- cleanly. CREATE INDEX would otherwise error with "relation already
+-- exists" because the index name is unchanged.
+DROP INDEX IF EXISTS audit_outbox_outcome_calibration_idx;
 CREATE INDEX audit_outbox_outcome_calibration_idx
     ON audit_outbox (tenant_id, recorded_month, prediction_strategy_used)
     INCLUDE (delta_b_ratio, delta_c_ratio, actual_output_tokens)
-    WHERE event_type = 'spendguard.audit.outcome'
-      AND (delta_b_ratio IS NOT NULL OR delta_c_ratio IS NOT NULL);
+    WHERE event_type = 'spendguard.audit.outcome';
 
 -- Round-3 fix M7: partial index supporting the
 -- audit_outbox_tokenizer_version_id_fk constraint declared in 0048.

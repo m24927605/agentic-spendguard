@@ -269,11 +269,17 @@ CREATE INDEX canonical_events_tier_idx
     ON canonical_events (tenant_id, recorded_month, tokenizer_tier)
     WHERE event_type = 'spendguard.audit.decision';
 
+-- Round-4 fix M14 mirror: WHERE clause relaxed to just
+-- `event_type = '...outcome'`. See ledger-side 0046 for rationale —
+-- the partial-index planner only fires when the query WHERE implies
+-- the index predicate. Forcing calibration-report queries to include
+-- the IS NOT NULL clause was a planner foot-gun. DROP-then-CREATE
+-- handles re-application against the round-3 form.
+DROP INDEX IF EXISTS canonical_events_outcome_calibration_idx;
 CREATE INDEX canonical_events_outcome_calibration_idx
     ON canonical_events (tenant_id, recorded_month, prediction_strategy_used)
     INCLUDE (delta_b_ratio, delta_c_ratio, actual_output_tokens)
-    WHERE event_type = 'spendguard.audit.outcome'
-      AND (delta_b_ratio IS NOT NULL OR delta_c_ratio IS NOT NULL);
+    WHERE event_type = 'spendguard.audit.outcome';
 
 -- ============================================================================
 -- Step 5: Pre-create future partitions through 2026-10 (round-2 fix
