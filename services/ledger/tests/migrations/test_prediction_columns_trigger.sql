@@ -42,29 +42,30 @@ BEGIN;
 --
 -- Use a UUID that does NOT clash with any existing test data. The row
 -- only needs to exist (the audit_outbox FK is RESTRICT, not CASCADE);
--- we don't exercise any ledger_transaction fields here.
+-- we don't exercise any ledger_transaction fields here. Required NOT NULL
+-- columns per services/ledger/migrations/0007_ledger_transactions.sql:
+-- ledger_transaction_id (PK), tenant_id, operation_kind, idempotency_key,
+-- request_hash, effective_at, recorded_at, lock_order_token.
 INSERT INTO ledger_transactions (
     ledger_transaction_id,
     tenant_id,
-    ledger_shard_id,
-    budget_window_instance_id,
-    ledger_fencing_epoch,
-    workload_instance_id,
-    transaction_kind,
+    operation_kind,
+    idempotency_key,
+    request_hash,
+    effective_at,
     recorded_at,
-    recorded_month
+    lock_order_token
 ) VALUES (
     '01999d70-0001-7000-8000-0000000000ff'::uuid,
     '00000000-0000-4000-8000-000000000001'::uuid,
-    'test-shard-0',
-    (SELECT budget_window_instance_id FROM budget_window_instances LIMIT 1),
-    1,
-    'test-wl',
-    'POST_LEDGER_TRANSACTION',
+    'reserve',
+    'test-prediction-trigger-fixture-1',
+    '\x00'::bytea,
     '2026-07-15T00:00:00Z'::timestamptz,
-    '2026-07-01'::date
+    '2026-07-15T00:00:00Z'::timestamptz,
+    'test-lock-order'
 )
-ON CONFLICT DO NOTHING;
+ON CONFLICT (tenant_id, operation_kind, idempotency_key) DO NOTHING;
 
 -- Set up a known-good baseline row. Use the 2026-07 partition that
 -- 0009 pre-creates so we don't depend on partition pre-creation order.
