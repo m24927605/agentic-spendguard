@@ -182,6 +182,9 @@ Layered on top of `docs/review-standards/predictor-review-checklist.md` §1:
 | Writing new column values | This slice is schema-only | SLICE 03+ |
 | `prediction_drift_alert` event subscriber | Stats aggregator-side | SLICE 06 |
 | Tokenizer asset signed bundle integration | Tokenizer service slice | SLICE 03 |
+| **schema_bundle_id rotation (round-3 B3)** | The placeholder bundle in round-2's 0014 was security-hostile (public-string hash + NULL cosign); cosigned bundle row insertion requires the operator-side bundle builder per Trace §12 | SLICE 06 |
+| **`verify-chain --check-prediction-mirror` full implementation (round-2 B3 / round-3 M5)** | Per-row scan path requires producer-side mirror writes; the round-3 CLI scaffold exits 2 (fail-closed) on the default flag so CI gates don't silent-pass | SLICE 06 |
+| **Rolling-upgrade enforcement via pre-upgrade Helm Job (round-2 M10 / round-3 M12)** | Round-2 only documented the rolling-upgrade invariant (canonical_ingest pods MUST upgrade before producer pods start writing tag 300+ fields). Round-3 explicitly defers programmatic enforcement to SLICE_06 along with the producer-side mirror writes — at that point a pre-upgrade Job hook can compare image versions or call a version endpoint on canonical_ingest. SLICE_01 ships the documented invariant only (charts/NOTES.txt §"PROST 0.13 ROLLOUT INVARIANT") | SLICE 06 |
 
 ---
 

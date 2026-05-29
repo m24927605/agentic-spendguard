@@ -110,19 +110,21 @@ T (Trace) → L (Ledger) → C (Contract DSL) → D (Decision) → E (Evidence) 
 
 加到 `audit_outbox` table（事件型別 `spendguard.audit.decision`）。
 
+> Round-3 fix M1: type cells updated to match the round-2 SLICE_01 implementation (BIGINT for token counts per round-2 M4; NUMERIC(4,3) for prediction_confidence per round-2 M12; enums realized as TEXT + CHECK constraints rather than Postgres ENUM types). The CHECK constraints are declared NOT VALID + VALIDATEd per round-2 M6 / round-3 M14 deployment-safe pattern. Partial NOT-NULL via event_type-scoped CHECK with cutoff 2027-01-01 per round-3 B5.
+
 | Column | Type | Nullable | 何時填 | Source |
 |---|---|---|---|---|
-| `predicted_a_tokens` | `INT` | NO（永遠算得出） | 每次 decision | `output_predictor.Predict` strategy A |
-| `predicted_b_tokens` | `INT` | YES — null 表「該 bucket 樣本不足」 | 當 stats_aggregator 對 `(tenant, model, agent_id, prompt_class)` bucket 有 ≥30 samples | `output_predictor.Predict` strategy B |
-| `predicted_c_tokens` | `INT` | YES — null 表 customer plugin 未配置 / 失敗 / fallback | 當 tenant 有配 plugin endpoint 且健康 | `output_predictor.Predict` strategy C (delegated) |
-| `reserved_strategy` | `audit_outbox_strategy` enum: `'A'\|'B'\|'C'` | NO | 每次 decision | Sidecar policy resolver（per `predictor-architecture-spec-v1alpha1.md` §5） |
-| `prediction_strategy_used` | `audit_outbox_strategy` enum | NO | 每次 decision；可能 != reserved_strategy（policy 為 STRICT_CEILING 時 reserved=A 但 prediction_strategy_used 可能仍是 B/C） | Sidecar |
-| `prediction_policy_used` | `audit_outbox_prediction_policy` enum: `'STRICT_CEILING'\|'EMPIRICAL_RUN_CEILING'\|'ADAPTIVE_CEILING'\|'SHADOW_ONLY'` | NO | 每次 decision | Contract evaluator |
-| `tokenizer_tier` | `audit_outbox_tokenizer_tier` enum: `'T1'\|'T2'\|'T3'` | NO | 每次 decision | tokenizer service response |
-| `tokenizer_version_id` | `UUID` | YES — null 表 Tier 3 fallback | T1/T2 時填；FK to `tokenizer_versions` registry table（new in SLICE 01） | tokenizer service |
-| `prediction_confidence` | `REAL` (0.0-1.0) | YES | B / C 有 sample 時填；A 永遠 null（A 是 lookup，不算 confidence） | output_predictor 算 |
-| `prediction_sample_size` | `INT` | YES — null 表 cold-start / A | B 採樣大小；C 由 plugin 回報 | stats_aggregator / customer plugin |
-| `cold_start_layer_used` | `audit_outbox_cold_start_layer` enum: `'L1'\|'L2'\|'L3'\|'L4'` | YES — 只在 cold-start 觸發時填 | 當 B / C lookup fall through layer fallback | output_predictor |
+| `predicted_a_tokens` | `BIGINT` (CHECK ≥ 0; >0 on .decision per round-3 M13) | NO on .decision past 2027-01-01 cutoff | 每次 decision | `output_predictor.Predict` strategy A |
+| `predicted_b_tokens` | `BIGINT` (CHECK ≥ 0; >0 when strategy='B') | YES — null 表「該 bucket 樣本不足」 | 當 stats_aggregator 對 `(tenant, model, agent_id, prompt_class)` bucket 有 ≥30 samples | `output_predictor.Predict` strategy B |
+| `predicted_c_tokens` | `BIGINT` (CHECK ≥ 0; >0 when strategy='C') | YES — null 表 customer plugin 未配置 / 失敗 / fallback | 當 tenant 有配 plugin endpoint 且健康 | `output_predictor.Predict` strategy C (delegated) |
+| `reserved_strategy` | `TEXT` (CHECK IN ('A','B','C')) | NO on .decision past 2027-01-01 cutoff | 每次 decision | Sidecar policy resolver（per `predictor-architecture-spec-v1alpha1.md` §5） |
+| `prediction_strategy_used` | `TEXT` (CHECK IN ('A','B','C')) | NO on .decision past 2027-01-01 cutoff；可能 != reserved_strategy（policy 為 STRICT_CEILING 時 reserved=A 但 prediction_strategy_used 可能仍是 B/C） | Sidecar |
+| `prediction_policy_used` | `TEXT` (CHECK IN ('STRICT_CEILING','EMPIRICAL_RUN_CEILING','ADAPTIVE_CEILING','SHADOW_ONLY')) | NO on .decision past 2027-01-01 cutoff | 每次 decision | Contract evaluator |
+| `tokenizer_tier` | `TEXT` (CHECK IN ('T1','T2','T3')) | NO on .decision past 2027-01-01 cutoff | 每次 decision | tokenizer service response |
+| `tokenizer_version_id` | `UUID` | YES — null 表 Tier 3 fallback | T1/T2 時填；FK to `tokenizer_versions` registry table（new in SLICE 01）；partial index per round-3 M7 | tokenizer service |
+| `prediction_confidence` | `NUMERIC(4,3)` (CHECK 0.000-1.000) | YES | B / C 有 sample 時填；A 永遠 null（A 是 lookup，不算 confidence；calibration-report filters `WHERE prediction_confidence IS NOT NULL`） | output_predictor 算 |
+| `prediction_sample_size` | `BIGINT` (CHECK ≥ 0) | YES — null 表 cold-start / A | B 採樣大小；C 由 plugin 回報 | stats_aggregator / customer plugin |
+| `cold_start_layer_used` | `TEXT` (CHECK IN ('L1','L2','L3','L4')) | YES — 只在 cold-start 觸發時填 | 當 B / C lookup fall through layer fallback | output_predictor |
 
 註：`reserved_strategy` 與 `prediction_strategy_used` 在 `STRICT_CEILING` policy 下分別永遠是 `A` 與「實際 picked」。寫兩個欄位是為了 calibration-report 可以同時看「我們 reserved 的策略」與「我們會建議的策略」。
 
@@ -132,9 +134,9 @@ T (Trace) → L (Ledger) → C (Contract DSL) → D (Decision) → E (Evidence) 
 
 | Column | Type | Nullable | 何時填 | Source |
 |---|---|---|---|---|
-| `run_projection_at_decision_atomic` | `NUMERIC(38,0)` | NO（當 `run_cost_projector` 可達時；否則 trigger fallback path 填 0） | 每次 decision | run_cost_projector |
-| `run_predicted_remaining_steps` | `INT` | YES — null 表 projector unreachable | 每次 decision；signal 1/2 算出 | run_cost_projector |
-| `run_steps_completed_so_far` | `INT` | NO | 每次 decision | sidecar in-process state cache |
+| `run_projection_at_decision_atomic` | `NUMERIC(38,0)` (CHECK ≥ 0 AND ≤ int64 max per round-2 M5) | NO on .decision past 2027-01-01 cutoff | 每次 decision | run_cost_projector |
+| `run_predicted_remaining_steps` | `INT` (CHECK ≥ -1; -1 sentinel = projector unreachable) | YES — null 表 projector unreachable | 每次 decision；signal 1/2 算出 | run_cost_projector |
+| `run_steps_completed_so_far` | `BIGINT` (CHECK ≥ 0 per round-2 M4) | NO on .decision past 2027-01-01 cutoff | 每次 decision | sidecar in-process state cache |
 
 ### 2.3 Commit-side actual columns (4)
 
@@ -142,10 +144,10 @@ T (Trace) → L (Ledger) → C (Contract DSL) → D (Decision) → E (Evidence) 
 
 | Column | Type | Nullable | 何時填 | Source |
 |---|---|---|---|---|
-| `actual_input_tokens` | `INT` | NO | commit_estimated / provider_report | `LlmCallPostPayload.provider_reported.input_tokens` 或 sidecar 計算 |
-| `actual_output_tokens` | `INT` | NO | 同上 | 同上 |
-| `delta_b_ratio` | `REAL` | YES — null 表 prediction B 當時 null | commit_estimated；`actual_output_tokens / predicted_b_tokens` | sidecar 在 commit 時算 |
-| `delta_c_ratio` | `REAL` | YES — null 表 prediction C 當時 null | 同上 | 同上 |
+| `actual_input_tokens` | `BIGINT` (CHECK ≥ 0) | NO on .outcome past 2027-01-01 cutoff | commit_estimated / provider_report | `LlmCallPostPayload.provider_reported.input_tokens` 或 sidecar 計算 |
+| `actual_output_tokens` | `BIGINT` (CHECK ≥ 0) | NO on .outcome past 2027-01-01 cutoff | 同上 | 同上 |
+| `delta_b_ratio` | `REAL` (CHECK ≥ 0.0 AND non-NaN per round-2 M3) | YES — null 表 prediction B 當時 null | commit_estimated；`actual_output_tokens / predicted_b_tokens` | sidecar 在 commit 時算 |
+| `delta_c_ratio` | `REAL` (CHECK ≥ 0.0 AND non-NaN per round-2 M3) | YES — null 表 prediction C 當時 null | 同上 | 同上 |
 
 註：`delta_a_ratio` 不加 —— A 永遠是 ceiling，`actual / A` 永遠 ≤ 1.0，calibration-report 直接從 `actual_output_tokens / predicted_a_tokens` 算即可，無需 materialize column。`delta_b/c_ratio` materialize 因為 B/C 是 mean estimator，ratio 是 calibration 主要訊號，frequent aggregation 該預先算好。
 
@@ -186,24 +188,24 @@ message CloudEvent {
   // Decision-side fields populated only on event_type "spendguard.audit.decision".
   // Outcome-side fields populated only on event_type "spendguard.audit.outcome".
 
-  int64  predicted_a_tokens = 300;             // always populated on .decision
-  int64  predicted_b_tokens = 301;             // populated when B available
-  int64  predicted_c_tokens = 302;             // populated when C available
+  int64  predicted_a_tokens = 300;             // always populated on .decision; mirror of BIGINT col
+  int64  predicted_b_tokens = 301;             // populated when B available; mirror of BIGINT col
+  int64  predicted_c_tokens = 302;             // populated when C available; mirror of BIGINT col
   string reserved_strategy = 303;              // "A" | "B" | "C"
   string prediction_strategy_used = 304;       // "A" | "B" | "C"
   string prediction_policy_used = 305;         // STRICT_CEILING | EMPIRICAL_RUN_CEILING | ADAPTIVE_CEILING | SHADOW_ONLY
   string tokenizer_tier = 306;                 // "T1" | "T2" | "T3"
   string tokenizer_version_id = 307;           // UUID v7; empty string on Tier 3
-  float  prediction_confidence = 308;          // 0.0-1.0; default 0.0 = "not applicable / strategy A"
-  int32  prediction_sample_size = 309;         // default 0 = "not applicable"
+  float  prediction_confidence = 308;          // 0.0-1.0; absent = column-NULL on Strategy A row per §6.3 round-2 M11
+  int64  prediction_sample_size = 309;         // round-3 M3: int32 → int64 to match BIGINT col; default 0 = "not applicable"
   string cold_start_layer_used = 310;          // "L1" | "L2" | "L3" | "L4"; empty = no cold start
 
-  int64  run_projection_at_decision_atomic = 311;  // NUMERIC(38,0) serialized as int64 (assumes < 2^63); for >2^63 use string
+  int64  run_projection_at_decision_atomic = 311;  // NUMERIC(38,0) serialized as int64 (assumes < 2^63 per round-2 M5)
   int32  run_predicted_remaining_steps = 312;       // default -1 = "projector unreachable" (use sentinel since proto3 default 0 conflates with "0 steps remaining")
   int32  run_steps_completed_so_far = 313;
 
-  int64 actual_input_tokens = 314;             // only on .outcome
-  int64 actual_output_tokens = 315;            // only on .outcome
+  int64 actual_input_tokens = 314;             // only on .outcome; mirror of BIGINT col
+  int64 actual_output_tokens = 315;            // only on .outcome; mirror of BIGINT col
   float delta_b_ratio = 316;                   // only on .outcome; default 0.0 sentinel = "B prediction was null at decision time"
   float delta_c_ratio = 317;                   // only on .outcome
 }
@@ -240,45 +242,84 @@ proto3 沒有「field absent」的原生語意（fields with default values are 
 ```sql
 -- Prediction extension columns per audit-chain-prediction-extension-v1alpha1.md §2.
 -- All ADD COLUMN with explicit NULL default. No backfill — old rows stay NULL.
+--
+-- Round-2 / round-3 updates baked in:
+--   * BIGINT for token counts (round-2 M4)
+--   * NUMERIC(4,3) for prediction_confidence (round-2 M12 deterministic AVG)
+--   * NOT VALID + VALIDATE for every CHECK (round-2 M6 / round-3 M14
+--     deployment-safe lock pattern)
+--   * Partial NOT-NULL via event_type-scoped CHECK with 2027-01-01 cutoff
+--     (round-3 B5 — was 2026-07-01 calendar bomb)
+--   * Sentinel-collision guards (round-3 M13) for predicted_a/b/c_tokens > 0
+--   * Per-table TRUNCATE statement-level trigger using
+--     reject_truncate_on_immutable_table() (round-3 M6 — replaces the
+--     misleading reject_immutable_ledger_entry_mutation)
+--
+-- See services/ledger/migrations/0046_audit_outbox_prediction_columns.sql
+-- and services/canonical_ingest/migrations/0013_canonical_events_prediction_columns.sql
+-- for the verbatim production DDL — the snippet below is illustrative.
 
 ALTER TABLE audit_outbox
-  ADD COLUMN predicted_a_tokens         INT,
-  ADD COLUMN predicted_b_tokens         INT,
-  ADD COLUMN predicted_c_tokens         INT,
-  ADD COLUMN reserved_strategy          TEXT CHECK (reserved_strategy IN ('A','B','C') OR reserved_strategy IS NULL),
-  ADD COLUMN prediction_strategy_used   TEXT CHECK (prediction_strategy_used IN ('A','B','C') OR prediction_strategy_used IS NULL),
-  ADD COLUMN prediction_policy_used     TEXT CHECK (prediction_policy_used IN ('STRICT_CEILING','EMPIRICAL_RUN_CEILING','ADAPTIVE_CEILING','SHADOW_ONLY') OR prediction_policy_used IS NULL),
-  ADD COLUMN tokenizer_tier             TEXT CHECK (tokenizer_tier IN ('T1','T2','T3') OR tokenizer_tier IS NULL),
+  ADD COLUMN predicted_a_tokens         BIGINT,
+  ADD COLUMN predicted_b_tokens         BIGINT,
+  ADD COLUMN predicted_c_tokens         BIGINT,
+  ADD COLUMN reserved_strategy          TEXT,
+  ADD COLUMN prediction_strategy_used   TEXT,
+  ADD COLUMN prediction_policy_used     TEXT,
+  ADD COLUMN tokenizer_tier             TEXT,
   ADD COLUMN tokenizer_version_id       UUID,
-  ADD COLUMN prediction_confidence      REAL CHECK (prediction_confidence BETWEEN 0.0 AND 1.0 OR prediction_confidence IS NULL),
-  ADD COLUMN prediction_sample_size     INT,
-  ADD COLUMN cold_start_layer_used      TEXT CHECK (cold_start_layer_used IN ('L1','L2','L3','L4') OR cold_start_layer_used IS NULL),
+  ADD COLUMN prediction_confidence      NUMERIC(4,3),
+  ADD COLUMN prediction_sample_size     BIGINT,
+  ADD COLUMN cold_start_layer_used      TEXT,
 
   ADD COLUMN run_projection_at_decision_atomic NUMERIC(38,0),
   ADD COLUMN run_predicted_remaining_steps     INT,
-  ADD COLUMN run_steps_completed_so_far        INT,
+  ADD COLUMN run_steps_completed_so_far        BIGINT,
 
-  ADD COLUMN actual_input_tokens  INT,
-  ADD COLUMN actual_output_tokens INT,
+  ADD COLUMN actual_input_tokens  BIGINT,
+  ADD COLUMN actual_output_tokens BIGINT,
   ADD COLUMN delta_b_ratio        REAL,
   ADD COLUMN delta_c_ratio        REAL;
 
+-- Then ALTER TABLE ... ADD CONSTRAINT ... CHECK (...) NOT VALID for every
+-- domain enum + sentinel-collision guard; then ALTER TABLE ... VALIDATE
+-- CONSTRAINT for each. See 0046 step 2 + step 3 + step 3b.
+
 -- Indexes for calibration-report (CLI per calibration-report-spec-v1alpha1.md).
+-- Round-2 M9: tenant_id first; tenant_id-scoped query patterns get
+-- index-only scans without bitmap heap pass.
 CREATE INDEX audit_outbox_calibration_idx
-  ON audit_outbox (recorded_month, tenant_id, prediction_strategy_used, prediction_policy_used)
+  ON audit_outbox (tenant_id, recorded_month, prediction_strategy_used, prediction_policy_used)
   WHERE event_type = 'spendguard.audit.decision';
 
 CREATE INDEX audit_outbox_tier_idx
-  ON audit_outbox (recorded_month, tenant_id, tokenizer_tier)
+  ON audit_outbox (tenant_id, recorded_month, tokenizer_tier)
   WHERE event_type = 'spendguard.audit.decision';
 
+CREATE INDEX audit_outbox_outcome_calibration_idx
+  ON audit_outbox (tenant_id, recorded_month, prediction_strategy_used)
+  INCLUDE (delta_b_ratio, delta_c_ratio, actual_output_tokens)
+  WHERE event_type = 'spendguard.audit.outcome'
+    AND (delta_b_ratio IS NOT NULL OR delta_c_ratio IS NOT NULL);
+
+-- Round-3 M7: partial index supporting the FK from
+-- audit_outbox.tokenizer_version_id -> tokenizer_versions.
+CREATE INDEX audit_outbox_tokenizer_version_id_idx
+  ON audit_outbox (tokenizer_version_id)
+  WHERE tokenizer_version_id IS NOT NULL;
+
 -- New tokenizer_versions registry table per tokenizer-service-spec-v1alpha1.md §6.
--- (placeholder; final DDL in tokenizer-service spec)
+-- Final DDL lives in services/ledger/migrations/0048_tokenizer_versions.sql:
+-- immutability trigger + TRUNCATE guard + REVOKE PUBLIC + role grants.
 CREATE TABLE IF NOT EXISTS tokenizer_versions (
   tokenizer_version_id UUID PRIMARY KEY,
-  kind                 TEXT NOT NULL CHECK (kind IN ('OPENAI_TIKTOKEN','ANTHROPIC_BPE','GEMINI_BPE','COHERE_BPE','SENTENCEPIECE_LLAMA')),
+  kind                 TEXT NOT NULL CHECK (kind IN ('OPENAI_TIKTOKEN','ANTHROPIC_BPE','GEMINI_BPE','COHERE_BPE','SENTENCEPIECE_LLAMA','HEURISTIC')),
+  encoder_name         TEXT NOT NULL,
   version_string       TEXT NOT NULL,
-  registered_at        TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+  asset_sha256         TEXT NOT NULL,
+  registered_at        TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+  retired_at           TIMESTAMPTZ,
+  UNIQUE (kind, encoder_name, version_string)
 );
 ```
 
