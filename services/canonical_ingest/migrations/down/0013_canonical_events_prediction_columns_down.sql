@@ -1,17 +1,24 @@
 -- Down-migration: reverse 0013_canonical_events_prediction_columns.sql
--- (round-2 fix m2; round-3 fixes M4 + M10).
+-- (round-2 fix m2; round-3 fixes M4 + M10; round-4 fixes M4 + B6).
 --
--- Apply AFTER ledger-side down migrations per SLICE_01 §11. canonical_events
--- has no FK from outside this DB so down order is internal-only.
+-- Apply AFTER 0015_down (quarantine drops are independent but per slice
+-- §11 0015_down lands first); canonical_events has no FK from outside
+-- this DB so the only dependency is on the partition/column order.
+-- Apply BEFORE ledger-side down migrations per slice §11.
 --
--- Round-3 fix M4: destructive-down guard.
+-- Round-3 fix M4 + round-4 fix M4: per-file destructive-down guard
+-- (spendguard.allow_destructive_down_0013) — see slice §11 for the exact
+-- SET LOCAL form.
 -- Round-3 fix M10: no explicit BEGIN/COMMIT (matches up-migration).
+-- Round-4 fix B6: ACCESS EXCLUSIVE LOCK before partition row-count
+-- check to close the TOCTOU race window.
 
 DO $$
 BEGIN
-    IF current_setting('spendguard.allow_destructive_down', true) IS DISTINCT FROM 'on' THEN
-        RAISE EXCEPTION 'destructive down-migration 0013 requires `SET spendguard.allow_destructive_down = on` first';
+    IF current_setting('spendguard.allow_destructive_down_0013', true) IS DISTINCT FROM 'on' THEN
+        RAISE EXCEPTION 'destructive down-migration 0013 requires `SET LOCAL spendguard.allow_destructive_down_0013 = on` first';
     END IF;
+    RAISE NOTICE 'DESTRUCTIVE down-migration 0013 proceeding (caller: %)', current_user;
 END $$;
 
 ALTER TABLE canonical_events
@@ -42,11 +49,14 @@ DROP INDEX IF EXISTS canonical_events_calibration_idx;
 DROP INDEX IF EXISTS canonical_events_tier_idx;
 DROP INDEX IF EXISTS canonical_events_outcome_calibration_idx;
 
--- Round-3 fix M4: per-partition row-count guard.
+-- Round-3 fix M4 + round-4 fix B6: per-partition row-count guard with
+-- ACCESS EXCLUSIVE LOCK so the count→drop pair is atomic against
+-- concurrent INSERTs.
 DO $$
 DECLARE
     rc BIGINT;
 BEGIN
+    LOCK TABLE canonical_events_2026_10 IN ACCESS EXCLUSIVE MODE;
     SELECT COUNT(*) INTO rc FROM canonical_events_2026_10;
     IF rc > 0 THEN
         RAISE EXCEPTION 'canonical_events_2026_10 has % rows; refusing to drop. Manual data migration required first.', rc;
@@ -58,6 +68,7 @@ DO $$
 DECLARE
     rc BIGINT;
 BEGIN
+    LOCK TABLE canonical_events_2026_09 IN ACCESS EXCLUSIVE MODE;
     SELECT COUNT(*) INTO rc FROM canonical_events_2026_09;
     IF rc > 0 THEN
         RAISE EXCEPTION 'canonical_events_2026_09 has % rows; refusing to drop. Manual data migration required first.', rc;
@@ -69,6 +80,7 @@ DO $$
 DECLARE
     rc BIGINT;
 BEGIN
+    LOCK TABLE canonical_events_2026_08 IN ACCESS EXCLUSIVE MODE;
     SELECT COUNT(*) INTO rc FROM canonical_events_2026_08;
     IF rc > 0 THEN
         RAISE EXCEPTION 'canonical_events_2026_08 has % rows; refusing to drop. Manual data migration required first.', rc;

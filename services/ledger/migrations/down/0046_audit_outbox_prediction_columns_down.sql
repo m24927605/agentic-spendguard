@@ -4,37 +4,59 @@
 -- Spec ref: docs/slices/SLICE_01_canonical_events_migration.md §11
 --   rollback plan.
 --
--- ## Rollback order (per slice §11)
+-- ## Rollback order (per slice §11; round-4 fix B1 — header rewritten to
+-- match slice doc which is authoritative)
 --
 --   1. Stop all 4 producer services so no new tag-300+ writes happen.
---   2. Apply this down-migration (drops 18 columns + restores the
---      pre-SLICE_01 trigger function + removes the TRUNCATE guard +
---      drops the generic TRUNCATE-rejector function +
---      drops the 2026-08 through 2026-10 partitions IF they are empty
---      per the row-count guard at top of step 3).
---   3. Apply 0048's down-migration to drop tokenizer_versions and the FK.
---   4. Apply 0013's down-migration on the canonical DB.
+--   2. Apply canonical_ingest down-migrations on the canonical DB:
+--      0015_down → 0013_down. 0015_down first so quarantine columns are
+--      dropped before the canonical_events columns they mirror.
+--   3. Apply ledger down-migrations on the ledger DB in this order:
+--      0048_down → THIS FILE (0046_down). 0048_down drops the FK on
+--      audit_outbox.tokenizer_version_id BEFORE this file drops the
+--      column itself — reversing the order would fail because the FK
+--      points at a column that no longer exists.
+--   4. After this file finishes, the schema substrate matches the
+--      pre-SLICE_01 state.
 --   5. Roll back canonical_ingest pods to the pre-SLICE_01 image.
+--   6. Roll back producer pods to the pre-SLICE_01 image.
 --
 -- ## Idempotency
 --
 -- All ALTER TABLE ... DROP COLUMN are guarded with IF EXISTS so re-running
 -- after partial rollback is safe. DROP TRIGGER IF EXISTS likewise.
 --
--- ## Round-3 fix M4: destructive-down guard
+-- ## Round-3 fix M4 + round-4 fix M4: destructive-down guard
 --
 -- This file drops 18 columns + 3 partitions + 2 triggers + 1 function.
 -- To prevent accidental application against production we gate the entire
--- file on a session-local GUC. Operator must explicitly opt in via:
---     SET spendguard.allow_destructive_down = on;
+-- file on a session-local GUC scoped per migration file. Operator must
+-- explicitly opt in via:
+--     SET LOCAL spendguard.allow_destructive_down_0046 = on;
 -- BEFORE running the file. Without the GUC the first statement raises an
 -- exception and the migration runner aborts.
 --
--- ## Round-3 fix M4: partition row-count guards
+-- Round-4 M4 rename: the GUC name now embeds the migration number so a
+-- single SET LOCAL ... = on cannot cascade across multiple destructive
+-- down files. Each file requires its own SET. The exact form to use is
+-- documented in docs/slices/SLICE_01_canonical_events_migration.md §11
+-- rollback runbook with the quoting convention.
+--
+-- Also emits a RAISE NOTICE 'DESTRUCTIVE down-migration 0046 proceeding
+-- (caller: <role>)' so PG audit / log_min_messages = notice captures
+-- the rollback for forensics.
+--
+-- ## Round-3 fix M4 + round-4 fix B6: partition row-count guards with TOCTOU LOCK
 --
 -- DROP TABLE on a partition with rows is silently destructive. Before each
--- partition drop we check row count and refuse if non-zero. Operator must
--- manually migrate (or accept loss) before running again.
+-- partition drop we LOCK TABLE ... IN ACCESS EXCLUSIVE MODE then
+-- check row count and refuse if non-zero. Operator must manually
+-- migrate (or accept loss) before running again.
+--
+-- Round-4 B6: the LOCK upgrade closes the TOCTOU window where a concurrent
+-- INSERT between COUNT(*) and DROP TABLE could see a zero count and have
+-- its row silently destroyed. ACCESS EXCLUSIVE blocks all reads + writes
+-- so the count→drop pair is atomic from any observer's perspective.
 --
 -- ## Round-3 fix M10: no BEGIN/COMMIT
 --
@@ -55,13 +77,15 @@
 -- touching the schema — the columns sit unused but harmless.
 
 -- ============================================================================
--- Destructive-down guard (round-3 fix M4).
+-- Destructive-down guard (round-3 fix M4; round-4 fix M4 per-file scope +
+-- caller audit notice).
 -- ============================================================================
 DO $$
 BEGIN
-    IF current_setting('spendguard.allow_destructive_down', true) IS DISTINCT FROM 'on' THEN
-        RAISE EXCEPTION 'destructive down-migration 0046 requires `SET spendguard.allow_destructive_down = on` first';
+    IF current_setting('spendguard.allow_destructive_down_0046', true) IS DISTINCT FROM 'on' THEN
+        RAISE EXCEPTION 'destructive down-migration 0046 requires `SET LOCAL spendguard.allow_destructive_down_0046 = on` first';
     END IF;
+    RAISE NOTICE 'DESTRUCTIVE down-migration 0046 proceeding (caller: %)', current_user;
 END $$;
 
 -- Restore the pre-SLICE_01 trigger function (from
@@ -133,14 +157,19 @@ DROP INDEX IF EXISTS audit_outbox_outcome_calibration_idx;
 DROP INDEX IF EXISTS audit_outbox_tokenizer_version_id_idx;
 
 -- ============================================================================
--- Drop pre-created partitions. Round-3 fix M4: per-partition row-count
--- guard — refuse to drop if any rows landed there. Manual data migration
--- required first.
+-- Drop pre-created partitions. Round-3 fix M4 + round-4 fix B6: per-partition
+-- row-count guard with ACCESS EXCLUSIVE LOCK so the count→drop pair is
+-- atomic against concurrent INSERTs. Manual data migration required first
+-- if any partition has rows.
 -- ============================================================================
 DO $$
 DECLARE
     rc BIGINT;
 BEGIN
+    -- Round-4 B6: LOCK before COUNT to close the TOCTOU race window. A
+    -- concurrent INSERT after COUNT but before DROP would silently lose
+    -- the row.
+    LOCK TABLE audit_outbox_2026_10 IN ACCESS EXCLUSIVE MODE;
     SELECT COUNT(*) INTO rc FROM audit_outbox_2026_10;
     IF rc > 0 THEN
         RAISE EXCEPTION 'audit_outbox_2026_10 has % rows; refusing to drop. Manual data migration required first.', rc;
@@ -152,6 +181,7 @@ DO $$
 DECLARE
     rc BIGINT;
 BEGIN
+    LOCK TABLE audit_outbox_2026_09 IN ACCESS EXCLUSIVE MODE;
     SELECT COUNT(*) INTO rc FROM audit_outbox_2026_09;
     IF rc > 0 THEN
         RAISE EXCEPTION 'audit_outbox_2026_09 has % rows; refusing to drop. Manual data migration required first.', rc;
@@ -163,6 +193,7 @@ DO $$
 DECLARE
     rc BIGINT;
 BEGIN
+    LOCK TABLE audit_outbox_2026_08 IN ACCESS EXCLUSIVE MODE;
     SELECT COUNT(*) INTO rc FROM audit_outbox_2026_08;
     IF rc > 0 THEN
         RAISE EXCEPTION 'audit_outbox_2026_08 has % rows; refusing to drop. Manual data migration required first.', rc;
