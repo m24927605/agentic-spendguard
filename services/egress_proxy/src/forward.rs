@@ -449,7 +449,15 @@ async fn forward_openai_request(
             // branch that calls OpenAI per spec §4.2 invariant.
             debug!(decision_id = %decision_resp.decision_id, "Decision::Continue → forwarding");
         }
-        Decision::Stop => {
+        // SLICE_02 §3.4: STOP_RUN_PROJECTION is the dashboard-level
+        // categorisation for a run-projection-driven stop; the wire
+        // effect is identical to STOP per spec invariant ("v1alpha1
+        // lattice unchanged; STOP_RUN_PROJECTION terminates the run
+        // exactly as STOP would"). We collapse the two arms here so
+        // the egress proxy treats both as Blocked. SLICE_10
+        // (egress_proxy_decision_rewrite) may split this for
+        // metric labels; SLICE_02 keeps them identical.
+        Decision::Stop | Decision::StopRunProjection => {
             return Err(ForwardError::Blocked {
                 decision_id: decision_resp.decision_id,
                 reason_codes: decision_resp.reason_codes,

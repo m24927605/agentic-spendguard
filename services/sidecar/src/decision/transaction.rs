@@ -403,6 +403,12 @@ pub async fn run_through_reserve(
         request_hash: Vec::new().into(),
     };
 
+    // SLICE_02 §6: thread the contract's prediction_policy into the
+    // audit CloudEvent so canonical_ingest mirrors it onto the
+    // audit_outbox.prediction_policy_used column. For v1alpha1
+    // contracts default-filled to STRICT_CEILING this emits the
+    // literal "STRICT_CEILING" (spec §4.1 conservative default).
+    let prediction_policy_str = bundle.parsed.prediction_policy.as_str();
     let mut cloudevent = build_audit_decision_cloudevent(
         ctx,
         &decision_id,
@@ -411,6 +417,7 @@ pub async fn run_through_reserve(
         &snapshot_hash,
         &matched_rules,
         &enrichment,
+        prediction_policy_str,
     );
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
@@ -584,6 +591,7 @@ fn build_audit_decision_cloudevent(
     snapshot_hash: &[u8; 32],
     matched_rules: &[String],
     enrichment: &AuditEnrichment,
+    prediction_policy: &str,
 ) -> CloudEvent {
     let mut payload = serde_json::json!({
         "snapshot_hash":   hex::encode(snapshot_hash),
@@ -609,7 +617,28 @@ fn build_audit_decision_cloudevent(
     }
     let payload_bytes =
         serde_json::to_vec(&payload).expect("snapshot json serialization is infallible");
-    CloudEvent {
+    // SLICE_02 §6 audit-chain impact: populate prediction_policy_used
+    // (CloudEvent proto tag 305) on every spendguard.audit.decision
+    // emission. SLICE_01 added the audit_outbox column; SLICE_02 wires
+    // the value at producer time so canonical_ingest's mirror path
+    // (services/canonical_ingest/src/persistence/append.rs) writes it
+    // to the column, the trigger function reject_audit_outbox_immutable_columns
+    // protects it, and verify-chain confirms it matches the
+    // cloudevent_payload_signature.
+    //
+    // For v1alpha1 contracts default-filled to STRICT_CEILING, this
+    // emits the literal "STRICT_CEILING" — which is the byte-identical
+    // expectation per spec §6.4 ("v1alpha1 contracts produce same
+    // decision_id, reason_codes, mutation_patch_json under v1alpha2
+    // evaluator"). NOTE: the audit-row prediction_policy_used VALUE
+    // changes from NULL (pre-SLICE_02) to "STRICT_CEILING"
+    // (post-SLICE_02). This is the intentional SLICE_02 boundary:
+    // SLICE_01 deferred filling the column to SLICE_02. Per spec §8.2
+    // the byte-identical regression compares the FIELDS spec calls
+    // out (decision_id, reason_codes, mutation_patch_json) — not
+    // every column, since `prediction_policy_used` going from NULL
+    // to STRICT_CEILING is the entire point of this slice.
+    let mut ce = CloudEvent {
         specversion: "1.0".into(),
         r#type: "spendguard.audit.decision".into(),
         source: format!("sidecar://{}/{}", ctx.region, ctx.workload_instance_id),
@@ -632,7 +661,15 @@ fn build_audit_decision_cloudevent(
         producer_sequence,
         producer_signature: vec![].into(), // POC: signing TBD
         signing_key_id: String::new(),
-    }
+        ..Default::default()
+    };
+    // SLICE_02: set tag 305 directly so the mirror path picks it up.
+    // The rest of the tag 300+ prediction fields stay at proto3 default
+    // (= SQL NULL via the prediction-mirror crate) until SLICE_06 wires
+    // the predictor; spec §6 confirms only prediction_policy_used is
+    // populated at this slice.
+    ce.prediction_policy_used = prediction_policy.to_string();
+    ce
 }
 
 // (Producer sequence now lives on SidecarState, initialized from ledger
@@ -641,6 +678,38 @@ fn build_audit_decision_cloudevent(
 // =====================================================================
 // Phase 3 wedge — DENY lane.
 // =====================================================================
+
+/// Map a `Decision` enum value to the canonical wire string used in the
+/// DENY-lane `audit_decision.decision` column.
+///
+/// Per `docs/contract-dsl-spec-v1alpha2.md` §3.4 invariant: "v1alpha1
+/// lattice + audit row decision field stays v1alpha1; new RUN_* codes
+/// appear in reason_codes only." Therefore `Decision::StopRunProjection`
+/// maps to the same `"STOP"` audit-row string as `Decision::Stop`; the
+/// run-projection categorisation lives in `reason_codes` (RUN_* code),
+/// not in the column string.
+///
+/// Returns `None` for variants that should never reach the DENY lane
+/// (`Continue` is filtered out by the caller; `Unspecified` would be a
+/// proto-default leak indicating an upstream bug).
+///
+/// Exposed at module visibility so the round-1 fix unit test can assert
+/// the SLICE_02 invariant directly.
+pub(super) fn denied_decision_label(decision_kind: Decision) -> Option<&'static str> {
+    match decision_kind {
+        Decision::Stop => Some("STOP"),
+        // SLICE_02 §3.4: STOP_RUN_PROJECTION is the dashboard / SIEM
+        // categorisation for a run-projection-driven stop; the audit
+        // row `decision` column stays at the v1alpha1 lattice value
+        // ("STOP"). The differentiator lives in `reason_codes` (RUN_*).
+        Decision::StopRunProjection => Some("STOP"),
+        Decision::RequireApproval => Some("REQUIRE_APPROVAL"),
+        Decision::Degrade => Some("DEGRADE"),
+        Decision::Skip => Some("SKIP"),
+        // Continue is filtered out by caller; Unspecified should not flow.
+        Decision::Continue | Decision::Unspecified => None,
+    }
+}
 
 /// Stage 4 (DENY branch). Skips Reserve and writes only an audit_decision
 /// row via Ledger.RecordDeniedDecision. Preserves Contract §6.1
@@ -665,19 +734,12 @@ async fn run_record_denied_decision(
     effect_hash: [u8; 32],
     enrichment: &AuditEnrichment,
 ) -> Result<DecisionOutput, DomainError> {
-    let final_decision_str = match decision_kind {
-        Decision::Stop => "STOP",
-        Decision::RequireApproval => "REQUIRE_APPROVAL",
-        Decision::Degrade => "DEGRADE",
-        Decision::Skip => "SKIP",
-        // Continue is filtered out by caller; Unspecified should not flow.
-        _ => {
-            return Err(DomainError::DecisionStage(format!(
-                "run_record_denied_decision called with unsupported decision {:?}",
-                decision_kind
-            )))
-        }
-    };
+    let final_decision_str = denied_decision_label(decision_kind).ok_or_else(|| {
+        DomainError::DecisionStage(format!(
+            "run_record_denied_decision called with unsupported decision {:?}",
+            decision_kind
+        ))
+    })?;
 
     // Use the adapter-supplied idempotency_key directly (no namespacing).
     // The new SP performs a cross-kind exclusivity check: if the same key
@@ -743,7 +805,13 @@ async fn run_record_denied_decision(
         producer_sequence,
         producer_signature: vec![].into(),
         signing_key_id: String::new(),
+        ..Default::default()
     };
+    // SLICE_02 §6: DENY-lane CloudEvent emits prediction_policy_used
+    // identical to the ALLOW lane (per §6.4 byte-identical regression
+    // requirement). v1alpha1 contracts get STRICT_CEILING; v1alpha2
+    // contracts pass through whatever they declared.
+    cloudevent.prediction_policy_used = bundle.parsed.prediction_policy.as_str().to_string();
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
     // Round-2 #9 producer SP. When the contract evaluator returns
@@ -928,8 +996,23 @@ pub fn build_response(out: DecisionOutput) -> DecisionResponse {
         approval_request_id: out.approval_request_id,
         approval_ttl: None,
         approver_role: String::new(),
-        terminal: matches!(out.decision, Decision::Stop),
+        // SLICE_02 §3.4: STOP_RUN_PROJECTION is wire-semantically
+        // identical to STOP ("STOP semantics completely equivalent;
+        // STOP_RUN_PROJECTION is dashboard / SIEM categorisation
+        // only"). The adapter response's `terminal` boolean must
+        // therefore treat both arms identically — otherwise SLICE_09
+        // run-projection stops would leak `terminal=false` and adapter
+        // callers (egress proxy, LiteLLM hook) would attempt to
+        // forward the call instead of halting the run.
+        terminal: matches!(out.decision, Decision::Stop | Decision::StopRunProjection),
         error: None,
+        // SLICE_02 §6.2: run_code_triggered always "" in this slice
+        // since no source emits RUN_* codes. SLICE_09 populates this
+        // from DecisionOutput.run_code_triggered once the projector
+        // wires through. v1alpha1 clients deserializing a v1alpha2
+        // response see this as the proto3 default empty string,
+        // identical to pre-bump behavior.
+        run_code_triggered: String::new(),
     }
 }
 
@@ -1105,6 +1188,12 @@ pub async fn run_commit_estimated(
         producer_sequence: producer_seq,
         producer_signature: vec![].into(),
         signing_key_id: String::new(),
+        // SLICE_02: tag 300+ prediction columns default to SQL-NULL
+        // sentinels (per audit-chain-prediction-extension-v1alpha1.md
+        // §3.3). spendguard.audit.outcome events only populate the
+        // commit-side actuals (tags 314-317) once the predictor
+        // wires through; SLICE_02 leaves them at proto3 default.
+        ..Default::default()
     };
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
@@ -1337,6 +1426,10 @@ pub async fn run_release(
         producer_sequence: producer_seq,
         producer_signature: vec![].into(),
         signing_key_id: String::new(),
+        // SLICE_02: see commit_estimated CloudEvent comment above —
+        // tag 300+ prediction columns left at proto3 default for the
+        // release-lane spendguard.audit.outcome event.
+        ..Default::default()
     };
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
@@ -1745,5 +1838,121 @@ mod enrichment_tests {
         assert_eq!(a.get("stream"), d.get("stream"));
         // Verify mixed-type coercion survives both clones.
         assert_eq!(a.get("stream"), Some(&serde_json::Value::Bool(true)));
+    }
+}
+
+// =====================================================================
+// SLICE_02 round-1 fix — exhaustive Decision match coverage tests.
+//
+// B1: build_response.terminal must collapse Stop + StopRunProjection
+//      into the same `true` arm (per spec §3.4 wire-semantic identity).
+//      Pre-fix `matches!(out.decision, Decision::Stop)` returned `false`
+//      for StopRunProjection, leaking a non-terminal response that adapter
+//      callers (egress proxy, LiteLLM hook) would forward instead of halt.
+//
+// B2: denied_decision_label must categorise StopRunProjection as the
+//      v1alpha1 audit-row string `"STOP"` (per spec §3.4 invariant: the
+//      audit row `decision` column stays v1alpha1; RUN_* lives in
+//      reason_codes). Pre-fix the function returned Err on
+//      StopRunProjection, which would have surfaced as
+//      `DecisionStage` errors when SLICE_09 starts emitting the variant.
+// =====================================================================
+
+#[cfg(test)]
+mod slice_02_decision_match_tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn _fixture_output(decision: Decision) -> DecisionOutput {
+        DecisionOutput {
+            decision_id: Uuid::nil(),
+            audit_decision_event_id: Uuid::nil(),
+            effect_hash: [0u8; 32],
+            decision,
+            reservation_set_id: String::new(),
+            reservation_ids: vec![],
+            ledger_transaction_id: String::new(),
+            approval_request_id: String::new(),
+            ttl_expires_at: None,
+            matched_rule_ids: vec![],
+            reason_codes: vec![],
+        }
+    }
+
+    #[test]
+    fn build_response_terminal_true_for_stop() {
+        let out = _fixture_output(Decision::Stop);
+        let resp = build_response(out);
+        assert!(resp.terminal, "Decision::Stop must produce terminal=true");
+    }
+
+    #[test]
+    fn build_response_terminal_true_for_stop_run_projection() {
+        // SLICE_02 §3.4: STOP_RUN_PROJECTION is wire-semantically
+        // identical to STOP. The adapter response's terminal boolean
+        // must therefore be `true`. Pre-round-1: this returned `false`,
+        // which would silently leak to adapter callers in SLICE_09.
+        let out = _fixture_output(Decision::StopRunProjection);
+        let resp = build_response(out);
+        assert!(
+            resp.terminal,
+            "Decision::StopRunProjection must produce terminal=true \
+             per spec §3.4 STOP-equivalent invariant"
+        );
+    }
+
+    #[test]
+    fn build_response_terminal_false_for_continue_and_other_non_stop() {
+        for kind in [
+            Decision::Continue,
+            Decision::Degrade,
+            Decision::Skip,
+            Decision::RequireApproval,
+        ] {
+            let resp = build_response(_fixture_output(kind));
+            assert!(
+                !resp.terminal,
+                "Decision::{:?} must produce terminal=false",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn denied_decision_label_maps_stop() {
+        assert_eq!(denied_decision_label(Decision::Stop), Some("STOP"));
+    }
+
+    #[test]
+    fn denied_decision_label_maps_stop_run_projection_to_v1alpha1_stop() {
+        // SLICE_02 §3.4 invariant: audit_decision.decision column stays
+        // at v1alpha1 lattice values ("STOP"); the RUN_* differentiator
+        // lives in reason_codes. Pre-round-1 the underlying match arm
+        // would have returned Err(DecisionStage(...)) on this variant,
+        // breaking the DENY-lane path when SLICE_09 emits it.
+        assert_eq!(
+            denied_decision_label(Decision::StopRunProjection),
+            Some("STOP"),
+            "StopRunProjection must categorise as v1alpha1 'STOP' string"
+        );
+    }
+
+    #[test]
+    fn denied_decision_label_maps_other_deny_lane_variants() {
+        assert_eq!(
+            denied_decision_label(Decision::RequireApproval),
+            Some("REQUIRE_APPROVAL")
+        );
+        assert_eq!(denied_decision_label(Decision::Degrade), Some("DEGRADE"));
+        assert_eq!(denied_decision_label(Decision::Skip), Some("SKIP"));
+    }
+
+    #[test]
+    fn denied_decision_label_returns_none_for_non_deny_variants() {
+        // Continue is filtered by caller; Unspecified is a proto-default
+        // leak that should not flow. Both yield None so the caller
+        // surfaces DecisionStage error.
+        assert_eq!(denied_decision_label(Decision::Continue), None);
+        assert_eq!(denied_decision_label(Decision::Unspecified), None);
     }
 }

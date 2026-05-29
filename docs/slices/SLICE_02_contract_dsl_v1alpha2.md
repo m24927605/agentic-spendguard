@@ -57,7 +57,16 @@ per `contract-dsl-spec-v1alpha2.md` §1.1: additive-only patch over v1alpha1; pe
 
 ### 4.2 Helm / config
 
-- `charts/spendguard/templates/sidecar.yaml` — accept new env var `SPENDGUARD_DEFAULT_PREDICTION_POLICY=STRICT_CEILING` (optional override for legacy contract loading)
+- No new env vars in SLICE_02. Per spec §4.2 prediction_policy is set
+  by the contract bundle (declarative source-of-truth) and runtime
+  override is FORBIDDEN — operators must redeploy a new bundle to
+  change policy. The originally-planned
+  `SPENDGUARD_DEFAULT_PREDICTION_POLICY` env var was removed in
+  round-1 fix M2 because it had no consumer in sidecar code and the
+  spec invariant precludes ever wiring one (an operator-side runtime
+  override would bypass the bundle redeploy + signature flow that
+  §4.2 mandates). YAGNI prevails; the Helm chart surface stays
+  honest about what the sidecar actually consumes.
 
 ---
 
