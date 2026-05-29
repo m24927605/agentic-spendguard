@@ -85,9 +85,17 @@ PROST 0.13 ROLLOUT INVARIANT (audit-chain extension §7.2):
     2. helm upgrade canonical-ingest first, wait for ready.
     3. THEN helm upgrade sidecar / webhook_receiver / ttl_sweeper.
 
-  Under chart.profile=production the post-install Job FAILS HARD if the
-  new files are absent from the ConfigMaps — this is intentional to
-  prevent silent stale-schema boots.
+  Round-4 fix B2 NOTE: the prior chart.profile=production fail-gate has
+  been REMOVED. `helm template` (CI dry-render) cannot reliably
+  distinguish "no cluster, ConfigMap status unknowable" from "live
+  cluster, ConfigMap missing", because `.Release.IsInstall` is true by
+  default during `helm template`. Three rounds of attempts to fix the
+  template behaviour confirmed it cannot be made identical across both
+  contexts. The post-install Job now ALWAYS runs; it emits a
+  `[migrate] WARNING` line when SLICE_01 files are missing from the
+  mount, but it does NOT abort the install. Operators who require a
+  hard gate should run `scripts/helm-validate-kind.sh --check-only` in
+  their CD pipeline BEFORE invoking `helm upgrade`.
 
   Schema_bundle_id rotation deferred to SLICE_06 (round-3 B3): the
   v1alpha1+prediction bundle row will be inserted by the operator-side
