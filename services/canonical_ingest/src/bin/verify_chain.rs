@@ -9,13 +9,22 @@
 //! SLICE_01 lands the **schema substrate + CLI flag scaffolding**, NOT
 //! the full mirror-check implementation. The flag is parsed, validated,
 //! and routed; the per-row scan path emits a structured `NOT_IMPLEMENTED`
-//! log line for every row the CLI would otherwise verify, then exits 0
-//! (idempotent / observable / safe in CI gates that run a smoke test of
-//! the binary). The full implementation — actually reading
-//! `audit_outbox` / `canonical_events` rows, decoding the embedded
-//! CloudEvent, and comparing column ↔ proto-field — lands in SLICE_06
-//! along with the producer-side mirror logic that populates the fields
-//! in the first place.
+//! log line for every row the CLI would otherwise verify. The full
+//! implementation — actually reading `audit_outbox` / `canonical_events`
+//! rows, decoding the embedded CloudEvent, and comparing column ↔
+//! proto-field — lands in SLICE_06 along with the producer-side mirror
+//! logic that populates the fields in the first place.
+//!
+//! ## Round-3 fix M5 — non-zero exit on default flag
+//!
+//! Round-2 exited 0 even with `--check-prediction-mirror=true` (default).
+//! That's a silent-pass CI vector: any CI gate that runs
+//! `verify-chain && echo green` succeeds before SLICE_06 even ships.
+//! Round-3 changes the contract: when `--check-prediction-mirror=true`
+//! AND implementation is still stub, exit code 2 with a stderr message
+//! pointing at `--no-check-prediction-mirror` for legacy-NULL scans.
+//! Operators get an observable, fail-closed signal — wiring this into CI
+//! before SLICE_06 lands is now safe.
 //!
 //! ## Stopping rule rationale
 //!
@@ -59,17 +68,34 @@ impl Args {
         let mut check_prediction_mirror = true;
         let mut tenant_id: Option<String> = None;
         let mut help = false;
-        let mut iter = args.peekable();
+        // Round-3 fix m1: drop .peekable() — never peeked. Bare iterator
+        // is the smaller surface.
+        let mut iter = args;
         // Skip argv[0].
         iter.next();
 
         while let Some(arg) = iter.next() {
-            match arg.as_str() {
+            // Round-3 fix M17: split `--flag=value` form. Treat bare
+            // `--check-prediction-mirror` as `=true` (matches default +
+            // `--no-` alias). The split also lets the caller pass
+            // `--check-prediction-mirror=true` without a separate token.
+            let (key, attached_value): (&str, Option<&str>) = match arg.find('=') {
+                Some(idx) => (&arg[..idx], Some(&arg[idx + 1..])),
+                None => (arg.as_str(), None),
+            };
+            match key {
                 "--help" | "-h" => help = true,
                 "--check-prediction-mirror" => {
-                    let v = iter.next().ok_or_else(|| {
-                        "--check-prediction-mirror requires a value (true|false)".to_string()
-                    })?;
+                    let v = match attached_value {
+                        Some(v) => v.to_string(),
+                        None => {
+                            // Round-3 fix M17: bare flag = `=true` to mirror
+                            // the default. Original behaviour (consume next
+                            // token) was inconsistent with the --no- alias
+                            // which takes no value.
+                            "true".to_string()
+                        }
+                    };
                     check_prediction_mirror = match v.as_str() {
                         "true" | "1" | "yes" => true,
                         "false" | "0" | "no" => false,
@@ -81,14 +107,22 @@ impl Args {
                     };
                 }
                 "--no-check-prediction-mirror" => {
+                    if attached_value.is_some() {
+                        return Err(
+                            "--no-check-prediction-mirror takes no value".to_string()
+                        );
+                    }
                     // Convenience alias for --check-prediction-mirror=false.
                     check_prediction_mirror = false;
                 }
                 "--tenant-id" => {
-                    tenant_id = Some(
-                        iter.next()
-                            .ok_or_else(|| "--tenant-id requires a value".to_string())?,
-                    );
+                    tenant_id = match attached_value {
+                        Some(v) => Some(v.to_string()),
+                        None => Some(
+                            iter.next()
+                                .ok_or_else(|| "--tenant-id requires a value".to_string())?,
+                        ),
+                    };
                 }
                 other => {
                     return Err(format!("unrecognized argument: {other:?}"));
@@ -129,7 +163,12 @@ OPTIONS:
 
 STATUS:
     SLICE_01 ships the flag scaffold only. The per-row scan path
-    currently emits structured NOT_IMPLEMENTED log lines and exits 0.
+    currently emits structured NOT_IMPLEMENTED log lines.
+    Default (`--check-prediction-mirror=true`) exits with code 2 — a
+    silent-pass CI gate before SLICE_06 lands is the failure mode this
+    closes (round-3 fix M5). Pass `--no-check-prediction-mirror` to
+    acknowledge the legacy-NULL scan only (exits 0 for legacy-only
+    audits where no tag 300-317 fields exist yet).
     Full implementation lands in SLICE_06 alongside the producer-side
     mirror writes. See:
         docs/slices/SLICE_01_canonical_events_migration.md §10
@@ -138,16 +177,9 @@ STATUS:
     );
 }
 
-fn main() -> ExitCode {
-    let args = match Args::parse(std::env::args()) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("verify-chain: {e}\n");
-            print_help();
-            return ExitCode::from(2);
-        }
-    };
-
+/// Round-3 fix M5: separated from `main()` so the exit-code contract
+/// can be unit-tested without process spawning.
+fn run(args: Args) -> ExitCode {
     if args.help {
         print_help();
         return ExitCode::SUCCESS;
@@ -168,11 +200,34 @@ fn main() -> ExitCode {
     });
     println!("{line}");
 
-    // Exit 0 — the stub completes "successfully" because the absent
-    // check is documented and expected. Operators wiring this into CI
-    // before SLICE_06 lands get an observable signal (the
-    // NOT_IMPLEMENTED log line) rather than a silent no-op.
+    // Round-3 fix M5: fail-closed on the default flag value. Before
+    // SLICE_06 lands, exit 2 with a stderr pointer when the mirror
+    // check is requested. Pre-existing CI gates that pass
+    // `--no-check-prediction-mirror` (acknowledging legacy-NULL scan
+    // only) keep exit 0. This removes the silent-pass vector where a
+    // bare `verify-chain && green` would always succeed pre-SLICE_06.
+    if args.check_prediction_mirror {
+        eprintln!(
+            "verify-chain: --check-prediction-mirror requires SLICE_06 producer-side \
+             mirror writes; pass --no-check-prediction-mirror to acknowledge \
+             legacy-NULL scan only"
+        );
+        return ExitCode::from(2);
+    }
+
     ExitCode::SUCCESS
+}
+
+fn main() -> ExitCode {
+    let args = match Args::parse(std::env::args()) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("verify-chain: {e}\n");
+            print_help();
+            return ExitCode::from(2);
+        }
+    };
+    run(args)
 }
 
 #[cfg(test)]
@@ -186,17 +241,46 @@ mod tests {
     }
 
     #[test]
-    fn parse_explicit_flag_false() {
+    fn parse_explicit_flag_false_equals_form() {
+        // Round-3 fix M17: prefer `--flag=value` to a separate token.
         let args = Args::parse(
             [
                 "verify-chain".to_string(),
-                "--check-prediction-mirror".to_string(),
-                "false".to_string(),
+                "--check-prediction-mirror=false".to_string(),
             ]
             .into_iter(),
         )
         .unwrap();
         assert!(!args.check_prediction_mirror);
+    }
+
+    #[test]
+    fn parse_explicit_flag_true_equals_form() {
+        let args = Args::parse(
+            [
+                "verify-chain".to_string(),
+                "--check-prediction-mirror=true".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert!(args.check_prediction_mirror);
+    }
+
+    #[test]
+    fn parse_bare_flag_treats_as_true() {
+        // Round-3 fix M17: bare `--check-prediction-mirror` (no value, no
+        // `=`) is the same as `=true`. Matches the `--no-` alias which
+        // takes no value.
+        let args = Args::parse(
+            [
+                "verify-chain".to_string(),
+                "--check-prediction-mirror".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+        assert!(args.check_prediction_mirror);
     }
 
     #[test]
@@ -230,12 +314,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_unrecognized() {
+    fn parse_rejects_invalid_attached_value() {
+        // Round-3 fix M17: `=value` form rejects non-bool values.
         let err = Args::parse(
             [
                 "verify-chain".to_string(),
-                "--check-prediction-mirror".to_string(),
-                "maybe".to_string(),
+                "--check-prediction-mirror=maybe".to_string(),
             ]
             .into_iter(),
         )
@@ -244,15 +328,78 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_missing_value() {
+    fn parse_rejects_unrecognized_arg() {
         let err = Args::parse(
             [
                 "verify-chain".to_string(),
-                "--check-prediction-mirror".to_string(),
+                "--bogus".to_string(),
             ]
             .into_iter(),
         )
         .unwrap_err();
-        assert!(err.contains("requires a value"));
+        assert!(err.contains("unrecognized argument"));
+    }
+
+    #[test]
+    fn parse_no_check_alias_rejects_value() {
+        // Round-3 fix M17: --no-check-prediction-mirror takes no value;
+        // attaching `=true` is an error.
+        let err = Args::parse(
+            [
+                "verify-chain".to_string(),
+                "--no-check-prediction-mirror=true".to_string(),
+            ]
+            .into_iter(),
+        )
+        .unwrap_err();
+        assert!(err.contains("takes no value"));
+    }
+
+    // ============================================================
+    // Round-3 fix M5: exit-code contract tests. Exercise `run()`
+    // directly so we don't have to spawn the binary.
+    // ============================================================
+
+    /// Helper: format ExitCode for assertion. Rust 1.61+ doesn't expose
+    /// the inner u8 publicly, so we compare via Debug.
+    fn ec_repr(c: ExitCode) -> String {
+        format!("{c:?}")
+    }
+
+    #[test]
+    fn run_default_flag_exits_non_zero() {
+        // Default `--check-prediction-mirror=true` exits 2 because the
+        // implementation is still stub; CI gates must explicitly
+        // acknowledge legacy-NULL scan via --no-check-prediction-mirror
+        // before SLICE_06 lands.
+        let args = Args {
+            check_prediction_mirror: true,
+            tenant_id: None,
+            help: false,
+        };
+        let code = run(args);
+        assert_eq!(ec_repr(code), ec_repr(ExitCode::from(2)));
+    }
+
+    #[test]
+    fn run_no_check_flag_exits_zero() {
+        let args = Args {
+            check_prediction_mirror: false,
+            tenant_id: None,
+            help: false,
+        };
+        let code = run(args);
+        assert_eq!(ec_repr(code), ec_repr(ExitCode::SUCCESS));
+    }
+
+    #[test]
+    fn run_help_flag_exits_zero() {
+        let args = Args {
+            check_prediction_mirror: true, // Even with default, help wins.
+            tenant_id: None,
+            help: true,
+        };
+        let code = run(args);
+        assert_eq!(ec_repr(code), ec_repr(ExitCode::SUCCESS));
     }
 }
