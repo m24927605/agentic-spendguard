@@ -319,6 +319,60 @@ message CloudEvent {
   uint64 producer_sequence = 201;
   bytes  producer_signature = 202;          // ed25519
   string signing_key_id = 203;
+
+  // ==========================================================================
+  // Prediction extension attributes
+  // Per docs/audit-chain-prediction-extension-v1alpha1.md §3.2.
+  //
+  // Tags 300+. All optional (proto3 default = unset = "field absent on
+  // this event"). Wire-level additive evolution: producers populate
+  // these on .decision / .outcome events; legacy verifiers ignore them;
+  // re-encoded canonical bytes remain byte-identical for rows where
+  // these fields are unset (proto3 default-encoding semantics — required
+  // by canonical_bytes_proto in services/canonical_ingest/src/verifier.rs).
+  //
+  // Decision-side fields populated only on event_type
+  //   "spendguard.audit.decision".
+  // Outcome-side fields populated only on event_type
+  //   "spendguard.audit.outcome".
+  //
+  // Sentinel mapping (see §3.3 of the spec):
+  //   - run_predicted_remaining_steps = -1  -> "projector unreachable"
+  //                                            (distinct from "0 remaining")
+  //   - tokenizer_version_id          = ""  -> Tier 3 fallback (no
+  //                                            versioned encoder)
+  //   - cold_start_layer_used         = ""  -> warm path (no cold start)
+  //   - delta_b_ratio                 = 0.0 -> Strategy B was null at
+  //                                            decision time
+  //   - delta_c_ratio                 = 0.0 -> Strategy C was null at
+  //                                            decision time
+  // ==========================================================================
+
+  // Decision-side prediction columns (11 per spec §2.1).
+  int64  predicted_a_tokens             = 300;
+  int64  predicted_b_tokens             = 301;
+  int64  predicted_c_tokens             = 302;
+  string reserved_strategy              = 303;  // "A" | "B" | "C"
+  string prediction_strategy_used       = 304;  // "A" | "B" | "C"
+  string prediction_policy_used         = 305;  // STRICT_CEILING | EMPIRICAL_RUN_CEILING | ADAPTIVE_CEILING | SHADOW_ONLY
+  string tokenizer_tier                 = 306;  // "T1" | "T2" | "T3"
+  string tokenizer_version_id           = 307;  // UUID v7 text; "" on Tier 3
+  float  prediction_confidence          = 308;  // 0.0-1.0; 0.0 = N/A (Strategy A)
+  int32  prediction_sample_size         = 309;  // 0 = N/A
+  string cold_start_layer_used          = 310;  // "L1" | "L2" | "L3" | "L4"; "" = warm
+
+  // Run-level projection columns (3 per spec §2.2).
+  // NUMERIC(38,0) serialized as int64 here (assumes < 2^63 atomic units;
+  // for larger budgets a future v2 may switch to string per Money type).
+  int64  run_projection_at_decision_atomic = 311;
+  int32  run_predicted_remaining_steps     = 312;  // -1 sentinel for unreachable
+  int32  run_steps_completed_so_far        = 313;
+
+  // Commit-side actual columns (4 per spec §2.3). Only on .outcome events.
+  int64  actual_input_tokens            = 314;
+  int64  actual_output_tokens           = 315;
+  float  delta_b_ratio                  = 316;  // 0.0 sentinel = B was null
+  float  delta_c_ratio                  = 317;  // 0.0 sentinel = C was null
 }
 
 // ============================================================================
