@@ -198,11 +198,20 @@ Layered on top of `docs/review-standards/predictor-review-checklist.md` §1:
   - `services/ledger/migrations/down/0048_tokenizer_versions_down.sql`
   - `services/canonical_ingest/migrations/down/0013_canonical_events_prediction_columns_down.sql`
   - `services/canonical_ingest/migrations/down/0015_audit_outcome_quarantine_prediction_columns_down.sql`
-- **Rollback order** (per round-2 fix M16 cross-DB ordering + round-3 B2/B3 updates):
+- **Rollback order** (per round-2 fix M16 cross-DB ordering + round-3 B2/B3 + round-4 M4/M5/B1 updates):
   1. Stop all 4 producer services (sidecar / webhook_receiver / ttl_sweeper / ledger invoice_reconcile) so no new tag-300+ writes happen.
-  2. `SET spendguard.allow_destructive_down = on;` on the target Postgres session (round-3 fix M4 destructive-down guard).
-  3. Apply canonical_ingest down-migrations: 0015_down → 0013_down. Order rationale (round-3 fix M11 rewrite of round-2 step 2): 0015_down first because the quarantine table's 18 prediction columns reference no foreign keys to canonical_events; dropping them first removes the dependency edge so 0013_down can then drop the canonical_events columns. (Round-2's claim that 0014 had to come first was based on a non-existent FK chain — 0014 only inserted a schema_bundles row.)
-  4. Apply ledger down-migrations: 0048_down → 0046_down (downstream first; the FK on audit_outbox.tokenizer_version_id is dropped in 0048_down before 0046_down drops the column).
+  2. For EACH down-migration file you intend to apply, opt in to the per-file destructive guard on the target Postgres session (round-4 fix M4 — per-file GUC scope replaces round-3's shared `spendguard.allow_destructive_down`). The exact form is:
+     ```sql
+     -- Canonical DB session (apply both before 0015_down + 0013_down):
+     SET LOCAL spendguard.allow_destructive_down_0015 = 'on';
+     SET LOCAL spendguard.allow_destructive_down_0013 = 'on';
+     -- Ledger DB session (apply both before 0048_down + 0046_down):
+     SET LOCAL spendguard.allow_destructive_down_0048 = 'on';
+     SET LOCAL spendguard.allow_destructive_down_0046 = 'on';
+     ```
+     `SET LOCAL` scopes the GUC to the current transaction only. The single-quote `'on'` form is required because the GUC value is parsed as a string, not a boolean literal. Without the matching GUC, each down-migration file aborts on its first statement with `destructive down-migration NNNN requires SET LOCAL spendguard.allow_destructive_down_NNNN = on first`. Each file also emits `NOTICE: DESTRUCTIVE down-migration NNNN proceeding (caller: <role>)` so PG audit logs capture the rollback (round-4 M4).
+  3. Apply canonical_ingest down-migrations: **0015_down → 0013_down**. Order rationale (round-3 fix M11 rewrite of round-2 step 2; round-4 fix M5 corrected the internal step order within 0015_down): 0015_down first because the quarantine table's 18 prediction columns reference no foreign keys to canonical_events; dropping them first removes the dependency edge so 0013_down can then drop the canonical_events columns. Internal order within 0015_down (round-4 M5): drop CHECK constraints → drop 18 columns → revert trigger function to 24-col tuple. Round-3's "revert function before drop columns" form left an 18-column tamper window where any UPDATE could mutate prediction columns and the reverted trigger would silently pass.
+  4. Apply ledger down-migrations: **0048_down → 0046_down** (round-4 fix B1 corrects round-3's contradictory header — 0048_down drops the FK on audit_outbox.tokenizer_version_id BEFORE 0046_down drops the column itself; reversing the order would fail with "column does not exist" because the FK's target column would already be gone).
   5. Roll back canonical_ingest pods to the pre-SLICE_01 image (recovers from the prost rollout invariant M8).
   6. Roll back producer pods to the pre-SLICE_01 image.
 - Demo regression: `make demo-up` should detect immediately if columns missing on producer side

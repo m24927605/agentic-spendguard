@@ -202,7 +202,10 @@ message CloudEvent {
 
   int64  run_projection_at_decision_atomic = 311;  // NUMERIC(38,0) serialized as int64 (assumes < 2^63 per round-2 M5)
   int32  run_predicted_remaining_steps = 312;       // default -1 = "projector unreachable" (use sentinel since proto3 default 0 conflates with "0 steps remaining")
-  int32  run_steps_completed_so_far = 313;
+  // Round-4 fix M1: int32 → int64 to match audit_outbox.run_steps_completed_so_far
+  // (BIGINT). Wire-compatible with the round-3 int32 form because varint
+  // encoding is identical for non-negative values per proto3 spec.
+  int64  run_steps_completed_so_far = 313;
 
   int64 actual_input_tokens = 314;             // only on .outcome; mirror of BIGINT col
   int64 actual_output_tokens = 315;            // only on .outcome; mirror of BIGINT col
@@ -439,7 +442,7 @@ per `0009_audit_outbox.sql` 註解：「Only forwarder state fields are UPDATE-a
 | `cold_start_layer_used` | 310 | `""`（empty string for "no cold start"） |
 | `run_projection_at_decision_atomic` | 311 | (always non-null; constrained ≤ int64 max per round-2 M5) |
 | `run_predicted_remaining_steps` | 312 | `-1`（sentinel for "projector unreachable"; distinguishes from "0 steps remaining"） |
-| `run_steps_completed_so_far` | 313 | (always non-null) |
+| `run_steps_completed_so_far` | 313 | `0`（round-4 fix M10 + M1: wire type int64 to match BIGINT col; NULL → proto3 default 0 acceptable per §3.3 because calibration-report filters `WHERE run_steps_completed_so_far IS NOT NULL`; mirror crate variant MirrorField::RunStepsCompletedSoFar added round-4） |
 | `actual_input_tokens` | 314 | (always non-null on .outcome) |
 | `actual_output_tokens` | 315 | (always non-null on .outcome) |
 | `delta_b_ratio` | 316 | `0.0`（sentinel; filter `WHERE delta_b_ratio > 0` in calibration-report） |
