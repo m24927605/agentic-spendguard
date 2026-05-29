@@ -16,8 +16,12 @@ type: application
 # services/ledger/migrations/ + services/canonical_ingest/migrations/).
 # Operators upgrading from 0.1.0-alpha.1 MUST regenerate the migration
 # ConfigMaps — see templates/NOTES.txt for the upgrade procedure.
-version: 0.1.0-alpha.2
-appVersion: "0.1.0-alpha.2"
+version: 0.1.0-alpha.3
+appVersion: "0.1.0-alpha.3"
+# Round-3 fix m5: declare minimum Kubernetes version. The chart uses
+# `helm.sh/hook` annotations + Job + ConfigMap.optional which are all
+# stable since 1.24. Older clusters silently mis-render the hook order.
+kubeVersion: ">=1.24.0"
 keywords:
   - ai
   - agents

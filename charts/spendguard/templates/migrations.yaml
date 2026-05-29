@@ -41,14 +41,32 @@ trigger + TRUNCATE guard, all atomic) MUST land before 0048
 before 0014 (schema_bundle row insert depends on canonical_events
 schema being prepared).
 */ -}}
+{{- /*
+Round-3 fix B1: gate the production fail-gate on install/upgrade context.
+Without this gate, `helm template` (no cluster connection) sees
+`lookup "v1" "ConfigMap" ...` return nil → the {{- fail ... }} fires →
+CI helm-validate.yml red. The lookup function only works against a live
+cluster API server; during template-only renders (CI dry-run) it returns
+nil regardless of ConfigMap existence in the operator's cluster.
+
+The .Release.IsInstall / .Release.IsUpgrade guards ONLY fire during real
+helm install / helm upgrade — `helm template` sees both as false, so the
+fail-gate is skipped in CI but enforced in production rollouts.
+
+Also fixes B3 (round-2 fix removed in round-3): the schema_bundle
+placeholder migration 0014 has been deleted. The file-presence check now
+only enforces 0013 — SLICE_06 producer slice will register the real
+cosigned bundle.
+*/ -}}
 {{- if eq (.Values.chart.profile | default "demo") "production" }}
+{{- if or .Release.IsInstall .Release.IsUpgrade }}
 {{- $ledgerCm := lookup "v1" "ConfigMap" .Release.Namespace (.Values.migrations.ledgerConfigMapName | default "spendguard-migrations-ledger") }}
 {{- $canonicalCm := lookup "v1" "ConfigMap" .Release.Namespace (.Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical") }}
 {{- if not $ledgerCm }}
 {{- fail (printf "chart.profile=production requires ConfigMap %s/%s with SLICE_01 migrations 0046_audit_outbox_prediction_columns.sql + 0048_tokenizer_versions.sql. Round-2 fix B2: regenerate via scripts/helm-validate-kind.sh or apply migrations out-of-band and set postgres.applyMigrationsOnInstall=false." .Release.Namespace (.Values.migrations.ledgerConfigMapName | default "spendguard-migrations-ledger")) }}
 {{- end }}
 {{- if not $canonicalCm }}
-{{- fail (printf "chart.profile=production requires ConfigMap %s/%s with SLICE_01 migrations 0013_canonical_events_prediction_columns.sql + 0014_schema_bundle_prediction_v1alpha1.sql. Round-2 fix B2: regenerate via scripts/helm-validate-kind.sh or apply migrations out-of-band and set postgres.applyMigrationsOnInstall=false." .Release.Namespace (.Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical")) }}
+{{- fail (printf "chart.profile=production requires ConfigMap %s/%s with SLICE_01 migrations 0013_canonical_events_prediction_columns.sql + 0015_audit_outcome_quarantine_prediction_columns.sql. Round-3 fix B3: 0014 placeholder bundle migration was removed; SLICE_06 registers the real cosigned bundle. Regenerate via scripts/helm-validate-kind.sh or apply migrations out-of-band and set postgres.applyMigrationsOnInstall=false." .Release.Namespace (.Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical")) }}
 {{- end }}
 {{- /*
 File-presence check for the SLICE_01 migrations themselves: even if the
@@ -62,10 +80,11 @@ files are missing.
 {{- fail (printf "chart.profile=production: ledger migration ConfigMap missing SLICE_01 file %s. Round-2 fix B2: regenerate the ConfigMap to include all migrations in services/ledger/migrations/ — see CHANGELOG for the SLICE_01 additions." .) }}
 {{- end }}
 {{- end }}
-{{- $needCanonical := list "0013_canonical_events_prediction_columns.sql" "0014_schema_bundle_prediction_v1alpha1.sql" }}
+{{- $needCanonical := list "0013_canonical_events_prediction_columns.sql" "0015_audit_outcome_quarantine_prediction_columns.sql" }}
 {{- range $needCanonical }}
 {{- if not (hasKey $canonicalCm.data .) }}
-{{- fail (printf "chart.profile=production: canonical-ingest migration ConfigMap missing SLICE_01 file %s. Round-2 fix B2: regenerate the ConfigMap to include all migrations in services/canonical_ingest/migrations/." .) }}
+{{- fail (printf "chart.profile=production: canonical-ingest migration ConfigMap missing SLICE_01 file %s. Round-3 fix B3: 0014 placeholder removed; 0015 quarantine prediction columns added. Regenerate the ConfigMap to include all migrations in services/canonical_ingest/migrations/." .) }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -96,6 +115,28 @@ spec:
               set -eu
               applied=0
               skipped=0
+              # Round-3 fix m6: detect SLICE_01-incomplete ConfigMap.
+              # In demo profile the production fail-gate does NOT fire,
+              # but the operator may still have mounted a pre-SLICE_01
+              # ConfigMap missing 0046/0048. Warn loudly so the silent
+              # stale-schema boot is at least observable in demo mode.
+              missing_slice01=""
+              for f in 0046_audit_outbox_prediction_columns.sql 0048_tokenizer_versions.sql; do
+                  if [ -d /etc/migrations/ledger ] && [ ! -f "/etc/migrations/ledger/$f" ]; then
+                      missing_slice01="$missing_slice01 ledger/$f"
+                  fi
+              done
+              for f in 0013_canonical_events_prediction_columns.sql 0015_audit_outcome_quarantine_prediction_columns.sql; do
+                  if [ -d /etc/migrations/canonical ] && [ ! -f "/etc/migrations/canonical/$f" ]; then
+                      missing_slice01="$missing_slice01 canonical/$f"
+                  fi
+              done
+              if [ -n "$missing_slice01" ]; then
+                  echo "[migrate] WARNING: SLICE_01 migration file(s) MISSING from mounted ConfigMaps:$missing_slice01"
+                  echo "[migrate] WARNING: this is OK in demo profile but will cause a 'column does not exist'"
+                  echo "[migrate] WARNING: runtime error once SLICE_06 producers attempt to write tag-300+ fields."
+                  echo "[migrate] WARNING: regenerate ConfigMaps via scripts/helm-validate-kind.sh."
+              fi
               for f in $(ls /etc/migrations/ledger/*.sql 2>/dev/null | sort); do
                   echo "[migrate] applying $f to spendguard_ledger..."
                   psql "$PG_LEDGER_URL" -v ON_ERROR_STOP=1 -f "$f"
