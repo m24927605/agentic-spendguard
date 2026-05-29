@@ -46,17 +46,29 @@
 -- (caller: <role>)' so PG audit / log_min_messages = notice captures
 -- the rollback for forensics.
 --
--- ## Round-3 fix M4 + round-4 fix B6: partition row-count guards with TOCTOU LOCK
+-- ## Round-3 fix M4 + round-4 fix B6 + round-5 fix N12-B: partition row-count guards
 --
 -- DROP TABLE on a partition with rows is silently destructive. Before each
 -- partition drop we LOCK TABLE ... IN ACCESS EXCLUSIVE MODE then
 -- check row count and refuse if non-zero. Operator must manually
 -- migrate (or accept loss) before running again.
 --
--- Round-4 B6: the LOCK upgrade closes the TOCTOU window where a concurrent
+-- Round-4 B6: the LOCK upgrade closed the TOCTOU window where a concurrent
 -- INSERT between COUNT(*) and DROP TABLE could see a zero count and have
--- its row silently destroyed. ACCESS EXCLUSIVE blocks all reads + writes
--- so the count→drop pair is atomic from any observer's perspective.
+-- its row silently destroyed.
+--
+-- Round-5 fix N12-B (Option B systemic fix): the migration runner invokes
+-- psql WITHOUT --single-transaction, so every top-level statement
+-- autocommits. Under round-4's pattern — DO $$ ... LOCK + COUNT END $$ on
+-- one line, DROP TABLE on the next — the lock is released the moment the
+-- DO block's implicit transaction commits, then the bare DROP TABLE
+-- starts a fresh transaction without re-acquiring it. A concurrent INSERT
+-- between commit-of-DO and start-of-DROP would silently lose its row.
+-- Round-5 collapses LOCK + COUNT + DROP into a single DO $$ block using
+-- EXECUTE 'DROP TABLE ...' so the three operations share one implicit
+-- transaction regardless of runner mode. ACCESS EXCLUSIVE held until END
+-- $$ commits the whole block, blocking all reads + writes for the entire
+-- count → drop sequence.
 --
 -- ## Round-3 fix M10: no BEGIN/COMMIT
 --
@@ -157,25 +169,30 @@ DROP INDEX IF EXISTS audit_outbox_outcome_calibration_idx;
 DROP INDEX IF EXISTS audit_outbox_tokenizer_version_id_idx;
 
 -- ============================================================================
--- Drop pre-created partitions. Round-3 fix M4 + round-4 fix B6: per-partition
--- row-count guard with ACCESS EXCLUSIVE LOCK so the count→drop pair is
--- atomic against concurrent INSERTs. Manual data migration required first
--- if any partition has rows.
+-- Drop pre-created partitions. Round-3 fix M4 + round-4 fix B6 + round-5
+-- fix N12-B: per-partition row-count guard with ACCESS EXCLUSIVE LOCK,
+-- LOCK + COUNT + DROP collapsed into ONE DO $$ block so the three
+-- operations share a single implicit transaction even under the autocommit
+-- runner. EXECUTE 'DROP TABLE ...' is required because DROP TABLE is not
+-- legal inside a PL/pgSQL block as a static statement. Manual data
+-- migration required first if any partition has rows.
 -- ============================================================================
 DO $$
 DECLARE
     rc BIGINT;
 BEGIN
-    -- Round-4 B6: LOCK before COUNT to close the TOCTOU race window. A
-    -- concurrent INSERT after COUNT but before DROP would silently lose
-    -- the row.
+    -- Round-5 N12-B: LOCK + COUNT + EXECUTE 'DROP TABLE' all inside one DO
+    -- block. The ACCESS EXCLUSIVE lock held by the DO block's implicit
+    -- transaction blocks all concurrent reads + writes from
+    -- LOCK acquisition until END $$ commits, so the count → drop sequence
+    -- cannot be interleaved with a concurrent INSERT.
     LOCK TABLE audit_outbox_2026_10 IN ACCESS EXCLUSIVE MODE;
     SELECT COUNT(*) INTO rc FROM audit_outbox_2026_10;
     IF rc > 0 THEN
         RAISE EXCEPTION 'audit_outbox_2026_10 has % rows; refusing to drop. Manual data migration required first.', rc;
     END IF;
+    EXECUTE 'DROP TABLE IF EXISTS audit_outbox_2026_10';
 END $$;
-DROP TABLE IF EXISTS audit_outbox_2026_10;
 
 DO $$
 DECLARE
@@ -186,8 +203,8 @@ BEGIN
     IF rc > 0 THEN
         RAISE EXCEPTION 'audit_outbox_2026_09 has % rows; refusing to drop. Manual data migration required first.', rc;
     END IF;
+    EXECUTE 'DROP TABLE IF EXISTS audit_outbox_2026_09';
 END $$;
-DROP TABLE IF EXISTS audit_outbox_2026_09;
 
 DO $$
 DECLARE
@@ -198,8 +215,8 @@ BEGIN
     IF rc > 0 THEN
         RAISE EXCEPTION 'audit_outbox_2026_08 has % rows; refusing to drop. Manual data migration required first.', rc;
     END IF;
+    EXECUTE 'DROP TABLE IF EXISTS audit_outbox_2026_08';
 END $$;
-DROP TABLE IF EXISTS audit_outbox_2026_08;
 
 -- Drop the 18 prediction columns.
 ALTER TABLE audit_outbox

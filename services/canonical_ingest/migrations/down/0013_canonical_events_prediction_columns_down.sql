@@ -8,10 +8,14 @@
 --
 -- Round-3 fix M4 + round-4 fix M4: per-file destructive-down guard
 -- (spendguard.allow_destructive_down_0013) — see slice §11 for the exact
--- SET LOCAL form.
+-- SET form (round-5 N12-A: SET, not SET LOCAL, because the migration
+-- runner autocommits each statement and SET LOCAL would die at the
+-- DO block's commit boundary before the next statement runs).
 -- Round-3 fix M10: no explicit BEGIN/COMMIT (matches up-migration).
--- Round-4 fix B6: ACCESS EXCLUSIVE LOCK before partition row-count
--- check to close the TOCTOU race window.
+-- Round-4 fix B6 + round-5 fix N12-B: ACCESS EXCLUSIVE LOCK + COUNT +
+-- DROP collapsed into ONE DO $$ block per partition so the three
+-- operations share a single implicit transaction under the autocommit
+-- runner.
 
 DO $$
 BEGIN
@@ -49,9 +53,13 @@ DROP INDEX IF EXISTS canonical_events_calibration_idx;
 DROP INDEX IF EXISTS canonical_events_tier_idx;
 DROP INDEX IF EXISTS canonical_events_outcome_calibration_idx;
 
--- Round-3 fix M4 + round-4 fix B6: per-partition row-count guard with
--- ACCESS EXCLUSIVE LOCK so the count→drop pair is atomic against
--- concurrent INSERTs.
+-- Round-3 fix M4 + round-4 fix B6 + round-5 fix N12-B: per-partition
+-- row-count guard with ACCESS EXCLUSIVE LOCK + COUNT + EXECUTE 'DROP TABLE'
+-- collapsed into ONE DO $$ block so the three operations share a single
+-- implicit transaction even under the autocommit runner. EXECUTE is
+-- required because DROP TABLE is not legal as a static statement inside
+-- PL/pgSQL. The lock is held until END $$ commits, blocking all
+-- concurrent reads + writes for the entire count → drop sequence.
 DO $$
 DECLARE
     rc BIGINT;
@@ -61,8 +69,8 @@ BEGIN
     IF rc > 0 THEN
         RAISE EXCEPTION 'canonical_events_2026_10 has % rows; refusing to drop. Manual data migration required first.', rc;
     END IF;
+    EXECUTE 'DROP TABLE IF EXISTS canonical_events_2026_10';
 END $$;
-DROP TABLE IF EXISTS canonical_events_2026_10;
 
 DO $$
 DECLARE
@@ -73,8 +81,8 @@ BEGIN
     IF rc > 0 THEN
         RAISE EXCEPTION 'canonical_events_2026_09 has % rows; refusing to drop. Manual data migration required first.', rc;
     END IF;
+    EXECUTE 'DROP TABLE IF EXISTS canonical_events_2026_09';
 END $$;
-DROP TABLE IF EXISTS canonical_events_2026_09;
 
 DO $$
 DECLARE
@@ -85,8 +93,8 @@ BEGIN
     IF rc > 0 THEN
         RAISE EXCEPTION 'canonical_events_2026_08 has % rows; refusing to drop. Manual data migration required first.', rc;
     END IF;
+    EXECUTE 'DROP TABLE IF EXISTS canonical_events_2026_08';
 END $$;
-DROP TABLE IF EXISTS canonical_events_2026_08;
 
 ALTER TABLE canonical_events
     DROP COLUMN IF EXISTS predicted_a_tokens,
