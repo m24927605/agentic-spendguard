@@ -47,23 +47,38 @@ pub const HEURISTIC_FALLBACK_VERSION_ID: &str = "";
 // SLICE_03 ships) and the random tail is a kind-specific hex
 // signature so the IDs sort by ship-date and are visually
 // distinguishable in audit dumps.
+//
+// ## UUIDv7 layout (RFC 9562 §5.7)
+//
+//   xxxxxxxx-xxxx-7xxx-Vxxx-xxxxxxxxxxxx
+//                     ^
+//                     variant nibble — MUST be 8/9/a/b (10xx2 prefix)
+//
+// Round-2 fix B2 (panel finding): the original constants used `0` for
+// the variant nibble (NCS-reserved range), which fails RFC 9562
+// `Uuid::get_variant() == Variant::RFC4122` checks downstream. We
+// re-mint the constants with variant `8` (the simplest deterministic
+// choice in the 10xx2 range). Since SLICE_03 has not yet shipped any
+// audit_outbox rows that FK to these IDs, no data migration is needed
+// — the rotation is purely textual across `versions.rs` + the 0049
+// seed SQL.
 // ============================================================================
 
 /// tiktoken-rs cl100k_base — used by gpt-4 / gpt-4-turbo / gpt-3.5-turbo.
-pub const TIKTOKEN_CL100K_BASE_VERSION_ID: &str = "01918000-0000-7c10-0c10-000000000001";
+pub const TIKTOKEN_CL100K_BASE_VERSION_ID: &str = "01918000-0000-7c10-8c10-000000000001";
 
 /// tiktoken-rs o200k_base — used by gpt-4o / gpt-4o-mini.
-pub const TIKTOKEN_O200K_BASE_VERSION_ID: &str = "01918000-0000-7c10-0c10-000000000002";
+pub const TIKTOKEN_O200K_BASE_VERSION_ID: &str = "01918000-0000-7c10-8c10-000000000002";
 
 /// tiktoken-rs p50k_base — used by text-davinci-003 family.
-pub const TIKTOKEN_P50K_BASE_VERSION_ID: &str = "01918000-0000-7c10-0c10-000000000003";
+pub const TIKTOKEN_P50K_BASE_VERSION_ID: &str = "01918000-0000-7c10-8c10-000000000003";
 
 /// HEURISTIC marker row — the registry row that exists for
 /// `audit_outbox` joins to identify the Tier-3 fallback path
 /// explicitly (the FK column itself is NULL on Tier 3 rows; this row
 /// exists for the calibration-report CLI and is referenced by the
 /// `HEURISTIC` kind variant in `tokenizer_versions.kind`).
-pub const HEURISTIC_MARKER_VERSION_ID: &str = "01918000-0000-7c10-0c10-00000000000f";
+pub const HEURISTIC_MARKER_VERSION_ID: &str = "01918000-0000-7c10-8c10-00000000000f";
 
 /// Rust-side mirror of a `tokenizer_versions` SQL row. Used by the
 /// seed migration audit fixture (`tests/seed_parity.rs`) so a future
@@ -138,6 +153,34 @@ mod tests {
         for row in initial_seed_rows() {
             uuid::Uuid::parse_str(row.tokenizer_version_id)
                 .unwrap_or_else(|e| panic!("invalid UUID `{}`: {e}", row.tokenizer_version_id));
+        }
+    }
+
+    #[test]
+    fn seed_rows_have_valid_uuidv7_per_rfc_9562() {
+        // Round-2 fix B2 (panel finding): the four constants must be
+        // syntactically valid UUIDv7 per RFC 9562 §5.7 — version nibble
+        // == 7 AND variant nibble in {8, 9, a, b} (the 10xx2 range).
+        // The original SLICE_03 mint used variant `0` (NCS-reserved)
+        // which would fail downstream `Uuid::get_variant() ==
+        // Variant::RFC4122` checks. This test pins the fix so a future
+        // edit that drifts back to an invalid variant fails loudly.
+        use uuid::{Variant, Version};
+        for row in initial_seed_rows() {
+            let uuid = uuid::Uuid::parse_str(row.tokenizer_version_id)
+                .unwrap_or_else(|e| panic!("invalid UUID `{}`: {e}", row.tokenizer_version_id));
+            assert_eq!(
+                uuid.get_version(),
+                Some(Version::SortRand),
+                "row id `{}` must be UUIDv7 (version nibble == 7) per spec §6.1",
+                row.tokenizer_version_id
+            );
+            assert_eq!(
+                uuid.get_variant(),
+                Variant::RFC4122,
+                "row id `{}` must have RFC4122 variant (10xx2 / 8|9|a|b) per RFC 9562 §5.7",
+                row.tokenizer_version_id
+            );
         }
     }
 

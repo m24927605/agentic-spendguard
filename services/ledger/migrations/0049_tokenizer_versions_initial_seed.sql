@@ -49,6 +49,14 @@
 -- Round-1 self-review note: the SQL is wrapped by the migration
 -- runner's per-file transaction; no explicit BEGIN/COMMIT here
 -- (matches 0048 convention).
+--
+-- Round-2 fix B2 (panel finding): the UUIDs below were re-minted with
+-- variant nibble `8` (was `0` — NCS-reserved which fails RFC 9562
+-- §5.7). The Rust-side constants in
+-- crates/spendguard-tokenizer/src/versions.rs match byte-for-byte;
+-- seed_parity.rs tests assert the rust↔SQL agreement so any future
+-- drift fails CI loudly. No data fix needed since SLICE_03 ships
+-- pre-FK-write (no audit_outbox rows reference these IDs yet).
 
 INSERT INTO tokenizer_versions (
     tokenizer_version_id,
@@ -58,28 +66,28 @@ INSERT INTO tokenizer_versions (
     asset_sha256
 ) VALUES
     (
-        '01918000-0000-7c10-0c10-000000000001'::uuid,
+        '01918000-0000-7c10-8c10-000000000001'::uuid,
         'OPENAI_TIKTOKEN',
         'cl100k_base',
         'tiktoken-rs-0.11.0',
         '223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7'
     ),
     (
-        '01918000-0000-7c10-0c10-000000000002'::uuid,
+        '01918000-0000-7c10-8c10-000000000002'::uuid,
         'OPENAI_TIKTOKEN',
         'o200k_base',
         'tiktoken-rs-0.11.0',
         '446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d'
     ),
     (
-        '01918000-0000-7c10-0c10-000000000003'::uuid,
+        '01918000-0000-7c10-8c10-000000000003'::uuid,
         'OPENAI_TIKTOKEN',
         'p50k_base',
         'tiktoken-rs-0.11.0',
         '94b5ca7dff4d00767bc256fdd1b27e5b17361d7b8a5f968547f9f23eb70d2069'
     ),
     (
-        '01918000-0000-7c10-0c10-00000000000f'::uuid,
+        '01918000-0000-7c10-8c10-00000000000f'::uuid,
         'HEURISTIC',
         'chars_div_4_with_5pct_margin',
         'spec-v1alpha1',
@@ -96,18 +104,26 @@ ON CONFLICT (kind, encoder_name, version_string) DO NOTHING;
 -- the deployment in a state where the library expects to map to a
 -- missing FK target. RAISE EXCEPTION fails the migration so the
 -- runner rolls back rather than ship a broken registry.
+--
+-- Round-2 fix M2 (panel finding): `SET LOCAL search_path` inside the
+-- DO body forces plpgsql to resolve COUNT / RAISE / etc against
+-- pg_catalog only — CVE-2018-1058 hardening that matches the SLICE_01
+-- R5 convention. SET LOCAL works here because the DO body runs inside
+-- a single tx frame; this differs from autocommit-scoped destructive-
+-- down GUC opt-ins (those need SET — see 0048_down).
 DO $$
 DECLARE
     expected_count INTEGER := 4;
     actual_count   INTEGER;
 BEGIN
+    SET LOCAL search_path = pg_catalog, pg_temp;
     SELECT COUNT(*) INTO actual_count
     FROM tokenizer_versions
     WHERE tokenizer_version_id IN (
-        '01918000-0000-7c10-0c10-000000000001'::uuid,
-        '01918000-0000-7c10-0c10-000000000002'::uuid,
-        '01918000-0000-7c10-0c10-000000000003'::uuid,
-        '01918000-0000-7c10-0c10-00000000000f'::uuid
+        '01918000-0000-7c10-8c10-000000000001'::uuid,
+        '01918000-0000-7c10-8c10-000000000002'::uuid,
+        '01918000-0000-7c10-8c10-000000000003'::uuid,
+        '01918000-0000-7c10-8c10-00000000000f'::uuid
     );
     IF actual_count <> expected_count THEN
         RAISE EXCEPTION
