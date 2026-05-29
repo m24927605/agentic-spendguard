@@ -36,7 +36,15 @@ sqlx = { version = "0.8", features = [
     "uuid",
     "chrono",
     "json",
+    # Round-3 fix B2: enables BigDecimal binding for NUMERIC(4,3) and
+    # NUMERIC(38,0) prediction-extension columns. Matches the ledger
+    # crate's convention (services/ledger uses bigdecimal feature too).
+    "bigdecimal",
 ] }
+
+# Round-3 fix B2: explicit BigDecimal type for the SQL NUMERIC binding.
+# sqlx re-exports `sqlx::types::BigDecimal` once the feature is on.
+bigdecimal = { version = "0.4", features = ["serde"] }
 
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 sha2 = "0.10"
