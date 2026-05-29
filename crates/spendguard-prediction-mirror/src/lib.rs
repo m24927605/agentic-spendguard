@@ -10,15 +10,22 @@
 //! that writes an audit row — sidecar, webhook_receiver, ttl_sweeper,
 //! ledger invoice_reconcile — and every consumer that compares the two
 //! representations — verify-chain `--check-prediction-mirror`,
-//! calibration-report SQL aggregations — must agree on:
+//! calibration-report SQL aggregations — must agree on the 10 mappings
+//! (round-3 fix M2 added the prediction_confidence + prediction_sample_size
+//! pairs that were missed in round-2):
 //!
-//!   * `predicted_b_tokens   IS NULL`          ⇔ proto tag 301 = `0`
-//!   * `predicted_c_tokens   IS NULL`          ⇔ proto tag 302 = `0`
-//!   * `tokenizer_version_id IS NULL`          ⇔ proto tag 307 = `""`
-//!   * `cold_start_layer_used IS NULL`         ⇔ proto tag 310 = `""`
+//!   * `predicted_b_tokens         IS NULL`    ⇔ proto tag 301 = `0`
+//!   * `predicted_c_tokens         IS NULL`    ⇔ proto tag 302 = `0`
+//!   * `tokenizer_version_id       IS NULL`    ⇔ proto tag 307 = `""`
+//!   * `prediction_confidence      IS NULL`    ⇔ proto tag 308 = `0.0`
+//!   * `prediction_sample_size     IS NULL`    ⇔ proto tag 309 = `0`
+//!   * `cold_start_layer_used      IS NULL`    ⇔ proto tag 310 = `""`
 //!   * `run_predicted_remaining_steps IS NULL` ⇔ proto tag 312 = `-1`
-//!   * `delta_b_ratio IS NULL`                 ⇔ proto tag 316 = `0.0`
-//!   * `delta_c_ratio IS NULL`                 ⇔ proto tag 317 = `0.0`
+//!   * `delta_b_ratio              IS NULL`    ⇔ proto tag 316 = `0.0`
+//!   * `delta_c_ratio              IS NULL`    ⇔ proto tag 317 = `0.0`
+//!
+//! Plus `predicted_a_tokens` (tag 300) which has no NULL case but is
+//! included for round-trip symmetry.
 //!
 //! If sidecar.rs and webhook_receiver.rs implement the translation
 //! independently, **drift is inevitable** — one service might encode
@@ -27,23 +34,39 @@
 //! translation in this crate keeps the mapping in a single audited
 //! file.
 //!
+//! ## Producer-side preconditions (round-3 fix M13)
+//!
+//! Because the sentinel mapping collapses NULL with proto3 default for
+//! token-count fields, producers MUST satisfy two preconditions BEFORE
+//! calling [`column_to_proto_sentinel`]:
+//!
+//!   1. `predicted_a_tokens > 0` on every `.decision` row. Strategy A
+//!      ceiling has no semantic interpretation for 0.
+//!   2. `predicted_b_tokens > 0` when `prediction_strategy_used = 'B'`.
+//!   3. `predicted_c_tokens > 0` when `prediction_strategy_used = 'C'`.
+//!
+//! Migration 0046 step 3b (round-3) enforces these as CHECK constraints
+//! on the SQL boundary as defense-in-depth.
+//!
 //! ## Round-2 scope
 //!
 //! SLICE_01 lands the helper crate with type-erased Rust signatures
-//! that match the spec §6.3 table, plus 5 unit tests covering every
-//! sentinel-bearing column. SLICE_06 producers will import this crate
-//! and replace their inline NULL↔sentinel translations with
-//! [`column_to_proto_sentinel`] / [`proto_to_column_value`] calls.
-//! Until then, the crate is dep-free (only `uuid`) and compiles in
-//! isolation.
+//! that match the spec §6.3 table, plus 7 unit tests covering every
+//! sentinel-bearing column (round-3 fix M2 added 2 tests for
+//! prediction_confidence and prediction_sample_size). SLICE_06
+//! producers will import this crate and replace their inline
+//! NULL↔sentinel translations with [`column_to_proto_sentinel`] /
+//! [`proto_to_column_value`] calls. Until then, the crate is dep-free
+//! (only `uuid`) and compiles in isolation.
 
 use uuid::Uuid;
 
-/// Mirror invariant: 16 prediction-extension columns + 2 commit-side
-/// columns. The discriminant identifies which column we're translating
-/// so the helper can pick the right sentinel mapping (proto3 has no
-/// "field absent" concept; `0` and `""` are wire-identical to "field
-/// unset").
+/// Mirror invariant: 18 prediction-extension columns. The discriminant
+/// identifies which column we're translating so the helper can pick the
+/// right sentinel mapping (proto3 has no "field absent" concept; `0` and
+/// `""` are wire-identical to "field unset"). Round-3 fix M2 added
+/// `PredictionConfidence` (tag 308) + `PredictionSampleSize` (tag 309)
+/// which were missing from the round-2 enum.
 ///
 /// Tag numbers reference `proto/spendguard/common/v1/common.proto`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,6 +79,13 @@ pub enum MirrorField {
     PredictedCTokens,
     /// Tag 307 — `tokenizer_version_id` (UUID NULL = Tier 3 fallback).
     TokenizerVersionId,
+    /// Tag 308 — `prediction_confidence` (NUMERIC(4,3) NULL = Strategy A
+    /// row). Round-3 fix M2.
+    PredictionConfidence,
+    /// Tag 309 — `prediction_sample_size` (BIGINT NULL = cold-start / A).
+    /// Round-3 fix M2. Wire type is int64 per round-3 M3 (was int32 in
+    /// round-2; aligned with BIGINT SQL column).
+    PredictionSampleSize,
     /// Tag 310 — `cold_start_layer_used` (TEXT NULL = warm path).
     ColdStartLayerUsed,
     /// Tag 312 — `run_predicted_remaining_steps` (INT NULL = projector
@@ -120,6 +150,28 @@ pub fn column_to_proto_sentinel(field: MirrorField, col: ColumnValue) -> ProtoVa
         (MirrorField::TokenizerVersionId, ColumnValue::NullUuid) => ProtoValue::Text(String::new()),
         (MirrorField::TokenizerVersionId, ColumnValue::Uuid(u)) => ProtoValue::Text(u.to_string()),
 
+        // ===== Tag 308: prediction_confidence — NULL → 0.0 sentinel.
+        // Round-3 fix M2. Wire is float (f32); SQL column is NUMERIC(4,3)
+        // 0.000-1.000. Producer converts NUMERIC→f32 before calling this
+        // (precision loss is bounded by the (4,3) constraint). NULL maps to
+        // proto3 default 0.0; calibration-report filters
+        // `WHERE prediction_confidence IS NOT NULL` per spec §6.3 round-3
+        // M11 note (collision with 0.0 is column-NULL semantics for
+        // Strategy A rows).
+        (MirrorField::PredictionConfidence, ColumnValue::NullReal) => ProtoValue::F32(0.0),
+        (MirrorField::PredictionConfidence, ColumnValue::Real(v)) => ProtoValue::F32(v),
+
+        // ===== Tag 309: prediction_sample_size — NULL → 0 sentinel.
+        // Round-3 fix M2. Wire is int64 (round-3 M3 fix; was int32 in
+        // round-2); SQL column is BIGINT. NULL maps to proto3 default 0;
+        // legal values [0, ∞). Producer-side overflow check: sample size
+        // > 2^63 would only happen on multi-billion-year aggregation
+        // which is operationally impossible — but we still validate at
+        // the SQL boundary via audit_outbox_prediction_sample_size_chk
+        // CHECK.
+        (MirrorField::PredictionSampleSize, ColumnValue::NullBigInt) => ProtoValue::I64(0),
+        (MirrorField::PredictionSampleSize, ColumnValue::BigInt(v)) => ProtoValue::I64(v),
+
         // ===== Tag 310: cold_start_layer_used — NULL → "" sentinel.
         (MirrorField::ColdStartLayerUsed, ColumnValue::NullText) => ProtoValue::Text(String::new()),
         (MirrorField::ColdStartLayerUsed, ColumnValue::Text(s)) => ProtoValue::Text(s),
@@ -168,6 +220,17 @@ pub fn proto_to_column_value(field: MirrorField, proto: ProtoValue) -> ColumnVal
             // emit this; defending against tampered wire bytes.
             Err(_) => ColumnValue::NullUuid,
         },
+
+        // Round-3 fix M2: PredictionConfidence (tag 308) wire 0.0 ↔ NULL.
+        (MirrorField::PredictionConfidence, ProtoValue::F32(v)) if v == 0.0 => {
+            ColumnValue::NullReal
+        }
+        (MirrorField::PredictionConfidence, ProtoValue::F32(v)) => ColumnValue::Real(v),
+
+        // Round-3 fix M2: PredictionSampleSize (tag 309) wire 0 ↔ NULL.
+        // Wire type is I64 per round-3 M3.
+        (MirrorField::PredictionSampleSize, ProtoValue::I64(0)) => ColumnValue::NullBigInt,
+        (MirrorField::PredictionSampleSize, ProtoValue::I64(v)) => ColumnValue::BigInt(v),
 
         (MirrorField::ColdStartLayerUsed, ProtoValue::Text(s)) if s.is_empty() => {
             ColumnValue::NullText
@@ -281,6 +344,63 @@ mod tests {
         assert_eq!(p, ProtoValue::I32(3));
         let c = proto_to_column_value(MirrorField::RunPredictedRemainingSteps, p);
         assert_eq!(c, ColumnValue::Int(3));
+    }
+
+    #[test]
+    fn prediction_confidence_zero_sentinel_roundtrip() {
+        // Round-3 fix M2: prediction_confidence (tag 308) — NULL ↔ 0.0
+        // sentinel. Strategy A rows are null in SQL; the wire encodes
+        // proto3 default 0.0; calibration-report filters
+        // `WHERE prediction_confidence IS NOT NULL`.
+        let p = column_to_proto_sentinel(
+            MirrorField::PredictionConfidence,
+            ColumnValue::NullReal,
+        );
+        assert_eq!(p, ProtoValue::F32(0.0));
+        let c = proto_to_column_value(MirrorField::PredictionConfidence, p);
+        assert_eq!(c, ColumnValue::NullReal);
+
+        // 0.875 → 0.875 → 0.875 (normal Strategy B confidence)
+        let p = column_to_proto_sentinel(
+            MirrorField::PredictionConfidence,
+            ColumnValue::Real(0.875),
+        );
+        assert_eq!(p, ProtoValue::F32(0.875));
+        let c = proto_to_column_value(MirrorField::PredictionConfidence, p);
+        assert_eq!(c, ColumnValue::Real(0.875));
+    }
+
+    #[test]
+    fn prediction_sample_size_int64_zero_sentinel_roundtrip() {
+        // Round-3 fix M2 + M3: prediction_sample_size (tag 309) — NULL ↔ 0
+        // sentinel; wire type is I64 (round-3 M3 aligned with BIGINT SQL).
+        let p = column_to_proto_sentinel(
+            MirrorField::PredictionSampleSize,
+            ColumnValue::NullBigInt,
+        );
+        assert_eq!(p, ProtoValue::I64(0));
+        let c = proto_to_column_value(MirrorField::PredictionSampleSize, p);
+        assert_eq!(c, ColumnValue::NullBigInt);
+
+        // 64 → 64 → 64 (sample-bucket-of-64 Strategy B row)
+        let p = column_to_proto_sentinel(
+            MirrorField::PredictionSampleSize,
+            ColumnValue::BigInt(64),
+        );
+        assert_eq!(p, ProtoValue::I64(64));
+        let c = proto_to_column_value(MirrorField::PredictionSampleSize, p);
+        assert_eq!(c, ColumnValue::BigInt(64));
+
+        // 2^33 → 2^33 → 2^33 — exercises the BIGINT range beyond i32 that
+        // round-2's int32 wire type would have silently truncated.
+        let big: i64 = 1 << 33;
+        let p = column_to_proto_sentinel(
+            MirrorField::PredictionSampleSize,
+            ColumnValue::BigInt(big),
+        );
+        assert_eq!(p, ProtoValue::I64(big));
+        let c = proto_to_column_value(MirrorField::PredictionSampleSize, p);
+        assert_eq!(c, ColumnValue::BigInt(big));
     }
 
     #[test]

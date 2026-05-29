@@ -82,3 +82,12 @@ testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
 # verifier.rs unit tests use rand::rngs::OsRng for ed25519 keypairs.
 rand = "0.8"
+# Round-3 fix B4: wire the orphan spendguard-prediction-mirror crate to
+# canonical_ingest as a dev-dependency. This is the minimum-blast-radius
+# fix — adding a root Cargo.toml workspace would touch every service.
+# Dev-deps build in CI (cargo test --workspace catches them indirectly via
+# this crate), the mirror crate compiles + its unit tests run, and
+# SLICE_06 will promote it to a regular dependency when producer-side
+# mirror writes land. See docs/audit-chain-prediction-extension-v1alpha1.md
+# §6.3 + crates/spendguard-prediction-mirror/src/lib.rs preamble.
+spendguard-prediction-mirror = { path = "../../crates/spendguard-prediction-mirror" }

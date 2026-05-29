@@ -11,4 +11,8 @@ description = "Shared sentinel helpers for the audit-chain prediction extension 
 # call sites is local to the column type domain.
 
 [dependencies]
-uuid = { version = "1", features = ["v7", "v4", "serde"] }
+# Round-3 fix M16: drop the unused v7 / v4 / serde features. The crate
+# only ever parses + formats Uuids via Uuid::parse_str + Uuid::to_string;
+# v7/v4 minting is producer-side (sidecar / webhook_receiver) and serde
+# is unused in this crate's signatures.
+uuid = { version = "1" }
