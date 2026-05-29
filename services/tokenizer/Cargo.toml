@@ -1,0 +1,74 @@
+[package]
+name = "spendguard-tokenizer-service"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard tokenizer service: gRPC over mTLS centralized form per tokenizer-service-spec-v1alpha1.md §2.1(a). Wraps the spendguard-tokenizer library crate (in-process Tier 2 BPE) plus a ShadowVerify stub (Tier 1; SLICE_05 wires the real shadow worker). SLICE_03 scope: tonic server skeleton + UDS bind + metrics endpoint."
+
+[[bin]]
+name = "spendguard-tokenizer"
+path = "src/main.rs"
+
+[lib]
+name = "spendguard_tokenizer_service"
+path = "src/lib.rs"
+
+[dependencies]
+# Library form — the service is a thin tonic wrapper around the
+# in-process tokenizer; both forms share the same dispatch table +
+# encoder cache (per spec §2.1).
+spendguard-tokenizer = { path = "../../crates/spendguard-tokenizer" }
+
+# Direct rustls dep so main() can call CryptoProvider::install_default()
+rustls = "0.23"
+
+# gRPC + protobuf (server side only — tokenizer is a leaf service
+# with no outbound RPCs in SLICE_03).
+tonic = { version = "0.12", features = ["tls", "transport", "gzip"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+
+# HTTP / Prometheus /metrics endpoint (raw hyper, matching the ledger
+# / canonical_ingest convention so there's no `prometheus` crate
+# dependency to track).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# UDS support — the production deployment exposes the gRPC server on
+# a hostPath UDS so sidecar pods on the same node can reach it
+# without an L4 hop (per spec §10.1 latency budget). The library
+# form is preferred but the gRPC form is the fallback for the
+# Tier 1 shadow worker + calibration / output_predictor consumers.
+tokio-vsock = { version = "0.5", optional = true }
+
+# Errors / logging
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config (env-driven for POC, mirrors sidecar / ledger)
+envy = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+# UUIDs (request_id mint)
+uuid = { version = "1", features = ["v7"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+
+[features]
+default = []
