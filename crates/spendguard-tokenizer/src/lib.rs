@@ -121,6 +121,39 @@ pub mod asset_sha256 {
     /// text-davinci-003 / older models).
     pub const P50K_BASE: &str =
         "94b5ca7dff4d00767bc256fdd1b27e5b17361d7b8a5f968547f9f23eb70d2069";
+
+    // ──────────────────────────────────────────────────────────────
+    // SLICE_04 — Tier 2 expansion (Anthropic + Cohere via tokenizers
+    // crate; Gemini approximation + Llama SentencePiece via same).
+    // Each constant is the sha256 of the file at
+    // `data/<vendor>/tokenizer.json` byte-for-byte; rotated together
+    // with the asset whenever a vendor's tokenizer.json is refreshed
+    // (per spec §6.2 + §7.3 quarterly cadence).
+    // ──────────────────────────────────────────────────────────────
+
+    /// sha256 of the vendored Anthropic Claude 3 tokenizer.json
+    /// (from Xenova/claude-tokenizer on Hugging Face;
+    /// see `LICENSE_NOTICES.md` for the pinned revision hash).
+    pub const ANTHROPIC_CLAUDE3: &str =
+        "c241737df24b4e7f7c9af4fdcee29a0ca903dcb288a8b753bc346a3092911767";
+
+    /// sha256 of the vendored Cohere Command-R tokenizer.json
+    /// (from Xenova/c4ai-command-r-v01-tokenizer on Hugging Face).
+    pub const COHERE_COMMAND_R: &str =
+        "0af6e6fe50ce1bb5611b103482de6bac000c82e06898138d57f35af121aec772";
+
+    /// sha256 of the vendored Gemini-approximation tokenizer.json
+    /// (from Xenova/gemma-tokenizer on Hugging Face — community
+    /// approximation since Google's official Gemini tokenizer is
+    /// API-only). Spec §4.2 0.01 drift threshold accommodates the
+    /// approximation gap; SLICE_05 shadow worker measures.
+    pub const GEMINI_15: &str =
+        "05e97791a5e007260de1db7e1692e53150e08cea481e2bf25435553380c147ee";
+
+    /// sha256 of the vendored Llama 3.1 tokenizer.json
+    /// (from Xenova/Meta-Llama-3.1-Tokenizer on Hugging Face).
+    pub const LLAMA_31: &str =
+        "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4";
 }
 
 /// Public-surface request shape.

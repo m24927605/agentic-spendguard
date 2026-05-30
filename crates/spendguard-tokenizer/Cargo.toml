@@ -36,6 +36,37 @@ path = "src/lib.rs"
 # 1.73.0 satisfied by workspace rustup pin 1.96.0.
 tiktoken-rs = "0.11"
 
+# Tier 2 multi-vendor BPE / SentencePiece loader (SLICE_04). Uses
+# HuggingFace's `tokenizers` crate to parse `tokenizer.json` vendored
+# from Anthropic / Gemini (community approximation) / Cohere / Llama.
+# Apache-2.0 licensed.
+#
+# Why this crate and not a raw byte-pair-encoding implementation:
+#   1. Already used by ~80% of vendor model cards on HF as the
+#      canonical loader, so the vendored `tokenizer.json` files we ship
+#      are read by the same crate the model authors target — encode
+#      output matches the upstream "transformers" Python output
+#      byte-for-byte where the JSON is identical.
+#   2. Supports BPE (Anthropic / Cohere / Gemma) AND SentencePiece
+#      (Llama / Gemma alt config) in one API surface.
+#   3. `Tokenizer::from_bytes(...)` lets us `include_bytes!` the
+#      vendored JSON for build-time embedding (matches spec §7.2
+#      asset-bundling expectation; no separate asset distribution).
+#
+# Feature set:
+#   * We keep the default features which include `onig` (Oniguruma
+#     regex backend). All four vendored tokenizer.json files reference
+#     PCRE-style patterns in their pretokenizer config, and the onig
+#     backend is what `transformers` defaults to — disabling it risks
+#     a silent encode drift on edge-case inputs.
+#   * Binary-size cost is ~2 MB native Oniguruma library; acceptable
+#     vs. the alternative of a Tier-2-encode-quality regression.
+#
+# Pin: 0.20.x (latest stable as of 2026-05-30). Bumping requires
+# re-running `cargo run --example discover_tier2_fixture_tokens` to
+# refresh the Layer B cross-check fixture vectors per spec §7.4.1.
+tokenizers = "0.20"
+
 # Regex for dispatch table pattern matching (per spec §3.1). Use the
 # default-features set; the dispatch table patterns are compiled once
 # in Tokenizer::new and reused.
