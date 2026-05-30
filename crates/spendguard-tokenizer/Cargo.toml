@@ -53,19 +53,25 @@ tiktoken-rs = "0.11"
 #      vendored JSON for build-time embedding (matches spec §7.2
 #      asset-bundling expectation; no separate asset distribution).
 #
-# Feature set:
-#   * We keep the default features which include `onig` (Oniguruma
-#     regex backend). All four vendored tokenizer.json files reference
-#     PCRE-style patterns in their pretokenizer config, and the onig
-#     backend is what `transformers` defaults to — disabling it risks
-#     a silent encode drift on edge-case inputs.
-#   * Binary-size cost is ~2 MB native Oniguruma library; acceptable
-#     vs. the alternative of a Tier-2-encode-quality regression.
+# Feature set (R2 Code F1 + Security F3 trim):
+#   * `default-features = false` excludes `progressbar` (indicatif
+#     CLI-only TTY rendering; unused in the in-process hot path) and
+#     `esaxx_fast` (a C++ training-time suffix-array implementation;
+#     used only for `BpeTrainer`, never for encode). Both default
+#     features added build deps + binary size without any runtime
+#     benefit for our use case.
+#   * `features = ["onig"]` keeps the Oniguruma regex backend (the
+#     `transformers` default). All four vendored tokenizer.json files
+#     reference PCRE-style patterns in their pretokenizer config;
+#     disabling `onig` risks a silent encode drift on edge-case inputs.
+#   * Net effect: ~1-2 MB smaller binary + ~30 fewer transitive crate
+#     deps. Boot time + hot path performance unchanged (we never
+#     touched the trimmed code paths).
 #
 # Pin: 0.20.x (latest stable as of 2026-05-30). Bumping requires
-# re-running `cargo run --example discover_tier2_fixture_tokens` to
+# re-running `cargo run --example discover_fixture_tokens` to
 # refresh the Layer B cross-check fixture vectors per spec §7.4.1.
-tokenizers = "0.20"
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
 
 # Regex for dispatch table pattern matching (per spec §3.1). Use the
 # default-features set; the dispatch table patterns are compiled once
