@@ -1,0 +1,73 @@
+[package]
+name = "spendguard-calibration-report"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SLICE_13: spendguard calibration-report CLI. Operator-facing differentiator surface for audit-grade calibration evidence."
+
+[[bin]]
+name = "spendguard-calibration-report"
+path = "src/main.rs"
+
+[lib]
+name = "spendguard_calibration_report"
+path = "src/lib.rs"
+
+[dependencies]
+
+# Direct rustls dep so main() can call CryptoProvider::install_default()
+# (matches doctor/sidecar/ttl_sweeper conventions in this repo).
+rustls = "0.23"
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", features = [
+    "runtime-tokio",
+    "tls-rustls",
+    "postgres",
+    "uuid",
+    "chrono",
+    "json",
+    "bigdecimal",
+] }
+bigdecimal = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v7", "v4", "serde"] }
+
+# Errors / observability.
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# CLI args. clap derive matches `services/doctor/Cargo.toml`.
+# `env` feature enables `#[arg(env = "...")]` for operator-set env
+# overrides (mTLS subject, scope, canonical URL).
+clap = { version = "4", features = ["derive", "env"] }
+
+# Self-audit CloudEvent emission to canonical_ingest. Phase C wires the
+# AppendEvents call; Phase A scaffolds the dependency.
+tonic = { version = "0.12", features = ["tls", "transport", "gzip"] }
+prost = "0.13"
+prost-types = "0.13"
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+
+# Phase 5 GA hardening S8: Verifier trait + LocalEd25519Verifier come
+# from the shared signing crate. Phase C uses Signer to sign the
+# self-audit CloudEvent.
+spendguard-signing = { path = "../signing" }
+
+# Phase C wires the verify-chain library function exposed from
+# canonical_ingest's library crate.
+spendguard-canonical-ingest = { path = "../canonical_ingest" }
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
+# Phase D integration tests stand up a Postgres testcontainer so
+# SQL queries run against a real planner.
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
