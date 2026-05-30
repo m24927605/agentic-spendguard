@@ -84,6 +84,12 @@ impl AnthropicClient {
         }
         let http = Client::builder()
             .timeout(REQUEST_TIMEOUT)
+            // R2 M4: split connect timeout from total timeout so DNS /
+            // TCP / TLS handshake failures surface fast (2s) regardless
+            // of REQUEST_TIMEOUT. Keep-alive avoids per-request TCP
+            // overhead on the hot worker loop.
+            .connect_timeout(Duration::from_secs(2))
+            .tcp_keepalive(Some(Duration::from_secs(30)))
             .user_agent(concat!(
                 "spendguard-tokenizer/",
                 env!("CARGO_PKG_VERSION"),
@@ -177,21 +183,40 @@ impl AnthropicClient {
     }
 }
 
+/// R2 B3 + defense-in-depth: scrub the URL from any reqwest send error
+/// before formatting. Anthropic uses header auth so the URL is benign,
+/// but the Gemini client carries `?key=...` in the URL — so both
+/// clients apply this scrub identically to avoid divergent secret
+/// handling. `reqwest::Error::without_url()` returns a clone with the
+/// URL stripped; `Display` then renders without leaking it.
 fn map_send_error(e: reqwest::Error) -> ProviderError {
     if e.is_timeout() {
         ProviderError::Timeout
     } else {
-        ProviderError::Other(format!("anthropic send: {e}"))
+        let safe = e.without_url();
+        ProviderError::Other(format!("anthropic send: {safe}"))
     }
 }
 
 /// Cap error body length so a 1MB error response doesn't bloat the log.
+///
+/// R2 M3: walk char boundaries so a multi-byte UTF-8 character split
+/// at byte 512 does not panic the worker. Drops to the nearest <= 512-byte
+/// char boundary (always ≤ 512 bytes; may be shorter when the boundary
+/// straddles 512).
 fn truncate_body(body: String) -> String {
     if body.len() <= 512 {
-        body
-    } else {
-        format!("{}…(truncated {}B)", &body[..512], body.len() - 512)
+        return body;
     }
+    // Find the largest valid UTF-8 char boundary at or below byte 512.
+    let mut cut = 0usize;
+    for (i, _) in body.char_indices() {
+        if i > 512 {
+            break;
+        }
+        cut = i;
+    }
+    format!("{}…(truncated {}B)", &body[..cut], body.len() - cut)
 }
 
 #[cfg(test)]
@@ -310,5 +335,39 @@ mod tests {
     fn empty_api_key_rejected_at_construction() {
         let err = AnthropicClient::new("").expect_err("empty key rejected");
         assert!(matches!(err, ProviderError::Auth(_)));
+    }
+
+    /// R2 M3 regression: multi-byte UTF-8 characters straddling byte 512
+    /// must NOT panic the worker. Previous `&body[..512]` slice would
+    /// fail at runtime with "byte index N is not a char boundary".
+    #[test]
+    fn truncate_body_handles_multibyte_at_boundary() {
+        // Build a string whose chars straddle byte 510-515. Use the
+        // multi-byte "é" (2 bytes) — 256 of them = 512 bytes — and
+        // then append a string that crosses the boundary.
+        let mut s = String::with_capacity(2000);
+        // First 510 bytes (255 × 2-byte chars).
+        for _ in 0..255 {
+            s.push('é');
+        }
+        // Now add a 3-byte char that crosses byte 510 boundary.
+        s.push('日');
+        // Pad to > 512 so the truncation path fires.
+        for _ in 0..200 {
+            s.push('日');
+        }
+        assert!(s.len() > 512);
+        let out = truncate_body(s);
+        // Returned string MUST be valid UTF-8 (test would panic if not)
+        // and ends with the truncation marker.
+        assert!(out.ends_with(')'));
+        assert!(out.contains("(truncated"));
+        // The body prefix length is ≤ 512 bytes.
+        let trail = "…(truncated ";
+        let prefix_end = out.find(trail).expect("marker present");
+        assert!(
+            prefix_end <= 512,
+            "truncated prefix exceeded 512B: {prefix_end}"
+        );
     }
 }

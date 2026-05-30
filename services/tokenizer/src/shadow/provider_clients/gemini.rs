@@ -59,6 +59,9 @@ impl GeminiClient {
         }
         let http = Client::builder()
             .timeout(REQUEST_TIMEOUT)
+            // R2 M4: connect timeout + keep-alive (see anthropic.rs).
+            .connect_timeout(Duration::from_secs(2))
+            .tcp_keepalive(Some(Duration::from_secs(30)))
             .user_agent(concat!(
                 "spendguard-tokenizer/",
                 env!("CARGO_PKG_VERSION"),
@@ -154,20 +157,37 @@ impl GeminiClient {
     }
 }
 
+/// R2 B3 — strip the URL from the reqwest error before formatting.
+/// The Gemini URL carries `?key=$API_KEY` in the query string;
+/// `reqwest::Error::Display` would render the full URL otherwise,
+/// leaking the API key into logs / error chains / metrics. We use
+/// `without_url()` which returns the same error with the URL field
+/// cleared (the underlying TCP / TLS / DNS detail remains intact).
 fn map_send_error(e: reqwest::Error) -> ProviderError {
     if e.is_timeout() {
         ProviderError::Timeout
     } else {
-        ProviderError::Other(format!("gemini send: {e}"))
+        let safe = e.without_url();
+        ProviderError::Other(format!("gemini send: {safe}"))
     }
 }
 
+/// R2 M3: walk UTF-8 char boundaries so multi-byte chars at byte 510-515
+/// do not panic. Drops to the nearest <= 512-byte char boundary; the
+/// returned slice is always ≤ 512 bytes (may be shorter when the
+/// boundary straddles 512).
 fn truncate_body(body: String) -> String {
     if body.len() <= 512 {
-        body
-    } else {
-        format!("{}…(truncated {}B)", &body[..512], body.len() - 512)
+        return body;
     }
+    let mut cut = 0usize;
+    for (i, _) in body.char_indices() {
+        if i > 512 {
+            break;
+        }
+        cut = i;
+    }
+    format!("{}…(truncated {}B)", &body[..cut], body.len() - cut)
 }
 
 #[cfg(test)]
@@ -289,5 +309,24 @@ mod tests {
     fn empty_api_key_rejected() {
         let err = GeminiClient::new("").expect_err("empty key");
         assert!(matches!(err, ProviderError::Auth(_)));
+    }
+
+    /// R2 M3: same multi-byte UTF-8 panic regression as the Anthropic
+    /// client — both share the truncate_body recipe.
+    #[test]
+    fn truncate_body_handles_multibyte_at_boundary() {
+        let mut s = String::with_capacity(2000);
+        for _ in 0..255 {
+            s.push('é');
+        }
+        s.push('日');
+        for _ in 0..200 {
+            s.push('日');
+        }
+        assert!(s.len() > 512);
+        let out = truncate_body(s);
+        assert!(out.contains("(truncated"));
+        let prefix_end = out.find("…(truncated ").expect("marker present");
+        assert!(prefix_end <= 512);
     }
 }

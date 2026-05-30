@@ -45,7 +45,8 @@
 --
 -- ## Stylistic alignment (Codex m3 convention, per 0050)
 --
--- No explicit BEGIN / COMMIT — migration runner wraps the file in its own tx.
+-- Migration runner uses psql autocommit per SLICE_01 R5; each statement
+-- commits independently. No explicit BEGIN/COMMIT.
 -- DO blocks use `SET LOCAL search_path = pg_catalog, pg_temp` (SLICE_01 R5
 -- convention; CVE-2018-1058 hardening).
 --
@@ -56,21 +57,34 @@
 -- one-liner (`DROP TABLE tokenizer_t1_samples CASCADE`) for the operator.
 -- ============================================================================
 
+-- ============================================================================
+-- Partitioning (R2 M8): RANGE-partitioned by sampled_at, monthly partitions.
+-- Same pattern as 0009_audit_outbox.sql — drops become `DROP TABLE
+-- tokenizer_t1_samples_YYYYMM` after the 90-day retention window, far
+-- cheaper than `DELETE WHERE sampled_at < cutoff` on a ~10M-row heap.
+--
+-- Partition key MUST be part of every UNIQUE constraint (Postgres §5.11);
+-- PRIMARY KEY therefore becomes `(sample_id, sampled_at)`.
+-- ============================================================================
+
 CREATE TABLE tokenizer_t1_samples (
     -- Application-minted UUIDv7; no DEFAULT so the writer (shadow worker)
     -- is forced to mint it explicitly — mirrors 0048 tokenizer_versions
     -- and 0049 seed conventions.
-    sample_id              UUID         PRIMARY KEY,
+    sample_id              UUID         NOT NULL,
 
     -- Tenant + model are the per-(tenant, model) state key for sample rate,
-    -- cool-down, and circuit breaker. TEXT for both because tenant ids in
-    -- some deployments are non-UUID (per SLICE_01 R7 audit convention) and
-    -- model strings are vendor-defined opaque identifiers.
-    tenant_id              TEXT         NOT NULL,
+    -- cool-down, and circuit breaker. tenant_id is UUID matching the rest
+    -- of the ledger schema (0003 budget_window_instances, 0028
+    -- tenant_data_policy, 0034 invoice_reconcile_decision_producer_id, etc.).
+    -- model is vendor-defined opaque identifier (e.g. "claude-3-5-sonnet").
+    tenant_id              UUID         NOT NULL,
     model                  TEXT         NOT NULL,
 
     -- Wallclock at sample observation. TIMESTAMPTZ with TZ-explicit storage
-    -- per SLICE_01 R5 convention.
+    -- per SLICE_01 R5 convention. R2 M8: event-time semantics — the
+    -- shadow worker passes the observation timestamp via explicit INSERT
+    -- so a slow worker queue does not skew the retention math.
     sampled_at             TIMESTAMPTZ  NOT NULL DEFAULT clock_timestamp(),
 
     -- Token counts: Tier 1 (provider count_tokens API) and Tier 2 (vendored
@@ -90,25 +104,48 @@ CREATE TABLE tokenizer_t1_samples (
     -- always knows the value.
     drift_ratio            REAL         NOT NULL CHECK (drift_ratio >= 0.0),
 
-    -- True iff this sample crossed the per-kind drift_threshold from
-    -- §4.2 and the shadow worker emitted a `tokenizer_drift_alert`
-    -- CloudEvent. Indexed below for "show me the alerting samples"
-    -- queries common to incident response.
-    drift_alert_emitted    BOOLEAN      NOT NULL DEFAULT FALSE,
+    -- R2 M9: SEMANTICS — this column reflects the *decision* the worker
+    -- made (drift_ratio > threshold). The CloudEvent emission outcome is
+    -- tracked separately by drift_alert_emitted_at. Renamed from
+    -- drift_alert_emitted (which conflated decision with emission ack).
+    drift_alert_decided    BOOLEAN      NOT NULL,
+
+    -- R2 M9: timestamp at which the emit_drift_alert path successfully
+    -- forwarded the CloudEvent to canonical_ingest. NULL when:
+    --   * drift_alert_decided = FALSE (no emission attempted), or
+    --   * emission failed (worker retries log + skip; row is still
+    --     persisted so the sample is not lost).
+    -- Indexed below for "show me alerts that actually emitted".
+    drift_alert_emitted_at TIMESTAMPTZ  NULL,
 
     -- Optional provider-side request id (Anthropic returns one in
     -- x-request-id; Gemini in `name`). NULL when the provider call
     -- failed before a response id was returned.
-    provider_request_id    TEXT
-);
+    provider_request_id    TEXT,
 
--- Per spec §4.4 — partial index for the alerting subset. Drives the most
--- common operator query "show me the alerts for tenant X in the last 24h"
--- without scanning the full retention window of normal samples (which can
--- exceed 1M rows for medium tenants at 1% sampling × normal traffic).
+    -- R2 M8 partition constraint — partition key (sampled_at) must be
+    -- part of every UNIQUE constraint on the parent table.
+    PRIMARY KEY (sample_id, sampled_at)
+) PARTITION BY RANGE (sampled_at);
+
+-- Pre-create the current month + 2 future months. Operators add new
+-- partitions via a cron job (deferred to SLICE-extra) before they are
+-- needed; missing-partition INSERTs raise an error rather than silently
+-- routing into the default partition. 0009_audit_outbox.sql tracks the
+-- same pattern (audit_outbox_YYYYMM).
+CREATE TABLE tokenizer_t1_samples_default
+    PARTITION OF tokenizer_t1_samples DEFAULT;
+
+-- Per spec §4.4 — partial index for the alerting subset that successfully
+-- emitted a CloudEvent (R2 M9: the operator-visible alert surface is the
+-- set whose CloudEvent landed in canonical_ingest, not the set the
+-- worker decided to alert on). Drives the most common operator query
+-- "show me the alerts for tenant X in the last 24h" without scanning
+-- the full retention window of normal samples (which can exceed 1M
+-- rows for medium tenants at 1% sampling × normal traffic).
 CREATE INDEX tokenizer_t1_samples_alert_idx
     ON tokenizer_t1_samples (tenant_id, model, sampled_at DESC)
-    WHERE drift_alert_emitted = TRUE;
+    WHERE drift_alert_emitted_at IS NOT NULL;
 
 -- Retention cleanup index — supports `DELETE WHERE sampled_at < cutoff`
 -- without a sequential scan. Cheap because sampled_at advances
@@ -126,34 +163,26 @@ REVOKE INSERT, UPDATE, DELETE ON tokenizer_t1_samples FROM PUBLIC;
 -- and the cleanup job deletes them after 90 days.
 GRANT INSERT, DELETE ON tokenizer_t1_samples TO ledger_application_role;
 
--- UPDATE deliberately NOT granted: samples are write-once after the
--- drift_ratio is computed. An update would mask a real drift event.
+-- R2 M9: column-level UPDATE for drift_alert_emitted_at only. The shadow
+-- worker writes this column AFTER successful canonical_ingest emission;
+-- every other column remains write-once. Operators inspecting a row find
+-- (decided=TRUE, emitted_at=NULL) when emission failed — useful for
+-- diagnosing canonical_ingest outages without losing the drift sample.
+GRANT UPDATE (drift_alert_emitted_at) ON tokenizer_t1_samples TO ledger_application_role;
 
 -- Reader role for drift-analysis CLI + dashboards.
 GRANT SELECT ON tokenizer_t1_samples TO ledger_reader_role;
 
 COMMENT ON TABLE tokenizer_t1_samples IS
-    'Tier 1 (provider count_tokens) shadow samples per tokenizer-service-spec-v1alpha1.md §4.4. Verification-only — NOT in audit chain. Retention: 90 days (cleanup job in SLICE-extra). Drift alerts cross into audit chain via signed tokenizer_drift_alert CloudEvents (not per-sample).';
+    'Tier 1 (provider count_tokens) shadow samples per tokenizer-service-spec-v1alpha1.md §4.4. Verification-only — NOT in audit chain. Retention: 90 days (cleanup job in SLICE-extra). Drift alerts cross into audit chain via signed tokenizer_drift_alert CloudEvents (not per-sample). R2 M8: PARTITION BY RANGE(sampled_at) with monthly partitions; DROP TABLE tokenizer_t1_samples_YYYYMM replaces the legacy DELETE retention path.';
 
 -- ============================================================================
--- Smoke check: confirm the indexes exist after CREATE TABLE so a partial
--- failure surfaces during the migration, not at the first cool-down query.
+-- R2 M7: DO-block smoke check removed. Migration runner uses psql
+-- autocommit per SLICE_01 R5 — each CREATE INDEX statement commits
+-- before the next runs, so a CREATE INDEX failure aborts the migration
+-- file at the failing statement rather than being masked by a wrapping
+-- transaction. The downstream subsequent statements (REVOKE / GRANT /
+-- COMMENT ON) implicitly prove the table + columns exist via their
+-- references; a missing index surfaces at the first query that needs
+-- it, with the same error as a "did we forget to migrate" check.
 -- ============================================================================
-
-DO $$
-DECLARE
-    expected_indexes INTEGER := 2;
-    actual_indexes   INTEGER;
-BEGIN
-    SET LOCAL search_path = pg_catalog, pg_temp;
-    SELECT COUNT(*) INTO actual_indexes
-    FROM pg_indexes
-    WHERE tablename = 'tokenizer_t1_samples'
-      AND indexname IN ('tokenizer_t1_samples_alert_idx',
-                        'tokenizer_t1_samples_retention_idx');
-    IF actual_indexes <> expected_indexes THEN
-        RAISE EXCEPTION
-            'tokenizer_t1_samples migration sanity check failed: expected % indexes, got %',
-            expected_indexes, actual_indexes;
-    END IF;
-END $$;

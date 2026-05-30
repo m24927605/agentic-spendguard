@@ -42,9 +42,14 @@ use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 use rand::Rng;
 
-/// Per-(tenant, model) state key. Strings rather than UUIDs because
-/// tenant ids in some SpendGuard deployments are non-UUID (per SLICE_01
-/// R7 audit convention) and model strings are vendor opaque.
+/// Per-(tenant, model) state key. tenant_id is stored as `String` here
+/// (rather than `uuid::Uuid`) because the in-memory map also serves the
+/// "anonymous" bucket — gRPC callers without the
+/// `x-spendguard-tenant-id` header yield empty tenant_id and still need
+/// to land in a HashMap entry for per-key state. ShadowEvent /
+/// SampleRow downstream use `uuid::Uuid` (R2 B5) so the persistence
+/// layer enforces the schema's `tenant_id UUID NOT NULL`; the worker
+/// converts via `Uuid::to_string()` when populating ShadowKey.
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
 pub struct ShadowKey {
     pub tenant_id: String,
@@ -86,6 +91,11 @@ struct SampleRateEntry {
     /// Diagnostic: last time we entered a cool-down. Surfaces in
     /// future control plane state-dump endpoints.
     last_alert_at: Option<Instant>,
+    /// R2 M10: rolling timestamps of every drift alert observed for this
+    /// (tenant, model) in the last 1h window. ≥3 within window triggers
+    /// an on-call escalation event (separate from the drift_alert
+    /// CloudEvents, which are per-sample).
+    recent_alerts: Vec<Instant>,
 }
 
 impl Default for SampleRateEntry {
@@ -94,9 +104,16 @@ impl Default for SampleRateEntry {
             override_rate: None,
             cool_down_until: None,
             last_alert_at: None,
+            recent_alerts: Vec::new(),
         }
     }
 }
+
+/// R2 M10: window length for on-call escalation count.
+const ESCALATION_WINDOW: Duration = Duration::from_secs(3600);
+/// R2 M10: threshold of alerts within ESCALATION_WINDOW that triggers
+/// an on-call escalation event.
+const ESCALATION_THRESHOLD: usize = 3;
 
 /// Snapshot of one (tenant, model) entry — for control plane GET
 /// endpoint (Phase F) and tests.
@@ -200,6 +217,24 @@ impl SampleRateState {
         let entry = entries.entry(key.clone()).or_default();
         entry.cool_down_until = Some(now + self.config.cool_down);
         entry.last_alert_at = Some(now);
+    }
+
+    /// R2 M10: record a drift alert and return TRUE when the rolling
+    /// 1h window count meets `ESCALATION_THRESHOLD`. Trims expired
+    /// alert timestamps under the same write-lock so the vec is
+    /// bounded by the worst-case alert rate within the window.
+    pub fn record_alert(&self, key: &ShadowKey) -> bool {
+        self.record_alert_at(key, Instant::now())
+    }
+
+    /// Test-visible variant.
+    pub fn record_alert_at(&self, key: &ShadowKey, now: Instant) -> bool {
+        let mut entries = self.entries.write();
+        let entry = entries.entry(key.clone()).or_default();
+        let cutoff = now.checked_sub(ESCALATION_WINDOW).unwrap_or(now);
+        entry.recent_alerts.retain(|t| *t > cutoff);
+        entry.recent_alerts.push(now);
+        entry.recent_alerts.len() >= ESCALATION_THRESHOLD
     }
 
     /// Apply a control plane override (Phase F). `rate` is the new
@@ -412,5 +447,46 @@ mod tests {
         assert!((s.snapshot(&k).effective_rate - 0.5).abs() < f64::EPSILON);
         s.set_override_rate(&k, None);
         assert!((s.snapshot(&k).effective_rate - 0.01).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn record_alert_escalates_after_three_in_window() {
+        // R2 M10: 3 alerts inside the 1h window triggers escalation.
+        let s = SampleRateState::new(SampleRateConfig::default());
+        let k = key("t", "claude-3-5-sonnet");
+        let t0 = Instant::now();
+        assert!(!s.record_alert_at(&k, t0));
+        assert!(!s.record_alert_at(&k, t0 + Duration::from_secs(60)));
+        assert!(
+            s.record_alert_at(&k, t0 + Duration::from_secs(120)),
+            "3rd alert in 2min must escalate"
+        );
+    }
+
+    #[test]
+    fn record_alert_expires_outside_window() {
+        // Alerts older than 1h drop out of the rolling count.
+        let s = SampleRateState::new(SampleRateConfig::default());
+        let k = key("t", "gemini-1.5-pro");
+        let t0 = Instant::now();
+        assert!(!s.record_alert_at(&k, t0));
+        assert!(!s.record_alert_at(&k, t0 + Duration::from_secs(60)));
+        // 3rd alert 2 hours later — first 2 expired; count is 1.
+        assert!(!s.record_alert_at(&k, t0 + Duration::from_secs(7200)));
+    }
+
+    #[test]
+    fn record_alert_is_per_key_isolated() {
+        // Tenant-A escalation must NOT affect tenant-B.
+        let s = SampleRateState::new(SampleRateConfig::default());
+        let k_a = key("a", "m");
+        let k_b = key("b", "m");
+        let t0 = Instant::now();
+        s.record_alert_at(&k_a, t0);
+        s.record_alert_at(&k_a, t0);
+        let escalated_a = s.record_alert_at(&k_a, t0);
+        let escalated_b = s.record_alert_at(&k_b, t0);
+        assert!(escalated_a);
+        assert!(!escalated_b);
     }
 }

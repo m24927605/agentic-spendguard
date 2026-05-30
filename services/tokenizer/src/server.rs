@@ -146,15 +146,25 @@ impl TokenizerSvcTrait for TokenizerSvc {
         request: Request<TokenizeRequest>,
     ) -> Result<Response<TokenizeResponse>, Status> {
         // SLICE_05: pull the tenant id from the gRPC metadata header
-        // BEFORE consuming the Request. Anonymous callers (tests /
-        // library form) yield empty tenant id — those samples will be
-        // routed into a "anonymous" bucket in the SampleRateState map.
-        let tenant_id = request
+        // BEFORE consuming the Request. R2 B5: parse as UUID; invalid
+        // UUIDs are rejected with InvalidArgument so misconfigured
+        // callers fail closed. Absent / empty header yields None and
+        // the shadow path is silently skipped for the request (test +
+        // anonymous library form).
+        let tenant_id: Option<uuid::Uuid> = match request
             .metadata()
             .get(&self.tenant_header_name)
             .and_then(|v| v.to_str().ok())
-            .map(str::to_owned)
-            .unwrap_or_default();
+        {
+            None => None,
+            Some(s) if s.is_empty() => None,
+            Some(s) => Some(uuid::Uuid::parse_str(s).map_err(|e| {
+                Status::invalid_argument(format!(
+                    "{}: invalid UUID `{s}`: {e}",
+                    self.tenant_header_name
+                ))
+            })?),
+        };
 
         let proto_req = request.into_inner();
 
@@ -210,30 +220,51 @@ impl TokenizerSvcTrait for TokenizerSvc {
 
         // SLICE_05: fire-and-forget shadow event AFTER computing the
         // Tier 2 response. The send is non-blocking; the result is
-        // intentionally ignored — Tier 2 hot path latency is structurally
-        // protected from any back-pressure here (spec §1.3 invariant).
+        // intentionally ignored for hot-path latency, but R2 M5 wires
+        // Prometheus counters so silent shadow drops surface in /metrics.
         // Only T2 results with a known kind go to the worker; T3 fallback
         // (Tier 3 heuristic) is excluded because there is no encoder to
         // compare against.
-        if let Some(ref worker) = self.shadow_worker {
+        //
+        // R2 M2: chat-shape (messages array) is SKIPPED in SLICE_05.
+        // Per-vendor message shape (Anthropic `Human:` / `Assistant:`
+        // role markers, Gemini `contents[role]`) needs honest
+        // round-tripping into the provider count_tokens schema; the
+        // SLICE_05 flatten was an approximation that would generate
+        // false drift alerts. Deferred to SLICE-extra; tracked as
+        // GH issue.
+        //
+        // R2 B5: tenant_id must be Some(uuid) for the worker to dispatch
+        // — anonymous callers (no header) yield None and the shadow
+        // path is silently skipped.
+        if let (Some(ref worker), Some(tenant_uuid)) = (&self.shadow_worker, tenant_id) {
             if let Some(kind) = encoder_kind_from_str(&lib_resp.kind) {
-                let event = ShadowEvent {
-                    tenant_id: tenant_id.clone(),
-                    model: lib_req.model.clone(),
-                    encoder_kind: kind,
-                    t2_input_tokens: lib_resp.input_tokens,
-                    t2_tokenizer_version_id: lib_resp.tokenizer_version_id.clone(),
-                    // Carry the original input as a raw string. For
-                    // chat-shape requests we re-flatten the messages
-                    // into a single text blob to feed the provider's
-                    // count_tokens (Phase C clients use the user-role
-                    // wrapper internally).
-                    raw_text: text_for_shadow(&lib_req),
-                };
-                // SLICE_05 hot-path invariant: ignore the try_send
-                // result. Channel-full + closed are both fine — we'd
-                // rather drop a shadow sample than slow the hot path.
-                let _ = worker.try_send(event);
+                // R2 M2: skip chat-shape requests; raw_text only.
+                if lib_req.raw_text.is_empty() && !lib_req.messages.is_empty() {
+                    crate::shadow::worker::SHADOW_SKIPPED_CHAT_SHAPE
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    let event = ShadowEvent {
+                        tenant_id: tenant_uuid,
+                        model: lib_req.model.clone(),
+                        encoder_kind: kind,
+                        t2_input_tokens: lib_resp.input_tokens,
+                        t2_tokenizer_version_id: lib_resp.tokenizer_version_id.clone(),
+                        raw_text: lib_req.raw_text.clone(),
+                    };
+                    match worker.try_send(event) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            crate::shadow::worker::SHADOW_DROPPED_FULL
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            crate::shadow::worker::SHADOW_WORKER_DEAD
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            warn!("shadow worker dead — drift detection offline");
+                        }
+                    }
+                }
             }
         }
 
@@ -274,30 +305,12 @@ fn encoder_kind_from_str(kind: &str) -> Option<EncoderKind> {
     }
 }
 
-/// SLICE_05 — flatten chat-shape requests + raw_text into one string
-/// for the provider count_tokens call. The provider clients
-/// (provider_clients::{anthropic,gemini}) wrap the text in a single
-/// user message body internally; we concatenate roles + contents here
-/// with a separator so the provider sees the same input text our Tier
-/// 2 encoder consumed.
-fn text_for_shadow(req: &spendguard_tokenizer::TokenizeRequest) -> String {
-    if !req.raw_text.is_empty() {
-        return req.raw_text.clone();
-    }
-    // Conservative concatenation; the goal is to keep token counts in
-    // the same ballpark, not byte-identical (the shadow worker checks
-    // drift against per-kind thresholds that allow up to 1.5%).
-    let mut out = String::new();
-    for m in &req.messages {
-        if !out.is_empty() {
-            out.push('\n');
-        }
-        out.push_str(&m.role);
-        out.push_str(": ");
-        out.push_str(&m.content);
-    }
-    out
-}
+// R2 M2: text_for_shadow flatten REMOVED. Chat-shape requests are
+// skipped from shadow sampling in SLICE_05 because the naive flatten
+// (role: content concatenation) does not match the per-vendor message
+// shape Anthropic / Gemini count_tokens expects — producing false drift
+// alerts. raw_text shadow paths continue. Honest per-vendor chat
+// shadowing deferred to SLICE-extra (tracked as GH issue).
 
 /// Translate [`TokenizerError`] to a tonic `Status`. Per spec §8 the
 /// service surfaces:

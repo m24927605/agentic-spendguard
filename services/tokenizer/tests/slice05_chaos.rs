@@ -48,9 +48,19 @@ fn deps_with(
     }
 }
 
+/// R2 B5: tenant_id is UUID in the schema; tests share one fixed UUID
+/// so the in-memory ShadowKey for assertion stays predictable.
+fn chaos_tenant_id() -> uuid::Uuid {
+    uuid::Uuid::parse_str("01918000-0000-7c10-8c10-0000000000ce").unwrap()
+}
+
+fn chaos_tenant_id_string() -> String {
+    chaos_tenant_id().to_string()
+}
+
 fn ev() -> ShadowEvent {
     ShadowEvent {
-        tenant_id: "tenant-chaos".into(),
+        tenant_id: chaos_tenant_id(),
         model: "claude-3-5-sonnet-20241022".into(),
         encoder_kind: EncoderKind::Anthropic,
         t2_input_tokens: 100,
@@ -96,7 +106,7 @@ async fn tier1_endpoint_outage_opens_the_breaker() {
     );
 
     let key = ShadowKey {
-        tenant_id: "tenant-chaos".into(),
+        tenant_id: chaos_tenant_id_string(),
         model: "claude-3-5-sonnet-20241022".into(),
     };
 
@@ -150,7 +160,7 @@ async fn tier1_endpoint_recovery_closes_the_breaker_via_probe() {
     let persister = Arc::new(InMemorySamplePersister::default());
     let alert_sink = Arc::new(InMemoryDriftAlertSink::default());
     let key = ShadowKey {
-        tenant_id: "tenant-chaos".into(),
+        tenant_id: chaos_tenant_id_string(),
         model: "claude-3-5-sonnet-20241022".into(),
     };
 
@@ -237,7 +247,7 @@ async fn drift_alert_cool_down_lifts_sampling_to_one_hundred_percent() {
     assert_eq!(out, ShadowOutcome::Alerted);
 
     let key = ShadowKey {
-        tenant_id: "tenant-chaos".into(),
+        tenant_id: chaos_tenant_id_string(),
         model: "claude-3-5-sonnet-20241022".into(),
     };
     let snap = sample_rate.snapshot(&key);
@@ -246,7 +256,7 @@ async fn drift_alert_cool_down_lifts_sampling_to_one_hundred_percent() {
 
     let rows = persister.rows.lock();
     assert_eq!(rows.len(), 1);
-    assert!(rows[0].drift_alert_emitted);
+    assert!(rows[0].drift_alert_decided);
 
     let events = alert_sink.events.lock();
     assert_eq!(events.len(), 1);

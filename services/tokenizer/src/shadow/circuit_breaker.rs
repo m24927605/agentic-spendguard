@@ -52,11 +52,15 @@ use super::sample_rate_state::ShadowKey;
 /// Per spec §4.5 — 10 consecutive failures trip the breaker.
 pub const DEFAULT_FAILURE_THRESHOLD: u32 = 10;
 
-/// Per spec §4.5 — "Open 5 min" before half-open probe. We default to
-/// 60 seconds for the production knob (a tighter retry cadence) but
-/// preserve the 5-minute value as the documented upper bound. Tests
-/// override via [`CircuitBreakerConfig`].
-pub const DEFAULT_OPEN_DURATION: Duration = Duration::from_secs(60);
+/// Per spec §4.5 — "Open 5 min" before half-open probe.
+///
+/// R2 M1: defaulted to 300 seconds (5 minutes) matching the spec
+/// authoritatively. The previous 60-second default was a Phase-D
+/// tightening that was not reflected in the spec; reviewers flagged
+/// the divergence as spec-vs-code drift. Operators who want a faster
+/// retry cadence override via [`CircuitBreakerConfig::open_duration`]
+/// at boot.
+pub const DEFAULT_OPEN_DURATION: Duration = Duration::from_secs(300);
 
 /// Three-state breaker per spec §4.5.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -275,10 +279,11 @@ mod tests {
     #[test]
     fn defaults_match_spec() {
         assert_eq!(DEFAULT_FAILURE_THRESHOLD, 10);
-        assert_eq!(DEFAULT_OPEN_DURATION, Duration::from_secs(60));
+        // R2 M1: aligned with spec §4.5 "Open 5 min".
+        assert_eq!(DEFAULT_OPEN_DURATION, Duration::from_secs(300));
         let cfg = CircuitBreakerConfig::default();
         assert_eq!(cfg.failure_threshold, 10);
-        assert_eq!(cfg.open_duration, Duration::from_secs(60));
+        assert_eq!(cfg.open_duration, Duration::from_secs(300));
     }
 
     #[test]

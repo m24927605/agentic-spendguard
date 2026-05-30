@@ -82,9 +82,14 @@ pub const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
 ///   * compute drift vs Tier 2 result (this phase),
 ///   * persist to `tokenizer_t1_samples` (this phase),
 ///   * emit `tokenizer_drift_alert` if drift > threshold (this phase).
+///
+/// R2 B5: `tenant_id` is `uuid::Uuid` matching ledger schema. The gRPC
+/// boundary parses the inbound string header and returns
+/// `Status::invalid_argument` on a malformed UUID so anonymous /
+/// misconfigured callers fail closed.
 #[derive(Debug, Clone)]
 pub struct ShadowEvent {
-    pub tenant_id: String,
+    pub tenant_id: uuid::Uuid,
     pub model: String,
     pub encoder_kind: EncoderKind,
     pub t2_input_tokens: i64,
@@ -95,9 +100,11 @@ pub struct ShadowEvent {
 }
 
 impl ShadowEvent {
+    /// R2 B5: convert the UUID tenant_id to the String form used as
+    /// the in-memory ShadowKey for per-(tenant, model) state lookup.
     fn shadow_key(&self) -> ShadowKey {
         ShadowKey {
-            tenant_id: self.tenant_id.clone(),
+            tenant_id: self.tenant_id.to_string(),
             model: self.model.clone(),
         }
     }
@@ -143,24 +150,50 @@ impl ShadowWorkerHandle {
 /// One persisted sample — the shadow worker hands this to the
 /// [`SamplePersister`] trait. Phase F may add a buffered batch
 /// persister; the SQL-direct path is the default.
+///
+/// R2 B5: `tenant_id` is `uuid::Uuid` matching the migration 0051
+/// schema (`tenant_id UUID NOT NULL`). R2 M9: `drift_alert_decided`
+/// reflects the worker's decision; CloudEvent emission outcome is
+/// tracked separately via [`SamplePersister::mark_drift_alert_emitted`].
 #[derive(Debug, Clone)]
 pub struct SampleRow {
     pub sample_id: uuid::Uuid,
-    pub tenant_id: String,
+    pub tenant_id: uuid::Uuid,
     pub model: String,
     pub t1_input_tokens: i64,
     pub t2_input_tokens: i64,
     pub t2_tokenizer_version_id: String,
     pub drift_ratio: f32,
-    pub drift_alert_emitted: bool,
+    /// R2 M9: TRUE iff drift_ratio > per-kind threshold (the *decision*).
+    /// The CloudEvent emission acknowledgement is recorded separately by
+    /// [`SamplePersister::mark_drift_alert_emitted`].
+    pub drift_alert_decided: bool,
     pub provider_request_id: Option<String>,
+    /// Wallclock at sample observation — passed explicitly by the worker
+    /// (event time) rather than relying on the DB default so a slow
+    /// worker queue does not skew retention math (R2 M8 + DB m8).
+    pub sampled_at: chrono::DateTime<chrono::Utc>,
 }
 
 /// Persistence abstraction so tests can plug in an in-memory recorder
 /// without spinning up a Postgres instance.
+///
+/// R2 M9: two-step semantics. `persist` writes the SampleRow with
+/// `drift_alert_decided = TRUE` but `drift_alert_emitted_at = NULL`.
+/// `mark_drift_alert_emitted` is called after the CloudEvent successfully
+/// lands in canonical_ingest. Failure of the second call surfaces in
+/// metrics — the SampleRow remains in the table with `emitted_at NULL`
+/// so operators can diagnose the canonical_ingest outage without losing
+/// the underlying drift signal.
 #[async_trait::async_trait]
 pub trait SamplePersister: Send + Sync {
     async fn persist(&self, sample: SampleRow) -> Result<(), anyhow::Error>;
+    async fn mark_drift_alert_emitted(
+        &self,
+        sample_id: uuid::Uuid,
+        sampled_at: chrono::DateTime<chrono::Utc>,
+        emitted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), anyhow::Error>;
 }
 
 /// CloudEvent emission abstraction. The real path forwards to
@@ -306,26 +339,71 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
     let threshold = event.encoder_kind.drift_threshold();
     let alert = drift_ratio > threshold;
 
-    if alert {
-        deps.sample_rate.enter_cool_down(&key);
-        if let Err(e) = emit_drift_alert(event, &provider_count, drift_ratio, threshold, deps).await {
-            error!(error = ?e, "failed to emit tokenizer_drift_alert CloudEvent");
-        }
-    }
+    // R2 M6: mint sample_id BEFORE alert branch so the CloudEvent can
+    // carry it for forensic traceability from audit chain back to the
+    // t1_samples row.
+    let sample_id = uuid::Uuid::now_v7();
+    let sampled_at = Utc::now();
 
     let sample_row = SampleRow {
-        sample_id: uuid::Uuid::now_v7(),
-        tenant_id: event.tenant_id.clone(),
+        sample_id,
+        tenant_id: event.tenant_id,
         model: event.model.clone(),
         t1_input_tokens: provider_count.input_tokens as i64,
         t2_input_tokens: event.t2_input_tokens,
         t2_tokenizer_version_id: event.t2_tokenizer_version_id.clone(),
         drift_ratio,
-        drift_alert_emitted: alert,
+        drift_alert_decided: alert,
         provider_request_id: provider_count.request_id.clone(),
+        sampled_at,
     };
+
+    // Persist FIRST so the t1_samples row exists before the CloudEvent
+    // emission. If emission fails we still have the underlying drift
+    // signal in the DB for operator triage.
     if let Err(e) = deps.persister.persist(sample_row).await {
         error!(error = ?e, "failed to persist tokenizer_t1_samples row");
+    }
+
+    if alert {
+        deps.sample_rate.enter_cool_down(&key);
+
+        // R2 M10: track 1h rolling alert count for on-call escalation.
+        let escalate = deps.sample_rate.record_alert(&key);
+        if escalate {
+            ALERT_ONCALL_ESCALATION_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            warn!(
+                tenant = %key.tenant_id,
+                model = %key.model,
+                "≥3 drift alerts in 1h window — on-call escalation event"
+            );
+        }
+
+        match emit_drift_alert(event, sample_id, &provider_count, drift_ratio, threshold, deps).await {
+            Ok(()) => {
+                // R2 M9: ack via mark_drift_alert_emitted so the row's
+                // drift_alert_emitted_at column moves from NULL → now().
+                let emitted_at = Utc::now();
+                if let Err(e) = deps
+                    .persister
+                    .mark_drift_alert_emitted(sample_id, sampled_at, emitted_at)
+                    .await
+                {
+                    error!(
+                        error = ?e,
+                        sample_id = %sample_id,
+                        "failed to mark drift_alert_emitted_at — row remains with NULL ack"
+                    );
+                }
+            }
+            Err(e) => {
+                error!(
+                    error = ?e,
+                    sample_id = %sample_id,
+                    "failed to emit tokenizer_drift_alert CloudEvent — row remains with NULL ack",
+                );
+            }
+        }
     }
 
     if alert {
@@ -334,6 +412,33 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
         ShadowOutcome::Sampled
     }
 }
+
+/// R2 M10: rolling 1h escalation counter. Atomic so the metrics
+/// endpoint can read without acquiring a lock.
+pub static ALERT_ONCALL_ESCALATION_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// R2 M5 — shadow events dropped because the worker channel was full.
+/// Surfaces silent shadow loss in `/metrics`.
+pub static SHADOW_DROPPED_FULL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// R2 M5 — shadow events dropped because the worker channel was closed
+/// (worker task crashed). Higher severity than DROPPED_FULL: it implies
+/// drift detection is offline.
+pub static SHADOW_WORKER_DEAD: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// R2 M2 — chat-shape (messages array) requests skipped from shadow
+/// sampling because the SLICE_05 flatten was a false-positive source.
+pub static SHADOW_SKIPPED_CHAT_SHAPE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// R2 M11 — Tier 1 provider returned a response that failed to parse
+/// as the documented count_tokens schema (vendor API drift). Distinct
+/// from network errors so operators can alert on it independently.
+pub static PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 async fn on_provider_error(
     key: &ShadowKey,
@@ -348,6 +453,12 @@ async fn on_provider_error(
     } else {
         // Schema drift / auth — operator attention required; don't trip
         // the breaker on a stuck vendor response.
+        // R2 M11: per-variant metric so operators can alert on schema
+        // drift (vendor API change) independently of auth (key rotation).
+        if matches!(err, ProviderError::Schema(_)) {
+            PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
         warn!(error = %err, tenant = %key.tenant_id, model = %key.model,
               "shadow provider returned schema-drift or auth error; sample skipped");
         ShadowOutcome::ProviderSchemaOrAuth
@@ -367,15 +478,21 @@ pub fn compute_drift_ratio(t1: u64, t2: u64) -> f32 {
 }
 
 /// Build + sign + emit one `tokenizer_drift_alert` CloudEvent.
+///
+/// R2 M6: `sample_id` is carried in the CloudEvent `data` so operators
+/// can pivot from an audit-chain replay back to the originating row in
+/// tokenizer_t1_samples.
 async fn emit_drift_alert(
     event: &ShadowEvent,
+    sample_id: uuid::Uuid,
     provider_count: &super::provider_clients::ProviderCount,
     drift_ratio: f32,
     threshold: f32,
     deps: &ShadowWorkerDeps,
 ) -> Result<(), anyhow::Error> {
     let data = serde_json::json!({
-        "tenant_id": event.tenant_id,
+        "sample_id": sample_id.to_string(),
+        "tenant_id": event.tenant_id.to_string(),
         "model": event.model,
         "tokenizer_version_id": event.t2_tokenizer_version_id,
         "tier2_count": event.t2_input_tokens,
@@ -405,7 +522,7 @@ async fn emit_drift_alert(
         }),
         datacontenttype: "application/json".to_string(),
         data: data_bytes.into(),
-        tenant_id: event.tenant_id.clone(),
+        tenant_id: event.tenant_id.to_string(),
         producer_id: deps.signer.producer_identity().to_string(),
         producer_signature: Bytes::new(),
         ..Default::default()
@@ -438,15 +555,34 @@ async fn sign_in_place(signer: &dyn Signer, event: &mut CloudEvent) -> Result<()
 
 /// Drop-in persister for tests + demo mode. Records persisted rows in
 /// an in-memory vec.
+///
+/// R2 M9: `mark_drift_alert_emitted` updates the matching row's
+/// `drift_alert_emitted_at` so tests can assert the two-step semantics
+/// (decided → emitted ack).
 #[derive(Default, Debug)]
 pub struct InMemorySamplePersister {
     pub rows: parking_lot::Mutex<Vec<SampleRow>>,
+    pub emitted_marks: parking_lot::Mutex<
+        Vec<(uuid::Uuid, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+    >,
 }
 
 #[async_trait::async_trait]
 impl SamplePersister for InMemorySamplePersister {
     async fn persist(&self, sample: SampleRow) -> Result<(), anyhow::Error> {
         self.rows.lock().push(sample);
+        Ok(())
+    }
+
+    async fn mark_drift_alert_emitted(
+        &self,
+        sample_id: uuid::Uuid,
+        sampled_at: chrono::DateTime<chrono::Utc>,
+        emitted_at: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), anyhow::Error> {
+        self.emitted_marks
+            .lock()
+            .push((sample_id, sampled_at, emitted_at));
         Ok(())
     }
 }
@@ -511,9 +647,13 @@ mod tests {
         d
     }
 
+    fn test_tenant_id() -> uuid::Uuid {
+        uuid::Uuid::parse_str("01918000-0000-7c10-8c10-0000000000aa").unwrap()
+    }
+
     fn ev_anthropic(t2_count: i64, raw: &str) -> ShadowEvent {
         ShadowEvent {
-            tenant_id: "tenant-x".into(),
+            tenant_id: test_tenant_id(),
             model: "claude-3-5-sonnet-20241022".into(),
             encoder_kind: EncoderKind::Anthropic,
             t2_input_tokens: t2_count,
@@ -524,7 +664,7 @@ mod tests {
 
     fn ev_gemini(t2_count: i64, raw: &str) -> ShadowEvent {
         ShadowEvent {
-            tenant_id: "tenant-x".into(),
+            tenant_id: test_tenant_id(),
             model: "gemini-1.5-flash".into(),
             encoder_kind: EncoderKind::Gemini,
             t2_input_tokens: t2_count,
@@ -598,7 +738,10 @@ mod tests {
         assert_eq!(rows[0].t1_input_tokens, 100);
         assert_eq!(rows[0].t2_input_tokens, 100);
         assert_eq!(rows[0].drift_ratio, 0.0);
-        assert!(!rows[0].drift_alert_emitted);
+        assert!(!rows[0].drift_alert_decided);
+        // R2 M9: emitted_marks empty too — no alert decision means no
+        // CloudEvent emission path.
+        assert!(persister.emitted_marks.lock().is_empty());
         let events = alert_sink.events.lock();
         assert!(events.is_empty(), "no alert event for no-drift sample");
     }
@@ -622,8 +765,11 @@ mod tests {
 
         let rows = persister.rows.lock();
         assert_eq!(rows.len(), 1);
-        assert!(rows[0].drift_alert_emitted);
+        assert!(rows[0].drift_alert_decided);
         assert!((rows[0].drift_ratio - 0.10).abs() < 1e-4);
+        let row_sample_id = rows[0].sample_id;
+        let row_sampled_at = rows[0].sampled_at;
+        drop(rows);
 
         let events = alert_sink.events.lock();
         assert_eq!(events.len(), 1);
@@ -644,6 +790,18 @@ mod tests {
         assert_eq!(data["encoder_kind"], "ANTHROPIC_BPE");
         assert!(data["drift_pct"].as_f64().unwrap() > 0.09);
         assert!((data["threshold"].as_f64().unwrap() - 0.01).abs() < 1e-6);
+        // R2 M6: sample_id is in the CloudEvent data for forensic pivot
+        // back to the t1_samples row.
+        let ce_sample_id = data["sample_id"].as_str().expect("sample_id present");
+        assert_eq!(ce_sample_id, row_sample_id.to_string());
+
+        // R2 M9: emitted_marks captures the persister-side ack with
+        // sample_id + sampled_at + emitted_at.
+        let marks = persister.emitted_marks.lock();
+        assert_eq!(marks.len(), 1);
+        assert_eq!(marks[0].0, row_sample_id);
+        assert_eq!(marks[0].1, row_sampled_at);
+        assert!(marks[0].2 >= row_sampled_at);
     }
 
     #[tokio::test]
@@ -680,7 +838,7 @@ mod tests {
         };
         let deps = deps_for_test(providers);
         let key = ShadowKey {
-            tenant_id: "tenant-x".into(),
+            tenant_id: test_tenant_id().to_string(),
             model: "claude-3-5-sonnet-20241022".into(),
         };
 
@@ -713,7 +871,7 @@ mod tests {
         };
         let deps = deps_for_test(providers);
         let key = ShadowKey {
-            tenant_id: "tenant-x".into(),
+            tenant_id: test_tenant_id().to_string(),
             model: "claude-3-5-sonnet-20241022".into(),
         };
         for _ in 0..5 {
