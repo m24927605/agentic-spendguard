@@ -35,6 +35,7 @@ use tracing::{debug, error, warn};
 use crate::cache::OutputDistributionCache;
 use crate::circuit_breaker::PluginCircuitBreaker;
 use crate::classifier::{self, CLASSIFIER_VERSION};
+use crate::cold_start_loader::ModelDefaultDistribution;
 use crate::context_window::ContextWindowTable;
 use crate::endpoint_cache::EndpointCache;
 use crate::fingerprint::FINGERPRINT_VERSION;
@@ -121,7 +122,9 @@ fn record_failure_metric(failure: &StrategyCFailure) {
 /// `OutputDistributionCache`. SLICE_07 adds the per-tenant plugin
 /// endpoint cache, per-tenant gRPC client, and per-tenant circuit
 /// breaker — all `Arc`d so the `tokio::join!(a, b, c)` orchestration
-/// in `predict()` clones cheaply onto each future.
+/// in `predict()` clones cheaply onto each future. SLICE_08 adds the
+/// embedded `ModelDefaultDistribution` (TOML loader; ~70 entries) used
+/// by strategy_b's L2 fallback when L4 misses.
 #[derive(Clone)]
 pub struct OutputPredictorSvc {
     cache: Arc<OutputDistributionCache>,
@@ -130,6 +133,11 @@ pub struct OutputPredictorSvc {
     endpoint_cache: Arc<EndpointCache>,
     plugin_client: Arc<PluginClient>,
     plugin_breaker: Arc<PluginCircuitBreaker>,
+    /// SLICE_08 cold-start L2 baseline table. None in skeleton tests
+    /// that don't need the embedded TOML loaded (loader failure during
+    /// test setup would mask the real test bug). Production always
+    /// passes `Some(...)`; main.rs refuses to start on load failure.
+    cold_start: Option<Arc<ModelDefaultDistribution>>,
 }
 
 impl OutputPredictorSvc {
@@ -140,6 +148,7 @@ impl OutputPredictorSvc {
         endpoint_cache: Arc<EndpointCache>,
         plugin_client: Arc<PluginClient>,
         plugin_breaker: Arc<PluginCircuitBreaker>,
+        cold_start: Option<Arc<ModelDefaultDistribution>>,
     ) -> Self {
         Self {
             cache,
@@ -148,6 +157,7 @@ impl OutputPredictorSvc {
             endpoint_cache,
             plugin_client,
             plugin_breaker,
+            cold_start,
         }
     }
 }
@@ -256,6 +266,7 @@ impl OutputPredictorTrait for OutputPredictorSvc {
             let b_start = std::time::Instant::now();
             let b = strategy_b::compute_b(
                 &self.cache,
+                self.cold_start.as_ref(),
                 tenant_uuid,
                 &req.model,
                 &req.agent_id,
@@ -376,16 +387,29 @@ impl OutputPredictorTrait for OutputPredictorSvc {
             Strategy::C => (c_confidence, c_sample_size),
         };
 
-        // cold_start_layer_used:
-        //   - L4 (cache hit, sufficient samples) → unset/empty per spec §7.1
-        //   - L1 (cache miss / insufficient) → "L1"
-        // SLICE_06: only L1 and L4 supported; L2/L3 unset.
+        // cold_start_layer_used per spec §7.1 truth table:
+        //   - L4 (cache hit, sufficient samples) → unset/empty (NULL audit)
+        //   - L3 (federated) → "L3" (deferred per spec §2.2; never fires)
+        //   - L2 (TOML hit) → "L2" (SLICE_08)
+        //   - L1 (everything missed; b_layer = None) → "L1" (signalled by
+        //     selector falling to A; written by selector.select_strategy
+        //     producing Strategy::A with no prior B layer carried forward).
+        //
+        // SLICE_08 wires L2 — when L4 misses, strategy_b's compute_b
+        // tries the embedded TOML and returns `Some(PredictionB { layer:
+        // Some("L2"), ... })` on hit. If the (model, class) combination
+        // is missing from the TOML, compute_b returns None (which means
+        // b_layer here is None) — and we set cold_start_layer_used =
+        // "L1" so the audit chain records the L1 hard-fallback path.
         let cold_start_layer_used = match (&b_layer, prediction_used) {
             // L4 hit recorded as None in the spec; we send empty string
             // (proto3 default) so the audit chain writes NULL.
             (Some(layer), _) if layer == "L4" => None,
+            // L2/L3 — pass through as the layer string.
             (Some(layer), _) => Some(layer.clone()),
-            (None, _) => None,
+            // No B prediction at all → A was selected → L1 fallback.
+            // Spec §7.1: cold_start_layer_used = 'L1'.
+            (None, _) => Some("L1".to_string()),
         };
 
         let total_latency_ns = start.elapsed().as_nanos() as i64;
@@ -434,6 +458,9 @@ mod tests {
         // validation tests. SLICE_07: also Strategy C skeleton deps —
         // the endpoint cache without a pool returns NotConfigured so
         // strategy_c silently falls to B per spec §11.
+        // SLICE_08: cold_start = None to keep these tests strictly L1
+        // (so input validation tests assert L1 audit). svc_with_cold_start()
+        // returns a variant for SLICE_08 L2 behaviour tests.
         use crate::circuit_breaker::CircuitBreakerConfig;
         let cache = OutputDistributionCache::new(None, Duration::from_secs(300));
         let context_window = Arc::new(ContextWindowTable::empty());
@@ -447,6 +474,31 @@ mod tests {
             endpoint_cache,
             plugin_client,
             plugin_breaker,
+            None,
+        )
+    }
+
+    fn svc_with_cold_start() -> OutputPredictorSvc {
+        // SLICE_08 variant: cold_start_loader populated from embedded
+        // TOML. Used by L2 fallback tests below.
+        use crate::circuit_breaker::CircuitBreakerConfig;
+        let cache = OutputDistributionCache::new(None, Duration::from_secs(300));
+        let context_window = Arc::new(ContextWindowTable::empty());
+        let endpoint_cache = EndpointCache::with_default_ttl(None);
+        let plugin_client = PluginClient::new(None).expect("skeleton-mode constructor");
+        let plugin_breaker = PluginCircuitBreaker::new(CircuitBreakerConfig::default());
+        let cold_start = Some(Arc::new(
+            ModelDefaultDistribution::load_embedded()
+                .expect("embedded TOML loads in tests"),
+        ));
+        OutputPredictorSvc::new(
+            cache,
+            context_window,
+            8000,
+            endpoint_cache,
+            plugin_client,
+            plugin_breaker,
+            cold_start,
         )
     }
 
@@ -535,5 +587,138 @@ mod tests {
         svc.predict(Request::new(req)).await.expect("ok");
         let after = UNKNOWN_CONTEXT_WINDOW_TOTAL.load(Ordering::Relaxed);
         assert!(after > before, "unknown_context_window counter must increment");
+    }
+
+    // ── SLICE_08 — cold-start L2 wiring tests ──────────────────────────
+
+    #[tokio::test]
+    async fn slice_08_audit_writes_l1_when_no_cold_start_table_and_b_empty() {
+        // svc_skeleton: cold_start = None → compute_b returns None →
+        // audit cold_start_layer_used = "L1" per spec §7.1.
+        let svc = svc_skeleton();
+        let req = valid_req();
+        let resp = svc
+            .predict(Request::new(req))
+            .await
+            .expect("ok")
+            .into_inner();
+        assert_eq!(
+            resp.cold_start_layer_used.as_deref(),
+            Some("L1"),
+            "SLICE_06+ contract — when B has no layer, audit must record L1"
+        );
+        assert!(
+            resp.predicted_b_tokens.is_none(),
+            "SLICE_08 — no cold_start table means B falls to L1 (None)"
+        );
+    }
+
+    #[tokio::test]
+    async fn slice_08_audit_writes_l2_when_cold_start_table_hits() {
+        // svc_with_cold_start: TOML loaded; gpt-4o + chat_short hits
+        // L2 because cache is empty (skeleton mode) and TOML has entry.
+        let svc = svc_with_cold_start();
+        let req = valid_req(); // model = gpt-4o, class = chat_short
+        let resp = svc
+            .predict(Request::new(req))
+            .await
+            .expect("ok")
+            .into_inner();
+        assert_eq!(
+            resp.cold_start_layer_used.as_deref(),
+            Some("L2"),
+            "SLICE_08 — when L4 misses and TOML has entry, audit must record L2"
+        );
+        // Strategy B should now have predicted_b_tokens populated from
+        // the TOML entry's P95 (gpt-4o chat_short P95 = 320).
+        assert_eq!(
+            resp.predicted_b_tokens,
+            Some(320),
+            "SLICE_08 — TOML entry P95 must flow through to predicted_b_tokens"
+        );
+        // Audit row should include confidence + sample_size from the
+        // TOML entry (selector chose B since both A and B are available).
+        assert!(
+            resp.confidence.is_some(),
+            "SLICE_08 — L2 hit must populate confidence per spec §7.1"
+        );
+        assert!(
+            resp.sample_size.is_some(),
+            "SLICE_08 — L2 hit must populate sample_size per spec §7.1"
+        );
+    }
+
+    #[tokio::test]
+    async fn slice_08_audit_writes_l1_when_cold_start_table_misses_known_class() {
+        // svc_with_cold_start: TOML loaded; unknown model means TOML
+        // lookup misses → L1 fallback (None) → audit = "L1".
+        let svc = svc_with_cold_start();
+        let mut req = valid_req();
+        req.model = "totally-unknown-model".into();
+        let resp = svc
+            .predict(Request::new(req))
+            .await
+            .expect("ok")
+            .into_inner();
+        assert_eq!(
+            resp.cold_start_layer_used.as_deref(),
+            Some("L1"),
+            "SLICE_08 — unknown model: L2 misses; cold_start_layer_used = L1"
+        );
+        assert!(
+            resp.predicted_b_tokens.is_none(),
+            "SLICE_08 — L2 miss falls to L1 (no B)"
+        );
+    }
+
+    #[tokio::test]
+    async fn slice_08_l2_strict_ceiling_keeps_reservation_a_but_records_b_used() {
+        // Per spec §6 selector — STRICT_CEILING:
+        //   reserved_strategy = A (safety; reservation never reduces)
+        //   prediction_strategy_used = best available (B if B is Some)
+        // SLICE_08 ships L2 wired; with L2 active, B becomes "available"
+        // on cold start, so STRICT_CEILING records prediction_used = B
+        // (for calibration backtest per spec §6.2 commentary) while
+        // KEEPING reservation = A.
+        let svc = svc_with_cold_start();
+        let mut req = valid_req();
+        req.prediction_policy = "STRICT_CEILING".into();
+        let resp = svc
+            .predict(Request::new(req))
+            .await
+            .expect("ok")
+            .into_inner();
+        assert_eq!(
+            resp.reserved_strategy, "A",
+            "STRICT_CEILING reservation must remain A regardless of L2"
+        );
+        assert_eq!(
+            resp.prediction_strategy_used, "B",
+            "STRICT_CEILING records B in prediction_used when L2 gives B (calibration backtest)"
+        );
+        assert_eq!(
+            resp.cold_start_layer_used.as_deref(),
+            Some("L2"),
+            "audit row must record L2 even though reservation stayed A"
+        );
+    }
+
+    #[tokio::test]
+    async fn slice_08_l2_selector_empirical_run_ceiling_picks_b() {
+        // Per spec §6 — EMPIRICAL_RUN_CEILING uses B when available.
+        // With L2 wired, B is now available even on cold-start so this
+        // policy should select B.
+        let svc = svc_with_cold_start();
+        let mut req = valid_req();
+        req.prediction_policy = "EMPIRICAL_RUN_CEILING".into();
+        let resp = svc
+            .predict(Request::new(req))
+            .await
+            .expect("ok")
+            .into_inner();
+        assert_eq!(
+            resp.prediction_strategy_used, "B",
+            "EMPIRICAL_RUN_CEILING must pick B when L2 fallback fires"
+        );
     }
 }

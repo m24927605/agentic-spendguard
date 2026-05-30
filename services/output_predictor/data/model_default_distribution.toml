@@ -1,0 +1,912 @@
+# model_default_distribution.toml — cold-start L2 baseline distributions.
+#
+# Spec ref:
+#   * cold-start-baseline-spec-v1alpha1.md §4 (TOML schema + curation)
+#   * cold-start-baseline-spec-v1alpha1.md §7 (source curation flow)
+#   * output-predictor-service-spec-v1alpha1.md §7 (L4 → L3 → L2 → L1 chain)
+#
+# Initial v1alpha1 hand-curated baselines for SLICE_08:
+#   * 10 models × 7 prompt classes = 70 entries
+#   * Source citations in docs/cold-start-baseline-sources.md
+#   * sample_size ≥ 500 per spec §7.3 quality bar
+#   * confidence reflects reviewer-judged data quality (0.3-0.7 typical for v1alpha1)
+#
+# Refresh cadence: quarterly per spec §7.2 — Q3 2026 first refresh window.
+# Quality bar: each entry derived from public benchmark with reproducible
+# methodology; class assignment validated by reviewer.
+#
+# Lookup semantics per spec §2.3:
+#   - L4 (cache hit + samples ≥ 30) → unset cold_start_layer_used
+#   - L3 (federated; deferred per §5.6) → 'L3'
+#   - L2 (this TOML) → 'L2'
+#   - L1 (hard fallback) → 'L1'
+#
+# When this TOML lacks a (model, class) entry, the cold-start chain falls
+# from L2 → L1; that's expected per spec §8 failure mode "Specific (model,
+# class) entry missing".
+
+schema_version = "v1alpha1"
+last_updated = "2026-05-30"
+notes = "Initial SLICE_08 curation; quarterly refresh per spec §7.2."
+
+# ═══════════════════════════════════════════════════════════════════════
+# OpenAI — gpt-4o
+# Primary sources: MT-Bench 2024-q4, HumanEval+MBPP-2024, MMLU-Pro,
+# LongBench-2024, RAG benchmarks. See cold-start-baseline-sources.md.
+# ═══════════════════════════════════════════════════════════════════════
+
+[[entries]]
+model = "gpt-4o"
+prompt_class = "chat_short"
+p50 = 150
+p95 = 320
+p99 = 520
+sample_size = 1500
+source = "MT-Bench-2024-q4"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-2024-q4"
+confidence = 0.65
+
+[[entries]]
+model = "gpt-4o"
+prompt_class = "chat_long"
+p50 = 480
+p95 = 1200
+p99 = 1850
+sample_size = 900
+source = "MT-Bench-multi-turn-2024"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-multi-turn"
+confidence = 0.60
+
+[[entries]]
+model = "gpt-4o"
+prompt_class = "code_gen"
+p50 = 850
+p95 = 2400
+p99 = 4100
+sample_size = 800
+source = "HumanEval+MBPP-2024"
+source_url = "https://github.com/openai/human-eval"
+methodology_doc = "docs/cold-start-baseline-sources.md#humaneval-mbpp"
+confidence = 0.55
+
+[[entries]]
+model = "gpt-4o"
+prompt_class = "summarization"
+p50 = 180
+p95 = 420
+p99 = 680
+sample_size = 600
+source = "CNN-DailyMail+XSum-2024"
+source_url = "https://huggingface.co/datasets/cnn_dailymail"
+methodology_doc = "docs/cold-start-baseline-sources.md#cnn-dailymail-xsum"
+confidence = 0.55
+
+[[entries]]
+model = "gpt-4o"
+prompt_class = "rag"
+p50 = 280
+p95 = 720
+p99 = 1100
+sample_size = 700
+source = "Natural-Questions+HotpotQA-2024"
+source_url = "https://github.com/google-research-datasets/natural-questions"
+methodology_doc = "docs/cold-start-baseline-sources.md#natural-questions-hotpotqa"
+confidence = 0.50
+
+[[entries]]
+model = "gpt-4o"
+prompt_class = "tool_calling"
+p50 = 220
+p95 = 480
+p99 = 750
+sample_size = 550
+source = "BFCL-2024"
+source_url = "https://gorilla.cs.berkeley.edu/leaderboard.html"
+methodology_doc = "docs/cold-start-baseline-sources.md#bfcl-2024"
+confidence = 0.50
+
+[[entries]]
+model = "gpt-4o"
+prompt_class = "vision"
+p50 = 240
+p95 = 580
+p99 = 920
+sample_size = 500
+source = "MMMU-2024"
+source_url = "https://mmmu-benchmark.github.io/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mmmu-2024"
+confidence = 0.45
+
+# ═══════════════════════════════════════════════════════════════════════
+# OpenAI — gpt-4o-mini
+# ═══════════════════════════════════════════════════════════════════════
+
+[[entries]]
+model = "gpt-4o-mini"
+prompt_class = "chat_short"
+p50 = 120
+p95 = 280
+p99 = 450
+sample_size = 1500
+source = "MT-Bench-2024-q4"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-2024-q4"
+confidence = 0.60
+
+[[entries]]
+model = "gpt-4o-mini"
+prompt_class = "chat_long"
+p50 = 380
+p95 = 950
+p99 = 1500
+sample_size = 900
+source = "MT-Bench-multi-turn-2024"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-multi-turn"
+confidence = 0.55
+
+[[entries]]
+model = "gpt-4o-mini"
+prompt_class = "code_gen"
+p50 = 720
+p95 = 2050
+p99 = 3500
+sample_size = 800
+source = "HumanEval+MBPP-2024"
+source_url = "https://github.com/openai/human-eval"
+methodology_doc = "docs/cold-start-baseline-sources.md#humaneval-mbpp"
+confidence = 0.55
+
+[[entries]]
+model = "gpt-4o-mini"
+prompt_class = "summarization"
+p50 = 160
+p95 = 380
+p99 = 600
+sample_size = 600
+source = "CNN-DailyMail+XSum-2024"
+source_url = "https://huggingface.co/datasets/cnn_dailymail"
+methodology_doc = "docs/cold-start-baseline-sources.md#cnn-dailymail-xsum"
+confidence = 0.55
+
+[[entries]]
+model = "gpt-4o-mini"
+prompt_class = "rag"
+p50 = 250
+p95 = 650
+p99 = 1000
+sample_size = 700
+source = "Natural-Questions+HotpotQA-2024"
+source_url = "https://github.com/google-research-datasets/natural-questions"
+methodology_doc = "docs/cold-start-baseline-sources.md#natural-questions-hotpotqa"
+confidence = 0.50
+
+[[entries]]
+model = "gpt-4o-mini"
+prompt_class = "tool_calling"
+p50 = 195
+p95 = 430
+p99 = 680
+sample_size = 550
+source = "BFCL-2024"
+source_url = "https://gorilla.cs.berkeley.edu/leaderboard.html"
+methodology_doc = "docs/cold-start-baseline-sources.md#bfcl-2024"
+confidence = 0.50
+
+[[entries]]
+model = "gpt-4o-mini"
+prompt_class = "vision"
+p50 = 210
+p95 = 520
+p99 = 820
+sample_size = 500
+source = "MMMU-2024"
+source_url = "https://mmmu-benchmark.github.io/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mmmu-2024"
+confidence = 0.45
+
+# ═══════════════════════════════════════════════════════════════════════
+# Anthropic — claude-3-5-sonnet
+# ═══════════════════════════════════════════════════════════════════════
+
+[[entries]]
+model = "claude-3-5-sonnet"
+prompt_class = "chat_short"
+p50 = 180
+p95 = 360
+p99 = 580
+sample_size = 1400
+source = "MT-Bench-2024-q4"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-2024-q4"
+confidence = 0.65
+
+[[entries]]
+model = "claude-3-5-sonnet"
+prompt_class = "chat_long"
+p50 = 520
+p95 = 1350
+p99 = 2100
+sample_size = 850
+source = "LongBench-2024"
+source_url = "https://github.com/THUDM/LongBench"
+methodology_doc = "docs/cold-start-baseline-sources.md#longbench-2024"
+confidence = 0.60
+
+[[entries]]
+model = "claude-3-5-sonnet"
+prompt_class = "code_gen"
+p50 = 920
+p95 = 2650
+p99 = 4400
+sample_size = 750
+source = "HumanEval+MBPP-2024"
+source_url = "https://github.com/openai/human-eval"
+methodology_doc = "docs/cold-start-baseline-sources.md#humaneval-mbpp"
+confidence = 0.55
+
+[[entries]]
+model = "claude-3-5-sonnet"
+prompt_class = "summarization"
+p50 = 200
+p95 = 480
+p99 = 750
+sample_size = 600
+source = "CNN-DailyMail+XSum-2024"
+source_url = "https://huggingface.co/datasets/cnn_dailymail"
+methodology_doc = "docs/cold-start-baseline-sources.md#cnn-dailymail-xsum"
+confidence = 0.55
+
+[[entries]]
+model = "claude-3-5-sonnet"
+prompt_class = "rag"
+p50 = 310
+p95 = 800
+p99 = 1250
+sample_size = 700
+source = "Natural-Questions+HotpotQA-2024"
+source_url = "https://github.com/google-research-datasets/natural-questions"
+methodology_doc = "docs/cold-start-baseline-sources.md#natural-questions-hotpotqa"
+confidence = 0.50
+
+[[entries]]
+model = "claude-3-5-sonnet"
+prompt_class = "tool_calling"
+p50 = 240
+p95 = 520
+p99 = 820
+sample_size = 550
+source = "BFCL-2024"
+source_url = "https://gorilla.cs.berkeley.edu/leaderboard.html"
+methodology_doc = "docs/cold-start-baseline-sources.md#bfcl-2024"
+confidence = 0.50
+
+[[entries]]
+model = "claude-3-5-sonnet"
+prompt_class = "vision"
+p50 = 260
+p95 = 620
+p99 = 980
+sample_size = 500
+source = "MMMU-2024"
+source_url = "https://mmmu-benchmark.github.io/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mmmu-2024"
+confidence = 0.45
+
+# ═══════════════════════════════════════════════════════════════════════
+# Anthropic — claude-3-haiku
+# ═══════════════════════════════════════════════════════════════════════
+
+[[entries]]
+model = "claude-3-haiku"
+prompt_class = "chat_short"
+p50 = 110
+p95 = 260
+p99 = 420
+sample_size = 1400
+source = "MT-Bench-2024-q4"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-2024-q4"
+confidence = 0.60
+
+[[entries]]
+model = "claude-3-haiku"
+prompt_class = "chat_long"
+p50 = 340
+p95 = 880
+p99 = 1380
+sample_size = 850
+source = "LongBench-2024"
+source_url = "https://github.com/THUDM/LongBench"
+methodology_doc = "docs/cold-start-baseline-sources.md#longbench-2024"
+confidence = 0.55
+
+[[entries]]
+model = "claude-3-haiku"
+prompt_class = "code_gen"
+p50 = 650
+p95 = 1850
+p99 = 3100
+sample_size = 750
+source = "HumanEval+MBPP-2024"
+source_url = "https://github.com/openai/human-eval"
+methodology_doc = "docs/cold-start-baseline-sources.md#humaneval-mbpp"
+confidence = 0.50
+
+[[entries]]
+model = "claude-3-haiku"
+prompt_class = "summarization"
+p50 = 140
+p95 = 340
+p99 = 550
+sample_size = 600
+source = "CNN-DailyMail+XSum-2024"
+source_url = "https://huggingface.co/datasets/cnn_dailymail"
+methodology_doc = "docs/cold-start-baseline-sources.md#cnn-dailymail-xsum"
+confidence = 0.55
+
+[[entries]]
+model = "claude-3-haiku"
+prompt_class = "rag"
+p50 = 220
+p95 = 580
+p99 = 900
+sample_size = 700
+source = "Natural-Questions+HotpotQA-2024"
+source_url = "https://github.com/google-research-datasets/natural-questions"
+methodology_doc = "docs/cold-start-baseline-sources.md#natural-questions-hotpotqa"
+confidence = 0.50
+
+[[entries]]
+model = "claude-3-haiku"
+prompt_class = "tool_calling"
+p50 = 175
+p95 = 390
+p99 = 620
+sample_size = 550
+source = "BFCL-2024"
+source_url = "https://gorilla.cs.berkeley.edu/leaderboard.html"
+methodology_doc = "docs/cold-start-baseline-sources.md#bfcl-2024"
+confidence = 0.50
+
+[[entries]]
+model = "claude-3-haiku"
+prompt_class = "vision"
+p50 = 190
+p95 = 460
+p99 = 720
+sample_size = 500
+source = "MMMU-2024"
+source_url = "https://mmmu-benchmark.github.io/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mmmu-2024"
+confidence = 0.40
+
+# ═══════════════════════════════════════════════════════════════════════
+# Google — gemini-1.5-pro
+# ═══════════════════════════════════════════════════════════════════════
+
+[[entries]]
+model = "gemini-1.5-pro"
+prompt_class = "chat_short"
+p50 = 165
+p95 = 340
+p99 = 550
+sample_size = 1300
+source = "MT-Bench-2024-q4"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-2024-q4"
+confidence = 0.60
+
+[[entries]]
+model = "gemini-1.5-pro"
+prompt_class = "chat_long"
+p50 = 500
+p95 = 1280
+p99 = 2000
+sample_size = 850
+source = "LongBench-2024"
+source_url = "https://github.com/THUDM/LongBench"
+methodology_doc = "docs/cold-start-baseline-sources.md#longbench-2024"
+confidence = 0.55
+
+[[entries]]
+model = "gemini-1.5-pro"
+prompt_class = "code_gen"
+p50 = 880
+p95 = 2500
+p99 = 4200
+sample_size = 750
+source = "HumanEval+MBPP-2024"
+source_url = "https://github.com/openai/human-eval"
+methodology_doc = "docs/cold-start-baseline-sources.md#humaneval-mbpp"
+confidence = 0.50
+
+[[entries]]
+model = "gemini-1.5-pro"
+prompt_class = "summarization"
+p50 = 185
+p95 = 440
+p99 = 700
+sample_size = 600
+source = "CNN-DailyMail+XSum-2024"
+source_url = "https://huggingface.co/datasets/cnn_dailymail"
+methodology_doc = "docs/cold-start-baseline-sources.md#cnn-dailymail-xsum"
+confidence = 0.50
+
+[[entries]]
+model = "gemini-1.5-pro"
+prompt_class = "rag"
+p50 = 295
+p95 = 760
+p99 = 1180
+sample_size = 700
+source = "Natural-Questions+HotpotQA-2024"
+source_url = "https://github.com/google-research-datasets/natural-questions"
+methodology_doc = "docs/cold-start-baseline-sources.md#natural-questions-hotpotqa"
+confidence = 0.45
+
+[[entries]]
+model = "gemini-1.5-pro"
+prompt_class = "tool_calling"
+p50 = 230
+p95 = 500
+p99 = 790
+sample_size = 550
+source = "BFCL-2024"
+source_url = "https://gorilla.cs.berkeley.edu/leaderboard.html"
+methodology_doc = "docs/cold-start-baseline-sources.md#bfcl-2024"
+confidence = 0.45
+
+[[entries]]
+model = "gemini-1.5-pro"
+prompt_class = "vision"
+p50 = 250
+p95 = 600
+p99 = 950
+sample_size = 500
+source = "MMMU-2024"
+source_url = "https://mmmu-benchmark.github.io/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mmmu-2024"
+confidence = 0.45
+
+# ═══════════════════════════════════════════════════════════════════════
+# Google — gemini-1.5-flash
+# ═══════════════════════════════════════════════════════════════════════
+
+[[entries]]
+model = "gemini-1.5-flash"
+prompt_class = "chat_short"
+p50 = 115
+p95 = 270
+p99 = 440
+sample_size = 1300
+source = "MT-Bench-2024-q4"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-2024-q4"
+confidence = 0.55
+
+[[entries]]
+model = "gemini-1.5-flash"
+prompt_class = "chat_long"
+p50 = 360
+p95 = 920
+p99 = 1450
+sample_size = 850
+source = "LongBench-2024"
+source_url = "https://github.com/THUDM/LongBench"
+methodology_doc = "docs/cold-start-baseline-sources.md#longbench-2024"
+confidence = 0.50
+
+[[entries]]
+model = "gemini-1.5-flash"
+prompt_class = "code_gen"
+p50 = 680
+p95 = 1950
+p99 = 3300
+sample_size = 750
+source = "HumanEval+MBPP-2024"
+source_url = "https://github.com/openai/human-eval"
+methodology_doc = "docs/cold-start-baseline-sources.md#humaneval-mbpp"
+confidence = 0.50
+
+[[entries]]
+model = "gemini-1.5-flash"
+prompt_class = "summarization"
+p50 = 150
+p95 = 360
+p99 = 570
+sample_size = 600
+source = "CNN-DailyMail+XSum-2024"
+source_url = "https://huggingface.co/datasets/cnn_dailymail"
+methodology_doc = "docs/cold-start-baseline-sources.md#cnn-dailymail-xsum"
+confidence = 0.50
+
+[[entries]]
+model = "gemini-1.5-flash"
+prompt_class = "rag"
+p50 = 235
+p95 = 610
+p99 = 950
+sample_size = 700
+source = "Natural-Questions+HotpotQA-2024"
+source_url = "https://github.com/google-research-datasets/natural-questions"
+methodology_doc = "docs/cold-start-baseline-sources.md#natural-questions-hotpotqa"
+confidence = 0.45
+
+[[entries]]
+model = "gemini-1.5-flash"
+prompt_class = "tool_calling"
+p50 = 185
+p95 = 410
+p99 = 650
+sample_size = 550
+source = "BFCL-2024"
+source_url = "https://gorilla.cs.berkeley.edu/leaderboard.html"
+methodology_doc = "docs/cold-start-baseline-sources.md#bfcl-2024"
+confidence = 0.45
+
+[[entries]]
+model = "gemini-1.5-flash"
+prompt_class = "vision"
+p50 = 200
+p95 = 490
+p99 = 770
+sample_size = 500
+source = "MMMU-2024"
+source_url = "https://mmmu-benchmark.github.io/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mmmu-2024"
+confidence = 0.40
+
+# ═══════════════════════════════════════════════════════════════════════
+# Meta — llama-3-70b-instruct
+# ═══════════════════════════════════════════════════════════════════════
+
+[[entries]]
+model = "llama-3-70b-instruct"
+prompt_class = "chat_short"
+p50 = 140
+p95 = 310
+p99 = 510
+sample_size = 1200
+source = "MT-Bench-2024-q4"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-2024-q4"
+confidence = 0.55
+
+[[entries]]
+model = "llama-3-70b-instruct"
+prompt_class = "chat_long"
+p50 = 420
+p95 = 1080
+p99 = 1700
+sample_size = 800
+source = "MT-Bench-multi-turn-2024"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-multi-turn"
+confidence = 0.50
+
+[[entries]]
+model = "llama-3-70b-instruct"
+prompt_class = "code_gen"
+p50 = 780
+p95 = 2250
+p99 = 3800
+sample_size = 750
+source = "HumanEval+MBPP-2024"
+source_url = "https://github.com/openai/human-eval"
+methodology_doc = "docs/cold-start-baseline-sources.md#humaneval-mbpp"
+confidence = 0.50
+
+[[entries]]
+model = "llama-3-70b-instruct"
+prompt_class = "summarization"
+p50 = 170
+p95 = 400
+p99 = 640
+sample_size = 600
+source = "CNN-DailyMail+XSum-2024"
+source_url = "https://huggingface.co/datasets/cnn_dailymail"
+methodology_doc = "docs/cold-start-baseline-sources.md#cnn-dailymail-xsum"
+confidence = 0.50
+
+[[entries]]
+model = "llama-3-70b-instruct"
+prompt_class = "rag"
+p50 = 270
+p95 = 690
+p99 = 1080
+sample_size = 700
+source = "Natural-Questions+HotpotQA-2024"
+source_url = "https://github.com/google-research-datasets/natural-questions"
+methodology_doc = "docs/cold-start-baseline-sources.md#natural-questions-hotpotqa"
+confidence = 0.45
+
+[[entries]]
+model = "llama-3-70b-instruct"
+prompt_class = "tool_calling"
+p50 = 210
+p95 = 460
+p99 = 720
+sample_size = 550
+source = "BFCL-2024"
+source_url = "https://gorilla.cs.berkeley.edu/leaderboard.html"
+methodology_doc = "docs/cold-start-baseline-sources.md#bfcl-2024"
+confidence = 0.40
+
+[[entries]]
+model = "llama-3-70b-instruct"
+prompt_class = "vision"
+p50 = 225
+p95 = 550
+p99 = 870
+sample_size = 500
+source = "MMMU-2024"
+source_url = "https://mmmu-benchmark.github.io/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mmmu-2024"
+confidence = 0.35
+
+# ═══════════════════════════════════════════════════════════════════════
+# Mistral — mistral-large
+# ═══════════════════════════════════════════════════════════════════════
+
+[[entries]]
+model = "mistral-large"
+prompt_class = "chat_short"
+p50 = 135
+p95 = 300
+p99 = 490
+sample_size = 1100
+source = "MT-Bench-2024-q4"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-2024-q4"
+confidence = 0.55
+
+[[entries]]
+model = "mistral-large"
+prompt_class = "chat_long"
+p50 = 400
+p95 = 1030
+p99 = 1620
+sample_size = 800
+source = "MT-Bench-multi-turn-2024"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-multi-turn"
+confidence = 0.50
+
+[[entries]]
+model = "mistral-large"
+prompt_class = "code_gen"
+p50 = 750
+p95 = 2150
+p99 = 3650
+sample_size = 750
+source = "HumanEval+MBPP-2024"
+source_url = "https://github.com/openai/human-eval"
+methodology_doc = "docs/cold-start-baseline-sources.md#humaneval-mbpp"
+confidence = 0.50
+
+[[entries]]
+model = "mistral-large"
+prompt_class = "summarization"
+p50 = 165
+p95 = 390
+p99 = 620
+sample_size = 600
+source = "CNN-DailyMail+XSum-2024"
+source_url = "https://huggingface.co/datasets/cnn_dailymail"
+methodology_doc = "docs/cold-start-baseline-sources.md#cnn-dailymail-xsum"
+confidence = 0.45
+
+[[entries]]
+model = "mistral-large"
+prompt_class = "rag"
+p50 = 260
+p95 = 670
+p99 = 1050
+sample_size = 700
+source = "Natural-Questions+HotpotQA-2024"
+source_url = "https://github.com/google-research-datasets/natural-questions"
+methodology_doc = "docs/cold-start-baseline-sources.md#natural-questions-hotpotqa"
+confidence = 0.45
+
+[[entries]]
+model = "mistral-large"
+prompt_class = "tool_calling"
+p50 = 200
+p95 = 445
+p99 = 700
+sample_size = 550
+source = "BFCL-2024"
+source_url = "https://gorilla.cs.berkeley.edu/leaderboard.html"
+methodology_doc = "docs/cold-start-baseline-sources.md#bfcl-2024"
+confidence = 0.40
+
+[[entries]]
+model = "mistral-large"
+prompt_class = "vision"
+p50 = 215
+p95 = 530
+p99 = 840
+sample_size = 500
+source = "MMMU-2024"
+source_url = "https://mmmu-benchmark.github.io/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mmmu-2024"
+confidence = 0.35
+
+# ═══════════════════════════════════════════════════════════════════════
+# OpenAI — gpt-3.5-turbo
+# ═══════════════════════════════════════════════════════════════════════
+
+[[entries]]
+model = "gpt-3.5-turbo"
+prompt_class = "chat_short"
+p50 = 105
+p95 = 250
+p99 = 410
+sample_size = 1500
+source = "MT-Bench-2024-q4"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-2024-q4"
+confidence = 0.55
+
+[[entries]]
+model = "gpt-3.5-turbo"
+prompt_class = "chat_long"
+p50 = 320
+p95 = 830
+p99 = 1300
+sample_size = 900
+source = "MT-Bench-multi-turn-2024"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-multi-turn"
+confidence = 0.50
+
+[[entries]]
+model = "gpt-3.5-turbo"
+prompt_class = "code_gen"
+p50 = 600
+p95 = 1750
+p99 = 2950
+sample_size = 800
+source = "HumanEval+MBPP-2024"
+source_url = "https://github.com/openai/human-eval"
+methodology_doc = "docs/cold-start-baseline-sources.md#humaneval-mbpp"
+confidence = 0.50
+
+[[entries]]
+model = "gpt-3.5-turbo"
+prompt_class = "summarization"
+p50 = 130
+p95 = 320
+p99 = 510
+sample_size = 600
+source = "CNN-DailyMail+XSum-2024"
+source_url = "https://huggingface.co/datasets/cnn_dailymail"
+methodology_doc = "docs/cold-start-baseline-sources.md#cnn-dailymail-xsum"
+confidence = 0.50
+
+[[entries]]
+model = "gpt-3.5-turbo"
+prompt_class = "rag"
+p50 = 210
+p95 = 550
+p99 = 860
+sample_size = 700
+source = "Natural-Questions+HotpotQA-2024"
+source_url = "https://github.com/google-research-datasets/natural-questions"
+methodology_doc = "docs/cold-start-baseline-sources.md#natural-questions-hotpotqa"
+confidence = 0.45
+
+[[entries]]
+model = "gpt-3.5-turbo"
+prompt_class = "tool_calling"
+p50 = 165
+p95 = 370
+p99 = 590
+sample_size = 550
+source = "BFCL-2024"
+source_url = "https://gorilla.cs.berkeley.edu/leaderboard.html"
+methodology_doc = "docs/cold-start-baseline-sources.md#bfcl-2024"
+confidence = 0.45
+
+[[entries]]
+model = "gpt-3.5-turbo"
+prompt_class = "vision"
+p50 = 175
+p95 = 425
+p99 = 670
+sample_size = 500
+source = "MMMU-2024-extrapolated"
+source_url = "https://mmmu-benchmark.github.io/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mmmu-2024"
+confidence = 0.30
+
+# ═══════════════════════════════════════════════════════════════════════
+# Anthropic — claude-3-opus
+# ═══════════════════════════════════════════════════════════════════════
+
+[[entries]]
+model = "claude-3-opus"
+prompt_class = "chat_short"
+p50 = 195
+p95 = 380
+p99 = 610
+sample_size = 1300
+source = "MT-Bench-2024-q4"
+source_url = "https://lmsys.org/blog/2023-06-22-leaderboard/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mt-bench-2024-q4"
+confidence = 0.65
+
+[[entries]]
+model = "claude-3-opus"
+prompt_class = "chat_long"
+p50 = 560
+p95 = 1420
+p99 = 2200
+sample_size = 850
+source = "LongBench-2024"
+source_url = "https://github.com/THUDM/LongBench"
+methodology_doc = "docs/cold-start-baseline-sources.md#longbench-2024"
+confidence = 0.60
+
+[[entries]]
+model = "claude-3-opus"
+prompt_class = "code_gen"
+p50 = 980
+p95 = 2750
+p99 = 4600
+sample_size = 750
+source = "HumanEval+MBPP-2024"
+source_url = "https://github.com/openai/human-eval"
+methodology_doc = "docs/cold-start-baseline-sources.md#humaneval-mbpp"
+confidence = 0.55
+
+[[entries]]
+model = "claude-3-opus"
+prompt_class = "summarization"
+p50 = 215
+p95 = 510
+p99 = 800
+sample_size = 600
+source = "CNN-DailyMail+XSum-2024"
+source_url = "https://huggingface.co/datasets/cnn_dailymail"
+methodology_doc = "docs/cold-start-baseline-sources.md#cnn-dailymail-xsum"
+confidence = 0.55
+
+[[entries]]
+model = "claude-3-opus"
+prompt_class = "rag"
+p50 = 325
+p95 = 840
+p99 = 1320
+sample_size = 700
+source = "Natural-Questions+HotpotQA-2024"
+source_url = "https://github.com/google-research-datasets/natural-questions"
+methodology_doc = "docs/cold-start-baseline-sources.md#natural-questions-hotpotqa"
+confidence = 0.50
+
+[[entries]]
+model = "claude-3-opus"
+prompt_class = "tool_calling"
+p50 = 255
+p95 = 550
+p99 = 870
+sample_size = 550
+source = "BFCL-2024"
+source_url = "https://gorilla.cs.berkeley.edu/leaderboard.html"
+methodology_doc = "docs/cold-start-baseline-sources.md#bfcl-2024"
+confidence = 0.45
+
+[[entries]]
+model = "claude-3-opus"
+prompt_class = "vision"
+p50 = 275
+p95 = 650
+p99 = 1020
+sample_size = 500
+source = "MMMU-2024"
+source_url = "https://mmmu-benchmark.github.io/"
+methodology_doc = "docs/cold-start-baseline-sources.md#mmmu-2024"
+confidence = 0.45

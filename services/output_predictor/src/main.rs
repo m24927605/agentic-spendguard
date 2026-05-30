@@ -27,6 +27,7 @@ use tracing_subscriber::EnvFilter;
 use spendguard_output_predictor::{
     cache::OutputDistributionCache,
     circuit_breaker::{CircuitBreakerConfig, PluginCircuitBreaker},
+    cold_start_loader::ModelDefaultDistribution,
     config::Config,
     context_window::ContextWindowTable,
     endpoint_cache::EndpointCache,
@@ -63,6 +64,23 @@ async fn main() -> Result<()> {
     info!(
         path = %cfg.context_window_toml_path,
         "model_context_window.toml loaded"
+    );
+
+    // ── SLICE_08: Load embedded model_default_distribution.toml ─────
+    //
+    // This is the cold-start L2 baseline table (70 entries). Loaded via
+    // `include_bytes!` at compile time; runtime check is the Layer A
+    // asset signature + Layer B fixture cross-check (spec §8). On any
+    // signature/sanity failure → refuse-to-start (anyhow propagates to
+    // main()'s ? operator which exits non-zero).
+    let cold_start = Arc::new(
+        ModelDefaultDistribution::load_embedded()
+            .context("loading cold-start L2 baseline table (model_default_distribution.toml)")?,
+    );
+    info!(
+        schema_version = cold_start.schema_version(),
+        last_updated = cold_start.last_updated(),
+        "model_default_distribution.toml loaded (cold-start L2)"
     );
 
     // ── Construct the output_distribution_cache ───────────────────
@@ -186,6 +204,7 @@ async fn main() -> Result<()> {
         endpoint_cache,
         plugin_client,
         plugin_breaker,
+        Some(cold_start),
     );
     let tonic_svc = OutputPredictorServer::new(svc)
         // Match the tokenizer's DoS posture: 1 MiB decoded message

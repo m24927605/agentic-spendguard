@@ -7,6 +7,15 @@
          - chart.profile=production: databaseUrl required for L4 cache lookups
          - container security baseline: USER 65532 + readOnlyRootFilesystem
            + cap_drop ALL (SLICE_03 R2 M7)
+
+       SLICE_08 — cold-start L2 baseline table.
+       Spec: docs/cold-start-baseline-spec-v1alpha1.md §4.
+       The 70-entry model_default_distribution.toml is EMBEDDED into the
+       output_predictor binary via include_bytes! — no ConfigMap mount or
+       operator-supplied path required. The binary refuses-to-start on
+       any asset signature / sanity violation (Layer A sha256 + Layer B
+       fixture cross-check + per-entry §6 sanity). Quarterly refresh per
+       spec §7.2 ships a new binary version; no chart change needed.
     */ -}}
 {{- if eq .Values.chart.profile "production" -}}
 {{- if eq .Values.outputPredictor.image.tag "" -}}
