@@ -380,9 +380,104 @@ Dispatch lookup 不命中 → return Tier 3 fallback + emit metric `tokenizer_un
 - tool_calls: function name + arguments_json 都按 model 的 tokenizer encode
 - system / user / assistant role markers: model-specific token sequences
 
-Anthropic / Gemini envelope rules：per vendored encoder's own tokenizer rules（隨 SDK / docs ship）。
+對 non-OpenAI vendors（Anthropic / Gemini / Cohere / Llama）：each vendored
+encoder ships its own [`ChatEnvelope`] policy + BOS rule per the
+amendments below (R2 M3 + R2 M4 + R3 N1).
 
-各 model 的 envelope 規則 hardcode 在 `dispatch::message_envelope_tokens(kind, role)` helper。
+#### 3.4.1 Per-vendor chat envelope table（R2 M3 amendment, R2 commit `4d6f96b`）
+
+`ChatEnvelope { per_message, per_turn_boundary, reply_priming }` policy
+per encoder. The per-request total is
+
+```text
+chat_total = Σ_messages (per_message + per_turn_boundary + tokens(role) +
+                         tokens(content) + Σ_tool_calls tool_overhead)
+             + reply_priming
+             + (BOS only if request uses raw_text path; see §3.4.2)
+```
+
+| Encoder                   | per_message | per_turn_boundary | reply_priming | Source-of-truth                                       |
+|---------------------------|-------------|-------------------|---------------|-------------------------------------------------------|
+| OpenAI cl100k / o200k     | 3           | 0                 | 3             | `encoders/openai.rs::OpenAiEncoder::envelope_overhead` |
+| OpenAI gpt-3.5-turbo-0301 | 4           | 0                 | 3             | `encoders/openai.rs::count_tokens` (model-specific arm) |
+| Anthropic                 | 0           | 4                 | 0             | `encoders/anthropic.rs::ANTHROPIC_ENVELOPE`           |
+| Gemini                    | 0           | 0                 | 0             | `encoders/gemini.rs::GEMINI_ENVELOPE`                 |
+| Cohere                    | 3           | 0                 | 0             | `encoders/cohere.rs::COHERE_ENVELOPE`                 |
+| Llama                     | 5           | 0                 | 0             | `encoders/llama.rs::LLAMA_ENVELOPE`                   |
+
+Rationale per row:
+
+- **OpenAI cl100k / o200k**: tiktoken cookbook convention (3 tokens / msg
+  for role + content separator markers; 3 tokens for assistant reply
+  priming). `gpt-3.5-turbo-0301` snapshot is the documented quirk
+  (per_message=4 for the legacy implicit "name" position).
+- **Anthropic**: chat shape uses `\n\nHuman:` / `\n\nAssistant:` turn
+  boundary markers (≈ 4 tokens per turn) rather than OpenAI-style
+  per-message framing; no reply priming.
+- **Gemini**: API takes a `contents` array where role is a structured
+  field, not a prompt token; envelope is all-zero.
+- **Cohere**: Command-R chat uses `<|START_OF_TURN|>` / `<|END_OF_TURN|>`
+  framing (≈ 3 tokens per turn).
+- **Llama**: Llama 3.1 chat uses the full header template
+  `<|begin_of_text|><|start_header_id|>{role}<|end_header_id|>\n\n
+  {content}<|eot_id|>` (≈ 5 tokens per turn for the marker headers).
+
+Tool-call accounting is uniform across encoders: `+1` overhead per
+tool_call + `tokens(name)` + `tokens(arguments_json)` (per spec §3.4
+SLICE_03 line + per-vendor encoder).
+
+#### 3.4.2 Per-vendor BOS token table（R2 M4 amendment, R2 commit `4d6f96b`；R3 N1 fix amendment, R3 commit `edbbfab`）
+
+`bos_token_count` is added once per non-empty `raw_text` encode (chat-shape
+requests do NOT add BOS — the per-turn header markers in §3.4.1 already
+include any leading marker the vendor prepends).
+
+| Encoder    | bos_token_count                       | Applies to                                       |
+|------------|---------------------------------------|--------------------------------------------------|
+| OpenAI     | 0                                     | All paths (cl100k / o200k / p50k have no BOS in `encode_with_special_tokens` output) |
+| Anthropic  | 1 (Bedrock routing); 0 (native API)   | R3 N1 gate via `is_bedrock_routing(model)` substring match on `anthropic.` |
+| Gemini     | 0                                     | All paths (Gemma `countTokens` reports no BOS)   |
+| Cohere     | 1                                     | Bedrock only (feature-gated; native API path absent until R2 M6 legal review widens scope) |
+| Llama      | 1                                     | Bedrock only (SLICE_04 ships only `meta.llama3-*-instruct-v1:0` patterns, all Bedrock) |
+
+Rationale per row:
+
+- **OpenAI**: tiktoken vocabularies have no BOS in the encode output
+  (the `<|endoftext|>` token is appended at model-emit time, not on input).
+- **Anthropic R3 N1 gate**: Bedrock invokeModel prepends `<|begin_of_text|>`
+  before forwarding; the Anthropic native `/v1/messages` API does NOT.
+  Unconditional BOS=1 over-counts native API calls by exactly 1 token,
+  which crosses the §4.2 1% drift threshold on every 100-token request.
+  Detection: model string contains the `anthropic.` substring (matches
+  every Bedrock dispatch entry per §3.1, including cross-region prefixes
+  `us.anthropic.…`, `eu.anthropic.…`, `apac.anthropic.…`, `us-gov.anthropic.…`).
+- **Gemini**: Gemma vocab has no BOS in `countTokens` semantics.
+- **Cohere**: Bedrock invokeModel prepends `<|START_OF_TURN|>`. Cohere
+  native API path is feature-gated (per R2 M6); when the feature is on,
+  the same Bedrock-only BOS=1 policy applies because all dispatch entries
+  are still Bedrock-shaped IDs (`cohere.command-*-v1:0`) or
+  `command-r{,-plus}{,-DATE}` SDK names that route via the same encoder.
+- **Llama**: Bedrock invokeModel prepends `<|begin_of_text|>`. SLICE_04
+  ships only Bedrock model patterns for Llama (no native SDK pattern).
+
+#### 3.4.3 Source-of-truth note
+
+The authoritative envelope + BOS values live in the Rust constants under
+`crates/spendguard-tokenizer/src/encoders/*.rs` (`*_ENVELOPE` and
+`*_BOS_COUNT*` consts surfaced via `Encoder::envelope_overhead` +
+`Encoder::bos_token_count` trait methods). The tables in §3.4.1 / §3.4.2
+above are illustrative — when the implementation amends a row, the spec
+amendment commit MUST update the corresponding cell in the same PR (per
+the §10 spec-impl sync rule introduced in R2 M5).
+
+各 model 的 envelope + BOS 規則直接由 per-encoder trait method 提供（per
+`crates/spendguard-tokenizer/src/encoders/mod.rs::Encoder`）；dispatch
+table 不再 carry an `envelope_tokens` helper. The earlier sketch of a
+`dispatch::message_envelope_tokens(kind, role)` helper is **superseded**
+by the per-encoder trait shape — see R2 M3 implementation for the
+migration rationale (one helper per kind kept envelope code adjacent to
+the encoder's own vocab knowledge, eliminating a centralised `match` arm
+that would have to grow with every new vendor row).
 
 ### 3.5 Output cap accounting
 
