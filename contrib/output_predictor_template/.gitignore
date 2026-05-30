@@ -1,0 +1,22 @@
+# Local dev artifacts that should never be committed alongside the
+# template. Customers cloning the template inherit these gitignores.
+.venv/
+venv/
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# Backtest report artifacts the harness can write.
+*.report.json
+calibration_report.json
+
+# Local certs — never commit. See mtls_setup.md.
+*.pem
+*.key
+*.crt
+*.csr
+!_proto/**/*.pyi

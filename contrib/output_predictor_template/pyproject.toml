@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spendguard-output-predictor-template"
+version = "0.1.0-alpha1"
+description = "Reference Python implementation of a SpendGuard Strategy C output predictor plugin. CUSTOMER TEMPLATE — STUB MODEL; replace before production."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Apache-2.0" }
+authors = [
+  { name = "SpendGuard contributors", email = "noreply@spendguard.invalid" },
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries",
+  "Operating System :: POSIX :: Linux",
+]
+
+# Pinned to ranges that match SDK + sklearn LTS. Customer SHOULD pin
+# more tightly in their fork once they replace the stub model.
+dependencies = [
+  "grpcio>=1.62,<2",
+  "grpcio-health-checking>=1.62,<2",
+  "protobuf>=4.25,<6",
+  "numpy>=1.26,<3",
+  "scikit-learn>=1.4,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "grpcio-tools>=1.62,<2",
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+  "ruff>=0.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/m24927605/agentic-spendguard"
+Spec = "https://github.com/m24927605/agentic-spendguard/blob/main/docs/output-predictor-plugin-contract-v1alpha1.md"
+
+[tool.setuptools]
+py-modules = [
+  "predictor_server",
+  "feature_extractor",
+  "model_predictor_stub",
+  "backtest_harness",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP"]
+ignore = ["B008"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["."]

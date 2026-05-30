@@ -1,0 +1,10 @@
+# SpendGuard output predictor plugin template — runtime requirements.
+#
+# Pin these in your fork once you replace the stub model. The version
+# ranges below are aligned with the SpendGuard Python SDK at the time
+# this template was authored.
+grpcio>=1.62,<2
+grpcio-health-checking>=1.62,<2
+protobuf>=4.25,<6
+numpy>=1.26,<3
+scikit-learn>=1.4,<2
