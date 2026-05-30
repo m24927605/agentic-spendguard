@@ -403,17 +403,74 @@ async fn forward_openai_request(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
 
+    // SLICE_10 Phase B — run the 3-stage prediction pipeline BEFORE
+    // constructing the DecisionRequest. The legacy `estimate_tokens`
+    // heuristic is gone — input_tokens now comes from the real tokenizer
+    // library; reservation amount comes from output_predictor Strategy
+    // A/B/C selector; run-level projection comes from run_cost_projector.
+    //
+    // The full 17-column ClaimEstimate is attached to DecisionRequest
+    // so the sidecar's audit_decision CloudEvent carries the entire
+    // prediction story.
+    let header_override = header_int(&headers, "x-spendguard-estimated-tokens");
+    let model_str = decision::parse_model_family(&parsed);
+    // SLICE_10 Phase B: agent_id sourced from header; falls back to "" so
+    // output_predictor bucket key is the empty-bucket default (cold-start
+    // chain handles missing data per spec §7).
+    let agent_id_str = headers
+        .get("x-spendguard-agent-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let step_id_preview = format!("{}:call:preview", &run_id);
+    let decision_id_preview = uuid::Uuid::now_v7().to_string();
+    let planned_steps_hint = headers
+        .get("x-spendguard-planned-steps-hint")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(0)
+        .max(0);
+    let estimate_inputs = decision::EstimateInputs {
+        body: &parsed,
+        model: &model_str,
+        tenant_id: &tenant_id,
+        agent_id: &agent_id_str,
+        run_id: &run_id,
+        decision_id: &decision_id_preview,
+        step_id: &step_id_preview,
+        // Contract DSL v1alpha1 default — sidecar overrides via contract.
+        prediction_policy: "STRICT_CEILING",
+        header_override_tokens: header_override,
+        planned_steps_hint,
+    };
+    let claim_estimate = decision::estimate_call_cost(
+        &estimate_inputs,
+        &app.tokenizer,
+        app.output_predictor.as_ref(),
+        app.run_cost_projector.as_ref(),
+    )
+    .await;
+    // The reservation amount is the chosen strategy's predicted tokens
+    // (output_predictor selector returns this in reserved_strategy +
+    // predicted_*_tokens). Per spec §4 invariant: reservation = Strategy A
+    // when STRICT_CEILING policy active.
+    let reserved_tokens = match claim_estimate.reserved_strategy.as_str() {
+        "B" if claim_estimate.predicted_b_tokens > 0 => claim_estimate.predicted_b_tokens,
+        "C" if claim_estimate.predicted_c_tokens > 0 => claim_estimate.predicted_c_tokens,
+        _ => claim_estimate.predicted_a_tokens.max(1),
+    };
+
     let inputs = DecisionInputs {
         tenant_id: &tenant_id,
         budget_id: &budget_id,
         window_instance_id: &window_instance_id,
         run_id: run_id.clone(),
         body_bytes: &body,
-        model_family: decision::parse_model_family(&parsed),
-        estimated_tokens: header_int(&headers, "x-spendguard-estimated-tokens")
-            .unwrap_or_else(|| decision::estimate_tokens(&parsed, None)),
+        model_family: model_str.clone(),
+        estimated_tokens: reserved_tokens,
         unit_id: &unit_id,
         explicit_idempotency_key,
+        claim_estimate: Some(claim_estimate),
     };
     if inputs.budget_id.is_empty()
         || inputs.window_instance_id.is_empty()
@@ -1262,12 +1319,10 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
-    #[test]
-    fn streaming_unsupported_renders_501() {
-        let err = ForwardError::StreamingUnsupported;
-        let resp = err.into_response();
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
-    }
+    // SLICE_10 cleanup: pre-existing dead test referring to a removed
+    // `StreamingUnsupported` variant — the variant was deleted when v0.2
+    // SSE streaming was added (streaming is now supported, not rejected).
+    // Removed here to unblock the SLICE_10 test pass.
 
     #[test]
     fn malformed_json_renders_400() {
