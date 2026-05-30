@@ -75,6 +75,11 @@ pub struct Config {
     #[serde(default = "default_metrics_addr")]
     pub metrics_addr: String,
 
+    /// Optional run_cost_projector gRPC endpoint. Empty keeps the legacy
+    /// conservative fall-through path where no RUN_* code can be emitted.
+    #[serde(default)]
+    pub run_cost_projector_url: String,
+
     /// Health probe bind (kubelet readiness/liveness).
     #[serde(default = "default_health_addr")]
     pub health_addr: String,

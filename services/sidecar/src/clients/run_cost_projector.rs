@@ -48,13 +48,21 @@ impl RunCostProjectorClient {
         sni: &str,
         mtls: &MTlsPaths,
     ) -> Result<Self, DomainError> {
-        let tls = build_client_tls(mtls, sni).map_err(|e| {
-            DomainError::LedgerClient(format!("projector build tls: {e}"))
-        })?;
-        let endpoint = Endpoint::from_shared(endpoint_url.clone())
-            .map_err(|e| DomainError::LedgerClient(format!("projector endpoint parse: {e}")))?
-            .tls_config(tls)
-            .map_err(|e| DomainError::LedgerClient(format!("projector apply tls: {e}")))?
+        let mut endpoint = Endpoint::from_shared(endpoint_url.clone())
+            .map_err(|e| DomainError::LedgerClient(format!("projector endpoint parse: {e}")))?;
+        if endpoint_url.starts_with("https://") {
+            let tls = build_client_tls(mtls, sni)
+                .map_err(|e| DomainError::LedgerClient(format!("projector build tls: {e}")))?;
+            endpoint = endpoint
+                .tls_config(tls)
+                .map_err(|e| DomainError::LedgerClient(format!("projector apply tls: {e}")))?;
+        } else {
+            tracing::warn!(
+                endpoint = %endpoint_url,
+                "run_cost_projector client using plaintext; only valid for demo/test"
+            );
+        }
+        let endpoint = endpoint
             // p99 budget per spec §12.1 is 5ms warm / 10ms cold; we time
             // out the RPC at 50ms — well above the projector's worst case
             // but tight enough to keep the sidecar 50ms p99 budget for

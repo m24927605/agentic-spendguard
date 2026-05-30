@@ -365,14 +365,40 @@ async fn call_projector_safe(
 
 /// Extract the run projector's budget snapshot from DecisionRequest.
 ///
-/// SLICE_09 initially defaulted missing projected_p90 to 0, and HARDEN_01
-/// briefly treated projected_p90 as a budget snapshot. Both are unsafe:
-/// projected_p90 is a caller-supplied risk-band hint, not remaining budget.
-/// Until the adapter wire contract carries an explicit budget snapshot,
-/// unknown budget must be non-triggering; ledger reserve remains the
-/// fail-closed budget gate.
-fn projector_budget_remaining_atomic(_req: &DecisionRequest) -> i64 {
-    i64::MAX
+/// `projected_p90_atomic` is a risk-band hint, not remaining budget. The
+/// only accepted budget snapshot is an explicit adapter metadata field.
+/// Missing, malformed, or negative snapshots remain non-triggering so the
+/// projector never invents a false `RUN_BUDGET_PROJECTION_EXCEEDED`.
+fn projector_budget_remaining_atomic(req: &DecisionRequest) -> i64 {
+    req.inputs
+        .as_ref()
+        .and_then(|i| i.runtime_metadata.as_ref())
+        .and_then(|m| {
+            ["budget_remaining_atomic", "run_budget_remaining_atomic"]
+                .iter()
+                .find_map(|key| {
+                    m.fields
+                        .get(*key)
+                        .and_then(nonnegative_i64_from_struct_value)
+                })
+        })
+        .unwrap_or(i64::MAX)
+}
+
+fn nonnegative_i64_from_struct_value(value: &prost_types::Value) -> Option<i64> {
+    match value.kind.as_ref()? {
+        prost_types::value::Kind::StringValue(raw) => {
+            raw.trim().parse::<i64>().ok().filter(|v| *v >= 0)
+        }
+        prost_types::value::Kind::NumberValue(raw) => {
+            if raw.is_finite() && raw.fract() == 0.0 && *raw >= 0.0 && *raw <= i64::MAX as f64 {
+                Some(*raw as i64)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Drive the decision transaction end-to-end through stage 4 (reserve +
@@ -795,6 +821,25 @@ fn build_audit_decision_cloudevent(
     if !enrichment.spendguard_context.is_null() {
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("spendguard".into(), enrichment.spendguard_context.clone());
+        }
+    }
+    if let Some(est) = claim_estimate {
+        if let Some(obj) = payload.as_object_mut() {
+            if !est.model.is_empty() {
+                obj.insert("model".into(), serde_json::Value::String(est.model.clone()));
+            }
+            if !est.prompt_class.is_empty() {
+                obj.insert(
+                    "prompt_class".into(),
+                    serde_json::Value::String(est.prompt_class.clone()),
+                );
+            }
+            if !est.prompt_class_fingerprint.is_empty() {
+                obj.insert(
+                    "prompt_class_fingerprint".into(),
+                    serde_json::Value::String(est.prompt_class_fingerprint.clone()),
+                );
+            }
         }
     }
     let payload_bytes =
@@ -1471,12 +1516,24 @@ pub async fn run_commit_estimated(
     //    decision_id at audit_outbox per Stage 2 §4.8.
     let audit_outcome_event_id = uuid::Uuid::now_v7();
 
-    let ce_payload = serde_json::json!({
+    let mut ce_payload = serde_json::json!({
         "kind": "commit_estimated",
         "reservation_id": reservation_uuid.to_string(),
         "estimated_amount_atomic": payload.estimated_amount_atomic,
         "decision_id": resv.decision_id.to_string(),
     });
+    if let Some(v) = payload.actual_input_tokens {
+        ce_payload["actual_input_tokens"] = serde_json::json!(v);
+    }
+    if let Some(v) = payload.actual_output_tokens {
+        ce_payload["actual_output_tokens"] = serde_json::json!(v);
+    }
+    if let Some(v) = payload.delta_b_ratio.filter(|v| v.is_finite() && *v >= 0.0) {
+        ce_payload["delta_b_ratio"] = serde_json::json!(v);
+    }
+    if let Some(v) = payload.delta_c_ratio.filter(|v| v.is_finite() && *v >= 0.0) {
+        ce_payload["delta_c_ratio"] = serde_json::json!(v);
+    }
     let mut cloudevent = CloudEvent {
         specversion: "1.0".into(),
         r#type: "spendguard.audit.outcome".into(),
@@ -1505,6 +1562,18 @@ pub async fn run_commit_estimated(
         // wires through; SLICE_02 leaves them at proto3 default.
         ..Default::default()
     };
+    if let Some(v) = payload.actual_input_tokens {
+        cloudevent.actual_input_tokens = v;
+    }
+    if let Some(v) = payload.actual_output_tokens {
+        cloudevent.actual_output_tokens = v;
+    }
+    if let Some(v) = payload.delta_b_ratio.filter(|v| v.is_finite() && *v >= 0.0) {
+        cloudevent.delta_b_ratio = v;
+    }
+    if let Some(v) = payload.delta_c_ratio.filter(|v| v.is_finite() && *v >= 0.0) {
+        cloudevent.delta_c_ratio = v;
+    }
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
     let request = CommitEstimatedRequest {
@@ -2338,10 +2407,19 @@ mod slice_02_decision_match_tests {
 
     #[test]
     fn projector_budget_remaining_invalid_or_negative_is_non_triggering() {
-        for projected_p90_atomic in ["not-a-number", "-1"] {
+        for budget_remaining_atomic in ["not-a-number", "-1"] {
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert(
+                "budget_remaining_atomic".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::StringValue(
+                        budget_remaining_atomic.to_string(),
+                    )),
+                },
+            );
             let req = DecisionRequest {
                 inputs: Some(Inputs {
-                    projected_p90_atomic: projected_p90_atomic.to_string(),
+                    runtime_metadata: Some(prost_types::Struct { fields }),
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -2364,6 +2442,26 @@ mod slice_02_decision_match_tests {
             i64::MAX,
             "projected_p90_atomic is a risk-band hint, not remaining budget"
         );
+    }
+
+    #[test]
+    fn projector_budget_remaining_uses_explicit_runtime_snapshot() {
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "budget_remaining_atomic".to_string(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue("999".into())),
+            },
+        );
+        let req = DecisionRequest {
+            inputs: Some(Inputs {
+                projected_p90_atomic: "12345".into(),
+                runtime_metadata: Some(prost_types::Struct { fields }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(projector_budget_remaining_atomic(&req), 999);
     }
 
     #[test]
