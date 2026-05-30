@@ -299,8 +299,25 @@ mod tests {
     }
 
     // ── Golden corpus per spec §0.2 / §8.1 acceptance criteria ──
-    // 100 hand-labeled samples; classifier must hit ≥ 90% accuracy
-    // (>= 90 correct). Each entry is a small fixture: (features → expected_class).
+    //
+    // 100 hand-labeled samples; classifier must hit ≥ 90% accuracy.
+    //
+    // R2 M11 (Software F7) — SCOPE NOTE:
+    //
+    // The current corpus is **N duplicated representative samples per
+    // class** (5 vision + 10 tool_calling + 12 summarization + 15
+    // code_gen + 13 rag + 15 chat_long + 30 chat_short = 100). This
+    // is a SMOKE check that the rule-engine fires on the expected
+    // representative shape; it is NOT the diverse hand-labeled corpus
+    // the spec ultimately requires.
+    //
+    // SLICE_08 will ship the real calibration corpus with adversarial
+    // edge cases + ambiguous samples that exercise the priority
+    // tie-breakers in classify_from_features. Until then this smoke
+    // test is the LOCKED definition of "classifier doesn't regress".
+    //
+    // Spec §0.2 #5 acceptance is downgraded to "smoke-check until
+    // SLICE_08 calibration corpus" per the R2 plan.
     #[test]
     fn classifier_90_percent_on_golden_corpus() {
         let corpus = build_golden_corpus();
