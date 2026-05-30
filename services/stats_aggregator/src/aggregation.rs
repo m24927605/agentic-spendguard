@@ -35,7 +35,8 @@
 //! SET LOCAL is the supported path going forward.
 
 use anyhow::Context;
-use sqlx::postgres::PgPool;
+use sqlx::pool::PoolConnection;
+use sqlx::postgres::{PgPool, Postgres};
 use sqlx::Row;
 use tracing::{debug, info};
 use uuid::Uuid;
@@ -61,45 +62,83 @@ pub struct BucketAggregate {
     pub sample_size_30d: Option<i32>,
 }
 
-/// Acquire the singleton advisory lock per spec §8.3. Returns Ok(true)
-/// when the lock was acquired (caller proceeds with the cycle), Ok(false)
-/// when another instance is holding it (caller skips the cycle + emits
-/// stats_aggregator_skipped_lock_held metric).
+/// Acquire the singleton advisory lock per spec §8.3 on a *pinned*
+/// PoolConnection.
 ///
-/// Per spec §10 "Advisory lock held by stale instance" — Postgres
-/// session-level locks (pg_try_advisory_lock) are automatically released
-/// when the session disconnects. Long-dead processes therefore release
-/// their locks within the TCP keepalive timeout (~ 2h default on Linux).
-/// For faster release operators can tune `tcp_keepalives_idle` /
-/// `tcp_keepalives_interval` / `tcp_keepalives_count` at the DB connection
-/// pool level (sqlx defaults; the connection-level setting itself is on
-/// the Postgres server side).
-pub async fn try_acquire_lock(pool: &PgPool) -> Result<bool, anyhow::Error> {
-    let acquired: bool =
-        sqlx::query("SELECT pg_try_advisory_lock($1) AS acquired")
-            .bind(STATS_AGGREGATOR_ADVISORY_LOCK_ID)
-            .fetch_one(pool)
-            .await
-            .context("pg_try_advisory_lock")?
-            .get::<bool, _>("acquired");
+/// R2 B2 (Backend + Software + DB B3): `pg_try_advisory_lock` is
+/// session-bound — releasing it on a different connection is a no-op.
+/// The R1 shape called `pool.fetch_one()` (arbitrary checkout) for the
+/// acquire and `pool.execute()` (different checkout) for the release,
+/// so the lock leaked and every subsequent cycle skipped the cycle.
+///
+/// R2 returns the PoolConnection so the scheduler can hold it for the
+/// entire cycle and explicitly release on the same connection. The
+/// connection also serves any cycle-wide control queries (per-tenant
+/// transactions are still checked out from the pool — `pool.begin()` —
+/// because each tenant transaction needs its own commit boundary; the
+/// advisory lock itself only needs to live on the pinned connection).
+///
+/// Returns:
+///   * `Ok(Some(conn))` — lock acquired; caller proceeds with the cycle.
+///     Caller MUST call [`release_lock_conn`] on the returned connection
+///     when done.
+///   * `Ok(None)` — another instance holds the lock; caller skips the
+///     cycle and emits the stats_aggregator_skipped_lock_held metric.
+///
+/// Per spec §10 — Postgres session-level locks auto-release on session
+/// disconnect, so a panicking scheduler doesn't permanently leak. TCP
+/// keepalives govern stale-session detection (~ 2h Linux default;
+/// operators tune via tcp_keepalives_idle on the Postgres side).
+pub async fn try_acquire_lock_conn(
+    pool: &PgPool,
+) -> Result<Option<PoolConnection<Postgres>>, anyhow::Error> {
+    let mut conn = pool.acquire().await.context("acquire pool conn for advisory lock")?;
+    let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+        .bind(STATS_AGGREGATOR_ADVISORY_LOCK_ID)
+        .fetch_one(&mut *conn)
+        .await
+        .context("pg_try_advisory_lock")?;
     if acquired {
-        info!(lock_id = STATS_AGGREGATOR_ADVISORY_LOCK_ID, "acquired stats_aggregator advisory lock");
+        info!(
+            lock_id = STATS_AGGREGATOR_ADVISORY_LOCK_ID,
+            "acquired stats_aggregator advisory lock (pinned)"
+        );
+        Ok(Some(conn))
     } else {
-        info!(lock_id = STATS_AGGREGATOR_ADVISORY_LOCK_ID, "advisory lock held by another instance; skipping cycle");
+        info!(
+            lock_id = STATS_AGGREGATOR_ADVISORY_LOCK_ID,
+            "advisory lock held by another instance; skipping cycle"
+        );
+        // Drop the connection — return it to the pool. Postgres
+        // pg_try_advisory_lock returns FALSE without taking the lock,
+        // so there is nothing to release.
+        drop(conn);
+        Ok(None)
     }
-    Ok(acquired)
 }
 
-/// Release the advisory lock acquired by [`try_acquire_lock`]. Best-effort
-/// — caller wraps in a deferred-style guard. Failure to release is
-/// non-fatal (the lock will release when the session disconnects).
-pub async fn release_lock(pool: &PgPool) -> Result<(), anyhow::Error> {
-    let _ = sqlx::query("SELECT pg_advisory_unlock($1)")
+/// Release the advisory lock on the connection that acquired it.
+///
+/// R2 B2: must run on the same session that called
+/// `pg_try_advisory_lock` — Postgres bookkeeping is per-session. The
+/// connection is then dropped (returned to the pool).
+///
+/// Failure to release is non-fatal: the lock will release when the
+/// session disconnects (immediately on drop here, since we drop the
+/// connection at the end). We still surface the error so operators see
+/// any anomalies in the cycle metrics.
+pub async fn release_lock_conn(
+    mut conn: PoolConnection<Postgres>,
+) -> Result<(), anyhow::Error> {
+    sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(STATS_AGGREGATOR_ADVISORY_LOCK_ID)
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .context("pg_advisory_unlock")?;
-    debug!(lock_id = STATS_AGGREGATOR_ADVISORY_LOCK_ID, "released stats_aggregator advisory lock");
+    debug!(
+        lock_id = STATS_AGGREGATOR_ADVISORY_LOCK_ID,
+        "released stats_aggregator advisory lock"
+    );
     Ok(())
 }
 

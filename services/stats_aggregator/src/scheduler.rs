@@ -30,7 +30,8 @@ use tokio::time::interval;
 use tracing::{error, info, warn};
 
 use crate::aggregation::{
-    aggregate_output_distribution, discover_active_tenants, release_lock, try_acquire_lock,
+    aggregate_output_distribution, discover_active_tenants, release_lock_conn,
+    try_acquire_lock_conn,
 };
 use crate::drift_detector::{detect_and_emit, DriftAlertSink, DriftDetectorConfig};
 use crate::run_length::aggregate_run_length;
@@ -60,9 +61,13 @@ pub async fn run_one_cycle(
         error_count: 0,
     };
 
-    if !try_acquire_lock(pool).await.context("acquire lock")? {
-        return Ok(outcome);
-    }
+    // R2 B2: pin a PoolConnection for the entire cycle so the advisory
+    // lock acquire + release run on the same session. Per-tenant
+    // transactions are still checked out separately via pool.begin().
+    let lock_conn = match try_acquire_lock_conn(pool).await.context("acquire lock")? {
+        Some(c) => c,
+        None => return Ok(outcome),
+    };
     outcome.lock_acquired = true;
 
     // Run the cycle body — capture errors so we can still release the
@@ -71,7 +76,7 @@ pub async fn run_one_cycle(
     // session disconnect, but we want a clean release in normal flow).
     let cycle_result = run_cycle_body(pool, cfg, signer, sink, &mut outcome).await;
 
-    if let Err(e) = release_lock(pool).await {
+    if let Err(e) = release_lock_conn(lock_conn).await {
         warn!(error = %e, "release_lock failed (Postgres will auto-release on session disconnect)");
     }
 
