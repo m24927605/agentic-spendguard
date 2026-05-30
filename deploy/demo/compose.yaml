@@ -279,6 +279,37 @@ services:
       SPENDGUARD_TOKENIZER_REGION:               "demo"
       # Spec §5.3 health invariant — alerts when tier3_hits / total > 0.001.
       SPENDGUARD_TOKENIZER_TIER3_ALERT_THRESHOLD: "0.001"
+      # R3 N1 fix: SLICE_05 Tier 1 shadow worker activation. Without
+      # these the tokenizer falls back to drop-only mode and §8.5
+      # demo regression (drift_alert CloudEvent end-to-end) is
+      # unrealizable. Pattern mirrors the sidecar block at L619 —
+      # missing host vars resolve to "" so demo-up still boots; supply
+      # them via `make demo-up DEMO_MODE=agent_real_anthropic` (or any
+      # mode that exports ANTHROPIC_API_KEY / GEMINI_API_KEY) to flip
+      # the worker into active mode.
+      #
+      # SHADOW_ENABLED defaults true: the worker registers but no-ops
+      # when both provider keys are empty (honest demo: no provider
+      # call → no Tier 1 sample → no drift CloudEvent). With at least
+      # one key + DATABASE_URL + CANONICAL_INGEST_URL the worker
+      # produces real samples + emits the signed drift_alert event.
+      SPENDGUARD_TOKENIZER_SHADOW_ENABLED:           "${SPENDGUARD_TOKENIZER_SHADOW_ENABLED:-true}"
+      SPENDGUARD_TOKENIZER_ANTHROPIC_API_KEY:        "${ANTHROPIC_API_KEY:-}"
+      SPENDGUARD_TOKENIZER_GEMINI_API_KEY:           "${GEMINI_API_KEY:-}"
+      # Demo defaults: canonical_ingest reachable on the compose
+      # network at gRPC 50052 (plaintext for compose — Helm production
+      # profile rejects this and demands mTLS via the sink_tls_* fields
+      # below). database_url empty = in-memory persister (demo-only
+      # behaviour; production Helm profile rejects empty).
+      SPENDGUARD_TOKENIZER_CANONICAL_INGEST_URL:     "${SPENDGUARD_TOKENIZER_CANONICAL_INGEST_URL:-http://canonical-ingest:50052}"
+      SPENDGUARD_TOKENIZER_DATABASE_URL:             "${SPENDGUARD_TOKENIZER_DATABASE_URL:-}"
+      # R2 B4 outbound mTLS to canonical_ingest. Empty in compose mode
+      # (plaintext fallback documented above); set via Helm production
+      # profile. Surfaced here so an operator can flip on per-compose
+      # mTLS testing without editing this file.
+      SPENDGUARD_TOKENIZER_SINK_TLS_CERT_PEM:        "${SPENDGUARD_TOKENIZER_SINK_TLS_CERT_PEM:-}"
+      SPENDGUARD_TOKENIZER_SINK_TLS_KEY_PEM:         "${SPENDGUARD_TOKENIZER_SINK_TLS_KEY_PEM:-}"
+      SPENDGUARD_TOKENIZER_SINK_TLS_CA_PEM:          "${SPENDGUARD_TOKENIZER_SINK_TLS_CA_PEM:-}"
     volumes:
       # Round-2 fix B3.1: UDS volume for sidecar peer demo. Empty in
       # compose mode (no SPENDGUARD_TOKENIZER_UDS_PATH env) so the
