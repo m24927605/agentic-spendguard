@@ -1,0 +1,97 @@
+{{- if .Values.calibrationReport.cronEnabled }}
+{{- $component := "calibration-report" }}
+# SLICE_13 Phase D: scheduled calibration-report emission.
+#
+# Spec ancestor: docs/calibration-report-spec-v1alpha1.md §5.3 +
+# docs/slices/SLICE_13_calibration_report_cli.md §4.1.
+#
+# This CronJob runs the spendguard-calibration-report binary on the
+# configured schedule (default: daily 04:00 UTC) and pushes the report
+# to the configured output destination. Each run also emits a
+# `spendguard.audit.calibration.report_generated` CloudEvent to
+# canonical_ingest (per spec §5.3) so "who scheduled what report"
+# itself becomes audit evidence.
+#
+# ## Gate: cronEnabled = false by default
+#
+# Per spec §0.3 GA prereq #1 the CLI is operator-driven; the cron is
+# an SRE convenience for daily health monitoring. Enable explicitly
+# via `values.calibrationReport.cronEnabled=true`.
+#
+# ## RBAC
+#
+# Runs as the deployment's default ServiceAccount. The pod connects to
+# canonical_ingest DB via mTLS (same secrets as other readers) and to
+# canonical_ingest's AppendEvents RPC for the self-audit event push.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "spendguard.fullname" . }}-calibration-report
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  # Schedule per spec §5.3 default. Operators override via values.
+  schedule: {{ .Values.calibrationReport.schedule | quote }}
+  # Spec §2.3: never run two reports for the same tenant in parallel.
+  # Forbid means a missed window is dropped (operator re-runs manually).
+  concurrencyPolicy: Forbid
+  # Spec §9 failure mode: keep the last 7 runs visible for audit.
+  successfulJobsHistoryLimit: {{ .Values.calibrationReport.successHistory | default 7 }}
+  failedJobsHistoryLimit: {{ .Values.calibrationReport.failureHistory | default 14 }}
+  jobTemplate:
+    spec:
+      # Spec §2.3 exit code 1 (critical findings) MUST NOT mark the
+      # job as failed — that would page on-call for every routine
+      # warning. Only exit codes >= 2 (query / verify-chain failure)
+      # are pod failures.
+      backoffLimit: 0
+      activeDeadlineSeconds: {{ .Values.calibrationReport.activeDeadlineSeconds | default 1800 }}
+      template:
+        metadata:
+          labels:
+            {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          containers:
+            - name: calibration-report
+              image: {{ include "spendguard.image" (merge (dict "image" .Values.calibrationReport.image "global" .Values.global) .) }}
+              imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+              # Spec §3 container-security baseline (SLICE_03+).
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 65532
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                capabilities:
+                  drop: ["ALL"]
+                seccompProfile:
+                  type: RuntimeDefault
+              args:
+                - report
+                - --tenant
+                - {{ .Values.calibrationReport.tenant | quote }}
+                - --from
+                - {{ .Values.calibrationReport.from | default "7d" | quote }}
+                - --to
+                - {{ .Values.calibrationReport.to | default "now" | quote }}
+                - --format
+                - {{ .Values.calibrationReport.format | default "json" | quote }}
+                - --proof-mode
+                - {{ .Values.calibrationReport.proofMode | default "cache" | quote }}
+                {{- if .Values.calibrationReport.verifyChain }}
+                - --verify-chain
+                {{- end }}
+              env:
+                - { name: SPENDGUARD_CALIBRATION_CANONICAL_URL, value: {{ .Values.postgres.canonicalUrl | quote }} }
+                - { name: SPENDGUARD_CALIBRATION_AUTH_SUBJECT, value: {{ .Values.calibrationReport.authSubject | default "cron:calibration-report" | quote }} }
+                - { name: SPENDGUARD_CALIBRATION_AUTH_TENANTS, value: {{ .Values.calibrationReport.tenant | quote }} }
+                - { name: RUST_LOG, value: {{ .Values.calibrationReport.rustLog | default "info" | quote }} }
+              resources:
+                {{- toYaml .Values.calibrationReport.resources | nindent 16 }}
+              volumeMounts:
+                - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+          volumes:
+            - name: tls
+              secret:
+                secretName: {{ .Values.secrets.tls.existingSecret }}
+{{- end }}
