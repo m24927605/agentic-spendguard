@@ -69,6 +69,13 @@ envy = "0.4"
 futures-util = "0.3"
 bytes = "1"
 
+# SLICE_11 — provider routing table (regex inbound path matching) +
+# Lazy<Vec<ProviderConfig>> singletons. Both already in tree via
+# spendguard-tokenizer; egress_proxy adds them direct so the routing
+# table compiles once at process start.
+regex = "1"
+once_cell = "1"
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"

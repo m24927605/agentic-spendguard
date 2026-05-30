@@ -38,7 +38,9 @@ mod decision;
 mod forward;
 mod predictor_client;
 mod proto;
+mod providers;
 mod redacted_auth;
+mod routing;
 mod sidecar_client;
 
 #[derive(Debug, Deserialize, Clone)]

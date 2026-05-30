@@ -1,0 +1,313 @@
+{{- /* SLICE_11 Phase D — NetworkPolicy template for L2 bypass-resistance.
+
+Spec ref: docs/slices/SLICE_11_multi_provider_routing.md §2 + §9.5
+("NetworkPolicy enforcement actually blocks egress").
+
+L2 capability semantics (per README L2 row): the egress_proxy is the
+single hard-block enforcement point for external LLM API calls.
+Without a NetworkPolicy, an application pod can bypass the proxy by
+dialling api.openai.com (or any provider) directly — defeating the
+SpendGuard gating contract. This template makes L2 enforceable at
+the K8s level:
+
+  * default-deny egress for ALL pods in the release namespace,
+  * explicit allows only for:
+    - egress_proxy → external LLM provider hosts (port 443),
+    - app pods → egress_proxy (so they can submit LLM calls),
+    - SpendGuard internal services → each other (sidecar ↔
+      egress_proxy / tokenizer / output_predictor /
+      run_cost_projector / canonical_ingest / Postgres / DNS).
+
+Gating:
+  * .Values.networkPolicy.enabled — opt-in (default false in demo,
+    operators flip to true in production).
+  * chart.profile=production with networkPolicy.enabled=false requires
+    explicit acknowledgeNoNetworkPolicy=true (refuse to render
+    otherwise). This surfaces the L2 advisory-vs-enforced gap loudly.
+
+K8s schema compatibility:
+  * networking.k8s.io/v1 (stable since K8s 1.7 — Chart.yaml floor 1.24
+    covers this; spec §9.4 review question 4 answer).
+  * podSelector + namespaceSelector combinator works in K8s ≥ 1.21
+    (the chart's appVersion declares >=1.24.0 so this is safe).
+*/ -}}
+
+{{- if .Values.networkPolicy.enabled -}}
+{{- $fullname := include "spendguard.fullname" . -}}
+{{- $appNamespace := default .Release.Namespace .Values.networkPolicy.appNamespace -}}
+---
+# ────────────────────────────────────────────────────────────────────────
+# Default-deny egress: every pod with this label denies ALL egress unless
+# a sibling NetworkPolicy below explicitly allows it. Pods in this
+# namespace MUST opt-in to the SpendGuard L2 enforcement model by
+# carrying the `spendguard.io/enforced=true` label.
+#
+# This is the per-tenant kill switch: a pod not carrying the label is
+# untouched by L2 enforcement (gradual migration path). Pods carrying
+# the label can ONLY egress via the sidecar-pod-allow + provider-allow
+# policies below.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-default-deny-egress
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" "networkpolicy") .) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      spendguard.io/enforced: "true"
+  policyTypes:
+    - Egress
+  # Empty egress list = deny-all-egress for pods matching the selector.
+---
+# ────────────────────────────────────────────────────────────────────────
+# Allow enforced app pods to reach the egress_proxy. This is the only
+# permitted upstream egress for L2-enforced pods: app code MUST use the
+# proxy as the OpenAI/Anthropic/Bedrock/Vertex/Azure SDK base_url.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-app-to-egress-proxy
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" "networkpolicy") .) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      spendguard.io/enforced: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "spendguard.selector" (merge (dict "component" "egress-proxy") .) | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 9000 }
+---
+# ────────────────────────────────────────────────────────────────────────
+# Allow DNS lookup (UDP + TCP 53). Without this, ALL DNS resolution
+# fails inside enforced pods → connections to the egress_proxy
+# ClusterIP service can't be resolved by name.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-app-dns
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" "networkpolicy") .) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      spendguard.io/enforced: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# ────────────────────────────────────────────────────────────────────────
+# Allow egress_proxy → external LLM provider hosts (port 443/HTTPS).
+#
+# The set of providers is the SLICE_11 routing-table coverage:
+#   api.openai.com
+#   api.anthropic.com
+#   bedrock-runtime.{region}.amazonaws.com   (operator pins region)
+#   generativelanguage.googleapis.com        (Vertex)
+#   {azure_resource}.openai.azure.com        (Azure OpenAI; per-tenant)
+#
+# K8s NetworkPolicy egress.to.ipBlock only supports CIDR (no DNS), so
+# we ALLOW any external destination on port 443 from the egress_proxy
+# pod (loose). For tight pinning (operator-specific provider IPs),
+# operators replace this template with a CIDR allowlist via Helm
+# extraEgressRules. v1 ships the broad allow because:
+#   - External LLM provider IPs rotate frequently (CDN-fronted).
+#   - The L2 contract is "app pods CANNOT reach external LLM APIs
+#     directly"; the proxy can — operator's choice whether to
+#     additionally CIDR-restrict the proxy's egress.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-egress-proxy-to-providers
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" "networkpolicy") .) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" "egress-proxy") .) | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # External LLM providers — port 443 HTTPS.
+    - to:
+      {{- with .Values.networkPolicy.externalProviderCidrs }}
+      {{- range . }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+      {{- end }}
+      {{- else }}
+        # Default: allow all external (non-private) IPv4. Operators
+        # override via networkPolicy.externalProviderCidrs for tight
+        # CIDR pinning.
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      {{- end }}
+      ports:
+        - { protocol: TCP, port: 443 }
+    # DNS (resolve provider hostnames).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Postgres (audit_outbox writes).
+    {{- if .Values.networkPolicy.postgresCidrs }}
+    - to:
+      {{- range .Values.networkPolicy.postgresCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+      {{- end }}
+      ports:
+        - { protocol: TCP, port: 5432 }
+    {{- end }}
+---
+# ────────────────────────────────────────────────────────────────────────
+# Allow sidecar → egress_proxy / tokenizer / output_predictor /
+# run_cost_projector / canonical_ingest / Postgres / DNS.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-sidecar-internal
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" "networkpolicy") .) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" "sidecar") .) | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # egress_proxy (sidecar's UDS path is unaffected — same pod / hostPath;
+    # this allow is for the L4 fallback path when UDS hostPath disabled).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "spendguard.selector" (merge (dict "component" "egress-proxy") .) | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 9000 }
+    # tokenizer gRPC.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "spendguard.selector" (merge (dict "component" "tokenizer") .) | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 50053 }
+    # output_predictor gRPC.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "spendguard.selector" (merge (dict "component" "output-predictor") .) | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 50054 }
+    # run_cost_projector gRPC.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "spendguard.selector" (merge (dict "component" "run-cost-projector") .) | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 50055 }
+    # canonical_ingest gRPC (audit append).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "spendguard.selector" (merge (dict "component" "canonical-ingest") .) | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 50051 }
+    # ledger gRPC.
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "spendguard.selector" (merge (dict "component" "ledger") .) | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 50052 }
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Postgres.
+    {{- if .Values.networkPolicy.postgresCidrs }}
+    - to:
+      {{- range .Values.networkPolicy.postgresCidrs }}
+        - ipBlock:
+            cidr: {{ . | quote }}
+      {{- end }}
+      ports:
+        - { protocol: TCP, port: 5432 }
+    {{- end }}
+---
+# ────────────────────────────────────────────────────────────────────────
+# Allow egress_proxy → sidecar UDS (when UDS hostPath disabled, falls
+# back to gRPC over the cluster network). Also allows reaching the
+# tokenizer / predictor / projector that the proxy dials directly per
+# SLICE_10.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-egress-proxy-internal
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" "networkpolicy") .) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" "egress-proxy") .) | nindent 6 }}
+  policyTypes:
+    - Egress
+  egress:
+    # output_predictor gRPC (SLICE_10).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "spendguard.selector" (merge (dict "component" "output-predictor") .) | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 50054 }
+    # run_cost_projector gRPC (SLICE_10).
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "spendguard.selector" (merge (dict "component" "run-cost-projector") .) | nindent 14 }}
+      ports:
+        - { protocol: TCP, port: 50055 }
+{{- end -}}
+{{- /* SLICE_11 Phase D — production-profile gate.
+
+When chart.profile=production AND networkPolicy.enabled is false, we
+require the operator to explicitly acknowledge the L2 advisory-mode
+posture via acknowledgeNoNetworkPolicy=true. This makes the README's
+L2 promise enforceable at install time.
+*/ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- if not .Values.networkPolicy.enabled -}}
+{{- if not .Values.networkPolicy.acknowledgeNoNetworkPolicy -}}
+{{- fail "chart.profile=production requires networkPolicy.enabled=true OR explicit networkPolicy.acknowledgeNoNetworkPolicy=true (L2 advisory-mode opt-out). See README L2 capability row + docs/slices/SLICE_11_multi_provider_routing.md §9.5." -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

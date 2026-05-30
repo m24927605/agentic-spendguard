@@ -88,7 +88,9 @@ pub use error::TokenizerError;
 pub use tier3::tier3_fallback;
 pub use versions::{
     initial_seed_rows, slice04_seed_rows, TokenizerVersionId, TokenizerVersionRow,
-    HEURISTIC_FALLBACK_VERSION_ID,
+    ANTHROPIC_CLAUDE3_VERSION_ID, COHERE_COMMAND_R_VERSION_ID, GEMINI_15_VERSION_ID,
+    HEURISTIC_FALLBACK_VERSION_ID, LLAMA_31_VERSION_ID, TIKTOKEN_CL100K_BASE_VERSION_ID,
+    TIKTOKEN_O200K_BASE_VERSION_ID, TIKTOKEN_P50K_BASE_VERSION_ID,
 };
 
 /// Embedded sha256 manifest for the vendored encoder assets.
