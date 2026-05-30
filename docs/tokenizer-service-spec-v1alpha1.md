@@ -403,7 +403,7 @@ async fn shadow_loop(rx: Receiver<TokenizeEvent>) {
 |---|---|---|
 | `OPENAI_TIKTOKEN` | 0.0 (any drift) | tiktoken byte-exact；任何 drift 等於 vendor bug，立刻 alert |
 | `ANTHROPIC_BPE` | 0.01 (1%) | vendored BPE 可能落後 vendor 微調；1% threshold tolerate noise |
-| `GEMINI_BPE` | 0.01 (1%) | 同上 |
+| `GEMINI_BPE` | 0.01 (1%) | **R2 M5 honest disclosure**: vendored asset is Gemma approximation (Google's official Gemini tokenizer is API-only); 1% threshold absorbs the approximation gap. SLICE_05 shadow worker measures the actual delta against `countTokens` API in production; spec will revise the threshold per measured drift (or switch Gemini to Tier 1-only if the gap exceeds the SpendGuard accuracy promise). |
 | `COHERE_BPE` | 0.015 (1.5%) | Cohere tokenizer 較不穩定；threshold 略寬 |
 | `SENTENCEPIECE_LLAMA` | 0.005 (0.5%) | SentencePiece 配置精確；嚴格 threshold |
 
@@ -545,9 +545,36 @@ per `audit-chain-prediction-extension-v1alpha1.md` §2.1：每筆 decision audit
 |---|---|---|
 | `OPENAI_TIKTOKEN` | `tiktoken-rs` crate（Cargo dep） | MIT (OpenAI public) |
 | `ANTHROPIC_BPE` | 從 `@anthropic-ai/tokenizer` JS package port，或 reconstruct from Anthropic published BPE merges | MIT (Anthropic public) |
-| `GEMINI_BPE` | 從 Google AI published tokenizer files | Apache 2.0 (Google public) |
+| `GEMINI_BPE` | **Community Gemma approximation** (per R2 M5) — Google's official Gemini tokenizer is API-only; no vendored BPE merges file is available. We ship the Xenova/gemma-tokenizer mirror which exposes the open-source Gemma vocabulary. Spec §4.2 0.01 drift threshold accommodates the approximation gap; SLICE_05 shadow worker measures the residual against the official `countTokens` API. | Apache 2.0 (Gemma upstream) / MIT (Xenova mirror) |
 | `COHERE_BPE` | 從 Cohere SDK tokenizer files | MIT (Cohere) |
 | `SENTENCEPIECE_LLAMA` | Meta-released SentencePiece model files | Llama 2 Community License |
+
+#### 7.1 R2 M5 — Gemini approximation honest disclosure
+
+The v1alpha1 draft claimed `GEMINI_BPE` came "From Google AI published
+tokenizer files". This was inaccurate: Google publishes a `countTokens`
+REST endpoint, not a vendorable BPE merges file. The actual asset
+SpendGuard vendors is the open-source **Gemma tokenizer** released by
+Google AI under Apache 2.0, which shares the underlying BPE config that
+Google reports as a parity proxy for Gemini's `countTokens` semantics
+within ~1% on typical inputs.
+
+Implications:
+
+* The published `<1% delta per Google's parity table` claim in
+  R1's `encoders/gemini.rs` doc-comment is not citable — there is no
+  Google-published parity table for Gemma-vs-Gemini. The R2 comment
+  rewrites this as "approximation; drift threshold §4.2 accounts for
+  unknown gap" so future readers don't repeat the unsupported claim.
+* The `tokenizer_versions` `kind=GEMINI_BPE` row's `version_string`
+  remains `gemini-1.5-bpe-2026-05` (the SpendGuard-internal asset id);
+  the underlying asset URL pinned in
+  `crates/spendguard-tokenizer/LICENSE_NOTICES.md` correctly references
+  `huggingface.co/Xenova/gemma-tokenizer`.
+* If SLICE_05 production data shows >1% drift, the §4.2 threshold
+  widens to absorb measured drift OR we switch Gemini to a Tier 1-only
+  strategy (no Tier 2 hot path). Either path documented for operator
+  visibility.
 
 ### 7.2 Asset bundling
 

@@ -13,25 +13,32 @@
 //!
 //! Instead we use the open-source Gemma tokenizer (released by
 //! Google AI under Apache 2.0) as the closest publicly available
-//! approximation. The Gemma model family shares the same
-//! SentencePiece-based BPE config that Google reports works as a
-//! proxy for Gemini 1.5/2.0 for token-counting purposes; the actual
-//! delta is < 1% on typical inputs per Google's published
-//! `tokenizer` parity table (Gemma 1.0/2.0 release notes).
+//! approximation.
+//!
+//! ### R2 M5 honest disclosure (2026-05-30)
+//!
+//! The R1 doc-comment claimed `< 1% delta per Google's published
+//! parity table (Gemma 1.0/2.0 release notes)`. This was an
+//! unsupported assertion — Google does NOT publish a Gemma-vs-Gemini
+//! parity table. The actual gap between the Gemma vocab and the
+//! Gemini `countTokens` semantics is **unknown** until SLICE_05
+//! shadow worker measures it in production.
 //!
 //! Spec §4.2 prescribes a 0.01 (1%) drift threshold for the Gemini
-//! kind explicitly to absorb this approximation gap. SLICE_05 ships
-//! the shadow worker that calls the actual Gemini `countTokens` API
-//! at 1% sampling and emits drift_alert events when the cumulative
-//! gap exceeds threshold; if production data shows the gap is wider
-//! than the spec threshold, we will:
+//! kind to absorb the approximation gap. SLICE_05 ships the shadow
+//! worker that calls the actual Gemini `countTokens` API at 1%
+//! sampling and emits drift_alert events when the cumulative gap
+//! exceeds threshold; if production data shows the gap is wider than
+//! the spec threshold, we will:
 //!   1. Tighten the spec threshold (operator response).
 //!   2. Switch Gemini to a Tier 1-only strategy if Tier 2
 //!      approximation cannot meet the SpendGuard accuracy promise.
 //!
 //! For now we ship the Gemma approximation as Tier 2 source of truth;
 //! reservation accuracy is bounded by the 1% threshold and any
-//! drift becomes operator-visible via the shadow worker.
+//! drift becomes operator-visible via the shadow worker. The §4.2
+//! Gemini row rationale carries the same disclosure for cross-spec
+//! consistency.
 //!
 //! ## Envelope rules (SLICE_04 R2 M3 amendment)
 //!
