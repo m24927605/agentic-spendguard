@@ -27,7 +27,6 @@
 
 use sqlx::{PgPool, Row};
 use thiserror::Error;
-use tracing::warn;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]

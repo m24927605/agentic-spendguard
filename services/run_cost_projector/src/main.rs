@@ -15,6 +15,7 @@
 
 use std::net::SocketAddr;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
@@ -50,8 +51,28 @@ async fn main() -> Result<()> {
         "starting spendguard-run-cost-projector"
     );
 
-    // Phase A: Service skeleton — Phases B/C/D wire cache + signals + DB.
-    let svc = RunCostProjectorSvc::new();
+    // Phase D: Open the canonical_ingest DB pool when DATABASE_URL set
+    // (Signal 1 + audit-chain recovery). Empty URL → skeleton mode
+    // (Signal 1 always cold-starts; recovery returns Ok(None)).
+    let pool = if cfg.database_url.is_empty() {
+        warn!(
+            "DATABASE_URL not set — run_cost_projector running in skeleton mode \
+             (Signal 1 always cold-starts; audit-chain recovery disabled; demo only). \
+             Production Helm profile rejects this fallback."
+        );
+        None
+    } else {
+        let p = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&cfg.database_url)
+            .await
+            .context("connect to canonical_ingest DB for Signal 1 + audit-chain recovery")?;
+        info!("canonical_ingest DB pool connected");
+        Some(p)
+    };
+
+    let svc = RunCostProjectorSvc::new(cfg.clone(), pool);
     let tonic_svc = RunCostProjectorServer::new(svc).max_decoding_message_size(1 << 20);
 
     // Metrics server (best-effort, mirrors output_predictor pattern).
