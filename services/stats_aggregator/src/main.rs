@@ -243,19 +243,39 @@ async fn shutdown_signal() {
 }
 
 fn render_metrics() -> String {
-    "# HELP spendguard_stats_aggregator_cycles_total \
-     Total aggregation cycles attempted.\n\
-     # TYPE spendguard_stats_aggregator_cycles_total counter\n\
-     spendguard_stats_aggregator_cycles_total 0\n\
-     # HELP spendguard_stats_aggregator_skipped_lock_held_total \
-     Cycles skipped because the advisory lock was held by another instance.\n\
-     # TYPE spendguard_stats_aggregator_skipped_lock_held_total counter\n\
-     spendguard_stats_aggregator_skipped_lock_held_total 0\n\
-     # HELP spendguard_stats_aggregator_drift_alerts_total \
-     Total prediction_drift_alert CloudEvents emitted.\n\
-     # TYPE spendguard_stats_aggregator_drift_alerts_total counter\n\
-     spendguard_stats_aggregator_drift_alerts_total 0\n"
-        .to_string()
+    use std::sync::atomic::Ordering;
+    use spendguard_stats_aggregator::scheduler::{
+        CYCLES_TOTAL, CYCLE_ERROR_TOTAL, DRIFT_ALERTS_TOTAL, LAST_CYCLE_START_UNIX_SECS,
+        SKIPPED_LOCK_HELD_TOTAL,
+    };
+    // R2 M13: render the live AtomicU64 counters.
+    format!(
+        "# HELP spendguard_stats_aggregator_cycles_total \
+         Total aggregation cycles attempted.\n\
+         # TYPE spendguard_stats_aggregator_cycles_total counter\n\
+         spendguard_stats_aggregator_cycles_total {}\n\
+         # HELP spendguard_stats_aggregator_skipped_lock_held_total \
+         Cycles skipped because the advisory lock was held by another instance.\n\
+         # TYPE spendguard_stats_aggregator_skipped_lock_held_total counter\n\
+         spendguard_stats_aggregator_skipped_lock_held_total {}\n\
+         # HELP spendguard_stats_aggregator_drift_alerts_total \
+         Total prediction_drift_alert CloudEvents emitted.\n\
+         # TYPE spendguard_stats_aggregator_drift_alerts_total counter\n\
+         spendguard_stats_aggregator_drift_alerts_total {}\n\
+         # HELP spendguard_stats_aggregator_cycle_error_total \
+         Total per-cycle errors (tenant aggregation failures + sink failures).\n\
+         # TYPE spendguard_stats_aggregator_cycle_error_total counter\n\
+         spendguard_stats_aggregator_cycle_error_total {}\n\
+         # HELP spendguard_stats_aggregator_last_cycle_start_unix_secs \
+         Unix timestamp (seconds) of the last cycle attempt; 0 if no cycle yet.\n\
+         # TYPE spendguard_stats_aggregator_last_cycle_start_unix_secs gauge\n\
+         spendguard_stats_aggregator_last_cycle_start_unix_secs {}\n",
+        CYCLES_TOTAL.load(Ordering::Relaxed),
+        SKIPPED_LOCK_HELD_TOTAL.load(Ordering::Relaxed),
+        DRIFT_ALERTS_TOTAL.load(Ordering::Relaxed),
+        CYCLE_ERROR_TOTAL.load(Ordering::Relaxed),
+        LAST_CYCLE_START_UNIX_SECS.load(Ordering::Relaxed),
+    )
 }
 
 /// Minimal /metrics + /healthz + /readyz hyper server.

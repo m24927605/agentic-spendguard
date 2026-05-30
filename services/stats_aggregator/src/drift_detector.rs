@@ -64,18 +64,28 @@ fn suggest_action(z_score: f32) -> &'static str {
     }
 }
 
-/// Compute z-score per spec §7.1. Returns None when the inputs are
-/// insufficient (missing window or stddev_30d == 0 → undefined ratio).
+/// Compute z-score per spec §7.1.
+///
+/// R2 M2 (Software F5): baseline EXCLUDES the current 7-day window.
+/// R1 shape used mean_30d (which includes the last 7d) → baseline was
+/// contaminated by the very window we were comparing against, biasing
+/// z toward 0. Now we read baseline_mean / baseline_stddev which were
+/// computed over [now - 30d, now - 7d] (see aggregation.rs::agg_baseline).
+///
+/// Returns None when:
+///   * 7d window is missing (no current sample to compare)
+///   * baseline window is missing (new bucket; first activity in 7d)
+///   * baseline_stddev == 0 (all baseline samples identical → undefined ratio)
 pub fn compute_z_score(agg: &BucketAggregate) -> Option<f32> {
     let mean_7d = agg.mean_7d?;
-    let mean_30d = agg.mean_30d?;
-    let stddev_30d = agg.stddev_30d?;
-    if stddev_30d <= 0.0 {
-        // stddev_30d == 0 → all 30d samples were the same value.
+    let baseline_mean = agg.baseline_mean?;
+    let baseline_stddev = agg.baseline_stddev?;
+    if baseline_stddev <= 0.0 {
+        // baseline_stddev == 0 → all baseline samples identical.
         // Strict spec interpretation: z-score is undefined → no alert.
         return None;
     }
-    Some((mean_7d - mean_30d) / stddev_30d)
+    Some((mean_7d - baseline_mean) / baseline_stddev)
 }
 
 /// Decision predicate: should this bucket emit a drift alert?
@@ -95,13 +105,17 @@ pub fn should_emit_drift_alert(agg: &BucketAggregate, cfg: &DriftDetectorConfig)
 pub fn build_drift_alert(agg: &BucketAggregate, z_score: f32, cfg: &DriftDetectorConfig) -> CloudEvent {
     use bytes::Bytes;
     let now = Utc::now();
+    // R2 M2: payload reports baseline_* fields (window [now-30d, now-7d]
+    // — distinct from mean_30d which is the strategy-B cache baseline).
+    // Calibration-report consumers want both for trend analysis.
     let data = serde_json::json!({
         "tenant_id": agg.tenant_id.to_string(),
         "model": agg.model,
         "agent_id": agg.agent_id,
         "prompt_class": agg.prompt_class,
-        "baseline_mean_30d": agg.mean_30d,
-        "baseline_stddev_30d": agg.stddev_30d,
+        "baseline_mean": agg.baseline_mean,
+        "baseline_stddev": agg.baseline_stddev,
+        "baseline_sample_size": agg.baseline_sample_size,
         "current_mean_7d": agg.mean_7d,
         "z_score": z_score,
         "sample_size_7d": agg.sample_size_7d,
@@ -292,6 +306,10 @@ mod tests {
     }
 
     fn fixture_agg() -> BucketAggregate {
+        // R2 M2: baseline_* fields drive z-score. Configure so
+        // existing tests' z-values stay numerically identical:
+        // current = 150 (mean_7d), baseline = 100, baseline_stddev = 20
+        // → z = (150 - 100) / 20 = 2.5
         BucketAggregate {
             tenant_id: Uuid::new_v4(),
             model: "gpt-4o".into(),
@@ -303,6 +321,9 @@ mod tests {
             mean_30d: Some(100.0),
             stddev_30d: Some(20.0),
             sample_size_30d: Some(800),
+            baseline_mean: Some(100.0),
+            baseline_stddev: Some(20.0),
+            baseline_sample_size: Some(600),
         }
     }
 
@@ -315,17 +336,35 @@ mod tests {
     }
 
     #[test]
-    fn z_score_none_when_missing_30d_window() {
+    fn z_score_none_when_missing_baseline_window() {
+        // R2 M2: baseline (NOT mean_30d) drives the z calculation.
         let mut agg = fixture_agg();
-        agg.mean_30d = None;
+        agg.baseline_mean = None;
         assert!(compute_z_score(&agg).is_none());
     }
 
     #[test]
-    fn z_score_none_when_stddev_zero() {
+    fn z_score_none_when_baseline_stddev_zero() {
+        // R2 M2: baseline_stddev (NOT stddev_30d) is the denominator.
         let mut agg = fixture_agg();
-        agg.stddev_30d = Some(0.0);
+        agg.baseline_stddev = Some(0.0);
         assert!(compute_z_score(&agg).is_none());
+    }
+
+    #[test]
+    fn z_score_uses_baseline_excluding_current_window() {
+        // R2 M2 regression: mean_30d INCLUDES the current 7d, baseline
+        // EXCLUDES it. Verify drift_detector reads from baseline_*
+        // (the excluded form), not mean_30d. Construct a case where
+        // the two differ + assert the computed z reflects baseline_*.
+        let mut agg = fixture_agg();
+        agg.mean_30d = Some(140.0); // inclusive mean — close to mean_7d
+        agg.stddev_30d = Some(100.0); // inclusive stddev — would damp z
+        agg.baseline_mean = Some(100.0); // exclusive baseline
+        agg.baseline_stddev = Some(20.0); // exclusive baseline
+        // z must be (150 - 100) / 20 = 2.5, NOT (150 - 140) / 100 = 0.1.
+        let z = compute_z_score(&agg).expect("z");
+        assert!((z - 2.5).abs() < 1e-4, "z must use baseline_*, got {z}");
     }
 
     #[test]
@@ -393,7 +432,9 @@ mod tests {
             "model",
             "agent_id",
             "prompt_class",
-            "baseline_mean_30d",
+            "baseline_mean",
+            "baseline_stddev",
+            "baseline_sample_size",
             "current_mean_7d",
             "z_score",
             "sample_size_7d",

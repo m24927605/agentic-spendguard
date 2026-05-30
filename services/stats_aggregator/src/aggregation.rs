@@ -48,6 +48,21 @@ use uuid::Uuid;
 pub const STATS_AGGREGATOR_ADVISORY_LOCK_ID: i64 = 0x5350_4441_4747_5253_u64 as i64; // "SPDAGGRS"
 
 /// One bucket's pre-computed aggregate as read back for drift detection.
+///
+/// R2 M2 (Software F5): drift_detector::compute_z_score must use a
+/// baseline window that EXCLUDES the current 7d window. Spec §7.1:
+///
+/// ```text
+/// baseline_mean = mean over [now - 30d, now - 7d]
+/// baseline_stddev = stddev over [now - 30d, now - 7d]
+/// current_mean = mean_7d
+/// z = (current_mean - baseline_mean) / baseline_stddev
+/// ```
+///
+/// Previously we naively used mean_30d (which INCLUDES the last 7 days)
+/// as the baseline — the current window thus contributes to its own
+/// reference, biasing z toward 0 and masking real drift. The R2 fix
+/// adds dedicated baseline_* fields filled from a separate window query.
 #[derive(Debug, Clone)]
 pub struct BucketAggregate {
     pub tenant_id: Uuid,
@@ -60,6 +75,12 @@ pub struct BucketAggregate {
     pub mean_30d: Option<f32>,
     pub stddev_30d: Option<f32>,
     pub sample_size_30d: Option<i32>,
+    /// R2 M2: window over [now - 30d, now - 7d] — baseline used by
+    /// drift detector. Distinct from mean_30d (which is the full 30d
+    /// window for Strategy B's cache lookup).
+    pub baseline_mean: Option<f32>,
+    pub baseline_stddev: Option<f32>,
+    pub baseline_sample_size: Option<i32>,
 }
 
 /// Acquire the singleton advisory lock per spec §8.3 on a *pinned*
@@ -268,6 +289,36 @@ pub async fn aggregate_output_distribution(
     .await
     .context("aggregate 7d window")?;
 
+    // R2 M2: drift baseline — distinct window [now-30d, now-7d] that
+    // EXCLUDES the current 7d so the baseline doesn't contaminate the
+    // z-score. Same column shape as the other two queries.
+    let agg_baseline = sqlx::query(
+        r#"
+        SELECT
+          model,
+          agent_id,
+          prompt_class,
+          avg(actual_output_tokens)::REAL AS baseline_mean,
+          stddev_samp(actual_output_tokens)::REAL AS baseline_stddev,
+          count(*)::INT AS baseline_sample_size
+        FROM canonical_events
+        WHERE event_type = 'spendguard.audit.outcome'
+          AND actual_output_tokens IS NOT NULL
+          AND ingest_at < now() - interval '7 days'
+          AND ingest_at >= now() - interval '30 days'
+          AND recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
+          AND tenant_id = $1
+          AND model IS NOT NULL
+          AND agent_id IS NOT NULL
+          AND prompt_class IS NOT NULL
+        GROUP BY model, agent_id, prompt_class
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_all(&mut *tx)
+    .await
+    .context("aggregate drift baseline window [now-30d, now-7d]")?;
+
     // Stitch on (model, agent_id, prompt_class).
     use std::collections::HashMap;
     let mut by_key: HashMap<(String, String, String), BucketAggregate> = HashMap::new();
@@ -290,6 +341,9 @@ pub async fn aggregate_output_distribution(
                 mean_30d: r.try_get::<f32, _>("mean_30d").ok(),
                 stddev_30d: r.try_get::<f32, _>("stddev_30d").ok(),
                 sample_size_30d: r.try_get::<i32, _>("sample_size_30d").ok(),
+                baseline_mean: None,
+                baseline_stddev: None,
+                baseline_sample_size: None,
             },
         );
     }
@@ -310,10 +364,42 @@ pub async fn aggregate_output_distribution(
             mean_30d: None,
             stddev_30d: None,
             sample_size_30d: None,
+            baseline_mean: None,
+            baseline_stddev: None,
+            baseline_sample_size: None,
         });
         entry.mean_7d = r.try_get::<f32, _>("mean_7d").ok();
         entry.stddev_7d = r.try_get::<f32, _>("stddev_7d").ok();
         entry.sample_size_7d = r.try_get::<i32, _>("sample_size_7d").ok();
+    }
+    // R2 M2: stitch baseline window in. Buckets without any baseline
+    // data (new bucket; first activity is in the last 7 days) keep
+    // baseline_* None — drift_detector treats this as insufficient
+    // signal and skips the alert per the existing None-guard.
+    for r in &agg_baseline {
+        let k = (
+            r.get::<String, _>("model"),
+            r.get::<String, _>("agent_id"),
+            r.get::<String, _>("prompt_class"),
+        );
+        let entry = by_key.entry(k.clone()).or_insert_with(|| BucketAggregate {
+            tenant_id,
+            model: k.0.clone(),
+            agent_id: k.1.clone(),
+            prompt_class: k.2.clone(),
+            mean_7d: None,
+            stddev_7d: None,
+            sample_size_7d: None,
+            mean_30d: None,
+            stddev_30d: None,
+            sample_size_30d: None,
+            baseline_mean: None,
+            baseline_stddev: None,
+            baseline_sample_size: None,
+        });
+        entry.baseline_mean = r.try_get::<f32, _>("baseline_mean").ok();
+        entry.baseline_stddev = r.try_get::<f32, _>("baseline_stddev").ok();
+        entry.baseline_sample_size = r.try_get::<i32, _>("baseline_sample_size").ok();
     }
 
     // ── UPSERT into output_distribution_cache ────────────────────────
@@ -418,8 +504,12 @@ mod tests {
             mean_30d: Some(100.0),
             stddev_30d: Some(25.0),
             sample_size_30d: Some(150),
+            baseline_mean: Some(95.0),
+            baseline_stddev: Some(20.0),
+            baseline_sample_size: Some(120),
         };
         assert!(b.mean_7d.is_none());
         assert_eq!(b.sample_size_30d, Some(150));
+        assert_eq!(b.baseline_sample_size, Some(120));
     }
 }
