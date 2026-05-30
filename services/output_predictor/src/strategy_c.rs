@@ -348,11 +348,63 @@ pub async fn compute_c(
     }))
 }
 
-/// Map tonic Status codes to the spec §5.1 failure mode taxonomy.
-/// Unauthenticated → TlsError; DataLoss / Internal on a decode failure
-/// → DeserializationError; everything else → GrpcError(code).
+/// Map tonic Status codes + messages to the spec §5.1 failure mode
+/// taxonomy.
+///
+/// R2 M6 (Backend F2): the original implementation mapped purely on
+/// `Code` but the codes tonic surfaces in practice don't match the
+/// table we wanted:
+///   - TLS handshake failures wrap as `Code::Unavailable` (the connect
+///     path inside plugin_client.rs returns
+///     `tonic::Status::unavailable(format!("plugin connect failed: ..."))`),
+///     NOT `Code::Unauthenticated`. The router peeks at the message
+///     for known TLS sentinels (the literal "plugin connect failed",
+///     "TLS", "certificate", "fingerprint") to route handshake errors
+///     to `TlsError` so dashboards aren't blind to mTLS failures.
+///   - Decoder failures arrive as `Code::Internal` with messages
+///     mentioning "decode" / "DecodeError" / "invalid wire format" /
+///     "InvalidProtobuf", NOT `Code::DataLoss`. The router peeks at
+///     the message for these sentinels.
+///   - `Code::Unavailable` with a "not_serving" sentinel maps to
+///     `NotServing` (spec §5.1 mode 8) so the kill-switch surfaces.
 fn classify_status(status: &tonic::Status) -> StrategyCFailure {
-    match status.code() {
+    let code = status.code();
+    let msg = status.message();
+
+    // R2 M6: TLS sentinel — the plugin connect path in plugin_client.rs
+    // wraps connect failures as `tonic::Status::unavailable("plugin connect failed: ...")`,
+    // so a TLS error comes back as Unavailable + this sentinel rather
+    // than as Unauthenticated.
+    if msg.contains("plugin connect failed")
+        || msg.contains("tls handshake")
+        || msg.contains("TLS")
+        || msg.contains("certificate")
+        || msg.contains("fingerprint")
+    {
+        return StrategyCFailure::TlsError;
+    }
+
+    // R2 M6: Decoder failures — prost wraps decode errors as
+    // `tonic::Status::internal("invalid wire format")` (Code::Internal),
+    // NOT Code::DataLoss. Look for known sentinels.
+    if msg.contains("decode")
+        || msg.contains("DecodeError")
+        || msg.contains("invalid wire")
+        || msg.contains("InvalidProtobuf")
+    {
+        return StrategyCFailure::DeserializationError;
+    }
+
+    match code {
+        Code::DeadlineExceeded => StrategyCFailure::Timeout,
+        // R2 M6: NOT_SERVING signal piggybacks on Code::Unavailable
+        // (the plugin returns a Unavailable status when it sets its
+        // health to NOT_SERVING and refuses Predict). Distinct from
+        // a connect-level Unavailable (which we already routed to
+        // TlsError above based on message sentinels).
+        Code::Unavailable if msg.contains("not_serving") => StrategyCFailure::NotServing,
+        // Retain the spec §5.1-doc'd legacy mapping for clients that
+        // explicitly choose these codes.
         Code::Unauthenticated => StrategyCFailure::TlsError,
         Code::DataLoss => StrategyCFailure::DeserializationError,
         code => StrategyCFailure::GrpcError(code),
@@ -535,12 +587,62 @@ mod tests {
         // Per spec §5.1 row 6: deserialization error → DataLoss.
         let s = tonic::Status::data_loss("proto decode failed");
         assert_eq!(classify_status(&s), StrategyCFailure::DeserializationError);
-        // Everything else → GrpcError(code).
-        let s = tonic::Status::unavailable("plugin down");
+        // R2 M6: a plain Unavailable without TLS/NOT_SERVING sentinel
+        // routes to GrpcError(Unavailable). Use a message that doesn't
+        // accidentally contain any sentinel substring.
+        let s = tonic::Status::unavailable("backend offline");
         assert_eq!(
             classify_status(&s),
             StrategyCFailure::GrpcError(Code::Unavailable)
         );
+    }
+
+    // ─── R2 M6 — classify_status routing additions ───────────────────
+
+    #[test]
+    fn classify_status_unavailable_with_connect_sentinel_is_tls_error() {
+        // The plugin_client.rs connect path wraps TLS failures as
+        // `tonic::Status::unavailable("plugin connect failed: ...")`.
+        // Route on the message sentinel.
+        let s = tonic::Status::unavailable("plugin connect failed: tls handshake error");
+        assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
+    }
+
+    #[test]
+    fn classify_status_internal_with_decode_sentinel_is_deserialization_error() {
+        // prost decode failures arrive as Code::Internal + message
+        // mentioning "decode" / "invalid wire" / "DecodeError".
+        let s = tonic::Status::internal("invalid wire format: DecodeError");
+        assert_eq!(classify_status(&s), StrategyCFailure::DeserializationError);
+        let s = tonic::Status::internal("decode error at field 2");
+        assert_eq!(classify_status(&s), StrategyCFailure::DeserializationError);
+    }
+
+    #[test]
+    fn classify_status_unavailable_with_not_serving_sentinel_is_not_serving() {
+        // Spec §5.1 mode 8: NOT_SERVING signal from the plugin maps to
+        // `customer_predictor_not_serving`.
+        let s = tonic::Status::unavailable("plugin reports not_serving");
+        assert_eq!(classify_status(&s), StrategyCFailure::NotServing);
+    }
+
+    #[test]
+    fn classify_status_certificate_sentinel_is_tls_error() {
+        // A handshake error whose message mentions "certificate" or
+        // "fingerprint" (R2 B1 emits "fingerprint mismatch") routes
+        // to TlsError regardless of Code.
+        let s = tonic::Status::internal("certificate verify failed: leaf untrusted");
+        assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
+        let s = tonic::Status::unknown("fingerprint mismatch (expected aa..., got bb...)");
+        assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
+    }
+
+    #[test]
+    fn classify_status_deadline_exceeded_is_timeout() {
+        // Per spec §5.1 mode 1: Code::DeadlineExceeded → Timeout
+        // (previously fell through to GrpcError; M6 promotes it).
+        let s = tonic::Status::deadline_exceeded("predict 50ms cap");
+        assert_eq!(classify_status(&s), StrategyCFailure::Timeout);
     }
 
     #[test]

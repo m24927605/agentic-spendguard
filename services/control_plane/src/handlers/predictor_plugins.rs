@@ -180,6 +180,14 @@ pub struct RegisterResp {
 /// malformed input never reaches a transaction. CHECK constraints in
 /// the migration enforce the same shape at the row level; these are
 /// the user-friendly version.
+///
+/// R2 M4 (Security F8): under `SPENDGUARD_PROFILE=production` the
+/// endpoint_url MUST start with `https://` — plaintext http to a
+/// customer plugin endpoint violates spec §3.1 mTLS-only auth.
+/// Helm chart.profile=production blocks the input gate at chart
+/// render time; this handler-level enforcement defends against
+/// non-Helm production deployments (raw kubectl apply, custom
+/// orchestrators).
 fn validate_register_input(req: &RegisterReq) -> Result<Uuid, (StatusCode, String)> {
     let tenant_uuid = Uuid::parse_str(&req.tenant_id)
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid tenant_id: {e}")))?;
@@ -195,6 +203,7 @@ fn validate_register_input(req: &RegisterReq) -> Result<Uuid, (StatusCode, Strin
             ),
         ));
     }
+    enforce_https_under_production(&req.endpoint_url)?;
     if req.endpoint_url.len() > 2048 {
         return Err((
             StatusCode::BAD_REQUEST,
@@ -217,6 +226,22 @@ fn validate_register_input(req: &RegisterReq) -> Result<Uuid, (StatusCode, Strin
         ));
     }
     Ok(tenant_uuid)
+}
+
+/// R2 M4 — refuse `http://` plugin endpoints when running under
+/// `SPENDGUARD_PROFILE=production`. The env var name matches the one
+/// the Helm chart exports (see chart.profile=production); a non-Helm
+/// production deployment MUST set this env to opt into the gate.
+fn enforce_https_under_production(endpoint_url: &str) -> Result<(), (StatusCode, String)> {
+    let profile = std::env::var("SPENDGUARD_PROFILE").unwrap_or_default();
+    if profile == "production" && !endpoint_url.starts_with("https://") {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "endpoint_url must use https:// under SPENDGUARD_PROFILE=production \
+             (spec §3.1 mTLS-only auth)".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn is_lowercase_hex_64(s: &str) -> bool {
@@ -378,6 +403,13 @@ pub async fn update_plugin<S: PluginAppState>(
                 (StatusCode::BAD_REQUEST, "endpoint_url must start with http:// or https://")
                     .into_response(),
             );
+        }
+        // R2 M4 (Security F8): same https://-under-production gate as
+        // register_plugin. Without this, an operator could register
+        // with https:// (passes the chart gate), then PUT to flip the
+        // URL to http:// (which bypassed any gate before this fix).
+        if let Err((code, msg)) = enforce_https_under_production(url) {
+            return Err((code, msg).into_response());
         }
         if url.len() > 2048 {
             return Err(
@@ -851,5 +883,82 @@ mod tests {
         };
         let (code, _msg) = validate_register_input(&req).expect_err("oversize");
         assert_eq!(code, StatusCode::BAD_REQUEST);
+    }
+
+    // ─── R2 M4 — https://-under-production gate ──────────────────────
+    //
+    // These tests mutate SPENDGUARD_PROFILE — process-wide env var.
+    // Each test SAVES the original value at entry + RESTORES at exit
+    // so the test suite is order-independent. We hold a parking_lot
+    // mutex (`PROFILE_LOCK`) across the env mutation so the four
+    // tests don't race each other when run with `cargo test
+    // -- --test-threads=8`.
+
+    use std::sync::Mutex;
+    static PROFILE_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Set SPENDGUARD_PROFILE to a known value, run the test body,
+    /// restore. Returns the body's result so the caller can assert.
+    fn with_profile<F: FnOnce() -> R, R>(profile: Option<&str>, f: F) -> R {
+        let _g = PROFILE_LOCK.lock().expect("env mutex poisoned");
+        let original = std::env::var("SPENDGUARD_PROFILE").ok();
+        match profile {
+            Some(p) => std::env::set_var("SPENDGUARD_PROFILE", p),
+            None => std::env::remove_var("SPENDGUARD_PROFILE"),
+        }
+        let result = f();
+        match original {
+            Some(o) => std::env::set_var("SPENDGUARD_PROFILE", o),
+            None => std::env::remove_var("SPENDGUARD_PROFILE"),
+        }
+        result
+    }
+
+    #[test]
+    fn enforce_https_allows_http_under_demo() {
+        with_profile(Some("demo"), || {
+            assert!(enforce_https_under_production("http://plugin.example/predict").is_ok());
+        });
+    }
+
+    #[test]
+    fn enforce_https_allows_http_when_profile_unset() {
+        with_profile(None, || {
+            // Default (no env) treats as demo posture — http allowed.
+            assert!(enforce_https_under_production("http://plugin.example/predict").is_ok());
+        });
+    }
+
+    #[test]
+    fn enforce_https_rejects_http_under_production() {
+        with_profile(Some("production"), || {
+            let err =
+                enforce_https_under_production("http://plugin.example/predict").expect_err("blocked");
+            assert_eq!(err.0, StatusCode::BAD_REQUEST);
+            assert!(err.1.contains("https://"));
+            assert!(err.1.contains("SPENDGUARD_PROFILE=production"));
+        });
+    }
+
+    #[test]
+    fn enforce_https_accepts_https_under_production() {
+        with_profile(Some("production"), || {
+            assert!(enforce_https_under_production("https://plugin.example/predict").is_ok());
+        });
+    }
+
+    #[test]
+    fn validate_register_rejects_http_under_production() {
+        with_profile(Some("production"), || {
+            let req = RegisterReq {
+                tenant_id: Uuid::new_v4().to_string(),
+                endpoint_url: "http://plugin.example/predict".into(),
+                server_cert_fingerprint: "a".repeat(64),
+                client_cert_id: "spendguard-default".into(),
+            };
+            let (code, msg) = validate_register_input(&req).expect_err("blocked under production");
+            assert_eq!(code, StatusCode::BAD_REQUEST);
+            assert!(msg.contains("https://"));
+        });
     }
 }

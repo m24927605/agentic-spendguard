@@ -131,6 +131,12 @@ struct BreakerEntry {
     /// `Some(deadline)` while we are in Open. When the deadline elapses
     /// the next `permit_request` will transition the entry to HalfOpen.
     open_until: Option<Instant>,
+    /// R2 M5: HalfOpen probe budget. `true` while a probe is in flight;
+    /// subsequent permit_request callers in HalfOpen see SkipOpen until
+    /// the probe resolves via record_success / record_failure /
+    /// record_health_* (each of which clears this back to `false`).
+    /// Per spec §6.4 the half-open state allows exactly ONE probe.
+    half_open_probe_inflight: bool,
 }
 
 impl Default for BreakerEntry {
@@ -139,6 +145,7 @@ impl Default for BreakerEntry {
             state: BreakerStateName::Closed,
             consecutive_failures: 0,
             open_until: None,
+            half_open_probe_inflight: false,
         }
     }
 }
@@ -183,17 +190,41 @@ impl PluginCircuitBreaker {
     }
 
     /// Test-visible variant.
+    ///
+    /// R2 M5: HalfOpen now enforces a single-probe budget — the FIRST
+    /// caller per HalfOpen window gets `Permit::Allow` + sets
+    /// `half_open_probe_inflight = true`; subsequent callers see
+    /// `Permit::SkipOpen` until the inflight probe resolves (via any
+    /// `record_*` method, all of which clear the inflight flag).
+    /// Closed state remains unconditionally Allow (no concurrency
+    /// cap — the breaker fires on N consecutive failures regardless of
+    /// concurrency).
     pub fn permit_request_at(&self, tenant: &Uuid, now: Instant) -> Permit {
         let mut entries = self.entries.write();
         let entry = entries.entry(*tenant).or_default();
         match entry.state {
-            BreakerStateName::Closed | BreakerStateName::HalfOpen => Permit::Allow,
+            BreakerStateName::Closed => Permit::Allow,
+            BreakerStateName::HalfOpen => {
+                if entry.half_open_probe_inflight {
+                    // R2 M5: another probe is already in flight; skip
+                    // and fall to B silently. The probe will resolve
+                    // shortly and either close the breaker (this caller
+                    // is unaffected — we're already in fall-to-B) or
+                    // re-open it (this caller is correctly held off
+                    // until the next HalfOpen window).
+                    Permit::SkipOpen
+                } else {
+                    entry.half_open_probe_inflight = true;
+                    Permit::Allow
+                }
+            }
             BreakerStateName::Open => {
                 if let Some(until) = entry.open_until {
                     if now >= until {
                         // Move to HalfOpen and permit one probe.
                         entry.state = BreakerStateName::HalfOpen;
                         entry.open_until = None;
+                        entry.half_open_probe_inflight = true;
                         Permit::Allow
                     } else {
                         Permit::SkipOpen
@@ -202,6 +233,7 @@ impl PluginCircuitBreaker {
                     // Defensive — Open without deadline should never
                     // exist; recover by treating as HalfOpen.
                     entry.state = BreakerStateName::HalfOpen;
+                    entry.half_open_probe_inflight = true;
                     Permit::Allow
                 }
             }
@@ -211,12 +243,16 @@ impl PluginCircuitBreaker {
     /// Record success of a Predict call (real or probe). From either
     /// Closed or HalfOpen the breaker returns to Closed with a zeroed
     /// failure counter.
+    ///
+    /// R2 M5: clears `half_open_probe_inflight` so the next caller in
+    /// a future HalfOpen window can be the probe.
     pub fn record_success(&self, tenant: &Uuid) {
         let mut entries = self.entries.write();
         let entry = entries.entry(*tenant).or_default();
         entry.state = BreakerStateName::Closed;
         entry.consecutive_failures = 0;
         entry.open_until = None;
+        entry.half_open_probe_inflight = false;
     }
 
     /// Record failure of a Predict call. From Closed: increment counter;
@@ -229,6 +265,9 @@ impl PluginCircuitBreaker {
     }
 
     /// Test-visible variant.
+    ///
+    /// R2 M5: always clears `half_open_probe_inflight` so a probe
+    /// failure releases the budget for the next HalfOpen window.
     pub fn record_failure_at(&self, tenant: &Uuid, now: Instant) {
         let mut entries = self.entries.write();
         let entry = entries.entry(*tenant).or_default();
@@ -251,17 +290,22 @@ impl PluginCircuitBreaker {
                 entry.open_until = Some(now + self.config.open_duration);
             }
         }
+        entry.half_open_probe_inflight = false;
     }
 
     /// Operator-triggered reset per spec §6.3 (force-reset circuit
     /// breaker via control plane API). Returns to Closed with zeroed
     /// counter regardless of current state.
+    ///
+    /// R2 M5: clears inflight flag so a force-reset releases any
+    /// stuck HalfOpen probe budget.
     pub fn force_reset(&self, tenant: &Uuid) {
         let mut entries = self.entries.write();
         let entry = entries.entry(*tenant).or_default();
         entry.state = BreakerStateName::Closed;
         entry.consecutive_failures = 0;
         entry.open_until = None;
+        entry.half_open_probe_inflight = false;
     }
 
     /// R2 B2 — record a successful HealthCheck probe (driven by the
@@ -283,6 +327,7 @@ impl PluginCircuitBreaker {
         entry.state = BreakerStateName::Closed;
         entry.consecutive_failures = 0;
         entry.open_until = None;
+        entry.half_open_probe_inflight = false;
     }
 
     /// R2 B2 — record a failed HealthCheck probe. Per spec §6.3
@@ -303,6 +348,7 @@ impl PluginCircuitBreaker {
         entry.state = BreakerStateName::Open;
         entry.open_until = Some(now + self.config.open_duration);
         entry.consecutive_failures = self.config.failure_threshold;
+        entry.half_open_probe_inflight = false;
     }
 
     /// Read-only state snapshot for tests / metrics.
@@ -470,6 +516,106 @@ mod tests {
         assert_eq!(b.state_of(&k_a), BreakerStateName::Open);
         assert_eq!(b.state_of(&k_b), BreakerStateName::Closed);
         assert_eq!(b.permit_request(&k_b), Permit::Allow);
+    }
+
+    #[test]
+    fn half_open_probe_budget_serializes_concurrent_callers() {
+        // R2 M5 (Backend F1): only ONE caller per HalfOpen window may
+        // probe the plugin. Subsequent concurrent callers MUST see
+        // Permit::SkipOpen and silently fall to B.
+        let b = breaker();
+        let k = t(1);
+        let t0 = Instant::now();
+        for _ in 0..DEFAULT_FAILURE_THRESHOLD {
+            b.record_failure_at(&k, t0);
+        }
+        assert_eq!(b.state_of(&k), BreakerStateName::Open);
+        // First caller past the deadline gets the probe.
+        let after = t0 + Duration::from_millis(150);
+        assert_eq!(b.permit_request_at(&k, after), Permit::Allow);
+        assert_eq!(b.state_of(&k), BreakerStateName::HalfOpen);
+        // Concurrent second / third callers in the same HalfOpen window
+        // see SkipOpen because the probe is inflight.
+        assert_eq!(b.permit_request_at(&k, after), Permit::SkipOpen);
+        assert_eq!(b.permit_request_at(&k, after), Permit::SkipOpen);
+        // Probe resolves successfully → breaker closes + budget releases.
+        b.record_success(&k);
+        assert_eq!(b.state_of(&k), BreakerStateName::Closed);
+        // Closed permits unconditionally (no probe budget applies).
+        assert_eq!(b.permit_request_at(&k, after), Permit::Allow);
+    }
+
+    #[test]
+    fn half_open_probe_budget_released_on_failure() {
+        // After a probe failure → breaker re-opens. The next caller
+        // past the new deadline MUST be able to probe (not get stuck
+        // on a stale inflight flag).
+        let b = breaker();
+        let k = t(1);
+        let t0 = Instant::now();
+        for _ in 0..DEFAULT_FAILURE_THRESHOLD {
+            b.record_failure_at(&k, t0);
+        }
+        // Enter HalfOpen + take the probe budget.
+        let t_half_1 = t0 + Duration::from_millis(150);
+        assert_eq!(b.permit_request_at(&k, t_half_1), Permit::Allow);
+        // Probe fails → breaker re-opens with fresh deadline.
+        b.record_failure_at(&k, t_half_1);
+        assert_eq!(b.state_of(&k), BreakerStateName::Open);
+        // Past the new deadline (open_duration = 100ms in the test
+        // fixture) the next caller can probe again.
+        let t_half_2 = t_half_1 + Duration::from_millis(150);
+        assert_eq!(b.permit_request_at(&k, t_half_2), Permit::Allow);
+    }
+
+    #[test]
+    fn half_open_probe_budget_released_on_force_reset() {
+        let b = breaker();
+        let k = t(1);
+        let t0 = Instant::now();
+        for _ in 0..DEFAULT_FAILURE_THRESHOLD {
+            b.record_failure_at(&k, t0);
+        }
+        let after = t0 + Duration::from_millis(150);
+        assert_eq!(b.permit_request_at(&k, after), Permit::Allow);
+        // force_reset should clear the inflight flag.
+        b.force_reset(&k);
+        assert_eq!(b.state_of(&k), BreakerStateName::Closed);
+        // Closed permits regardless of budget, but a subsequent
+        // sequence (10 failures → Open → deadline → HalfOpen) should
+        // see the budget available.
+        for _ in 0..DEFAULT_FAILURE_THRESHOLD {
+            b.record_failure_at(&k, after);
+        }
+        let t_after_reset = after + Duration::from_millis(150);
+        assert_eq!(b.permit_request_at(&k, t_after_reset), Permit::Allow);
+    }
+
+    #[test]
+    fn half_open_probe_budget_released_on_health_signals() {
+        // Both record_health_ok and record_health_fail must release
+        // the inflight flag so the next HalfOpen window can probe.
+        let b = breaker();
+        let k = t(1);
+        let t0 = Instant::now();
+        for _ in 0..DEFAULT_FAILURE_THRESHOLD {
+            b.record_failure_at(&k, t0);
+        }
+        let after = t0 + Duration::from_millis(150);
+        assert_eq!(b.permit_request_at(&k, after), Permit::Allow);
+        // health_ok closes the breaker; inflight flag clears.
+        b.record_health_ok(&k);
+        // Now drive back to Open + HalfOpen and confirm the budget is
+        // available.
+        for _ in 0..DEFAULT_FAILURE_THRESHOLD {
+            b.record_failure_at(&k, after);
+        }
+        let later = after + Duration::from_millis(150);
+        assert_eq!(b.permit_request_at(&k, later), Permit::Allow);
+        // Same shape via record_health_fail.
+        b.record_health_fail_at(&k, later);
+        let later2 = later + Duration::from_millis(150);
+        assert_eq!(b.permit_request_at(&k, later2), Permit::Allow);
     }
 
     #[test]
