@@ -2,8 +2,104 @@
 #
 # Spec ref output-predictor-service-spec-v1alpha1.md §3.2.
 #
-# Phase C populates initial entries. Unknown models fall back to
+# Each entry maps a model identifier (as it appears in
+# `PredictRequest.model`) to its context window size in tokens. Used by
+# Strategy A when the caller does not supply `model_context_window`
+# explicitly (sidecar typically does — this table is the fallback).
+#
+# Unknown models fall back to
 # `SPENDGUARD_OUTPUT_PREDICTOR_UNKNOWN_MODEL_CONTEXT_WINDOW` (default 8000
 # per spec §3.3).
+#
+# Refresh cadence: same quarterly cadence as
+# `model_default_distribution.toml` (SLICE_08+). When vendors release
+# new models or change context windows, bump the entries here and ship
+# a new output_predictor binary.
+#
+# Sources (as of 2026-05-30):
+#   * OpenAI: https://platform.openai.com/docs/models
+#   * Anthropic: https://docs.anthropic.com/en/docs/models-overview
+#   * Google: https://ai.google.dev/gemini-api/docs/models/gemini
 
-# (Phase C will append [[entries]] here.)
+# ── OpenAI ──────────────────────────────────────────────────────────
+[[entries]]
+model = "gpt-4o"
+context_window = 128000
+
+[[entries]]
+model = "gpt-4o-mini"
+context_window = 128000
+
+[[entries]]
+model = "gpt-4o-2024-05-13"
+context_window = 128000
+
+[[entries]]
+model = "gpt-4o-2024-08-06"
+context_window = 128000
+
+[[entries]]
+model = "gpt-4-turbo"
+context_window = 128000
+
+[[entries]]
+model = "gpt-4"
+context_window = 8192
+
+[[entries]]
+model = "gpt-3.5-turbo"
+context_window = 16385
+
+# ── Anthropic Claude ─────────────────────────────────────────────────
+[[entries]]
+model = "claude-3-5-sonnet-20240620"
+context_window = 200000
+
+[[entries]]
+model = "claude-3-5-sonnet-20241022"
+context_window = 200000
+
+[[entries]]
+model = "claude-3-5-haiku-20241022"
+context_window = 200000
+
+[[entries]]
+model = "claude-3-opus-20240229"
+context_window = 200000
+
+[[entries]]
+model = "claude-3-sonnet-20240229"
+context_window = 200000
+
+[[entries]]
+model = "claude-3-haiku-20240307"
+context_window = 200000
+
+# ── Google Gemini ────────────────────────────────────────────────────
+[[entries]]
+model = "gemini-1.5-pro"
+context_window = 2000000
+
+[[entries]]
+model = "gemini-1.5-pro-001"
+context_window = 2000000
+
+[[entries]]
+model = "gemini-1.5-pro-002"
+context_window = 2000000
+
+[[entries]]
+model = "gemini-1.5-flash"
+context_window = 1000000
+
+[[entries]]
+model = "gemini-1.5-flash-001"
+context_window = 1000000
+
+[[entries]]
+model = "gemini-1.5-flash-002"
+context_window = 1000000
+
+[[entries]]
+model = "gemini-1.0-pro"
+context_window = 32000
