@@ -143,17 +143,32 @@ class SpendGuardAgentsModel(_AgentsModel):  # type: ignore[misc, valid-type]
         window_instance_id: str,
         unit: Any,
         pricing: Any,
-        claim_estimator: ClaimEstimator,
+        claim_estimator: ClaimEstimator | None = None,
     ) -> None:
         # Note: agents.Model is ABC with no shared state in __init__,
         # so we don't call super().__init__(). The inner model is what
         # actually owns the OpenAI client + retry logic.
+        #
+        # SLICE_12: when claim_estimator is None (default) or omitted,
+        # build one from the inner model's name via the dispatched
+        # default token estimator. Backward compat: explicit non-None
+        # claim_estimator wins (per spec §8.5).
         self._inner = inner
         self._client = client
         self._budget_id = budget_id
         self._window_instance_id = window_instance_id
         self._unit = unit
         self._pricing = pricing
+        if claim_estimator is None:
+            from ._default_estimator import openai_agents_default_claim_estimator
+
+            model_name = getattr(inner, "model", None) or ""
+            claim_estimator = openai_agents_default_claim_estimator(
+                budget_id=budget_id,
+                window_instance_id=window_instance_id,
+                unit=unit,
+                model=str(model_name),
+            )
         self._claim_estimator = claim_estimator
 
     async def get_response(

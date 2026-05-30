@@ -47,6 +47,7 @@ from .ids import (
     new_uuid7,
     workload_instance_id,
 )
+from .run_plan import RunPlan, current_run_plan, with_run_plan
 
 __all__ = [
     # client
@@ -75,6 +76,10 @@ __all__ = [
     "derive_uuid_from_signature",
     "new_uuid7",
     "workload_instance_id",
+    # run plan (Signal 3, SLICE_12)
+    "RunPlan",
+    "current_run_plan",
+    "with_run_plan",
 ]
 
-__version__ = "0.1.0a1"
+__version__ = "0.5.0"

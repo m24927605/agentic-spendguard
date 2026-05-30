@@ -242,7 +242,7 @@ class SpendGuardModel(_PydanticAIModel):
         window_instance_id: str,
         unit: common_pb2.UnitRef,
         pricing: common_pb2.PricingFreeze,
-        claim_estimator: ClaimEstimator,
+        claim_estimator: ClaimEstimator | None = None,
         call_signature_fn: CallSignatureFn | None = None,
         provider_event_id_extractor: Callable[["ModelResponse"], str] | None = None,
     ) -> None:
@@ -257,6 +257,23 @@ class SpendGuardModel(_PydanticAIModel):
         self._window_instance_id = window_instance_id
         self._unit = unit
         self._pricing = pricing
+        # SLICE_12: default claim_estimator from inner.model_name when
+        # caller omits it. Pydantic-AI Model exposes `.model_name`
+        # (validated against pydantic-ai 0.0.20+).
+        if claim_estimator is None:
+            from ._default_estimator import pydantic_ai_default_claim_estimator
+
+            model_name = (
+                getattr(inner, "model_name", None)
+                or getattr(inner, "model", None)
+                or ""
+            )
+            claim_estimator = pydantic_ai_default_claim_estimator(
+                budget_id=budget_id,
+                window_instance_id=window_instance_id,
+                unit=unit,
+                model=str(model_name),
+            )
         self._claim_estimator = claim_estimator
         self._call_signature_fn = call_signature_fn or default_call_signature
         self._provider_event_id_extractor = provider_event_id_extractor or (lambda _r: "")

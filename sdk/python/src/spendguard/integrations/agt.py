@@ -181,7 +181,12 @@ class SpendGuardCompositeEvaluator:
         window_instance_id: str,
         unit: Any,
         pricing: Any,
-        claim_estimator: ClaimEstimator,
+        claim_estimator: ClaimEstimator | None = None,
+        # SLICE_12: when ``claim_estimator`` is None, the default
+        # estimator dispatches via the ``model`` arg (read from the
+        # AGT payload's ``"model"`` key per call, or this fallback
+        # passed at construction).
+        default_model: str = "",
     ) -> None:
         self._agt = agt_evaluator
         self._client = spendguard_client
@@ -189,6 +194,34 @@ class SpendGuardCompositeEvaluator:
         self._window_instance_id = window_instance_id
         self._unit = unit
         self._pricing = pricing
+        if claim_estimator is None:
+            from ._default_estimator import agt_default_claim_estimator
+
+            inner_estimator = agt_default_claim_estimator(
+                budget_id=budget_id,
+                window_instance_id=window_instance_id,
+                unit=unit,
+                model=default_model,
+            )
+
+            # AGT payloads may carry a per-action ``"model"`` key that
+            # overrides the construction-time ``default_model``; the
+            # wrapper re-dispatches when it sees one.
+            def _per_call_default(payload: Mapping[str, Any]) -> list[Any]:
+                model_override = payload.get("model")
+                if not model_override or model_override == default_model:
+                    return inner_estimator(payload)
+                from ._default_estimator import agt_default_claim_estimator as _factory
+
+                per_call = _factory(
+                    budget_id=budget_id,
+                    window_instance_id=window_instance_id,
+                    unit=unit,
+                    model=str(model_override),
+                )
+                return per_call(payload)
+
+            claim_estimator = _per_call_default
         self._claim_estimator = claim_estimator
 
     async def evaluate(self, payload: Mapping[str, Any]) -> CompositeResult:

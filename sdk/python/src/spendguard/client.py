@@ -492,6 +492,15 @@ class SpendGuardClient:
             key=idempotency_key,
             request_hash=b"",  # let sidecar/ledger own canonical
         )
+        # SLICE_12: read the active RunPlan (Signal 3) from the
+        # context-var set by ``with_run_plan``. When no plan is active
+        # (``None``), we leave ``planned_steps_hint=0`` and the
+        # projector falls back to Signal 1 (history-induced) per
+        # `run-cost-projector-spec-v1alpha1.md` §5.2.
+        from .run_plan import current_run_plan
+
+        plan = current_run_plan()
+        planned_steps_hint = plan.planned_steps_hint if plan is not None else 0
         req = adapter_pb2.DecisionRequest(
             session_id=session_id,
             trigger=trigger_enum,
@@ -502,6 +511,7 @@ class SpendGuardClient:
             parent_run_id=parent_run_id,
             budget_grant_jti=budget_grant_jti,
             idempotency=idem,
+            planned_steps_hint=planned_steps_hint,
         )
 
         try:
