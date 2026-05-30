@@ -28,14 +28,21 @@ classifiers = [
 dependencies = [
   "grpcio>=1.62,<2",
   "grpcio-health-checking>=1.62,<2",
-  "protobuf>=4.25,<6",
+  # Aligned with committed _proto/ stubs (gencode marker 5.29.0
+  # emitted by grpcio-tools 1.69). See requirements.txt for the
+  # bump path when regenerating with grpcio-tools >= 1.71.
+  "protobuf>=5.29,<6",
   "numpy>=1.26,<3",
   "scikit-learn>=1.4,<2",
 ]
 
 [project.optional-dependencies]
 dev = [
-  "grpcio-tools>=1.62,<2",
+  # Upper bound 1.70 keeps gencode marker at 5.29.x so regen output
+  # stays runtime-compatible with the protobuf 5.x pin above.
+  # Bump the runtime + this ceiling together if you regen with
+  # grpcio-tools >= 1.71.
+  "grpcio-tools>=1.62,<1.70",
   "pytest>=8",
   "pytest-asyncio>=0.23",
   "ruff>=0.5",

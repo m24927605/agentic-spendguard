@@ -1,6 +1,7 @@
 # Local dev artifacts that should never be committed alongside the
 # template. Customers cloning the template inherit these gitignores.
 .venv/
+.venv-ci/
 venv/
 .env
 __pycache__/
