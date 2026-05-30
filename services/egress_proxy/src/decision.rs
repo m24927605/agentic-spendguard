@@ -1037,6 +1037,136 @@ mod tests {
         assert_eq!(parse_model_family(&body), "gpt-4o-mini-2024-07-18");
     }
 
+    // ── SLICE_11 Phase C — provider-aware tokenizer dispatch ─────────
+
+    #[tokio::test]
+    async fn estimate_call_cost_bedrock_anthropic_uses_anthropic_tokenizer() {
+        // Bedrock model id passed via the `model` field exercises the
+        // SLICE_04 tokenizer dispatch (anthropic.claude-3-5-sonnet-...
+        // → Anthropic BPE). This is the contract that SLICE_11 Phase C
+        // surfaces: the routing table extracts model_id from URL path
+        // for Bedrock, then passes it to estimate_call_cost, which then
+        // tokenize()s it via the existing tokenizer dispatch (no proxy-
+        // internal table duplication).
+        let tokenizer =
+            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let body = json!({
+            // Bedrock InvokeModel body — proxy preserves the body
+            // verbatim; the model_id from URL path is passed as `model`.
+            "messages": [{"role": "user", "content": "Hello from Bedrock"}],
+            "max_tokens": 256,
+            "anthropic_version": "bedrock-2023-05-31",
+        });
+        let inputs = EstimateInputs {
+            body: &body,
+            // Routing table's resolve_model_id extracted this from
+            // /model/anthropic.claude-3-5-sonnet-20240620-v1:0/invoke.
+            model: "anthropic.claude-3-5-sonnet-20240620-v1:0",
+            tenant_id: "00000000-0000-4000-8000-000000000001",
+            agent_id: "bedrock-agent",
+            run_id: "test-run",
+            decision_id: "test-decision",
+            step_id: "test-step",
+            prediction_policy: "STRICT_CEILING",
+            header_override_tokens: None,
+            planned_steps_hint: 0,
+        };
+        let est = estimate_call_cost(&inputs, &tokenizer, None, None).await;
+        // Should use Anthropic tokenizer (T2) per SLICE_04 dispatch.
+        assert_eq!(est.tokenizer_tier, "T2");
+        // The version id should be the Anthropic Claude 3 version, NOT
+        // an OpenAI tiktoken version. Verify via the version registry.
+        assert_eq!(
+            est.tokenizer_version_id,
+            spendguard_tokenizer::ANTHROPIC_CLAUDE3_VERSION_ID,
+            "Bedrock anthropic.claude-3-5-* should route to Anthropic BPE"
+        );
+    }
+
+    #[tokio::test]
+    async fn estimate_call_cost_bedrock_unknown_model_falls_to_tier3() {
+        // amazon.titan-* is not in the SLICE_04 narrow Option A
+        // dispatch; tokenizer should fall to Tier 3 (5% margin).
+        let tokenizer =
+            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let body = json!({"inputText": "Hello", "textGenerationConfig": {}});
+        let inputs = EstimateInputs {
+            body: &body,
+            model: "amazon.titan-text-express-v1",
+            tenant_id: "00000000-0000-4000-8000-000000000001",
+            agent_id: "bedrock-titan",
+            run_id: "test-run",
+            decision_id: "test-decision",
+            step_id: "test-step",
+            prediction_policy: "STRICT_CEILING",
+            header_override_tokens: None,
+            planned_steps_hint: 0,
+        };
+        let est = estimate_call_cost(&inputs, &tokenizer, None, None).await;
+        // Tier 3 fallback (5% margin via chars/4 × 1.05).
+        assert_eq!(est.tokenizer_tier, "T3");
+    }
+
+    #[tokio::test]
+    async fn estimate_call_cost_anthropic_native_uses_anthropic_tokenizer() {
+        // Anthropic native /v1/messages — model field holds e.g.
+        // "claude-3-5-sonnet-20241022".
+        let tokenizer =
+            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let body = json!({
+            "model": "claude-3-5-sonnet-20241022",
+            "messages": [{"role": "user", "content": "Hello Claude"}],
+            "max_tokens": 256,
+        });
+        let inputs = EstimateInputs {
+            body: &body,
+            model: "claude-3-5-sonnet-20241022",
+            tenant_id: "00000000-0000-4000-8000-000000000001",
+            agent_id: "anthropic-agent",
+            run_id: "test-run",
+            decision_id: "test-decision",
+            step_id: "test-step",
+            prediction_policy: "STRICT_CEILING",
+            header_override_tokens: None,
+            planned_steps_hint: 0,
+        };
+        let est = estimate_call_cost(&inputs, &tokenizer, None, None).await;
+        assert_eq!(est.tokenizer_tier, "T2");
+        assert_eq!(
+            est.tokenizer_version_id,
+            spendguard_tokenizer::ANTHROPIC_CLAUDE3_VERSION_ID
+        );
+    }
+
+    #[tokio::test]
+    async fn estimate_call_cost_gemini_uses_gemini_tokenizer() {
+        // Vertex generateContent — model id extracted from URL path
+        // (e.g. "gemini-1.5-pro").
+        let tokenizer =
+            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let body = json!({
+            "contents": [{"role": "user", "parts": [{"text": "Hello Gemini"}]}],
+        });
+        let inputs = EstimateInputs {
+            body: &body,
+            model: "gemini-1.5-pro",
+            tenant_id: "00000000-0000-4000-8000-000000000001",
+            agent_id: "vertex-agent",
+            run_id: "test-run",
+            decision_id: "test-decision",
+            step_id: "test-step",
+            prediction_policy: "STRICT_CEILING",
+            header_override_tokens: None,
+            planned_steps_hint: 0,
+        };
+        let est = estimate_call_cost(&inputs, &tokenizer, None, None).await;
+        assert_eq!(est.tokenizer_tier, "T2");
+        assert_eq!(
+            est.tokenizer_version_id,
+            spendguard_tokenizer::GEMINI_15_VERSION_ID
+        );
+    }
+
     #[test]
     fn parse_model_family_missing_returns_unknown() {
         let body = json!({});

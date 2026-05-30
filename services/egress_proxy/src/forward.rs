@@ -63,6 +63,17 @@ impl ApiKind {
     fn needs_include_usage_injection(self) -> bool {
         matches!(self, Self::ChatCompletions)
     }
+
+    /// SLICE_11 Phase C — the inbound path this api_kind handles. Used
+    /// to look up the routing table entry that drives upstream URL +
+    /// provider-aware model_id resolution (Bedrock embeds model in
+    /// path; others use body.model).
+    fn inbound_path(self) -> &'static str {
+        match self {
+            Self::ChatCompletions => "/v1/chat/completions",
+            Self::Responses => "/v1/responses",
+        }
+    }
 }
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
@@ -416,7 +427,46 @@ async fn forward_openai_request(
     // so the sidecar's audit_decision CloudEvent carries the entire
     // prediction story.
     let header_override = header_int(&headers, "x-spendguard-estimated-tokens");
-    let model_str = decision::parse_model_family(&parsed);
+    // SLICE_11 Phase C — provider-aware model resolution. For non-
+    // Bedrock providers this returns the body's `model` field (same
+    // as pre-SLICE_11). For Bedrock InvokeModel the model id lives
+    // in the URL path (`/model/{model_id}/invoke`); the routing table
+    // extracts it from the inbound path so estimate_call_cost passes
+    // the right model string to the tokenizer for SLICE_04 narrow-
+    // pattern dispatch (Anthropic / Cohere / Llama via the existing
+    // tokenizer dispatch table, with cross-region prefix support).
+    //
+    // OpenAI / Anthropic / Vertex / Azure OpenAI all use the body's
+    // model field so the existing parse_model_family fallback path
+    // continues to work; the routing helper just centralises the
+    // Bedrock special case in one place instead of branching inside
+    // estimate_call_cost.
+    let model_str = if let Some(cfg) = routing::route(api_kind.inbound_path()) {
+        let resolved = routing::resolve_model_id(cfg, api_kind.inbound_path(), &parsed);
+        // SLICE_11 Phase C — Bedrock per-model tokenizer kind dispatch.
+        // For OpenAI / Anthropic / Vertex / Azure OpenAI this just
+        // logs the static routing-table kind; for Bedrock it walks
+        // the SLICE_04 narrow Option A patterns and emits an unknown-
+        // model warning when the model id doesn't match any vendor
+        // pattern (spec §3.3 tokenizer_unknown_model metric).
+        match routing::resolve_tokenizer_kind(cfg, api_kind.inbound_path(), &parsed) {
+            Some(kind) => debug!(
+                provider = %cfg.kind.as_str(),
+                model = %resolved,
+                tokenizer_kind = ?kind,
+                "SLICE_11 routing: provider-aware tokenizer kind resolved"
+            ),
+            None => warn!(
+                provider = %cfg.kind.as_str(),
+                model = %resolved,
+                metric = "tokenizer_unknown_model",
+                "SLICE_11 routing: tokenizer kind not resolved; tokenizer will fall to Tier 3"
+            ),
+        }
+        resolved
+    } else {
+        decision::parse_model_family(&parsed)
+    };
     // SLICE_10 Phase B: agent_id sourced from header; falls back to "" so
     // output_predictor bucket key is the empty-bucket default (cold-start
     // chain handles missing data per spec §7).

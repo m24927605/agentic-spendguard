@@ -291,6 +291,63 @@ pub fn route(path: &str) -> Option<&'static ProviderConfig> {
         .find(|cfg| cfg.inbound_path_pattern.is_match(path))
 }
 
+/// SLICE_11 Phase C — resolve the upstream model identifier for a
+/// request given the inbound path + parsed body.
+///
+/// For most providers the model is in the body's `model` field; for
+/// Bedrock InvokeModel the model id is embedded in the URL path
+/// (`/model/{model_id}/invoke`) and the body shape varies per
+/// vendor. This function centralises the per-provider extraction so
+/// `decision::estimate_call_cost` receives the correct model string
+/// for tokenizer dispatch — without needing to know about Bedrock's
+/// path-based addressing.
+///
+/// Returns:
+///   * For OpenAI / Anthropic / Vertex / Azure OpenAI: the body's
+///     `model` field (or `"unknown"` if absent).
+///   * For Bedrock: the model_id from the URL path (via the
+///     `inbound_path_pattern` capture group 1).
+pub fn resolve_model_id(cfg: &ProviderConfig, path: &str, body: &Value) -> String {
+    match cfg.request_shape {
+        RequestShape::BedrockInvokeModel => cfg
+            .inbound_path_pattern
+            .captures(path)
+            .and_then(|c| c.get(1).map(|m| m.as_str().to_string()))
+            .unwrap_or_else(|| "unknown".to_string()),
+        _ => body
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string(),
+    }
+}
+
+/// SLICE_11 Phase C — resolve the tokenizer kind for a request.
+///
+/// For most providers the tokenizer kind is statically encoded in
+/// the ProviderConfig (e.g. OpenAI → OpenAi, Anthropic → Anthropic).
+/// For Bedrock, the per-model dispatch picks Anthropic / Cohere /
+/// Llama based on the model id (per
+/// `tokenizer-service-spec-v1alpha1.md` §3.1 + SLICE_04 R2 B1
+/// narrow Option A).
+///
+/// Returns `None` when Bedrock model id doesn't match any known
+/// vendor pattern; caller falls to Tier 3 + emits the
+/// `tokenizer_unknown_model` metric per spec §3.3.
+pub fn resolve_tokenizer_kind(
+    cfg: &ProviderConfig,
+    path: &str,
+    body: &Value,
+) -> Option<EncoderKind> {
+    match cfg.request_shape {
+        RequestShape::BedrockInvokeModel => {
+            let model_id = resolve_model_id(cfg, path, body);
+            crate::providers::bedrock::dispatch_tokenizer_kind(&model_id)
+        }
+        _ => Some(cfg.tokenizer_kind),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +452,91 @@ mod tests {
         assert_eq!(ProviderKind::Bedrock.as_str(), "bedrock");
         assert_eq!(ProviderKind::Vertex.as_str(), "vertex");
         assert_eq!(ProviderKind::AzureOpenAi.as_str(), "azure_openai");
+    }
+
+    #[test]
+    fn resolve_model_id_openai_from_body() {
+        let cfg = route("/v1/chat/completions").unwrap();
+        let body = serde_json::json!({"model": "gpt-4o-mini-2024-07-18"});
+        assert_eq!(
+            resolve_model_id(cfg, "/v1/chat/completions", &body),
+            "gpt-4o-mini-2024-07-18"
+        );
+    }
+
+    #[test]
+    fn resolve_model_id_bedrock_from_path() {
+        let path = "/model/anthropic.claude-3-5-sonnet-20240620-v1:0/invoke";
+        let cfg = route(path).unwrap();
+        let body = serde_json::json!({});
+        assert_eq!(
+            resolve_model_id(cfg, path, &body),
+            "anthropic.claude-3-5-sonnet-20240620-v1:0"
+        );
+    }
+
+    #[test]
+    fn resolve_model_id_bedrock_cross_region() {
+        let path = "/model/us.meta.llama3-1-70b-instruct-v1:0/invoke";
+        let cfg = route(path).unwrap();
+        let body = serde_json::json!({});
+        assert_eq!(
+            resolve_model_id(cfg, path, &body),
+            "us.meta.llama3-1-70b-instruct-v1:0"
+        );
+    }
+
+    #[test]
+    fn resolve_tokenizer_kind_bedrock_anthropic() {
+        let path = "/model/anthropic.claude-3-5-sonnet-20240620-v1:0/invoke";
+        let cfg = route(path).unwrap();
+        let body = serde_json::json!({});
+        assert_eq!(
+            resolve_tokenizer_kind(cfg, path, &body),
+            Some(EncoderKind::Anthropic)
+        );
+    }
+
+    #[test]
+    fn resolve_tokenizer_kind_bedrock_llama() {
+        let path = "/model/us.meta.llama3-1-70b-instruct-v1:0/invoke";
+        let cfg = route(path).unwrap();
+        let body = serde_json::json!({});
+        assert_eq!(
+            resolve_tokenizer_kind(cfg, path, &body),
+            Some(EncoderKind::Llama)
+        );
+    }
+
+    #[test]
+    fn resolve_tokenizer_kind_bedrock_unknown_returns_none() {
+        // Pre-Claude-3 / pre-Llama-3 / amazon.titan-* etc. fall to Tier 3.
+        let path = "/model/amazon.titan-text-express-v1/invoke";
+        let cfg = route(path).unwrap();
+        let body = serde_json::json!({});
+        assert_eq!(resolve_tokenizer_kind(cfg, path, &body), None);
+    }
+
+    #[test]
+    fn resolve_tokenizer_kind_openai_static() {
+        // Non-Bedrock providers always use the routing-table's static kind.
+        let cfg = route("/v1/chat/completions").unwrap();
+        let body = serde_json::json!({"model": "gpt-4o"});
+        assert_eq!(
+            resolve_tokenizer_kind(cfg, "/v1/chat/completions", &body),
+            Some(EncoderKind::OpenAi)
+        );
+    }
+
+    #[test]
+    fn resolve_tokenizer_kind_vertex_static() {
+        let path = "/v1/projects/p/locations/us/publishers/google/models/gemini-1.5-pro:generateContent";
+        let cfg = route(path).unwrap();
+        let body = serde_json::json!({});
+        assert_eq!(
+            resolve_tokenizer_kind(cfg, path, &body),
+            Some(EncoderKind::Gemini)
+        );
     }
 
     #[test]
