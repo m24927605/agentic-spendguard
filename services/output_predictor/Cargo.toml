@@ -17,6 +17,18 @@ path = "src/lib.rs"
 # Direct rustls dep so main() can install the aws_lc_rs default provider
 # (mirrors sidecar / ledger / tokenizer).
 rustls = "0.23"
+# R2 B1: cert fingerprint pinning via custom ServerCertVerifier wired
+# into a rustls ClientConfig + tokio-rustls connector, fed to tonic
+# via `Endpoint::connect_with_connector`. tonic 0.12's ClientTlsConfig
+# does NOT expose `dangerous().with_custom_certificate_verifier()`, so
+# the channel build path drops down to raw tokio-rustls + a tower
+# service_fn that performs TCP+TLS itself.
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+tower = { version = "0.5", features = ["util"] }
+# rustls-pemfile is already a transitive dep via tonic; pinned here so
+# parse_pinned_fingerprint + build_rustls_client_config can call it
+# directly.
+rustls-pemfile = "2"
 
 # gRPC + protobuf (server + client; client is for future SLICE_10 dispatch
 # from sidecar/egress_proxy).
@@ -36,6 +48,8 @@ async-stream = "0.3"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+# Uri parse for SNI extraction in plugin_client.rs (SLICE_07).
+http = "1"
 
 # Errors / logging
 thiserror = "1"

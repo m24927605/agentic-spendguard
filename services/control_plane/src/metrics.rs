@@ -31,6 +31,12 @@ pub enum Route {
     ListApprovals,
     GetApproval,
     ResolveApproval,
+    /// SLICE_07: Strategy C plugin endpoint registry.
+    RegisterPlugin,
+    GetPlugin,
+    UpdatePlugin,
+    DeletePlugin,
+    ForceResetPlugin,
     Healthz,
     /// Catch-all for routes not yet enumerated; surfaces churn before
     /// we forget to bump the enum.
@@ -47,6 +53,11 @@ impl Route {
             Self::ListApprovals => "list_approvals",
             Self::GetApproval => "get_approval",
             Self::ResolveApproval => "resolve_approval",
+            Self::RegisterPlugin => "register_plugin",
+            Self::GetPlugin => "get_plugin",
+            Self::UpdatePlugin => "update_plugin",
+            Self::DeletePlugin => "delete_plugin",
+            Self::ForceResetPlugin => "force_reset_plugin",
             Self::Healthz => "healthz",
             Self::Other => "other",
         }
@@ -63,6 +74,13 @@ impl Route {
             (&Method::GET, "/v1/approvals") => Self::ListApprovals,
             (&Method::GET, "/v1/approvals/:id") => Self::GetApproval,
             (&Method::POST, "/v1/approvals/:id/resolve") => Self::ResolveApproval,
+            (&Method::POST, "/v1/predictor/plugins") => Self::RegisterPlugin,
+            (&Method::GET, "/v1/predictor/plugins/:tenant_id") => Self::GetPlugin,
+            (&Method::PUT, "/v1/predictor/plugins/:tenant_id") => Self::UpdatePlugin,
+            (&Method::DELETE, "/v1/predictor/plugins/:tenant_id") => Self::DeletePlugin,
+            (&Method::POST, "/v1/predictor/plugins/:tenant_id/force-reset") => {
+                Self::ForceResetPlugin
+            }
             (&Method::GET, "/healthz") => Self::Healthz,
             _ => Self::Other,
         }
@@ -84,7 +102,7 @@ impl Outcome {
     }
 }
 
-const ROUTE_COUNT: usize = 9;
+const ROUTE_COUNT: usize = 14;
 
 #[derive(Default)]
 pub struct ControlPlaneMetricsInner {
@@ -143,6 +161,11 @@ const ALL_ROUTES: &[Route] = &[
     Route::ListApprovals,
     Route::GetApproval,
     Route::ResolveApproval,
+    Route::RegisterPlugin,
+    Route::GetPlugin,
+    Route::UpdatePlugin,
+    Route::DeletePlugin,
+    Route::ForceResetPlugin,
     Route::Healthz,
     Route::Other,
 ];
@@ -156,8 +179,13 @@ fn route_index(r: Route) -> usize {
         Route::ListApprovals => 4,
         Route::GetApproval => 5,
         Route::ResolveApproval => 6,
-        Route::Healthz => 7,
-        Route::Other => 8,
+        Route::RegisterPlugin => 7,
+        Route::GetPlugin => 8,
+        Route::UpdatePlugin => 9,
+        Route::DeletePlugin => 10,
+        Route::ForceResetPlugin => 11,
+        Route::Healthz => 12,
+        Route::Other => 13,
     }
 }
 

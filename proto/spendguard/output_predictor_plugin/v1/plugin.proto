@@ -1,0 +1,160 @@
+// SpendGuard customer-trained output predictor plugin contract.
+//
+// Spec refs:
+//   - output-predictor-plugin-contract-v1alpha1.md §2 (proto)
+//   - output-predictor-plugin-contract-v1alpha1.md §3 (mTLS authentication)
+//   - output-predictor-plugin-contract-v1alpha1.md §4 (50ms hard cap)
+//   - output-predictor-plugin-contract-v1alpha1.md §5 (8 failure modes)
+//   - output-predictor-plugin-contract-v1alpha1.md §6 (circuit breaker)
+//   - output-predictor-plugin-contract-v1alpha1.md §7 (multi-tenant isolation)
+//
+// This file is shipped to customers and is the public ABI for the
+// Strategy C delegated predictor. Treat it as frozen except via proto3
+// additive evolution and 12-month deprecation notice for any breaking
+// change (per spec §0.4 + §11.2).
+//
+// Field-number convention mirrors common.proto:
+//   - 1..15  : latency-hot fields (single-byte varint tag)
+//   - 16..   : additive / cold fields
+//
+// Compatibility: proto3 additive evolution; new fields appended at the
+// next available tag. Plugin authors SHOULD log unknown fields received
+// (forward-compat with future SpendGuard additions per spec §2.2).
+
+syntax = "proto3";
+
+package spendguard.output_predictor_plugin.v1;
+
+import "google/protobuf/timestamp.proto";
+
+// Customer-trained output predictor plugin.
+//
+// SpendGuard's output_predictor calls Predict synchronously on the
+// 50ms hot path per spec §4. The plugin MUST respond within 50ms;
+// any later = timeout = fall to Strategy B per spec §5.1.
+//
+// HealthCheck is called every 30s by the circuit breaker per spec §6.3.
+// Not on hot path. NOT_SERVING means SpendGuard skips Predict for this
+// tenant until HealthCheck returns SERVING again.
+service CustomerPredictor {
+  rpc Predict(PredictRequest) returns (PredictResponse);
+  rpc HealthCheck(HealthCheckRequest) returns (HealthCheckResponse);
+}
+
+message PredictRequest {
+  // SpendGuard-assigned per-call identifier (UUIDv7). Used by the
+  // plugin for telemetry. Half-open probe calls use the `probe-` prefix
+  // per spec §6.4 — plugins may treat probes identically to real calls
+  // or fast-path return a known-good response.
+  string spendguard_call_id = 1;
+
+  // Tenant identifier (UUIDv7 string form). SpendGuard validates that
+  // this matches the configured endpoint's tenant before issuing the
+  // RPC (per spec §7.3 enforcement). The plugin SHOULD additionally
+  // verify the tenant_id matches its configured expected tenant; a
+  // mismatch indicates a SpendGuard misconfiguration and plugins MAY
+  // reject with INVALID_ARGUMENT.
+  string tenant_id = 2;
+
+  // Model string (e.g. "gpt-4o", "claude-3-5-sonnet-20240620").
+  string model = 3;
+
+  // Agent identifier (customer-defined). Allows the plugin's model to
+  // segment predictions per-agent if the training corpus supports it.
+  string agent_id = 4;
+
+  // Server-classified prompt class label (one of the 7 enum values
+  // per `output-predictor-service-spec-v1alpha1.md` §8.1):
+  //   chat_short | chat_long | code_gen | summarization | rag |
+  //   tool_calling | vision
+  string prompt_class = 5;
+
+  // Exact input token count from the tokenizer service.
+  int64 input_tokens = 6;
+
+  // Caller-requested max_tokens (request.max_tokens). 0 = unset
+  // (proto3 default; caller did not specify a cap). Plugins MAY use
+  // this as an upper bound hint but the SpendGuard side enforces the
+  // hard ceiling via Strategy A regardless of plugin output.
+  int64 max_tokens_requested = 7;
+
+  // Classifier version stamp from SpendGuard at decision time. Plugins
+  // can correlate audit drift with classifier-version-at-decision when
+  // SpendGuard upgrades the classifier mid-rollout.
+  string classifier_version = 8;
+
+  // Optional fingerprint of the (model, prompt_class) bucket.
+  // SpendGuard echoes this back into the audit row; plugins MAY use
+  // it as part of their training-corpus bucketing key.
+  string prompt_class_fingerprint = 9;
+
+  // Optional context features SpendGuard surfaces to help the plugin.
+  // Plugins may ignore (the proto allows new ContextFeatures fields to
+  // be added at higher tags without breaking older plugins).
+  ContextFeatures features = 10;
+
+  message ContextFeatures {
+    int32 conversation_depth = 1;       // messages.length proxy
+    bool has_tool_calls = 2;
+    bool has_system_message = 3;
+    int32 num_tool_definitions = 4;
+    string user_role_hint = 5;          // "first" | "continuation" | "tool_response"
+    google.protobuf.Timestamp request_time = 6;
+  }
+}
+
+message PredictResponse {
+  // Predicted output tokens. MUST be > 0 and <= model context window.
+  // SpendGuard validates; out-of-range = treated as plugin error per
+  // spec §5.1 (mode `customer_predictor_invalid_zero_or_negative` /
+  // `customer_predictor_invalid_overflow`).
+  int64 predicted_output_tokens = 1;
+
+  // Plugin's self-reported confidence in the prediction.
+  // 0.0 - 1.0; SpendGuard writes to audit `prediction_confidence`.
+  // Out-of-range = treated as plugin error per spec §5.1
+  // (mode `customer_predictor_invalid_confidence`).
+  float confidence = 2;
+
+  // Sample size the plugin used to derive this prediction. 0 = N/A
+  // (plugin training corpus size unknown). Surfaced to audit
+  // `prediction_sample_size`.
+  int32 sample_size = 3;
+
+  // Plugin internal version (for audit/diagnostics). Format opaque to
+  // SpendGuard. Surfaced via metric `customer_predictor_call_total`
+  // labels in v1beta1.
+  string plugin_version = 4;
+
+  // Plugin feature hash so SpendGuard can correlate audit drift with
+  // plugin training/version changes. Format opaque to SpendGuard.
+  string feature_hash = 5;
+}
+
+message HealthCheckRequest {
+  // Empty per spec §2.1. Reserved for future per-tenant or per-model
+  // selectors.
+}
+
+message HealthCheckResponse {
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    // Plugin healthy and ready to answer Predict.
+    SERVING = 1;
+    // Plugin can answer but quality degraded (e.g. model retrain
+    // underway). SpendGuard still calls Predict but tags audit with
+    // a `degraded` label for v1beta1 telemetry.
+    DEGRADED = 2;
+    // Plugin is not ready; do not call Predict. SpendGuard skips C
+    // and falls to Strategy B silently per spec §5.1 / §6.3.
+    NOT_SERVING = 3;
+  }
+  Status status = 1;
+
+  // Plugin self-reported version (for control plane diagnostics).
+  string plugin_version = 2;
+
+  // When the plugin computed this health response (for staleness
+  // detection at SpendGuard side).
+  google.protobuf.Timestamp checked_at = 3;
+}

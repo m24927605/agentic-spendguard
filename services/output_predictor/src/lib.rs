@@ -32,14 +32,18 @@
 //! [`output-predictor-service-spec-v1alpha1.md`]: ../../docs/output-predictor-service-spec-v1alpha1.md
 
 pub mod cache;
+pub mod circuit_breaker;
 pub mod classifier;
 pub mod config;
 pub mod context_window;
+pub mod endpoint_cache;
 pub mod fingerprint;
+pub mod plugin_client;
 pub mod selector;
 pub mod server;
 pub mod strategy_a;
 pub mod strategy_b;
+pub mod strategy_c;
 
 /// Generated protobuf types — `tonic::include_proto!` requires this
 /// module path so server / client codegen lands inside the crate's
@@ -48,6 +52,15 @@ pub mod proto {
     pub mod output_predictor {
         pub mod v1 {
             tonic::include_proto!("spendguard.output_predictor.v1");
+        }
+    }
+    /// SLICE_07: customer-trained Strategy C plugin proto. Client stub
+    /// is used by `crate::plugin_client` + `crate::strategy_c` to dial
+    /// the customer-hosted Predict + HealthCheck endpoints per
+    /// `output-predictor-plugin-contract-v1alpha1.md` §2.1.
+    pub mod output_predictor_plugin {
+        pub mod v1 {
+            tonic::include_proto!("spendguard.output_predictor_plugin.v1");
         }
     }
 }

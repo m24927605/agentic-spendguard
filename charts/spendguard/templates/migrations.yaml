@@ -125,10 +125,20 @@ spec:
                   psql "$PG_CANONICAL_URL" -v ON_ERROR_STOP=1 -f "$f"
                   applied=$((applied + 1))
               done
+              # R2 M3 (Security F5): control_plane migrations apply against
+              # the separate spendguard_control_plane DB. The ConfigMap is
+              # OPTIONAL — if absent, no-op. Production helm-validate-kind.sh
+              # regenerates all three ConfigMaps in lockstep.
+              for f in $(ls /etc/migrations/control-plane/*.sql 2>/dev/null | sort); do
+                  echo "[migrate] applying $f to spendguard_control_plane..."
+                  psql "$PG_CONTROL_PLANE_URL" -v ON_ERROR_STOP=1 -f "$f"
+                  applied=$((applied + 1))
+              done
               if [ "$applied" -eq 0 ]; then
-                  echo "[migrate] no SQL files found in /etc/migrations/{ledger,canonical}/."
+                  echo "[migrate] no SQL files found in /etc/migrations/{ledger,canonical,control-plane}/."
                   echo "[migrate] Operator must mount the {{ .Values.migrations.ledgerConfigMapName | default "spendguard-migrations-ledger" }} +"
-                  echo "[migrate] {{ .Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical" }} ConfigMaps OR"
+                  echo "[migrate] {{ .Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical" }} +"
+                  echo "[migrate] {{ .Values.migrations.controlPlaneConfigMapName | default "spendguard-migrations-control-plane" }} ConfigMaps OR"
                   echo "[migrate] override migrations.applyMigrationsOnInstall=false + run migrations out-of-band."
                   echo "[migrate] Job exits 0 so helm install can complete."
               else
@@ -139,12 +149,17 @@ spec:
               value: {{ .Values.postgres.ledgerUrl | quote }}
             - name: PG_CANONICAL_URL
               value: {{ .Values.postgres.canonicalUrl | quote }}
+            - name: PG_CONTROL_PLANE_URL
+              value: {{ .Values.postgres.controlPlaneUrl | quote }}
           volumeMounts:
             - name: migrations-ledger
               mountPath: /etc/migrations/ledger
               readOnly: true
             - name: migrations-canonical
               mountPath: /etc/migrations/canonical
+              readOnly: true
+            - name: migrations-control-plane
+              mountPath: /etc/migrations/control-plane
               readOnly: true
           resources:
             {{- toYaml .Values.migrations.resources | nindent 12 }}
@@ -156,5 +171,9 @@ spec:
         - name: migrations-canonical
           configMap:
             name: {{ .Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical" }}
+            optional: true
+        - name: migrations-control-plane
+          configMap:
+            name: {{ .Values.migrations.controlPlaneConfigMapName | default "spendguard-migrations-control-plane" }}
             optional: true
 {{- end }}

@@ -77,7 +77,14 @@ secrets:
 postgres:
   ledgerUrl: "postgres://spendguard:CHANGE_ME@postgres:5432/spendguard_ledger"
   canonicalUrl: "postgres://spendguard:CHANGE_ME@postgres:5432/spendguard_canonical"
-  # Apply ledger + canonical SQL migrations on chart install via hook.
+  # R2 M3 (Security F5): control_plane DB now owns the SLICE_07
+  # predictor_plugin_endpoints registry + the control_plane_audit_outbox
+  # table introduced in R2 M1. Co-located on the same Postgres server
+  # as ledger/canonical by default (separate logical DB to keep
+  # schema/RLS surfaces independent); operators can point at a
+  # different host for production isolation.
+  controlPlaneUrl: "postgres://spendguard:CHANGE_ME@postgres:5432/spendguard_control_plane"
+  # Apply ledger + canonical + control_plane SQL migrations on chart install via hook.
   applyMigrationsOnInstall: true
 
 # Per-service overrides
@@ -304,6 +311,30 @@ outputPredictor:
   cacheTtlSeconds: 300
   # Unknown-model context window fallback per spec §3.3.
   unknownModelContextWindow: 8000
+  # ── SLICE_07: Strategy C plugin wiring ──────────────────────────
+  # per output-predictor-plugin-contract-v1alpha1.md.
+  # Empty pluginEndpointDatabaseUrl = Strategy C skeleton mode:
+  # every tenant lookup returns NotConfigured so Predict falls to
+  # Strategy B silently (per spec §11). Setting this enables
+  # Strategy C and REQUIRES pluginClientSecretName under
+  # chart.profile=production (production gate enforces).
+  # Distinct from databaseUrl because the registry lives in
+  # control_plane DB while output_distribution_cache lives in
+  # canonical_ingest DB; separate pools per spec §8.
+  pluginEndpointDatabaseUrl: ""
+  # Plugin endpoint cache TTL (spec §6.3 — 30s health-check cadence
+  # implies cache TTL ≤ 30s; R2 M2 tightened the default to 5s so a
+  # control plane mutation (POST/PUT/DELETE/force-reset) is observed
+  # by the predictor within at most 5s. Spec §11 documents this as
+  # the eventual-consistency window operator contract. Tighter
+  # consistency requires the cache_revision_at column approach
+  # tracked as a follow-up GH issue.
+  pluginEndpointCacheTtlSeconds: 5
+  # Secret name carrying SpendGuard's client cert + key + the
+  # customer trust CA (PEMs under keys tls.crt / tls.key / ca.crt).
+  # Required under chart.profile=production when Strategy C is
+  # enabled. Mounted at /etc/spendguard/plugin-client/.
+  pluginClientSecretName: ""
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
@@ -518,6 +549,13 @@ migrations:
   canonicalImage: postgres:16-alpine
   ledgerConfigMapName: spendguard-migrations-ledger
   canonicalConfigMapName: spendguard-migrations-canonical
+  # R2 M3 (Security F5): control_plane migrations live under
+  # services/control_plane/migrations/. The ConfigMap is OPTIONAL —
+  # if the operator hasn't created it, the migrate Job processes only
+  # the ledger + canonical globs (no-op for control_plane, with a
+  # warn-style [migrate] line). Production helm-validate-kind.sh
+  # regenerates all three ConfigMaps in lockstep.
+  controlPlaneConfigMapName: spendguard-migrations-control-plane
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "256Mi" }

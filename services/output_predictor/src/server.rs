@@ -30,12 +30,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use tonic::{Request, Response, Status};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use crate::cache::OutputDistributionCache;
+use crate::circuit_breaker::PluginCircuitBreaker;
 use crate::classifier::{self, CLASSIFIER_VERSION};
 use crate::context_window::ContextWindowTable;
+use crate::endpoint_cache::EndpointCache;
 use crate::fingerprint::FINGERPRINT_VERSION;
+use crate::plugin_client::PluginClient;
 use crate::proto::output_predictor::v1::{
     output_predictor_server::OutputPredictor as OutputPredictorTrait, PredictRequest,
     PredictResponse,
@@ -43,6 +46,7 @@ use crate::proto::output_predictor::v1::{
 use crate::selector::{self, Strategy};
 use crate::strategy_a;
 use crate::strategy_b::{self, PredictionB};
+use crate::strategy_c::{self, StrategyCError, StrategyCFailure, StrategyCInput, StrategyCOutcome};
 
 // R2 M5 (Backend F5 + Security F5): input validation bounds for
 // fields that flow into bucket cache keys + SQL queries. Without
@@ -58,14 +62,74 @@ pub const MAX_PROMPT_CLASS_LEN: usize = 32;
 /// per-model unknown-rate trends in Prometheus.
 pub static UNKNOWN_CONTEXT_WINDOW_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+// ── SLICE_07: customer plugin call outcome counters ────────────────
+//
+// Per output-predictor-plugin-contract-v1alpha1.md §9.1 these surface
+// via Prometheus as `customer_predictor_*_total`. Phase E wires the
+// /metrics scrape body; this slice ships the in-process atomics so
+// strategy_c.rs can record outcomes from any concurrent Predict task
+// without locks.
+
+/// Total successful Strategy C calls (predicted_c_tokens populated).
+pub static CUSTOMER_PREDICTOR_CALL_SUCCESS_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Total Strategy C calls that fell to Strategy B for any reason.
+/// Decomposed by failure mode via the FAILURE_BY_MODE_* atomics below.
+pub static CUSTOMER_PREDICTOR_CALL_FALL_TO_B_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Total spec §7.3 tenant binding violations — RLS bypass suspect.
+/// Should ALWAYS be zero in production; a non-zero scrape value is an
+/// operator-page condition.
+pub static CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Per-failure-mode counters per spec §5.1 (8 documented modes + the
+/// 2 SLICE_07 metric-only modes for not_configured + breaker_open).
+pub static FAILURE_BY_MODE_TIMEOUT: AtomicU64 = AtomicU64::new(0);
+pub static FAILURE_BY_MODE_GRPC_ERROR: AtomicU64 = AtomicU64::new(0);
+pub static FAILURE_BY_MODE_INVALID_ZERO_OR_NEGATIVE: AtomicU64 = AtomicU64::new(0);
+pub static FAILURE_BY_MODE_INVALID_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+pub static FAILURE_BY_MODE_INVALID_CONFIDENCE: AtomicU64 = AtomicU64::new(0);
+pub static FAILURE_BY_MODE_DESERIALIZATION_ERROR: AtomicU64 = AtomicU64::new(0);
+pub static FAILURE_BY_MODE_TLS_ERROR: AtomicU64 = AtomicU64::new(0);
+pub static FAILURE_BY_MODE_NOT_SERVING: AtomicU64 = AtomicU64::new(0);
+pub static FAILURE_BY_MODE_NOT_CONFIGURED: AtomicU64 = AtomicU64::new(0);
+pub static FAILURE_BY_MODE_BREAKER_OPEN: AtomicU64 = AtomicU64::new(0);
+
+/// Record a Strategy C failure outcome. Tags the per-mode counter so
+/// dashboards can split fall-to-B by cause.
+fn record_failure_metric(failure: &StrategyCFailure) {
+    CUSTOMER_PREDICTOR_CALL_FALL_TO_B_TOTAL.fetch_add(1, Ordering::Relaxed);
+    let counter = match failure {
+        StrategyCFailure::Timeout => &FAILURE_BY_MODE_TIMEOUT,
+        StrategyCFailure::GrpcError(_) => &FAILURE_BY_MODE_GRPC_ERROR,
+        StrategyCFailure::InvalidZeroOrNegative => &FAILURE_BY_MODE_INVALID_ZERO_OR_NEGATIVE,
+        StrategyCFailure::InvalidOverflow => &FAILURE_BY_MODE_INVALID_OVERFLOW,
+        StrategyCFailure::InvalidConfidence => &FAILURE_BY_MODE_INVALID_CONFIDENCE,
+        StrategyCFailure::DeserializationError => &FAILURE_BY_MODE_DESERIALIZATION_ERROR,
+        StrategyCFailure::TlsError => &FAILURE_BY_MODE_TLS_ERROR,
+        StrategyCFailure::NotServing => &FAILURE_BY_MODE_NOT_SERVING,
+        StrategyCFailure::NotConfigured => &FAILURE_BY_MODE_NOT_CONFIGURED,
+        StrategyCFailure::BreakerOpen => &FAILURE_BY_MODE_BREAKER_OPEN,
+    };
+    counter.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Service struct. Shares the in-memory cache layer + context-window
-/// table across all RPC handlers. SLICE_06 holds the canonical_ingest
-/// DB pool inside `OutputDistributionCache`.
+/// table + Strategy C dependencies across all RPC handlers.
+///
+/// SLICE_06 holds the canonical_ingest DB pool inside
+/// `OutputDistributionCache`. SLICE_07 adds the per-tenant plugin
+/// endpoint cache, per-tenant gRPC client, and per-tenant circuit
+/// breaker — all `Arc`d so the `tokio::join!(a, b, c)` orchestration
+/// in `predict()` clones cheaply onto each future.
 #[derive(Clone)]
 pub struct OutputPredictorSvc {
     cache: Arc<OutputDistributionCache>,
     context_window: Arc<ContextWindowTable>,
     unknown_model_context_window: i64,
+    endpoint_cache: Arc<EndpointCache>,
+    plugin_client: Arc<PluginClient>,
+    plugin_breaker: Arc<PluginCircuitBreaker>,
 }
 
 impl OutputPredictorSvc {
@@ -73,11 +137,17 @@ impl OutputPredictorSvc {
         cache: Arc<OutputDistributionCache>,
         context_window: Arc<ContextWindowTable>,
         unknown_model_context_window: i64,
+        endpoint_cache: Arc<EndpointCache>,
+        plugin_client: Arc<PluginClient>,
+        plugin_breaker: Arc<PluginCircuitBreaker>,
     ) -> Self {
         Self {
             cache,
             context_window,
             unknown_model_context_window,
+            endpoint_cache,
+            plugin_client,
+            plugin_breaker,
         }
     }
 }
@@ -194,25 +264,96 @@ impl OutputPredictorTrait for OutputPredictorSvc {
             .await;
             (b, b_start.elapsed().as_nanos() as i64)
         };
-        let c_fut = async {
-            // SLICE_07 wires real plugin path; SLICE_06 stub immediate None.
+        // SLICE_07 Phase D: real Strategy C path (delegated plugin).
+        // Returns (Option<PredictionC>, c_latency_ns, Option<StrategyCError>).
+        // The error variant rises ONLY on tenant binding violation
+        // (spec §7.3) — every other failure resolves to FallToB and is
+        // recorded as `Option<i64> = None` plus a metric increment.
+        let endpoint_cache_for_c = self.endpoint_cache.clone();
+        let plugin_client_for_c = self.plugin_client.clone();
+        let plugin_breaker_for_c = self.plugin_breaker.clone();
+        let tenant_id_for_c = tenant_uuid;
+        let model_for_c = req.model.clone();
+        let agent_id_for_c = req.agent_id.clone();
+        let prompt_class_for_c = req.prompt_class.clone();
+        let decision_id_for_c = req.decision_id.clone();
+        let fingerprint_for_c = req.prompt_class_fingerprint.clone();
+        let input_tokens_for_c = req.input_tokens;
+        let max_tokens_for_c = req.max_tokens_requested;
+        let ctx_window_for_c = context_window;
+        let c_fut = async move {
             let c_start = std::time::Instant::now();
-            let c: Option<i64> = None;
-            (c, c_start.elapsed().as_nanos() as i64)
+            let input = StrategyCInput {
+                tenant_id: tenant_id_for_c,
+                model: &model_for_c,
+                agent_id: &agent_id_for_c,
+                prompt_class: &prompt_class_for_c,
+                input_tokens: input_tokens_for_c,
+                max_tokens_requested: max_tokens_for_c,
+                model_context_window: ctx_window_for_c,
+                decision_id: &decision_id_for_c,
+                classifier_version: CLASSIFIER_VERSION,
+                prompt_class_fingerprint: &fingerprint_for_c,
+            };
+            let result = strategy_c::compute_c(
+                &endpoint_cache_for_c,
+                &plugin_client_for_c,
+                &plugin_breaker_for_c,
+                input,
+            )
+            .await;
+            (result, c_start.elapsed().as_nanos() as i64)
         };
 
-        let ((a, a_latency_ns), (b, b_latency_ns), (c, c_latency_ns)): (
+        let ((a, a_latency_ns), (b, b_latency_ns), (c_result, c_latency_ns)): (
             (i64, i64),
             (Option<PredictionB>, i64),
-            (Option<i64>, i64),
+            (Result<StrategyCOutcome, StrategyCError>, i64),
         ) = tokio::join!(a_fut, b_fut, c_fut);
+
+        // Map the StrategyCOutcome envelope down to:
+        //   - `c`               (Option<i64>) for the selector
+        //   - `c_confidence`    (Option<f32>) for audit row
+        //   - `c_sample_size`   (Option<i32>) for audit row
+        // Per spec §1.8 a recoverable failure resolves to c = None and
+        // the selector falls to B. The TenantBindingViolation arm is
+        // mapped to a `Status::failed_precondition` returned to the
+        // caller because it indicates RLS bypass — operator MUST see.
+        let (c, c_confidence, c_sample_size) = match c_result {
+            Ok(StrategyCOutcome::Ok(p)) => {
+                CUSTOMER_PREDICTOR_CALL_SUCCESS_TOTAL.fetch_add(1, Ordering::Relaxed);
+                (
+                    Some(p.predicted_output_tokens),
+                    Some(p.confidence),
+                    Some(p.sample_size),
+                )
+            }
+            Ok(StrategyCOutcome::FallToB(failure)) => {
+                record_failure_metric(&failure);
+                (None, None, None)
+            }
+            Err(StrategyCError::TenantBindingViolation { requested, got }) => {
+                CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL
+                    .fetch_add(1, Ordering::Relaxed);
+                error!(
+                    requested_tenant = %requested,
+                    got_tenant = %got,
+                    "Strategy C tenant binding violation — refusing Predict (spec §7.3)"
+                );
+                return Err(Status::failed_precondition(format!(
+                    "tenant binding violation: tenant {} cannot use plugin registered for {}",
+                    requested, got
+                )));
+            }
+        };
 
         // ── Selector ──────────────────────────────────────────────────
         let (reserved, prediction_used) =
             selector::select_strategy(&req.prediction_policy, a, b.as_ref().map(|v| v.value), c);
 
         // Map cold-start layer + extract confidence/sample_size from the
-        // chosen B/C. SLICE_06: only B can carry these; C always None.
+        // chosen B/C. SLICE_07: Strategy C populates from PredictionC
+        // when c_result was Ok; Strategy B populates from the cache row.
         let (b_value, b_confidence, b_sample_size, b_layer) = match &b {
             Some(p) => (Some(p.value), Some(p.confidence), Some(p.sample_size), p.layer.clone()),
             None => (None, None, None, Some("L1".to_string())),
@@ -228,11 +369,11 @@ impl OutputPredictorTrait for OutputPredictorSvc {
         // Confidence + sample-size emission rules per spec §6.3 + §7.1:
         // - When strategy_used == A, both are unset (no statistical row).
         // - When strategy_used == B, populate from the B row.
-        // - When strategy_used == C, would populate from C row (SLICE_07).
+        // - When strategy_used == C, populate from the C row (SLICE_07).
         let (confidence, sample_size) = match prediction_used {
             Strategy::A => (None, None),
             Strategy::B => (b_confidence, b_sample_size),
-            Strategy::C => (None, None), // SLICE_07
+            Strategy::C => (c_confidence, c_sample_size),
         };
 
         // cold_start_layer_used:
@@ -265,7 +406,7 @@ impl OutputPredictorTrait for OutputPredictorSvc {
         Ok(Response::new(PredictResponse {
             predicted_a_tokens: a,
             predicted_b_tokens: b_value,
-            predicted_c_tokens: None,
+            predicted_c_tokens: c,
             reserved_strategy: reserved.to_string(),
             prediction_strategy_used: prediction_used.to_string(),
             confidence,
@@ -290,10 +431,23 @@ mod tests {
 
     fn svc_skeleton() -> OutputPredictorSvc {
         // No DB pool → Strategy B always None; pure A path for input
-        // validation tests.
+        // validation tests. SLICE_07: also Strategy C skeleton deps —
+        // the endpoint cache without a pool returns NotConfigured so
+        // strategy_c silently falls to B per spec §11.
+        use crate::circuit_breaker::CircuitBreakerConfig;
         let cache = OutputDistributionCache::new(None, Duration::from_secs(300));
         let context_window = Arc::new(ContextWindowTable::empty());
-        OutputPredictorSvc::new(cache, context_window, 8000)
+        let endpoint_cache = EndpointCache::with_default_ttl(None);
+        let plugin_client = PluginClient::new(None).expect("skeleton-mode constructor");
+        let plugin_breaker = PluginCircuitBreaker::new(CircuitBreakerConfig::default());
+        OutputPredictorSvc::new(
+            cache,
+            context_window,
+            8000,
+            endpoint_cache,
+            plugin_client,
+            plugin_breaker,
+        )
     }
 
     fn valid_req() -> PredictRequest {

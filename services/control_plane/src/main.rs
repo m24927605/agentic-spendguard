@@ -26,6 +26,7 @@
 //! so audit chain + fencing CAS + per-unit balance invariants are
 //! exercised on every provisioning step.
 
+mod handlers;
 mod metrics;
 
 use std::net::SocketAddr;
@@ -66,6 +67,12 @@ fn default_metrics_addr() -> String {
 
 struct AppState {
     pg: PgPool,
+}
+
+impl handlers::predictor_plugins::PluginAppState for AppState {
+    fn pg(&self) -> &PgPool {
+        &self.pg
+    }
 }
 
 #[tokio::main]
@@ -135,6 +142,22 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/v1/tokenizer/sampling-rate",
             post(post_tokenizer_sampling_rate).get(get_tokenizer_sampling_rate),
+        )
+        // SLICE_07: Strategy C plugin endpoint registry.
+        // Spec: docs/output-predictor-plugin-contract-v1alpha1.md §8.
+        .route(
+            "/v1/predictor/plugins",
+            post(handlers::predictor_plugins::register_plugin::<AppState>),
+        )
+        .route(
+            "/v1/predictor/plugins/:tenant_id",
+            get(handlers::predictor_plugins::get_plugin::<AppState>)
+                .put(handlers::predictor_plugins::update_plugin::<AppState>)
+                .delete(handlers::predictor_plugins::delete_plugin::<AppState>),
+        )
+        .route(
+            "/v1/predictor/plugins/:tenant_id/force-reset",
+            post(handlers::predictor_plugins::force_reset_plugin::<AppState>),
         )
         .layer(from_fn_with_state(auth.clone(), spendguard_auth::require_auth));
 

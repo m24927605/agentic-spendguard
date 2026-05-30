@@ -80,6 +80,40 @@ pub struct Config {
     /// mounted ConfigMap for out-of-band refresh.
     #[serde(default = "default_context_window_toml_path")]
     pub context_window_toml_path: String,
+
+    // -- SLICE_07: Strategy C plugin wiring (per output-predictor-plugin-
+    //    contract-v1alpha1.md). Empty values = skeleton mode: every
+    //    Predict falls to B silently because the endpoint cache returns
+    //    NotConfigured (per spec §11). Production Helm gate requires
+    //    these set when chart.profile=production AND when at least one
+    //    tenant has registered a plugin endpoint via control plane API.
+    //
+    /// Postgres URL for the read-only predictor_plugin_endpoints lookup
+    /// (spec §8). Empty = skeleton mode (Strategy C always returns
+    /// NotConfigured; fall to B). Distinct from `database_url` because
+    /// the plugin endpoints live in the control_plane DB while the
+    /// output_distribution_cache lives in the canonical_ingest DB —
+    /// keeping the two pools separate avoids accidental cross-DB
+    /// connection-string reuse.
+    #[serde(default)]
+    pub plugin_endpoint_database_url: String,
+
+    /// Endpoint cache refresh TTL in seconds (spec §6.3 — 60s cap by
+    /// SLICE_07 design; lower values = more SQL load + faster pick-up
+    /// of control plane API mutations).
+    #[serde(default = "default_plugin_endpoint_cache_ttl_seconds")]
+    pub plugin_endpoint_cache_ttl_seconds: u64,
+
+    /// Plugin client TLS cert PEM path. SpendGuard presents this cert
+    /// to the customer plugin endpoint per spec §3.1 (mTLS-only auth).
+    /// All three (cert / key / ca) must be set together; partial config
+    /// fails at boot.
+    #[serde(default)]
+    pub plugin_client_cert_pem: Option<String>,
+    #[serde(default)]
+    pub plugin_client_key_pem: Option<String>,
+    #[serde(default)]
+    pub plugin_trust_ca_pem: Option<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -100,6 +134,17 @@ impl std::fmt::Debug for Config {
             .field("cache_ttl_seconds", &self.cache_ttl_seconds)
             .field("unknown_model_context_window", &self.unknown_model_context_window)
             .field("context_window_toml_path", &self.context_window_toml_path)
+            .field(
+                "plugin_endpoint_database_url_present",
+                &!self.plugin_endpoint_database_url.is_empty(),
+            )
+            .field(
+                "plugin_endpoint_cache_ttl_seconds",
+                &self.plugin_endpoint_cache_ttl_seconds,
+            )
+            .field("plugin_client_cert_pem", &self.plugin_client_cert_pem)
+            .field("plugin_client_key_pem", &self.plugin_client_key_pem)
+            .field("plugin_trust_ca_pem", &self.plugin_trust_ca_pem)
             .finish()
     }
 }
@@ -128,6 +173,17 @@ fn default_context_window_toml_path() -> String {
     // mounts a ConfigMap at /etc/spendguard/output_predictor/
     // model_context_window.toml when override.
     "data/model_context_window.toml".to_string()
+}
+
+fn default_plugin_endpoint_cache_ttl_seconds() -> u64 {
+    // R2 M2 (Security F4): cache TTL tightened from 60s → 5s.
+    // Spec §6.3 health-check cadence is 30s; cache TTL must be ≤
+    // that. The 5s value bounds the control-plane mutation →
+    // predictor observation window at 5s, documented in spec §11
+    // as the eventual-consistency operator contract. Tighter
+    // consistency requires a cache_revision_at column on the
+    // registry table (tracked as a follow-up GH issue).
+    5
 }
 
 impl Config {
