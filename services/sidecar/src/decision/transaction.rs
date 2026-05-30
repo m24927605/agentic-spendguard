@@ -277,6 +277,107 @@ pub struct DecisionOutput {
     /// DecisionResponse so adapter sees which rules fired and why.
     pub matched_rule_ids: Vec<String>,
     pub reason_codes: Vec<String>,
+    /// SLICE_09 Phase E: which RUN_* code (if any) drove this decision.
+    /// One of "" | "RUN_BUDGET_PROJECTION_EXCEEDED" | "RUN_DRIFT_DETECTED"
+    /// | "RUN_STEPS_EXCEEDED" per contract-dsl-v1alpha2 §3.x. Carried into
+    /// DecisionResponse.run_code_triggered tag 16 (SLICE_02 wired the
+    /// field; SLICE_09 populates the value).
+    pub run_code_triggered: String,
+}
+
+/// SLICE_09 Phase E — projector call with built-in fall-through.
+///
+/// Returns `Ok(ProjectResponse)` on a successful Project RPC, OR
+/// `Err(DomainError)` for any of: client = None (Helm not configured),
+/// client.project returns Err (timeout, network, validation, etc.).
+///
+/// The caller (run_through_reserve) treats Err as "projector unreachable"
+/// per spec §10 — no RUN_* code emitted, audit row uses sentinels.
+///
+/// Inputs derive from `req` + `claims` + `enrichment`:
+///   * `this_call_reservation_atomic` = sum of `claim.amount_atomic`
+///     across all projected_claims (parsed to i64; clamps on overflow).
+///     This is what the per-call reservation would be if we accepted
+///     unchanged; projector uses it as Signal 2's baseline.
+///   * `budget_remaining_atomic` is sourced from inputs.projected_p90 as
+///     a hot-path-cached approximation; production wires the ledger
+///     QueryBudget call but that costs another RTT we can't afford
+///     inside the 50ms p99 budget. This is acceptable per spec §1.2:
+///     projector's job is to surface trajectory, not to be the
+///     authoritative budget oracle (ledger.reserve_set still enforces
+///     the hard cap).
+async fn call_projector_safe(
+    state: &SidecarState,
+    ctx: &DecisionContext,
+    req: &DecisionRequest,
+    claims: &[BudgetClaim],
+    enrichment: &AuditEnrichment,
+) -> Result<crate::proto::run_cost_projector::v1::ProjectResponse, DomainError> {
+    use num_bigint::BigInt;
+    use std::str::FromStr;
+
+    let client = state
+        .inner
+        .run_cost_projector
+        .as_ref()
+        .ok_or_else(|| DomainError::DecisionStage("projector client not configured".into()))?;
+
+    // Sum claims for the per-call reservation amount.
+    let mut total = BigInt::from(0i64);
+    for c in claims {
+        if let Ok(v) = BigInt::from_str(&c.amount_atomic) {
+            total += v;
+        }
+    }
+    // Clamp to i64 — projector proto is int64. Per audit-extension §3.3
+    // round-2 M5: NUMERIC values exceeding 2^63-1 are constraint-rejected
+    // at audit_outbox INSERT; we cap silently here so the projector
+    // doesn't see a wraparound.
+    let this_call_atomic: i64 = i64::try_from(total).unwrap_or(i64::MAX);
+
+    // Budget remaining: pull from inputs.projected_p90 as conservative
+    // estimate. Empty → 0 → projector immediately fires BUDGET on any
+    // non-trivial projection (fail-loud). In production deployments,
+    // SLICE_11+ wires a hot-cached ledger budget snapshot here.
+    let budget_remaining: i64 = req
+        .inputs
+        .as_ref()
+        .and_then(|i| BigInt::from_str(&i.projected_p90_atomic).ok())
+        .and_then(|v| i64::try_from(v).ok())
+        .unwrap_or(0);
+
+    // Signal 3 hint: passed through from DecisionRequest.planned_steps_hint
+    // (SLICE_09 additive proto field; SLICE_02 stubbed pass-through; SLICE_12
+    // SDK with_run_plan decorator populates it).
+    let planned_steps_hint = req.planned_steps_hint.max(0);
+
+    let project_req = crate::proto::run_cost_projector::v1::ProjectRequest {
+        tenant_id: ctx.tenant_id.clone(),
+        run_id: enrichment.run_id.clone(),
+        agent_id: enrichment.agent_id.clone(),
+        model: enrichment.model_family.clone(),
+        step_id: req
+            .ids
+            .as_ref()
+            .map(|i| i.step_id.clone())
+            .unwrap_or_default(),
+        decision_id: req
+            .ids
+            .as_ref()
+            .map(|i| i.decision_id.clone())
+            .unwrap_or_default(),
+        this_call_reservation_atomic: this_call_atomic,
+        unit_id: claims
+            .first()
+            .and_then(|c| c.unit.as_ref())
+            .map(|u| u.unit_id.clone())
+            .unwrap_or_default(),
+        budget_remaining_atomic: budget_remaining,
+        planned_steps_hint,
+        planned_tools_hint: 0,
+    };
+
+    client.project(project_req).await
 }
 
 /// Drive the decision transaction end-to-end through stage 4 (reserve +
@@ -313,9 +414,59 @@ pub async fn run_through_reserve(
         .ok_or_else(|| DomainError::DecisionStage("no contract bundle loaded".into()))?;
 
     let eval_outcome = contract::evaluate(&bundle.parsed, &claims);
-    let decision_kind = eval_outcome.decision;
-    let matched_rules = eval_outcome.matched_rule_ids;
-    let reason_codes = eval_outcome.reason_codes;
+
+    // Cost Advisor P0.5 enrichment used early so projector call can carry
+    // run_id / agent_id even on the DENY path (where enrichment is also
+    // pulled inside run_record_denied_decision below — both call sites
+    // extract from the same DecisionRequest so the values match).
+    let enrichment = extract_enrichment(req);
+
+    // ── SLICE_09 Phase E: run_cost_projector wire ──────────────────────
+    //
+    // Spec ref `run-cost-projector-spec-v1alpha1.md` §1.2 + §10.
+    //
+    // Call the projector right after the per-call evaluator returns.
+    // The projector emits at most one RUN_* code; we project that onto a
+    // v1alpha1 lattice decision per contract.prediction_policy
+    // (contract-dsl-v1alpha2 §3.4 + §5.3 allowed-pairs table). The
+    // projector outcome merges into eval_outcome via the standard
+    // most-restrictive lattice (CONTINUE < SKIP < DEGRADE <
+    // REQUIRE_APPROVAL < STOP).
+    //
+    // Failure modes per spec §10:
+    //   * projector client = None (Helm not configured) → no projection;
+    //     reason_codes unchanged; audit row gets -1 sentinel for
+    //     `run_predicted_remaining_steps` (audit-chain-extension §3.3).
+    //   * projector.Project Err (timeout, connect, validation) → same as
+    //     above + metric `projector_unreachable` would be incremented
+    //     (Phase F surfaces the metric counter).
+    //
+    // The "additive only" property means a v1alpha1 sidecar running the
+    // legacy code path (no projector linked) produces byte-identical
+    // audit rows to before Phase E — the only NEW field populated when
+    // the projector IS wired is `reason_codes` (plus the 3 audit columns
+    // wired to the same proto envelope).
+    let projector_result = call_projector_safe(state, ctx, req, &claims, &enrichment).await;
+    let projector_response_ref = projector_result.as_ref().ok();
+    let combined_outcome = match projector_response_ref {
+        Some(resp) if !resp.emitted_code.is_empty() => {
+            match contract::apply_projector_code(&bundle.parsed, &resp.emitted_code) {
+                Some(projector_outcome) => contract::merge_outcomes(eval_outcome, projector_outcome),
+                None => eval_outcome,
+            }
+        }
+        _ => eval_outcome,
+    };
+    let decision_kind = combined_outcome.decision;
+    let matched_rules = combined_outcome.matched_rule_ids;
+    let reason_codes = combined_outcome.reason_codes;
+
+    // SLICE_09 Phase E: surface the RUN_* code that drove the decision (if
+    // any) on the wire-level DecisionResponse.run_code_triggered field
+    // (tag 16; SLICE_02 added the field, SLICE_09 populates it).
+    let run_code_triggered = projector_response_ref
+        .map(|r| r.emitted_code.clone())
+        .unwrap_or_default();
 
     // Stage 3: prepare_effect (pure)
     let effect_hash = compute_effect_hash(&snapshot_hash, decision_kind);
@@ -360,10 +511,9 @@ pub async fn run_through_reserve(
         ));
     }
 
-    // Cost Advisor P0.5 enrichment: extract run_id / agent_id /
-    // model_family / prompt_hash from the request ONCE; thread into
-    // both CONTINUE + DENY audit.decision emissions below.
-    let enrichment = extract_enrichment(req);
+    // Cost Advisor P0.5 enrichment: extracted ONCE above for projector
+    // call. Same value flows into both CONTINUE + DENY audit.decision
+    // emissions below per the pre-SLICE_09 invariant.
 
     // Phase 3 wedge: branch CONTINUE vs DENY before building the
     // reserve-specific payload. DENY skips Reserve entirely but still
@@ -387,6 +537,7 @@ pub async fn run_through_reserve(
             &adapter_idempotency.key,
             effect_hash,
             &enrichment,
+            projector_response_ref,
         )
         .await;
     }
@@ -418,6 +569,7 @@ pub async fn run_through_reserve(
         &matched_rules,
         &enrichment,
         prediction_policy_str,
+        projector_response_ref,
     );
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
@@ -487,6 +639,7 @@ pub async fn run_through_reserve(
                 ttl_expires_at: ttl_from_server,
                 matched_rule_ids: matched_rules.clone(),
                 reason_codes: reason_codes.clone(),
+                run_code_triggered: run_code_triggered.clone(),
             })
         }
         Some(Outcome::Replay(r)) => {
@@ -529,6 +682,7 @@ pub async fn run_through_reserve(
                 ttl_expires_at: r.ttl_expires_at.clone(),
                 matched_rule_ids: matched_rules.clone(),
                 reason_codes: reason_codes.clone(),
+                run_code_triggered: run_code_triggered.clone(),
             })
         }
         Some(Outcome::Error(e)) => Err(DomainError::DecisionStage(format!(
@@ -592,6 +746,7 @@ fn build_audit_decision_cloudevent(
     matched_rules: &[String],
     enrichment: &AuditEnrichment,
     prediction_policy: &str,
+    projector_response: Option<&crate::proto::run_cost_projector::v1::ProjectResponse>,
 ) -> CloudEvent {
     let mut payload = serde_json::json!({
         "snapshot_hash":   hex::encode(snapshot_hash),
@@ -669,6 +824,31 @@ fn build_audit_decision_cloudevent(
     // the predictor; spec §6 confirms only prediction_policy_used is
     // populated at this slice.
     ce.prediction_policy_used = prediction_policy.to_string();
+
+    // SLICE_09 Phase E: 3 run-level audit columns per audit-chain-
+    // prediction-extension-v1alpha1.md §2.2 (mirrored into CloudEvent
+    // tags 311/312/313). When the projector is None or its call failed,
+    // we set the spec §3.3 sentinels:
+    //   * run_projection_at_decision_atomic = 0  (proto3 default)
+    //   * run_predicted_remaining_steps     = -1 (sentinel "unreachable")
+    //   * run_steps_completed_so_far        = 0  (proto3 default)
+    // canonical_ingest's mirror layer treats -1 specifically as "NULL"
+    // when populating the audit_outbox column (per
+    // audit-chain-extension §3.3 sentinel design).
+    match projector_response {
+        Some(resp) => {
+            ce.run_projection_at_decision_atomic = resp.run_projection_at_decision_atomic;
+            ce.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
+            ce.run_steps_completed_so_far = resp.run_steps_completed_so_far;
+        }
+        None => {
+            // Projector unreachable / not wired — sentinel.
+            ce.run_projection_at_decision_atomic = 0;
+            ce.run_predicted_remaining_steps = -1;
+            ce.run_steps_completed_so_far = 0;
+        }
+    }
+
     ce
 }
 
@@ -733,7 +913,14 @@ async fn run_record_denied_decision(
     adapter_idempotency_key: &str,
     effect_hash: [u8; 32],
     enrichment: &AuditEnrichment,
+    projector_response: Option<&crate::proto::run_cost_projector::v1::ProjectResponse>,
 ) -> Result<DecisionOutput, DomainError> {
+    // SLICE_09 Phase E: surface the RUN_* code that drove this DENY
+    // (if any). Empty string = per-call DENY without projector input.
+    let run_code_triggered_local: String = projector_response
+        .map(|r| r.emitted_code.clone())
+        .unwrap_or_default();
+
     let final_decision_str = denied_decision_label(decision_kind).ok_or_else(|| {
         DomainError::DecisionStage(format!(
             "run_record_denied_decision called with unsupported decision {:?}",
@@ -812,6 +999,26 @@ async fn run_record_denied_decision(
     // requirement). v1alpha1 contracts get STRICT_CEILING; v1alpha2
     // contracts pass through whatever they declared.
     cloudevent.prediction_policy_used = bundle.parsed.prediction_policy.as_str().to_string();
+
+    // SLICE_09 Phase E: DENY-lane CloudEvent emits the 3 run-level audit
+    // columns identical to the ALLOW lane. STOP / REQUIRE_APPROVAL /
+    // DEGRADE / SKIP rows still carry the projector's observation so
+    // calibration-report can compare RUN_* code precision against
+    // realized decisions.
+    match projector_response {
+        Some(resp) => {
+            cloudevent.run_projection_at_decision_atomic =
+                resp.run_projection_at_decision_atomic;
+            cloudevent.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
+            cloudevent.run_steps_completed_so_far = resp.run_steps_completed_so_far;
+        }
+        None => {
+            cloudevent.run_projection_at_decision_atomic = 0;
+            cloudevent.run_predicted_remaining_steps = -1;
+            cloudevent.run_steps_completed_so_far = 0;
+        }
+    }
+
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
     // Round-2 #9 producer SP. When the contract evaluator returns
@@ -927,6 +1134,7 @@ async fn run_record_denied_decision(
             ttl_expires_at: None,
             matched_rule_ids: matched_rules.to_vec(),
             reason_codes: reason_codes.to_vec(),
+            run_code_triggered: run_code_triggered_local.clone(),
         }),
         Some(DeniedOutcome::Replay(r)) => {
             // Codex R1 P1 — known POC gap: Replay path returns the
@@ -965,6 +1173,7 @@ async fn run_record_denied_decision(
                 ttl_expires_at: None,
                 matched_rule_ids: matched_rules.to_vec(),
                 reason_codes: reason_codes.to_vec(),
+                run_code_triggered: run_code_triggered_local.clone(),
             })
         }
         Some(DeniedOutcome::Error(e)) => Err(DomainError::DecisionStage(format!(
@@ -1006,13 +1215,11 @@ pub fn build_response(out: DecisionOutput) -> DecisionResponse {
         // forward the call instead of halting the run.
         terminal: matches!(out.decision, Decision::Stop | Decision::StopRunProjection),
         error: None,
-        // SLICE_02 §6.2: run_code_triggered always "" in this slice
-        // since no source emits RUN_* codes. SLICE_09 populates this
-        // from DecisionOutput.run_code_triggered once the projector
-        // wires through. v1alpha1 clients deserializing a v1alpha2
-        // response see this as the proto3 default empty string,
-        // identical to pre-bump behavior.
-        run_code_triggered: String::new(),
+        // SLICE_09 Phase E: surface the RUN_* code (if any) that drove
+        // this decision. Empty string for per-call decisions. v1alpha1
+        // clients deserializing this response see proto3 default empty
+        // string, identical to pre-bump behavior.
+        run_code_triggered: out.run_code_triggered,
     }
 }
 
@@ -1876,6 +2083,7 @@ mod slice_02_decision_match_tests {
             ttl_expires_at: None,
             matched_rule_ids: vec![],
             reason_codes: vec![],
+            run_code_triggered: String::new(),
         }
     }
 

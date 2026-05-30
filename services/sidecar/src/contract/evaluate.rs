@@ -31,7 +31,9 @@
 
 use num_bigint::BigInt;
 
-use crate::contract::types::{Contract, EvalOutcome, Rule, RunCode, RunProjectionAction};
+use crate::contract::types::{
+    Contract, EvalOutcome, PredictionPolicy, Rule, RunCode, RunProjectionAction,
+};
 use crate::proto::common::v1::BudgetClaim;
 use crate::proto::sidecar_adapter::v1::decision_response::Decision;
 
@@ -174,6 +176,67 @@ pub fn handle_run_code(
             contract.id, rule.when.budget_id, rule.id
         )],
     }
+}
+
+/// SLICE_09 Phase E — projector-driven RUN_* projection.
+///
+/// Called by `decision/transaction.rs` after `evaluate()` returns and after
+/// run_cost_projector.Project supplies an `emitted_code` (non-empty). The
+/// contract's `prediction_policy` determines the default
+/// `RunProjectionAction` per spec §5.3 allowed-pairs table:
+///
+/// | PredictionPolicy        | Default RunProjectionAction      |
+/// |-------------------------|----------------------------------|
+/// | STRICT_CEILING          | BlockNextCall (only allowed)     |
+/// | EMPIRICAL_RUN_CEILING   | BlockNextCall (conservative)     |
+/// | ADAPTIVE_CEILING        | BlockNextCall (conservative)     |
+/// | SHADOW_ONLY             | AlertOnly (only allowed)         |
+///
+/// If the matched contract rules carry an explicit RUN_* rule (SLICE_02
+/// pass-through), that path takes precedence via `evaluate()`'s
+/// `handle_run_code` route — this function fires only when the projector
+/// emits a code without a corresponding contract rule (the zero-config
+/// universal-coverage case per spec §3.3).
+///
+/// Returns an EvalOutcome with the projected lattice decision + the RUN_*
+/// reason code. Caller merges with the prior `evaluate()` outcome via the
+/// same most-restrictive lattice (re-exposed below as `merge_outcomes`).
+pub fn apply_projector_code(contract: &Contract, code_str: &str) -> Option<EvalOutcome> {
+    let code = RunCode::from_str(code_str)?;
+    // Default action by policy (per spec §5.3).
+    let action = match contract.prediction_policy {
+        PredictionPolicy::ShadowOnly => RunProjectionAction::AlertOnly,
+        PredictionPolicy::StrictCeiling
+        | PredictionPolicy::EmpiricalRunCeiling
+        | PredictionPolicy::AdaptiveCeiling => RunProjectionAction::BlockNextCall,
+    };
+    let decision = match action {
+        RunProjectionAction::BlockNextCall => {
+            // Spec contract-dsl-v1alpha2 §3.4: STOP_RUN_PROJECTION is the
+            // dashboard categorisation; for lattice purposes it has the
+            // same precedence as STOP. We emit StopRunProjection so
+            // build_response can surface the distinct enum to consumers
+            // that filter on it (SIEM dashboards).
+            Decision::StopRunProjection
+        }
+        RunProjectionAction::RequireApproval => Decision::RequireApproval,
+        RunProjectionAction::AlertOnly => Decision::Continue,
+    };
+    Some(EvalOutcome {
+        decision,
+        reason_codes: vec![code.as_str().to_string()],
+        // Synthetic matched_rule_id — calibration-report uses this to
+        // attribute the run-projection decision to the projector service
+        // rather than a contract rule.
+        matched_rule_ids: vec![format!("{}:projector:{}", contract.id, code.as_str())],
+    })
+}
+
+/// SLICE_09 Phase E — most-restrictive merge of an evaluator outcome with
+/// a projector outcome. Re-exposes the internal merge function for use by
+/// decision/transaction.rs.
+pub fn merge_outcomes(a: EvalOutcome, b: EvalOutcome) -> EvalOutcome {
+    merge(a, b)
 }
 
 /// Most-restrictive merge. Order from least to most restrictive:

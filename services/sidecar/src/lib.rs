@@ -32,4 +32,11 @@ pub mod proto {
             tonic::include_proto!("spendguard.canonical_ingest.v1");
         }
     }
+    // SLICE_09 Phase E: run_cost_projector client stub. Spec
+    // run-cost-projector-spec-v1alpha1.md §2.1.
+    pub mod run_cost_projector {
+        pub mod v1 {
+            tonic::include_proto!("spendguard.run_cost_projector.v1");
+        }
+    }
 }

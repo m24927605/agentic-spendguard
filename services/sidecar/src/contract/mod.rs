@@ -18,7 +18,7 @@ pub mod evaluate;
 pub mod parse;
 pub mod types;
 
-pub use evaluate::{evaluate, handle_run_code};
+pub use evaluate::{apply_projector_code, evaluate, handle_run_code, merge_outcomes};
 pub use parse::parse_from_tgz;
 pub use types::{
     is_allowed_pair, Action, Budget, Condition, Contract, EvalOutcome, PredictionPolicy, Rule,

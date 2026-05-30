@@ -12,7 +12,10 @@ use parking_lot::{Mutex, RwLock};
 use uuid::Uuid;
 
 use crate::{
-    clients::{canonical_ingest::CanonicalIngestClient, ledger::LedgerClient},
+    clients::{
+        canonical_ingest::CanonicalIngestClient, ledger::LedgerClient,
+        run_cost_projector::RunCostProjectorClient,
+    },
     decision::idempotency::IdempotencyCache,
 };
 use spendguard_signing::Signer;
@@ -103,6 +106,14 @@ pub struct SidecarStateInner {
     /// or an Admit + AuditMarker that gets published before the
     /// decision returns Success.
     pub fail_policy: Arc<FailPolicyMatrix>,
+
+    /// SLICE_09 Phase E: optional projector client. None in demo/skeleton
+    /// mode (the projector is not deployed); decision/transaction.rs treats
+    /// None as "projector unreachable" and falls through per spec §10:
+    /// no RUN_* code emitted; reservation correct via Strategy A.
+    ///
+    /// Spec ref `run-cost-projector-spec-v1alpha1.md` §10.
+    pub run_cost_projector: Option<RunCostProjectorClient>,
 }
 
 #[derive(Debug, Clone)]
@@ -196,8 +207,40 @@ impl SidecarState {
                 reservation_ttl_seconds,
                 signer,
                 fail_policy,
+                // SLICE_09 Phase E: projector client wired via Helm only.
+                // The skeleton `SidecarState::new` constructor (used in
+                // existing tests) leaves None so the failure-mode path is
+                // exercised by default — this is the "unreachable" branch
+                // of spec §10. `SidecarState::with_run_cost_projector`
+                // installs the real client after-the-fact when the
+                // sidecar's main.rs configures it.
+                run_cost_projector: None,
             }),
         }
+    }
+
+    /// SLICE_09 Phase E: install the projector client. Wired in main.rs
+    /// when `SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_ENDPOINT` is set.
+    ///
+    /// MUST be called BEFORE the sidecar starts accepting RPCs (the
+    /// inner Arc would otherwise be shared and projector field mutation
+    /// would race). The shape (consume + return new) makes this an
+    /// invariant the caller can't violate at runtime.
+    pub fn with_run_cost_projector(mut self, client: RunCostProjectorClient) -> Self {
+        // Safety: this method runs before the SidecarState is cloned to
+        // the gRPC server, so Arc::get_mut succeeds (strong_count=1).
+        if let Some(inner) = Arc::get_mut(&mut self.inner) {
+            inner.run_cost_projector = Some(client);
+        } else {
+            // Defensive: if the caller already cloned the state, log and
+            // skip rather than panic. The fall-through-on-None handler
+            // keeps the run safe; only the projection signal is lost.
+            tracing::warn!(
+                "with_run_cost_projector called after SidecarState was cloned; \
+                 projector wiring skipped — RUN_* codes will not fire this session"
+            );
+        }
+        self
     }
 
     pub fn next_producer_sequence(&self) -> u64 {

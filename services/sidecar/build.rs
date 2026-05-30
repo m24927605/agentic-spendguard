@@ -16,6 +16,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         proto_root.join("spendguard/sidecar_adapter/v1/adapter.proto"),
         proto_root.join("spendguard/ledger/v1/ledger.proto"),
         proto_root.join("spendguard/canonical_ingest/v1/canonical_ingest.proto"),
+        // SLICE_09 Phase E: run_cost_projector client stub. Sidecar dials
+        // Project from decision/transaction.rs after output_predictor.Predict
+        // and before reserve stage. Per run-cost-projector-spec-v1alpha1.md §10
+        // failure mode "projector unreachable from sidecar → conservative
+        // fall-through (no RUN_* emitted; reservation correct via Strategy A)".
+        proto_root.join("spendguard/run_cost_projector/v1/projector.proto"),
     ];
     let includes = &[proto_root.clone()];
 
