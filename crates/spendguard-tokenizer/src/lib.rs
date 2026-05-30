@@ -87,7 +87,8 @@ pub use encoders::{EncodeResult, Encoder, EncoderKind};
 pub use error::TokenizerError;
 pub use tier3::tier3_fallback;
 pub use versions::{
-    initial_seed_rows, TokenizerVersionId, TokenizerVersionRow, HEURISTIC_FALLBACK_VERSION_ID,
+    initial_seed_rows, slice04_seed_rows, TokenizerVersionId, TokenizerVersionRow,
+    HEURISTIC_FALLBACK_VERSION_ID,
 };
 
 /// Embedded sha256 manifest for the vendored encoder assets.
