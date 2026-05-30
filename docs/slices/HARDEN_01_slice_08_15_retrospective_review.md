@@ -148,6 +148,7 @@ The review must verify that all audit-chain promises made by SLICE_08 through SL
 | Item | Why deferred |
 |---|---|
 | Docker/kind install and execution flake handling | HARDEN_02 owns environment bring-up |
+| Authoritative `budget_remaining_atomic` snapshot for `RUN_BUDGET_PROJECTION_EXCEEDED` integration | Staff+ arbitration after Round 5 accepted this as a cross-slice budget-source gap; HARDEN_02 must prove the demo path and HARDEN_03/#160 owns the Postgres-backed integration coverage |
 | Closing GH issues unrelated to SLICE_08-15 review | HARDEN_03 owns issue closure |
 | New SVID identity architecture | HARDEN_08 owns cert minting |
 
@@ -178,6 +179,9 @@ Use one review dispatch for the HARDEN_01 branch after implementation. The revie
 | Design | Security Engineer | Container baseline and audit routing must be rechecked for skipped slices | §9 includes security baseline and `spendguard.audit.*` checks |
 | Design | Database Optimizer | Audit mirror population must be verified from write path to canonical events | §6 and §8 require verify-chain and mirror checks |
 | Design | Predictor domain expert | Benchmark claims are only valid if reproducible | §8 and §9 require benchmark artifact review |
+| Round 5 | codex CLI adversarial review `review:01KSXC48DBZJ5D2P8HSQ22M4KH` | Max review round still found F1 budget sentinel, F2 missing actual usage mirrored as zero, and F3 run-level event counting | Triggered Staff+ arbitration per §12 |
+| Staff+ arbitration | Software Architect + Security Engineer | F1/F2/F3 should be fixed in-slice | Minority position on F1 recorded |
+| Staff+ arbitration | Backend Architect + Database Optimizer + Predictor domain expert | F2 and F3 must be fixed in-slice; F1 requires an authoritative budget snapshot not owned by HARDEN_01 | Final arbitration: accept F1 as HARDEN_02/HARDEN_03 prerequisite, fix F2/F3 before merge |
 
 ---
 

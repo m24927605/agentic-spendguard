@@ -21,7 +21,6 @@
 //!     enforces 'reserved' -> 'released' or 'reserved' -> 'committed';
 //!     never both).
 
-use base64::Engine as _;
 use prost_types::Timestamp;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -256,23 +255,7 @@ fn minimal_replay_seed(
 fn extract_cloudevent_payload(
     evt: &crate::proto::common::v1::CloudEvent,
 ) -> Result<Value, DomainError> {
-    Ok(json!({
-        "specversion":     evt.specversion,
-        "type":            evt.r#type,
-        "source":          evt.source,
-        "id":              evt.id,
-        "time_seconds":    evt.time.as_ref().map(|t| t.seconds).unwrap_or_default(),
-        "time_nanos":      evt.time.as_ref().map(|t| t.nanos).unwrap_or_default(),
-        "datacontenttype": evt.datacontenttype,
-        "data_b64":        base64::engine::general_purpose::STANDARD.encode(&evt.data),
-        "tenantid":        evt.tenant_id,
-        "runid":           evt.run_id,
-        "decisionid":      evt.decision_id,
-        "schema_bundle_id": evt.schema_bundle_id,
-        "producer_id":     evt.producer_id,
-        "producer_sequence": evt.producer_sequence,
-        "signing_key_id":  evt.signing_key_id,
-    }))
+    Ok(crate::handlers::audit_payload::cloudevent_payload(evt))
 }
 
 fn build_success(ledger_transaction_id: Uuid, reservation_set_id: &Uuid) -> ReleaseSuccess {

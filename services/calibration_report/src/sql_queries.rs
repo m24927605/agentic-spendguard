@@ -180,13 +180,21 @@ pub async fn fetch_tier_distribution(
 pub const CALIBRATION_RATIO_SQL: &str = r#"
 WITH paired AS (
   SELECT
-    decision.payload_json->>'model' AS model,
+    COALESCE(
+      decision_payload->>'model_family',
+      decision_payload #>> '{spendguard,model}',
+      decision_payload->>'model',
+      '(unknown)'
+    ) AS model,
     decision.prediction_strategy_used AS strategy,
     decision.predicted_a_tokens,
     decision.predicted_b_tokens,
     decision.predicted_c_tokens,
     outcome.actual_output_tokens
   FROM canonical_events decision
+  CROSS JOIN LATERAL (
+    SELECT cost_advisor_safe_decode_payload(decision.payload_json) AS decision_payload
+  ) decoded
   JOIN canonical_events outcome
     ON decision.decision_id = outcome.decision_id
    AND outcome.event_type = 'spendguard.audit.outcome'
@@ -331,23 +339,30 @@ pub async fn fetch_calibration_ratios_cache_mode(
 
 /// §3.3 — drift alert count (and detail rows for the text formatter).
 pub const DRIFT_ALERTS_SQL: &str = r#"
+WITH decoded AS (
+  SELECT
+      event_id,
+      event_time,
+      cost_advisor_safe_decode_payload(payload_json) AS payload
+  FROM canonical_events
+  WHERE tenant_id = $1
+    AND event_type = 'spendguard.audit.prediction_drift_alert.v1alpha1'
+    AND event_time BETWEEN $2 AND $3
+)
 SELECT
     event_id::text,
     event_time,
     COALESCE(
-      payload_json->>'bucket',
+      payload->>'bucket',
       NULLIF(concat_ws(', ',
-        payload_json->>'model',
-        payload_json->>'agent_id',
-        payload_json->>'prompt_class'
+        payload->>'model',
+        payload->>'agent_id',
+        payload->>'prompt_class'
       ), ''),
       '(unknown)'
     ) AS bucket,
-    COALESCE((payload_json->>'z_score')::float, 0.0) AS z_score
-FROM canonical_events
-WHERE tenant_id = $1
-  AND event_type = 'spendguard.audit.prediction_drift_alert.v1alpha1'
-  AND event_time BETWEEN $2 AND $3
+    COALESCE((payload->>'z_score')::float, 0.0) AS z_score
+FROM decoded
 ORDER BY event_time
 "#;
 
@@ -381,21 +396,29 @@ pub async fn fetch_drift_alerts(
 
 /// Run-level counts for the §8.1 recommendation rules.
 pub const RUN_LEVEL_COUNTS_SQL: &str = r#"
+WITH decoded AS (
+  SELECT
+      run_id,
+      cost_advisor_safe_decode_payload(payload_json) AS payload
+  FROM canonical_events
+  WHERE tenant_id = $1
+    AND event_type = 'spendguard.audit.decision'
+    AND run_id IS NOT NULL
+    AND event_time BETWEEN $2 AND $3
+),
+run_flags AS (
+  SELECT
+      run_id,
+      bool_or(payload->'reason_codes' ? 'RUN_BUDGET_PROJECTION_EXCEEDED') AS proj_exceeded,
+      bool_or(payload->'reason_codes' ? 'RUN_DRIFT_DETECTED') AS drift_detected
+  FROM decoded
+  GROUP BY run_id
+)
 SELECT
-    SUM(CASE
-          WHEN event_type = 'spendguard.audit.decision'
-           AND payload_json->'reason_codes' ? 'RUN_BUDGET_PROJECTION_EXCEEDED'
-          THEN 1 ELSE 0
-        END)::bigint AS proj_exceeded,
-    SUM(CASE
-          WHEN event_type = 'spendguard.audit.decision'
-           AND payload_json->'reason_codes' ? 'RUN_DRIFT_DETECTED'
-          THEN 1 ELSE 0
-        END)::bigint AS drift_detected,
-    COUNT(DISTINCT run_id) FILTER (WHERE event_type = 'spendguard.audit.decision' AND run_id IS NOT NULL)::bigint AS run_total
-FROM canonical_events
-WHERE tenant_id = $1
-  AND event_time BETWEEN $2 AND $3
+    COUNT(*) FILTER (WHERE proj_exceeded)::bigint AS proj_exceeded,
+    COUNT(*) FILTER (WHERE drift_detected)::bigint AS drift_detected,
+    COUNT(*)::bigint AS run_total
+FROM run_flags
 "#;
 
 pub async fn fetch_run_level_counts(
@@ -515,16 +538,36 @@ mod tests {
             "stale non-audit drift alert type bypasses ImmutableAuditLog routing"
         );
         assert!(
-            DRIFT_ALERTS_SQL.contains("payload_json->>'model'")
-                && DRIFT_ALERTS_SQL.contains("payload_json->>'agent_id'")
-                && DRIFT_ALERTS_SQL.contains("payload_json->>'prompt_class'"),
-            "stats_aggregator drift payload has model/agent_id/prompt_class fields, not a bucket field"
+            DRIFT_ALERTS_SQL.contains("cost_advisor_safe_decode_payload(payload_json)")
+                && DRIFT_ALERTS_SQL.contains("payload->>'model'")
+                && DRIFT_ALERTS_SQL.contains("payload->>'agent_id'")
+                && DRIFT_ALERTS_SQL.contains("payload->>'prompt_class'"),
+            "stats_aggregator drift details live in the decoded inner CloudEvent data"
+        );
+    }
+
+    #[test]
+    fn calibration_ratio_reads_model_from_decoded_decision_payload() {
+        assert!(CALIBRATION_RATIO_SQL
+            .contains("cost_advisor_safe_decode_payload(decision.payload_json)"));
+        assert!(CALIBRATION_RATIO_SQL.contains("decision_payload->>'model_family'"));
+        assert!(CALIBRATION_RATIO_SQL.contains("decision_payload #>> '{spendguard,model}'"));
+        assert!(
+            !CALIBRATION_RATIO_SQL.contains("decision.payload_json->>'model'"),
+            "calibration ratio must not read the outer CloudEvent envelope as the model"
         );
     }
 
     #[test]
     fn run_level_counts_read_run_codes_from_decision_payload() {
-        assert!(RUN_LEVEL_COUNTS_SQL.contains("payload_json->'reason_codes'"));
+        assert!(RUN_LEVEL_COUNTS_SQL.contains("cost_advisor_safe_decode_payload(payload_json)"));
+        assert!(RUN_LEVEL_COUNTS_SQL.contains("payload->'reason_codes'"));
+        assert!(RUN_LEVEL_COUNTS_SQL.contains("bool_or"));
+        assert!(RUN_LEVEL_COUNTS_SQL.contains("COUNT(*) FILTER"));
+        assert!(
+            !RUN_LEVEL_COUNTS_SQL.contains("SUM(CASE"),
+            "RUN_* report rows must count distinct runs, not repeated decision events"
+        );
         assert!(RUN_LEVEL_COUNTS_SQL.contains("RUN_BUDGET_PROJECTION_EXCEEDED"));
         assert!(RUN_LEVEL_COUNTS_SQL.contains("RUN_DRIFT_DETECTED"));
         assert!(

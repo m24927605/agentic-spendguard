@@ -198,6 +198,119 @@ fn decode_cloudevent_from_jsonb(row: &AuditOutboxRow) -> Result<CloudEvent, anyh
         producer_sequence: get_u64("producer_sequence"),
         producer_signature,
         signing_key_id: get_str("signing_key_id"),
-        ..Default::default()
+        predicted_a_tokens: get_i64("predicted_a_tokens"),
+        predicted_b_tokens: get_i64("predicted_b_tokens"),
+        predicted_c_tokens: get_i64("predicted_c_tokens"),
+        reserved_strategy: get_str("reserved_strategy"),
+        prediction_strategy_used: get_str("prediction_strategy_used"),
+        prediction_policy_used: get_str("prediction_policy_used"),
+        tokenizer_tier: get_str("tokenizer_tier"),
+        tokenizer_version_id: get_str("tokenizer_version_id"),
+        prediction_confidence: payload
+            .get("prediction_confidence")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32)
+            .unwrap_or_default(),
+        prediction_sample_size: get_i64("prediction_sample_size"),
+        cold_start_layer_used: get_str("cold_start_layer_used"),
+        run_projection_at_decision_atomic: get_i64("run_projection_at_decision_atomic"),
+        run_predicted_remaining_steps: get_i32("run_predicted_remaining_steps"),
+        run_steps_completed_so_far: get_i64("run_steps_completed_so_far"),
+        actual_input_tokens: get_i64("actual_input_tokens"),
+        actual_output_tokens: get_i64("actual_output_tokens"),
+        delta_b_ratio: payload
+            .get("delta_b_ratio")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32)
+            .unwrap_or_default(),
+        delta_c_ratio: payload
+            .get("delta_c_ratio")
+            .and_then(|v| v.as_f64())
+            .map(|v| v as f32)
+            .unwrap_or_default(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use serde_json::json;
+    use uuid::Uuid;
+
+    fn replay_row(payload: serde_json::Value) -> AuditOutboxRow {
+        let id = Uuid::now_v7();
+        AuditOutboxRow {
+            audit_outbox_id: id,
+            audit_decision_event_id: id,
+            decision_id: Uuid::now_v7(),
+            ledger_transaction_id: Uuid::now_v7(),
+            event_type: "spendguard.audit.decision".to_string(),
+            cloudevent_payload: payload,
+            cloudevent_payload_signature: vec![1, 2, 3],
+            ledger_fencing_epoch: 1,
+            workload_instance_id: "sidecar-0".to_string(),
+            pending_forward: true,
+            forwarded_at: None,
+            recorded_at: Utc::now(),
+            producer_sequence: 9,
+        }
+    }
+
+    #[test]
+    fn replay_decode_preserves_prediction_extension_fields() {
+        let tenant_id = Uuid::now_v7();
+        let decision_id = Uuid::now_v7();
+        let payload = json!({
+            "specversion": "1.0",
+            "type": "spendguard.audit.decision",
+            "source": "spendguard://sidecar/test",
+            "id": Uuid::now_v7().to_string(),
+            "time_seconds": 1,
+            "time_nanos": 2,
+            "datacontenttype": "application/json",
+            "data_b64": "e30=",
+            "tenantid": tenant_id.to_string(),
+            "runid": Uuid::now_v7().to_string(),
+            "decisionid": decision_id.to_string(),
+            "schema_bundle_id": Uuid::now_v7().to_string(),
+            "producer_id": "sidecar:test",
+            "producer_sequence": 9,
+            "signing_key_id": "sidecar-key",
+            "predicted_a_tokens": 123,
+            "predicted_b_tokens": 456,
+            "predicted_c_tokens": 789,
+            "reserved_strategy": "B",
+            "prediction_strategy_used": "B",
+            "prediction_policy_used": "STRICT_CEILING",
+            "tokenizer_tier": "T2",
+            "tokenizer_version_id": "01918000-0000-7c10-8c10-000000000001",
+            "prediction_confidence": 0.875,
+            "prediction_sample_size": 35,
+            "cold_start_layer_used": "L2",
+            "run_projection_at_decision_atomic": 999,
+            "run_predicted_remaining_steps": 4,
+            "run_steps_completed_so_far": 0,
+            "actual_input_tokens": 11,
+            "actual_output_tokens": 22,
+            "delta_b_ratio": 0.5,
+            "delta_c_ratio": 0.25
+        });
+
+        let evt =
+            decode_cloudevent_from_jsonb(&replay_row(payload)).expect("decode replay payload");
+
+        assert_eq!(evt.predicted_a_tokens, 123);
+        assert_eq!(evt.predicted_b_tokens, 456);
+        assert_eq!(evt.reserved_strategy, "B");
+        assert_eq!(
+            evt.tokenizer_version_id,
+            "01918000-0000-7c10-8c10-000000000001"
+        );
+        assert_eq!(evt.run_projection_at_decision_atomic, 999);
+        assert_eq!(evt.run_predicted_remaining_steps, 4);
+        assert_eq!(evt.run_steps_completed_so_far, 0);
+        assert_eq!(evt.actual_input_tokens, 11);
+        assert_eq!(evt.actual_output_tokens, 22);
+    }
 }

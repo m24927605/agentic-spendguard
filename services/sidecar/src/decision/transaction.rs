@@ -293,12 +293,12 @@ pub struct DecisionOutput {
 ///     across all projected_claims (parsed to i64; clamps on overflow).
 ///     This is what the per-call reservation would be if we accepted
 ///     unchanged; projector uses it as Signal 2's baseline.
-///   * `budget_remaining_atomic` is sourced from inputs.projected_p90 as
-///     a hot-path-cached approximation. If the caller has no budget
-///     snapshot, we pass `i64::MAX` so the projector still records
-///     trajectory but cannot emit a false RUN_BUDGET_PROJECTION_EXCEEDED
-///     on an unknown budget. The ledger reserve path remains the hard
-///     authoritative budget oracle.
+///   * `budget_remaining_atomic` uses the unknown-budget sentinel because
+///     DecisionRequest does not currently carry an authoritative budget
+///     snapshot. `inputs.projected_p90_atomic` is a risk-band hint, not
+///     available budget. The projector still records trajectory but cannot
+///     emit a false RUN_BUDGET_PROJECTION_EXCEEDED on an unknown budget.
+///     The ledger reserve path remains the hard budget oracle.
 async fn call_projector_safe(
     state: &SidecarState,
     ctx: &DecisionContext,
@@ -365,25 +365,14 @@ async fn call_projector_safe(
 
 /// Extract the run projector's budget snapshot from DecisionRequest.
 ///
-/// SLICE_09 initially defaulted missing projected_p90 to 0, which made
-/// every non-trivial projection look over budget and could trigger
-/// STOP_RUN_PROJECTION on the first call. Unknown budget must be
-/// non-triggering; ledger reserve remains the fail-closed budget gate.
-fn projector_budget_remaining_atomic(req: &DecisionRequest) -> i64 {
-    use num_bigint::BigInt;
-    use std::str::FromStr;
-
-    req.inputs
-        .as_ref()
-        .and_then(|i| BigInt::from_str(&i.projected_p90_atomic).ok())
-        .and_then(|v| {
-            if v < BigInt::from(0i64) {
-                None
-            } else {
-                i64::try_from(v).ok()
-            }
-        })
-        .unwrap_or(i64::MAX)
+/// SLICE_09 initially defaulted missing projected_p90 to 0, and HARDEN_01
+/// briefly treated projected_p90 as a budget snapshot. Both are unsafe:
+/// projected_p90 is a caller-supplied risk-band hint, not remaining budget.
+/// Until the adapter wire contract carries an explicit budget snapshot,
+/// unknown budget must be non-triggering; ledger reserve remains the
+/// fail-closed budget gate.
+fn projector_budget_remaining_atomic(_req: &DecisionRequest) -> i64 {
+    i64::MAX
 }
 
 /// Drive the decision transaction end-to-end through stage 4 (reserve +
@@ -583,6 +572,7 @@ pub async fn run_through_reserve(
         producer_sequence,
         &snapshot_hash,
         &matched_rules,
+        &reason_codes,
         &enrichment,
         prediction_policy_str,
         projector_response_ref,
@@ -778,6 +768,7 @@ fn build_audit_decision_cloudevent(
     producer_sequence: u64,
     snapshot_hash: &[u8; 32],
     matched_rules: &[String],
+    reason_codes: &[String],
     enrichment: &AuditEnrichment,
     prediction_policy: &str,
     projector_response: Option<&crate::proto::run_cost_projector::v1::ProjectResponse>,
@@ -786,6 +777,7 @@ fn build_audit_decision_cloudevent(
     let mut payload = serde_json::json!({
         "snapshot_hash":   hex::encode(snapshot_hash),
         "matched_rules":   matched_rules,
+        "reason_codes":    reason_codes,
         "session_id":      ctx.session_id,
         // Cost Advisor P0.5 enrichment fields. Empty strings indicate
         // the SDK adapter did not provide enrichment for this call —
@@ -2359,7 +2351,7 @@ mod slice_02_decision_match_tests {
     }
 
     #[test]
-    fn projector_budget_remaining_valid_value_is_used() {
+    fn projector_budget_remaining_ignores_projected_p90_hint() {
         let req = DecisionRequest {
             inputs: Some(Inputs {
                 projected_p90_atomic: "12345".to_string(),
@@ -2367,6 +2359,50 @@ mod slice_02_decision_match_tests {
             }),
             ..Default::default()
         };
-        assert_eq!(projector_budget_remaining_atomic(&req), 12_345);
+        assert_eq!(
+            projector_budget_remaining_atomic(&req),
+            i64::MAX,
+            "projected_p90_atomic is a risk-band hint, not remaining budget"
+        );
+    }
+
+    #[test]
+    fn allow_path_audit_payload_includes_reason_codes() {
+        let ctx = DecisionContext {
+            session_id: "session-test".to_string(),
+            workload_instance_id: "sidecar-test".to_string(),
+            tenant_id: Uuid::nil().to_string(),
+            region: "test-region".to_string(),
+        };
+        let enrichment = AuditEnrichment {
+            run_id: "run-test".to_string(),
+            agent_id: "agent-test".to_string(),
+            model_family: "model-test".to_string(),
+            prompt_hash: "prompt-test".to_string(),
+            spendguard_context: serde_json::Value::Null,
+        };
+        let matched_rules = vec!["run-drift-alert".to_string()];
+        let reason_codes = vec!["RUN_DRIFT_DETECTED".to_string()];
+
+        let ce = build_audit_decision_cloudevent(
+            &ctx,
+            &Uuid::nil(),
+            &Uuid::nil(),
+            1,
+            &[0u8; 32],
+            &matched_rules,
+            &reason_codes,
+            &enrichment,
+            "STRICT_CEILING",
+            None,
+            None,
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(ce.data.as_ref()).expect("audit decision payload JSON");
+
+        assert_eq!(
+            payload.get("reason_codes"),
+            Some(&serde_json::json!(["RUN_DRIFT_DETECTED"]))
+        );
     }
 }
