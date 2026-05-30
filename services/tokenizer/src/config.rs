@@ -60,6 +60,48 @@ pub struct Config {
     /// tenant-bound state per spec §9 review question 6).
     #[serde(default)]
     pub region: String,
+
+    // ── SLICE_05: Tier 1 shadow drift detection ────────────────────
+    /// Master kill-switch for the shadow worker. When `false` the
+    /// service still tokenises (Tier 2 hot path), but no shadow events
+    /// are produced. Documented in §11 rollback plan.
+    #[serde(default = "default_shadow_enabled")]
+    pub shadow_enabled: bool,
+
+    /// Default sample rate (per spec §4.1; default 1% = 0.01). Override
+    /// per (tenant, model) via the control plane API (Phase F).
+    #[serde(default = "default_shadow_sample_rate")]
+    pub shadow_default_sample_rate: f64,
+
+    /// Anthropic API key for `POST /v1/messages/count_tokens`. Empty =
+    /// Anthropic shadow path disabled (worker still runs for Gemini).
+    /// Read from a file path when prefixed with `file://` so K8s
+    /// Secret mounts work cleanly (see Helm tokenizer.yaml).
+    #[serde(default)]
+    pub anthropic_api_key: String,
+
+    /// Gemini API key for `POST /v1/models/{model}:countTokens`.
+    /// Empty = Gemini shadow path disabled.
+    #[serde(default)]
+    pub gemini_api_key: String,
+
+    /// Postgres URL for the shadow worker's `tokenizer_t1_samples`
+    /// persistence. Empty = use in-memory persister (demo only —
+    /// production Helm profile requires this set).
+    #[serde(default)]
+    pub database_url: String,
+
+    /// canonical_ingest gRPC URL for the signed `tokenizer_drift_alert`
+    /// CloudEvent sink. Empty = use in-memory sink (demo only —
+    /// production Helm profile requires this set).
+    #[serde(default)]
+    pub canonical_ingest_url: String,
+
+    /// Producer source URI written into the emitted CloudEvent. Defaults
+    /// to `spendguard://tokenizer-service/<region>`. Surfaced for
+    /// per-instance disambiguation in multi-region deploys.
+    #[serde(default)]
+    pub event_source_override: String,
 }
 
 fn default_metrics_addr() -> String {
@@ -79,6 +121,18 @@ fn default_metrics_addr() -> String {
 
 fn default_tier3_alert_threshold() -> f32 {
     0.001
+}
+
+fn default_shadow_enabled() -> bool {
+    // SLICE_05: enabled by default — operators disable via env var per
+    // §11 rollback plan. Helm production profile honours the value
+    // explicitly so it lands in the chart's NOTES.txt.
+    true
+}
+
+fn default_shadow_sample_rate() -> f64 {
+    // Spec §4.1 — 1% default.
+    0.01
 }
 
 impl Config {

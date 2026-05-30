@@ -39,4 +39,15 @@ pub mod proto {
             tonic::include_proto!("spendguard.tokenizer.v1");
         }
     }
+    // SLICE_05: CloudEvent envelope + canonical_ingest client.
+    pub mod common {
+        pub mod v1 {
+            tonic::include_proto!("spendguard.common.v1");
+        }
+    }
+    pub mod canonical_ingest {
+        pub mod v1 {
+            tonic::include_proto!("spendguard.canonical_ingest.v1");
+        }
+    }
 }

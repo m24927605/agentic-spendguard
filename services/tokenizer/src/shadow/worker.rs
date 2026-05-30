@@ -1,23 +1,87 @@
-//! Phase A placeholder — full implementation in Phase E.
+//! Async shadow worker — drift detection + `tokenizer_drift_alert`
+//! CloudEvent emission.
 //!
-//! Async shadow loop spawned at boot via `tokio::spawn` from
-//! `services/tokenizer/src/main.rs`. Listens on a `mpsc::Receiver` fed
-//! by the gRPC `Tokenize` handler after Tier 2 returns to caller (the
-//! send is best-effort + non-blocking so Tier 2 latency is unaffected).
+//! Spec refs:
+//!   - `tokenizer-service-spec-v1alpha1.md` §4 (Tier 1 shadow architecture)
+//!   - `tokenizer-service-spec-v1alpha1.md` §4.1 (sampling + worker
+//!     pseudocode)
+//!   - `tokenizer-service-spec-v1alpha1.md` §4.2 (per-kind drift threshold;
+//!     consumed via `EncoderKind::drift_threshold()` so SLICE_04 owns
+//!     the values)
+//!   - `tokenizer-service-spec-v1alpha1.md` §4.3 (1h cool-down window)
+//!   - `tokenizer-service-spec-v1alpha1.md` §4.4 (`tokenizer_t1_samples`
+//!     persistence)
+//!   - `stats-aggregator-spec-v1alpha1.md` §7.2 (CloudEvent schema
+//!     conventions — reused for the `tokenizer_drift_alert` family)
 //!
-//! Per spec §4 — the shadow path is strictly async; the worker SHALL
-//! NOT block the gRPC response path.
+//! ## Hot path invariant
 //!
-//! See `tokenizer-service-spec-v1alpha1.md` §4 + `worker` stub in §4.1.
+//! The gRPC `Tokenize` handler calls [`ShadowWorkerHandle::try_send`]
+//! AFTER returning the Tier 2 response to the caller. The send is
+//! non-blocking and returns immediately on a full channel — Tier 2
+//! latency is structurally protected from any back-pressure here.
+//!
+//! This module is referenced ONLY from `services/tokenizer/src/main.rs`
+//! (worker spawn) and `services/tokenizer/src/server.rs` (try_send). It
+//! is NEVER referenced from `services/sidecar/` or
+//! `services/egress_proxy/` — spec §1.3 invariant.
+//!
+//! ## Drift alert event shape
+//!
+//! Per spec §4 + stats-aggregator-spec §7.2 the emitted CloudEvent is:
+//!
+//! ```yaml
+//! type:   spendguard.tokenizer.drift_alert.v1alpha1
+//! source: spendguard://tokenizer-service/<instance>
+//! data:
+//!   tenant_id:              <string>
+//!   model:                  <string>
+//!   tokenizer_version_id:   <uuid>
+//!   tier2_count:            <int>
+//!   tier1_count:            <int>
+//!   drift_pct:              <float>
+//!   threshold:              <float>
+//!   encoder_kind:           "ANTHROPIC_BPE" | "GEMINI_BPE" | ...
+//! ```
+//!
+//! The CloudEvent is signed in place via the canonical Ed25519 path
+//! (mirrors `services/sidecar/src/audit.rs::sign_cloudevent_in_place`).
 
+use std::sync::Arc;
+
+use bytes::Bytes;
+use chrono::Utc;
+use prost::Message as _;
+use spendguard_signing::Signer;
 use spendguard_tokenizer::encoders::EncoderKind;
 use tokio::sync::mpsc;
+use tracing::{debug, error, info, warn};
 
-/// One sampled tokenize event headed to the shadow worker. Carries
-/// enough context to (a) decide whether to actually sample (Phase B
-/// rate gating), (b) call the provider Tier 1 endpoint (Phase C), (c)
-/// compute drift vs Tier 2 result (Phase E), (d) persist to
-/// `tokenizer_t1_samples` (Phase E).
+use super::circuit_breaker::{CircuitBreakerState, Permit};
+use super::provider_clients::{
+    anthropic::AnthropicClient, gemini::GeminiClient, ProviderError,
+};
+use super::sample_rate_state::{SampleRateState, ShadowKey};
+use crate::proto::common::v1::CloudEvent;
+
+/// CloudEvent type string for tokenizer drift alerts (spec §4 +
+/// stats-aggregator §7.2 family).
+pub const DRIFT_ALERT_EVENT_TYPE: &str = "spendguard.tokenizer.drift_alert.v1alpha1";
+
+/// Default bounded-channel capacity from the gRPC handler to the
+/// shadow worker. Bounded so Tier 2 hot path never queues forever when
+/// the worker is overloaded; spec §10.2 sample queue lag p99 < 30s SLO
+/// covers tail latency, not hard cap.
+pub const DEFAULT_CHANNEL_CAPACITY: usize = 1024;
+
+/// One sampled tokenize event headed to the shadow worker.
+///
+/// Carries enough context to:
+///   * decide whether to actually sample (Phase B rate gating),
+///   * call the provider Tier 1 endpoint (Phase C),
+///   * compute drift vs Tier 2 result (this phase),
+///   * persist to `tokenizer_t1_samples` (this phase),
+///   * emit `tokenizer_drift_alert` if drift > threshold (this phase).
 #[derive(Debug, Clone)]
 pub struct ShadowEvent {
     pub tenant_id: String,
@@ -25,61 +89,692 @@ pub struct ShadowEvent {
     pub encoder_kind: EncoderKind,
     pub t2_input_tokens: i64,
     pub t2_tokenizer_version_id: String,
-    /// Raw text the caller tokenized. We carry it across the channel
-    /// (rather than only the count) because the provider count_tokens
-    /// APIs need the original text. Bounded by spec §10.1 1 MiB cap
-    /// upstream so memory pressure on the channel is bounded.
+    /// Raw text the caller tokenized. Bounded upstream by spec §10.1
+    /// 1 MiB cap so channel memory pressure is bounded.
     pub raw_text: String,
 }
 
-/// Handle the shadow worker returns to main.rs for graceful shutdown +
-/// best-effort event submission.
+impl ShadowEvent {
+    fn shadow_key(&self) -> ShadowKey {
+        ShadowKey {
+            tenant_id: self.tenant_id.clone(),
+            model: self.model.clone(),
+        }
+    }
+}
+
+/// Outcome of processing one shadow event. Surfaced via the metrics
+/// hook so the /metrics endpoint can render per-state counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowOutcome {
+    /// Sample was dropped (rate gate or breaker open).
+    Skipped,
+    /// Provider call returned; no drift detected.
+    Sampled,
+    /// Provider call returned; drift exceeded threshold; alert emitted.
+    Alerted,
+    /// Provider call failed; circuit breaker counter incremented.
+    ProviderFailed,
+    /// Provider returned schema drift OR auth failure; sample skipped,
+    /// breaker NOT incremented.
+    ProviderSchemaOrAuth,
+}
+
+/// Handle returned to main.rs for graceful shutdown + best-effort
+/// event submission from the gRPC handler.
 #[derive(Debug, Clone)]
 pub struct ShadowWorkerHandle {
     sender: mpsc::Sender<ShadowEvent>,
 }
 
 impl ShadowWorkerHandle {
-    /// Non-blocking try-send. Phase A returns the result so callers can
-    /// distinguish "channel full" from "channel closed"; the gRPC
-    /// server handler ignores both (Tier 2 hot path is not allowed to
-    /// be perturbed by the shadow path per spec §1.3 invariant).
-    pub fn try_send(&self, event: ShadowEvent) -> Result<(), mpsc::error::TrySendError<ShadowEvent>> {
+    /// Non-blocking try-send. The gRPC server handler ignores the
+    /// result — Tier 2 hot path is not allowed to be perturbed by the
+    /// shadow path per spec §1.3 invariant. We return the typed error
+    /// for tests + Phase F metric emission.
+    pub fn try_send(
+        &self,
+        event: ShadowEvent,
+    ) -> Result<(), mpsc::error::TrySendError<ShadowEvent>> {
         self.sender.try_send(event)
     }
 }
 
-/// Phase A skeleton — Phase E ships the real shadow loop. The boot
-/// path can call this today; the returned handle is otherwise inert
-/// (channel receiver drops the events).
-pub fn spawn_shadow_worker(buffer: usize) -> ShadowWorkerHandle {
-    let (tx, mut rx) = mpsc::channel::<ShadowEvent>(buffer);
-    // Drain receiver so try_send returns Ok until full; Phase E
-    // replaces with the real loop.
+/// One persisted sample — the shadow worker hands this to the
+/// [`SamplePersister`] trait. Phase F may add a buffered batch
+/// persister; the SQL-direct path is the default.
+#[derive(Debug, Clone)]
+pub struct SampleRow {
+    pub sample_id: uuid::Uuid,
+    pub tenant_id: String,
+    pub model: String,
+    pub t1_input_tokens: i64,
+    pub t2_input_tokens: i64,
+    pub t2_tokenizer_version_id: String,
+    pub drift_ratio: f32,
+    pub drift_alert_emitted: bool,
+    pub provider_request_id: Option<String>,
+}
+
+/// Persistence abstraction so tests can plug in an in-memory recorder
+/// without spinning up a Postgres instance.
+#[async_trait::async_trait]
+pub trait SamplePersister: Send + Sync {
+    async fn persist(&self, sample: SampleRow) -> Result<(), anyhow::Error>;
+}
+
+/// CloudEvent emission abstraction. The real path forwards to
+/// canonical_ingest's AppendEvents RPC; tests collect the events in a
+/// Vec.
+#[async_trait::async_trait]
+pub trait DriftAlertSink: Send + Sync {
+    async fn emit(&self, event: CloudEvent) -> Result<(), anyhow::Error>;
+}
+
+/// Dispatching client surface — the worker may have one, the other, or
+/// both. Drift detection only fires when the call returns a valid
+/// Tier 1 count.
+#[derive(Clone, Default)]
+pub struct ProviderRoster {
+    pub anthropic: Option<AnthropicClient>,
+    pub gemini: Option<GeminiClient>,
+}
+
+impl std::fmt::Debug for ProviderRoster {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderRoster")
+            .field("anthropic", &self.anthropic.is_some())
+            .field("gemini", &self.gemini.is_some())
+            .finish()
+    }
+}
+
+/// Shadow worker dependencies bundled into one struct so the spawn
+/// signature stays sane.
+pub struct ShadowWorkerDeps {
+    pub sample_rate: Arc<SampleRateState>,
+    pub circuit_breaker: Arc<CircuitBreakerState>,
+    pub providers: ProviderRoster,
+    pub persister: Arc<dyn SamplePersister>,
+    pub alert_sink: Arc<dyn DriftAlertSink>,
+    pub signer: Arc<dyn Signer>,
+    /// Producer source URI for the signed CloudEvent, e.g.
+    /// `spendguard://tokenizer-service/region-us-west2`.
+    pub event_source: String,
+    /// Channel capacity from gRPC handler → worker.
+    pub channel_capacity: usize,
+}
+
+impl ShadowWorkerDeps {
+    pub fn channel_capacity_or_default(&self) -> usize {
+        if self.channel_capacity == 0 {
+            DEFAULT_CHANNEL_CAPACITY
+        } else {
+            self.channel_capacity
+        }
+    }
+}
+
+/// Spawn the shadow worker. Returns the handle the gRPC server uses to
+/// fire-and-forget events.
+pub fn spawn_shadow_worker(deps: ShadowWorkerDeps) -> ShadowWorkerHandle {
+    let cap = deps.channel_capacity_or_default();
+    let (tx, rx) = mpsc::channel::<ShadowEvent>(cap);
+    tokio::spawn(run_loop(rx, deps));
+    ShadowWorkerHandle { sender: tx }
+}
+
+/// Inert handle for `services/tokenizer/src/main.rs` to use during the
+/// boot phase when no provider clients are configured (demo mode).
+/// Drops every event silently. Wraps the same channel shape so the
+/// gRPC handler does not need to know about the difference.
+pub fn spawn_drop_handle(buffer: usize) -> ShadowWorkerHandle {
+    let cap = if buffer == 0 { DEFAULT_CHANNEL_CAPACITY } else { buffer };
+    let (tx, mut rx) = mpsc::channel::<ShadowEvent>(cap);
     tokio::spawn(async move {
         while rx.recv().await.is_some() {
-            // Drop. Phase E processes the event.
+            // Drain. Demo mode.
         }
     });
     ShadowWorkerHandle { sender: tx }
 }
 
+async fn run_loop(mut rx: mpsc::Receiver<ShadowEvent>, deps: ShadowWorkerDeps) {
+    info!("shadow worker started");
+    while let Some(event) = rx.recv().await {
+        let outcome = process_one(&event, &deps).await;
+        debug!(?outcome, model = %event.model, "shadow event processed");
+    }
+    warn!("shadow worker channel closed; exiting");
+}
+
+/// Process one shadow event end-to-end. Visible for direct testing in
+/// addition to the channel-driven loop.
+pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> ShadowOutcome {
+    let key = event.shadow_key();
+
+    // Rate gate — should_sample handles the cool-down 100% case.
+    if !deps.sample_rate.should_sample(&key) {
+        return ShadowOutcome::Skipped;
+    }
+
+    // Circuit breaker — skip if Open.
+    match deps.circuit_breaker.permit_request(&key) {
+        Permit::SkipOpen => return ShadowOutcome::Skipped,
+        Permit::Allow => {}
+    }
+
+    // Dispatch to the right provider.
+    let provider_call = match event.encoder_kind {
+        EncoderKind::Anthropic => match deps.providers.anthropic.as_ref() {
+            Some(c) => c.count_tokens(&event.model, &event.raw_text).await,
+            None => {
+                debug!(model = %event.model,
+                       "anthropic shadow client not configured; skipping sample");
+                return ShadowOutcome::Skipped;
+            }
+        },
+        EncoderKind::Gemini => match deps.providers.gemini.as_ref() {
+            Some(c) => c.count_tokens(&event.model, &event.raw_text).await,
+            None => {
+                debug!(model = %event.model,
+                       "gemini shadow client not configured; skipping sample");
+                return ShadowOutcome::Skipped;
+            }
+        },
+        // SLICE_05 ships providers for Anthropic + Gemini only.
+        // OpenAI's tiktoken is byte-exact (per spec §4.2 threshold 0.0)
+        // — drift detection lives elsewhere (CI golden fixture diff).
+        // Cohere / Llama Tier 1 endpoints are deferred to SLICE-extra.
+        _ => return ShadowOutcome::Skipped,
+    };
+
+    let provider_count = match provider_call {
+        Ok(c) => c,
+        Err(err) => {
+            return on_provider_error(&key, &err, deps).await;
+        }
+    };
+
+    // Probe success → close the breaker (no-op if already Closed).
+    deps.circuit_breaker.record_success(&key);
+
+    let drift_ratio = compute_drift_ratio(
+        provider_count.input_tokens,
+        event.t2_input_tokens.max(0) as u64,
+    );
+    let threshold = event.encoder_kind.drift_threshold();
+    let alert = drift_ratio > threshold;
+
+    if alert {
+        deps.sample_rate.enter_cool_down(&key);
+        if let Err(e) = emit_drift_alert(event, &provider_count, drift_ratio, threshold, deps).await {
+            error!(error = ?e, "failed to emit tokenizer_drift_alert CloudEvent");
+        }
+    }
+
+    let sample_row = SampleRow {
+        sample_id: uuid::Uuid::now_v7(),
+        tenant_id: event.tenant_id.clone(),
+        model: event.model.clone(),
+        t1_input_tokens: provider_count.input_tokens as i64,
+        t2_input_tokens: event.t2_input_tokens,
+        t2_tokenizer_version_id: event.t2_tokenizer_version_id.clone(),
+        drift_ratio,
+        drift_alert_emitted: alert,
+        provider_request_id: provider_count.request_id.clone(),
+    };
+    if let Err(e) = deps.persister.persist(sample_row).await {
+        error!(error = ?e, "failed to persist tokenizer_t1_samples row");
+    }
+
+    if alert {
+        ShadowOutcome::Alerted
+    } else {
+        ShadowOutcome::Sampled
+    }
+}
+
+async fn on_provider_error(
+    key: &ShadowKey,
+    err: &ProviderError,
+    deps: &ShadowWorkerDeps,
+) -> ShadowOutcome {
+    if err.counts_as_breaker_failure() {
+        deps.circuit_breaker.record_failure(key);
+        warn!(error = %err, tenant = %key.tenant_id, model = %key.model,
+              "shadow provider call failed; breaker counter incremented");
+        ShadowOutcome::ProviderFailed
+    } else {
+        // Schema drift / auth — operator attention required; don't trip
+        // the breaker on a stuck vendor response.
+        warn!(error = %err, tenant = %key.tenant_id, model = %key.model,
+              "shadow provider returned schema-drift or auth error; sample skipped");
+        ShadowOutcome::ProviderSchemaOrAuth
+    }
+}
+
+/// `|T1 - T2| / max(T1, 1)` — defensively guards against T1=0 which
+/// would cause a division by zero. T1=0 is a vendor bug; treat as a
+/// 100% drift so the alert fires.
+pub fn compute_drift_ratio(t1: u64, t2: u64) -> f32 {
+    if t1 == 0 {
+        return if t2 == 0 { 0.0 } else { 1.0 };
+    }
+    let t1_f = t1 as f64;
+    let t2_f = t2 as f64;
+    ((t1_f - t2_f).abs() / t1_f) as f32
+}
+
+/// Build + sign + emit one `tokenizer_drift_alert` CloudEvent.
+async fn emit_drift_alert(
+    event: &ShadowEvent,
+    provider_count: &super::provider_clients::ProviderCount,
+    drift_ratio: f32,
+    threshold: f32,
+    deps: &ShadowWorkerDeps,
+) -> Result<(), anyhow::Error> {
+    let data = serde_json::json!({
+        "tenant_id": event.tenant_id,
+        "model": event.model,
+        "tokenizer_version_id": event.t2_tokenizer_version_id,
+        "tier2_count": event.t2_input_tokens,
+        "tier1_count": provider_count.input_tokens,
+        "drift_pct": drift_ratio,
+        "threshold": threshold,
+        "encoder_kind": event.encoder_kind.as_str(),
+        "provider_request_id": provider_count.request_id,
+        "provider_latency_ms": provider_count.latency.as_millis() as u64,
+    });
+    let data_bytes = serde_json::to_vec(&data)?;
+
+    let now = Utc::now();
+    // CloudEvent has many tag-300+ prediction-extension fields; we only
+    // populate the envelope + spendguard extensions we own + clear the
+    // sig fields. Default::default() supplies the rest (proto3 default
+    // == "field absent on this event" — see common.proto §3.2 wire
+    // semantics).
+    let mut ce = CloudEvent {
+        specversion: "1.0".to_string(),
+        r#type: DRIFT_ALERT_EVENT_TYPE.to_string(),
+        source: deps.event_source.clone(),
+        id: uuid::Uuid::now_v7().to_string(),
+        time: Some(prost_types::Timestamp {
+            seconds: now.timestamp(),
+            nanos: now.timestamp_subsec_nanos() as i32,
+        }),
+        datacontenttype: "application/json".to_string(),
+        data: data_bytes.into(),
+        tenant_id: event.tenant_id.clone(),
+        producer_id: deps.signer.producer_identity().to_string(),
+        producer_signature: Bytes::new(),
+        ..Default::default()
+    };
+    sign_in_place(deps.signer.as_ref(), &mut ce).await?;
+    deps.alert_sink.emit(ce).await?;
+    Ok(())
+}
+
+/// Canonical-bytes sign-in-place mirror of
+/// `services/sidecar/src/audit.rs::sign_cloudevent_in_place`. We
+/// duplicate the helper rather than introduce a cross-crate dep on
+/// sidecar's domain error type — both call sites converge on the same
+/// "set key_id, clear signature, encode, sign, write signature" recipe.
+async fn sign_in_place(signer: &dyn Signer, event: &mut CloudEvent) -> Result<(), anyhow::Error> {
+    event.signing_key_id = signer.key_id().to_string();
+    event.producer_signature = Bytes::new();
+    let canonical = event.encode_to_vec();
+    let sig = signer
+        .sign(&canonical)
+        .await
+        .map_err(|e| anyhow::anyhow!("sign drift_alert CloudEvent: {e}"))?;
+    event.producer_signature = sig.bytes.into();
+    Ok(())
+}
+
+// ──────────────────────────────────────────────────────────────────
+// Tests
+// ──────────────────────────────────────────────────────────────────
+
+/// Drop-in persister for tests + demo mode. Records persisted rows in
+/// an in-memory vec.
+#[derive(Default, Debug)]
+pub struct InMemorySamplePersister {
+    pub rows: parking_lot::Mutex<Vec<SampleRow>>,
+}
+
+#[async_trait::async_trait]
+impl SamplePersister for InMemorySamplePersister {
+    async fn persist(&self, sample: SampleRow) -> Result<(), anyhow::Error> {
+        self.rows.lock().push(sample);
+        Ok(())
+    }
+}
+
+/// Drop-in alert sink for tests. Records emitted CloudEvents.
+#[derive(Default, Debug)]
+pub struct InMemoryDriftAlertSink {
+    pub events: parking_lot::Mutex<Vec<CloudEvent>>,
+}
+
+#[async_trait::async_trait]
+impl DriftAlertSink for InMemoryDriftAlertSink {
+    async fn emit(&self, event: CloudEvent) -> Result<(), anyhow::Error> {
+        self.events.lock().push(event);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::super::circuit_breaker::CircuitBreakerConfig;
+    use super::super::provider_clients::ProviderCount;
+    use super::super::sample_rate_state::SampleRateConfig;
     use super::*;
+    use spendguard_signing::DisabledSigner;
+    use std::time::Duration;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn deps_for_test(providers: ProviderRoster) -> ShadowWorkerDeps {
+        let sample_rate = SampleRateState::new(SampleRateConfig {
+            // Always-sample so tests don't deal with probabilistic gating.
+            default_rate: 1.0,
+            cool_down: Duration::from_secs(3600),
+            cool_down_rate: 1.0,
+        });
+        let cb = CircuitBreakerState::new(CircuitBreakerConfig {
+            failure_threshold: 2,
+            open_duration: Duration::from_millis(200),
+        });
+        ShadowWorkerDeps {
+            sample_rate,
+            circuit_breaker: cb,
+            providers,
+            persister: Arc::new(InMemorySamplePersister::default()),
+            alert_sink: Arc::new(InMemoryDriftAlertSink::default()),
+            signer: Arc::new(DisabledSigner::for_test(
+                "tokenizer-service:test".into(),
+            )),
+            event_source: "spendguard://tokenizer-service/test".into(),
+            channel_capacity: 16,
+        }
+    }
+
+    fn deps_for_test_sample_rate_zero(providers: ProviderRoster) -> ShadowWorkerDeps {
+        let mut d = deps_for_test(providers);
+        d.sample_rate = SampleRateState::new(SampleRateConfig {
+            default_rate: 0.0,
+            cool_down: Duration::from_secs(3600),
+            cool_down_rate: 1.0,
+        });
+        d
+    }
+
+    fn ev_anthropic(t2_count: i64, raw: &str) -> ShadowEvent {
+        ShadowEvent {
+            tenant_id: "tenant-x".into(),
+            model: "claude-3-5-sonnet-20241022".into(),
+            encoder_kind: EncoderKind::Anthropic,
+            t2_input_tokens: t2_count,
+            t2_tokenizer_version_id: "01918000-0000-7c10-8c10-000000000010".into(),
+            raw_text: raw.into(),
+        }
+    }
+
+    fn ev_gemini(t2_count: i64, raw: &str) -> ShadowEvent {
+        ShadowEvent {
+            tenant_id: "tenant-x".into(),
+            model: "gemini-1.5-flash".into(),
+            encoder_kind: EncoderKind::Gemini,
+            t2_input_tokens: t2_count,
+            t2_tokenizer_version_id: "01918000-0000-7c10-8c10-000000000020".into(),
+            raw_text: raw.into(),
+        }
+    }
+
+    async fn anthropic_mock_returning(tokens: u64) -> (MockServer, AnthropicClient) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/count_tokens"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("request-id", "req_test")
+                    .set_body_json(serde_json::json!({ "input_tokens": tokens })),
+            )
+            .mount(&server)
+            .await;
+        let c = AnthropicClient::with_base_url("test-key", server.uri()).unwrap();
+        (server, c)
+    }
+
+    #[test]
+    fn compute_drift_ratio_basic_cases() {
+        // No drift.
+        assert_eq!(compute_drift_ratio(100, 100), 0.0);
+        // 5% drift.
+        let d = compute_drift_ratio(100, 95);
+        assert!((d - 0.05).abs() < 1e-5);
+        // T1 < T2 (Tier 2 over-counted).
+        let d = compute_drift_ratio(100, 110);
+        assert!((d - 0.10).abs() < 1e-5);
+        // T1 = 0, T2 > 0 → 100% drift.
+        assert_eq!(compute_drift_ratio(0, 5), 1.0);
+        // T1 = 0, T2 = 0 → 0% drift.
+        assert_eq!(compute_drift_ratio(0, 0), 0.0);
+    }
 
     #[tokio::test]
-    async fn try_send_smoke() {
-        let handle = spawn_shadow_worker(8);
-        let ev = ShadowEvent {
-            tenant_id: "t".into(),
-            model: "gpt-4o".into(),
-            encoder_kind: EncoderKind::OpenAi,
-            t2_input_tokens: 10,
-            t2_tokenizer_version_id: "01918000-0000-7c10-8c10-000000000001".into(),
-            raw_text: "hi".into(),
+    async fn sample_skipped_when_rate_zero() {
+        let (_s, c) = anthropic_mock_returning(100).await;
+        let providers = ProviderRoster {
+            anthropic: Some(c),
+            gemini: None,
         };
-        // First send should succeed.
-        handle.try_send(ev).expect("phase A drain receiver");
+        let deps = deps_for_test_sample_rate_zero(providers);
+        let out = process_one(&ev_anthropic(100, "hi"), &deps).await;
+        assert_eq!(out, ShadowOutcome::Skipped);
+    }
+
+    #[tokio::test]
+    async fn happy_path_no_drift_persists_sample() {
+        // T1 = T2 = 100 → drift_ratio = 0 ≤ threshold 0.01 → no alert.
+        let (_server, c) = anthropic_mock_returning(100).await;
+        let providers = ProviderRoster {
+            anthropic: Some(c),
+            gemini: None,
+        };
+        let persister = Arc::new(InMemorySamplePersister::default());
+        let alert_sink = Arc::new(InMemoryDriftAlertSink::default());
+        let mut deps = deps_for_test(providers);
+        deps.persister = persister.clone();
+        deps.alert_sink = alert_sink.clone();
+
+        let out = process_one(&ev_anthropic(100, "hi"), &deps).await;
+        assert_eq!(out, ShadowOutcome::Sampled);
+
+        let rows = persister.rows.lock();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].t1_input_tokens, 100);
+        assert_eq!(rows[0].t2_input_tokens, 100);
+        assert_eq!(rows[0].drift_ratio, 0.0);
+        assert!(!rows[0].drift_alert_emitted);
+        let events = alert_sink.events.lock();
+        assert!(events.is_empty(), "no alert event for no-drift sample");
+    }
+
+    #[tokio::test]
+    async fn drift_above_threshold_emits_signed_cloudevent() {
+        // Anthropic threshold is 0.01. T1=100, T2=90 → drift=10% ≫ 0.01.
+        let (_server, c) = anthropic_mock_returning(100).await;
+        let providers = ProviderRoster {
+            anthropic: Some(c),
+            gemini: None,
+        };
+        let persister = Arc::new(InMemorySamplePersister::default());
+        let alert_sink = Arc::new(InMemoryDriftAlertSink::default());
+        let mut deps = deps_for_test(providers);
+        deps.persister = persister.clone();
+        deps.alert_sink = alert_sink.clone();
+
+        let out = process_one(&ev_anthropic(90, "hi"), &deps).await;
+        assert_eq!(out, ShadowOutcome::Alerted);
+
+        let rows = persister.rows.lock();
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].drift_alert_emitted);
+        assert!((rows[0].drift_ratio - 0.10).abs() < 1e-4);
+
+        let events = alert_sink.events.lock();
+        assert_eq!(events.len(), 1);
+        let ce = &events[0];
+        assert_eq!(ce.specversion, "1.0");
+        assert_eq!(ce.r#type, DRIFT_ALERT_EVENT_TYPE);
+        assert_eq!(ce.datacontenttype, "application/json");
+        // signing_key_id populated by sign_in_place (DisabledSigner →
+        // "disabled" surface; the prod LocalEd25519Signer returns the
+        // ed25519:<hex> form).
+        assert!(!ce.signing_key_id.is_empty());
+
+        // Decode the JSON data and verify required fields.
+        let data: serde_json::Value = serde_json::from_slice(&ce.data).unwrap();
+        assert_eq!(data["model"], "claude-3-5-sonnet-20241022");
+        assert_eq!(data["tier1_count"], 100);
+        assert_eq!(data["tier2_count"], 90);
+        assert_eq!(data["encoder_kind"], "ANTHROPIC_BPE");
+        assert!(data["drift_pct"].as_f64().unwrap() > 0.09);
+        assert!((data["threshold"].as_f64().unwrap() - 0.01).abs() < 1e-6);
+    }
+
+    #[tokio::test]
+    async fn drift_alert_enters_cool_down() {
+        // After an alert, sample rate snapshot should report 100% rate.
+        let (_server, c) = anthropic_mock_returning(100).await;
+        let providers = ProviderRoster {
+            anthropic: Some(c),
+            gemini: None,
+        };
+        let deps = deps_for_test(providers);
+        let sample_rate = deps.sample_rate.clone();
+
+        let ev = ev_anthropic(90, "hi");
+        let _ = process_one(&ev, &deps).await;
+        let snap = sample_rate.snapshot(&ev.shadow_key());
+        assert!(snap.in_cool_down,
+                "drift alert must enter cool-down per spec §4.3");
+        assert!((snap.effective_rate - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn provider_5xx_increments_breaker() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/count_tokens"))
+            .respond_with(ResponseTemplate::new(503))
+            .mount(&server)
+            .await;
+        let c = AnthropicClient::with_base_url("test-key", server.uri()).unwrap();
+        let providers = ProviderRoster {
+            anthropic: Some(c),
+            gemini: None,
+        };
+        let deps = deps_for_test(providers);
+        let key = ShadowKey {
+            tenant_id: "tenant-x".into(),
+            model: "claude-3-5-sonnet-20241022".into(),
+        };
+
+        let out = process_one(&ev_anthropic(100, "hi"), &deps).await;
+        assert_eq!(out, ShadowOutcome::ProviderFailed);
+        assert_eq!(deps.circuit_breaker.consecutive_failures(&key), 1);
+
+        let _ = process_one(&ev_anthropic(100, "hi"), &deps).await;
+        // After 2 failures (test threshold) breaker is Open and the
+        // next attempt is Skipped.
+        let out = process_one(&ev_anthropic(100, "hi"), &deps).await;
+        assert_eq!(out, ShadowOutcome::Skipped);
+    }
+
+    #[tokio::test]
+    async fn schema_drift_skips_sample_without_tripping_breaker() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/count_tokens"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "nope": "wrong-shape" })),
+            )
+            .mount(&server)
+            .await;
+        let c = AnthropicClient::with_base_url("test-key", server.uri()).unwrap();
+        let providers = ProviderRoster {
+            anthropic: Some(c),
+            gemini: None,
+        };
+        let deps = deps_for_test(providers);
+        let key = ShadowKey {
+            tenant_id: "tenant-x".into(),
+            model: "claude-3-5-sonnet-20241022".into(),
+        };
+        for _ in 0..5 {
+            let out = process_one(&ev_anthropic(100, "hi"), &deps).await;
+            assert_eq!(out, ShadowOutcome::ProviderSchemaOrAuth);
+        }
+        // 5 schema-drift responses MUST NOT trip the breaker.
+        assert_eq!(deps.circuit_breaker.consecutive_failures(&key), 0);
+    }
+
+    #[tokio::test]
+    async fn unsupported_encoder_kind_skips() {
+        // OpenAI / Cohere / Llama all skipped in SLICE_05.
+        let providers = ProviderRoster::default();
+        let deps = deps_for_test(providers);
+        let mut ev = ev_anthropic(100, "hi");
+        ev.encoder_kind = EncoderKind::OpenAi;
+        let out = process_one(&ev, &deps).await;
+        assert_eq!(out, ShadowOutcome::Skipped);
+    }
+
+    #[tokio::test]
+    async fn gemini_dispatch_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/models/gemini-1.5-flash:countTokens"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "totalTokens": 100,
+                    "totalBillableCharacters": 50
+                })),
+            )
+            .mount(&server)
+            .await;
+        let c = GeminiClient::with_base_url("test-key", server.uri()).unwrap();
+        let providers = ProviderRoster {
+            anthropic: None,
+            gemini: Some(c),
+        };
+        let persister = Arc::new(InMemorySamplePersister::default());
+        let mut deps = deps_for_test(providers);
+        deps.persister = persister.clone();
+
+        let out = process_one(&ev_gemini(100, "hi"), &deps).await;
+        assert_eq!(out, ShadowOutcome::Sampled);
+        assert_eq!(persister.rows.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn handle_try_send_smoke() {
+        let providers = ProviderRoster::default();
+        let deps = deps_for_test(providers);
+        let h = spawn_shadow_worker(deps);
+        let ev = ev_anthropic(100, "hi");
+        h.try_send(ev).expect("first send succeeds on fresh channel");
+    }
+
+    #[tokio::test]
+    async fn drop_handle_compiles_and_drains() {
+        let h = spawn_drop_handle(8);
+        let ev = ev_anthropic(100, "hi");
+        h.try_send(ev).expect("demo drop handle accepts events");
     }
 }

@@ -37,6 +37,7 @@ use spendguard_tokenizer_service::{
     config::Config,
     proto::tokenizer::v1::tokenizer_server::TokenizerServer,
     server::TokenizerSvc,
+    shadow::worker::{spawn_drop_handle, ShadowWorkerHandle},
 };
 
 #[tokio::main]
@@ -88,7 +89,33 @@ async fn main() -> Result<()> {
         info!(addr = %cfg.metrics_addr, "metrics endpoint bound");
     }
 
-    let svc = TokenizerSvc::new(Arc::clone(&tokenizer));
+    // SLICE_05: shadow worker boot. Real production wire-up (provider
+    // clients + SQL persister + canonical_ingest CloudEvent sink + Ed25519
+    // signer) is deferred to a follow-up; SLICE_05 ships the drop-handle
+    // boot path for service-startup parity. The drop handle accepts events
+    // from the gRPC handler without blocking and discards them — keeps the
+    // hot path try_send call site exercised end-to-end so it can never
+    // regress. Future wire-up: read config.shadow_enabled / api keys /
+    // canonical_ingest_url and switch from drop handle to spawn_shadow_worker
+    // with the full ShadowWorkerDeps.
+    let shadow_handle: ShadowWorkerHandle = spawn_drop_handle(0);
+    if !cfg.shadow_enabled {
+        info!("shadow_enabled=false — shadow worker started in drop-only mode");
+    } else if cfg.anthropic_api_key.is_empty() && cfg.gemini_api_key.is_empty() {
+        info!("no provider API keys configured — shadow worker in drop-only mode (demo)");
+    } else {
+        // Future SLICE-extra: real worker wiring lands here. For now
+        // SLICE_05 surfaces an info log so operators can see the boot
+        // state explicitly and the gRPC handler still benefits from
+        // the channel try_send no-regression invariant.
+        warn!(
+            anthropic = !cfg.anthropic_api_key.is_empty(),
+            gemini = !cfg.gemini_api_key.is_empty(),
+            "provider API keys configured but real shadow worker wiring deferred — drop-only this build"
+        );
+    }
+
+    let svc = TokenizerSvc::new(Arc::clone(&tokenizer)).with_shadow_worker(shadow_handle);
     let tonic_svc = TokenizerServer::new(svc)
         // Round-2 fix M6 + Round-3 fix N3: protocol-layer cap matches
         // the field caps in server.rs (1 MiB raw_text + 1 MiB per

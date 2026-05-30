@@ -47,6 +47,8 @@ use crate::proto::tokenizer::v1::{
     tokenizer_server::Tokenizer as TokenizerSvcTrait, ShadowVerifyRequest, ShadowVerifyResponse,
     TokenizeRequest, TokenizeResponse,
 };
+use crate::shadow::worker::{ShadowEvent, ShadowWorkerHandle};
+use spendguard_tokenizer::encoders::EncoderKind;
 use spendguard_tokenizer::{Tokenizer, TokenizerError};
 
 // ============================================================================
@@ -88,16 +90,54 @@ pub(crate) const MAX_MESSAGE_CONTENT_LEN: usize = 1 << 20;
 /// Service struct holding a shared library handle. Constructed once
 /// in main(); cloned cheaply on every RPC dispatch because
 /// `Arc<Tokenizer>` is cheap-clone-and-share by design.
+///
+/// SLICE_05: also holds an optional [`ShadowWorkerHandle`] for
+/// fire-and-forget Tier 1 shadow event submission. The handle is
+/// `Option<…>` because SLICE_03 / SLICE_04 callers (existing tests +
+/// the build-up bootstrap path) construct the service without a worker.
+/// When `Some` the service handler tries-sends an event AFTER returning
+/// the Tier 2 response to the caller — Tier 2 hot path latency is
+/// structurally unaffected because the channel is bounded + try_send
+/// is non-blocking + the send result is intentionally ignored.
 #[derive(Clone)]
 pub struct TokenizerSvc {
     tokenizer: Arc<Tokenizer>,
+    shadow_worker: Option<ShadowWorkerHandle>,
+    /// Per-request tenant id pulled from a gRPC metadata header.
+    /// Empty when the caller is anonymous (test / library form).
+    /// Phase F's control plane API references this for the per-(tenant,
+    /// model) override surface.
+    tenant_header_name: String,
 }
 
 impl TokenizerSvc {
     pub fn new(tokenizer: Arc<Tokenizer>) -> Self {
-        Self { tokenizer }
+        Self {
+            tokenizer,
+            shadow_worker: None,
+            tenant_header_name: DEFAULT_TENANT_METADATA_HEADER.to_string(),
+        }
+    }
+
+    /// Set the shadow worker handle. Returns Self for fluent chaining
+    /// in main.rs's boot sequence.
+    pub fn with_shadow_worker(mut self, h: ShadowWorkerHandle) -> Self {
+        self.shadow_worker = Some(h);
+        self
+    }
+
+    /// Override the tenant metadata header (default
+    /// `x-spendguard-tenant-id`). Surfaced for tests + future
+    /// multi-tenant routing.
+    pub fn with_tenant_header(mut self, name: impl Into<String>) -> Self {
+        self.tenant_header_name = name.into();
+        self
     }
 }
+
+/// gRPC metadata header carrying the caller's tenant id. The default
+/// matches the sidecar convention.
+pub const DEFAULT_TENANT_METADATA_HEADER: &str = "x-spendguard-tenant-id";
 
 #[tonic::async_trait]
 impl TokenizerSvcTrait for TokenizerSvc {
@@ -105,6 +145,17 @@ impl TokenizerSvcTrait for TokenizerSvc {
         &self,
         request: Request<TokenizeRequest>,
     ) -> Result<Response<TokenizeResponse>, Status> {
+        // SLICE_05: pull the tenant id from the gRPC metadata header
+        // BEFORE consuming the Request. Anonymous callers (tests /
+        // library form) yield empty tenant id — those samples will be
+        // routed into a "anonymous" bucket in the SampleRateState map.
+        let tenant_id = request
+            .metadata()
+            .get(&self.tenant_header_name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned)
+            .unwrap_or_default();
+
         let proto_req = request.into_inner();
 
         // ── Round-2 fix M6: DoS protection request-shape caps ──────
@@ -156,6 +207,36 @@ impl TokenizerSvcTrait for TokenizerSvc {
             Ok(resp) => resp,
             Err(err) => return Err(map_tokenizer_error(err)),
         };
+
+        // SLICE_05: fire-and-forget shadow event AFTER computing the
+        // Tier 2 response. The send is non-blocking; the result is
+        // intentionally ignored — Tier 2 hot path latency is structurally
+        // protected from any back-pressure here (spec §1.3 invariant).
+        // Only T2 results with a known kind go to the worker; T3 fallback
+        // (Tier 3 heuristic) is excluded because there is no encoder to
+        // compare against.
+        if let Some(ref worker) = self.shadow_worker {
+            if let Some(kind) = encoder_kind_from_str(&lib_resp.kind) {
+                let event = ShadowEvent {
+                    tenant_id: tenant_id.clone(),
+                    model: lib_req.model.clone(),
+                    encoder_kind: kind,
+                    t2_input_tokens: lib_resp.input_tokens,
+                    t2_tokenizer_version_id: lib_resp.tokenizer_version_id.clone(),
+                    // Carry the original input as a raw string. For
+                    // chat-shape requests we re-flatten the messages
+                    // into a single text blob to feed the provider's
+                    // count_tokens (Phase C clients use the user-role
+                    // wrapper internally).
+                    raw_text: text_for_shadow(&lib_req),
+                };
+                // SLICE_05 hot-path invariant: ignore the try_send
+                // result. Channel-full + closed are both fine — we'd
+                // rather drop a shadow sample than slow the hot path.
+                let _ = worker.try_send(event);
+            }
+        }
+
         Ok(Response::new(lib_resp.into()))
     }
 
@@ -176,6 +257,46 @@ impl TokenizerSvcTrait for TokenizerSvc {
              see docs/tokenizer-service-spec-v1alpha1.md §0.1 + §4)",
         ))
     }
+}
+
+/// SLICE_05 — map the string `kind` the library returns to the
+/// strongly-typed `EncoderKind` the shadow worker dispatches on. Tier 3
+/// (HEURISTIC) returns None because there is no encoder to compare
+/// against.
+fn encoder_kind_from_str(kind: &str) -> Option<EncoderKind> {
+    match kind {
+        "OPENAI_TIKTOKEN" => Some(EncoderKind::OpenAi),
+        "ANTHROPIC_BPE" => Some(EncoderKind::Anthropic),
+        "GEMINI_BPE" => Some(EncoderKind::Gemini),
+        "COHERE_BPE" => Some(EncoderKind::Cohere),
+        "SENTENCEPIECE_LLAMA" => Some(EncoderKind::Llama),
+        _ => None,
+    }
+}
+
+/// SLICE_05 — flatten chat-shape requests + raw_text into one string
+/// for the provider count_tokens call. The provider clients
+/// (provider_clients::{anthropic,gemini}) wrap the text in a single
+/// user message body internally; we concatenate roles + contents here
+/// with a separator so the provider sees the same input text our Tier
+/// 2 encoder consumed.
+fn text_for_shadow(req: &spendguard_tokenizer::TokenizeRequest) -> String {
+    if !req.raw_text.is_empty() {
+        return req.raw_text.clone();
+    }
+    // Conservative concatenation; the goal is to keep token counts in
+    // the same ballpark, not byte-identical (the shadow worker checks
+    // drift against per-kind thresholds that allow up to 1.5%).
+    let mut out = String::new();
+    for m in &req.messages {
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&m.role);
+        out.push_str(": ");
+        out.push_str(&m.content);
+    }
+    out
 }
 
 /// Translate [`TokenizerError`] to a tonic `Status`. Per spec §8 the

@@ -88,6 +88,30 @@ rand = { version = "0.8", default-features = false, features = ["std", "std_rng"
 # shadow worker can't deadlock the gRPC handler that shares the lock).
 parking_lot = "0.12"
 
+# SLICE_05: Ed25519 producer signing for `tokenizer_drift_alert`
+# CloudEvent emitted by the shadow worker. Reuses the canonical
+# Signer trait + LocalEd25519Signer + DisabledSigner triad already
+# wired in sidecar / canonical_ingest / ttl_sweeper.
+spendguard-signing = { path = "../signing" }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+
+# SLICE_05: SQL persistence for tokenizer_t1_samples. sqlx-postgres
+# behind tls-rustls (matching the sidecar / ledger convention) and
+# without the macros feature (we use query() / query_as() / fetch_one
+# patterns to keep compile-time DB checks off).
+sqlx = { version = "0.8", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls",
+    "uuid",
+    "chrono",
+] }
+
+# SLICE_05: prost CloudEvent uses bytes::Bytes for the signature +
+# data fields; the worker constructs both via Bytes::new() / Bytes::from.
+bytes = "1"
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"

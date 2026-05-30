@@ -35,8 +35,10 @@
 //! `sample_rate_state`, `circuit_breaker`, or `shadow::` paths.
 
 pub mod circuit_breaker;
+pub mod persistence;
 pub mod provider_clients;
 pub mod sample_rate_state;
+pub mod sink;
 pub mod worker;
 
 // Re-exports for the small set of types main.rs / server.rs reach for.
