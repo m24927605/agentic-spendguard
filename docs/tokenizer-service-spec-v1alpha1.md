@@ -242,38 +242,70 @@ impl Tokenizer {
 ### 3.1 Per-provider dispatch table
 
 The dispatch table is maintained in
-`crates/spendguard-tokenizer/src/dispatch.rs`. Each entry maps a
-model-string match pattern (anchored regex) to an encoder kind +
-canonical encoder name. The implementation is the source of truth; the
-shape below is illustrative.
+`crates/spendguard-tokenizer/src/dispatch.rs::RAW_ENTRIES` (plus the
+feature-gated `COHERE_ENTRIES`). The structural rule is **first-match
+wins; anchored regex**; new providers / model families ship as
+PR-time additive edits to those constants.
+
+The R2 M7 verbatim enumeration below mirrors the implementation as of
+SLICE_04 R2. The source-of-truth is `dispatch.rs`; this section is
+kept in sync via the spec-amendment commits.
 
 ```rust
-// Maintained in `spendguard-tokenizer/src/dispatch.rs`. Each entry maps a
-// model-string match pattern to an encoder kind + canonical encoder name.
+// === OpenAI (via tiktoken-rs) ===
+// Most specific patterns first per first-match-wins semantics.
+Entry { pattern: r"^gpt-4o-mini(-\d{4}-\d{2}-\d{2})?$",            kind: Kind::OpenAiTiktoken,    encoder: "o200k_base"     },
+Entry { pattern: r"^gpt-4o(-\d{4}-\d{2}-\d{2})?$",                 kind: Kind::OpenAiTiktoken,    encoder: "o200k_base"     },
+Entry { pattern: r"^gpt-4(-\d{4})?-preview$",                      kind: Kind::OpenAiTiktoken,    encoder: "cl100k_base"    },
+Entry { pattern: r"^gpt-4-turbo(-preview)?(-\d{4}-\d{2}-\d{2})?$", kind: Kind::OpenAiTiktoken,    encoder: "cl100k_base"    },
+Entry { pattern: r"^gpt-4(-\d{4})?(-\d{4}-\d{2}-\d{2})?$",         kind: Kind::OpenAiTiktoken,    encoder: "cl100k_base"    },
+Entry { pattern: r"^gpt-3\.5-turbo(-\d{4})?(-\d{2}k)?$",           kind: Kind::OpenAiTiktoken,    encoder: "cl100k_base"    },
+Entry { pattern: r"^gpt-3\.5-turbo-instruct(-\d{4})?$",            kind: Kind::OpenAiTiktoken,    encoder: "p50k_base"      },
+Entry { pattern: r"^text-davinci-(002|003)$",                      kind: Kind::OpenAiTiktoken,    encoder: "p50k_base"      },
+Entry { pattern: r"^code-davinci-(001|002)$",                      kind: Kind::OpenAiTiktoken,    encoder: "p50k_base"      },
 
-const DISPATCH: &[Entry] = &[
-    // === OpenAI (via tiktoken-rs) ===
-    Entry { pattern: r"^gpt-4o(-mini)?(-\d{4}-\d{2}-\d{2})?$",  kind: Kind::OpenAiTiktoken, encoder: "o200k_base" },
-    Entry { pattern: r"^gpt-4(-\d+)?(-\d{4}-\d{2}-\d{2})?$",     kind: Kind::OpenAiTiktoken, encoder: "cl100k_base" },
-    Entry { pattern: r"^gpt-4-turbo(-\d{4}-\d{2}-\d{2})?$",       kind: Kind::OpenAiTiktoken, encoder: "cl100k_base" },
-    Entry { pattern: r"^gpt-3\.5-turbo(-\d{4})?$",                kind: Kind::OpenAiTiktoken, encoder: "cl100k_base" },
-    // ... more OpenAI ...
+// === Anthropic native (Claude 3 / 3.5 family) ===
+Entry { pattern: r"^claude-3-5-(sonnet|haiku|opus)(-\d{8})?$",     kind: Kind::AnthropicBpe,      encoder: "anthropic-v3-bpe" },
+Entry { pattern: r"^claude-3-(haiku|sonnet|opus)(-\d{8})?$",       kind: Kind::AnthropicBpe,      encoder: "anthropic-v3-bpe" },
 
-    // === Anthropic (vendored BPE) ===
-    Entry { pattern: r"^claude-3-5-(sonnet|haiku|opus)(-\d{8})?$", kind: Kind::AnthropicBpe, encoder: "anthropic-v3-bpe" },
-    Entry { pattern: r"^claude-3-(sonnet|haiku|opus)(-\d{8})?$",   kind: Kind::AnthropicBpe, encoder: "anthropic-v3-bpe" },
+// === Anthropic Bedrock (with cross-region inference profile prefix) ===
+Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-5-(sonnet|haiku|opus)(-\d{8})?-v\d+:\d+$",
+                                                                   kind: Kind::AnthropicBpe,      encoder: "anthropic-v3-bpe" },
+Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-(haiku|sonnet|opus)(-\d{8})?-v\d+:\d+$",
+                                                                   kind: Kind::AnthropicBpe,      encoder: "anthropic-v3-bpe" },
 
-    // === Gemini (vendored BPE) ===
-    Entry { pattern: r"^gemini-1\.5-(pro|flash)(-\d{3})?$",        kind: Kind::GeminiBpe, encoder: "gemini-1.5-bpe" },
+// === Gemini native (vendored Gemma approximation per §7.1 R2 M5) ===
+Entry { pattern: r"^gemini-2\.0-flash(-exp)?$",                    kind: Kind::GeminiBpe,         encoder: "gemini-1.5-bpe" },
+Entry { pattern: r"^gemini-1\.5-(flash|pro)(-\d{3})?$",            kind: Kind::GeminiBpe,         encoder: "gemini-1.5-bpe" },
 
-    // === Bedrock routing (narrow + cross-region; see §3.1 amendments below) ===
-    Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-(haiku|sonnet|opus)(-\d{8})?-v\d+:\d+$", kind: Kind::AnthropicBpe, encoder: "anthropic-v3-bpe" },
-    Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?cohere\.command(-r)?(-plus)?-v\d+:\d+$",                    kind: Kind::CohereBpe,    encoder: "cohere-v2-bpe" },
-    Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?meta\.llama3(-\d+)?-\d+b-instruct-v\d+:\d+$",               kind: Kind::SentencepieceLlama, encoder: "llama-sentencepiece" },
-];
+// === Llama Bedrock (Llama 3.1+ family with cross-region prefix) ===
+Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?meta\.llama3(-\d+)?-\d+b-instruct-v\d+:\d+$",
+                                                                   kind: Kind::SentencepieceLlama, encoder: "llama-sentencepiece" },
+
+// === Cohere — FEATURE-GATED `cohere` per §7.1 R2 M6 ===
+//   * Patterns below are present in the dispatch table ONLY when the
+//     spendguard-tokenizer crate is built with `--features cohere`.
+//   * When the feature is OFF (default), Cohere model IDs fall to
+//     Tier 3 with 5% margin + `tokenizer_unknown_model` metric.
+//   * `command-light` is INTENTIONALLY omitted per R2 Backend F4
+//     (different vocab; routing to command-r would silently
+//     under-count by ~5-20%).
+#[cfg(feature = "cohere")]
+Entry { pattern: r"^command-r-plus(-\d{8})?$",                     kind: Kind::CohereBpe,         encoder: "cohere-v2-bpe"  },
+#[cfg(feature = "cohere")]
+Entry { pattern: r"^command-r(-\d{8})?$",                          kind: Kind::CohereBpe,         encoder: "cohere-v2-bpe"  },
+#[cfg(feature = "cohere")]
+Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?cohere\.command(-r)?(-plus)?-v\d+:\d+$",
+                                                                   kind: Kind::CohereBpe,         encoder: "cohere-v2-bpe"  },
 ```
 
 每個 entry 對應一筆 `tokenizer_versions` registry row（per §6 schema）。增加 provider / model 透過 PR 補 entries + 對應 vendored asset。
+
+**Structural rule**: first-match-wins with dated suffixes optional and
+cross-region inference profile prefixes optional on Bedrock routes.
+Specific-before-general ordering is enforced by unit tests (per
+`pattern_ordering_specific_before_general`, `command_r_plus_pattern_
+precedes_command_r`, etc.).
 
 #### 3.1 amendments (SLICE_04 R2)
 
