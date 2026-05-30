@@ -44,19 +44,29 @@
 //! and ~400 µs at 1000-char raw text — within the spec §10.1
 //! "Tier 2 library form p99 < 1 ms" SLO for typical sidecar payloads.
 //!
-//! ## Envelope rules
+//! ## Envelope rules (SLICE_04 R2 M3 amendment)
 //!
-//! Anthropic's chat API uses a different message structure than the
-//! OpenAI `messages` schema; the BPE encoder we ship here is the raw
-//! token vocabulary, so envelope tokens for Claude 3 chat shape
-//! (`role: human` / `role: assistant` framing) are accounted by
-//! adding the same 3-tokens-per-message + 3 reply-priming overhead
-//! that the OpenAI path uses. Per spec §3.4 this is an approximation;
-//! the actual Anthropic envelope is < 5 tokens of drift on typical
-//! inputs and well within the §4.2 0.01 drift threshold. SLICE_05
-//! shadow worker quantifies and the spec will tighten if needed.
+//! Anthropic Claude 3 chat shape uses `\n\nHuman:` / `\n\nAssistant:`
+//! turn-boundary markers (≈ 4 tokens per turn) rather than per-message
+//! envelope tokens. There is no OpenAI-style "3 tokens per message"
+//! framing. Per spec §3.4 amendment:
+//!
+//! ```text
+//! ChatEnvelope { per_message: 0, per_turn_boundary: 4, reply_priming: 0 }
+//! ```
+//!
+//! ## BOS token (SLICE_04 R2 M4 amendment)
+//!
+//! Bedrock invokeModel prepends `<|begin_of_text|>` to the prompt
+//! before forwarding to the Anthropic backend. `tokenizer.encode(text,
+//! false)` does NOT include this BOS in the returned vector
+//! (`add_special_tokens=false`); we add it via `bos_token_count() = 1`
+//! so Tier 2 = vendor-observed count.
+//!
+//! SLICE_05 shadow worker measures the residual gap and the spec
+//! tightens if needed.
 
-use crate::encoders::{EncodeResult, Encoder, EncoderKind};
+use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
 use crate::error::TokenizerError;
 use crate::versions::ANTHROPIC_CLAUDE3_VERSION_ID;
 use crate::{TokenizeRequest, ToolCall};
@@ -124,6 +134,21 @@ impl AnthropicEncoder {
     }
 }
 
+/// Anthropic chat envelope per spec §3.4 (R2 M3): no per-message
+/// overhead; 4-token turn boundary (`\n\nHuman:` / `\n\nAssistant:`
+/// markers approximated); no reply priming (Anthropic API uses a
+/// different reply-start convention than OpenAI's primed assistant
+/// turn).
+const ANTHROPIC_ENVELOPE: ChatEnvelope = ChatEnvelope {
+    per_message: 0,
+    per_turn_boundary: 4,
+    reply_priming: 0,
+};
+
+/// Anthropic BOS per spec §3.4 (R2 M4): Bedrock invokeModel prepends
+/// `<|begin_of_text|>` to the prompt.
+const ANTHROPIC_BOS_COUNT: usize = 1;
+
 impl Encoder for AnthropicEncoder {
     fn kind(&self) -> EncoderKind {
         EncoderKind::Anthropic
@@ -137,6 +162,14 @@ impl Encoder for AnthropicEncoder {
         "anthropic-v3-bpe"
     }
 
+    fn envelope_overhead(&self) -> ChatEnvelope {
+        ANTHROPIC_ENVELOPE
+    }
+
+    fn bos_token_count(&self) -> usize {
+        ANTHROPIC_BOS_COUNT
+    }
+
     fn count_tokens_request(&self, req: &TokenizeRequest) -> Result<EncodeResult, TokenizerError> {
         let input_tokens = count_tokens_anthropic(&self.tokenizer, req)?;
         Ok(EncodeResult {
@@ -148,14 +181,14 @@ impl Encoder for AnthropicEncoder {
 }
 
 /// Tokenize an entire request applying Anthropic chat envelope rules
-/// (per spec §3.4). Same overhead model as OpenAI chat:
-///   * 3 tokens per message
-///   * 1 tool-call overhead + name + arguments_json
-///   * 3 priming tokens for the assistant reply
+/// per spec §3.4 (R2 M3 amendment):
+///   * per_message=0 (no fixed per-message overhead)
+///   * per_turn_boundary=4 (`\n\nHuman:` / `\n\nAssistant:` markers)
+///   * reply_priming=0
+///   * BOS=1 (Bedrock invokeModel `<|begin_of_text|>`)
 ///
-/// This is an approximation acceptable per spec §4.2 0.01 drift
-/// threshold for the Anthropic kind; SLICE_05 shadow worker
-/// quantifies the gap against the Anthropic `count_tokens` API.
+/// SLICE_05 shadow worker quantifies the residual gap against
+/// Anthropic's `count_tokens` API.
 fn count_tokens_anthropic(
     tokenizer: &Tokenizer,
     req: &TokenizeRequest,
@@ -163,21 +196,23 @@ fn count_tokens_anthropic(
     let mut total: usize = 0;
 
     if !req.messages.is_empty() {
-        const PER_MSG_OVERHEAD: usize = 3;
-        const REPLY_PRIMING: usize = 3;
+        let env = ANTHROPIC_ENVELOPE;
         for msg in &req.messages {
-            total += PER_MSG_OVERHEAD;
+            total += env.per_message;
+            total += env.per_turn_boundary;
             total += encode_count(tokenizer, &msg.role)?;
             total += encode_count(tokenizer, &msg.content)?;
             for tc in &msg.tool_calls {
                 total += tool_call_tokens(tokenizer, tc)?;
             }
         }
-        total += REPLY_PRIMING;
+        total += env.reply_priming;
     }
 
     if !req.raw_text.is_empty() {
         total += encode_count(tokenizer, &req.raw_text)?;
+        // R2 M4: BOS prepended by Bedrock invokeModel.
+        total += ANTHROPIC_BOS_COUNT;
     }
 
     Ok(total)
@@ -303,7 +338,9 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_encodes_hello_world_to_2_tokens() {
+    fn anthropic_encodes_hello_world_raw_with_bos() {
+        // R2 M4: BOS=1 added to raw_text. "hello world" = 2 vocab tokens
+        // + 1 BOS = 3.
         let enc = AnthropicEncoder::new().expect("boot");
         let req = TokenizeRequest {
             model: "claude-3-haiku".to_string(),
@@ -311,13 +348,19 @@ mod tests {
             ..Default::default()
         };
         let r = enc.count_tokens_request(&req).unwrap();
-        // Discovered count for this asset revision is 2.
-        assert_eq!(r.input_tokens, 2);
+        assert_eq!(r.input_tokens, 3, "expected 2 vocab + 1 BOS = 3");
         assert_eq!(r.kind, EncoderKind::Anthropic);
     }
 
     #[test]
-    fn anthropic_chat_envelope_adds_overhead() {
+    fn anthropic_chat_envelope_uses_turn_boundary_not_per_message() {
+        // R2 M3: Anthropic chat envelope is `per_message=0,
+        // per_turn_boundary=4, reply_priming=0`. Raw_text has BOS=1.
+        // For a 1-message chat ("user" / "hello"):
+        //   chat_n = 0 (per_msg) + 4 (boundary) + role_tokens + content_tokens
+        //   raw_n  = content_tokens + 1 (BOS)
+        // Therefore chat_n - raw_n = 4 + role_tokens - 1 ≥ 4 (since
+        // role_tokens ≥ 1 for "user").
         let enc = AnthropicEncoder::new().expect("boot");
         let raw_req = TokenizeRequest {
             model: "claude-3-haiku".to_string(),
@@ -336,8 +379,25 @@ mod tests {
         let raw_n = enc.count_tokens_request(&raw_req).unwrap().input_tokens;
         let chat_n = enc.count_tokens_request(&chat_req).unwrap().input_tokens;
         assert!(chat_n > raw_n, "chat ({chat_n}) should exceed raw ({raw_n})");
-        // Envelope: 3 per-msg + role-tokens + content-tokens + 3 priming
-        assert!(chat_n >= raw_n + 7);
+        // chat = role_tokens + content_tokens + 4 (per_turn_boundary)
+        // raw = content_tokens + 1 (BOS)
+        // delta = role_tokens + 3 (≥ 4)
+        assert!(
+            chat_n >= raw_n + 4,
+            "chat-raw delta must include 4-token Anthropic turn boundary; got raw={raw_n} chat={chat_n}"
+        );
+    }
+
+    #[test]
+    fn anthropic_envelope_and_bos_constants_match_trait() {
+        // Pin the per-vendor envelope + BOS constants surface via the
+        // trait so future maintainers can't silently drift them.
+        let enc = AnthropicEncoder::new().expect("boot");
+        let env = enc.envelope_overhead();
+        assert_eq!(env.per_message, 0);
+        assert_eq!(env.per_turn_boundary, 4);
+        assert_eq!(env.reply_priming, 0);
+        assert_eq!(enc.bos_token_count(), 1);
     }
 
     #[test]

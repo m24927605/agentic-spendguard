@@ -33,8 +33,24 @@
 //!   https://huggingface.co/Xenova/Meta-Llama-3.1-Tokenizer
 //!
 //! License: MIT (mirror) / Llama 3.1 Community License (Meta).
+//!
+//! ## Envelope rules (SLICE_04 R2 M3 amendment)
+//!
+//! Llama 3.1 chat uses the full header template
+//! `<|begin_of_text|><|start_header_id|>{role}<|end_header_id|>\n\n
+//! {content}<|eot_id|>` (≈ 5 tokens per turn for the header markers).
+//! Per spec §3.4 amendment:
+//!
+//! ```text
+//! ChatEnvelope { per_message: 5, per_turn_boundary: 0, reply_priming: 0 }
+//! ```
+//!
+//! ## BOS token (SLICE_04 R2 M4 amendment)
+//!
+//! Bedrock invokeModel prepends `<|begin_of_text|>` (1 token).
+//! `bos_token_count() = 1`.
 
-use crate::encoders::{EncodeResult, Encoder, EncoderKind};
+use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
 use crate::error::TokenizerError;
 use crate::versions::LLAMA_31_VERSION_ID;
 use crate::{TokenizeRequest, ToolCall};
@@ -78,6 +94,20 @@ impl LlamaEncoder {
     }
 }
 
+/// Llama chat envelope per spec §3.4 (R2 M3): 5 tokens per message
+/// for the `<|start_header_id|>{role}<|end_header_id|>\n\n{content}
+/// <|eot_id|>` template header markers (excludes role + content which
+/// are encoded separately).
+const LLAMA_ENVELOPE: ChatEnvelope = ChatEnvelope {
+    per_message: 5,
+    per_turn_boundary: 0,
+    reply_priming: 0,
+};
+
+/// Llama BOS per spec §3.4 (R2 M4): Bedrock invokeModel prepends
+/// `<|begin_of_text|>` to the prompt.
+const LLAMA_BOS_COUNT: usize = 1;
+
 impl Encoder for LlamaEncoder {
     fn kind(&self) -> EncoderKind {
         EncoderKind::Llama
@@ -89,6 +119,14 @@ impl Encoder for LlamaEncoder {
 
     fn encoder_name(&self) -> &'static str {
         "llama-sentencepiece"
+    }
+
+    fn envelope_overhead(&self) -> ChatEnvelope {
+        LLAMA_ENVELOPE
+    }
+
+    fn bos_token_count(&self) -> usize {
+        LLAMA_BOS_COUNT
     }
 
     fn count_tokens_request(&self, req: &TokenizeRequest) -> Result<EncodeResult, TokenizerError> {
@@ -108,21 +146,23 @@ fn count_tokens_llama(
     let mut total: usize = 0;
 
     if !req.messages.is_empty() {
-        const PER_MSG_OVERHEAD: usize = 3;
-        const REPLY_PRIMING: usize = 3;
+        let env = LLAMA_ENVELOPE;
         for msg in &req.messages {
-            total += PER_MSG_OVERHEAD;
+            total += env.per_message;
+            total += env.per_turn_boundary;
             total += encode_count(tokenizer, &msg.role)?;
             total += encode_count(tokenizer, &msg.content)?;
             for tc in &msg.tool_calls {
                 total += tool_call_tokens(tokenizer, tc)?;
             }
         }
-        total += REPLY_PRIMING;
+        total += env.reply_priming;
     }
 
     if !req.raw_text.is_empty() {
         total += encode_count(tokenizer, &req.raw_text)?;
+        // R2 M4: BOS prepended by Bedrock invokeModel.
+        total += LLAMA_BOS_COUNT;
     }
 
     Ok(total)
@@ -241,7 +281,8 @@ mod tests {
     }
 
     #[test]
-    fn llama_encodes_hello_world_to_2_tokens() {
+    fn llama_encodes_hello_world_raw_with_bos() {
+        // R2 M4: BOS=1 added on raw_text. "hello world" = 2 + 1 = 3.
         let enc = LlamaEncoder::new().expect("boot");
         let req = TokenizeRequest {
             model: "meta.llama3-1-8b-instruct-v1:0".to_string(),
@@ -249,12 +290,17 @@ mod tests {
             ..Default::default()
         };
         let r = enc.count_tokens_request(&req).unwrap();
-        assert_eq!(r.input_tokens, 2);
+        assert_eq!(r.input_tokens, 3, "expected 2 vocab + 1 BOS = 3");
         assert_eq!(r.kind, EncoderKind::Llama);
     }
 
     #[test]
-    fn llama_chat_envelope_adds_overhead() {
+    fn llama_chat_envelope_5_per_message() {
+        // R2 M3: Llama envelope = `per_message=5, per_turn_boundary=0,
+        // reply_priming=0`. For 1-message chat ("user" / "hello"):
+        //   chat_n = 5 + role_tokens + content_tokens
+        //   raw_n  = content_tokens + 1 (BOS)
+        // Therefore chat_n - raw_n = 5 + role_tokens - 1.
         let enc = LlamaEncoder::new().expect("boot");
         let raw_req = TokenizeRequest {
             model: "meta.llama3-1-8b-instruct-v1:0".to_string(),
@@ -273,6 +319,20 @@ mod tests {
         let raw_n = enc.count_tokens_request(&raw_req).unwrap().input_tokens;
         let chat_n = enc.count_tokens_request(&chat_req).unwrap().input_tokens;
         assert!(chat_n > raw_n);
+        assert!(
+            chat_n >= raw_n + 5,
+            "chat-raw delta must include 5-token Llama per-message; got raw={raw_n} chat={chat_n}"
+        );
+    }
+
+    #[test]
+    fn llama_envelope_and_bos_constants_match_trait() {
+        let enc = LlamaEncoder::new().expect("boot");
+        let env = enc.envelope_overhead();
+        assert_eq!(env.per_message, 5);
+        assert_eq!(env.per_turn_boundary, 0);
+        assert_eq!(env.reply_priming, 0);
+        assert_eq!(enc.bos_token_count(), 1);
     }
 
     #[test]

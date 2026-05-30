@@ -29,15 +29,22 @@
 //! Same Layer A + Layer B scheme as the Anthropic encoder
 //! (per spec §7.4.1).
 //!
-//! ## Envelope rules
+//! ## Envelope rules (SLICE_04 R2 M3 amendment)
 //!
 //! Cohere Command-R chat uses a Llama-style instruction template with
-//! distinct `<|START_OF_TURN|>` / `<|END_OF_TURN|>` markers that the
-//! `tokenizer.json` knows as added_tokens. We apply the same 3+3
-//! per-message envelope used by OpenAI / Anthropic above — drift up to
-//! ~1.5% per spec §4.2 acceptable. SLICE_05 shadow worker measures.
+//! distinct `<|START_OF_TURN|>` / `<|END_OF_TURN|>` markers (≈ 3 tokens
+//! per turn). Per spec §3.4 amendment:
+//!
+//! ```text
+//! ChatEnvelope { per_message: 3, per_turn_boundary: 0, reply_priming: 0 }
+//! ```
+//!
+//! ## BOS token (SLICE_04 R2 M4 amendment)
+//!
+//! Bedrock invokeModel for Cohere prepends `<|START_OF_TURN|>` to the
+//! prompt. `bos_token_count() = 1` accounts for it on raw_text encode.
 
-use crate::encoders::{EncodeResult, Encoder, EncoderKind};
+use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
 use crate::error::TokenizerError;
 use crate::versions::COHERE_COMMAND_R_VERSION_ID;
 use crate::{TokenizeRequest, ToolCall};
@@ -84,6 +91,20 @@ impl CohereEncoder {
     }
 }
 
+/// Cohere chat envelope per spec §3.4 (R2 M3): 3 tokens per message
+/// for `<|START_OF_TURN|>` / `<|END_OF_TURN|>` framing. No separate
+/// per-turn-boundary or reply-priming (the OpenAI 3-token priming
+/// concept does not apply to Cohere's chat template).
+const COHERE_ENVELOPE: ChatEnvelope = ChatEnvelope {
+    per_message: 3,
+    per_turn_boundary: 0,
+    reply_priming: 0,
+};
+
+/// Cohere BOS per spec §3.4 (R2 M4): Bedrock invokeModel prepends
+/// `<|START_OF_TURN|>` to the prompt.
+const COHERE_BOS_COUNT: usize = 1;
+
 impl Encoder for CohereEncoder {
     fn kind(&self) -> EncoderKind {
         EncoderKind::Cohere
@@ -95,6 +116,14 @@ impl Encoder for CohereEncoder {
 
     fn encoder_name(&self) -> &'static str {
         "cohere-v2-bpe"
+    }
+
+    fn envelope_overhead(&self) -> ChatEnvelope {
+        COHERE_ENVELOPE
+    }
+
+    fn bos_token_count(&self) -> usize {
+        COHERE_BOS_COUNT
     }
 
     fn count_tokens_request(&self, req: &TokenizeRequest) -> Result<EncodeResult, TokenizerError> {
@@ -114,21 +143,23 @@ fn count_tokens_cohere(
     let mut total: usize = 0;
 
     if !req.messages.is_empty() {
-        const PER_MSG_OVERHEAD: usize = 3;
-        const REPLY_PRIMING: usize = 3;
+        let env = COHERE_ENVELOPE;
         for msg in &req.messages {
-            total += PER_MSG_OVERHEAD;
+            total += env.per_message;
+            total += env.per_turn_boundary;
             total += encode_count(tokenizer, &msg.role)?;
             total += encode_count(tokenizer, &msg.content)?;
             for tc in &msg.tool_calls {
                 total += tool_call_tokens(tokenizer, tc)?;
             }
         }
-        total += REPLY_PRIMING;
+        total += env.reply_priming;
     }
 
     if !req.raw_text.is_empty() {
         total += encode_count(tokenizer, &req.raw_text)?;
+        // R2 M4: BOS prepended by Bedrock invokeModel.
+        total += COHERE_BOS_COUNT;
     }
 
     Ok(total)
@@ -247,7 +278,8 @@ mod tests {
     }
 
     #[test]
-    fn cohere_encodes_hello_world_to_2_tokens() {
+    fn cohere_encodes_hello_world_raw_with_bos() {
+        // R2 M4: BOS=1 added on raw_text. "hello world" = 2 + 1 = 3.
         let enc = CohereEncoder::new().expect("boot");
         let req = TokenizeRequest {
             model: "command-r".to_string(),
@@ -255,12 +287,17 @@ mod tests {
             ..Default::default()
         };
         let r = enc.count_tokens_request(&req).unwrap();
-        assert_eq!(r.input_tokens, 2);
+        assert_eq!(r.input_tokens, 3, "expected 2 vocab + 1 BOS = 3");
         assert_eq!(r.kind, EncoderKind::Cohere);
     }
 
     #[test]
-    fn cohere_chat_envelope_adds_overhead() {
+    fn cohere_chat_envelope_3_per_message() {
+        // R2 M3: Cohere envelope = `per_message=3, per_turn_boundary=0,
+        // reply_priming=0`. For 1-message chat ("user" / "hello"):
+        //   chat_n = 3 + role_tokens + content_tokens
+        //   raw_n  = content_tokens + 1 (BOS)
+        // Therefore chat_n - raw_n = 3 + role_tokens - 1 (= 2 + role).
         let enc = CohereEncoder::new().expect("boot");
         let raw_req = TokenizeRequest {
             model: "command-r".to_string(),
@@ -279,7 +316,20 @@ mod tests {
         let raw_n = enc.count_tokens_request(&raw_req).unwrap().input_tokens;
         let chat_n = enc.count_tokens_request(&chat_req).unwrap().input_tokens;
         assert!(chat_n > raw_n);
-        assert!(chat_n >= raw_n + 7);
+        assert!(
+            chat_n >= raw_n + 3,
+            "chat-raw delta must include 3-token Cohere per-message; got raw={raw_n} chat={chat_n}"
+        );
+    }
+
+    #[test]
+    fn cohere_envelope_and_bos_constants_match_trait() {
+        let enc = CohereEncoder::new().expect("boot");
+        let env = enc.envelope_overhead();
+        assert_eq!(env.per_message, 3);
+        assert_eq!(env.per_turn_boundary, 0);
+        assert_eq!(env.reply_priming, 0);
+        assert_eq!(enc.bos_token_count(), 1);
     }
 
     #[test]

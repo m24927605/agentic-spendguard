@@ -29,7 +29,7 @@
 //! See `encoders/mod.rs` for the trait contract.
 
 use crate::dispatch::TiktokenEncoder;
-use crate::encoders::{EncodeResult, Encoder, EncoderKind};
+use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
 use crate::error::TokenizerError;
 use crate::versions::{
     TIKTOKEN_CL100K_BASE_VERSION_ID, TIKTOKEN_O200K_BASE_VERSION_ID, TIKTOKEN_P50K_BASE_VERSION_ID,
@@ -119,6 +119,32 @@ impl Encoder for OpenAiEncoder {
 
     fn encoder_name(&self) -> &'static str {
         self.family.encoder_name()
+    }
+
+    fn envelope_overhead(&self) -> ChatEnvelope {
+        // OpenAI cookbook formula: 3 per-message + 3 reply priming.
+        // p50k_base is text-completion; envelope all zero (graceful
+        // degradation when caller passes messages to a completion-only
+        // model — see `count_tokens` below).
+        match self.family {
+            TiktokenFamily::Cl100kBase | TiktokenFamily::O200kBase => ChatEnvelope {
+                per_message: 3,
+                per_turn_boundary: 0,
+                reply_priming: 3,
+            },
+            TiktokenFamily::P50kBase => ChatEnvelope {
+                per_message: 0,
+                per_turn_boundary: 0,
+                reply_priming: 0,
+            },
+        }
+    }
+
+    fn bos_token_count(&self) -> usize {
+        // OpenAI tiktoken vocab has no BOS in the encode output (the
+        // `<|endoftext|>` token is appended elsewhere when the model
+        // emits it, not on input).
+        0
     }
 
     fn count_tokens_request(&self, req: &TokenizeRequest) -> Result<EncodeResult, TokenizerError> {

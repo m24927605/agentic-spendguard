@@ -33,6 +33,23 @@
 //! reservation accuracy is bounded by the 1% threshold and any
 //! drift becomes operator-visible via the shadow worker.
 //!
+//! ## Envelope rules (SLICE_04 R2 M3 amendment)
+//!
+//! Gemini's API takes a `contents` array where role is a structured
+//! field, NOT a token in the prompt. There is no per-message envelope
+//! to tokenize. Per spec §3.4 amendment:
+//!
+//! ```text
+//! ChatEnvelope { per_message: 0, per_turn_boundary: 0, reply_priming: 0 }
+//! ```
+//!
+//! Gemini also has no BOS token in the Gemma vocab (Google's official
+//! `countTokens` API does not include one):
+//!
+//! ```text
+//! bos_token_count() = 0
+//! ```
+//!
 //! ## Vendoring
 //!
 //! Source URL (pinned in `LICENSE_NOTICES.md`):
@@ -40,7 +57,7 @@
 //!
 //! License: MIT (mirror) / Apache 2.0 (Google upstream).
 
-use crate::encoders::{EncodeResult, Encoder, EncoderKind};
+use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
 use crate::error::TokenizerError;
 use crate::versions::GEMINI_15_VERSION_ID;
 use crate::{TokenizeRequest, ToolCall};
@@ -81,6 +98,18 @@ impl GeminiEncoder {
     }
 }
 
+/// Gemini chat envelope per spec §3.4 (R2 M3): role is a structured
+/// API field, not a prompt token. No per-message overhead.
+const GEMINI_ENVELOPE: ChatEnvelope = ChatEnvelope {
+    per_message: 0,
+    per_turn_boundary: 0,
+    reply_priming: 0,
+};
+
+/// Gemini BOS per spec §3.4 (R2 M4): Gemma vocab has no BOS in the
+/// `countTokens` semantics. SLICE_05 shadow worker measures residual.
+const GEMINI_BOS_COUNT: usize = 0;
+
 impl Encoder for GeminiEncoder {
     fn kind(&self) -> EncoderKind {
         EncoderKind::Gemini
@@ -92,6 +121,14 @@ impl Encoder for GeminiEncoder {
 
     fn encoder_name(&self) -> &'static str {
         "gemini-1.5-bpe"
+    }
+
+    fn envelope_overhead(&self) -> ChatEnvelope {
+        GEMINI_ENVELOPE
+    }
+
+    fn bos_token_count(&self) -> usize {
+        GEMINI_BOS_COUNT
     }
 
     fn count_tokens_request(&self, req: &TokenizeRequest) -> Result<EncodeResult, TokenizerError> {
@@ -111,21 +148,23 @@ fn count_tokens_gemini(
     let mut total: usize = 0;
 
     if !req.messages.is_empty() {
-        const PER_MSG_OVERHEAD: usize = 3;
-        const REPLY_PRIMING: usize = 3;
+        let env = GEMINI_ENVELOPE;
         for msg in &req.messages {
-            total += PER_MSG_OVERHEAD;
+            total += env.per_message;
+            total += env.per_turn_boundary;
             total += encode_count(tokenizer, &msg.role)?;
             total += encode_count(tokenizer, &msg.content)?;
             for tc in &msg.tool_calls {
                 total += tool_call_tokens(tokenizer, tc)?;
             }
         }
-        total += REPLY_PRIMING;
+        total += env.reply_priming;
     }
 
     if !req.raw_text.is_empty() {
         total += encode_count(tokenizer, &req.raw_text)?;
+        // R2 M4: Gemini BOS=0; no BOS added.
+        total += GEMINI_BOS_COUNT;
     }
 
     Ok(total)
@@ -244,7 +283,8 @@ mod tests {
     }
 
     #[test]
-    fn gemini_encodes_hello_world_to_2_tokens() {
+    fn gemini_encodes_hello_world_to_2_tokens_no_bos() {
+        // R2 M4: Gemini BOS=0 so raw_text count unchanged from R1.
         let enc = GeminiEncoder::new().expect("boot");
         let req = TokenizeRequest {
             model: "gemini-1.5-flash".to_string(),
@@ -257,7 +297,10 @@ mod tests {
     }
 
     #[test]
-    fn gemini_chat_envelope_adds_overhead() {
+    fn gemini_chat_envelope_only_adds_role_token() {
+        // R2 M3: Gemini envelope is all-zero (role is a structured API
+        // field, not a prompt token). The only delta between raw_text
+        // and 1-message chat is the role string being tokenized.
         let enc = GeminiEncoder::new().expect("boot");
         let raw_req = TokenizeRequest {
             model: "gemini-1.5-flash".to_string(),
@@ -275,7 +318,23 @@ mod tests {
         };
         let raw_n = enc.count_tokens_request(&raw_req).unwrap().input_tokens;
         let chat_n = enc.count_tokens_request(&chat_req).unwrap().input_tokens;
-        assert!(chat_n > raw_n);
+        // Both contain "hello" content; chat adds "user" role tokens.
+        // The role string is non-empty so chat_n must be > raw_n by at
+        // least 1 (role_tokens), with no envelope overhead added.
+        assert!(
+            chat_n > raw_n,
+            "chat must exceed raw by role-token count; got raw={raw_n} chat={chat_n}"
+        );
+    }
+
+    #[test]
+    fn gemini_envelope_and_bos_constants_match_trait() {
+        let enc = GeminiEncoder::new().expect("boot");
+        let env = enc.envelope_overhead();
+        assert_eq!(env.per_message, 0);
+        assert_eq!(env.per_turn_boundary, 0);
+        assert_eq!(env.reply_priming, 0);
+        assert_eq!(enc.bos_token_count(), 0);
     }
 
     #[test]

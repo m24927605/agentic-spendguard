@@ -101,17 +101,20 @@ fn dispatch_kind(model: &str) -> String {
 // --- 25 raw-text samples --------------------------------------------
 
 #[test]
-fn anthropic_hello_world_is_2_tokens() {
-    assert_eq!(tokenize_raw("claude-3-haiku", "hello world"), 2);
+fn anthropic_hello_world_is_3_tokens_with_bos() {
+    // R2 M4: BOS=1 added to raw_text. "hello world" = 2 vocab + 1 BOS.
+    assert_eq!(tokenize_raw("claude-3-haiku", "hello world"), 3);
 }
 
 #[test]
-fn anthropic_hello_is_1_token() {
-    assert_eq!(tokenize_raw("claude-3-haiku", "hello"), 1);
+fn anthropic_hello_is_2_tokens_with_bos() {
+    // R2 M4: BOS=1 added to raw_text. "hello" = 1 vocab + 1 BOS.
+    assert_eq!(tokenize_raw("claude-3-haiku", "hello"), 2);
 }
 
 #[test]
 fn anthropic_empty_string_is_0_tokens() {
+    // R2 M4: BOS NOT added when raw_text is empty.
     assert_eq!(tokenize_raw("claude-3-haiku", ""), 0);
 }
 
@@ -424,9 +427,10 @@ fn anthropic_tab_only() {
 }
 
 #[test]
-fn anthropic_single_char() {
+fn anthropic_single_char_with_bos() {
+    // R2 M4: BOS=1 added to raw_text. "a" = 1 vocab + 1 BOS = 2.
     let n = tokenize_raw("claude-3-haiku", "a");
-    assert_eq!(n, 1);
+    assert_eq!(n, 2);
 }
 
 #[test]
@@ -673,20 +677,25 @@ fn gemini_chat_user_role_adds_envelope() {
 
 #[test]
 fn gemini_chat_system_role_in_band() {
+    // R2 M3: Gemini envelope is all-zero (role/content are structured
+    // API fields, not prompt tokens). So count = role_tokens +
+    // content_tokens. Widened lower bound from 6 to 3.
     let n = tokenize_chat("gemini-1.5-flash", "system", "You are helpful.");
-    assert!((6..=18).contains(&n), "got {n}");
+    assert!((3..=18).contains(&n), "got {n}");
 }
 
 #[test]
 fn gemini_chat_assistant_role_in_band() {
+    // R2 M3: see above.
     let n = tokenize_chat("gemini-1.5-flash", "assistant", "Of course!");
-    assert!((6..=15).contains(&n), "got {n}");
+    assert!((3..=15).contains(&n), "got {n}");
 }
 
 #[test]
 fn gemini_chat_tool_role_in_band() {
+    // R2 M3: see above.
     let n = tokenize_chat("gemini-1.5-flash", "tool", "{\"result\":42}");
-    assert!((6..=18).contains(&n), "got {n}");
+    assert!((3..=18).contains(&n), "got {n}");
 }
 
 #[test]
@@ -698,8 +707,9 @@ fn gemini_chat_pro_matches_flash() {
 
 #[test]
 fn gemini_chat_2_0_works() {
+    // R2 M3: Gemini all-zero envelope; count = role + content tokens.
     let n = tokenize_chat("gemini-2.0-flash", "user", "hi");
-    assert!(n >= 5);
+    assert!(n >= 2, "got {n}");
 }
 
 #[test]
@@ -710,18 +720,26 @@ fn gemini_chat_long_content_proportional() {
 
 #[test]
 fn gemini_chat_empty_content() {
+    // R2 M3: With all-zero envelope, empty content contributes 0; only
+    // role tokens count. "user" tokenizes to ≥ 1.
     let n = tokenize_chat("gemini-1.5-flash", "user", "");
-    assert!(n >= 4);
+    assert!(n >= 1, "got {n}");
 }
 
 #[test]
 fn gemini_chat_cjk_content() {
+    // R2 M3: With all-zero envelope, count = role_tokens +
+    // content_tokens. Gemma may compress CJK aggressively; minimum is
+    // 1 (role only).
     let n = tokenize_chat("gemini-1.5-flash", "user", "你好");
-    assert!(n >= 5);
+    assert!(n >= 1, "got {n}");
 }
 
 #[test]
 fn gemini_chat_multi_msg() {
+    // R2 M3: 2 messages × (0 envelope + role + content). Sum of
+    // role_tokens + content_tokens for "user"/"Hi" + "assistant"/
+    // "Hello!" is ~ 5 (Gemma packs short ASCII tightly).
     let tok = boot_tokenizer();
     let req = TokenizeRequest {
         model: "gemini-1.5-flash".to_string(),
@@ -740,7 +758,7 @@ fn gemini_chat_multi_msg() {
         ..Default::default()
     };
     let n = tok.tokenize(&req).unwrap().input_tokens;
-    assert!(n >= 10);
+    assert!(n >= 4, "got {n}");
 }
 
 // --- 5 boundary samples ---------------------------------------------
@@ -782,17 +800,20 @@ fn gemini_very_long_text() {
 // --- 25 raw-text samples --------------------------------------------
 
 #[test]
-fn cohere_hello_world_is_2_tokens() {
-    assert_eq!(tokenize_raw("command-r", "hello world"), 2);
+fn cohere_hello_world_is_3_tokens_with_bos() {
+    // R2 M4: BOS=1 added to raw_text. "hello world" = 2 vocab + 1 BOS.
+    assert_eq!(tokenize_raw("command-r", "hello world"), 3);
 }
 
 #[test]
-fn cohere_hello_is_1_token() {
-    assert_eq!(tokenize_raw("command-r", "hello"), 1);
+fn cohere_hello_is_2_tokens_with_bos() {
+    // R2 M4: BOS=1 added to raw_text. "hello" = 1 vocab + 1 BOS.
+    assert_eq!(tokenize_raw("command-r", "hello"), 2);
 }
 
 #[test]
 fn cohere_empty_string_is_0_tokens() {
+    // R2 M4: BOS NOT added when raw_text is empty.
     assert_eq!(tokenize_raw("command-r", ""), 0);
 }
 
@@ -810,8 +831,9 @@ fn cohere_punctuation_heavy_text() {
 
 #[test]
 fn cohere_numbers_text() {
+    // R2 M4: +1 BOS shifts band by 1.
     let n = tokenize_raw("command-r", "Pi is approximately 3.14159.");
-    assert!((6..=12).contains(&n), "got {n}");
+    assert!((6..=14).contains(&n), "got {n}");
 }
 
 #[test]
@@ -1093,9 +1115,10 @@ fn cohere_tab_only() {
 }
 
 #[test]
-fn cohere_single_char() {
+fn cohere_single_char_with_bos() {
+    // R2 M4: BOS=1 added to raw_text. "a" = 1 vocab + 1 BOS = 2.
     let n = tokenize_raw("command-r", "a");
-    assert_eq!(n, 1);
+    assert_eq!(n, 2);
 }
 
 #[test]
@@ -1111,17 +1134,20 @@ fn cohere_very_long_text() {
 // --- 25 raw-text samples --------------------------------------------
 
 #[test]
-fn llama_hello_world_is_2_tokens() {
-    assert_eq!(tokenize_raw("meta.llama3-8b-instruct-v1:0", "hello world"), 2);
+fn llama_hello_world_is_3_tokens_with_bos() {
+    // R2 M4: BOS=1 added to raw_text. "hello world" = 2 vocab + 1 BOS.
+    assert_eq!(tokenize_raw("meta.llama3-8b-instruct-v1:0", "hello world"), 3);
 }
 
 #[test]
-fn llama_hello_is_1_token() {
-    assert_eq!(tokenize_raw("meta.llama3-8b-instruct-v1:0", "hello"), 1);
+fn llama_hello_is_2_tokens_with_bos() {
+    // R2 M4: BOS=1 added to raw_text. "hello" = 1 vocab + 1 BOS.
+    assert_eq!(tokenize_raw("meta.llama3-8b-instruct-v1:0", "hello"), 2);
 }
 
 #[test]
 fn llama_empty_string_is_0_tokens() {
+    // R2 M4: BOS NOT added when raw_text is empty.
     assert_eq!(tokenize_raw("meta.llama3-8b-instruct-v1:0", ""), 0);
 }
 
@@ -1474,9 +1500,10 @@ fn llama_tab_only() {
 }
 
 #[test]
-fn llama_single_char() {
+fn llama_single_char_with_bos() {
+    // R2 M4: BOS=1 added to raw_text. "a" = 1 vocab + 1 BOS = 2.
     let n = tokenize_raw("meta.llama3-8b-instruct-v1:0", "a");
-    assert_eq!(n, 1);
+    assert_eq!(n, 2);
 }
 
 #[test]

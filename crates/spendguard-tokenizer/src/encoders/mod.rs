@@ -27,8 +27,14 @@
 //!   1. Asset bytes (`include_bytes!`) + Layer A sha256 verification.
 //!   2. Layer B runtime cross-check fixture (per spec §7.4.1).
 //!   3. The actual `encode()` path (encode + count_tokens).
-//!   4. Per-kind envelope rules (per spec §3.4).
-//!   5. Its `tokenizer_version_id` stable UUIDv7.
+//!   4. Per-kind envelope rules (per spec §3.4) — see [`ChatEnvelope`]
+//!      and [`Encoder::envelope_overhead`].
+//!   5. BOS token accounting on raw_text — see
+//!      [`Encoder::bos_token_count`]. Bedrock invokeModel prepends
+//!      `<|begin_of_text|>` / `<|START_OF_TURN|>` markers for vendors
+//!      that ship a BOS in their tokenizer config; the count must
+//!      include them so Tier 2 = vendor-observed count.
+//!   6. Its `tokenizer_version_id` stable UUIDv7.
 
 use crate::error::TokenizerError;
 
@@ -111,6 +117,55 @@ pub struct EncodeResult {
     pub kind: EncoderKind,
 }
 
+/// Per-vendor chat envelope rule per spec §3.4.
+///
+/// Different vendors frame chat turns with different special-token
+/// sequences. The OpenAI cookbook formula
+/// (`3 + role + content + 1 tool_call_overhead + 3 reply_priming`)
+/// is wrong for Anthropic / Gemini / Cohere / Llama. SLICE_04 R2 M3
+/// adds per-vendor envelopes so each encoder counts the real overhead.
+///
+/// ## Field meanings
+///
+/// * `per_message` — fixed tokens added once per message regardless of
+///   role / content (e.g., Cohere `<|START_OF_TURN|>` markers ≈ 3
+///   tokens per turn; Llama header template ≈ 5 tokens).
+/// * `per_turn_boundary` — tokens at the boundary between turns
+///   (e.g., Anthropic `\n\nHuman:` / `\n\nAssistant:` boundary
+///   ≈ 4 tokens per turn).
+/// * `reply_priming` — tokens added once at the end of the chat to
+///   prime the assistant's reply (e.g., OpenAI's 3-token priming).
+///
+/// The total chat tokens = sum over messages of
+/// `(per_message + per_turn_boundary + role_tokens + content_tokens +
+/// tool_call_tokens)` + `reply_priming` + (BOS for the whole prompt
+/// if applicable).
+///
+/// Per-vendor values (per spec §3.4 amendment):
+///
+/// | Vendor    | per_message | per_turn_boundary | reply_priming |
+/// | --------- | ----------- | ----------------- | ------------- |
+/// | OpenAI    | 3 (4 for gpt-3.5-turbo-0301) | 0          | 3             |
+/// | Anthropic | 0           | 4                 | 0             |
+/// | Gemini    | 0           | 0                 | 0             |
+/// | Cohere    | 3           | 0                 | 0             |
+/// | Llama     | 5           | 0                 | 0             |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ChatEnvelope {
+    pub per_message: usize,
+    pub per_turn_boundary: usize,
+    pub reply_priming: usize,
+}
+
+impl ChatEnvelope {
+    /// Total fixed-envelope overhead for `n` messages, excluding role
+    /// + content + tool_call payload tokens (those are encoded
+    /// separately).
+    pub fn fixed_overhead(self, n_messages: usize) -> usize {
+        n_messages * (self.per_message + self.per_turn_boundary) + self.reply_priming
+    }
+}
+
 /// Per-encoder dispatch contract.
 ///
 /// Implementations live under `encoders/<vendor>.rs`. Each
@@ -131,6 +186,32 @@ pub trait Encoder: Send + Sync {
     /// Canonical encoder name — e.g. `"cl100k_base"`, `"anthropic-v3-bpe"`.
     /// Surfaces in `tokenizer_versions.encoder_name`.
     fn encoder_name(&self) -> &'static str;
+
+    /// Per-vendor chat envelope policy per spec §3.4 (R2 M3 amendment).
+    /// Returns the fixed token overhead applied per message / per turn /
+    /// at reply priming. Each vendor returns its real envelope rather
+    /// than the SLICE_04 R1 placeholder that used the OpenAI 3+3 formula
+    /// for all 4 non-OpenAI vendors.
+    fn envelope_overhead(&self) -> ChatEnvelope;
+
+    /// Per-vendor BOS token count added to raw_text (R2 M4 amendment).
+    /// Bedrock's invokeModel API and Anthropic / Cohere / Llama SDK
+    /// completions prepend a BOS marker (`<|begin_of_text|>`,
+    /// `<|START_OF_TURN|>`) to the user's text. Tier 2 must account
+    /// for it so the count matches vendor-observed token count.
+    ///
+    /// Returned value is added once per non-empty raw_text encode.
+    /// For chat-shape requests the BOS is conceptually part of the
+    /// first per_turn_boundary so it is NOT double-counted here; chat
+    /// path uses `envelope_overhead()` instead.
+    ///
+    /// Per-vendor values (per spec §3.4 amendment):
+    ///   * OpenAI: 0 (cl100k / o200k have no BOS in encode output)
+    ///   * Anthropic: 1 (`<|begin_of_text|>` prepended by Bedrock)
+    ///   * Gemini: 0 (Gemma vocab has no BOS in countTokens semantics)
+    ///   * Cohere: 1 (`<|START_OF_TURN|>` prepended by Bedrock)
+    ///   * Llama: 1 (`<|begin_of_text|>` prepended by Bedrock invokeModel)
+    fn bos_token_count(&self) -> usize;
 
     /// Tokenize a single `TokenizeRequest` into an
     /// [`EncodeResult`]. Per spec §3.4 the per-kind envelope rules
