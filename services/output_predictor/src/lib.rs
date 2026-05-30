@@ -34,6 +34,7 @@
 pub mod cache;
 pub mod circuit_breaker;
 pub mod classifier;
+pub mod cold_start_loader;
 pub mod config;
 pub mod context_window;
 pub mod endpoint_cache;
