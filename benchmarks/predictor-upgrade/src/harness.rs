@@ -64,17 +64,14 @@ impl<'a> BurstRunner<'a> {
         Self { target }
     }
 
-    pub async fn run(
-        &self,
-        burst: usize,
-        warmup: usize,
-        samples: usize,
-    ) -> Result<BurstReport> {
+    pub async fn run(&self, burst: usize, warmup: usize, samples: usize) -> Result<BurstReport> {
         // ---------------------------------------------------------------
         // Warmup. Latencies discarded.
         // ---------------------------------------------------------------
-        if warmup > 0 {
-            self.fan_out(burst, warmup, /*record=*/ false).await?;
+        let effective_warmup = warmup.max(burst.saturating_mul(2));
+        if effective_warmup > 0 {
+            self.fan_out(burst, effective_warmup, /*record=*/ false)
+                .await?;
         }
 
         // ---------------------------------------------------------------
@@ -149,7 +146,11 @@ impl<'a> BurstRunner<'a> {
         total: usize,
         record: bool,
     ) -> Result<(Vec<u64>, Vec<Result<DecisionResult>>)> {
-        let mut latencies: Vec<u64> = if record { Vec::with_capacity(total) } else { Vec::new() };
+        let mut latencies: Vec<u64> = if record {
+            Vec::with_capacity(total)
+        } else {
+            Vec::new()
+        };
         let mut results: Vec<Result<DecisionResult>> = Vec::with_capacity(total);
 
         // Process in waves so we don't allocate `total` tasks at once for
@@ -170,7 +171,12 @@ impl<'a> BurstRunner<'a> {
             }
             while let Some((dt_us, r)) = wave.next().await {
                 if record {
-                    latencies.push(dt_us);
+                    let decision_dt_us = r
+                        .as_ref()
+                        .ok()
+                        .and_then(|d| d.decision_latency_us)
+                        .unwrap_or(dt_us);
+                    latencies.push(decision_dt_us);
                 }
                 results.push(r);
             }

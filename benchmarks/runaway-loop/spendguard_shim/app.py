@@ -60,11 +60,14 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 BUDGET_USD = float(os.environ.get("BUDGET_USD", "1.00"))
+BUDGET_ATOMIC = float(os.environ.get("BUDGET_ATOMIC", "1000000000"))
 LOG_PATH = Path(os.environ.get("SHIM_LEDGER_LOG", "/var/log/spendguard_shim.jsonl"))
+LOG_ENABLED = os.environ.get("SHIM_DISABLE_LEDGER_LOG", "").lower() not in {"1", "true", "yes"}
 
-LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
-# Truncate on each startup so back-to-back benchmark runs start clean.
-LOG_PATH.write_text("")
+if LOG_ENABLED:
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    # Truncate on each startup so back-to-back benchmark runs start clean.
+    LOG_PATH.write_text("")
 
 _state_lock = threading.Lock()
 _spent = 0.0
@@ -72,18 +75,23 @@ _reserved: dict[str, float] = {}
 
 
 def _append(event: dict) -> None:
+    if not LOG_ENABLED:
+        return
     event["ts"] = time.time()
     with LOG_PATH.open("a") as f:
         f.write(json.dumps(event) + "\n")
 
 
 class ReserveRequest(BaseModel):
-    amount_usd: float
+    amount_usd: float | None = None
+    amount_atomic: int | None = None
+    idempotency_key: str | None = None
 
 
 class CommitRequest(BaseModel):
     reservation_id: str
     actual_usd: float | None = None
+    actual_atomic: int | None = None
 
 
 class ReleaseRequest(BaseModel):
@@ -94,12 +102,12 @@ app = FastAPI()
 
 
 @app.get("/healthz")
-def healthz() -> dict[str, str]:
+async def healthz() -> dict[str, str]:
     return {"status": "ok"}
 
 
 @app.get("/state")
-def state() -> dict[str, float]:
+async def state() -> dict[str, float]:
     with _state_lock:
         reserved = sum(_reserved.values())
         return {
@@ -111,17 +119,23 @@ def state() -> dict[str, float]:
 
 
 @app.post("/reserve")
-def reserve(req: ReserveRequest) -> dict:
+async def reserve(req: ReserveRequest) -> dict:
+    if req.amount_atomic is None and req.amount_usd is None:
+        raise HTTPException(400, "amount_usd or amount_atomic required")
+    amount = float(req.amount_atomic if req.amount_atomic is not None else req.amount_usd)
+    budget = BUDGET_ATOMIC if req.amount_atomic is not None else BUDGET_USD
     with _state_lock:
         reserved_total = sum(_reserved.values())
-        if _spent + reserved_total + req.amount_usd > BUDGET_USD:
+        if _spent + reserved_total + amount > budget:
             _append(
                 {
                     "kind": "reserve_denied",
                     "amount_usd": req.amount_usd,
+                    "amount_atomic": req.amount_atomic,
+                    "idempotency_key": req.idempotency_key,
                     "spent": _spent,
                     "reserved": reserved_total,
-                    "budget": BUDGET_USD,
+                    "budget": budget,
                 }
             )
             raise HTTPException(
@@ -129,54 +143,64 @@ def reserve(req: ReserveRequest) -> dict:
                 detail={
                     "reason": "would_exceed_budget",
                     "amount_usd": req.amount_usd,
+                    "amount_atomic": req.amount_atomic,
                     "spent": _spent,
                     "reserved": reserved_total,
                     "budget_usd": BUDGET_USD,
-                    "remaining_usd": BUDGET_USD - _spent - reserved_total,
+                    "budget_atomic": BUDGET_ATOMIC,
+                    "remaining_usd": budget - _spent - reserved_total,
                 },
             )
         rid = str(uuid.uuid4())
-        _reserved[rid] = req.amount_usd
+        _reserved[rid] = amount
         _append(
             {
                 "kind": "reserve",
                 "reservation_id": rid,
                 "amount_usd": req.amount_usd,
+                "amount_atomic": req.amount_atomic,
+                "idempotency_key": req.idempotency_key,
             }
         )
         return {
             "reservation_id": rid,
             "amount_usd": req.amount_usd,
-            "remaining_usd": BUDGET_USD - _spent - sum(_reserved.values()),
+            "amount_atomic": req.amount_atomic,
+            "reserved_atomic": req.amount_atomic,
+            "remaining_usd": budget - _spent - sum(_reserved.values()),
         }
 
 
 @app.post("/commit")
-def commit(req: CommitRequest) -> dict:
+async def commit(req: CommitRequest) -> dict:
     global _spent
     with _state_lock:
         if req.reservation_id not in _reserved:
             raise HTTPException(404, "reservation not found")
         held = _reserved.pop(req.reservation_id)
-        actual = req.actual_usd if req.actual_usd is not None else held
+        actual = req.actual_atomic if req.actual_atomic is not None else req.actual_usd
+        if actual is None:
+            actual = held
         _spent += actual
         _append(
             {
                 "kind": "commit",
                 "reservation_id": req.reservation_id,
                 "actual_usd": actual,
+                "actual_atomic": req.actual_atomic,
                 "spent_after": _spent,
             }
         )
         return {
             "reservation_id": req.reservation_id,
             "actual_usd": actual,
+            "actual_atomic": req.actual_atomic,
             "spent_total": _spent,
         }
 
 
 @app.post("/release")
-def release(req: ReleaseRequest) -> dict:
+async def release(req: ReleaseRequest) -> dict:
     with _state_lock:
         if req.reservation_id not in _reserved:
             raise HTTPException(404, "reservation not found")

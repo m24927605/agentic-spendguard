@@ -86,6 +86,7 @@ impl Competitor for LiteLlmClient {
                 return Ok(DecisionResult {
                     reserved_atomic: 0,
                     actual_atomic: 0,
+                    decision_latency_us: None,
                 });
             }
             if !r.status().is_success() {
@@ -112,6 +113,7 @@ impl Competitor for LiteLlmClient {
             Ok(DecisionResult {
                 reserved_atomic: MAX_TOKENS,
                 actual_atomic: body.usage.total_tokens,
+                decision_latency_us: None,
             })
         })
     }

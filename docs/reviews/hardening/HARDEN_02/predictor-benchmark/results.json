@@ -1,0 +1,43 @@
+{
+  "spendguard": [
+    {
+      "actual_total": 350000,
+      "burst": 1,
+      "errors": 0,
+      "note": null,
+      "overshoot_pct": 0.42857142857142855,
+      "p50_us": 391,
+      "p95_us": 447,
+      "p999_us": 648,
+      "p99_us": 504,
+      "reserved_total": 500000,
+      "samples": 1000
+    },
+    {
+      "actual_total": 379300,
+      "burst": 10,
+      "errors": 0,
+      "note": null,
+      "overshoot_pct": 0.3182177695755339,
+      "p50_us": 1679,
+      "p95_us": 3083,
+      "p999_us": 3933,
+      "p99_us": 3645,
+      "reserved_total": 500000,
+      "samples": 1000
+    },
+    {
+      "actual_total": 422760,
+      "burst": 100,
+      "errors": 0,
+      "note": null,
+      "overshoot_pct": 0.18270413473365502,
+      "p50_us": 13247,
+      "p95_us": 14719,
+      "p999_us": 15599,
+      "p99_us": 15407,
+      "reserved_total": 500000,
+      "samples": 1000
+    }
+  ]
+}

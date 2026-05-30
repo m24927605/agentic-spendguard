@@ -84,7 +84,10 @@ impl Competitor for PortkeyClient {
                 ));
             }
 
-            let url = format!("{}/v1/chat/completions", self.base_url.trim_end_matches('/'));
+            let url = format!(
+                "{}/v1/chat/completions",
+                self.base_url.trim_end_matches('/')
+            );
             let req = ChatRequest {
                 model: "gpt-4o-mini",
                 messages: vec![ChatMessage {
@@ -105,6 +108,7 @@ impl Competitor for PortkeyClient {
                 return Ok(DecisionResult {
                     reserved_atomic: 0,
                     actual_atomic: 0,
+                    decision_latency_us: None,
                 });
             }
             if !r.status().is_success() {
@@ -114,6 +118,7 @@ impl Competitor for PortkeyClient {
             Ok(DecisionResult {
                 reserved_atomic: MAX_TOKENS,
                 actual_atomic: body.usage.total_tokens,
+                decision_latency_us: None,
             })
         })
     }
