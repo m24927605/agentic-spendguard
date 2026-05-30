@@ -49,6 +49,28 @@
 {{- if and (not .Values.tokenizer.udsHostPath) (not .Values.tokenizer.mtlsSecretName) -}}
 {{- fail "tokenizer must configure either udsHostPath (for in-cluster on-node sidecar callers) or mtlsSecretName (for cross-node mTLS) under chart.profile=production (plaintext TCP forbidden per spec §10.1 + sidecar-architecture §5)" -}}
 {{- end -}}
+{{- /* R2 B1 + M12: when shadowEnabled is true (default), the production
+       profile requires the FULL shadow stack — provider Secret +
+       canonical_ingest URL + database URL + outbound mTLS secret.
+       Drop-only mode is forbidden in production because the entire
+       point of SLICE_05 is drift detection; silently disabling it
+       defeats the audit-routed alert chain (spec §6 / slice §6).
+       Operators who want to ship the tokenizer without shadow set
+       tokenizer.shadowEnabled=false explicitly. */ -}}
+{{- if .Values.tokenizer.shadowEnabled -}}
+{{- if not .Values.tokenizer.providerSecretName -}}
+{{- fail "tokenizer.providerSecretName is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B1 + M12: silent drop-only mode is forbidden — set shadowEnabled=false to ship without drift detection)" -}}
+{{- end -}}
+{{- if not .Values.tokenizer.canonicalIngestUrl -}}
+{{- fail "tokenizer.canonicalIngestUrl is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B1 + M12: drift alerts must reach canonical_ingest's ImmutableAuditLog route)" -}}
+{{- end -}}
+{{- if not .Values.tokenizer.databaseUrl -}}
+{{- fail "tokenizer.databaseUrl is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B1 + M12: tokenizer_t1_samples persistence required for drift attribution)" -}}
+{{- end -}}
+{{- if not .Values.tokenizer.sinkMtlsSecretName -}}
+{{- fail "tokenizer.sinkMtlsSecretName is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B4 + M12: plaintext canonical_ingest sink is forbidden — drift_alert CloudEvents carry signed audit-chain bytes)" -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- /* Spec §2.1 — the tokenizer ships in two co-existing forms:
        (a) gRPC service (this Deployment + Service) — used by the
@@ -131,21 +153,48 @@ spec:
             # Provider API keys for Anthropic / Gemini Tier 1
             # count_tokens calls. Mounted from a pre-created Secret
             # so the keys never appear in the Helm release secrets
-            # or Deployment manifest. Optional under demo profile;
-            # required under chart.profile=production when
-            # shadowEnabled=true.
+            # or Deployment manifest. Demo: both optional (worker falls
+            # back to drop-only when neither key is present). Production
+            # (chart.profile=production + shadowEnabled=true): the
+            # template-level fail-fast above requires this Secret to
+            # exist; at least ONE of the two keys MUST be populated for
+            # the shadow worker to make any provider call.
+            # R2 M12: optional flag flipped to false in production so a
+            # rotated/missing key surfaces as a CrashLoopBackoff instead
+            # of silent shadow-disablement.
             - name: SPENDGUARD_TOKENIZER_ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.tokenizer.providerSecretName | quote }}
                   key: anthropic-api-key
-                  optional: true
+                  optional: {{ if eq .Values.chart.profile "production" }}false{{ else }}true{{ end }}
             - name: SPENDGUARD_TOKENIZER_GEMINI_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.tokenizer.providerSecretName | quote }}
                   key: gemini-api-key
-                  optional: true
+                  optional: {{ if eq .Values.chart.profile "production" }}false{{ else }}true{{ end }}
+            {{- end }}
+            {{- if .Values.tokenizer.sinkMtlsSecretName }}
+            # R2 B4: outbound mTLS to canonical_ingest for the
+            # tokenizer_drift_alert CloudEvent sink. Required under
+            # chart.profile=production + shadowEnabled=true. Paths
+            # match the cert-manager mount convention the sidecar uses.
+            - { name: SPENDGUARD_TOKENIZER_SINK_TLS_CERT_PEM, value: "/etc/spendguard/sink-tls/tls.crt" }
+            - { name: SPENDGUARD_TOKENIZER_SINK_TLS_KEY_PEM,  value: "/etc/spendguard/sink-tls/tls.key" }
+            - { name: SPENDGUARD_TOKENIZER_SINK_TLS_CA_PEM,   value: "/etc/spendguard/sink-tls/ca.crt"  }
+            - { name: SPENDGUARD_TOKENIZER_SINK_TLS_SNI,      value: {{ .Values.tokenizer.sinkMtlsSni | quote }} }
+            {{- end }}
+            # R2 B1: producer identity + signing mode for the audit-routed
+            # drift_alert CloudEvent. Mirrors the env contract used by
+            # sidecar / canonical_ingest / ledger via signer_from_env.
+            - { name: SPENDGUARD_PROFILE,                     value: {{ .Values.chart.profile | quote }} }
+            - { name: SPENDGUARD_TOKENIZER_SIGNING_PRODUCER_IDENTITY, value: {{ printf "tokenizer-service:%s" .Values.global.region | quote }} }
+            {{- if .Values.tokenizer.signingKeyPath }}
+            - { name: SPENDGUARD_TOKENIZER_SIGNING_MODE,      value: "local" }
+            - { name: SPENDGUARD_TOKENIZER_SIGNING_KEY_PATH,  value: {{ .Values.tokenizer.signingKeyPath | quote }} }
+            {{- else if eq .Values.chart.profile "demo" }}
+            - { name: SPENDGUARD_TOKENIZER_SIGNING_MODE,      value: "disabled" }
             {{- end }}
             {{- if .Values.tokenizer.udsHostPath }}
             # Round-2 fix B3.1: UDS bind path (hostPath for on-node
@@ -171,6 +220,21 @@ spec:
             {{- if .Values.tokenizer.mtlsSecretName }}
             - name: tls
               mountPath: /etc/spendguard/tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tokenizer.sinkMtlsSecretName }}
+            # R2 B4: outbound mTLS material for canonical_ingest sink.
+            - name: sink-tls
+              mountPath: /etc/spendguard/sink-tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.tokenizer.signingKeyPath }}
+            # R2 B1: PKCS8 PEM key for Ed25519 drift_alert CloudEvent
+            # signing. Mounted from a Secret named `signingKeySecretName`
+            # at the path the SPENDGUARD_TOKENIZER_SIGNING_KEY_PATH env
+            # points at.
+            - name: signing-key
+              mountPath: /etc/spendguard/signing
               readOnly: true
             {{- end }}
           livenessProbe:
@@ -200,6 +264,16 @@ spec:
         - name: tls
           secret:
             secretName: {{ .Values.tokenizer.mtlsSecretName | quote }}
+        {{- end }}
+        {{- if .Values.tokenizer.sinkMtlsSecretName }}
+        - name: sink-tls
+          secret:
+            secretName: {{ .Values.tokenizer.sinkMtlsSecretName | quote }}
+        {{- end }}
+        {{- if .Values.tokenizer.signingKeySecretName }}
+        - name: signing-key
+          secret:
+            secretName: {{ .Values.tokenizer.signingKeySecretName | quote }}
         {{- end }}
 {{- /* Round-3 Backend Architect Finding N2 (Major): Service gating.
 

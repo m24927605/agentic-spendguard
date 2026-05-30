@@ -7,7 +7,12 @@
 use serde::Deserialize;
 
 /// Configuration loaded from env at boot.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// R2 M13: custom Debug impl masks `anthropic_api_key` + `gemini_api_key`
+/// so structured logs / panic backtraces / error chains never leak the
+/// raw keys. The startup log emits `*_api_key_present: bool` so
+/// operators can verify configuration without leaking the secret.
+#[derive(Clone, Deserialize)]
 pub struct Config {
     /// gRPC listen socket; either `127.0.0.1:50053` (compose / dev)
     /// or `0.0.0.0:50053` (Helm chart in-cluster). The Helm chart
@@ -102,6 +107,59 @@ pub struct Config {
     /// per-instance disambiguation in multi-region deploys.
     #[serde(default)]
     pub event_source_override: String,
+
+    /// R2 B4 — paths for the outbound mTLS sink config to canonical_ingest.
+    /// When all three are set the sink connects with mTLS; when all three
+    /// are unset the sink falls back to plaintext (rejected by the Helm
+    /// production profile). Partial config rejected at startup.
+    #[serde(default)]
+    pub sink_tls_cert_pem: Option<String>,
+    #[serde(default)]
+    pub sink_tls_key_pem: Option<String>,
+    #[serde(default)]
+    pub sink_tls_ca_pem: Option<String>,
+    /// SNI domain to send in the TLS handshake. Defaults to
+    /// `canonical-ingest.spendguard.internal` (matches the sidecar SNI).
+    #[serde(default = "default_sink_sni")]
+    pub sink_tls_sni: String,
+
+    /// Deploy profile (demo|production). Used by signer_from_env to
+    /// gate DisabledSigner. Also surfaced here so the worker's audit
+    /// chain handling can fail-fast in production if the signer config
+    /// is incomplete. Demo profile only accepts disabled signer.
+    #[serde(default)]
+    pub profile: String,
+}
+
+impl std::fmt::Debug for Config {
+    /// R2 M13: mask API keys in Debug output so structured logs / panic
+    /// backtraces / error chains never spill secrets. Reports key
+    /// presence as a boolean so operators can verify config without
+    /// the raw value.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("listen_addr", &self.listen_addr)
+            .field("uds_path", &self.uds_path)
+            .field("tls_cert_pem", &self.tls_cert_pem)
+            .field("tls_key_pem", &self.tls_key_pem)
+            .field("tls_ca_pem", &self.tls_ca_pem)
+            .field("metrics_addr", &self.metrics_addr)
+            .field("tier3_alert_threshold", &self.tier3_alert_threshold)
+            .field("region", &self.region)
+            .field("shadow_enabled", &self.shadow_enabled)
+            .field("shadow_default_sample_rate", &self.shadow_default_sample_rate)
+            .field("anthropic_api_key_present", &!self.anthropic_api_key.is_empty())
+            .field("gemini_api_key_present", &!self.gemini_api_key.is_empty())
+            .field("database_url_present", &!self.database_url.is_empty())
+            .field("canonical_ingest_url", &self.canonical_ingest_url)
+            .field("event_source_override", &self.event_source_override)
+            .field("sink_tls_cert_pem", &self.sink_tls_cert_pem)
+            .field("sink_tls_key_pem", &self.sink_tls_key_pem)
+            .field("sink_tls_ca_pem", &self.sink_tls_ca_pem)
+            .field("sink_tls_sni", &self.sink_tls_sni)
+            .field("profile", &self.profile)
+            .finish()
+    }
 }
 
 fn default_metrics_addr() -> String {
@@ -133,6 +191,10 @@ fn default_shadow_enabled() -> bool {
 fn default_shadow_sample_rate() -> f64 {
     // Spec §4.1 — 1% default.
     0.01
+}
+
+fn default_sink_sni() -> String {
+    "canonical-ingest.spendguard.internal".to_string()
 }
 
 impl Config {
@@ -174,5 +236,49 @@ mod tests {
         ])
         .expect("config loads");
         assert!((cfg.tier3_alert_threshold - 0.005).abs() < 1e-6);
+    }
+
+    /// R2 M13: Debug must not spill the raw API keys.
+    #[test]
+    fn debug_format_masks_api_keys() {
+        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![
+            (
+                "TEST_CFG_LISTEN_ADDR".to_string(),
+                "127.0.0.1:50053".to_string(),
+            ),
+            (
+                "TEST_CFG_ANTHROPIC_API_KEY".to_string(),
+                "sk-ant-extremely-secret-token-DO-NOT-LEAK".to_string(),
+            ),
+            (
+                "TEST_CFG_GEMINI_API_KEY".to_string(),
+                "AIza-extremely-secret-DO-NOT-LEAK".to_string(),
+            ),
+        ])
+        .expect("config loads");
+        let dbg = format!("{cfg:?}");
+        assert!(
+            !dbg.contains("sk-ant-extremely-secret"),
+            "Anthropic key leaked into Debug output: {dbg}"
+        );
+        assert!(
+            !dbg.contains("AIza-extremely-secret"),
+            "Gemini key leaked into Debug output: {dbg}"
+        );
+        // Both presence booleans rendered.
+        assert!(dbg.contains("anthropic_api_key_present: true"));
+        assert!(dbg.contains("gemini_api_key_present: true"));
+    }
+
+    #[test]
+    fn debug_format_reports_missing_keys_as_false() {
+        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![(
+            "TEST_CFG_LISTEN_ADDR".to_string(),
+            "127.0.0.1:50053".to_string(),
+        )])
+        .expect("config loads");
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("anthropic_api_key_present: false"));
+        assert!(dbg.contains("gemini_api_key_present: false"));
     }
 }

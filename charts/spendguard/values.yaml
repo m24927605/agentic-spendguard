@@ -255,7 +255,24 @@ tokenizer:
   # boots in drop-only mode (events accepted from the gRPC handler
   # but discarded; Tier 2 hot path unaffected). See
   # services/tokenizer/src/main.rs boot log for visibility.
+  # R2 M12: required under chart.profile=production + shadowEnabled=true.
+  # R2 M12: `optional` flag on the env reference flips to false in
+  # production so a missing/rotated key surfaces as CrashLoopBackoff
+  # instead of silent shadow-disablement.
   providerSecretName: ""
+  # R2 B4: outbound mTLS Secret for the canonical_ingest sink.
+  # Expected keys: tls.crt / tls.key / ca.crt. SNI sent to
+  # canonical_ingest defaults to the in-cluster ClusterIP DNS name
+  # — override for cross-cluster topologies.
+  # Required under chart.profile=production + shadowEnabled=true.
+  sinkMtlsSecretName: ""
+  sinkMtlsSni: "canonical-ingest.spendguard.internal"
+  # R2 B1: Ed25519 signing key (PKCS8 PEM) for the drift_alert
+  # CloudEvent. signingKeySecretName names the Secret; signingKeyPath
+  # is the in-pod path the binary reads via signer_from_env. Demo
+  # profile leaves both empty and falls back to the disabled signer.
+  signingKeySecretName: ""
+  signingKeyPath: ""
   resources:
     requests: { cpu: "100m", memory: "192Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }

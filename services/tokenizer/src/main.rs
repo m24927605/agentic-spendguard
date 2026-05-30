@@ -24,7 +24,7 @@
 //!   6. Block on graceful shutdown signal.
 
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -32,12 +32,23 @@ use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
+use spendguard_signing::Signer;
 use spendguard_tokenizer::Tokenizer;
 use spendguard_tokenizer_service::{
     config::Config,
     proto::tokenizer::v1::tokenizer_server::TokenizerServer,
     server::TokenizerSvc,
-    shadow::worker::{spawn_drop_handle, ShadowWorkerHandle},
+    shadow::{
+        circuit_breaker::{CircuitBreakerConfig, CircuitBreakerState},
+        persistence::SqlSamplePersister,
+        provider_clients::{anthropic::AnthropicClient, gemini::GeminiClient},
+        sample_rate_state::{SampleRateConfig, SampleRateState},
+        sink::{CanonicalIngestDriftAlertSink, SinkMTlsConfig},
+        worker::{
+            spawn_drop_handle, spawn_shadow_worker, DriftAlertSink, ProviderRoster,
+            SamplePersister, ShadowWorkerDeps, ShadowWorkerHandle,
+        },
+    },
 };
 
 #[tokio::main]
@@ -89,31 +100,28 @@ async fn main() -> Result<()> {
         info!(addr = %cfg.metrics_addr, "metrics endpoint bound");
     }
 
-    // SLICE_05: shadow worker boot. Real production wire-up (provider
-    // clients + SQL persister + canonical_ingest CloudEvent sink + Ed25519
-    // signer) is deferred to a follow-up; SLICE_05 ships the drop-handle
-    // boot path for service-startup parity. The drop handle accepts events
-    // from the gRPC handler without blocking and discards them — keeps the
-    // hot path try_send call site exercised end-to-end so it can never
-    // regress. Future wire-up: read config.shadow_enabled / api keys /
-    // canonical_ingest_url and switch from drop handle to spawn_shadow_worker
-    // with the full ShadowWorkerDeps.
-    let shadow_handle: ShadowWorkerHandle = spawn_drop_handle(0);
-    if !cfg.shadow_enabled {
-        info!("shadow_enabled=false — shadow worker started in drop-only mode");
-    } else if cfg.anthropic_api_key.is_empty() && cfg.gemini_api_key.is_empty() {
-        info!("no provider API keys configured — shadow worker in drop-only mode (demo)");
-    } else {
-        // Future SLICE-extra: real worker wiring lands here. For now
-        // SLICE_05 surfaces an info log so operators can see the boot
-        // state explicitly and the gRPC handler still benefits from
-        // the channel try_send no-regression invariant.
-        warn!(
-            anthropic = !cfg.anthropic_api_key.is_empty(),
-            gemini = !cfg.gemini_api_key.is_empty(),
-            "provider API keys configured but real shadow worker wiring deferred — drop-only this build"
-        );
-    }
+    // SLICE_05 R2 B1: real shadow worker boot. The shadow worker is
+    // wired with:
+    //   * SqlSamplePersister against `database_url` for
+    //     `tokenizer_t1_samples` writes (migration 0051).
+    //   * CanonicalIngestDriftAlertSink (mTLS when sink_tls_* are set)
+    //     for signed `spendguard.audit.tokenizer_drift_alert.v1alpha1`
+    //     CloudEvents (audit-routed; see worker.rs::DRIFT_ALERT_EVENT_TYPE).
+    //   * LocalEd25519Signer reading PKCS8 PEM from
+    //     `SPENDGUARD_TOKENIZER_SIGNING_KEY_PATH` (via signer_from_env).
+    //   * Provider clients for whichever vendor keys are present.
+    //
+    // Drop-handle fallback paths:
+    //   * shadow_enabled=false                              → drop-only
+    //   * no Anthropic + no Gemini key                      → drop-only
+    //   * canonical_ingest_url empty OR database_url empty  → drop-only
+    //
+    // Production Helm profile rejects the drop-only fallback under
+    // shadow_enabled=true via the required-input gate
+    // (charts/spendguard/templates/tokenizer.yaml).
+    let shadow_handle: ShadowWorkerHandle = boot_shadow_worker(&cfg)
+        .await
+        .context("boot shadow worker")?;
 
     let svc = TokenizerSvc::new(Arc::clone(&tokenizer)).with_shadow_worker(shadow_handle);
     let tonic_svc = TokenizerServer::new(svc)
@@ -135,6 +143,140 @@ async fn main() -> Result<()> {
 
     info!("spendguard-tokenizer-service shut down cleanly");
     Ok(())
+}
+
+/// R2 B1 — wire the real shadow worker when all required inputs are
+/// present; otherwise return a drop-only handle that drains events
+/// silently (preserves the hot-path try_send invariant under tests +
+/// demo mode).
+async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
+    if !cfg.shadow_enabled {
+        info!("shadow_enabled=false — shadow worker started in drop-only mode");
+        return Ok(spawn_drop_handle(0));
+    }
+
+    let no_provider_keys =
+        cfg.anthropic_api_key.is_empty() && cfg.gemini_api_key.is_empty();
+    if no_provider_keys {
+        info!("no provider API keys configured — shadow worker in drop-only mode (demo)");
+        return Ok(spawn_drop_handle(0));
+    }
+
+    if cfg.canonical_ingest_url.is_empty() || cfg.database_url.is_empty() {
+        warn!(
+            canonical_ingest = !cfg.canonical_ingest_url.is_empty(),
+            database = !cfg.database_url.is_empty(),
+            "shadow_enabled but canonical_ingest_url or database_url missing — \
+             shadow worker started in drop-only mode (Helm production profile \
+             rejects this fallback via required-input gate)"
+        );
+        return Ok(spawn_drop_handle(0));
+    }
+
+    info!(
+        anthropic_api_key_present = !cfg.anthropic_api_key.is_empty(),
+        gemini_api_key_present = !cfg.gemini_api_key.is_empty(),
+        canonical_ingest_url = %cfg.canonical_ingest_url,
+        database_url_present = !cfg.database_url.is_empty(),
+        sink_mtls = cfg.sink_tls_cert_pem.is_some(),
+        "booting real shadow worker"
+    );
+
+    // SQL persister.
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(5)
+        .connect(&cfg.database_url)
+        .await
+        .context("connect to ledger DB for t1_samples persistence")?;
+    let persister: Arc<dyn SamplePersister> = Arc::new(SqlSamplePersister::new(pool));
+
+    // canonical_ingest sink (R2 B4 mTLS).
+    let mtls = build_sink_mtls_config(cfg)?;
+    let alert_sink: Arc<dyn DriftAlertSink> = Arc::new(
+        CanonicalIngestDriftAlertSink::connect(
+            cfg.canonical_ingest_url.clone(),
+            format!("tokenizer-service:{}", cfg.region),
+            mtls,
+        )
+        .await
+        .context("connect canonical_ingest for drift_alert sink")?,
+    );
+
+    // Signer — same env contract as the rest of the audit-producing
+    // services (sidecar / canonical_ingest / ledger).
+    let signer: Arc<dyn Signer> =
+        Arc::from(spendguard_signing::signer_from_env("SPENDGUARD_TOKENIZER")
+            .await
+            .context("load Ed25519 signer for drift_alert CloudEvent signing")?);
+
+    // Provider roster.
+    let providers = ProviderRoster {
+        anthropic: if cfg.anthropic_api_key.is_empty() {
+            None
+        } else {
+            Some(
+                AnthropicClient::new(cfg.anthropic_api_key.clone())
+                    .map_err(|e| anyhow::anyhow!("build Anthropic client: {e}"))?,
+            )
+        },
+        gemini: if cfg.gemini_api_key.is_empty() {
+            None
+        } else {
+            Some(
+                GeminiClient::new(cfg.gemini_api_key.clone())
+                    .map_err(|e| anyhow::anyhow!("build Gemini client: {e}"))?,
+            )
+        },
+    };
+
+    let event_source = if cfg.event_source_override.is_empty() {
+        format!("spendguard://tokenizer-service/{}", cfg.region)
+    } else {
+        cfg.event_source_override.clone()
+    };
+
+    let sample_rate = SampleRateState::new(SampleRateConfig {
+        default_rate: cfg.shadow_default_sample_rate,
+        ..SampleRateConfig::default()
+    });
+    let circuit_breaker = CircuitBreakerState::new(CircuitBreakerConfig::default());
+
+    let deps = ShadowWorkerDeps {
+        sample_rate,
+        circuit_breaker,
+        providers,
+        persister,
+        alert_sink,
+        signer,
+        event_source,
+        channel_capacity: 1024,
+    };
+    let handle = spawn_shadow_worker(deps);
+    info!("shadow worker spawned (real provider clients + SQL persister + canonical_ingest sink)");
+    Ok(handle)
+}
+
+/// R2 B4 — build the optional SinkMTlsConfig from cfg. All three paths
+/// must be present together; partial config returns an error so we
+/// fail closed against accidental plaintext.
+fn build_sink_mtls_config(cfg: &Config) -> Result<Option<SinkMTlsConfig>> {
+    match (
+        cfg.sink_tls_cert_pem.as_deref(),
+        cfg.sink_tls_key_pem.as_deref(),
+        cfg.sink_tls_ca_pem.as_deref(),
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(cert), Some(key), Some(ca)) => Ok(Some(SinkMTlsConfig {
+            workload_cert_pem: PathBuf::from(cert),
+            workload_key_pem: PathBuf::from(key),
+            trust_ca_pem: PathBuf::from(ca),
+            sni_domain: cfg.sink_tls_sni.clone(),
+        })),
+        _ => Err(anyhow::anyhow!(
+            "partial sink mTLS config: must set all of \
+             sink_tls_cert_pem / sink_tls_key_pem / sink_tls_ca_pem, or none"
+        )),
+    }
 }
 
 /// Round-3 fix N2 (security, Major): symlink-safe stale-socket cleanup.
@@ -328,6 +470,51 @@ fn init_tracing() {
         .init();
 }
 
+/// R2 M5 + M10 + M11 — render Prometheus payload including the SLICE_05
+/// shadow worker counters. Held in a separate fn so tests can exercise
+/// rendering without binding a socket.
+fn render_metrics() -> String {
+    use std::sync::atomic::Ordering;
+    use spendguard_tokenizer_service::shadow::worker::{
+        ALERT_ONCALL_ESCALATION_TOTAL, PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT,
+        SHADOW_DROPPED_FULL, SHADOW_SKIPPED_CHAT_SHAPE, SHADOW_WORKER_DEAD,
+    };
+    let dropped_full = SHADOW_DROPPED_FULL.load(Ordering::Relaxed);
+    let worker_dead = SHADOW_WORKER_DEAD.load(Ordering::Relaxed);
+    let chat_skipped = SHADOW_SKIPPED_CHAT_SHAPE.load(Ordering::Relaxed);
+    let schema_drift = PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT.load(Ordering::Relaxed);
+    let escalations = ALERT_ONCALL_ESCALATION_TOTAL.load(Ordering::Relaxed);
+    format!(
+        "# HELP spendguard_tokenizer_tier3_hit_total \
+         Number of Tier 3 fallback hits (spec §5.2).\n\
+         # TYPE spendguard_tokenizer_tier3_hit_total counter\n\
+         spendguard_tokenizer_tier3_hit_total 0\n\
+         # HELP spendguard_tokenizer_total_calls Total tokenize calls.\n\
+         # TYPE spendguard_tokenizer_total_calls counter\n\
+         spendguard_tokenizer_total_calls 0\n\
+         # HELP spendguard_tokenizer_shadow_dropped_full_total \
+         Shadow events dropped because the worker channel was full (R2 M5).\n\
+         # TYPE spendguard_tokenizer_shadow_dropped_full_total counter\n\
+         spendguard_tokenizer_shadow_dropped_full_total {dropped_full}\n\
+         # HELP spendguard_tokenizer_shadow_worker_dead_total \
+         Shadow events dropped because the worker task died — drift detection offline (R2 M5).\n\
+         # TYPE spendguard_tokenizer_shadow_worker_dead_total counter\n\
+         spendguard_tokenizer_shadow_worker_dead_total {worker_dead}\n\
+         # HELP spendguard_tokenizer_shadow_skipped_chat_shape_total \
+         Shadow events skipped because the caller used the chat-shape messages array (R2 M2; SLICE-extra wires honest per-vendor chat shadowing).\n\
+         # TYPE spendguard_tokenizer_shadow_skipped_chat_shape_total counter\n\
+         spendguard_tokenizer_shadow_skipped_chat_shape_total {chat_skipped}\n\
+         # HELP spendguard_tokenizer_provider_count_tokens_schema_drift_total \
+         Provider count_tokens response failed to match the documented schema (R2 M11; spec §7 — likely vendor API drift).\n\
+         # TYPE spendguard_tokenizer_provider_count_tokens_schema_drift_total counter\n\
+         spendguard_tokenizer_provider_count_tokens_schema_drift_total {schema_drift}\n\
+         # HELP spendguard_tokenizer_drift_alert_oncall_escalation_total \
+         Per-(tenant, model) drift alert reached the on-call escalation threshold (≥3 within 1h; R2 M10).\n\
+         # TYPE spendguard_tokenizer_drift_alert_oncall_escalation_total counter\n\
+         spendguard_tokenizer_drift_alert_oncall_escalation_total {escalations}\n",
+    )
+}
+
 async fn shutdown_signal() {
     let _ = tokio::signal::ctrl_c().await;
     info!("ctrl_c received — initiating graceful shutdown");
@@ -356,19 +543,7 @@ async fn run_metrics_server(addr: SocketAddr) -> Result<()> {
                         (&Method::GET, "/metrics") => (
                             StatusCode::OK,
                             "text/plain; version=0.0.4; charset=utf-8",
-                            // SLICE_03 ships a stable Prometheus
-                            // payload with the counters the spec
-                            // §5.2 + §5.3 alert wiring expects;
-                            // the actual increments are emitted
-                            // from the request path in SLICE-extra.
-                            "# HELP spendguard_tokenizer_tier3_hit_total \
-                             Number of Tier 3 fallback hits (spec §5.2).\n\
-                             # TYPE spendguard_tokenizer_tier3_hit_total counter\n\
-                             spendguard_tokenizer_tier3_hit_total 0\n\
-                             # HELP spendguard_tokenizer_total_calls Total tokenize calls.\n\
-                             # TYPE spendguard_tokenizer_total_calls counter\n\
-                             spendguard_tokenizer_total_calls 0\n"
-                                .to_string(),
+                            render_metrics(),
                         ),
                         (&Method::GET, "/healthz") => (
                             StatusCode::OK,
@@ -493,5 +668,117 @@ mod tests {
             "error must mention refusing to overwrite, got: {msg}"
         );
         assert!(path.exists(), "regular file must remain");
+    }
+
+    // ── R2 B1 — boot_shadow_worker conditional gates ──────────────
+    fn minimal_cfg() -> Config {
+        envy::prefixed("TEST_BOOTCFG_")
+            .from_iter::<_, Config>(vec![(
+                "TEST_BOOTCFG_LISTEN_ADDR".to_string(),
+                "127.0.0.1:0".to_string(),
+            )])
+            .expect("config loads")
+    }
+
+    #[tokio::test]
+    async fn boot_drop_only_when_shadow_disabled() {
+        let mut cfg = minimal_cfg();
+        cfg.shadow_enabled = false;
+        cfg.anthropic_api_key = "x".into();
+        cfg.gemini_api_key = "y".into();
+        cfg.canonical_ingest_url = "http://localhost:1".into();
+        cfg.database_url = "postgres://nowhere".into();
+        // Even with everything set, shadow_enabled=false short-circuits
+        // to drop-only — no DB/canonical connection attempted.
+        let h = boot_shadow_worker(&cfg).await.expect("drop-only boots");
+        // Try-send succeeds without a worker because spawn_drop_handle
+        // drains.
+        let ev = make_shadow_event();
+        h.try_send(ev).expect("drop handle accepts");
+    }
+
+    #[tokio::test]
+    async fn boot_drop_only_when_no_provider_keys() {
+        let mut cfg = minimal_cfg();
+        cfg.shadow_enabled = true;
+        cfg.anthropic_api_key = "".into();
+        cfg.gemini_api_key = "".into();
+        cfg.canonical_ingest_url = "http://localhost:1".into();
+        cfg.database_url = "postgres://nowhere".into();
+        let h = boot_shadow_worker(&cfg).await.expect("drop-only boots");
+        let ev = make_shadow_event();
+        h.try_send(ev).expect("drop handle accepts");
+    }
+
+    #[tokio::test]
+    async fn boot_drop_only_when_database_url_missing() {
+        let mut cfg = minimal_cfg();
+        cfg.shadow_enabled = true;
+        cfg.anthropic_api_key = "ant".into();
+        cfg.canonical_ingest_url = "http://localhost:1".into();
+        cfg.database_url = "".into();
+        // Missing database_url even with enabled + key + canonical URL
+        // → drop-only (no DB connection attempted).
+        let h = boot_shadow_worker(&cfg).await.expect("drop-only boots");
+        let ev = make_shadow_event();
+        h.try_send(ev).expect("drop handle accepts");
+    }
+
+    #[tokio::test]
+    async fn boot_drop_only_when_canonical_ingest_missing() {
+        let mut cfg = minimal_cfg();
+        cfg.shadow_enabled = true;
+        cfg.anthropic_api_key = "ant".into();
+        cfg.canonical_ingest_url = "".into();
+        cfg.database_url = "postgres://nowhere".into();
+        let h = boot_shadow_worker(&cfg).await.expect("drop-only boots");
+        let ev = make_shadow_event();
+        h.try_send(ev).expect("drop handle accepts");
+    }
+
+    #[test]
+    fn build_sink_mtls_config_all_or_none() {
+        let mut cfg = minimal_cfg();
+        // None set → Ok(None).
+        assert!(build_sink_mtls_config(&cfg).expect("ok").is_none());
+        // All three set → Ok(Some).
+        cfg.sink_tls_cert_pem = Some("/tmp/cert.pem".into());
+        cfg.sink_tls_key_pem = Some("/tmp/key.pem".into());
+        cfg.sink_tls_ca_pem = Some("/tmp/ca.pem".into());
+        let some = build_sink_mtls_config(&cfg).expect("ok");
+        assert!(some.is_some());
+        // Partial → Err.
+        cfg.sink_tls_ca_pem = None;
+        let err = build_sink_mtls_config(&cfg).expect_err("partial rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("partial sink mTLS config"), "got: {msg}");
+    }
+
+    #[test]
+    fn render_metrics_contains_shadow_counters() {
+        let body = render_metrics();
+        // R2 M5 + M10 + M11 names are stable for chart scraping.
+        assert!(body.contains("spendguard_tokenizer_shadow_dropped_full_total"));
+        assert!(body.contains("spendguard_tokenizer_shadow_worker_dead_total"));
+        assert!(body.contains("spendguard_tokenizer_shadow_skipped_chat_shape_total"));
+        assert!(
+            body.contains("spendguard_tokenizer_provider_count_tokens_schema_drift_total")
+        );
+        assert!(
+            body.contains("spendguard_tokenizer_drift_alert_oncall_escalation_total")
+        );
+    }
+
+    fn make_shadow_event() -> spendguard_tokenizer_service::shadow::worker::ShadowEvent {
+        use spendguard_tokenizer::encoders::EncoderKind;
+        spendguard_tokenizer_service::shadow::worker::ShadowEvent {
+            tenant_id: uuid::Uuid::parse_str("01918000-0000-7c10-8c10-0000000000bb")
+                .unwrap(),
+            model: "claude-3-5-sonnet-20241022".into(),
+            encoder_kind: EncoderKind::Anthropic,
+            t2_input_tokens: 10,
+            t2_tokenizer_version_id: "01918000-0000-7c10-8c10-000000000010".into(),
+            raw_text: "x".into(),
+        }
     }
 }
