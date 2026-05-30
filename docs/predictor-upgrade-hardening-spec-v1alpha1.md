@@ -31,13 +31,25 @@ The HARDEN phase is strictly additive: no locked spec invariant is reopened; eve
 
 ### 2.1 Codex CLI as canonical reviewer
 
-Per `feedback_hardening_workflow.md` (2026-05-31 directive), the canonical adversarial reviewer for every HARDEN slice is **codex CLI** (`codex review` subcommand, invoked via `codex:codex-rescue` or direct CLI). Agency-agents (the multi-agent panel used during SLICE_01–SLICE_07) is NOT the canonical reviewer for HARDEN. Rationale:
+Per `feedback_hardening_workflow.md` (2026-05-31 directive), the canonical adversarial reviewer for every HARDEN slice is **codex CLI dispatched by AIT**. The `claude-code` adapter is not used for this phase. Rationale:
 
 - The honest-gap directive was issued by a maintainer who wants a single adversarial gate, not a 4-reviewer panel.
-- Codex CLI's adversarial mode is the "200 IQ autistic developer second opinion" already proven during SLICE_02–SLICE_07 cross-checks.
+- Codex CLI's adversarial mode is the independent second opinion already proven during SLICE_02–SLICE_07 cross-checks.
 - One reviewer reduces per-slice cycle cost from 50–300k tokens to 10–80k tokens, which matters when shipping 8 slices.
 
-Each HARDEN slice's §12 (AIT execution notes) MUST name codex CLI as the reviewer and MUST NOT name agency-agents.
+The concrete invocation is:
+
+```bash
+ait run \
+  --adapter codex \
+  --review-mode adversarial \
+  --base main \
+  --branch harden/HARDEN_NN_<name> \
+  --slice-doc docs/slices/HARDEN_NN_*.md \
+  --review-budget deep
+```
+
+Each HARDEN slice's §12 (AIT execution notes) MUST name codex CLI via this AIT invocation and MUST NOT name the claude-code adapter.
 
 ### 2.2 Max 5 codex review rounds per slice
 
@@ -52,12 +64,12 @@ If round 5 still has findings after the implementer's fix attempt, the slice esc
 
 ### 2.3 Staff+ panel arbitration on round-5 fail
 
-Identical process to `staff-panel-arbitration-process.md`. The panel composition for HARDEN slices is:
+Identical process to `staff-panel-arbitration-process.md`, but dispatched through separate `ait run --adapter codex --review-mode adversarial` invocations. The panel composition for HARDEN slices is:
 
 - Software Architect (always)
 - Backend Architect (always)
 - Security Engineer (always)
-- Code Reviewer (always)
+- Database Optimizer (always)
 - Domain expert (varies by slice; see each slice's §12)
 
 The arbitration ruling is committed to `docs/arbitrations/HARDEN_NN-ruling-YYYY-MM-DD.md` and linked from the merge commit. Per `feedback_hardening_workflow.md` step 5, **arbitration must not block** — the panel ships a decision (merge / block / rework), it does not punt.
@@ -116,26 +128,26 @@ Drift reconciliation (HARDEN_04) is the explicit exception and runs under a sepa
 
 ### 3.2 Ordering rationale
 
-The order is not strict — slices can run in parallel where they don't share files — but the recommended sequence is:
+The maintainer directive for this phase is strict: slices run sequentially in numeric order, without stopping between slices unless a slice reaches the round-5 Staff+ arbitration path.
 
 ```
-HARDEN_01 → HARDEN_03 → HARDEN_04 → HARDEN_06 → HARDEN_05 → HARDEN_08 → HARDEN_07 → HARDEN_02
+HARDEN_01 → HARDEN_02 → HARDEN_03 → HARDEN_04 → HARDEN_05 → HARDEN_06 → HARDEN_07 → HARDEN_08
 ```
 
 Reasoning:
 
-1. **HARDEN_01 first** because retrospective review may surface new GH issues that HARDEN_03 then triages. Running them out of order would force HARDEN_03 to re-run.
-2. **HARDEN_03 second** because P1 closure quiets the gap list before any other slice picks at it. HARDEN_03 also closes the SDK proto regen (#90) that other slices may depend on.
-3. **HARDEN_04 third** because drift reconciliation makes the spec text accurate before HARDEN_05 / HARDEN_06 cite it. Drift fixes are small additive doc edits with low risk of late churn.
-4. **HARDEN_06 before HARDEN_05** because the tokenizer sink envelope + Ed25519 wire are foundational (every CloudEvent depends on the envelope); HARDEN_05 then layers replay protection on top.
-5. **HARDEN_05 before HARDEN_08** because cool-down quota cap (#138) constrains count_tokens API surface that HARDEN_08's per-tenant cert validation interacts with.
-6. **HARDEN_08 before HARDEN_07** because cert minting requires Helm + cert-manager changes, which HARDEN_07's helm-template-all-profiles audit then verifies.
-7. **HARDEN_02 last** because E2E real-cluster validation is the integration audit; running it earlier would just re-fail every time a later slice changes a wire format. Once HARDEN_01–HARDEN_08 are merged, HARDEN_02 verifies the whole stack boots and serves traffic.
+1. **HARDEN_01 first** because SLICE_08–SLICE_15 missed adversarial review and may contain hot-path regressions, especially in SLICE_10.
+2. **HARDEN_02 second** because real demo and cluster failures must be observed early; later slices then close concrete failures rather than theoretical ones.
+3. **HARDEN_03 third** because GH P1 triage can incorporate HARDEN_01/HARDEN_02 findings and close production blockers in one pass.
+4. **HARDEN_04 fourth** because the specs should be reconciled after the first three discovery-heavy slices reveal the complete drift set.
+5. **HARDEN_05 fifth** because the security backlog can rely on reconciled spec text and closed P1 issue taxonomy.
+6. **HARDEN_06 sixth** because SLICE_05/06 leftover CloudEvent and signing work should land after the replay/PII/rate-limit model is hardened.
+7. **HARDEN_07 seventh** because cargo, Helm, migration, and NetworkPolicy verification should run after the security and signing changes have landed.
+8. **HARDEN_08 eighth** because per-tenant SVID cert minting is the final identity hardening layer and must pass the verification gates introduced by HARDEN_07.
 
 ### 3.3 Parallelism
 
-HARDEN_01 and HARDEN_04 can run in parallel (no shared files; one reviews code, the other reviews specs).
-HARDEN_03 and HARDEN_06 can run in parallel (HARDEN_06 closes specific P1s — #168, #171 — but HARDEN_03 handles the others). When parallelizing, the implementer must coordinate GH issue closure to avoid double-close.
+No implementation parallelism is used in this maintainer-directed hardening run. Parallelism is allowed only inside a slice for read-only inspection, test execution, or independent Staff+ arbitration reviews. Merge order remains HARDEN_01 through HARDEN_08.
 
 ### 3.4 HARDEN_04 spec-edit exception
 
@@ -155,7 +167,7 @@ These decisions are LOCKED for the duration of the HARDEN phase and require a v1
 
 ### 4.1 LD-H-01: codex CLI is the canonical reviewer
 
-Stated in §2.1. The agency-agents 4-reviewer panel is NOT used during HARDEN unless the slice escalates to Staff+ arbitration on round-5 fail (§2.3), in which case the agency-agents panel IS the Staff+ panel.
+Stated in §2.1. The `claude-code` adapter is never used during HARDEN. Staff+ arbitration, when required, is run as separate AIT codex invocations for each panel role.
 
 ### 4.2 LD-H-02: 5-round budget + arbitration escalation
 
@@ -245,4 +257,4 @@ When (1)–(8) are green, this spec is LOCKED and the next phase is v1alpha2 des
 
 ---
 
-*Spec version: predictor-upgrade-hardening-spec v1alpha1 (draft 2026-05-31) | Drives: HARDEN_01–HARDEN_08 slice docs | Locked-in design decisions: §4 | Reviewer: codex CLI | Panel-arbitration backstop: agency-agents Staff+ panel | Branch: `design/predictor-upgrade-hardening`*
+*Spec version: predictor-upgrade-hardening-spec v1alpha1 (draft 2026-05-31) | Drives: HARDEN_01–HARDEN_08 slice docs | Locked-in design decisions: §4 | Reviewer: codex CLI via AIT | Panel-arbitration backstop: Staff+ codex panel via AIT | Branch: `design/predictor-upgrade-hardening`*
