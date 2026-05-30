@@ -30,6 +30,23 @@
 {{- if not .Values.statsAggregator.signingKeySecretName -}}
 {{- fail "statsAggregator.signingKeySecretName is required under chart.profile=production (Ed25519 signing key for prediction_drift_alert CloudEvents — DisabledSigner is demo-profile only per spendguard-signing crate)" -}}
 {{- end -}}
+{{- /* R2 M9 (Security F2): signingKeySecretName WITHOUT signingKeyPath is
+       a half-configured signer — the secret is mounted but the binary
+       has no path to look up. The signer_from_env contract requires
+       _SIGNING_KEY_PATH when _SIGNING_MODE=local. Reject early so the
+       operator fixes the config instead of debugging a CrashLoopBackOff. */ -}}
+{{- if not .Values.statsAggregator.signingKeyPath -}}
+{{- fail "statsAggregator.signingKeyPath is required under chart.profile=production when signingKeySecretName is set (Ed25519 PKCS8 PEM path within the mounted signing-key volume — typically /etc/spendguard/signing/signing-key.pem)" -}}
+{{- end -}}
+{{- /* R2 B5: schema_bundle_id + schema_bundle_hash_hex required when
+       canonical_ingest sink is used (handler rejects missing
+       schema_bundle). Both are wired below via env. */ -}}
+{{- if not .Values.statsAggregator.schemaBundleId -}}
+{{- fail "statsAggregator.schemaBundleId is required under chart.profile=production (UUID of the schema bundle the canonical_ingest service has registered; mismatch → SchemaBundleUnknown on every drift alert)" -}}
+{{- end -}}
+{{- if not .Values.statsAggregator.schemaBundleHashHex -}}
+{{- fail "statsAggregator.schemaBundleHashHex is required under chart.profile=production (byte-exact hex SHA-256 of the schema bundle .tgz; outbox_forwarder uses the same envelope)" -}}
+{{- end -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -102,6 +119,15 @@ spec:
             {{- else if eq .Values.chart.profile "demo" }}
             - { name: SPENDGUARD_STATS_AGGREGATOR_SIGNING_MODE,           value: "disabled" }
             {{- end }}
+            {{- /* R2 B5 wiring — AppendEventsRequest envelope fields. Production
+                  profile gates these above; demo profile may leave them empty
+                  (LoggingDriftAlertSink path skips the envelope). */}}
+            {{- if .Values.statsAggregator.schemaBundleId }}
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_ID,       value: {{ .Values.statsAggregator.schemaBundleId | quote }} }
+            {{- end }}
+            {{- if .Values.statsAggregator.schemaBundleHashHex }}
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_HASH_HEX, value: {{ .Values.statsAggregator.schemaBundleHashHex | quote }} }
+            {{- end }}
           volumeMounts:
             - name: tmp
               mountPath: /tmp
@@ -117,12 +143,16 @@ spec:
             {{- end }}
           livenessProbe:
             httpGet:
-              path: /healthz
+              # R2 M8: /livez is pure process liveness — won't restart
+              # the pod just because DB connectivity is flaky (that's
+              # readiness's job, which only marks the pod as not-serving).
+              path: /livez
               port: metrics
             initialDelaySeconds: 10
             periodSeconds: 15
           readinessProbe:
             httpGet:
+              # R2 M8: /readyz probes the DB pool + cycle freshness.
               path: /readyz
               port: metrics
             initialDelaySeconds: 5
