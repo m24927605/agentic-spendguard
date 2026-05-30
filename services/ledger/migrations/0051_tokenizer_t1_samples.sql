@@ -128,13 +128,41 @@ CREATE TABLE tokenizer_t1_samples (
     PRIMARY KEY (sample_id, sampled_at)
 ) PARTITION BY RANGE (sampled_at);
 
--- Pre-create the current month + 2 future months. Operators add new
--- partitions via a cron job (deferred to SLICE-extra) before they are
--- needed; missing-partition INSERTs raise an error rather than silently
--- routing into the default partition. 0009_audit_outbox.sql tracks the
--- same pattern (audit_outbox_YYYYMM).
-CREATE TABLE tokenizer_t1_samples_default
-    PARTITION OF tokenizer_t1_samples DEFAULT;
+-- R3 N2 fix: pre-create current + 2 future monthly partitions (2026-05
+-- ship window: 2026-05, 2026-06, 2026-07). No DEFAULT partition — a
+-- missing-month INSERT must raise `no partition of relation` rather
+-- than silently routing into a catch-all that defeats the
+-- `DROP TABLE tokenizer_t1_samples_YYYYMM` retention model.
+--
+-- ## Operator obligation
+--
+-- Future-month partitions are NOT auto-created. Operators MUST add
+-- the next month's partition before the 1st of that month, otherwise
+-- shadow inserts after `2026-08-01 00:00:00+00` will fail with a
+-- partition-routing error (and the worker fails the sample insert,
+-- which is preferable to silent data loss in a default partition).
+--
+-- A cron job to mint future partitions (and DROP TABLE old ones for
+-- the 90-day retention window) is deferred to SLICE-extra and tracked
+-- as a GH issue (R3 N2 follow-up). The shadow worker is fail-loud on
+-- a missing partition: the sample insert returns an error, the worker
+-- logs + skips (sample is dropped, not silently corrupted), and the
+-- `tokenizer_shadow_sample_insert_failed_total` Prometheus counter
+-- ticks — operators see the alert and ship a partition.
+--
+-- ## Migration runner note
+--
+-- Each CREATE TABLE commits independently (psql autocommit per SLICE_01
+-- R5). A partition-creation failure aborts the migration at the failing
+-- statement; preceding partitions remain.
+CREATE TABLE tokenizer_t1_samples_2026_05 PARTITION OF tokenizer_t1_samples
+    FOR VALUES FROM ('2026-05-01 00:00:00+00') TO ('2026-06-01 00:00:00+00');
+
+CREATE TABLE tokenizer_t1_samples_2026_06 PARTITION OF tokenizer_t1_samples
+    FOR VALUES FROM ('2026-06-01 00:00:00+00') TO ('2026-07-01 00:00:00+00');
+
+CREATE TABLE tokenizer_t1_samples_2026_07 PARTITION OF tokenizer_t1_samples
+    FOR VALUES FROM ('2026-07-01 00:00:00+00') TO ('2026-08-01 00:00:00+00');
 
 -- Per spec §4.4 — partial index for the alerting subset that successfully
 -- emitted a CloudEvent (R2 M9: the operator-visible alert surface is the
