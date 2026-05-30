@@ -13,3 +13,18 @@ pub mod sidecar_adapter {
         tonic::include_proto!("spendguard.sidecar_adapter.v1");
     }
 }
+
+// SLICE_10 Phase A: egress_proxy is also a CLIENT of output_predictor +
+// run_cost_projector. The Predict + Project calls happen BEFORE the
+// DecisionRequest reaches the sidecar so the proxy can populate
+// ClaimEstimate with the full 17-column prediction metadata.
+pub mod output_predictor {
+    pub mod v1 {
+        tonic::include_proto!("spendguard.output_predictor.v1");
+    }
+}
+pub mod run_cost_projector {
+    pub mod v1 {
+        tonic::include_proto!("spendguard.run_cost_projector.v1");
+    }
+}
