@@ -547,6 +547,8 @@ pub async fn estimate_call_cost(
         Ok(p) => build_estimate_from_predictor(
             &tok_resp,
             input_tokens,
+            inputs.model,
+            &prompt_class,
             inputs.prediction_policy,
             &p,
             project_result.as_ref().ok(),
@@ -561,6 +563,8 @@ pub async fn estimate_call_cost(
                 tokenizer_tier.clone(),
                 tokenizer_version_id.clone(),
                 input_tokens,
+                inputs.model,
+                &prompt_class,
                 strategy_a_local,
                 inputs.prediction_policy,
                 project_result.as_ref().ok(),
@@ -601,6 +605,8 @@ fn compute_strategy_a_local(
 fn build_estimate_from_predictor(
     tok_resp: &spendguard_tokenizer::TokenizeResponse,
     input_tokens: i64,
+    model: &str,
+    prompt_class: &str,
     prediction_policy: &str,
     predict: &PredictResponse,
     project: Option<&ProjectResponse>,
@@ -629,6 +635,8 @@ fn build_estimate_from_predictor(
         run_predicted_remaining_steps: -1,
         run_steps_completed_so_far: 0,
         run_code_triggered: String::new(),
+        model: model.to_string(),
+        prompt_class: prompt_class.to_string(),
     };
     if let Some(p) = project {
         estimate.run_projection_at_decision_atomic = p.run_projection_at_decision_atomic;
@@ -645,6 +653,8 @@ fn build_estimate_fallback_a(
     tokenizer_tier: String,
     tokenizer_version_id: String,
     input_tokens: i64,
+    model: &str,
+    prompt_class: &str,
     strategy_a_local: i64,
     prediction_policy: &str,
     project: Option<&ProjectResponse>,
@@ -672,6 +682,8 @@ fn build_estimate_fallback_a(
         run_predicted_remaining_steps: -1,
         run_steps_completed_so_far: 0,
         run_code_triggered: String::new(),
+        model: model.to_string(),
+        prompt_class: prompt_class.to_string(),
     };
     if let Some(p) = project {
         estimate.run_projection_at_decision_atomic = p.run_projection_at_decision_atomic;
@@ -812,6 +824,8 @@ mod tests {
             run_predicted_remaining_steps: -1,
             run_steps_completed_so_far: 0,
             run_code_triggered: String::new(),
+            model: "gpt-4o-mini".into(),
+            prompt_class: "chat_short".into(),
         };
         inputs.claim_estimate = Some(est.clone());
         let req = build_decision_request(&inputs).unwrap();

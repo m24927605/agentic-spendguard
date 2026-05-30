@@ -417,6 +417,7 @@ class SpendGuardClient:
         projected_unit: common_pb2.UnitRef | None = None,
         prompt_text: str | None = None,
         decision_context_json: dict | None = None,
+        claim_estimate: "adapter_pb2.ClaimEstimate | None" = None,
     ) -> DecisionOutcome:
         """Run a `*.pre` decision boundary through the sidecar.
 
@@ -487,6 +488,7 @@ class SpendGuardClient:
             projected_p99_atomic=projected_p99_atomic,
             projected_unit=projected_unit or common_pb2.UnitRef(),
             runtime_metadata=runtime_metadata,
+            claim_estimate=claim_estimate,
         )
         idem = common_pb2.Idempotency(
             key=idempotency_key,
@@ -835,6 +837,10 @@ class SpendGuardClient:
         provider_event_id: str,
         outcome: str,
         estimated_amount_atomic: str = "",
+        actual_input_tokens: int | None = None,
+        actual_output_tokens: int | None = None,
+        delta_b_ratio: float | None = None,
+        delta_c_ratio: float | None = None,
         traceparent: str = "",
         tracestate: str = "",
         provider_response_metadata: str = "",
@@ -859,15 +865,24 @@ class SpendGuardClient:
 
         ts = timestamp_pb2.Timestamp()
         ts.GetCurrentTime()
-        payload = adapter_pb2.LlmCallPostPayload(
-            reservation_id=reservation_id,
-            provider_reported_amount_atomic=provider_reported_amount_atomic,
-            estimated_amount_atomic=estimated_amount_atomic,
-            unit=unit,
-            pricing=pricing,
-            provider_event_id=provider_event_id,
-            outcome=outcome_enum,
-        )
+        payload_kwargs = {
+            "reservation_id": reservation_id,
+            "provider_reported_amount_atomic": provider_reported_amount_atomic,
+            "estimated_amount_atomic": estimated_amount_atomic,
+            "unit": unit,
+            "pricing": pricing,
+            "provider_event_id": provider_event_id,
+            "outcome": outcome_enum,
+        }
+        if actual_input_tokens is not None:
+            payload_kwargs["actual_input_tokens"] = actual_input_tokens
+        if actual_output_tokens is not None:
+            payload_kwargs["actual_output_tokens"] = actual_output_tokens
+        if delta_b_ratio is not None:
+            payload_kwargs["delta_b_ratio"] = delta_b_ratio
+        if delta_c_ratio is not None:
+            payload_kwargs["delta_c_ratio"] = delta_c_ratio
+        payload = adapter_pb2.LlmCallPostPayload(**payload_kwargs)
         ev = adapter_pb2.TraceEvent(
             session_id=session_id,
             trace=_build_trace_context(traceparent, tracestate),
@@ -954,6 +969,7 @@ class SpendGuardClient:
             adapter_pb2.DecisionResponse.SKIP: "SKIP",
             adapter_pb2.DecisionResponse.STOP: "STOP",
             adapter_pb2.DecisionResponse.REQUIRE_APPROVAL: "REQUIRE_APPROVAL",
+            adapter_pb2.DecisionResponse.STOP_RUN_PROJECTION: "STOP",
         }
         return mapping.get(decision_enum, "UNKNOWN")
 

@@ -1,5 +1,6 @@
 PROTO_ROOT := $(realpath $(CURDIR)/../../proto)
 OUT_DIR    := $(CURDIR)/src/spendguard/_proto
+PYTHON     ?= $(shell command -v python3.11 >/dev/null 2>&1 && echo python3.11 || echo python3)
 # ledger.proto is included for the demo's webhook simulator path
 # (talks directly to ledger gRPC for Step 8 dev convenience).
 # Production adapters do NOT use ledger.proto; sidecar is the only
@@ -18,7 +19,7 @@ PROTOS     := \
 # a self-contained import tree.
 proto:
 	@mkdir -p $(OUT_DIR)
-	python -m grpc_tools.protoc \
+	$(PYTHON) -m grpc_tools.protoc \
 		--proto_path=$(PROTO_ROOT) \
 		--python_out=$(OUT_DIR) \
 		--grpc_python_out=$(OUT_DIR) \
@@ -38,24 +39,24 @@ clean:
 	rm -rf $(OUT_DIR) dist build *.egg-info
 
 lint:
-	ruff check src
+	$(PYTHON) -m ruff check src
 
 typecheck:
-	mypy src
+	$(PYTHON) -m mypy src
 
 test:
-	pytest -q
+	$(PYTHON) -m pytest -q
 
 # Build sdist + wheel for publishing.
 build: clean proto
-	python -m build
+	$(PYTHON) -m build
 
 # Publish to test.pypi.org for verification.
 publish-test: build
-	python -m twine check dist/*
-	python -m twine upload --repository testpypi dist/*
+	$(PYTHON) -m twine check dist/*
+	$(PYTHON) -m twine upload --repository testpypi dist/*
 
 # Publish to PyPI (real).
 publish: build
-	python -m twine check dist/*
-	python -m twine upload dist/*
+	$(PYTHON) -m twine check dist/*
+	$(PYTHON) -m twine upload dist/*
