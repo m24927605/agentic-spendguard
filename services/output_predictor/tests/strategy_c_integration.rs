@@ -66,7 +66,7 @@ async fn skeleton_mode_path_falls_to_b_silently() {
     // Status::failed_precondition, no Status::internal, just c=None
     // and the selector picks B.
     let cache = EndpointCache::with_default_ttl(None);
-    let client = PluginClient::new(None);
+    let client = PluginClient::new(None).expect("skeleton-mode constructor");
     let breaker = PluginCircuitBreaker::new(CircuitBreakerConfig::default());
 
     let tenant = Uuid::new_v4();

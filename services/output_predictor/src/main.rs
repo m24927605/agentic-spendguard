@@ -134,7 +134,12 @@ async fn main() -> Result<()> {
     // accidental production plaintext.
     let plugin_client_tls = build_plugin_client_tls_config(&cfg)
         .context("loading plugin client mTLS config")?;
-    let plugin_client = PluginClient::new(plugin_client_tls);
+    // R2 B1: PluginClient::new now eagerly reads + parses cert/key/CA
+    // PEMs (so a typo in the path / bad PEM byte ordering surfaces at
+    // boot rather than on the first Predict call). `?` here propagates
+    // the failure up to `main()` which exits non-zero — fail-closed.
+    let plugin_client = PluginClient::new(plugin_client_tls)
+        .context("initialise plugin client (mTLS materials)")?;
 
     let plugin_breaker = PluginCircuitBreaker::new(CircuitBreakerConfig::default());
 

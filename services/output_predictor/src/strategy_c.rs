@@ -397,7 +397,7 @@ mod tests {
         Arc<PluginCircuitBreaker>,
     ) {
         let cache = EndpointCache::with_default_ttl(None);
-        let client = PluginClient::new(None);
+        let client = PluginClient::new(None).expect("skeleton-mode constructor");
         let breaker = PluginCircuitBreaker::new(CircuitBreakerConfig::default());
         (cache, client, breaker)
     }

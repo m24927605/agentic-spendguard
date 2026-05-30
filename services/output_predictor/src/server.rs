@@ -438,7 +438,7 @@ mod tests {
         let cache = OutputDistributionCache::new(None, Duration::from_secs(300));
         let context_window = Arc::new(ContextWindowTable::empty());
         let endpoint_cache = EndpointCache::with_default_ttl(None);
-        let plugin_client = PluginClient::new(None);
+        let plugin_client = PluginClient::new(None).expect("skeleton-mode constructor");
         let plugin_breaker = PluginCircuitBreaker::new(CircuitBreakerConfig::default());
         OutputPredictorSvc::new(
             cache,
