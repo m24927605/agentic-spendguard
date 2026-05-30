@@ -29,6 +29,10 @@ docs/site/site/
 # when an operator runs `cargo test` outside Docker.
 services/*/target/
 services/*/Cargo.lock
+crates/*/target/
+crates/*/Cargo.lock
+benchmarks/*/target/
+benchmarks/*/Cargo.lock
 proto/google
 *.swp
 *.swo

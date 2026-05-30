@@ -1,0 +1,221 @@
+{{- if .Values.tokenizer.enabled }}
+{{- $component := "tokenizer" }}
+{{- /* chart.profile=production: required-input gates.
+
+       Per tokenizer-service-spec-v1alpha1.md §5.3 health invariant
+       (tier3 hit rate < 0.1%) the operator must explicitly confirm
+       the tier3 alert threshold under production profile — leaving
+       it at chart default in production hides the metric behind a
+       chart placeholder.
+
+       Per spec §8 "Tier 2 encoder load failure" + §7.4 signed bundle:
+       the asset sha256 verification happens inside the library at
+       boot; chart-side we only need to ensure the image tag is
+       pinned (no `latest`).
+
+       Mirrors the sidecar.yaml:8-23 production-profile fail-gate
+       pattern. Round-2 fixes B3, M4, M5 strengthen the gates:
+       - B3.3: production must configure UDS hostPath OR mTLS Secret
+       - M4: tier3AlertThreshold uses regex (Helm --set casts to string)
+              + range bounds (0.00001, 0.05]
+       - M5: image.tag must be semver vN.N.N or @sha256:... digest
+    */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- if eq .Values.tokenizer.image.tag "" -}}
+{{- fail "tokenizer.image.tag is required under chart.profile=production (do not run with mutable tags like `latest`)" -}}
+{{- end -}}
+{{- /* Round-2 fix M5: strict tag policy. Previously rejected only
+       "latest"; mutable tags like "stable", "main", "dev" slipped
+       through. Now: must be either semver (v?N.N.N optionally
+       suffixed) OR digest-pinned (@sha256:HEX). */ -}}
+{{- if not (or (regexMatch "@sha256:[0-9a-f]{64}$" (toString .Values.tokenizer.image.tag)) (regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[a-z0-9.]+)?$" (toString .Values.tokenizer.image.tag))) -}}
+{{- fail (printf "tokenizer.image.tag=%q must be a semver tag (vN.N.N) or digest-pinned (@sha256:HEX) under chart.profile=production (per spec §7.2 immutable tag for asset signature audit trail)" (toString .Values.tokenizer.image.tag)) -}}
+{{- end -}}
+{{- /* Round-2 fix M4: tier3AlertThreshold validation. Helm --set
+       casts numbers to strings, so kindIs "float64" rejects valid
+       overrides like --set tokenizer.tier3AlertThreshold=0.005. Use
+       regexMatch to validate the string shape, then bounds-check
+       the parsed float. */ -}}
+{{- if not (regexMatch "^[0-9]+(\\.[0-9]+)?$" (toString .Values.tokenizer.tier3AlertThreshold)) -}}
+{{- fail (printf "tokenizer.tier3AlertThreshold=%q must be a positive number under chart.profile=production (per spec §5.3 health invariant default 0.001 = 0.1%%)" (toString .Values.tokenizer.tier3AlertThreshold)) -}}
+{{- end -}}
+{{- $threshold := .Values.tokenizer.tier3AlertThreshold | float64 -}}
+{{- if or (lt $threshold 0.00001) (gt $threshold 0.05) -}}
+{{- fail (printf "tokenizer.tier3AlertThreshold=%f must be in (0.00001, 0.05] under chart.profile=production (per spec §5.3 default 0.001; values outside this range either disable alerts or alert constantly)" $threshold) -}}
+{{- end -}}
+{{- /* Round-2 fix B3.3: production must configure secure transport.
+       Either UDS hostPath (in-pod kernel trust) OR mTLS Secret. If
+       neither is set, fail-fast. */ -}}
+{{- if and (not .Values.tokenizer.udsHostPath) (not .Values.tokenizer.mtlsSecretName) -}}
+{{- fail "tokenizer must configure either udsHostPath (for in-cluster on-node sidecar callers) or mtlsSecretName (for cross-node mTLS) under chart.profile=production (plaintext TCP forbidden per spec §10.1 + sidecar-architecture §5)" -}}
+{{- end -}}
+{{- end -}}
+{{- /* Spec §2.1 — the tokenizer ships in two co-existing forms:
+       (a) gRPC service (this Deployment + Service) — used by the
+           Tier 1 shadow worker, output_predictor, calibration_report,
+           SDK fallback.
+       (b) Rust library — sidecar / egress_proxy link directly for
+           the hot path; no chart resource needed.
+       Both forms share the same dispatch table + tokenizer_versions
+       registry, so a service-side encoder refresh + DB seed migration
+       roll out together.
+    */ -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-tokenizer
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.tokenizer.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      # Round-2 fix M7: pod-level securityContext — runAsNonRoot +
+      # seccomp baseline matching CIS Kubernetes Benchmark §5.7. Container
+      # securityContext below adds read-only rootfs + drop ALL caps.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tokenizer
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.tokenizer.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          # Round-2 fix M7: container-level securityContext.
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: grpc,    containerPort: 50053 }
+            - { name: metrics, containerPort: 9099  }
+          env:
+            - { name: SPENDGUARD_TOKENIZER_LISTEN_ADDR,           value: "0.0.0.0:50053" }
+            - { name: SPENDGUARD_TOKENIZER_METRICS_ADDR,          value: "0.0.0.0:9099"  }
+            - { name: SPENDGUARD_TOKENIZER_REGION,                value: {{ .Values.global.region | quote }} }
+            # Per spec §5.3 health invariant — Tier 3 hit-rate
+            # alerting threshold. SLICE_03 plumbs the value through
+            # Config; the alert wire-up itself lands in SLICE-extra.
+            - { name: SPENDGUARD_TOKENIZER_TIER3_ALERT_THRESHOLD, value: {{ .Values.tokenizer.tier3AlertThreshold | quote }} }
+            {{- if .Values.tokenizer.udsHostPath }}
+            # Round-2 fix B3.1: UDS bind path (hostPath for on-node
+            # sidecar callers). When set, the service binds the UDS
+            # *instead of* TCP — both modes share the dispatch + cache.
+            - { name: SPENDGUARD_TOKENIZER_UDS_PATH,              value: "/var/run/spendguard/tokenizer.sock" }
+            {{- end }}
+            {{- if .Values.tokenizer.mtlsSecretName }}
+            # Round-2 fix B3.2: mTLS — paths into the mounted Secret.
+            - { name: SPENDGUARD_TOKENIZER_TLS_CERT_PEM,          value: "/etc/spendguard/tls/tls.crt" }
+            - { name: SPENDGUARD_TOKENIZER_TLS_KEY_PEM,           value: "/etc/spendguard/tls/tls.key" }
+            - { name: SPENDGUARD_TOKENIZER_TLS_CA_PEM,            value: "/etc/spendguard/tls/ca.crt" }
+            {{- end }}
+          volumeMounts:
+            # Round-2 fix M7: read-only rootfs requires /tmp writable for
+            # any scratch + spilled state from tonic/h2.
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.tokenizer.udsHostPath }}
+            - name: uds
+              mountPath: /var/run/spendguard
+            {{- end }}
+            {{- if .Values.tokenizer.mtlsSecretName }}
+            - name: tls
+              mountPath: /etc/spendguard/tls
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.tokenizer.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.tokenizer.udsHostPath }}
+        - name: uds
+          hostPath:
+            path: {{ .Values.tokenizer.udsHostPath | quote }}
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if .Values.tokenizer.mtlsSecretName }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.tokenizer.mtlsSecretName | quote }}
+        {{- end }}
+{{- /* Round-3 Backend Architect Finding N2 (Major): Service gating.
+
+       Spec §2.1(a) — the tokenizer ships in two transport modes:
+         * UDS hostPath (on-node sidecar callers; kernel-enforced trust)
+         * TCP with mTLS (cross-node callers: Tier 1 shadow worker,
+           output_predictor, calibration_report, SDK fallback)
+
+       In UDS-only mode the pod binds the UDS socket and does NOT
+       listen on TCP 50053 (main.rs:101-105 dispatches one or the
+       other). Exposing a Service with `port: grpc → targetPort: grpc`
+       under UDS-only mode would advertise a TCP endpoint that the
+       pod immediately RSTs. Cross-node callers would see connection
+       resets instead of a clean "TCP transport not configured" signal.
+
+       Gate the entire Service block behind `not udsHostPath`:
+         * UDS-only deploys     → no Service rendered. Operators
+                                  mount the hostPath directly.
+         * mTLS / plaintext     → Service rendered with grpc + metrics.
+
+       Note: the /metrics endpoint runs on a separate hyper server
+       inside the same pod and only binds TCP — Prometheus scrape via
+       a separate Pod-targeted ServiceMonitor or annotations on the
+       Deployment, NOT through this Service. This is consistent with
+       services/canonical_ingest and services/ledger which do not
+       expose /metrics via Service either.
+    */ -}}
+{{- if not .Values.tokenizer.udsHostPath }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spendguard.fullname" . }}-tokenizer
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc,    port: 50053, targetPort: grpc    }
+    - { name: metrics, port: 9099,  targetPort: metrics }
+  selector:
+    {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+{{- else }}
+# UDS-only deployment (udsHostPath is set): no TCP Service exposed.
+# main.rs dispatches UDS xor TCP — when SPENDGUARD_TOKENIZER_UDS_PATH
+# is set, the pod does NOT listen on TCP 50053, so rendering a
+# Service would advertise an endpoint that the pod immediately RSTs.
+#
+# Per round-3 Backend Architect Finding N2 — cross-node callers
+# (Tier 1 shadow worker, output_predictor) cannot reach a UDS-only
+# tokenizer. Operators running multi-tier topologies must:
+#   * deploy a SECOND tokenizer release with mtlsSecretName set
+#     (different release name, no udsHostPath), OR
+#   * leave udsHostPath empty and use mtlsSecretName for all callers.
+# Setting both values on the same release results in UDS taking
+# precedence (the pod binds UDS, ignores TCP) and is rejected here.
+{{- end }}
+{{- end }}

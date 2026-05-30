@@ -1,0 +1,171 @@
+// SpendGuard Tokenizer service.
+//
+// Spec references:
+//   - tokenizer-service-spec-v1alpha1.md §2.2 (proto definition)
+//   - tokenizer-service-spec-v1alpha1.md §3 (Tier 2 hot path)
+//   - tokenizer-service-spec-v1alpha1.md §5 (Tier 3 fallback)
+//   - audit-chain-prediction-extension-v1alpha1.md §2.1 (audit columns
+//     tokenizer_tier + tokenizer_version_id are populated by Tokenize)
+//   - sidecar-architecture-spec-v1alpha1.md §5 (mTLS internal transport)
+//
+// Transport: gRPC over mTLS (centralized form per §2.1(a)); in-process
+// Rust library call (per-pod hot path form per §2.1(b)).
+//
+// Compatibility: proto3, additive evolution; encoder version surfaced
+// via tokenizer_version_id field in TokenizeResponse so audit-chain
+// verify-chain can reproduce historical decisions even after an
+// encoder refresh (per §7.3).
+//
+// SLICE_03 scope:
+//   - Tokenize RPC: Tier 2 OpenAI dispatch + Tier 3 fallback
+//   - ShadowVerify RPC: declared but returns UNIMPLEMENTED;
+//     SLICE_05 wires the Tier 1 shadow worker
+//
+// Field-number convention mirrors common.proto:
+//   - 1..15  : latency-hot fields (single-byte varint tag)
+//   - 16..   : additive / cold fields
+
+syntax = "proto3";
+
+package spendguard.tokenizer.v1;
+
+// Round-2 minor m5 (panel finding): the previous import of
+// google/protobuf/timestamp.proto was unused; removed. If a future
+// slice adds Timestamp fields (e.g., shadow_verify provider response
+// timestamps), re-add the import alongside the field declaration.
+
+service Tokenizer {
+  // Hot-path tokenize. Synchronous; returns Tier 2 result (or Tier 3
+  // fallback) under 1ms p99 (library form) / 3ms p99 (gRPC over UDS).
+  // Per spec §10.1 latency SLO.
+  rpc Tokenize(TokenizeRequest) returns (TokenizeResponse);
+
+  // Async shadow check via provider count_tokens API. Caller is
+  // expected to be the shadow sampling worker, NOT the hot path.
+  // Returns Tier 1 (provider-reported) count.
+  //
+  // SLICE_03: stub — returns gRPC UNIMPLEMENTED. SLICE_05 wires the
+  // real shadow worker + Anthropic / Gemini provider clients.
+  rpc ShadowVerify(ShadowVerifyRequest) returns (ShadowVerifyResponse);
+}
+
+// Round-2 fix M6 + Round-3 fix N3 (DoS protection): the server-side
+// TokenizerSvc rejects requests that exceed the following per-field
+// caps with gRPC InvalidArgument:
+//   model.len()      <= 256 bytes
+//   raw_text.len()   <= 1 MiB
+//   messages.len()   <= 1000 elements
+//   message.content  <= 1 MiB each
+// Plus a protocol-layer cap configured in main.rs:
+//   max_decoding_message_size = 1 MiB     (matches field caps)
+// The protocol cap is the dominant hard cap — anything larger than
+// 1 MiB is rejected by tonic with ResourceExhausted BEFORE proto
+// deserialisation. The field caps are redundant defense-in-depth that
+// also defend the in-process library form (no tonic protocol layer)
+// and provide more specific InvalidArgument errors for callers that
+// want to metric per-field violations. Real workloads sit far below.
+message TokenizeRequest {
+  // Required. Model string as appears in the LLM request body
+  // (e.g., "gpt-4o-mini", "claude-3-5-sonnet-20240620").
+  // Server rejects with InvalidArgument if len > 256 bytes (M6).
+  string model = 1;
+
+  // Messages array per OpenAI Chat Completions shape; tokenizer
+  // applies model-specific message envelope tokens (system + user +
+  // assistant role markers + content separators) where applicable.
+  // For non-chat models or alternate envelope shapes, use raw_text.
+  // Server rejects with InvalidArgument if len > 1000 (M6).
+  repeated Message messages = 2;
+
+  // Mutually exclusive with messages; for text-completion shape.
+  // Server rejects with InvalidArgument if len > 1 MiB (M6 / R3 N3).
+  string raw_text = 3;
+
+  // Caller-supplied request_id for tracing/audit; mints UUIDv7 if
+  // empty. Surfaced in tokenize span (per trace-schema-spec §3.1).
+  string request_id = 4;
+
+  message Message {
+    // "system" | "user" | "assistant" | "tool"
+    string role = 1;
+
+    // Text content; vision/multimodal v2 will add binary
+    // content_parts as a separate additive field.
+    // Server rejects with InvalidArgument if len > 1 MiB (M6 / R3 N3).
+    string content = 2;
+
+    // Tool call payload tokens count for tool-using agents.
+    // Tokenizer adds function name + arguments JSON encoding to
+    // total count using the model's tokenizer.
+    repeated ToolCall tool_calls = 3;
+
+    message ToolCall {
+      string name = 1;
+      // Canonical JSON encoding of arguments (already serialised).
+      string arguments_json = 2;
+    }
+  }
+}
+
+message TokenizeResponse {
+  // Authoritative token count for the input.
+  int64 input_tokens = 1;
+
+  // Which tier was used. Always one of T2 | T3 (T1 never on hot
+  // path per §1.3 invariant).
+  // "T2" | "T3"
+  string tier = 2;
+
+  // Encoder version that produced this count. Empty string for
+  // Tier 3 (no versioned encoder used). Maps to audit_outbox
+  // tokenizer_version_id via the mirror crate
+  // (spendguard-prediction-mirror).
+  // UUIDv7 of tokenizer_versions row.
+  string tokenizer_version_id = 3;
+
+  // Encoder kind for diagnostics; redundant with version_id but
+  // cheap. Mirrors tokenizer_versions.kind CHECK constraint.
+  // "OPENAI_TIKTOKEN" | "ANTHROPIC_BPE" | "GEMINI_BPE" |
+  // "COHERE_BPE" | "SENTENCEPIECE_LLAMA" | "HEURISTIC"
+  string kind = 4;
+
+  // For Tier 3 fallback only: the underlying char count + the
+  // conservative margin applied; lets caller log / metric.
+  // Both are zero for Tier 2 (proto3 default).
+  int64 fallback_char_count = 5;
+  // e.g., 1.05 for 5% conservative (per spec §5.1).
+  float fallback_margin_ratio = 6;
+
+  // Time spent inside Tokenize (excludes RPC overhead). Useful for
+  // SLO tracking; not on audit chain.
+  int64 latency_ns = 7;
+}
+
+message ShadowVerifyRequest {
+  // Same shape as TokenizeRequest; shadow worker passes through.
+  string model = 1;
+  repeated TokenizeRequest.Message messages = 2;
+  string raw_text = 3;
+
+  // Tier 2 result captured at hot-path time, for drift comparison.
+  int64 t2_input_tokens = 4;
+  string t2_tokenizer_version_id = 5;
+}
+
+message ShadowVerifyResponse {
+  // Provider-reported count.
+  int64 t1_input_tokens = 1;
+
+  // Absolute drift |T1 - T2| / T1; alert threshold compare against
+  // configured per-kind threshold (default 1.0%).
+  float drift_ratio = 2;
+
+  // Whether this sample triggered a drift_alert event emission.
+  bool drift_alert_emitted = 3;
+
+  // Latency to provider; for circuit-breaker metrics.
+  int64 provider_latency_ms = 4;
+
+  // Provider response identifiers for debugging.
+  string provider_request_id = 5;
+}

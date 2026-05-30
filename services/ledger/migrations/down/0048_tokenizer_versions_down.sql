@@ -1,5 +1,18 @@
--- Down-migration: reverse 0048_tokenizer_versions.sql
--- (round-2 fix m2; round-3 fixes M4 + M10 + m4; round-4 fixes B1 + M4).
+-- Down-migration: reverse 0048_tokenizer_versions.sql AND 0049
+-- (round-2 fix m2; round-3 fixes M4 + M10 + m4; round-4 fixes B1 + M4;
+-- SLICE_03 round-2 fix M3: 0049_down deleted — see note below).
+--
+-- ## SLICE_03 round-2 fix M3 (panel finding)
+--
+-- The companion 0049_tokenizer_versions_initial_seed_down.sql file
+-- previously existed for migration-runner symmetry but was a structural
+-- no-op (DROP TABLE on tokenizer_versions in this file implicitly
+-- removes the seed rows since the immutability trigger blocks DELETE).
+-- Panel R1 review flagged the file as creating operator confusion
+-- (deviation from SLICE_01 §11 destructive-down GUC opt-in convention).
+-- Resolution: delete 0049_down outright; this file (0048_down) is
+-- responsible for atomically rolling back both 0049 (seed rows) and
+-- 0048 (table + FK + triggers) when invoked.
 --
 -- Apply BEFORE 0046_audit_outbox_prediction_columns_down.sql per
 -- SLICE_01 §11 rollback order. Round-4 fix B1 corrects the round-3

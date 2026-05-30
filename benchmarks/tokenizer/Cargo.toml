@@ -1,0 +1,17 @@
+[package]
+name = "spendguard-tokenizer-benchmarks"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "Criterion benchmark harness for the SpendGuard tokenizer library. Verifies tokenizer-service-spec-v1alpha1.md §10.1 hot-path SLO (Tier 2 library form p99 < 1 ms on commodity hardware)."
+publish = false
+
+[[bench]]
+name = "tier2_library"
+harness = false
+
+[dependencies]
+spendguard-tokenizer = { path = "../../crates/spendguard-tokenizer" }
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["html_reports"] }

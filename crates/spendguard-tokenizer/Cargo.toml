@@ -1,0 +1,83 @@
+[package]
+name = "spendguard-tokenizer"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard tokenizer library crate (per tokenizer-service-spec-v1alpha1.md §2.1(b)). In-process Tier 2 BPE tokenization for OpenAI models via tiktoken-rs, plus Tier 3 heuristic fallback. SLICE_03: OpenAI-only; SLICE_04 adds Anthropic/Gemini; SLICE_05 wires the gRPC shadow path. Hot-path SLO: p99 < 1ms per spec §10.1."
+
+# Two-form coexistence (spec §2.1):
+#   (a) gRPC service — `services/tokenizer/` crate links this lib + tonic.
+#   (b) Rust library — sidecar / egress_proxy link this crate directly
+#       for in-process tokenize on the hot path.
+# Both forms share the same dispatch table, encoder cache, asset
+# integrity check, and tokenizer_versions registry mapping so a refresh
+# rolls out consistently across forms.
+
+[lib]
+name = "spendguard_tokenizer"
+path = "src/lib.rs"
+
+[dependencies]
+# Tier 2 OpenAI BPE encoders. Pin to 0.11.x (latest as of 2026-05-29).
+# tiktoken-rs vendors cl100k_base / o200k_base / p50k_base / r50k_base
+# BPE merges and ships thread-safe encoder objects. Per spec §3.2 the
+# encoders are immutable Arc<EncoderRef> wrappers — no lock contention
+# on hot path.
+#
+# Version pin policy (per §6.2): bumping tiktoken-rs requires:
+#   1. Inserting a new tokenizer_versions row (kind=OPENAI_TIKTOKEN,
+#      version_string="tiktoken-rs-X.Y.Z").
+#   2. asset_sha256 rotation for each affected encoder (vendor checks
+#      whether the .tiktoken merges file bytes changed).
+#   3. Schema bundle id rotation per SLICE_01 locked decision 7 +
+#      SLICE_06 producer rollout.
+#
+# Current pin: 0.11.x (latest stable as of 2026-05-30); rust-version
+# 1.73.0 satisfied by workspace rustup pin 1.96.0.
+tiktoken-rs = "0.11"
+
+# Regex for dispatch table pattern matching (per spec §3.1). Use the
+# default-features set; the dispatch table patterns are compiled once
+# in Tokenizer::new and reused.
+regex = "1"
+
+# Asset signature integrity (spec §7.4: ed25519-signed bundles).
+# sha256 hash check at boot is the v1alpha1 mechanism; ed25519 sig
+# verification is wired in SLICE-extra (production release pipeline).
+sha2 = "0.10"
+hex = "0.4"
+
+# Round-2 fix m14 (panel finding): constant-time sha256 equality
+# comparison to avoid a (theoretical) timing side-channel on the boot
+# integrity check. The asset_sha256 constants live in source so a
+# straight string compare would leak via early-exit timing if an
+# attacker could observe boot latency precisely. Use subtle::
+# ConstantTimeEq on decoded [u8; 32] bytes instead of String::eq.
+subtle = "2"
+
+# UUIDs for tokenizer_versions row ids (UUIDv7 per spec §6.1).
+uuid = { version = "1", features = ["v7"] }
+
+# Error types and tracing.
+thiserror = "1"
+tracing = "0.1"
+
+# Synchronization for the encoder cache (parking_lot is faster than
+# std::sync::RwLock and matches sidecar's choice).
+parking_lot = "0.12"
+
+# Lazy initialization for the compiled dispatch table.
+once_cell = "1"
+
+[dev-dependencies]
+pretty_assertions = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[features]
+default = []
+# Disable embedded encoder assets — useful for unit tests that exercise
+# dispatch logic without paying the encoder-load cost. Production never
+# sets this. The skeleton tests in §8.1 do not require it; provided as
+# an escape hatch for future micro-benchmarks.
+skip_encoder_load = []
