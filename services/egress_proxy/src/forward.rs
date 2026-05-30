@@ -31,14 +31,24 @@ use tracing::{debug, info, warn};
 use crate::decision::{self, DecisionInputs};
 use crate::proto::sidecar_adapter::v1::decision_response::Decision;
 use crate::redacted_auth::RedactedAuth;
+use crate::routing;
 use crate::AppState;
 
-const UPSTREAM_URL_CHAT_COMPLETIONS: &str = "https://api.openai.com/v1/chat/completions";
-const UPSTREAM_URL_RESPONSES: &str = "https://api.openai.com/v1/responses";
+// SLICE_11 — the SLICE_03 hard-coded UPSTREAM_URL_* constants at
+// `forward.rs:36-37` are gone. The routing table at `crate::routing`
+// is the single source of truth for inbound-path → upstream-URL +
+// per-provider tokenizer kind + usage extractor. See
+// `services/egress_proxy/src/routing.rs` and
+// `services/egress_proxy/src/providers/*.rs`.
 
 /// Which OpenAI API surface a given request targets. v0.3 added the
 /// Responses API alongside the v0.1 Chat Completions endpoint.
 /// Spec: docs/specs/egress-proxy-v0.3-responses-api.md.
+///
+/// SLICE_11 keeps this enum as the SSE parser dispatcher key — the
+/// upstream URL is now sourced from the routing table, but the
+/// streaming-event JSON shape (Chat Completions vs Responses API)
+/// still differs and the parser switches on this variant.
 #[derive(Debug, Clone, Copy)]
 enum ApiKind {
     ChatCompletions,
@@ -46,13 +56,6 @@ enum ApiKind {
 }
 
 impl ApiKind {
-    fn upstream_url(self) -> &'static str {
-        match self {
-            Self::ChatCompletions => UPSTREAM_URL_CHAT_COMPLETIONS,
-            Self::Responses => UPSTREAM_URL_RESPONSES,
-        }
-    }
-
     /// Chat Completions omits the usage block on streaming responses
     /// unless `stream_options.include_usage=true` is set in the request.
     /// Responses API includes usage by default. Proxy injects only for
@@ -539,11 +542,38 @@ async fn forward_openai_request(
     }
     // ===== End Slice 4c gating =====
 
-    // Forward to OpenAI. We use reqwest's `bytes()` body to preserve
+    // SLICE_11 — the upstream URL is sourced from the routing table,
+    // NOT a hard-coded constant. The OpenAI inbound paths
+    // (/v1/chat/completions, /v1/responses) are routed via the table's
+    // first two rows so the resolved URL matches the pre-SLICE_11
+    // behaviour for backward compatibility. The routing table also
+    // covers Anthropic / Bedrock / Vertex / Azure OpenAI paths added
+    // in Phase B.
+    //
+    // SLICE_03 forward path retains its OpenAI focus — the routing
+    // table's per-provider tokenizer kind feeds into estimate_call_cost
+    // (Phase C wiring); the SSE parser still keys on ApiKind for the
+    // event-shape (Chat Completions vs Responses).
+    let upstream_url = match api_kind {
+        ApiKind::ChatCompletions => routing::route("/v1/chat/completions")
+            .map(|cfg| cfg.upstream_url_for("/v1/chat/completions"))
+            .unwrap_or_else(|| {
+                warn!("routing table missing /v1/chat/completions; falling back to hard-coded URL");
+                "https://api.openai.com/v1/chat/completions".to_string()
+            }),
+        ApiKind::Responses => routing::route("/v1/responses")
+            .map(|cfg| cfg.upstream_url_for("/v1/responses"))
+            .unwrap_or_else(|| {
+                warn!("routing table missing /v1/responses; falling back to hard-coded URL");
+                "https://api.openai.com/v1/responses".to_string()
+            }),
+    };
+
+    // Forward to upstream. We use reqwest's `bytes()` body to preserve
     // byte-identity (no serde re-encode in the request path).
     let mut req = state
         .http_client
-        .post(api_kind.upstream_url())
+        .post(&upstream_url)
         .header(
             axum::http::header::CONTENT_TYPE,
             HeaderValue::from_static("application/json"),
@@ -565,10 +595,10 @@ async fn forward_openai_request(
     }
 
     debug!(
-        upstream = api_kind.upstream_url(),
+        upstream = %upstream_url,
         body_bytes = body_for_upstream.len(),
         is_streaming = is_streaming,
-        "forwarding to OpenAI"
+        "forwarding to upstream"
     );
 
     // Build reservation context for slice 5 commit lane.
