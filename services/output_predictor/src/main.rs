@@ -502,6 +502,11 @@ mod tests {
             cache_ttl_seconds: 300,
             unknown_model_context_window: 8000,
             context_window_toml_path: "data/model_context_window.toml".into(),
+            plugin_endpoint_database_url: "".into(),
+            plugin_endpoint_cache_ttl_seconds: 60,
+            plugin_client_cert_pem: None,
+            plugin_client_key_pem: None,
+            plugin_trust_ca_pem: None,
         };
         // None set → Ok(None).
         assert!(build_server_tls_config(&cfg).expect("ok").is_none());

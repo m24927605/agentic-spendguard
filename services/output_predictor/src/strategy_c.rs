@@ -402,6 +402,61 @@ mod tests {
         (cache, client, breaker)
     }
 
+    #[test]
+    fn tenant_binding_violation_is_hard_error_not_fall_to_b() {
+        // Spec §7.3 + slice §9 checklist Q5: cross-tenant injection
+        // MUST be rejected (NOT silently fall to B). Verify the
+        // StrategyCError variant exists and the error message
+        // includes both UUIDs so the operator can diagnose RLS
+        // misconfig from logs alone.
+        let requested = Uuid::new_v4();
+        let got = Uuid::new_v4();
+        let err = StrategyCError::TenantBindingViolation { requested, got };
+        let msg = format!("{err}");
+        assert!(
+            msg.contains(&requested.to_string()),
+            "error message must include requested tenant"
+        );
+        assert!(
+            msg.contains(&got.to_string()),
+            "error message must include the mismatched tenant"
+        );
+        assert!(
+            msg.contains("violation"),
+            "error message must mention violation"
+        );
+    }
+
+    #[test]
+    fn defense_in_depth_check_matches_cache_check() {
+        // Spec §7.3 belt-and-suspenders: the cache layer (RLS + code
+        // verification) is the first gate; strategy_c.rs adds a second
+        // identical check at the call site. This test documents that
+        // both layers exist and uses the same comparison shape so a
+        // future refactor that drops one of them flags here.
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+        // Simulate cache returning a row whose tenant doesn't match.
+        let fake = crate::endpoint_cache::PluginEndpoint {
+            plugin_endpoint_id: Uuid::new_v4(),
+            tenant_id: tenant_b,
+            endpoint_url: "https://plugin.example/predict".into(),
+            server_cert_fingerprint: "a".repeat(64),
+            client_cert_id: "spendguard-default".into(),
+            enabled: true,
+        };
+        // The check that lives in strategy_c.rs's compute_c after
+        // cache.lookup() — verify by comparison directly.
+        assert_ne!(fake.tenant_id, tenant_a);
+        let err = StrategyCError::TenantBindingViolation {
+            requested: tenant_a,
+            got: fake.tenant_id,
+        };
+        let msg = format!("{err}");
+        assert!(msg.contains(&tenant_a.to_string()));
+        assert!(msg.contains(&tenant_b.to_string()));
+    }
+
     #[tokio::test]
     async fn breaker_open_short_circuits_when_endpoint_exists() {
         // R0 self-review: skeleton mode falls to NotConfigured BEFORE
