@@ -199,6 +199,28 @@ impl EndpointCache {
         self.entries.write().remove(tenant);
     }
 
+    /// R2 B2 — snapshot of currently-cached tenant ids. The 30s
+    /// HealthCheck loop in main.rs iterates over this set to drive
+    /// per-tenant probes (spec §6.3); we return a cloned `Vec<Uuid>`
+    /// rather than a guard so the caller does not hold the read lock
+    /// across `.await` points inside the loop.
+    ///
+    /// Returns only tenants whose cached entry is still within
+    /// `refresh_ttl`. Stale entries are excluded: the health loop will
+    /// pick them up after the next lookup() reload via the slow path.
+    /// Includes both enabled + disabled tenants — `enabled = FALSE`
+    /// is reported as `not_serving` so the kill-switch surfaces in
+    /// the breaker metrics.
+    pub fn cached_tenants(&self) -> Vec<Uuid> {
+        let now = Instant::now();
+        self.entries
+            .read()
+            .iter()
+            .filter(|(_, c)| now.duration_since(c.loaded_at) < self.refresh_ttl)
+            .map(|(k, _)| *k)
+            .collect()
+    }
+
     /// Test-visible accessor.
     #[cfg(test)]
     pub fn cached_count(&self) -> usize {
@@ -376,6 +398,46 @@ mod tests {
             EndpointCacheError::Sql(_) => "sql",
         };
         assert_eq!(observed, "violation");
+    }
+
+    #[test]
+    fn cached_tenants_returns_fresh_entries_only() {
+        // R2 B2: the 30s health loop iterates over cached_tenants().
+        // The method MUST exclude stale entries so the loop doesn't
+        // probe endpoints we haven't validated recently.
+        let cache = EndpointCache::new(None, Duration::from_millis(100));
+        let fresh = Uuid::new_v4();
+        let mut row_fresh = ep(true);
+        row_fresh.tenant_id = fresh;
+        cache.entries.write().insert(
+            fresh,
+            Cached {
+                endpoint: Arc::new(row_fresh),
+                loaded_at: Instant::now(),
+            },
+        );
+        let stale = Uuid::new_v4();
+        let mut row_stale = ep(true);
+        row_stale.tenant_id = stale;
+        cache.entries.write().insert(
+            stale,
+            Cached {
+                endpoint: Arc::new(row_stale),
+                // Far past the 100ms refresh window.
+                loaded_at: Instant::now()
+                    .checked_sub(Duration::from_secs(60))
+                    .unwrap_or_else(Instant::now),
+            },
+        );
+        let cached = cache.cached_tenants();
+        assert!(cached.contains(&fresh), "fresh tenant must be reported");
+        assert!(!cached.contains(&stale), "stale tenant must be excluded");
+    }
+
+    #[test]
+    fn cached_tenants_returns_empty_when_cold() {
+        let cache = EndpointCache::with_default_ttl(None);
+        assert!(cache.cached_tenants().is_empty());
     }
 
     #[test]

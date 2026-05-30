@@ -124,7 +124,7 @@ async fn main() -> Result<()> {
         Some(p)
     };
     let endpoint_cache = EndpointCache::new(
-        plugin_endpoint_pool,
+        plugin_endpoint_pool.clone(),
         Duration::from_secs(cfg.plugin_endpoint_cache_ttl_seconds),
     );
 
@@ -142,6 +142,41 @@ async fn main() -> Result<()> {
         .context("initialise plugin client (mTLS materials)")?;
 
     let plugin_breaker = PluginCircuitBreaker::new(CircuitBreakerConfig::default());
+
+    // ── R2 B2: spawn the 30s HealthCheck loop (spec §6.3) ──────────
+    //
+    // Per output-predictor-plugin-contract-v1alpha1.md §6.3 the
+    // predictor MUST drive a periodic HealthCheck against every
+    // currently-cached endpoint so the breaker can transition out of
+    // Open without waiting for 10 consecutive Predict failures (failure
+    // mode 8 NOT_SERVING). The previous slice shipped the
+    // PluginClient::health_check method but never invoked it — the
+    // breaker had no health signal at all.
+    //
+    // The loop is started UNCONDITIONALLY: in skeleton mode the
+    // endpoint cache returns NotConfigured (no DB pool) so the loop's
+    // inner body is a noop; production wires a real cache + client +
+    // pool and the loop probes every tenant once per cycle. Per-probe
+    // timeout is 2s (the spec §6.3 health probe budget, distinct from
+    // the 50ms Predict hot-path budget).
+    {
+        let cache_for_loop = endpoint_cache.clone();
+        let client_for_loop = plugin_client.clone();
+        let breaker_for_loop = plugin_breaker.clone();
+        let pool_for_loop = plugin_endpoint_pool.clone();
+        tokio::spawn(async move {
+            run_plugin_health_loop(
+                cache_for_loop,
+                client_for_loop,
+                breaker_for_loop,
+                pool_for_loop,
+                Duration::from_secs(30),
+                Duration::from_secs(2),
+            )
+            .await;
+        });
+        info!("plugin HealthCheck loop spawned (30s cadence per spec §6.3)");
+    }
 
     // ── Build service ─────────────────────────────────────────────
     let svc = OutputPredictorSvc::new(
@@ -338,6 +373,171 @@ fn build_plugin_client_tls_config(cfg: &Config) -> Result<Option<PluginClientTls
              customer service is a security policy violation."
         )),
     }
+}
+
+/// R2 B2 — periodic HealthCheck driver per spec §6.3.
+///
+/// On each tick:
+///   1. Snapshot the set of currently-cached tenant ids (those whose
+///      cache entry is still within `cache.refresh_ttl`).
+///   2. For each tenant, look up the endpoint (cache or DB).
+///   3. Issue `client.health_check` with a `probe_timeout` budget.
+///   4. Drive the breaker via `record_health_ok` / `record_health_fail`
+///      so spec §6.3 failure mode 8 (NOT_SERVING) flips the breaker
+///      Open without waiting for 10 consecutive Predict failures.
+///   5. Best-effort DB write of `current_health_status` so the control
+///      plane GET surfaces the latest observation.
+///
+/// The function never returns under normal operation; it's spawned by
+/// main.rs into a tokio task. A panic inside the loop would propagate
+/// to the task runtime; we use `tokio::spawn(async move { … })` from
+/// the caller so a panic does not take down the predictor itself.
+async fn run_plugin_health_loop(
+    cache: std::sync::Arc<spendguard_output_predictor::endpoint_cache::EndpointCache>,
+    client: std::sync::Arc<PluginClient>,
+    breaker: std::sync::Arc<PluginCircuitBreaker>,
+    pool: Option<sqlx::PgPool>,
+    cadence: Duration,
+    probe_timeout: Duration,
+) {
+    use spendguard_output_predictor::endpoint_cache::EndpointCacheError;
+    let mut interval = tokio::time::interval(cadence);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    // Skip the immediate first tick — first probe fires at `cadence`
+    // after boot so cold-start churn doesn't fight cache hydration.
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        let tenants = cache.cached_tenants();
+        if tenants.is_empty() {
+            continue;
+        }
+        for tenant_id in tenants {
+            let endpoint = match cache.lookup(&tenant_id).await {
+                Ok(ep) => ep,
+                Err(EndpointCacheError::NotConfigured(_)) => {
+                    // Kill-switch flip or DELETE happened mid-cycle — skip.
+                    continue;
+                }
+                Err(EndpointCacheError::TenantBindingViolation { requested, got }) => {
+                    // Defense-in-depth — surface as a warn, do NOT
+                    // touch the breaker (this is a config-level RLS
+                    // bypass, not a plugin liveness signal).
+                    warn!(
+                        tenant = %tenant_id,
+                        requested = %requested,
+                        got = %got,
+                        "plugin health loop: tenant binding violation during cache lookup"
+                    );
+                    continue;
+                }
+                Err(EndpointCacheError::Sql(e)) => {
+                    warn!(
+                        tenant = %tenant_id,
+                        err = %e,
+                        "plugin health loop: cache SQL error; skipping this tick for tenant"
+                    );
+                    continue;
+                }
+            };
+            let probe = client.health_check(&tenant_id, endpoint);
+            let result = tokio::time::timeout(probe_timeout, probe).await;
+            let (status_str, healthy) = match result {
+                Ok(Ok(resp)) => {
+                    // Per output_predictor_plugin proto:
+                    //   HealthCheckResponse.Status enum:
+                    //     0 = STATUS_UNSPECIFIED (treated unhealthy)
+                    //     1 = SERVING            (healthy)
+                    //     2 = DEGRADED           (still Serving per spec §6.3 —
+                    //                              SpendGuard calls Predict but
+                    //                              tags audit with degraded; do
+                    //                              NOT flip breaker Open)
+                    //     3 = NOT_SERVING        (unhealthy → breaker Open)
+                    use spendguard_output_predictor::proto::output_predictor_plugin::v1::health_check_response::Status as HcStatus;
+                    match HcStatus::try_from(resp.status) {
+                        Ok(HcStatus::Serving) => ("serving", true),
+                        Ok(HcStatus::Degraded) => ("degraded", true),
+                        Ok(HcStatus::NotServing) => ("not_serving", false),
+                        Ok(HcStatus::Unspecified) | Err(_) => {
+                            // Unknown / unspecified — treat as unhealthy to
+                            // fail-closed. A future enum extension that the
+                            // predictor binary doesn't yet know about is the
+                            // expected path here.
+                            ("not_serving", false)
+                        }
+                    }
+                }
+                Ok(Err(status)) => {
+                    let code = status.code();
+                    warn!(
+                        tenant = %tenant_id,
+                        code = ?code,
+                        message = %status.message(),
+                        "plugin health loop: HealthCheck RPC error"
+                    );
+                    if code == tonic::Code::Unavailable {
+                        ("unreachable", false)
+                    } else {
+                        ("not_serving", false)
+                    }
+                }
+                Err(_) => {
+                    warn!(
+                        tenant = %tenant_id,
+                        timeout_ms = %probe_timeout.as_millis(),
+                        "plugin health loop: HealthCheck timed out"
+                    );
+                    ("unreachable", false)
+                }
+            };
+
+            if healthy {
+                breaker.record_health_ok(&tenant_id);
+            } else {
+                breaker.record_health_fail(&tenant_id);
+            }
+
+            if let Some(p) = &pool {
+                if let Err(e) = update_health_status_in_db(p, tenant_id, status_str).await {
+                    warn!(
+                        tenant = %tenant_id,
+                        status = status_str,
+                        err = %e,
+                        "plugin health loop: DB status write failed (best-effort)"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Best-effort update of `predictor_plugin_endpoints.current_health_status`.
+/// Wrapped in its own helper so the health loop is small + the SQL +
+/// RLS setup is testable in isolation.
+async fn update_health_status_in_db(
+    pool: &sqlx::PgPool,
+    tenant_id: uuid::Uuid,
+    status: &str,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query(
+        r#"
+        UPDATE predictor_plugin_endpoints
+           SET current_health_status = $2,
+               last_health_check_at  = clock_timestamp()
+         WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(status)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Build server TLS config when cert+key+ca paths are all set; partial

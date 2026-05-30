@@ -264,6 +264,47 @@ impl PluginCircuitBreaker {
         entry.open_until = None;
     }
 
+    /// R2 B2 — record a successful HealthCheck probe (driven by the
+    /// 30s loop in main.rs per spec §6.3). HealthCheck OK from any
+    /// state transitions the breaker to Closed with zeroed counter —
+    /// the health channel is independent of the Predict hot path and
+    /// represents an authoritative "the plugin is live" signal that
+    /// supersedes accumulated Predict failures (which may have been
+    /// a transient burst).
+    ///
+    /// Semantically identical to `record_success` today; kept as a
+    /// distinct method so the call site in main.rs documents that the
+    /// signal came from HealthCheck not Predict. Future spec §6.3
+    /// refinement may grow asymmetric transitions (e.g. require N
+    /// consecutive HealthCheck OKs to close from Open).
+    pub fn record_health_ok(&self, tenant: &Uuid) {
+        let mut entries = self.entries.write();
+        let entry = entries.entry(*tenant).or_default();
+        entry.state = BreakerStateName::Closed;
+        entry.consecutive_failures = 0;
+        entry.open_until = None;
+    }
+
+    /// R2 B2 — record a failed HealthCheck probe. Per spec §6.3
+    /// failure mode 8 (NOT_SERVING), one failed health probe is enough
+    /// to flip the breaker Open (this is the dedicated health channel,
+    /// not the noisy Predict path that gates on N consecutive failures
+    /// — health probes already have their own debouncing via the 30s
+    /// cadence, so the deadline-refresh shape mirrors `record_failure`
+    /// in Open state).
+    pub fn record_health_fail(&self, tenant: &Uuid) {
+        self.record_health_fail_at(tenant, Instant::now());
+    }
+
+    /// Test-visible variant.
+    pub fn record_health_fail_at(&self, tenant: &Uuid, now: Instant) {
+        let mut entries = self.entries.write();
+        let entry = entries.entry(*tenant).or_default();
+        entry.state = BreakerStateName::Open;
+        entry.open_until = Some(now + self.config.open_duration);
+        entry.consecutive_failures = self.config.failure_threshold;
+    }
+
     /// Read-only state snapshot for tests / metrics.
     pub fn state_of(&self, tenant: &Uuid) -> BreakerStateName {
         self.entries
@@ -429,6 +470,82 @@ mod tests {
         assert_eq!(b.state_of(&k_a), BreakerStateName::Open);
         assert_eq!(b.state_of(&k_b), BreakerStateName::Closed);
         assert_eq!(b.permit_request(&k_b), Permit::Allow);
+    }
+
+    #[test]
+    fn record_health_ok_closes_breaker_from_open() {
+        // R2 B2 spec §6.3: a successful HealthCheck probe is an
+        // authoritative "plugin live" signal that supersedes accumulated
+        // Predict failures. Drive the breaker Open via 10 consecutive
+        // Predict failures, then issue record_health_ok — the breaker
+        // must return to Closed.
+        let b = breaker();
+        let k = t(1);
+        for _ in 0..DEFAULT_FAILURE_THRESHOLD {
+            b.record_failure(&k);
+        }
+        assert_eq!(b.state_of(&k), BreakerStateName::Open);
+        b.record_health_ok(&k);
+        assert_eq!(b.state_of(&k), BreakerStateName::Closed);
+        assert_eq!(b.consecutive_failures(&k), 0);
+        assert_eq!(b.permit_request(&k), Permit::Allow);
+    }
+
+    #[test]
+    fn record_health_ok_closes_breaker_from_half_open() {
+        let b = breaker();
+        let k = t(1);
+        let t0 = Instant::now();
+        for _ in 0..DEFAULT_FAILURE_THRESHOLD {
+            b.record_failure_at(&k, t0);
+        }
+        b.permit_request_at(&k, t0 + Duration::from_millis(150));
+        assert_eq!(b.state_of(&k), BreakerStateName::HalfOpen);
+        b.record_health_ok(&k);
+        assert_eq!(b.state_of(&k), BreakerStateName::Closed);
+    }
+
+    #[test]
+    fn record_health_fail_opens_breaker_from_closed() {
+        // R2 B2 spec §6.3 NOT_SERVING: one failed HealthCheck probe is
+        // enough to open the breaker (the health channel has its own
+        // 30s debouncing so this is the equivalent of "many Predict
+        // failures").
+        let b = breaker();
+        let k = t(1);
+        assert_eq!(b.state_of(&k), BreakerStateName::Closed);
+        b.record_health_fail(&k);
+        assert_eq!(b.state_of(&k), BreakerStateName::Open);
+        assert_eq!(b.permit_request(&k), Permit::SkipOpen);
+    }
+
+    #[test]
+    fn record_health_fail_refreshes_open_deadline() {
+        let b = breaker();
+        let k = t(1);
+        let t0 = Instant::now();
+        for _ in 0..DEFAULT_FAILURE_THRESHOLD {
+            b.record_failure_at(&k, t0);
+        }
+        assert_eq!(b.state_of(&k), BreakerStateName::Open);
+        let t1 = t0 + Duration::from_millis(150);
+        // record_health_fail at t1 should refresh the deadline so the
+        // 100ms test breaker stays Open through t1+50ms.
+        b.record_health_fail_at(&k, t1);
+        let t_mid = t1 + Duration::from_millis(50);
+        assert_eq!(b.permit_request_at(&k, t_mid), Permit::SkipOpen);
+    }
+
+    #[test]
+    fn record_health_fail_isolated_per_tenant() {
+        // Spec §6.2 cross-tenant isolation also applies to health-driven
+        // transitions.
+        let b = breaker();
+        let k_a = t(0xAA);
+        let k_b = t(0xBB);
+        b.record_health_fail(&k_a);
+        assert_eq!(b.state_of(&k_a), BreakerStateName::Open);
+        assert_eq!(b.state_of(&k_b), BreakerStateName::Closed);
     }
 
     #[test]
