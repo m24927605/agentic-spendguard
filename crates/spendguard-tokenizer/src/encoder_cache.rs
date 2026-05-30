@@ -66,7 +66,11 @@
 //! There is NO env-var override for either layer (per §9 review
 //! question 3).
 
-use crate::dispatch::{DispatchEntry, TiktokenEncoder};
+use crate::dispatch::{DispatchEntry, EncoderResolver, TiktokenEncoder};
+use crate::encoders::{
+    anthropic::AnthropicEncoder, cohere::CohereEncoder, gemini::GeminiEncoder,
+    llama::LlamaEncoder, Encoder,
+};
 use crate::error::TokenizerError;
 use crate::{Message, TokenizeRequest, TokenizeResponse, ToolCall};
 use sha2::{Digest, Sha256};
@@ -151,6 +155,14 @@ pub struct EncoderCache {
     cl100k: Option<EncoderRow>,
     o200k: Option<EncoderRow>,
     p50k: Option<EncoderRow>,
+    // SLICE_04: per-vendor `Encoder` trait objects, each holding its
+    // own loaded `tokenizers::Tokenizer` instance. `Option<...>` so
+    // the `test_empty` constructor can produce an unloaded cache for
+    // dispatch-only unit tests without paying the boot cost.
+    anthropic: Option<AnthropicEncoder>,
+    gemini: Option<GeminiEncoder>,
+    cohere: Option<CohereEncoder>,
+    llama: Option<LlamaEncoder>,
 }
 
 impl EncoderCache {
@@ -185,6 +197,15 @@ impl EncoderCache {
         cross_check_encoder("o200k_base", o200k_ref, EXPECTED_O200K_FIXTURE)?;
         cross_check_encoder("p50k_base", p50k_ref, EXPECTED_P50K_FIXTURE)?;
 
+        // SLICE_04 — eager-load Tier 2 vendor encoders. Each
+        // constructor runs its own two-layer (sha256 + cross-check
+        // fixture) integrity check per spec §7.4.1; failure → boot-
+        // fast `AssetSignatureMismatch` surfaces here.
+        let anthropic = AnthropicEncoder::new()?;
+        let gemini = GeminiEncoder::new()?;
+        let cohere = CohereEncoder::new()?;
+        let llama = LlamaEncoder::new()?;
+
         Ok(Self {
             cl100k: Some(EncoderRow {
                 encoder: cl100k_ref,
@@ -198,6 +219,10 @@ impl EncoderCache {
                 encoder: p50k_ref,
                 tiktoken: TiktokenEncoder::P50kBase,
             }),
+            anthropic: Some(anthropic),
+            gemini: Some(gemini),
+            cohere: Some(cohere),
+            llama: Some(llama),
         })
     }
 
@@ -212,6 +237,10 @@ impl EncoderCache {
             cl100k: None,
             o200k: None,
             p50k: None,
+            anthropic: None,
+            gemini: None,
+            cohere: None,
+            llama: None,
         }
     }
 
@@ -223,15 +252,56 @@ impl EncoderCache {
     /// the p50k_base completion encoders we fall back to raw text
     /// encoding (chat envelope semantics are undefined for
     /// text-completion shape).
+    ///
+    /// SLICE_04 multi-encoder dispatch: route via `entry.resolver`.
+    /// The `entry.tiktoken` field is honoured only when the resolver
+    /// is `EncoderResolver::Tiktoken(...)` (SLICE_03 short-circuit).
+    /// Non-tiktoken resolvers ignore the placeholder `tiktoken` value
+    /// per `DispatchTable::compile` invariant.
     pub fn tokenize_with_entry(
         &self,
         entry: &DispatchEntry,
         req: &TokenizeRequest,
     ) -> Result<TokenizeResponse, TokenizerError> {
+        match entry.resolver {
+            EncoderResolver::Tiktoken(family) => self.tokenize_via_tiktoken(family, entry, req),
+            EncoderResolver::Anthropic => self.tokenize_via_trait(
+                self.anthropic.as_ref().map(|e| e as &dyn Encoder),
+                "anthropic-v3-bpe",
+                req,
+            ),
+            EncoderResolver::Gemini => self.tokenize_via_trait(
+                self.gemini.as_ref().map(|e| e as &dyn Encoder),
+                "gemini-1.5-bpe",
+                req,
+            ),
+            EncoderResolver::Cohere => self.tokenize_via_trait(
+                self.cohere.as_ref().map(|e| e as &dyn Encoder),
+                "cohere-v2-bpe",
+                req,
+            ),
+            EncoderResolver::Llama => self.tokenize_via_trait(
+                self.llama.as_ref().map(|e| e as &dyn Encoder),
+                "llama-sentencepiece",
+                req,
+            ),
+        }
+    }
+
+    /// SLICE_03 OpenAI short-circuit — keeps the original encode
+    /// path byte-identical to pre-refactor behaviour. Per spec §3.4
+    /// envelope rules (3 per-msg + 3 reply priming for chat
+    /// shape; raw for completion shape; 0301 quirk).
+    fn tokenize_via_tiktoken(
+        &self,
+        family: TiktokenEncoder,
+        entry: &DispatchEntry,
+        req: &TokenizeRequest,
+    ) -> Result<TokenizeResponse, TokenizerError> {
         let row = self
-            .row_for(entry.tiktoken)
+            .row_for(family)
             .ok_or(TokenizerError::AssetLoadFailed {
-                encoder: encoder_static_name(entry.tiktoken),
+                encoder: encoder_static_name(family),
                 message: "encoder not loaded (test_empty cache)".to_string(),
             })?;
 
@@ -240,8 +310,35 @@ impl EncoderCache {
         Ok(TokenizeResponse {
             input_tokens: input_tokens as i64,
             tier: "T2".to_string(),
-            tokenizer_version_id: entry.tiktoken.tokenizer_version_id().to_string(),
+            tokenizer_version_id: family.tokenizer_version_id().to_string(),
             kind: entry.kind.as_str().to_string(),
+            fallback_char_count: 0,
+            fallback_margin_ratio: 0.0,
+            latency_ns: 0,
+        })
+    }
+
+    /// SLICE_04 multi-vendor path — delegate to the `Encoder` trait
+    /// object. Returns `AssetLoadFailed` if the encoder slot is
+    /// `None` (test_empty cache scenario).
+    fn tokenize_via_trait(
+        &self,
+        encoder: Option<&dyn Encoder>,
+        encoder_name: &'static str,
+        req: &TokenizeRequest,
+    ) -> Result<TokenizeResponse, TokenizerError> {
+        let enc = encoder.ok_or(TokenizerError::AssetLoadFailed {
+            encoder: encoder_name,
+            message: "encoder not loaded (test_empty cache)".to_string(),
+        })?;
+
+        let result = enc.count_tokens_request(req)?;
+
+        Ok(TokenizeResponse {
+            input_tokens: result.input_tokens as i64,
+            tier: "T2".to_string(),
+            tokenizer_version_id: result.tokenizer_version_id.to_string(),
+            kind: result.kind.as_str().to_string(),
             fallback_char_count: 0,
             fallback_margin_ratio: 0.0,
             latency_ns: 0,

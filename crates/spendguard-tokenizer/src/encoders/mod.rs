@@ -41,7 +41,7 @@ pub mod openai;
 /// Stable string discriminant matching `tokenizer_versions.kind`
 /// CHECK constraint values. Used for `TokenizeResponse.kind` and for
 /// per-kind drift threshold lookups (spec §4.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum EncoderKind {
     /// tiktoken-rs `cl100k_base` / `o200k_base` / `p50k_base`.
     OpenAi,
