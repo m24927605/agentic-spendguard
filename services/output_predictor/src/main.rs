@@ -377,11 +377,21 @@ async fn shutdown_signal() {
 
 fn render_metrics() -> String {
     use std::sync::atomic::Ordering;
-    use spendguard_output_predictor::server::UNKNOWN_CONTEXT_WINDOW_TOTAL;
-    // R2 M12: wire UNKNOWN_CONTEXT_WINDOW_TOTAL into the scrape body.
-    // Phase D wires the cache hit-rate counter — SLICE_06 ships the
-    // scaffold + the names Phase F's Helm scrape config expects.
-    format!(
+    use spendguard_output_predictor::server::{
+        UNKNOWN_CONTEXT_WINDOW_TOTAL,
+        CUSTOMER_PREDICTOR_CALL_SUCCESS_TOTAL,
+        CUSTOMER_PREDICTOR_CALL_FALL_TO_B_TOTAL,
+        CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL,
+        FAILURE_BY_MODE_TIMEOUT, FAILURE_BY_MODE_GRPC_ERROR,
+        FAILURE_BY_MODE_INVALID_ZERO_OR_NEGATIVE, FAILURE_BY_MODE_INVALID_OVERFLOW,
+        FAILURE_BY_MODE_INVALID_CONFIDENCE, FAILURE_BY_MODE_DESERIALIZATION_ERROR,
+        FAILURE_BY_MODE_TLS_ERROR, FAILURE_BY_MODE_NOT_SERVING,
+        FAILURE_BY_MODE_NOT_CONFIGURED, FAILURE_BY_MODE_BREAKER_OPEN,
+    };
+    // SLICE_07 Phase E: surface the spec §9.1 customer_predictor_* counters.
+    // The 10 per-mode counters cover the spec §5.1 8 documented failure
+    // modes + the 2 SLICE_07 metric-only modes (not_configured + breaker_open).
+    let body = format!(
         "# HELP spendguard_output_predictor_predict_total \
          Total Predict RPCs handled.\n\
          # TYPE spendguard_output_predictor_predict_total counter\n\
@@ -393,9 +403,45 @@ fn render_metrics() -> String {
          # HELP spendguard_output_predictor_unknown_context_window_total \
          Predict calls that fell back to the unknown model_context_window default per spec §3.3.\n\
          # TYPE spendguard_output_predictor_unknown_context_window_total counter\n\
-         spendguard_output_predictor_unknown_context_window_total {}\n",
-        UNKNOWN_CONTEXT_WINDOW_TOTAL.load(Ordering::Relaxed),
-    )
+         spendguard_output_predictor_unknown_context_window_total {unknown}\n\
+         # HELP customer_predictor_call_total \
+         Strategy C call outcomes per output-predictor-plugin-contract-v1alpha1.md §9.1. outcome=success | fall_to_b.\n\
+         # TYPE customer_predictor_call_total counter\n\
+         customer_predictor_call_total{{outcome=\"success\"}} {success}\n\
+         customer_predictor_call_total{{outcome=\"fall_to_b\"}} {fall_to_b}\n\
+         # HELP customer_predictor_tenant_isolation_violation_total \
+         Spec §7.3 tenant binding violation count — RLS bypass suspect; should ALWAYS be zero in production.\n\
+         # TYPE customer_predictor_tenant_isolation_violation_total counter\n\
+         customer_predictor_tenant_isolation_violation_total {violation}\n\
+         # HELP customer_predictor_failure_mode_total \
+         Per-mode breakdown of Strategy C fall-to-B outcomes per spec §5.1.\n\
+         # TYPE customer_predictor_failure_mode_total counter\n\
+         customer_predictor_failure_mode_total{{mode=\"timeout\"}} {m_timeout}\n\
+         customer_predictor_failure_mode_total{{mode=\"grpc_error\"}} {m_grpc}\n\
+         customer_predictor_failure_mode_total{{mode=\"invalid_zero_or_negative\"}} {m_zero}\n\
+         customer_predictor_failure_mode_total{{mode=\"invalid_overflow\"}} {m_overflow}\n\
+         customer_predictor_failure_mode_total{{mode=\"invalid_confidence\"}} {m_conf}\n\
+         customer_predictor_failure_mode_total{{mode=\"deserialization_error\"}} {m_deser}\n\
+         customer_predictor_failure_mode_total{{mode=\"tls_error\"}} {m_tls}\n\
+         customer_predictor_failure_mode_total{{mode=\"not_serving\"}} {m_ns}\n\
+         customer_predictor_failure_mode_total{{mode=\"not_configured\"}} {m_nc}\n\
+         customer_predictor_failure_mode_total{{mode=\"breaker_open\"}} {m_brk}\n",
+        unknown = UNKNOWN_CONTEXT_WINDOW_TOTAL.load(Ordering::Relaxed),
+        success = CUSTOMER_PREDICTOR_CALL_SUCCESS_TOTAL.load(Ordering::Relaxed),
+        fall_to_b = CUSTOMER_PREDICTOR_CALL_FALL_TO_B_TOTAL.load(Ordering::Relaxed),
+        violation = CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL.load(Ordering::Relaxed),
+        m_timeout = FAILURE_BY_MODE_TIMEOUT.load(Ordering::Relaxed),
+        m_grpc = FAILURE_BY_MODE_GRPC_ERROR.load(Ordering::Relaxed),
+        m_zero = FAILURE_BY_MODE_INVALID_ZERO_OR_NEGATIVE.load(Ordering::Relaxed),
+        m_overflow = FAILURE_BY_MODE_INVALID_OVERFLOW.load(Ordering::Relaxed),
+        m_conf = FAILURE_BY_MODE_INVALID_CONFIDENCE.load(Ordering::Relaxed),
+        m_deser = FAILURE_BY_MODE_DESERIALIZATION_ERROR.load(Ordering::Relaxed),
+        m_tls = FAILURE_BY_MODE_TLS_ERROR.load(Ordering::Relaxed),
+        m_ns = FAILURE_BY_MODE_NOT_SERVING.load(Ordering::Relaxed),
+        m_nc = FAILURE_BY_MODE_NOT_CONFIGURED.load(Ordering::Relaxed),
+        m_brk = FAILURE_BY_MODE_BREAKER_OPEN.load(Ordering::Relaxed),
+    );
+    body
 }
 
 /// Minimal /metrics + /livez + /healthz + /readyz hyper server.
@@ -645,5 +691,20 @@ mod tests {
         let body = render_metrics();
         assert!(body.contains("spendguard_output_predictor_predict_total"));
         assert!(body.contains("spendguard_output_predictor_cache_hit_rate"));
+        // SLICE_07 Phase E: customer_predictor_* metric surface per spec §9.1.
+        assert!(body.contains("customer_predictor_call_total"));
+        assert!(body.contains("customer_predictor_tenant_isolation_violation_total"));
+        assert!(body.contains("customer_predictor_failure_mode_total"));
+        // Each of the 10 failure modes is represented.
+        assert!(body.contains("mode=\"timeout\""));
+        assert!(body.contains("mode=\"grpc_error\""));
+        assert!(body.contains("mode=\"invalid_zero_or_negative\""));
+        assert!(body.contains("mode=\"invalid_overflow\""));
+        assert!(body.contains("mode=\"invalid_confidence\""));
+        assert!(body.contains("mode=\"deserialization_error\""));
+        assert!(body.contains("mode=\"tls_error\""));
+        assert!(body.contains("mode=\"not_serving\""));
+        assert!(body.contains("mode=\"not_configured\""));
+        assert!(body.contains("mode=\"breaker_open\""));
     }
 }
