@@ -1,0 +1,139 @@
+{{- if .Values.outputPredictor.enabled }}
+{{- $component := "output-predictor" }}
+{{- /* SLICE_06 — output_predictor Deployment.
+       Spec: docs/output-predictor-service-spec-v1alpha1.md §2.
+       Pattern mirrors charts/spendguard/templates/tokenizer.yaml SLICE_03 R3 N2:
+         - chart.profile=production: image.tag semver/digest + UDS xor mTLS gate
+         - chart.profile=production: databaseUrl required for L4 cache lookups
+         - container security baseline: USER 65532 + readOnlyRootFilesystem
+           + cap_drop ALL (SLICE_03 R2 M7)
+    */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- if eq .Values.outputPredictor.image.tag "" -}}
+{{- fail "outputPredictor.image.tag is required under chart.profile=production" -}}
+{{- end -}}
+{{- if not (or (regexMatch "@sha256:[0-9a-f]{64}$" (toString .Values.outputPredictor.image.tag)) (regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[a-z0-9.]+)?$" (toString .Values.outputPredictor.image.tag))) -}}
+{{- fail (printf "outputPredictor.image.tag=%q must be a semver tag (vN.N.N) or digest-pinned (@sha256:HEX) under chart.profile=production" (toString .Values.outputPredictor.image.tag)) -}}
+{{- end -}}
+{{- if and (not .Values.outputPredictor.udsHostPath) (not .Values.outputPredictor.mtlsSecretName) -}}
+{{- fail "outputPredictor must configure either udsHostPath (for in-cluster on-node sidecar callers) or mtlsSecretName (for cross-node mTLS) under chart.profile=production (plaintext TCP forbidden per spec §2.2 + sidecar §5)" -}}
+{{- end -}}
+{{- if not .Values.outputPredictor.databaseUrl -}}
+{{- fail "outputPredictor.databaseUrl is required under chart.profile=production (output_distribution_cache lookup per spec §4.2 — empty databaseUrl forces every Predict to L1 cold-start which defeats SLICE_06's purpose)" -}}
+{{- end -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-output-predictor
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.outputPredictor.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      # Container security baseline per SLICE_03 R2 M7.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: output-predictor
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.outputPredictor.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: grpc,    containerPort: 50054 }
+            - { name: metrics, containerPort: 9100  }
+          env:
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_LISTEN_ADDR,                value: "0.0.0.0:50054" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_METRICS_ADDR,               value: "0.0.0.0:9100"  }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_REGION,                     value: {{ .Values.global.region | quote }} }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PROFILE,                    value: {{ .Values.chart.profile | quote }} }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_CACHE_TTL_SECONDS,          value: {{ .Values.outputPredictor.cacheTtlSeconds | quote }} }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_UNKNOWN_MODEL_CONTEXT_WINDOW, value: {{ .Values.outputPredictor.unknownModelContextWindow | quote }} }
+            {{- if .Values.outputPredictor.databaseUrl }}
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_DATABASE_URL,               value: {{ .Values.outputPredictor.databaseUrl | quote }} }
+            {{- end }}
+            {{- if .Values.outputPredictor.udsHostPath }}
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_UDS_PATH,                   value: "/var/run/spendguard/output-predictor.sock" }
+            {{- end }}
+            {{- if .Values.outputPredictor.mtlsSecretName }}
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_TLS_CERT_PEM,               value: "/etc/spendguard/tls/tls.crt" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_TLS_KEY_PEM,                value: "/etc/spendguard/tls/tls.key" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_TLS_CA_PEM,                 value: "/etc/spendguard/tls/ca.crt"  }
+            {{- end }}
+          volumeMounts:
+            # read-only rootfs requires /tmp writable
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.outputPredictor.udsHostPath }}
+            - name: uds
+              mountPath: /var/run/spendguard
+            {{- end }}
+            {{- if .Values.outputPredictor.mtlsSecretName }}
+            - name: tls
+              mountPath: /etc/spendguard/tls
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.outputPredictor.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.outputPredictor.udsHostPath }}
+        - name: uds
+          hostPath:
+            path: {{ .Values.outputPredictor.udsHostPath | quote }}
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if .Values.outputPredictor.mtlsSecretName }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.outputPredictor.mtlsSecretName | quote }}
+        {{- end }}
+{{- /* Service gating mirrors tokenizer SLICE_03 R3 N2 — UDS-only mode
+       does NOT render a Service (main.rs binds UDS xor TCP). */ -}}
+{{- if not .Values.outputPredictor.udsHostPath }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spendguard.fullname" . }}-output-predictor
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc,    port: 50054, targetPort: grpc    }
+    - { name: metrics, port: 9100,  targetPort: metrics }
+  selector:
+    {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+{{- end }}
+{{- end }}

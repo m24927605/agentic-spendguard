@@ -1,0 +1,93 @@
+[package]
+name = "spendguard-stats-aggregator"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard stats_aggregator service: hourly SQL aggregation of canonical_events into output_distribution_cache + run_length_distribution_cache per stats-aggregator-spec-v1alpha1.md. Pure SQL — no GPU, no model registry, no A/B framework. Postgres advisory lock enforces singleton. SLICE_06 ships the daemon, aggregation cycle, drift detection (2σ + min_samples 100), and signed CloudEvent emission to canonical_ingest."
+
+[[bin]]
+name = "spendguard-stats-aggregator"
+path = "src/main.rs"
+
+[lib]
+name = "spendguard_stats_aggregator"
+path = "src/lib.rs"
+
+[dependencies]
+# Direct rustls dep for aws_lc_rs provider install (mirrors sidecar / ledger).
+rustls = "0.23"
+
+# gRPC client only — talks to canonical_ingest's AppendEvents RPC for
+# signed CloudEvent drift_alert emission per spec §7.2.
+tonic = { version = "0.12", features = ["tls", "transport", "gzip"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+
+# HTTP / Prometheus metrics endpoint (raw hyper, matching the convention).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# Errors / logging
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config (env-driven for POC, mirrors sidecar / ledger / tokenizer)
+envy = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# UUIDs — tenant_id parse to uuid::Uuid at gRPC/SQL boundary per
+# SLICE_05 R2 B5 convention.
+uuid = { version = "1", features = ["v7", "v4", "serde"] }
+
+# SQL — read canonical_events + write {output,run_length}_distribution_cache.
+# Matches tokenizer SLICE_05 SQL persister shape.
+sqlx = { version = "0.8", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls",
+    "uuid",
+    "chrono",
+] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Signed CloudEvent emission for prediction_drift_alert. Reuses canonical
+# Signer trait + LocalEd25519Signer + DisabledSigner triad from sidecar /
+# canonical_ingest / ttl_sweeper / tokenizer SLICE_05.
+spendguard-signing = { path = "../signing" }
+
+# parking_lot for RecordingSink in unit tests + future shared state across
+# scheduler tasks (matches tokenizer SLICE_05 convention — faster than
+# std for read-mostly + poison-free guards).
+parking_lot = "0.12"
+
+# CloudEvent envelope + canonical_ingest client share the tokenizer
+# crate's proto codegen so we don't duplicate codegen logic across services.
+# SLICE_06 generates both common.proto + canonical_ingest.proto in this
+# build.rs (see services/stats_aggregator/build.rs).
+async-trait = "0.1"
+bytes = "1"
+
+# R2 B5: hex decoding for schema_bundle_hash_hex env input (mirror of
+# outbox_forwarder convention; same parser shape used by canonical_ingest
+# producers).
+hex = "0.4"
+
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+
+[features]
+default = []

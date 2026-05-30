@@ -1,0 +1,155 @@
+// SpendGuard Output Predictor service.
+//
+// Spec references:
+//   - output-predictor-service-spec-v1alpha1.md §2.1 (proto)
+//   - output-predictor-service-spec-v1alpha1.md §3 (Strategy A)
+//   - output-predictor-service-spec-v1alpha1.md §4 (Strategy B)
+//   - output-predictor-service-spec-v1alpha1.md §5 (Strategy C — SLICE_07)
+//   - output-predictor-service-spec-v1alpha1.md §6 (selector)
+//   - output-predictor-service-spec-v1alpha1.md §7 (cold-start chain)
+//   - audit-chain-prediction-extension-v1alpha1.md §2.1 (audit columns)
+//
+// Transport: gRPC over mTLS (sidecar §5 internal transport) or UDS for
+// on-node colocated callers. SLICE_06 ships server side; SLICE_10 wires
+// sidecar/egress_proxy as clients.
+//
+// SLICE_06 scope:
+//   - Predict RPC: Strategy A + Strategy B + selector
+//   - Strategy C field declared (optional int64) but server always returns
+//     unset; SLICE_07 wires plugin path.
+//   - Cold-start L1 + L4 supported; L2 returns unset until SLICE_08;
+//     L3 not implemented per spec §7.
+//
+// Field-number convention mirrors common.proto:
+//   - 1..15  : latency-hot fields (single-byte varint tag)
+//   - 16..   : additive / cold fields
+
+syntax = "proto3";
+
+package spendguard.output_predictor.v1;
+
+service OutputPredictor {
+  // Hot-path: compute A/B/C predictions + select strategy. Per spec
+  // §11.1 p99 budget: A only ≤ 1ms; A+B ≤ 5ms; A+B+C ≤ 15ms.
+  //
+  // SLICE_06: returns A always; B when cache hit + sample_size_30d >= 30;
+  // C never (predicted_c_tokens always unset). SLICE_07 wires C.
+  rpc Predict(PredictRequest) returns (PredictResponse);
+}
+
+message PredictRequest {
+  // Required. Tenant identifier (UUIDv7 string form). Parsed to
+  // uuid::Uuid at the gRPC boundary per SLICE_05 R2 B5 convention.
+  string tenant_id = 1;
+
+  // Required. Model string (e.g. "gpt-4o", "claude-3-5-sonnet-20240620").
+  string model = 2;
+
+  // Required. Agent identifier (customer-defined). Bucket key per spec §3.2.
+  string agent_id = 3;
+
+  // Required. Server-classified prompt class label. The sidecar runs the
+  // classifier per spec §8.3 and passes the result here; the predictor
+  // does NOT re-run the classifier (avoid duplicate work on the hot path).
+  // One of: chat_short | chat_long | code_gen | summarization | rag |
+  // tool_calling | vision (per spec §8.1 + cold-start-baseline §3.1).
+  string prompt_class = 4;
+
+  // Required. Input token count from tokenizer service (SLICE_03+).
+  int64 input_tokens = 5;
+
+  // Optional. Caller-requested max_tokens (request.max_tokens). 0 means
+  // unset (proto3 default; caller did not specify a cap). Per spec §3.1
+  // unset → INFINITY in Strategy A formula.
+  int64 max_tokens_requested = 6;
+
+  // Required. Model context window (e.g. 128000 for gpt-4o). The caller
+  // (sidecar) is expected to pass this in; the predictor's own
+  // model_context_window.toml is a fallback when the caller doesn't know.
+  // 0 means "predictor should look it up itself" (defaults to 8000 per
+  // spec §3.3 if not in TOML).
+  int64 model_context_window = 7;
+
+  // Required. Active prediction policy from contract evaluation per
+  // contract-dsl-spec-v1alpha2 §4. One of: STRICT_CEILING |
+  // EMPIRICAL_RUN_CEILING | ADAPTIVE_CEILING | SHADOW_ONLY.
+  string prediction_policy = 8;
+
+  // Optional plugin context features (Strategy C — SLICE_07).
+  PluginContextFeatures plugin_features = 9;
+
+  // Optional. Caller's decision_id for tracing/audit correlation.
+  string decision_id = 10;
+
+  // Optional. Caller's run_id for run-scoped projection (consumed by
+  // run_cost_projector in SLICE_09).
+  string run_id = 11;
+
+  // Optional. Caller-computed prompt_class_fingerprint per spec §8.2.
+  // When empty, the predictor computes its own. Surfaced as a separate
+  // field so the audit chain can record both the caller's view + the
+  // predictor's view of the bucket identity.
+  string prompt_class_fingerprint = 12;
+}
+
+message PluginContextFeatures {
+  int32 conversation_depth = 1;
+  bool has_tool_calls = 2;
+  bool has_system_message = 3;
+  int32 num_tool_definitions = 4;
+  string user_role_hint = 5;
+}
+
+message PredictResponse {
+  // Strategy A — always computed; never unset (per spec §3.4 invariant).
+  // A = min(max_tokens_requested if > 0 else INFINITY,
+  //         model_context_window - input_tokens).
+  int64 predicted_a_tokens = 1;
+
+  // Strategy B — unset when cache miss + cold-start chain falls to L1.
+  // proto3 optional preserves the null distinction so the audit chain
+  // can record `predicted_b_tokens = NULL` faithfully.
+  optional int64 predicted_b_tokens = 2;
+
+  // Strategy C — SLICE_06 always returns unset; SLICE_07 populates this
+  // when the plugin path is configured + healthy.
+  optional int64 predicted_c_tokens = 3;
+
+  // Selector decision per spec §6. The two-field design (reserved vs
+  // prediction_used) lets calibration-report backtest "what if customer
+  // switched policy" without losing the actual reservation choice.
+  // Both fields one of: A | B | C.
+  string reserved_strategy = 4;
+  string prediction_strategy_used = 5;
+
+  // Confidence + sample size from the chosen B/C row. Unset when
+  // strategy_used = A.
+  optional float confidence = 6;
+  optional int32 sample_size = 7;
+
+  // Cold-start chain output. NULL/empty when L4 (cache hit). Values:
+  // L1 (hard fallback) | L2 (TOML — SLICE_08+) | L3 (federated — deferred)
+  // | L4 (cache hit). Per spec §7.1 mapping.
+  optional string cold_start_layer_used = 8;
+
+  // Per-strategy latency for SLO tracking (spec §11.1 budget breakdown
+  // + spec §2.1 layout). Tags 10-13 per spec §2.1 — R2 M3 restores
+  // these from R1's incorrect 13-16 layout (which clobbered audit row
+  // semantics). Nanoseconds wall-clock; not on audit chain.
+  int64 a_latency_ns = 10;
+  int64 b_latency_ns = 11;
+  int64 c_latency_ns = 12;
+  int64 total_latency_ns = 13;
+
+  // Classifier + fingerprint version stamps written into the response so
+  // the audit chain captures classifier-version-at-decision for
+  // future-proofed analytics. Per spec §8.4 classifier upgrade path.
+  // Tags 14-15 — additive; outside the spec §2.1 hot-path tag range
+  // because they're cold metadata (not used by selector or sidecar).
+  string classifier_version = 14;
+  string fingerprint_version = 15;
+
+  // Echoed fingerprint per spec §8.2 — the predictor's view of the
+  // bucket identity. Audit row records this; verify-chain validates.
+  string prompt_class_fingerprint_used = 16;
+}

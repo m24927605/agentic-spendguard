@@ -1,0 +1,189 @@
+//! Env-driven configuration for the output_predictor gRPC service.
+//!
+//! Mirrors the convention used by services/tokenizer/src/config.rs and
+//! services/sidecar/src/config.rs — `envy` deserializes from
+//! `SPENDGUARD_OUTPUT_PREDICTOR_*` env vars.
+//!
+//! ## Secrets policy
+//!
+//! No vendor API keys in this service (Strategy C plugin endpoint is per
+//! spec §5 a customer-side service the predictor *calls*, not an internal
+//! service that consumes vendor keys). The custom Debug impl is kept to
+//! mirror the tokenizer's R2 M13 pattern — sink_tls paths and database URL
+//! are inputs that we deliberately do NOT exclude from Debug because the
+//! values themselves are non-secret (paths + DSN without password); only
+//! the URL inside DATABASE_URL would carry a secret, and we mask it via
+//! a `_present: bool` projection to avoid accidental log spill.
+
+use serde::Deserialize;
+
+/// Configuration loaded from env at boot.
+#[derive(Clone, Deserialize)]
+pub struct Config {
+    /// gRPC listen socket; `127.0.0.1:50054` (compose / dev) or
+    /// `0.0.0.0:50054` (Helm chart in-cluster). The Helm chart also
+    /// mounts a UDS at `uds_path` when set.
+    pub listen_addr: String,
+
+    /// Optional UDS path. When set, the server binds the UDS instead of
+    /// TCP per the tokenizer SLICE_03 R3 N1+N2 pattern. UDS uses
+    /// kernel-enforced trust; TCP requires mTLS (production profile).
+    #[serde(default)]
+    pub uds_path: Option<String>,
+
+    // -- mTLS server bootstrap (mirrors services/tokenizer/src/config.rs
+    //    SLICE_03 R3 + services/ledger/src/config.rs §12.1) --
+    /// Path to the predictor's workload TLS cert PEM. When set together
+    /// with `tls_key_pem` and `tls_ca_pem`, the gRPC server starts in
+    /// mTLS mode and rejects clients whose cert chain doesn't validate.
+    #[serde(default)]
+    pub tls_cert_pem: Option<String>,
+    #[serde(default)]
+    pub tls_key_pem: Option<String>,
+    #[serde(default)]
+    pub tls_ca_pem: Option<String>,
+
+    /// Prometheus /metrics + /healthz + /readyz listen socket. Empty
+    /// string = disable metrics endpoint.
+    #[serde(default = "default_metrics_addr")]
+    pub metrics_addr: String,
+
+    /// Multi-tenant region label (echoed into telemetry; no tenant-bound
+    /// state per stats-aggregator-spec §9 isolation invariant).
+    #[serde(default)]
+    pub region: String,
+
+    /// Deploy profile (demo|production). Used by Helm chart for
+    /// production-fail-fast gates. Mirrors tokenizer convention.
+    #[serde(default)]
+    pub profile: String,
+
+    /// Postgres URL for the read-only output_distribution_cache lookup
+    /// (spec §4.2). Empty = run in skeleton mode (Strategy B always falls
+    /// back to L1; demo-only — production Helm profile requires this set).
+    #[serde(default)]
+    pub database_url: String,
+
+    /// In-memory cache TTL in seconds (spec §4.3 default 5 minutes = 300s).
+    /// Lower = more SQL load + fresher data; higher = less SQL + more stale.
+    #[serde(default = "default_cache_ttl_seconds")]
+    pub cache_ttl_seconds: u64,
+
+    /// Default model context window for unknown models (spec §3.3).
+    /// 8000 tokens per OpenAI's old gpt-3 standard.
+    #[serde(default = "default_unknown_model_context_window")]
+    pub unknown_model_context_window: i64,
+
+    /// Path to the model_context_window.toml file. Defaults to the
+    /// crate-relative `data/model_context_window.toml` packed with the
+    /// binary. Production deployments may override to point at a Helm-
+    /// mounted ConfigMap for out-of-band refresh.
+    #[serde(default = "default_context_window_toml_path")]
+    pub context_window_toml_path: String,
+}
+
+impl std::fmt::Debug for Config {
+    /// Mirrors tokenizer R2 M13 pattern. database_url is masked via a
+    /// `_present: bool` projection to avoid leaking embedded credentials
+    /// into structured logs / panic backtraces.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("listen_addr", &self.listen_addr)
+            .field("uds_path", &self.uds_path)
+            .field("tls_cert_pem", &self.tls_cert_pem)
+            .field("tls_key_pem", &self.tls_key_pem)
+            .field("tls_ca_pem", &self.tls_ca_pem)
+            .field("metrics_addr", &self.metrics_addr)
+            .field("region", &self.region)
+            .field("profile", &self.profile)
+            .field("database_url_present", &!self.database_url.is_empty())
+            .field("cache_ttl_seconds", &self.cache_ttl_seconds)
+            .field("unknown_model_context_window", &self.unknown_model_context_window)
+            .field("context_window_toml_path", &self.context_window_toml_path)
+            .finish()
+    }
+}
+
+fn default_metrics_addr() -> String {
+    // Port 9100 — output_predictor in the demo compose port table:
+    //   ledger=9092, canonical-ingest=9091, sidecar=9093,
+    //   control-plane=9094, dashboard=9095, outbox=9096,
+    //   ttl-sweeper=9097, webhook-receiver=9098, tokenizer=9099,
+    //   output-predictor=9100, stats-aggregator=9101.
+    "0.0.0.0:9100".to_string()
+}
+
+fn default_cache_ttl_seconds() -> u64 {
+    // Spec §4.3 — 5 minutes.
+    300
+}
+
+fn default_unknown_model_context_window() -> i64 {
+    // Spec §3.3 — conservative 8000 tokens for unknown models.
+    8000
+}
+
+fn default_context_window_toml_path() -> String {
+    // Relative to the binary's working directory in compose; Helm chart
+    // mounts a ConfigMap at /etc/spendguard/output_predictor/
+    // model_context_window.toml when override.
+    "data/model_context_window.toml".to_string()
+}
+
+impl Config {
+    /// Load from `SPENDGUARD_OUTPUT_PREDICTOR_*` env vars.
+    pub fn from_env() -> Result<Self, envy::Error> {
+        envy::prefixed("SPENDGUARD_OUTPUT_PREDICTOR_").from_env()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn defaults_load_with_minimum_env() {
+        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![(
+            "TEST_CFG_LISTEN_ADDR".to_string(),
+            "127.0.0.1:50054".to_string(),
+        )])
+        .expect("config loads");
+        assert_eq!(cfg.listen_addr, "127.0.0.1:50054");
+        assert!(cfg.uds_path.is_none());
+        assert_eq!(cfg.metrics_addr, "0.0.0.0:9100");
+        assert_eq!(cfg.cache_ttl_seconds, 300);
+        assert_eq!(cfg.unknown_model_context_window, 8000);
+    }
+
+    #[test]
+    fn debug_format_masks_database_url() {
+        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![
+            (
+                "TEST_CFG_LISTEN_ADDR".to_string(),
+                "127.0.0.1:50054".to_string(),
+            ),
+            (
+                "TEST_CFG_DATABASE_URL".to_string(),
+                "postgres://user:secret-pass-DO-NOT-LEAK@host/db".to_string(),
+            ),
+        ])
+        .expect("config loads");
+        let dbg = format!("{cfg:?}");
+        assert!(
+            !dbg.contains("secret-pass-DO-NOT-LEAK"),
+            "database_url password leaked into Debug: {dbg}"
+        );
+        assert!(dbg.contains("database_url_present: true"));
+    }
+
+    #[test]
+    fn debug_format_reports_missing_database_url() {
+        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![(
+            "TEST_CFG_LISTEN_ADDR".to_string(),
+            "127.0.0.1:50054".to_string(),
+        )])
+        .expect("config loads");
+        let dbg = format!("{cfg:?}");
+        assert!(dbg.contains("database_url_present: false"));
+    }
+}

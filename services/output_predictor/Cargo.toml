@@ -1,0 +1,97 @@
+[package]
+name = "spendguard-output-predictor"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard output predictor service: hot-path gRPC Predict per output-predictor-service-spec-v1alpha1.md §2. SLICE_06 ships Strategy A (always) + Strategy B (cache lookup w/ cold-start L1/L4) + 7-class classifier + fingerprint. Strategy C deferred to SLICE_07; L2 TOML deferred to SLICE_08."
+
+[[bin]]
+name = "spendguard-output-predictor"
+path = "src/main.rs"
+
+[lib]
+name = "spendguard_output_predictor"
+path = "src/lib.rs"
+
+[dependencies]
+# Direct rustls dep so main() can install the aws_lc_rs default provider
+# (mirrors sidecar / ledger / tokenizer).
+rustls = "0.23"
+
+# gRPC + protobuf (server + client; client is for future SLICE_10 dispatch
+# from sidecar/egress_proxy).
+tonic = { version = "0.12", features = ["tls", "transport", "gzip"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+
+# HTTP / Prometheus metrics endpoint (raw hyper, matching the convention
+# used by services/canonical_ingest + services/ledger + services/tokenizer
+# so there's no `prometheus` crate dependency to track).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# Errors / logging
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config (env-driven for POC, mirrors sidecar / ledger / tokenizer)
+envy = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+# UUIDs — tenant_id parse to uuid::Uuid at gRPC boundary per
+# SLICE_05 R2 B5 convention. v4 enabled for test fixtures.
+uuid = { version = "1", features = ["v7", "v4", "serde"] }
+
+# SHA-256 for prompt_class_fingerprint (spec §8.2).
+sha2 = "0.10"
+hex = "0.4"
+
+# Regex for classifier rule patterns (spec §8.1 code_gen + rag markers).
+# once_cell so the compiled regex is shared across hot-path calls.
+regex = "1"
+once_cell = "1"
+
+# parking_lot for the in-memory cache RwLock (matches tokenizer's
+# SLICE_05 convention — faster than std for read-mostly + poison-free).
+parking_lot = "0.12"
+
+# R2 M5: bounded LRU cache. Without it, the in-memory entry map grew
+# unbounded — every (tenant × model × agent × class) bucket allocated
+# a permanent slot under high cardinality. Capped at 100K entries.
+lru = "0.12"
+
+# TOML loader for data/model_context_window.toml.
+toml = "0.8"
+
+# SQL — read-only pool to canonical_ingest DB for output_distribution_cache
+# lookup (spec §4.2). Same shape as tokenizer's SLICE_05 SQL persister
+# (postgres + runtime-tokio + tls-rustls + uuid + chrono; no macros).
+sqlx = { version = "0.8", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls",
+    "uuid",
+    "chrono",
+] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+
+[features]
+default = []

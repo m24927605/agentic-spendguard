@@ -1,0 +1,175 @@
+{{- if .Values.statsAggregator.enabled }}
+{{- $component := "stats-aggregator" }}
+{{- /* SLICE_06 — stats_aggregator Deployment (singleton daemon).
+       Spec: docs/stats-aggregator-spec-v1alpha1.md.
+       Pattern:
+         - chart.profile=production: image.tag semver/digest + databaseUrl +
+           canonicalIngestUrl + sinkMtlsSecretName + signingKey gates
+         - replicas: 1 (singleton; advisory lock allows overlapping pods
+           but only one runs)
+         - strategy: Recreate (no rolling update — lock-clean handoff)
+         - container security baseline: USER 65532 + readOnlyRootFilesystem
+           + cap_drop ALL (SLICE_03 R2 M7)
+    */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- if eq .Values.statsAggregator.image.tag "" -}}
+{{- fail "statsAggregator.image.tag is required under chart.profile=production" -}}
+{{- end -}}
+{{- if not (or (regexMatch "@sha256:[0-9a-f]{64}$" (toString .Values.statsAggregator.image.tag)) (regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[a-z0-9.]+)?$" (toString .Values.statsAggregator.image.tag))) -}}
+{{- fail (printf "statsAggregator.image.tag=%q must be a semver tag (vN.N.N) or digest-pinned (@sha256:HEX) under chart.profile=production" (toString .Values.statsAggregator.image.tag)) -}}
+{{- end -}}
+{{- if not .Values.statsAggregator.databaseUrl -}}
+{{- fail "statsAggregator.databaseUrl is required under chart.profile=production (canonical_ingest DB read+write source per spec §2.1)" -}}
+{{- end -}}
+{{- if not .Values.statsAggregator.canonicalIngestUrl -}}
+{{- fail "statsAggregator.canonicalIngestUrl is required under chart.profile=production (signed prediction_drift_alert CloudEvent emission per spec §7.2; demo-only LoggingDriftAlertSink fallback rejected)" -}}
+{{- end -}}
+{{- if not .Values.statsAggregator.sinkMtlsSecretName -}}
+{{- fail "statsAggregator.sinkMtlsSecretName is required under chart.profile=production (mTLS to canonical_ingest required for audit-routed signed CloudEvents per SLICE_05 R2 B4 + tokenizer convention)" -}}
+{{- end -}}
+{{- if not .Values.statsAggregator.signingKeySecretName -}}
+{{- fail "statsAggregator.signingKeySecretName is required under chart.profile=production (Ed25519 signing key for prediction_drift_alert CloudEvents — DisabledSigner is demo-profile only per spendguard-signing crate)" -}}
+{{- end -}}
+{{- /* R2 M9 (Security F2): signingKeySecretName WITHOUT signingKeyPath is
+       a half-configured signer — the secret is mounted but the binary
+       has no path to look up. The signer_from_env contract requires
+       _SIGNING_KEY_PATH when _SIGNING_MODE=local. Reject early so the
+       operator fixes the config instead of debugging a CrashLoopBackOff. */ -}}
+{{- if not .Values.statsAggregator.signingKeyPath -}}
+{{- fail "statsAggregator.signingKeyPath is required under chart.profile=production when signingKeySecretName is set (Ed25519 PKCS8 PEM path within the mounted signing-key volume — typically /etc/spendguard/signing/signing-key.pem)" -}}
+{{- end -}}
+{{- /* R2 B5: schema_bundle_id + schema_bundle_hash_hex required when
+       canonical_ingest sink is used (handler rejects missing
+       schema_bundle). Both are wired below via env. */ -}}
+{{- if not .Values.statsAggregator.schemaBundleId -}}
+{{- fail "statsAggregator.schemaBundleId is required under chart.profile=production (UUID of the schema bundle the canonical_ingest service has registered; mismatch → SchemaBundleUnknown on every drift alert)" -}}
+{{- end -}}
+{{- if not .Values.statsAggregator.schemaBundleHashHex -}}
+{{- fail "statsAggregator.schemaBundleHashHex is required under chart.profile=production (byte-exact hex SHA-256 of the schema bundle .tgz; outbox_forwarder uses the same envelope)" -}}
+{{- end -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-stats-aggregator
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  # Spec §2.2: singleton. Advisory lock prevents data corruption when
+  # two pods overlap (e.g. rolling update). Recreate strategy gives a
+  # clean handoff — no rolling update = no overlap with the advisory
+  # lock guard.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: stats-aggregator
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.statsAggregator.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: metrics, containerPort: 9101 }
+          env:
+            - { name: SPENDGUARD_STATS_AGGREGATOR_METRICS_ADDR,           value: "0.0.0.0:9101" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_REGION,                 value: {{ .Values.global.region | quote }} }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_PROFILE,                value: {{ .Values.chart.profile | quote }} }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_CYCLE_SECONDS,          value: {{ .Values.statsAggregator.cycleSeconds | quote }} }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_MIN_SAMPLES_FOR_ALERT,  value: {{ .Values.statsAggregator.minSamplesForAlert | quote }} }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_DRIFT_Z_THRESHOLD,      value: {{ .Values.statsAggregator.driftZThreshold | quote }} }
+            {{- if .Values.statsAggregator.databaseUrl }}
+            - { name: SPENDGUARD_STATS_AGGREGATOR_DATABASE_URL,           value: {{ .Values.statsAggregator.databaseUrl | quote }} }
+            {{- end }}
+            {{- if .Values.statsAggregator.canonicalIngestUrl }}
+            - { name: SPENDGUARD_STATS_AGGREGATOR_CANONICAL_INGEST_URL,   value: {{ .Values.statsAggregator.canonicalIngestUrl | quote }} }
+            {{- end }}
+            {{- if .Values.statsAggregator.sinkMtlsSecretName }}
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SINK_TLS_CERT_PEM,      value: "/etc/spendguard/sink-tls/tls.crt" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SINK_TLS_KEY_PEM,       value: "/etc/spendguard/sink-tls/tls.key" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SINK_TLS_CA_PEM,        value: "/etc/spendguard/sink-tls/ca.crt"  }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SINK_TLS_SNI,           value: {{ .Values.statsAggregator.sinkMtlsSni | quote }} }
+            {{- end }}
+            # SLICE_06: producer identity + signing mode for the audit-routed
+            # prediction_drift_alert CloudEvent. Mirrors tokenizer SLICE_05
+            # R2 B1 env contract for signer_from_env.
+            - { name: SPENDGUARD_PROFILE,                                 value: {{ .Values.chart.profile | quote }} }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SIGNING_PRODUCER_IDENTITY, value: {{ printf "stats-aggregator:%s" .Values.global.region | quote }} }
+            {{- if .Values.statsAggregator.signingKeyPath }}
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SIGNING_MODE,           value: "local" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SIGNING_KEY_PATH,       value: {{ .Values.statsAggregator.signingKeyPath | quote }} }
+            {{- else if eq .Values.chart.profile "demo" }}
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SIGNING_MODE,           value: "disabled" }
+            {{- end }}
+            {{- /* R2 B5 wiring — AppendEventsRequest envelope fields. Production
+                  profile gates these above; demo profile may leave them empty
+                  (LoggingDriftAlertSink path skips the envelope). */}}
+            {{- if .Values.statsAggregator.schemaBundleId }}
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_ID,       value: {{ .Values.statsAggregator.schemaBundleId | quote }} }
+            {{- end }}
+            {{- if .Values.statsAggregator.schemaBundleHashHex }}
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_HASH_HEX, value: {{ .Values.statsAggregator.schemaBundleHashHex | quote }} }
+            {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.statsAggregator.sinkMtlsSecretName }}
+            - name: sink-tls
+              mountPath: /etc/spendguard/sink-tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.statsAggregator.signingKeyPath }}
+            - name: signing-key
+              mountPath: /etc/spendguard/signing
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              # R2 M8: /livez is pure process liveness — won't restart
+              # the pod just because DB connectivity is flaky (that's
+              # readiness's job, which only marks the pod as not-serving).
+              path: /livez
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              # R2 M8: /readyz probes the DB pool + cycle freshness.
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.statsAggregator.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.statsAggregator.sinkMtlsSecretName }}
+        - name: sink-tls
+          secret:
+            secretName: {{ .Values.statsAggregator.sinkMtlsSecretName | quote }}
+        {{- end }}
+        {{- if .Values.statsAggregator.signingKeySecretName }}
+        - name: signing-key
+          secret:
+            secretName: {{ .Values.statsAggregator.signingKeySecretName | quote }}
+        {{- end }}
+{{- end }}
