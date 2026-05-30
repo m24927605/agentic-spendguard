@@ -36,6 +36,8 @@ async-stream = "0.3"
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+# Uri parse for SNI extraction in plugin_client.rs (SLICE_07).
+http = "1"
 
 # Errors / logging
 thiserror = "1"
