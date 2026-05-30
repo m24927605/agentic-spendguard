@@ -48,8 +48,8 @@ envy = "0.4"
 serde = { version = "1", features = ["derive"] }
 
 # UUIDs — tenant_id parse to uuid::Uuid at gRPC boundary per
-# SLICE_05 R2 B5 convention.
-uuid = { version = "1", features = ["v7", "serde"] }
+# SLICE_05 R2 B5 convention. v4 enabled for test fixtures.
+uuid = { version = "1", features = ["v7", "v4", "serde"] }
 
 # SHA-256 for prompt_class_fingerprint (spec §8.2).
 sha2 = "0.10"
