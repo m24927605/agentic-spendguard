@@ -293,12 +293,13 @@ pub struct DecisionOutput {
 ///     across all projected_claims (parsed to i64; clamps on overflow).
 ///     This is what the per-call reservation would be if we accepted
 ///     unchanged; projector uses it as Signal 2's baseline.
-///   * `budget_remaining_atomic` uses the unknown-budget sentinel because
-///     DecisionRequest does not currently carry an authoritative budget
-///     snapshot. `inputs.projected_p90_atomic` is a risk-band hint, not
-///     available budget. The projector still records trajectory but cannot
-///     emit a false RUN_BUDGET_PROJECTION_EXCEEDED on an unknown budget.
-///     The ledger reserve path remains the hard budget oracle.
+///   * `budget_remaining_atomic` is read only from explicit runtime metadata
+///     keys (`budget_remaining_atomic` / `run_budget_remaining_atomic`).
+///     `inputs.projected_p90_atomic` is a risk-band hint, not available
+///     budget. Missing or malformed snapshots fall back to the unknown-budget
+///     sentinel so the projector records trajectory without inventing a false
+///     RUN_BUDGET_PROJECTION_EXCEEDED. The ledger reserve path remains the
+///     hard budget oracle.
 async fn call_projector_safe(
     state: &SidecarState,
     ctx: &DecisionContext,
