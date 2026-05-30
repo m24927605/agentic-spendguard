@@ -273,6 +273,29 @@ message DecisionRequest {
 
   // Idempotency at the trigger level; sidecar may return same decision twice.
   spendguard.common.v1.Idempotency idempotency = 9;
+
+  // === SLICE_09 additive: Signal 3 pass-through ===
+  //
+  // SDK with_run_plan decorator (SLICE_12) writes this into the
+  // request_decision metadata; sidecar passes through to
+  // run_cost_projector.Project per run-cost-projector-spec-v1alpha1.md §5.
+  //
+  // Wire-compat per proto3 additive evolution: v1alpha1 clients send 0
+  // (proto3 default), which the projector treats as "Signal 3 inactive"
+  // per spec §5.2. v1alpha2 clients with the SDK decorator send a
+  // positive integer naming the total planned LLM + tool steps.
+  //
+  // Tag 17 chosen as the next stable tag after the v1alpha2 run_code_
+  // triggered field (tag 16 on DecisionResponse). DecisionRequest tags
+  // 10-15 are reserved for future hot-path fields per
+  // common.proto §field-number convention.
+  //
+  // SLICE_02 stubbed RUN_* code pass-through but did NOT add this field
+  // (no projector to consume it); SLICE_09 lands the field + activates
+  // the projector wire. Field cap 10000 enforced server-side at
+  // run_cost_projector validation (services/run_cost_projector/src/
+  // server.rs MAX_PLANNED_STEPS).
+  int32 planned_steps_hint = 17;
 }
 
 message DecisionResponse {

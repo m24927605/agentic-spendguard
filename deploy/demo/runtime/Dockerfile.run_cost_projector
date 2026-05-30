@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.7
+#
+# Build the SpendGuard run_cost_projector service image.
+#
+# Spec ref `run-cost-projector-spec-v1alpha1.md` §2.
+
+FROM rust:1.91-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY proto ./proto
+RUN ln -sf /usr/include/google ./proto/google
+COPY services/run_cost_projector ./services/run_cost_projector
+WORKDIR /build/services/run_cost_projector
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-run-cost-projector,target=/build/services/run_cost_projector/target,sharing=locked \
+    cargo build --release --bin spendguard-run-cost-projector \
+    && cp target/release/spendguard-run-cost-projector /spendguard-run-cost-projector
+
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /spendguard-run-cost-projector /usr/local/bin/spendguard-run-cost-projector
+
+# Container security baseline per SLICE_03 R2 M7: non-root UID matching
+# the chart's runAsUser.
+USER 65532:65532
+
+ENTRYPOINT ["/usr/local/bin/spendguard-run-cost-projector"]
