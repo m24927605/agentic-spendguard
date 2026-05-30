@@ -1,0 +1,16 @@
+# SpendGuard output predictor plugin template — runtime requirements.
+#
+# Pin these in your fork once you replace the stub model. The version
+# ranges below are aligned with the SpendGuard Python SDK at the time
+# this template was authored.
+grpcio>=1.62,<2
+grpcio-health-checking>=1.62,<2
+# Protobuf runtime must match the gencode emitted by gen_proto.sh.
+# The committed _proto/ stubs were generated with grpcio-tools 1.69
+# (gencode marker "5.29.0") which requires runtime >= 5.29 and is
+# compatible with protobuf 5.x. Customers regenerating with a newer
+# grpcio-tools (>=1.71, gencode 6.x) MUST bump this pin to allow 6.x
+# OR pin grpcio-tools to <1.70 in their dev deps.
+protobuf>=5.29,<6
+numpy>=1.26,<3
+scikit-learn>=1.4,<2
