@@ -77,7 +77,14 @@ secrets:
 postgres:
   ledgerUrl: "postgres://spendguard:CHANGE_ME@postgres:5432/spendguard_ledger"
   canonicalUrl: "postgres://spendguard:CHANGE_ME@postgres:5432/spendguard_canonical"
-  # Apply ledger + canonical SQL migrations on chart install via hook.
+  # R2 M3 (Security F5): control_plane DB now owns the SLICE_07
+  # predictor_plugin_endpoints registry + the control_plane_audit_outbox
+  # table introduced in R2 M1. Co-located on the same Postgres server
+  # as ledger/canonical by default (separate logical DB to keep
+  # schema/RLS surfaces independent); operators can point at a
+  # different host for production isolation.
+  controlPlaneUrl: "postgres://spendguard:CHANGE_ME@postgres:5432/spendguard_control_plane"
+  # Apply ledger + canonical + control_plane SQL migrations on chart install via hook.
   applyMigrationsOnInstall: true
 
 # Per-service overrides
@@ -542,6 +549,13 @@ migrations:
   canonicalImage: postgres:16-alpine
   ledgerConfigMapName: spendguard-migrations-ledger
   canonicalConfigMapName: spendguard-migrations-canonical
+  # R2 M3 (Security F5): control_plane migrations live under
+  # services/control_plane/migrations/. The ConfigMap is OPTIONAL —
+  # if the operator hasn't created it, the migrate Job processes only
+  # the ledger + canonical globs (no-op for control_plane, with a
+  # warn-style [migrate] line). Production helm-validate-kind.sh
+  # regenerates all three ConfigMaps in lockstep.
+  controlPlaneConfigMapName: spendguard-migrations-control-plane
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "256Mi" }

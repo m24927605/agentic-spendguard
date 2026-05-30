@@ -205,8 +205,19 @@ async fn main() -> Result<()> {
             .parse()
             .with_context(|| format!("invalid metrics_addr `{}`", cfg.metrics_addr))?;
         let pool_for_health = pool.clone();
+        // R2 M3 (Security F5): /readyz probes the control_plane DB pool
+        // (when configured) so the predictor reports NotReady if the
+        // SLICE_07 plugin endpoints migration hasn't landed in the
+        // operator's deployment. Skeleton mode (no pool) returns OK
+        // because the service intentionally has no control_plane
+        // dependency — production Helm gate rejects that fallback.
+        let plugin_pool_for_health = plugin_endpoint_pool.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_metrics_server(metrics_addr, pool_for_health).await {
+            if let Err(e) = run_metrics_server(
+                metrics_addr,
+                pool_for_health,
+                plugin_pool_for_health,
+            ).await {
                 error!(?e, "metrics server exited with error");
             }
         });
@@ -662,6 +673,7 @@ fn render_metrics() -> String {
 async fn run_metrics_server(
     addr: SocketAddr,
     pool: Option<sqlx::PgPool>,
+    plugin_endpoint_pool: Option<sqlx::PgPool>,
 ) -> Result<()> {
     use http_body_util::Full;
     use hyper::body::Bytes;
@@ -675,9 +687,11 @@ async fn run_metrics_server(
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let pool_clone = pool.clone();
+        let plugin_pool_clone = plugin_endpoint_pool.clone();
         tokio::spawn(async move {
             let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
                 let pool = pool_clone.clone();
+                let plugin_pool = plugin_pool_clone.clone();
                 async move {
                     let (status, content_type, body): (StatusCode, &str, String) =
                         match (req.method(), req.uri().path()) {
@@ -714,26 +728,56 @@ async fn run_metrics_server(
                                     "ok (skeleton mode)".to_string(),
                                 ),
                             },
-                            (&Method::GET, "/readyz") => match pool {
-                                Some(ref p) => {
-                                    match sqlx::query("SELECT 1").execute(p).await {
-                                        Ok(_) => (
-                                            StatusCode::OK,
-                                            "text/plain; charset=utf-8",
-                                            "ready".to_string(),
-                                        ),
-                                        Err(e) => (
-                                            StatusCode::SERVICE_UNAVAILABLE,
-                                            "text/plain; charset=utf-8",
-                                            format!("db not ready: {e}"),
-                                        ),
-                                    }
+                            (&Method::GET, "/readyz") => {
+                                // First gate: canonical_ingest DB (Strategy B
+                                // cache lookup pool).
+                                let mut status_lines = Vec::new();
+                                let mut overall_ok = true;
+                                match &pool {
+                                    Some(p) => match sqlx::query("SELECT 1").execute(p).await {
+                                        Ok(_) => status_lines.push("canonical_ingest: ok".to_string()),
+                                        Err(e) => {
+                                            overall_ok = false;
+                                            status_lines.push(format!("canonical_ingest: db not ready ({e})"));
+                                        }
+                                    },
+                                    None => status_lines.push("canonical_ingest: skeleton".to_string()),
                                 }
-                                None => (
-                                    StatusCode::OK,
-                                    "text/plain; charset=utf-8",
-                                    "ready (skeleton mode)".to_string(),
-                                ),
+                                // R2 M3 (Security F5) second gate: control_plane
+                                // DB plus SLICE_07 migration freshness. The
+                                // `SELECT FROM predictor_plugin_endpoints LIMIT 0`
+                                // succeeds as long as the table exists; if the
+                                // operator forgot to mount the control-plane
+                                // ConfigMap (Security F5), the table is missing
+                                // and /readyz fails — surfaces in Helm
+                                // --wait, kubectl rollout, and the canary.
+                                match &plugin_pool {
+                                    Some(p) => match sqlx::query(
+                                        "SELECT 1 FROM predictor_plugin_endpoints LIMIT 0",
+                                    )
+                                    .execute(p)
+                                    .await
+                                    {
+                                        Ok(_) => status_lines.push("control_plane: ok".to_string()),
+                                        Err(e) => {
+                                            overall_ok = false;
+                                            status_lines.push(format!(
+                                                "control_plane: predictor_plugin_endpoints missing ({e}) — operator must apply services/control_plane/migrations/"
+                                            ));
+                                        }
+                                    },
+                                    None => status_lines.push("control_plane: skeleton".to_string()),
+                                }
+                                let body = status_lines.join("; ");
+                                if overall_ok {
+                                    (StatusCode::OK, "text/plain; charset=utf-8", format!("ready ({body})"))
+                                } else {
+                                    (
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        "text/plain; charset=utf-8",
+                                        format!("not ready ({body})"),
+                                    )
+                                }
                             },
                             _ => (
                                 StatusCode::NOT_FOUND,

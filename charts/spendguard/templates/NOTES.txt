@@ -73,6 +73,11 @@ REGENERATE the ConfigMaps:
     {{ .Values.migrations.canonicalConfigMapName | default "spendguard-migrations-canonical" }} \
     --from-file=services/canonical_ingest/migrations/ \
     --dry-run=client -o yaml | kubectl apply -f -
+  # R2 M3 (Security F5): SLICE_07 control_plane DB migrations.
+  kubectl --namespace {{ .Release.Namespace }} create configmap \
+    {{ .Values.migrations.controlPlaneConfigMapName | default "spendguard-migrations-control-plane" }} \
+    --from-file=services/control_plane/migrations/ \
+    --dry-run=client -o yaml | kubectl apply -f -
 
 PROST 0.13 ROLLOUT INVARIANT (audit-chain extension §7.2):
   prost 0.13 does NOT preserve proto3 unknown fields. To avoid a
