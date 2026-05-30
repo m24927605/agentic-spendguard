@@ -160,17 +160,30 @@ async fn main() -> Result<()> {
     };
 
     // ── Spawn metrics server ──────────────────────────────────────
+    //
+    // R2 M8: pass the DB pool + cycle-staleness threshold so /healthz +
+    // /readyz can probe real subsystem state. /livez stays as pure
+    // process liveness ("ok"). /readyz fails if no cycle has run in
+    // 2× cycle_seconds (operator alert on stuck scheduler).
     if !cfg.metrics_addr.is_empty() {
         let addr: SocketAddr = cfg
             .metrics_addr
             .parse()
             .with_context(|| format!("invalid metrics_addr `{}`", cfg.metrics_addr))?;
+        let pool_for_health = pool.clone();
+        let max_cycle_age_secs = cycle_seconds.saturating_mul(2);
         tokio::spawn(async move {
-            if let Err(e) = run_metrics_server(addr).await {
+            if let Err(e) =
+                run_metrics_server(addr, pool_for_health, max_cycle_age_secs).await
+            {
                 error!(?e, "metrics server exited with error");
             }
         });
-        info!(addr = %cfg.metrics_addr, "metrics endpoint bound");
+        info!(
+            addr = %cfg.metrics_addr,
+            max_cycle_age_secs,
+            "metrics endpoint bound"
+        );
     }
 
     // ── Run scheduler loop (forever, until ctrl-c) ────────────────
@@ -278,50 +291,106 @@ fn render_metrics() -> String {
     )
 }
 
-/// Minimal /metrics + /healthz + /readyz hyper server.
-async fn run_metrics_server(addr: SocketAddr) -> Result<()> {
+/// Minimal /metrics + /livez + /healthz + /readyz hyper server.
+///
+/// R2 M8 (Security F8): real subsystem probes.
+///   * /livez — pure process liveness, always 200 OK
+///   * /healthz — DB pool ping (unhealthy if pool can't acquire)
+///   * /readyz — DB pool ping AND cycle freshness (unready if last
+///     cycle attempt > max_cycle_age_secs ago)
+async fn run_metrics_server(
+    addr: SocketAddr,
+    pool: sqlx::PgPool,
+    max_cycle_age_secs: u64,
+) -> Result<()> {
     use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::service::service_fn;
     use hyper::{Method, Request, Response, StatusCode};
     use hyper_util::rt::TokioIo;
+    use std::sync::atomic::Ordering;
+    use spendguard_stats_aggregator::scheduler::LAST_CYCLE_START_UNIX_SECS;
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     loop {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
+        let pool_clone = pool.clone();
         tokio::spawn(async move {
-            let svc = service_fn(|req: Request<hyper::body::Incoming>| async move {
-                let (status, content_type, body): (StatusCode, &str, String) =
-                    match (req.method(), req.uri().path()) {
-                        (&Method::GET, "/metrics") => (
-                            StatusCode::OK,
-                            "text/plain; version=0.0.4; charset=utf-8",
-                            render_metrics(),
-                        ),
-                        (&Method::GET, "/healthz") => (
-                            StatusCode::OK,
-                            "text/plain; charset=utf-8",
-                            "ok".to_string(),
-                        ),
-                        (&Method::GET, "/readyz") => (
-                            StatusCode::OK,
-                            "text/plain; charset=utf-8",
-                            "ready".to_string(),
-                        ),
-                        _ => (
-                            StatusCode::NOT_FOUND,
-                            "text/plain; charset=utf-8",
-                            "not found".to_string(),
-                        ),
-                    };
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(status)
-                        .header("content-type", content_type)
-                        .body(Full::new(Bytes::from(body)))
-                        .unwrap(),
-                )
+            let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                let pool = pool_clone.clone();
+                async move {
+                    let (status, content_type, body): (StatusCode, &str, String) =
+                        match (req.method(), req.uri().path()) {
+                            (&Method::GET, "/metrics") => (
+                                StatusCode::OK,
+                                "text/plain; version=0.0.4; charset=utf-8",
+                                render_metrics(),
+                            ),
+                            (&Method::GET, "/livez") => (
+                                StatusCode::OK,
+                                "text/plain; charset=utf-8",
+                                "ok".to_string(),
+                            ),
+                            (&Method::GET, "/healthz") => {
+                                // R2 M8: DB pool ping. SELECT 1 covers
+                                // both connectivity + a trivial round-trip.
+                                match sqlx::query("SELECT 1").execute(&pool).await {
+                                    Ok(_) => (
+                                        StatusCode::OK,
+                                        "text/plain; charset=utf-8",
+                                        "ok".to_string(),
+                                    ),
+                                    Err(e) => (
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        "text/plain; charset=utf-8",
+                                        format!("db ping failed: {e}"),
+                                    ),
+                                }
+                            }
+                            (&Method::GET, "/readyz") => {
+                                // R2 M8: DB ping + cycle freshness.
+                                let db_ok = sqlx::query("SELECT 1").execute(&pool).await.is_ok();
+                                let now_secs = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_secs())
+                                    .unwrap_or(0);
+                                let last_cycle =
+                                    LAST_CYCLE_START_UNIX_SECS.load(Ordering::Relaxed);
+                                let cycle_fresh = last_cycle == 0
+                                    || now_secs.saturating_sub(last_cycle) <= max_cycle_age_secs;
+                                if db_ok && cycle_fresh {
+                                    (
+                                        StatusCode::OK,
+                                        "text/plain; charset=utf-8",
+                                        "ready".to_string(),
+                                    )
+                                } else {
+                                    (
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        "text/plain; charset=utf-8",
+                                        format!(
+                                            "not ready (db_ok={db_ok}, cycle_fresh={cycle_fresh}, \
+                                             last_cycle={last_cycle}, now={now_secs}, \
+                                             max_cycle_age_secs={max_cycle_age_secs})"
+                                        ),
+                                    )
+                                }
+                            }
+                            _ => (
+                                StatusCode::NOT_FOUND,
+                                "text/plain; charset=utf-8",
+                                "not found".to_string(),
+                            ),
+                        };
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(status)
+                            .header("content-type", content_type)
+                            .body(Full::new(Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
             });
             if let Err(err) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, svc)

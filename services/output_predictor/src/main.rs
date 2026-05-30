@@ -84,7 +84,10 @@ async fn main() -> Result<()> {
         info!("output_distribution_cache pool connected");
         Some(p)
     };
-    let cache = OutputDistributionCache::new(pool, Duration::from_secs(cfg.cache_ttl_seconds));
+    let cache = OutputDistributionCache::new(
+        pool.clone(),
+        Duration::from_secs(cfg.cache_ttl_seconds),
+    );
 
     // ── Build service ─────────────────────────────────────────────
     let svc = OutputPredictorSvc::new(
@@ -99,13 +102,19 @@ async fn main() -> Result<()> {
         .max_decoding_message_size(1 << 20);
 
     // ── Spawn metrics server (best-effort) ────────────────────────
+    //
+    // R2 M8: pass the DB pool (Option clone) so /healthz + /readyz can
+    // probe real connectivity. Skeleton-mode (no pool) returns 200 OK
+    // on /healthz + /readyz because the service is intentionally
+    // running without DB — production gates that off in Helm.
     if !cfg.metrics_addr.is_empty() {
         let metrics_addr: SocketAddr = cfg
             .metrics_addr
             .parse()
             .with_context(|| format!("invalid metrics_addr `{}`", cfg.metrics_addr))?;
+        let pool_for_health = pool.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_metrics_server(metrics_addr).await {
+            if let Err(e) = run_metrics_server(metrics_addr, pool_for_health).await {
                 error!(?e, "metrics server exited with error");
             }
         });
@@ -282,25 +291,42 @@ async fn shutdown_signal() {
 }
 
 fn render_metrics() -> String {
-    // Phase D wires the cache hit-rate counter. SLICE_06 ships the
-    // metric scaffold + the names that Phase F's Helm scrape config
-    // expects.
-    "# HELP spendguard_output_predictor_predict_total \
-     Total Predict RPCs handled.\n\
-     # TYPE spendguard_output_predictor_predict_total counter\n\
-     spendguard_output_predictor_predict_total 0\n\
-     # HELP spendguard_output_predictor_cache_hit_rate \
-     Phase-D cache hit rate (count of L4 hits / total predict calls).\n\
-     # TYPE spendguard_output_predictor_cache_hit_rate gauge\n\
-     spendguard_output_predictor_cache_hit_rate 0\n"
-        .to_string()
+    use std::sync::atomic::Ordering;
+    use spendguard_output_predictor::server::UNKNOWN_CONTEXT_WINDOW_TOTAL;
+    // R2 M12: wire UNKNOWN_CONTEXT_WINDOW_TOTAL into the scrape body.
+    // Phase D wires the cache hit-rate counter — SLICE_06 ships the
+    // scaffold + the names Phase F's Helm scrape config expects.
+    format!(
+        "# HELP spendguard_output_predictor_predict_total \
+         Total Predict RPCs handled.\n\
+         # TYPE spendguard_output_predictor_predict_total counter\n\
+         spendguard_output_predictor_predict_total 0\n\
+         # HELP spendguard_output_predictor_cache_hit_rate \
+         Phase-D cache hit rate (count of L4 hits / total predict calls).\n\
+         # TYPE spendguard_output_predictor_cache_hit_rate gauge\n\
+         spendguard_output_predictor_cache_hit_rate 0\n\
+         # HELP spendguard_output_predictor_unknown_context_window_total \
+         Predict calls that fell back to the unknown model_context_window default per spec §3.3.\n\
+         # TYPE spendguard_output_predictor_unknown_context_window_total counter\n\
+         spendguard_output_predictor_unknown_context_window_total {}\n",
+        UNKNOWN_CONTEXT_WINDOW_TOTAL.load(Ordering::Relaxed),
+    )
 }
 
-/// Minimal /metrics + /healthz + /readyz hyper server. Mirrors the
-/// raw-hyper pattern used by services/canonical_ingest and
-/// services/ledger so the chart can scrape Prometheus without adding
-/// a `prometheus` crate dependency.
-async fn run_metrics_server(addr: SocketAddr) -> Result<()> {
+/// Minimal /metrics + /livez + /healthz + /readyz hyper server.
+///
+/// R2 M8 (Security F8): real subsystem probes.
+///   * /livez — pure process liveness, always 200 OK
+///   * /healthz — DB pool ping when configured (skeleton mode: OK)
+///   * /readyz — same as /healthz currently; future per-route gates
+///
+/// Mirrors the raw-hyper pattern used by services/canonical_ingest and
+/// services/ledger so the chart can scrape Prometheus without adding a
+/// `prometheus` crate dependency.
+async fn run_metrics_server(
+    addr: SocketAddr,
+    pool: Option<sqlx::PgPool>,
+) -> Result<()> {
     use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::service::service_fn;
@@ -312,38 +338,81 @@ async fn run_metrics_server(addr: SocketAddr) -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
+        let pool_clone = pool.clone();
         tokio::spawn(async move {
-            let svc = service_fn(|req: Request<hyper::body::Incoming>| async move {
-                let (status, content_type, body): (StatusCode, &str, String) =
-                    match (req.method(), req.uri().path()) {
-                        (&Method::GET, "/metrics") => (
-                            StatusCode::OK,
-                            "text/plain; version=0.0.4; charset=utf-8",
-                            render_metrics(),
-                        ),
-                        (&Method::GET, "/healthz") => (
-                            StatusCode::OK,
-                            "text/plain; charset=utf-8",
-                            "ok".to_string(),
-                        ),
-                        (&Method::GET, "/readyz") => (
-                            StatusCode::OK,
-                            "text/plain; charset=utf-8",
-                            "ready".to_string(),
-                        ),
-                        _ => (
-                            StatusCode::NOT_FOUND,
-                            "text/plain; charset=utf-8",
-                            "not found".to_string(),
-                        ),
-                    };
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(status)
-                        .header("content-type", content_type)
-                        .body(Full::new(Bytes::from(body)))
-                        .unwrap(),
-                )
+            let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                let pool = pool_clone.clone();
+                async move {
+                    let (status, content_type, body): (StatusCode, &str, String) =
+                        match (req.method(), req.uri().path()) {
+                            (&Method::GET, "/metrics") => (
+                                StatusCode::OK,
+                                "text/plain; version=0.0.4; charset=utf-8",
+                                render_metrics(),
+                            ),
+                            (&Method::GET, "/livez") => (
+                                StatusCode::OK,
+                                "text/plain; charset=utf-8",
+                                "ok".to_string(),
+                            ),
+                            (&Method::GET, "/healthz") => match pool {
+                                Some(ref p) => {
+                                    match sqlx::query("SELECT 1").execute(p).await {
+                                        Ok(_) => (
+                                            StatusCode::OK,
+                                            "text/plain; charset=utf-8",
+                                            "ok".to_string(),
+                                        ),
+                                        Err(e) => (
+                                            StatusCode::SERVICE_UNAVAILABLE,
+                                            "text/plain; charset=utf-8",
+                                            format!("db ping failed: {e}"),
+                                        ),
+                                    }
+                                }
+                                None => (
+                                    // Skeleton mode — no DB to ping; healthz
+                                    // is about the *process* health, return OK.
+                                    StatusCode::OK,
+                                    "text/plain; charset=utf-8",
+                                    "ok (skeleton mode)".to_string(),
+                                ),
+                            },
+                            (&Method::GET, "/readyz") => match pool {
+                                Some(ref p) => {
+                                    match sqlx::query("SELECT 1").execute(p).await {
+                                        Ok(_) => (
+                                            StatusCode::OK,
+                                            "text/plain; charset=utf-8",
+                                            "ready".to_string(),
+                                        ),
+                                        Err(e) => (
+                                            StatusCode::SERVICE_UNAVAILABLE,
+                                            "text/plain; charset=utf-8",
+                                            format!("db not ready: {e}"),
+                                        ),
+                                    }
+                                }
+                                None => (
+                                    StatusCode::OK,
+                                    "text/plain; charset=utf-8",
+                                    "ready (skeleton mode)".to_string(),
+                                ),
+                            },
+                            _ => (
+                                StatusCode::NOT_FOUND,
+                                "text/plain; charset=utf-8",
+                                "not found".to_string(),
+                            ),
+                        };
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(status)
+                            .header("content-type", content_type)
+                            .body(Full::new(Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
             });
             if let Err(err) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, svc)
