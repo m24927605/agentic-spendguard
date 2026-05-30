@@ -1,0 +1,151 @@
+// SpendGuard Run Cost Projector service.
+//
+// Spec references:
+//   - run-cost-projector-spec-v1alpha1.md §2.1 (proto surface)
+//   - run-cost-projector-spec-v1alpha1.md §3 (Signal 1 — induced from history)
+//   - run-cost-projector-spec-v1alpha1.md §4 (Signal 2 — per-step dynamic re-projection)
+//   - run-cost-projector-spec-v1alpha1.md §5 (Signal 3 — explicit hint via SDK)
+//   - run-cost-projector-spec-v1alpha1.md §6 (Signal layering + override rules)
+//   - run-cost-projector-spec-v1alpha1.md §7 (Run state cache)
+//   - run-cost-projector-spec-v1alpha1.md §8 (RUN_* decision codes)
+//   - contract-dsl-spec-v1alpha2.md §3 (RUN_BUDGET_PROJECTION_EXCEEDED /
+//     RUN_DRIFT_DETECTED / RUN_STEPS_EXCEEDED + STOP_RUN_PROJECTION)
+//   - audit-chain-prediction-extension-v1alpha1.md §2.2 (3 run-level audit cols)
+//
+// Transport: gRPC over UDS (on-node sidecar colocated) or mTLS (cross-node).
+// Pattern mirrors output_predictor (SLICE_06/07).
+//
+// SLICE_09 scope:
+//   - Project RPC: compute run projection + emit RUN_* codes (precedence: BUDGET > STEPS > DRIFT).
+//   - TerminateRun RPC: idempotent cache eviction on run.end lifecycle event.
+//   - Failure mode: projector unreachable → sidecar conservative pass-through
+//     (no RUN_* emitted; per-call decision unaffected; reservation = Strategy A).
+
+syntax = "proto3";
+
+package spendguard.run_cost_projector.v1;
+
+service RunCostProjector {
+  // Hot path: project remaining run cost + decide RUN_* emission.
+  // Called by sidecar after output_predictor.Predict, before reserve stage.
+  // Spec §12.1 budget: p99 ≤ 5ms warm cache, ≤ 10ms cold cache rebuild.
+  rpc Project(ProjectRequest) returns (ProjectResponse);
+
+  // Lifecycle: run.end notifier → remove from cache.
+  // Idempotent: repeated calls for same (tenant_id, run_id) succeed regardless
+  // of cache state.
+  rpc TerminateRun(TerminateRunRequest) returns (TerminateRunResponse);
+}
+
+message ProjectRequest {
+  // Required. Tenant identifier (UUIDv7 string form). Parsed to uuid::Uuid at
+  // the gRPC boundary per SLICE_05 R2 B5 convention.
+  string tenant_id = 1;
+
+  // Required. Run identifier (UUIDv7 from SDK / sidecar enrichment).
+  string run_id = 2;
+
+  // Required. Agent identifier (customer-defined). Run-length distribution
+  // bucket key per stats-aggregator-spec-v1alpha1.md §6.
+  string agent_id = 3;
+
+  // Optional. Model identifier (for diagnostics / future Signal 1 refinement).
+  string model = 4;
+
+  // Optional. Step identifier within the run (for diagnostics).
+  string step_id = 5;
+
+  // Required. Decision identifier from sidecar (for audit correlation).
+  string decision_id = 6;
+
+  // Required. Per-call cost just computed by output_predictor for THIS call
+  // (Strategy A/B/C atomic micros). Drives the projection sum.
+  int64 this_call_reservation_atomic = 7;
+
+  // Optional. Unit identifier (e.g. USD micros). Currently advisory.
+  string unit_id = 8;
+
+  // Required. Budget remaining (atomic micros) at the budget window the
+  // sidecar would charge this call against. Source: ledger.QueryBudget or
+  // cached `BudgetClaim.amount_atomic` projection.
+  int64 budget_remaining_atomic = 9;
+
+  // Optional Signal 3 hint (spec §5). 0 = unset (proto3 default; no hint).
+  // SDK with_run_plan decorator sets this via SDK metadata; sidecar passes
+  // through. SLICE_12 lands the SDK decorator; SLICE_09 wires the pass-through.
+  int32 planned_steps_hint = 10;
+  int32 planned_tools_hint = 11;
+}
+
+message ProjectResponse {
+  // Projection at decision time (atomic micros, signed sentinel-free).
+  // spec §6 step 4: cumulative_cost + this_call_reservation + predicted_remaining_cost.
+  int64 run_projection_at_decision_atomic = 1;
+
+  // Predicted remaining steps (after this call). -1 sentinel means
+  // "projector internal error" — sidecar treats as "projector unreachable" and
+  // falls through to per-call decision per spec §10. The audit column
+  // `run_predicted_remaining_steps` writes -1 for this case.
+  int32 run_predicted_remaining_steps = 2;
+
+  // Steps completed in this run so far (before this call). Sourced from the
+  // run state cache (post recovery if cold). Audit column
+  // `run_steps_completed_so_far` (int64-on-wire per spec round-4 fix).
+  int64 run_steps_completed_so_far = 3;
+
+  // Strategy used for this projection (diagnostic only, not signed):
+  //   COLD_START — no historical data, used cold-start default 10 steps
+  //   S1         — Signal 1 only
+  //   S1S2       — Signal 1 + Signal 2 drift detection
+  //   S3         — Signal 3 hint override (no historical, just plan)
+  //   S1S2S3     — All three signals active
+  StrategyUsed strategy_used = 4;
+
+  // Optional emitted RUN_* code. Empty string means "no code triggered" —
+  // sidecar evaluator falls through to per-call lattice.
+  // Per spec §6 precedence: BUDGET > STEPS > DRIFT. At most one code emitted
+  // per Project response.
+  string emitted_code = 5;
+
+  // All reason codes that were considered (for diagnostics + audit trail).
+  // Includes the emitted_code plus any codes that fired but lost on precedence.
+  repeated string considered_codes = 6;
+
+  // Projection confidence (0.0-1.0). Lower when cold-start, higher when
+  // historical sample size is large. Not signed into audit chain; informational.
+  float projection_confidence = 7;
+}
+
+// SLICE_09 strategy enum — diagnostic, not used by contract evaluator.
+enum StrategyUsed {
+  STRATEGY_USED_UNSPECIFIED = 0;
+  // Cold start: no historical run_length data for (tenant, agent_id),
+  // used the cold_start default 10 steps per spec §3.2.
+  COLD_START = 1;
+  // Signal 1 only: historical P95 run length.
+  S1 = 2;
+  // Signal 1 + Signal 2: Signal 1 baseline + per-step drift detection.
+  S1S2 = 3;
+  // Signal 3 only: SDK with_run_plan hint, no Signal 1/2 needed.
+  S3 = 4;
+  // All three: hint + historical + drift detection.
+  S1S2S3 = 5;
+}
+
+message TerminateRunRequest {
+  // Required. Tenant identifier (UUIDv7 string form).
+  string tenant_id = 1;
+
+  // Required. Run identifier to evict from cache.
+  string run_id = 2;
+
+  // Optional. Reason ("completed" | "aborted" | "error" | "timeout").
+  // Informational only; eviction is idempotent regardless.
+  string reason = 3;
+}
+
+message TerminateRunResponse {
+  // True if the run was in cache and successfully evicted;
+  // False if it was not in cache (still considered success — idempotent).
+  bool removed_from_cache = 1;
+}

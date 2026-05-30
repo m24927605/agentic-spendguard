@@ -1,0 +1,89 @@
+[package]
+name = "spendguard-run-cost-projector"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard run_cost_projector service: hot-path gRPC Project per run-cost-projector-spec-v1alpha1.md §2. SLICE_09 ships Signal 1 (induced from history via run_length_distribution_cache) + Signal 2 (per-step drift detection) + Signal 3 (SDK planned_steps_hint override) + 3 RUN_* codes (BUDGET > STEPS > DRIFT precedence) + in-memory RunState cache with 30-min TTL eviction + audit-chain replay recovery."
+
+[[bin]]
+name = "spendguard-run-cost-projector"
+path = "src/main.rs"
+
+[lib]
+name = "spendguard_run_cost_projector"
+path = "src/lib.rs"
+
+[dependencies]
+# Direct rustls dep so main() can install the aws_lc_rs default provider
+# (mirrors sidecar / ledger / tokenizer / output_predictor).
+rustls = "0.23"
+
+# gRPC + protobuf (server side per SLICE_09; sidecar wires the client in Phase E).
+tonic = { version = "0.12", features = ["tls", "transport", "gzip"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+
+# HTTP / Prometheus metrics endpoint (raw hyper, matching tokenizer /
+# canonical_ingest / ledger / output_predictor convention; no `prometheus`
+# crate dep to track).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# Errors / logging
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config (env-driven, mirrors sidecar / output_predictor)
+envy = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# UUIDs — tenant_id / run_id parse to uuid::Uuid at gRPC boundary per
+# SLICE_05 R2 B5 convention. v4 enabled for test fixtures.
+uuid = { version = "1", features = ["v7", "v4", "serde"] }
+
+# parking_lot for the RunState cache RwLock (read-mostly + poison-free,
+# matches output_predictor SLICE_06 convention).
+parking_lot = "0.12"
+
+# Bounded LRU cache for the RunState entries (spec §7.2 — memory pressure
+# eviction; 10K-entry cap default per spec §0.2 endurance test).
+lru = "0.12"
+
+# SQL — read-only pools to:
+#   1. canonical_ingest DB → run_length_distribution_cache (Signal 1)
+#      and audit_outbox replay (state recovery on cold miss)
+sqlx = { version = "0.8", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls",
+    "uuid",
+    "chrono",
+] }
+chrono = { version = "0.4", features = ["serde"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+criterion = { version = "0.5", default-features = false, features = ["html_reports"] }
+
+[features]
+default = []
+
+[[bench]]
+name = "project_p99"
+harness = false
