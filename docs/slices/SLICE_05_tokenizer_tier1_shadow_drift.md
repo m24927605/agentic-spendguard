@@ -42,6 +42,7 @@ per `tokenizer-service-spec-v1alpha1.md` §4 (Tier 1 shadow), §4.5 (circuit bre
 | Provider HTTP client retries (use existing http client crate) | use existing |
 | Audit chain entries for T1 samples | Intentionally NOT (per §4.4) |
 | Calibration-report integration of T1 samples | SLICE_13 |
+| Chat-shape (messages array) shadow comparison (R2 M2) | SLICE-extra — needs honest per-vendor message shape (Anthropic `Human:`/`Assistant:` role markers vs Gemini `contents[role]`). SLICE_05 ships raw_text-only shadowing; chat requests emit `SHADOW_SKIPPED_CHAT_SHAPE` metric and skip silently. |
 
 ---
 
@@ -79,8 +80,8 @@ per `tokenizer-service-spec-v1alpha1.md` §4 (Tier 1 shadow), §4.5 (circuit bre
 
 ## §6. Audit-chain impact
 
-- **None directly**. Tier 1 samples land in `tokenizer_t1_samples` not audit_outbox (per spec §4.4)
-- BUT: `tokenizer_drift_alert` CloudEvent emitted to canonical_ingest as signed event (audit chain entry; tied to stats_aggregator's drift_alert family; per `stats-aggregator-spec-v1alpha1.md` §7.2 schema)
+- **None directly for samples**. Tier 1 samples land in `tokenizer_t1_samples` not audit_outbox (per spec §4.4)
+- **Audit-chain bound for alerts** (R2 B1): the `spendguard.audit.tokenizer_drift_alert.v1alpha1` CloudEvent emitted to canonical_ingest carries the `spendguard.audit.*` prefix which the routing layer (`services/canonical_ingest/src/domain/event_routing.rs:33`) maps to ImmutableAuditLog — NOT ProfilePayloadBlob (RTBF-deletable). The drift_alert family in `stats-aggregator-spec-v1alpha1.md` §7.2 consumes this surface.
 
 ---
 

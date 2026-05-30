@@ -261,7 +261,8 @@ async fn drift_alert_cool_down_lifts_sampling_to_one_hundred_percent() {
     let events = alert_sink.events.lock();
     assert_eq!(events.len(), 1);
     let ce = &events[0];
-    assert_eq!(ce.r#type, "spendguard.tokenizer.drift_alert.v1alpha1");
+    // R2 B1: spendguard.audit.* prefix routes to ImmutableAuditLog.
+    assert_eq!(ce.r#type, "spendguard.audit.tokenizer_drift_alert.v1alpha1");
     let data: serde_json::Value = serde_json::from_slice(&ce.data).unwrap();
     assert_eq!(data["tier1_count"], 110);
     assert_eq!(data["tier2_count"], 100);

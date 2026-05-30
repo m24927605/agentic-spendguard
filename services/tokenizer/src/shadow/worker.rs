@@ -28,13 +28,15 @@
 //!
 //! ## Drift alert event shape
 //!
-//! Per spec §4 + stats-aggregator-spec §7.2 the emitted CloudEvent is:
+//! Per spec §4 + stats-aggregator-spec §7.2 the emitted CloudEvent is
+//! (R2 B1: `spendguard.audit.*` prefix routes to ImmutableAuditLog):
 //!
 //! ```yaml
-//! type:   spendguard.tokenizer.drift_alert.v1alpha1
+//! type:   spendguard.audit.tokenizer_drift_alert.v1alpha1
 //! source: spendguard://tokenizer-service/<instance>
 //! data:
-//!   tenant_id:              <string>
+//!   sample_id:              <uuid>      # R2 M6
+//!   tenant_id:              <uuid>      # R2 B5
 //!   model:                  <string>
 //!   tokenizer_version_id:   <uuid>
 //!   tier2_count:            <int>
@@ -66,7 +68,17 @@ use crate::proto::common::v1::CloudEvent;
 
 /// CloudEvent type string for tokenizer drift alerts (spec §4 +
 /// stats-aggregator §7.2 family).
-pub const DRIFT_ALERT_EVENT_TYPE: &str = "spendguard.tokenizer.drift_alert.v1alpha1";
+///
+/// R2 B1 (event prefix): `spendguard.audit.*` routes the event to
+/// ImmutableAuditLog via canonical_ingest's `event_routing::classify`
+/// (`spendguard.audit.` prefix arm at
+/// `services/canonical_ingest/src/domain/event_routing.rs:33-36`).
+/// The previous `spendguard.tokenizer.drift_alert.*` prefix fell
+/// through to ProfilePayloadBlob — which is RTBF-deletable — and
+/// violated the audit-chain immutability claim in spec §6 + slice
+/// doc §6.
+pub const DRIFT_ALERT_EVENT_TYPE: &str =
+    "spendguard.audit.tokenizer_drift_alert.v1alpha1";
 
 /// Default bounded-channel capacity from the gRPC handler to the
 /// shadow worker. Bounded so Tier 2 hot path never queues forever when
