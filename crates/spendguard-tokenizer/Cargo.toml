@@ -112,3 +112,36 @@ default = []
 # sets this. The skeleton tests in §8.1 do not require it; provided as
 # an escape hatch for future micro-benchmarks.
 skip_encoder_load = []
+
+# ===== `cohere` — opt-in Cohere Command-R encoder =====================
+#
+# SLICE_04 R2 M6 + Security F5 (legal disclosure):
+#
+# The vendored `Xenova/c4ai-command-r-v01-tokenizer` mirror is MIT-
+# licensed, but the underlying Cohere `c4ai-command-r-v01` model is
+# CC-BY-NC-4.0 on Hugging Face (research-only). The R1 LICENSE_NOTICES
+# claimed an "MPL-2.0 exemption" allowing re-distribution of just the
+# tokenizer.json — this claim is uncited and legally ambiguous.
+#
+# The safe default is to NOT ship the Cohere encoder asset in stock
+# `cargo build`. Deployments that have completed their own legal review
+# enable the `cohere` feature explicitly:
+#
+#   spendguard-tokenizer = { version = "...", features = ["cohere"] }
+#
+# When the feature is OFF (default):
+#   * The `cohere.rs` module is not compiled.
+#   * The `data/cohere-command-r/tokenizer.json` asset is not embedded.
+#   * Dispatch table omits Cohere patterns → `command-r` etc. fall to
+#     Tier 3 with the 5% conservative margin + `tokenizer_unknown_model`
+#     metric (per spec §3.3).
+#
+# When the feature is ON:
+#   * Full Cohere encoder loads at boot (Layer A sha256 + Layer B
+#     cross-check).
+#   * Dispatch table includes `command-r`, `command-r-plus`, and
+#     `cohere.command*-v\d+:\d+` (with cross-region prefix).
+#
+# Spec §7.1 R2 M6 disclosure documents the rationale; LICENSE_NOTICES.md
+# carries the current legal status.
+cohere = []

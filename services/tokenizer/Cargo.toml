@@ -17,7 +17,15 @@ path = "src/lib.rs"
 # Library form — the service is a thin tonic wrapper around the
 # in-process tokenizer; both forms share the same dispatch table +
 # encoder cache (per spec §2.1).
-spendguard-tokenizer = { path = "../../crates/spendguard-tokenizer" }
+#
+# R2 M6: enable the opt-in `cohere` feature for the tokenizer service
+# binary + integration tests. The service is the centralized form per
+# spec §2.1(a); deployments still gate the Cohere encoder behind their
+# own legal review when linking the library form (sidecar /
+# egress_proxy default to feature OFF). The slice04 golden samples
+# integration tests live here and require the Cohere dispatch entries
+# to be present.
+spendguard-tokenizer = { path = "../../crates/spendguard-tokenizer", features = ["cohere"] }
 
 # Direct rustls dep so main() can call CryptoProvider::install_default()
 rustls = "0.23"

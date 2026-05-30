@@ -354,36 +354,25 @@ const RAW_ENTRIES: &[(&str, EncoderResolver)] = &[
         EncoderResolver::Gemini,
     ),
 
-    // ── Cohere native ──
-    // `command-r-plus` must precede `command-r` for first-match-wins.
-    (
-        r"^command-r-plus(-\d{8})?$",
-        EncoderResolver::Cohere,
-    ),
-    (
-        r"^command-r(-\d{8})?$",
-        EncoderResolver::Cohere,
-    ),
-    // Round-2 fix Backend F4: `command-light` is INTENTIONALLY omitted
-    // from the dispatch table. Cohere's `command-light` model uses a
-    // different BPE vocabulary than `command-r`, so routing it to the
+    // ── Cohere native + Bedrock entries are FEATURE-GATED ──
+    //
+    // R2 M6 + Security F5: the Cohere encoder ships behind the `cohere`
+    // Cargo feature (default OFF) pending legal review of the Cohere
+    // tokenizer asset's redistribution terms. When the feature is off
+    // the corresponding patterns are absent from the dispatch table
+    // and Cohere model IDs fall to Tier 3 (5% margin +
+    // `tokenizer_unknown_model` metric). See `COHERE_ENTRIES` below
+    // for the gated rows.
+    //
+    // Round-2 fix Backend F4 (unchanged): `command-light` is
+    // INTENTIONALLY omitted from `COHERE_ENTRIES` even when the
+    // feature is ON. Cohere's `command-light` model uses a different
+    // BPE vocabulary than `command-r`, so routing it to the
     // `cohere-v2-bpe` (command-r) encoder would silently under-count
-    // tokens by ~5-20%. Falling to Tier 3 is correct behaviour per spec
-    // §3.4 fallback policy until a separate `command-light` tokenizer
-    // asset is vendored (tracked as a SLICE_NN follow-up). The
-    // `cohere_command_light_falls_to_tier3` unit test below pins this.
-    //
-    // (Previously a `^command-light(-\d{8})?$` entry routed to Cohere;
-    //  removed in R2 to eliminate the silent wrong-encoder dispatch.)
-
-    // ── Cohere Bedrock routing ──
-    //
-    // Round-2 fix B1 (Software F1): cross-region prefix support, same
-    // rationale as the Anthropic Bedrock entries above.
-    (
-        r"^(?:[a-z][a-z0-9-]*\.)?cohere\.command(-r)?(-plus)?-v\d+:\d+$",
-        EncoderResolver::Cohere,
-    ),
+    // tokens by ~5-20%. Falling to Tier 3 is correct behaviour per
+    // spec §3.4 fallback policy until a separate `command-light`
+    // tokenizer asset is vendored. The
+    // `cohere_command_light_falls_to_tier3` unit test pins this.
 
     // ── Llama Bedrock routing ──
     // Per Bedrock published model IDs:
@@ -402,6 +391,39 @@ const RAW_ENTRIES: &[(&str, EncoderResolver)] = &[
     ),
 ];
 
+/// R2 M6 — Cohere dispatch entries, feature-gated.
+///
+/// When the `cohere` Cargo feature is OFF (default), this constant is
+/// not referenced; the patterns are absent from `DispatchTable` and
+/// Cohere model IDs (`command-r`, `cohere.command*-v\d+:\d+`) fall to
+/// Tier 3 with the 5% conservative margin + the `tokenizer_unknown_model`
+/// metric per spec §3.3.
+///
+/// When the feature is ON, `DispatchTable::compile` appends these
+/// entries after the unconditional entries in `RAW_ENTRIES`. Pattern
+/// ordering is preserved (`command-r-plus` before `command-r` for
+/// first-match-wins).
+///
+/// `command-light` is INTENTIONALLY omitted per R2 Backend F4 (wrong
+/// vocab → silent ~5-20% under-count if routed to command-r encoder).
+#[cfg(feature = "cohere")]
+const COHERE_ENTRIES: &[(&str, EncoderResolver)] = &[
+    // `command-r-plus` must precede `command-r` for first-match-wins.
+    (
+        r"^command-r-plus(-\d{8})?$",
+        EncoderResolver::Cohere,
+    ),
+    (
+        r"^command-r(-\d{8})?$",
+        EncoderResolver::Cohere,
+    ),
+    // Bedrock + cross-region prefix support per R2 B1.
+    (
+        r"^(?:[a-z][a-z0-9-]*\.)?cohere\.command(-r)?(-plus)?-v\d+:\d+$",
+        EncoderResolver::Cohere,
+    ),
+];
+
 /// The compiled dispatch table — one `DispatchEntry` per row.
 #[derive(Debug)]
 pub struct DispatchTable {
@@ -413,8 +435,21 @@ impl DispatchTable {
     /// [`TokenizerError::DispatchPatternInvalid`] if any pattern is
     /// malformed (programmer error; never expected at runtime).
     pub fn compile() -> Result<Self, TokenizerError> {
-        let mut entries = Vec::with_capacity(RAW_ENTRIES.len());
-        for (pattern, resolver) in RAW_ENTRIES {
+        // R2 M6: when the `cohere` feature is ON, append COHERE_ENTRIES
+        // to the unconditional patterns. When OFF, only RAW_ENTRIES are
+        // compiled and Cohere model IDs fall to Tier 3.
+        #[cfg(feature = "cohere")]
+        let total = RAW_ENTRIES.len() + COHERE_ENTRIES.len();
+        #[cfg(not(feature = "cohere"))]
+        let total = RAW_ENTRIES.len();
+        let mut entries = Vec::with_capacity(total);
+
+        #[cfg(feature = "cohere")]
+        let raw_iter = RAW_ENTRIES.iter().chain(COHERE_ENTRIES.iter());
+        #[cfg(not(feature = "cohere"))]
+        let raw_iter = RAW_ENTRIES.iter();
+
+        for (pattern, resolver) in raw_iter {
             let regex = Regex::new(pattern).map_err(|e| TokenizerError::DispatchPatternInvalid {
                 pattern: (*pattern).to_string(),
                 source: e,
@@ -785,7 +820,11 @@ mod tests {
     }
 
     // ── Cohere native ───────────────────────────────────────────────
+    //
+    // R2 M6: Cohere encoder + dispatch entries are feature-gated.
+    // These tests run only when the `cohere` feature is enabled.
 
+    #[cfg(feature = "cohere")]
     #[test]
     fn command_r_routes_to_cohere() {
         let t = table();
@@ -793,6 +832,7 @@ mod tests {
         assert_eq!(e.kind, EncoderKind::Cohere);
     }
 
+    #[cfg(feature = "cohere")]
     #[test]
     fn command_r_plus_routes_to_cohere() {
         // `command-r-plus` must come BEFORE `command-r` else it'd
@@ -813,6 +853,9 @@ mod tests {
         // a separate `command-light` tokenizer asset is vendored in a
         // future SLICE_NN. This test pins the absence so a future
         // contributor doesn't re-add the wrong-encoder row.
+        //
+        // Note: this invariant holds whether or not `feature = "cohere"`
+        // is enabled, so the test is unconditional.
         let t = table();
         assert!(
             t.lookup("command-light").is_none(),
@@ -822,8 +865,21 @@ mod tests {
         assert!(t.lookup("command-light-20240501").is_none());
     }
 
+    #[cfg(not(feature = "cohere"))]
+    #[test]
+    fn command_r_falls_to_tier3_without_cohere_feature() {
+        // R2 M6: when the `cohere` Cargo feature is OFF (default), the
+        // Cohere encoder is not shipped and command-r model IDs must
+        // fall to Tier 3 with `tokenizer_unknown_model` metric.
+        let t = table();
+        assert!(t.lookup("command-r").is_none());
+        assert!(t.lookup("command-r-plus").is_none());
+        assert!(t.lookup("cohere.command-r-v1:0").is_none());
+    }
+
     // ── Cohere Bedrock routing ──────────────────────────────────────
 
+    #[cfg(feature = "cohere")]
     #[test]
     fn bedrock_cohere_command_routes_to_cohere() {
         let t = table();
@@ -831,6 +887,7 @@ mod tests {
         assert_eq!(e.kind, EncoderKind::Cohere);
     }
 
+    #[cfg(feature = "cohere")]
     #[test]
     fn bedrock_cohere_command_r_plus_routes_to_cohere() {
         let t = table();
@@ -905,6 +962,7 @@ mod tests {
         assert_eq!(e.kind, EncoderKind::Anthropic);
     }
 
+    #[cfg(feature = "cohere")]
     #[test]
     fn bedrock_cross_region_cohere_command_r_plus_routes() {
         let t = table();
@@ -1034,6 +1092,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "cohere")]
     #[test]
     fn command_r_plus_pattern_precedes_command_r() {
         let t = table();
@@ -1085,26 +1144,35 @@ mod tests {
     #[test]
     fn dispatch_table_has_expected_slice04_entries() {
         let t = table();
-        // SLICE_03 = 9; SLICE_04 R2 adds (Anthropic: 4 — native + Bedrock
-        // with cross-region prefix support) + (Gemini: 2) + (Cohere: 3 —
-        // dropped command-light per R2 Backend F4) + (Llama: 1) = 10.
-        // Total expected >= 19 after R2.
+        // SLICE_03 = 9; SLICE_04 R2 adds (Anthropic: 4) + (Gemini: 2) +
+        // (Llama: 1) = 7. Cohere adds 3 more when feature is ON.
+        // Total: 16 base; 19 with `cohere` feature.
+        #[cfg(feature = "cohere")]
+        let expected_min = 19;
+        #[cfg(not(feature = "cohere"))]
+        let expected_min = 16;
         assert!(
-            t.len() >= 19,
-            "expected >=19 entries after SLICE_04 R2, got {}",
+            t.len() >= expected_min,
+            "expected >={expected_min} entries after SLICE_04 R2, got {}",
             t.len()
         );
     }
 
     #[test]
-    fn dispatch_table_covers_all_five_kinds() {
+    fn dispatch_table_covers_expected_kinds() {
+        // R2 M6: Cohere kind is feature-gated. Always covers
+        // OpenAi/Anthropic/Gemini/Llama; Cohere covered only when
+        // `cohere` feature is on.
         let t = table();
         use std::collections::BTreeSet;
         let kinds: BTreeSet<EncoderKind> = t.entries().iter().map(|e| e.kind).collect();
         assert!(kinds.contains(&EncoderKind::OpenAi));
         assert!(kinds.contains(&EncoderKind::Anthropic));
         assert!(kinds.contains(&EncoderKind::Gemini));
-        assert!(kinds.contains(&EncoderKind::Cohere));
         assert!(kinds.contains(&EncoderKind::Llama));
+        #[cfg(feature = "cohere")]
+        assert!(kinds.contains(&EncoderKind::Cohere));
+        #[cfg(not(feature = "cohere"))]
+        assert!(!kinds.contains(&EncoderKind::Cohere));
     }
 }

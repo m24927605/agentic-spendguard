@@ -75,11 +75,14 @@ fn main() {
         &format!("{manifest_dir}/data/gemini-1.5/tokenizer.json"),
         asset_sha256::GEMINI_15,
     );
+    #[cfg(feature = "cohere")]
     print_tier2_block(
         "COHERE",
         &format!("{manifest_dir}/data/cohere-command-r/tokenizer.json"),
         asset_sha256::COHERE_COMMAND_R,
     );
+    #[cfg(not(feature = "cohere"))]
+    println!("// ── SLICE_04 — COHERE skipped (feature `cohere` disabled) ──");
     print_tier2_block(
         "LLAMA",
         &format!("{manifest_dir}/data/llama-3.1/tokenizer.json"),

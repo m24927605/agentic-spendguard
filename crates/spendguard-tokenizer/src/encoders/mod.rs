@@ -39,6 +39,7 @@
 use crate::error::TokenizerError;
 
 pub mod anthropic;
+#[cfg(feature = "cohere")]
 pub mod cohere;
 pub mod gemini;
 pub mod llama;

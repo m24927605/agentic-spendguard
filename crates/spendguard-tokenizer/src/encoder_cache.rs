@@ -68,9 +68,10 @@
 
 use crate::dispatch::{DispatchEntry, EncoderResolver, TiktokenEncoder};
 use crate::encoders::{
-    anthropic::AnthropicEncoder, cohere::CohereEncoder, gemini::GeminiEncoder,
-    llama::LlamaEncoder, Encoder,
+    anthropic::AnthropicEncoder, gemini::GeminiEncoder, llama::LlamaEncoder, Encoder,
 };
+#[cfg(feature = "cohere")]
+use crate::encoders::cohere::CohereEncoder;
 use crate::error::TokenizerError;
 use crate::{Message, TokenizeRequest, TokenizeResponse, ToolCall};
 use sha2::{Digest, Sha256};
@@ -161,6 +162,9 @@ pub struct EncoderCache {
     // dispatch-only unit tests without paying the boot cost.
     anthropic: Option<AnthropicEncoder>,
     gemini: Option<GeminiEncoder>,
+    // R2 M6: Cohere encoder is feature-gated. When `feature = "cohere"`
+    // is off (default), this slot does not exist at all.
+    #[cfg(feature = "cohere")]
     cohere: Option<CohereEncoder>,
     llama: Option<LlamaEncoder>,
 }
@@ -203,6 +207,8 @@ impl EncoderCache {
         // fast `AssetSignatureMismatch` surfaces here.
         let anthropic = AnthropicEncoder::new()?;
         let gemini = GeminiEncoder::new()?;
+        // R2 M6: Cohere encoder behind `cohere` feature flag.
+        #[cfg(feature = "cohere")]
         let cohere = CohereEncoder::new()?;
         let llama = LlamaEncoder::new()?;
 
@@ -221,6 +227,7 @@ impl EncoderCache {
             }),
             anthropic: Some(anthropic),
             gemini: Some(gemini),
+            #[cfg(feature = "cohere")]
             cohere: Some(cohere),
             llama: Some(llama),
         })
@@ -239,6 +246,7 @@ impl EncoderCache {
             p50k: None,
             anthropic: None,
             gemini: None,
+            #[cfg(feature = "cohere")]
             cohere: None,
             llama: None,
         }
@@ -275,11 +283,26 @@ impl EncoderCache {
                 "gemini-1.5-bpe",
                 req,
             ),
+            // R2 M6: Cohere encoder is feature-gated. When the feature
+            // is OFF the dispatch table does not include Cohere patterns
+            // (see `dispatch::COHERE_ENTRIES` `#[cfg]` gate) so this arm
+            // is unreachable in practice. When ON, dispatch via the
+            // cache slot.
+            #[cfg(feature = "cohere")]
             EncoderResolver::Cohere => self.tokenize_via_trait(
                 self.cohere.as_ref().map(|e| e as &dyn Encoder),
                 "cohere-v2-bpe",
                 req,
             ),
+            // When `cohere` feature is OFF, the dispatch table never
+            // produces an `EncoderResolver::Cohere` entry; this arm is
+            // defensive only.
+            #[cfg(not(feature = "cohere"))]
+            EncoderResolver::Cohere => Err(TokenizerError::AssetLoadFailed {
+                encoder: "cohere-v2-bpe",
+                message: "Cohere encoder not built (enable `cohere` Cargo feature \
+                          after legal review per R2 M6)".to_string(),
+            }),
             EncoderResolver::Llama => self.tokenize_via_trait(
                 self.llama.as_ref().map(|e| e as &dyn Encoder),
                 "llama-sentencepiece",

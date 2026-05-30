@@ -546,7 +546,7 @@ per `audit-chain-prediction-extension-v1alpha1.md` §2.1：每筆 decision audit
 | `OPENAI_TIKTOKEN` | `tiktoken-rs` crate（Cargo dep） | MIT (OpenAI public) |
 | `ANTHROPIC_BPE` | 從 `@anthropic-ai/tokenizer` JS package port，或 reconstruct from Anthropic published BPE merges | MIT (Anthropic public) |
 | `GEMINI_BPE` | **Community Gemma approximation** (per R2 M5) — Google's official Gemini tokenizer is API-only; no vendored BPE merges file is available. We ship the Xenova/gemma-tokenizer mirror which exposes the open-source Gemma vocabulary. Spec §4.2 0.01 drift threshold accommodates the approximation gap; SLICE_05 shadow worker measures the residual against the official `countTokens` API. | Apache 2.0 (Gemma upstream) / MIT (Xenova mirror) |
-| `COHERE_BPE` | 從 Cohere SDK tokenizer files | MIT (Cohere) |
+| `COHERE_BPE` | **OPT-IN per R2 M6** — Xenova/c4ai-command-r-v01-tokenizer mirror. Underlying Cohere model is CC-BY-NC-4.0 (research-only) and the tokenizer-only redistribution terms are uncited; safe default ships the encoder behind a `cohere` Cargo feature flag (default OFF). Deployments enable `--features cohere` after their own legal review. See LICENSE_NOTICES.md and `7.1 R2 M6` subsection below. | MIT (Xenova mirror); model CC-BY-NC-4.0 |
 | `SENTENCEPIECE_LLAMA` | Meta-released SentencePiece model files | Llama 2 Community License |
 
 #### 7.1 R2 M5 — Gemini approximation honest disclosure
@@ -575,6 +575,42 @@ Implications:
   widens to absorb measured drift OR we switch Gemini to a Tier 1-only
   strategy (no Tier 2 hot path). Either path documented for operator
   visibility.
+
+#### 7.1 R2 M6 — Cohere encoder opt-in feature flag
+
+The R1 LICENSE_NOTICES claimed a "MPL-2.0 exemption" allowing
+re-distribution of the Cohere `tokenizer.json` independently from the
+CC-BY-NC-4.0 model weights. This claim is **uncited and legally
+ambiguous**; the safe path until Cohere clarifies tokenizer-only
+redistribution terms (or a separately-licensed encoder asset is
+vendored) is to ship the Cohere encoder behind an opt-in Cargo feature.
+
+The `spendguard-tokenizer` crate exposes a `cohere` feature flag,
+**default OFF**:
+
+* **OFF (default)**: the `cohere.rs` module is not compiled, the
+  `data/cohere-command-r/tokenizer.json` asset is not embedded, and
+  the dispatch table omits Cohere patterns. Cohere model IDs
+  (`command-r`, `command-r-plus`, `cohere.command*-v\d+:\d+`) fall to
+  Tier 3 with the 5% conservative margin + the `tokenizer_unknown_model`
+  metric.
+
+* **ON (via `--features cohere`)**: the encoder loads at boot with the
+  full two-layer integrity check (Layer A sha256 + Layer B cross-check
+  fixture per §7.4.1), and the dispatch routes Cohere model IDs to the
+  Tier 2 BPE encoder.
+
+Stock deployments that have not completed their own legal review use
+the default OFF path. Deployments that need Cohere Tier 2 accuracy
+explicitly opt in. `services/tokenizer` (the centralized form per
+§2.1(a)) enables `cohere` by default so its golden corpus tests pass;
+`services/sidecar` and `services/egress_proxy` (the in-process library
+form per §2.1(b)) default to OFF.
+
+`crates/spendguard-tokenizer/LICENSE_NOTICES.md` carries the current
+legal disclosure; any future revision of the Cohere model license OR
+a separately-licensed encoder asset will be tracked in that file with
+the §7.1 row updated to match.
 
 ### 7.2 Asset bundling
 

@@ -76,7 +76,7 @@ shadow worker will quantify the actual delta in production and the
 spec will tighten if needed (or we will switch to a Tier 1 sampling
 strategy for Gemini specifically).
 
-### Cohere Command-R BPE
+### Cohere Command-R BPE (R2 M6 + Security F5 — OPT-IN FEATURE)
 
 | Field                | Value                                                                                                              |
 | -------------------- | ------------------------------------------------------------------------------------------------------------------ |
@@ -85,17 +85,50 @@ strategy for Gemini specifically).
 | Asset path           | `crates/spendguard-tokenizer/data/cohere-command-r/tokenizer.json`                                                 |
 | Size                 | ~12 MB                                                                                                              |
 | Vocabulary           | ~255K tokens                                                                                                        |
-| License              | MIT (mirror); underlying tokenizer.json is compatible with the model's Apache-2.0 tokenizer config                 |
+| License              | MIT (Xenova mirror); UNDERLYING MODEL IS CC-BY-NC-4.0 (research-only). See R2 M6 disclosure below.                |
 | Asset sha256         | `0af6e6fe50ce1bb5611b103482de6bac000c82e06898138d57f35af121aec772`                                                |
 | Snapshot date        | 2026-05-30                                                                                                          |
 | Spec drift threshold | 0.015 (1.5%; per spec §4.2 — Cohere tokenizer has been less stable historically)                                  |
+| **Cargo feature**    | `cohere` (default OFF; opt-in via `--features cohere`)                                                             |
 
-The Cohere `c4ai-command-r-v01` model weights are CC-BY-NC licensed
-on Hugging Face (research-only). The Xenova port extracts ONLY the
-`tokenizer.json` (vocab + BPE merges, no model weights), and the
-re-packaging follows the Cohere `tokenizer.json` MPL-2.0 exemption
-clause (which allows re-distribution of the tokenizer configuration
-independently from the weight files).
+#### R2 M6 + Security F5 legal disclosure (2026-05-30)
+
+The R1 LICENSE_NOTICES claimed a "MPL-2.0 exemption" allowing
+re-distribution of just the `tokenizer.json` independently from the
+weight files. This claim is **uncited and legally ambiguous**:
+
+* The Cohere `c4ai-command-r-v01` model is published under CC-BY-NC-4.0
+  on Hugging Face — explicitly research-only / non-commercial.
+* The Xenova HF port re-packages the model's BPE merges + vocab as a
+  `tokenizer.json`. The port author asserts MIT for the port; we have
+  no independent verification this is enforceable against Cohere's
+  CC-BY-NC restrictions on the underlying vocabulary.
+* No SpendGuard-vetted legal opinion has confirmed that vendoring the
+  Cohere tokenizer config for **commercial** Tier 2 use is permitted.
+
+**Safe default**: the Cohere encoder ships behind the `cohere` Cargo
+feature flag, default OFF. Stock `cargo build` produces a binary that
+does NOT embed the Cohere asset and routes Cohere model IDs (`command-r`,
+`cohere.command*-v\d+:\d+`) to Tier 3 with the standard 5% conservative
+margin + `tokenizer_unknown_model` metric.
+
+**Opt-in path**: deployments that have completed their own legal
+review enable the feature explicitly:
+
+```toml
+spendguard-tokenizer = { version = "...", features = ["cohere"] }
+```
+
+When the feature is ON, the Cohere encoder loads at boot with full
+two-layer integrity (Layer A sha256 + Layer B cross-check fixture per
+spec §7.4.1), and the dispatch table routes `command-r` / `command-r-
+plus` / `cohere.command*-v\d+:\d+` to the Tier 2 BPE encoder.
+
+If a deployment intends to use Cohere models commercially without
+legal review, the safe path is to leave the feature OFF and accept
+Tier 3 fallback's 5% margin until either (a) Cohere clarifies the
+tokenizer-only redistribution terms or (b) a separate non-CC-BY-NC
+encoder asset is vendored.
 
 ### Meta Llama 3.1 SentencePiece
 
