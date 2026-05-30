@@ -176,10 +176,14 @@ fn default_context_window_toml_path() -> String {
 }
 
 fn default_plugin_endpoint_cache_ttl_seconds() -> u64 {
-    // Spec §6.3 — 60s cap; aligns with the periodic health-check
-    // cadence so force-reset via control plane API is reflected
-    // within one cache cycle.
-    60
+    // R2 M2 (Security F4): cache TTL tightened from 60s → 5s.
+    // Spec §6.3 health-check cadence is 30s; cache TTL must be ≤
+    // that. The 5s value bounds the control-plane mutation →
+    // predictor observation window at 5s, documented in spec §11
+    // as the eventual-consistency operator contract. Tighter
+    // consistency requires a cache_revision_at column on the
+    // registry table (tracked as a follow-up GH issue).
+    5
 }
 
 impl Config {

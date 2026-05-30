@@ -61,10 +61,17 @@ use uuid::Uuid;
 
 /// Per spec §6.3 — periodic health-check cadence is 30s; cache TTL
 /// must be ≤ that so a `force-reset` from the control plane is
-/// reflected within one health cycle. 60s is the cache TTL ceiling
-/// chosen by the slice doc; lower values are operator-tunable via
-/// `with_refresh_ttl`.
-pub const DEFAULT_REFRESH_TTL: Duration = Duration::from_secs(60);
+/// reflected within one health cycle.
+///
+/// R2 M2 (Security F4): control-plane writes do NOT actively evict
+/// output_predictor caches — the cache layer is per-pod in-memory and
+/// the control plane has no fanout signal in v1alpha1. The pragmatic
+/// fix is to shorten the TTL to 5s so the eventual-consistency window
+/// between a control plane mutation and the predictor observing it is
+/// at most 5s. Spec §11 documents this 5s window as the operator
+/// contract; a tighter consistency guarantee requires the cache-
+/// revision column approach tracked as a GH issue in R2 outputs.
+pub const DEFAULT_REFRESH_TTL: Duration = Duration::from_secs(5);
 
 /// Endpoint snapshot returned by the cache. Cheap to clone (Arc'd in
 /// the cache to avoid copying the full struct on every Predict call).
@@ -361,8 +368,12 @@ mod tests {
 
     #[test]
     fn default_ttl_matches_spec() {
-        // Spec §6.3: 30s health cadence; cache TTL chosen at 60s.
-        assert_eq!(DEFAULT_REFRESH_TTL, Duration::from_secs(60));
+        // R2 M2 (Security F4): cache TTL tightened from 60s → 5s to
+        // bound the control-plane mutation → predictor observation
+        // window. Spec §11 documents the 5s eventual-consistency
+        // contract; tighter consistency is tracked as a follow-up
+        // GH issue (cache_revision_at column on the registry table).
+        assert_eq!(DEFAULT_REFRESH_TTL, Duration::from_secs(5));
     }
 
     #[test]

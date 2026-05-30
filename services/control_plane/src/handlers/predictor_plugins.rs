@@ -56,11 +56,89 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use tracing::{info, warn};
 use uuid::Uuid;
 
 use spendguard_auth::{Permission, Principal};
+
+/// R2 M1 — write a `spendguard.audit.plugin_*.v1alpha1` CloudEvent
+/// into `control_plane_audit_outbox` inside the caller's transaction.
+/// The audit row + the registry-row mutation commit together so an
+/// audit chain consumer never sees a row mutation without the
+/// corresponding audit event (atomic single-tx outbox pattern,
+/// mirror of ledger's post_ledger_transaction SP).
+///
+/// `payload` is the event-specific `data` body — register/update
+/// include `endpoint_url` + `server_cert_fingerprint` (NOT the full
+/// PEM); delete includes only the tenant_id; force_reset includes the
+/// operator's reason. The caller MUST have run
+/// `SELECT set_config('app.current_tenant_id', ...)` inside the same
+/// transaction so the RLS WITH CHECK clause passes.
+///
+/// `producer_sequence` is allocated per-tenant by the helper itself —
+/// it issues `SELECT COALESCE(MAX(producer_sequence), 0) + 1 FROM
+/// control_plane_audit_outbox WHERE tenant_id = $1` inside the same
+/// tx so concurrent INSERTs in different transactions hit the
+/// UNIQUE(tenant_id, producer_sequence) constraint and one rolls
+/// back (the handler's HTTP semantics then surface as 409 / 500).
+/// SLICE-extra will replace this with a dedicated sequence allocator
+/// SP per the ledger pattern.
+async fn emit_plugin_audit_event(
+    tx: &mut Transaction<'_, Postgres>,
+    tenant_id: Uuid,
+    event_kind: &str, // "registered" | "updated" | "deleted" | "force_reset"
+    actor_subject: &str,
+    payload_data: serde_json::Value,
+) -> Result<(), sqlx::Error> {
+    let audit_outbox_id = Uuid::now_v7();
+    let event_id = Uuid::now_v7();
+    let event_type = format!("spendguard.audit.plugin_{event_kind}.v1alpha1");
+
+    // Allocate the next per-tenant producer_sequence inside the same tx.
+    let next_seq: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COALESCE(MAX(producer_sequence), 0) + 1
+          FROM control_plane_audit_outbox
+         WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let producer_sequence = next_seq.0;
+
+    let now = Utc::now();
+    let cloudevent = serde_json::json!({
+        "specversion": "1.0",
+        "type": event_type,
+        "id": event_id.to_string(),
+        "source": "spendguard-control-plane",
+        "tenantid": tenant_id.to_string(),
+        "subject": format!("plugin/{tenant_id}"),
+        "time": now.to_rfc3339(),
+        "actor_subject": actor_subject,
+        "producer_sequence": producer_sequence,
+        "data": payload_data,
+    });
+
+    sqlx::query(
+        r#"
+        INSERT INTO control_plane_audit_outbox
+            (audit_outbox_id, tenant_id, event_type, cloudevent_payload,
+             cloudevent_payload_signature_hex, producer_sequence)
+        VALUES ($1, $2, $3, $4::JSONB, '', $5)
+        "#,
+    )
+    .bind(audit_outbox_id)
+    .bind(tenant_id)
+    .bind(&event_type)
+    .bind(&cloudevent)
+    .bind(producer_sequence)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
 
 /// Shared app state — for SLICE_07 we only need the pg pool. The
 /// existing `AppState` in main.rs holds the same shape so we accept
@@ -222,6 +300,27 @@ pub async fn register_plugin<S: PluginAppState>(
         Err(e) => return Err(internal_err(e).into_response()),
     };
 
+    // R2 M1: signed CloudEvent emission inside the same tx so
+    // outbox + registry-row commit atomically. payload includes the
+    // endpoint URL + cert fingerprint (NOT the full PEM) so audit
+    // consumers can reconstruct the wire identity.
+    if let Err(e) = emit_plugin_audit_event(
+        &mut tx,
+        tenant_uuid,
+        "registered",
+        &principal.subject,
+        serde_json::json!({
+            "plugin_endpoint_id": row.0.to_string(),
+            "endpoint_url": &req.endpoint_url,
+            "server_cert_fingerprint": &req.server_cert_fingerprint,
+            "client_cert_id": &req.client_cert_id,
+        }),
+    )
+    .await
+    {
+        return Err(internal_err(e).into_response());
+    }
+
     tx.commit().await.map_err(|e| internal_err(e).into_response())?;
 
     info!(
@@ -345,6 +444,39 @@ pub async fn update_plugin<S: PluginAppState>(
         }
     };
 
+    // R2 M1: signed CloudEvent emission. Payload includes the RESULTING
+    // endpoint_url + server_cert_fingerprint (post-COALESCE) so audit
+    // consumers see the effective state. The "fields requested" list
+    // captures which knobs the operator touched even if COALESCE
+    // resolved them to the same value.
+    let fields_changed: Vec<&str> = [
+        ("endpoint_url", req.endpoint_url.is_some()),
+        ("server_cert_fingerprint", req.server_cert_fingerprint.is_some()),
+        ("client_cert_id", req.client_cert_id.is_some()),
+        ("enabled", req.enabled.is_some()),
+    ]
+    .into_iter()
+    .filter_map(|(k, set)| if set { Some(k) } else { None })
+    .collect();
+    if let Err(e) = emit_plugin_audit_event(
+        &mut tx,
+        tenant_uuid,
+        "updated",
+        &principal.subject,
+        serde_json::json!({
+            "plugin_endpoint_id": row.0.to_string(),
+            "endpoint_url": &row.2,
+            "server_cert_fingerprint": &row.3,
+            "client_cert_id": &row.4,
+            "enabled": row.5,
+            "fields_changed": fields_changed,
+        }),
+    )
+    .await
+    {
+        return Err(internal_err(e).into_response());
+    }
+
     tx.commit().await.map_err(|e| internal_err(e).into_response())?;
 
     info!(
@@ -403,11 +535,29 @@ pub async fn delete_plugin<S: PluginAppState>(
     .await
     .map_err(|e| internal_err(e).into_response())?;
 
-    tx.commit().await.map_err(|e| internal_err(e).into_response())?;
-
     if res.rows_affected() == 0 {
+        // No row to delete — DO NOT emit an audit event; surface 404.
+        // tx.commit() is still safe (no changes).
+        let _ = tx.commit().await;
         return Err((StatusCode::NOT_FOUND, "plugin endpoint not registered for tenant").into_response());
     }
+
+    // R2 M1: signed CloudEvent emission inside the same tx as the DELETE.
+    if let Err(e) = emit_plugin_audit_event(
+        &mut tx,
+        tenant_uuid,
+        "deleted",
+        &principal.subject,
+        serde_json::json!({
+            "tenant_id": tenant_uuid.to_string(),
+        }),
+    )
+    .await
+    {
+        return Err(internal_err(e).into_response());
+    }
+
+    tx.commit().await.map_err(|e| internal_err(e).into_response())?;
 
     info!(
         subject = %principal.subject,
@@ -548,6 +698,27 @@ pub async fn force_reset_plugin<S: PluginAppState>(
     .map_err(|e| internal_err(e).into_response())?;
 
     let row = row.ok_or((StatusCode::NOT_FOUND, "plugin endpoint not registered for tenant").into_response())?;
+
+    // R2 M1: signed CloudEvent emission inside the same tx. The reason
+    // is operator-supplied free text; we already enforce non-empty +
+    // could grow length caps in a follow-up (tracked as GH issue per
+    // R2 outputs).
+    if let Err(e) = emit_plugin_audit_event(
+        &mut tx,
+        tenant_uuid,
+        "force_reset",
+        &principal.subject,
+        serde_json::json!({
+            "tenant_id": row.0.to_string(),
+            "reset_at": row.1.to_rfc3339(),
+            "reason": &req.reason,
+        }),
+    )
+    .await
+    {
+        return Err(internal_err(e).into_response());
+    }
+
     tx.commit().await.map_err(|e| internal_err(e).into_response())?;
 
     info!(

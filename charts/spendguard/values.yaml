@@ -315,10 +315,14 @@ outputPredictor:
   # control_plane DB while output_distribution_cache lives in
   # canonical_ingest DB; separate pools per spec §8.
   pluginEndpointDatabaseUrl: ""
-  # Plugin endpoint cache TTL (spec §6.3 — 60s ceiling so a
-  # force-reset via control plane API is reflected within one
-  # health-check cycle).
-  pluginEndpointCacheTtlSeconds: 60
+  # Plugin endpoint cache TTL (spec §6.3 — 30s health-check cadence
+  # implies cache TTL ≤ 30s; R2 M2 tightened the default to 5s so a
+  # control plane mutation (POST/PUT/DELETE/force-reset) is observed
+  # by the predictor within at most 5s. Spec §11 documents this as
+  # the eventual-consistency window operator contract. Tighter
+  # consistency requires the cache_revision_at column approach
+  # tracked as a follow-up GH issue.
+  pluginEndpointCacheTtlSeconds: 5
   # Secret name carrying SpendGuard's client cert + key + the
   # customer trust CA (PEMs under keys tls.crt / tls.key / ca.crt).
   # Required under chart.profile=production when Strategy C is
