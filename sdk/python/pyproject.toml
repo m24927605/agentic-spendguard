@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "spendguard-sdk"
-version = "0.4.0"
-description = "SpendGuard SDK — runtime safety layer client for AI agent frameworks (Pydantic-AI, LangChain, LangGraph, OpenAI Agents SDK)."
+version = "0.5.0"
+description = "SpendGuard SDK — runtime safety layer client for AI agent frameworks (Pydantic-AI, LangChain, LangGraph, OpenAI Agents SDK). SLICE_12: default token estimators + with_run_plan decorator (Signal 3)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "Apache-2.0"
@@ -27,10 +27,19 @@ classifiers = [
 # Core deps: the SpendGuardClient + proto stubs only. Framework deps
 # are gated behind extras so a user who only writes raw OpenAI SDK code
 # doesn't pull in pydantic-ai / langchain / etc.
+#
+# SLICE_12: `tiktoken` and `tokenizers` are CORE deps, not extras —
+# the default `claim_estimator` in every integration uses them for
+# any OpenAI / Anthropic / Gemini model. Skipping them would force
+# every adapter user to supply a manual estimator (regression vs 0.4.0
+# where `claim_estimator` was a required parameter; users were
+# building chars/4 stubs by hand). Both deps are <1MB each.
 dependencies = [
   "grpcio>=1.62",
   "protobuf>=4.25,<6",
   "pydantic>=2.6",
+  "tiktoken>=0.6,<1.0",
+  "tokenizers>=0.20,<1.0",
 ]
 
 [project.optional-dependencies]
@@ -76,6 +85,26 @@ Issues = "https://github.com/m24927605/agentic-spendguard/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/spendguard"]
+
+# SLICE_12 Phase B: ensure vendored tokenizer JSON assets are
+# explicitly forced into the wheel. hatchling treats *.json under
+# `src/spendguard/data/` as package data automatically, but the
+# force-include guards against future builds that exclude non-Python
+# extensions or pyproject churn dropping the data path.
+[tool.hatch.build.targets.wheel.force-include]
+"src/spendguard/data/anthropic_claude3_tokenizer.json" = "spendguard/data/anthropic_claude3_tokenizer.json"
+"src/spendguard/data/gemini_1_5_tokenizer.json" = "spendguard/data/gemini_1_5_tokenizer.json"
+
+# Sdist explicit inclusion: pyproject's `tool.hatch.build` defaults
+# include all of `src/`, but make the data dependency explicit so a
+# user inspecting `pip download --no-binary` sees the assets.
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/spendguard/",
+  "LICENSE_NOTICES.md",
+  "README.md",
+  "pyproject.toml",
+]
 
 [tool.ruff]
 line-length = 100

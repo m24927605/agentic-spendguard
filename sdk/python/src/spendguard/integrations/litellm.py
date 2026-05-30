@@ -211,12 +211,40 @@ class SpendGuardLiteLLMCallback(CustomLogger):
         *,
         client: SpendGuardClient | None,
         budget_resolver: BudgetResolver,
-        claim_estimator: ClaimEstimator,
+        claim_estimator: ClaimEstimator | None = None,
         claim_reconciler: ClaimReconciler,
         fail_closed: bool = True,
     ) -> None:
         self._client = client
         self._budget_resolver = budget_resolver
+        # SLICE_12: when claim_estimator is None, install a deferred
+        # default that re-dispatches per call. The LiteLLM proxy may
+        # serve heterogeneous models; ``data["model"]`` resolves the
+        # right estimator per request. The closure re-invokes the
+        # budget_resolver to get budget/window/unit because those
+        # vary per request too — the resolver MUST be a pure function
+        # (no side effects) so the double-call is safe.
+        if claim_estimator is None:
+            from ._default_estimator import litellm_default_claim_estimator
+
+            def _per_call_default(rctx: Any) -> list[Any]:
+                binding = self._budget_resolver(rctx)
+                if binding is None:
+                    raise SpendGuardConfigError(
+                        "LiteLLM default claim_estimator: budget_resolver "
+                        "returned None; cannot build default claim. Either "
+                        "fix the resolver or supply an explicit claim_estimator."
+                    )
+                model = (rctx.data or {}).get("model") or ""
+                fn = litellm_default_claim_estimator(
+                    budget_id=binding.budget_id,
+                    window_instance_id=binding.window_instance_id,
+                    unit=binding.unit,
+                    model=str(model),
+                )
+                return fn(rctx)
+
+            claim_estimator = _per_call_default
         self._claim_estimator = claim_estimator
         self._claim_reconciler = claim_reconciler
         self._fail_closed = fail_closed
@@ -747,10 +775,12 @@ class _LoopBoundCallback(SpendGuardLiteLLMCallback):
         socket_path: str,
         tenant_id: str,
         budget_resolver: BudgetResolver,
-        claim_estimator: ClaimEstimator,
+        claim_estimator: ClaimEstimator | None = None,
         claim_reconciler: ClaimReconciler,
         fail_closed: bool = True,
     ) -> None:
+        # SLICE_12: parent __init__ handles claim_estimator=None default
+        # installation (per-call dispatch via _per_call_default).
         super().__init__(
             client=None,
             budget_resolver=budget_resolver,
@@ -889,11 +919,35 @@ class SpendGuardDirectAcompletion:
         *,
         client: SpendGuardClient,
         budget_resolver: BudgetResolver,
-        claim_estimator: ClaimEstimator,
+        claim_estimator: ClaimEstimator | None = None,
         claim_reconciler: ClaimReconciler,
     ) -> None:
         self._client = client
         self._budget_resolver = budget_resolver
+        # SLICE_12: same default-estimator pattern as the proxy callback.
+        # Direct mode users still get sensible defaults if they don't
+        # supply a claim_estimator.
+        if claim_estimator is None:
+            from ._default_estimator import litellm_default_claim_estimator
+
+            def _per_call_default(rctx: Any) -> list[Any]:
+                binding = self._budget_resolver(rctx)
+                if binding is None:
+                    raise SpendGuardConfigError(
+                        "LiteLLM direct default claim_estimator: "
+                        "budget_resolver returned None; cannot build "
+                        "default claim. Supply an explicit claim_estimator."
+                    )
+                model = (rctx.data or {}).get("model") or ""
+                fn = litellm_default_claim_estimator(
+                    budget_id=binding.budget_id,
+                    window_instance_id=binding.window_instance_id,
+                    unit=binding.unit,
+                    model=str(model),
+                )
+                return fn(rctx)
+
+            claim_estimator = _per_call_default
         self._claim_estimator = claim_estimator
         self._claim_reconciler = claim_reconciler
         self._fail_open_dev = (

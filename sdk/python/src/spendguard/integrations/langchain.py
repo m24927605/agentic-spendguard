@@ -173,8 +173,44 @@ class SpendGuardChatModel(BaseChatModel):
     window_instance_id: str
     unit: Any  # common_pb2.UnitRef
     pricing: Any  # common_pb2.PricingFreeze
-    claim_estimator: ClaimEstimator
+    # SLICE_12: claim_estimator is now Optional. When None / omitted,
+    # an after-validator below auto-populates it with the default
+    # estimator dispatched from the inner model's name. Backward compat
+    # (spec §8.5): explicit non-None still wins.
+    claim_estimator: ClaimEstimator | None = None
     call_signature_fn: CallSignatureFn | None = None
+
+    def model_post_init(self, _ctx: Any, /) -> None:
+        """Pydantic v2 post-init: install default claim_estimator if absent."""
+        if self.claim_estimator is None:
+            from ._default_estimator import langchain_default_claim_estimator
+
+            # `inner` may be a RunnableBinding (bind_tools result) whose
+            # `model_name` lives on the bound runnable's `.bound`. Try a
+            # cascade of common attribute names; settle for empty string
+            # if none match (the estimator then warns + uses chars/4).
+            inner = self.inner
+            model_name = (
+                getattr(inner, "model_name", None)
+                or getattr(inner, "model", None)
+                or getattr(getattr(inner, "bound", None), "model_name", None)
+                or getattr(getattr(inner, "bound", None), "model", None)
+                or ""
+            )
+            # Use object.__setattr__ because pydantic v2 BaseModel
+            # frozen-ness applies to assignment but allows __setattr__
+            # within model_post_init. This sets the field on the
+            # already-validated instance.
+            object.__setattr__(
+                self,
+                "claim_estimator",
+                langchain_default_claim_estimator(
+                    budget_id=self.budget_id,
+                    window_instance_id=self.window_instance_id,
+                    unit=self.unit,
+                    model=str(model_name),
+                ),
+            )
 
     @property
     def _llm_type(self) -> str:
