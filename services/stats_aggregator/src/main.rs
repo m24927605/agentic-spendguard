@@ -81,33 +81,15 @@ async fn main() -> Result<()> {
         .context("connect to canonical_ingest DB")?;
     info!("canonical_ingest DB pool connected");
 
-    // ── Build drift alert sink ────────────────────────────────────
-    let sink: Arc<dyn DriftAlertSink> = if cfg.canonical_ingest_url.is_empty() {
-        warn!(
-            "SPENDGUARD_STATS_AGGREGATOR_CANONICAL_INGEST_URL not set — \
-             drift_alert events will log to stdout (demo mode). \
-             Production Helm profile rejects this fallback."
-        );
-        Arc::new(LoggingDriftAlertSink)
-    } else {
-        let channel = build_canonical_ingest_channel(&cfg)
-            .await
-            .context("connect canonical_ingest channel")?;
-        info!(
-            url = %cfg.canonical_ingest_url,
-            mtls = cfg.sink_tls_cert_pem.is_some(),
-            "canonical_ingest sink connected"
-        );
-        Arc::new(CanonicalIngestDriftAlertSink::new(channel))
-    };
-
     // ── Signer (audit-routed CloudEvent producer identity) ────────
-    let producer_identity = if cfg.event_source_override.is_empty() {
-        format!("stats-aggregator:{}", cfg.region)
-    } else {
-        cfg.event_source_override.clone()
-    };
-    std::env::set_var("SPENDGUARD_STATS_AGGREGATOR_SIGNING_PRODUCER_IDENTITY", &producer_identity);
+    //
+    // R2 M10: do NOT std::env::set_var() — that mutation is racy on
+    // multi-threaded Rust (Rust 1.80+ marks set_var unsafe in code
+    // running concurrently with other env reads). The signer crate's
+    // signer_from_env reads `<prefix>_SIGNING_PRODUCER_IDENTITY`
+    // directly; Helm sets this env var at pod startup (see
+    // charts/spendguard/templates/stats_aggregator.yaml). No runtime
+    // mutation required.
     let signer: Arc<dyn Signer> = Arc::from(
         spendguard_signing::signer_from_env("SPENDGUARD_STATS_AGGREGATOR")
             .await
@@ -118,6 +100,59 @@ async fn main() -> Result<()> {
         key_id = %signer.key_id(),
         "signer ready"
     );
+
+    // ── Build drift alert sink ────────────────────────────────────
+    //
+    // R2 B5: production sink construction requires schema_bundle_id +
+    // schema_bundle_hash_hex from config so the AppendEventsRequest
+    // envelope carries the required fields. Demo profile may use the
+    // LoggingDriftAlertSink which skips the envelope entirely.
+    let sink: Arc<dyn DriftAlertSink> = if cfg.canonical_ingest_url.is_empty() {
+        warn!(
+            "SPENDGUARD_STATS_AGGREGATOR_CANONICAL_INGEST_URL not set — \
+             drift_alert events will log to stdout (demo mode). \
+             Production Helm profile rejects this fallback."
+        );
+        Arc::new(LoggingDriftAlertSink)
+    } else {
+        if cfg.schema_bundle_id.is_empty() {
+            anyhow::bail!(
+                "SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_ID required when \
+                 SPENDGUARD_STATS_AGGREGATOR_CANONICAL_INGEST_URL is set \
+                 (R2 B5: canonical_ingest rejects AppendEventsRequest \
+                 without schema_bundle)"
+            );
+        }
+        if cfg.schema_bundle_hash_hex.is_empty() {
+            anyhow::bail!(
+                "SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_HASH_HEX required \
+                 when SPENDGUARD_STATS_AGGREGATOR_CANONICAL_INGEST_URL is set"
+            );
+        }
+        let bundle_hash = hex::decode(&cfg.schema_bundle_hash_hex)
+            .context("SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_HASH_HEX must be hex-encoded")?;
+        let schema_bundle_ref =
+            spendguard_stats_aggregator::proto::common::v1::SchemaBundleRef {
+                schema_bundle_id: cfg.schema_bundle_id.clone(),
+                schema_bundle_hash: bundle_hash.into(),
+                canonical_schema_version: cfg.canonical_schema_version.clone(),
+            };
+        let channel = build_canonical_ingest_channel(&cfg)
+            .await
+            .context("connect canonical_ingest channel")?;
+        info!(
+            url = %cfg.canonical_ingest_url,
+            mtls = cfg.sink_tls_cert_pem.is_some(),
+            schema_bundle_id = %cfg.schema_bundle_id,
+            "canonical_ingest sink connected"
+        );
+        Arc::new(CanonicalIngestDriftAlertSink::new(
+            channel,
+            signer.producer_identity().to_string(),
+            schema_bundle_ref,
+            signer.key_id().to_string(),
+        ))
+    };
 
     let detector_cfg = DriftDetectorConfig {
         drift_z_threshold: cfg.drift_z_threshold,

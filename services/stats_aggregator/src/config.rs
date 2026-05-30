@@ -61,6 +61,40 @@ pub struct Config {
     /// per-instance disambiguation in multi-region deploys.
     #[serde(default)]
     pub event_source_override: String,
+
+    // ── R2 B5: AppendEventsRequest envelope fields ────────────────────
+    //
+    // canonical_ingest's append handler validates producer_id +
+    // schema_bundle + route fields on every AppendEventsRequest. The
+    // R1 shape sent `..Default::default()` on these → empty producer_id
+    // → "producer_id required"; missing schema_bundle → "schema_bundle
+    // required"; ROUTE_UNSPECIFIED → "route is unspecified". Every
+    // drift_alert emit was rejected.
+    //
+    // Mirrors the outbox_forwarder env contract
+    // (services/outbox_forwarder/src/config.rs + outbox-forwarder.yaml).
+
+    /// UUID string identifying the schema bundle stats_aggregator's
+    /// outgoing drift_alert CloudEvents conform to. Same format as
+    /// outboxForwarder.schemaBundleId in the Helm chart. Required at
+    /// runtime when the CanonicalIngest sink is configured (production
+    /// profile) — empty value triggers a sink-construction failure with
+    /// a clear error.
+    #[serde(default)]
+    pub schema_bundle_id: String,
+
+    /// Hex-encoded SHA-256 of the schema bundle .tgz. Must byte-exact
+    /// match the canonical_ingest service's registered hash — mismatch
+    /// → canonical_ingest rejects every event with SchemaBundleUnknown.
+    /// Required at runtime when the sink is configured.
+    #[serde(default)]
+    pub schema_bundle_hash_hex: String,
+
+    /// Canonical schema version string written into the
+    /// SchemaBundleRef.canonical_schema_version field. Defaults to
+    /// `spendguard.v1alpha1` matching the outbox_forwarder pattern.
+    #[serde(default = "default_canonical_schema_version")]
+    pub canonical_schema_version: String,
 }
 
 impl std::fmt::Debug for Config {
@@ -81,8 +115,15 @@ impl std::fmt::Debug for Config {
             .field("sink_tls_ca_pem", &self.sink_tls_ca_pem)
             .field("sink_tls_sni", &self.sink_tls_sni)
             .field("event_source_override", &self.event_source_override)
+            .field("schema_bundle_id", &self.schema_bundle_id)
+            .field("schema_bundle_hash_hex_present", &!self.schema_bundle_hash_hex.is_empty())
+            .field("canonical_schema_version", &self.canonical_schema_version)
             .finish()
     }
+}
+
+fn default_canonical_schema_version() -> String {
+    "spendguard.v1alpha1".to_string()
 }
 
 fn default_cycle_seconds() -> u64 {

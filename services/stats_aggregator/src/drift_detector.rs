@@ -36,9 +36,10 @@ use tracing::{debug, info, warn};
 
 use crate::aggregation::BucketAggregate;
 use crate::proto::canonical_ingest::v1::{
-    canonical_ingest_client::CanonicalIngestClient, AppendEventsRequest,
+    append_events_request::Route, canonical_ingest_client::CanonicalIngestClient,
+    AppendEventsRequest,
 };
-use crate::proto::common::v1::CloudEvent;
+use crate::proto::common::v1::{CloudEvent, SchemaBundleRef};
 
 /// CloudEvent type for prediction drift alerts. Per spec §7.2 family
 /// + SLICE_05 R2 B2 audit-routed prefix discipline.
@@ -154,14 +155,44 @@ impl DriftAlertSink for LoggingDriftAlertSink {
 }
 
 /// canonical_ingest sink emitting one AppendEventsRequest per alert.
+///
+/// R2 B5: AppendEventsRequest envelope MUST carry producer_id +
+/// schema_bundle + route or canonical_ingest's append handler rejects
+/// the call with `producer_id required` / `schema_bundle required` /
+/// `route is unspecified` (see
+/// services/canonical_ingest/src/handlers/append_events.rs:64,73,101).
+/// Defaults from R1 shape (`..Default::default()`) failed all three.
 pub struct CanonicalIngestDriftAlertSink {
     client: tokio::sync::Mutex<CanonicalIngestClient<Channel>>,
+    producer_id: String,
+    schema_bundle_ref: SchemaBundleRef,
+    signing_key_id: String,
 }
 
 impl CanonicalIngestDriftAlertSink {
-    pub fn new(channel: Channel) -> Self {
+    /// Build the sink with the envelope fields the canonical_ingest
+    /// handler requires.
+    ///
+    /// * `producer_id` — typically `stats-aggregator:<region>`; matches
+    ///   the `signer.producer_identity()` discipline used by tokenizer
+    ///   SLICE_05.
+    /// * `schema_bundle_ref` — pre-built SchemaBundleRef (id + hash +
+    ///   canonical_schema_version). Built in main.rs from config + the
+    ///   hex-decoded hash bytes (mirror of outbox_forwarder).
+    /// * `signing_key_id` — the AppendEventsRequest batch-level
+    ///   signing_key_id (transport check only; per-event signature is on
+    ///   each CloudEvent). Reuse signer.key_id() for consistency.
+    pub fn new(
+        channel: Channel,
+        producer_id: String,
+        schema_bundle_ref: SchemaBundleRef,
+        signing_key_id: String,
+    ) -> Self {
         Self {
             client: tokio::sync::Mutex::new(CanonicalIngestClient::new(channel)),
+            producer_id,
+            schema_bundle_ref,
+            signing_key_id,
         }
     }
 }
@@ -170,8 +201,19 @@ impl CanonicalIngestDriftAlertSink {
 impl DriftAlertSink for CanonicalIngestDriftAlertSink {
     async fn emit(&self, event: CloudEvent) -> Result<(), anyhow::Error> {
         let req = AppendEventsRequest {
+            producer_id: self.producer_id.clone(),
+            batch_max_producer_sequence: 0,
+            // batch_signature optional per Trace §13 — per-event
+            // signature on each CloudEvent is the canonical truth; we
+            // leave batch_signature empty (allowed in-cluster on mTLS).
+            batch_signature: bytes::Bytes::new(),
+            signing_key_id: self.signing_key_id.clone(),
+            schema_bundle: Some(self.schema_bundle_ref.clone()),
             events: vec![event],
-            ..Default::default()
+            // OBSERVABILITY: drift_alert is an observability event, not
+            // an enforcement event. canonical_ingest's failure mode for
+            // OBSERVABILITY is buffer_then_retry (per Trace §10.1).
+            route: Route::Observability as i32,
         };
         let mut guard = self.client.lock().await;
         guard

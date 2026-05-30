@@ -75,6 +75,11 @@ parking_lot = "0.12"
 async-trait = "0.1"
 bytes = "1"
 
+# R2 B5: hex decoding for schema_bundle_hash_hex env input (mirror of
+# outbox_forwarder convention; same parser shape used by canonical_ingest
+# producers).
+hex = "0.4"
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"
