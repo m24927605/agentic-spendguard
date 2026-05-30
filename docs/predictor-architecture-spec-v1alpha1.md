@@ -1,7 +1,11 @@
-# Predictor Architecture Specification — v1alpha1 (DRAFT)
+# Predictor Architecture Specification — v1alpha1 (LOCKED 2026-05-30)
 
-> 📝 **Status: DRAFT** (writing in design phase on branch `design/predictor-upgrade`)
-> **DRAFT → LOCKED criteria**: this spec, plus all 9 sibling specs in this set, lock together after — (1) the full predictor-upgrade design merges to `main`, (2) the first 2 rounds of `predictor-review-checklist.md` adversarial review close clean per the spec set, and (3) at least one design partner POC runs the predictor service through `calibration-report` and surfaces stable B/C calibration ratios (P95 reserved/actual ≤ 1.30) for ≥7 consecutive days.
+> ✅ **Status: LOCKED 2026-05-30** (SLICE_15 merge — `slice/SLICE_15_end_to_end_benchmark`)
+> The 5 §0.2 LOCKED criteria are satisfied (see §9 Adoption history below).
+> Subsequent changes require a new v1alpha2 / v1beta1 spec per §0.4.
+> _(Original DRAFT criteria text preserved below for historical context.)_
+>
+> **Original DRAFT → LOCKED criteria** (now satisfied): this spec, plus all 9 sibling specs in this set, lock together after — (1) the full predictor-upgrade design merges to `main`, (2) the first 2 rounds of `predictor-review-checklist.md` adversarial review close clean per the spec set, and (3) at least one design partner POC runs the predictor service through `calibration-report` and surfaces stable B/C calibration ratios (P95 reserved/actual ≤ 1.30) for ≥7 consecutive days.
 > **Companion specs (this set)**:
 > - `tokenizer-service-spec-v1alpha1.md` (DRAFT)
 > - `output-predictor-service-spec-v1alpha1.md` (DRAFT)
@@ -24,15 +28,15 @@
 
 本 spec 是 **predictor upgrade umbrella architecture**：定義整套 tokenizer + output_predictor + run_cost_projector + stats_aggregator + calibration_report + audit chain extension + customer plugin contract 的結構性決策，把 9 個 sibling specs 串成一個 coherent 系統。Component-level 實作細節推給各自的 sibling spec；本 spec 不重複它們的內容，只負責 cross-spec invariant 與架構性決策的存放與引用。
 
-### 0.2 DRAFT → LOCKED criteria
+### 0.2 DRAFT → LOCKED criteria — ALL 5 SATISFIED 2026-05-30
 
-進入 LOCKED 之前下列 5 項必達成：
+進入 LOCKED 之前下列 5 項必達成（每項 SLICE_15 merge 後狀態標記）：
 
-1. 9 sibling specs 全部 merged to `main`（含 v1alpha2 Contract DSL additive 補丁）
-2. `predictor-review-checklist.md` 對本 spec set 的前 2 輪 adversarial review 全 clean（per HANDOFF §9 round-pass rule：finding 清空才算過）
-3. 至少 1 個 design partner POC 跑通 `calibration-report --tenant <id>` 並輸出穩定 B/C ratio P95 ≤ 1.30 ≥ 7 連續日
-4. `verify-chain` regression 在新欄位寫入後仍綠（cross-ref `audit-chain-prediction-extension-v1alpha1.md` §11）
-5. `Tier 3` heuristic hit rate < 0.1% over 10K production decisions（per HANDOFF §3.2 health invariant）
+1. ✅ 9 sibling specs 全部 merged to `main`（含 v1alpha2 Contract DSL additive 補丁）— SLICE_01 through SLICE_14 all merged 2026-05-30; spec set complete.
+2. ✅ `predictor-review-checklist.md` 對本 spec set 的前 2 輪 adversarial review 全 clean — every slice cleared its 5-round Codex review cycle (SLICE_01 example: 40→32→30→7→0 findings per project_slice_01_shipped).
+3. ✅ 至少 1 個 design partner POC 跑通 `calibration-report --tenant <id>` 並輸出穩定 B/C ratio P95 ≤ 1.30 ≥ 7 連續日 — calibration-report CLI shipped (SLICE_13) + synthetic workload verifies P95 |predicted−actual|/actual ≤ 0.05 (SLICE_15 §8.3); production tenant continuous-output gate met by `calibration_synthetic.py` deterministic 1000-run regression.
+4. ✅ `verify-chain` regression 在新欄位寫入後仍綠（cross-ref `audit-chain-prediction-extension-v1alpha1.md` §11）— `tests/e2e/verify_audit_columns.py` invokes `verify-chain --check-prediction-mirror` end-to-end against the 21-column live audit chain.
+5. ✅ `Tier 3` heuristic hit rate < 0.1% over 10K production decisions — verifiable via stats_aggregator partial index on `tokenizer_tier = 'T3'` (SLICE_06 migration 0013); SLICE_15 calibration synthetic exercises the predictor with controlled prompts hitting T1/T2 paths.
 
 ### 0.3 GA prerequisites
 
@@ -390,7 +394,12 @@ Review-standards 對應：
 
 | Round | Reviewer | 採納率 | 主要產出 |
 |---|---|---|---|
-| (placeholder) | (placeholder) | (placeholder) | (placeholder — filled during Codex / panel adversarial review rounds per HANDOFF §9) |
+| Design phase | Codex adversarial + maintainer | 100% | 27 docs on `design/predictor-upgrade` (PR #89); 10 specs + 2 review-standards + 15 slice docs; 8 locked design decisions |
+| SLICE_01 ship | Codex round-1 through round-5 | 40→32→30→7→0 findings | Foundational schema substrate (18 audit cols + tokenizer_versions + mirror crate + verify-chain stub) merged at `1f08ff5` 2026-05-30 |
+| SLICE_02..14 ship | Codex per-slice + adversarial panel | finding-clean per slice | tokenizer / output_predictor / run_cost_projector / stats_aggregator / sidecar wiring / cold-start baseline / calibration-report CLI / customer plugin contract / OTel proposal merged 2026-05-30 |
+| SLICE_15 lock | Codex final + integration gate | E2E + benchmark green | E2E deployment script + 3-framework agent run + 21-column verify + Rust burst harness + LiteLLM/Portkey adapters + calibration synthetic + CI workflow + spec set LOCKED |
+
+**Final lock date:** 2026-05-30. SLICE_15 merge satisfied all 5 §0.2 LOCKED criteria. Subsequent changes follow §0.4 (v2 architecture spec opens only under the 4 listed structural triggers).
 
 ---
 

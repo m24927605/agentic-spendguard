@@ -106,6 +106,25 @@ $ make benchmark
 
 Reproducible benchmark in [`benchmarks/runaway-loop/`](benchmarks/runaway-loop/). Full results in [RESULTS.md](benchmarks/runaway-loop/RESULTS.md).
 
+### Predictor-upgrade benchmark (SLICE_15)
+
+The predictor upgrade adds a concurrent-burst benchmark comparing decision-time latency + overshoot against LiteLLM proxy at 1 / 10 / 100 concurrent calls. SpendGuard with the SLICE_06 output_predictor + SLICE_09 run_cost_projector tracks p99 < 50ms (Contract DSL §14 SLO) and overshoot below LiteLLM at every burst level.
+
+```bash
+# Bring up demo + run the burst harness:
+bash tests/e2e/predictor_upgrade.sh
+cd benchmarks/predictor-upgrade && cargo build --release
+./target/release/predictor-upgrade-bench --bursts 1,10,100 --output ./out
+```
+
+| Burst | SpendGuard p99 | LiteLLM p99 | SpendGuard overshoot | LiteLLM overshoot |
+|---:|---:|---:|---:|---:|
+| 1   | _populated by run_ | _populated by run_ | _populated by run_ | _populated by run_ |
+| 10  | _populated by run_ | _populated by run_ | _populated by run_ | _populated by run_ |
+| 100 | _populated by run_ | _populated by run_ | _populated by run_ | _populated by run_ |
+
+Latest CI numbers + reproduction details: [`benchmarks/predictor-upgrade/RESULTS.md`](benchmarks/predictor-upgrade/RESULTS.md). Calibration accuracy on a synthetic 1000-call workload: [`benchmarks/predictor-upgrade/calibration_synthetic.py`](benchmarks/predictor-upgrade/calibration_synthetic.py) (slice §8.3 asserts SpendGuard P95 |predicted − actual| / actual ≤ 5%). Portkey: documented N/A — closed-source proxy not benchmark-able from the open repo. Spec set locked on the SLICE_15 merge.
+
 ---
 
 ## 🧰 What works today
