@@ -95,6 +95,15 @@ pub struct AppendInput<'a> {
     /// Caller computes via `crate::classify::classify_audit_outcome`.
     pub failure_class: Option<&'a str>,
 
+    /// SLICE_06/0018 aggregator mirrors. These are not part of the
+    /// tag-300 prediction extension; they are decoded from the signed
+    /// CloudEvent data payload and written once with the canonical row.
+    pub model: Option<&'a str>,
+    pub agent_id: Option<&'a str>,
+    pub run_id_mirror: Option<Uuid>,
+    pub prompt_class: Option<&'a str>,
+    pub prompt_class_fingerprint: Option<&'a str>,
+
     /// Round-3 fix B2: tag 300-317 prediction-extension column mirror.
     /// SLICE_01 callers pass Default::default() (all None → SQL NULL);
     /// SLICE_06 callers populate from the decoded CloudEvent.
@@ -174,6 +183,8 @@ pub async fn append_event(
             payload_json, payload_blob_ref,
             region_id, ingest_shard_id, ingest_log_offset, ingest_at,
             recorded_month, failure_class,
+            model, agent_id, run_id_mirror, prompt_class,
+            prompt_class_fingerprint,
             -- 18 prediction columns (round-3 B2)
             predicted_a_tokens, predicted_b_tokens, predicted_c_tokens,
             reserved_strategy, prediction_strategy_used,
@@ -193,15 +204,17 @@ pub async fn append_event(
             $17, $18,
             $19, $20, $21, clock_timestamp(),
             date_trunc('month', $15)::DATE, $22,
-            $23, $24, $25,
-            $26, $27,
+            $23, $24, $25, $26,
+            $27,
             $28, $29, $30,
             $31, $32,
-            $33,
-            $34,
-            $35, $36,
-            $37, $38,
-            $39, $40
+            $33, $34, $35,
+            $36, $37,
+            $38,
+            $39,
+            $40, $41,
+            $42, $43,
+            $44, $45
          )",
     )
     .bind(input.event_id)
@@ -226,6 +239,11 @@ pub async fn append_event(
     .bind(input.ingest_shard_id)
     .bind(offset)
     .bind(input.failure_class)
+    .bind(input.model)
+    .bind(input.agent_id)
+    .bind(input.run_id_mirror)
+    .bind(input.prompt_class)
+    .bind(input.prompt_class_fingerprint)
     .bind(input.prediction.predicted_a_tokens)
     .bind(input.prediction.predicted_b_tokens)
     .bind(input.prediction.predicted_c_tokens)
