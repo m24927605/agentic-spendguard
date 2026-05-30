@@ -27,10 +27,19 @@ classifiers = [
 # Core deps: the SpendGuardClient + proto stubs only. Framework deps
 # are gated behind extras so a user who only writes raw OpenAI SDK code
 # doesn't pull in pydantic-ai / langchain / etc.
+#
+# SLICE_12: `tiktoken` and `tokenizers` are CORE deps, not extras —
+# the default `claim_estimator` in every integration uses them for
+# any OpenAI / Anthropic / Gemini model. Skipping them would force
+# every adapter user to supply a manual estimator (regression vs 0.4.0
+# where `claim_estimator` was a required parameter; users were
+# building chars/4 stubs by hand). Both deps are <1MB each.
 dependencies = [
   "grpcio>=1.62",
   "protobuf>=4.25,<6",
   "pydantic>=2.6",
+  "tiktoken>=0.6,<1.0",
+  "tokenizers>=0.20,<1.0",
 ]
 
 [project.optional-dependencies]
