@@ -145,13 +145,20 @@ pub async fn release_lock_conn(
 /// Discover the set of distinct tenants present in canonical_events for
 /// the last 30 days. Per spec §8.3 we iterate per-tenant for transaction
 /// isolation.
+///
+/// R2 B4: column is `ingest_at` (matches canonical_events.ingest_at —
+/// insertion-time stamp) not `recorded_at`. R2 M7: add the
+/// recorded_month partition-pruning predicate so the planner stays on
+/// the active monthly partitions instead of scanning the default
+/// partition.
 pub async fn discover_active_tenants(pool: &PgPool) -> Result<Vec<Uuid>, anyhow::Error> {
     let rows = sqlx::query(
         r#"
         SELECT DISTINCT tenant_id
         FROM canonical_events
         WHERE event_type = 'spendguard.audit.outcome'
-          AND recorded_at >= now() - interval '30 days'
+          AND ingest_at >= now() - interval '30 days'
+          AND recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
         "#,
     )
     .fetch_all(pool)
@@ -190,12 +197,25 @@ pub async fn aggregate_output_distribution(
     // production query plan benchmarks closer to the CTE form because
     // the percentile_cont workload is the dominant cost; the two-phase
     // application stitching adds ~5% overhead vs the full SQL CTE.
+    //
+    // R2 B3 (Software B4): GROUP BY the 7-class `prompt_class` enum —
+    // NOT prompt_class_fingerprint. output-predictor spec §8.2 closing
+    // paragraph: "Aggregator key uses class itself, not fingerprint —
+    // fingerprint is the audit identifier, class is the aggregation
+    // bucket." Stitching by the enum means the predictor's L4 cache
+    // lookup (keyed on req.prompt_class) hits real rows.
+    //
+    // R2 B4 (DB B1): columns referenced are the first-class mirror
+    // columns added in 0018 (model, agent_id, prompt_class) — NOT the
+    // base64-decoded JSON path. ingest_at not recorded_at (matches the
+    // real canonical_events.ingest_at). recorded_month partition-prune
+    // predicate (R2 M7) pins the planner to active partitions.
     let agg_30d = sqlx::query(
         r#"
         SELECT
-          cloudevent_payload->>'model' AS model,
-          cloudevent_payload->>'agent_id' AS agent_id,
-          cloudevent_payload->>'prompt_class_fingerprint' AS prompt_class,
+          model,
+          agent_id,
+          prompt_class,
           percentile_cont(0.50) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p50_30d,
           percentile_cont(0.95) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p95_30d,
           percentile_cont(0.99) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p99_30d,
@@ -205,11 +225,12 @@ pub async fn aggregate_output_distribution(
         FROM canonical_events
         WHERE event_type = 'spendguard.audit.outcome'
           AND actual_output_tokens IS NOT NULL
-          AND recorded_at >= now() - interval '30 days'
+          AND ingest_at >= now() - interval '30 days'
+          AND recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
           AND tenant_id = $1
-          AND cloudevent_payload->>'model' IS NOT NULL
-          AND cloudevent_payload->>'agent_id' IS NOT NULL
-          AND cloudevent_payload->>'prompt_class_fingerprint' IS NOT NULL
+          AND model IS NOT NULL
+          AND agent_id IS NOT NULL
+          AND prompt_class IS NOT NULL
         GROUP BY model, agent_id, prompt_class
         "#,
     )
@@ -221,9 +242,9 @@ pub async fn aggregate_output_distribution(
     let agg_7d = sqlx::query(
         r#"
         SELECT
-          cloudevent_payload->>'model' AS model,
-          cloudevent_payload->>'agent_id' AS agent_id,
-          cloudevent_payload->>'prompt_class_fingerprint' AS prompt_class,
+          model,
+          agent_id,
+          prompt_class,
           percentile_cont(0.50) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p50_7d,
           percentile_cont(0.95) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p95_7d,
           percentile_cont(0.99) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p99_7d,
@@ -233,11 +254,12 @@ pub async fn aggregate_output_distribution(
         FROM canonical_events
         WHERE event_type = 'spendguard.audit.outcome'
           AND actual_output_tokens IS NOT NULL
-          AND recorded_at >= now() - interval '7 days'
+          AND ingest_at >= now() - interval '7 days'
+          AND recorded_month >= DATE_TRUNC('month', now() - interval '7 days')::DATE
           AND tenant_id = $1
-          AND cloudevent_payload->>'model' IS NOT NULL
-          AND cloudevent_payload->>'agent_id' IS NOT NULL
-          AND cloudevent_payload->>'prompt_class_fingerprint' IS NOT NULL
+          AND model IS NOT NULL
+          AND agent_id IS NOT NULL
+          AND prompt_class IS NOT NULL
         GROUP BY model, agent_id, prompt_class
         "#,
     )

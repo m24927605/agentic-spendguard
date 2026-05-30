@@ -24,21 +24,28 @@ pub async fn aggregate_run_length(pool: &PgPool, tenant_id: Uuid) -> Result<(), 
 
     // Spec §6 — compute per-agent run lengths from decision events,
     // then aggregate percentiles + count of distinct run_ids.
+    //
+    // R2 B4 (DB B1): query first-class mirror columns from 0018 —
+    // agent_id, run_id_mirror (the UUID-typed run_id; mirror suffix
+    // disambiguates from canonical_events.run_id audit anchor).
+    // ingest_at not recorded_at. recorded_month partition-prune
+    // predicate per R2 M7 keeps the planner on active partitions.
     sqlx::query(
         r#"
         WITH run_lengths AS (
           SELECT
             tenant_id,
-            cloudevent_payload->>'agent_id' AS agent_id,
-            cloudevent_payload->>'run_id' AS run_id,
+            agent_id,
+            run_id_mirror AS run_id,
             count(*)::INT AS steps_in_run
           FROM canonical_events
           WHERE event_type = 'spendguard.audit.decision'
-            AND recorded_at >= now() - interval '30 days'
+            AND ingest_at >= now() - interval '30 days'
+            AND recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
             AND tenant_id = $1
-            AND cloudevent_payload->>'agent_id' IS NOT NULL
-            AND cloudevent_payload->>'run_id' IS NOT NULL
-          GROUP BY tenant_id, agent_id, run_id
+            AND agent_id IS NOT NULL
+            AND run_id_mirror IS NOT NULL
+          GROUP BY tenant_id, agent_id, run_id_mirror
         )
         INSERT INTO run_length_distribution_cache (
           tenant_id, agent_id,
