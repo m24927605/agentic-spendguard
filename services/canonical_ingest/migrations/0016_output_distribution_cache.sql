@@ -132,10 +132,12 @@ CREATE INDEX output_distribution_cache_freshness_idx
 -- call. Operators querying ad-hoc via psql see 0 rows until they set
 -- the session variable explicitly.
 --
--- BYPASSRLS for the aggregation writer (stats_aggregator runs as the
--- application role with BYPASSRLS — see GRANT below). RLS only applies
--- to the reader path. Adversarial cross-tenant query injection (per
--- spec §9.2) is blocked by the policy + session variable contract.
+-- R2 B1 fix: writer uses `set_config('app.current_tenant_id', ...)` per
+-- tenant before UPSERT — the policy's WITH CHECK clause then enforces
+-- tenant_id matches the session variable at INSERT/UPDATE. No BYPASSRLS
+-- attribute on the role; defense-in-depth via FORCE RLS. Adversarial
+-- cross-tenant query injection (per spec §9.2) is blocked by the policy
+-- + session variable contract for both reads and writes.
 -- ============================================================================
 
 ALTER TABLE output_distribution_cache ENABLE ROW LEVEL SECURITY;
