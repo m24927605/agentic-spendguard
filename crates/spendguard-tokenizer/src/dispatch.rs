@@ -181,9 +181,10 @@ pub struct DispatchEntry {
 ///     * `claude-3-(haiku|sonnet|opus)` (+ optional dated suffix)
 ///     * `claude-3-5-(haiku|sonnet|opus)` (+ optional dated suffix)
 ///
-///   Anthropic Bedrock (SLICE_04):
-///     * `anthropic.claude-3-(haiku|sonnet|opus)*-v\d:\d+`
-///     * `anthropic.claude-3-5-(haiku|sonnet|opus)*-v\d:\d+`
+///   Anthropic Bedrock (SLICE_04, R2 B1 cross-region prefix):
+///     * `[REGION.]anthropic.claude-3-(haiku|sonnet|opus)*-v\d:\d+`
+///     * `[REGION.]anthropic.claude-3-5-(haiku|sonnet|opus)*-v\d:\d+`
+///     where `REGION` is any lowercase region prefix (us/eu/apac/us-gov/future)
 ///
 ///   Gemini native (SLICE_04):
 ///     * `gemini-1.5-(flash|pro)` (+ optional `-NNN` revision)
@@ -191,13 +192,33 @@ pub struct DispatchEntry {
 ///
 ///   Cohere native (SLICE_04):
 ///     * `command-r(-plus)?` (+ optional dated suffix)
-///     * `command-light` (+ optional dated suffix)
+///     * (`command-light` INTENTIONALLY omitted per R2 Backend F4 —
+///        uses different vocab; falls to Tier 3 until vendored.)
 ///
-///   Cohere Bedrock (SLICE_04):
-///     * `cohere.command(-r)?(-plus)?-v\d:\d+`
+///   Cohere Bedrock (SLICE_04, R2 B1 cross-region prefix):
+///     * `[REGION.]cohere.command(-r)?(-plus)?-v\d:\d+`
 ///
-///   Llama Bedrock (SLICE_04):
-///     * `meta.llama3-N-Mb-instruct-v\d:\d+`
+///   Llama Bedrock (SLICE_04, R2 B1 cross-region prefix):
+///     * `[REGION.]meta.llama3-N-Mb-instruct-v\d:\d+`
+///
+/// ## R2 B2 — narrow patterns by design (Option A)
+///
+/// Spec §3.1 originally listed catch-all Bedrock patterns
+/// (`^anthropic\.claude-.*$`, `^cohere\..*$`, `^meta\.llama.*$`).
+/// The implementation narrows them on purpose so that:
+///   * Pre-Claude-3 models (`anthropic.claude-instant-v1`,
+///     `anthropic.claude-v2`) fall to Tier 3 instead of being silently
+///     dispatched to the Claude-3 BPE (older vocab; different tokens).
+///   * Cohere embedding models (`cohere.embed-english-v3` et al.) fall
+///     to Tier 3 because they use a different vocab than command-r.
+///   * Pre-Llama-3 models (`meta.llama2-70b-chat-v1`) fall to Tier 3.
+///
+/// Each Tier 3 fallback emits the `tokenizer_unknown_model` metric per
+/// spec §3.3 so operators see the gap and PR a tracked follow-up. The
+/// rationale: dispatching wrong-vocab encoders produces silent ~5-20%
+/// under-counts; falling to Tier 3 produces a 5% conservative margin
+/// + a visible metric. Safer default. SLICE_NN follow-ups will widen
+/// coverage by adding explicit vendored asset rows per family.
 ///
 /// Pattern ordering: more specific (e.g. `gpt-4o`) listed BEFORE the
 /// broader `gpt-4` pattern so first-match wins. The dispatch loop
@@ -292,15 +313,34 @@ const RAW_ENTRIES: &[(&str, EncoderResolver)] = &[
     // Full Bedrock IDs look like:
     //   anthropic.claude-3-5-sonnet-20240620-v1:0
     //   anthropic.claude-3-haiku-20240307-v1:0
-    // Per §9 review question 3 — explicit golden-sample coverage
-    // for the full dated + versioned form is in
-    // `services/tokenizer/tests/golden_samples.rs` SLICE_04 section.
+    //
+    // Round-2 fix B1 (Software F1 panel finding): AWS Bedrock since
+    // 2024-09 routes major models via cross-region inference profiles
+    // that prepend a region prefix:
+    //   us.anthropic.claude-3-5-sonnet-20240620-v1:0
+    //   eu.anthropic.claude-3-haiku-20240307-v1:0
+    //   apac.anthropic.claude-3-5-sonnet-20241022-v1:0
+    //   us-gov.anthropic.claude-3-5-sonnet-20240620-v1:0
+    //
+    // The optional `(?:[a-z][a-z0-9-]*\.)?` prefix admits any current
+    // region prefix (us/eu/apac/us-gov) AND any future region AWS adds
+    // (e.g., `me`, `il`, future regional partitions). Per Bedrock
+    // documentation the region prefix is a single lowercase token
+    // matching `[a-z][a-z0-9-]*` followed by a dot before the vendor
+    // family. We use a permissive prefix rather than enumerating regions
+    // to avoid an annual maintenance burden — if AWS adds a region, we
+    // route automatically instead of silently falling to Tier 3.
+    //
+    // Per §9 review question 3 — explicit golden-sample coverage for
+    // the full dated + versioned form lives in
+    // `services/tokenizer/tests/slice04_golden_samples.rs` SLICE_04
+    // section; R2 B1 added cross-region variants.
     (
-        r"^anthropic\.claude-3-5-(sonnet|haiku|opus)(-\d{8})?-v\d+:\d+$",
+        r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-5-(sonnet|haiku|opus)(-\d{8})?-v\d+:\d+$",
         EncoderResolver::Anthropic,
     ),
     (
-        r"^anthropic\.claude-3-(haiku|sonnet|opus)(-\d{8})?-v\d+:\d+$",
+        r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-(haiku|sonnet|opus)(-\d{8})?-v\d+:\d+$",
         EncoderResolver::Anthropic,
     ),
 
@@ -324,14 +364,24 @@ const RAW_ENTRIES: &[(&str, EncoderResolver)] = &[
         r"^command-r(-\d{8})?$",
         EncoderResolver::Cohere,
     ),
-    (
-        r"^command-light(-\d{8})?$",
-        EncoderResolver::Cohere,
-    ),
+    // Round-2 fix Backend F4: `command-light` is INTENTIONALLY omitted
+    // from the dispatch table. Cohere's `command-light` model uses a
+    // different BPE vocabulary than `command-r`, so routing it to the
+    // `cohere-v2-bpe` (command-r) encoder would silently under-count
+    // tokens by ~5-20%. Falling to Tier 3 is correct behaviour per spec
+    // §3.4 fallback policy until a separate `command-light` tokenizer
+    // asset is vendored (tracked as a SLICE_NN follow-up). The
+    // `cohere_command_light_falls_to_tier3` unit test below pins this.
+    //
+    // (Previously a `^command-light(-\d{8})?$` entry routed to Cohere;
+    //  removed in R2 to eliminate the silent wrong-encoder dispatch.)
 
     // ── Cohere Bedrock routing ──
+    //
+    // Round-2 fix B1 (Software F1): cross-region prefix support, same
+    // rationale as the Anthropic Bedrock entries above.
     (
-        r"^cohere\.command(-r)?(-plus)?-v\d+:\d+$",
+        r"^(?:[a-z][a-z0-9-]*\.)?cohere\.command(-r)?(-plus)?-v\d+:\d+$",
         EncoderResolver::Cohere,
     ),
 
@@ -341,8 +391,13 @@ const RAW_ENTRIES: &[(&str, EncoderResolver)] = &[
     //   meta.llama3-1-70b-instruct-v1:0
     //   meta.llama3-2-1b-instruct-v1:0
     //   meta.llama3-3-70b-instruct-v1:0
+    //
+    // Round-2 fix B1 (Software F1): cross-region prefix support per
+    // Bedrock inference profile conventions. Examples:
+    //   us.meta.llama3-1-70b-instruct-v1:0
+    //   eu.meta.llama3-2-1b-instruct-v1:0
     (
-        r"^meta\.llama3(-\d+)?-\d+b-instruct-v\d+:\d+$",
+        r"^(?:[a-z][a-z0-9-]*\.)?meta\.llama3(-\d+)?-\d+b-instruct-v\d+:\d+$",
         EncoderResolver::Llama,
     ),
 ];
@@ -748,10 +803,23 @@ mod tests {
     }
 
     #[test]
-    fn command_light_routes_to_cohere() {
+    fn cohere_command_light_falls_to_tier3() {
+        // Round-2 fix Backend F4: `command-light` uses a different BPE
+        // vocabulary than `command-r`. Routing both to the same
+        // `cohere-v2-bpe` encoder would silently under-count tokens by
+        // ~5-20% on typical inputs. The R1 dispatch row was removed in
+        // R2; `command-light` now falls to Tier 3 (5% conservative
+        // margin + `tokenizer_unknown_model` metric per spec §3.3) until
+        // a separate `command-light` tokenizer asset is vendored in a
+        // future SLICE_NN. This test pins the absence so a future
+        // contributor doesn't re-add the wrong-encoder row.
         let t = table();
-        let e = t.lookup("command-light").expect("hit");
-        assert_eq!(e.kind, EncoderKind::Cohere);
+        assert!(
+            t.lookup("command-light").is_none(),
+            "command-light must NOT route to Cohere command-r encoder \
+             (silent ~5-20% under-count; see R2 Backend F4)"
+        );
+        assert!(t.lookup("command-light-20240501").is_none());
     }
 
     // ── Cohere Bedrock routing ──────────────────────────────────────
@@ -791,6 +859,126 @@ mod tests {
         let t = table();
         let e = t.lookup("meta.llama3-1-70b-instruct-v1:0").expect("hit");
         assert_eq!(e.kind, EncoderKind::Llama);
+    }
+
+    // ── R2 B1 — Bedrock cross-region inference profile prefixes ────
+    //
+    // AWS Bedrock since 2024-09 routes major models via cross-region
+    // inference profiles that prepend a region prefix. The dispatch
+    // patterns now admit any lowercase prefix (us/eu/apac/us-gov/future)
+    // so these IDs no longer fall to Tier 3 with a 5% margin (which
+    // produced ~2x under-count on CJK input per panel finding).
+
+    #[test]
+    fn bedrock_us_cross_region_anthropic_claude_3_5_sonnet_routes() {
+        let t = table();
+        let e = t
+            .lookup("us.anthropic.claude-3-5-sonnet-20240620-v1:0")
+            .expect("us. cross-region prefix must route");
+        assert_eq!(e.kind, EncoderKind::Anthropic);
+    }
+
+    #[test]
+    fn bedrock_eu_cross_region_anthropic_claude_3_haiku_routes() {
+        let t = table();
+        let e = t
+            .lookup("eu.anthropic.claude-3-haiku-20240307-v1:0")
+            .expect("eu. cross-region prefix must route");
+        assert_eq!(e.kind, EncoderKind::Anthropic);
+    }
+
+    #[test]
+    fn bedrock_apac_cross_region_anthropic_claude_3_5_sonnet_routes() {
+        let t = table();
+        let e = t
+            .lookup("apac.anthropic.claude-3-5-sonnet-20241022-v1:0")
+            .expect("apac. cross-region prefix must route");
+        assert_eq!(e.kind, EncoderKind::Anthropic);
+    }
+
+    #[test]
+    fn bedrock_us_gov_cross_region_anthropic_claude_routes() {
+        let t = table();
+        let e = t
+            .lookup("us-gov.anthropic.claude-3-5-sonnet-20240620-v1:0")
+            .expect("us-gov. cross-region prefix must route");
+        assert_eq!(e.kind, EncoderKind::Anthropic);
+    }
+
+    #[test]
+    fn bedrock_cross_region_cohere_command_r_plus_routes() {
+        let t = table();
+        let e = t
+            .lookup("us.cohere.command-r-plus-v1:0")
+            .expect("us. cohere cross-region prefix must route");
+        assert_eq!(e.kind, EncoderKind::Cohere);
+        let e2 = t
+            .lookup("eu.cohere.command-r-v1:0")
+            .expect("eu. cohere cross-region prefix must route");
+        assert_eq!(e2.kind, EncoderKind::Cohere);
+    }
+
+    #[test]
+    fn bedrock_cross_region_meta_llama_routes() {
+        let t = table();
+        let e = t
+            .lookup("us.meta.llama3-1-70b-instruct-v1:0")
+            .expect("us. llama cross-region prefix must route");
+        assert_eq!(e.kind, EncoderKind::Llama);
+        let e2 = t
+            .lookup("eu.meta.llama3-2-1b-instruct-v1:0")
+            .expect("eu. llama cross-region prefix must route");
+        assert_eq!(e2.kind, EncoderKind::Llama);
+    }
+
+    // ── R2 B2 — narrow-pattern Option A invariants (deny incompatible) ──
+    //
+    // Spec §3.1 had catch-all Bedrock patterns; we narrowed deliberately
+    // so wrong-vocab models do NOT silently route to the wrong encoder.
+    // These tests pin the narrow boundary: pre-Claude-3 Anthropic,
+    // Cohere embed-*, and pre-Llama-3 fall to Tier 3 (not the BPE).
+
+    #[test]
+    fn bedrock_pre_claude3_anthropic_falls_to_tier3() {
+        // claude-instant-v1 and claude-v2 predate the SLICE_04 BPE;
+        // routing them to the claude-3 encoder would silently mis-count.
+        let t = table();
+        assert!(t.lookup("anthropic.claude-instant-v1").is_none());
+        assert!(t.lookup("anthropic.claude-v2").is_none());
+        assert!(t.lookup("anthropic.claude-v2:1").is_none());
+    }
+
+    #[test]
+    fn bedrock_cohere_embed_falls_to_tier3() {
+        // Cohere embed-* models use a different BPE than command-r.
+        // The narrow `cohere.command...` pattern correctly leaves embed
+        // models for Tier 3 instead of silently dispatching wrong vocab.
+        let t = table();
+        assert!(t.lookup("cohere.embed-english-v3").is_none());
+        assert!(t.lookup("cohere.embed-multilingual-v3").is_none());
+    }
+
+    #[test]
+    fn bedrock_pre_llama3_falls_to_tier3() {
+        // Llama 2 family uses a different SentencePiece vocab; the
+        // narrow `meta.llama3...` pattern correctly excludes it.
+        let t = table();
+        assert!(t.lookup("meta.llama2-13b-chat-v1").is_none());
+        assert!(t.lookup("meta.llama2-70b-chat-v1").is_none());
+    }
+
+    #[test]
+    fn cross_region_prefix_does_not_admit_invalid_chars() {
+        // The cross-region prefix `(?:[a-z][a-z0-9-]*\.)?` requires the
+        // first char to be a lowercase letter. Empty / invalid prefixes
+        // must NOT match the optional group differently than the base
+        // pattern — i.e., `1us.anthropic...` must not route via the
+        // cross-region branch.
+        let t = table();
+        // Upper-case prefix not allowed by regex
+        assert!(t.lookup("US.anthropic.claude-3-haiku-20240307-v1:0").is_none());
+        // Digit-leading prefix not allowed
+        assert!(t.lookup("1us.anthropic.claude-3-haiku-20240307-v1:0").is_none());
     }
 
     // ── No-fuzzy-match negative tests (per spec §3.3) ───────────────
@@ -897,11 +1085,13 @@ mod tests {
     #[test]
     fn dispatch_table_has_expected_slice04_entries() {
         let t = table();
-        // SLICE_03 = 9; SLICE_04 adds (Anthropic: 4) + (Gemini: 2) +
-        // (Cohere: 4) + (Llama: 1) = 11. Total expected >= 20.
+        // SLICE_03 = 9; SLICE_04 R2 adds (Anthropic: 4 — native + Bedrock
+        // with cross-region prefix support) + (Gemini: 2) + (Cohere: 3 —
+        // dropped command-light per R2 Backend F4) + (Llama: 1) = 10.
+        // Total expected >= 19 after R2.
         assert!(
-            t.len() >= 20,
-            "expected >=20 entries after SLICE_04 expansion, got {}",
+            t.len() >= 19,
+            "expected >=19 entries after SLICE_04 R2, got {}",
             t.len()
         );
     }

@@ -943,8 +943,13 @@ fn cohere_command_r_plus_dispatches() {
 }
 
 #[test]
-fn cohere_command_light_dispatches() {
-    assert_eq!(dispatch_kind("command-light"), "COHERE_BPE");
+fn cohere_command_light_falls_to_tier3() {
+    // Round-2 fix Backend F4: `command-light` uses a different BPE
+    // vocab than `command-r`. The R1 dispatch row was removed in R2
+    // to avoid silent ~5-20% under-counts; `command-light` now hits
+    // Tier 3 (5% conservative margin + `tokenizer_unknown_model`
+    // metric per spec §3.3) until a separate vendored asset ships.
+    assert_eq!(dispatch_kind("command-light"), "HEURISTIC");
 }
 
 #[test]

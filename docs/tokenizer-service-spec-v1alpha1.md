@@ -241,6 +241,12 @@ impl Tokenizer {
 
 ### 3.1 Per-provider dispatch table
 
+The dispatch table is maintained in
+`crates/spendguard-tokenizer/src/dispatch.rs`. Each entry maps a
+model-string match pattern (anchored regex) to an encoder kind +
+canonical encoder name. The implementation is the source of truth; the
+shape below is illustrative.
+
 ```rust
 // Maintained in `spendguard-tokenizer/src/dispatch.rs`. Each entry maps a
 // model-string match pattern to an encoder kind + canonical encoder name.
@@ -260,14 +266,67 @@ const DISPATCH: &[Entry] = &[
     // === Gemini (vendored BPE) ===
     Entry { pattern: r"^gemini-1\.5-(pro|flash)(-\d{3})?$",        kind: Kind::GeminiBpe, encoder: "gemini-1.5-bpe" },
 
-    // === Bedrock routing ===
-    Entry { pattern: r"^anthropic\.claude-.*$",                     kind: Kind::AnthropicBpe, encoder: "anthropic-v3-bpe" },
-    Entry { pattern: r"^cohere\..*$",                               kind: Kind::CohereBpe, encoder: "cohere-v2-bpe" },
-    Entry { pattern: r"^meta\.llama.*$",                            kind: Kind::SentencepieceLlama, encoder: "llama-sentencepiece" },
+    // === Bedrock routing (narrow + cross-region; see §3.1 amendments below) ===
+    Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-(haiku|sonnet|opus)(-\d{8})?-v\d+:\d+$", kind: Kind::AnthropicBpe, encoder: "anthropic-v3-bpe" },
+    Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?cohere\.command(-r)?(-plus)?-v\d+:\d+$",                    kind: Kind::CohereBpe,    encoder: "cohere-v2-bpe" },
+    Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?meta\.llama3(-\d+)?-\d+b-instruct-v\d+:\d+$",               kind: Kind::SentencepieceLlama, encoder: "llama-sentencepiece" },
 ];
 ```
 
 每個 entry 對應一筆 `tokenizer_versions` registry row（per §6 schema）。增加 provider / model 透過 PR 補 entries + 對應 vendored asset。
+
+#### 3.1 amendments (SLICE_04 R2)
+
+The implementation deliberately differs from the loose "catch-all"
+Bedrock patterns the v1alpha1 draft sketched (`^anthropic\.claude-.*$`,
+`^cohere\..*$`, `^meta\.llama.*$`). Two structural rules govern the
+divergence:
+
+**(R2 B1) Cross-region inference profile prefixes.** AWS Bedrock since
+2024-09 routes major models via cross-region inference profiles that
+prepend a region prefix (`us`, `eu`, `apac`, `us-gov`, and future
+regions AWS may add). Examples:
+
+- `us.anthropic.claude-3-5-sonnet-20240620-v1:0`
+- `eu.anthropic.claude-3-haiku-20240307-v1:0`
+- `apac.anthropic.claude-3-5-sonnet-20241022-v1:0`
+- `us.cohere.command-r-plus-v1:0`
+- `us.meta.llama3-1-70b-instruct-v1:0`
+
+The implementation admits any lowercase region prefix via the optional
+group `(?:[a-z][a-z0-9-]*\.)?` so AWS adding a new region routes
+automatically. Without this, cross-region IDs would silently fall to
+Tier 3 with the 5% conservative margin — which under-counts CJK input
+by ~2× per the predictor accuracy analysis.
+
+**(R2 B2) Narrow patterns by design (Option A).** Each Bedrock vendor
+family is narrowed to the specific model generation whose BPE we have
+vendored. This is deliberate so that wrong-vocab models do NOT silently
+route to the wrong encoder:
+
+- Pre-Claude-3 IDs (`anthropic.claude-instant-v1`, `anthropic.claude-v2`,
+  `anthropic.claude-v2:1`) fall to Tier 3 — different vocab from Claude 3.
+- Cohere embedding models (`cohere.embed-english-v3`,
+  `cohere.embed-multilingual-v3`) fall to Tier 3 — different vocab from
+  command-r.
+- Pre-Llama-3 IDs (`meta.llama2-13b-chat-v1`, `meta.llama2-70b-chat-v1`)
+  fall to Tier 3 — different SentencePiece config from Llama 3.
+
+Each Tier 3 fallback emits the `tokenizer_unknown_model` metric per
+§3.3 so operators see the gap and PR a tracked follow-up. The rationale:
+dispatching wrong-vocab encoders produces silent ~5-20% under-counts;
+falling to Tier 3 produces a 5% conservative margin + a visible metric.
+
+**(R2 Backend F4) `command-light` is omitted intentionally.** Cohere's
+`command-light` uses a different BPE vocabulary than `command-r`.
+Routing `command-light` to the `cohere-v2-bpe` encoder would silently
+under-count tokens by ~5-20%. The dispatch table does NOT include a
+`command-light` row; the model falls to Tier 3 until a separate
+`command-light` tokenizer asset is vendored in a future SLICE_NN.
+
+The full enumeration of current patterns lives in
+`crates/spendguard-tokenizer/src/dispatch.rs::RAW_ENTRIES`; that file is
+the structural source of truth, this section is the policy intent.
 
 ### 3.2 Encoder cache
 
