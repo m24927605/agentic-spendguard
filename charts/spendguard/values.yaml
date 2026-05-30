@@ -438,6 +438,47 @@ egressProxy:
     requests: { cpu: "50m",  memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
 
+# ── SLICE_11 — NetworkPolicy for L2 bypass-resistance ───────────────
+# Spec: docs/slices/SLICE_11_multi_provider_routing.md §2 + §9.5.
+#
+# L2 capability semantics (per README): the egress_proxy is the
+# single hard-block point for external LLM API egress. Without a
+# NetworkPolicy, app pods can dial api.openai.com directly and
+# bypass SpendGuard gating. This chart's NetworkPolicy renders a
+# default-deny + explicit-allow set so L2 enforcement becomes a
+# K8s-level guarantee, not an advisory README claim.
+#
+# Operator opt-in: pods MUST carry the label
+# `spendguard.io/enforced=true` to fall under the policy. This is the
+# per-tenant kill switch and the gradual-migration path.
+#
+# Production gate: chart.profile=production with networkPolicy.enabled=
+# false requires explicit `acknowledgeNoNetworkPolicy=true` so an
+# operator doesn't accidentally ship a bypass-able L2.
+networkPolicy:
+  # Opt-in. Default false to keep the demo path noise-free; production
+  # operators flip to true (or explicitly acknowledge advisory-mode).
+  enabled: false
+  # Explicit opt-out of NetworkPolicy under chart.profile=production.
+  # When true the production gate accepts a deployment without
+  # NetworkPolicy enforcement (operator accepts L2 advisory-mode).
+  acknowledgeNoNetworkPolicy: false
+  # Namespace the app pods (LLM SDK callers) live in. Defaults to
+  # the release namespace. Override for cross-namespace deployments.
+  appNamespace: ""
+  # Optional CIDR allowlist for external provider hosts. When set, the
+  # `allow-egress-proxy-to-providers` policy uses these CIDRs instead
+  # of the default broad public-internet allow. Use this to tightly
+  # pin which provider IPs the proxy can reach (e.g. cloud-provider
+  # private-link endpoints). Most operators leave this empty — the
+  # default `0.0.0.0/0` minus RFC1918 covers all major LLM providers.
+  externalProviderCidrs: []
+  # Optional CIDR allowlist for Postgres. When unset, the policies
+  # do NOT include a Postgres egress rule (operators using cluster-
+  # internal Postgres add it via internal podSelector + extraEgressRules).
+  # Most managed-Postgres deployments use a known CIDR — set it here.
+  postgresCidrs: []
+
 # ── stats_aggregator service (SLICE_06) ─────────────────────────────
 # Spec: docs/stats-aggregator-spec-v1alpha1.md (full).
 #
