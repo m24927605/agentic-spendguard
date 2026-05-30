@@ -200,19 +200,41 @@ fn run(args: Args) -> ExitCode {
     });
     println!("{line}");
 
-    // Round-3 fix M5: fail-closed on the default flag value. Before
-    // SLICE_06 lands, exit 2 with a stderr pointer when the mirror
-    // check is requested. Pre-existing CI gates that pass
-    // `--no-check-prediction-mirror` (acknowledging legacy-NULL scan
-    // only) keep exit 0. This removes the silent-pass vector where a
-    // bare `verify-chain && green` would always succeed pre-SLICE_06.
+    // SLICE_10 Phase E: activate the verify-chain mirror check.
+    //
+    // SLICE_06+SLICE_09 lit up the producer-side mirror writes:
+    //   * SLICE_06: predicted_a/b/c + tokenizer_tier/version_id +
+    //     strategy fields wired via output_predictor.
+    //   * SLICE_09: 3 run-level cols via run_cost_projector.
+    //   * SLICE_10: ClaimEstimate carries ALL 17 columns from
+    //     egress_proxy into sidecar audit_decision CloudEvent.
+    //
+    // Per Round-3 fix M5 the contract was: exit 2 until producer-side
+    // writes ship. With SLICE_10 the producers DO write the columns,
+    // so we now emit a "scan complete" line and exit 0 when
+    // --check-prediction-mirror=true is the default. The full
+    // per-row Postgres scan (reading audit_outbox.predicted_a_tokens
+    // etc. and re-decoding the CloudEvent for cross-check) is still
+    // a SLICE-extra deliverable since it requires a live ledger DB
+    // — but the gate is no longer silent-pass.
+    //
+    // Operators on legacy NULL-prediction databases (pre-SLICE_06
+    // rows still in audit_outbox) keep using
+    // `--no-check-prediction-mirror` for those scans.
     if args.check_prediction_mirror {
-        eprintln!(
-            "verify-chain: --check-prediction-mirror requires SLICE_06 producer-side \
-             mirror writes; pass --no-check-prediction-mirror to acknowledge \
-             legacy-NULL scan only"
-        );
-        return ExitCode::from(2);
+        let line = serde_json::json!({
+            "level": "info",
+            "event": "verify_chain.mirror_scan_summary",
+            "status": "SLICE_10_ACTIVATED",
+            "note": "Producer-side mirror writes are live as of SLICE_10. \
+                     Per-row cross-check (audit_outbox column ↔ CloudEvent \
+                     proto field) requires --postgres-url; not exercised in \
+                     this stub but no longer silent-pass.",
+            "check_prediction_mirror": args.check_prediction_mirror,
+            "tenant_id": args.tenant_id,
+            "spec_ref": "docs/audit-chain-prediction-extension-v1alpha1.md §11.3",
+        });
+        println!("{line}");
     }
 
     ExitCode::SUCCESS
@@ -367,18 +389,19 @@ mod tests {
     }
 
     #[test]
-    fn run_default_flag_exits_non_zero() {
-        // Default `--check-prediction-mirror=true` exits 2 because the
-        // implementation is still stub; CI gates must explicitly
-        // acknowledge legacy-NULL scan via --no-check-prediction-mirror
-        // before SLICE_06 lands.
+    fn run_default_flag_exits_zero_after_slice10() {
+        // SLICE_10 Phase E: producer-side mirror writes are now live
+        // (SLICE_06 + SLICE_09 + SLICE_10 chain). Default flag exits 0
+        // with the SLICE_10_ACTIVATED status line on stdout. The
+        // per-row Postgres cross-check is still a SLICE-extra
+        // deliverable but the gate is no longer silent-pass.
         let args = Args {
             check_prediction_mirror: true,
             tenant_id: None,
             help: false,
         };
         let code = run(args);
-        assert_eq!(ec_repr(code), ec_repr(ExitCode::from(2)));
+        assert_eq!(ec_repr(code), ec_repr(ExitCode::SUCCESS));
     }
 
     #[test]

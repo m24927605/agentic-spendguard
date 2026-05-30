@@ -932,6 +932,81 @@ mod tests {
         assert_eq!(est.run_code_triggered, "");
     }
 
+    /// SLICE_10 Phase E — measure aggregate latency of estimate_call_cost
+    /// on the predictor-absent fallback path (tokenizer + Strategy A only).
+    ///
+    /// Per spec §11.2 + Contract §14 50ms p99 sidecar latency budget,
+    /// egress_proxy's portion (tokenizer + parallel predict/project)
+    /// should consume well under half the budget. With both gRPC clients
+    /// None, the test runs purely the tokenizer library + local
+    /// Strategy A computation — should comfortably hit p99 < 5ms even
+    /// on cold cache hits.
+    ///
+    /// This is a fast unit-test-level measurement; the real production
+    /// p99 latency is measured by docker-compose integration runs
+    /// (SLICE_15 e2e benchmark).
+    #[tokio::test]
+    async fn estimate_call_cost_p99_under_5ms_fallback_path() {
+        use std::time::Instant;
+        let tokenizer =
+            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let body = json!({
+            "model": "gpt-4o-mini",
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": "What is the capital of France?"},
+            ],
+            "max_tokens": 256,
+        });
+        // Warm up the tokenizer cache.
+        for _ in 0..3 {
+            let inputs = EstimateInputs {
+                body: &body,
+                model: "gpt-4o-mini",
+                tenant_id: "00000000-0000-4000-8000-000000000001",
+                agent_id: "warm-up",
+                run_id: "warm-up",
+                decision_id: "warm-up",
+                step_id: "warm-up",
+                prediction_policy: "STRICT_CEILING",
+                header_override_tokens: None,
+                planned_steps_hint: 0,
+            };
+            let _ = estimate_call_cost(&inputs, &tokenizer, None, None).await;
+        }
+        // Measure 100 iterations and check p99.
+        let mut samples = Vec::with_capacity(100);
+        for i in 0..100 {
+            let run_id = format!("run-{i}");
+            let inputs = EstimateInputs {
+                body: &body,
+                model: "gpt-4o-mini",
+                tenant_id: "00000000-0000-4000-8000-000000000001",
+                agent_id: "bench-agent",
+                run_id: &run_id,
+                decision_id: "bench-decision",
+                step_id: "bench-step",
+                prediction_policy: "STRICT_CEILING",
+                header_override_tokens: None,
+                planned_steps_hint: 0,
+            };
+            let t0 = Instant::now();
+            let _ = estimate_call_cost(&inputs, &tokenizer, None, None).await;
+            samples.push(t0.elapsed());
+        }
+        samples.sort();
+        let p50 = samples[50];
+        let p99 = samples[99];
+        eprintln!("estimate_call_cost latency (fallback path): p50={p50:?}, p99={p99:?}");
+        // p99 budget (fallback path with both gRPC None): 5ms is
+        // conservative — typical p99 < 1ms. Test is intentionally
+        // generous so CI doesn't flake on slow runners.
+        assert!(
+            p99 < std::time::Duration::from_millis(5),
+            "p99 latency {p99:?} exceeded 5ms budget; investigate tokenizer cache regression"
+        );
+    }
+
     #[tokio::test]
     async fn estimate_call_cost_respects_header_override() {
         let tokenizer =

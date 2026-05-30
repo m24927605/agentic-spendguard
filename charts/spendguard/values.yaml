@@ -386,6 +386,58 @@ runCostProjector:
     requests: { cpu: "100m", memory: "64Mi"  }
     limits:   { cpu: "500m", memory: "256Mi" }
 
+# ── egress_proxy service (SLICE_10) ─────────────────────────────────
+# Spec: docs/specs/auto-instrument-egress-proxy-spec.md v7;
+#       docs/slices/SLICE_10_egress_proxy_decision_rewrite.md.
+#
+# HTTP proxy for SpendGuard: drop-in OpenAI-compatible endpoint that
+# gates LLM calls via the sidecar UDS before forwarding. SLICE_10
+# upgraded the decision lane to call tokenizer library + output_predictor
+# + run_cost_projector before each DecisionRequest, lighting up all 17
+# audit columns from SLICE_01 in production.
+#
+# Per-call latency budget (Contract §14 50ms p99 total):
+#   tokenizer library    : ≤ 1ms  p99 (in-process, no RPC)
+#   output_predictor RPC : ≤ 10ms p99 (parallel with projector)
+#   run_cost_projector RPC: ≤ 5ms  p99 (parallel with predictor)
+#   sidecar DecisionRequest: ≤ 35ms p99 remaining
+egressProxy:
+  enabled: false                            # opt-in: not all deployments expose HTTP proxy
+  replicas: 1
+  image:
+    repository: spendguard/egress-proxy
+    tag: "0.1.0-alpha"
+  # ── Bind address (proxy listens here) ──
+  # v0.1 trust model: localhost only by default. Operators exposing on
+  # other interfaces accept the trust-boundary widening per spec §8.
+  bindAddr: "0.0.0.0:9000"
+  # ── Sidecar UDS path (proxy dials sidecar here) ──
+  # Shared hostPath with the sidecar DaemonSet.
+  sidecarUdsHostPath: "/var/run/spendguard"
+  # ── SLICE_10 — output_predictor + run_cost_projector endpoints ──
+  # Both optional. When unset, decision::estimate_call_cost falls back per
+  # spec §11:
+  #   * predictor unset → local Strategy A only (audit row: predicted_b/c=0,
+  #     reserved_strategy="A", confidence=0).
+  #   * projector unset → no RUN_* code; run_predicted_remaining_steps=-1
+  #     sentinel per audit-chain-prediction-extension-v1alpha1.md §3.3.
+  #
+  # Production deployments SHOULD set both — that's the entire point of
+  # SLICE_10 (lighting up all 17 audit columns in production).
+  #
+  # Format: gRPC endpoint URL (http://host:port for plaintext or
+  # https://host:port + chart.profile=production for mTLS once SLICE_07
+  # cert-pinning lands for egress_proxy).
+  outputPredictorEndpoint: ""
+  runCostProjectorEndpoint: ""
+  # ── Production gate ──
+  # Under chart.profile=production both endpoints SHOULD be set; warn
+  # (not fail) for now since the proxy is opt-in and demo deployments
+  # may not need predictor enrichment.
+  resources:
+    requests: { cpu: "50m",  memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+
 # ── stats_aggregator service (SLICE_06) ─────────────────────────────
 # Spec: docs/stats-aggregator-spec-v1alpha1.md (full).
 #

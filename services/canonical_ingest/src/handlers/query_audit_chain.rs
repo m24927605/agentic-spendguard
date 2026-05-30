@@ -161,5 +161,11 @@ fn decode_cloudevent_from_row(row: &ChainRow) -> Result<CloudEvent, anyhow::Erro
         producer_sequence: get_u64("producer_sequence"),
         producer_signature: row.producer_signature.clone().into(),
         signing_key_id: get_str("signing_key_id"),
+        // SLICE_10 Phase E: replay path doesn't reconstruct prediction
+        // columns from the per-row JSONB (canonical_events table stores
+        // them in the parent row directly, not in payload_json). Leave
+        // at proto3 default; the chain verifier reads them from the
+        // typed columns rather than from the CloudEvent envelope.
+        ..Default::default()
     })
 }
