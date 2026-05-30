@@ -1,5 +1,92 @@
 # Changelog
 
+## 0.5.0 — 2026-05-30
+
+SLICE_12 — Python SDK gains **default token estimators** for OpenAI /
+Anthropic / Gemini models so callers no longer have to write a
+`claim_estimator` by hand, and a new **`with_run_plan` decorator**
+wires Signal 3 (`planned_steps_hint`) per
+`run-cost-projector-spec-v1alpha1.md` §5.
+
+### Added
+
+- **`spendguard.estimators`** package — Python mirror of the Rust
+  `crates/spendguard-tokenizer` dispatch table (SLICE_03 + SLICE_04
+  R2). 16-entry first-match-wins regex table covers OpenAI
+  (cl100k/o200k/p50k via `tiktoken`), Anthropic Claude 3.x/3.5
+  (native + Bedrock + cross-region prefix via vendored BPE),
+  Gemini 1.5/2.0 (vendored Gemma approximation), and Llama Bedrock
+  (server-side only; SDK warns + chars/4 fallback). Cohere
+  intentionally omitted (Rust ships feature-gated pending legal
+  review). Unknown models warn + chars/4 fallback.
+  - Public surface: `estimator_for_model(model) → EstimatorFns`,
+    `EncoderKind`, `TiktokenFamily`, `dispatch_table()`, `lookup()`.
+- **Vendored tokenizer assets**: `spendguard/data/anthropic_claude3_tokenizer.json`
+  (~1.7 MB, Xenova/claude-tokenizer MIT mirror) +
+  `spendguard/data/gemini_1_5_tokenizer.json` (~17 MB,
+  Xenova/gemma-tokenizer Apache 2.0 mirror). Both byte-identical to
+  the Rust crate's vendored copy; sha256 verified at first call per
+  `tokenizer-service-spec-v1alpha1.md` §7.4.1 (fail-fast on mismatch).
+  See `LICENSE_NOTICES.md` for provenance + reproducibility.
+- **`with_run_plan(planned_calls, planned_tools)` decorator** —
+  Signal 3 power-user API per `run-cost-projector-spec-v1alpha1.md`
+  §5.1. Works on sync OR async; nested usage → outer wins;
+  context-var cleared on exception. The decorator stamps
+  `planned_steps_hint = planned_calls + planned_tools` on every
+  `DecisionRequest` issued inside the decorated frame.
+- **`RunPlan` + `current_run_plan()`** — exported helpers for
+  framework adapters that need to read the active plan.
+- **Default `claim_estimator` in all 5 integrations** (litellm /
+  langchain / pydantic_ai / openai_agents / agt). When omitted /
+  `None`, each integration auto-builds a default from the inner
+  model's name. Backward compat: explicit non-None still wins per
+  spec §8.5.
+
+### Use it
+
+```python
+from spendguard import with_run_plan
+from spendguard.integrations.langchain import SpendGuardChatModel
+from langchain_openai import ChatOpenAI
+
+# No more manual claim_estimator!
+guarded = SpendGuardChatModel(
+    inner=ChatOpenAI(model="gpt-4o-mini"),
+    client=client,
+    budget_id="...",
+    window_instance_id="...",
+    unit=...,
+    pricing=...,
+    # claim_estimator omitted — default dispatched from "gpt-4o-mini"
+)
+
+# Signal 3 — declare expected step count
+@with_run_plan(planned_calls=8, planned_tools=2)
+async def my_agent(query: str) -> str:
+    # ... agent runs 10 total steps ...
+    return await runner.run(...)
+```
+
+### Changed
+
+- `protobuf` runtime now `>=4.25,<6` (unchanged); proto stubs
+  regenerated against `grpcio-tools 1.71` (gencode 5.28.1 — compatible
+  with the existing protobuf 5.x runtime).
+- `tiktoken>=0.6,<1.0` and `tokenizers>=0.20,<1.0` promoted to **core
+  dependencies** (no longer optional). Every integration's default
+  `claim_estimator` uses them.
+
+### Notes
+
+- 50 golden parity samples + 100-string property test validate the
+  Python dispatch matches the Rust table byte-for-byte.
+- Asset sha256 verification: `LICENSE_NOTICES.md` is the source of
+  truth; estimator modules + shipped assets MUST all agree (parity
+  test `test_vendored_assets.py::TestLicenseNoticesParity`).
+- Demo regression: `make demo-up DEMO_MODE=agent_real_langgraph` works
+  without caller-supplied `claim_estimator` (default dispatched from
+  inner ChatOpenAI's `model_name`).
+
 ## 0.4.0 — 2026-05-23
 
 Adds the explicit `release_reservation()` SDK method, the first
