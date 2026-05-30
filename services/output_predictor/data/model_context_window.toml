@@ -1,0 +1,9 @@
+# model_context_window.toml — bundled lookup table for Strategy A.
+#
+# Spec ref output-predictor-service-spec-v1alpha1.md §3.2.
+#
+# Phase C populates initial entries. Unknown models fall back to
+# `SPENDGUARD_OUTPUT_PREDICTOR_UNKNOWN_MODEL_CONTEXT_WINDOW` (default 8000
+# per spec §3.3).
+
+# (Phase C will append [[entries]] here.)
