@@ -86,6 +86,26 @@ Issues = "https://github.com/m24927605/agentic-spendguard/issues"
 [tool.hatch.build.targets.wheel]
 packages = ["src/spendguard"]
 
+# SLICE_12 Phase B: ensure vendored tokenizer JSON assets are
+# explicitly forced into the wheel. hatchling treats *.json under
+# `src/spendguard/data/` as package data automatically, but the
+# force-include guards against future builds that exclude non-Python
+# extensions or pyproject churn dropping the data path.
+[tool.hatch.build.targets.wheel.force-include]
+"src/spendguard/data/anthropic_claude3_tokenizer.json" = "spendguard/data/anthropic_claude3_tokenizer.json"
+"src/spendguard/data/gemini_1_5_tokenizer.json" = "spendguard/data/gemini_1_5_tokenizer.json"
+
+# Sdist explicit inclusion: pyproject's `tool.hatch.build` defaults
+# include all of `src/`, but make the data dependency explicit so a
+# user inspecting `pip download --no-binary` sees the assets.
+[tool.hatch.build.targets.sdist]
+include = [
+  "src/spendguard/",
+  "LICENSE_NOTICES.md",
+  "README.md",
+  "pyproject.toml",
+]
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
