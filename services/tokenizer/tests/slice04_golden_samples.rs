@@ -101,75 +101,109 @@ fn dispatch_kind(model: &str) -> String {
 // --- 25 raw-text samples --------------------------------------------
 
 #[test]
-fn anthropic_hello_world_is_3_tokens_with_bos() {
-    // R2 M4: BOS=1 added to raw_text. "hello world" = 2 vocab + 1 BOS.
-    assert_eq!(tokenize_raw("claude-3-haiku", "hello world"), 3);
+fn anthropic_native_hello_world_is_2_tokens_no_bos() {
+    // R3 N1: native API (`claude-3-haiku`) does NOT prepend BOS;
+    // "hello world" = 2 vocab + 0 BOS = 2.
+    assert_eq!(tokenize_raw("claude-3-haiku", "hello world"), 2);
 }
 
 #[test]
-fn anthropic_hello_is_2_tokens_with_bos() {
-    // R2 M4: BOS=1 added to raw_text. "hello" = 1 vocab + 1 BOS.
-    assert_eq!(tokenize_raw("claude-3-haiku", "hello"), 2);
+fn anthropic_bedrock_hello_world_is_3_tokens_with_bos() {
+    // R3 N1: Bedrock invokeModel path prepends `<|begin_of_text|>`;
+    // "hello world" = 2 vocab + 1 BOS = 3.
+    assert_eq!(
+        tokenize_raw("anthropic.claude-3-haiku-20240307-v1:0", "hello world"),
+        3
+    );
+}
+
+#[test]
+fn anthropic_bedrock_cross_region_hello_world_is_3_tokens_with_bos() {
+    // R3 N1: cross-region inference profile prefix is still Bedrock
+    // routing; BOS=1 applies.
+    assert_eq!(
+        tokenize_raw(
+            "us.anthropic.claude-3-5-sonnet-20240620-v1:0",
+            "hello world"
+        ),
+        3
+    );
+}
+
+#[test]
+fn anthropic_native_hello_is_1_token_no_bos() {
+    // R3 N1: native API has no BOS; "hello" = 1 vocab + 0 BOS = 1.
+    assert_eq!(tokenize_raw("claude-3-haiku", "hello"), 1);
 }
 
 #[test]
 fn anthropic_empty_string_is_0_tokens() {
-    // R2 M4: BOS NOT added when raw_text is empty.
+    // BOS NOT added when raw_text is empty (both native + Bedrock paths
+    // short-circuit before BOS accumulation).
     assert_eq!(tokenize_raw("claude-3-haiku", ""), 0);
+    assert_eq!(
+        tokenize_raw("anthropic.claude-3-haiku-20240307-v1:0", ""),
+        0
+    );
 }
+
+// Note: bands below use the native API path (`claude-3-haiku`); under
+// R3 N1 the BOS=0 means observed counts are 1 lower than the R2 bands.
+// Each lower bound is reduced by 1 to absorb the BOS drop while keeping
+// the upper bound unchanged (no false-positive risk from upper widening).
 
 #[test]
 fn anthropic_short_sentence_in_band() {
     let n = tokenize_raw("claude-3-haiku", "The quick brown fox jumps over the lazy dog.");
-    assert!((8..=14).contains(&n), "got {n}");
+    assert!((7..=14).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_punctuation_heavy_text() {
     let n = tokenize_raw("claude-3-haiku", "Hello, world! How are you today?");
-    assert!((6..=12).contains(&n), "got {n}");
+    assert!((5..=12).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_numbers_text() {
     let n = tokenize_raw("claude-3-haiku", "Pi is approximately 3.14159.");
-    assert!((6..=12).contains(&n), "got {n}");
+    assert!((5..=12).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_code_snippet() {
     let n = tokenize_raw("claude-3-haiku", "fn main() { println!(\"hello\"); }");
-    assert!((8..=18).contains(&n), "got {n}");
+    assert!((7..=18).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_json_snippet() {
     let n = tokenize_raw("claude-3-haiku", r#"{"name":"alice","age":30}"#);
-    assert!((6..=14).contains(&n), "got {n}");
+    assert!((5..=14).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_cjk_text() {
     let n = tokenize_raw("claude-3-haiku", "你好世界");
-    assert!((3..=10).contains(&n), "got {n}");
+    assert!((2..=10).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_emoji_text() {
     let n = tokenize_raw("claude-3-haiku", "Hello 🌍 world 🚀");
-    assert!((4..=14).contains(&n), "got {n}");
+    assert!((3..=14).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_newlines_preserved() {
     let n = tokenize_raw("claude-3-haiku", "line1\nline2\nline3");
-    assert!((4..=10).contains(&n), "got {n}");
+    assert!((3..=10).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_repeated_word_compresses() {
     let n = tokenize_raw("claude-3-haiku", "the the the the the the the the");
-    assert!((4..=12).contains(&n), "got {n}");
+    assert!((3..=12).contains(&n), "got {n}");
 }
 
 #[test]
@@ -179,61 +213,61 @@ fn anthropic_long_paragraph_proportional() {
                 medium-length text without anomalies. The token count should \
                 scale roughly linearly with the character count.";
     let n = tokenize_raw("claude-3-haiku", text);
-    assert!((35..=80).contains(&n), "got {n}");
+    assert!((34..=80).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_url_text() {
     let n = tokenize_raw("claude-3-haiku", "https://example.com/path?q=value");
-    assert!((6..=18).contains(&n), "got {n}");
+    assert!((5..=18).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_special_chars() {
     let n = tokenize_raw("claude-3-haiku", "@#$%^&*()");
-    assert!((3..=15).contains(&n), "got {n}");
+    assert!((2..=15).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_mixed_case_camelcase() {
     let n = tokenize_raw("claude-3-haiku", "ThisIsCamelCaseWord");
-    assert!((4..=12).contains(&n), "got {n}");
+    assert!((3..=12).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_snake_case_identifier() {
     let n = tokenize_raw("claude-3-haiku", "some_function_name_here");
-    assert!((4..=12).contains(&n), "got {n}");
+    assert!((3..=12).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_kebab_case_identifier() {
     let n = tokenize_raw("claude-3-haiku", "some-function-name-here");
-    assert!((4..=12).contains(&n), "got {n}");
+    assert!((3..=12).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_multiline_markdown() {
     let n = tokenize_raw("claude-3-haiku", "# Heading\n\nSome **bold** text and _italic_.");
-    assert!((10..=22).contains(&n), "got {n}");
+    assert!((9..=22).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_korean_text() {
     let n = tokenize_raw("claude-3-haiku", "안녕하세요");
-    assert!((2..=12).contains(&n), "got {n}");
+    assert!((1..=12).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_arabic_text() {
     let n = tokenize_raw("claude-3-haiku", "مرحبا بالعالم");
-    assert!((3..=15).contains(&n), "got {n}");
+    assert!((2..=15).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_xml_snippet() {
     let n = tokenize_raw("claude-3-haiku", "<tag>content</tag>");
-    assert!((5..=12).contains(&n), "got {n}");
+    assert!((4..=12).contains(&n), "got {n}");
 }
 
 #[test]
@@ -245,13 +279,13 @@ fn anthropic_long_repeating() {
 #[test]
 fn anthropic_python_code() {
     let n = tokenize_raw("claude-3-haiku", "def f(x):\n    return x + 1");
-    assert!((6..=18).contains(&n), "got {n}");
+    assert!((5..=18).contains(&n), "got {n}");
 }
 
 #[test]
 fn anthropic_quotes_text() {
     let n = tokenize_raw("claude-3-haiku", "\"single\" and 'double' quotes");
-    assert!((6..=14).contains(&n), "got {n}");
+    assert!((5..=14).contains(&n), "got {n}");
 }
 
 // --- 10 model-string dispatch samples -------------------------------
@@ -427,9 +461,16 @@ fn anthropic_tab_only() {
 }
 
 #[test]
-fn anthropic_single_char_with_bos() {
-    // R2 M4: BOS=1 added to raw_text. "a" = 1 vocab + 1 BOS = 2.
+fn anthropic_native_single_char_no_bos() {
+    // R3 N1: native API has no BOS; "a" = 1 vocab + 0 BOS = 1.
     let n = tokenize_raw("claude-3-haiku", "a");
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn anthropic_bedrock_single_char_with_bos() {
+    // R3 N1: Bedrock path adds BOS; "a" = 1 vocab + 1 BOS = 2.
+    let n = tokenize_raw("anthropic.claude-3-haiku-20240307-v1:0", "a");
     assert_eq!(n, 2);
 }
 
@@ -437,7 +478,8 @@ fn anthropic_single_char_with_bos() {
 fn anthropic_very_long_text() {
     let n = tokenize_raw("claude-3-haiku", &"hello world ".repeat(100));
     // ~2 tokens per "hello world " repeats ≈ 200 tokens.
-    assert!((100..=400).contains(&n), "got {n}");
+    // R3 N1: native API has no BOS; lower bound 99 absorbs the drop.
+    assert!((99..=400).contains(&n), "got {n}");
 }
 
 // ════════════════════════════════════════════════════════════════════

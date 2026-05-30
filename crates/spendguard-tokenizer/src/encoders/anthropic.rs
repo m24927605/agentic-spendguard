@@ -55,13 +55,30 @@
 //! ChatEnvelope { per_message: 0, per_turn_boundary: 4, reply_priming: 0 }
 //! ```
 //!
-//! ## BOS token (SLICE_04 R2 M4 amendment)
+//! ## BOS token (SLICE_04 R2 M4 + R3 N1 amendments)
 //!
 //! Bedrock invokeModel prepends `<|begin_of_text|>` to the prompt
-//! before forwarding to the Anthropic backend. `tokenizer.encode(text,
-//! false)` does NOT include this BOS in the returned vector
-//! (`add_special_tokens=false`); we add it via `bos_token_count() = 1`
-//! so Tier 2 = vendor-observed count.
+//! before forwarding to the Anthropic backend. The Anthropic native
+//! `/v1/messages` API does NOT prepend a BOS — the server adds it
+//! internally and `countTokens` reports the user-visible count without
+//! the BOS. R3 N1 (Major) found that unconditional BOS=1 over-counts
+//! native API requests by exactly 1 token, which at the spec §4.2
+//! 1% drift threshold means 100-token requests cross threshold on
+//! every native call.
+//!
+//! Therefore BOS=1 is gated on **Bedrock routing detection**:
+//!
+//!   * `claude-3-haiku`, `claude-3-5-sonnet-20240620` (native API) → BOS=0
+//!   * `anthropic.claude-3-haiku-20240307-v1:0` (Bedrock direct) → BOS=1
+//!   * `us.anthropic.claude-3-5-sonnet-20240620-v1:0` (Bedrock cross-region) → BOS=1
+//!
+//! Detection rule: model string contains `anthropic.` substring (matches
+//! all Bedrock dispatch entries in `dispatch.rs::RAW_ENTRIES`; native
+//! API model IDs never contain the `anthropic.` vendor prefix).
+//!
+//! `tokenizer.encode(text, false)` does NOT include BOS in the returned
+//! vector (`add_special_tokens=false`); the Bedrock path adds it via
+//! the gated `bos_token_count` so Tier 2 = vendor-observed count.
 //!
 //! SLICE_05 shadow worker measures the residual gap and the spec
 //! tightens if needed.
@@ -145,9 +162,46 @@ const ANTHROPIC_ENVELOPE: ChatEnvelope = ChatEnvelope {
     reply_priming: 0,
 };
 
-/// Anthropic BOS per spec §3.4 (R2 M4): Bedrock invokeModel prepends
-/// `<|begin_of_text|>` to the prompt.
-const ANTHROPIC_BOS_COUNT: usize = 1;
+/// Anthropic BOS per spec §3.4 (R2 M4 + R3 N1): Bedrock invokeModel
+/// prepends `<|begin_of_text|>` to the prompt; native API does not.
+/// Gated by [`is_bedrock_routing`] on the request's `model` string.
+const ANTHROPIC_BOS_COUNT_BEDROCK: usize = 1;
+const ANTHROPIC_BOS_COUNT_NATIVE: usize = 0;
+
+/// R3 N1 (Major) fix — detect Bedrock routing from the model string.
+///
+/// Returns true iff the model is dispatched via the Bedrock invokeModel
+/// API (which prepends `<|begin_of_text|>` before forwarding to the
+/// Anthropic backend). Returns false for the Anthropic native
+/// `/v1/messages` API (which does NOT prepend a BOS).
+///
+/// Detection rule: model string contains the `anthropic.` substring.
+/// This matches every Bedrock dispatch entry in
+/// `dispatch.rs::RAW_ENTRIES` — both bare Bedrock IDs
+/// (`anthropic.claude-3-haiku-20240307-v1:0`) and cross-region
+/// inference profile IDs (`us.anthropic.claude-3-5-sonnet-20240620-v1:0`,
+/// `eu.anthropic.…`, `apac.…`, `us-gov.…`). Native API model IDs never
+/// contain the `anthropic.` vendor prefix (per Anthropic docs).
+///
+/// Cheaper alternative considered: pass the dispatch `EncoderResolver`
+/// kind discriminant to `count_tokens_request`. Rejected because it
+/// would widen the `Encoder` trait surface and force the encoder cache
+/// to thread routing context through every call; substring detection
+/// is O(model.len()), runs once per request, and never touches the
+/// encode hot path.
+fn is_bedrock_routing(model: &str) -> bool {
+    model.contains("anthropic.")
+}
+
+/// Per-request BOS count, gated on Bedrock routing detection.
+#[inline]
+fn bos_count_for(model: &str) -> usize {
+    if is_bedrock_routing(model) {
+        ANTHROPIC_BOS_COUNT_BEDROCK
+    } else {
+        ANTHROPIC_BOS_COUNT_NATIVE
+    }
+}
 
 impl Encoder for AnthropicEncoder {
     fn kind(&self) -> EncoderKind {
@@ -167,7 +221,11 @@ impl Encoder for AnthropicEncoder {
     }
 
     fn bos_token_count(&self) -> usize {
-        ANTHROPIC_BOS_COUNT
+        // R3 N1: the trait method returns the **upper bound** across
+        // routing modes for back-compat with cross-vendor invariant
+        // tests; the actual per-request count is gated by routing via
+        // [`bos_count_for`] inside `count_tokens_anthropic`.
+        ANTHROPIC_BOS_COUNT_BEDROCK
     }
 
     fn count_tokens_request(&self, req: &TokenizeRequest) -> Result<EncodeResult, TokenizerError> {
@@ -181,11 +239,12 @@ impl Encoder for AnthropicEncoder {
 }
 
 /// Tokenize an entire request applying Anthropic chat envelope rules
-/// per spec §3.4 (R2 M3 amendment):
+/// per spec §3.4 (R2 M3 + R3 N1 amendments):
 ///   * per_message=0 (no fixed per-message overhead)
 ///   * per_turn_boundary=4 (`\n\nHuman:` / `\n\nAssistant:` markers)
 ///   * reply_priming=0
-///   * BOS=1 (Bedrock invokeModel `<|begin_of_text|>`)
+///   * BOS=1 ONLY for Bedrock invokeModel routing (R3 N1: native API
+///     does NOT prepend `<|begin_of_text|>`); see [`bos_count_for`].
 ///
 /// SLICE_05 shadow worker quantifies the residual gap against
 /// Anthropic's `count_tokens` API.
@@ -211,8 +270,10 @@ fn count_tokens_anthropic(
 
     if !req.raw_text.is_empty() {
         total += encode_count(tokenizer, &req.raw_text)?;
-        // R2 M4: BOS prepended by Bedrock invokeModel.
-        total += ANTHROPIC_BOS_COUNT;
+        // R3 N1: BOS gated on Bedrock routing detection. Native API
+        // (e.g., `claude-3-haiku`) → 0; Bedrock direct or cross-region
+        // (e.g., `anthropic.claude-3-…`, `us.anthropic.claude-3-…`) → 1.
+        total += bos_count_for(&req.model);
     }
 
     Ok(total)
@@ -338,9 +399,9 @@ mod tests {
     }
 
     #[test]
-    fn anthropic_encodes_hello_world_raw_with_bos() {
-        // R2 M4: BOS=1 added to raw_text. "hello world" = 2 vocab tokens
-        // + 1 BOS = 3.
+    fn anthropic_native_api_raw_text_has_no_bos() {
+        // R3 N1: native API path (`claude-3-haiku`) does NOT prepend
+        // BOS. "hello world" = 2 vocab tokens + 0 BOS = 2.
         let enc = AnthropicEncoder::new().expect("boot");
         let req = TokenizeRequest {
             model: "claude-3-haiku".to_string(),
@@ -348,19 +409,87 @@ mod tests {
             ..Default::default()
         };
         let r = enc.count_tokens_request(&req).unwrap();
-        assert_eq!(r.input_tokens, 3, "expected 2 vocab + 1 BOS = 3");
+        assert_eq!(
+            r.input_tokens, 2,
+            "native API: expected 2 vocab + 0 BOS = 2"
+        );
         assert_eq!(r.kind, EncoderKind::Anthropic);
     }
 
     #[test]
+    fn anthropic_bedrock_raw_text_has_bos() {
+        // R3 N1: Bedrock invokeModel path prepends `<|begin_of_text|>`.
+        // "hello world" = 2 vocab tokens + 1 BOS = 3.
+        let enc = AnthropicEncoder::new().expect("boot");
+        let req = TokenizeRequest {
+            model: "anthropic.claude-3-haiku-20240307-v1:0".to_string(),
+            raw_text: "hello world".to_string(),
+            ..Default::default()
+        };
+        let r = enc.count_tokens_request(&req).unwrap();
+        assert_eq!(
+            r.input_tokens, 3,
+            "Bedrock: expected 2 vocab + 1 BOS = 3"
+        );
+        assert_eq!(r.kind, EncoderKind::Anthropic);
+    }
+
+    #[test]
+    fn anthropic_bedrock_cross_region_raw_text_has_bos() {
+        // R3 N1: cross-region inference profile prefix (`us.`, `eu.`,
+        // `apac.`, `us-gov.`) still routes via Bedrock invokeModel so
+        // BOS=1 applies. Pin via `us.anthropic.…`.
+        let enc = AnthropicEncoder::new().expect("boot");
+        let req = TokenizeRequest {
+            model: "us.anthropic.claude-3-5-sonnet-20240620-v1:0".to_string(),
+            raw_text: "hello world".to_string(),
+            ..Default::default()
+        };
+        let r = enc.count_tokens_request(&req).unwrap();
+        assert_eq!(
+            r.input_tokens, 3,
+            "Bedrock cross-region: expected 2 vocab + 1 BOS = 3"
+        );
+    }
+
+    #[test]
+    fn anthropic_is_bedrock_routing_classifier() {
+        // R3 N1 — pin the classifier so a future maintainer can't
+        // silently widen / narrow it.
+        // Native API (Anthropic /v1/messages):
+        assert!(!is_bedrock_routing("claude-3-haiku"));
+        assert!(!is_bedrock_routing("claude-3-5-sonnet-20240620"));
+        assert!(!is_bedrock_routing("claude-3-opus-20240229"));
+        // Bedrock direct:
+        assert!(is_bedrock_routing("anthropic.claude-3-haiku-20240307-v1:0"));
+        assert!(is_bedrock_routing(
+            "anthropic.claude-3-5-sonnet-20240620-v1:0"
+        ));
+        // Bedrock cross-region inference profile:
+        assert!(is_bedrock_routing(
+            "us.anthropic.claude-3-5-sonnet-20240620-v1:0"
+        ));
+        assert!(is_bedrock_routing(
+            "eu.anthropic.claude-3-haiku-20240307-v1:0"
+        ));
+        assert!(is_bedrock_routing(
+            "apac.anthropic.claude-3-5-sonnet-20241022-v1:0"
+        ));
+        assert!(is_bedrock_routing(
+            "us-gov.anthropic.claude-3-5-sonnet-20240620-v1:0"
+        ));
+    }
+
+    #[test]
     fn anthropic_chat_envelope_uses_turn_boundary_not_per_message() {
-        // R2 M3: Anthropic chat envelope is `per_message=0,
-        // per_turn_boundary=4, reply_priming=0`. Raw_text has BOS=1.
+        // R2 M3 + R3 N1: Anthropic chat envelope is `per_message=0,
+        // per_turn_boundary=4, reply_priming=0`. Native API path
+        // (`claude-3-haiku`) has BOS=0 on raw_text (R3 N1 fix).
         // For a 1-message chat ("user" / "hello"):
         //   chat_n = 0 (per_msg) + 4 (boundary) + role_tokens + content_tokens
-        //   raw_n  = content_tokens + 1 (BOS)
-        // Therefore chat_n - raw_n = 4 + role_tokens - 1 ≥ 4 (since
-        // role_tokens ≥ 1 for "user").
+        //   raw_n  = content_tokens (no BOS on native API)
+        // Therefore chat_n - raw_n = 4 + role_tokens ≥ 5 (since
+        // role_tokens ≥ 1 for "user"); chat exceeds raw by ≥ 4.
         let enc = AnthropicEncoder::new().expect("boot");
         let raw_req = TokenizeRequest {
             model: "claude-3-haiku".to_string(),
@@ -379,9 +508,10 @@ mod tests {
         let raw_n = enc.count_tokens_request(&raw_req).unwrap().input_tokens;
         let chat_n = enc.count_tokens_request(&chat_req).unwrap().input_tokens;
         assert!(chat_n > raw_n, "chat ({chat_n}) should exceed raw ({raw_n})");
-        // chat = role_tokens + content_tokens + 4 (per_turn_boundary)
-        // raw = content_tokens + 1 (BOS)
-        // delta = role_tokens + 3 (≥ 4)
+        // Native API arithmetic (post R3 N1):
+        //   chat = role_tokens + content_tokens + 4 (per_turn_boundary)
+        //   raw  = content_tokens                  (no BOS on native)
+        //   delta = role_tokens + 4 (≥ 5)
         assert!(
             chat_n >= raw_n + 4,
             "chat-raw delta must include 4-token Anthropic turn boundary; got raw={raw_n} chat={chat_n}"
