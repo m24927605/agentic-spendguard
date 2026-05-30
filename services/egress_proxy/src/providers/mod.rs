@@ -13,3 +13,6 @@ pub mod azure_openai;
 pub mod bedrock;
 pub mod openai;
 pub mod vertex;
+
+#[cfg(test)]
+mod golden_samples;
