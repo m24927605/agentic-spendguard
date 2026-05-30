@@ -36,9 +36,8 @@ pub async fn replay_stream(
         None
     } else {
         Some(
-            Uuid::parse_str(&req.fencing_scope_id).map_err(|e| {
-                Status::invalid_argument(format!("fencing_scope_id: {}", e))
-            })?,
+            Uuid::parse_str(&req.fencing_scope_id)
+                .map_err(|e| Status::invalid_argument(format!("fencing_scope_id: {}", e)))?,
         )
     };
 
@@ -159,12 +158,8 @@ fn decode_cloudevent_from_jsonb(row: &AuditOutboxRow) -> Result<CloudEvent, anyh
             .map(|s| s.to_string())
             .unwrap_or_default()
     };
-    let get_u64 = |k: &str| -> u64 {
-        payload.get(k).and_then(|v| v.as_u64()).unwrap_or_default()
-    };
-    let get_i64 = |k: &str| -> i64 {
-        payload.get(k).and_then(|v| v.as_i64()).unwrap_or_default()
-    };
+    let get_u64 = |k: &str| -> u64 { payload.get(k).and_then(|v| v.as_u64()).unwrap_or_default() };
+    let get_i64 = |k: &str| -> i64 { payload.get(k).and_then(|v| v.as_i64()).unwrap_or_default() };
     let get_i32 = |k: &str| -> i32 { get_i64(k) as i32 };
 
     let data_b64 = get_str("data_b64");
@@ -203,5 +198,6 @@ fn decode_cloudevent_from_jsonb(row: &AuditOutboxRow) -> Result<CloudEvent, anyh
         producer_sequence: get_u64("producer_sequence"),
         producer_signature,
         signing_key_id: get_str("signing_key_id"),
+        ..Default::default()
     })
 }

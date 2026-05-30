@@ -153,10 +153,7 @@ async fn handle_inner(
     // surface as Postgres 22003 → CODE_UNSPECIFIED → opaque 502).
     if parsed.amount_atomic.is_empty()
         || parsed.amount_atomic.len() > 38
-        || !parsed
-            .amount_atomic
-            .chars()
-            .all(|c| c.is_ascii_digit())
+        || !parsed.amount_atomic.chars().all(|c| c.is_ascii_digit())
     {
         return Err(ReceiverError::InvalidRequest(
             "amount_atomic must be 1-38 ASCII digits (NUMERIC(38,0))".into(),
@@ -185,10 +182,12 @@ async fn handle_inner(
     let op_kind = match event_kind {
         "provider_report" => "provider_report",
         "invoice_reconcile" => "invoice_reconcile",
-        _ => return Err(ReceiverError::InvalidRequest(format!(
-            "unknown event_kind: {}",
-            event_kind
-        ))),
+        _ => {
+            return Err(ReceiverError::InvalidRequest(format!(
+                "unknown event_kind: {}",
+                event_kind
+            )))
+        }
     };
     let provenance = format!(
         "{}:{}:{}:{}",
@@ -412,13 +411,8 @@ async fn handle_inner(
                         return Err(ReceiverError::Conflict);
                     }
                 }
-                let tx = dedupe::lookup_ledger_tx(
-                    &state.pg,
-                    tenant_uuid,
-                    op_kind,
-                    &provenance,
-                )
-                .await?;
+                let tx =
+                    dedupe::lookup_ledger_tx(&state.pg, tenant_uuid, op_kind, &provenance).await?;
                 if let Some((tx_id, hash)) = tx {
                     if hash == canonical.to_vec() {
                         // Insert dedupe row defensively (POC self-heal).
@@ -577,7 +571,10 @@ fn build_cloudevent(
     Ok(CloudEvent {
         specversion: "1.0".into(),
         r#type: type_str.into(),
-        source: format!("webhook-receiver://{}/{}", provider, parsed.provider_account),
+        source: format!(
+            "webhook-receiver://{}/{}",
+            provider, parsed.provider_account
+        ),
         id: event_id,
         time: Some(ts),
         datacontenttype: "application/json".into(),
@@ -590,6 +587,7 @@ fn build_cloudevent(
         producer_sequence: seq,
         signing_key_id: "webhook-receiver:demo:v1".into(),
         producer_signature: Vec::new().into(),
+        ..Default::default()
     })
 }
 

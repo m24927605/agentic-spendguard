@@ -64,6 +64,7 @@ pub async fn sweep_one(state: &mut AppState, row: ExpiredRow) -> anyhow::Result<
         producer_sequence: producer_seq,
         signing_key_id: String::new(),
         producer_signature: Vec::new().into(),
+        ..Default::default()
     };
     crate::audit::sign_cloudevent_in_place(&*state.signer, &mut cloud_event).await?;
 
