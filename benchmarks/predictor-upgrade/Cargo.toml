@@ -1,0 +1,61 @@
+[package]
+# SLICE_15 — Concurrent-burst benchmark harness comparing SpendGuard (with
+# predictor upgrade) against LiteLLM proxy + Portkey (when available).
+#
+# Spec ancestors:
+#   - docs/slices/SLICE_15_end_to_end_benchmark.md §2 (burst benchmark)
+#   - docs/slices/SLICE_15_end_to_end_benchmark.md §8.2 (acceptance criteria)
+#   - docs/predictor-architecture-spec-v1alpha1.md §0.2 lock criterion #5
+#     (Tier 3 heuristic hit rate < 0.1%)
+#   - docs/contract-dsl-spec-v1alpha1.md §14 (decision latency SLO < 50ms)
+#
+# Independent crate (not in any cargo workspace). Mirrors the established
+# convention from benchmarks/tokenizer/Cargo.toml. The output_predictor
+# upgrade benchmark stays separated from the per-component microbench so
+# that bench cycle time (which includes spinning competitors) doesn't
+# block tokenizer SLO regression tests.
+name = "spendguard-predictor-upgrade-benchmarks"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "Concurrent-burst benchmark harness for the predictor upgrade spec set. Compares SpendGuard's overshoot %, p99 decision latency, and Tier 2 p99 against LiteLLM proxy + Portkey at 1/10/100/1000 concurrent calls."
+publish = false
+
+[[bin]]
+name = "predictor-upgrade-bench"
+path = "src/main.rs"
+
+[dependencies]
+# Concurrency primitives + async HTTP for hitting competitors over the
+# wire. tokio multi-thread runtime is required to actually exercise the
+# concurrency dimension (single-thread would serialize on the runtime).
+tokio = { version = "1.38", features = ["full"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+
+# hdrhistogram gives us p99 / p99.9 latency without averaging artifacts
+# (CRITICAL — the slice doc §9 review item #5 calls out "p99 measurement
+# correct, not aggregated wrong"). We feed every per-call latency into
+# the histogram and read percentiles atomically.
+hdrhistogram = "7"
+
+# UUID + chrono for reservation_id minting + RESULTS.md timestamps.
+uuid = { version = "1", features = ["v4", "v7"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+# Tracing — kept light (default-features = false) because we don't want
+# the benchmark itself to skew p99 with logger latency.
+tracing = { version = "0.1", default-features = false }
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt"] }
+
+# futures::stream::FuturesUnordered for concurrent task fan-out per
+# burst level. tokio::spawn + join_all would also work but introduces
+# allocation overhead under high concurrency.
+futures = "0.3"
+
+# For deterministic random prompt selection in the synthetic workload.
+# `rand` here is dev-only quality (not crypto). Pinned to a stable major.
+rand = "0.8"
