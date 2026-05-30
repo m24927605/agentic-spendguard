@@ -225,6 +225,61 @@ message HandshakeResponse {
 }
 
 // ============================================================================
+// ClaimEstimate — egress_proxy / SDK supplied prediction metadata (SLICE_10).
+// ============================================================================
+//
+// All 17 prediction columns the audit chain expects per
+// `audit-chain-prediction-extension-v1alpha1.md` §2.1+§2.2.
+//
+// Field-tag layout:
+//   1..15   — hot-path fields (single-byte varint).
+//   16..    — additive / cold metadata.
+//
+// Sentinel semantics mirror the CloudEvent extension attributes
+// (`spendguard/common/v1/common.proto` tags 300-317):
+//   * predicted_b_tokens = 0   → Strategy B null (cache miss → L1 cold-start
+//                                fall back to A as reservation)
+//   * predicted_c_tokens = 0   → Strategy C null (no plugin OR plugin
+//                                returned no signal)
+//   * prediction_confidence = 0.0 → Strategy A row (NULL on SQL side)
+//   * cold_start_layer_used = ""   → warm path (no cold-start fallback)
+//   * tokenizer_version_id = ""    → Tier 3 fallback (heuristic, no
+//                                     versioned encoder)
+//   * run_predicted_remaining_steps = -1 → projector unreachable
+//   * run_steps_completed_so_far = 0 → run is at first call (cold cache)
+//   * run_code_triggered = ""      → no RUN_* code emitted
+message ClaimEstimate {
+  // ── Tokenizer ───────────────────────────────────────────────────────────
+  // Tier 2 = local exact BPE; Tier 3 = chars/4 heuristic fallback.
+  string tokenizer_tier        = 1;  // "T1" | "T2" | "T3"
+  string tokenizer_version_id  = 2;  // UUIDv7; "" for T3.
+  int64  input_tokens          = 3;
+
+  // ── Output predictor — Strategy A/B/C ──────────────────────────────────
+  int64  predicted_a_tokens          = 4;
+  int64  predicted_b_tokens          = 5;  // 0 = unset.
+  int64  predicted_c_tokens          = 6;  // 0 = unset.
+  string reserved_strategy           = 7;  // "A" | "B" | "C"
+  string prediction_strategy_used    = 8;  // "A" | "B" | "C"
+  string prediction_policy_used      = 9;  // STRICT_CEILING | EMPIRICAL_RUN_CEILING | ADAPTIVE_CEILING | SHADOW_ONLY
+  float  prediction_confidence       = 10; // 0.0 = unset.
+  int64  prediction_sample_size      = 11; // 0 = N/A
+  string cold_start_layer_used       = 12; // "L1"|"L2"|"L3"|"L4"|"" = warm
+
+  // ── Classifier + prompt-class fingerprint ──────────────────────────────
+  // Spec §8.2: fingerprint capture both predictor's view + caller's view.
+  string classifier_version          = 13;
+  string fingerprint_version         = 14;
+  string prompt_class_fingerprint    = 15;
+
+  // ── Run-cost projector — 3 run-level audit cols ───────────────────────
+  int64  run_projection_at_decision_atomic = 16;
+  int32  run_predicted_remaining_steps     = 17; // -1 = projector unreachable.
+  int64  run_steps_completed_so_far        = 18;
+  string run_code_triggered                = 19; // "" = no RUN_* emitted.
+}
+
+// ============================================================================
 // RequestDecision (per Contract §15 *.pre triggers)
 // ============================================================================
 
@@ -264,6 +319,26 @@ message DecisionRequest {
 
     // Free-form runtime metadata (kept opaque server-side).
     google.protobuf.Struct runtime_metadata = 7;
+
+    // === SLICE_10 additive: ClaimEstimate enrichment ===
+    //
+    // egress_proxy (after SLICE_10) calls tokenizer library + output_predictor
+    // + run_cost_projector BEFORE constructing this DecisionRequest, and
+    // attaches the full prediction metadata here. The sidecar reads these
+    // values into the audit_decision CloudEvent (common.v1 tags 300-313)
+    // so the audit chain carries the entire prediction story end-to-end.
+    //
+    // Wire-compat per proto3 additive evolution:
+    //   * SLICE_09 and earlier producers (SDK wrapper, legacy egress_proxy)
+    //     omit this field; sidecar treats it as "estimate not supplied" and
+    //     leaves the prediction CloudEvent tags at proto3 defaults (existing
+    //     behaviour — Strategy A imputed locally if needed in legacy path,
+    //     audit row prediction fields = NULL).
+    //   * SLICE_10 egress_proxy / SLICE_12 SDK populate this field; sidecar
+    //     reads the values verbatim into the CloudEvent.
+    //
+    // Tag 8 (next free in Inputs); additive.
+    ClaimEstimate claim_estimate = 8;
   }
   Inputs inputs = 6;
 

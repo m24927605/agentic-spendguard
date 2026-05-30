@@ -520,6 +520,10 @@ pub async fn run_through_reserve(
     // emits an audit_decision row via Ledger.RecordDeniedDecision so
     // Contract §6.1 invariant 「無 audit 則無 effect」 holds.
     if decision_kind != Decision::Continue {
+        // SLICE_10 Phase C: thread the egress_proxy/SDK ClaimEstimate
+        // through the DENY lane so the audit row also carries the 17
+        // prediction columns. None = legacy SDK wrapper path.
+        let claim_estimate_for_deny = extract_claim_estimate(req);
         return run_record_denied_decision(
             state,
             ctx,
@@ -538,6 +542,7 @@ pub async fn run_through_reserve(
             effect_hash,
             &enrichment,
             projector_response_ref,
+            claim_estimate_for_deny,
         )
         .await;
     }
@@ -560,6 +565,9 @@ pub async fn run_through_reserve(
     // contracts default-filled to STRICT_CEILING this emits the
     // literal "STRICT_CEILING" (spec §4.1 conservative default).
     let prediction_policy_str = bundle.parsed.prediction_policy.as_str();
+    // SLICE_10 Phase C: pick up egress_proxy / SDK supplied
+    // ClaimEstimate (None if caller is legacy / pre-SLICE_10).
+    let claim_estimate_ref = extract_claim_estimate(req);
     let mut cloudevent = build_audit_decision_cloudevent(
         ctx,
         &decision_id,
@@ -570,6 +578,7 @@ pub async fn run_through_reserve(
         &enrichment,
         prediction_policy_str,
         projector_response_ref,
+        claim_estimate_ref,
     );
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
@@ -737,6 +746,17 @@ fn build_budget_claims(req: &DecisionRequest) -> Result<Vec<BudgetClaim>, Domain
     Ok(out)
 }
 
+/// SLICE_10 Phase C — read the egress_proxy / SDK supplied ClaimEstimate
+/// off the DecisionRequest (additive proto field; absent on legacy
+/// callers). Returns None when the caller did not supply a ClaimEstimate
+/// — sidecar then falls back to the existing per-field defaults (proto3
+/// zero = SQL NULL via prediction-mirror).
+fn extract_claim_estimate(
+    req: &DecisionRequest,
+) -> Option<&crate::proto::sidecar_adapter::v1::ClaimEstimate> {
+    req.inputs.as_ref().and_then(|i| i.claim_estimate.as_ref())
+}
+
 fn build_audit_decision_cloudevent(
     ctx: &DecisionContext,
     decision_id: &Uuid,
@@ -747,6 +767,7 @@ fn build_audit_decision_cloudevent(
     enrichment: &AuditEnrichment,
     prediction_policy: &str,
     projector_response: Option<&crate::proto::run_cost_projector::v1::ProjectResponse>,
+    claim_estimate: Option<&crate::proto::sidecar_adapter::v1::ClaimEstimate>,
 ) -> CloudEvent {
     let mut payload = serde_json::json!({
         "snapshot_hash":   hex::encode(snapshot_hash),
@@ -825,27 +846,63 @@ fn build_audit_decision_cloudevent(
     // populated at this slice.
     ce.prediction_policy_used = prediction_policy.to_string();
 
-    // SLICE_09 Phase E: 3 run-level audit columns per audit-chain-
-    // prediction-extension-v1alpha1.md §2.2 (mirrored into CloudEvent
-    // tags 311/312/313). When the projector is None or its call failed,
-    // we set the spec §3.3 sentinels:
-    //   * run_projection_at_decision_atomic = 0  (proto3 default)
-    //   * run_predicted_remaining_steps     = -1 (sentinel "unreachable")
-    //   * run_steps_completed_so_far        = 0  (proto3 default)
-    // canonical_ingest's mirror layer treats -1 specifically as "NULL"
-    // when populating the audit_outbox column (per
-    // audit-chain-extension §3.3 sentinel design).
-    match projector_response {
-        Some(resp) => {
-            ce.run_projection_at_decision_atomic = resp.run_projection_at_decision_atomic;
-            ce.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
-            ce.run_steps_completed_so_far = resp.run_steps_completed_so_far;
+    // SLICE_10 Phase C: ALL 17 prediction columns now populated from
+    // the egress_proxy / SDK supplied ClaimEstimate. When the caller
+    // doesn't supply one (legacy SDK wrapper, SLICE_09 path), the field
+    // is None and we leave the CloudEvent fields at proto3 defaults
+    // (= SQL NULL via the prediction-mirror crate) — backwards-compat
+    // with pre-SLICE_10 producers.
+    //
+    // The 3 run-level columns are sourced from the projector response
+    // when claim_estimate is None (SLICE_09 path); when claim_estimate
+    // is present, egress_proxy has already merged the projector data
+    // into it so we read from claim_estimate exclusively to keep a
+    // single source of truth.
+    if let Some(est) = claim_estimate {
+        ce.predicted_a_tokens = est.predicted_a_tokens;
+        ce.predicted_b_tokens = est.predicted_b_tokens;
+        ce.predicted_c_tokens = est.predicted_c_tokens;
+        ce.reserved_strategy = est.reserved_strategy.clone();
+        ce.prediction_strategy_used = est.prediction_strategy_used.clone();
+        // prediction_policy_used already set above from contract.
+        // If the egress_proxy supplied a different value (matched its
+        // STRICT_CEILING default), prefer the contract's value as
+        // canonical. SLICE_10 keeps both the same in practice.
+        if !est.prediction_policy_used.is_empty() {
+            ce.prediction_policy_used = est.prediction_policy_used.clone();
         }
-        None => {
-            // Projector unreachable / not wired — sentinel.
-            ce.run_projection_at_decision_atomic = 0;
-            ce.run_predicted_remaining_steps = -1;
-            ce.run_steps_completed_so_far = 0;
+        ce.tokenizer_tier = est.tokenizer_tier.clone();
+        ce.tokenizer_version_id = est.tokenizer_version_id.clone();
+        ce.prediction_confidence = est.prediction_confidence;
+        ce.prediction_sample_size = est.prediction_sample_size;
+        ce.cold_start_layer_used = est.cold_start_layer_used.clone();
+
+        ce.run_projection_at_decision_atomic = est.run_projection_at_decision_atomic;
+        ce.run_predicted_remaining_steps = est.run_predicted_remaining_steps;
+        ce.run_steps_completed_so_far = est.run_steps_completed_so_far;
+    } else {
+        // SLICE_09 Phase E: 3 run-level audit columns per audit-chain-
+        // prediction-extension-v1alpha1.md §2.2 (mirrored into
+        // CloudEvent tags 311/312/313). When projector is None or its
+        // call failed, set the spec §3.3 sentinels:
+        //   * run_projection_at_decision_atomic = 0  (proto3 default)
+        //   * run_predicted_remaining_steps     = -1 (sentinel "unreachable")
+        //   * run_steps_completed_so_far        = 0  (proto3 default)
+        // canonical_ingest's mirror layer treats -1 specifically as
+        // "NULL" when populating the audit_outbox column (per
+        // audit-chain-extension §3.3 sentinel design).
+        match projector_response {
+            Some(resp) => {
+                ce.run_projection_at_decision_atomic = resp.run_projection_at_decision_atomic;
+                ce.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
+                ce.run_steps_completed_so_far = resp.run_steps_completed_so_far;
+            }
+            None => {
+                // Projector unreachable / not wired — sentinel.
+                ce.run_projection_at_decision_atomic = 0;
+                ce.run_predicted_remaining_steps = -1;
+                ce.run_steps_completed_so_far = 0;
+            }
         }
     }
 
@@ -914,6 +971,9 @@ async fn run_record_denied_decision(
     effect_hash: [u8; 32],
     enrichment: &AuditEnrichment,
     projector_response: Option<&crate::proto::run_cost_projector::v1::ProjectResponse>,
+    // SLICE_10 Phase C: ClaimEstimate flows into DENY-lane CloudEvent
+    // identical to the ALLOW lane (per §6.4 byte-identical regression).
+    claim_estimate: Option<&crate::proto::sidecar_adapter::v1::ClaimEstimate>,
 ) -> Result<DecisionOutput, DomainError> {
     // SLICE_09 Phase E: surface the RUN_* code that drove this DENY
     // (if any). Empty string = per-call DENY without projector input.
@@ -1000,22 +1060,46 @@ async fn run_record_denied_decision(
     // contracts pass through whatever they declared.
     cloudevent.prediction_policy_used = bundle.parsed.prediction_policy.as_str().to_string();
 
-    // SLICE_09 Phase E: DENY-lane CloudEvent emits the 3 run-level audit
+    // SLICE_10 Phase C: DENY-lane CloudEvent emits all 17 prediction
     // columns identical to the ALLOW lane. STOP / REQUIRE_APPROVAL /
-    // DEGRADE / SKIP rows still carry the projector's observation so
-    // calibration-report can compare RUN_* code precision against
-    // realized decisions.
-    match projector_response {
-        Some(resp) => {
-            cloudevent.run_projection_at_decision_atomic =
-                resp.run_projection_at_decision_atomic;
-            cloudevent.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
-            cloudevent.run_steps_completed_so_far = resp.run_steps_completed_so_far;
+    // DEGRADE / SKIP rows still carry the predictor + projector
+    // observations so calibration-report can backtest precision against
+    // realized decisions. When claim_estimate is None (legacy SDK
+    // wrapper), fall back to the SLICE_09 path of populating just the
+    // 3 run-level cols from the projector_response.
+    if let Some(est) = claim_estimate {
+        cloudevent.predicted_a_tokens = est.predicted_a_tokens;
+        cloudevent.predicted_b_tokens = est.predicted_b_tokens;
+        cloudevent.predicted_c_tokens = est.predicted_c_tokens;
+        cloudevent.reserved_strategy = est.reserved_strategy.clone();
+        cloudevent.prediction_strategy_used = est.prediction_strategy_used.clone();
+        if !est.prediction_policy_used.is_empty() {
+            cloudevent.prediction_policy_used = est.prediction_policy_used.clone();
         }
-        None => {
-            cloudevent.run_projection_at_decision_atomic = 0;
-            cloudevent.run_predicted_remaining_steps = -1;
-            cloudevent.run_steps_completed_so_far = 0;
+        cloudevent.tokenizer_tier = est.tokenizer_tier.clone();
+        cloudevent.tokenizer_version_id = est.tokenizer_version_id.clone();
+        cloudevent.prediction_confidence = est.prediction_confidence;
+        cloudevent.prediction_sample_size = est.prediction_sample_size;
+        cloudevent.cold_start_layer_used = est.cold_start_layer_used.clone();
+
+        cloudevent.run_projection_at_decision_atomic =
+            est.run_projection_at_decision_atomic;
+        cloudevent.run_predicted_remaining_steps = est.run_predicted_remaining_steps;
+        cloudevent.run_steps_completed_so_far = est.run_steps_completed_so_far;
+    } else {
+        // SLICE_09 fallback: 3 run-level cols only, from projector_response.
+        match projector_response {
+            Some(resp) => {
+                cloudevent.run_projection_at_decision_atomic =
+                    resp.run_projection_at_decision_atomic;
+                cloudevent.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
+                cloudevent.run_steps_completed_so_far = resp.run_steps_completed_so_far;
+            }
+            None => {
+                cloudevent.run_projection_at_decision_atomic = 0;
+                cloudevent.run_predicted_remaining_steps = -1;
+                cloudevent.run_steps_completed_so_far = 0;
+            }
         }
     }
 

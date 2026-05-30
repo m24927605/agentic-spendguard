@@ -31,11 +31,12 @@ use serde::Deserialize;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
-use tracing::info;
+use tracing::{debug, info, warn};
 use tracing_subscriber::EnvFilter;
 
 mod decision;
 mod forward;
+mod predictor_client;
 mod proto;
 mod redacted_auth;
 mod sidecar_client;
@@ -91,7 +92,71 @@ async fn main() -> Result<()> {
 
     let forward_state =
         Arc::new(forward::ForwardState::new().context("build reqwest client")?);
-    let app = build_app(forward_state, sidecar);
+
+    // SLICE_10 Phase A: boot Tokenizer (library form; in-process, p99 ≤ 1ms)
+    // + optional output_predictor + run_cost_projector gRPC clients. Both
+    // gRPC clients are optional in demo deployments — when their endpoint
+    // env var is unset, decision::estimate_call_cost falls back per spec
+    // §11 (Strategy A only; no RUN_* code emitted; audit row carries -1
+    // sentinel for run_predicted_remaining_steps per audit-chain-extension
+    // §3.3).
+    //
+    // Tokenizer.new_with_embedded_assets() is fail-closed: any embedded
+    // asset sha256 mismatch panics at boot (Tier 2 panic invariant per
+    // tokenizer-service-spec-v1alpha1.md §7.4 + §3.6). This is the only
+    // place in egress_proxy startup that fails the binary outright.
+    let tokenizer = Arc::new(
+        spendguard_tokenizer::Tokenizer::new_with_embedded_assets()
+            .context("tokenizer library init failed (Tier 2 invariant fail-closed)")?,
+    );
+    info!("tokenizer library booted (embedded BPE assets verified)");
+
+    let predictor_cfg = predictor_client::PredictorClientConfig::from_env();
+    let output_predictor = if let Some(url) = predictor_cfg.output_predictor_endpoint.clone() {
+        info!(endpoint = %url, "dialing output_predictor gRPC");
+        match predictor_client::OutputPredictorClient::connect(url.clone()).await {
+            Ok(c) => {
+                info!("output_predictor client ready");
+                Some(c)
+            }
+            Err(e) => {
+                // Per SLICE_05 R1: fall-through behaviour on boot failure is
+                // acceptable when the downstream service is explicitly
+                // optional. We log + continue with None so demo mode still
+                // boots; audit rows simply carry Strategy A only.
+                warn!(err = %e, endpoint = %url, "output_predictor connect failed; falling back to local Strategy A");
+                None
+            }
+        }
+    } else {
+        debug!("SPENDGUARD_PROXY_OUTPUT_PREDICTOR_ENDPOINT unset; Strategy A only");
+        None
+    };
+
+    let run_cost_projector = if let Some(url) = predictor_cfg.run_cost_projector_endpoint.clone() {
+        info!(endpoint = %url, "dialing run_cost_projector gRPC");
+        match predictor_client::RunCostProjectorClient::connect(url.clone()).await {
+            Ok(c) => {
+                info!("run_cost_projector client ready");
+                Some(c)
+            }
+            Err(e) => {
+                warn!(err = %e, endpoint = %url, "run_cost_projector connect failed; pass-through (no RUN_* codes)");
+                None
+            }
+        }
+    } else {
+        debug!("SPENDGUARD_PROXY_RUN_COST_PROJECTOR_ENDPOINT unset; pass-through");
+        None
+    };
+
+    let app = build_app(
+        forward_state,
+        sidecar,
+        tokenizer,
+        output_predictor,
+        run_cost_projector,
+    );
     let addr: SocketAddr = cfg.bind_addr.parse().context("parse bind_addr")?;
 
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -121,17 +186,36 @@ fn init_tracing() {
 }
 
 /// Combined app state: HTTP client for upstream forward + sidecar
-/// handle for decision gating + pricing cache (slice 4b). All
-/// cheaply-clonable; axum requires `Clone` on the state extractor's
-/// bound type.
+/// handle for decision gating + pricing cache (slice 4b) + SLICE_10
+/// prediction services (tokenizer library + output_predictor + run_cost_projector
+/// gRPC clients). All cheaply-clonable; axum requires `Clone` on the state
+/// extractor's bound type.
 #[derive(Clone)]
 pub struct AppState {
     pub forward: Arc<forward::ForwardState>,
     pub sidecar: sidecar_client::SidecarHandle,
     pub pricing_cache: Option<decision::PricingCache>,
+    /// SLICE_10 Phase A — in-process Tier 2 BPE tokenizer (p99 ≤ 1ms).
+    /// Boot-time integrity check guarantees the embedded encoder assets
+    /// match `asset_sha256` constants per tokenizer spec §7.4 fail-fast.
+    pub tokenizer: Arc<spendguard_tokenizer::Tokenizer>,
+    /// SLICE_10 Phase A — optional output_predictor gRPC client. When
+    /// `None`, decision::estimate_call_cost falls back to local Strategy A
+    /// (input_tokens × max_tokens_default) per spec §11 failure mode.
+    pub output_predictor: Option<predictor_client::OutputPredictorClient>,
+    /// SLICE_10 Phase A — optional run_cost_projector gRPC client. When
+    /// `None`, no RUN_* codes are emitted and run_predicted_remaining_steps
+    /// gets the -1 sentinel per audit-chain-prediction-extension §3.3.
+    pub run_cost_projector: Option<predictor_client::RunCostProjectorClient>,
 }
 
-fn build_app(forward_state: Arc<forward::ForwardState>, sidecar: sidecar_client::SidecarHandle) -> Router {
+fn build_app(
+    forward_state: Arc<forward::ForwardState>,
+    sidecar: sidecar_client::SidecarHandle,
+    tokenizer: Arc<spendguard_tokenizer::Tokenizer>,
+    output_predictor: Option<predictor_client::OutputPredictorClient>,
+    run_cost_projector: Option<predictor_client::RunCostProjectorClient>,
+) -> Router {
     let pricing_cache = std::env::var("SPENDGUARD_PROXY_RUNTIME_ENV_PATH")
         .ok()
         .or_else(|| Some("/var/lib/spendguard/bundles/runtime.env".to_string()))
@@ -151,6 +235,9 @@ fn build_app(forward_state: Arc<forward::ForwardState>, sidecar: sidecar_client:
         forward: forward_state.clone(),
         sidecar: sidecar.clone(),
         pricing_cache,
+        tokenizer,
+        output_predictor,
+        run_cost_projector,
     };
     Router::new()
         .route("/healthz", get(healthz))
@@ -209,7 +296,15 @@ mod tests {
         // handle with `ready=true` so unit tests that only hit
         // /healthz / /readyz don't need a real UDS server.
         let sidecar = make_stub_sidecar_handle();
-        build_app(forward, sidecar)
+        // SLICE_10 Phase A: tokenizer library + None for the two
+        // optional gRPC clients. Tokenizer init is fast (~50ms) and
+        // tests /healthz / /readyz routes don't go near the predictor
+        // path, so the None branch is unreached.
+        let tokenizer = Arc::new(
+            spendguard_tokenizer::Tokenizer::new_with_embedded_assets()
+                .expect("tokenizer init"),
+        );
+        build_app(forward, sidecar, tokenizer, None, None)
     }
 
     /// Helper: produce a SidecarHandle without a real UDS server.

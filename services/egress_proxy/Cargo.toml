@@ -36,6 +36,16 @@ serde_json = "1"
 # Shared crates
 spendguard-ids = { path = "../ids" }
 
+# SLICE_10 Phase A: tokenizer library form for in-process hot-path tokenize.
+# Spec §10.1 SLO p99 < 1ms; gRPC service form (services/tokenizer/) is too
+# slow for the per-request hot path so we link the library directly per
+# tokenizer-service-spec-v1alpha1.md §2.1(b).
+spendguard-tokenizer = { path = "../../crates/spendguard-tokenizer" }
+
+# Synchronous big-int / numeric helpers used when summing claim amounts
+# (SLICE_10 Phase B run_cost_projector input).
+num-bigint = "0.4"
+
 # Outbound HTTP client (forward to OpenAI). rustls backend matches the
 # main() install_default() pattern; no native-tls to avoid OpenSSL dep.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }

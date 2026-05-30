@@ -1,0 +1,122 @@
+{{- if .Values.egressProxy.enabled }}
+{{- $component := "egress-proxy" }}
+{{- /* SLICE_10 — egress_proxy Deployment.
+       Spec: docs/specs/auto-instrument-egress-proxy-spec.md v7
+            + docs/slices/SLICE_10_egress_proxy_decision_rewrite.md.
+
+       Pattern mirrors charts/spendguard/templates/output_predictor.yaml
+       Container security baseline:
+         - USER 65532, readOnlyRootFilesystem, cap_drop ALL.
+       Sidecar UDS:
+         - hostPath shared with the sidecar DaemonSet so the proxy
+           pod can dial /var/run/spendguard/adapter.sock.
+       Production warnings (not fails):
+         - outputPredictorEndpoint / runCostProjectorEndpoint unset
+           ⇒ proxy boots in degraded mode (Strategy A only, no RUN_*).
+           This is documented under spec §11 failure modes; we WARN at
+           helm template time so operators see the implication.
+    */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- if eq .Values.egressProxy.image.tag "" -}}
+{{- fail "egressProxy.image.tag is required under chart.profile=production" -}}
+{{- end -}}
+{{- if not (or (regexMatch "@sha256:[0-9a-f]{64}$" (toString .Values.egressProxy.image.tag)) (regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[a-z0-9.]+)?$" (toString .Values.egressProxy.image.tag))) -}}
+{{- fail (printf "egressProxy.image.tag=%q must be a semver tag (vN.N.N) or digest-pinned (@sha256:HEX) under chart.profile=production" (toString .Values.egressProxy.image.tag)) -}}
+{{- end -}}
+{{- if eq .Values.egressProxy.outputPredictorEndpoint "" -}}
+{{- /* WARN only — degraded mode (Strategy A only) is documented as
+       valid under spec §11 failure modes. The audit row will carry
+       predicted_b_tokens=0, predicted_c_tokens=0, reserved_strategy="A". */ -}}
+{{- /* Helm doesn't have a built-in WARN; embed in NOTES.txt or
+       use an annotation. For now we document via this comment. */ -}}
+{{- end -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-egress-proxy
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.egressProxy.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: egress-proxy
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.egressProxy.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: http, containerPort: 9000 }
+          env:
+            - { name: SPENDGUARD_EGRESS_PROXY_BIND_ADDR, value: {{ .Values.egressProxy.bindAddr | quote }} }
+            - { name: SPENDGUARD_PROXY_DEFAULT_TENANT_ID, value: {{ .Values.global.tenantId | quote }} }
+            - { name: SPENDGUARD_PROXY_SIDECAR_UDS_PATH, value: "/var/run/spendguard/adapter.sock" }
+            {{- if .Values.egressProxy.outputPredictorEndpoint }}
+            # SLICE_10: output_predictor wiring. Empty ⇒ proxy falls back
+            # to local Strategy A (predicted_b/c=0; reserved="A").
+            - { name: SPENDGUARD_PROXY_OUTPUT_PREDICTOR_ENDPOINT, value: {{ .Values.egressProxy.outputPredictorEndpoint | quote }} }
+            {{- end }}
+            {{- if .Values.egressProxy.runCostProjectorEndpoint }}
+            # SLICE_10: run_cost_projector wiring. Empty ⇒ proxy
+            # pass-through (no RUN_* codes; remaining_steps=-1).
+            - { name: SPENDGUARD_PROXY_RUN_COST_PROJECTOR_ENDPOINT, value: {{ .Values.egressProxy.runCostProjectorEndpoint | quote }} }
+            {{- end }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: sidecar-uds
+              mountPath: /var/run/spendguard
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.egressProxy.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: sidecar-uds
+          hostPath:
+            path: {{ .Values.egressProxy.sidecarUdsHostPath }}
+            type: DirectoryOrCreate
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spendguard.fullname" . }}-egress-proxy
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: http, port: 9000, targetPort: http }
+  selector:
+    {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+{{- end }}
