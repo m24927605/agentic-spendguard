@@ -69,14 +69,21 @@
 
 pub mod dispatch;
 pub mod encoder_cache;
+pub mod encoders;
 pub mod error;
 pub mod tier3;
 pub mod versions;
 
 use std::sync::Arc;
 
-pub use dispatch::{DispatchEntry, EncoderKind};
+// `EncoderKind` was scoped under `dispatch` in SLICE_03 (OpenAI-only).
+// SLICE_04 lifts it into `encoders` so all 5 kinds (OpenAi, Anthropic,
+// Gemini, Cohere, Llama) live together with the `Encoder` trait. The
+// re-export below preserves `spendguard_tokenizer::EncoderKind` as the
+// stable public path (the trait module is the source of truth).
+pub use dispatch::DispatchEntry;
 pub use encoder_cache::EncoderCache;
+pub use encoders::{EncodeResult, Encoder, EncoderKind};
 pub use error::TokenizerError;
 pub use tier3::tier3_fallback;
 pub use versions::{

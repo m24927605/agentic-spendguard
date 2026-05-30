@@ -24,6 +24,7 @@
 //! 4. If the encoder kind / asset is new, embed the bundle in
 //!    `data/` and add a sha256 const in `lib.rs::asset_sha256`.
 
+use crate::encoders::EncoderKind;
 use crate::error::TokenizerError;
 use crate::versions::{
     TIKTOKEN_CL100K_BASE_VERSION_ID, TIKTOKEN_O200K_BASE_VERSION_ID,
@@ -31,29 +32,19 @@ use crate::versions::{
 };
 use regex::Regex;
 
-/// Encoder kind discriminant — mirrors `tokenizer_versions.kind`
-/// CHECK constraint values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EncoderKind {
-    OpenAiTiktoken,
-    // SLICE_04 will add: AnthropicBpe, GeminiBpe, CohereBpe,
-    // SentencepieceLlama. Defining them now would force noop
-    // match arms across the codebase without test coverage; we
-    // keep the enum minimal so SLICE_03's compile graph cleanly
-    // refuses to compile if anyone accidentally references a
-    // SLICE_04 variant.
-}
-
-impl EncoderKind {
-    /// Stable string discriminant used in
-    /// [`crate::TokenizeResponse::kind`] and in the
-    /// `tokenizer_versions.kind` SQL CHECK constraint.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            EncoderKind::OpenAiTiktoken => "OPENAI_TIKTOKEN",
-        }
-    }
-}
+// `EncoderKind` moved to `crate::encoders` in SLICE_04 so all five
+// kinds (OpenAi, Anthropic, Gemini, Cohere, Llama) live alongside the
+// `Encoder` trait + per-kind drift threshold. The SLICE_03 variant name
+// `OpenAiTiktoken` is renamed to `OpenAi` to match the trait module's
+// convention (one variant per provider, not per asset format). The
+// `tokenizer_versions.kind` SQL CHECK constraint value is still
+// "OPENAI_TIKTOKEN" because that's what describes the embedded asset
+// family; only the Rust enum name changed.
+//
+// External code that wants a stable Rust path can import via
+// `spendguard_tokenizer::EncoderKind` (the lib.rs re-export points to
+// the new location). The `dispatch::EncoderKind` path is no longer
+// exposed; references inside this file use the trait module's enum.
 
 /// Identifies which tiktoken-rs encoder a SLICE_03 entry resolves
 /// to. Lets the [`crate::encoder_cache::EncoderCache`] pick the
@@ -115,12 +106,12 @@ const RAW_ENTRIES: &[(&str, EncoderKind, TiktokenEncoder)] = &[
     // ── o200k_base (latest, narrowest patterns first) ──────────
     (
         r"^gpt-4o-mini(-\d{4}-\d{2}-\d{2})?$",
-        EncoderKind::OpenAiTiktoken,
+        EncoderKind::OpenAi,
         TiktokenEncoder::O200kBase,
     ),
     (
         r"^gpt-4o(-\d{4}-\d{2}-\d{2})?$",
-        EncoderKind::OpenAiTiktoken,
+        EncoderKind::OpenAi,
         TiktokenEncoder::O200kBase,
     ),
     // ── cl100k_base ───────────────────────────────────────────
@@ -131,22 +122,22 @@ const RAW_ENTRIES: &[(&str, EncoderKind, TiktokenEncoder)] = &[
     // → ~2x under-count vs legacy heuristic).
     (
         r"^gpt-4(-\d{4})?-preview$",
-        EncoderKind::OpenAiTiktoken,
+        EncoderKind::OpenAi,
         TiktokenEncoder::Cl100kBase,
     ),
     (
         r"^gpt-4-turbo(-preview)?(-\d{4}-\d{2}-\d{2})?$",
-        EncoderKind::OpenAiTiktoken,
+        EncoderKind::OpenAi,
         TiktokenEncoder::Cl100kBase,
     ),
     (
         r"^gpt-4(-\d{4})?(-\d{4}-\d{2}-\d{2})?$",
-        EncoderKind::OpenAiTiktoken,
+        EncoderKind::OpenAi,
         TiktokenEncoder::Cl100kBase,
     ),
     (
         r"^gpt-3\.5-turbo(-\d{4})?(-\d{2}k)?$",
-        EncoderKind::OpenAiTiktoken,
+        EncoderKind::OpenAi,
         TiktokenEncoder::Cl100kBase,
     ),
     // ── p50k_base (legacy completion models) ──────────────────
@@ -157,17 +148,17 @@ const RAW_ENTRIES: &[(&str, EncoderKind, TiktokenEncoder)] = &[
     // chat-instruct-style suffixes follows the same module order.
     (
         r"^gpt-3\.5-turbo-instruct(-\d{4})?$",
-        EncoderKind::OpenAiTiktoken,
+        EncoderKind::OpenAi,
         TiktokenEncoder::P50kBase,
     ),
     (
         r"^text-davinci-(002|003)$",
-        EncoderKind::OpenAiTiktoken,
+        EncoderKind::OpenAi,
         TiktokenEncoder::P50kBase,
     ),
     (
         r"^code-davinci-(001|002)$",
-        EncoderKind::OpenAiTiktoken,
+        EncoderKind::OpenAi,
         TiktokenEncoder::P50kBase,
     ),
 ];
@@ -236,7 +227,7 @@ mod tests {
         let t = table();
         let e = t.lookup("gpt-4o").expect("hit");
         assert_eq!(e.tiktoken, TiktokenEncoder::O200kBase);
-        assert_eq!(e.kind, EncoderKind::OpenAiTiktoken);
+        assert_eq!(e.kind, EncoderKind::OpenAi);
     }
 
     #[test]
@@ -360,7 +351,7 @@ mod tests {
         let t = table();
         let e = t.lookup("gpt-4-1106-preview").expect("hit");
         assert_eq!(e.tiktoken, TiktokenEncoder::Cl100kBase);
-        assert_eq!(e.kind, EncoderKind::OpenAiTiktoken);
+        assert_eq!(e.kind, EncoderKind::OpenAi);
     }
 
     #[test]
@@ -386,7 +377,7 @@ mod tests {
         let t = table();
         let e = t.lookup("gpt-3.5-turbo-instruct").expect("hit");
         assert_eq!(e.tiktoken, TiktokenEncoder::P50kBase);
-        assert_eq!(e.kind, EncoderKind::OpenAiTiktoken);
+        assert_eq!(e.kind, EncoderKind::OpenAi);
     }
 
     #[test]
