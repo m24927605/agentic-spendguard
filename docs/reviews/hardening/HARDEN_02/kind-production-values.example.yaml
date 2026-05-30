@@ -1,0 +1,63 @@
+chart:
+  profile: production
+
+global:
+  region: kind-harden02
+  imagePullPolicy: IfNotPresent
+
+postgres:
+  ledgerUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_ledger
+  canonicalUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical
+  controlPlaneUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_control_plane
+  applyMigrationsOnInstall: false
+
+sidecar:
+  endpointCatalogManifestUrl: https://endpoint-catalog.spendguard.svc.cluster.local:8443/v1/catalog/manifest
+  contractBundleHashHex: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  trustRootSpkiSha256Hex: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+tokenizer:
+  image:
+    tag: v0.1.0
+  mtlsSecretName: spendguard-tokenizer-mtls
+  providerSecretName: spendguard-tokenizer-provider-keys
+  canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
+  databaseUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical
+  sinkMtlsSecretName: spendguard-tokenizer-sink-mtls
+  signingKeySecretName: spendguard-tokenizer-signing-key
+  signingKeyPath: /etc/spendguard/signing/signing-key.pem
+
+outputPredictor:
+  image:
+    tag: v0.1.0
+  mtlsSecretName: spendguard-output-predictor-mtls
+  databaseUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical
+
+runCostProjector:
+  image:
+    tag: v0.1.0
+  mtlsSecretName: spendguard-run-cost-projector-mtls
+  databaseUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical
+
+egressProxy:
+  enabled: true
+  image:
+    tag: v0.1.0
+
+networkPolicy:
+  enabled: true
+  postgresCidrs:
+    - 10.0.0.0/8
+
+statsAggregator:
+  image:
+    tag: v0.1.0
+  databaseUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical
+  canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
+  sinkMtlsSecretName: spendguard-stats-aggregator-sink-mtls
+  signingKeySecretName: spendguard-stats-aggregator-signing-key
+  signingKeyPath: /etc/spendguard/signing/signing-key.pem
+  schemaBundleHashHex: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+
+outboxForwarder:
+  schemaBundleHashHex: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc

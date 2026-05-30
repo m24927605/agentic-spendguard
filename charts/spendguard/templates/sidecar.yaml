@@ -28,6 +28,10 @@
 {{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
 {{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo (set signing.profile=demo in values.yaml or pick mode=local|kms)" }}
 {{- end }}
+{{- $runCostProjectorUrl := .Values.sidecar.runCostProjectorUrl -}}
+{{- if and (eq .Values.chart.profile "production") .Values.runCostProjector.enabled (eq $runCostProjectorUrl "") -}}
+{{- $runCostProjectorUrl = printf "https://%s-run-cost-projector:50055" (include "spendguard.fullname" .) -}}
+{{- end -}}
 {{- /* Phase 5 GA hardening S5: multi-pod safety gates. */ -}}
 {{- if gt (int .Values.sidecar.replicas) 1 }}
 {{- if not .Values.sidecar.acknowledgeMultiPod }}
@@ -87,6 +91,9 @@ spec:
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
             - name: SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL
               value: "https://{{ include "spendguard.fullname" . }}-canonical-ingest:50052"
+            {{- if $runCostProjectorUrl }}
+            - { name: SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL, value: {{ $runCostProjectorUrl | quote }} }
+            {{- end }}
             # NOTE: sidecar/src/clients/mtls.rs uses MTlsPaths::default()
             # which hardcodes the workload-cert paths. Files come from the
             # `tls` volume mounted at /var/run/secrets/spendguard/ below,

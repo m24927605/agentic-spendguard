@@ -148,6 +148,12 @@ sidecar:
   # chart.profile=production rejects it; operator must supply a real URL
   # pointing at their endpoint-catalog deployment (not provisioned here).
   endpointCatalogManifestUrl: "https://endpoint-catalog.spendguard:8443/v1/catalog/manifest"
+  # SLICE_09/HARDEN_02: optional run-cost projector RPC endpoint. Demo
+  # compose leaves this empty unless a scenario explicitly starts the
+  # projector. Production deployments should point at the in-cluster
+  # run-cost-projector Service so RUN_* projection stops are available
+  # before Ledger Reserve.
+  runCostProjectorUrl: ""
   # Round-2 #3: Contract + schema bundle bootstrap. The chart's bundles
   # init container pre-pulls these .tgz files into the bundles-data
   # secret; the sidecar verifies the byte-exact hash before installing.
