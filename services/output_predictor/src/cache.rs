@@ -164,9 +164,23 @@ impl OutputDistributionCache {
     /// interval '2 hours'` is in the WHERE so stale rows return zero
     /// matches → cache miss path.
     ///
+    /// R2 B1 / M4: use `set_config(..., true)` with a bound parameter
+    /// instead of literal interpolation. tenant_id is already a Uuid
+    /// (parsed at gRPC boundary) so the literal form was technically
+    /// safe, but the parametrised form (a) removes the format-string
+    /// foot-gun entirely, (b) matches the writer-side discipline in
+    /// services/stats_aggregator/src/aggregation.rs, and (c) makes the
+    /// adversarial RLS-injection test pattern parallel between writer
+    /// and reader paths.
+    ///
+    /// R2 M15: NULL p95_30d handled via try_get → Option mapping. Rows
+    /// with NULL p95 (e.g. a fresh cycle that found 0 samples) are
+    /// filtered as cache miss instead of panicking in `r.get::<f32, _>(0)`.
+    ///
     /// Returns:
     ///   * `Ok(Some(row))` — row present + fresh + sample_size_30d >= 30
-    ///   * `Ok(None)` — row absent / stale / under-sampled
+    ///                      + p95_30d non-NULL
+    ///   * `Ok(None)` — row absent / stale / under-sampled / NULL p95
     ///   * `Err(_)` — connection or RLS error
     async fn sql_lookup(
         &self,
@@ -175,19 +189,14 @@ impl OutputDistributionCache {
     ) -> Result<Option<CacheRow>, sqlx::Error> {
         let mut tx = pool.begin().await?;
 
-        // RLS session variable per stats-aggregator-spec §9.1. SET LOCAL
-        // confines the variable to this transaction; transaction commit
-        // / rollback resets it. The literal interpolation is safe
-        // because tenant_id is a Uuid (parsed at gRPC boundary →
-        // structurally limited to hex+dashes).
-        sqlx::query(&format!(
-            "SET LOCAL app.current_tenant_id = '{}'",
-            key.tenant_id
-        ))
-        .execute(&mut *tx)
-        .await?;
+        // RLS session variable per stats-aggregator-spec §9.1.
+        // set_config(..., true) is SET LOCAL — auto-reset at commit.
+        sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+            .bind(key.tenant_id.to_string())
+            .execute(&mut *tx)
+            .await?;
 
-        let row: Option<(f32, i32)> = sqlx::query(
+        let row_opt = sqlx::query(
             r#"
             SELECT p95_30d, sample_size_30d
             FROM output_distribution_cache
@@ -197,6 +206,7 @@ impl OutputDistributionCache {
               AND prompt_class = $4
               AND computed_at > now() - interval '2 hours'
               AND sample_size_30d >= $5
+              AND p95_30d IS NOT NULL
             LIMIT 1
             "#,
         )
@@ -206,15 +216,21 @@ impl OutputDistributionCache {
         .bind(&key.prompt_class)
         .bind(PROMOTION_THRESHOLD_SAMPLES)
         .fetch_optional(&mut *tx)
-        .await?
-        .map(|r| (r.get::<f32, _>(0), r.get::<i32, _>(1)));
+        .await?;
 
         tx.commit().await?;
 
-        Ok(row.map(|(p95, n)| CacheRow {
-            p95_30d: p95,
-            sample_size_30d: n,
-        }))
+        // R2 M15: try_get tolerates NULL → cache miss instead of panic.
+        let row = row_opt.and_then(|r| {
+            let p95 = r.try_get::<Option<f32>, _>(0).ok().flatten()?;
+            let n = r.try_get::<Option<i32>, _>(1).ok().flatten()?;
+            Some(CacheRow {
+                p95_30d: p95,
+                sample_size_30d: n,
+            })
+        });
+
+        Ok(row)
     }
 
     /// Test helper — number of in-memory entries (after expiry timestamps

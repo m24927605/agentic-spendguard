@@ -48,12 +48,23 @@
 --
 -- ## Multi-tenant isolation (spec §9)
 --
--- Row-Level Security ON: every SELECT requires the caller's session to have
+-- Row-Level Security ON with FOR ALL policy: every SELECT and every
+-- INSERT/UPDATE/DELETE requires the caller's session to have
 -- `SET LOCAL app.current_tenant_id = '<uuid>'` before the query.
--- output_predictor sets this per Predict call from PredictRequest.tenant_id;
--- stats_aggregator's aggregation cycle uses BYPASSRLS via the migrator role
--- because aggregation is the producer that *populates* the per-tenant rows
--- (cross-tenant by design at write time; per-tenant at read time).
+--
+-- ### R2 B1 — writer path correction
+--
+-- R1 prior shape declared `FOR SELECT` + claimed `BYPASSRLS` for the
+-- aggregation writer, but BYPASSRLS was never granted to the application
+-- role (no GRANT BYPASSRLS in this migration; no role-level attribute in
+-- 0005_immutability_triggers.sql). Under FORCE ROW LEVEL SECURITY the
+-- writer's UPSERTs would be rejected with
+-- "new row violates row-level security policy". R2 widens the policy to
+-- FOR ALL and pairs it with the writer's SET LOCAL discipline (see
+-- services/stats_aggregator/src/aggregation.rs::aggregate_output_distribution
+-- — invokes `set_config('app.current_tenant_id', tenant, true)` before
+-- every per-tenant UPSERT). Reader path (output_predictor cache.rs) sets
+-- the same variable for SELECT. Same contract, no BYPASSRLS dependency.
 -- ============================================================================
 
 CREATE TABLE output_distribution_cache (
@@ -86,7 +97,13 @@ CREATE TABLE output_distribution_cache (
     -- aggregation_version lets downstream consumers detect SQL aggregation
     -- recipe changes (spec §0.1 compatibility policy "aggregation_version
     -- column versioned").
-    computed_at          TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    --
+    -- R2 M17: no DEFAULT on computed_at — the aggregation writer ALWAYS
+    -- supplies an explicit `now()`. Removing the default closes a foot-gun
+    -- where an ad-hoc INSERT could land with `clock_timestamp()` from
+    -- within a long-running transaction (the freshness gate downstream
+    -- relies on the writer-supplied stamp being the real cycle time).
+    computed_at          TIMESTAMPTZ NOT NULL,
     aggregation_version  TEXT NOT NULL DEFAULT 'v1alpha1',
 
     PRIMARY KEY (tenant_id, model, agent_id, prompt_class)
@@ -124,16 +141,26 @@ CREATE INDEX output_distribution_cache_freshness_idx
 ALTER TABLE output_distribution_cache ENABLE ROW LEVEL SECURITY;
 ALTER TABLE output_distribution_cache FORCE ROW LEVEL SECURITY;
 
+-- R2 B1: FOR ALL policy. SELECT path enforces USING; INSERT/UPDATE/DELETE
+-- additionally enforces WITH CHECK so a writer who forgets the SET LOCAL
+-- still fails closed (cannot insert a row with mismatched tenant_id).
+--
 -- Use COALESCE to a deliberately-illegal sentinel so a missing session
--- variable produces a clean type-cast failure ("invalid input syntax")
--- rather than silently leaking every tenant's rows under a NULL match.
--- The sentinel '00000000-0000-0000-0000-000000000000' is the nil UUID
--- which never matches any production tenant_id (all tenants mint
--- UUIDv7 with timestamp > 0).
+-- variable produces a clean tenant-mismatch (returns 0 rows / rejects
+-- WITH CHECK) rather than silently leaking every tenant's rows under a
+-- NULL match. The sentinel '00000000-0000-0000-0000-000000000000' is
+-- the nil UUID which never matches any production tenant_id (all
+-- tenants mint UUIDv7 with timestamp > 0).
 CREATE POLICY output_distribution_cache_tenant_isolation
     ON output_distribution_cache
-    FOR SELECT
+    FOR ALL
     USING (
+        tenant_id = COALESCE(
+            NULLIF(current_setting('app.current_tenant_id', TRUE), ''),
+            '00000000-0000-0000-0000-000000000000'
+        )::uuid
+    )
+    WITH CHECK (
         tenant_id = COALESCE(
             NULLIF(current_setting('app.current_tenant_id', TRUE), ''),
             '00000000-0000-0000-0000-000000000000'
@@ -147,9 +174,13 @@ CREATE POLICY output_distribution_cache_tenant_isolation
 --   output_predictor pool (reader path goes through application role to
 --   pick up RLS — reader role bypasses RLS by default which is wrong here).
 -- canonical_ingest_reader_role: ad-hoc operator queries. RLS applies.
+--
+-- R2 M16: REVOKE SELECT FROM PUBLIC. Without it, any new connecting role
+-- inherits PUBLIC's SELECT and can run cross-tenant probes through the
+-- RLS policy. Belt-and-suspenders on top of RLS — defence in depth.
 -- ============================================================================
 
-REVOKE INSERT, UPDATE, DELETE ON output_distribution_cache FROM PUBLIC;
+REVOKE SELECT, INSERT, UPDATE, DELETE ON output_distribution_cache FROM PUBLIC;
 
 GRANT SELECT, INSERT, UPDATE, DELETE
     ON output_distribution_cache
@@ -158,7 +189,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE
 GRANT SELECT ON output_distribution_cache TO canonical_ingest_reader_role;
 
 COMMENT ON TABLE output_distribution_cache IS
-    'Strategy B per-(tenant, model, agent_id, prompt_class) P50/P95/P99 distribution cache per stats-aggregator-spec-v1alpha1.md §5. Populated hourly by services/stats_aggregator. Read by services/output_predictor on the Predict hot path. RLS enforces per-tenant isolation at read time; aggregation writer uses BYPASSRLS implicitly via the application role privilege. Mutable (UPSERT every cycle); no immutability trigger.';
+    'Strategy B per-(tenant, model, agent_id, prompt_class) P50/P95/P99 distribution cache per stats-aggregator-spec-v1alpha1.md §5. Populated hourly by services/stats_aggregator. Read by services/output_predictor on the Predict hot path. RLS FOR ALL policy enforces per-tenant isolation at both read AND write time; the stats_aggregator writer SETs app.current_tenant_id per tenant before each UPSERT (R2 B1). Mutable (UPSERT every cycle); no immutability trigger.';
 COMMENT ON COLUMN output_distribution_cache.tenant_id IS
     'Tenant identifier (UUIDv7). Indexed via PRIMARY KEY for hot-path Predict lookup.';
 COMMENT ON COLUMN output_distribution_cache.computed_at IS

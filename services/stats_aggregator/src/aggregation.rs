@@ -22,16 +22,17 @@
 //! roll back other tenants' updates. The advisory lock guarantees no
 //! other aggregator instance can interleave.
 //!
-//! ## RLS bypass for the writer path
+//! ## RLS writer-side discipline (R2 B1)
 //!
 //! The aggregation writer needs to insert/update rows across all
-//! tenants. The migration role (canonical_ingest_application_role) gets
-//! GRANT SELECT/INSERT/UPDATE/DELETE; RLS would still apply unless the
-//! role has BYPASSRLS. Operators set BYPASSRLS on the application role
-//! at deployment time (documented in Helm chart + migrations). Without
-//! BYPASSRLS, the writer must SET LOCAL app.current_tenant_id per
-//! tenant before each query. SLICE_06 uses the latter form (no role
-//! attribute dependency), which is also adversarial-test friendly.
+//! tenants. RLS policy on output_distribution_cache + run_length_*
+//! is FOR ALL (R2 B1) — every UPSERT is checked against
+//! `app.current_tenant_id`. The writer therefore MUST invoke
+//! `SELECT set_config('app.current_tenant_id', '<tenant>', true)`
+//! IMMEDIATELY after `pool.begin()` so the per-transaction GUC is
+//! visible to subsequent SELECTs + UPSERTs. The R1 shape claimed
+//! BYPASSRLS but the role attribute was never granted; FOR ALL +
+//! SET LOCAL is the supported path going forward.
 
 use anyhow::Context;
 use sqlx::postgres::PgPool;
@@ -132,6 +133,16 @@ pub async fn aggregate_output_distribution(
     tenant_id: Uuid,
 ) -> Result<Vec<BucketAggregate>, anyhow::Error> {
     let mut tx = pool.begin().await.context("begin tenant tx")?;
+
+    // R2 B1: set RLS session variable per migration 0016 FOR ALL policy.
+    // Without this every UPSERT below would fail with "new row violates
+    // row-level security policy". `set_config(..., true)` is the
+    // SET-LOCAL flavour — the GUC is auto-reset at COMMIT / ROLLBACK.
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .context("set RLS tenant_id for output_distribution_cache")?;
 
     // Spec §4.1 main aggregation query. NOTE: we run two queries (7d
     // window + 30d window) and stitch via the application — keeping

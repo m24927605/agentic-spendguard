@@ -13,6 +13,15 @@ use uuid::Uuid;
 pub async fn aggregate_run_length(pool: &PgPool, tenant_id: Uuid) -> Result<(), anyhow::Error> {
     let mut tx = pool.begin().await.context("begin run-length tx")?;
 
+    // R2 B1: set RLS session variable per migration 0017 FOR ALL policy.
+    // Without this the UPSERT below would fail with "new row violates
+    // row-level security policy". SET LOCAL flavour auto-resets at COMMIT.
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .context("set RLS tenant_id for run_length_distribution_cache")?;
+
     // Spec §6 — compute per-agent run lengths from decision events,
     // then aggregate percentiles + count of distinct run_ids.
     sqlx::query(

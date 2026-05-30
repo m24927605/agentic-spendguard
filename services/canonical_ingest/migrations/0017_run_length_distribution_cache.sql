@@ -23,8 +23,11 @@
 --
 -- ## Privilege boundary + RLS
 --
--- Same shape as 0016. RLS enforced; canonical_ingest_application_role gets
--- INSERT/UPDATE/DELETE/SELECT; canonical_ingest_reader_role gets SELECT.
+-- Same shape as 0016. RLS FOR ALL policy (R2 B1) enforced; the writer
+-- (services/stats_aggregator/src/run_length.rs::aggregate_run_length)
+-- SETs app.current_tenant_id per tenant before each UPSERT.
+-- canonical_ingest_application_role gets INSERT/UPDATE/DELETE/SELECT;
+-- canonical_ingest_reader_role gets SELECT.
 --
 -- ## Stylistic alignment
 --
@@ -50,8 +53,10 @@ CREATE TABLE run_length_distribution_cache (
     stddev_steps_30d     REAL,
     sample_size_30d      INTEGER CHECK (sample_size_30d IS NULL OR sample_size_30d >= 0),
 
-    -- Metadata. TZ-explicit +00 per SLICE_01 R5.
-    computed_at          TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    -- Metadata. TZ-explicit +00 per SLICE_01 R5. R2 M17: no DEFAULT on
+    -- computed_at — writer always supplies explicit `now()` (matches
+    -- 0016 convention; closes the same in-transaction freshness foot-gun).
+    computed_at          TIMESTAMPTZ NOT NULL,
     aggregation_version  TEXT NOT NULL DEFAULT 'v1alpha1',
 
     PRIMARY KEY (tenant_id, agent_id)
@@ -69,8 +74,14 @@ ALTER TABLE run_length_distribution_cache FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY run_length_distribution_cache_tenant_isolation
     ON run_length_distribution_cache
-    FOR SELECT
+    FOR ALL
     USING (
+        tenant_id = COALESCE(
+            NULLIF(current_setting('app.current_tenant_id', TRUE), ''),
+            '00000000-0000-0000-0000-000000000000'
+        )::uuid
+    )
+    WITH CHECK (
         tenant_id = COALESCE(
             NULLIF(current_setting('app.current_tenant_id', TRUE), ''),
             '00000000-0000-0000-0000-000000000000'
@@ -81,7 +92,9 @@ CREATE POLICY run_length_distribution_cache_tenant_isolation
 -- Privilege boundary.
 -- ============================================================================
 
-REVOKE INSERT, UPDATE, DELETE ON run_length_distribution_cache FROM PUBLIC;
+-- R2 M16: REVOKE SELECT alongside INSERT/UPDATE/DELETE so PUBLIC role
+-- doesn't inherit cross-tenant read capability behind RLS. Defence in depth.
+REVOKE SELECT, INSERT, UPDATE, DELETE ON run_length_distribution_cache FROM PUBLIC;
 
 GRANT SELECT, INSERT, UPDATE, DELETE
     ON run_length_distribution_cache
