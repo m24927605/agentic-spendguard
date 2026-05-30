@@ -479,10 +479,15 @@ CloudEvent proto mirror at tag 310 per audit-chain extension §3.2。
 
 ## §12. Lock 後的下一步
 
-1. SLICE 08 PR：`model_default_distribution.toml` initial population + `docs/cold-start-baseline-sources.md` + loader module + 7-class classifier in output_predictor
-2. SLICE 08 acceptance：simulation validate 30-sample threshold；70 TOML entries with sources
-3. L3 federated aggregate schema review (Codex round 2)；implementation deferred per §5.6 trigger
-4. Quarterly refresh playbook 文檔化 + first refresh drill 排程
+1. ✅ SLICE 08 PR shipped (2026-05-30, branch `slice/SLICE_08_cold_start_baseline_table`):
+   - `services/output_predictor/data/model_default_distribution.toml` (70 entries, v1alpha1)
+   - `docs/cold-start-baseline-sources.md` (source citations per §7.4)
+   - `services/output_predictor/src/cold_start_loader.rs` (Layer A sha256 + Layer B fixture cross-check + per-entry sanity)
+   - L2 wired in `strategy_b::compute_b` + `cold_start_layer_used` audit column populated per §7.1 truth table
+   - Simulation validation: P95 estimate at N=30 within spec §6.3 acceptance gate
+2. ✅ SLICE 08 acceptance: 7-class classifier (SLICE_06); 70 TOML entries with sources
+3. L3 federated aggregate schema review (Codex round 2); implementation deferred per §5.6 trigger
+4. Quarterly refresh playbook 文檔化 + first refresh drill 排程 (Q3 2026 first window)
 
 ---
 

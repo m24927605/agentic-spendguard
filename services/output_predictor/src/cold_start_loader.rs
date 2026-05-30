@@ -388,17 +388,23 @@ impl ModelDefaultDistribution {
         &self.last_updated
     }
 
-    /// Test helper — total entry count.
-    #[cfg(test)]
+    /// Total entry count — public so integration tests + ops dashboards
+    /// can verify the embedded TOML covers the SLICE_08 contract
+    /// (70 entries for v1alpha1).
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
-    /// Test helper — check entry presence.
-    #[cfg(test)]
+    /// `true` if `(model, class)` has an entry. Cheap O(1) probe useful
+    /// for ops dashboards + integration tests.
     pub fn contains_key(&self, model: &str, class: &str) -> bool {
         self.entries
             .contains_key(&(model.to_string(), class.to_string()))
+    }
+
+    /// Convenience for `len() == 0` (clippy::len_without_is_empty).
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
     }
 }
 
