@@ -11,6 +11,8 @@ COPY proto ./proto
 RUN ln -sf /usr/include/google ./proto/google
 # Slice 2: shared ids crate consumed via path dep
 COPY services/ids ./services/ids
+# SLICE_10 links tokenizer as an in-process path dependency.
+COPY crates/spendguard-tokenizer ./crates/spendguard-tokenizer
 COPY services/egress_proxy ./services/egress_proxy
 WORKDIR /build/services/egress_proxy
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \

@@ -138,6 +138,106 @@ INSERT INTO audit_outbox (
 
 DO $$
 DECLARE
+    missing_input BIGINT;
+    missing_output BIGINT;
+    zero_input BIGINT;
+    zero_output BIGINT;
+BEGIN
+    INSERT INTO audit_outbox (
+        audit_outbox_id,
+        audit_decision_event_id,
+        decision_id,
+        tenant_id,
+        ledger_transaction_id,
+        event_type,
+        cloudevent_payload,
+        cloudevent_payload_signature,
+        ledger_fencing_epoch,
+        workload_instance_id,
+        pending_forward,
+        recorded_at,
+        recorded_month,
+        producer_sequence,
+        idempotency_key
+    ) VALUES (
+        '01999d70-0001-7000-8000-000000000010'::uuid,
+        '01999d70-0001-7000-8000-000000000011'::uuid,
+        '01999d70-0001-7000-8000-000000000012'::uuid,
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        '01999d70-0001-7000-8000-0000000000ff'::uuid,
+        'spendguard.audit.outcome',
+        jsonb_build_object(
+            'data_b64', encode(convert_to('{"estimated_amount_atomic":"42"}', 'UTF8'), 'base64'),
+            'actual_input_tokens', 0,
+            'actual_output_tokens', 0
+        ),
+        '\x00'::bytea,
+        1,
+        'test-wl',
+        TRUE,
+        '2026-07-15T00:00:00Z'::timestamptz,
+        '2026-07-01'::date,
+        2,
+        'test-key-missing-actuals'
+    )
+    RETURNING actual_input_tokens, actual_output_tokens
+    INTO missing_input, missing_output;
+
+    IF missing_input IS NOT NULL OR missing_output IS NOT NULL THEN
+        RAISE EXCEPTION 'FAIL: missing outcome usage mirrored as %, % instead of NULL, NULL',
+            missing_input, missing_output;
+    END IF;
+
+    INSERT INTO audit_outbox (
+        audit_outbox_id,
+        audit_decision_event_id,
+        decision_id,
+        tenant_id,
+        ledger_transaction_id,
+        event_type,
+        cloudevent_payload,
+        cloudevent_payload_signature,
+        ledger_fencing_epoch,
+        workload_instance_id,
+        pending_forward,
+        recorded_at,
+        recorded_month,
+        producer_sequence,
+        idempotency_key
+    ) VALUES (
+        '01999d70-0001-7000-8000-000000000020'::uuid,
+        '01999d70-0001-7000-8000-000000000021'::uuid,
+        '01999d70-0001-7000-8000-000000000022'::uuid,
+        '00000000-0000-4000-8000-000000000001'::uuid,
+        '01999d70-0001-7000-8000-0000000000ff'::uuid,
+        'spendguard.audit.outcome',
+        jsonb_build_object(
+            'data_b64', encode(convert_to('{"actual_input_tokens":0,"actual_output_tokens":0}', 'UTF8'), 'base64'),
+            'actual_input_tokens', 0,
+            'actual_output_tokens', 0
+        ),
+        '\x00'::bytea,
+        1,
+        'test-wl',
+        TRUE,
+        '2026-07-15T00:00:00Z'::timestamptz,
+        '2026-07-01'::date,
+        3,
+        'test-key-zero-actuals'
+    )
+    RETURNING actual_input_tokens, actual_output_tokens
+    INTO zero_input, zero_output;
+
+    IF zero_input <> 0 OR zero_output <> 0 THEN
+        RAISE EXCEPTION 'FAIL: explicit zero outcome usage mirrored as %, % instead of 0, 0',
+            zero_input, zero_output;
+    END IF;
+
+    RAISE NOTICE 'PASS: 0052 mirror keeps missing actual usage NULL and preserves explicit zero usage';
+END $$;
+
+DO $$
+DECLARE
     test_id UUID := '01999d70-0001-7000-8000-000000000001'::uuid;
     test_month DATE := '2026-07-01'::date;
     test_columns TEXT[] := ARRAY[

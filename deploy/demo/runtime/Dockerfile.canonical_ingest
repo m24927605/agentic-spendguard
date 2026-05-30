@@ -12,6 +12,9 @@ COPY proto ./proto
 RUN ln -sf /usr/include/google ./proto/google
 # Phase 5 GA hardening S8: signing path-dep crate (Verifier trait).
 COPY services/signing ./services/signing
+# SLICE_01/06 dev-dep mirror crate is still resolved by cargo build,
+# even when not compiled for the release binary.
+COPY crates/spendguard-prediction-mirror ./crates/spendguard-prediction-mirror
 COPY services/canonical_ingest ./services/canonical_ingest
 WORKDIR /build/services/canonical_ingest
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \

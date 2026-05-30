@@ -20,10 +20,12 @@
 //!   * Each event runs in its own Postgres transaction. Batch atomicity is
 //!     not required by spec; per-event independent results are.
 
+use bigdecimal::BigDecimal;
 use chrono::Utc;
 use prost_types::Timestamp;
 use sqlx::PgPool;
 use spendguard_signing::{VerifyFailure, Verifier};
+use std::str::FromStr;
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
@@ -329,10 +331,7 @@ async fn process_one(
         region_id: &cfg.region,
         ingest_shard_id: &cfg.ingest_shard_id,
         failure_class,
-        // Round-3 fix B2: SLICE_01 callers pass Default (all None → SQL
-        // NULL). SLICE_06 will replace this with a translated decode of
-        // evt.predicted_*_tokens etc. via spendguard-prediction-mirror.
-        prediction: Default::default(),
+        prediction: prediction_columns_from_event(evt),
     };
 
     // Per-decision sequence enforcement: audit.outcome with no preceding decision.
@@ -469,10 +468,7 @@ async fn process_one(
                 region_id: &cfg.region,
                 ingest_shard_id: &cfg.ingest_shard_id,
                 failure_class,
-                // Round-3 fix B2: SLICE_01 trigger-side fallback also
-                // passes Default (SLICE_06 will populate from decoded
-                // CloudEvent tag 300-317 fields).
-                prediction: Default::default(),
+                prediction: prediction_columns_from_event(evt),
             };
             if let Err(e) = append::quarantine_audit_outcome(pool, input, orphan_after).await {
                 return error_result(&evt.id, EventStatus::Quarantined, e);
@@ -541,7 +537,286 @@ fn cloudevent_to_json(evt: &CloudEvent) -> serde_json::Value {
         "producer_id":     evt.producer_id,
         "producer_sequence": evt.producer_sequence,
         "signing_key_id":  evt.signing_key_id,
+        "predicted_a_tokens": evt.predicted_a_tokens,
+        "predicted_b_tokens": evt.predicted_b_tokens,
+        "predicted_c_tokens": evt.predicted_c_tokens,
+        "reserved_strategy": evt.reserved_strategy,
+        "prediction_strategy_used": evt.prediction_strategy_used,
+        "prediction_policy_used": evt.prediction_policy_used,
+        "tokenizer_tier": evt.tokenizer_tier,
+        "tokenizer_version_id": evt.tokenizer_version_id,
+        "prediction_confidence": evt.prediction_confidence,
+        "prediction_sample_size": evt.prediction_sample_size,
+        "cold_start_layer_used": evt.cold_start_layer_used,
+        "run_projection_at_decision_atomic": evt.run_projection_at_decision_atomic,
+        "run_predicted_remaining_steps": evt.run_predicted_remaining_steps,
+        "run_steps_completed_so_far": evt.run_steps_completed_so_far,
+        "actual_input_tokens": evt.actual_input_tokens,
+        "actual_output_tokens": evt.actual_output_tokens,
+        "delta_b_ratio": evt.delta_b_ratio,
+        "delta_c_ratio": evt.delta_c_ratio,
     })
+}
+
+fn prediction_columns_from_event(evt: &CloudEvent) -> append::PredictionColumns<'_> {
+    let is_decision = evt.r#type == "spendguard.audit.decision";
+    let is_outcome = evt.r#type == "spendguard.audit.outcome";
+    let projector_unreachable = evt.run_projection_at_decision_atomic == 0
+        && evt.run_predicted_remaining_steps == -1
+        && evt.run_steps_completed_so_far == 0;
+    let projector_absent_default = evt.run_projection_at_decision_atomic == 0
+        && evt.run_predicted_remaining_steps == 0
+        && evt.run_steps_completed_so_far == 0;
+    let no_projector = !is_decision || projector_unreachable || projector_absent_default;
+
+    append::PredictionColumns {
+        predicted_a_tokens: is_decision
+            .then(|| nonzero_i64(evt.predicted_a_tokens))
+            .flatten(),
+        predicted_b_tokens: is_decision
+            .then(|| nonzero_i64(evt.predicted_b_tokens))
+            .flatten(),
+        predicted_c_tokens: is_decision
+            .then(|| nonzero_i64(evt.predicted_c_tokens))
+            .flatten(),
+        reserved_strategy: is_decision
+            .then(|| nonempty(&evt.reserved_strategy))
+            .flatten(),
+        prediction_strategy_used: is_decision
+            .then(|| nonempty(&evt.prediction_strategy_used))
+            .flatten(),
+        prediction_policy_used: is_decision
+            .then(|| nonempty(&evt.prediction_policy_used))
+            .flatten(),
+        tokenizer_tier: is_decision.then(|| nonempty(&evt.tokenizer_tier)).flatten(),
+        tokenizer_version_id: is_decision
+            .then(|| uuid_nonempty(&evt.tokenizer_version_id))
+            .flatten(),
+        prediction_confidence: is_decision
+            .then(|| nonzero_f32_decimal(evt.prediction_confidence))
+            .flatten(),
+        prediction_sample_size: is_decision
+            .then(|| nonzero_i64(evt.prediction_sample_size))
+            .flatten(),
+        cold_start_layer_used: is_decision
+            .then(|| nonempty(&evt.cold_start_layer_used))
+            .flatten(),
+        run_projection_at_decision_atomic: if no_projector {
+            None
+        } else {
+            nonzero_i64_decimal(evt.run_projection_at_decision_atomic)
+        },
+        run_predicted_remaining_steps: if no_projector || evt.run_predicted_remaining_steps == -1 {
+            None
+        } else {
+            Some(evt.run_predicted_remaining_steps)
+        },
+        run_steps_completed_so_far: if no_projector {
+            None
+        } else {
+            Some(evt.run_steps_completed_so_far)
+        },
+        actual_input_tokens: outcome_actual_token(
+            evt,
+            "actual_input_tokens",
+            evt.actual_input_tokens,
+        ),
+        actual_output_tokens: outcome_actual_token(
+            evt,
+            "actual_output_tokens",
+            evt.actual_output_tokens,
+        ),
+        delta_b_ratio: is_outcome.then(|| nonzero_f32(evt.delta_b_ratio)).flatten(),
+        delta_c_ratio: is_outcome.then(|| nonzero_f32(evt.delta_c_ratio)).flatten(),
+    }
+}
+
+fn nonempty(value: &str) -> Option<&str> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn uuid_nonempty(value: &str) -> Option<Uuid> {
+    if value.is_empty() {
+        None
+    } else {
+        Uuid::parse_str(value).ok()
+    }
+}
+
+fn nonzero_i64(value: i64) -> Option<i64> {
+    if value == 0 {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn nonzero_i64_decimal(value: i64) -> Option<BigDecimal> {
+    nonzero_i64(value).map(BigDecimal::from)
+}
+
+fn outcome_actual_token(evt: &CloudEvent, key: &str, extension_value: i64) -> Option<i64> {
+    if evt.r#type != "spendguard.audit.outcome" {
+        return None;
+    }
+    if let Ok(serde_json::Value::Object(data)) =
+        serde_json::from_slice::<serde_json::Value>(&evt.data)
+    {
+        if let Some(value) = data.get(key).and_then(json_i64) {
+            return (value >= 0).then_some(value);
+        }
+    }
+    (extension_value > 0).then_some(extension_value)
+}
+
+fn json_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|s| s.parse::<i64>().ok()))
+}
+
+fn nonzero_f32(value: f32) -> Option<f32> {
+    if value == 0.0 {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn nonzero_f32_decimal(value: f32) -> Option<BigDecimal> {
+    nonzero_f32(value).and_then(|v| BigDecimal::from_str(&format!("{v:.3}")).ok())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prediction_columns_preserve_first_run_step_zero() {
+        let evt = CloudEvent {
+            r#type: "spendguard.audit.decision".to_string(),
+            run_projection_at_decision_atomic: 42,
+            run_predicted_remaining_steps: 3,
+            run_steps_completed_so_far: 0,
+            ..Default::default()
+        };
+
+        let cols = prediction_columns_from_event(&evt);
+
+        assert_eq!(
+            cols.run_steps_completed_so_far,
+            Some(0),
+            "step zero is a valid first decision when projector data is present"
+        );
+        assert_eq!(
+            cols.run_projection_at_decision_atomic
+                .map(|v| v.to_string()),
+            Some("42".to_string())
+        );
+        assert_eq!(cols.run_predicted_remaining_steps, Some(3));
+    }
+
+    #[test]
+    fn prediction_columns_keep_unreachable_projector_sentinel_null() {
+        let evt = CloudEvent {
+            r#type: "spendguard.audit.decision".to_string(),
+            run_projection_at_decision_atomic: 0,
+            run_predicted_remaining_steps: -1,
+            run_steps_completed_so_far: 0,
+            ..Default::default()
+        };
+
+        let cols = prediction_columns_from_event(&evt);
+
+        assert_eq!(cols.run_projection_at_decision_atomic, None);
+        assert_eq!(cols.run_predicted_remaining_steps, None);
+        assert_eq!(cols.run_steps_completed_so_far, None);
+    }
+
+    #[test]
+    fn prediction_columns_keep_default_decision_projection_null() {
+        let evt = CloudEvent {
+            r#type: "spendguard.audit.decision".to_string(),
+            run_projection_at_decision_atomic: 0,
+            run_predicted_remaining_steps: 0,
+            run_steps_completed_so_far: 0,
+            ..Default::default()
+        };
+
+        let cols = prediction_columns_from_event(&evt);
+
+        assert_eq!(cols.run_projection_at_decision_atomic, None);
+        assert_eq!(cols.run_predicted_remaining_steps, None);
+        assert_eq!(cols.run_steps_completed_so_far, None);
+    }
+
+    #[test]
+    fn prediction_columns_do_not_invent_run_projection_for_outcomes() {
+        let evt = CloudEvent {
+            r#type: "spendguard.audit.outcome".to_string(),
+            run_projection_at_decision_atomic: 0,
+            run_predicted_remaining_steps: 0,
+            run_steps_completed_so_far: 0,
+            actual_input_tokens: 10,
+            actual_output_tokens: 20,
+            ..Default::default()
+        };
+
+        let cols = prediction_columns_from_event(&evt);
+
+        assert_eq!(cols.run_projection_at_decision_atomic, None);
+        assert_eq!(cols.run_predicted_remaining_steps, None);
+        assert_eq!(cols.run_steps_completed_so_far, None);
+        assert_eq!(cols.actual_input_tokens, Some(10));
+        assert_eq!(cols.actual_output_tokens, Some(20));
+    }
+
+    #[test]
+    fn prediction_columns_preserve_zero_actual_tokens_for_outcomes() {
+        let evt = CloudEvent {
+            r#type: "spendguard.audit.outcome".to_string(),
+            data: serde_json::json!({
+                "actual_input_tokens": 0,
+                "actual_output_tokens": 0
+            })
+            .to_string()
+            .into_bytes()
+            .into(),
+            actual_input_tokens: 0,
+            actual_output_tokens: 0,
+            ..Default::default()
+        };
+
+        let cols = prediction_columns_from_event(&evt);
+
+        assert_eq!(cols.actual_input_tokens, Some(0));
+        assert_eq!(cols.actual_output_tokens, Some(0));
+    }
+
+    #[test]
+    fn prediction_columns_keep_missing_actual_tokens_null_for_outcomes() {
+        let evt = CloudEvent {
+            r#type: "spendguard.audit.outcome".to_string(),
+            data: serde_json::json!({
+                "estimated_amount_atomic": "42"
+            })
+            .to_string()
+            .into_bytes()
+            .into(),
+            actual_input_tokens: 0,
+            actual_output_tokens: 0,
+            ..Default::default()
+        };
+
+        let cols = prediction_columns_from_event(&evt);
+
+        assert_eq!(cols.actual_input_tokens, None);
+        assert_eq!(cols.actual_output_tokens, None);
+    }
 }
 
 fn parse_uuid(s: &str, field: &str) -> Result<Uuid, DomainError> {

@@ -37,11 +37,10 @@ use crate::{
             query_reservation_context_response::Outcome as QrcOutcome,
             record_denied_decision_response::Outcome as DeniedOutcome,
             release_request::Reason as ReleaseReasonProto,
-            release_response::Outcome as ReleaseOutcome,
-            reserve_set_response::Outcome, CommitEstimatedRequest, CommitEstimatedResponse,
-            QueryReservationContextRequest, RecordDeniedDecisionRequest,
-            RecordDeniedDecisionResponse, ReleaseRequest, ReleaseResponse, ReserveSetRequest,
-            ReserveSetResponse,
+            release_response::Outcome as ReleaseOutcome, reserve_set_response::Outcome,
+            CommitEstimatedRequest, CommitEstimatedResponse, QueryReservationContextRequest,
+            RecordDeniedDecisionRequest, RecordDeniedDecisionResponse, ReleaseRequest,
+            ReleaseResponse, ReserveSetRequest, ReserveSetResponse,
         },
         sidecar_adapter::v1::{
             decision_response::Decision, DecisionRequest, DecisionResponse, LlmCallPostPayload,
@@ -183,21 +182,16 @@ pub(crate) fn extract_enrichment(req: &DecisionRequest) -> AuditEnrichment {
                 if let Some(v) = m.fields.get(key) {
                     match v.kind.as_ref() {
                         Some(prost_types::value::Kind::StringValue(s)) => {
-                            obj.insert(key.into(),
-                                serde_json::Value::String(s.clone()));
+                            obj.insert(key.into(), serde_json::Value::String(s.clone()));
                         }
                         Some(prost_types::value::Kind::BoolValue(b)) => {
-                            obj.insert(key.into(),
-                                serde_json::Value::Bool(*b));
+                            obj.insert(key.into(), serde_json::Value::Bool(*b));
                         }
                         Some(prost_types::value::Kind::NumberValue(n)) => {
                             // serde_json::Number from f64 — None only
                             // for NaN/Inf which the SDK never sends.
-                            if let Some(num) =
-                                serde_json::Number::from_f64(*n)
-                            {
-                                obj.insert(key.into(),
-                                    serde_json::Value::Number(num));
+                            if let Some(num) = serde_json::Number::from_f64(*n) {
+                                obj.insert(key.into(), serde_json::Value::Number(num));
                             }
                         }
                         Some(prost_types::value::Kind::NullValue(_)) => {
@@ -299,13 +293,12 @@ pub struct DecisionOutput {
 ///     across all projected_claims (parsed to i64; clamps on overflow).
 ///     This is what the per-call reservation would be if we accepted
 ///     unchanged; projector uses it as Signal 2's baseline.
-///   * `budget_remaining_atomic` is sourced from inputs.projected_p90 as
-///     a hot-path-cached approximation; production wires the ledger
-///     QueryBudget call but that costs another RTT we can't afford
-///     inside the 50ms p99 budget. This is acceptable per spec §1.2:
-///     projector's job is to surface trajectory, not to be the
-///     authoritative budget oracle (ledger.reserve_set still enforces
-///     the hard cap).
+///   * `budget_remaining_atomic` uses the unknown-budget sentinel because
+///     DecisionRequest does not currently carry an authoritative budget
+///     snapshot. `inputs.projected_p90_atomic` is a risk-band hint, not
+///     available budget. The projector still records trajectory but cannot
+///     emit a false RUN_BUDGET_PROJECTION_EXCEEDED on an unknown budget.
+///     The ledger reserve path remains the hard budget oracle.
 async fn call_projector_safe(
     state: &SidecarState,
     ctx: &DecisionContext,
@@ -335,20 +328,10 @@ async fn call_projector_safe(
     // doesn't see a wraparound.
     let this_call_atomic: i64 = i64::try_from(total).unwrap_or(i64::MAX);
 
-    // Budget remaining: pull from inputs.projected_p90 as conservative
-    // estimate. Empty → 0 → projector immediately fires BUDGET on any
-    // non-trivial projection (fail-loud). In production deployments,
-    // SLICE_11+ wires a hot-cached ledger budget snapshot here.
-    let budget_remaining: i64 = req
-        .inputs
-        .as_ref()
-        .and_then(|i| BigInt::from_str(&i.projected_p90_atomic).ok())
-        .and_then(|v| i64::try_from(v).ok())
-        .unwrap_or(0);
-
+    let budget_remaining = projector_budget_remaining_atomic(req);
     // Signal 3 hint: passed through from DecisionRequest.planned_steps_hint
-    // (SLICE_09 additive proto field; SLICE_02 stubbed pass-through; SLICE_12
-    // SDK with_run_plan decorator populates it).
+    // (SLICE_09 additive proto field; SLICE_12 SDK with_run_plan decorator
+    // populates it).
     let planned_steps_hint = req.planned_steps_hint.max(0);
 
     let project_req = crate::proto::run_cost_projector::v1::ProjectRequest {
@@ -378,6 +361,18 @@ async fn call_projector_safe(
     };
 
     client.project(project_req).await
+}
+
+/// Extract the run projector's budget snapshot from DecisionRequest.
+///
+/// SLICE_09 initially defaulted missing projected_p90 to 0, and HARDEN_01
+/// briefly treated projected_p90 as a budget snapshot. Both are unsafe:
+/// projected_p90 is a caller-supplied risk-band hint, not remaining budget.
+/// Until the adapter wire contract carries an explicit budget snapshot,
+/// unknown budget must be non-triggering; ledger reserve remains the
+/// fail-closed budget gate.
+fn projector_budget_remaining_atomic(_req: &DecisionRequest) -> i64 {
+    i64::MAX
 }
 
 /// Drive the decision transaction end-to-end through stage 4 (reserve +
@@ -451,7 +446,9 @@ pub async fn run_through_reserve(
     let combined_outcome = match projector_response_ref {
         Some(resp) if !resp.emitted_code.is_empty() => {
             match contract::apply_projector_code(&bundle.parsed, &resp.emitted_code) {
-                Some(projector_outcome) => contract::merge_outcomes(eval_outcome, projector_outcome),
+                Some(projector_outcome) => {
+                    contract::merge_outcomes(eval_outcome, projector_outcome)
+                }
                 None => eval_outcome,
             }
         }
@@ -575,6 +572,7 @@ pub async fn run_through_reserve(
         producer_sequence,
         &snapshot_hash,
         &matched_rules,
+        &reason_codes,
         &enrichment,
         prediction_policy_str,
         projector_response_ref,
@@ -595,8 +593,7 @@ pub async fn run_through_reserve(
         // ttl_sweep overrides to 5s. Phase 2 derives TTL from the
         // matched contract rule's `reservation.ttl` field (Contract §7).
         ttl_expires_at: Some(prost_types::Timestamp {
-            seconds: (Utc::now()
-                + chrono::Duration::seconds(state.inner.reservation_ttl_seconds))
+            seconds: (Utc::now() + chrono::Duration::seconds(state.inner.reservation_ttl_seconds))
                 .timestamp(),
             nanos: 0,
         }),
@@ -642,7 +639,11 @@ pub async fn run_through_reserve(
                 effect_hash,
                 decision: decision_kind,
                 reservation_set_id: s.reservation_set_id,
-                reservation_ids: s.reservations.iter().map(|r| r.reservation_id.clone()).collect(),
+                reservation_ids: s
+                    .reservations
+                    .iter()
+                    .map(|r| r.reservation_id.clone())
+                    .collect(),
                 ledger_transaction_id: s.ledger_transaction_id,
                 approval_request_id: String::new(),
                 ttl_expires_at: ttl_from_server,
@@ -665,16 +666,19 @@ pub async fn run_through_reserve(
             // build_replay_response refuses to return Replay when either
             // is NULL, so well-formed input is guaranteed; we still parse
             // here to convert wire-format strings.
-            let original_audit_id = uuid::Uuid::parse_str(&r.audit_decision_event_id)
-                .map_err(|e| DomainError::DecisionStage(format!(
-                    "ledger replay returned malformed audit_decision_event_id '{}': {}",
-                    r.audit_decision_event_id, e
-                )))?;
-            let original_decision_id = uuid::Uuid::parse_str(&r.decision_id)
-                .map_err(|e| DomainError::DecisionStage(format!(
+            let original_audit_id =
+                uuid::Uuid::parse_str(&r.audit_decision_event_id).map_err(|e| {
+                    DomainError::DecisionStage(format!(
+                        "ledger replay returned malformed audit_decision_event_id '{}': {}",
+                        r.audit_decision_event_id, e
+                    ))
+                })?;
+            let original_decision_id = uuid::Uuid::parse_str(&r.decision_id).map_err(|e| {
+                DomainError::DecisionStage(format!(
                     "ledger replay returned malformed decision_id '{}': {}",
                     r.decision_id, e
-                )))?;
+                ))
+            })?;
             Ok(DecisionOutput {
                 decision_id: original_decision_id,
                 audit_decision_event_id: original_audit_id,
@@ -764,6 +768,7 @@ fn build_audit_decision_cloudevent(
     producer_sequence: u64,
     snapshot_hash: &[u8; 32],
     matched_rules: &[String],
+    reason_codes: &[String],
     enrichment: &AuditEnrichment,
     prediction_policy: &str,
     projector_response: Option<&crate::proto::run_cost_projector::v1::ProjectResponse>,
@@ -772,6 +777,7 @@ fn build_audit_decision_cloudevent(
     let mut payload = serde_json::json!({
         "snapshot_hash":   hex::encode(snapshot_hash),
         "matched_rules":   matched_rules,
+        "reason_codes":    reason_codes,
         "session_id":      ctx.session_id,
         // Cost Advisor P0.5 enrichment fields. Empty strings indicate
         // the SDK adapter did not provide enrichment for this call —
@@ -1028,8 +1034,8 @@ async fn run_record_denied_decision(
             obj.insert("spendguard".into(), enrichment.spendguard_context.clone());
         }
     }
-    let payload_bytes = serde_json::to_vec(&payload)
-        .expect("denied decision json serialization is infallible");
+    let payload_bytes =
+        serde_json::to_vec(&payload).expect("denied decision json serialization is infallible");
     let mut cloudevent = CloudEvent {
         specversion: "1.0".into(),
         r#type: "spendguard.audit.decision".into(),
@@ -1082,8 +1088,7 @@ async fn run_record_denied_decision(
         cloudevent.prediction_sample_size = est.prediction_sample_size;
         cloudevent.cold_start_layer_used = est.cold_start_layer_used.clone();
 
-        cloudevent.run_projection_at_decision_atomic =
-            est.run_projection_at_decision_atomic;
+        cloudevent.run_projection_at_decision_atomic = est.run_projection_at_decision_atomic;
         cloudevent.run_predicted_remaining_steps = est.run_predicted_remaining_steps;
         cloudevent.run_steps_completed_so_far = est.run_steps_completed_so_far;
     } else {
@@ -1114,66 +1119,77 @@ async fn run_record_denied_decision(
     //
     // Shape mirrors the SQL header comment in migration 0037 + the
     // `approval_resume_payload` parser in adapter_uds.rs.
-    let (decision_context_json, requested_effect_json, approval_ttl_seconds) =
-        if decision_kind == Decision::RequireApproval {
-            let primary_claim = claims.first();
-            let (unit_id, unit_kind_str, unit_token_kind) = match primary_claim.and_then(|c| c.unit.as_ref()) {
-                Some(u) => (
-                    u.unit_id.clone(),
-                    match u.kind {
-                        x if x == crate::proto::common::v1::unit_ref::Kind::Monetary as i32 => "MONETARY",
-                        x if x == crate::proto::common::v1::unit_ref::Kind::Token as i32 => "TOKEN",
-                        x if x == crate::proto::common::v1::unit_ref::Kind::Credit as i32 => "CREDIT",
-                        x if x == crate::proto::common::v1::unit_ref::Kind::NonMonetary as i32 => "NON_MONETARY",
-                        _ => "MONETARY",
-                    },
-                    u.token_kind.clone(),
-                ),
-                None => (String::new(), "MONETARY", String::new()),
-            };
-            // Issue #59: capture the 4 pricing fields at REQUIRE_APPROVAL
-            // time so resume() can rebuild the ReserveSetRequest with
-            // frozen-at-PRE pricing, not the sidecar's live bundle
-            // (which may have hot-reloaded between approval + resume).
-            // Spec: docs/specs/issue-59-approval-resume-frozen-pricing.md §3.1.
-            let decision_ctx = serde_json::json!({
-                "tenant_id":                       ctx.tenant_id,
-                "budget_id":                       primary_claim.map(|c| c.budget_id.clone()).unwrap_or_default(),
-                "window_instance_id":              primary_claim.map(|c| c.window_instance_id.clone()).unwrap_or_default(),
-                "fencing_scope_id":                fencing.scope_id,
-                "fencing_epoch":                   fencing.epoch,
-                "decision_id":                     decision_id.to_string(),
-                "matched_rule_ids":                matched_rules,
-                "reason_codes":                    reason_codes,
-                "contract_bundle_id":              bundle.bundle_id.to_string(),
-                "contract_bundle_hash_hex":        hex::encode(&bundle.bundle_hash),
-                "schema_bundle_id":                state.inner.schema_bundle.read().as_ref().map(|s| s.bundle_id.to_string()).unwrap_or_default(),
-                "schema_bundle_canonical_version": state.inner.schema_bundle.read().as_ref().map(|s| s.canonical_schema_version.clone()).unwrap_or_default(),
-                "pricing_version":                 bundle.pricing_version,
-                "price_snapshot_hash_hex":         hex::encode(&bundle.price_snapshot_hash),
-                "fx_rate_version":                 bundle.fx_rate_version,
-                "unit_conversion_version":         bundle.unit_conversion_version,
-            });
-            let amount = primary_claim.map(|c| c.amount_atomic.clone()).unwrap_or_default();
-            let direction = match primary_claim.map(|c| c.direction) {
-                Some(x) if x == crate::proto::common::v1::budget_claim::Direction::Credit as i32 => "CREDIT",
-                _ => "DEBIT",
-            };
-            let requested_eff = serde_json::json!({
-                "unit_id":         unit_id,
-                "unit_kind":       unit_kind_str,
-                "unit_token_kind": unit_token_kind,
-                "amount_atomic":   amount,
-                "direction":       direction,
-            });
-            (
-                serde_json::to_vec(&decision_ctx).unwrap_or_default(),
-                serde_json::to_vec(&requested_eff).unwrap_or_default(),
-                3600_u32,
-            )
-        } else {
-            (Vec::new(), Vec::new(), 0_u32)
+    let (decision_context_json, requested_effect_json, approval_ttl_seconds) = if decision_kind
+        == Decision::RequireApproval
+    {
+        let primary_claim = claims.first();
+        let (unit_id, unit_kind_str, unit_token_kind) = match primary_claim
+            .and_then(|c| c.unit.as_ref())
+        {
+            Some(u) => (
+                u.unit_id.clone(),
+                match u.kind {
+                    x if x == crate::proto::common::v1::unit_ref::Kind::Monetary as i32 => {
+                        "MONETARY"
+                    }
+                    x if x == crate::proto::common::v1::unit_ref::Kind::Token as i32 => "TOKEN",
+                    x if x == crate::proto::common::v1::unit_ref::Kind::Credit as i32 => "CREDIT",
+                    x if x == crate::proto::common::v1::unit_ref::Kind::NonMonetary as i32 => {
+                        "NON_MONETARY"
+                    }
+                    _ => "MONETARY",
+                },
+                u.token_kind.clone(),
+            ),
+            None => (String::new(), "MONETARY", String::new()),
         };
+        // Issue #59: capture the 4 pricing fields at REQUIRE_APPROVAL
+        // time so resume() can rebuild the ReserveSetRequest with
+        // frozen-at-PRE pricing, not the sidecar's live bundle
+        // (which may have hot-reloaded between approval + resume).
+        // Spec: docs/specs/issue-59-approval-resume-frozen-pricing.md §3.1.
+        let decision_ctx = serde_json::json!({
+            "tenant_id":                       ctx.tenant_id,
+            "budget_id":                       primary_claim.map(|c| c.budget_id.clone()).unwrap_or_default(),
+            "window_instance_id":              primary_claim.map(|c| c.window_instance_id.clone()).unwrap_or_default(),
+            "fencing_scope_id":                fencing.scope_id,
+            "fencing_epoch":                   fencing.epoch,
+            "decision_id":                     decision_id.to_string(),
+            "matched_rule_ids":                matched_rules,
+            "reason_codes":                    reason_codes,
+            "contract_bundle_id":              bundle.bundle_id.to_string(),
+            "contract_bundle_hash_hex":        hex::encode(&bundle.bundle_hash),
+            "schema_bundle_id":                state.inner.schema_bundle.read().as_ref().map(|s| s.bundle_id.to_string()).unwrap_or_default(),
+            "schema_bundle_canonical_version": state.inner.schema_bundle.read().as_ref().map(|s| s.canonical_schema_version.clone()).unwrap_or_default(),
+            "pricing_version":                 bundle.pricing_version,
+            "price_snapshot_hash_hex":         hex::encode(&bundle.price_snapshot_hash),
+            "fx_rate_version":                 bundle.fx_rate_version,
+            "unit_conversion_version":         bundle.unit_conversion_version,
+        });
+        let amount = primary_claim
+            .map(|c| c.amount_atomic.clone())
+            .unwrap_or_default();
+        let direction = match primary_claim.map(|c| c.direction) {
+            Some(x) if x == crate::proto::common::v1::budget_claim::Direction::Credit as i32 => {
+                "CREDIT"
+            }
+            _ => "DEBIT",
+        };
+        let requested_eff = serde_json::json!({
+            "unit_id":         unit_id,
+            "unit_kind":       unit_kind_str,
+            "unit_token_kind": unit_token_kind,
+            "amount_atomic":   amount,
+            "direction":       direction,
+        });
+        (
+            serde_json::to_vec(&decision_ctx).unwrap_or_default(),
+            serde_json::to_vec(&requested_eff).unwrap_or_default(),
+            3600_u32,
+        )
+    } else {
+        (Vec::new(), Vec::new(), 0_u32)
+    };
 
     let request = RecordDeniedDecisionRequest {
         tenant_id: ctx.tenant_id.clone(),
@@ -1230,16 +1246,19 @@ async fn run_record_denied_decision(
             // retries within a session. GA path: surface
             // final_decision in RecordDeniedDecisionResponse.Replay
             // and propagate through DecisionOutput.
-            let original_decision_id = uuid::Uuid::parse_str(&r.decision_id)
-                .map_err(|e| DomainError::DecisionStage(format!(
+            let original_decision_id = uuid::Uuid::parse_str(&r.decision_id).map_err(|e| {
+                DomainError::DecisionStage(format!(
                     "ledger denied replay returned malformed decision_id '{}': {}",
                     r.decision_id, e
-                )))?;
-            let original_audit_id = uuid::Uuid::parse_str(&r.audit_decision_event_id)
-                .map_err(|e| DomainError::DecisionStage(format!(
-                    "ledger denied replay returned malformed audit_decision_event_id '{}': {}",
-                    r.audit_decision_event_id, e
-                )))?;
+                ))
+            })?;
+            let original_audit_id =
+                uuid::Uuid::parse_str(&r.audit_decision_event_id).map_err(|e| {
+                    DomainError::DecisionStage(format!(
+                        "ledger denied replay returned malformed audit_decision_event_id '{}': {}",
+                        r.audit_decision_event_id, e
+                    ))
+                })?;
             Ok(DecisionOutput {
                 decision_id: original_decision_id,
                 audit_decision_event_id: original_audit_id,
@@ -1347,7 +1366,8 @@ pub async fn run_commit_estimated(
         && !payload.estimated_amount_atomic.is_empty()
     {
         return Err(DomainError::InvalidRequest(
-            "estimated_amount_atomic and provider_reported_amount_atomic are mutually exclusive".into(),
+            "estimated_amount_atomic and provider_reported_amount_atomic are mutually exclusive"
+                .into(),
         ));
     }
     if !payload.provider_reported_amount_atomic.is_empty() {
@@ -1361,9 +1381,8 @@ pub async fn run_commit_estimated(
         ));
     }
 
-    let reservation_uuid = uuid::Uuid::parse_str(&payload.reservation_id).map_err(|e| {
-        DomainError::InvalidRequest(format!("reservation_id parse: {e}"))
-    })?;
+    let reservation_uuid = uuid::Uuid::parse_str(&payload.reservation_id)
+        .map_err(|e| DomainError::InvalidRequest(format!("reservation_id parse: {e}")))?;
 
     // 2) Recover reservation context (cache -> ledger query).
     let resv = recover_reservation_ctx(state, &ctx.tenant_id, &reservation_uuid).await?;
@@ -1432,9 +1451,7 @@ pub async fn run_commit_estimated(
     let original = resv
         .original_reserved_amount_atomic
         .parse::<BigInt>()
-        .map_err(|e| {
-            DomainError::Internal(anyhow::anyhow!("ctx original amount parse: {e}"))
-        })?;
+        .map_err(|e| DomainError::Internal(anyhow::anyhow!("ctx original amount parse: {e}")))?;
     if estimated.sign() != num_bigint::Sign::Plus {
         return Err(DomainError::InvalidRequest(
             "estimated_amount_atomic must be > 0".into(),
@@ -1470,7 +1487,9 @@ pub async fn run_commit_estimated(
             nanos: Utc::now().timestamp_subsec_nanos() as i32,
         }),
         datacontenttype: "application/json".into(),
-        data: serde_json::to_vec(&ce_payload).expect("payload json").into(),
+        data: serde_json::to_vec(&ce_payload)
+            .expect("payload json")
+            .into(),
         tenant_id: ctx.tenant_id.clone(),
         run_id: String::new(),
         decision_id: resv.decision_id.to_string(),
@@ -1517,11 +1536,14 @@ pub async fn run_commit_estimated(
     };
 
     let _ = cfg; // currently unused; kept for parity with run_through_reserve
-    let response: CommitEstimatedResponse =
-        state.inner.ledger.commit_estimated(request).await?;
+    let response: CommitEstimatedResponse = state.inner.ledger.commit_estimated(request).await?;
     match response.outcome {
         Some(CommitOutcome::Success(s)) => {
-            state.inner.reservation_cache.lock().remove(&reservation_uuid);
+            state
+                .inner
+                .reservation_cache
+                .lock()
+                .remove(&reservation_uuid);
             // Step 7.5 P2.2: also evict decision_id index so a stray
             // ConfirmPublishOutcome.APPLY_FAILED for an already-committed
             // decision doesn't route to run_release with stale state.
@@ -1537,7 +1559,11 @@ pub async fn run_commit_estimated(
             })
         }
         Some(CommitOutcome::Replay(r)) => {
-            state.inner.reservation_cache.lock().remove(&reservation_uuid);
+            state
+                .inner
+                .reservation_cache
+                .lock()
+                .remove(&reservation_uuid);
             state
                 .inner
                 .decision_id_to_reservation
@@ -1549,9 +1575,7 @@ pub async fn run_commit_estimated(
                 delta_to_reserved_atomic: String::new(),
             })
         }
-        Some(CommitOutcome::Error(e)) => {
-            map_proto_error_to_domain(e.code, e.message)
-        }
+        Some(CommitOutcome::Error(e)) => map_proto_error_to_domain(e.code, e.message),
         None => Err(DomainError::DecisionStage(
             "CommitEstimated response empty oneof".into(),
         )),
@@ -1708,7 +1732,9 @@ pub async fn run_release(
             nanos: Utc::now().timestamp_subsec_nanos() as i32,
         }),
         datacontenttype: "application/json".into(),
-        data: serde_json::to_vec(&ce_payload).expect("payload json").into(),
+        data: serde_json::to_vec(&ce_payload)
+            .expect("payload json")
+            .into(),
         tenant_id: ctx.tenant_id.clone(),
         run_id: String::new(),
         decision_id: resv.decision_id.to_string(),
@@ -1763,7 +1789,11 @@ pub async fn run_release(
     match response.outcome {
         Some(ReleaseOutcome::Success(s)) => {
             // Evict caches.
-            state.inner.reservation_cache.lock().remove(&reservation_uuid);
+            state
+                .inner
+                .reservation_cache
+                .lock()
+                .remove(&reservation_uuid);
             state
                 .inner
                 .decision_id_to_reservation
@@ -1782,7 +1812,11 @@ pub async fn run_release(
             })
         }
         Some(ReleaseOutcome::Replay(r)) => {
-            state.inner.reservation_cache.lock().remove(&reservation_uuid);
+            state
+                .inner
+                .reservation_cache
+                .lock()
+                .remove(&reservation_uuid);
             state
                 .inner
                 .decision_id_to_reservation
@@ -1824,10 +1858,7 @@ fn derive_reservation_set_id(decision_id: &uuid::Uuid) -> uuid::Uuid {
     uuid::Uuid::from_bytes(buf)
 }
 
-fn map_proto_error_to_domain<T>(
-    code: i32,
-    message: String,
-) -> Result<T, DomainError> {
+fn map_proto_error_to_domain<T>(code: i32, message: String) -> Result<T, DomainError> {
     use crate::proto::common::v1::error::Code as PC;
     let pc = PC::try_from(code).unwrap_or(PC::Unspecified);
     Err(match pc {
@@ -1857,7 +1888,13 @@ async fn recover_reservation_ctx(
     tenant_id: &str,
     reservation_id: &uuid::Uuid,
 ) -> Result<ReservationCtx, DomainError> {
-    if let Some(ctx) = state.inner.reservation_cache.lock().get(reservation_id).cloned() {
+    if let Some(ctx) = state
+        .inner
+        .reservation_cache
+        .lock()
+        .get(reservation_id)
+        .cloned()
+    {
         return Ok(ctx);
     }
     // Cold path: query ledger.
@@ -1870,14 +1907,15 @@ async fn recover_reservation_ctx(
         Some(QrcOutcome::Context(c)) => {
             let parsed = ReservationCtx {
                 tenant_id: c.tenant_id,
-                budget_id: uuid::Uuid::parse_str(&c.budget_id).map_err(|e| {
-                    DomainError::Internal(anyhow::anyhow!("budget_id: {e}"))
+                budget_id: uuid::Uuid::parse_str(&c.budget_id)
+                    .map_err(|e| DomainError::Internal(anyhow::anyhow!("budget_id: {e}")))?,
+                window_instance_id: uuid::Uuid::parse_str(&c.window_instance_id).map_err(|e| {
+                    DomainError::Internal(anyhow::anyhow!("window_instance_id: {e}"))
                 })?,
-                window_instance_id: uuid::Uuid::parse_str(&c.window_instance_id).map_err(
-                    |e| DomainError::Internal(anyhow::anyhow!("window_instance_id: {e}")),
-                )?,
-                unit_id: uuid::Uuid::parse_str(c.unit.as_ref().map(|u| u.unit_id.as_str()).unwrap_or(""))
-                    .map_err(|e| DomainError::Internal(anyhow::anyhow!("unit_id: {e}")))?,
+                unit_id: uuid::Uuid::parse_str(
+                    c.unit.as_ref().map(|u| u.unit_id.as_str()).unwrap_or(""),
+                )
+                .map_err(|e| DomainError::Internal(anyhow::anyhow!("unit_id: {e}")))?,
                 original_reserved_amount_atomic: c.original_reserved_amount_atomic,
                 pricing_version: c
                     .pricing
@@ -1899,16 +1937,17 @@ async fn recover_reservation_ctx(
                     .as_ref()
                     .map(|p| p.unit_conversion_version.clone())
                     .unwrap_or_default(),
-                fencing_scope_id: uuid::Uuid::parse_str(&c.fencing_scope_id).map_err(|e| {
-                    DomainError::Internal(anyhow::anyhow!("fencing_scope_id: {e}"))
-                })?,
+                fencing_scope_id: uuid::Uuid::parse_str(&c.fencing_scope_id)
+                    .map_err(|e| DomainError::Internal(anyhow::anyhow!("fencing_scope_id: {e}")))?,
                 fencing_epoch_at_post: c.fencing_epoch_at_post,
-                decision_id: uuid::Uuid::parse_str(&c.decision_id).map_err(|e| {
-                    DomainError::Internal(anyhow::anyhow!("decision_id: {e}"))
-                })?,
+                decision_id: uuid::Uuid::parse_str(&c.decision_id)
+                    .map_err(|e| DomainError::Internal(anyhow::anyhow!("decision_id: {e}")))?,
                 ttl_expires_at: c
                     .ttl_expires_at
-                    .map(|t| chrono::DateTime::<chrono::Utc>::from_timestamp(t.seconds, t.nanos as u32).unwrap_or_default())
+                    .map(|t| {
+                        chrono::DateTime::<chrono::Utc>::from_timestamp(t.seconds, t.nanos as u32)
+                            .unwrap_or_default()
+                    })
                     .unwrap_or_default(),
                 current_state: c.current_state,
             };
@@ -1950,17 +1989,29 @@ fn populate_reservation_cache(
 
     let mut cache = state.inner.reservation_cache.lock();
     for r in reservations {
-        let Ok(rid) = uuid::Uuid::parse_str(&r.reservation_id) else { continue };
-        let Ok(budget_id) = uuid::Uuid::parse_str(&r.budget_id) else { continue };
-        let Ok(window_instance_id) = uuid::Uuid::parse_str(&r.window_instance_id) else { continue };
-        let unit_id = match r.unit.as_ref().and_then(|u| uuid::Uuid::parse_str(&u.unit_id).ok()) {
+        let Ok(rid) = uuid::Uuid::parse_str(&r.reservation_id) else {
+            continue;
+        };
+        let Ok(budget_id) = uuid::Uuid::parse_str(&r.budget_id) else {
+            continue;
+        };
+        let Ok(window_instance_id) = uuid::Uuid::parse_str(&r.window_instance_id) else {
+            continue;
+        };
+        let unit_id = match r
+            .unit
+            .as_ref()
+            .and_then(|u| uuid::Uuid::parse_str(&u.unit_id).ok())
+        {
             Some(u) => u,
             None => continue,
         };
         let ttl = r
             .ttl_expires_at
             .as_ref()
-            .and_then(|t| chrono::DateTime::<chrono::Utc>::from_timestamp(t.seconds, t.nanos as u32))
+            .and_then(|t| {
+                chrono::DateTime::<chrono::Utc>::from_timestamp(t.seconds, t.nanos as u32)
+            })
             .unwrap_or_else(chrono::Utc::now);
         cache.insert(
             rid,
@@ -2005,13 +2056,19 @@ mod enrichment_tests {
     use std::collections::BTreeMap;
 
     fn _str_value(s: &str) -> PtValue {
-        PtValue { kind: Some(PtKind::StringValue(s.into())) }
+        PtValue {
+            kind: Some(PtKind::StringValue(s.into())),
+        }
     }
     fn _bool_value(b: bool) -> PtValue {
-        PtValue { kind: Some(PtKind::BoolValue(b)) }
+        PtValue {
+            kind: Some(PtKind::BoolValue(b)),
+        }
     }
     fn _null_value() -> PtValue {
-        PtValue { kind: Some(PtKind::NullValue(0)) }
+        PtValue {
+            kind: Some(PtKind::NullValue(0)),
+        }
     }
     fn _request_with_metadata(fields: BTreeMap<String, PtValue>) -> DecisionRequest {
         DecisionRequest {
@@ -2027,13 +2084,19 @@ mod enrichment_tests {
     fn empty_runtime_metadata_yields_null_context() {
         let req = _request_with_metadata(BTreeMap::new());
         let enr = extract_enrichment(&req);
-        assert!(enr.spendguard_context.is_null(),
-            "empty fields → Null, got {:?}", enr.spendguard_context);
+        assert!(
+            enr.spendguard_context.is_null(),
+            "empty fields → Null, got {:?}",
+            enr.spendguard_context
+        );
     }
 
     #[test]
     fn missing_runtime_metadata_yields_null_context() {
-        let req = DecisionRequest { inputs: None, ..Default::default() };
+        let req = DecisionRequest {
+            inputs: None,
+            ..Default::default()
+        };
         let enr = extract_enrichment(&req);
         assert!(enr.spendguard_context.is_null());
     }
@@ -2047,7 +2110,9 @@ mod enrichment_tests {
         fields.insert("stream".into(), _bool_value(true));
         let req = _request_with_metadata(fields);
         let enr = extract_enrichment(&req);
-        let obj = enr.spendguard_context.as_object()
+        let obj = enr
+            .spendguard_context
+            .as_object()
             .expect("expected Object, got Null");
         assert_eq!(obj.get("stream"), Some(&serde_json::Value::Bool(true)));
     }
@@ -2061,7 +2126,9 @@ mod enrichment_tests {
         fields.insert("team_id".into(), _null_value());
         let req = _request_with_metadata(fields);
         let enr = extract_enrichment(&req);
-        let obj = enr.spendguard_context.as_object()
+        let obj = enr
+            .spendguard_context
+            .as_object()
             .expect("expected Object, got Null");
         assert_eq!(obj.get("team_id"), Some(&serde_json::Value::Null));
     }
@@ -2077,8 +2144,10 @@ mod enrichment_tests {
         let enr = extract_enrichment(&req);
         let obj = enr.spendguard_context.as_object().unwrap();
         assert!(obj.contains_key("integration"));
-        assert!(!obj.contains_key("evil_pii"),
-            "PII key must NOT leak into signed payload");
+        assert!(
+            !obj.contains_key("evil_pii"),
+            "PII key must NOT leak into signed payload"
+        );
     }
 
     #[test]
@@ -2119,8 +2188,10 @@ mod enrichment_tests {
         // Simulate both emit paths cloning the same context.
         let allow_clone = enr.spendguard_context.clone();
         let deny_clone = enr.spendguard_context.clone();
-        assert_eq!(allow_clone, deny_clone,
-            "ALLOW and DENY clones must produce identical JSON");
+        assert_eq!(
+            allow_clone, deny_clone,
+            "ALLOW and DENY clones must produce identical JSON"
+        );
         // Both must be Objects (not Null) with the same key set.
         let a = allow_clone.as_object().expect("ALLOW clone is Object");
         let d = deny_clone.as_object().expect("DENY clone is Object");
@@ -2152,6 +2223,7 @@ mod enrichment_tests {
 #[cfg(test)]
 mod slice_02_decision_match_tests {
     use super::*;
+    use crate::proto::sidecar_adapter::v1::decision_request::Inputs;
     use uuid::Uuid;
 
     fn _fixture_output(decision: Decision) -> DecisionOutput {
@@ -2246,5 +2318,91 @@ mod slice_02_decision_match_tests {
         // surfaces DecisionStage error.
         assert_eq!(denied_decision_label(Decision::Continue), None);
         assert_eq!(denied_decision_label(Decision::Unspecified), None);
+    }
+
+    #[test]
+    fn projector_budget_remaining_unknown_is_non_triggering() {
+        let req = DecisionRequest {
+            inputs: Some(Inputs {
+                projected_p90_atomic: String::new(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            projector_budget_remaining_atomic(&req),
+            i64::MAX,
+            "missing budget snapshot must not synthesize budget=0 and trigger RUN_BUDGET_PROJECTION_EXCEEDED"
+        );
+    }
+
+    #[test]
+    fn projector_budget_remaining_invalid_or_negative_is_non_triggering() {
+        for projected_p90_atomic in ["not-a-number", "-1"] {
+            let req = DecisionRequest {
+                inputs: Some(Inputs {
+                    projected_p90_atomic: projected_p90_atomic.to_string(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            };
+            assert_eq!(projector_budget_remaining_atomic(&req), i64::MAX);
+        }
+    }
+
+    #[test]
+    fn projector_budget_remaining_ignores_projected_p90_hint() {
+        let req = DecisionRequest {
+            inputs: Some(Inputs {
+                projected_p90_atomic: "12345".to_string(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            projector_budget_remaining_atomic(&req),
+            i64::MAX,
+            "projected_p90_atomic is a risk-band hint, not remaining budget"
+        );
+    }
+
+    #[test]
+    fn allow_path_audit_payload_includes_reason_codes() {
+        let ctx = DecisionContext {
+            session_id: "session-test".to_string(),
+            workload_instance_id: "sidecar-test".to_string(),
+            tenant_id: Uuid::nil().to_string(),
+            region: "test-region".to_string(),
+        };
+        let enrichment = AuditEnrichment {
+            run_id: "run-test".to_string(),
+            agent_id: "agent-test".to_string(),
+            model_family: "model-test".to_string(),
+            prompt_hash: "prompt-test".to_string(),
+            spendguard_context: serde_json::Value::Null,
+        };
+        let matched_rules = vec!["run-drift-alert".to_string()];
+        let reason_codes = vec!["RUN_DRIFT_DETECTED".to_string()];
+
+        let ce = build_audit_decision_cloudevent(
+            &ctx,
+            &Uuid::nil(),
+            &Uuid::nil(),
+            1,
+            &[0u8; 32],
+            &matched_rules,
+            &reason_codes,
+            &enrichment,
+            "STRICT_CEILING",
+            None,
+            None,
+        );
+        let payload: serde_json::Value =
+            serde_json::from_slice(ce.data.as_ref()).expect("audit decision payload JSON");
+
+        assert_eq!(
+            payload.get("reason_codes"),
+            Some(&serde_json::json!(["RUN_DRIFT_DETECTED"]))
+        );
     }
 }

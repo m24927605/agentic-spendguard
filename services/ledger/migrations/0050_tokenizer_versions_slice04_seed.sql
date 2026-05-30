@@ -61,7 +61,7 @@
 -- plpgsql to resolve COUNT / RAISE / etc against pg_catalog only —
 -- CVE-2018-1058 hardening.
 
-INSERT INTO tokenizer_versions (
+INSERT INTO public.tokenizer_versions (
     tokenizer_version_id,
     kind,
     encoder_name,
@@ -111,7 +111,7 @@ DECLARE
 BEGIN
     SET LOCAL search_path = pg_catalog, pg_temp;
     SELECT COUNT(*) INTO actual_count
-    FROM tokenizer_versions
+    FROM public.tokenizer_versions
     WHERE tokenizer_version_id IN (
         '01918000-0000-7c10-8c10-000000000004'::uuid,
         '01918000-0000-7c10-8c10-000000000005'::uuid,
@@ -125,5 +125,5 @@ BEGIN
     END IF;
 END $$;
 
-COMMENT ON TABLE tokenizer_versions IS
+COMMENT ON TABLE public.tokenizer_versions IS
     'Registry of tokenizer encoder versions per tokenizer-service-spec-v1alpha1.md §6.1. Initial SLICE_03 seed: 3 OpenAI tiktoken-rs encoders + 1 HEURISTIC marker (0049). SLICE_04 expansion: Anthropic + Gemini + Cohere + Llama BPE/SentencePiece (0050).';

@@ -118,6 +118,7 @@ mod tests {
             producer_sequence: 42,
             producer_signature: Vec::new().into(),
             signing_key_id: String::new(),
+            ..Default::default()
         }
     }
 

@@ -34,13 +34,12 @@
 --     reject_immutable_ledger_entry_mutation() (mirror of the new
 --     audit_outbox_no_truncate trigger in 0046).
 --
--- Round-2 deployment-safety hardening (Codex M18):
---   * The FK declaration is split into NOT VALID + VALIDATE so a
---     production re-run on a large audit_outbox does not take a long
---     ACCESS EXCLUSIVE lock during the existing-row scan (the column
---     is all-NULL in legacy rows so the scan is a no-op, but the
---     two-step form is the deployment-safe pattern and keeps SLICE_01
---     consistent with §4.3 cross-DB ordering documentation).
+-- HARDEN_01 deployment-safety correction:
+--   * PostgreSQL 16 rejects NOT VALID foreign keys on partitioned
+--     referencing tables. audit_outbox is partitioned, so this migration
+--     must use the supported single-step FK form. Legacy rows have NULL
+--     tokenizer_version_id, so the validation scan is still empty for
+--     pre-SLICE_03 installs.
 --
 -- Round-2 stylistic alignment (Codex m3): no explicit BEGIN/COMMIT —
 -- migration runner wraps each file in its own transaction (matches the
@@ -145,17 +144,14 @@ CREATE TRIGGER tokenizer_versions_no_truncate
 -- is NULLable per §2.1 to represent Tier 3 fallback). A NULL on audit_outbox
 -- side simply does not exercise the FK; no referential integrity loss.
 --
--- Round-2 fix M18: declared NOT VALID first, then VALIDATEd. The legacy
--- audit_outbox rows have NULL tokenizer_version_id so the scan is empty,
--- but the two-step form matches the M6 / 0046 deployment-safe pattern
--- and keeps the lock window minimal on future production re-runs.
+-- HARDEN_01: PostgreSQL 16 does not support NOT VALID foreign keys on
+-- partitioned referencing tables, so use the supported single-step FK.
+-- The legacy audit_outbox rows have NULL tokenizer_version_id, so the
+-- validation scan remains empty for existing installs.
 -- ============================================================================
 
 ALTER TABLE audit_outbox
     ADD CONSTRAINT audit_outbox_tokenizer_version_id_fk
         FOREIGN KEY (tokenizer_version_id)
         REFERENCES tokenizer_versions(tokenizer_version_id)
-        ON DELETE RESTRICT
-        NOT VALID;
-
-ALTER TABLE audit_outbox VALIDATE CONSTRAINT audit_outbox_tokenizer_version_id_fk;
+        ON DELETE RESTRICT;

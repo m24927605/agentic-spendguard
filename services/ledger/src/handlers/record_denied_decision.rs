@@ -11,7 +11,6 @@
 //! authority on idempotent replay + fencing CAS. Handler MUST NOT
 //! pre-check `ledger_transactions` (TOCTOU).
 
-use base64::Engine as _;
 use prost_types::Timestamp;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -324,23 +323,7 @@ fn extract_cloudevent_payload(req: &RecordDeniedDecisionRequest) -> Result<Value
         .audit_event
         .as_ref()
         .ok_or_else(|| DomainError::InvalidRequest("audit_event required".into()))?;
-    Ok(json!({
-        "specversion":     evt.specversion,
-        "type":            evt.r#type,
-        "source":          evt.source,
-        "id":              evt.id,
-        "time_seconds":    evt.time.as_ref().map(|t| t.seconds).unwrap_or_default(),
-        "time_nanos":      evt.time.as_ref().map(|t| t.nanos).unwrap_or_default(),
-        "datacontenttype": evt.datacontenttype,
-        "data_b64":        base64::engine::general_purpose::STANDARD.encode(&evt.data),
-        "tenantid":        evt.tenant_id,
-        "runid":           evt.run_id,
-        "decisionid":      evt.decision_id,
-        "schema_bundle_id": evt.schema_bundle_id,
-        "producer_id":     evt.producer_id,
-        "producer_sequence": evt.producer_sequence,
-        "signing_key_id":  evt.signing_key_id,
-    }))
+    Ok(crate::handlers::audit_payload::cloudevent_payload(evt))
 }
 
 fn extract_cloudevent_signature_hex(req: &RecordDeniedDecisionRequest) -> String {

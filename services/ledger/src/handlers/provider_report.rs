@@ -24,7 +24,6 @@
 //!   * Pricing tuple (4 fields) MUST equal the original reserve's frozen
 //!     tuple (IS DISTINCT FROM compare in SP).
 
-use base64::Engine as _;
 use num_bigint::BigInt;
 use prost_types::Timestamp;
 use serde_json::{json, Value};
@@ -304,23 +303,7 @@ fn minimal_replay_seed(tx: &Uuid, decision: &Uuid, reservation: &Uuid) -> Value 
 fn extract_cloudevent_payload(
     evt: &crate::proto::common::v1::CloudEvent,
 ) -> Result<Value, DomainError> {
-    Ok(json!({
-        "specversion":     evt.specversion,
-        "type":            evt.r#type,
-        "source":          evt.source,
-        "id":              evt.id,
-        "time_seconds":    evt.time.as_ref().map(|t| t.seconds).unwrap_or_default(),
-        "time_nanos":      evt.time.as_ref().map(|t| t.nanos).unwrap_or_default(),
-        "datacontenttype": evt.datacontenttype,
-        "data_b64":        base64::engine::general_purpose::STANDARD.encode(&evt.data),
-        "tenantid":        evt.tenant_id,
-        "runid":           evt.run_id,
-        "decisionid":      evt.decision_id,
-        "schema_bundle_id": evt.schema_bundle_id,
-        "producer_id":     evt.producer_id,
-        "producer_sequence": evt.producer_sequence,
-        "signing_key_id":  evt.signing_key_id,
-    }))
+    Ok(crate::handlers::audit_payload::cloudevent_payload(evt))
 }
 
 async fn build_success(

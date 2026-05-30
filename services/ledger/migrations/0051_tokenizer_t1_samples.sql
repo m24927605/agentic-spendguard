@@ -96,7 +96,7 @@ CREATE TABLE tokenizer_t1_samples (
     -- FK to the encoder that produced t2_input_tokens. Critical for drift
     -- attribution: operator needs to know "which BPE version drifted".
     t2_tokenizer_version_id UUID        NOT NULL
-                            REFERENCES tokenizer_versions(tokenizer_version_id)
+                            REFERENCES public.tokenizer_versions(tokenizer_version_id)
                             ON DELETE RESTRICT,
 
     -- |t1 - t2| / max(t1, 1) — REAL is sufficient precision (we alert on

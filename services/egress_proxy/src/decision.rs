@@ -62,10 +62,10 @@ pub struct DecisionInputs<'a> {
     pub tenant_id: &'a str,
     pub budget_id: &'a str,
     pub window_instance_id: &'a str,
-    pub run_id: String,           // from X-SpendGuard-Run-Id or fresh UUIDv7
+    pub run_id: String, // from X-SpendGuard-Run-Id or fresh UUIDv7
     pub body_bytes: &'a [u8],
-    pub model_family: String,     // parsed from request.model
-    pub estimated_tokens: i64,    // heuristic or X-SpendGuard-Estimated-Tokens
+    pub model_family: String,  // parsed from request.model
+    pub estimated_tokens: i64, // heuristic or X-SpendGuard-Estimated-Tokens
     pub unit_id: &'a str,
     /// Final-sweep P2 fix: caller may supply explicit
     /// X-SpendGuard-Idempotency-Key for retry-collapse semantics
@@ -91,15 +91,17 @@ pub struct DecisionInputs<'a> {
 /// Note: DecisionRequest does NOT carry pricing or fencing — sidecar
 /// loads pricing from its bundle. PricingFreeze becomes relevant at
 /// the POST step (LlmCallPostPayload, slice 5).
-pub fn build_decision_request(
-    inputs: &DecisionInputs<'_>,
-) -> anyhow::Result<DecisionRequest> {
+pub fn build_decision_request(inputs: &DecisionInputs<'_>) -> anyhow::Result<DecisionRequest> {
     let body_json: Value = serde_json::from_slice(inputs.body_bytes)
         .context("body not valid JSON for signature derivation")?;
-    let signature = spendguard_ids::default_call_signature_jcs(&body_json)
-        .context("compute body signature")?;
+    let signature =
+        spendguard_ids::default_call_signature_jcs(&body_json).context("compute body signature")?;
 
-    let step_id = format!("{}:call:{}", inputs.run_id, &signature[..16.min(signature.len())]);
+    let step_id = format!(
+        "{}:call:{}",
+        inputs.run_id,
+        &signature[..16.min(signature.len())]
+    );
     let llm_call_id = spendguard_ids::derive_uuid_from_signature(&signature, "llm_call_id");
     let decision_id = Uuid::now_v7();
 
@@ -197,9 +199,7 @@ impl PricingCache {
     /// Load initial snapshot from runtime.env + metadata.json.
     pub fn load(runtime_env_path: PathBuf) -> anyhow::Result<Self> {
         let snapshot = read_pricing_snapshot(&runtime_env_path)
-            .with_context(|| {
-                format!("initial pricing read from {}", runtime_env_path.display())
-            })?;
+            .with_context(|| format!("initial pricing read from {}", runtime_env_path.display()))?;
         Ok(Self {
             runtime_env_path,
             current: Arc::new(ArcSwap::from_pointee(snapshot)),
@@ -491,21 +491,19 @@ pub async fn estimate_call_cost(
     };
 
     // Strategy A local fallback per spec §11 (when predictor unreachable).
-    let strategy_a_local = compute_strategy_a_local(
-        input_tokens,
-        max_tokens_requested,
-        model_context_window,
-    );
+    let strategy_a_local =
+        compute_strategy_a_local(input_tokens, max_tokens_requested, model_context_window);
 
     let project_fut = async {
         match run_cost_projector {
             None => Err("projector client not configured".to_string()),
             Some(client) => {
-                // budget_remaining_atomic is sourced from a hot cache in
-                // production. For SLICE_10 v1 we pass 0 (projector treats
-                // as "trigger BUDGET on any non-trivial projection") —
-                // the per-call decision is still enforced by sidecar's
-                // ledger.reserve_set so this is conservative.
+                // The egress proxy does not have an authoritative budget
+                // remaining snapshot. Passing 0 here would make every
+                // non-trivial projection look over budget and produce a
+                // false RUN_BUDGET_PROJECTION_EXCEEDED. Use a non-triggering
+                // sentinel; the sidecar/ledger reserve path remains the
+                // hard budget gate.
                 let req = ProjectRequest {
                     tenant_id: inputs.tenant_id.to_string(),
                     run_id: inputs.run_id.to_string(),
@@ -517,15 +515,12 @@ pub async fn estimate_call_cost(
                     // when predictor hasn't returned yet (parallel join).
                     this_call_reservation_atomic: strategy_a_local,
                     unit_id: String::new(),
-                    budget_remaining_atomic: 0,
+                    budget_remaining_atomic: i64::MAX,
                     planned_steps_hint: inputs.planned_steps_hint,
                     planned_tools_hint: 0,
                 };
                 client
-                    .project_with_timeout(
-                        req,
-                        Duration::from_millis(RUN_COST_PROJECTOR_TIMEOUT_MS),
-                    )
+                    .project_with_timeout(req, Duration::from_millis(RUN_COST_PROJECTOR_TIMEOUT_MS))
                     .await
                     .map_err(|e| e.to_string())
             }
@@ -761,11 +756,20 @@ mod tests {
         let req1 = build_decision_request(&inputs).unwrap();
         let req2 = build_decision_request(&inputs).unwrap();
         // Same body + same run_id → same step_id (Staff #4 convergence).
-        assert_eq!(req1.ids.as_ref().unwrap().step_id, req2.ids.as_ref().unwrap().step_id);
+        assert_eq!(
+            req1.ids.as_ref().unwrap().step_id,
+            req2.ids.as_ref().unwrap().step_id
+        );
         // But decision_id is per-attempt UUIDv7 — different.
-        assert_ne!(req1.ids.as_ref().unwrap().decision_id, req2.ids.as_ref().unwrap().decision_id);
+        assert_ne!(
+            req1.ids.as_ref().unwrap().decision_id,
+            req2.ids.as_ref().unwrap().decision_id
+        );
         // Idempotency key per-attempt too (nanos diff).
-        assert_ne!(req1.idempotency.as_ref().unwrap().key, req2.idempotency.as_ref().unwrap().key);
+        assert_ne!(
+            req1.idempotency.as_ref().unwrap().key,
+            req2.idempotency.as_ref().unwrap().key
+        );
     }
 
     #[test]
@@ -898,8 +902,7 @@ mod tests {
     #[tokio::test]
     async fn estimate_call_cost_falls_back_to_strategy_a_when_predictor_absent() {
         // Boot tokenizer; both gRPC clients absent → fallback path.
-        let tokenizer =
-            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let tokenizer = spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
         let body = json!({
             "model": "gpt-4o-mini",
             "messages": [{"role": "user", "content": "hello world from SLICE_10"}],
@@ -948,8 +951,7 @@ mod tests {
     #[tokio::test]
     async fn estimate_call_cost_p99_under_5ms_fallback_path() {
         use std::time::Instant;
-        let tokenizer =
-            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let tokenizer = spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
         let body = json!({
             "model": "gpt-4o-mini",
             "messages": [
@@ -1009,8 +1011,7 @@ mod tests {
 
     #[tokio::test]
     async fn estimate_call_cost_respects_header_override() {
-        let tokenizer =
-            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let tokenizer = spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
         let body = json!({
             "model": "gpt-4o-mini",
             "messages": [{"role": "user", "content": "x".repeat(1000)}],
@@ -1048,8 +1049,7 @@ mod tests {
         // for Bedrock, then passes it to estimate_call_cost, which then
         // tokenize()s it via the existing tokenizer dispatch (no proxy-
         // internal table duplication).
-        let tokenizer =
-            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let tokenizer = spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
         let body = json!({
             // Bedrock InvokeModel body — proxy preserves the body
             // verbatim; the model_id from URL path is passed as `model`.
@@ -1087,8 +1087,7 @@ mod tests {
     async fn estimate_call_cost_bedrock_unknown_model_falls_to_tier3() {
         // amazon.titan-* is not in the SLICE_04 narrow Option A
         // dispatch; tokenizer should fall to Tier 3 (5% margin).
-        let tokenizer =
-            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let tokenizer = spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
         let body = json!({"inputText": "Hello", "textGenerationConfig": {}});
         let inputs = EstimateInputs {
             body: &body,
@@ -1111,8 +1110,7 @@ mod tests {
     async fn estimate_call_cost_anthropic_native_uses_anthropic_tokenizer() {
         // Anthropic native /v1/messages — model field holds e.g.
         // "claude-3-5-sonnet-20241022".
-        let tokenizer =
-            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let tokenizer = spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
         let body = json!({
             "model": "claude-3-5-sonnet-20241022",
             "messages": [{"role": "user", "content": "Hello Claude"}],
@@ -1142,8 +1140,7 @@ mod tests {
     async fn estimate_call_cost_gemini_uses_gemini_tokenizer() {
         // Vertex generateContent — model id extracted from URL path
         // (e.g. "gemini-1.5-pro").
-        let tokenizer =
-            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
+        let tokenizer = spendguard_tokenizer::Tokenizer::new_with_embedded_assets().unwrap();
         let body = json!({
             "contents": [{"role": "user", "parts": [{"text": "Hello Gemini"}]}],
         });

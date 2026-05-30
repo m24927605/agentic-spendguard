@@ -14,6 +14,8 @@ RUN ln -sf /usr/include/google ./proto/google
 COPY services/signing ./services/signing
 # Phase 5 GA hardening S22: fail-policy path-dep crate.
 COPY services/policy ./services/policy
+# SLICE_10 links tokenizer as an in-process path dependency.
+COPY crates/spendguard-tokenizer ./crates/spendguard-tokenizer
 COPY services/sidecar ./services/sidecar
 WORKDIR /build/services/sidecar
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \

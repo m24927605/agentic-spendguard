@@ -392,4 +392,21 @@ SELECT post_ledger_transaction(
 );
 EOSQL
 
+# The two opening-balance adjustments are bootstrap fixtures, not
+# sidecar-produced audit events. They predate the runtime signing key
+# path in this init container, so do not hand them to the strict
+# outbox-forwarder loop; live demo decisions still exercise the full
+# signed path and must drain to canonical_events.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" \
+     --dbname spendguard_ledger <<EOSQL
+UPDATE audit_outbox
+   SET pending_forward = FALSE,
+       forwarded_at = now(),
+       last_forward_error = 'DEMO_SEED_BOOTSTRAP_NOT_FORWARDED'
+ WHERE audit_outbox_id IN (
+       '00000000-0000-7000-a000-000000000040'::uuid,
+       '00000000-0000-7000-a000-000000000140'::uuid
+ );
+EOSQL
+
 echo "[init] demo seed inserted into spendguard_ledger (token + USD units)"
