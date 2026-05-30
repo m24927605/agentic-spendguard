@@ -108,6 +108,45 @@ spec:
             # alerting threshold. SLICE_03 plumbs the value through
             # Config; the alert wire-up itself lands in SLICE-extra.
             - { name: SPENDGUARD_TOKENIZER_TIER3_ALERT_THRESHOLD, value: {{ .Values.tokenizer.tier3AlertThreshold | quote }} }
+            # ── SLICE_05: Tier 1 shadow drift detection ────────────
+            # Per spec §4 + §11 rollback plan, shadowEnabled is a
+            # master kill-switch. Default true; operators set to
+            # false to disable the shadow worker entirely (Tier 2
+            # hot path is unaffected).
+            - { name: SPENDGUARD_TOKENIZER_SHADOW_ENABLED,        value: {{ .Values.tokenizer.shadowEnabled | quote }} }
+            # Default sample rate per spec §4.1 (1% = 0.01).
+            # Per-(tenant, model) override via the control plane API.
+            - { name: SPENDGUARD_TOKENIZER_SHADOW_DEFAULT_SAMPLE_RATE, value: {{ .Values.tokenizer.shadowDefaultSampleRate | quote }} }
+            {{- if .Values.tokenizer.canonicalIngestUrl }}
+            # canonical_ingest gRPC endpoint for signed
+            # tokenizer_drift_alert CloudEvent emission.
+            - { name: SPENDGUARD_TOKENIZER_CANONICAL_INGEST_URL,  value: {{ .Values.tokenizer.canonicalIngestUrl | quote }} }
+            {{- end }}
+            {{- if .Values.tokenizer.databaseUrl }}
+            # Postgres URL for tokenizer_t1_samples persistence.
+            # Migration 0051 owns the schema.
+            - { name: SPENDGUARD_TOKENIZER_DATABASE_URL,          value: {{ .Values.tokenizer.databaseUrl | quote }} }
+            {{- end }}
+            {{- if .Values.tokenizer.providerSecretName }}
+            # Provider API keys for Anthropic / Gemini Tier 1
+            # count_tokens calls. Mounted from a pre-created Secret
+            # so the keys never appear in the Helm release secrets
+            # or Deployment manifest. Optional under demo profile;
+            # required under chart.profile=production when
+            # shadowEnabled=true.
+            - name: SPENDGUARD_TOKENIZER_ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tokenizer.providerSecretName | quote }}
+                  key: anthropic-api-key
+                  optional: true
+            - name: SPENDGUARD_TOKENIZER_GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tokenizer.providerSecretName | quote }}
+                  key: gemini-api-key
+                  optional: true
+            {{- end }}
             {{- if .Values.tokenizer.udsHostPath }}
             # Round-2 fix B3.1: UDS bind path (hostPath for on-node
             # sidecar callers). When set, the service binds the UDS

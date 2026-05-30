@@ -225,6 +225,37 @@ tokenizer:
   #                 callers can resolve `<release>-spendguard-tokenizer:50053`.
   udsHostPath: ""
   mtlsSecretName: ""
+  # ── SLICE_05: Tier 1 shadow drift detection ────────────────────────
+  # Master kill-switch for the shadow worker. When false the Tier 2
+  # hot path is unaffected — only the async shadow path stops. Per
+  # spec §11 rollback plan, operators flip this when a vendor outage
+  # cascades shadow failures into operational noise.
+  shadowEnabled: true
+  # Default sample rate per spec §4.1 = 0.01 (1%). Per-(tenant, model)
+  # override via the control plane API. Range (0.0, 1.0]; 0 disables
+  # sampling, 1 forces 100% sampling (matches the cool-down rate).
+  shadowDefaultSampleRate: 0.01
+  # canonical_ingest gRPC endpoint for the signed
+  # `tokenizer_drift_alert` CloudEvent the shadow worker emits per
+  # spec §4 + stats-aggregator-spec §7.2. Empty in demo profile
+  # (worker drops alerts to logs); production deploys SHOULD set
+  # this so drift detection feeds the canonical audit chain.
+  canonicalIngestUrl: ""
+  # Postgres URL for tokenizer_t1_samples persistence per spec §4.4
+  # schema (migration 0051). Empty falls back to in-memory persister
+  # (demo only). Production deploys MUST set this.
+  databaseUrl: ""
+  # Optional Secret holding Anthropic + Gemini Tier 1 count_tokens
+  # API keys. Expected keys inside the Secret:
+  #   anthropic-api-key: <api key string>
+  #   gemini-api-key:    <api key string>
+  # Both keys are independent — if only Anthropic is set, Gemini
+  # shadow samples are silently skipped and the Tier 1 path is
+  # disabled for that vendor. Empty in demo profile = shadow worker
+  # boots in drop-only mode (events accepted from the gRPC handler
+  # but discarded; Tier 2 hot path unaffected). See
+  # services/tokenizer/src/main.rs boot log for visibility.
+  providerSecretName: ""
   resources:
     requests: { cpu: "100m", memory: "192Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
