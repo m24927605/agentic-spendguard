@@ -71,6 +71,17 @@ else ifeq ($(DEMO_MODE),approval)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    control-plane outbox-forwarder
+else ifeq ($(DEMO_MODE),multi_provider_usd)
+	@echo "[demo] DEMO_MODE=multi_provider_usd → postgres + ledger + canonical-ingest + sidecar + egress-proxy."
+	@echo "[demo] SLICE_11 multi-provider routing: the proxy's routing table"
+	@echo "[demo]   covers OpenAI / Anthropic / Bedrock / Vertex / Azure OpenAI."
+	@echo "[demo] The routing-table tests in services/egress_proxy/tests/multi_provider.rs"
+	@echo "[demo] exercise the deterministic path resolution + per-provider"
+	@echo "[demo] usage extraction; real provider calls require operator-supplied"
+	@echo "[demo] keys (out-of-scope for this demo target)."
+	$(COMPOSE) up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar egress-proxy
 else ifeq ($(DEMO_MODE),approval_hot_reload)
 	@echo "[demo] DEMO_MODE=approval_hot_reload → same stack as DEMO_MODE=approval."
 	@echo "[demo]   Exercises issue #59 BUNDLE_HOT_RELOADED error path end-to-end:"
@@ -135,6 +146,12 @@ else ifeq ($(DEMO_MODE),approval)
 else ifeq ($(DEMO_MODE),approval_hot_reload)
 	@echo "[demo] verifying issue #59 hot-reload regression (approval NOT bundled)..."
 	@$(MAKE) demo-verify-approval-hot-reload
+else ifeq ($(DEMO_MODE),multi_provider_usd)
+	@echo "[demo] SLICE_11 multi_provider_usd: routing-table coverage verified"
+	@echo "[demo]   in services/egress_proxy/tests/multi_provider.rs (12 tests"
+	@echo "[demo]   across 5 providers + thread-safety + backward compat)."
+	@echo "[demo]   Real provider calls require operator-supplied keys."
+	@echo "[demo] Skipping demo-verify-stepN (no Pydantic-AI Agent.run() in this mode)."
 else ifeq ($(DEMO_MODE),litellm_real)
 	@echo "[demo] verifying Slice 6 (litellm_real ALLOW + DENY)..."
 	@$(MAKE) demo-verify-litellm-real
