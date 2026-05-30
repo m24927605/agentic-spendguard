@@ -20,8 +20,9 @@ WORKDIR /build/services/canonical_ingest
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=cargo-target-canonical-ingest,target=/build/services/canonical_ingest/target,sharing=locked \
-    cargo build --release --bin spendguard-canonical-ingest \
-    && cp target/release/spendguard-canonical-ingest /spendguard-canonical-ingest
+    cargo build --release --bin spendguard-canonical-ingest --bin verify-chain \
+    && cp target/release/spendguard-canonical-ingest /spendguard-canonical-ingest \
+    && cp target/release/verify-chain /verify-chain
 
 # ---------------------------------------------------------------------------
 
@@ -32,5 +33,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /spendguard-canonical-ingest /usr/local/bin/spendguard-canonical-ingest
+COPY --from=builder /verify-chain /usr/local/bin/verify-chain
 
 ENTRYPOINT ["/usr/local/bin/spendguard-canonical-ingest"]

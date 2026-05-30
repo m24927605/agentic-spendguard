@@ -82,6 +82,14 @@ else ifeq ($(DEMO_MODE),multi_provider_usd)
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar egress-proxy
+else ifeq ($(DEMO_MODE),m1_benchmark_runaway_loop)
+	@echo "[demo] DEMO_MODE=m1_benchmark_runaway_loop → sidecar wired to run_cost_projector."
+	@SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL=http://run-cost-projector:50055 $(COMPOSE) up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest run-cost-projector sidecar webhook-receiver \
+	    outbox-forwarder
+else ifeq ($(DEMO_MODE),plugin_c_synthetic)
+	@echo "[demo] DEMO_MODE=plugin_c_synthetic → host Strategy C circuit-breaker regression."
 else ifeq ($(DEMO_MODE),approval_hot_reload)
 	@echo "[demo] DEMO_MODE=approval_hot_reload → same stack as DEMO_MODE=approval."
 	@echo "[demo]   Exercises issue #59 BUNDLE_HOT_RELOADED error path end-to-end:"
@@ -102,12 +110,19 @@ else
 endif
 ifeq ($(DEMO_MODE),proxy)
 	@echo "[demo] running egress-proxy smoke test..."
+	@test -n "$$OPENAI_API_KEY" || (echo "[demo] FATAL: OPENAI_API_KEY required for DEMO_MODE=proxy" >&2; exit 8)
 	$(COMPOSE) run --rm egress-proxy-smoke
+else ifeq ($(DEMO_MODE),plugin_c_synthetic)
+	@echo "[demo] verifying Strategy C breaker-open skip path..."
+	@cd ../.. && cargo test --manifest-path services/output_predictor/Cargo.toml \
+	    breaker_open_skips_predict_without_recording_extra_failure -- --nocapture
+	@echo "[demo] plugin_c_synthetic PASS — Strategy C breaker open skips plugin Predict"
 else ifeq ($(DEMO_MODE),agent_real_openai_agents_proxy)
 	@echo "[demo] running openai-agents SDK demo against the proxy..."
 	@echo "[demo]   the demo container has OPENAI_API_KEY from the host env"
 	@echo "[demo]   and OPENAI_BASE_URL pointing at the proxy."
-	$(COMPOSE) run --rm \
+	$(COMPOSE) build demo
+	$(COMPOSE) run --rm --no-deps \
 	    --env SPENDGUARD_DEMO_MODE=agent_real_openai_agents_proxy \
 	    --env OPENAI_API_KEY=$$OPENAI_API_KEY \
 	    --env SPENDGUARD_PROXY_BASE_URL=http://egress-proxy:9000/v1 \
@@ -122,11 +137,15 @@ else ifeq ($(DEMO_MODE),cost_advisor)
 	@echo "[demo]    pending_forward=FALSE so the forwarder skips them)"
 else
 	@echo "[demo] core services up; running demo container (DEMO_MODE=$(DEMO_MODE))..."
-	$(COMPOSE) run --rm \
+	$(COMPOSE) build demo
+	$(COMPOSE) run --rm --no-deps \
 	    --env SPENDGUARD_DEMO_MODE=$(DEMO_MODE) \
 	    demo
 ifeq ($(DEMO_MODE),decision)
 	@echo "[demo] verifying Phase 2B Step 8 (decision-mode commit + provider_report)..."
+	@$(MAKE) demo-verify-step8
+else ifeq ($(DEMO_MODE),default)
+	@echo "[demo] verifying Phase 2B Step 8 (default decision-mode commit + provider_report)..."
 	@$(MAKE) demo-verify-step8
 else ifeq ($(DEMO_MODE),invoice)
 	@echo "[demo] verifying Phase 2B Step 9 (invoice-mode reserve+commit+provider_report+invoice_reconcile)..."
@@ -147,11 +166,14 @@ else ifeq ($(DEMO_MODE),approval_hot_reload)
 	@echo "[demo] verifying issue #59 hot-reload regression (approval NOT bundled)..."
 	@$(MAKE) demo-verify-approval-hot-reload
 else ifeq ($(DEMO_MODE),multi_provider_usd)
-	@echo "[demo] SLICE_11 multi_provider_usd: routing-table coverage verified"
-	@echo "[demo]   in services/egress_proxy/tests/multi_provider.rs (12 tests"
-	@echo "[demo]   across 5 providers + thread-safety + backward compat)."
-	@echo "[demo]   Real provider calls require operator-supplied keys."
-	@echo "[demo] Skipping demo-verify-stepN (no Pydantic-AI Agent.run() in this mode)."
+	@echo "[demo] verifying SLICE_11 multi-provider routing table..."
+	@cd ../.. && cargo test --manifest-path services/egress_proxy/Cargo.toml \
+	    multi_provider_demo_routing_works_for_all_five -- --nocapture
+	@echo "[demo] multi_provider_usd PASS — five provider routes verified"
+else ifeq ($(DEMO_MODE),m1_benchmark_runaway_loop)
+	@echo "[demo] verifying RUN_BUDGET_PROJECTION_EXCEEDED landed in canonical_events..."
+	@sleep 5
+	@$(MAKE) demo-verify-m1-runaway-loop
 else ifeq ($(DEMO_MODE),litellm_real)
 	@echo "[demo] verifying Slice 6 (litellm_real ALLOW + DENY)..."
 	@$(MAKE) demo-verify-litellm-real
@@ -170,9 +192,13 @@ else
 	@echo "[demo] verifying Phase 2B Step 7 (agent-mode commit_estimated only)..."
 	@$(MAKE) demo-verify-step7
 endif
+ifneq ($(DEMO_MODE),multi_provider_usd)
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure
+else
+	@echo "[demo] multi_provider_usd offline routing gate emits no audit rows without provider keys; skipping outbox closure."
+endif
 endif
 
 # Phase 2B Step 7 verification: 1 reserve + 1 commit_estimated;
@@ -241,6 +267,20 @@ demo-verify-outbox-closure:
 demo-verify-deny:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_deny.sql
 	@echo "[demo] Phase 3 DENY verification done"
+
+demo-verify-m1-runaway-loop:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_count INT; BEGIN \
+		   SELECT COUNT(*) INTO v_count FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND cost_advisor_safe_decode_payload(payload_json)::text LIKE '%RUN_BUDGET_PROJECTION_EXCEEDED%'; \
+		   IF v_count = 0 THEN \
+		     RAISE EXCEPTION 'HARDEN_02_GATE: RUN_BUDGET_PROJECTION_EXCEEDED not found in canonical_events'; \
+		   END IF; \
+		   RAISE NOTICE 'HARDEN_02 RUNAWAY LOOP OK: matching canonical_events=%', v_count; \
+		 END; \$$\$$;"
+	@echo "[demo] M1 runaway-loop verification done"
 
 # Round-2 #9 part 2 closed-loop verification: full REQUIRE_APPROVAL
 # round-trip — contract evaluator emits REQUIRE_APPROVAL, demo runner

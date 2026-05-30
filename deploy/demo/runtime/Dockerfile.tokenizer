@@ -20,6 +20,7 @@ COPY proto ./proto
 RUN ln -sf /usr/include/google ./proto/google
 # Library crate is a path-dep of the service crate; copy both.
 COPY crates/spendguard-tokenizer ./crates/spendguard-tokenizer
+COPY services/signing ./services/signing
 COPY services/tokenizer ./services/tokenizer
 WORKDIR /build/services/tokenizer
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \

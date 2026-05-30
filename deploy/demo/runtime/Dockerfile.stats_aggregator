@@ -33,8 +33,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /spendguard-stats-aggregator /usr/local/bin/spendguard-stats-aggregator
+RUN printf '#!/bin/sh\nset -eu\nif [ -f /var/lib/spendguard/bundles/runtime.env ]; then\n    set -a\n    . /var/lib/spendguard/bundles/runtime.env\n    set +a\nfi\nif [ -z "${SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_HASH_HEX:-}" ]; then\n    export SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_HASH_HEX="${SPENDGUARD_SCHEMA_BUNDLE_HASH_HEX:-}"\nfi\nexec /usr/local/bin/spendguard-stats-aggregator\n' > /usr/local/bin/stats-aggregator-entrypoint.sh \
+    && chmod +x /usr/local/bin/stats-aggregator-entrypoint.sh
 
 # Container security baseline per SLICE_03 R2 M7.
 USER 65532:65532
 
-ENTRYPOINT ["/usr/local/bin/spendguard-stats-aggregator"]
+ENTRYPOINT ["/usr/local/bin/stats-aggregator-entrypoint.sh"]

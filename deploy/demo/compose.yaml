@@ -203,6 +203,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      canonical-seed-init:
+        condition: service_completed_successfully
       pki-init:
         condition: service_completed_successfully
     # No healthcheck: tonic's gRPC reflection isn't enabled; readiness
@@ -241,6 +243,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      canonical-seed-init:
+        condition: service_completed_successfully
       pki-init:
         condition: service_completed_successfully
     networks:
@@ -363,6 +367,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      canonical-seed-init:
+        condition: service_completed_successfully
     ports:
       - "9100:9100"
       - "50054:50054"
@@ -423,6 +429,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      canonical-seed-init:
+        condition: service_completed_successfully
     ports:
       - "9102:9102"
       - "50055:50055"
@@ -473,6 +481,8 @@ services:
       SPENDGUARD_STATS_AGGREGATOR_CYCLE_SECONDS:         "${SPENDGUARD_STATS_AGGREGATOR_CYCLE_SECONDS:-60}"
       SPENDGUARD_STATS_AGGREGATOR_MIN_SAMPLES_FOR_ALERT: "${SPENDGUARD_STATS_AGGREGATOR_MIN_SAMPLES_FOR_ALERT:-100}"
       SPENDGUARD_STATS_AGGREGATOR_DRIFT_Z_THRESHOLD:     "${SPENDGUARD_STATS_AGGREGATOR_DRIFT_Z_THRESHOLD:-2.0}"
+      SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_ID:      "22222222-2222-4222-8222-222222222222"
+      SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_HASH_HEX: "${SPENDGUARD_SCHEMA_BUNDLE_HASH_HEX:-}"
       # R2 B1 — demo profile resolves to DisabledSigner (empty
       # signatures; verifiers refuse to validate = correct demo behaviour).
       SPENDGUARD_PROFILE:                                "demo"
@@ -481,6 +491,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      bundles-init:
+        condition: service_completed_successfully
+    volumes:
+      - bundles-data:/var/lib/spendguard/bundles:ro
     ports:
       - "9101:9101"
     healthcheck:
@@ -533,6 +547,7 @@ services:
       # Upstream URLs (mTLS gRPC over docker DNS)
       SPENDGUARD_SIDECAR_LEDGER_URL:               "https://ledger:50051"
       SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL:     "https://canonical-ingest:50052"
+      SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL:    "${SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL:-}"
       # Health probe
       SPENDGUARD_SIDECAR_HEALTH_ADDR:              "0.0.0.0:8080"
       # Round-2 #11: Prometheus /metrics endpoint (sidecar = port 9093
@@ -557,6 +572,9 @@ services:
         condition: service_started
       endpoint-catalog:
         condition: service_healthy
+      run-cost-projector:
+        condition: service_healthy
+        required: false
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz | grep -q ready"]
       interval: 3s
@@ -812,6 +830,7 @@ services:
       # FATALs on use (fail-fast).
       OPENAI_API_KEY:                          "${OPENAI_API_KEY:-}"
       ANTHROPIC_API_KEY:                       "${ANTHROPIC_API_KEY:-}"
+      SPENDGUARD_DEMO_REAL_ANTHROPIC:          "${SPENDGUARD_DEMO_REAL_ANTHROPIC:-}"
       SPENDGUARD_DEMO_WEBHOOK_FENCING_SCOPE_ID: "00000000-0000-7000-a000-000000000050"
       SPENDGUARD_DEMO_WEBHOOK_WORKLOAD_INSTANCE_ID: "demo-webhook-receiver"
       # Phase 2B Step 11: webhook receiver service replaces in-process simulator.
@@ -888,7 +907,11 @@ services:
       dockerfile: deploy/demo/runtime/Dockerfile.egress_proxy_smoke
     container_name: spendguard-egress-proxy-smoke
     environment:
-      OPENAI_API_KEY:                "${OPENAI_API_KEY:?missing OPENAI_API_KEY for DEMO_MODE=proxy}"
+      # Keep interpolation optional so unrelated compose invocations
+      # (default demo, E2E health gates) do not fail before service
+      # selection. The proxy demo target enforces this key before it
+      # starts the smoke container.
+      OPENAI_API_KEY:                "${OPENAI_API_KEY:-}"
       SPENDGUARD_EGRESS_PROXY_URL:   "http://egress-proxy:9000"
     volumes:
       - ../../deploy/demo/proxy_smoke.sh:/demo/proxy_smoke.sh:ro
