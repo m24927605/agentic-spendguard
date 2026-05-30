@@ -117,5 +117,75 @@ pub fn strict_decode(row: &OutboxRow) -> Result<CloudEvent, DecodeError> {
         producer_sequence,
         signing_key_id,
         producer_signature: row.cloudevent_payload_signature.clone().into(),
+        predicted_a_tokens: 0,
+        predicted_b_tokens: 0,
+        predicted_c_tokens: 0,
+        reserved_strategy: String::new(),
+        prediction_strategy_used: String::new(),
+        prediction_policy_used: String::new(),
+        tokenizer_tier: String::new(),
+        tokenizer_version_id: String::new(),
+        prediction_confidence: 0.0,
+        prediction_sample_size: 0,
+        cold_start_layer_used: String::new(),
+        run_projection_at_decision_atomic: 0,
+        run_predicted_remaining_steps: 0,
+        run_steps_completed_so_far: 0,
+        actual_input_tokens: 0,
+        actual_output_tokens: 0,
+        delta_b_ratio: 0.0,
+        delta_c_ratio: 0.0,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::Utc;
+    use serde_json::json;
+
+    fn minimal_row() -> OutboxRow {
+        let id = Uuid::now_v7();
+        let decision_id = Uuid::now_v7();
+        let tenant_id = Uuid::now_v7();
+        OutboxRow {
+            recorded_month: Utc::now().date_naive(),
+            audit_outbox_id: id,
+            audit_decision_event_id: id,
+            decision_id,
+            tenant_id,
+            event_type: "spendguard.audit.decision".into(),
+            cloudevent_payload: json!({
+                "specversion": "1.0",
+                "type": "spendguard.audit.decision",
+                "source": "spendguard://sidecar/test",
+                "id": id.to_string(),
+                "time_seconds": 1,
+                "time_nanos": 2,
+                "datacontenttype": "application/json",
+                "data_b64": "e30=",
+                "tenantid": tenant_id.to_string(),
+                "runid": "run-1",
+                "decisionid": decision_id.to_string(),
+                "schema_bundle_id": "schema-1",
+                "producer_id": "sidecar:test",
+                "producer_sequence": 7,
+                "signing_key_id": "key-1"
+            }),
+            cloudevent_payload_signature: vec![1, 2, 3],
+            producer_sequence: 7,
+            recorded_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn strict_decode_defaults_prediction_extension_fields() {
+        let event = strict_decode(&minimal_row()).expect("decode minimal row");
+
+        assert_eq!(event.predicted_a_tokens, 0);
+        assert_eq!(event.reserved_strategy, "");
+        assert_eq!(event.run_projection_at_decision_atomic, 0);
+        assert_eq!(event.actual_input_tokens, 0);
+        assert_eq!(event.delta_b_ratio, 0.0);
+    }
 }
