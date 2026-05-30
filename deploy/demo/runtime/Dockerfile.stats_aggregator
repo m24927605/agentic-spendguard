@@ -1,0 +1,40 @@
+# syntax=docker/dockerfile:1.7
+#
+# Build the SpendGuard stats_aggregator service image.
+#
+# Spec ref `stats-aggregator-spec-v1alpha1.md`.
+
+FROM rust:1.91-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY proto ./proto
+RUN ln -sf /usr/include/google ./proto/google
+# signing crate is a path-dep of stats_aggregator (Ed25519 signer for
+# audit-routed CloudEvents); copy both.
+COPY services/signing ./services/signing
+COPY services/stats_aggregator ./services/stats_aggregator
+WORKDIR /build/services/stats_aggregator
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-stats-aggregator,target=/build/services/stats_aggregator/target,sharing=locked \
+    cargo build --release --bin spendguard-stats-aggregator \
+    && cp target/release/spendguard-stats-aggregator /spendguard-stats-aggregator
+
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /spendguard-stats-aggregator /usr/local/bin/spendguard-stats-aggregator
+
+# Container security baseline per SLICE_03 R2 M7.
+USER 65532:65532
+
+ENTRYPOINT ["/usr/local/bin/spendguard-stats-aggregator"]

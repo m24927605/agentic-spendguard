@@ -277,6 +277,81 @@ tokenizer:
     requests: { cpu: "100m", memory: "192Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
 
+# ── output_predictor service (SLICE_06) ─────────────────────────────
+# Spec: docs/output-predictor-service-spec-v1alpha1.md §2.
+#
+# Hot-path RPC: Predict (A + B + C parallel). SLICE_06 ships A + B + L1/L4
+# cold-start; C arrives in SLICE_07; L2 TOML in SLICE_08. SLICE_10 wires
+# sidecar/egress_proxy as clients.
+outputPredictor:
+  enabled: true
+  # Stateless; per-pod cache only. 2-3 replicas for redundancy in prod.
+  replicas: 1
+  image:
+    repository: spendguard/output-predictor
+    tag: "0.1.0-alpha.1"
+  # ── Secure transport gates (mirrors tokenizer SLICE_03 R3 N2) ──
+  # Set EXACTLY ONE under chart.profile=production. Demo falls back to
+  # plaintext TCP with a loud warn.
+  udsHostPath: ""
+  mtlsSecretName: ""
+  # ── canonical_ingest DB for output_distribution_cache lookup (spec §4.2)
+  # Required under chart.profile=production. Demo can leave empty —
+  # output_predictor runs in skeleton mode where Strategy B always
+  # falls to L1 cold-start.
+  databaseUrl: ""
+  # In-memory cache TTL per spec §4.3 (default 5 min).
+  cacheTtlSeconds: 300
+  # Unknown-model context window fallback per spec §3.3.
+  unknownModelContextWindow: 8000
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+
+# ── stats_aggregator service (SLICE_06) ─────────────────────────────
+# Spec: docs/stats-aggregator-spec-v1alpha1.md (full).
+#
+# Singleton daemon — Postgres advisory lock enforces. Hourly aggregation
+# cycle UPSERTs output_distribution_cache + run_length_distribution_cache;
+# 2σ drift detection emits signed CloudEvents via canonical_ingest.
+statsAggregator:
+  enabled: true
+  # Per spec §2.2 only one replica may write at a time. The advisory
+  # lock allows blue/green rollouts (overlapping pods compete; only the
+  # lock holder runs). Recreate strategy ensures clean handoff.
+  replicas: 1
+  image:
+    repository: spendguard/stats-aggregator
+    tag: "0.1.0-alpha.1"
+  # Postgres URL for canonical_ingest DB (read source + cache write).
+  # REQUIRED under chart.profile=production; demo can leave empty and
+  # the daemon bails at boot with a clear error.
+  databaseUrl: ""
+  # canonical_ingest gRPC for signed prediction_drift_alert CloudEvent
+  # emission (spec §7.2). Required under chart.profile=production;
+  # demo falls back to LoggingDriftAlertSink (drift alerts → stdout only).
+  canonicalIngestUrl: ""
+  # Outbound mTLS Secret for the canonical_ingest sink (mirrors
+  # tokenizer SLICE_05 R2 B4 + sinkMtlsSecretName pattern). Required
+  # under chart.profile=production + canonicalIngestUrl set.
+  sinkMtlsSecretName: ""
+  sinkMtlsSni: "canonical-ingest.spendguard.internal"
+  # Ed25519 signing key (PKCS8 PEM) for the drift_alert CloudEvent.
+  # Demo profile falls back to DisabledSigner (empty signatures —
+  # verifiers refuse to validate; correct demo behaviour).
+  signingKeySecretName: ""
+  signingKeyPath: ""
+  # Aggregation cycle cadence in seconds (spec §8.1 default 3600 hourly).
+  # Minimum 60 enforced at boot.
+  cycleSeconds: 3600
+  # Drift detection threshold params (spec §7.1). Default 2.0σ + 100 min
+  # samples.
+  driftZThreshold: 2.0
+  minSamplesForAlert: 100
+  resources:
+    requests: { cpu: "50m",  memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+
 webhookReceiver:
   enabled: true
   replicas: 1

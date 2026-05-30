@@ -1,0 +1,45 @@
+# syntax=docker/dockerfile:1.7
+#
+# Build the SpendGuard output_predictor service image.
+#
+# Spec ref `output-predictor-service-spec-v1alpha1.md` §2.
+
+FROM rust:1.91-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY proto ./proto
+RUN ln -sf /usr/include/google ./proto/google
+COPY services/output_predictor ./services/output_predictor
+WORKDIR /build/services/output_predictor
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-output-predictor,target=/build/services/output_predictor/target,sharing=locked \
+    cargo build --release --bin spendguard-output-predictor \
+    && cp target/release/spendguard-output-predictor /spendguard-output-predictor
+
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /spendguard-output-predictor /usr/local/bin/spendguard-output-predictor
+
+# data/model_context_window.toml is loaded relative to the binary's
+# working directory; copy the data file into the image so the default
+# path resolves cleanly under compose / Helm.
+COPY services/output_predictor/data /opt/spendguard/output_predictor/data
+
+WORKDIR /opt/spendguard/output_predictor
+
+# Container security baseline per SLICE_03 R2 M7: non-root UID matching
+# the chart's runAsUser.
+USER 65532:65532
+
+ENTRYPOINT ["/usr/local/bin/spendguard-output-predictor"]
