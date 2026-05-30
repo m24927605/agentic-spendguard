@@ -1,0 +1,215 @@
+# SLICE_15 — Predictor-upgrade benchmark CI workflow.
+#
+# Spec ancestors:
+#   - docs/slices/SLICE_15_end_to_end_benchmark.md §8.5 (CI integration)
+#   - docs/slices/SLICE_15_end_to_end_benchmark.md §9 #7 (CI run-time < 30 min)
+#   - docs/predictor-architecture-spec-v1alpha1.md §0.2 lock criterion #4 + #5
+#
+# What this workflow does on every PR to `main`:
+#   1. Restores cargo + rustup cache (5-7 min saved on warm runs).
+#   2. Builds the SLICE_15 benchmark crate in release mode.
+#   3. Runs the benchmark at bursts 1 / 10 / 100 (not 1000 — slice §9 #7
+#      CI budget; --include-1k off by default).
+#   4. Runs the calibration synthetic with --skip-spendguard-assertion
+#      because the CI sandbox doesn't have a live SpendGuard shim or
+#      LiteLLM proxy. The synthetic still exercises the script's IO and
+#      JSON shape regression.
+#   5. Posts results as a PR comment so reviewers can eyeball trends.
+#   6. Compares p99 against baseline.json (if present) and fails the job
+#      if any burst exceeds baseline.p99 * 1.10 — the §8.5 regression alert.
+#
+# Per slice §9 #1 (hardware spec reproducibility):
+#   `runs-on: ubuntu-latest` is non-reproducible across GH Actions runner
+#   pool. The workflow captures the runner OS + cpuinfo into the PR
+#   comment so reviewers see what hardware produced the numbers. Year-
+#   over-year baseline drift due to runner hardware changes is expected
+#   and is NOT treated as a regression (the 10% threshold is large
+#   enough to absorb runner-class drift).
+#
+# Per feedback_demo_quality_gate:
+#   This workflow runs the benchmark against the CI sandbox where the
+#   full demo stack is NOT brought up (would exceed 30-min budget). The
+#   crate is built and the harness exercises the Portkey N/A path +
+#   error-only burst for LiteLLM (unreachable in CI). The SpendGuard
+#   adapter is skipped via --targets litellm,portkey for CI; the real
+#   SpendGuard numbers come from the manual release benchmark documented
+#   in benchmarks/predictor-upgrade/RESULTS.md (or a separate dedicated
+#   benchmark runner not gated by 30 min).
+#
+# Future expansion: a separate workflow (predictor-benchmark-full.yml)
+# could bring up the full demo stack with a 2-hour budget for nightly /
+# release-tag runs.
+
+name: Predictor upgrade benchmark
+
+on:
+  pull_request:
+    paths:
+      - "benchmarks/predictor-upgrade/**"
+      - "services/output_predictor/**"
+      - "services/tokenizer/**"
+      - "services/run_cost_projector/**"
+      - "services/stats_aggregator/**"
+      - "services/sidecar/**"
+      - "crates/spendguard-tokenizer/**"
+      - "crates/spendguard-prediction-mirror/**"
+      - ".github/workflows/predictor-benchmark.yml"
+  push:
+    branches: [main]
+    paths:
+      - "benchmarks/predictor-upgrade/**"
+      - ".github/workflows/predictor-benchmark.yml"
+  workflow_dispatch:
+
+# Cancel earlier runs on the same PR — we only need the latest.
+concurrency:
+  group: predictor-benchmark-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pull-requests: write   # required to post the results comment
+
+jobs:
+  benchmark:
+    name: Build + run SLICE_15 benchmark harness
+    runs-on: ubuntu-latest
+    timeout-minutes: 30   # slice §9 item #7
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"     # matches deploy/demo/runtime/Dockerfile.ledger badge
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            benchmarks/predictor-upgrade/target
+          key: ${{ runner.os }}-cargo-slice15-${{ hashFiles('benchmarks/predictor-upgrade/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-slice15-
+
+      - name: Capture hardware spec (slice §9 #1)
+        id: hwspec
+        run: |
+          {
+            echo "## CI hardware spec"
+            echo ""
+            echo "- **Runner OS:** \`$RUNNER_OS\`"
+            echo "- **Runner arch:** \`$RUNNER_ARCH\`"
+            echo "- **CPU cores:** \`$(nproc)\`"
+            echo "- **RAM MB:** \`$(awk '/MemTotal/ {print int($2/1024)}' /proc/meminfo)\`"
+            echo "- **Kernel:** \`$(uname -r)\`"
+            echo "- **Commit:** \`${{ github.sha }}\`"
+            echo "- **PR:** \`${{ github.event.pull_request.number || 'main-push' }}\`"
+          } > hwspec.md
+          cat hwspec.md
+
+      - name: Build benchmark crate (release)
+        working-directory: benchmarks/predictor-upgrade
+        run: cargo build --release --locked || cargo build --release
+
+      - name: Run benchmark (LiteLLM + Portkey path; SpendGuard skipped in CI)
+        working-directory: benchmarks/predictor-upgrade
+        # SLICE_15 CI sandbox doesn't run the full demo stack. We run
+        # against the documented-N/A targets to verify:
+        #   1. The crate still builds
+        #   2. The harness produces RESULTS.md + results.json
+        #   3. The error-path handling is correct (Portkey N/A surfaces clean)
+        # Real SpendGuard numbers come from release benchmarks (see
+        # benchmarks/predictor-upgrade/RESULTS.md§Reproducing).
+        run: |
+          ./target/release/predictor-upgrade-bench \
+            --bursts 1,10,100 \
+            --warmup 10 \
+            --samples 50 \
+            --targets litellm,portkey \
+            --litellm-url http://127.0.0.1:0 \
+            --output ./out
+          echo "---"
+          echo "RESULTS.md preview:"
+          head -50 ./out/RESULTS.md
+
+      - name: Calibration synthetic (IO + JSON shape regression)
+        working-directory: benchmarks/predictor-upgrade
+        run: |
+          python3 calibration_synthetic.py \
+            --targets spendguard \
+            --shim-url http://127.0.0.1:0 \
+            --output ./out \
+            --skip-spendguard-assertion
+
+      - name: Regression check (p99 vs baseline)
+        working-directory: benchmarks/predictor-upgrade
+        run: |
+          # Per slice §8.5: alert if p99 > baseline.p99 * 1.10. The
+          # baseline.json is committed alongside the crate; if absent,
+          # we skip the gate and emit a hint to populate it.
+          if [ ! -f baseline.json ]; then
+            echo "::notice::No baseline.json yet — skip regression gate. Populate after first release benchmark."
+            exit 0
+          fi
+          python3 <<'PY'
+          import json, sys, pathlib
+          base = json.loads(pathlib.Path("baseline.json").read_text())
+          cur = json.loads(pathlib.Path("out/results.json").read_text())
+          worst = 0.0
+          violations = []
+          for tgt, rows in cur.items():
+              if tgt not in base:
+                  continue
+              base_by_burst = {r["burst"]: r for r in base[tgt]}
+              for r in rows:
+                  if r["burst"] not in base_by_burst:
+                      continue
+                  b = base_by_burst[r["burst"]]
+                  if b["p99_us"] <= 0:
+                      continue
+                  delta = (r["p99_us"] - b["p99_us"]) / b["p99_us"]
+                  worst = max(worst, delta)
+                  if delta > 0.10:
+                      violations.append(
+                          f"{tgt} burst={r['burst']}: p99 {b['p99_us']}us → {r['p99_us']}us (+{delta*100:.1f}%)"
+                      )
+          if violations:
+              print("::error::p99 regression > 10% detected:")
+              for v in violations:
+                  print(f"::error::  {v}")
+              sys.exit(1)
+          print(f"Regression check OK; worst delta vs baseline: {worst*100:+.1f}%")
+          PY
+
+      - name: Comment results on PR
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const hwspec = fs.readFileSync('hwspec.md', 'utf8');
+            let body = "# SLICE_15 Predictor Benchmark Results\n\n";
+            body += hwspec + "\n\n";
+            try {
+              const md = fs.readFileSync('benchmarks/predictor-upgrade/out/RESULTS.md', 'utf8');
+              body += "<details><summary>Benchmark RESULTS.md</summary>\n\n" + md + "\n</details>\n\n";
+            } catch (e) {
+              body += `(RESULTS.md not generated: ${e.message})\n\n`;
+            }
+            try {
+              const cal = fs.readFileSync('benchmarks/predictor-upgrade/out/calibration.md', 'utf8');
+              body += "<details><summary>Calibration synthetic</summary>\n\n" + cal + "\n</details>\n\n";
+            } catch (e) {
+              body += `(calibration.md not generated: ${e.message})\n\n`;
+            }
+            body += "_Generated by .github/workflows/predictor-benchmark.yml. Real SpendGuard numbers come from the release benchmark documented in benchmarks/predictor-upgrade/RESULTS.md §Reproducing._\n";
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body: body,
+            });
