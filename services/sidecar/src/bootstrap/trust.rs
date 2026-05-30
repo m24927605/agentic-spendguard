@@ -77,16 +77,16 @@ mod tests {
     use super::*;
 
     const SELF_SIGNED_PEM: &str = "-----BEGIN CERTIFICATE-----\n\
-MIIB1TCCAXigAwIBAgIUTestPin\n\
+AQIDBA==\n\
 -----END CERTIFICATE-----\n";
 
     #[test]
     fn rejects_mismatched_pin() {
-        // We don't actually decode the bytes here (since the example PEM is
-        // truncated), but we exercise the mismatch branch with a known-bad
-        // hash.
+        // This POC pin check hashes decoded PEM bytes rather than parsing a
+        // complete X.509 certificate, so a minimal valid base64 payload is
+        // enough to exercise the mismatch branch.
         let result =
-            pem_decode_first_cert(SELF_SIGNED_PEM).expect("decode truncated PEM should not panic");
+            pem_decode_first_cert(SELF_SIGNED_PEM).expect("decode fixture PEM should not panic");
         let actual = Sha256::digest(&result);
         let actual_hex = hex::encode(actual);
         let bad_pin = "0".repeat(64);
