@@ -699,3 +699,34 @@ migrations:
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "256Mi" }
+
+# SLICE_13 Phase D: optional CronJob that runs `spendguard-calibration-report`
+# on a schedule and pushes the resulting report + self-audit CloudEvent.
+#
+# Default cronEnabled=false because the CLI is primarily operator-driven
+# (oncall + ad-hoc). Operators wanting daily monitoring set
+# cronEnabled=true and configure schedule + tenant.
+#
+# When `verifyChain=true` the cron run pulls `--proof-mode=canonical`
+# implicitly per spec §2.2 — the report exits 3 on chain integrity
+# violation, which fails the pod and pages on-call.
+calibrationReport:
+  cronEnabled: false
+  schedule: "0 4 * * *"   # 04:00 UTC daily
+  image:
+    repository: spendguard/calibration-report
+    tag: "0.1.0-alpha.1"
+  tenant: ""               # operator MUST set when cronEnabled=true
+  from: "7d"
+  to: "now"
+  format: "json"           # JSON output for SIEM ingestion
+  proofMode: "cache"
+  verifyChain: false
+  authSubject: "cron:calibration-report"
+  rustLog: "info"
+  activeDeadlineSeconds: 1800
+  successHistory: 7
+  failureHistory: 14
+  resources:
+    requests: { cpu: "100m", memory: "256Mi" }
+    limits:   { cpu: "1000m", memory: "1Gi" }
