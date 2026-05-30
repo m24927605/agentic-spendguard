@@ -169,6 +169,57 @@ fn bench_tier2_library(c: &mut Criterion) {
         });
     });
 
+    // ── SLICE_04 scenarios — one bench per new encoder kind at the
+    //    1000-char hot-path size to verify spec §10.1 Tier 2 library-
+    //    form p99 < 1ms across all 5 kinds.
+    let anthropic_req = TokenizeRequest {
+        model: "claude-3-5-sonnet-20240620".to_string(),
+        raw_text: "x".repeat(1000),
+        ..Default::default()
+    };
+    group.bench_function("raw_text_claude_3_5_sonnet_1000_chars", |b| {
+        b.iter(|| {
+            let resp = tokenizer.tokenize(black_box(&anthropic_req)).unwrap();
+            black_box(resp)
+        });
+    });
+
+    let gemini_req = TokenizeRequest {
+        model: "gemini-1.5-pro".to_string(),
+        raw_text: "x".repeat(1000),
+        ..Default::default()
+    };
+    group.bench_function("raw_text_gemini_1_5_pro_1000_chars", |b| {
+        b.iter(|| {
+            let resp = tokenizer.tokenize(black_box(&gemini_req)).unwrap();
+            black_box(resp)
+        });
+    });
+
+    let cohere_req = TokenizeRequest {
+        model: "command-r-plus".to_string(),
+        raw_text: "x".repeat(1000),
+        ..Default::default()
+    };
+    group.bench_function("raw_text_command_r_plus_1000_chars", |b| {
+        b.iter(|| {
+            let resp = tokenizer.tokenize(black_box(&cohere_req)).unwrap();
+            black_box(resp)
+        });
+    });
+
+    let llama_req = TokenizeRequest {
+        model: "meta.llama3-1-70b-instruct-v1:0".to_string(),
+        raw_text: "x".repeat(1000),
+        ..Default::default()
+    };
+    group.bench_function("raw_text_llama_3_1_70b_1000_chars", |b| {
+        b.iter(|| {
+            let resp = tokenizer.tokenize(black_box(&llama_req)).unwrap();
+            black_box(resp)
+        });
+    });
+
     group.finish();
 }
 

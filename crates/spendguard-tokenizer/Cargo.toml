@@ -36,6 +36,43 @@ path = "src/lib.rs"
 # 1.73.0 satisfied by workspace rustup pin 1.96.0.
 tiktoken-rs = "0.11"
 
+# Tier 2 multi-vendor BPE / SentencePiece loader (SLICE_04). Uses
+# HuggingFace's `tokenizers` crate to parse `tokenizer.json` vendored
+# from Anthropic / Gemini (community approximation) / Cohere / Llama.
+# Apache-2.0 licensed.
+#
+# Why this crate and not a raw byte-pair-encoding implementation:
+#   1. Already used by ~80% of vendor model cards on HF as the
+#      canonical loader, so the vendored `tokenizer.json` files we ship
+#      are read by the same crate the model authors target — encode
+#      output matches the upstream "transformers" Python output
+#      byte-for-byte where the JSON is identical.
+#   2. Supports BPE (Anthropic / Cohere / Gemma) AND SentencePiece
+#      (Llama / Gemma alt config) in one API surface.
+#   3. `Tokenizer::from_bytes(...)` lets us `include_bytes!` the
+#      vendored JSON for build-time embedding (matches spec §7.2
+#      asset-bundling expectation; no separate asset distribution).
+#
+# Feature set (R2 Code F1 + Security F3 trim):
+#   * `default-features = false` excludes `progressbar` (indicatif
+#     CLI-only TTY rendering; unused in the in-process hot path) and
+#     `esaxx_fast` (a C++ training-time suffix-array implementation;
+#     used only for `BpeTrainer`, never for encode). Both default
+#     features added build deps + binary size without any runtime
+#     benefit for our use case.
+#   * `features = ["onig"]` keeps the Oniguruma regex backend (the
+#     `transformers` default). All four vendored tokenizer.json files
+#     reference PCRE-style patterns in their pretokenizer config;
+#     disabling `onig` risks a silent encode drift on edge-case inputs.
+#   * Net effect: ~1-2 MB smaller binary + ~30 fewer transitive crate
+#     deps. Boot time + hot path performance unchanged (we never
+#     touched the trimmed code paths).
+#
+# Pin: 0.20.x (latest stable as of 2026-05-30). Bumping requires
+# re-running `cargo run --example discover_fixture_tokens` to
+# refresh the Layer B cross-check fixture vectors per spec §7.4.1.
+tokenizers = { version = "0.20", default-features = false, features = ["onig"] }
+
 # Regex for dispatch table pattern matching (per spec §3.1). Use the
 # default-features set; the dispatch table patterns are compiled once
 # in Tokenizer::new and reused.
@@ -81,3 +118,36 @@ default = []
 # sets this. The skeleton tests in §8.1 do not require it; provided as
 # an escape hatch for future micro-benchmarks.
 skip_encoder_load = []
+
+# ===== `cohere` — opt-in Cohere Command-R encoder =====================
+#
+# SLICE_04 R2 M6 + Security F5 (legal disclosure):
+#
+# The vendored `Xenova/c4ai-command-r-v01-tokenizer` mirror is MIT-
+# licensed, but the underlying Cohere `c4ai-command-r-v01` model is
+# CC-BY-NC-4.0 on Hugging Face (research-only). The R1 LICENSE_NOTICES
+# claimed an "MPL-2.0 exemption" allowing re-distribution of just the
+# tokenizer.json — this claim is uncited and legally ambiguous.
+#
+# The safe default is to NOT ship the Cohere encoder asset in stock
+# `cargo build`. Deployments that have completed their own legal review
+# enable the `cohere` feature explicitly:
+#
+#   spendguard-tokenizer = { version = "...", features = ["cohere"] }
+#
+# When the feature is OFF (default):
+#   * The `cohere.rs` module is not compiled.
+#   * The `data/cohere-command-r/tokenizer.json` asset is not embedded.
+#   * Dispatch table omits Cohere patterns → `command-r` etc. fall to
+#     Tier 3 with the 5% conservative margin + `tokenizer_unknown_model`
+#     metric (per spec §3.3).
+#
+# When the feature is ON:
+#   * Full Cohere encoder loads at boot (Layer A sha256 + Layer B
+#     cross-check).
+#   * Dispatch table includes `command-r`, `command-r-plus`, and
+#     `cohere.command*-v\d+:\d+` (with cross-region prefix).
+#
+# Spec §7.1 R2 M6 disclosure documents the rationale; LICENSE_NOTICES.md
+# carries the current legal status.
+cohere = []

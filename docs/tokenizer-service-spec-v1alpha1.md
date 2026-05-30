@@ -241,33 +241,124 @@ impl Tokenizer {
 
 ### 3.1 Per-provider dispatch table
 
+The dispatch table is maintained in
+`crates/spendguard-tokenizer/src/dispatch.rs::RAW_ENTRIES` (plus the
+feature-gated `COHERE_ENTRIES`). The structural rule is **first-match
+wins; anchored regex**; new providers / model families ship as
+PR-time additive edits to those constants.
+
+The R2 M7 verbatim enumeration below mirrors the implementation as of
+SLICE_04 R2. The source-of-truth is `dispatch.rs`; this section is
+kept in sync via the spec-amendment commits.
+
 ```rust
-// Maintained in `spendguard-tokenizer/src/dispatch.rs`. Each entry maps a
-// model-string match pattern to an encoder kind + canonical encoder name.
+// === OpenAI (via tiktoken-rs) ===
+// Most specific patterns first per first-match-wins semantics.
+Entry { pattern: r"^gpt-4o-mini(-\d{4}-\d{2}-\d{2})?$",            kind: Kind::OpenAiTiktoken,    encoder: "o200k_base"     },
+Entry { pattern: r"^gpt-4o(-\d{4}-\d{2}-\d{2})?$",                 kind: Kind::OpenAiTiktoken,    encoder: "o200k_base"     },
+Entry { pattern: r"^gpt-4(-\d{4})?-preview$",                      kind: Kind::OpenAiTiktoken,    encoder: "cl100k_base"    },
+Entry { pattern: r"^gpt-4-turbo(-preview)?(-\d{4}-\d{2}-\d{2})?$", kind: Kind::OpenAiTiktoken,    encoder: "cl100k_base"    },
+Entry { pattern: r"^gpt-4(-\d{4})?(-\d{4}-\d{2}-\d{2})?$",         kind: Kind::OpenAiTiktoken,    encoder: "cl100k_base"    },
+Entry { pattern: r"^gpt-3\.5-turbo(-\d{4})?(-\d{2}k)?$",           kind: Kind::OpenAiTiktoken,    encoder: "cl100k_base"    },
+Entry { pattern: r"^gpt-3\.5-turbo-instruct(-\d{4})?$",            kind: Kind::OpenAiTiktoken,    encoder: "p50k_base"      },
+Entry { pattern: r"^text-davinci-(002|003)$",                      kind: Kind::OpenAiTiktoken,    encoder: "p50k_base"      },
+Entry { pattern: r"^code-davinci-(001|002)$",                      kind: Kind::OpenAiTiktoken,    encoder: "p50k_base"      },
 
-const DISPATCH: &[Entry] = &[
-    // === OpenAI (via tiktoken-rs) ===
-    Entry { pattern: r"^gpt-4o(-mini)?(-\d{4}-\d{2}-\d{2})?$",  kind: Kind::OpenAiTiktoken, encoder: "o200k_base" },
-    Entry { pattern: r"^gpt-4(-\d+)?(-\d{4}-\d{2}-\d{2})?$",     kind: Kind::OpenAiTiktoken, encoder: "cl100k_base" },
-    Entry { pattern: r"^gpt-4-turbo(-\d{4}-\d{2}-\d{2})?$",       kind: Kind::OpenAiTiktoken, encoder: "cl100k_base" },
-    Entry { pattern: r"^gpt-3\.5-turbo(-\d{4})?$",                kind: Kind::OpenAiTiktoken, encoder: "cl100k_base" },
-    // ... more OpenAI ...
+// === Anthropic native (Claude 3 / 3.5 family) ===
+Entry { pattern: r"^claude-3-5-(sonnet|haiku|opus)(-\d{8})?$",     kind: Kind::AnthropicBpe,      encoder: "anthropic-v3-bpe" },
+Entry { pattern: r"^claude-3-(haiku|sonnet|opus)(-\d{8})?$",       kind: Kind::AnthropicBpe,      encoder: "anthropic-v3-bpe" },
 
-    // === Anthropic (vendored BPE) ===
-    Entry { pattern: r"^claude-3-5-(sonnet|haiku|opus)(-\d{8})?$", kind: Kind::AnthropicBpe, encoder: "anthropic-v3-bpe" },
-    Entry { pattern: r"^claude-3-(sonnet|haiku|opus)(-\d{8})?$",   kind: Kind::AnthropicBpe, encoder: "anthropic-v3-bpe" },
+// === Anthropic Bedrock (with cross-region inference profile prefix) ===
+Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-5-(sonnet|haiku|opus)(-\d{8})?-v\d+:\d+$",
+                                                                   kind: Kind::AnthropicBpe,      encoder: "anthropic-v3-bpe" },
+Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-(haiku|sonnet|opus)(-\d{8})?-v\d+:\d+$",
+                                                                   kind: Kind::AnthropicBpe,      encoder: "anthropic-v3-bpe" },
 
-    // === Gemini (vendored BPE) ===
-    Entry { pattern: r"^gemini-1\.5-(pro|flash)(-\d{3})?$",        kind: Kind::GeminiBpe, encoder: "gemini-1.5-bpe" },
+// === Gemini native (vendored Gemma approximation per §7.1 R2 M5) ===
+Entry { pattern: r"^gemini-2\.0-flash(-exp)?$",                    kind: Kind::GeminiBpe,         encoder: "gemini-1.5-bpe" },
+Entry { pattern: r"^gemini-1\.5-(flash|pro)(-\d{3})?$",            kind: Kind::GeminiBpe,         encoder: "gemini-1.5-bpe" },
 
-    // === Bedrock routing ===
-    Entry { pattern: r"^anthropic\.claude-.*$",                     kind: Kind::AnthropicBpe, encoder: "anthropic-v3-bpe" },
-    Entry { pattern: r"^cohere\..*$",                               kind: Kind::CohereBpe, encoder: "cohere-v2-bpe" },
-    Entry { pattern: r"^meta\.llama.*$",                            kind: Kind::SentencepieceLlama, encoder: "llama-sentencepiece" },
-];
+// === Llama Bedrock (Llama 3.1+ family with cross-region prefix) ===
+Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?meta\.llama3(-\d+)?-\d+b-instruct-v\d+:\d+$",
+                                                                   kind: Kind::SentencepieceLlama, encoder: "llama-sentencepiece" },
+
+// === Cohere — FEATURE-GATED `cohere` per §7.1 R2 M6 ===
+//   * Patterns below are present in the dispatch table ONLY when the
+//     spendguard-tokenizer crate is built with `--features cohere`.
+//   * When the feature is OFF (default), Cohere model IDs fall to
+//     Tier 3 with 5% margin + `tokenizer_unknown_model` metric.
+//   * `command-light` is INTENTIONALLY omitted per R2 Backend F4
+//     (different vocab; routing to command-r would silently
+//     under-count by ~5-20%).
+#[cfg(feature = "cohere")]
+Entry { pattern: r"^command-r-plus(-\d{8})?$",                     kind: Kind::CohereBpe,         encoder: "cohere-v2-bpe"  },
+#[cfg(feature = "cohere")]
+Entry { pattern: r"^command-r(-\d{8})?$",                          kind: Kind::CohereBpe,         encoder: "cohere-v2-bpe"  },
+#[cfg(feature = "cohere")]
+Entry { pattern: r"^(?:[a-z][a-z0-9-]*\.)?cohere\.command(-r)?(-plus)?-v\d+:\d+$",
+                                                                   kind: Kind::CohereBpe,         encoder: "cohere-v2-bpe"  },
 ```
 
 每個 entry 對應一筆 `tokenizer_versions` registry row（per §6 schema）。增加 provider / model 透過 PR 補 entries + 對應 vendored asset。
+
+**Structural rule**: first-match-wins with dated suffixes optional and
+cross-region inference profile prefixes optional on Bedrock routes.
+Specific-before-general ordering is enforced by unit tests (per
+`pattern_ordering_specific_before_general`, `command_r_plus_pattern_
+precedes_command_r`, etc.).
+
+#### 3.1 amendments (SLICE_04 R2)
+
+The implementation deliberately differs from the loose "catch-all"
+Bedrock patterns the v1alpha1 draft sketched (`^anthropic\.claude-.*$`,
+`^cohere\..*$`, `^meta\.llama.*$`). Two structural rules govern the
+divergence:
+
+**(R2 B1) Cross-region inference profile prefixes.** AWS Bedrock since
+2024-09 routes major models via cross-region inference profiles that
+prepend a region prefix (`us`, `eu`, `apac`, `us-gov`, and future
+regions AWS may add). Examples:
+
+- `us.anthropic.claude-3-5-sonnet-20240620-v1:0`
+- `eu.anthropic.claude-3-haiku-20240307-v1:0`
+- `apac.anthropic.claude-3-5-sonnet-20241022-v1:0`
+- `us.cohere.command-r-plus-v1:0`
+- `us.meta.llama3-1-70b-instruct-v1:0`
+
+The implementation admits any lowercase region prefix via the optional
+group `(?:[a-z][a-z0-9-]*\.)?` so AWS adding a new region routes
+automatically. Without this, cross-region IDs would silently fall to
+Tier 3 with the 5% conservative margin — which under-counts CJK input
+by ~2× per the predictor accuracy analysis.
+
+**(R2 B2) Narrow patterns by design (Option A).** Each Bedrock vendor
+family is narrowed to the specific model generation whose BPE we have
+vendored. This is deliberate so that wrong-vocab models do NOT silently
+route to the wrong encoder:
+
+- Pre-Claude-3 IDs (`anthropic.claude-instant-v1`, `anthropic.claude-v2`,
+  `anthropic.claude-v2:1`) fall to Tier 3 — different vocab from Claude 3.
+- Cohere embedding models (`cohere.embed-english-v3`,
+  `cohere.embed-multilingual-v3`) fall to Tier 3 — different vocab from
+  command-r.
+- Pre-Llama-3 IDs (`meta.llama2-13b-chat-v1`, `meta.llama2-70b-chat-v1`)
+  fall to Tier 3 — different SentencePiece config from Llama 3.
+
+Each Tier 3 fallback emits the `tokenizer_unknown_model` metric per
+§3.3 so operators see the gap and PR a tracked follow-up. The rationale:
+dispatching wrong-vocab encoders produces silent ~5-20% under-counts;
+falling to Tier 3 produces a 5% conservative margin + a visible metric.
+
+**(R2 Backend F4) `command-light` is omitted intentionally.** Cohere's
+`command-light` uses a different BPE vocabulary than `command-r`.
+Routing `command-light` to the `cohere-v2-bpe` encoder would silently
+under-count tokens by ~5-20%. The dispatch table does NOT include a
+`command-light` row; the model falls to Tier 3 until a separate
+`command-light` tokenizer asset is vendored in a future SLICE_NN.
+
+The full enumeration of current patterns lives in
+`crates/spendguard-tokenizer/src/dispatch.rs::RAW_ENTRIES`; that file is
+the structural source of truth, this section is the policy intent.
 
 ### 3.2 Encoder cache
 
@@ -289,9 +380,104 @@ Dispatch lookup 不命中 → return Tier 3 fallback + emit metric `tokenizer_un
 - tool_calls: function name + arguments_json 都按 model 的 tokenizer encode
 - system / user / assistant role markers: model-specific token sequences
 
-Anthropic / Gemini envelope rules：per vendored encoder's own tokenizer rules（隨 SDK / docs ship）。
+對 non-OpenAI vendors（Anthropic / Gemini / Cohere / Llama）：each vendored
+encoder ships its own [`ChatEnvelope`] policy + BOS rule per the
+amendments below (R2 M3 + R2 M4 + R3 N1).
 
-各 model 的 envelope 規則 hardcode 在 `dispatch::message_envelope_tokens(kind, role)` helper。
+#### 3.4.1 Per-vendor chat envelope table（R2 M3 amendment, R2 commit `4d6f96b`）
+
+`ChatEnvelope { per_message, per_turn_boundary, reply_priming }` policy
+per encoder. The per-request total is
+
+```text
+chat_total = Σ_messages (per_message + per_turn_boundary + tokens(role) +
+                         tokens(content) + Σ_tool_calls tool_overhead)
+             + reply_priming
+             + (BOS only if request uses raw_text path; see §3.4.2)
+```
+
+| Encoder                   | per_message | per_turn_boundary | reply_priming | Source-of-truth                                       |
+|---------------------------|-------------|-------------------|---------------|-------------------------------------------------------|
+| OpenAI cl100k / o200k     | 3           | 0                 | 3             | `encoders/openai.rs::OpenAiEncoder::envelope_overhead` |
+| OpenAI gpt-3.5-turbo-0301 | 4           | 0                 | 3             | `encoders/openai.rs::count_tokens` (model-specific arm) |
+| Anthropic                 | 0           | 4                 | 0             | `encoders/anthropic.rs::ANTHROPIC_ENVELOPE`           |
+| Gemini                    | 0           | 0                 | 0             | `encoders/gemini.rs::GEMINI_ENVELOPE`                 |
+| Cohere                    | 3           | 0                 | 0             | `encoders/cohere.rs::COHERE_ENVELOPE`                 |
+| Llama                     | 5           | 0                 | 0             | `encoders/llama.rs::LLAMA_ENVELOPE`                   |
+
+Rationale per row:
+
+- **OpenAI cl100k / o200k**: tiktoken cookbook convention (3 tokens / msg
+  for role + content separator markers; 3 tokens for assistant reply
+  priming). `gpt-3.5-turbo-0301` snapshot is the documented quirk
+  (per_message=4 for the legacy implicit "name" position).
+- **Anthropic**: chat shape uses `\n\nHuman:` / `\n\nAssistant:` turn
+  boundary markers (≈ 4 tokens per turn) rather than OpenAI-style
+  per-message framing; no reply priming.
+- **Gemini**: API takes a `contents` array where role is a structured
+  field, not a prompt token; envelope is all-zero.
+- **Cohere**: Command-R chat uses `<|START_OF_TURN|>` / `<|END_OF_TURN|>`
+  framing (≈ 3 tokens per turn).
+- **Llama**: Llama 3.1 chat uses the full header template
+  `<|begin_of_text|><|start_header_id|>{role}<|end_header_id|>\n\n
+  {content}<|eot_id|>` (≈ 5 tokens per turn for the marker headers).
+
+Tool-call accounting is uniform across encoders: `+1` overhead per
+tool_call + `tokens(name)` + `tokens(arguments_json)` (per spec §3.4
+SLICE_03 line + per-vendor encoder).
+
+#### 3.4.2 Per-vendor BOS token table（R2 M4 amendment, R2 commit `4d6f96b`；R3 N1 fix amendment, R3 commit `edbbfab`）
+
+`bos_token_count` is added once per non-empty `raw_text` encode (chat-shape
+requests do NOT add BOS — the per-turn header markers in §3.4.1 already
+include any leading marker the vendor prepends).
+
+| Encoder    | bos_token_count                       | Applies to                                       |
+|------------|---------------------------------------|--------------------------------------------------|
+| OpenAI     | 0                                     | All paths (cl100k / o200k / p50k have no BOS in `encode_with_special_tokens` output) |
+| Anthropic  | 1 (Bedrock routing); 0 (native API)   | R3 N1 gate via `is_bedrock_routing(model)` substring match on `anthropic.` |
+| Gemini     | 0                                     | All paths (Gemma `countTokens` reports no BOS)   |
+| Cohere     | 1                                     | Bedrock only (feature-gated; native API path absent until R2 M6 legal review widens scope) |
+| Llama      | 1                                     | Bedrock only (SLICE_04 ships only `meta.llama3-*-instruct-v1:0` patterns, all Bedrock) |
+
+Rationale per row:
+
+- **OpenAI**: tiktoken vocabularies have no BOS in the encode output
+  (the `<|endoftext|>` token is appended at model-emit time, not on input).
+- **Anthropic R3 N1 gate**: Bedrock invokeModel prepends `<|begin_of_text|>`
+  before forwarding; the Anthropic native `/v1/messages` API does NOT.
+  Unconditional BOS=1 over-counts native API calls by exactly 1 token,
+  which crosses the §4.2 1% drift threshold on every 100-token request.
+  Detection: model string contains the `anthropic.` substring (matches
+  every Bedrock dispatch entry per §3.1, including cross-region prefixes
+  `us.anthropic.…`, `eu.anthropic.…`, `apac.anthropic.…`, `us-gov.anthropic.…`).
+- **Gemini**: Gemma vocab has no BOS in `countTokens` semantics.
+- **Cohere**: Bedrock invokeModel prepends `<|START_OF_TURN|>`. Cohere
+  native API path is feature-gated (per R2 M6); when the feature is on,
+  the same Bedrock-only BOS=1 policy applies because all dispatch entries
+  are still Bedrock-shaped IDs (`cohere.command-*-v1:0`) or
+  `command-r{,-plus}{,-DATE}` SDK names that route via the same encoder.
+- **Llama**: Bedrock invokeModel prepends `<|begin_of_text|>`. SLICE_04
+  ships only Bedrock model patterns for Llama (no native SDK pattern).
+
+#### 3.4.3 Source-of-truth note
+
+The authoritative envelope + BOS values live in the Rust constants under
+`crates/spendguard-tokenizer/src/encoders/*.rs` (`*_ENVELOPE` and
+`*_BOS_COUNT*` consts surfaced via `Encoder::envelope_overhead` +
+`Encoder::bos_token_count` trait methods). The tables in §3.4.1 / §3.4.2
+above are illustrative — when the implementation amends a row, the spec
+amendment commit MUST update the corresponding cell in the same PR (per
+the §10 spec-impl sync rule introduced in R2 M5).
+
+各 model 的 envelope + BOS 規則直接由 per-encoder trait method 提供（per
+`crates/spendguard-tokenizer/src/encoders/mod.rs::Encoder`）；dispatch
+table 不再 carry an `envelope_tokens` helper. The earlier sketch of a
+`dispatch::message_envelope_tokens(kind, role)` helper is **superseded**
+by the per-encoder trait shape — see R2 M3 implementation for the
+migration rationale (one helper per kind kept envelope code adjacent to
+the encoder's own vocab knowledge, eliminating a centralised `match` arm
+that would have to grow with every new vendor row).
 
 ### 3.5 Output cap accounting
 
@@ -344,7 +530,7 @@ async fn shadow_loop(rx: Receiver<TokenizeEvent>) {
 |---|---|---|
 | `OPENAI_TIKTOKEN` | 0.0 (any drift) | tiktoken byte-exact；任何 drift 等於 vendor bug，立刻 alert |
 | `ANTHROPIC_BPE` | 0.01 (1%) | vendored BPE 可能落後 vendor 微調；1% threshold tolerate noise |
-| `GEMINI_BPE` | 0.01 (1%) | 同上 |
+| `GEMINI_BPE` | 0.01 (1%) | **R2 M5 honest disclosure**: vendored asset is Gemma approximation (Google's official Gemini tokenizer is API-only); 1% threshold absorbs the approximation gap. SLICE_05 shadow worker measures the actual delta against `countTokens` API in production; spec will revise the threshold per measured drift (or switch Gemini to Tier 1-only if the gap exceeds the SpendGuard accuracy promise). |
 | `COHERE_BPE` | 0.015 (1.5%) | Cohere tokenizer 較不穩定；threshold 略寬 |
 | `SENTENCEPIECE_LLAMA` | 0.005 (0.5%) | SentencePiece 配置精確；嚴格 threshold |
 
@@ -486,9 +672,72 @@ per `audit-chain-prediction-extension-v1alpha1.md` §2.1：每筆 decision audit
 |---|---|---|
 | `OPENAI_TIKTOKEN` | `tiktoken-rs` crate（Cargo dep） | MIT (OpenAI public) |
 | `ANTHROPIC_BPE` | 從 `@anthropic-ai/tokenizer` JS package port，或 reconstruct from Anthropic published BPE merges | MIT (Anthropic public) |
-| `GEMINI_BPE` | 從 Google AI published tokenizer files | Apache 2.0 (Google public) |
-| `COHERE_BPE` | 從 Cohere SDK tokenizer files | MIT (Cohere) |
+| `GEMINI_BPE` | **Community Gemma approximation** (per R2 M5) — Google's official Gemini tokenizer is API-only; no vendored BPE merges file is available. We ship the Xenova/gemma-tokenizer mirror which exposes the open-source Gemma vocabulary. Spec §4.2 0.01 drift threshold accommodates the approximation gap; SLICE_05 shadow worker measures the residual against the official `countTokens` API. | Apache 2.0 (Gemma upstream) / MIT (Xenova mirror) |
+| `COHERE_BPE` | **OPT-IN per R2 M6** — Xenova/c4ai-command-r-v01-tokenizer mirror. Underlying Cohere model is CC-BY-NC-4.0 (research-only) and the tokenizer-only redistribution terms are uncited; safe default ships the encoder behind a `cohere` Cargo feature flag (default OFF). Deployments enable `--features cohere` after their own legal review. See LICENSE_NOTICES.md and `7.1 R2 M6` subsection below. | MIT (Xenova mirror); model CC-BY-NC-4.0 |
 | `SENTENCEPIECE_LLAMA` | Meta-released SentencePiece model files | Llama 2 Community License |
+
+#### 7.1 R2 M5 — Gemini approximation honest disclosure
+
+The v1alpha1 draft claimed `GEMINI_BPE` came "From Google AI published
+tokenizer files". This was inaccurate: Google publishes a `countTokens`
+REST endpoint, not a vendorable BPE merges file. The actual asset
+SpendGuard vendors is the open-source **Gemma tokenizer** released by
+Google AI under Apache 2.0, which shares the underlying BPE config that
+Google reports as a parity proxy for Gemini's `countTokens` semantics
+within ~1% on typical inputs.
+
+Implications:
+
+* The published `<1% delta per Google's parity table` claim in
+  R1's `encoders/gemini.rs` doc-comment is not citable — there is no
+  Google-published parity table for Gemma-vs-Gemini. The R2 comment
+  rewrites this as "approximation; drift threshold §4.2 accounts for
+  unknown gap" so future readers don't repeat the unsupported claim.
+* The `tokenizer_versions` `kind=GEMINI_BPE` row's `version_string`
+  remains `gemini-1.5-bpe-2026-05` (the SpendGuard-internal asset id);
+  the underlying asset URL pinned in
+  `crates/spendguard-tokenizer/LICENSE_NOTICES.md` correctly references
+  `huggingface.co/Xenova/gemma-tokenizer`.
+* If SLICE_05 production data shows >1% drift, the §4.2 threshold
+  widens to absorb measured drift OR we switch Gemini to a Tier 1-only
+  strategy (no Tier 2 hot path). Either path documented for operator
+  visibility.
+
+#### 7.1 R2 M6 — Cohere encoder opt-in feature flag
+
+The R1 LICENSE_NOTICES claimed a "MPL-2.0 exemption" allowing
+re-distribution of the Cohere `tokenizer.json` independently from the
+CC-BY-NC-4.0 model weights. This claim is **uncited and legally
+ambiguous**; the safe path until Cohere clarifies tokenizer-only
+redistribution terms (or a separately-licensed encoder asset is
+vendored) is to ship the Cohere encoder behind an opt-in Cargo feature.
+
+The `spendguard-tokenizer` crate exposes a `cohere` feature flag,
+**default OFF**:
+
+* **OFF (default)**: the `cohere.rs` module is not compiled, the
+  `data/cohere-command-r/tokenizer.json` asset is not embedded, and
+  the dispatch table omits Cohere patterns. Cohere model IDs
+  (`command-r`, `command-r-plus`, `cohere.command*-v\d+:\d+`) fall to
+  Tier 3 with the 5% conservative margin + the `tokenizer_unknown_model`
+  metric.
+
+* **ON (via `--features cohere`)**: the encoder loads at boot with the
+  full two-layer integrity check (Layer A sha256 + Layer B cross-check
+  fixture per §7.4.1), and the dispatch routes Cohere model IDs to the
+  Tier 2 BPE encoder.
+
+Stock deployments that have not completed their own legal review use
+the default OFF path. Deployments that need Cohere Tier 2 accuracy
+explicitly opt in. `services/tokenizer` (the centralized form per
+§2.1(a)) enables `cohere` by default so its golden corpus tests pass;
+`services/sidecar` and `services/egress_proxy` (the in-process library
+form per §2.1(b)) default to OFF.
+
+`crates/spendguard-tokenizer/LICENSE_NOTICES.md` carries the current
+legal disclosure; any future revision of the Cohere model license OR
+a separately-licensed encoder asset will be tracked in that file with
+the §7.1 row updated to match.
 
 ### 7.2 Asset bundling
 
