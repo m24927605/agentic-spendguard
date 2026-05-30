@@ -339,6 +339,53 @@ outputPredictor:
     requests: { cpu: "100m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
 
+# ── run_cost_projector service (SLICE_09) ───────────────────────────
+# Spec: docs/run-cost-projector-spec-v1alpha1.md (full).
+#
+# Hot-path gRPC service called by sidecar after output_predictor.Predict
+# and before reserve stage. SLICE_09 ships Signal 1 (historical P95) +
+# Signal 2 (per-step drift) + Signal 3 (SDK with_run_plan pass-through)
+# + 3 RUN_* code emission (BUDGET > STEPS > DRIFT precedence) +
+# in-memory RunState cache (10K cap, 30-min TTL) + audit-chain replay
+# recovery on cold miss.
+#
+# Resource ceiling (spec §10): 256 MiB worst case for 10K concurrent
+# runs × ~1 KiB RunState; default request 64 MiB.
+runCostProjector:
+  enabled: true
+  # Stateless across replicas via per-run state cache (in-memory).
+  # Multi-replica deployments rely on tenant-shard routing OR audit-
+  # chain replay for cross-replica state recovery (spec §7.4).
+  replicas: 1
+  image:
+    repository: spendguard/run-cost-projector
+    tag: "0.1.0-alpha.1"
+  # ── Secure transport gates (mirrors output_predictor SLICE_06 R3 N2) ──
+  # Set EXACTLY ONE under chart.profile=production. Demo falls back to
+  # plaintext TCP with a loud warn.
+  udsHostPath: ""
+  mtlsSecretName: ""
+  # ── canonical_ingest DB for Signal 1 + audit-chain recovery ──
+  # Required under chart.profile=production. Empty → skeleton mode
+  # (Signal 1 always cold-starts; recovery returns Ok(None); demo only).
+  databaseUrl: ""
+  # ── RunState cache (spec §7.2) ──
+  # TTL eviction default 30 minutes; LRU eviction at capacity 10K.
+  stateCacheTtlSeconds: 1800
+  stateCacheCapacity: 10000
+  # ── Audit-chain replay window (spec §7.4) ──
+  # Bounded window (NOT 30 days) — replay is hot-path on cold miss.
+  replayWindowMinutes: 30
+  # ── Signal 1 cold-start default (spec §3.2) ──
+  coldStartRunLength: 10
+  # ── Signal 2 drift detection (spec §4.2) ──
+  # 3 consecutive steps > 0.5 ratio shift triggers RUN_DRIFT_DETECTED.
+  driftConsecutiveThreshold: 3
+  driftRatioThreshold: "0.5"
+  resources:
+    requests: { cpu: "100m", memory: "64Mi"  }
+    limits:   { cpu: "500m", memory: "256Mi" }
+
 # ── stats_aggregator service (SLICE_06) ─────────────────────────────
 # Spec: docs/stats-aggregator-spec-v1alpha1.md (full).
 #

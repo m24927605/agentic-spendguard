@@ -376,6 +376,66 @@ services:
       spendguard-net:
         aliases: [output-predictor]
 
+  # ── run_cost_projector (SLICE_09) ───────────────────────────────────
+  # Hot-path gRPC service per run-cost-projector-spec-v1alpha1.md §2.
+  # SLICE_09 ships Signal 1 (induced from history) + Signal 2 (per-step
+  # drift detection) + Signal 3 (SDK with_run_plan hint pass-through;
+  # SLICE_12 lands the SDK decorator) + 3 RUN_* code emission (BUDGET >
+  # STEPS > DRIFT precedence) + in-memory RunState cache (10K cap,
+  # 30-min TTL) + audit-chain replay recovery on cold miss.
+  #
+  # Demo connects to the canonical_ingest DB for run_length_distribution
+  # _cache (Signal 1 P95 lookups; stats_aggregator populates it after
+  # one cycle) + audit_outbox replay (cold cache recovery).
+  #
+  # The sidecar (Phase E) dials this service via TCP. SLICE_10 wires
+  # the egress_proxy hot path; this slice keeps egress_proxy unchanged.
+  run-cost-projector:
+    build:
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.run_cost_projector
+    container_name: spendguard-run-cost-projector
+    user: "65532:65532"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges
+    tmpfs:
+      - /tmp
+    environment:
+      RUST_LOG:                                                   "info,spendguard_run_cost_projector=debug"
+      SPENDGUARD_RUN_COST_PROJECTOR_LISTEN_ADDR:                  "0.0.0.0:50055"
+      SPENDGUARD_RUN_COST_PROJECTOR_METRICS_ADDR:                 "0.0.0.0:9102"
+      SPENDGUARD_RUN_COST_PROJECTOR_REGION:                       "demo"
+      SPENDGUARD_RUN_COST_PROJECTOR_PROFILE:                      "demo"
+      # canonical_ingest DB for run_length_distribution_cache lookup
+      # (Signal 1) AND audit_outbox replay (cold cache recovery per
+      # spec §7.4). Empty → skeleton mode (Signal 1 always cold-starts;
+      # recovery returns Ok(None); demo only — production Helm profile
+      # rejects this fallback).
+      SPENDGUARD_RUN_COST_PROJECTOR_DATABASE_URL:                 "${SPENDGUARD_RUN_COST_PROJECTOR_DATABASE_URL:-postgres://spendguard:spendguard_demo@postgres:5432/spendguard_canonical}"
+      SPENDGUARD_RUN_COST_PROJECTOR_STATE_CACHE_TTL_SECONDS:      "1800"
+      SPENDGUARD_RUN_COST_PROJECTOR_STATE_CACHE_CAPACITY:         "10000"
+      SPENDGUARD_RUN_COST_PROJECTOR_REPLAY_WINDOW_MINUTES:        "30"
+      SPENDGUARD_RUN_COST_PROJECTOR_COLD_START_RUN_LENGTH:        "10"
+      SPENDGUARD_RUN_COST_PROJECTOR_DRIFT_CONSECUTIVE_THRESHOLD:  "3"
+      SPENDGUARD_RUN_COST_PROJECTOR_DRIFT_RATIO_THRESHOLD:        "0.5"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "9102:9102"
+      - "50055:50055"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:9102/livez | grep -q ok"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [run-cost-projector]
+
   # ── stats_aggregator (SLICE_06) ─────────────────────────────────────
   # Daemon per stats-aggregator-spec-v1alpha1.md. Hourly aggregation
   # cycle UPSERTs output_distribution_cache + run_length_distribution_cache;

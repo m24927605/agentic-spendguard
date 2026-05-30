@@ -1,0 +1,145 @@
+{{- if .Values.runCostProjector.enabled }}
+{{- $component := "run-cost-projector" }}
+{{- /* SLICE_09 — run_cost_projector Deployment.
+       Spec: docs/run-cost-projector-spec-v1alpha1.md §2.
+       Pattern mirrors charts/spendguard/templates/output_predictor.yaml
+       SLICE_06 R3 N2:
+         - chart.profile=production: image.tag semver/digest + UDS xor mTLS gate
+         - chart.profile=production: databaseUrl required for Signal 1 +
+           audit-chain recovery
+         - container security baseline: USER 65532 + readOnlyRootFilesystem
+           + cap_drop ALL (SLICE_03 R2 M7)
+    */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- if eq .Values.runCostProjector.image.tag "" -}}
+{{- fail "runCostProjector.image.tag is required under chart.profile=production" -}}
+{{- end -}}
+{{- if not (or (regexMatch "@sha256:[0-9a-f]{64}$" (toString .Values.runCostProjector.image.tag)) (regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[a-z0-9.]+)?$" (toString .Values.runCostProjector.image.tag))) -}}
+{{- fail (printf "runCostProjector.image.tag=%q must be a semver tag (vN.N.N) or digest-pinned (@sha256:HEX) under chart.profile=production" (toString .Values.runCostProjector.image.tag)) -}}
+{{- end -}}
+{{- if and (not .Values.runCostProjector.udsHostPath) (not .Values.runCostProjector.mtlsSecretName) -}}
+{{- fail "runCostProjector must configure either udsHostPath (for in-cluster on-node sidecar callers) or mtlsSecretName (for cross-node mTLS) under chart.profile=production (plaintext TCP forbidden per spec §2.2 + sidecar §5)" -}}
+{{- end -}}
+{{- if not .Values.runCostProjector.databaseUrl -}}
+{{- fail "runCostProjector.databaseUrl is required under chart.profile=production (Signal 1 run_length_distribution_cache lookup + audit_outbox cold-recovery replay per spec §3 + §7.4 — empty databaseUrl forces every Project to skeleton-mode cold-start with no recovery, which defeats SLICE_09's purpose)" -}}
+{{- end -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-run-cost-projector
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.runCostProjector.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      # Container security baseline per SLICE_03 R2 M7.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: run-cost-projector
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.runCostProjector.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: grpc,    containerPort: 50055 }
+            - { name: metrics, containerPort: 9102  }
+          env:
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_LISTEN_ADDR,                value: "0.0.0.0:50055" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_METRICS_ADDR,               value: "0.0.0.0:9102"  }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_REGION,                     value: {{ .Values.global.region | quote }} }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_PROFILE,                    value: {{ .Values.chart.profile | quote }} }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_STATE_CACHE_TTL_SECONDS,    value: {{ .Values.runCostProjector.stateCacheTtlSeconds | quote }} }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_STATE_CACHE_CAPACITY,       value: {{ .Values.runCostProjector.stateCacheCapacity | quote }} }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_REPLAY_WINDOW_MINUTES,      value: {{ .Values.runCostProjector.replayWindowMinutes | quote }} }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_COLD_START_RUN_LENGTH,      value: {{ .Values.runCostProjector.coldStartRunLength | quote }} }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_DRIFT_CONSECUTIVE_THRESHOLD, value: {{ .Values.runCostProjector.driftConsecutiveThreshold | quote }} }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_DRIFT_RATIO_THRESHOLD,      value: {{ .Values.runCostProjector.driftRatioThreshold | quote }} }
+            {{- if .Values.runCostProjector.databaseUrl }}
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_DATABASE_URL,               value: {{ .Values.runCostProjector.databaseUrl | quote }} }
+            {{- end }}
+            {{- if .Values.runCostProjector.udsHostPath }}
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_UDS_PATH,                   value: "/var/run/spendguard/run-cost-projector.sock" }
+            {{- end }}
+            {{- if .Values.runCostProjector.mtlsSecretName }}
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_TLS_CERT_PEM,               value: "/etc/spendguard/tls/tls.crt" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_TLS_KEY_PEM,                value: "/etc/spendguard/tls/tls.key" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_TLS_CA_PEM,                 value: "/etc/spendguard/tls/ca.crt"  }
+            {{- end }}
+          volumeMounts:
+            # read-only rootfs requires /tmp writable
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.runCostProjector.udsHostPath }}
+            - name: uds
+              mountPath: /var/run/spendguard
+            {{- end }}
+            {{- if .Values.runCostProjector.mtlsSecretName }}
+            - name: tls
+              mountPath: /etc/spendguard/tls
+              readOnly: true
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.runCostProjector.resources | nindent 12 }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.runCostProjector.udsHostPath }}
+        - name: uds
+          hostPath:
+            path: {{ .Values.runCostProjector.udsHostPath | quote }}
+            type: DirectoryOrCreate
+        {{- end }}
+        {{- if .Values.runCostProjector.mtlsSecretName }}
+        - name: tls
+          secret:
+            secretName: {{ .Values.runCostProjector.mtlsSecretName | quote }}
+        {{- end }}
+{{- /* Service gating mirrors output_predictor SLICE_06 R3 N2 — UDS-only
+       mode does NOT render a Service (main.rs binds UDS xor TCP). */ -}}
+{{- if not .Values.runCostProjector.udsHostPath }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spendguard.fullname" . }}-run-cost-projector
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc,    port: 50055, targetPort: grpc    }
+    - { name: metrics, port: 9102,  targetPort: metrics }
+  selector:
+    {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+{{- end }}
+{{- end }}
