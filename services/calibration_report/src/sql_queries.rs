@@ -120,7 +120,7 @@ SELECT
     COUNT(*) * 100.0 / NULLIF(SUM(COUNT(*)) OVER (), 0) AS pct
 FROM canonical_events
 WHERE tenant_id = $1
-  AND event_type = 'spendguard.audit.decision.v1alpha1'
+  AND event_type = 'spendguard.audit.decision'
   AND event_time BETWEEN $2 AND $3
 GROUP BY tokenizer_tier
 ORDER BY tokenizer_tier NULLS LAST
@@ -189,10 +189,10 @@ WITH paired AS (
   FROM canonical_events decision
   JOIN canonical_events outcome
     ON decision.decision_id = outcome.decision_id
-   AND outcome.event_type = 'spendguard.audit.outcome.v1alpha1'
+   AND outcome.event_type = 'spendguard.audit.outcome'
    AND outcome.tenant_id  = decision.tenant_id
   WHERE decision.tenant_id = $1
-    AND decision.event_type = 'spendguard.audit.decision.v1alpha1'
+    AND decision.event_type = 'spendguard.audit.decision'
     AND decision.event_time BETWEEN $2 AND $3
     AND outcome.actual_output_tokens IS NOT NULL
     AND decision.prediction_strategy_used IN ('A', 'B', 'C')
@@ -334,11 +334,19 @@ pub const DRIFT_ALERTS_SQL: &str = r#"
 SELECT
     event_id::text,
     event_time,
-    COALESCE(payload_json->>'bucket', '(unknown)') AS bucket,
+    COALESCE(
+      payload_json->>'bucket',
+      NULLIF(concat_ws(', ',
+        payload_json->>'model',
+        payload_json->>'agent_id',
+        payload_json->>'prompt_class'
+      ), ''),
+      '(unknown)'
+    ) AS bucket,
     COALESCE((payload_json->>'z_score')::float, 0.0) AS z_score
 FROM canonical_events
 WHERE tenant_id = $1
-  AND event_type = 'spendguard.prediction.drift_alert.v1alpha1'
+  AND event_type = 'spendguard.audit.prediction_drift_alert.v1alpha1'
   AND event_time BETWEEN $2 AND $3
 ORDER BY event_time
 "#;
@@ -374,9 +382,17 @@ pub async fn fetch_drift_alerts(
 /// Run-level counts for the §8.1 recommendation rules.
 pub const RUN_LEVEL_COUNTS_SQL: &str = r#"
 SELECT
-    SUM(CASE WHEN event_type = 'spendguard.audit.run_budget_projection_exceeded.v1alpha1' THEN 1 ELSE 0 END)::bigint AS proj_exceeded,
-    SUM(CASE WHEN event_type = 'spendguard.audit.run_drift_detected.v1alpha1' THEN 1 ELSE 0 END)::bigint AS drift_detected,
-    COUNT(DISTINCT run_id) FILTER (WHERE event_type = 'spendguard.audit.decision.v1alpha1' AND run_id IS NOT NULL)::bigint AS run_total
+    SUM(CASE
+          WHEN event_type = 'spendguard.audit.decision'
+           AND payload_json->'reason_codes' ? 'RUN_BUDGET_PROJECTION_EXCEEDED'
+          THEN 1 ELSE 0
+        END)::bigint AS proj_exceeded,
+    SUM(CASE
+          WHEN event_type = 'spendguard.audit.decision'
+           AND payload_json->'reason_codes' ? 'RUN_DRIFT_DETECTED'
+          THEN 1 ELSE 0
+        END)::bigint AS drift_detected,
+    COUNT(DISTINCT run_id) FILTER (WHERE event_type = 'spendguard.audit.decision' AND run_id IS NOT NULL)::bigint AS run_total
 FROM canonical_events
 WHERE tenant_id = $1
   AND event_time BETWEEN $2 AND $3
@@ -397,11 +413,7 @@ pub async fn fetch_run_level_counts(
     let proj: Option<i64> = row.try_get(0)?;
     let drift: Option<i64> = row.try_get(1)?;
     let total: Option<i64> = row.try_get(2)?;
-    Ok((
-        proj.unwrap_or(0),
-        drift.unwrap_or(0),
-        total.unwrap_or(0),
-    ))
+    Ok((proj.unwrap_or(0), drift.unwrap_or(0), total.unwrap_or(0)))
 }
 
 #[cfg(test)]
@@ -449,10 +461,7 @@ mod tests {
     fn parse_window_iso8601() {
         let anchor = Utc.with_ymd_and_hms(2026, 5, 30, 12, 0, 0).unwrap();
         let parsed = parse_window_anchor("2026-01-15T10:00:00Z", anchor).unwrap();
-        assert_eq!(
-            parsed,
-            Utc.with_ymd_and_hms(2026, 1, 15, 10, 0, 0).unwrap()
-        );
+        assert_eq!(parsed, Utc.with_ymd_and_hms(2026, 1, 15, 10, 0, 0).unwrap());
     }
 
     #[test]
@@ -470,5 +479,57 @@ mod tests {
         assert_eq!(split_relative("30d"), Some(("30", "d")));
         assert_eq!(split_relative("d7"), None);
         assert_eq!(split_relative(""), None);
+    }
+
+    #[test]
+    fn canonical_queries_match_sidecar_emitted_event_types() {
+        for sql in [
+            TIER_DISTRIBUTION_SQL,
+            CALIBRATION_RATIO_SQL,
+            RUN_LEVEL_COUNTS_SQL,
+        ] {
+            assert!(
+                sql.contains("spendguard.audit.decision"),
+                "query must target sidecar's emitted decision event type: {sql}"
+            );
+            assert!(
+                !sql.contains("spendguard.audit.decision.v1alpha1"),
+                "sidecar emits unversioned spendguard.audit.decision; versioned filter returns zero rows: {sql}"
+            );
+        }
+        assert!(
+            CALIBRATION_RATIO_SQL.contains("spendguard.audit.outcome"),
+            "calibration join must target sidecar's emitted outcome event type"
+        );
+        assert!(
+            !CALIBRATION_RATIO_SQL.contains("spendguard.audit.outcome.v1alpha1"),
+            "sidecar emits unversioned spendguard.audit.outcome; versioned filter returns zero rows"
+        );
+    }
+
+    #[test]
+    fn drift_alert_query_uses_audit_routed_stats_aggregator_type() {
+        assert!(DRIFT_ALERTS_SQL.contains("spendguard.audit.prediction_drift_alert.v1alpha1"));
+        assert!(
+            !DRIFT_ALERTS_SQL.contains("spendguard.prediction.drift_alert.v1alpha1"),
+            "stale non-audit drift alert type bypasses ImmutableAuditLog routing"
+        );
+        assert!(
+            DRIFT_ALERTS_SQL.contains("payload_json->>'model'")
+                && DRIFT_ALERTS_SQL.contains("payload_json->>'agent_id'")
+                && DRIFT_ALERTS_SQL.contains("payload_json->>'prompt_class'"),
+            "stats_aggregator drift payload has model/agent_id/prompt_class fields, not a bucket field"
+        );
+    }
+
+    #[test]
+    fn run_level_counts_read_run_codes_from_decision_payload() {
+        assert!(RUN_LEVEL_COUNTS_SQL.contains("payload_json->'reason_codes'"));
+        assert!(RUN_LEVEL_COUNTS_SQL.contains("RUN_BUDGET_PROJECTION_EXCEEDED"));
+        assert!(RUN_LEVEL_COUNTS_SQL.contains("RUN_DRIFT_DETECTED"));
+        assert!(
+            !RUN_LEVEL_COUNTS_SQL.contains("spendguard.audit.run_budget_projection_exceeded"),
+            "RUN_* codes are reason_codes on decision events, not separate CloudEvent types"
+        );
     }
 }
