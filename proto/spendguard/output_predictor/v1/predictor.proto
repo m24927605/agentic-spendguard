@@ -132,20 +132,24 @@ message PredictResponse {
   // | L4 (cache hit). Per spec §7.1 mapping.
   optional string cold_start_layer_used = 8;
 
+  // Per-strategy latency for SLO tracking (spec §11.1 budget breakdown
+  // + spec §2.1 layout). Tags 10-13 per spec §2.1 — R2 M3 restores
+  // these from R1's incorrect 13-16 layout (which clobbered audit row
+  // semantics). Nanoseconds wall-clock; not on audit chain.
+  int64 a_latency_ns = 10;
+  int64 b_latency_ns = 11;
+  int64 c_latency_ns = 12;
+  int64 total_latency_ns = 13;
+
   // Classifier + fingerprint version stamps written into the response so
   // the audit chain captures classifier-version-at-decision for
   // future-proofed analytics. Per spec §8.4 classifier upgrade path.
-  string classifier_version = 9;
-  string fingerprint_version = 10;
+  // Tags 14-15 — additive; outside the spec §2.1 hot-path tag range
+  // because they're cold metadata (not used by selector or sidecar).
+  string classifier_version = 14;
+  string fingerprint_version = 15;
 
   // Echoed fingerprint per spec §8.2 — the predictor's view of the
   // bucket identity. Audit row records this; verify-chain validates.
-  string prompt_class_fingerprint_used = 11;
-
-  // Per-strategy latency for SLO tracking (spec §11.1 budget breakdown).
-  // Not on audit chain. Nanoseconds wall-clock.
-  int64 a_latency_ns = 13;
-  int64 b_latency_ns = 14;
-  int64 c_latency_ns = 15;
-  int64 total_latency_ns = 16;
+  string prompt_class_fingerprint_used = 16;
 }

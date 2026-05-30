@@ -64,6 +64,11 @@ once_cell = "1"
 # SLICE_05 convention — faster than std for read-mostly + poison-free).
 parking_lot = "0.12"
 
+# R2 M5: bounded LRU cache. Without it, the in-memory entry map grew
+# unbounded — every (tenant × model × agent × class) bucket allocated
+# a permanent slot under high cardinality. Capped at 100K entries.
+lru = "0.12"
+
 # TOML loader for data/model_context_window.toml.
 toml = "0.8"
 

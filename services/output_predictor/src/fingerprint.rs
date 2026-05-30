@@ -17,7 +17,17 @@
 
 use sha2::{Digest, Sha256};
 
-pub const FINGERPRINT_VERSION: &str = "v1alpha1";
+/// Fingerprint string prefix per output-predictor-service-spec-v1alpha1.md
+/// §8.2 ("`v1:` prefix to allow future v2 classifier upgrades to mint
+/// v2-prefixed hashes so legacy rows are identifiable").
+///
+/// R2 M4 (Software F8): R1 set this to "v1alpha1" which doesn't match
+/// the spec. Spec example: `format!("v1:{:x}", sha256(canonical.as_bytes()))`.
+/// Bumping the constant changes every fingerprint emitted by the
+/// predictor — acceptable in SLICE_06 because no production traffic is
+/// gated on the legacy string yet (the L4 cache is keyed by
+/// prompt_class enum per B3, not by fingerprint).
+pub const FINGERPRINT_VERSION: &str = "v1";
 
 /// Compute the deterministic prompt_class_fingerprint per spec §8.2.
 ///

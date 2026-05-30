@@ -9,11 +9,15 @@
 //!
 //! ## Two-tier cache architecture
 //!
-//! 1. **In-memory**: parking_lot::RwLock<HashMap<BucketKey, CacheEntry>>;
-//!    per-entry TTL stamp; read-mostly; bounded-size LRU NOT included in
-//!    SLICE_06 (deferred to SLICE-extra — the bucket space is naturally
-//!    bounded by (tenant × model × agent_id × class) which Helm gates
-//!    via tenant + model counts).
+//! 1. **In-memory**: parking_lot::Mutex<LruCache<BucketKey, CacheEntry>>;
+//!    per-entry TTL stamp; bounded at MAX_IN_MEMORY_ENTRIES (100K)
+//!    so a tenant with high bucket cardinality cannot OOM the process.
+//!    LRU eviction picks the coldest entry when the cache is full.
+//!    R2 M5: prior shape used unbounded `HashMap` — high-cardinality
+//!    customer + memory-pressure attack vector. Mutex (vs RwLock) is
+//!    fine because the LRU implementation needs to mutate on every
+//!    access (touch the recency list); RwLock would still need write
+//!    lock on hit.
 //! 2. **SQL**: read-only sqlx PgPool against canonical_ingest DB. Each
 //!    query opens a transaction, runs `SET LOCAL app.current_tenant_id`
 //!    for RLS enforcement, runs the SELECT, returns the row.
@@ -33,15 +37,24 @@
 //! miss. Enforced in the SQL WHERE clause so the DB doesn't return stale
 //! rows; in-memory TTL is the additional 5min freshness gate per spec §4.3.
 
-use std::collections::HashMap;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use parking_lot::RwLock;
+use lru::LruCache;
+use parking_lot::Mutex;
 use sqlx::postgres::PgPool;
 use sqlx::Row;
 use tracing::{debug, warn};
 use uuid::Uuid;
+
+/// Bounded LRU capacity per spec §4.3 + R2 M5.
+///
+/// 100K entries × ~256 bytes per entry = ~25 MB resident cache memory
+/// in the worst case. Plenty of headroom for 10K tenants × 5 models ×
+/// 2 agents × 7 classes (= 700K theoretical max — beyond this the LRU
+/// evicts cold entries instead of OOM-ing the process).
+pub const MAX_IN_MEMORY_ENTRIES: usize = 100_000;
 
 /// Cache row consumed by Strategy B per spec §4.2.
 #[derive(Debug, Clone)]
@@ -76,17 +89,21 @@ pub struct OutputDistributionCache {
     /// fallback). When None, every lookup short-circuits to None and
     /// Strategy B collapses to L1 cold-start.
     pool: Option<PgPool>,
-    /// In-memory entry map. RwLock keyed for read-mostly workload.
-    entries: RwLock<HashMap<BucketKey, CacheEntry>>,
+    /// In-memory entry map — R2 M5: bounded LRU. Mutex because every
+    /// access touches the recency list (write lock semantics even on
+    /// "read"). RwLock here would not be cheaper.
+    entries: Mutex<LruCache<BucketKey, CacheEntry>>,
     /// In-memory TTL per spec §4.3 (5 min default).
     ttl: Duration,
 }
 
 impl OutputDistributionCache {
     pub fn new(pool: Option<PgPool>, ttl: Duration) -> Arc<Self> {
+        let capacity = NonZeroUsize::new(MAX_IN_MEMORY_ENTRIES)
+            .expect("MAX_IN_MEMORY_ENTRIES > 0 at compile time");
         Arc::new(Self {
             pool,
-            entries: RwLock::new(HashMap::new()),
+            entries: Mutex::new(LruCache::new(capacity)),
             ttl,
         })
     }
@@ -111,7 +128,7 @@ impl OutputDistributionCache {
 
         // ── Fast path: in-memory hit ────────────────────────────────
         {
-            let guard = self.entries.read();
+            let mut guard = self.entries.lock();
             if let Some(entry) = guard.get(&key) {
                 if entry.expires_at > Instant::now() {
                     return entry.value.clone();
@@ -120,9 +137,16 @@ impl OutputDistributionCache {
         }
 
         // ── Slow path: SQL lookup (when pool present) ───────────────
-        let value = if let Some(pool) = &self.pool {
+        //
+        // R2 (Backend F6): when the SQL path errors transiently
+        // (connection timeout / RLS misconfiguration / etc.) we do NOT
+        // cache the None result — caching would mask the recovery
+        // for `ttl` seconds. Only an authoritative absence (Ok(None) —
+        // row genuinely absent / stale / under-sampled) populates the
+        // cache.
+        let sql_outcome: Result<Option<CacheRow>, ()> = if let Some(pool) = &self.pool {
             match self.sql_lookup(pool, &key).await {
-                Ok(row) => row,
+                Ok(row) => Ok(row),
                 Err(e) => {
                     warn!(
                         tenant_id = %tenant_id,
@@ -130,32 +154,37 @@ impl OutputDistributionCache {
                         agent_id = %agent_id,
                         prompt_class = %prompt_class,
                         error = %e,
-                        "output_distribution_cache SQL lookup failed; falling to L1"
+                        "output_distribution_cache SQL lookup failed; falling to L1 \
+                         WITHOUT cache poisoning (transient error)"
                     );
-                    None
+                    Err(())
                 }
             }
         } else {
             debug!("output_distribution_cache pool=None; skeleton mode L1");
-            None
+            Ok(None)
         };
 
-        // ── Update in-memory cache (double-checked locking) ─────────
-        {
-            let mut guard = self.entries.write();
-            // Re-check: another task may have populated the entry while
-            // we were running SQL. Last writer wins is fine — both
-            // values are equally fresh (within milliseconds).
-            guard.insert(
-                key,
-                CacheEntry {
-                    value: value.clone(),
-                    expires_at: Instant::now() + self.ttl,
-                },
-            );
+        match sql_outcome {
+            Ok(value) => {
+                // Authoritative result — populate cache with TTL stamp.
+                let mut guard = self.entries.lock();
+                guard.put(
+                    key,
+                    CacheEntry {
+                        value: value.clone(),
+                        expires_at: Instant::now() + self.ttl,
+                    },
+                );
+                value
+            }
+            Err(()) => {
+                // Transient SQL error → don't populate cache; return
+                // None so caller falls to L1 cold-start. Next call will
+                // retry SQL.
+                None
+            }
         }
-
-        value
     }
 
     /// SQL lookup per spec §4.2. Sets `app.current_tenant_id` inside the
@@ -238,7 +267,7 @@ impl OutputDistributionCache {
     /// returns the raw map size).
     #[cfg(test)]
     pub(crate) fn in_memory_size(&self) -> usize {
-        self.entries.read().len()
+        self.entries.lock().len()
     }
 }
 
