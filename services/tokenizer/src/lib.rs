@@ -22,6 +22,14 @@ pub mod config;
 pub mod dispatch;
 pub mod server;
 
+// SLICE_05: Tier 1 shadow drift detection (per spec §4). The
+// `shadow` module is the orchestrator + sub-modules (sample rate state,
+// circuit breaker, provider clients, worker). Hot path invariant: this
+// module is referenced ONLY from main.rs (worker spawn) and server.rs
+// (best-effort channel send after Tier 2 returns); sidecar /
+// egress_proxy never see this module (spec §1.3).
+pub mod shadow;
+
 /// Generated protobuf types — `tonic::include_proto!` requires this
 /// module path so server / client codegen lands inside the crate's
 /// public namespace.
@@ -29,6 +37,17 @@ pub mod proto {
     pub mod tokenizer {
         pub mod v1 {
             tonic::include_proto!("spendguard.tokenizer.v1");
+        }
+    }
+    // SLICE_05: CloudEvent envelope + canonical_ingest client.
+    pub mod common {
+        pub mod v1 {
+            tonic::include_proto!("spendguard.common.v1");
+        }
+    }
+    pub mod canonical_ingest {
+        pub mod v1 {
+            tonic::include_proto!("spendguard.canonical_ingest.v1");
         }
     }
 }

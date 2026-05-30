@@ -42,6 +42,7 @@ per `tokenizer-service-spec-v1alpha1.md` §4 (Tier 1 shadow), §4.5 (circuit bre
 | Provider HTTP client retries (use existing http client crate) | use existing |
 | Audit chain entries for T1 samples | Intentionally NOT (per §4.4) |
 | Calibration-report integration of T1 samples | SLICE_13 |
+| Chat-shape (messages array) shadow comparison (R2 M2) | SLICE-extra — needs honest per-vendor message shape (Anthropic `Human:`/`Assistant:` role markers vs Gemini `contents[role]`). SLICE_05 ships raw_text-only shadowing; chat requests emit `SHADOW_SKIPPED_CHAT_SHAPE` metric and skip silently. |
 
 ---
 
@@ -79,8 +80,8 @@ per `tokenizer-service-spec-v1alpha1.md` §4 (Tier 1 shadow), §4.5 (circuit bre
 
 ## §6. Audit-chain impact
 
-- **None directly**. Tier 1 samples land in `tokenizer_t1_samples` not audit_outbox (per spec §4.4)
-- BUT: `tokenizer_drift_alert` CloudEvent emitted to canonical_ingest as signed event (audit chain entry; tied to stats_aggregator's drift_alert family; per `stats-aggregator-spec-v1alpha1.md` §7.2 schema)
+- **None directly for samples**. Tier 1 samples land in `tokenizer_t1_samples` not audit_outbox (per spec §4.4)
+- **Audit-chain bound for alerts** (R2 B1): the `spendguard.audit.tokenizer_drift_alert.v1alpha1` CloudEvent emitted to canonical_ingest carries the `spendguard.audit.*` prefix which the routing layer (`services/canonical_ingest/src/domain/event_routing.rs:33`) maps to ImmutableAuditLog — NOT ProfilePayloadBlob (RTBF-deletable). The drift_alert family in `stats-aggregator-spec-v1alpha1.md` §7.2 consumes this surface.
 
 ---
 
@@ -170,7 +171,8 @@ per `tokenizer-service-spec-v1alpha1.md` §11.1:
 
 | Round | Reviewer | 採納率 | 主要產出 |
 |---|---|---|---|
-| (placeholder) | (placeholder) | (placeholder) | (placeholder) |
+| R1 (4-reviewer panel: Backend / Software / Security / DB) | adversarial | — | 6 Blockers + 17 Majors + 17 minors; all ALL BLOCK verdicts. |
+| R2 (this round) | substantial implementer | 6/6 Blockers + 13/17 Majors closed in-slice; 14 minors → GH issues | **Closed in-slice**: B1 (real worker wired in main.rs; spawn_drop_handle confined to fallback paths), B2 (event prefix → `spendguard.audit.tokenizer_drift_alert.v1alpha1` audit-routed), B3 (URL leak via `reqwest::Error::without_url()`), B4 (canonical_ingest sink mTLS), B5 (tenant_id TEXT→UUID + delete fabricated R7 citation), B6 (implicit — drop handle no longer the default), M1 (circuit breaker 300s aligned with spec §4.5), M2 (chat-shape skip per `SHADOW_SKIPPED_CHAT_SHAPE`; honest per-vendor chat shadow deferred), M3 (UTF-8 char-boundary truncate), M4 (connect_timeout + tcp_keepalive), M5 (Prometheus counters + try_send branch metric), M6 (sample_id in CloudEvent for forensic pivot), M7 (DO-block smoke check delete), M8 (PARTITION BY RANGE(sampled_at) monthly), M9 (drift_alert_decided + drift_alert_emitted_at split; column-level UPDATE grant), M10 (≥3/1h on-call escalation), M11 (`provider_count_tokens_schema_drift_total`), M12 (Helm production-profile gates + `optional: false` for provider Secret), M13 (Config Debug masks API keys). **GH issues opened for 14 residuals** (panel m / out-of-scope items): control plane API persistence, cool-down rate cap, Cohere/Llama Tier 1 clients, Llama envelope tuning, key rotation runbook, PII opt-in, verify-chain admission, replay protection, plaintext DB URL (workspace-wide), REVOKE SELECT FROM PUBLIC, index naming consistency, sampled_at event-time semantics, drift_alert_emitted DEFAULT removal, pg_indexes smoke schemaname filter. Test count: 319 → 332 (+13 unit tests). All 5 verification gates green. |
 
 ---
 

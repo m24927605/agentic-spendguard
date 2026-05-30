@@ -69,6 +69,49 @@ serde = { version = "1", features = ["derive"] }
 # UUIDs (request_id mint)
 uuid = { version = "1", features = ["v7"] }
 
+# SLICE_05: HTTP client for Anthropic / Gemini provider count_tokens
+# APIs (Tier 1 shadow). `rustls-tls` keeps the TLS surface
+# single-provider (matches the aws_lc_rs default_provider main.rs
+# installs); `json` feature serialises request bodies; default-features
+# off drops the native-tls fallback we don't want.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+
+# SLICE_05: random float for sample rate gating. Default features
+# omitted to drop `getrandom`'s wasm-only paths; the `std` + `std_rng`
+# defaults we keep are enough for ThreadRng.
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+
+# SLICE_05: parking_lot RwLock for SampleRateState per-(tenant, model)
+# map + CircuitBreaker per-(tenant, model) state. Faster than std for
+# read-mostly workloads and provides poison-free guards (so a panicked
+# shadow worker can't deadlock the gRPC handler that shares the lock).
+parking_lot = "0.12"
+
+# SLICE_05: Ed25519 producer signing for `tokenizer_drift_alert`
+# CloudEvent emitted by the shadow worker. Reuses the canonical
+# Signer trait + LocalEd25519Signer + DisabledSigner triad already
+# wired in sidecar / canonical_ingest / ttl_sweeper.
+spendguard-signing = { path = "../signing" }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+
+# SLICE_05: SQL persistence for tokenizer_t1_samples. sqlx-postgres
+# behind tls-rustls (matching the sidecar / ledger convention) and
+# without the macros feature (we use query() / query_as() / fetch_one
+# patterns to keep compile-time DB checks off).
+sqlx = { version = "0.8", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls",
+    "uuid",
+    "chrono",
+] }
+
+# SLICE_05: prost CloudEvent uses bytes::Bytes for the signature +
+# data fields; the worker constructs both via Bytes::new() / Bytes::from.
+bytes = "1"
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"
@@ -77,6 +120,11 @@ prost-build = "0.13"
 pretty_assertions = "1"
 tempfile = "3"
 tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+
+# SLICE_05: mock HTTP server for provider client unit tests. wiremock
+# spins up a tokio HTTP server per test fixture, so the Anthropic /
+# Gemini clients can be unit-tested without provider credentials.
+wiremock = "0.6"
 
 [features]
 default = []

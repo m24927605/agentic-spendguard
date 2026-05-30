@@ -126,6 +126,16 @@ async fn main() -> anyhow::Result<()> {
         .route("/v1/approvals", get(list_approvals))
         .route("/v1/approvals/:id", get(get_approval))
         .route("/v1/approvals/:id/resolve", post(resolve_approval))
+        // SLICE_05: tokenizer per-(tenant, model) shadow sampling rate
+        // override surface per spec §4.1 + §9 review checklist Q2.
+        // POST sets the rate; GET returns the current effective value.
+        // Phase F ships the API skeleton; the tokenizer-service poll
+        // path that consumes the override is wired in SLICE-extra
+        // alongside the dashboard.
+        .route(
+            "/v1/tokenizer/sampling-rate",
+            post(post_tokenizer_sampling_rate).get(get_tokenizer_sampling_rate),
+        )
         .layer(from_fn_with_state(auth.clone(), spendguard_auth::require_auth));
 
     let app = Router::new()
@@ -190,6 +200,100 @@ async fn serve_metrics(addr: String, metrics: ControlPlaneMetrics) -> anyhow::Re
 
 async fn healthz() -> &'static str {
     "ok"
+}
+
+// ============================================================================
+// SLICE_05: Tokenizer per-(tenant, model) shadow sampling rate API.
+//
+// Per tokenizer-service-spec-v1alpha1.md §4.1 the default sample rate
+// is 1% with operator override via this REST surface. Phase F ships
+// the API skeleton; the tokenizer service polls the control plane (or
+// reads from a shared store wired in SLICE-extra) to consume the
+// override. The route is auth-gated by `require_auth` so only
+// authenticated operators (TenantWrite permission required for POST)
+// can mutate.
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct TokenizerSamplingRateReq {
+    /// Tenant the override applies to. Required.
+    tenant_id: String,
+    /// Model the override applies to (e.g. "claude-3-5-sonnet"). Required.
+    model: String,
+    /// New sample rate in [0.0, 1.0]. 0 disables sampling for the
+    /// (tenant, model). 1.0 forces 100% sampling (matches the cool-down
+    /// rate). Required.
+    rate: f64,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenizerSamplingRateResp {
+    tenant_id: String,
+    model: String,
+    rate: f64,
+    /// Whether the rate is currently overridden by a cool-down window
+    /// (spec §4.3). Always `false` for POST responses; Phase F GET
+    /// reads the live tokenizer-service state when it ships.
+    in_cool_down: bool,
+}
+
+async fn post_tokenizer_sampling_rate(
+    Extension(principal): Extension<Principal>,
+    Json(req): Json<TokenizerSamplingRateReq>,
+) -> Result<Json<TokenizerSamplingRateResp>, StatusCode> {
+    if principal.require(Permission::TenantWrite).is_err() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if req.tenant_id.is_empty() || req.model.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    if !(0.0..=1.0).contains(&req.rate) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    // SLICE_05 Phase F: API skeleton only. SLICE-extra wires the
+    // tokenizer-service polling path that materialises this override
+    // into the SampleRateState map; for now we echo the accepted
+    // value so client integrations can be smoke-tested.
+    info!(
+        subject = %principal.subject,
+        tenant = %req.tenant_id,
+        model = %req.model,
+        rate = req.rate,
+        "tokenizer sampling rate override accepted (SLICE_05 skeleton — persistence wired in SLICE-extra)"
+    );
+    Ok(Json(TokenizerSamplingRateResp {
+        tenant_id: req.tenant_id,
+        model: req.model,
+        rate: req.rate,
+        in_cool_down: false,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenizerSamplingRateQuery {
+    tenant_id: String,
+    model: String,
+}
+
+async fn get_tokenizer_sampling_rate(
+    Extension(principal): Extension<Principal>,
+    axum::extract::Query(q): axum::extract::Query<TokenizerSamplingRateQuery>,
+) -> Result<Json<TokenizerSamplingRateResp>, StatusCode> {
+    // Any authenticated principal can read.
+    let _ = principal;
+    if q.tenant_id.is_empty() || q.model.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    // SLICE_05 Phase F skeleton: returns the spec §4.1 default until
+    // the tokenizer-service-poll path lands in SLICE-extra. Clients
+    // wiring against this API today should treat the response as the
+    // baseline rate, not the live sampling decision.
+    Ok(Json(TokenizerSamplingRateResp {
+        tenant_id: q.tenant_id,
+        model: q.model,
+        rate: 0.01, // Spec §4.1 default.
+        in_cool_down: false,
+    }))
 }
 
 

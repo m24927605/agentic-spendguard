@@ -47,6 +47,8 @@ use crate::proto::tokenizer::v1::{
     tokenizer_server::Tokenizer as TokenizerSvcTrait, ShadowVerifyRequest, ShadowVerifyResponse,
     TokenizeRequest, TokenizeResponse,
 };
+use crate::shadow::worker::{ShadowEvent, ShadowWorkerHandle};
+use spendguard_tokenizer::encoders::EncoderKind;
 use spendguard_tokenizer::{Tokenizer, TokenizerError};
 
 // ============================================================================
@@ -88,16 +90,54 @@ pub(crate) const MAX_MESSAGE_CONTENT_LEN: usize = 1 << 20;
 /// Service struct holding a shared library handle. Constructed once
 /// in main(); cloned cheaply on every RPC dispatch because
 /// `Arc<Tokenizer>` is cheap-clone-and-share by design.
+///
+/// SLICE_05: also holds an optional [`ShadowWorkerHandle`] for
+/// fire-and-forget Tier 1 shadow event submission. The handle is
+/// `Option<…>` because SLICE_03 / SLICE_04 callers (existing tests +
+/// the build-up bootstrap path) construct the service without a worker.
+/// When `Some` the service handler tries-sends an event AFTER returning
+/// the Tier 2 response to the caller — Tier 2 hot path latency is
+/// structurally unaffected because the channel is bounded + try_send
+/// is non-blocking + the send result is intentionally ignored.
 #[derive(Clone)]
 pub struct TokenizerSvc {
     tokenizer: Arc<Tokenizer>,
+    shadow_worker: Option<ShadowWorkerHandle>,
+    /// Per-request tenant id pulled from a gRPC metadata header.
+    /// Empty when the caller is anonymous (test / library form).
+    /// Phase F's control plane API references this for the per-(tenant,
+    /// model) override surface.
+    tenant_header_name: String,
 }
 
 impl TokenizerSvc {
     pub fn new(tokenizer: Arc<Tokenizer>) -> Self {
-        Self { tokenizer }
+        Self {
+            tokenizer,
+            shadow_worker: None,
+            tenant_header_name: DEFAULT_TENANT_METADATA_HEADER.to_string(),
+        }
+    }
+
+    /// Set the shadow worker handle. Returns Self for fluent chaining
+    /// in main.rs's boot sequence.
+    pub fn with_shadow_worker(mut self, h: ShadowWorkerHandle) -> Self {
+        self.shadow_worker = Some(h);
+        self
+    }
+
+    /// Override the tenant metadata header (default
+    /// `x-spendguard-tenant-id`). Surfaced for tests + future
+    /// multi-tenant routing.
+    pub fn with_tenant_header(mut self, name: impl Into<String>) -> Self {
+        self.tenant_header_name = name.into();
+        self
     }
 }
+
+/// gRPC metadata header carrying the caller's tenant id. The default
+/// matches the sidecar convention.
+pub const DEFAULT_TENANT_METADATA_HEADER: &str = "x-spendguard-tenant-id";
 
 #[tonic::async_trait]
 impl TokenizerSvcTrait for TokenizerSvc {
@@ -105,6 +145,27 @@ impl TokenizerSvcTrait for TokenizerSvc {
         &self,
         request: Request<TokenizeRequest>,
     ) -> Result<Response<TokenizeResponse>, Status> {
+        // SLICE_05: pull the tenant id from the gRPC metadata header
+        // BEFORE consuming the Request. R2 B5: parse as UUID; invalid
+        // UUIDs are rejected with InvalidArgument so misconfigured
+        // callers fail closed. Absent / empty header yields None and
+        // the shadow path is silently skipped for the request (test +
+        // anonymous library form).
+        let tenant_id: Option<uuid::Uuid> = match request
+            .metadata()
+            .get(&self.tenant_header_name)
+            .and_then(|v| v.to_str().ok())
+        {
+            None => None,
+            Some(s) if s.is_empty() => None,
+            Some(s) => Some(uuid::Uuid::parse_str(s).map_err(|e| {
+                Status::invalid_argument(format!(
+                    "{}: invalid UUID `{s}`: {e}",
+                    self.tenant_header_name
+                ))
+            })?),
+        };
+
         let proto_req = request.into_inner();
 
         // ── Round-2 fix M6: DoS protection request-shape caps ──────
@@ -156,6 +217,57 @@ impl TokenizerSvcTrait for TokenizerSvc {
             Ok(resp) => resp,
             Err(err) => return Err(map_tokenizer_error(err)),
         };
+
+        // SLICE_05: fire-and-forget shadow event AFTER computing the
+        // Tier 2 response. The send is non-blocking; the result is
+        // intentionally ignored for hot-path latency, but R2 M5 wires
+        // Prometheus counters so silent shadow drops surface in /metrics.
+        // Only T2 results with a known kind go to the worker; T3 fallback
+        // (Tier 3 heuristic) is excluded because there is no encoder to
+        // compare against.
+        //
+        // R2 M2: chat-shape (messages array) is SKIPPED in SLICE_05.
+        // Per-vendor message shape (Anthropic `Human:` / `Assistant:`
+        // role markers, Gemini `contents[role]`) needs honest
+        // round-tripping into the provider count_tokens schema; the
+        // SLICE_05 flatten was an approximation that would generate
+        // false drift alerts. Deferred to SLICE-extra; tracked as
+        // GH issue.
+        //
+        // R2 B5: tenant_id must be Some(uuid) for the worker to dispatch
+        // — anonymous callers (no header) yield None and the shadow
+        // path is silently skipped.
+        if let (Some(ref worker), Some(tenant_uuid)) = (&self.shadow_worker, tenant_id) {
+            if let Some(kind) = encoder_kind_from_str(&lib_resp.kind) {
+                // R2 M2: skip chat-shape requests; raw_text only.
+                if lib_req.raw_text.is_empty() && !lib_req.messages.is_empty() {
+                    crate::shadow::worker::SHADOW_SKIPPED_CHAT_SHAPE
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    let event = ShadowEvent {
+                        tenant_id: tenant_uuid,
+                        model: lib_req.model.clone(),
+                        encoder_kind: kind,
+                        t2_input_tokens: lib_resp.input_tokens,
+                        t2_tokenizer_version_id: lib_resp.tokenizer_version_id.clone(),
+                        raw_text: lib_req.raw_text.clone(),
+                    };
+                    match worker.try_send(event) {
+                        Ok(()) => {}
+                        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                            crate::shadow::worker::SHADOW_DROPPED_FULL
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                            crate::shadow::worker::SHADOW_WORKER_DEAD
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            warn!("shadow worker dead — drift detection offline");
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(Response::new(lib_resp.into()))
     }
 
@@ -177,6 +289,28 @@ impl TokenizerSvcTrait for TokenizerSvc {
         ))
     }
 }
+
+/// SLICE_05 — map the string `kind` the library returns to the
+/// strongly-typed `EncoderKind` the shadow worker dispatches on. Tier 3
+/// (HEURISTIC) returns None because there is no encoder to compare
+/// against.
+fn encoder_kind_from_str(kind: &str) -> Option<EncoderKind> {
+    match kind {
+        "OPENAI_TIKTOKEN" => Some(EncoderKind::OpenAi),
+        "ANTHROPIC_BPE" => Some(EncoderKind::Anthropic),
+        "GEMINI_BPE" => Some(EncoderKind::Gemini),
+        "COHERE_BPE" => Some(EncoderKind::Cohere),
+        "SENTENCEPIECE_LLAMA" => Some(EncoderKind::Llama),
+        _ => None,
+    }
+}
+
+// R2 M2: text_for_shadow flatten REMOVED. Chat-shape requests are
+// skipped from shadow sampling in SLICE_05 because the naive flatten
+// (role: content concatenation) does not match the per-vendor message
+// shape Anthropic / Gemini count_tokens expects — producing false drift
+// alerts. raw_text shadow paths continue. Honest per-vendor chat
+// shadowing deferred to SLICE-extra (tracked as GH issue).
 
 /// Translate [`TokenizerError`] to a tonic `Status`. Per spec §8 the
 /// service surfaces:
