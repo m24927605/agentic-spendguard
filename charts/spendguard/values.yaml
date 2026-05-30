@@ -304,6 +304,26 @@ outputPredictor:
   cacheTtlSeconds: 300
   # Unknown-model context window fallback per spec §3.3.
   unknownModelContextWindow: 8000
+  # ── SLICE_07: Strategy C plugin wiring ──────────────────────────
+  # per output-predictor-plugin-contract-v1alpha1.md.
+  # Empty pluginEndpointDatabaseUrl = Strategy C skeleton mode:
+  # every tenant lookup returns NotConfigured so Predict falls to
+  # Strategy B silently (per spec §11). Setting this enables
+  # Strategy C and REQUIRES pluginClientSecretName under
+  # chart.profile=production (production gate enforces).
+  # Distinct from databaseUrl because the registry lives in
+  # control_plane DB while output_distribution_cache lives in
+  # canonical_ingest DB; separate pools per spec §8.
+  pluginEndpointDatabaseUrl: ""
+  # Plugin endpoint cache TTL (spec §6.3 — 60s ceiling so a
+  # force-reset via control plane API is reflected within one
+  # health-check cycle).
+  pluginEndpointCacheTtlSeconds: 60
+  # Secret name carrying SpendGuard's client cert + key + the
+  # customer trust CA (PEMs under keys tls.crt / tls.key / ca.crt).
+  # Required under chart.profile=production when Strategy C is
+  # enabled. Mounted at /etc/spendguard/plugin-client/.
+  pluginClientSecretName: ""
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }

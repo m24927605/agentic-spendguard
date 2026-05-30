@@ -26,8 +26,11 @@ use tracing_subscriber::EnvFilter;
 
 use spendguard_output_predictor::{
     cache::OutputDistributionCache,
+    circuit_breaker::{CircuitBreakerConfig, PluginCircuitBreaker},
     config::Config,
     context_window::ContextWindowTable,
+    endpoint_cache::EndpointCache,
+    plugin_client::{PluginClient, PluginClientTls},
     proto::output_predictor::v1::output_predictor_server::OutputPredictorServer,
     server::OutputPredictorSvc,
 };
@@ -89,11 +92,60 @@ async fn main() -> Result<()> {
         Duration::from_secs(cfg.cache_ttl_seconds),
     );
 
+    // ── SLICE_07 Phase D: Strategy C wiring ───────────────────────
+    //
+    // Per output-predictor-plugin-contract-v1alpha1.md §8: plugin
+    // endpoint registry lives in the control_plane DB. The endpoint
+    // cache reads from a SEPARATE pool from the output_distribution_cache
+    // (which lives in canonical_ingest DB) to avoid accidental
+    // cross-DB DSN reuse.
+    //
+    // Empty plugin_endpoint_database_url = skeleton mode: every
+    // tenant lookup returns NotConfigured so strategy_c falls to
+    // B silently. Production Helm gate (Phase D below) rejects
+    // the empty case when chart.profile=production.
+    let plugin_endpoint_pool = if cfg.plugin_endpoint_database_url.is_empty() {
+        warn!(
+            "SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_ENDPOINT_DATABASE_URL not set — \
+             Strategy C running in skeleton mode (every tenant lookup returns \
+             NotConfigured; Predict falls to Strategy B). Production Helm profile \
+             rejects this fallback when chart.profile=production AND at least \
+             one tenant has registered a plugin endpoint."
+        );
+        None
+    } else {
+        let p = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(3)
+            .acquire_timeout(Duration::from_secs(5))
+            .connect(&cfg.plugin_endpoint_database_url)
+            .await
+            .context("connect to control_plane DB for predictor_plugin_endpoints lookup")?;
+        info!("predictor_plugin_endpoints pool connected");
+        Some(p)
+    };
+    let endpoint_cache = EndpointCache::new(
+        plugin_endpoint_pool,
+        Duration::from_secs(cfg.plugin_endpoint_cache_ttl_seconds),
+    );
+
+    // Plugin client TLS — all-or-none per the same pattern the
+    // server-side mTLS uses (build_server_tls_config). Partial
+    // config is a hard boot failure to fail-closed against
+    // accidental production plaintext.
+    let plugin_client_tls = build_plugin_client_tls_config(&cfg)
+        .context("loading plugin client mTLS config")?;
+    let plugin_client = PluginClient::new(plugin_client_tls);
+
+    let plugin_breaker = PluginCircuitBreaker::new(CircuitBreakerConfig::default());
+
     // ── Build service ─────────────────────────────────────────────
     let svc = OutputPredictorSvc::new(
         cache,
         context_window,
         cfg.unknown_model_context_window,
+        endpoint_cache,
+        plugin_client,
+        plugin_breaker,
     );
     let tonic_svc = OutputPredictorServer::new(svc)
         // Match the tokenizer's DoS posture: 1 MiB decoded message
@@ -248,6 +300,39 @@ async fn bind_tcp(
         .serve_with_shutdown(listen_addr, shutdown_signal())
         .await
         .context("tonic TCP gRPC server failed")
+}
+
+/// SLICE_07 Phase D: build the SpendGuard side of the plugin mTLS
+/// (cert + key + customer trust CA). All-or-none like
+/// `build_server_tls_config` — partial config is a hard boot failure
+/// because plaintext to a customer endpoint violates spec §3.1
+/// (mTLS-only auth contract).
+///
+/// Empty config = `Ok(None)`: skeleton/demo mode where strategy_c.rs
+/// still works (the plugin_client logs a warn at boot and tonic
+/// channels are plaintext). Production Helm profile rejects this
+/// fallback via the chart's required-input gate (Phase D values).
+fn build_plugin_client_tls_config(cfg: &Config) -> Result<Option<PluginClientTls>> {
+    use std::path::PathBuf;
+    match (
+        &cfg.plugin_client_cert_pem,
+        &cfg.plugin_client_key_pem,
+        &cfg.plugin_trust_ca_pem,
+    ) {
+        (None, None, None) => Ok(None),
+        (Some(cert), Some(key), Some(ca)) => Ok(Some(PluginClientTls {
+            client_cert_pem: PathBuf::from(cert),
+            client_key_pem: PathBuf::from(key),
+            trust_ca_pem: PathBuf::from(ca),
+        })),
+        _ => Err(anyhow::anyhow!(
+            "partial plugin client mTLS config: must set all of \
+             SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_CLIENT_CERT_PEM / \
+             PLUGIN_CLIENT_KEY_PEM / PLUGIN_TRUST_CA_PEM, or none. Spec §3.1 \
+             requires mTLS for customer plugin endpoints; plaintext to a \
+             customer service is a security policy violation."
+        )),
+    }
 }
 
 /// Build server TLS config when cert+key+ca paths are all set; partial
@@ -485,6 +570,44 @@ mod tests {
             "error must mention refusing to overwrite, got: {msg}"
         );
         assert!(path.exists());
+    }
+
+    #[test]
+    fn build_plugin_client_tls_config_all_or_none() {
+        let mut cfg = Config {
+            listen_addr: "127.0.0.1:0".into(),
+            uds_path: None,
+            tls_cert_pem: None,
+            tls_key_pem: None,
+            tls_ca_pem: None,
+            metrics_addr: "".into(),
+            region: "test".into(),
+            profile: "demo".into(),
+            database_url: "".into(),
+            cache_ttl_seconds: 300,
+            unknown_model_context_window: 8000,
+            context_window_toml_path: "data/model_context_window.toml".into(),
+            plugin_endpoint_database_url: "".into(),
+            plugin_endpoint_cache_ttl_seconds: 60,
+            plugin_client_cert_pem: None,
+            plugin_client_key_pem: None,
+            plugin_trust_ca_pem: None,
+        };
+        // None set → Ok(None): demo / skeleton mode.
+        assert!(build_plugin_client_tls_config(&cfg).expect("ok").is_none());
+        // Partial → Err (cert only).
+        cfg.plugin_client_cert_pem = Some("/tmp/plugin-cert.pem".into());
+        let err = build_plugin_client_tls_config(&cfg).expect_err("partial rejected");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("partial plugin client mTLS config"), "got: {msg}");
+        // All three → Ok(Some).
+        cfg.plugin_client_key_pem = Some("/tmp/plugin-key.pem".into());
+        cfg.plugin_trust_ca_pem = Some("/tmp/plugin-ca.pem".into());
+        let tls = build_plugin_client_tls_config(&cfg).expect("ok");
+        let tls = tls.expect("should be Some");
+        assert_eq!(tls.client_cert_pem.to_string_lossy(), "/tmp/plugin-cert.pem");
+        assert_eq!(tls.client_key_pem.to_string_lossy(), "/tmp/plugin-key.pem");
+        assert_eq!(tls.trust_ca_pem.to_string_lossy(), "/tmp/plugin-ca.pem");
     }
 
     #[test]

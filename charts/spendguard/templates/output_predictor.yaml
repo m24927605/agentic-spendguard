@@ -21,6 +21,19 @@
 {{- if not .Values.outputPredictor.databaseUrl -}}
 {{- fail "outputPredictor.databaseUrl is required under chart.profile=production (output_distribution_cache lookup per spec §4.2 — empty databaseUrl forces every Predict to L1 cold-start which defeats SLICE_06's purpose)" -}}
 {{- end -}}
+{{- /* SLICE_07 Phase D: Strategy C plugin wiring.
+       per output-predictor-plugin-contract-v1alpha1.md:
+         - §3.1: mTLS-only auth — production MUST provide plugin client cert
+         - §8.1: plugin endpoints registered via control plane REST API;
+           output_predictor reads from control_plane DB
+       When the operator sets `pluginEndpointDatabaseUrl`, they are
+       enabling Strategy C — the plugin client mTLS secret MUST also be
+       set; partial config is a spec §3.1 violation. */ -}}
+{{- if .Values.outputPredictor.pluginEndpointDatabaseUrl -}}
+{{- if not .Values.outputPredictor.pluginClientSecretName -}}
+{{- fail "outputPredictor.pluginClientSecretName is required when pluginEndpointDatabaseUrl is set under chart.profile=production (spec §3.1 mTLS-only auth — plaintext to a customer plugin endpoint is forbidden)" -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -77,6 +90,22 @@ spec:
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_TLS_KEY_PEM,                value: "/etc/spendguard/tls/tls.key" }
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_TLS_CA_PEM,                 value: "/etc/spendguard/tls/ca.crt"  }
             {{- end }}
+            {{- /* SLICE_07 Phase D: Strategy C plugin wiring.
+                   pluginEndpointDatabaseUrl points at the control_plane DB
+                   for the predictor_plugin_endpoints registry (spec §8).
+                   pluginEndpointCacheTtlSeconds is the cache TTL (60s default
+                   per spec §6.3). pluginClientSecretName mounts SpendGuard's
+                   client cert + key + the customer trust CA for the mTLS
+                   handshake to the customer plugin endpoint (spec §3.1). */ -}}
+            {{- if .Values.outputPredictor.pluginEndpointDatabaseUrl }}
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_ENDPOINT_DATABASE_URL, value: {{ .Values.outputPredictor.pluginEndpointDatabaseUrl | quote }} }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_ENDPOINT_CACHE_TTL_SECONDS, value: {{ .Values.outputPredictor.pluginEndpointCacheTtlSeconds | quote }} }
+            {{- end }}
+            {{- if .Values.outputPredictor.pluginClientSecretName }}
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_CLIENT_CERT_PEM, value: "/etc/spendguard/plugin-client/tls.crt" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_CLIENT_KEY_PEM,  value: "/etc/spendguard/plugin-client/tls.key" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_TRUST_CA_PEM,    value: "/etc/spendguard/plugin-client/ca.crt"  }
+            {{- end }}
           volumeMounts:
             # read-only rootfs requires /tmp writable
             - name: tmp
@@ -88,6 +117,11 @@ spec:
             {{- if .Values.outputPredictor.mtlsSecretName }}
             - name: tls
               mountPath: /etc/spendguard/tls
+              readOnly: true
+            {{- end }}
+            {{- if .Values.outputPredictor.pluginClientSecretName }}
+            - name: plugin-client-tls
+              mountPath: /etc/spendguard/plugin-client
               readOnly: true
             {{- end }}
           livenessProbe:
@@ -117,6 +151,11 @@ spec:
         - name: tls
           secret:
             secretName: {{ .Values.outputPredictor.mtlsSecretName | quote }}
+        {{- end }}
+        {{- if .Values.outputPredictor.pluginClientSecretName }}
+        - name: plugin-client-tls
+          secret:
+            secretName: {{ .Values.outputPredictor.pluginClientSecretName | quote }}
         {{- end }}
 {{- /* Service gating mirrors tokenizer SLICE_03 R3 N2 — UDS-only mode
        does NOT render a Service (main.rs binds UDS xor TCP). */ -}}
