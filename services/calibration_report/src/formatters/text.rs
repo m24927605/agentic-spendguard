@@ -203,7 +203,7 @@ fn truncate(s: &str, n: usize) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::report::{Recommendation, Window};
+    use crate::report::{DriftAlert, Recommendation, Window};
     use chrono::{TimeZone, Utc};
 
     fn fixture() -> Report {

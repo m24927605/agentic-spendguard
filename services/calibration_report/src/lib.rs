@@ -35,6 +35,7 @@ pub mod cli;
 pub mod formatters;
 pub mod recommendations;
 pub mod report;
+pub mod self_audit;
 pub mod sql_queries;
 pub mod verify_chain_wrapper;
 

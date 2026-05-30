@@ -6,13 +6,15 @@
 //!
 //! 1. Parse CLI.
 //! 2. Enforce cross-tenant scope (§5.2). Mismatch → exit 2 + emit
-//!    `spendguard.audit.calibration.unauthorized_access` (Phase C).
+//!    `spendguard.audit.calibration.unauthorized_access`.
 //! 3. Open canonical Postgres pool (sqlx tls-rustls).
-//! 4. Run §3 queries inside a per-tenant RLS transaction.
-//! 5. Run recommendation engine (§8.1). Phase B.
-//! 6. (Phase C) optional verify-chain replay.
+//! 4. Run §3 queries inside a per-tenant RLS transaction. Routes
+//!    cache vs canonical per `--proof-mode`.
+//! 5. Run §8 recommendation engine.
+//! 6. If `--verify-chain` set: invoke `spendguard_canonical_ingest::
+//!    verify_chain_lib::verify_chain` and stop on failure with exit 3.
 //! 7. Render via formatter.
-//! 8. Emit self-audit CloudEvent (§5.3). Phase C.
+//! 8. Emit `spendguard.audit.calibration.report_generated` (§5.3).
 //! 9. Exit per `Report::exit_code()`.
 
 use clap::Parser;
@@ -20,25 +22,23 @@ use sqlx::postgres::PgPoolOptions;
 use spendguard_calibration_report::{
     cli::{Cli, ProofMode, Subcommand},
     formatters::{self, FormatOptions},
-    recommendations,
+    recommendations, self_audit,
     report::{Report, ReportExitCode, Window},
     sql_queries::{
-        self, fetch_calibration_ratios, fetch_drift_alerts, fetch_run_level_counts,
-        fetch_tier_distribution, open_tenant_tx,
+        self, fetch_calibration_ratios, fetch_calibration_ratios_cache_mode,
+        fetch_drift_alerts, fetch_run_level_counts, fetch_tier_distribution, open_tenant_tx,
     },
+    verify_chain_wrapper,
 };
 use std::process::ExitCode;
 use tracing::{error, info, warn};
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    // Install rustls default crypto provider for sqlx + tonic. Mirrors
-    // doctor / sidecar / ttl_sweeper conventions.
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
         .expect("rustls install_default");
 
-    // JSON-line tracing so the CLI plays nicely with operator pipelines.
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -52,7 +52,7 @@ async fn main() -> ExitCode {
 
     match cli.subcommand() {
         Subcommand::Report => run_report(cli).await,
-        Subcommand::VerifyChain => run_verify_chain(cli).await,
+        Subcommand::VerifyChain => run_verify_chain_subcommand(cli).await,
     }
 }
 
@@ -77,11 +77,11 @@ async fn run_report(cli: Cli) -> ExitCode {
         );
         eprintln!(
             "calibration-report: caller {subj} not authorised for tenant {tenant} \
-             (spec §5.2). Audit event emitted to canonical_ingest if --self-audit=true."
+             (spec §5.2). Audit event emitted."
         );
-        // Phase C: emit `spendguard.audit.calibration.unauthorized_access`.
-        // For Phase A we log the rejection so a SIEM tail picks it up.
-        emit_unauthorized_access_log(&cli);
+        if cli.self_audit {
+            self_audit::emit_unauthorized_access(&cli);
+        }
         return ReportExitCode::QueryError.to_process_exit_code();
     }
 
@@ -145,12 +145,12 @@ async fn run_report(cli: Cli) -> ExitCode {
     };
 
     // ---- §3 queries ---------------------------------------------
-    let report = match run_queries(&pool, &tenant_uuid, from, to, cli.effective_proof_mode()).await
-    {
+    let effective_mode = cli.effective_proof_mode();
+    let mut report = match run_queries(&pool, &tenant_uuid, from, to, effective_mode).await {
         Ok(mut r) => {
             r.tenant_id = tenant_uuid.to_string();
             r.window = Window { from, to };
-            r.proof_mode = match cli.effective_proof_mode() {
+            r.proof_mode = match effective_mode {
                 ProofMode::Cache => "cache".into(),
                 ProofMode::Canonical => "canonical".into(),
             };
@@ -163,15 +163,30 @@ async fn run_report(cli: Cli) -> ExitCode {
         }
     };
 
-    // Phase B will run the recommendation engine here.
-    let mut report = report;
+    // ---- §8 recommendation engine -------------------------------
     report.recommendations = recommendations::evaluate(&report);
 
-    // Phase C will wire verify-chain integration; Phase A scaffolds
-    // the marker on the report.
+    // ---- §3.4 verify-chain integration --------------------------
     if cli.verify_chain {
         report.verify_chain_run = true;
-        info!("verify-chain integration: Phase C wires the full per-row scan");
+        match verify_chain_wrapper::run_verify_chain(&pool, tenant_uuid, from, to).await {
+            Ok(Some(failure)) => {
+                error!(
+                    event_id = %failure.event_id,
+                    reason = %failure.reason,
+                    "verify-chain failure"
+                );
+                report.verify_chain_failure = Some(failure);
+            }
+            Ok(None) => {
+                info!("verify-chain replay clean");
+            }
+            Err(e) => {
+                error!(error = %e, "verify-chain wrapper error");
+                eprintln!("calibration-report: verify-chain wrapper failed: {e}");
+                return ReportExitCode::QueryError.to_process_exit_code();
+            }
+        }
     }
 
     // ---- Render -------------------------------------------------
@@ -190,18 +205,13 @@ async fn run_report(cli: Cli) -> ExitCode {
         print!("{rendered}");
     }
 
-    // Phase C emits the self-audit CloudEvent here.
+    // ---- Self-audit (§5.3) --------------------------------------
+    let exit_code = report.exit_code();
     if cli.self_audit {
-        info!(
-            tenant = %tenant_uuid,
-            window_from = %report.window.from,
-            window_to = %report.window.to,
-            exit_code = report.exit_code() as u8,
-            "spendguard.audit.calibration.report_generated (Phase C wires full emit)"
-        );
+        self_audit::emit_report_generated(&cli, from, to, exit_code as u8);
     }
 
-    report.exit_code().to_process_exit_code()
+    exit_code.to_process_exit_code()
 }
 
 async fn run_queries(
@@ -209,19 +219,28 @@ async fn run_queries(
     tenant: &uuid::Uuid,
     from: chrono::DateTime<chrono::Utc>,
     to: chrono::DateTime<chrono::Utc>,
-    _proof_mode: ProofMode,
+    proof_mode: ProofMode,
 ) -> Result<Report, sql_queries::QueryError> {
     let mut tx = open_tenant_tx(pool, tenant).await?;
+    // Tier distribution + drift alerts always read from canonical_events
+    // (cache has no tier breakdown; drift_alert is a canonical event type).
     let tier_distribution = fetch_tier_distribution(&mut tx, tenant, from, to).await?;
-    let calibration_ratios = fetch_calibration_ratios(&mut tx, tenant, from, to).await?;
     let drift_alerts = fetch_drift_alerts(&mut tx, tenant, from, to).await?;
     let (proj_exceeded, drift_detected, run_total) =
         fetch_run_level_counts(&mut tx, tenant, from, to).await?;
+    // Calibration ratios depend on proof mode.
+    let calibration_ratios = match proof_mode {
+        ProofMode::Cache => fetch_calibration_ratios_cache_mode(&mut tx, tenant, from, to).await?,
+        ProofMode::Canonical => fetch_calibration_ratios(&mut tx, tenant, from, to).await?,
+    };
     tx.commit().await?;
     Ok(Report {
         tenant_id: tenant.to_string(),
         window: Window { from, to },
-        proof_mode: "cache".into(),
+        proof_mode: match proof_mode {
+            ProofMode::Cache => "cache".into(),
+            ProofMode::Canonical => "canonical".into(),
+        },
         tier_distribution,
         calibration_ratios,
         drift_alerts,
@@ -234,22 +253,65 @@ async fn run_queries(
     })
 }
 
-fn emit_unauthorized_access_log(cli: &Cli) {
-    // Phase A: structured tracing log so SIEM consumers can pick up
-    // the rejection. Phase C wires the signed CloudEvent emission.
-    info!(
-        event = "spendguard.audit.calibration.unauthorized_access",
-        tenant = cli.tenant.as_deref().unwrap_or("?"),
-        auth_subject = cli.auth_subject.as_deref().unwrap_or("?"),
-        "cross-tenant rejection (spec §5.2)"
-    );
-}
-
 /// `spendguard-calibration-report verify-chain` — inline shortcut to
-/// the canonical_ingest replay verifier (per spec §3.4). Phase A
-/// returns success unconditionally to keep the dependency graph
-/// compiling; Phase C wires this to the library entry-point.
-async fn run_verify_chain(_cli: Cli) -> ExitCode {
-    info!("verify-chain subcommand: Phase A returns success; Phase C wires full replay");
-    ReportExitCode::Success.to_process_exit_code()
+/// the canonical_ingest replay verifier (per spec §3.4). Re-uses the
+/// library entry point.
+async fn run_verify_chain_subcommand(cli: Cli) -> ExitCode {
+    info!("verify-chain subcommand invoked");
+    let pool = match &cli.canonical_url {
+        Some(url) => match PgPoolOptions::new()
+            .max_connections(2)
+            .connect(url)
+            .await
+        {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("calibration-report verify-chain: DB connect failed: {e}");
+                return ReportExitCode::QueryError.to_process_exit_code();
+            }
+        },
+        None => {
+            eprintln!(
+                "calibration-report verify-chain: --canonical-url (or env \
+                 SPENDGUARD_CALIBRATION_CANONICAL_URL) required"
+            );
+            return ReportExitCode::QueryError.to_process_exit_code();
+        }
+    };
+    let tenant_uuid = cli
+        .tenant
+        .as_deref()
+        .and_then(|s| uuid::Uuid::parse_str(s).ok());
+    if tenant_uuid.is_none() && cli.tenant.is_some() {
+        eprintln!("calibration-report verify-chain: --tenant is not a UUID");
+        return ReportExitCode::QueryError.to_process_exit_code();
+    }
+
+    // Use library API directly so the verify-chain subcommand is a
+    // thin pass-through.
+    let now = chrono::Utc::now();
+    let from = sql_queries::parse_window_anchor(&cli.from, now)
+        .unwrap_or(now - chrono::Duration::days(7));
+    let to = sql_queries::parse_window_anchor(&cli.to, now).unwrap_or(now);
+
+    let args = spendguard_canonical_ingest::verify_chain_lib::VerifyChainArgs {
+        tenant_id: tenant_uuid,
+        check_prediction_mirror: true,
+        from: Some(from),
+        to: Some(to),
+    };
+    match spendguard_canonical_ingest::verify_chain_lib::verify_chain(&pool, &args).await {
+        Ok(summary) => {
+            let json = serde_json::to_string(&summary).unwrap_or_default();
+            println!("{json}");
+            if summary.rows_failed > 0 {
+                return ReportExitCode::VerifyChainFailed.to_process_exit_code();
+            }
+            ReportExitCode::Success.to_process_exit_code()
+        }
+        Err(e) => {
+            eprintln!("calibration-report verify-chain: {e}");
+            ReportExitCode::QueryError.to_process_exit_code()
+        }
+    }
 }
