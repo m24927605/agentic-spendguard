@@ -27,20 +27,24 @@ def _normalise_auth_value(value: bytes | str) -> str:
 
 def extract_spiffe_uri_from_auth_context(auth_context: dict[str | bytes, list[bytes]]) -> str | None:
     """Extract the SpendGuard SPIFFE URI SAN from ``grpc.ServicerContext`` auth data."""
-    candidates: list[str] = []
     normalised: dict[str, list[bytes]] = {}
     for key, values in auth_context.items():
         key_text = key.decode("utf-8", errors="replace") if isinstance(key, bytes) else key
         normalised.setdefault(key_text, []).extend(values)
+    uri_values: list[str] = []
     for key in ("x509_subject_alternative_name", "x509_common_name"):
         for raw in normalised.get(key, []):
             value = _normalise_auth_value(raw)
-            if value.startswith(SVID_PREFIX):
-                candidates.append(value)
-    unique = sorted(set(candidates))
+            if value.startswith("spiffe://"):
+                uri_values.append(value)
+    unique = sorted(set(uri_values))
     if len(unique) > 1:
-        raise ValueError("multiple SpendGuard predictor-client SVID subjects presented")
-    return unique[0] if unique else None
+        raise ValueError("multiple SVID URI subjects presented")
+    if not unique:
+        return None
+    if not unique[0].startswith(SVID_PREFIX):
+        raise ValueError("SVID subject has wrong prefix")
+    return unique[0]
 
 
 def validate_auth_context_tenant(

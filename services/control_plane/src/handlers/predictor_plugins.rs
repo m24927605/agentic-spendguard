@@ -224,10 +224,10 @@ fn validate_register_input(req: &RegisterReq) -> Result<Uuid, (StatusCode, Strin
 }
 
 fn validate_client_cert_id(client_cert_id: &str) -> Result<(), (StatusCode, String)> {
-    if client_cert_id.is_empty() || client_cert_id.len() > 256 {
+    if client_cert_id.is_empty() || client_cert_id.len() > 63 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "client_cert_id must be 1-256 bytes".into(),
+            "client_cert_id must be 1-63 bytes".into(),
         ));
     }
     if !client_cert_id
@@ -935,7 +935,7 @@ mod tests {
             tenant_id: Uuid::new_v4().to_string(),
             endpoint_url: "https://plugin.example/predict".into(),
             server_cert_fingerprint: "a".repeat(64),
-            client_cert_id: "x".repeat(257),
+            client_cert_id: "x".repeat(64),
         };
         let (code, _msg) = validate_register_input(&req).expect_err("oversize");
         assert_eq!(code, StatusCode::BAD_REQUEST);

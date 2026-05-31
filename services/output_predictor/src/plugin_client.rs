@@ -50,7 +50,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use futures::future::FutureExt;
@@ -87,6 +87,13 @@ pub const HANDSHAKE_DEADLINE: Duration = Duration::from_millis(500);
 /// to set its own. strategy_c.rs always wraps the Predict future in
 /// `tokio::time::timeout(50ms)` so this fallback is belt-and-suspenders.
 pub const PER_CALL_TIMEOUT_FALLBACK: Duration = Duration::from_millis(50);
+
+/// Grace period for Kubernetes Secret projected-volume rotation. During
+/// this bounded window we can keep using an already-established HTTP/2
+/// channel if the replacement SVID files are transiently inconsistent.
+/// After the window, fail closed instead of masking a permanent bad or
+/// revoked cert.
+pub const SVID_ROTATION_RELOAD_GRACE: Duration = Duration::from_secs(60);
 
 /// SpendGuard's plugin client identity source.
 #[derive(Debug, Clone)]
@@ -211,6 +218,7 @@ struct CachedChannel {
     /// Cloning is cheap (Arc-backed PluginEndpoint).
     endpoint_snapshot: Arc<PluginEndpoint>,
     material_fingerprint_hex: Option<String>,
+    established_at: Instant,
     channel: Channel,
 }
 
@@ -345,6 +353,14 @@ impl PluginClient {
                 Ok(materials) => Some(materials),
                 Err(err) => {
                     if let Some(cached) = cached_for_endpoint {
+                        if cached.established_at.elapsed() > SVID_ROTATION_RELOAD_GRACE {
+                            return Err(err).with_context(|| {
+                                format!(
+                                    "tenant SVID material reload still failing after {}s grace",
+                                    SVID_ROTATION_RELOAD_GRACE.as_secs()
+                                )
+                            });
+                        }
                         warn!(
                             tenant = %tenant,
                             client_cert_id = %endpoint.client_cert_id,
@@ -387,6 +403,7 @@ impl PluginClient {
             CachedChannel {
                 endpoint_snapshot: endpoint.clone(),
                 material_fingerprint_hex,
+                established_at: Instant::now(),
                 channel: channel.clone(),
             },
         );

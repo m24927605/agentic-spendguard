@@ -436,6 +436,22 @@ def test_client_svid_tenant_mismatch_rejected():
         )
 
 
+def test_client_svid_extra_uri_identity_rejected():
+    subject = expected_svid_subject("018fcf9a-3d2d-7b37-9f21-0f27de0b20c1")
+    auth_context = {
+        "x509_subject_alternative_name": [
+            f"URI:{subject}".encode("utf-8"),
+            b"URI:spiffe://other-platform/workload",
+        ]
+    }
+    with pytest.raises(ValueError, match="multiple SVID URI subjects"):
+        validate_auth_context_tenant(
+            auth_context=auth_context,
+            tenant_id="018fcf9a-3d2d-7b37-9f21-0f27de0b20c1",
+            require_svid=True,
+        )
+
+
 def test_client_svid_missing_cert_fails_closed():
     srv, _ = build_server(expected_tenant_id="tenant-a", require_client_svid=True)
     port = srv.add_insecure_port("127.0.0.1:0")

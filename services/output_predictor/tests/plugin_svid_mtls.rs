@@ -37,7 +37,14 @@ fn client_cert_id_maps_to_bounded_subdirectory() {
 
 #[test]
 fn client_cert_id_path_traversal_fails_closed() {
-    for bad in ["../tenant", "tenant/one", "tenant.one", "tenant one", ".."] {
+    for bad in [
+        "../tenant",
+        "tenant/one",
+        "tenant.one",
+        "tenant one",
+        "..",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+    ] {
         assert!(
             validate_client_cert_id(bad).is_err(),
             "unsafe client_cert_id must be rejected: {bad}"
