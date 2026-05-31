@@ -102,7 +102,11 @@ pub fn should_emit_drift_alert(agg: &BucketAggregate, cfg: &DriftDetectorConfig)
 /// Build (but do not sign or emit) the prediction_drift_alert
 /// CloudEvent for a bucket. Separated from the emission step so unit
 /// tests can verify the envelope shape without a tonic Channel.
-pub fn build_drift_alert(agg: &BucketAggregate, z_score: f32, cfg: &DriftDetectorConfig) -> CloudEvent {
+pub fn build_drift_alert(
+    agg: &BucketAggregate,
+    z_score: f32,
+    cfg: &DriftDetectorConfig,
+) -> CloudEvent {
     use bytes::Bytes;
     let now = Utc::now();
     // R2 M2: payload reports baseline_* fields (window [now-30d, now-7d]
@@ -362,7 +366,7 @@ mod tests {
         agg.stddev_30d = Some(100.0); // inclusive stddev — would damp z
         agg.baseline_mean = Some(100.0); // exclusive baseline
         agg.baseline_stddev = Some(20.0); // exclusive baseline
-        // z must be (150 - 100) / 20 = 2.5, NOT (150 - 140) / 100 = 0.1.
+                                          // z must be (150 - 100) / 20 = 2.5, NOT (150 - 140) / 100 = 0.1.
         let z = compute_z_score(&agg).expect("z");
         assert!((z - 2.5).abs() < 1e-4, "z must use baseline_*, got {z}");
     }
@@ -442,7 +446,10 @@ mod tests {
             "min_samples_for_alert",
             "suggested_action",
         ] {
-            assert!(parsed.get(k).is_some(), "missing key `{k}` in data: {parsed}");
+            assert!(
+                parsed.get(k).is_some(),
+                "missing key `{k}` in data: {parsed}"
+            );
         }
     }
 
@@ -478,9 +485,6 @@ mod tests {
         assert_eq!(n, 1, "exactly one breach must fire");
         let events = sink.events.lock();
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0].r#type,
-            PREDICTION_DRIFT_ALERT_EVENT_TYPE
-        );
+        assert_eq!(events[0].r#type, PREDICTION_DRIFT_ALERT_EVENT_TYPE);
     }
 }

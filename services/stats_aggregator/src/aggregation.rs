@@ -113,7 +113,10 @@ pub struct BucketAggregate {
 pub async fn try_acquire_lock_conn(
     pool: &PgPool,
 ) -> Result<Option<PoolConnection<Postgres>>, anyhow::Error> {
-    let mut conn = pool.acquire().await.context("acquire pool conn for advisory lock")?;
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("acquire pool conn for advisory lock")?;
     let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
         .bind(STATS_AGGREGATOR_ADVISORY_LOCK_ID)
         .fetch_one(&mut *conn)
@@ -148,9 +151,7 @@ pub async fn try_acquire_lock_conn(
 /// session disconnects (immediately on drop here, since we drop the
 /// connection at the end). We still surface the error so operators see
 /// any anomalies in the cycle metrics.
-pub async fn release_lock_conn(
-    mut conn: PoolConnection<Postgres>,
-) -> Result<(), anyhow::Error> {
+pub async fn release_lock_conn(mut conn: PoolConnection<Postgres>) -> Result<(), anyhow::Error> {
     sqlx::query("SELECT pg_advisory_unlock($1)")
         .bind(STATS_AGGREGATOR_ADVISORY_LOCK_ID)
         .execute(&mut *conn)
@@ -485,7 +486,10 @@ mod tests {
         // Stability check — the lock id must NEVER change once shipped
         // because a different id means concurrent old + new deployments
         // would both think they hold the singleton lock.
-        assert_eq!(STATS_AGGREGATOR_ADVISORY_LOCK_ID, 0x5350_4441_4747_5253_u64 as i64);
+        assert_eq!(
+            STATS_AGGREGATOR_ADVISORY_LOCK_ID,
+            0x5350_4441_4747_5253_u64 as i64
+        );
     }
 
     #[test]
