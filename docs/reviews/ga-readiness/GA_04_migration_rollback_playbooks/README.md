@@ -12,8 +12,9 @@ GA_04 adds a checked-in migration inventory, operator playbooks for migration an
 | `CONTAINER=spendguard-ga04-migrations EVIDENCE_PREFIX=/tmp/spendguard-ga04 scripts/verify-migrations-postgres16.sh` | PASS - applied 77 direct deploy migrations on Postgres 16.14 |
 | `helm template spendguard charts/spendguard --set chart.profile=demo` | PASS |
 | `helm template spendguard charts/spendguard -f charts/spendguard/values-production.example.yaml` | PASS |
-| `scripts/release/build-release-bundle.sh --output /tmp/spendguard-ga04-release-bundle` | PASS |
-| `scripts/release/check-release-bundle.sh /tmp/spendguard-ga04-release-bundle` | PASS |
+| `scripts/release/build-release-bundle.sh --output /tmp/spendguard-ga04-release-bundle-r2` | PASS |
+| `scripts/release/check-release-bundle.sh /tmp/spendguard-ga04-release-bundle-r2` | PASS |
+| `POSTGRES_IMAGE=postgres:15-alpine CONTAINER=spendguard-ga04-pg15-negative ... scripts/verify-migrations-postgres16.sh` | PASS - failed closed with `expected Postgres 16.x` |
 | Migration playbook backup/restore checkpoints | Covered in `docs/operations/migration-playbook.md` |
 | Rollback decision tree and forward-fix warnings | Covered in `docs/operations/rollback-playbook.md` |
 
@@ -21,12 +22,13 @@ GA_04 adds a checked-in migration inventory, operator playbooks for migration an
 
 | Item | Value |
 |---|---|
-| Evidence refresh commit | `6586c694da03b52ad5bc105f943ab87994f5a2e0` plus R1 retry-stability patch in this branch |
+| Evidence refresh commit | `e0b708c7aa97ba47562a439d8e1f9e842626f14f` before this evidence-note update |
 | Postgres image | `postgres:16-alpine` |
 | Server version evidence | `/tmp/spendguard-ga04-postgres-version.txt`: `server_version_num=160014`, `server_version=16.14` |
 | Helm demo render | `/tmp/spendguard-ga04-helm-demo.yaml` |
 | Helm production render | `/tmp/spendguard-ga04-helm-production.yaml` |
-| Release bundle | `/tmp/spendguard-ga04-release-bundle-r1` |
+| Release bundle | `/tmp/spendguard-ga04-release-bundle-r2` |
+| Postgres 15 negative transcript | `/tmp/spendguard-ga04-pg15-negative.out` |
 
 ## Postgres 16 Smoke Output
 
