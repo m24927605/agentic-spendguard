@@ -431,10 +431,10 @@ mod tests {
     }
 
     #[test]
-	    fn render_metrics_contains_known_names() {
-	        let body = render_metrics();
-	        assert!(body.contains("spendguard_run_cost_projector_project_total"));
-	        assert!(body.contains("spendguard_run_cost_projector_project_latency_seconds_bucket"));
-	        assert!(body.contains("spendguard_run_cost_projector_terminate_run_total"));
-	    }
+    fn render_metrics_contains_known_names() {
+        let body = render_metrics();
+        assert!(body.contains("spendguard_run_cost_projector_project_total"));
+        assert!(body.contains("spendguard_run_cost_projector_project_latency_seconds_bucket"));
+        assert!(body.contains("spendguard_run_cost_projector_terminate_run_total"));
+    }
 }

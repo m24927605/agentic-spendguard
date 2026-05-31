@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use spendguard_leases::{
-    spawn_lease_loop, DisabledLease, K8sLease, LeaseConfig, LeaseManager, LeaseState, PostgresLease,
+    DisabledLease, K8sLease, LeaseConfig, LeaseManager, LeaseState, PostgresLease, spawn_lease_loop,
 };
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -11,7 +11,7 @@ use spendguard_outbox_forwarder::{
     config::Config,
     forward::forward_batch,
     metrics::{LoopOutcome, OutboxForwarderMetrics, SkipReason},
-    state::{build_canonical_client, build_pg_pool, AppState},
+    state::{AppState, build_canonical_client, build_pg_pool},
 };
 
 #[tokio::main(flavor = "multi_thread")]
@@ -104,24 +104,24 @@ async fn main() -> anyhow::Result<()> {
                 info!("ctrl-c received; exiting");
                 break;
             }
-	            _ = sleep(poll_dur) => {
-	                // S1 invariant: only the leader processes work. Standby
-	                // pods sleep + wait for state changes.
-	                let s = guard.state_rx.borrow().clone();
-	                if let Err(e) = refresh_pending_oldest_age_metric(&state.pg, &metrics).await {
-	                    warn!(err = %e, "failed to refresh pending outbox age metric");
-	                }
-	                // Codex round-9 P2: use expiry-aware is_leader_now()
-	                // instead of plain pattern match. A stalled renewal
-	                // task could leave the watch channel holding a stale
+            _ = sleep(poll_dur) => {
+                // S1 invariant: only the leader processes work. Standby
+                // pods sleep + wait for state changes.
+                let s = guard.state_rx.borrow().clone();
+                if let Err(e) = refresh_pending_oldest_age_metric(&state.pg, &metrics).await {
+                    warn!(err = %e, "failed to refresh pending outbox age metric");
+                }
+                // Codex round-9 P2: use expiry-aware is_leader_now()
+                // instead of plain pattern match. A stalled renewal
+                // task could leave the watch channel holding a stale
                 // Leader value; forwarding under expired leadership
-	                // would let two pods double-send the same outbox row
-	                // to the same downstream sink.
-	                if s.is_leader_now() {
-	                    metrics.set_is_leader(true);
-	                    match forward_batch(&mut state).await {
-	                        Ok(0) => {
-	                            metrics.inc_loop(LoopOutcome::Processed);
+                // would let two pods double-send the same outbox row
+                // to the same downstream sink.
+                if s.is_leader_now() {
+                    metrics.set_is_leader(true);
+                    match forward_batch(&mut state).await {
+                        Ok(0) => {
+                            metrics.inc_loop(LoopOutcome::Processed);
                             tracing::debug!("no pending rows");
                         }
                         Ok(n) => {
@@ -137,11 +137,11 @@ async fn main() -> anyhow::Result<()> {
                     }
                     if let Err(e) = refresh_pending_oldest_age_metric(&state.pg, &metrics).await {
                         warn!(err = %e, "failed to refresh pending outbox age metric after batch");
-	                    }
-	                } else {
-	                    metrics.set_is_leader(false);
-	                    metrics.inc_loop(LoopOutcome::Skipped);
-	                    match &s {
+                    }
+                } else {
+                    metrics.set_is_leader(false);
+                    metrics.inc_loop(LoopOutcome::Skipped);
+                    match &s {
                         LeaseState::Leader { expires_at, .. } => {
                             metrics.inc_skip(SkipReason::LeaseExpired);
                             warn!(expires_at = %expires_at, "lease expired locally; skip batch until renewed");
