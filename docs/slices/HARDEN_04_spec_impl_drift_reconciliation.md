@@ -168,6 +168,7 @@ Reviewer should prioritize citation truthfulness and grep completeness over pros
 | Implementation | codex CLI | Broad grep found calibration-report spec drift too | Added calibration-report spec corrections and grep artifacts |
 | AIT R1 | codex CLI adversarial reviewer | Calibration ratio direction and stats bucket key still drifted | Fixed actual/predicted wording, Strategy C threshold/tests, and `prompt_class` bucket-key prose |
 | AIT R2 | codex CLI adversarial reviewer | Strategy A critical actual/predicted ratios were hidden by formatter special-case | Threshold checks now precede the Strategy A label; recommendation Rule 1 covers any strategy |
+| AIT R3 | codex CLI adversarial reviewer | Strategy C critical under-prediction could render as generic warning | Strategy C under-prediction label now precedes generic warning; text/markdown regressions added |
 
 ---
 

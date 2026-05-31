@@ -150,12 +150,12 @@ fn format_tier_row(tier: &TierDistribution) -> String {
 fn format_calibration_row(r: &CalibrationRatio) -> String {
     let health_marker = if r.p95 > crate::report::CRITICAL_P95_THRESHOLD {
         "  ⚠ P95 exceeds 1.50 critical threshold"
+    } else if r.p95 > 1.05 && r.strategy == "C" {
+        "  ⚠ critical under-prediction (C P95 > 1.05)"
     } else if r.p95 > 1.30 {
         "  ⚠ P95 exceeds 1.30 warning threshold"
     } else if r.strategy == "A" {
         "  (ceiling; expected conservative ratio)"
-    } else if r.p95 > 1.05 && r.strategy == "C" {
-        "  ⚠ under-prediction (C P95 > 1.05)"
     } else {
         "  ✓ healthy"
     };
@@ -437,5 +437,21 @@ mod tests {
         let out = render(&r, &opts(false, false));
         assert!(out.contains("P95 exceeds 1.50 critical threshold"));
         assert!(!out.contains("expected conservative ratio"));
+    }
+
+    #[test]
+    fn strategy_c_under_prediction_beats_generic_warning() {
+        let mut r = fixture();
+        r.calibration_ratios = vec![CalibrationRatio {
+            model: "gpt-4o".into(),
+            strategy: "C".into(),
+            p50: 1.1,
+            p95: 1.31,
+            p99: 1.4,
+            sample_size: 100,
+        }];
+        let out = render(&r, &opts(false, false));
+        assert!(out.contains("critical under-prediction"));
+        assert!(!out.contains("P95 exceeds 1.30 warning threshold"));
     }
 }
