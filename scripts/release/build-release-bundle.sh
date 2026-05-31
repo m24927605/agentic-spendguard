@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'USAGE'
+Usage: scripts/release/build-release-bundle.sh --output DIR
+
+Build a local SpendGuard GA release bundle from a clean checkout.
+USAGE
+}
+
+output_dir=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --output)
+      output_dir="${2:-}"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "unknown argument: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$output_dir" ]]; then
+  echo "--output is required" >&2
+  usage >&2
+  exit 2
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+if [[ -n "$(git status --porcelain)" ]]; then
+  echo "release bundle requires a clean git worktree" >&2
+  git status --short >&2
+  exit 1
+fi
+
+command -v helm >/dev/null 2>&1 || {
+  echo "helm is required to build the release bundle" >&2
+  exit 1
+}
+
+commit_sha="$(git rev-parse HEAD)"
+branch_name="$(git rev-parse --abbrev-ref HEAD)"
+chart_version="$(awk '/^version:/ {print $2; exit}' charts/spendguard/Chart.yaml)"
+timestamp_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+
+rm -rf "$output_dir"
+mkdir -p "$output_dir/charts" "$output_dir/migrations" "$output_dir/sbom"
+
+helm lint charts/spendguard >/dev/null
+helm template spendguard charts/spendguard --set chart.profile=demo >/dev/null
+helm template spendguard charts/spendguard -f scripts/helm-validate-test-values.yaml >/dev/null
+helm package charts/spendguard --destination "$output_dir/charts" >/dev/null
+
+printf '%s\n' "$commit_sha" > "$output_dir/commit.txt"
+cat > "$output_dir/manifest.txt" <<MANIFEST
+release_bundle_version=v1alpha1
+commit=$commit_sha
+branch=$branch_name
+built_at_utc=$timestamp_utc
+chart_version=$chart_version
+helm_version=$(helm version --short 2>/dev/null || helm version)
+release_notes_pointer=docs/release/release-notes-template.md
+MANIFEST
+
+cat > "$output_dir/release-notes.pointer" <<'POINTER'
+docs/release/release-notes-template.md
+POINTER
+
+{
+  printf '# SpendGuard migration inventory\n'
+  printf 'commit=%s\n' "$commit_sha"
+  printf '\n'
+  find services -path '*/migrations/*.sql' -type f | sort | while read -r migration; do
+    checksum="$(shasum -a 256 "$migration" | awk '{print $1}')"
+    printf '%s  %s\n' "$checksum" "$migration"
+  done
+} > "$output_dir/migrations/inventory.txt"
+shasum -a 256 "$output_dir/migrations/inventory.txt" > "$output_dir/migrations/inventory.sha256"
+
+cat > "$output_dir/sbom/README.md" <<'SBOM'
+# SBOM Status
+
+GA_01 records the SBOM slot in the release bundle. GA_09 owns actual SBOM generation, vulnerability scanning, image signing, and provenance verification.
+SBOM
+
+(
+  cd "$output_dir"
+  find . -type f ! -name SHA256SUMS | sort | xargs shasum -a 256 > SHA256SUMS
+)
+
+echo "release bundle written to $output_dir"
