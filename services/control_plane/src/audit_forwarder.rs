@@ -219,7 +219,7 @@ fn row_to_cloudevent(
     let source = required_str(payload, "source")?.to_owned();
     let specversion = required_str(payload, "specversion")?.to_owned();
     let time = payload_timestamp(payload)?;
-    let data = payload.get("data").cloned().unwrap_or(Value::Null);
+    let data = forwarded_data(payload);
     let decision_id = data
         .get("decision_id")
         .and_then(Value::as_str)
@@ -263,6 +263,21 @@ fn payload_timestamp(payload: &Value) -> Result<prost_types::Timestamp, anyhow::
         seconds: parsed.timestamp(),
         nanos: parsed.timestamp_subsec_nanos() as i32,
     })
+}
+
+fn forwarded_data(payload: &Value) -> Value {
+    let mut data = payload.get("data").cloned().unwrap_or(Value::Null);
+    if !data.is_object() {
+        return data;
+    }
+    if let Some(obj) = data.as_object_mut() {
+        for key in ["subject", "actor_subject"] {
+            if let Some(value) = payload.get(key) {
+                obj.entry(key.to_string()).or_insert_with(|| value.clone());
+            }
+        }
+    }
+    data
 }
 
 pub fn ensure_append_accepted(resp: AppendEventsResponse) -> Result<(), anyhow::Error> {
@@ -312,7 +327,9 @@ mod tests {
                 "id": "01918000-0000-7c10-8c10-000000000603",
                 "source": "spendguard-control-plane",
                 "tenantid": tenant_id.to_string(),
+                "subject": format!("plugin/{tenant_id}"),
                 "time": "2026-05-31T12:34:56.789123456Z",
+                "actor_subject": "demo-operator",
                 "data": {
                     "tenant_id": tenant_id.to_string(),
                     "endpoint_url": "https://plugin.example.invalid",
@@ -352,6 +369,16 @@ mod tests {
         assert_eq!(req.events[0].producer_sequence, 7);
         assert_eq!(req.events[0].time.as_ref().unwrap().seconds, 1_780_230_896);
         assert_eq!(req.events[0].time.as_ref().unwrap().nanos, 789_123_456);
+        let data: serde_json::Value =
+            serde_json::from_slice(&req.events[0].data).expect("event data is JSON");
+        assert_eq!(
+            data.get("subject").and_then(Value::as_str),
+            Some("plugin/01918000-0000-7c10-8c10-000000000601")
+        );
+        assert_eq!(
+            data.get("actor_subject").and_then(Value::as_str),
+            Some("demo-operator")
+        );
         assert_eq!(
             req.events[0].r#type,
             "spendguard.audit.plugin_registered.v1alpha1"

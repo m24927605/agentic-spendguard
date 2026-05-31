@@ -173,6 +173,7 @@ Reviewer must inspect real integration tests for tokenizer envelope admission an
 | Review R2 | codex CLI adversarial reviewer | Forwarder must not query RLS-protected outbox through the request-serving role | Added `control_plane_audit_forwarder_role`, production audit-forwarder DB URL, Helm secret key, and boot-time production validation |
 | Review R3 | codex CLI adversarial reviewer | Demo image must install `protoc`; forwarder must preserve stored CloudEvent time | Added `protobuf-compiler`/`libprotobuf-dev` and RFC3339 payload-time parsing regression assertion |
 | Review R4 | codex CLI adversarial reviewer | Production Helm values and kind inventory must include the new control-plane workload | Updated `scripts/helm-validate-test-values.yaml`, kind validation workload/TLS/signing/DB secrets, and chart README secret contract |
+| Review R5 / Staff+ | Software Architect, Backend Architect, Security Engineer, Database Optimizer, Audit-chain domain expert | Fix both R5 P2s anyway: provenance fields and KMS Secret mount are in-slice production-readiness issues | Folded `subject`/`actor_subject` into forwarded JSON `data`; guarded signing volume/mount to `signing.mode=local` |
 
 ---
 

@@ -108,16 +108,22 @@ spec:
             {{- end }}
           volumeMounts:
             - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+            {{- if eq .Values.signing.mode "local" }}
             - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+            {{- end }}
           resources:
             {{- toYaml .Values.controlPlane.resources | nindent 12 }}
       volumes:
         - name: tls
           secret:
             secretName: {{ .Values.secrets.tls.existingSecret }}
+        {{- if eq .Values.signing.mode "local" }}
         - name: signing
           secret:
             secretName: {{ .Values.signing.existingSecret }}
+            items:
+              - { key: control-plane.pem, path: control-plane.pem }
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
