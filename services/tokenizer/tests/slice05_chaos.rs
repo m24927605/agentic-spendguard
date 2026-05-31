@@ -22,8 +22,8 @@ use spendguard_tokenizer_service::shadow::{
     provider_clients::anthropic::AnthropicClient,
     sample_rate_state::{SampleRateConfig, SampleRateState, ShadowKey},
     worker::{
-        process_one, DriftAlertSink, InMemoryDriftAlertSink, InMemorySamplePersister, ProviderRoster,
-        SamplePersister, ShadowEvent, ShadowOutcome, ShadowWorkerDeps,
+        process_one, DriftAlertSink, InMemoryDriftAlertSink, InMemorySamplePersister,
+        ProviderRoster, SamplePersister, ShadowEvent, ShadowOutcome, ShadowWorkerDeps,
     },
 };
 use wiremock::matchers::{method, path};
@@ -141,8 +141,7 @@ async fn tier1_endpoint_recovery_closes_the_breaker_via_probe() {
     Mock::given(method("POST"))
         .and(path("/v1/messages/count_tokens"))
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({ "input_tokens": 100 })),
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "input_tokens": 100 })),
         )
         .mount(&recovery_server)
         .await;
@@ -216,8 +215,7 @@ async fn drift_alert_cool_down_lifts_sampling_to_one_hundred_percent() {
         .and(path("/v1/messages/count_tokens"))
         // Tier 1 reports 110 vs Tier 2's 100 → drift 9.1% ≫ 1%.
         .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({ "input_tokens": 110 })),
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({ "input_tokens": 110 })),
         )
         .mount(&server)
         .await;

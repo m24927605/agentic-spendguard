@@ -155,8 +155,7 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
         return Ok(spawn_drop_handle(0));
     }
 
-    let no_provider_keys =
-        cfg.anthropic_api_key.is_empty() && cfg.gemini_api_key.is_empty();
+    let no_provider_keys = cfg.anthropic_api_key.is_empty() && cfg.gemini_api_key.is_empty();
     if no_provider_keys {
         info!("no provider API keys configured — shadow worker in drop-only mode (demo)");
         return Ok(spawn_drop_handle(0));
@@ -182,6 +181,17 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
         "booting real shadow worker"
     );
 
+    // Signer — same env contract as the rest of the audit-producing
+    // services (sidecar / canonical_ingest / ledger). The signer must
+    // be ready before the canonical_ingest sink so the AppendEvents
+    // envelope uses the same producer identity and key id as the
+    // per-event CloudEvent signatures.
+    let signer: Arc<dyn Signer> = Arc::from(
+        spendguard_signing::signer_from_env("SPENDGUARD_TOKENIZER")
+            .await
+            .context("load Ed25519 signer for drift_alert CloudEvent signing")?,
+    );
+
     // SQL persister.
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(5)
@@ -191,23 +201,19 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
     let persister: Arc<dyn SamplePersister> = Arc::new(SqlSamplePersister::new(pool));
 
     // canonical_ingest sink (R2 B4 mTLS).
+    let schema_bundle_ref = build_schema_bundle_ref(cfg)?;
     let mtls = build_sink_mtls_config(cfg)?;
     let alert_sink: Arc<dyn DriftAlertSink> = Arc::new(
         CanonicalIngestDriftAlertSink::connect(
             cfg.canonical_ingest_url.clone(),
-            format!("tokenizer-service:{}", cfg.region),
+            signer.producer_identity().to_string(),
+            schema_bundle_ref,
+            signer.key_id().to_string(),
             mtls,
         )
         .await
         .context("connect canonical_ingest for drift_alert sink")?,
     );
-
-    // Signer — same env contract as the rest of the audit-producing
-    // services (sidecar / canonical_ingest / ledger).
-    let signer: Arc<dyn Signer> =
-        Arc::from(spendguard_signing::signer_from_env("SPENDGUARD_TOKENIZER")
-            .await
-            .context("load Ed25519 signer for drift_alert CloudEvent signing")?);
 
     // Provider roster.
     let providers = ProviderRoster {
@@ -254,6 +260,33 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
     let handle = spawn_shadow_worker(deps);
     info!("shadow worker spawned (real provider clients + SQL persister + canonical_ingest sink)");
     Ok(handle)
+}
+
+fn build_schema_bundle_ref(
+    cfg: &Config,
+) -> Result<spendguard_tokenizer_service::proto::common::v1::SchemaBundleRef> {
+    if cfg.schema_bundle_id.is_empty() {
+        anyhow::bail!(
+            "SPENDGUARD_TOKENIZER_SCHEMA_BUNDLE_ID required when \
+             SPENDGUARD_TOKENIZER_CANONICAL_INGEST_URL is set \
+             (canonical_ingest rejects AppendEventsRequest without schema_bundle)"
+        );
+    }
+    if cfg.schema_bundle_hash_hex.is_empty() {
+        anyhow::bail!(
+            "SPENDGUARD_TOKENIZER_SCHEMA_BUNDLE_HASH_HEX required when \
+             SPENDGUARD_TOKENIZER_CANONICAL_INGEST_URL is set"
+        );
+    }
+    let bundle_hash = hex::decode(&cfg.schema_bundle_hash_hex)
+        .context("SPENDGUARD_TOKENIZER_SCHEMA_BUNDLE_HASH_HEX must be hex-encoded")?;
+    Ok(
+        spendguard_tokenizer_service::proto::common::v1::SchemaBundleRef {
+            schema_bundle_id: cfg.schema_bundle_id.clone(),
+            schema_bundle_hash: bundle_hash.into(),
+            canonical_schema_version: cfg.canonical_schema_version.clone(),
+        },
+    )
 }
 
 /// R2 B4 — build the optional SinkMTlsConfig from cfg. All three paths
@@ -336,10 +369,7 @@ async fn cleanup_stale_uds(path: &Path) -> Result<()> {
 ///         target — potentially anywhere on the filesystem the
 ///         process can write. We refuse to follow symlinks and
 ///         only `unlink(2)` regular socket files.
-async fn bind_uds(
-    uds_path: &str,
-    tonic_svc: TokenizerServer<TokenizerSvc>,
-) -> Result<()> {
+async fn bind_uds(uds_path: &str, tonic_svc: TokenizerServer<TokenizerSvc>) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
     let path = Path::new(uds_path);
@@ -352,8 +382,8 @@ async fn bind_uds(
     // Round-3 N2: symlink-safe stale-socket cleanup.
     cleanup_stale_uds(path).await?;
 
-    let listener = UnixListener::bind(path)
-        .with_context(|| format!("bind uds listener `{uds_path}`"))?;
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("bind uds listener `{uds_path}`"))?;
 
     // Round-3 N1: socket file perms 0660. Default umask leaves the
     // socket world-readable; under hostPath mount this lets any
@@ -392,10 +422,7 @@ async fn bind_uds(
 
 /// TCP bind path. mTLS when cert+key+ca are all configured; plaintext
 /// otherwise (with a loud warn — production Helm profile rejects this).
-async fn bind_tcp(
-    cfg: &Config,
-    tonic_svc: TokenizerServer<TokenizerSvc>,
-) -> Result<()> {
+async fn bind_tcp(cfg: &Config, tonic_svc: TokenizerServer<TokenizerSvc>) -> Result<()> {
     let listen_addr: SocketAddr = cfg
         .listen_addr
         .parse()
@@ -442,12 +469,11 @@ fn build_server_tls_config(cfg: &Config) -> Result<Option<ServerTlsConfig>> {
     match (&cfg.tls_cert_pem, &cfg.tls_key_pem, &cfg.tls_ca_pem) {
         (None, None, None) => Ok(None),
         (Some(cert_path), Some(key_path), Some(ca_path)) => {
-            let cert = std::fs::read(cert_path)
-                .with_context(|| format!("read tls cert {cert_path}"))?;
-            let key = std::fs::read(key_path)
-                .with_context(|| format!("read tls key {key_path}"))?;
-            let ca = std::fs::read(ca_path)
-                .with_context(|| format!("read tls ca {ca_path}"))?;
+            let cert =
+                std::fs::read(cert_path).with_context(|| format!("read tls cert {cert_path}"))?;
+            let key =
+                std::fs::read(key_path).with_context(|| format!("read tls key {key_path}"))?;
+            let ca = std::fs::read(ca_path).with_context(|| format!("read tls ca {ca_path}"))?;
             Ok(Some(
                 ServerTlsConfig::new()
                     .identity(Identity::from_pem(cert, key))
@@ -474,11 +500,11 @@ fn init_tracing() {
 /// shadow worker counters. Held in a separate fn so tests can exercise
 /// rendering without binding a socket.
 fn render_metrics() -> String {
-    use std::sync::atomic::Ordering;
     use spendguard_tokenizer_service::shadow::worker::{
-        ALERT_ONCALL_ESCALATION_TOTAL, PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT,
-        SHADOW_DROPPED_FULL, SHADOW_SKIPPED_CHAT_SHAPE, SHADOW_WORKER_DEAD,
+        ALERT_ONCALL_ESCALATION_TOTAL, PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT, SHADOW_DROPPED_FULL,
+        SHADOW_SKIPPED_CHAT_SHAPE, SHADOW_WORKER_DEAD,
     };
+    use std::sync::atomic::Ordering;
     let dropped_full = SHADOW_DROPPED_FULL.load(Ordering::Relaxed);
     let worker_dead = SHADOW_WORKER_DEAD.load(Ordering::Relaxed);
     let chat_skipped = SHADOW_SKIPPED_CHAT_SHAPE.load(Ordering::Relaxed);
@@ -614,7 +640,10 @@ mod tests {
         // inode mimicking a crashed prior tokenizer run.
         let _listener = UnixListener::bind(&path).expect("bind");
         drop(_listener);
-        assert!(path.exists(), "sanity: socket file should exist pre-cleanup");
+        assert!(
+            path.exists(),
+            "sanity: socket file should exist pre-cleanup"
+        );
         cleanup_stale_uds(&path).await.expect("unlink stale socket");
         assert!(!path.exists(), "socket should be removed");
     }
@@ -761,19 +790,14 @@ mod tests {
         assert!(body.contains("spendguard_tokenizer_shadow_dropped_full_total"));
         assert!(body.contains("spendguard_tokenizer_shadow_worker_dead_total"));
         assert!(body.contains("spendguard_tokenizer_shadow_skipped_chat_shape_total"));
-        assert!(
-            body.contains("spendguard_tokenizer_provider_count_tokens_schema_drift_total")
-        );
-        assert!(
-            body.contains("spendguard_tokenizer_drift_alert_oncall_escalation_total")
-        );
+        assert!(body.contains("spendguard_tokenizer_provider_count_tokens_schema_drift_total"));
+        assert!(body.contains("spendguard_tokenizer_drift_alert_oncall_escalation_total"));
     }
 
     fn make_shadow_event() -> spendguard_tokenizer_service::shadow::worker::ShadowEvent {
         use spendguard_tokenizer::encoders::EncoderKind;
         spendguard_tokenizer_service::shadow::worker::ShadowEvent {
-            tenant_id: uuid::Uuid::parse_str("01918000-0000-7c10-8c10-0000000000bb")
-                .unwrap(),
+            tenant_id: uuid::Uuid::parse_str("01918000-0000-7c10-8c10-0000000000bb").unwrap(),
             model: "claude-3-5-sonnet-20241022".into(),
             encoder_kind: EncoderKind::Anthropic,
             t2_input_tokens: 10,

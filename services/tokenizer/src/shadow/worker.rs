@@ -60,9 +60,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::circuit_breaker::{CircuitBreakerState, Permit};
-use super::provider_clients::{
-    anthropic::AnthropicClient, gemini::GeminiClient, ProviderError,
-};
+use super::provider_clients::{anthropic::AnthropicClient, gemini::GeminiClient, ProviderError};
 use super::sample_rate_state::{SampleRateState, ShadowKey};
 use crate::proto::common::v1::CloudEvent;
 
@@ -77,8 +75,7 @@ use crate::proto::common::v1::CloudEvent;
 /// through to ProfilePayloadBlob — which is RTBF-deletable — and
 /// violated the audit-chain immutability claim in spec §6 + slice
 /// doc §6.
-pub const DRIFT_ALERT_EVENT_TYPE: &str =
-    "spendguard.audit.tokenizer_drift_alert.v1alpha1";
+pub const DRIFT_ALERT_EVENT_TYPE: &str = "spendguard.audit.tokenizer_drift_alert.v1alpha1";
 
 /// Default bounded-channel capacity from the gRPC handler to the
 /// shadow worker. Bounded so Tier 2 hot path never queues forever when
@@ -274,7 +271,11 @@ pub fn spawn_shadow_worker(deps: ShadowWorkerDeps) -> ShadowWorkerHandle {
 /// Drops every event silently. Wraps the same channel shape so the
 /// gRPC handler does not need to know about the difference.
 pub fn spawn_drop_handle(buffer: usize) -> ShadowWorkerHandle {
-    let cap = if buffer == 0 { DEFAULT_CHANNEL_CAPACITY } else { buffer };
+    let cap = if buffer == 0 {
+        DEFAULT_CHANNEL_CAPACITY
+    } else {
+        buffer
+    };
     let (tx, mut rx) = mpsc::channel::<ShadowEvent>(cap);
     tokio::spawn(async move {
         while rx.recv().await.is_some() {
@@ -391,7 +392,16 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
             );
         }
 
-        match emit_drift_alert(event, sample_id, &provider_count, drift_ratio, threshold, deps).await {
+        match emit_drift_alert(
+            event,
+            sample_id,
+            &provider_count,
+            drift_ratio,
+            threshold,
+            deps,
+        )
+        .await
+        {
             Ok(()) => {
                 // R2 M9: ack via mark_drift_alert_emitted so the row's
                 // drift_alert_emitted_at column moves from NULL → now().
@@ -432,14 +442,12 @@ pub static ALERT_ONCALL_ESCALATION_TOTAL: std::sync::atomic::AtomicU64 =
 
 /// R2 M5 — shadow events dropped because the worker channel was full.
 /// Surfaces silent shadow loss in `/metrics`.
-pub static SHADOW_DROPPED_FULL: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub static SHADOW_DROPPED_FULL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// R2 M5 — shadow events dropped because the worker channel was closed
 /// (worker task crashed). Higher severity than DROPPED_FULL: it implies
 /// drift detection is offline.
-pub static SHADOW_WORKER_DEAD: std::sync::atomic::AtomicU64 =
-    std::sync::atomic::AtomicU64::new(0);
+pub static SHADOW_WORKER_DEAD: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// R2 M2 — chat-shape (messages array) requests skipped from shadow
 /// sampling because the SLICE_05 flatten was a false-positive source.
@@ -468,8 +476,7 @@ async fn on_provider_error(
         // R2 M11: per-variant metric so operators can alert on schema
         // drift (vendor API change) independently of auth (key rotation).
         if matches!(err, ProviderError::Schema(_)) {
-            PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         warn!(error = %err, tenant = %key.tenant_id, model = %key.model,
               "shadow provider returned schema-drift or auth error; sample skipped");
@@ -575,7 +582,11 @@ async fn sign_in_place(signer: &dyn Signer, event: &mut CloudEvent) -> Result<()
 pub struct InMemorySamplePersister {
     pub rows: parking_lot::Mutex<Vec<SampleRow>>,
     pub emitted_marks: parking_lot::Mutex<
-        Vec<(uuid::Uuid, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>)>,
+        Vec<(
+            uuid::Uuid,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        )>,
     >,
 }
 
@@ -641,9 +652,7 @@ mod tests {
             providers,
             persister: Arc::new(InMemorySamplePersister::default()),
             alert_sink: Arc::new(InMemoryDriftAlertSink::default()),
-            signer: Arc::new(DisabledSigner::for_test(
-                "tokenizer-service:test".into(),
-            )),
+            signer: Arc::new(DisabledSigner::for_test("tokenizer-service:test".into())),
             event_source: "spendguard://tokenizer-service/test".into(),
             channel_capacity: 16,
         }
@@ -830,8 +839,10 @@ mod tests {
         let ev = ev_anthropic(90, "hi");
         let _ = process_one(&ev, &deps).await;
         let snap = sample_rate.snapshot(&ev.shadow_key());
-        assert!(snap.in_cool_down,
-                "drift alert must enter cool-down per spec §4.3");
+        assert!(
+            snap.in_cool_down,
+            "drift alert must enter cool-down per spec §4.3"
+        );
         assert!((snap.effective_rate - 1.0).abs() < f64::EPSILON);
     }
 
@@ -910,12 +921,10 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/models/gemini-1.5-flash:countTokens"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "totalTokens": 100,
-                    "totalBillableCharacters": 50
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "totalTokens": 100,
+                "totalBillableCharacters": 50
+            })))
             .mount(&server)
             .await;
         let c = GeminiClient::with_base_url("test-key", server.uri()).unwrap();
@@ -938,7 +947,8 @@ mod tests {
         let deps = deps_for_test(providers);
         let h = spawn_shadow_worker(deps);
         let ev = ev_anthropic(100, "hi");
-        h.try_send(ev).expect("first send succeeds on fresh channel");
+        h.try_send(ev)
+            .expect("first send succeeds on fresh channel");
     }
 
     #[tokio::test]

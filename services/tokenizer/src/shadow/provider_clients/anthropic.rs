@@ -146,9 +146,7 @@ impl AnthropicClient {
                 .get("input_tokens")
                 .and_then(|v| v.as_u64())
                 .ok_or_else(|| {
-                    ProviderError::Schema(format!(
-                        "missing or non-u64 `input_tokens` in: {parsed}"
-                    ))
+                    ProviderError::Schema(format!("missing or non-u64 `input_tokens` in: {parsed}"))
                 })?;
             return Ok(ProviderCount {
                 input_tokens: count,
@@ -246,7 +244,8 @@ mod tests {
             .await;
 
         let c = client_for_server(&server).await;
-        let resp = c.count_tokens("claude-3-5-sonnet-20241022", "hello world")
+        let resp = c
+            .count_tokens("claude-3-5-sonnet-20241022", "hello world")
             .await
             .expect("ok");
         assert_eq!(resp.input_tokens, 42);
@@ -271,8 +270,10 @@ mod tests {
             ProviderError::Schema(_) => {}
             other => panic!("expected Schema, got {other:?}"),
         }
-        assert!(!err.counts_as_breaker_failure(),
-                "schema drift must NOT trip the circuit breaker per spec §7");
+        assert!(
+            !err.counts_as_breaker_failure(),
+            "schema drift must NOT trip the circuit breaker per spec §7"
+        );
     }
 
     #[tokio::test]

@@ -266,7 +266,9 @@ impl SampleRateState {
                     entry.override_rate.unwrap_or(self.config.default_rate)
                 };
                 let cool_down_remaining = if in_cool_down {
-                    entry.cool_down_until.map(|until| until.saturating_duration_since(now))
+                    entry
+                        .cool_down_until
+                        .map(|until| until.saturating_duration_since(now))
                 } else {
                     None
                 };
@@ -366,7 +368,10 @@ mod tests {
         // must still be in cool-down because the extension reset.
         let t_check = t0 + Duration::from_millis(130);
         let snap = s.snapshot_at(&k, t_check);
-        assert!(snap.in_cool_down, "cool-down extension must keep us active past the initial 100ms deadline");
+        assert!(
+            snap.in_cool_down,
+            "cool-down extension must keep us active past the initial 100ms deadline"
+        );
     }
 
     #[test]

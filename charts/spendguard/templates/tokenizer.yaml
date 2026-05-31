@@ -64,6 +64,12 @@
 {{- if not .Values.tokenizer.canonicalIngestUrl -}}
 {{- fail "tokenizer.canonicalIngestUrl is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B1 + M12: drift alerts must reach canonical_ingest's ImmutableAuditLog route)" -}}
 {{- end -}}
+{{- if not .Values.tokenizer.schemaBundleId -}}
+{{- fail "tokenizer.schemaBundleId is required under chart.profile=production when tokenizer.shadowEnabled=true (HARDEN_03 #168: canonical_ingest rejects AppendEventsRequest without schema_bundle)" -}}
+{{- end -}}
+{{- if not .Values.tokenizer.schemaBundleHashHex -}}
+{{- fail "tokenizer.schemaBundleHashHex is required under chart.profile=production when tokenizer.shadowEnabled=true (HARDEN_03 #168: byte-exact schema bundle hash for tokenizer_drift_alert AppendEventsRequest)" -}}
+{{- end -}}
 {{- if not .Values.tokenizer.databaseUrl -}}
 {{- fail "tokenizer.databaseUrl is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B1 + M12: tokenizer_t1_samples persistence required for drift attribution)" -}}
 {{- end -}}
@@ -144,6 +150,17 @@ spec:
             # tokenizer_drift_alert CloudEvent emission.
             - { name: SPENDGUARD_TOKENIZER_CANONICAL_INGEST_URL,  value: {{ .Values.tokenizer.canonicalIngestUrl | quote }} }
             {{- end }}
+            {{- if .Values.tokenizer.schemaBundleId }}
+            # HARDEN_03 / #168: AppendEventsRequest schema bundle
+            # envelope. Production profile gates this above; demo may
+            # leave the hash empty because canonical_ingest is unset and
+            # the sink is not constructed.
+            - { name: SPENDGUARD_TOKENIZER_SCHEMA_BUNDLE_ID,       value: {{ .Values.tokenizer.schemaBundleId | quote }} }
+            {{- end }}
+            {{- if .Values.tokenizer.schemaBundleHashHex }}
+            - { name: SPENDGUARD_TOKENIZER_SCHEMA_BUNDLE_HASH_HEX, value: {{ .Values.tokenizer.schemaBundleHashHex | quote }} }
+            {{- end }}
+            - { name: SPENDGUARD_TOKENIZER_CANONICAL_SCHEMA_VERSION, value: {{ .Values.tokenizer.canonicalSchemaVersion | quote }} }
             {{- if .Values.tokenizer.databaseUrl }}
             # Postgres URL for tokenizer_t1_samples persistence.
             # Migration 0051 owns the schema.

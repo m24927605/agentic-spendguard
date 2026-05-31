@@ -67,9 +67,9 @@ impl ProviderError {
     /// attention, not auto-recovery).
     pub fn counts_as_breaker_failure(&self) -> bool {
         match self {
-            ProviderError::Timeout
-            | ProviderError::RateLimit { .. }
-            | ProviderError::Other(_) => true,
+            ProviderError::Timeout | ProviderError::RateLimit { .. } | ProviderError::Other(_) => {
+                true
+            }
             ProviderError::Schema(_) | ProviderError::Auth(_) => false,
         }
     }

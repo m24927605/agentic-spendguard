@@ -260,6 +260,14 @@ tokenizer:
   # (worker drops alerts to logs); production deploys SHOULD set
   # this so drift detection feeds the canonical audit chain.
   canonicalIngestUrl: ""
+  # HARDEN_03 / #168: schema bundle envelope fields for the
+  # AppendEventsRequest sent to canonical_ingest. Same values as
+  # outboxForwarder.schemaBundleId / schemaBundleHashHex because the
+  # tokenizer drift-alert producer writes the same canonical schema
+  # family. Required under chart.profile=production + shadowEnabled=true.
+  schemaBundleId: "22222222-2222-4222-8222-222222222222"
+  schemaBundleHashHex: ""
+  canonicalSchemaVersion: "spendguard.v1alpha1"
   # Postgres URL for tokenizer_t1_samples persistence per spec §4.4
   # schema (migration 0051). Empty falls back to in-memory persister
   # (demo only). Production deploys MUST set this.
