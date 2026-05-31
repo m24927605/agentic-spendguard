@@ -88,6 +88,10 @@ postgres:
   # and control_plane_audit_outbox. Keep it as a distinct logical DB URL
   # even when co-located on the same Postgres server.
   controlPlaneUrlKey: control-plane-url
+  # HARDEN_06: production control-plane audit forwarding reads and marks
+  # control_plane_audit_outbox under a dedicated RLS role, not the
+  # request-serving control_plane_application_role.
+  controlPlaneAuditForwarderUrlKey: control-plane-audit-forwarder-url
   tokenizerShadowUrlKey: tokenizer-shadow-url
   tokenizerUrlKey: tokenizer-url
   outputPredictorUrlKey: output-predictor-url

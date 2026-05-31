@@ -68,6 +68,8 @@ struct Config {
     #[serde(default)]
     canonical_ingest_url: String,
     #[serde(default)]
+    audit_forwarder_database_url: String,
+    #[serde(default)]
     canonical_ingest_tls_client_cert: String,
     #[serde(default)]
     canonical_ingest_tls_client_key: String,
@@ -151,9 +153,10 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .map_err(|e| anyhow::anyhow!("load control-plane audit signer: {e}"))?,
         );
+        let forwarder_pg = build_audit_forwarder_pool(&cfg, &profile, &pg).await?;
         let canonical_client =
             build_canonical_client(&forwarder_cfg.canonical_ingest_url, tls_files.as_ref()).await?;
-        spawn_audit_forwarder(pg.clone(), signer, forwarder_cfg, canonical_client);
+        spawn_audit_forwarder(forwarder_pg, signer, forwarder_cfg, canonical_client);
     } else {
         tracing::warn!(
             "control-plane audit forwarder disabled; demo only unless chart.profile=production gates are off"
@@ -267,6 +270,27 @@ fn build_audit_forwarder_config(
         },
         tls_files,
     )))
+}
+
+async fn build_audit_forwarder_pool(
+    cfg: &Config,
+    profile: &str,
+    default_pool: &PgPool,
+) -> anyhow::Result<PgPool> {
+    if cfg.audit_forwarder_database_url.is_empty() {
+        if profile == "production" {
+            anyhow::bail!(
+                "SPENDGUARD_CONTROL_PLANE_AUDIT_FORWARDER_DATABASE_URL required in production"
+            );
+        }
+        return Ok(default_pool.clone());
+    }
+
+    PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&cfg.audit_forwarder_database_url)
+        .await
+        .context("connect control-plane audit forwarder database")
 }
 
 fn build_canonical_tls_files(

@@ -144,6 +144,7 @@ No public proto changes expected. Control-plane DB schema may gain outbox forwar
 
 - Risk: forwarder creates duplicate signed events. Mitigation: idempotent outbox status plus HARDEN_05 replay dedup.
 - Risk: production boot fails due to signing config. Mitigation: explicit Helm required values and clear error.
+- Risk: request-serving RLS hides pending outbox rows from the worker. Mitigation: production requires a separate audit-forwarder database URL using `control_plane_audit_forwarder_role` RLS policies; no `BYPASSRLS` shortcut is used.
 - Rollback: disable forwarder only in demo/dev; production rollback requires reverting this slice and reopening blocker issues.
 
 ---
@@ -168,6 +169,8 @@ Reviewer must inspect real integration tests for tokenizer envelope admission an
 | Implementation | Backend Architect | Keep tokenizer envelope as-is and harden canonical_ingest fail-fast tests | `append_events_rejects_*_before_storage` added |
 | Implementation | Security Engineer | Use mTLS plus per-event Ed25519 signatures for control-plane forwarding | Helm/compose mount TLS and `control-plane.pem` |
 | Implementation | Software Architect | Add a real Helm control-plane surface instead of compose-only wiring | `templates/control-plane.yaml` added |
+| Review R1 | codex CLI adversarial reviewer | Demo Helm must not enable forwarder without schema hash; compose must source runtime schema hash and generate signing key | Fixed with `$forwarderEnabled`, control-plane entrypoint, and PKI signing key generation |
+| Review R2 | codex CLI adversarial reviewer | Forwarder must not query RLS-protected outbox through the request-serving role | Added `control_plane_audit_forwarder_role`, production audit-forwarder DB URL, Helm secret key, and boot-time production validation |
 
 ---
 

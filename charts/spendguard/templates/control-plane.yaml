@@ -68,6 +68,8 @@ spec:
             - name: SPENDGUARD_CONTROL_PLANE_DATABASE_URL
               {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.controlPlaneUrlKey) | nindent 14 }}
             {{- if $forwarderEnabled }}
+            - name: SPENDGUARD_CONTROL_PLANE_AUDIT_FORWARDER_DATABASE_URL
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.controlPlaneAuditForwarderUrlKey) | nindent 14 }}
             - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_URL, value: {{ $canonicalUrl | quote }} }
             - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_CERT, value: "/etc/ssl/spendguard/control-plane.crt" }
             - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_KEY, value: "/etc/ssl/spendguard/control-plane.key" }

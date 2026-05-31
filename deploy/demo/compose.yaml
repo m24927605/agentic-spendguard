@@ -754,6 +754,7 @@ services:
       RUST_LOG: "info,spendguard_control_plane=debug"
       SPENDGUARD_CONTROL_PLANE_BIND_ADDR:    "0.0.0.0:8091"
       SPENDGUARD_CONTROL_PLANE_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
+      SPENDGUARD_CONTROL_PLANE_AUDIT_FORWARDER_DATABASE_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger?sslmode=disable"
       # Phase 5 GA hardening S17: OIDC/SSO foundation. Demo runs in
       # static_token mode (allowed only with profile=demo).
       SPENDGUARD_PROFILE:                                     "demo"
