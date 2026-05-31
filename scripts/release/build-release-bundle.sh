@@ -53,13 +53,12 @@ release_migration_inventory() {
   local commit="$2"
   (
     cd "$root"
+    scripts/release/verify-migration-inventory.sh >/dev/null
     printf '# SpendGuard migration inventory\n'
     printf 'commit=%s\n' "$commit"
     printf '\n'
-    find services -maxdepth 3 -type f -path 'services/*/migrations/*.sql' | sort | while read -r migration; do
-      checksum="$(shasum -a 256 "$migration" | awk '{print $1}')"
-      printf '%s  %s\n' "$checksum" "$migration"
-    done
+    awk '$1 ~ /^[0-9a-f]{64}$/ && NF == 2 {printf "%s  %s\n", $1, $2}' \
+      docs/operations/migration-inventory-v1alpha1.txt
   )
 }
 

@@ -11,7 +11,13 @@ intentionally excluded.
 USAGE
 }
 
-repo_root="$(git rev-parse --show-toplevel)"
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+default_repo_root="$(cd "$script_dir/../.." && pwd)"
+if repo_root="$(git rev-parse --show-toplevel 2>/dev/null)"; then
+  :
+else
+  repo_root="$default_repo_root"
+fi
 cd "$repo_root"
 
 inventory_path="docs/operations/migration-inventory-v1alpha1.txt"

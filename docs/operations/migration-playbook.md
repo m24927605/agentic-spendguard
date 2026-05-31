@@ -30,9 +30,19 @@ Confirm all items before the maintenance window:
 | Audit chain | Current immutable audit verification job is green |
 | Pager coverage | Migration owner, database owner, security owner, and incident commander assigned |
 
-## 3. Backup Checkpoint
+## 3. Write Freeze Checkpoint
 
-Take backups before applying any migration:
+Enter write freeze before taking rollback backups. Drain or pause write-producing workers, stop scheduled jobs that create ledger/canonical/control-plane rows, and record a coordinated audit cutoff:
+
+```sql
+SELECT now() AS cutoff_at, current_database() AS database_name;
+```
+
+The incident commander records the cutoff timestamp for all three databases. If the database provider supports coordinated snapshots, take snapshots for ledger, canonical_ingest, and control_plane in the same maintenance step. If snapshots cannot be coordinated, logical dumps are still required, but the cutoff and paused write state become the consistency boundary.
+
+## 4. Backup Checkpoint
+
+Take backups only after the write freeze checkpoint:
 
 ```bash
 export BACKUP_DIR=/secure/spendguard/backups/$(date -u +%Y%m%dT%H%M%SZ)
@@ -47,9 +57,9 @@ shasum -a 256 "$BACKUP_DIR"/*.dump > "$BACKUP_DIR/SHA256SUMS"
 
 Also record provider-native snapshot identifiers for each database. Logical dumps are the portable restore artifact; provider snapshots are the fast restore artifact.
 
-## 4. Restore Rehearsal Checkpoint
+## 5. Restore Rehearsal Checkpoint
 
-Before production apply, restore the newly created dumps into isolated databases and run smoke checks:
+Before production apply, restore the exact dumps or provider snapshots created after the write freeze checkpoint into isolated databases and run smoke checks:
 
 ```bash
 createdb spendguard_restore_ledger
@@ -63,11 +73,11 @@ pg_restore --exit-on-error --dbname=spendguard_restore_control_plane "$BACKUP_DI
 
 The restore rehearsal is a hard gate. If restore fails, do not apply production migrations.
 
-## 5. Apply Order
+## 6. Apply Order
 
 Apply only direct deploy migrations listed in `docs/operations/migration-inventory-v1alpha1.txt`; never apply files under `migrations/down` during a production rollout.
 
-1. Put write-heavy workers into maintenance or drain mode.
+1. Confirm the write freeze checkpoint is still active.
 2. Apply ledger migrations in lexical order from `services/ledger/migrations`.
 3. Apply canonical_ingest migrations in lexical order from `services/canonical_ingest/migrations`.
 4. Apply control_plane migrations in lexical order from `services/control_plane/migrations`.
@@ -75,7 +85,7 @@ Apply only direct deploy migrations listed in `docs/operations/migration-invento
 
 Use `psql -v ON_ERROR_STOP=1` for every file. Stop immediately on the first error and move to the partial-failure section.
 
-## 6. Immutable Tables
+## 7. Immutable Tables
 
 These tables are forward-fix only in production:
 
@@ -87,7 +97,7 @@ These tables are forward-fix only in production:
 
 Do not truncate, delete, rewrite, or run down migrations against immutable audit data to make a rollback easier. If a migration corrupts immutable state, restore into a new database from the backup checkpoint and reconcile through the audit-chain incident process.
 
-## 7. Partial Failure Recovery
+## 8. Partial Failure Recovery
 
 If a migration fails before commit, leave the application drained and inspect the database transaction state. If the failed migration committed partial objects, do not edit the shipped migration file. Create a forward-fix migration with a higher version number.
 
@@ -99,7 +109,7 @@ Recovery sequence:
 4. Decide with the database owner and security owner whether the safe action is rerun, forward-fix, or restore to a new database.
 5. Resume only after the inventory and Postgres 16 verification pass on the corrected commit.
 
-## 8. Post-Apply Checks
+## 9. Post-Apply Checks
 
 Run these checks before ending the window:
 
@@ -118,7 +128,7 @@ For production databases, also verify:
 | Control-plane RLS | `control_plane_audit_outbox_forwarder_update` policy exists |
 | Audit chain | latest immutable audit verifier run exits 0 |
 
-## 9. Evidence Bundle
+## 10. Evidence Bundle
 
 Store the following with the release record:
 

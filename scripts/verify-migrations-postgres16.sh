@@ -43,6 +43,18 @@ psql_exec() {
         psql -v ON_ERROR_STOP=1 -U spendguard -d "${db}" "$@"
 }
 
+server_version_num="$(psql_exec postgres -At -c "SHOW server_version_num;" | tr -d '[:space:]')"
+server_version="$(psql_exec postgres -At -c "SHOW server_version;" | tr -d '\r')"
+if [[ ! "${server_version_num}" =~ ^[0-9]+$ || "${server_version_num}" -lt 160000 || "${server_version_num}" -ge 170000 ]]; then
+    log "FATAL: expected Postgres 16.x, got server_version_num=${server_version_num} (${server_version})"
+    exit 1
+fi
+{
+    printf 'image=%s\n' "${IMAGE}"
+    printf 'server_version_num=%s\n' "${server_version_num}"
+    printf 'server_version=%s\n' "${server_version}"
+} | tee "${EVIDENCE_PREFIX}-postgres-version.txt"
+
 psql_exec postgres -c "CREATE DATABASE spendguard_ledger;"
 psql_exec postgres -c "CREATE DATABASE spendguard_canonical;"
 psql_exec postgres -c "CREATE DATABASE spendguard_control_plane;"
