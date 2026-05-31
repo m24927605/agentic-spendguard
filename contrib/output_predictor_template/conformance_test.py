@@ -441,10 +441,10 @@ def test_client_svid_extra_uri_identity_rejected():
     auth_context = {
         "x509_subject_alternative_name": [
             f"URI:{subject}".encode("utf-8"),
-            b"URI:spiffe://other-platform/workload",
+            b"URI:https://example.invalid/id",
         ]
     }
-    with pytest.raises(ValueError, match="multiple SVID URI subjects"):
+    with pytest.raises(ValueError, match="multiple URI SAN identities"):
         validate_auth_context_tenant(
             auth_context=auth_context,
             tenant_id="018fcf9a-3d2d-7b37-9f21-0f27de0b20c1",

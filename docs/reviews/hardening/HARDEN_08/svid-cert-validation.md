@@ -26,6 +26,10 @@
   `client_cert_id` to 44 bytes, requires URI SAN rather than commonName in
   the reference plugin, and extends the real mTLS test to reject tenant-B
   SVIDs while accepting same-tenant rotated material.
+- R4 hardening applies bounded rotation grace to new-channel failures during
+  material changes, uses the bounded `plugin-client-svid-<clientCertId>`
+  Certificate name without release-name truncation, and rejects any extra URI
+  SAN identity in the reference plugin.
 
 ## Local verification
 

@@ -34,11 +34,11 @@ def extract_spiffe_uri_from_auth_context(auth_context: dict[str | bytes, list[by
     uri_values: list[str] = []
     for raw in normalised.get("x509_subject_alternative_name", []):
         value = _normalise_auth_value(raw)
-        if value.startswith("spiffe://"):
+        if "://" in value:
             uri_values.append(value)
     unique = sorted(set(uri_values))
     if len(unique) > 1:
-        raise ValueError("multiple SVID URI subjects presented")
+        raise ValueError("multiple URI SAN identities presented")
     if not unique:
         return None
     if not unique[0].startswith(SVID_PREFIX):

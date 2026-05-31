@@ -356,34 +356,9 @@ impl PluginClient {
                         return Err(err);
                     }
                     if let Some(cached) = cached_for_endpoint {
-                        let now = Instant::now();
-                        let failure_started_at = {
-                            let mut write = self.channels.write();
-                            let entry = write.get_mut(tenant).filter(|cached| {
-                                cached.endpoint_snapshot.same_wire_shape(&endpoint)
-                            });
-                            match entry {
-                                Some(entry) => {
-                                    *entry.svid_reload_failure_started_at.get_or_insert(now)
-                                }
-                                None => now,
-                            }
-                        };
-                        if now.duration_since(failure_started_at) > SVID_ROTATION_RELOAD_GRACE {
-                            return Err(err).with_context(|| {
-                                format!(
-                                    "tenant SVID material reload still failing after {}s grace",
-                                    SVID_ROTATION_RELOAD_GRACE.as_secs()
-                                )
-                            });
-                        }
-                        warn!(
-                            tenant = %tenant,
-                            client_cert_id = %endpoint.client_cert_id,
-                            error = ?err,
-                            "tenant SVID material reload failed; reusing existing cached plugin channel during rotation window"
-                        );
-                        return Ok(cached.channel);
+                        return self
+                            .reuse_cached_during_rotation(tenant, &endpoint, cached, err)
+                            .map(|cached| cached.channel);
                     }
                     return Err(err);
                 }
@@ -417,7 +392,24 @@ impl PluginClient {
         }
         // Slow path — build a new channel. Drop the read lock first so
         // we don't hold it across the await.
-        let channel = build_channel(materials.as_deref(), &endpoint).await?;
+        let channel = match build_channel(materials.as_deref(), &endpoint).await {
+            Ok(channel) => channel,
+            Err(err) => {
+                if materials.is_some() {
+                    if let Some(cached) = {
+                        let read = self.channels.read();
+                        read.get(tenant)
+                            .filter(|cached| cached.endpoint_snapshot.same_wire_shape(&endpoint))
+                            .cloned()
+                    } {
+                        return self
+                            .reuse_cached_during_rotation(tenant, &endpoint, cached, err)
+                            .map(|cached| cached.channel);
+                    }
+                }
+                return Err(err);
+            }
+        };
         let mut write = self.channels.write();
         write.insert(
             *tenant,
@@ -429,6 +421,41 @@ impl PluginClient {
             },
         );
         Ok(channel)
+    }
+
+    fn reuse_cached_during_rotation(
+        &self,
+        tenant: &Uuid,
+        endpoint: &PluginEndpoint,
+        cached: CachedChannel,
+        err: anyhow::Error,
+    ) -> Result<CachedChannel, anyhow::Error> {
+        let now = Instant::now();
+        let failure_started_at = {
+            let mut write = self.channels.write();
+            let entry = write
+                .get_mut(tenant)
+                .filter(|cached| cached.endpoint_snapshot.same_wire_shape(endpoint));
+            match entry {
+                Some(entry) => *entry.svid_reload_failure_started_at.get_or_insert(now),
+                None => now,
+            }
+        };
+        if now.duration_since(failure_started_at) > SVID_ROTATION_RELOAD_GRACE {
+            return Err(err).with_context(|| {
+                format!(
+                    "tenant SVID material reload still failing after {}s grace",
+                    SVID_ROTATION_RELOAD_GRACE.as_secs()
+                )
+            });
+        }
+        warn!(
+            tenant = %tenant,
+            client_cert_id = %endpoint.client_cert_id,
+            error = ?err,
+            "tenant SVID reload/connect failed; reusing existing cached plugin channel during rotation window"
+        );
+        Ok(cached)
     }
 }
 

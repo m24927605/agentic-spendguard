@@ -179,6 +179,7 @@ Reviewer must inspect cert subject construction, tenant UUID comparison, Helm pr
 | Review R1 | codex CLI adversarial reviewer | Fix 4 Majors + 1 Minor: TLS without client CA, rotation reload fallback, control-plane `client_cert_id` validation, real mTLS demo/test, exact URI SAN | Commit `0209c42` closes all R1 findings |
 | Review R2 | codex CLI adversarial reviewer | Bound rotation fallback, cap `client_cert_id` for K8s-safe names, reject extra Python peer SVID URI identities | Commit `4c34877` closes all R2 findings |
 | Review R3 | codex CLI adversarial reviewer | Start rotation grace at first reload failure, prevent Helm name truncation collisions, validate real server-side SVID tenant, reject CN-only plugin SVID | Commit `654ad6c` closes all R3 findings |
+| Review R4 | codex CLI adversarial reviewer | Reuse cached channel for bounded new-channel failures during rotation, remove Certificate-name truncation, reject non-SPIFFE extra URI SANs | Commit pending closes all R4 findings |
 
 ---
 
@@ -190,7 +191,7 @@ Reviewer must inspect cert subject construction, tenant UUID comparison, Helm pr
 - [x] Cross-tenant mismatch test fails closed
 - [x] `plugin_c_synthetic` demo runs with SVID validation
 - [ ] GH #171 closed with fixing commit
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded (R1/R2/R3 fixed; R4 pending)
+- [ ] AIT adversarial review passes or Staff+ arbitration is recorded (R1/R2/R3/R4 fixed; R5 pending)
 
 ---
 
