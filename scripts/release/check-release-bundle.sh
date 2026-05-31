@@ -150,12 +150,13 @@ fi
 chart_compare_dir="$(mktemp -d)"
 helm package "$committed_tree/charts/spendguard" --destination "$chart_compare_dir" >/dev/null
 expected_chart="$(find "$chart_compare_dir" -maxdepth 1 -type f -name 'spendguard-*.tgz' | sort | head -n 1)"
-expected_chart_hash="$(shasum -a 256 "$expected_chart" | awk '{print $1}')"
-actual_chart_hash="$(shasum -a 256 "$chart_pkg" | awk '{print $1}')"
-if [[ "$actual_chart_hash" != "$expected_chart_hash" ]]; then
-  echo "packaged chart digest does not match chart rebuilt from current checkout" >&2
-  echo "bundle:   $actual_chart_hash" >&2
-  echo "checkout: $expected_chart_hash" >&2
+expected_chart_tree="$(mktemp -d)"
+actual_chart_tree="$(mktemp -d)"
+tar -xzf "$expected_chart" -C "$expected_chart_tree"
+tar -xzf "$chart_pkg" -C "$actual_chart_tree"
+if ! diff -qr "$expected_chart_tree" "$actual_chart_tree" >/tmp/spendguard-release-chart.diff; then
+  echo "packaged chart content does not match chart rebuilt from committed release tree" >&2
+  cat /tmp/spendguard-release-chart.diff >&2
   exit 1
 fi
 
@@ -173,7 +174,7 @@ fi
 )
 
 chart_scan_dir="$(mktemp -d)"
-trap 'rm -rf "$chart_scan_dir" "$chart_compare_dir" "$expected_inventory" "$committed_tree"' EXIT
+trap 'rm -rf "$chart_scan_dir" "$chart_compare_dir" "$expected_chart_tree" "$actual_chart_tree" "$expected_inventory" "$committed_tree"' EXIT
 tar -xzf "$chart_pkg" -C "$chart_scan_dir"
 
 if grep -RInE '(postgres(ql)?://|BEGIN ((RSA|EC|OPENSSH) )?PRIVATE KEY|AKIA[0-9A-Z]{16}|xox[baprs]-|sk-[A-Za-z0-9_-]{20,})' "$bundle_dir" "$chart_scan_dir" >/tmp/spendguard-release-secret-scan.txt; then
