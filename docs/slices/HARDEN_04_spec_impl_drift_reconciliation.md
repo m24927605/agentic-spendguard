@@ -54,13 +54,16 @@ The spec set locked on 2026-05-30, but some text still describes round-1 drafts 
 
 - `docs/stats-aggregator-spec-v1alpha1.md`
 - `docs/contract-dsl-spec-v1alpha2.md`
+- `docs/calibration-report-spec-v1alpha1.md`
+- `docs/slices/SLICE_13_calibration_report_cli.md`
+- `proto/spendguard/sidecar_adapter/v1/adapter.proto` comment text only
 - Any other predictor spec where grep proves a stale CloudEvent type, stale column name, or contradictory failure behavior
 
 ---
 
 ## §5. Schema / proto changes
 
-No schema or proto changes. This slice reconciles documentation to already-shipped schema and proto behavior.
+No schema or generated proto changes. This slice reconciles documentation to already-shipped schema and proto behavior; proto edits, if any, are comment-only corrections.
 
 ---
 
@@ -159,6 +162,7 @@ Reviewer should prioritize citation truthfulness and grep completeness over pros
 | Design | Security Engineer | Audit-routed CloudEvents must retain `spendguard.audit.*` | stats-aggregator §7.2 is in scope |
 | Design | Database Optimizer | Column names must be verified against migrations | stats-aggregator §4.1 is in scope |
 | Design | Technical Writer | Avoid broad prose churn | §9 includes minimal-diff review |
+| Implementation | codex CLI | Broad grep found calibration-report spec drift too | Added calibration-report spec corrections and grep artifacts |
 
 ---
 

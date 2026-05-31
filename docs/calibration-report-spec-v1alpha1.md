@@ -146,29 +146,42 @@ SELECT
 FROM canonical_events
 WHERE tenant_id = $1
   AND event_type = 'spendguard.audit.decision'
-  AND recorded_at BETWEEN $2 AND $3
+  AND event_time BETWEEN $2 AND $3
 GROUP BY tokenizer_tier
 ORDER BY tokenizer_tier;
 ```
+
+HARDEN_04 reconciliation: the implementation uses `canonical_events.event_time`
+for the report window and unversioned `spendguard.audit.decision`; see
+calibration-report commits `dabc6fb` / `15a3f3d`.
 
 ### 3.2 Per-(model, strategy) calibration ratio query
 
 ```sql
 WITH paired AS (
   SELECT
-    decision.cloudevent_payload->>'model' AS model,
+    COALESCE(
+      decision_payload->>'model_family',
+      decision_payload #>> '{spendguard,model}',
+      decision_payload->>'model',
+      '(unknown)'
+    ) AS model,
     decision.prediction_strategy_used AS strategy,
     decision.predicted_b_tokens,
     decision.predicted_c_tokens,
     decision.predicted_a_tokens,
     outcome.actual_output_tokens
   FROM canonical_events decision
+  CROSS JOIN LATERAL (
+    SELECT cost_advisor_safe_decode_payload(decision.payload_json) AS decision_payload
+  ) decoded
   JOIN canonical_events outcome
     ON decision.decision_id = outcome.decision_id
     AND outcome.event_type = 'spendguard.audit.outcome'
+    AND outcome.tenant_id = decision.tenant_id
   WHERE decision.tenant_id = $1
     AND decision.event_type = 'spendguard.audit.decision'
-    AND decision.recorded_at BETWEEN $2 AND $3
+    AND decision.event_time BETWEEN $2 AND $3
     AND outcome.actual_output_tokens IS NOT NULL
 )
 SELECT
@@ -194,15 +207,24 @@ GROUP BY model, strategy
 ORDER BY model, strategy;
 ```
 
+HARDEN_04 reconciliation: the shipped CLI decodes `canonical_events.payload_json`
+with `cost_advisor_safe_decode_payload` rather than reading the ledger-only
+`audit_outbox.cloudevent_payload` column; see calibration-report commit
+`c4fbab6`.
+
 ### 3.3 Drift alert count query
 
 ```sql
 SELECT count(*) AS drift_alerts_in_window
 FROM canonical_events
 WHERE tenant_id = $1
-  AND event_type = 'spendguard.prediction.drift_alert'
-  AND recorded_at BETWEEN $2 AND $3;
+  AND event_type = 'spendguard.audit.prediction_drift_alert.v1alpha1'
+  AND event_time BETWEEN $2 AND $3;
 ```
+
+HARDEN_04 reconciliation: drift alerts route through ImmutableAuditLog with
+the audit-prefixed event type emitted by stats_aggregator commit `f8dc34c`
+and queried by calibration-report commit `c4fbab6`.
 
 ### 3.4 verify-chain integration
 
@@ -315,13 +337,16 @@ CLI 認證模式：
 
 ### 5.3 Audit log
 
-每次 CLI run 自身 emit `spendguard.calibration.report_generated` CloudEvent，記錄：
+每次 CLI run 自身 emit `spendguard.audit.calibration.report_generated.v1alpha1` CloudEvent，記錄：
 
 - 跑 report 的 user identity
 - tenant_id + 時間範圍
 - exit code + summary
 
 Signed + immutable per audit chain。確保「誰看了 calibration report」也有 trail。
+HARDEN_04 reconciliation: implementation commit `dabc6fb` added self-audit,
+and `services/calibration_report/src/self_audit.rs` now uses the audit-prefixed
+constant `spendguard.audit.calibration.report_generated.v1alpha1`.
 
 ---
 
@@ -396,7 +421,7 @@ Recommendations 是 derived 從 stable audit data；本身不需要 audit chain 
 | Tenant scope mismatch | exit code 2 + audit log 記嘗試 |
 | Window too large (event count > 100M) | warn user; suggest 縮小 window；仍跑但可能超 30s |
 | verify-chain fail | exit code 3 + 標記 row + 整 report aborted |
-| JSON parse fail on cloudevent_payload | skip row + emit metric `report_skipped_rows` |
+| JSON parse fail on `payload_json` | skip row + emit metric `report_skipped_rows` |
 
 ---
 
