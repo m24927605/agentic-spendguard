@@ -18,7 +18,9 @@
 - R1 hardening requires `--tls-client-ca` whenever the reference plugin starts
   in TLS mode; TLS without client auth is no longer a supported "secure" mode.
 - Control-plane plugin registration/update validation now uses the same
-  `[A-Za-z0-9_-]` `client_cert_id` shape that Helm and runtime mounts require.
+  `[A-Za-z0-9_-]{1,63}` `client_cert_id` shape that Helm and runtime mounts require.
+- R2 hardening bounds SVID reload cached-channel reuse to 60 seconds and
+  makes the reference plugin reject extra SPIFFE URI identities.
 
 ## Local verification
 
@@ -30,7 +32,7 @@ cargo test --manifest-path services/control_plane/Cargo.toml validate_register -
 PASS: 8 validation tests
 
 python3 -m pytest contrib/output_predictor_template/conformance_test.py -q
-PASS: 68 passed
+PASS: 69 passed
 
 helm template spendguard charts/spendguard --set chart.profile=demo
 PASS
@@ -55,4 +57,7 @@ PASS: render failed closed without explicit legacy opt-in
 make demo-up DEMO_MODE=plugin_c_synthetic
 PASS: breaker regression, real Rust PluginClient mTLS/SVID integration,
 and Python reference plugin SVID fail-closed checks ran successfully
+
+helm template ... clientCertId=64-byte-string
+PASS: render failed closed with `clientCertId must match ^[A-Za-z0-9_-]{1,63}$`
 ```

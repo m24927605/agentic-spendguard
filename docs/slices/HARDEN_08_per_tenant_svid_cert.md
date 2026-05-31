@@ -177,6 +177,7 @@ Reviewer must inspect cert subject construction, tenant UUID comparison, Helm pr
 | Implementation | Backend Architect | Reuse existing `predictor_plugin_endpoints.client_cert_id`; no schema migration needed | `client_cert_id` selects the SVID subdirectory |
 | Implementation | Security Engineer | Include mounted cert/key/CA fingerprint in channel cache identity | Rotation rebuilds channels on the next request |
 | Review R1 | codex CLI adversarial reviewer | Fix 4 Majors + 1 Minor: TLS without client CA, rotation reload fallback, control-plane `client_cert_id` validation, real mTLS demo/test, exact URI SAN | Commit `0209c42` closes all R1 findings |
+| Review R2 | codex CLI adversarial reviewer | Bound rotation fallback, cap `client_cert_id` for K8s-safe names, reject extra Python peer SVID URI identities | Commit `4c34877` closes all R2 findings |
 
 ---
 
@@ -188,7 +189,7 @@ Reviewer must inspect cert subject construction, tenant UUID comparison, Helm pr
 - [x] Cross-tenant mismatch test fails closed
 - [x] `plugin_c_synthetic` demo runs with SVID validation
 - [ ] GH #171 closed with fixing commit
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded (R1 fixed; R2 pending)
+- [ ] AIT adversarial review passes or Staff+ arbitration is recorded (R1/R2 fixed; R3 pending)
 
 ---
 
