@@ -175,6 +175,10 @@ Reviewer should run or inspect the verification scripts and reject any script th
 | Implementation | codex CLI implementer/reviewer | Verification scripts must run on the local macOS/Bash 3 environment, not just Linux CI | Replaced `mapfile`; used `cargo metadata --no-deps` for manifests without committed lockfiles |
 | Implementation | codex CLI implementer/reviewer | KMS signing check must target control-plane local signing material, not canonical-ingest trust-store material | Narrowed production KMS check to the control-plane rendered section |
 | Implementation | codex CLI implementer/reviewer | Demo regression remains a hard gate after verification fixes | `make demo-up DEMO_MODE=default` passed Step 8, outbox drain, and canonical_events verification |
+| Review R1 | codex CLI adversarial reviewer | Migration checks must fail on missing state, not print diagnostics | Added `RAISE EXCEPTION` assertions for ledger, canonical_ingest, and control_plane required objects |
+| Review R1 | codex CLI adversarial reviewer | Cargo verification must not depend on ignored local lockfiles and must run affected tests | Re-runs in a clean detached worktree and adds seven focused regression test commands |
+| Review R1 | codex CLI adversarial reviewer | NetworkPolicy denial must be attributable to policy enforcement | Added unlabeled control pod external egress proof before enforced-pod deny |
+| Review R1 | codex CLI adversarial reviewer | Helm security checks must inspect rendered objects, not global strings | Added YAML-level container security and database `secretKeyRef` assertions |
 
 ---
 

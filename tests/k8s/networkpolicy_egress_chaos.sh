@@ -97,18 +97,33 @@ kubectl --context "${CTX}" -n "${NAMESPACE}" rollout status deployment/spendguar
 run_curl() {
     local name="$1"
     local url="$2"
-    kubectl --context "${CTX}" -n "${NAMESPACE}" run "${name}" \
-        --rm -i --restart=Never \
-        --image=curlimages/curl:8.10.1 \
-        --labels='spendguard.io/enforced=true' \
-        --command -- sh -c "curl -fsS --connect-timeout 5 --max-time 8 ${url}" >/tmp/"${name}".out 2>/tmp/"${name}".err
+    local labels="${3:-}"
+    local label_args=()
+    if [ -n "${labels}" ]; then
+        label_args=(--labels="${labels}")
+    fi
+    if [ "${#label_args[@]}" -gt 0 ]; then
+        kubectl --context "${CTX}" -n "${NAMESPACE}" run "${name}" \
+            --rm -i --restart=Never \
+            --image=curlimages/curl:8.10.1 \
+            "${label_args[@]}" \
+            --command -- sh -c "curl -k -sS --connect-timeout 5 --max-time 8 -o /dev/null ${url}" >/tmp/"${name}".out 2>/tmp/"${name}".err
+    else
+        kubectl --context "${CTX}" -n "${NAMESPACE}" run "${name}" \
+            --rm -i --restart=Never \
+            --image=curlimages/curl:8.10.1 \
+            --command -- sh -c "curl -k -sS --connect-timeout 5 --max-time 8 -o /dev/null ${url}" >/tmp/"${name}".out 2>/tmp/"${name}".err
+    fi
 }
 
+log "checking cluster has baseline external egress before attributing deny to NetworkPolicy"
+run_curl spendguard-netpol-control https://1.1.1.1
+
 log "checking app pod can reach egress proxy"
-run_curl spendguard-netpol-allow http://spendguard-spendguard-egress-proxy:9000
+run_curl spendguard-netpol-allow http://spendguard-spendguard-egress-proxy:9000 'spendguard.io/enforced=true'
 
 log "checking direct external egress is blocked"
-if run_curl spendguard-netpol-deny https://1.1.1.1; then
+if run_curl spendguard-netpol-deny https://1.1.1.1 'spendguard.io/enforced=true'; then
     log "FATAL: enforced pod reached external HTTPS directly"
     cat /tmp/spendguard-netpol-deny.out >&2 || true
     exit 1

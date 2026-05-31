@@ -15,6 +15,7 @@ Result: PASS.
 
 - Checked metadata for 30 Cargo manifests.
 - Used `--locked` for manifests with committed lockfiles and `--no-deps` for library/service manifests without a committed lockfile.
+- Re-runs from a clean detached git worktree so ignored local per-service `Cargo.lock` files cannot mask checkout behavior.
 - Built the predictor-upgrade Rust set:
   - `benchmarks/predictor-upgrade/Cargo.toml`
   - `services/canonical_ingest/Cargo.toml`
@@ -27,6 +28,7 @@ Result: PASS.
   - `services/stats_aggregator/Cargo.toml`
   - `services/tokenizer/Cargo.toml`
 - No Cargo.lock drift remained after verification.
+- Runs affected regression tests for canonical_ingest, control_plane, egress_proxy, output_predictor, run_cost_projector, stats_aggregator, and tokenizer.
 
 ## Helm
 
@@ -50,7 +52,8 @@ Additional checks:
 
 - Rendered manifests contain no plaintext `postgres://` URLs.
 - Production KMS control-plane render contains no local signing Secret mount or `control-plane.pem` reference.
-- Rendered manifests retain baseline security tokens including `runAsUser: 65532`, `readOnlyRootFilesystem: true`, and capability drop `ALL`.
+- YAML assertions verify every rendered Deployment, Job, and CronJob container has `readOnlyRootFilesystem: true`, `allowPrivilegeEscalation: false`, and capability drop `ALL`.
+- YAML assertions verify every rendered database environment variable is sourced from a `secretKeyRef`.
 
 ## Migrations
 
@@ -70,6 +73,7 @@ Result: PASS.
   - `audit_outbox` and `tokenizer_t1_samples` exist with prediction columns.
   - `canonical_events` and `canonical_event_replay_dedup` exist with mirror columns.
   - `predictor_plugin_endpoints`, `control_plane_audit_outbox`, and `control_plane_audit_outbox_forwarder_update` policy exist.
+- Smoke checks are hard `DO $$ ... RAISE EXCEPTION` assertions, not informational `SELECT` output.
 
 ## NetworkPolicy
 
@@ -84,8 +88,21 @@ Result: PASS.
 - Created kind cluster `spendguard-netpol` with default CNI disabled.
 - Installed Calico `v3.28.2` so NetworkPolicy enforcement is real.
 - Applied the chart's `templates/networkpolicy.yaml` with `networkPolicy.enabled=true`.
+- Verified an unlabeled control pod can reach `https://1.1.1.1`, proving the cluster has baseline external egress before attributing denial to NetworkPolicy.
 - Verified an enforced app pod can reach the in-cluster egress proxy on port 9000.
 - Verified the same enforced app pod cannot reach `https://1.1.1.1` directly.
+
+## Adversarial Review Round 1
+
+Reviewer: separate codex CLI reviewer via AIT-compatible subagent after local `ait run` rejected the documented `--review-mode`/`--base` flags.
+
+Findings fixed in-slice:
+
+- Blocker: migration smoke checks were informational and column checks accepted partial state. Fixed with hard Postgres assertions for all required tables, columns, and RLS policies.
+- Major: Cargo verification could depend on ignored local lockfiles. Fixed by re-running the verifier in a clean detached git worktree from `HEAD`.
+- Major: Cargo verifier omitted affected tests. Fixed by adding seven focused regression test commands across the predictor upgrade services.
+- Major: NetworkPolicy chaos could false-pass if the cluster had no external egress. Fixed by adding an unlabeled control pod external egress check before the enforced deny check.
+- Minor: Helm checks were global string greps. Fixed with YAML-level per-workload container security and database secret assertions.
 
 ## Demo Regression
 

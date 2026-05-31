@@ -70,6 +70,36 @@ apply_dir spendguard_control_plane services/control_plane/migrations control_pla
 
 log "ledger smoke checks"
 psql_exec spendguard_ledger -c "
+DO \$\$
+DECLARE
+  missing text[];
+BEGIN
+  IF to_regclass('public.audit_outbox') IS NULL THEN
+    RAISE EXCEPTION 'missing ledger audit_outbox';
+  END IF;
+  IF to_regclass('public.tokenizer_t1_samples') IS NULL THEN
+    RAISE EXCEPTION 'missing ledger tokenizer_t1_samples';
+  END IF;
+  SELECT ARRAY(
+    SELECT c FROM unnest(ARRAY[
+      'predicted_a_tokens',
+      'run_projection_at_decision_atomic',
+      'prediction_strategy_used'
+    ]) AS c
+    WHERE NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='public'
+        AND table_name='audit_outbox'
+        AND column_name=c
+    )
+  ) INTO missing;
+  IF array_length(missing, 1) IS NOT NULL THEN
+    RAISE EXCEPTION 'missing ledger audit_outbox prediction columns: %', missing;
+  END IF;
+END
+\$\$;
+"
+psql_exec spendguard_ledger -c "
 SELECT
   to_regclass('public.audit_outbox') AS audit_outbox,
   to_regclass('public.tokenizer_t1_samples') AS tokenizer_t1_samples,
@@ -82,6 +112,36 @@ SELECT
 
 log "canonical smoke checks"
 psql_exec spendguard_canonical -c "
+DO \$\$
+DECLARE
+  missing text[];
+BEGIN
+  IF to_regclass('public.canonical_events') IS NULL THEN
+    RAISE EXCEPTION 'missing canonical_events';
+  END IF;
+  IF to_regclass('public.canonical_event_replay_dedup') IS NULL THEN
+    RAISE EXCEPTION 'missing canonical_event_replay_dedup';
+  END IF;
+  SELECT ARRAY(
+    SELECT c FROM unnest(ARRAY[
+      'payload_json',
+      'prediction_strategy_used',
+      'run_id_mirror'
+    ]) AS c
+    WHERE NOT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema='public'
+        AND table_name='canonical_events'
+        AND column_name=c
+    )
+  ) INTO missing;
+  IF array_length(missing, 1) IS NOT NULL THEN
+    RAISE EXCEPTION 'missing canonical_events mirror columns: %', missing;
+  END IF;
+END
+\$\$;
+"
+psql_exec spendguard_canonical -c "
 SELECT
   to_regclass('public.canonical_events') AS canonical_events,
   to_regclass('public.canonical_event_replay_dedup') AS replay_dedup,
@@ -93,6 +153,26 @@ SELECT
 " | tee /tmp/spendguard-harden07-canonical-smoke.txt
 
 log "control-plane smoke checks"
+psql_exec spendguard_control_plane -c "
+DO \$\$
+BEGIN
+  IF to_regclass('public.predictor_plugin_endpoints') IS NULL THEN
+    RAISE EXCEPTION 'missing predictor_plugin_endpoints';
+  END IF;
+  IF to_regclass('public.control_plane_audit_outbox') IS NULL THEN
+    RAISE EXCEPTION 'missing control_plane_audit_outbox';
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_policies
+    WHERE schemaname='public'
+      AND tablename='control_plane_audit_outbox'
+      AND policyname='control_plane_audit_outbox_forwarder_update'
+  ) THEN
+    RAISE EXCEPTION 'missing control_plane_audit_outbox_forwarder_update RLS policy';
+  END IF;
+END
+\$\$;
+"
 psql_exec spendguard_control_plane -c "
 SELECT
   to_regclass('public.predictor_plugin_endpoints') AS predictor_plugin_endpoints,

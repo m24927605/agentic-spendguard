@@ -33,6 +33,8 @@ spec:
         - name: outbox-forwarder
           image: {{ include "spendguard.image" (merge (dict "image" .Values.outboxForwarder.image "global" .Values.global) .) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "spendguard.containerSecurityContext" . | nindent 12 }}
           ports:
             - { name: metrics, containerPort: 9096 }
           env:

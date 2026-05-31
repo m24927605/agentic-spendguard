@@ -84,6 +84,8 @@ spec:
       containers:
         - name: migrate
           image: {{ .Values.migrations.ledgerImage }}
+          securityContext:
+            {{- include "spendguard.containerSecurityContext" . | nindent 12 }}
           command: ["/bin/sh", "-c"]
           args:
             - |

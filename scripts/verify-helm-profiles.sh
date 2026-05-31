@@ -30,9 +30,9 @@ render production-kms -f scripts/helm-validate-test-values.yaml \
     --set signing.kms.ttlSweeperArn=arn:aws:kms:us-east-1:111122223333:key/ttl \
     --set signing.kms.controlPlaneArn=arn:aws:kms:us-east-1:111122223333:key/control-plane
 
-if grep -R "postgres://[^[:space:]\"']*" "${OUT_DIR}" >/dev/null; then
+if grep -RE "postgres(ql)?://[^[:space:]\"']*" "${OUT_DIR}" >/dev/null; then
     log "FATAL: rendered manifests contain plaintext postgres URL"
-    grep -R "postgres://[^[:space:]\"']*" "${OUT_DIR}" >&2
+    grep -RE "postgres(ql)?://[^[:space:]\"']*" "${OUT_DIR}" >&2
     exit 1
 fi
 
@@ -48,11 +48,46 @@ if grep -n "spendguard-signing-keys\\|/etc/spendguard/signing\\|control-plane.pe
     exit 1
 fi
 
-for required in "runAsUser: 65532" "readOnlyRootFilesystem: true" "drop:" "ALL"; do
-    if ! grep -R "${required}" "${OUT_DIR}" >/dev/null; then
-        log "FATAL: rendered manifests missing security baseline token: ${required}"
-        exit 1
-    fi
-done
+ruby -ryaml - "${OUT_DIR}/production-networkpolicy.yaml" <<'RUBY'
+docs = YAML.load_stream(File.read(ARGV.fetch(0)))
+errors = []
+
+docs.each do |doc|
+  next unless doc.is_a?(Hash)
+  kind = doc["kind"]
+  next unless ["Deployment", "Job", "CronJob"].include?(kind)
+  name = doc.dig("metadata", "name")
+  pod_spec =
+    if kind == "CronJob"
+      doc.dig("spec", "jobTemplate", "spec", "template", "spec")
+    else
+      doc.dig("spec", "template", "spec")
+    end
+  next unless pod_spec
+
+  containers = pod_spec["containers"] || []
+  containers.each do |container|
+    cname = container["name"]
+    sc = container["securityContext"] || {}
+    errors << "#{kind}/#{name}/#{cname}: readOnlyRootFilesystem != true" unless sc["readOnlyRootFilesystem"] == true
+    errors << "#{kind}/#{name}/#{cname}: allowPrivilegeEscalation != false" unless sc["allowPrivilegeEscalation"] == false
+    drops = sc.dig("capabilities", "drop") || []
+    errors << "#{kind}/#{name}/#{cname}: capabilities.drop missing ALL" unless drops.include?("ALL")
+
+    (container["env"] || []).each do |env|
+      next unless env["name"].to_s.end_with?("DATABASE_URL") || env["name"].to_s.start_with?("PG_")
+      unless env.dig("valueFrom", "secretKeyRef", "name") && env.dig("valueFrom", "secretKeyRef", "key")
+        errors << "#{kind}/#{name}/#{cname}: #{env["name"]} is not sourced from secretKeyRef"
+      end
+    end
+  end
+end
+
+unless errors.empty?
+  warn "FATAL: rendered workload assertions failed:"
+  errors.each { |error| warn "  - #{error}" }
+  exit 1
+end
+RUBY
 
 log "PASS outputs=${OUT_DIR}"
