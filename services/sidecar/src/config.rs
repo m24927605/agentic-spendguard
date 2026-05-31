@@ -75,6 +75,20 @@ pub struct Config {
     #[serde(default = "default_metrics_addr")]
     pub metrics_addr: String,
 
+    /// Optional run_cost_projector gRPC endpoint. Empty keeps the legacy
+    /// conservative fall-through path where no RUN_* code can be emitted.
+    #[serde(default)]
+    pub run_cost_projector_url: String,
+
+    /// Demo/test-only escape hatch: allow free-form adapter runtime_metadata
+    /// to provide `budget_remaining_atomic` for RUN_BUDGET_PROJECTION_EXCEEDED.
+    ///
+    /// Production must leave this false until the sidecar derives budget
+    /// remaining from a signed/fenced ledger snapshot. The hard budget oracle
+    /// remains Ledger.ReserveSet regardless of this advisory projection signal.
+    #[serde(default)]
+    pub allow_untrusted_budget_metadata: bool,
+
     /// Health probe bind (kubelet readiness/liveness).
     #[serde(default = "default_health_addr")]
     pub health_addr: String,

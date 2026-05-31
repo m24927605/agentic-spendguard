@@ -10,6 +10,7 @@ use spendguard_sidecar::{
     bootstrap::{catalog, hot_reload, trust},
     clients::{
         canonical_ingest::CanonicalIngestClient, ledger::LedgerClient, mtls::MTlsPaths,
+        run_cost_projector::RunCostProjectorClient,
     },
     config::Config,
     domain::state::SidecarState,
@@ -122,7 +123,7 @@ async fn main() -> Result<()> {
     // another. LedgerClient wraps Arc<LedgerProtoClient<Channel>>, so the
     // clone is cheap.
     let ledger_for_lease = ledger.clone();
-    let state = SidecarState::new(
+    let mut state = SidecarState::new(
         ledger,
         canonical_ingest,
         idempotency,
@@ -130,7 +131,30 @@ async fn main() -> Result<()> {
         cfg.reservation_ttl_seconds,
         signer,
         fail_policy,
+        cfg.allow_untrusted_budget_metadata,
     );
+    if cfg.allow_untrusted_budget_metadata {
+        tracing::warn!(
+            "SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA=true; \
+             caller-supplied budget_remaining metadata is enabled for demo/test only"
+        );
+    }
+    if cfg.run_cost_projector_url.trim().is_empty() {
+        info!("run_cost_projector not configured; RUN_* projection path disabled");
+    } else {
+        let projector = RunCostProjectorClient::connect(
+            cfg.run_cost_projector_url.clone(),
+            default_service_sni(&cfg.run_cost_projector_url),
+            &mtls,
+        )
+        .await
+        .context("connect run_cost_projector")?;
+        state = state.with_run_cost_projector(projector);
+        info!(
+            endpoint = %cfg.run_cost_projector_url,
+            "run_cost_projector client configured"
+        );
+    }
 
     // 2b) Install pre-pulled bundles from disk (Helm init container loads
     //     them; Phase 2 will pull from Bundle Registry at startup).
@@ -307,6 +331,14 @@ fn init_tracing() {
         .with_target(false)
         .json()
         .init();
+}
+
+fn default_service_sni(endpoint_url: &str) -> &str {
+    if endpoint_url.contains("run-cost-projector") {
+        "run-cost-projector"
+    } else {
+        "localhost"
+    }
 }
 
 async fn wait_for_workload_cert(mtls: &MTlsPaths) -> Result<()> {

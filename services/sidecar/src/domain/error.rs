@@ -41,6 +41,9 @@ pub enum DomainError {
     #[error("reservation not found: {0}")]
     ReservationNotFound(String),
 
+    #[error("idempotency conflict: {0}")]
+    IdempotencyConflict(String),
+
     #[error("ledger client: {0}")]
     LedgerClient(String),
 
@@ -78,6 +81,7 @@ impl DomainError {
                 (ProtoCode::MultiReservationCommitDeferred, d.clone())
             }
             DomainError::ReservationNotFound(d) => (ProtoCode::Unspecified, d.clone()),
+            DomainError::IdempotencyConflict(d) => (ProtoCode::Unspecified, d.clone()),
             DomainError::InvalidRequest(d) => (ProtoCode::Unspecified, d.clone()),
             DomainError::TrustBootstrap(d)
             | DomainError::ManifestSignatureInvalid(d)
@@ -117,6 +121,7 @@ impl DomainError {
                 Status::failed_precondition(self.to_string())
             }
             DomainError::ReservationNotFound(_) => Status::not_found(self.to_string()),
+            DomainError::IdempotencyConflict(_) => Status::failed_precondition(self.to_string()),
             DomainError::LedgerClient(_) | DomainError::CanonicalIngestClient(_) => {
                 Status::unavailable(self.to_string())
             }

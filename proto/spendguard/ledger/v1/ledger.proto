@@ -642,7 +642,11 @@ message ReplayAuditEvent {
 
 message QueryDecisionOutcomeRequest {
   string tenant_id = 1;
+  // Optional direct lookup. Existing callers may keep using decision_id.
+  // Sidecar retry recovery uses idempotency_key so it can resolve durable
+  // replay before any mutating predictor/projector call.
   string decision_id = 2;
+  string idempotency_key = 3;
 }
 
 message QueryDecisionOutcomeResponse {
@@ -660,6 +664,19 @@ message QueryDecisionOutcomeResponse {
 
   // For idempotent re-publish (Stage 2 §4.6 adapter idempotency).
   bytes effect_hash = 6;
+
+  // Durable replay metadata for idempotency-key lookups. These fields are
+  // additive and remain empty for older rows that lack the source payload.
+  string decision_id = 7;
+  string operation_kind = 8;
+  string operation_id = 9;
+  repeated string projection_ids = 10;
+  google.protobuf.Timestamp ttl_expires_at = 11;
+  string final_decision = 12;
+  repeated string matched_rule_ids = 13;
+  repeated string reason_codes = 14;
+  string run_code_triggered = 15;
+  string request_fingerprint_hex = 16;
 }
 
 // ============================================================================

@@ -1,0 +1,33 @@
+[workspace]
+members = ["benchmarks/predictor-upgrade"]
+exclude = [
+  "benchmarks/tokenizer",
+  "crates/spendguard-prediction-mirror",
+  "crates/spendguard-tokenizer",
+  "services/auth",
+  "services/bundle_registry",
+  "services/calibration_report",
+  "services/canonical_ingest",
+  "services/control_plane",
+  "services/cost_advisor",
+  "services/dashboard",
+  "services/doctor",
+  "services/egress_proxy",
+  "services/endpoint_catalog",
+  "services/ids",
+  "services/leases",
+  "services/ledger",
+  "services/outbox_forwarder",
+  "services/output_predictor",
+  "services/policy",
+  "services/retention_sweeper",
+  "services/run_cost_projector",
+  "services/sidecar",
+  "services/signing",
+  "services/stats_aggregator",
+  "services/tokenizer",
+  "services/ttl_sweeper",
+  "services/usage_poller",
+  "services/webhook_receiver",
+]
+resolver = "2"

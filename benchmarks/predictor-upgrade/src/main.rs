@@ -129,7 +129,10 @@ async fn main() -> anyhow::Result<()> {
         .split(',')
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(|s| s.parse::<usize>().map_err(|e| anyhow::anyhow!("bad burst '{}': {}", s, e)))
+        .map(|s| {
+            s.parse::<usize>()
+                .map_err(|e| anyhow::anyhow!("bad burst '{}': {}", s, e))
+        })
         .collect::<Result<_, _>>()?;
     if !cli.include_1k {
         bursts.retain(|&b| b < 1000);
@@ -142,7 +145,12 @@ async fn main() -> anyhow::Result<()> {
     // 2. Parse targets.
     // ---------------------------------------------------------------
     let mut competitor_specs: Vec<(CompetitorName, Box<dyn Competitor>)> = Vec::new();
-    for raw in cli.targets.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+    for raw in cli
+        .targets
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         match raw {
             "all" => {
                 competitor_specs.push((
@@ -176,7 +184,10 @@ async fn main() -> anyhow::Result<()> {
         }
     }
     if competitor_specs.is_empty() {
-        anyhow::bail!("no targets selected after parsing (--targets={})", cli.targets);
+        anyhow::bail!(
+            "no targets selected after parsing (--targets={})",
+            cli.targets
+        );
     }
 
     // ---------------------------------------------------------------
@@ -188,7 +199,10 @@ async fn main() -> anyhow::Result<()> {
         info!("=== competitor: {} ===", name.as_str());
         let mut per_burst: Vec<BurstReport> = Vec::new();
         for &burst in &bursts {
-            info!("  burst={} warmup={} samples={}", burst, cli.warmup, cli.samples);
+            info!(
+                "  burst={} warmup={} samples={}",
+                burst, cli.warmup, cli.samples
+            );
             let runner_ref = BurstRunner::new(runner.as_ref());
             let start = Instant::now();
             match runner_ref.run(burst, cli.warmup, cli.samples).await {

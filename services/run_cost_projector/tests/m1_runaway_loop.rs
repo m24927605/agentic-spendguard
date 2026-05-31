@@ -18,9 +18,7 @@
 
 use spendguard_run_cost_projector::{
     config::Config,
-    proto::run_cost_projector::v1::{
-        run_cost_projector_server::RunCostProjector, ProjectRequest,
-    },
+    proto::run_cost_projector::v1::{run_cost_projector_server::RunCostProjector, ProjectRequest},
     server::RunCostProjectorSvc,
 };
 use tonic::Request;
@@ -52,6 +50,7 @@ fn build_req(
     this_call: i64,
     budget_remaining: i64,
     hint: i32,
+    decision_id: String,
 ) -> ProjectRequest {
     ProjectRequest {
         tenant_id: tenant.to_string(),
@@ -59,7 +58,7 @@ fn build_req(
         agent_id: "ag-runaway".into(),
         model: "gpt-4o".into(),
         step_id: String::new(),
-        decision_id: "dec-runaway".into(),
+        decision_id,
         this_call_reservation_atomic: this_call,
         unit_id: "USD".into(),
         budget_remaining_atomic: budget_remaining,
@@ -78,7 +77,10 @@ async fn m1_runaway_loop_stops_well_before_47_calls() {
     // ... budget = 1099 (one less than tight) would fire at step 1.
     //
     // To prove "stops well before 47" we tighten budget to 999 so step 1's
-    // projection (1100) immediately exceeds and the projector fires.
+    // future commitment (100 + 1000) immediately exceeds and the projector
+    // fires. ProjectRequest carries live remaining balance, so this test
+    // decrements the request budget as if the ledger had accepted each prior
+    // call.
     let svc = RunCostProjectorSvc::new(test_cfg(), None);
     let tenant = Uuid::new_v4();
     let run = Uuid::new_v4();
@@ -86,8 +88,16 @@ async fn m1_runaway_loop_stops_well_before_47_calls() {
     let mut fired_at: Option<i64> = None;
     let mut emitted_count = 0;
     for call_idx in 1..=47 {
+        let live_remaining = (budget - ((call_idx - 1) * 100)).max(0);
         let resp = svc
-            .project(Request::new(build_req(tenant, run, 100, budget, 0)))
+            .project(Request::new(build_req(
+                tenant,
+                run,
+                100,
+                live_remaining,
+                0,
+                format!("runaway-{call_idx}"),
+            )))
             .await
             .expect("project ok")
             .into_inner();
@@ -105,7 +115,8 @@ async fn m1_runaway_loop_stops_well_before_47_calls() {
         fired <= 11,
         "expected fire ≤ step 11; actually fired at step {fired}"
     );
-    // All subsequent calls should also fire (budget never resets).
+    // All subsequent calls should also fire as live ledger balance keeps
+    // decreasing.
     let expected_fires = 47 - fired + 1;
     assert_eq!(
         emitted_count, expected_fires,
@@ -125,7 +136,14 @@ async fn m1_runaway_loop_drift_detection_simulation() {
     let mut drift_fired_at: Option<usize> = None;
     for (idx, cost) in costs.iter().enumerate() {
         let resp = svc
-            .project(Request::new(build_req(tenant, run, *cost, budget, 0)))
+            .project(Request::new(build_req(
+                tenant,
+                run,
+                *cost,
+                budget,
+                0,
+                format!("drift-{idx}"),
+            )))
             .await
             .expect("project ok")
             .into_inner();
@@ -160,7 +178,14 @@ async fn m1_runaway_loop_signal3_hint_caps_run_length() {
     let mut steps_fired_at: Option<i64> = None;
     for call_idx in 1..=10 {
         let resp = svc
-            .project(Request::new(build_req(tenant, run, 100, budget, 2)))
+            .project(Request::new(build_req(
+                tenant,
+                run,
+                100,
+                budget,
+                2,
+                format!("steps-{call_idx}"),
+            )))
             .await
             .expect("project ok")
             .into_inner();

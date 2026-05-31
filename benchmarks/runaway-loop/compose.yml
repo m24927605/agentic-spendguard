@@ -69,9 +69,14 @@ services:
     container_name: benchmark-spendguard-shim
     environment:
       BUDGET_USD: "1.00"
+      BUDGET_ATOMIC: "1000000000"
       SHIM_LEDGER_LOG: /var/log/spendguard_shim.jsonl
+      SHIM_DISABLE_LEDGER_LOG: "${SHIM_DISABLE_LEDGER_LOG:-}"
+      SHIM_UVICORN_WORKERS: "${SHIM_UVICORN_WORKERS:-1}"
     volumes:
       - shim-log:/var/log
+    ports:
+      - "8090:8090"
     healthcheck:
       test: ["CMD-SHELL", "python -c 'import urllib.request; urllib.request.urlopen(\"http://localhost:8090/healthz\")'"]
       interval: 1s

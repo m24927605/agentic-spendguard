@@ -1,5 +1,6 @@
 -- Phase 2B Step 8 verification (decision-mode).
--- After: reserve(100) -> commit_estimated(42) -> provider_report(38)
+-- After: release smoke reserve(10) -> release(10), then
+-- reserve(100) -> commit_estimated(42) -> provider_report(38)
 -- Expected:
 --   available_budget = 462 (= 500 seed - 42 + 4 refund delta)
 --   reserved_hold    = 0
@@ -11,17 +12,17 @@
 --   commits.delta_to_reserved = 38 - 100 = -62
 --
 -- audit_outbox events:
---   audit.decision: 4 (deposit_token + deposit_usd + reserve + provider_report)
+--   audit.decision: 5 (deposit_token + deposit_usd + release-smoke reserve + main reserve + provider_report)
 --                       — Phase 4 O4 added the USD opening deposit; the
 --                       Phase 2B baseline (3 decisions) didn't track it.
---   audit.outcome:  1 (commit_estimated)
+--   audit.outcome:  2 (release + commit_estimated)
 
 \echo
 \echo === ledger_transactions: operation_kind counts ===
 SELECT operation_kind, COUNT(*)::int AS n
   FROM ledger_transactions
  WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
-   AND operation_kind IN ('reserve','commit_estimated','provider_report','adjustment')
+   AND operation_kind IN ('reserve','release','commit_estimated','provider_report','adjustment')
  GROUP BY operation_kind
  ORDER BY operation_kind;
 
@@ -72,12 +73,14 @@ SELECT event_type, COUNT(*)::int AS n
 DO $$
 DECLARE
     v_reserve_count       INT;
+    v_release_count       INT;
     v_commit_count        INT;
     v_provider_count      INT;
     v_available_net       NUMERIC;
     v_reserved_hold_net   NUMERIC;
     v_committed_spend_net NUMERIC;
     v_committed_state_n   INT;
+    v_released_state_n    INT;
     v_decision_audit_n    INT;
     v_outcome_audit_n     INT;
     v_commit_state        TEXT;
@@ -89,8 +92,16 @@ BEGIN
       FROM ledger_transactions
      WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
        AND operation_kind = 'reserve';
-    IF v_reserve_count <> 1 THEN
-        RAISE EXCEPTION 'EXPECTED 1 reserve tx; got %', v_reserve_count;
+    IF v_reserve_count <> 2 THEN
+        RAISE EXCEPTION 'EXPECTED 2 reserve txs (release smoke + main); got %', v_reserve_count;
+    END IF;
+
+    SELECT COUNT(*) INTO v_release_count
+      FROM ledger_transactions
+     WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
+       AND operation_kind = 'release';
+    IF v_release_count <> 1 THEN
+        RAISE EXCEPTION 'EXPECTED 1 release tx from release smoke; got %', v_release_count;
     END IF;
 
     SELECT COUNT(*) INTO v_commit_count
@@ -148,6 +159,14 @@ BEGIN
     IF v_committed_state_n <> 1 THEN
         RAISE EXCEPTION 'EXPECTED 1 committed reservation; got %', v_committed_state_n;
     END IF;
+    SELECT COUNT(*) INTO v_released_state_n
+      FROM reservations
+     WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
+       AND budget_id = '44444444-4444-4444-8444-444444444444'
+       AND current_state = 'released';
+    IF v_released_state_n <> 1 THEN
+        RAISE EXCEPTION 'EXPECTED 1 released reservation from release smoke; got %', v_released_state_n;
+    END IF;
 
     SELECT latest_state, estimated_amount_atomic,
            provider_reported_amount_atomic, delta_to_reserved_atomic
@@ -177,14 +196,15 @@ BEGIN
       FROM audit_outbox
      WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
        AND event_type = 'spendguard.audit.outcome';
-    -- 4 audit.decision (deposit_token + deposit_usd + reserve + provider_report) + 1 audit.outcome (commit_estimated)
-    IF v_decision_audit_n <> 4 THEN
-        RAISE EXCEPTION 'EXPECTED 4 audit.decision events; got %', v_decision_audit_n;
+    -- 5 audit.decision (deposit_token + deposit_usd + release-smoke reserve + main reserve + provider_report)
+    -- + 2 audit.outcome (release + commit_estimated).
+    IF v_decision_audit_n <> 5 THEN
+        RAISE EXCEPTION 'EXPECTED 5 audit.decision events; got %', v_decision_audit_n;
     END IF;
-    IF v_outcome_audit_n <> 1 THEN
-        RAISE EXCEPTION 'EXPECTED 1 audit.outcome event; got %', v_outcome_audit_n;
+    IF v_outcome_audit_n <> 2 THEN
+        RAISE EXCEPTION 'EXPECTED 2 audit.outcome events; got %', v_outcome_audit_n;
     END IF;
 
-    RAISE NOTICE 'Phase 2B Step 8 assertions PASS (available=462, committed=38, reserved=0, commits.latest_state=provider_reported, delta=-62)';
+    RAISE NOTICE 'Phase 2B Step 8 assertions PASS (release smoke + provider_reported commit; available=462, committed=38, reserved=0, delta=-62)';
 END
 $$;

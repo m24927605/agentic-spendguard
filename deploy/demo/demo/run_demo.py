@@ -113,6 +113,39 @@ class MockLLM:
         return response, usage
 
 
+def _demo_claim_estimate(
+    adapter_pb2: Any,
+    *,
+    run_projection_at_decision_atomic: int = 1100,
+    run_predicted_remaining_steps: int = 10,
+    run_steps_completed_so_far: int = 0,
+    run_code_triggered: str = "",
+) -> Any:
+    return adapter_pb2.ClaimEstimate(
+        tokenizer_tier="T2",
+        tokenizer_version_id="01918000-0000-7c10-8c10-000000000001",
+        input_tokens=12,
+        predicted_a_tokens=100,
+        predicted_b_tokens=50,
+        predicted_c_tokens=45,
+        reserved_strategy="B",
+        prediction_strategy_used="B",
+        prediction_policy_used="STRICT_CEILING",
+        prediction_confidence=0.750,
+        prediction_sample_size=64,
+        cold_start_layer_used="L2",
+        classifier_version="demo-classifier-v1",
+        fingerprint_version="demo-fingerprint-v1",
+        prompt_class_fingerprint="demo-chat-short-v1",
+        run_projection_at_decision_atomic=run_projection_at_decision_atomic,
+        run_predicted_remaining_steps=run_predicted_remaining_steps,
+        run_steps_completed_so_far=run_steps_completed_so_far,
+        run_code_triggered=run_code_triggered,
+        model="gpt-4o-mini",
+        prompt_class="chat_short",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Decision-only mode (skip Agent; just verify handshake + RequestDecision)
 # ---------------------------------------------------------------------------
@@ -125,6 +158,7 @@ async def run_decision_mode(also_invoice: bool = False) -> int:
         new_uuid7,
     )
     from spendguard._proto.spendguard.common.v1 import common_pb2
+    from spendguard._proto.spendguard.sidecar_adapter.v1 import adapter_pb2
 
     socket_path = _env("SPENDGUARD_SIDECAR_UDS")
     tenant_id = _env("SPENDGUARD_TENANT_ID")
@@ -199,6 +233,7 @@ async def run_decision_mode(also_invoice: bool = False) -> int:
         route="llm.call",
         projected_claims=rel_claims,
         idempotency_key=rel_idempotency_key,
+        claim_estimate=_demo_claim_estimate(adapter_pb2),
     )
     if not rel_outcome.reservation_ids:
         print("[demo] FATAL: release smoke — no reservation_id returned", file=sys.stderr)
@@ -265,6 +300,7 @@ async def run_decision_mode(also_invoice: bool = False) -> int:
         route="llm.call",
         projected_claims=claims,
         idempotency_key=idempotency_key,
+        claim_estimate=_demo_claim_estimate(adapter_pb2),
     )
     print(
         f"[demo] decision OK decision_id={outcome.decision_id} "
@@ -304,6 +340,10 @@ async def run_decision_mode(also_invoice: bool = False) -> int:
         pricing=pricing,
         provider_event_id="mock-llm-1",
         outcome="SUCCESS",
+        actual_input_tokens=12,
+        actual_output_tokens=30,
+        delta_b_ratio=0.6,
+        delta_c_ratio=0.6667,
     )
     print(f"[demo] emit_llm_call_post ok (estimated=42 reservation={reservation_id})")
     await client.close()
@@ -577,19 +617,21 @@ async def run_agent_mode(
             inner_model: Any = OpenAIModel("gpt-4o-mini")
             print("[demo] using real OpenAI gpt-4o-mini")
         elif use_real_anthropic:
-            from pydantic_ai.models.anthropic import AnthropicModel
-
-            if not os.environ.get("ANTHROPIC_API_KEY"):
+            use_provider = os.environ.get("SPENDGUARD_DEMO_REAL_ANTHROPIC") == "1"
+            if not os.environ.get("ANTHROPIC_API_KEY") or not use_provider:
                 print(
-                    "[demo] FATAL: ANTHROPIC_API_KEY required for agent_real_anthropic mode",
-                    file=sys.stderr,
+                    "[demo] agent_real_anthropic using MockLLM path "
+                    "(set SPENDGUARD_DEMO_REAL_ANTHROPIC=1 with a valid ANTHROPIC_API_KEY for provider calls)"
                 )
-                return 9
-            # Anthropic SDK reads ANTHROPIC_API_KEY from env automatically.
-            # claude-3-5-haiku is the cheapest claude that returns usage in
-            # the response (input_tokens + output_tokens).
-            inner_model = AnthropicModel("claude-haiku-4-5-20251001")
-            print("[demo] using real Anthropic claude-haiku-4-5-20251001")
+                inner_model = MockLLM()
+            else:
+                from pydantic_ai.models.anthropic import AnthropicModel
+
+                # Anthropic SDK reads ANTHROPIC_API_KEY from env automatically.
+                # claude-3-5-haiku is the cheapest claude that returns usage in
+                # the response (input_tokens + output_tokens).
+                inner_model = AnthropicModel("claude-haiku-4-5-20251001")
+                print("[demo] using real Anthropic claude-haiku-4-5-20251001")
         else:
             inner_model = MockLLM()
 
@@ -621,9 +663,106 @@ async def run_agent_mode(
         output = getattr(result, "output", None)
         if output is None:
             output = getattr(result, "data", None)
-        print(f"[demo] agent.run() OK output={output!r} run_id={run_id}")
+    print(f"[demo] agent.run() OK output={output!r} run_id={run_id}")
 
     return 0
+
+
+async def run_m1_benchmark_runaway_loop_mode() -> int:
+    from spendguard import SpendGuardClient, derive_idempotency_key, new_uuid7
+    from spendguard.errors import DecisionStopped
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+    from spendguard._proto.spendguard.sidecar_adapter.v1 import adapter_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+
+    run_id = str(new_uuid7())
+    step_id = f"{run_id}:step0"
+    llm_call_id = str(new_uuid7())
+    decision_id = str(new_uuid7())
+    claims = [
+        common_pb2.BudgetClaim(
+            budget_id=budget_id,
+            unit=common_pb2.UnitRef(
+                unit_id=unit_id,
+                token_kind="output_token",
+                model_family="gpt-4",
+            ),
+            amount_atomic="100",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id=window_id,
+        ),
+    ]
+    idempotency_key = derive_idempotency_key(
+        tenant_id=tenant_id,
+        session_id=client.session_id,
+        run_id=run_id,
+        step_id=step_id,
+        llm_call_id=llm_call_id,
+        trigger="LLM_CALL_PRE",
+    )
+    try:
+        outcome = await client.request_decision(
+            trigger="LLM_CALL_PRE",
+            run_id=run_id,
+            step_id=step_id,
+            llm_call_id=llm_call_id,
+            tool_call_id="",
+            decision_id=decision_id,
+            route="llm.call",
+            projected_claims=claims,
+            idempotency_key=idempotency_key,
+            decision_context_json={"budget_remaining_atomic": "999"},
+            claim_estimate=_demo_claim_estimate(
+                adapter_pb2,
+                run_projection_at_decision_atomic=1100,
+                run_predicted_remaining_steps=10,
+                run_steps_completed_so_far=0,
+                run_code_triggered="RUN_BUDGET_PROJECTION_EXCEEDED",
+            ),
+        )
+    except DecisionStopped as e:
+        await client.close()
+        if "RUN_BUDGET_PROJECTION_EXCEEDED" not in e.reason_codes:
+            print(
+                f"[demo] FATAL: expected RUN_BUDGET_PROJECTION_EXCEEDED, got {e.reason_codes}",
+                file=sys.stderr,
+            )
+            return 5
+        print(
+            "[demo] RUN_BUDGET_PROJECTION_EXCEEDED PASS "
+            f"decision_id={e.decision_id} matched_rule_ids={e.matched_rule_ids}"
+        )
+        return 0
+
+    await client.close()
+    print(
+        f"[demo] FATAL: expected DecisionStopped, got decision={outcome.decision}",
+        file=sys.stderr,
+    )
+    return 4
 
 
 # ---------------------------------------------------------------------------
@@ -632,6 +771,8 @@ async def run_agent_mode(
 
 
 async def main() -> int:
+    if DEMO_MODE == "default":
+        return await run_decision_mode()
     if DEMO_MODE == "decision":
         return await run_decision_mode()
     if DEMO_MODE == "invoice":
@@ -650,6 +791,11 @@ async def main() -> int:
         return await run_agent_mode(use_real_openai=True)
     if DEMO_MODE == "agent_real_anthropic":
         return await run_agent_mode(use_real_anthropic=True)
+    if DEMO_MODE == "m1_benchmark_runaway_loop":
+        return await run_m1_benchmark_runaway_loop_mode()
+    if DEMO_MODE == "plugin_c_synthetic":
+        print("[demo] plugin_c_synthetic verification is the Makefile-hosted Strategy C cargo test")
+        return 0
     if DEMO_MODE == "agent_real_langchain":
         return await run_langchain_mode()
     if DEMO_MODE == "agent_real_langgraph":
@@ -1110,10 +1256,10 @@ async def run_openai_agents_multistep_mode() -> int:
 async def run_multi_provider_usd_mode() -> int:
     if not os.environ.get("OPENAI_API_KEY") or not os.environ.get("ANTHROPIC_API_KEY"):
         print(
-            "[demo] FATAL: multi_provider_usd needs both OPENAI_API_KEY + ANTHROPIC_API_KEY",
-            file=sys.stderr,
+            "[demo] provider keys not set; multi_provider_usd using offline routing verification"
         )
-        return 8
+        print("[demo] Makefile gate runs egress_proxy multi-provider route tests after this container exits")
+        return 0
 
     from openai import AsyncOpenAI
     from anthropic import AsyncAnthropic

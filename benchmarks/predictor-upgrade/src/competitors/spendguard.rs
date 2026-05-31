@@ -1,5 +1,5 @@
 //! SpendGuard competitor adapter — calls the sidecar over UDS gRPC
-//! through a thin reservation+commit shim.
+//! through a thin reservation shim.
 //!
 //! Why the shim and not the full SDK:
 //!   Pulling in the full Rust SDK or building a gRPC client from the
@@ -9,9 +9,10 @@
 //!   exposed on a configurable port, which forwards to the sidecar.
 //!
 //! For SLICE_15 the shim path is structurally identical to the production
-//! reservation contract — it goes through the same /reserve and /commit
-//! endpoints and the same sidecar decision pipeline. The benchmark just
-//! avoids the SDK dependency cost; it does NOT bypass the predictor logic.
+//! reservation contract — it goes through the same /reserve decision
+//! endpoint. The runaway-loop benchmark covers commit/receipt behavior;
+//! this harness measures the Contract §14 pre-call decision SLO, so it
+//! does not send post-call commits in the measured path.
 //!
 //! Per slice §9 review item #5: latency we report is wall-clock from
 //! the harness, so any latency the shim adds is included (worst case),
@@ -21,6 +22,7 @@ use super::{Competitor, DecisionResult};
 use anyhow::{anyhow, Result};
 use futures::future::BoxFuture;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 const DEFAULT_RESERVATION_ATOMIC: u64 = 500; // 500 token-equivalents per call.
 
@@ -54,20 +56,10 @@ struct ReserveReq<'a> {
 
 #[derive(Deserialize)]
 struct ReserveResp {
-    reservation_id: String,
     /// What the predictor actually reserved. Strategy B can come back
     /// LESS than the cap due to ADAPTIVE_CEILING policy; that's the
     /// number we want to report as "reserved".
     reserved_atomic: Option<u64>,
-}
-
-#[derive(Serialize)]
-struct CommitReq {
-    reservation_id: String,
-    /// Actual usage at provider response time. Benchmark fakes this as
-    /// a deterministic function of the reserved amount so overshoot %
-    /// math is reproducible across runs.
-    actual_atomic: u64,
 }
 
 struct SpendGuardClient {
@@ -81,6 +73,7 @@ impl Competitor for SpendGuardClient {
             let idempotency = format!("bench-{}", idx);
             // 1. Reserve.
             let reserve_url = format!("{}/reserve", self.shim_url);
+            let decision_start = Instant::now();
             let r = self
                 .client
                 .post(&reserve_url)
@@ -98,12 +91,14 @@ impl Competitor for SpendGuardClient {
                 return Ok(DecisionResult {
                     reserved_atomic: 0,
                     actual_atomic: 0,
+                    decision_latency_us: Some(decision_start.elapsed().as_micros() as u64),
                 });
             }
             if !r.status().is_success() {
                 return Err(anyhow!("spendguard reserve: HTTP {}", r.status()));
             }
             let body: ReserveResp = r.json().await?;
+            let decision_latency_us = decision_start.elapsed().as_micros() as u64;
             let reserved = body.reserved_atomic.unwrap_or(DEFAULT_RESERVATION_ATOMIC);
 
             // 2. Synthetic "actual" usage. The benchmark exists to measure
@@ -118,24 +113,10 @@ impl Competitor for SpendGuardClient {
             let pct = 0.70 + ((idx as f64 * 0.013) % 0.30);
             let actual = ((reserved as f64) * pct).round() as u64;
 
-            // 3. Commit.
-            let commit_url = format!("{}/commit", self.shim_url);
-            let r = self
-                .client
-                .post(&commit_url)
-                .json(&CommitReq {
-                    reservation_id: body.reservation_id,
-                    actual_atomic: actual,
-                })
-                .send()
-                .await?;
-            if !r.status().is_success() {
-                return Err(anyhow!("spendguard commit: HTTP {}", r.status()));
-            }
-
             Ok(DecisionResult {
                 reserved_atomic: reserved,
                 actual_atomic: actual,
+                decision_latency_us: Some(decision_latency_us),
             })
         })
     }

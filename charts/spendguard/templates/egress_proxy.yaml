@@ -31,6 +31,15 @@
        use an annotation. For now we document via this comment. */ -}}
 {{- end -}}
 {{- end -}}
+{{- $outputPredictorEndpoint := .Values.egressProxy.outputPredictorEndpoint -}}
+{{- if and (eq .Values.chart.profile "production") .Values.outputPredictor.enabled (eq $outputPredictorEndpoint "") -}}
+{{- $outputPredictorEndpoint = printf "https://%s-output-predictor:50054" (include "spendguard.fullname" .) -}}
+{{- end -}}
+{{- $runCostProjectorEndpoint := .Values.egressProxy.runCostProjectorEndpoint -}}
+{{- $sidecarProjectorConfigured := and .Values.sidecar.enabled .Values.sidecar.runCostProjectorUrl -}}
+{{- if and (eq .Values.chart.profile "production") $sidecarProjectorConfigured $runCostProjectorEndpoint -}}
+{{- fail "egressProxy.runCostProjectorEndpoint must be empty when sidecar run_cost_projector is configured; otherwise one proxied LLM call mutates run_cost_projector state twice. Keep the sidecar as the authoritative Project caller until a non-mutating proxy preview RPC exists." -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -70,15 +79,15 @@ spec:
             - { name: SPENDGUARD_EGRESS_PROXY_BIND_ADDR, value: {{ .Values.egressProxy.bindAddr | quote }} }
             - { name: SPENDGUARD_PROXY_DEFAULT_TENANT_ID, value: {{ .Values.global.tenantId | quote }} }
             - { name: SPENDGUARD_PROXY_SIDECAR_UDS_PATH, value: "/var/run/spendguard/adapter.sock" }
-            {{- if .Values.egressProxy.outputPredictorEndpoint }}
+            {{- if $outputPredictorEndpoint }}
             # SLICE_10: output_predictor wiring. Empty ⇒ proxy falls back
             # to local Strategy A (predicted_b/c=0; reserved="A").
-            - { name: SPENDGUARD_PROXY_OUTPUT_PREDICTOR_ENDPOINT, value: {{ .Values.egressProxy.outputPredictorEndpoint | quote }} }
+            - { name: SPENDGUARD_PROXY_OUTPUT_PREDICTOR_ENDPOINT, value: {{ $outputPredictorEndpoint | quote }} }
             {{- end }}
-            {{- if .Values.egressProxy.runCostProjectorEndpoint }}
+            {{- if $runCostProjectorEndpoint }}
             # SLICE_10: run_cost_projector wiring. Empty ⇒ proxy
             # pass-through (no RUN_* codes; remaining_steps=-1).
-            - { name: SPENDGUARD_PROXY_RUN_COST_PROJECTOR_ENDPOINT, value: {{ .Values.egressProxy.runCostProjectorEndpoint | quote }} }
+            - { name: SPENDGUARD_PROXY_RUN_COST_PROJECTOR_ENDPOINT, value: {{ $runCostProjectorEndpoint | quote }} }
             {{- end }}
           volumeMounts:
             - name: tmp

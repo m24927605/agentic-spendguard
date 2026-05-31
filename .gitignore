@@ -27,6 +27,7 @@ docs/site/site/
 # Phase 5 GA hardening: per-crate Rust build artifacts. Each
 # services/<crate>/ standalone Cargo build pollutes the worktree
 # when an operator runs `cargo test` outside Docker.
+target/
 services/*/target/
 services/*/Cargo.lock
 crates/*/target/

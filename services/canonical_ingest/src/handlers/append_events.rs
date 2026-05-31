@@ -308,6 +308,7 @@ async fn process_one(
         decoded_data.as_ref(),
     )
     .map(|c| c.as_db_str());
+    let aggregator = aggregator_mirrors_from_event(evt, decoded_data.as_ref(), run_id);
 
     let input = AppendInput {
         event_id,
@@ -331,6 +332,11 @@ async fn process_one(
         region_id: &cfg.region,
         ingest_shard_id: &cfg.ingest_shard_id,
         failure_class,
+        model: aggregator.model,
+        agent_id: aggregator.agent_id,
+        run_id_mirror: aggregator.run_id_mirror,
+        prompt_class: aggregator.prompt_class,
+        prompt_class_fingerprint: aggregator.prompt_class_fingerprint,
         prediction: prediction_columns_from_event(evt),
     };
 
@@ -446,6 +452,7 @@ async fn process_one(
                 decoded_data.as_ref(),
             )
             .map(|c| c.as_db_str());
+            let aggregator = aggregator_mirrors_from_event(evt, decoded_data.as_ref(), run_id);
             let input = AppendInput {
                 event_id,
                 tenant_id,
@@ -468,6 +475,11 @@ async fn process_one(
                 region_id: &cfg.region,
                 ingest_shard_id: &cfg.ingest_shard_id,
                 failure_class,
+                model: aggregator.model,
+                agent_id: aggregator.agent_id,
+                run_id_mirror: aggregator.run_id_mirror,
+                prompt_class: aggregator.prompt_class,
+                prompt_class_fingerprint: aggregator.prompt_class_fingerprint,
                 prediction: prediction_columns_from_event(evt),
             };
             if let Err(e) = append::quarantine_audit_outcome(pool, input, orphan_after).await {
@@ -556,6 +568,44 @@ fn cloudevent_to_json(evt: &CloudEvent) -> serde_json::Value {
         "delta_b_ratio": evt.delta_b_ratio,
         "delta_c_ratio": evt.delta_c_ratio,
     })
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct AggregatorMirrors<'a> {
+    model: Option<&'a str>,
+    agent_id: Option<&'a str>,
+    run_id_mirror: Option<Uuid>,
+    prompt_class: Option<&'a str>,
+    prompt_class_fingerprint: Option<&'a str>,
+}
+
+fn aggregator_mirrors_from_event<'a>(
+    evt: &CloudEvent,
+    decoded_data: Option<&'a serde_json::Value>,
+    run_id: Option<Uuid>,
+) -> AggregatorMirrors<'a> {
+    if evt.r#type != "spendguard.audit.decision" {
+        return AggregatorMirrors::default();
+    }
+    let Some(data) = decoded_data.and_then(|v| v.as_object()) else {
+        return AggregatorMirrors::default();
+    };
+    let model = json_nonempty_str(data.get("model"))
+        .or_else(|| json_nonempty_str(data.get("model_family")));
+    AggregatorMirrors {
+        model,
+        agent_id: json_nonempty_str(data.get("agent_id")),
+        run_id_mirror: run_id,
+        prompt_class: json_nonempty_str(data.get("prompt_class")),
+        prompt_class_fingerprint: json_nonempty_str(data.get("prompt_class_fingerprint")),
+    }
+}
+
+fn json_nonempty_str(value: Option<&serde_json::Value>) -> Option<&str> {
+    value
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 fn prediction_columns_from_event(evt: &CloudEvent) -> append::PredictionColumns<'_> {

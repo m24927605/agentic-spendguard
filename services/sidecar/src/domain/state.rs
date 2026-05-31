@@ -114,6 +114,11 @@ pub struct SidecarStateInner {
     ///
     /// Spec ref `run-cost-projector-spec-v1alpha1.md` §10.
     pub run_cost_projector: Option<RunCostProjectorClient>,
+
+    /// Demo/test-only gate for caller-provided budget_remaining metadata.
+    /// Production keeps this false so free-form adapter metadata cannot drive
+    /// RUN_BUDGET_PROJECTION_EXCEEDED enforcement decisions.
+    pub allow_untrusted_budget_metadata: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -189,6 +194,7 @@ impl SidecarState {
         reservation_ttl_seconds: i64,
         signer: Arc<dyn Signer>,
         fail_policy: Arc<FailPolicyMatrix>,
+        allow_untrusted_budget_metadata: bool,
     ) -> Self {
         Self {
             inner: Arc::new(SidecarStateInner {
@@ -215,6 +221,7 @@ impl SidecarState {
                 // installs the real client after-the-fact when the
                 // sidecar's main.rs configures it.
                 run_cost_projector: None,
+                allow_untrusted_budget_metadata,
             }),
         }
     }

@@ -277,6 +277,12 @@ message ClaimEstimate {
   int32  run_predicted_remaining_steps     = 17; // -1 = projector unreachable.
   int64  run_steps_completed_so_far        = 18;
   string run_code_triggered                = 19; // "" = no RUN_* emitted.
+
+  // Aggregator mirror fields (canonical_events 0018). These are not
+  // common.v1 CloudEvent tag-300 fields, so sidecar copies them into
+  // the signed CloudEvent data JSON for canonical_ingest to mirror.
+  string model        = 20;
+  string prompt_class = 21;
 }
 
 // ============================================================================
@@ -576,6 +582,23 @@ message LlmCallPostPayload {
   // NUMERIC(38,0) decimal string, same encoding as the provider-reported
   // field. Required when the caller wants the CommitEstimated path.
   string estimated_amount_atomic = 7;
+
+  // Optional provider-observed token totals for audit calibration.
+  //
+  // Proto3 optional is intentional: omitted means the producer did not
+  // observe real usage and the audit mirror MUST remain SQL NULL. A
+  // present value of 0 is an explicit provider-observed zero and is
+  // preserved by canonical_ingest / audit_outbox mirror code.
+  optional int64 actual_input_tokens = 8;
+  optional int64 actual_output_tokens = 9;
+
+  // Optional calibration ratios computed by the adapter when it has both
+  // actual usage and the prediction it wants to compare. Omitted means
+  // "not applicable"; 0.0 is still treated as unset by mirror code
+  // because a zero denominator/no Strategy B-C path is the dominant
+  // sentinel in the audit-chain extension.
+  optional float delta_b_ratio = 10;
+  optional float delta_c_ratio = 11;
 }
 
 message ApprovalLifecyclePayload {

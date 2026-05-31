@@ -38,7 +38,7 @@ impl CompetitorName {
 }
 
 /// Per-call result from a competitor adapter. The harness uses this to
-/// compute overshoot %.
+/// compute overshoot % and, when available, decision-only latency.
 #[derive(Debug, Clone)]
 pub struct DecisionResult {
     /// Reserved units at decision time (atomic — token-equivalent or USD-atomic).
@@ -48,10 +48,17 @@ pub struct DecisionResult {
     pub reserved_atomic: u64,
     /// Actual usage observed at commit time (post-call).
     pub actual_atomic: u64,
+    /// Optional adapter-measured decision latency in microseconds. This
+    /// is used when a target has post-call accounting work that must be
+    /// awaited for overshoot math but is outside the Contract §14
+    /// decision-latency SLO.
+    pub decision_latency_us: Option<u64>,
 }
 
 /// All competitors implement this. Each `one_decision` is one full
 /// reserve+commit roundtrip (or whatever shape the competitor exposes).
+/// Adapters may return `decision_latency_us` when post-call accounting
+/// must not be counted as pre-call decision latency.
 ///
 /// The `idx` arg lets adapters mint per-call idempotency keys without
 /// drag from a shared counter (== avoid lock contention in the burst).

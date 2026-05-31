@@ -17,6 +17,7 @@
 //! deferred to a future slice.
 
 use chrono::Utc;
+use prost::Message as _;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -34,16 +35,19 @@ use crate::{
         },
         ledger::v1::{
             commit_estimated_response::Outcome as CommitOutcome,
+            query_decision_outcome_response::Stage as QueryDecisionStage,
             query_reservation_context_response::Outcome as QrcOutcome,
             record_denied_decision_response::Outcome as DeniedOutcome,
             release_request::Reason as ReleaseReasonProto,
             release_response::Outcome as ReleaseOutcome, reserve_set_response::Outcome,
-            CommitEstimatedRequest, CommitEstimatedResponse, QueryReservationContextRequest,
-            RecordDeniedDecisionRequest, RecordDeniedDecisionResponse, ReleaseRequest,
-            ReleaseResponse, ReserveSetRequest, ReserveSetResponse,
+            CommitEstimatedRequest, CommitEstimatedResponse, QueryDecisionOutcomeRequest,
+            QueryReservationContextRequest, RecordDeniedDecisionRequest,
+            RecordDeniedDecisionResponse, ReleaseRequest, ReleaseResponse, ReserveSetRequest,
+            ReserveSetResponse,
         },
         sidecar_adapter::v1::{
-            decision_response::Decision, DecisionRequest, DecisionResponse, LlmCallPostPayload,
+            decision_response::Decision, ClaimEstimate, DecisionRequest, DecisionResponse,
+            LlmCallPostPayload,
         },
     },
 };
@@ -293,18 +297,20 @@ pub struct DecisionOutput {
 ///     across all projected_claims (parsed to i64; clamps on overflow).
 ///     This is what the per-call reservation would be if we accepted
 ///     unchanged; projector uses it as Signal 2's baseline.
-///   * `budget_remaining_atomic` uses the unknown-budget sentinel because
-///     DecisionRequest does not currently carry an authoritative budget
-///     snapshot. `inputs.projected_p90_atomic` is a risk-band hint, not
-///     available budget. The projector still records trajectory but cannot
-///     emit a false RUN_BUDGET_PROJECTION_EXCEEDED on an unknown budget.
-///     The ledger reserve path remains the hard budget oracle.
+///   * `budget_remaining_atomic` is read from explicit runtime metadata only
+///     when the demo/test `allow_untrusted_budget_metadata` gate is enabled.
+///     Production keeps that gate false until the sidecar derives budget
+///     remaining from a signed/fenced ledger snapshot. Missing, malformed, or
+///     disabled snapshots fall back to the unknown-budget sentinel so the
+///     projector records trajectory without trusting caller-controlled budget
+///     values. The ledger reserve path remains the hard budget oracle.
 async fn call_projector_safe(
     state: &SidecarState,
     ctx: &DecisionContext,
     req: &DecisionRequest,
     claims: &[BudgetClaim],
     enrichment: &AuditEnrichment,
+    adapter_idempotency_key: &str,
 ) -> Result<crate::proto::run_cost_projector::v1::ProjectResponse, DomainError> {
     use num_bigint::BigInt;
     use std::str::FromStr;
@@ -328,7 +334,7 @@ async fn call_projector_safe(
     // doesn't see a wraparound.
     let this_call_atomic: i64 = i64::try_from(total).unwrap_or(i64::MAX);
 
-    let budget_remaining = projector_budget_remaining_atomic(req);
+    let budget_remaining = projector_budget_remaining_atomic(state, ctx, req, claims).await;
     // Signal 3 hint: passed through from DecisionRequest.planned_steps_hint
     // (SLICE_09 additive proto field; SLICE_12 SDK with_run_plan decorator
     // populates it).
@@ -344,11 +350,7 @@ async fn call_projector_safe(
             .as_ref()
             .map(|i| i.step_id.clone())
             .unwrap_or_default(),
-        decision_id: req
-            .ids
-            .as_ref()
-            .map(|i| i.decision_id.clone())
-            .unwrap_or_default(),
+        decision_id: projector_decision_id_from_idempotency_key(adapter_idempotency_key),
         this_call_reservation_atomic: this_call_atomic,
         unit_id: claims
             .first()
@@ -363,16 +365,245 @@ async fn call_projector_safe(
     client.project(project_req).await
 }
 
+fn projector_decision_id_from_idempotency_key(adapter_idempotency_key: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(b"spendguard:run-cost-projector:decision:v1:");
+    h.update(adapter_idempotency_key.as_bytes());
+    hex::encode(h.finalize())
+}
+
 /// Extract the run projector's budget snapshot from DecisionRequest.
 ///
-/// SLICE_09 initially defaulted missing projected_p90 to 0, and HARDEN_01
-/// briefly treated projected_p90 as a budget snapshot. Both are unsafe:
-/// projected_p90 is a caller-supplied risk-band hint, not remaining budget.
-/// Until the adapter wire contract carries an explicit budget snapshot,
-/// unknown budget must be non-triggering; ledger reserve remains the
-/// fail-closed budget gate.
-fn projector_budget_remaining_atomic(_req: &DecisionRequest) -> i64 {
-    i64::MAX
+/// `projected_p90_atomic` is a risk-band hint, not remaining budget. The
+/// only accepted budget snapshot is an explicit adapter metadata field.
+/// Missing, malformed, or negative snapshots remain non-triggering so the
+/// projector never invents a false `RUN_BUDGET_PROJECTION_EXCEEDED`.
+async fn projector_budget_remaining_atomic(
+    state: &SidecarState,
+    ctx: &DecisionContext,
+    req: &DecisionRequest,
+    claims: &[BudgetClaim],
+) -> i64 {
+    if state.inner.allow_untrusted_budget_metadata {
+        return projector_budget_remaining_from_runtime_metadata(req).unwrap_or(i64::MAX);
+    }
+
+    match authoritative_budget_remaining_atomic(state, ctx, claims).await {
+        Some(value) => value,
+        None => i64::MAX,
+    }
+}
+
+fn projector_budget_remaining_from_runtime_metadata(req: &DecisionRequest) -> Option<i64> {
+    req.inputs
+        .as_ref()
+        .and_then(|i| i.runtime_metadata.as_ref())
+        .and_then(|m| {
+            ["budget_remaining_atomic", "run_budget_remaining_atomic"]
+                .iter()
+                .find_map(|key| {
+                    m.fields
+                        .get(*key)
+                        .and_then(nonnegative_i64_from_struct_value)
+                })
+        })
+}
+
+async fn authoritative_budget_remaining_atomic(
+    state: &SidecarState,
+    ctx: &DecisionContext,
+    claims: &[BudgetClaim],
+) -> Option<i64> {
+    let mut min_remaining: Option<i64> = None;
+    for claim in claims {
+        if claim.direction == crate::proto::common::v1::budget_claim::Direction::Credit as i32 {
+            continue;
+        }
+        let unit_id = claim.unit.as_ref()?.unit_id.clone();
+        let now = Utc::now();
+        let response = state
+            .inner
+            .ledger
+            .query_budget_state(crate::proto::ledger::v1::QueryBudgetStateRequest {
+                tenant_id: ctx.tenant_id.clone(),
+                budget_id: claim.budget_id.clone(),
+                window_instance_id: claim.window_instance_id.clone(),
+                snapshot_at: Some(prost_types::Timestamp {
+                    seconds: now.timestamp(),
+                    nanos: now.timestamp_subsec_nanos() as i32,
+                }),
+                unit_id,
+            })
+            .await
+            .ok()?;
+        let remaining = nonnegative_i64_from_decimal_str(&response.available_atomic)?;
+        min_remaining = Some(match min_remaining {
+            Some(current) => current.min(remaining),
+            None => remaining,
+        });
+    }
+    min_remaining
+}
+
+fn nonnegative_i64_from_decimal_str(raw: &str) -> Option<i64> {
+    raw.trim().parse::<i64>().ok().map(|value| value.max(0))
+}
+
+fn nonnegative_i64_from_struct_value(value: &prost_types::Value) -> Option<i64> {
+    match value.kind.as_ref()? {
+        prost_types::value::Kind::StringValue(raw) => {
+            raw.trim().parse::<i64>().ok().filter(|v| *v >= 0)
+        }
+        prost_types::value::Kind::NumberValue(raw) => {
+            if raw.is_finite() && raw.fract() == 0.0 && *raw >= 0.0 && *raw <= i64::MAX as f64 {
+                Some(*raw as i64)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+async fn replay_existing_decision_by_idempotency(
+    state: &SidecarState,
+    ctx: &DecisionContext,
+    req: &DecisionRequest,
+    adapter_idempotency_key: &str,
+    request_fingerprint_hex: &str,
+) -> Result<Option<DecisionOutput>, DomainError> {
+    let response = state
+        .inner
+        .ledger
+        .query_decision_outcome(QueryDecisionOutcomeRequest {
+            tenant_id: ctx.tenant_id.clone(),
+            decision_id: String::new(),
+            idempotency_key: adapter_idempotency_key.to_string(),
+        })
+        .await?;
+    let stage =
+        QueryDecisionStage::try_from(response.stage).unwrap_or(QueryDecisionStage::Unspecified);
+    if matches!(
+        stage,
+        QueryDecisionStage::NotFound | QueryDecisionStage::Unspecified
+    ) {
+        return Ok(None);
+    }
+    if response.request_fingerprint_hex.is_empty() {
+        return Err(DomainError::IdempotencyConflict(format!(
+            "ledger idempotency replay for key '{}' has no request fingerprint; refusing ambiguous replay before projector mutation",
+            adapter_idempotency_key
+        )));
+    }
+    if response.request_fingerprint_hex != request_fingerprint_hex {
+        return Err(DomainError::IdempotencyConflict(format!(
+            "DecisionRequest.idempotency.key reused with different request fingerprint (existing={}, current={})",
+            response.request_fingerprint_hex, request_fingerprint_hex
+        )));
+    }
+
+    let decision_id = parse_replay_uuid("decision_id", &response.decision_id)?;
+    let audit_decision_event_id =
+        parse_replay_uuid("audit_decision_event_id", &response.audit_decision_event_id)?;
+    let decision = replay_decision_kind(
+        &response.operation_kind,
+        &response.final_decision,
+        &response.run_code_triggered,
+        &response.reason_codes,
+    )?;
+    let snapshot_hash = compute_snapshot_hash(req, &ctx.tenant_id);
+    let effect_hash = compute_effect_hash(&snapshot_hash, decision);
+
+    let reservation_set_id = if response.operation_kind == "reserve" {
+        if response.operation_id.is_empty() {
+            derive_reservation_set_id(&decision_id).to_string()
+        } else {
+            response.operation_id.clone()
+        }
+    } else {
+        String::new()
+    };
+    let reservation_ids = if response.operation_kind == "reserve" {
+        response.projection_ids.clone()
+    } else {
+        Vec::new()
+    };
+
+    Ok(Some(DecisionOutput {
+        decision_id,
+        audit_decision_event_id,
+        effect_hash,
+        decision,
+        reservation_set_id,
+        reservation_ids,
+        ledger_transaction_id: response.ledger_transaction_id,
+        approval_request_id: String::new(),
+        ttl_expires_at: response.ttl_expires_at,
+        matched_rule_ids: response.matched_rule_ids,
+        reason_codes: response.reason_codes.clone(),
+        run_code_triggered: if response.run_code_triggered.is_empty() {
+            response
+                .reason_codes
+                .iter()
+                .find(|code| code.starts_with("RUN_"))
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            response.run_code_triggered
+        },
+    }))
+}
+
+fn parse_replay_uuid(field: &str, raw: &str) -> Result<Uuid, DomainError> {
+    Uuid::parse_str(raw).map_err(|e| {
+        DomainError::DecisionStage(format!(
+            "ledger idempotency replay returned malformed {field} '{raw}': {e}"
+        ))
+    })
+}
+
+fn replay_decision_kind(
+    operation_kind: &str,
+    final_decision: &str,
+    run_code_triggered: &str,
+    reason_codes: &[String],
+) -> Result<Decision, DomainError> {
+    if operation_kind == "reserve" {
+        return Ok(Decision::Continue);
+    }
+    if operation_kind != "denied_decision" {
+        return Err(DomainError::DecisionStage(format!(
+            "ledger idempotency replay returned unsupported operation_kind '{operation_kind}'"
+        )));
+    }
+    let run_projection =
+        !run_code_triggered.is_empty() || reason_codes.iter().any(|code| code.starts_with("RUN_"));
+    match final_decision {
+        "STOP" if run_projection => Ok(Decision::StopRunProjection),
+        "STOP" => Ok(Decision::Stop),
+        "REQUIRE_APPROVAL" => Ok(Decision::RequireApproval),
+        "DEGRADE" => Ok(Decision::Degrade),
+        "SKIP" => Ok(Decision::Skip),
+        other => Err(DomainError::DecisionStage(format!(
+            "ledger idempotency replay returned unsupported final_decision '{other}'"
+        ))),
+    }
+}
+
+pub fn idempotency_request_fingerprint_hex(ctx: &DecisionContext, req: &DecisionRequest) -> String {
+    let mut h = Sha256::new();
+    h.update(b"spendguard.sidecar.decision_idempotency_request.v1:");
+    h.update((ctx.tenant_id.len() as u64).to_be_bytes());
+    h.update(ctx.tenant_id.as_bytes());
+    h.update((ctx.region.len() as u64).to_be_bytes());
+    h.update(ctx.region.as_bytes());
+
+    let mut encoded = Vec::with_capacity(req.encoded_len());
+    req.encode(&mut encoded)
+        .expect("DecisionRequest encoding to Vec cannot fail");
+    h.update((encoded.len() as u64).to_be_bytes());
+    h.update(&encoded);
+    hex::encode(h.finalize())
 }
 
 /// Drive the decision transaction end-to-end through stage 4 (reserve +
@@ -389,6 +620,39 @@ pub async fn run_through_reserve(
         return Err(DomainError::Draining);
     }
     crate::bootstrap::catalog::enforce_freshness_gate(state, cfg)?;
+
+    // Validate the adapter idempotency key before any mutating downstream
+    // call. The run-cost projector Project RPC mutates per-run state, so
+    // retries must carry a stable key that Project can use as its own
+    // idempotency discriminator.
+    let adapter_idempotency_key = req
+        .idempotency
+        .as_ref()
+        .ok_or_else(|| DomainError::InvalidRequest("DecisionRequest.idempotency required".into()))?
+        .key
+        .clone();
+    if adapter_idempotency_key.is_empty() {
+        return Err(DomainError::InvalidRequest(
+            "DecisionRequest.idempotency.key required".into(),
+        ));
+    }
+
+    // Durable replay check before the run-cost projector. Project mutates
+    // per-run state, so cache loss or sidecar restart must not let a retry
+    // recompute a different RUN_* decision before the ledger can replay the
+    // first decision for this adapter idempotency key.
+    let request_fingerprint_hex = idempotency_request_fingerprint_hex(ctx, req);
+    if let Some(replay) = replay_existing_decision_by_idempotency(
+        state,
+        ctx,
+        req,
+        &adapter_idempotency_key,
+        &request_fingerprint_hex,
+    )
+    .await?
+    {
+        return Ok(replay);
+    }
 
     // Stage 1: snapshot
     let _snapshot_id = Uuid::now_v7();
@@ -441,7 +705,15 @@ pub async fn run_through_reserve(
     // audit rows to before Phase E — the only NEW field populated when
     // the projector IS wired is `reason_codes` (plus the 3 audit columns
     // wired to the same proto envelope).
-    let projector_result = call_projector_safe(state, ctx, req, &claims, &enrichment).await;
+    let projector_result = call_projector_safe(
+        state,
+        ctx,
+        req,
+        &claims,
+        &enrichment,
+        &adapter_idempotency_key,
+    )
+    .await;
     let projector_response_ref = projector_result.as_ref().ok();
     let combined_outcome = match projector_response_ref {
         Some(resp) if !resp.emitted_code.is_empty() => {
@@ -495,19 +767,6 @@ pub async fn run_through_reserve(
         workload_instance_id: ctx.workload_instance_id.clone(),
     };
 
-    // Use the adapter-supplied idempotency key directly so retries from
-    // the same logical trigger collapse via ledger UNIQUE
-    // (tenant_id, operation_kind, idempotency_key) — even after a sidecar
-    // process restart that wipes the local IdempotencyCache.
-    let adapter_idempotency = req.idempotency.as_ref().ok_or_else(|| {
-        DomainError::InvalidRequest("DecisionRequest.idempotency required".into())
-    })?;
-    if adapter_idempotency.key.is_empty() {
-        return Err(DomainError::InvalidRequest(
-            "DecisionRequest.idempotency.key required".into(),
-        ));
-    }
-
     // Cost Advisor P0.5 enrichment: extracted ONCE above for projector
     // call. Same value flows into both CONTINUE + DENY audit.decision
     // emissions below per the pre-SLICE_09 invariant.
@@ -535,7 +794,8 @@ pub async fn run_through_reserve(
             &pricing,
             &fencing,
             &bundle,
-            &adapter_idempotency.key,
+            &adapter_idempotency_key,
+            &request_fingerprint_hex,
             effect_hash,
             &enrichment,
             projector_response_ref,
@@ -545,7 +805,7 @@ pub async fn run_through_reserve(
     }
 
     let idempotency = Idempotency {
-        key: adapter_idempotency.key.clone(),
+        key: adapter_idempotency_key.clone(),
         // Leave empty so the ledger computes its canonical hash server-side
         // and uses THAT for replay verification (see
         // services/ledger/src/handlers/reserve_set.rs `canonical_request_hash`).
@@ -575,6 +835,7 @@ pub async fn run_through_reserve(
         &reason_codes,
         &enrichment,
         prediction_policy_str,
+        &request_fingerprint_hex,
         projector_response_ref,
         claim_estimate_ref,
     );
@@ -761,6 +1022,27 @@ fn extract_claim_estimate(
     req.inputs.as_ref().and_then(|i| i.claim_estimate.as_ref())
 }
 
+fn insert_claim_estimate_payload_mirrors(payload: &mut serde_json::Value, est: &ClaimEstimate) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    if !est.model.is_empty() {
+        obj.insert("model".into(), serde_json::Value::String(est.model.clone()));
+    }
+    if !est.prompt_class.is_empty() {
+        obj.insert(
+            "prompt_class".into(),
+            serde_json::Value::String(est.prompt_class.clone()),
+        );
+    }
+    if !est.prompt_class_fingerprint.is_empty() {
+        obj.insert(
+            "prompt_class_fingerprint".into(),
+            serde_json::Value::String(est.prompt_class_fingerprint.clone()),
+        );
+    }
+}
+
 fn build_audit_decision_cloudevent(
     ctx: &DecisionContext,
     decision_id: &Uuid,
@@ -771,6 +1053,7 @@ fn build_audit_decision_cloudevent(
     reason_codes: &[String],
     enrichment: &AuditEnrichment,
     prediction_policy: &str,
+    request_fingerprint_hex: &str,
     projector_response: Option<&crate::proto::run_cost_projector::v1::ProjectResponse>,
     claim_estimate: Option<&crate::proto::sidecar_adapter::v1::ClaimEstimate>,
 ) -> CloudEvent {
@@ -778,6 +1061,7 @@ fn build_audit_decision_cloudevent(
         "snapshot_hash":   hex::encode(snapshot_hash),
         "matched_rules":   matched_rules,
         "reason_codes":    reason_codes,
+        "idempotency_request_fingerprint": request_fingerprint_hex,
         "session_id":      ctx.session_id,
         // Cost Advisor P0.5 enrichment fields. Empty strings indicate
         // the SDK adapter did not provide enrichment for this call —
@@ -796,6 +1080,9 @@ fn build_audit_decision_cloudevent(
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("spendguard".into(), enrichment.spendguard_context.clone());
         }
+    }
+    if let Some(est) = claim_estimate {
+        insert_claim_estimate_payload_mirrors(&mut payload, est);
     }
     let payload_bytes =
         serde_json::to_vec(&payload).expect("snapshot json serialization is infallible");
@@ -859,24 +1146,22 @@ fn build_audit_decision_cloudevent(
     // (= SQL NULL via the prediction-mirror crate) — backwards-compat
     // with pre-SLICE_10 producers.
     //
-    // The 3 run-level columns are sourced from the projector response
-    // when claim_estimate is None (SLICE_09 path); when claim_estimate
-    // is present, egress_proxy has already merged the projector data
-    // into it so we read from claim_estimate exclusively to keep a
-    // single source of truth.
+    // The tokenizer/output-predictor/cold-start columns come from
+    // ClaimEstimate. The 3 run-level columns are authoritative from the
+    // sidecar's projector_response when present because the sidecar is
+    // the single mutating Project caller in hardened production wiring.
+    // If the projector is not wired, keep ClaimEstimate's run fields for
+    // legacy proxy callers; otherwise use the SLICE_09 unreachable
+    // sentinels.
     if let Some(est) = claim_estimate {
         ce.predicted_a_tokens = est.predicted_a_tokens;
         ce.predicted_b_tokens = est.predicted_b_tokens;
         ce.predicted_c_tokens = est.predicted_c_tokens;
         ce.reserved_strategy = est.reserved_strategy.clone();
         ce.prediction_strategy_used = est.prediction_strategy_used.clone();
-        // prediction_policy_used already set above from contract.
-        // If the egress_proxy supplied a different value (matched its
-        // STRICT_CEILING default), prefer the contract's value as
-        // canonical. SLICE_10 keeps both the same in practice.
-        if !est.prediction_policy_used.is_empty() {
-            ce.prediction_policy_used = est.prediction_policy_used.clone();
-        }
+        // prediction_policy_used is authoritative from the loaded
+        // contract bundle. ClaimEstimate is caller input and must not
+        // rewrite the signed audit policy.
         ce.tokenizer_tier = est.tokenizer_tier.clone();
         ce.tokenizer_version_id = est.tokenizer_version_id.clone();
         ce.prediction_confidence = est.prediction_confidence;
@@ -887,29 +1172,15 @@ fn build_audit_decision_cloudevent(
         ce.run_predicted_remaining_steps = est.run_predicted_remaining_steps;
         ce.run_steps_completed_so_far = est.run_steps_completed_so_far;
     } else {
-        // SLICE_09 Phase E: 3 run-level audit columns per audit-chain-
-        // prediction-extension-v1alpha1.md §2.2 (mirrored into
-        // CloudEvent tags 311/312/313). When projector is None or its
-        // call failed, set the spec §3.3 sentinels:
-        //   * run_projection_at_decision_atomic = 0  (proto3 default)
-        //   * run_predicted_remaining_steps     = -1 (sentinel "unreachable")
-        //   * run_steps_completed_so_far        = 0  (proto3 default)
-        // canonical_ingest's mirror layer treats -1 specifically as
-        // "NULL" when populating the audit_outbox column (per
-        // audit-chain-extension §3.3 sentinel design).
-        match projector_response {
-            Some(resp) => {
-                ce.run_projection_at_decision_atomic = resp.run_projection_at_decision_atomic;
-                ce.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
-                ce.run_steps_completed_so_far = resp.run_steps_completed_so_far;
-            }
-            None => {
-                // Projector unreachable / not wired — sentinel.
-                ce.run_projection_at_decision_atomic = 0;
-                ce.run_predicted_remaining_steps = -1;
-                ce.run_steps_completed_so_far = 0;
-            }
-        }
+        // Projector unreachable / not wired — sentinel.
+        ce.run_projection_at_decision_atomic = 0;
+        ce.run_predicted_remaining_steps = -1;
+        ce.run_steps_completed_so_far = 0;
+    }
+    if let Some(resp) = projector_response {
+        ce.run_projection_at_decision_atomic = resp.run_projection_at_decision_atomic;
+        ce.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
+        ce.run_steps_completed_so_far = resp.run_steps_completed_so_far;
     }
 
     ce
@@ -974,6 +1245,7 @@ async fn run_record_denied_decision(
     fencing: &Fencing,
     bundle: &crate::domain::state::CachedContractBundle,
     adapter_idempotency_key: &str,
+    request_fingerprint_hex: &str,
     effect_hash: [u8; 32],
     enrichment: &AuditEnrichment,
     projector_response: Option<&crate::proto::run_cost_projector::v1::ProjectResponse>,
@@ -1010,6 +1282,7 @@ async fn run_record_denied_decision(
         "snapshot_hash":     hex::encode(snapshot_hash),
         "matched_rules":     matched_rules,
         "reason_codes":      reason_codes,
+        "idempotency_request_fingerprint": request_fingerprint_hex,
         "final_decision":    final_decision_str,
         "session_id":        ctx.session_id,
         "attempted_claims":  claims.iter().map(|c| serde_json::json!({
@@ -1033,6 +1306,9 @@ async fn run_record_denied_decision(
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("spendguard".into(), enrichment.spendguard_context.clone());
         }
+    }
+    if let Some(est) = claim_estimate {
+        insert_claim_estimate_payload_mirrors(&mut payload, est);
     }
     let payload_bytes =
         serde_json::to_vec(&payload).expect("denied decision json serialization is infallible");
@@ -1070,18 +1346,18 @@ async fn run_record_denied_decision(
     // columns identical to the ALLOW lane. STOP / REQUIRE_APPROVAL /
     // DEGRADE / SKIP rows still carry the predictor + projector
     // observations so calibration-report can backtest precision against
-    // realized decisions. When claim_estimate is None (legacy SDK
-    // wrapper), fall back to the SLICE_09 path of populating just the
-    // 3 run-level cols from the projector_response.
+    // realized decisions. ClaimEstimate supplies tokenizer/output
+    // predictor fields; the sidecar's projector_response overrides the
+    // 3 run-level fields whenever it exists.
     if let Some(est) = claim_estimate {
         cloudevent.predicted_a_tokens = est.predicted_a_tokens;
         cloudevent.predicted_b_tokens = est.predicted_b_tokens;
         cloudevent.predicted_c_tokens = est.predicted_c_tokens;
         cloudevent.reserved_strategy = est.reserved_strategy.clone();
         cloudevent.prediction_strategy_used = est.prediction_strategy_used.clone();
-        if !est.prediction_policy_used.is_empty() {
-            cloudevent.prediction_policy_used = est.prediction_policy_used.clone();
-        }
+        // prediction_policy_used is authoritative from the loaded
+        // contract bundle. ClaimEstimate is caller input and must not
+        // rewrite the signed audit policy.
         cloudevent.tokenizer_tier = est.tokenizer_tier.clone();
         cloudevent.tokenizer_version_id = est.tokenizer_version_id.clone();
         cloudevent.prediction_confidence = est.prediction_confidence;
@@ -1092,20 +1368,14 @@ async fn run_record_denied_decision(
         cloudevent.run_predicted_remaining_steps = est.run_predicted_remaining_steps;
         cloudevent.run_steps_completed_so_far = est.run_steps_completed_so_far;
     } else {
-        // SLICE_09 fallback: 3 run-level cols only, from projector_response.
-        match projector_response {
-            Some(resp) => {
-                cloudevent.run_projection_at_decision_atomic =
-                    resp.run_projection_at_decision_atomic;
-                cloudevent.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
-                cloudevent.run_steps_completed_so_far = resp.run_steps_completed_so_far;
-            }
-            None => {
-                cloudevent.run_projection_at_decision_atomic = 0;
-                cloudevent.run_predicted_remaining_steps = -1;
-                cloudevent.run_steps_completed_so_far = 0;
-            }
-        }
+        cloudevent.run_projection_at_decision_atomic = 0;
+        cloudevent.run_predicted_remaining_steps = -1;
+        cloudevent.run_steps_completed_so_far = 0;
+    }
+    if let Some(resp) = projector_response {
+        cloudevent.run_projection_at_decision_atomic = resp.run_projection_at_decision_atomic;
+        cloudevent.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
+        cloudevent.run_steps_completed_so_far = resp.run_steps_completed_so_far;
     }
 
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
@@ -1471,12 +1741,24 @@ pub async fn run_commit_estimated(
     //    decision_id at audit_outbox per Stage 2 §4.8.
     let audit_outcome_event_id = uuid::Uuid::now_v7();
 
-    let ce_payload = serde_json::json!({
+    let mut ce_payload = serde_json::json!({
         "kind": "commit_estimated",
         "reservation_id": reservation_uuid.to_string(),
         "estimated_amount_atomic": payload.estimated_amount_atomic,
         "decision_id": resv.decision_id.to_string(),
     });
+    if let Some(v) = payload.actual_input_tokens {
+        ce_payload["actual_input_tokens"] = serde_json::json!(v);
+    }
+    if let Some(v) = payload.actual_output_tokens {
+        ce_payload["actual_output_tokens"] = serde_json::json!(v);
+    }
+    if let Some(v) = payload.delta_b_ratio.filter(|v| v.is_finite() && *v >= 0.0) {
+        ce_payload["delta_b_ratio"] = serde_json::json!(v);
+    }
+    if let Some(v) = payload.delta_c_ratio.filter(|v| v.is_finite() && *v >= 0.0) {
+        ce_payload["delta_c_ratio"] = serde_json::json!(v);
+    }
     let mut cloudevent = CloudEvent {
         specversion: "1.0".into(),
         r#type: "spendguard.audit.outcome".into(),
@@ -1505,6 +1787,18 @@ pub async fn run_commit_estimated(
         // wires through; SLICE_02 leaves them at proto3 default.
         ..Default::default()
     };
+    if let Some(v) = payload.actual_input_tokens {
+        cloudevent.actual_input_tokens = v;
+    }
+    if let Some(v) = payload.actual_output_tokens {
+        cloudevent.actual_output_tokens = v;
+    }
+    if let Some(v) = payload.delta_b_ratio.filter(|v| v.is_finite() && *v >= 0.0) {
+        cloudevent.delta_b_ratio = v;
+    }
+    if let Some(v) = payload.delta_c_ratio.filter(|v| v.is_finite() && *v >= 0.0) {
+        cloudevent.delta_c_ratio = v;
+    }
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
 
     let request = CommitEstimatedRequest {
@@ -2330,23 +2624,32 @@ mod slice_02_decision_match_tests {
             ..Default::default()
         };
         assert_eq!(
-            projector_budget_remaining_atomic(&req),
-            i64::MAX,
+            projector_budget_remaining_from_runtime_metadata(&req),
+            None,
             "missing budget snapshot must not synthesize budget=0 and trigger RUN_BUDGET_PROJECTION_EXCEEDED"
         );
     }
 
     #[test]
     fn projector_budget_remaining_invalid_or_negative_is_non_triggering() {
-        for projected_p90_atomic in ["not-a-number", "-1"] {
+        for budget_remaining_atomic in ["not-a-number", "-1"] {
+            let mut fields = std::collections::BTreeMap::new();
+            fields.insert(
+                "budget_remaining_atomic".to_string(),
+                prost_types::Value {
+                    kind: Some(prost_types::value::Kind::StringValue(
+                        budget_remaining_atomic.to_string(),
+                    )),
+                },
+            );
             let req = DecisionRequest {
                 inputs: Some(Inputs {
-                    projected_p90_atomic: projected_p90_atomic.to_string(),
+                    runtime_metadata: Some(prost_types::Struct { fields }),
                     ..Default::default()
                 }),
                 ..Default::default()
             };
-            assert_eq!(projector_budget_remaining_atomic(&req), i64::MAX);
+            assert_eq!(projector_budget_remaining_from_runtime_metadata(&req), None);
         }
     }
 
@@ -2360,10 +2663,228 @@ mod slice_02_decision_match_tests {
             ..Default::default()
         };
         assert_eq!(
-            projector_budget_remaining_atomic(&req),
-            i64::MAX,
+            projector_budget_remaining_from_runtime_metadata(&req),
+            None,
             "projected_p90_atomic is a risk-band hint, not remaining budget"
         );
+    }
+
+    #[test]
+    fn projector_budget_remaining_uses_explicit_runtime_snapshot() {
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "budget_remaining_atomic".to_string(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue("999".into())),
+            },
+        );
+        let req = DecisionRequest {
+            inputs: Some(Inputs {
+                projected_p90_atomic: "12345".into(),
+                runtime_metadata: Some(prost_types::Struct { fields }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            projector_budget_remaining_from_runtime_metadata(&req),
+            Some(999)
+        );
+    }
+
+    #[test]
+    fn authoritative_budget_remaining_clamps_negative_available_to_zero() {
+        assert_eq!(nonnegative_i64_from_decimal_str("-1"), Some(0));
+        assert_eq!(nonnegative_i64_from_decimal_str("123"), Some(123));
+        assert_eq!(nonnegative_i64_from_decimal_str("not-a-number"), None);
+    }
+
+    #[test]
+    fn idempotency_replay_decision_kind_preserves_projection_stop() {
+        let reason_codes = vec!["RUN_BUDGET_PROJECTION_EXCEEDED".to_string()];
+        assert_eq!(
+            replay_decision_kind("denied_decision", "STOP", "", &reason_codes).unwrap(),
+            Decision::StopRunProjection
+        );
+        assert_eq!(
+            replay_decision_kind("reserve", "", "", &[]).unwrap(),
+            Decision::Continue
+        );
+    }
+
+    #[test]
+    fn idempotency_request_fingerprint_changes_with_claims_and_ids() {
+        let ctx = DecisionContext {
+            session_id: "session-test".to_string(),
+            workload_instance_id: "sidecar-test".to_string(),
+            tenant_id: Uuid::nil().to_string(),
+            region: "test-region".to_string(),
+        };
+        let mut req = DecisionRequest {
+            session_id: "session-test".into(),
+            route: "llm.openai.chat".into(),
+            ids: Some(crate::proto::common::v1::SpendGuardIds {
+                run_id: "run-1".into(),
+                step_id: "step-1".into(),
+                llm_call_id: "call-1".into(),
+                decision_id: "decision-1".into(),
+                ..Default::default()
+            }),
+            inputs: Some(Inputs {
+                projected_claims: vec![BudgetClaim {
+                    budget_id: "budget-1".into(),
+                    amount_atomic: "100".into(),
+                    window_instance_id: "window-1".into(),
+                    unit: Some(UnitRef {
+                        unit_id: "usd-micros".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            idempotency: Some(Idempotency {
+                key: "idem-1".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let original = idempotency_request_fingerprint_hex(&ctx, &req);
+
+        req.ids.as_mut().unwrap().decision_id = "decision-2".into();
+        assert_ne!(original, idempotency_request_fingerprint_hex(&ctx, &req));
+
+        req.ids.as_mut().unwrap().decision_id = "decision-1".into();
+        req.inputs.as_mut().unwrap().projected_claims[0].amount_atomic = "101".into();
+        assert_ne!(original, idempotency_request_fingerprint_hex(&ctx, &req));
+    }
+
+    #[test]
+    fn claim_estimate_payload_mirrors_include_model_prompt_class_and_fingerprint() {
+        let mut payload = serde_json::json!({
+            "snapshot_hash": "00",
+            "reason_codes": ["RUN_BUDGET_PROJECTION_EXCEEDED"],
+        });
+        let est = ClaimEstimate {
+            model: "gpt-4o-mini".into(),
+            prompt_class: "support_triage".into(),
+            prompt_class_fingerprint: "pcfp_123".into(),
+            ..Default::default()
+        };
+
+        insert_claim_estimate_payload_mirrors(&mut payload, &est);
+
+        assert_eq!(
+            payload.get("model"),
+            Some(&serde_json::json!("gpt-4o-mini"))
+        );
+        assert_eq!(
+            payload.get("prompt_class"),
+            Some(&serde_json::json!("support_triage"))
+        );
+        assert_eq!(
+            payload.get("prompt_class_fingerprint"),
+            Some(&serde_json::json!("pcfp_123"))
+        );
+    }
+
+    #[test]
+    fn projector_decision_id_is_stable_bounded_hash() {
+        let a = projector_decision_id_from_idempotency_key("adapter-key-1");
+        let b = projector_decision_id_from_idempotency_key("adapter-key-1");
+        let c = projector_decision_id_from_idempotency_key("adapter-key-2");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn projector_response_overrides_claim_estimate_run_fields() {
+        let ctx = DecisionContext {
+            session_id: "session-test".to_string(),
+            workload_instance_id: "sidecar-test".to_string(),
+            tenant_id: Uuid::nil().to_string(),
+            region: "test-region".to_string(),
+        };
+        let enrichment = AuditEnrichment {
+            run_id: Uuid::nil().to_string(),
+            agent_id: "agent-test".to_string(),
+            model_family: "model-test".to_string(),
+            prompt_hash: "prompt-test".to_string(),
+            spendguard_context: serde_json::Value::Null,
+        };
+        let claim = ClaimEstimate {
+            predicted_a_tokens: 12,
+            run_projection_at_decision_atomic: 1,
+            run_predicted_remaining_steps: 2,
+            run_steps_completed_so_far: 3,
+            ..Default::default()
+        };
+        let projector = crate::proto::run_cost_projector::v1::ProjectResponse {
+            run_projection_at_decision_atomic: 900,
+            run_predicted_remaining_steps: 8,
+            run_steps_completed_so_far: 4,
+            ..Default::default()
+        };
+
+        let ce = build_audit_decision_cloudevent(
+            &ctx,
+            &Uuid::nil(),
+            &Uuid::nil(),
+            1,
+            &[0u8; 32],
+            &[],
+            &[],
+            &enrichment,
+            "STRICT_CEILING",
+            "test-fingerprint",
+            Some(&projector),
+            Some(&claim),
+        );
+
+        assert_eq!(ce.predicted_a_tokens, 12);
+        assert_eq!(ce.run_projection_at_decision_atomic, 900);
+        assert_eq!(ce.run_predicted_remaining_steps, 8);
+        assert_eq!(ce.run_steps_completed_so_far, 4);
+    }
+
+    #[test]
+    fn claim_estimate_cannot_override_contract_prediction_policy() {
+        let ctx = DecisionContext {
+            session_id: "session-test".to_string(),
+            workload_instance_id: "sidecar-test".to_string(),
+            tenant_id: Uuid::nil().to_string(),
+            region: "test-region".to_string(),
+        };
+        let enrichment = AuditEnrichment {
+            run_id: Uuid::nil().to_string(),
+            agent_id: "agent-test".to_string(),
+            model_family: "model-test".to_string(),
+            prompt_hash: "prompt-test".to_string(),
+            spendguard_context: serde_json::Value::Null,
+        };
+        let claim = ClaimEstimate {
+            prediction_policy_used: "STRICT_CEILING".into(),
+            ..Default::default()
+        };
+
+        let ce = build_audit_decision_cloudevent(
+            &ctx,
+            &Uuid::nil(),
+            &Uuid::nil(),
+            1,
+            &[0u8; 32],
+            &[],
+            &[],
+            &enrichment,
+            "ADAPTIVE_CEILING",
+            "test-fingerprint",
+            None,
+            Some(&claim),
+        );
+
+        assert_eq!(ce.prediction_policy_used, "ADAPTIVE_CEILING");
     }
 
     #[test]
@@ -2394,6 +2915,7 @@ mod slice_02_decision_match_tests {
             &reason_codes,
             &enrichment,
             "STRICT_CEILING",
+            "test-fingerprint",
             None,
             None,
         );
