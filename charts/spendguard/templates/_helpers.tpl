@@ -67,3 +67,15 @@ allowPrivilegeEscalation: false
 capabilities:
   drop: ["ALL"]
 {{- end -}}
+
+{{/*
+Pod security baseline shared by production workloads.
+*/}}
+{{- define "spendguard.podSecurityContext" -}}
+runAsNonRoot: true
+runAsUser: 65532
+runAsGroup: 65532
+fsGroup: 65532
+seccompProfile:
+  type: RuntimeDefault
+{{- end -}}

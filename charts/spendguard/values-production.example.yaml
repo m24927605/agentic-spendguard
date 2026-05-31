@@ -1,0 +1,163 @@
+# SpendGuard production values example.
+#
+# This file is intentionally credential-free. Pre-create every referenced
+# Secret in the target namespace; do not place database URLs, API keys, PEM
+# material, or tokens directly in Helm values.
+
+global:
+  tenantId: "00000000-0000-4000-8000-000000000001"
+  region: "us-west-2"
+  imagePullPolicy: IfNotPresent
+  imageRegistry: ghcr.io/m24927605
+
+chart:
+  profile: production
+
+secrets:
+  tls:
+    existingSecret: spendguard-prod-tls
+  bundles:
+    existingSecret: spendguard-prod-bundles
+
+postgres:
+  existingSecret: spendguard-prod-postgres-urls
+  ledgerUrlKey: ledger-url
+  canonicalUrlKey: canonical-url
+  controlPlaneUrlKey: control-plane-url
+  controlPlaneAuditForwarderUrlKey: control-plane-audit-forwarder-url
+  tokenizerShadowUrlKey: tokenizer-shadow-url
+  tokenizerUrlKey: tokenizer-url
+  outputPredictorUrlKey: output-predictor-url
+  outputPredictorPluginEndpointUrlKey: output-predictor-plugin-endpoint-url
+  runCostProjectorUrlKey: run-cost-projector-url
+  statsAggregatorUrlKey: stats-aggregator-url
+  applyMigrationsOnInstall: true
+
+ledger:
+  image:
+    tag: v0.1.0
+
+canonicalIngest:
+  image:
+    tag: v0.1.0
+  ingestShardId: primary-us-west-2
+
+controlPlane:
+  image:
+    tag: v0.1.0
+  canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
+  auditSchemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  auth:
+    mode: jwt
+    oidcIssuer: https://issuer.example.invalid/
+    oidcAudience: spendguard-control-plane
+    oidcJwksUrl: https://issuer.example.invalid/.well-known/jwks.json
+
+sidecar:
+  image:
+    tag: v0.1.0
+  endpointCatalogManifestUrl: https://endpoint-catalog.example.invalid/v1/catalog/manifest
+  runCostProjectorUrl: https://spendguard-spendguard-run-cost-projector:50055
+  contractBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  trustSecret:
+    name: spendguard-prod-trust
+    caPemKey: ca.pem
+  trustRootSpkiSha256Hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  mtlsBootstrapTokenSecret:
+    name: spendguard-prod-mtls-bootstrap
+    tokenKey: token
+  manifestVerifyKey:
+    existingSecret: spendguard-prod-manifest-verify-key
+    pemKey: manifest_verify_key.pub.pem
+
+tokenizer:
+  image:
+    tag: v0.1.0
+  mtlsSecretName: spendguard-prod-tokenizer-mtls
+  shadowEnabled: true
+  canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
+  schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  databaseSecretEnabled: true
+  samplingOverrideDatabaseSecretEnabled: true
+  providerSecretName: spendguard-prod-tokenizer-provider-keys
+  sinkMtlsSecretName: spendguard-prod-tokenizer-sink-mtls
+  signingKeySecretName: spendguard-prod-tokenizer-signing-key
+  signingKeyPath: /etc/spendguard/signing/signing-key.pem
+
+outputPredictor:
+  image:
+    tag: v0.1.0
+  mtlsSecretName: spendguard-prod-output-predictor-mtls
+  databaseSecretEnabled: true
+  pluginEndpointDatabaseEnabled: true
+  pluginClientSvid:
+    enabled: true
+    legacyGlobalCertAllowed: false
+    issuer:
+      create: false
+      name: spendguard-predictor-client-issuer
+      kind: Issuer
+      group: cert-manager.io
+    bindings:
+      - tenantId: "00000000-0000-4000-8000-000000000001"
+        clientCertId: tenant-0001
+      - tenantId: "00000000-0000-4000-8000-000000000002"
+        clientCertId: tenant-0002
+
+runCostProjector:
+  image:
+    tag: v0.1.0
+  mtlsSecretName: spendguard-prod-run-cost-projector-mtls
+  databaseSecretEnabled: true
+
+egressProxy:
+  enabled: true
+  image:
+    tag: v0.1.0
+  outputPredictorEndpoint: https://spendguard-spendguard-output-predictor:50054
+  runCostProjectorEndpoint: ""
+
+statsAggregator:
+  image:
+    tag: v0.1.0
+  databaseSecretEnabled: true
+  canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
+  sinkMtlsSecretName: spendguard-prod-stats-aggregator-sink-mtls
+  signingKeySecretName: spendguard-prod-stats-aggregator-signing-key
+  signingKeyPath: /etc/spendguard/signing/signing-key.pem
+  schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+
+webhookReceiver:
+  image:
+    tag: v0.1.0
+  hmacSecretName: spendguard-prod-webhook-hmac
+
+outboxForwarder:
+  image:
+    tag: v0.1.0
+  schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+
+ttlSweeper:
+  image:
+    tag: v0.1.0
+
+signing:
+  mode: local
+  profile: production
+  existingSecret: spendguard-prod-signing-keys
+  strictVerification: true
+
+networkPolicy:
+  enabled: true
+  acknowledgeNoNetworkPolicy: false
+  externalProviderCidrs:
+    - 203.0.113.0/24
+  postgresCidrs:
+    - 198.51.100.10/32
+
+migrations:
+  ledgerImage: postgres:16-alpine
+  canonicalImage: postgres:16-alpine
+
+calibrationReport:
+  cronEnabled: false

@@ -62,10 +62,14 @@ spec:
       labels:
         {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
     spec:
+      securityContext:
+        {{- include "spendguard.podSecurityContext" . | nindent 8 }}
       containers:
         - name: sidecar
           image: {{ include "spendguard.image" (merge (dict "image" .Values.sidecar.image "global" .Values.global) .) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "spendguard.containerSecurityContext" . | nindent 12 }}
           ports:
             - { name: metrics, containerPort: 9093 }
           env:

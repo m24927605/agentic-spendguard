@@ -21,6 +21,8 @@ spec:
       labels:
         {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
     spec:
+      securityContext:
+        {{- include "spendguard.podSecurityContext" . | nindent 8 }}
       containers:
         - name: ledger
           image: {{ include "spendguard.image" (merge (dict "image" .Values.ledger.image "global" .Values.global) .) }}

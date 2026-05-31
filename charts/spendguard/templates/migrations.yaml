@@ -81,6 +81,8 @@ spec:
         {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
     spec:
       restartPolicy: OnFailure
+      securityContext:
+        {{- include "spendguard.podSecurityContext" . | nindent 8 }}
       containers:
         - name: migrate
           image: {{ .Values.migrations.ledgerImage }}
