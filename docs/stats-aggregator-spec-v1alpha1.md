@@ -102,7 +102,9 @@ services/stats_aggregator/
 │   └── db.rs                   # connection pool to ledger Postgres
 ```
 
-**Output**：寫 `output_distribution_cache` table + emit CloudEvents（`spendguard.prediction.drift_alert`）to canonical_ingest。
+**Output**：寫 `output_distribution_cache` table + emit CloudEvents（`spendguard.audit.prediction_drift_alert.v1alpha1`）to canonical_ingest。
+
+> HARDEN_04 drift reconciliation: SLICE_06 merge `d00287f` / implementation commit `f8dc34c` made the drift alert audit-routed, and HARDEN_03 merge `16f0194` preserves durable append-result checking. The earlier non-audit draft type is non-authoritative.
 
 **Input**：read-only 對 `canonical_events`（`audit_outbox` 透過 `outbox_forwarder` 傳到的鏡像）。
 
@@ -128,18 +130,18 @@ services/stats_aggregator/
 ```sql
 SELECT
   tenant_id,
-  cloudevent_payload->>'model' AS model,             -- denormalized; same value as canonical CloudEvent.model_family
-  cloudevent_payload->>'agent_id' AS agent_id,
-  cloudevent_payload->>'prompt_class_fingerprint' AS prompt_class,
+  model,             -- mirror column populated from canonical_events.payload_json
+  agent_id,
+  prompt_class,
   actual_output_tokens
 FROM canonical_events
 WHERE event_type = 'spendguard.audit.outcome'
   AND actual_output_tokens IS NOT NULL
-  AND recorded_at >= now() - interval '30 days'
+  AND ingest_at >= now() - interval '30 days'
   AND tenant_id = $1;
 ```
 
-（real query 更複雜；details §4。此段示範 input shape。）
+（real query 更複雜；details §4。此段示範 input shape。`payload_json` 是 canonical CloudEvent envelope 欄位；SLICE_06 implementation commit `8436cd4` / HARDEN_03 merge `16f0194` made `model`, `agent_id`, `run_id_mirror`, `prompt_class`, and `prompt_class_fingerprint` first-class mirror columns so the hot aggregation query does not repeatedly decode JSON.）
 
 ### 3.2 Bucket key
 
@@ -183,15 +185,19 @@ fn prompt_class_fingerprint(messages: &[Message], model: &str) -> String {
 WITH events_30d AS (
   SELECT
     tenant_id,
-    cloudevent_payload->>'model' AS model,
-    cloudevent_payload->>'agent_id' AS agent_id,
-    cloudevent_payload->>'prompt_class_fingerprint' AS prompt_class,
+    model,
+    agent_id,
+    prompt_class,
     actual_output_tokens,
-    recorded_at
+    ingest_at
   FROM canonical_events
   WHERE event_type = 'spendguard.audit.outcome'
     AND actual_output_tokens IS NOT NULL
-    AND recorded_at >= now() - interval '30 days'
+    AND ingest_at >= now() - interval '30 days'
+    AND recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
+    AND model IS NOT NULL
+    AND agent_id IS NOT NULL
+    AND prompt_class IS NOT NULL
 ),
 agg_30d AS (
   SELECT
@@ -215,7 +221,7 @@ agg_7d AS (
     stddev_samp(actual_output_tokens)::REAL AS stddev_7d,
     count(*) AS sample_size_7d
   FROM events_30d
-  WHERE recorded_at >= now() - interval '7 days'
+  WHERE ingest_at >= now() - interval '7 days'
   GROUP BY tenant_id, model, agent_id, prompt_class
 )
 INSERT INTO output_distribution_cache (
@@ -319,12 +325,15 @@ per `run-cost-projector-spec-v1alpha1.md` Signal 1 需要 「per-(tenant, agent_
 WITH run_lengths AS (
   SELECT
     tenant_id,
-    cloudevent_payload->>'agent_id' AS agent_id,
-    cloudevent_payload->>'run_id' AS run_id,
+    agent_id,
+    run_id_mirror AS run_id,
     count(*) AS steps_in_run
   FROM canonical_events
   WHERE event_type = 'spendguard.audit.decision'
-    AND recorded_at >= now() - interval '30 days'
+    AND ingest_at >= now() - interval '30 days'
+    AND recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
+    AND agent_id IS NOT NULL
+    AND run_id_mirror IS NOT NULL
   GROUP BY tenant_id, agent_id, run_id
 )
 INSERT INTO run_length_distribution_cache (
@@ -378,8 +387,8 @@ For each (tenant, model, agent_id, prompt_class) bucket:
 
 ```yaml
 # CloudEvent emitted to canonical_ingest
-type: spendguard.prediction.drift_alert
-source: stats-aggregator://<instance>
+type: spendguard.audit.prediction_drift_alert.v1alpha1
+source: spendguard://stats-aggregator/<tenant_id>
 data:
   tenant_id: <uuid>
   model: <string>
@@ -392,6 +401,8 @@ data:
   sample_size_30d: <int>
   suggested_action: "review_predictor_baseline" | "retrain_strategy_c_plugin" | "investigate_agent_change"
 ```
+
+Implementation reference: `services/stats_aggregator/src/drift_detector.rs` commit `f8dc34c` defines `PREDICTION_DRIFT_ALERT_EVENT_TYPE = "spendguard.audit.prediction_drift_alert.v1alpha1"`; calibration-report commit `8ee35ca` reads the same event type from `canonical_events.payload_json`.
 
 Signed + immutable per audit chain。
 

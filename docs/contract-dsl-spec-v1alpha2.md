@@ -1,7 +1,7 @@
 # Contract DSL Specification — v1alpha2 (DRAFT, additive over v1alpha1)
 
 > 📝 **Status: DRAFT** (writing in design phase on branch `design/predictor-upgrade`)
-> **DRAFT → LOCKED criteria**: locks together with the predictor-upgrade spec set per `predictor-architecture-spec-v1alpha1.md` §0.2; additionally requires (a) the 3 new decision codes (`RUN_BUDGET_PROJECTION_EXCEEDED` / `RUN_DRIFT_DETECTED` / `RUN_STEPS_EXCEEDED`) flow through the sidecar DSL evaluator as pass-through (initial slice 02 implementation), (b) `prediction_policy` enum default is `STRICT_CEILING` confirmed by Codex round 2 adversarial review, and (c) all 8+ existing demo modes (`make demo-up DEMO_MODE=...`) running v1alpha1 contracts continue to produce identical decision outcomes after the v1alpha2 evaluator upgrade.
+> **DRAFT → LOCKED criteria**: locks together with the predictor-upgrade spec set per `predictor-architecture-spec-v1alpha1.md` §0.2; additionally requires (a) the 3 new decision codes (`RUN_BUDGET_PROJECTION_EXCEEDED` / `RUN_DRIFT_DETECTED` / `RUN_STEPS_EXCEEDED`) are accepted by the sidecar DSL evaluator without crashing in the initial SLICE_02 implementation (`d5c5434`), then activated by SLICE_09/10 projector wiring (`6407648` / `c649196`) with unsupported wire clients failing closed, (b) `prediction_policy` enum default is `STRICT_CEILING` confirmed by Codex round 2 adversarial review, and (c) all 8+ existing demo modes (`make demo-up DEMO_MODE=...`) running v1alpha1 contracts continue to produce identical decision outcomes after the v1alpha2 evaluator upgrade.
 > **Pre-existing LOCKED dependency**: `contract-dsl-spec-v1alpha1.md` — this spec is a strictly additive bump over v1alpha1; **no v1alpha1 semantics changes, no field removals, no breaking enum renumbering**.
 > **Companion specs in this set**: `predictor-architecture-spec-v1alpha1.md` (umbrella, defines policy matrix consumed by §4), `run-cost-projector-spec-v1alpha1.md` (defines decision-code emission semantics consumed by §3), `audit-chain-prediction-extension-v1alpha1.md` (defines audit columns that record which policy was active).
 > **Compatibility policy**: alpha — strictly additive. v1alpha1 wire format remains byte-compatible; proto3 additive evolution gives new enum values new tags without renumbering existing ones; v1alpha1 contracts continue to load and evaluate identically on a v1alpha2 evaluator.
@@ -14,11 +14,11 @@
 
 本 spec 對 `contract-dsl-spec-v1alpha1.md` 的**最小可能 additive 補丁**：
 
-1. 3 個新 decision codes（`RUN_BUDGET_PROJECTION_EXCEEDED` / `RUN_DRIFT_DETECTED` / `RUN_STEPS_EXCEEDED`），語意定義 + DSL 評估器 pass-through 規則
+1. 3 個新 decision codes（`RUN_BUDGET_PROJECTION_EXCEEDED` / `RUN_DRIFT_DETECTED` / `RUN_STEPS_EXCEEDED`），語意定義 + DSL 評估器 acceptance rules（SLICE_02 merge `d5c5434`）and SLICE_09/10 activation/fail-closed behavior（`6407648` / `c649196`）
 2. 1 個新 policy enum `prediction_policy`（`STRICT_CEILING` | `EMPIRICAL_RUN_CEILING` | `ADAPTIVE_CEILING` | `SHADOW_ONLY`）+ default 設計
 3. 1 個新 policy enum `run_projection_action`（`BLOCK_NEXT_CALL` | `REQUIRE_APPROVAL` | `ALERT_ONLY`）+ default 設計
 4. 對 `proto/spendguard/sidecar_adapter/v1/adapter.proto` 的 `DecisionResponse.Decision` enum 與 budget claim schema 的 additive field 補丁
-5. v1alpha1 contracts encountering v1alpha2 codes 的 pass-through 行為
+5. v1alpha1 contracts encountering v1alpha2 codes 的 compatibility 行為：contract bundle loading is capability-gated, and unknown response enum values must fail closed rather than allowing a provider call（egress_proxy commit `3035b54`, Python SDK HARDEN_03 commit `307eed4`）
 
 **不在本 spec 範圍**：
 
@@ -32,7 +32,7 @@
 進入 LOCKED 之前下列 4 項必達成：
 
 1. SLICE 02 實作 proto additive 補丁通過 prost / tonic codegen + 全部 service 編譯不 break
-2. SLICE 02 DSL evaluator 對 3 個新 codes 採 pass-through 實作，sidecar 收到 v1alpha2 contract 不 crash
+2. SLICE 02 DSL evaluator 對 3 個新 codes 採 non-crashing acceptance 實作（`d5c5434`），且 SLICE_09/10 activation後 unsupported response enum consumers fail closed（`6407648` / `c649196`）
 3. 既有 v1alpha1 contracts 在 v1alpha2 evaluator 下產生 byte-identical decision audit rows（regression test 在 8+ demo modes 全綠）
 4. 對「v1alpha2 contract 含新 codes 但 sidecar 為 v1alpha1 版本」的 rollback 情境驗證 sidecar fail-closed（per `sidecar-architecture-spec-v1alpha1.md` §3.3 capability_required mismatch）
 
@@ -69,7 +69,7 @@
 
 唯一不夠的是 **per-run 級別的決策碼語意**。現有 decision lattice（`continue` / `degrade` / `skip` / `stop` / `require_approval`）是 per-call 語意；per-run projection 需要的「stop next call in this run」與 per-call stop 在 audit / control plane / approval flow 都該分開歸類。
 
-v1alpha2 用 **additive enum values**（per proto3 additive evolution）加 3 個新 RUN_* codes，舊 evaluator 對未認的 codes pass-through（行為等同 `continue`），新 evaluator 對 codes 採對應 `run_projection_action` policy 處理 —— 雙向 wire-compatible。
+v1alpha2 用 **additive enum values**（per proto3 additive evolution）加 3 個新 RUN_* codes。舊 evaluator 不會載入 `apiVersion: spendguard.ai/v1alpha2` bundle（§8.1 fail-closed），支援 v1alpha2 的 evaluator 對 RUN_* codes 採對應 `run_projection_action` policy 處理。舊 client 若無法辨識新增的 response enum value，不得放行 provider call：Python SDK HARDEN_03 commit `307eed4` maps `STOP_RUN_PROJECTION` to `DecisionStopped`, and egress_proxy SLICE_02 commit `3035b54` treats unknown/unspecified decision variants as fail-closed sidecar errors.
 
 ### 1.2 在 T → L → C → D → E → P 中的位置
 
@@ -90,7 +90,7 @@ T → L → C → D → E → P
 >
 > **`STRICT_CEILING` 是 default**：規範性業務的 safety floor，operator 必須 explicit opt-in 其他 policy（per `predictor-architecture-spec-v1alpha1.md` §5）。
 >
-> **Pass-through 是 fallback 不是 default**：v1alpha2 evaluator 對 v1alpha1 contracts 主動套用 default policy；只在 hot-reload 或 rollback 時做 pass-through 處理。
+> **Fail-closed 是 wire fallback；pass-through 只描述內部 evaluator compatibility**：v1alpha2 evaluator 對 v1alpha1 contracts 主動套用 default policy；SLICE_02 的 pass-through 是 parser/evaluator 內部 compatibility path（merge `d5c5434`），不是 old client 放行 provider call 的 fallback。Unsupported response enum consumers must fail closed per egress_proxy commit `3035b54` and Python SDK commit `307eed4`.
 
 ---
 
@@ -142,7 +142,7 @@ T → L → C → D → E → P
 **Audit row 影響**：
 
 - `decision_id` 與 normal stop 一樣 mint
-- `cloudevent_payload` 的 `reason_codes` array 含 `"RUN_BUDGET_PROJECTION_EXCEEDED"`
+- ledger `audit_outbox.cloudevent_payload` and downstream `canonical_events.payload_json` 的 `reason_codes` array 含 `"RUN_BUDGET_PROJECTION_EXCEEDED"`（schema lineage: commit `ca83792`; aggregator mirror columns were added by commit `8436cd4`）
 - `run_projection_at_decision_atomic`（per `audit-chain-prediction-extension-v1alpha1.md` §2.2）必填
 
 ### 3.2 `RUN_DRIFT_DETECTED`
@@ -271,8 +271,13 @@ enum Decision {
   STOP = 4;
   REQUIRE_APPROVAL = 5;
   // NEW (v1alpha2): explicit decision when stop is driven by run projection,
-  // distinct from per-call STOP. Effect lattice still maps to STOP for old
-  // consumers; new field reason_codes carries the RUN_* code explicitly.
+  // distinct from per-call STOP. Effect lattice still maps this to the same
+  // terminal STOP effect; old or unsupported consumers must fail closed rather
+  // than gracefully continuing. Implemented by SLICE_02 commit `c50b911`
+  // (sidecar exhaustive StopRunProjection match), egress_proxy commit `3035b54`
+  // (StopRunProjection blocked; unknown decision → fail-closed sidecar error),
+  // and SLICE_09 commit `cc20cb4` (projector activation).
+  // New field reason_codes carries the RUN_* code explicitly.
   // STOP semantics 完全等同 v1alpha1 STOP; 此值僅供 dashboard / SIEM
   // 細分顯示用，effect lattice precedence 不變.
   STOP_RUN_PROJECTION = 6;
@@ -414,7 +419,7 @@ discarded with no log breadcrumb.
 
 `services/sidecar/src/contract/evaluate.rs` 增量點：
 
-### 7.1 SLICE 02 階段（pass-through 實作）
+### 7.1 SLICE 02 階段（internal compatibility path）
 
 ```rust
 // Pseudo-code; actual SLICE 02 PR will follow Rust style of evaluate.rs
@@ -438,7 +443,7 @@ fn handle_run_code(code: RunCode, action: RunProjectionAction, ctx: &EvalContext
 }
 ```
 
-SLICE 02 PR 不實作 RUN_* code 觸發邏輯（無 run_cost_projector）—— 三 codes 進 evaluator 後 unconditionally route through above function。實際 emit 由 SLICE 09 接入 projector 後產生。
+SLICE_02 merge `d5c5434` did not implement RUN_* code trigger logic（no run_cost_projector yet）—— 三 codes 進 evaluator 後 route through above function for internal compatibility. Actual emission was activated by SLICE_09 merge `6407648` / commit `cc20cb4`; unsupported or unknown response enum handling is fail-closed, not provider-call pass-through, per egress_proxy commit `3035b54`.
 
 ### 7.2 Latency 預算
 
@@ -496,7 +501,7 @@ per §6.4，v1alpha2 evaluator 對 v1alpha1 bundle：
 
 ## §11. Lock 後的下一步
 
-1. SLICE 02 PR：proto additive 補丁 + DSL evaluator extension（pass-through 實作）+ 既有 8+ demo modes regression
+1. SLICE_02 implementation（merge `d5c5434`）：proto additive 補丁 + DSL evaluator extension（internal compatibility path）+ 既有 8+ demo modes regression; production emission/blocked-call behavior was activated by SLICE_09/10 (`6407648` / `c649196`)
 2. SLICE 02 acceptance：v1alpha1 contract 在 v1alpha2 evaluator 下 byte-identical audit row
 3. SLICE 09 PR：run_cost_projector 接入 + RUN_* codes 真正觸發
 4. 客戶 v1alpha2 quickstart template（per v1alpha1 §18 風格）—— 加 `prediction_policy: STRICT_CEILING` + 一個 sample RUN_BUDGET_PROJECTION_EXCEEDED rule
