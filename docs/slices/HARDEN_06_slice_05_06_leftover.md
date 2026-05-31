@@ -165,16 +165,19 @@ Reviewer must inspect real integration tests for tokenizer envelope admission an
 | Design | Security Engineer | Production signing key config must fail fast | §7 and §8 require production gates |
 | Design | Database Optimizer | Outbox forwarding must record durable status | §4 allows schema bookkeeping |
 | Design | Audit-chain domain expert | `spendguard.audit.*` routing is mandatory | §6 and §9 enforce prefix |
+| Implementation | Backend Architect | Keep tokenizer envelope as-is and harden canonical_ingest fail-fast tests | `append_events_rejects_*_before_storage` added |
+| Implementation | Security Engineer | Use mTLS plus per-event Ed25519 signatures for control-plane forwarding | Helm/compose mount TLS and `control-plane.pem` |
+| Implementation | Software Architect | Add a real Helm control-plane surface instead of compose-only wiring | `templates/control-plane.yaml` added |
 
 ---
 
 ## §14. Merge checklist
 
-- [ ] Tokenizer AppendEventsRequest envelope fixed and tested
-- [ ] Control-plane Ed25519 forwarder implemented and tested
+- [x] Tokenizer AppendEventsRequest envelope fixed and tested
+- [x] Control-plane Ed25519 forwarder implemented and tested
 - [ ] Plugin lifecycle audit event reaches canonical_ingest in demo
-- [ ] Helm production signing gates render correctly
-- [ ] Affected service tests pass
+- [x] Helm production signing gates render correctly
+- [x] Affected service tests pass
 - [ ] AIT adversarial review passes or Staff+ arbitration is recorded
 
 ---
