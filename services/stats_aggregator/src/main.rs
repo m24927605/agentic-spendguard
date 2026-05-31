@@ -131,12 +131,11 @@ async fn main() -> Result<()> {
         }
         let bundle_hash = hex::decode(&cfg.schema_bundle_hash_hex)
             .context("SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_HASH_HEX must be hex-encoded")?;
-        let schema_bundle_ref =
-            spendguard_stats_aggregator::proto::common::v1::SchemaBundleRef {
-                schema_bundle_id: cfg.schema_bundle_id.clone(),
-                schema_bundle_hash: bundle_hash.into(),
-                canonical_schema_version: cfg.canonical_schema_version.clone(),
-            };
+        let schema_bundle_ref = spendguard_stats_aggregator::proto::common::v1::SchemaBundleRef {
+            schema_bundle_id: cfg.schema_bundle_id.clone(),
+            schema_bundle_hash: bundle_hash.into(),
+            canonical_schema_version: cfg.canonical_schema_version.clone(),
+        };
         let channel = build_canonical_ingest_channel(&cfg)
             .await
             .context("connect canonical_ingest channel")?;
@@ -173,9 +172,7 @@ async fn main() -> Result<()> {
         let pool_for_health = pool.clone();
         let max_cycle_age_secs = cycle_seconds.saturating_mul(2);
         tokio::spawn(async move {
-            if let Err(e) =
-                run_metrics_server(addr, pool_for_health, max_cycle_age_secs).await
-            {
+            if let Err(e) = run_metrics_server(addr, pool_for_health, max_cycle_age_secs).await {
                 error!(?e, "metrics server exited with error");
             }
         });
@@ -256,11 +253,11 @@ async fn shutdown_signal() {
 }
 
 fn render_metrics() -> String {
-    use std::sync::atomic::Ordering;
     use spendguard_stats_aggregator::scheduler::{
         CYCLES_TOTAL, CYCLE_ERROR_TOTAL, DRIFT_ALERTS_TOTAL, LAST_CYCLE_START_UNIX_SECS,
         SKIPPED_LOCK_HELD_TOTAL,
     };
+    use std::sync::atomic::Ordering;
     // R2 M13: render the live AtomicU64 counters.
     format!(
         "# HELP spendguard_stats_aggregator_cycles_total \
@@ -308,8 +305,8 @@ async fn run_metrics_server(
     use hyper::service::service_fn;
     use hyper::{Method, Request, Response, StatusCode};
     use hyper_util::rt::TokioIo;
-    use std::sync::atomic::Ordering;
     use spendguard_stats_aggregator::scheduler::LAST_CYCLE_START_UNIX_SECS;
+    use std::sync::atomic::Ordering;
 
     let listener = tokio::net::TcpListener::bind(addr).await?;
     loop {
@@ -355,8 +352,7 @@ async fn run_metrics_server(
                                     .duration_since(std::time::UNIX_EPOCH)
                                     .map(|d| d.as_secs())
                                     .unwrap_or(0);
-                                let last_cycle =
-                                    LAST_CYCLE_START_UNIX_SECS.load(Ordering::Relaxed);
+                                let last_cycle = LAST_CYCLE_START_UNIX_SECS.load(Ordering::Relaxed);
                                 let cycle_fresh = last_cycle == 0
                                     || now_secs.saturating_sub(last_cycle) <= max_cycle_age_secs;
                                 if db_ok && cycle_fresh {

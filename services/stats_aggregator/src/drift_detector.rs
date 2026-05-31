@@ -37,7 +37,7 @@ use tracing::{debug, info, warn};
 use crate::aggregation::BucketAggregate;
 use crate::proto::canonical_ingest::v1::{
     append_events_request::Route, canonical_ingest_client::CanonicalIngestClient,
-    AppendEventsRequest,
+    event_result::Status as EventStatus, AppendEventsRequest, AppendEventsResponse,
 };
 use crate::proto::common::v1::{CloudEvent, SchemaBundleRef};
 
@@ -102,7 +102,11 @@ pub fn should_emit_drift_alert(agg: &BucketAggregate, cfg: &DriftDetectorConfig)
 /// Build (but do not sign or emit) the prediction_drift_alert
 /// CloudEvent for a bucket. Separated from the emission step so unit
 /// tests can verify the envelope shape without a tonic Channel.
-pub fn build_drift_alert(agg: &BucketAggregate, z_score: f32, cfg: &DriftDetectorConfig) -> CloudEvent {
+pub fn build_drift_alert(
+    agg: &BucketAggregate,
+    z_score: f32,
+    cfg: &DriftDetectorConfig,
+) -> CloudEvent {
     use bytes::Bytes;
     let now = Utc::now();
     // R2 M2: payload reports baseline_* fields (window [now-30d, now-7d]
@@ -230,11 +234,46 @@ impl DriftAlertSink for CanonicalIngestDriftAlertSink {
             route: Route::Observability as i32,
         };
         let mut guard = self.client.lock().await;
-        guard
+        let resp = guard
             .append_events(req)
             .await
             .context("canonical_ingest AppendEvents")?;
-        Ok(())
+        ensure_append_accepted(resp.into_inner())
+    }
+}
+
+pub(crate) fn ensure_append_accepted(resp: AppendEventsResponse) -> Result<(), anyhow::Error> {
+    if resp.results.len() != 1 {
+        return Err(anyhow::anyhow!(
+            "AppendEvents prediction_drift_alert returned {} results for one event",
+            resp.results.len()
+        ));
+    }
+
+    let result = &resp.results[0];
+    let status = EventStatus::try_from(result.status).unwrap_or(EventStatus::Unspecified);
+    match status {
+        EventStatus::Appended | EventStatus::Deduped => Ok(()),
+        other => {
+            let error_message = result
+                .error
+                .as_ref()
+                .map(|err| err.message.as_str())
+                .filter(|msg| !msg.is_empty())
+                .unwrap_or("canonical_ingest returned no error detail");
+            warn!(
+                event_id = %result.event_id,
+                status = ?other,
+                err = %error_message,
+                "canonical_ingest rejected prediction_drift_alert"
+            );
+            Err(anyhow::anyhow!(
+                "AppendEvents prediction_drift_alert rejected event_id={} status={:?}: {}",
+                result.event_id,
+                other,
+                error_message
+            ))
+        }
     }
 }
 
@@ -296,6 +335,8 @@ pub async fn detect_and_emit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::canonical_ingest::v1::EventResult;
+    use crate::proto::common::v1::Error as ProtoError;
     use uuid::Uuid;
 
     fn fixture_cfg() -> DriftDetectorConfig {
@@ -362,7 +403,7 @@ mod tests {
         agg.stddev_30d = Some(100.0); // inclusive stddev — would damp z
         agg.baseline_mean = Some(100.0); // exclusive baseline
         agg.baseline_stddev = Some(20.0); // exclusive baseline
-        // z must be (150 - 100) / 20 = 2.5, NOT (150 - 140) / 100 = 0.1.
+                                          // z must be (150 - 100) / 20 = 2.5, NOT (150 - 140) / 100 = 0.1.
         let z = compute_z_score(&agg).expect("z");
         assert!((z - 2.5).abs() < 1e-4, "z must use baseline_*, got {z}");
     }
@@ -442,7 +483,10 @@ mod tests {
             "min_samples_for_alert",
             "suggested_action",
         ] {
-            assert!(parsed.get(k).is_some(), "missing key `{k}` in data: {parsed}");
+            assert!(
+                parsed.get(k).is_some(),
+                "missing key `{k}` in data: {parsed}"
+            );
         }
     }
 
@@ -458,6 +502,72 @@ mod tests {
             self.events.lock().push(event);
             Ok(())
         }
+    }
+
+    struct FailingSink;
+
+    #[async_trait::async_trait]
+    impl DriftAlertSink for FailingSink {
+        async fn emit(&self, _event: CloudEvent) -> Result<(), anyhow::Error> {
+            Err(anyhow::anyhow!("canonical_ingest rejected append"))
+        }
+    }
+
+    fn append_response(status: EventStatus) -> AppendEventsResponse {
+        AppendEventsResponse {
+            results: vec![EventResult {
+                event_id: "evt-1".to_string(),
+                status: status as i32,
+                ingest_position: None,
+                error: Some(ProtoError {
+                    code: 0,
+                    message: format!("{status:?} for test"),
+                    details: Default::default(),
+                }),
+            }],
+        }
+    }
+
+    #[test]
+    fn append_response_validation_accepts_durable_statuses() {
+        ensure_append_accepted(append_response(EventStatus::Appended)).expect("appended ok");
+        ensure_append_accepted(append_response(EventStatus::Deduped)).expect("deduped ok");
+    }
+
+    #[test]
+    fn append_response_validation_rejects_quarantined_status() {
+        let err = ensure_append_accepted(append_response(EventStatus::Quarantined))
+            .expect_err("quarantined is not durable success");
+        assert!(
+            err.to_string().contains("Quarantined"),
+            "error should include status, got {err}"
+        );
+    }
+
+    #[test]
+    fn append_response_validation_rejects_empty_or_multiple_results() {
+        let empty_err = ensure_append_accepted(AppendEventsResponse { results: vec![] })
+            .expect_err("missing per-event result must fail");
+        assert!(empty_err.to_string().contains("0 results"));
+
+        let multi_err = ensure_append_accepted(AppendEventsResponse {
+            results: vec![
+                EventResult {
+                    event_id: "evt-1".to_string(),
+                    status: EventStatus::Appended as i32,
+                    ingest_position: None,
+                    error: None,
+                },
+                EventResult {
+                    event_id: "evt-2".to_string(),
+                    status: EventStatus::Appended as i32,
+                    ingest_position: None,
+                    error: None,
+                },
+            ],
+        })
+        .expect_err("multiple results for one event must fail");
+        assert!(multi_err.to_string().contains("2 results"));
     }
 
     #[tokio::test]
@@ -478,9 +588,20 @@ mod tests {
         assert_eq!(n, 1, "exactly one breach must fire");
         let events = sink.events.lock();
         assert_eq!(events.len(), 1);
-        assert_eq!(
-            events[0].r#type,
-            PREDICTION_DRIFT_ALERT_EVENT_TYPE
-        );
+        assert_eq!(events[0].r#type, PREDICTION_DRIFT_ALERT_EVENT_TYPE);
+    }
+
+    #[tokio::test]
+    async fn detect_and_emit_does_not_count_failed_append() {
+        use spendguard_signing::DisabledSigner;
+        let signer = DisabledSigner::for_test("test-stats-aggregator".into());
+        let mut breaching = fixture_agg();
+        breaching.mean_7d = Some(200.0);
+
+        let n = detect_and_emit(&[breaching], &fixture_cfg(), &signer, &FailingSink)
+            .await
+            .expect("emit failures are logged for retry, not fatal to cycle");
+
+        assert_eq!(n, 0, "failed canonical append must not count as emitted");
     }
 }

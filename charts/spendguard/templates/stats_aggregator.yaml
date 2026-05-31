@@ -3,7 +3,7 @@
 {{- /* SLICE_06 — stats_aggregator Deployment (singleton daemon).
        Spec: docs/stats-aggregator-spec-v1alpha1.md.
        Pattern:
-         - chart.profile=production: image.tag semver/digest + databaseUrl +
+         - chart.profile=production: image.tag semver/digest + DB URL Secret key +
            canonicalIngestUrl + sinkMtlsSecretName + signingKey gates
          - replicas: 1 (singleton; advisory lock allows overlapping pods
            but only one runs)
@@ -18,8 +18,8 @@
 {{- if not (or (regexMatch "@sha256:[0-9a-f]{64}$" (toString .Values.statsAggregator.image.tag)) (regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[a-z0-9.]+)?$" (toString .Values.statsAggregator.image.tag))) -}}
 {{- fail (printf "statsAggregator.image.tag=%q must be a semver tag (vN.N.N) or digest-pinned (@sha256:HEX) under chart.profile=production" (toString .Values.statsAggregator.image.tag)) -}}
 {{- end -}}
-{{- if not .Values.statsAggregator.databaseUrl -}}
-{{- fail "statsAggregator.databaseUrl is required under chart.profile=production (canonical_ingest DB read+write source per spec §2.1)" -}}
+{{- if not .Values.postgres.statsAggregatorUrlKey -}}
+{{- fail "postgres.statsAggregatorUrlKey is required under chart.profile=production (canonical_ingest DB read+write source per spec §2.1)" -}}
 {{- end -}}
 {{- if not .Values.statsAggregator.canonicalIngestUrl -}}
 {{- fail "statsAggregator.canonicalIngestUrl is required under chart.profile=production (signed prediction_drift_alert CloudEvent emission per spec §7.2; demo-only LoggingDriftAlertSink fallback rejected)" -}}
@@ -96,8 +96,9 @@ spec:
             - { name: SPENDGUARD_STATS_AGGREGATOR_CYCLE_SECONDS,          value: {{ .Values.statsAggregator.cycleSeconds | quote }} }
             - { name: SPENDGUARD_STATS_AGGREGATOR_MIN_SAMPLES_FOR_ALERT,  value: {{ .Values.statsAggregator.minSamplesForAlert | quote }} }
             - { name: SPENDGUARD_STATS_AGGREGATOR_DRIFT_Z_THRESHOLD,      value: {{ .Values.statsAggregator.driftZThreshold | quote }} }
-            {{- if .Values.statsAggregator.databaseUrl }}
-            - { name: SPENDGUARD_STATS_AGGREGATOR_DATABASE_URL,           value: {{ .Values.statsAggregator.databaseUrl | quote }} }
+            {{- if or (eq .Values.chart.profile "production") .Values.statsAggregator.databaseSecretEnabled }}
+            - name: SPENDGUARD_STATS_AGGREGATOR_DATABASE_URL
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.statsAggregatorUrlKey) | nindent 14 }}
             {{- end }}
             {{- if .Values.statsAggregator.canonicalIngestUrl }}
             - { name: SPENDGUARD_STATS_AGGREGATOR_CANONICAL_INGEST_URL,   value: {{ .Values.statsAggregator.canonicalIngestUrl | quote }} }

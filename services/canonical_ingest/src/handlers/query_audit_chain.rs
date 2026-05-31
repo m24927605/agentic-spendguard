@@ -45,11 +45,14 @@ pub async fn handle(
     tokio::spawn(async move {
         let rows_result = match req.anchor {
             Some(ProtoAnchor::DecisionId(s)) => match Uuid::parse_str(&s) {
-                Ok(decision_id) => {
-                    query::query_chain_by_decision(&pool, tenant_id, decision_id, Some(storage_classes))
-                        .await
-                        .map_err(|e| e.to_status())
-                }
+                Ok(decision_id) => query::query_chain_by_decision(
+                    &pool,
+                    tenant_id,
+                    decision_id,
+                    Some(storage_classes),
+                )
+                .await
+                .map_err(|e| e.to_status()),
                 Err(e) => Err(Status::invalid_argument(format!("decision_id: {}", e))),
             },
             Some(ProtoAnchor::RunId(s)) => match Uuid::parse_str(&s) {
@@ -126,10 +129,8 @@ fn decode_cloudevent_from_row(row: &ChainRow) -> Result<CloudEvent, anyhow::Erro
             .map(|s| s.to_string())
             .unwrap_or_default()
     };
-    let get_u64 =
-        |k: &str| -> u64 { payload.get(k).and_then(|v| v.as_u64()).unwrap_or_default() };
-    let get_i64 =
-        |k: &str| -> i64 { payload.get(k).and_then(|v| v.as_i64()).unwrap_or_default() };
+    let get_u64 = |k: &str| -> u64 { payload.get(k).and_then(|v| v.as_u64()).unwrap_or_default() };
+    let get_i64 = |k: &str| -> i64 { payload.get(k).and_then(|v| v.as_i64()).unwrap_or_default() };
     let get_i32 = |k: &str| -> i32 { get_i64(k) as i32 };
 
     let data_b64 = get_str("data_b64");

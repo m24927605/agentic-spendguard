@@ -43,7 +43,7 @@ spec:
             - name: SPENDGUARD_WEBHOOK_RECEIVER_LEDGER_URL
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
             - name: SPENDGUARD_WEBHOOK_RECEIVER_DATABASE_URL
-              value: {{ .Values.postgres.ledgerUrl | quote }}
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.ledgerUrlKey) | nindent 14 }}
             # Round-2 #3: per-tenant HMAC secret for the mock-llm
             # provider. Config field is `mock_llm_secret`, and
             # envy::from_env() (NOT prefixed) reads the env var as

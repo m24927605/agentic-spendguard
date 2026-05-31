@@ -96,11 +96,44 @@ pub struct Config {
     #[serde(default)]
     pub database_url: String,
 
+    /// Optional Postgres URL for control_plane's durable
+    /// `tokenizer_sampling_rate_overrides` table. When configured, the
+    /// shadow worker refreshes the current event's (tenant, model)
+    /// override under that tenant's RLS context before rate-gating.
+    #[serde(default)]
+    pub sampling_override_database_url: String,
+
     /// canonical_ingest gRPC URL for the signed `tokenizer_drift_alert`
     /// CloudEvent sink. Empty = use in-memory sink (demo only —
     /// production Helm profile requires this set).
     #[serde(default)]
     pub canonical_ingest_url: String,
+
+    // ── HARDEN_03 / #168: AppendEventsRequest envelope fields ────────
+    //
+    // canonical_ingest rejects AppendEventsRequest envelopes without
+    // producer_id + schema_bundle + non-ROUTE_UNSPECIFIED route. The
+    // tokenizer shadow sink originally populated only producer_id and
+    // left schema_bundle/route at defaults, so every drift alert was
+    // rejected before admission. These fields mirror the stats_aggregator
+    // envelope config and are required whenever canonical_ingest_url is
+    // set.
+    /// UUID string identifying the schema bundle tokenizer drift-alert
+    /// CloudEvents conform to. Required when canonical_ingest_url is
+    /// configured.
+    #[serde(default)]
+    pub schema_bundle_id: String,
+
+    /// Hex-encoded SHA-256 of the schema bundle .tgz registered in
+    /// canonical_ingest. Required when canonical_ingest_url is
+    /// configured.
+    #[serde(default)]
+    pub schema_bundle_hash_hex: String,
+
+    /// Canonical schema version written into SchemaBundleRef. Defaults
+    /// to the repo-wide v1alpha1 schema bundle name.
+    #[serde(default = "default_canonical_schema_version")]
+    pub canonical_schema_version: String,
 
     /// Producer source URI written into the emitted CloudEvent. Defaults
     /// to `spendguard://tokenizer-service/<region>`. Surfaced for
@@ -147,11 +180,27 @@ impl std::fmt::Debug for Config {
             .field("tier3_alert_threshold", &self.tier3_alert_threshold)
             .field("region", &self.region)
             .field("shadow_enabled", &self.shadow_enabled)
-            .field("shadow_default_sample_rate", &self.shadow_default_sample_rate)
-            .field("anthropic_api_key_present", &!self.anthropic_api_key.is_empty())
+            .field(
+                "shadow_default_sample_rate",
+                &self.shadow_default_sample_rate,
+            )
+            .field(
+                "anthropic_api_key_present",
+                &!self.anthropic_api_key.is_empty(),
+            )
             .field("gemini_api_key_present", &!self.gemini_api_key.is_empty())
             .field("database_url_present", &!self.database_url.is_empty())
+            .field(
+                "sampling_override_database_url_present",
+                &!self.sampling_override_database_url.is_empty(),
+            )
             .field("canonical_ingest_url", &self.canonical_ingest_url)
+            .field("schema_bundle_id", &self.schema_bundle_id)
+            .field(
+                "schema_bundle_hash_hex_present",
+                &!self.schema_bundle_hash_hex.is_empty(),
+            )
+            .field("canonical_schema_version", &self.canonical_schema_version)
             .field("event_source_override", &self.event_source_override)
             .field("sink_tls_cert_pem", &self.sink_tls_cert_pem)
             .field("sink_tls_key_pem", &self.sink_tls_key_pem)
@@ -197,6 +246,10 @@ fn default_sink_sni() -> String {
     "canonical-ingest.spendguard.internal".to_string()
 }
 
+fn default_canonical_schema_version() -> String {
+    "spendguard.v1alpha1".to_string()
+}
+
 impl Config {
     /// Load from `SPENDGUARD_TOKENIZER_*` env vars.
     pub fn from_env() -> Result<Self, envy::Error> {
@@ -211,11 +264,12 @@ mod tests {
     #[test]
     fn defaults_load_with_minimum_env() {
         // Force load with only the required field.
-        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![(
-            "TEST_CFG_LISTEN_ADDR".to_string(),
-            "127.0.0.1:50053".to_string(),
-        )])
-        .expect("config loads");
+        let cfg = envy::prefixed("TEST_CFG_")
+            .from_iter::<_, Config>(vec![(
+                "TEST_CFG_LISTEN_ADDR".to_string(),
+                "127.0.0.1:50053".to_string(),
+            )])
+            .expect("config loads");
         assert_eq!(cfg.listen_addr, "127.0.0.1:50053");
         assert!(cfg.uds_path.is_none());
         assert_eq!(cfg.metrics_addr, "0.0.0.0:9099");
@@ -224,38 +278,40 @@ mod tests {
 
     #[test]
     fn tier3_threshold_overridable() {
-        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![
-            (
-                "TEST_CFG_LISTEN_ADDR".to_string(),
-                "127.0.0.1:50053".to_string(),
-            ),
-            (
-                "TEST_CFG_TIER3_ALERT_THRESHOLD".to_string(),
-                "0.005".to_string(),
-            ),
-        ])
-        .expect("config loads");
+        let cfg = envy::prefixed("TEST_CFG_")
+            .from_iter::<_, Config>(vec![
+                (
+                    "TEST_CFG_LISTEN_ADDR".to_string(),
+                    "127.0.0.1:50053".to_string(),
+                ),
+                (
+                    "TEST_CFG_TIER3_ALERT_THRESHOLD".to_string(),
+                    "0.005".to_string(),
+                ),
+            ])
+            .expect("config loads");
         assert!((cfg.tier3_alert_threshold - 0.005).abs() < 1e-6);
     }
 
     /// R2 M13: Debug must not spill the raw API keys.
     #[test]
     fn debug_format_masks_api_keys() {
-        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![
-            (
-                "TEST_CFG_LISTEN_ADDR".to_string(),
-                "127.0.0.1:50053".to_string(),
-            ),
-            (
-                "TEST_CFG_ANTHROPIC_API_KEY".to_string(),
-                "sk-ant-extremely-secret-token-DO-NOT-LEAK".to_string(),
-            ),
-            (
-                "TEST_CFG_GEMINI_API_KEY".to_string(),
-                "AIza-extremely-secret-DO-NOT-LEAK".to_string(),
-            ),
-        ])
-        .expect("config loads");
+        let cfg = envy::prefixed("TEST_CFG_")
+            .from_iter::<_, Config>(vec![
+                (
+                    "TEST_CFG_LISTEN_ADDR".to_string(),
+                    "127.0.0.1:50053".to_string(),
+                ),
+                (
+                    "TEST_CFG_ANTHROPIC_API_KEY".to_string(),
+                    "sk-ant-extremely-secret-token-DO-NOT-LEAK".to_string(),
+                ),
+                (
+                    "TEST_CFG_GEMINI_API_KEY".to_string(),
+                    "AIza-extremely-secret-DO-NOT-LEAK".to_string(),
+                ),
+            ])
+            .expect("config loads");
         let dbg = format!("{cfg:?}");
         assert!(
             !dbg.contains("sk-ant-extremely-secret"),
@@ -272,11 +328,12 @@ mod tests {
 
     #[test]
     fn debug_format_reports_missing_keys_as_false() {
-        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![(
-            "TEST_CFG_LISTEN_ADDR".to_string(),
-            "127.0.0.1:50053".to_string(),
-        )])
-        .expect("config loads");
+        let cfg = envy::prefixed("TEST_CFG_")
+            .from_iter::<_, Config>(vec![(
+                "TEST_CFG_LISTEN_ADDR".to_string(),
+                "127.0.0.1:50053".to_string(),
+            )])
+            .expect("config loads");
         let dbg = format!("{cfg:?}");
         assert!(dbg.contains("anthropic_api_key_present: false"));
         assert!(dbg.contains("gemini_api_key_present: false"));

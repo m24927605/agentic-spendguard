@@ -133,19 +133,13 @@ fn cl100k_numbers_text() {
 
 #[test]
 fn cl100k_code_snippet() {
-    let n = tokenize_raw(
-        "gpt-4",
-        "fn main() { println!(\"hello\"); }",
-    );
+    let n = tokenize_raw("gpt-4", "fn main() { println!(\"hello\"); }");
     assert!((8..=15).contains(&n), "got {n}");
 }
 
 #[test]
 fn cl100k_json_snippet() {
-    let n = tokenize_raw(
-        "gpt-4",
-        r#"{"name":"alice","age":30}"#,
-    );
+    let n = tokenize_raw("gpt-4", r#"{"name":"alice","age":30}"#);
     assert!((8..=14).contains(&n), "got {n}");
 }
 
@@ -400,7 +394,10 @@ fn chat_envelope_adds_overhead_vs_raw() {
     let chat = tokenize_chat("gpt-4o", "user", "hello");
     assert!(chat > raw, "chat {chat} should exceed raw {raw}");
     // Lower bound: at least raw + 1 role + 3 per-msg + 3 priming.
-    assert!(chat >= raw + 4, "chat envelope undercount: chat={chat} raw={raw}");
+    assert!(
+        chat >= raw + 4,
+        "chat envelope undercount: chat={chat} raw={raw}"
+    );
 }
 
 #[test]

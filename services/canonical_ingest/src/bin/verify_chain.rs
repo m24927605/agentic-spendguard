@@ -108,9 +108,7 @@ impl Args {
                 }
                 "--no-check-prediction-mirror" => {
                     if attached_value.is_some() {
-                        return Err(
-                            "--no-check-prediction-mirror takes no value".to_string()
-                        );
+                        return Err("--no-check-prediction-mirror takes no value".to_string());
                     }
                     // Convenience alias for --check-prediction-mirror=false.
                     check_prediction_mirror = false;
@@ -351,14 +349,8 @@ mod tests {
 
     #[test]
     fn parse_rejects_unrecognized_arg() {
-        let err = Args::parse(
-            [
-                "verify-chain".to_string(),
-                "--bogus".to_string(),
-            ]
-            .into_iter(),
-        )
-        .unwrap_err();
+        let err = Args::parse(["verify-chain".to_string(), "--bogus".to_string()].into_iter())
+            .unwrap_err();
         assert!(err.contains("unrecognized argument"));
     }
 

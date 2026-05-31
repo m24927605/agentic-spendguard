@@ -180,17 +180,24 @@ Reviewer must read `issue-triage.md`, confirm that P1 issues have real code fixe
 | Design | Security Engineer | Plaintext DB URL and SVID work are production blockers | #145 and #171 are P1 |
 | Design | Database Optimizer | `pg_indexes` schemaname and RLS tests are required | #150 and #160 are P1 |
 | Design | SDK/domain expert | STOP_RUN_PROJECTION SDK regen blocks real users | #90 is P1 |
+| Round 1 | codex CLI adversarial review `review_01KSXXXWV5NGW6TNE6QYBEZESH` | Fix 4 findings in-slice | Sampling override auth/store, tokenizer override lookup, outcome mirror population, and production Secret gating fixed |
+| Round 2 | codex CLI adversarial review `review_01KSXYSV0NWT1EGBYAV69C8EDM` | Fix 3 findings in-slice | Quarantine mirror preservation, tokenizer append-result validation, and control-plane migration ConfigMap validation fixed |
+| Round 3 | codex CLI adversarial review `review_01KSY013KM0ZQH9KCKPPAWP22H` | Fix 2 findings in-slice | Kind strict-ready workload inventory and verify-chain mirror drift semantics fixed |
+| Round 4 | codex CLI adversarial review `review_01KSY5ZY05HZKE7BXHND8QPBN8` | Fix 1 finding in-slice | Kind strict-ready stats-aggregator DB Secret wiring fixed |
+| Round 5 | codex CLI adversarial review `review_01KSY6KJXN0AY27J3A3CT4RF0A` | Trigger Staff+ arbitration | Remaining finding: stats-aggregator counted rejected `prediction_drift_alert` appends as emitted |
+| Staff+ arbitration | Software Architect + Backend Architect + Security Engineer + Database Optimizer + SpendGuard Predictor domain expert | Unanimous `FIX_IN_SLICE` | Final decision: validate `AppendEventsResponse.results` and count only `APPENDED` / `DEDUPED` as durable success; no AIT round 6 |
+| Staff+ implementation | codex CLI implementer | Fix applied | `services/stats_aggregator/src/drift_detector.rs` now rejects non-durable append statuses and tests failed append count as zero |
 
 ---
 
 ## §14. Merge checklist
 
-- [ ] `gh issue list` output captured
-- [ ] `issue-triage.md` classifies all open #90-#177 issues
-- [ ] P1 fixes committed and verified
-- [ ] P1 issues closed or explicitly linked to HARDEN_08
-- [ ] Affected tests and Helm templates pass
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded
+- [x] `gh issue list` output captured
+- [x] `issue-triage.md` classifies all open #90-#177 issues
+- [x] P1 fixes committed and verified
+- [x] P1 issues closed or explicitly linked to HARDEN_08
+- [x] Affected tests and Helm templates pass
+- [x] AIT adversarial review passes or Staff+ arbitration is recorded
 
 ---
 

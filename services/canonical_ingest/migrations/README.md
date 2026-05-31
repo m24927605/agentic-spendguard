@@ -12,7 +12,7 @@ zero-padded sequence: `NNNN_short_description.sql`. The runner wraps
 each file in its own transaction (see SLICE_01 R5 + 0013 round-2 fix
 m3) — no explicit BEGIN/COMMIT inside the SQL bodies.
 
-The migration index as of SLICE_06 R2:
+The migration index as of HARDEN_03 R2:
 
 | #    | Slice         | What                                                                   |
 |------|---------------|------------------------------------------------------------------------|
@@ -35,6 +35,7 @@ The migration index as of SLICE_06 R2:
 | 0016 | SLICE_06      | output_distribution_cache (R2 B1+M16+M17: FOR ALL RLS + REVOKE PUBLIC) |
 | 0017 | SLICE_06      | run_length_distribution_cache (mirror RLS shape)                       |
 | 0018 | SLICE_06 R2   | canonical_events aggregator mirror columns (R2 B4 Option A)            |
+| 0019 | HARDEN_03 R2  | audit_outcome_quarantine aggregator mirror columns                     |
 
 ## The 0014 gap
 
@@ -59,6 +60,7 @@ recipe to roll back isn't a simple `DROP TABLE ... CASCADE` /
 
 * `down/0013_canonical_events_prediction_columns_down.sql`
 * `down/0015_audit_outcome_quarantine_prediction_columns_down.sql`
+* `down/0019_audit_outcome_quarantine_aggregator_mirror_columns_down.sql`
 
 0016 / 0017 / 0018 have no down/ files. Rollback recipe for each:
 

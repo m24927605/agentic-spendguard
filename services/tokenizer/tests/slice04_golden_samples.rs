@@ -46,9 +46,7 @@ use std::sync::OnceLock;
 /// from ~10 min to under 30 s on a typical dev box.
 fn shared_tokenizer() -> &'static Tokenizer {
     static TOKENIZER: OnceLock<Tokenizer> = OnceLock::new();
-    TOKENIZER.get_or_init(|| {
-        Tokenizer::new_with_embedded_assets().expect("boot tokenizer")
-    })
+    TOKENIZER.get_or_init(|| Tokenizer::new_with_embedded_assets().expect("boot tokenizer"))
 }
 
 fn boot_tokenizer() -> &'static Tokenizer {
@@ -63,7 +61,11 @@ fn tokenize_raw(model: &str, text: &str) -> i64 {
         ..Default::default()
     };
     let resp = tok.tokenize(&req).expect("tokenize");
-    assert_eq!(resp.tier, "T2", "model `{model}` must hit Tier 2, got tier {}", resp.tier);
+    assert_eq!(
+        resp.tier, "T2",
+        "model `{model}` must hit Tier 2, got tier {}",
+        resp.tier
+    );
     resp.input_tokens
 }
 
@@ -154,7 +156,10 @@ fn anthropic_empty_string_is_0_tokens() {
 
 #[test]
 fn anthropic_short_sentence_in_band() {
-    let n = tokenize_raw("claude-3-haiku", "The quick brown fox jumps over the lazy dog.");
+    let n = tokenize_raw(
+        "claude-3-haiku",
+        "The quick brown fox jumps over the lazy dog.",
+    );
     assert!((7..=14).contains(&n), "got {n}");
 }
 
@@ -248,7 +253,10 @@ fn anthropic_kebab_case_identifier() {
 
 #[test]
 fn anthropic_multiline_markdown() {
-    let n = tokenize_raw("claude-3-haiku", "# Heading\n\nSome **bold** text and _italic_.");
+    let n = tokenize_raw(
+        "claude-3-haiku",
+        "# Heading\n\nSome **bold** text and _italic_.",
+    );
     assert!((9..=22).contains(&n), "got {n}");
 }
 
@@ -390,11 +398,7 @@ fn anthropic_chat_3_5_model_works() {
 
 #[test]
 fn anthropic_chat_bedrock_model_works() {
-    let n = tokenize_chat(
-        "anthropic.claude-3-haiku-20240307-v1:0",
-        "user",
-        "hello",
-    );
+    let n = tokenize_chat("anthropic.claude-3-haiku-20240307-v1:0", "user", "hello");
     assert!(n >= 5);
 }
 
@@ -505,7 +509,10 @@ fn gemini_empty_string_is_0_tokens() {
 
 #[test]
 fn gemini_short_sentence_in_band() {
-    let n = tokenize_raw("gemini-1.5-flash", "The quick brown fox jumps over the lazy dog.");
+    let n = tokenize_raw(
+        "gemini-1.5-flash",
+        "The quick brown fox jumps over the lazy dog.",
+    );
     assert!((8..=14).contains(&n), "got {n}");
 }
 
@@ -1178,7 +1185,10 @@ fn cohere_very_long_text() {
 #[test]
 fn llama_hello_world_is_3_tokens_with_bos() {
     // R2 M4: BOS=1 added to raw_text. "hello world" = 2 vocab + 1 BOS.
-    assert_eq!(tokenize_raw("meta.llama3-8b-instruct-v1:0", "hello world"), 3);
+    assert_eq!(
+        tokenize_raw("meta.llama3-8b-instruct-v1:0", "hello world"),
+        3
+    );
 }
 
 #[test]
@@ -1210,13 +1220,19 @@ fn llama_punctuation_heavy_text() {
 
 #[test]
 fn llama_numbers_text() {
-    let n = tokenize_raw("meta.llama3-8b-instruct-v1:0", "Pi is approximately 3.14159.");
+    let n = tokenize_raw(
+        "meta.llama3-8b-instruct-v1:0",
+        "Pi is approximately 3.14159.",
+    );
     assert!((6..=12).contains(&n), "got {n}");
 }
 
 #[test]
 fn llama_code_snippet() {
-    let n = tokenize_raw("meta.llama3-8b-instruct-v1:0", "fn main() { println!(\"hi\"); }");
+    let n = tokenize_raw(
+        "meta.llama3-8b-instruct-v1:0",
+        "fn main() { println!(\"hi\"); }",
+    );
     assert!((8..=18).contains(&n), "got {n}");
 }
 
@@ -1436,31 +1452,19 @@ fn llama_chat_user_role_adds_envelope() {
 
 #[test]
 fn llama_chat_system_role_in_band() {
-    let n = tokenize_chat(
-        "meta.llama3-8b-instruct-v1:0",
-        "system",
-        "You are helpful.",
-    );
+    let n = tokenize_chat("meta.llama3-8b-instruct-v1:0", "system", "You are helpful.");
     assert!((6..=18).contains(&n), "got {n}");
 }
 
 #[test]
 fn llama_chat_assistant_role_in_band() {
-    let n = tokenize_chat(
-        "meta.llama3-8b-instruct-v1:0",
-        "assistant",
-        "Of course!",
-    );
+    let n = tokenize_chat("meta.llama3-8b-instruct-v1:0", "assistant", "Of course!");
     assert!((6..=15).contains(&n), "got {n}");
 }
 
 #[test]
 fn llama_chat_tool_role_in_band() {
-    let n = tokenize_chat(
-        "meta.llama3-8b-instruct-v1:0",
-        "tool",
-        "{\"result\":42}",
-    );
+    let n = tokenize_chat("meta.llama3-8b-instruct-v1:0", "tool", "{\"result\":42}");
     assert!((6..=18).contains(&n), "got {n}");
 }
 
@@ -1478,11 +1482,7 @@ fn llama_chat_3_2_1b_works() {
 
 #[test]
 fn llama_chat_long_content_proportional() {
-    let n = tokenize_chat(
-        "meta.llama3-8b-instruct-v1:0",
-        "user",
-        &"hi ".repeat(50),
-    );
+    let n = tokenize_chat("meta.llama3-8b-instruct-v1:0", "user", &"hi ".repeat(50));
     assert!(n >= 30);
 }
 
@@ -1550,9 +1550,6 @@ fn llama_single_char_with_bos() {
 
 #[test]
 fn llama_very_long_text() {
-    let n = tokenize_raw(
-        "meta.llama3-8b-instruct-v1:0",
-        &"hello world ".repeat(100),
-    );
+    let n = tokenize_raw("meta.llama3-8b-instruct-v1:0", &"hello world ".repeat(100));
     assert!((100..=400).contains(&n), "got {n}");
 }

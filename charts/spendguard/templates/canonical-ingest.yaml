@@ -1,8 +1,8 @@
 {{- if .Values.canonicalIngest.enabled }}
 {{- $component := "canonical-ingest" }}
-{{- /* postgres.canonicalUrl CHANGE_ME gate lives in templates/validations.yaml
+{{- /* postgres Secret key gates live in templates/validations.yaml
        (must fire even when canonicalIngest.enabled=false but a future
-       external consumer reaches for the URL). */ -}}
+       external consumer reaches for the URL Secret key). */ -}}
 {{- /* Phase 5 GA hardening S8: strict signatures gate.
        production profile MUST run with strict mode on; flipping it
        off in production silently admits unsigned events. */ -}}
@@ -34,7 +34,8 @@ spec:
             - { name: metrics, containerPort: 9091 }
           env:
             - { name: SPENDGUARD_CANONICAL_INGEST_BIND_ADDR,    value: "0.0.0.0:50052" }
-            - { name: SPENDGUARD_CANONICAL_INGEST_DATABASE_URL, value: {{ .Values.postgres.canonicalUrl | quote }} }
+            - name: SPENDGUARD_CANONICAL_INGEST_DATABASE_URL
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.canonicalUrlKey) | nindent 14 }}
             # Round-2 #3: canonical_ingest Config::from_env() requires
             # REGION + INGEST_SHARD_ID (no defaults). The (region,
             # ingest_shard_id) tuple is the canonical ordering scope

@@ -159,7 +159,10 @@ async fn main() -> anyhow::Result<()> {
             "/v1/predictor/plugins/:tenant_id/force-reset",
             post(handlers::predictor_plugins::force_reset_plugin::<AppState>),
         )
-        .layer(from_fn_with_state(auth.clone(), spendguard_auth::require_auth));
+        .layer(from_fn_with_state(
+            auth.clone(),
+            spendguard_auth::require_auth,
+        ));
 
     let app = Router::new()
         .route("/healthz", get(healthz))
@@ -178,13 +181,13 @@ async fn main() -> anyhow::Result<()> {
 /// ControlPlaneMetrics Prometheus text. Same hyper-based pattern as
 /// canonical_ingest / ledger / sidecar.
 async fn serve_metrics(addr: String, metrics: ControlPlaneMetrics) -> anyhow::Result<()> {
-    use std::convert::Infallible;
+    use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
-    use http_body_util::Full;
+    use std::convert::Infallible;
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind(&addr).await?;
@@ -205,10 +208,7 @@ async fn serve_metrics(addr: String, metrics: ControlPlaneMetrics) -> anyhow::Re
                     };
                     Ok::<_, Infallible>(
                         Response::builder()
-                            .header(
-                                "content-type",
-                                "text/plain; version=0.0.4; charset=utf-8",
-                            )
+                            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
                             .body(Full::new(Bytes::from(body)))
                             .unwrap(),
                     )
@@ -229,12 +229,12 @@ async fn healthz() -> &'static str {
 // SLICE_05: Tokenizer per-(tenant, model) shadow sampling rate API.
 //
 // Per tokenizer-service-spec-v1alpha1.md §4.1 the default sample rate
-// is 1% with operator override via this REST surface. Phase F ships
-// the API skeleton; the tokenizer service polls the control plane (or
-// reads from a shared store wired in SLICE-extra) to consume the
-// override. The route is auth-gated by `require_auth` so only
-// authenticated operators (TenantWrite permission required for POST)
-// can mutate.
+// is 1% with operator override via this REST surface. HARDEN_03 wires
+// durable Postgres persistence for the control-plane API; tokenizer
+// service reads consume the same table under per-event tenant RLS. The
+// route is auth-gated by `require_auth`; POST requires TenantWrite,
+// GET requires ReadView, and both assert the requested tenant against
+// the authenticated Principal before setting the RLS tenant.
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
@@ -262,31 +262,91 @@ struct TokenizerSamplingRateResp {
 
 async fn post_tokenizer_sampling_rate(
     Extension(principal): Extension<Principal>,
+    State(state): State<Arc<AppState>>,
     Json(req): Json<TokenizerSamplingRateReq>,
 ) -> Result<Json<TokenizerSamplingRateResp>, StatusCode> {
     if principal.require(Permission::TenantWrite).is_err() {
         return Err(StatusCode::FORBIDDEN);
     }
-    if req.tenant_id.is_empty() || req.model.is_empty() {
+    if req.tenant_id.is_empty() || req.model.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
     if !(0.0..=1.0).contains(&req.rate) {
         return Err(StatusCode::BAD_REQUEST);
     }
-    // SLICE_05 Phase F: API skeleton only. SLICE-extra wires the
-    // tokenizer-service polling path that materialises this override
-    // into the SampleRateState map; for now we echo the accepted
-    // value so client integrations can be smoke-tested.
+    let tenant_id = parse_tokenizer_sampling_tenant(&req.tenant_id)?;
+    authorize_tokenizer_sampling_tenant(&principal, &tenant_id, Permission::TenantWrite)?;
+    let model = req.model.trim().to_string();
+    if model.len() > 256 || principal.subject.len() > 256 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut tx = state
+        .pg
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "set tokenizer sampling RLS tenant");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO tokenizer_sampling_rate_overrides
+            (tenant_id, model, rate, updated_by)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (tenant_id, model)
+        DO UPDATE SET
+            rate = EXCLUDED.rate,
+            updated_at = clock_timestamp(),
+            updated_by = EXCLUDED.updated_by
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&model)
+    .bind(req.rate)
+    .bind(&principal.subject)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = ?e, "persist tokenizer sampling rate override");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    emit_tokenizer_sampling_rate_audit_event(
+        &mut tx,
+        tenant_id,
+        &model,
+        req.rate,
+        &principal.subject,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = ?e, "emit tokenizer sampling rate audit event");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        tracing::error!(error = ?e, "commit tokenizer sampling rate override");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
     info!(
         subject = %principal.subject,
-        tenant = %req.tenant_id,
-        model = %req.model,
+        tenant = %tenant_id,
+        model = %model,
         rate = req.rate,
-        "tokenizer sampling rate override accepted (SLICE_05 skeleton — persistence wired in SLICE-extra)"
+        "tokenizer sampling rate override persisted"
     );
     Ok(Json(TokenizerSamplingRateResp {
-        tenant_id: req.tenant_id,
-        model: req.model,
+        tenant_id: tenant_id.to_string(),
+        model,
         rate: req.rate,
         in_cool_down: false,
     }))
@@ -300,25 +360,139 @@ struct TokenizerSamplingRateQuery {
 
 async fn get_tokenizer_sampling_rate(
     Extension(principal): Extension<Principal>,
+    State(state): State<Arc<AppState>>,
     axum::extract::Query(q): axum::extract::Query<TokenizerSamplingRateQuery>,
 ) -> Result<Json<TokenizerSamplingRateResp>, StatusCode> {
-    // Any authenticated principal can read.
-    let _ = principal;
-    if q.tenant_id.is_empty() || q.model.is_empty() {
+    if q.tenant_id.is_empty() || q.model.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
-    // SLICE_05 Phase F skeleton: returns the spec §4.1 default until
-    // the tokenizer-service-poll path lands in SLICE-extra. Clients
-    // wiring against this API today should treat the response as the
-    // baseline rate, not the live sampling decision.
+    let tenant_id = parse_tokenizer_sampling_tenant(&q.tenant_id)?;
+    authorize_tokenizer_sampling_tenant(&principal, &tenant_id, Permission::ReadView)?;
+    let model = q.model.trim().to_string();
+    if model.len() > 256 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut tx = state
+        .pg
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "set tokenizer sampling RLS tenant");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let row: Option<(f64,)> = sqlx::query_as(
+        r#"
+        SELECT rate
+          FROM tokenizer_sampling_rate_overrides
+         WHERE tenant_id = $1 AND model = $2
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(&model)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = ?e, "read tokenizer sampling rate override");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        tracing::error!(error = ?e, "commit tokenizer sampling rate lookup");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
     Ok(Json(TokenizerSamplingRateResp {
-        tenant_id: q.tenant_id,
-        model: q.model,
-        rate: 0.01, // Spec §4.1 default.
+        tenant_id: tenant_id.to_string(),
+        model,
+        rate: row.map(|r| r.0).unwrap_or(0.01), // Spec §4.1 default.
         in_cool_down: false,
     }))
 }
 
+fn parse_tokenizer_sampling_tenant(raw: &str) -> Result<Uuid, StatusCode> {
+    Uuid::parse_str(raw).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+fn authorize_tokenizer_sampling_tenant(
+    principal: &Principal,
+    tenant_id: &Uuid,
+    permission: Permission,
+) -> Result<(), StatusCode> {
+    principal
+        .require(permission)
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    principal
+        .assert_tenant(&tenant_id.to_string())
+        .map_err(|_| StatusCode::FORBIDDEN)
+}
+
+async fn emit_tokenizer_sampling_rate_audit_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    model: &str,
+    rate: f64,
+    actor_subject: &str,
+) -> Result<(), sqlx::Error> {
+    let audit_outbox_id = Uuid::now_v7();
+    let event_id = Uuid::now_v7();
+    let event_type = "spendguard.audit.tokenizer_sampling_rate_override.v1alpha1";
+
+    let next_seq: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COALESCE(MAX(producer_sequence), 0) + 1
+          FROM control_plane_audit_outbox
+         WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let producer_sequence = next_seq.0;
+
+    let now = chrono::Utc::now();
+    let cloudevent = serde_json::json!({
+        "specversion": "1.0",
+        "type": event_type,
+        "id": event_id.to_string(),
+        "source": "spendguard-control-plane",
+        "tenantid": tenant_id.to_string(),
+        "subject": format!("tokenizer/sampling-rate/{model}"),
+        "time": now.to_rfc3339(),
+        "actor_subject": actor_subject,
+        "producer_sequence": producer_sequence,
+        "data": {
+            "tenant_id": tenant_id.to_string(),
+            "model": model,
+            "rate": rate
+        }
+    });
+
+    sqlx::query(
+        r#"
+        INSERT INTO control_plane_audit_outbox
+            (audit_outbox_id, tenant_id, event_type, cloudevent_payload,
+             cloudevent_payload_signature_hex, producer_sequence)
+        VALUES ($1, $2, $3, $4::JSONB, '', $5)
+        "#,
+    )
+    .bind(audit_outbox_id)
+    .bind(tenant_id)
+    .bind(event_type)
+    .bind(&cloudevent)
+    .bind(producer_sequence)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
 
 #[derive(Deserialize)]
 struct CreateTenantReq {
@@ -389,13 +563,11 @@ async fn create_tenant(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // 1) ledger_units row.
-    let (unit_kind_db, currency, scale, rounding_mode, token_kind) = match req
-        .budget_unit_kind
-        .as_str()
-    {
-        "usd_micros" => ("monetary", Some("USD"), 6, "half_up", None::<&str>),
-        "token" | _ => ("token", None, 0, "truncate", Some("output_token")),
-    };
+    let (unit_kind_db, currency, scale, rounding_mode, token_kind) =
+        match req.budget_unit_kind.as_str() {
+            "usd_micros" => ("monetary", Some("USD"), 6, "half_up", None::<&str>),
+            "token" | _ => ("token", None, 0, "truncate", Some("output_token")),
+        };
 
     sqlx::query(
         r#"INSERT INTO ledger_units
@@ -604,16 +776,18 @@ async fn create_tenant(
         "producer_sequence":                1,
     });
 
-    sqlx::query("SELECT post_ledger_transaction($1::JSONB, $2::JSONB, NULL::JSONB, $3::JSONB, NULL)")
-        .bind(tx_json)
-        .bind(entries_json)
-        .bind(outbox_json)
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| {
-            tracing::error!(error = ?e, "post_ledger_transaction (opening deposit)");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    sqlx::query(
+        "SELECT post_ledger_transaction($1::JSONB, $2::JSONB, NULL::JSONB, $3::JSONB, NULL)",
+    )
+    .bind(tx_json)
+    .bind(entries_json)
+    .bind(outbox_json)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = ?e, "post_ledger_transaction (opening deposit)");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     tx.commit()
         .await
@@ -676,8 +850,7 @@ async fn get_tenant(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let tenant_id =
-        Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let tenant_id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     let rows = sqlx::query_as::<
         _,
@@ -759,8 +932,7 @@ async fn tombstone_tenant(
         "tombstone_tenant invoked"
     );
 
-    let tenant_id =
-        Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let tenant_id = Uuid::parse_str(&id).map_err(|_| StatusCode::BAD_REQUEST)?;
 
     // POC: tombstone via fencing_scope expiry. Audit chain is
     // immutable so we don't delete rows — just expire the writer's
@@ -779,7 +951,8 @@ async fn tombstone_tenant(
     Ok(Json(TombstoneResp {
         tenant_id,
         tombstoned: true,
-        note: "fencing scope TTL expired; new ReserveSet will fail closed. Audit chain immutable.".into(),
+        note: "fencing scope TTL expired; new ReserveSet will fail closed. Audit chain immutable."
+            .into(),
     })
     .into_response())
 }
@@ -787,8 +960,7 @@ async fn tombstone_tenant(
 fn base64_encode(bytes: &[u8]) -> String {
     // Lightweight Standard b64. Avoid a full base64 crate dep; output
     // is a fresh String of ASCII bytes built char-by-char.
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = Vec::with_capacity(((bytes.len() + 2) / 3) * 4);
     let mut i = 0;
     while i < bytes.len() {
@@ -858,15 +1030,21 @@ async fn list_approvals(
     }
     let tenant_uuid = Uuid::parse_str(&q.tenant_id).map_err(|_| StatusCode::BAD_REQUEST)?;
     let state_filter = q.state.unwrap_or_else(|| "pending".into());
-    if !["pending", "approved", "denied", "expired", "cancelled"].contains(&state_filter.as_str())
-    {
+    if !["pending", "approved", "denied", "expired", "cancelled"].contains(&state_filter.as_str()) {
         return Err(StatusCode::BAD_REQUEST);
     }
     let limit = q.limit.unwrap_or(50).clamp(1, 200);
 
     let rows = sqlx::query_as::<
         _,
-        (Uuid, Uuid, Uuid, String, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>),
+        (
+            Uuid,
+            Uuid,
+            Uuid,
+            String,
+            chrono::DateTime<chrono::Utc>,
+            chrono::DateTime<chrono::Utc>,
+        ),
     >(
         r#"
         SELECT approval_id, tenant_id, decision_id, state,
@@ -1238,15 +1416,19 @@ async fn resolve_approval(
     // ("approver action MUST happen before this wallclock").
     // SP-level enforcement is an S14-followup migration; this is
     // the surgical chokepoint for now.
-    let row: Option<(Uuid, serde_json::Value, chrono::DateTime<chrono::Utc>, String)> =
-        sqlx::query_as(
-            "SELECT tenant_id, approver_policy, ttl_expires_at, state \
+    let row: Option<(
+        Uuid,
+        serde_json::Value,
+        chrono::DateTime<chrono::Utc>,
+        String,
+    )> = sqlx::query_as(
+        "SELECT tenant_id, approver_policy, ttl_expires_at, state \
              FROM approval_requests WHERE approval_id = $1",
-        )
-        .bind(approval_uuid)
-        .fetch_optional(&state.pg)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    )
+    .bind(approval_uuid)
+    .fetch_optional(&state.pg)
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let Some((row_tenant, approver_policy, ttl_expires_at, row_state)) = row else {
         return Err(StatusCode::FORBIDDEN);
     };
@@ -1317,23 +1499,22 @@ async fn resolve_approval(
         "S15: resolve_approval invoked"
     );
 
-    let row: (String, bool, Option<Uuid>) = sqlx::query_as(
-        "SELECT * FROM resolve_approval_request($1, $2, $3, $4, $5)",
-    )
-    .bind(approval_uuid)
-    .bind(&req.target_state)
-    .bind(&principal.subject)
-    .bind(&principal.issuer)
-    .bind(&req.reason)
-    .fetch_one(&state.pg)
-    .await
-    .map_err(|e| {
-        info!(err = %e, "S15: resolve_approval SP failed");
-        // SP raises 22023 / P0002 for invalid transitions / missing
-        // approval. Both surface here as 422-ish; keep the public
-        // mapping conservative.
-        StatusCode::CONFLICT
-    })?;
+    let row: (String, bool, Option<Uuid>) =
+        sqlx::query_as("SELECT * FROM resolve_approval_request($1, $2, $3, $4, $5)")
+            .bind(approval_uuid)
+            .bind(&req.target_state)
+            .bind(&principal.subject)
+            .bind(&principal.issuer)
+            .bind(&req.reason)
+            .fetch_one(&state.pg)
+            .await
+            .map_err(|e| {
+                info!(err = %e, "S15: resolve_approval SP failed");
+                // SP raises 22023 / P0002 for invalid transitions / missing
+                // approval. Both surface here as 422-ish; keep the public
+                // mapping conservative.
+                StatusCode::CONFLICT
+            })?;
 
     Ok(Json(ResolveApprovalResp {
         final_state: row.0,
@@ -1341,6 +1522,55 @@ async fn resolve_approval(
         event_id: row.2,
     })
     .into_response())
+}
+
+#[cfg(test)]
+mod tokenizer_sampling_auth_tests {
+    use super::{authorize_tokenizer_sampling_tenant, Permission, Principal};
+    use uuid::Uuid;
+
+    fn principal(roles: &[&str], tenants: &[&str]) -> Principal {
+        Principal {
+            issuer: "test".into(),
+            subject: "operator".into(),
+            groups: Vec::new(),
+            tenant_ids: tenants.iter().map(|s| s.to_string()).collect(),
+            roles: roles.iter().map(|s| s.to_string()).collect(),
+            mode: "test".into(),
+        }
+    }
+
+    #[test]
+    fn tokenizer_sampling_write_requires_tenant_scope() {
+        let tenant = Uuid::new_v4();
+        let p = principal(&["admin"], &[&tenant.to_string()]);
+
+        authorize_tokenizer_sampling_tenant(&p, &tenant, Permission::TenantWrite).unwrap();
+    }
+
+    #[test]
+    fn tokenizer_sampling_write_rejects_cross_tenant_admin() {
+        let requested = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let p = principal(&["admin"], &[&other.to_string()]);
+
+        assert_eq!(
+            authorize_tokenizer_sampling_tenant(&p, &requested, Permission::TenantWrite)
+                .unwrap_err(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn tokenizer_sampling_read_requires_read_view() {
+        let tenant = Uuid::new_v4();
+        let p = principal(&[], &[&tenant.to_string()]);
+
+        assert_eq!(
+            authorize_tokenizer_sampling_tenant(&p, &tenant, Permission::ReadView).unwrap_err(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1374,7 +1604,10 @@ mod approver_policy_tests {
     fn metadata_only_object_no_restriction() {
         // Object carries non-restrictive metadata only.
         let p = json!({"description": "billing-team approval flow"});
-        assert_eq!(parse_approver_policy(&p), ApproverPolicyParse::NoRestriction);
+        assert_eq!(
+            parse_approver_policy(&p),
+            ApproverPolicyParse::NoRestriction
+        );
     }
 
     // ---- Restrict ---------------------------------------------------
@@ -1522,10 +1755,7 @@ mod approver_policy_shape_tests {
 
     #[test]
     fn scalar_string_shape_shows_type_only() {
-        assert_eq!(
-            approver_policy_shape(&json!("sensitive-value")),
-            "string"
-        );
+        assert_eq!(approver_policy_shape(&json!("sensitive-value")), "string");
     }
 
     #[test]

@@ -29,9 +29,10 @@ use tracing::{info, warn};
 
 use super::worker::DriftAlertSink;
 use crate::proto::canonical_ingest::v1::{
-    canonical_ingest_client::CanonicalIngestClient, AppendEventsRequest,
+    append_events_request::Route, canonical_ingest_client::CanonicalIngestClient,
+    event_result::Status as EventStatus, AppendEventsRequest, AppendEventsResponse,
 };
-use crate::proto::common::v1::CloudEvent;
+use crate::proto::common::v1::{CloudEvent, SchemaBundleRef};
 
 /// R2 B4 — paths to cert + key + CA + SNI domain for mTLS to
 /// canonical_ingest. Matches the
@@ -52,12 +53,16 @@ pub struct SinkMTlsConfig {
 pub struct CanonicalIngestDriftAlertSink {
     client: Arc<Mutex<CanonicalIngestClient<tonic::transport::Channel>>>,
     producer_id: String,
+    schema_bundle_ref: SchemaBundleRef,
+    signing_key_id: String,
 }
 
 impl std::fmt::Debug for CanonicalIngestDriftAlertSink {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CanonicalIngestDriftAlertSink")
             .field("producer_id", &self.producer_id)
+            .field("schema_bundle_id", &self.schema_bundle_ref.schema_bundle_id)
+            .field("signing_key_id", &self.signing_key_id)
             .finish()
     }
 }
@@ -72,6 +77,8 @@ impl CanonicalIngestDriftAlertSink {
     pub async fn connect(
         endpoint: impl Into<String>,
         producer_id: impl Into<String>,
+        schema_bundle_ref: SchemaBundleRef,
+        signing_key_id: impl Into<String>,
         mtls: Option<SinkMTlsConfig>,
     ) -> Result<Self, anyhow::Error> {
         let endpoint: String = endpoint.into();
@@ -89,8 +96,7 @@ impl CanonicalIngestDriftAlertSink {
             .keep_alive_while_idle(true);
 
         if let Some(cfg) = mtls {
-            let tls = build_client_tls(&cfg)
-                .context("build canonical_ingest sink tls config")?;
+            let tls = build_client_tls(&cfg).context("build canonical_ingest sink tls config")?;
             ep = ep
                 .tls_config(tls)
                 .map_err(|e| anyhow::anyhow!("apply tls config: {e}"))?;
@@ -110,7 +116,28 @@ impl CanonicalIngestDriftAlertSink {
         Ok(Self {
             client: Arc::new(Mutex::new(CanonicalIngestClient::new(channel))),
             producer_id: producer_id.into(),
+            schema_bundle_ref,
+            signing_key_id: signing_key_id.into(),
         })
+    }
+}
+
+pub(crate) fn build_append_events_request(
+    producer_id: String,
+    signing_key_id: String,
+    schema_bundle_ref: SchemaBundleRef,
+    event: CloudEvent,
+) -> AppendEventsRequest {
+    AppendEventsRequest {
+        producer_id,
+        batch_max_producer_sequence: 0,
+        // Per-event signature is on `event.producer_signature`; batch
+        // signatures remain optional for in-cluster mTLS producers.
+        batch_signature: bytes::Bytes::new(),
+        signing_key_id,
+        schema_bundle: Some(schema_bundle_ref),
+        events: vec![event],
+        route: Route::Observability as i32,
     }
 }
 
@@ -134,34 +161,116 @@ fn build_client_tls(cfg: &SinkMTlsConfig) -> Result<ClientTlsConfig, anyhow::Err
 #[async_trait::async_trait]
 impl DriftAlertSink for CanonicalIngestDriftAlertSink {
     async fn emit(&self, event: CloudEvent) -> Result<(), anyhow::Error> {
-        let req = AppendEventsRequest {
-            producer_id: self.producer_id.clone(),
-            batch_max_producer_sequence: 0,
-            // Per-event signature is on `event.producer_signature`; we
-            // leave batch_signature empty (allowed in-cluster on mTLS
-            // per the canonical_ingest.proto comment).
-            batch_signature: bytes::Bytes::new(),
-            signing_key_id: String::new(),
-            schema_bundle: None,
-            events: vec![event],
-            route: 0, // ROUTE_UNSPECIFIED — canonical_ingest's
-                      // observability path is appropriate for alerts.
-        };
+        let req = build_append_events_request(
+            self.producer_id.clone(),
+            self.signing_key_id.clone(),
+            self.schema_bundle_ref.clone(),
+            event,
+        );
         let mut client = self.client.lock().await;
         match client.append_events(req).await {
-            Ok(resp) => {
-                let resp = resp.into_inner();
-                for r in &resp.results {
-                    if let Some(err) = r.error.as_ref() {
-                        if !err.message.is_empty() {
-                            warn!(event_id = %r.event_id, err = %err.message,
-                                  "canonical_ingest rejected drift_alert");
-                        }
-                    }
-                }
-                Ok(())
-            }
+            Ok(resp) => ensure_append_accepted(resp.into_inner()),
             Err(e) => Err(anyhow::anyhow!("AppendEvents drift_alert: {e}")),
         }
+    }
+}
+
+pub(crate) fn ensure_append_accepted(resp: AppendEventsResponse) -> Result<(), anyhow::Error> {
+    if resp.results.len() != 1 {
+        return Err(anyhow::anyhow!(
+            "AppendEvents drift_alert returned {} results for one event",
+            resp.results.len()
+        ));
+    }
+
+    let result = &resp.results[0];
+    let status = EventStatus::try_from(result.status).unwrap_or(EventStatus::Unspecified);
+    match status {
+        EventStatus::Appended | EventStatus::Deduped => Ok(()),
+        other => {
+            let error_message = result
+                .error
+                .as_ref()
+                .map(|err| err.message.as_str())
+                .filter(|msg| !msg.is_empty())
+                .unwrap_or("canonical_ingest returned no error detail");
+            warn!(
+                event_id = %result.event_id,
+                status = ?other,
+                err = %error_message,
+                "canonical_ingest rejected drift_alert"
+            );
+            Err(anyhow::anyhow!(
+                "AppendEvents drift_alert rejected event_id={} status={:?}: {}",
+                result.event_id,
+                other,
+                error_message
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::canonical_ingest::v1::EventResult;
+
+    #[test]
+    fn append_request_carries_required_observability_envelope() {
+        let bundle = SchemaBundleRef {
+            schema_bundle_id: "018fa6b3-0f59-7a4d-bbd2-4be8f4f14a10".to_string(),
+            schema_bundle_hash: bytes::Bytes::from_static(&[0xab; 32]),
+            canonical_schema_version: "spendguard.v1alpha1".to_string(),
+        };
+        let event = CloudEvent {
+            id: "evt-1".to_string(),
+            r#type: "spendguard.audit.tokenizer_drift_alert.v1alpha1".to_string(),
+            ..Default::default()
+        };
+
+        let req = build_append_events_request(
+            "tokenizer-service:us".to_string(),
+            "tokenizer-key-v1".to_string(),
+            bundle.clone(),
+            event,
+        );
+
+        assert_eq!(req.producer_id, "tokenizer-service:us");
+        assert_eq!(req.signing_key_id, "tokenizer-key-v1");
+        assert_eq!(req.schema_bundle, Some(bundle));
+        assert_eq!(req.route, Route::Observability as i32);
+        assert_eq!(req.events.len(), 1);
+        assert_eq!(
+            req.events[0].r#type,
+            "spendguard.audit.tokenizer_drift_alert.v1alpha1"
+        );
+    }
+
+    #[test]
+    fn append_response_must_be_durable_success() {
+        assert!(ensure_append_accepted(AppendEventsResponse {
+            results: vec![EventResult {
+                event_id: "evt-1".to_string(),
+                status: EventStatus::Appended as i32,
+                ingest_position: None,
+                error: None,
+            }],
+        })
+        .is_ok());
+
+        let err = ensure_append_accepted(AppendEventsResponse {
+            results: vec![EventResult {
+                event_id: "evt-2".to_string(),
+                status: EventStatus::Quarantined as i32,
+                ingest_position: None,
+                error: None,
+            }],
+        })
+        .expect_err("QUARANTINED must not mark drift alert as emitted");
+        assert!(err.to_string().contains("Quarantined"));
+
+        let err = ensure_append_accepted(AppendEventsResponse { results: vec![] })
+            .expect_err("missing result must fail delivery");
+        assert!(err.to_string().contains("0 results"));
     }
 }

@@ -76,6 +76,7 @@ uuid = { version = "1", features = ["v7"] }
 # off drops the native-tls fallback we don't want.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde_json = "1"
+hex = "0.4"
 
 # SLICE_05: random float for sample rate gating. Default features
 # omitted to drop `getrandom`'s wasm-only paths; the `std` + `std_rng`

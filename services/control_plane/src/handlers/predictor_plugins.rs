@@ -238,16 +238,15 @@ fn enforce_https_under_production(endpoint_url: &str) -> Result<(), (StatusCode,
         return Err((
             StatusCode::BAD_REQUEST,
             "endpoint_url must use https:// under SPENDGUARD_PROFILE=production \
-             (spec §3.1 mTLS-only auth)".into(),
+             (spec §3.1 mTLS-only auth)"
+                .into(),
         ));
     }
     Ok(())
 }
 
 fn is_lowercase_hex_64(s: &str) -> bool {
-    s.len() == 64
-        && s.bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 pub async fn register_plugin<S: PluginAppState>(
@@ -258,8 +257,7 @@ pub async fn register_plugin<S: PluginAppState>(
     if principal.require(Permission::TenantWrite).is_err() {
         return Err((StatusCode::FORBIDDEN, "TenantWrite required").into_response());
     }
-    let tenant_uuid = validate_register_input(&req)
-        .map_err(|(c, m)| (c, m).into_response())?;
+    let tenant_uuid = validate_register_input(&req).map_err(|(c, m)| (c, m).into_response())?;
     if principal.assert_tenant(&tenant_uuid.to_string()).is_err() {
         warn!(
             subject = %principal.subject,
@@ -310,10 +308,11 @@ pub async fn register_plugin<S: PluginAppState>(
 
     let row = match row {
         Ok(r) => r,
-        Err(sqlx::Error::Database(db)) if db.constraint() == Some("predictor_plugin_endpoints_pkey")
-            || db
-                .message()
-                .contains("predictor_plugin_endpoints_tenant_id_key") =>
+        Err(sqlx::Error::Database(db))
+            if db.constraint() == Some("predictor_plugin_endpoints_pkey")
+                || db
+                    .message()
+                    .contains("predictor_plugin_endpoints_tenant_id_key") =>
         {
             // UNIQUE violation on tenant_id — operator must PUT to update.
             return Err((
@@ -346,7 +345,9 @@ pub async fn register_plugin<S: PluginAppState>(
         return Err(internal_err(e).into_response());
     }
 
-    tx.commit().await.map_err(|e| internal_err(e).into_response())?;
+    tx.commit()
+        .await
+        .map_err(|e| internal_err(e).into_response())?;
 
     info!(
         subject = %principal.subject,
@@ -389,8 +390,9 @@ pub async fn update_plugin<S: PluginAppState>(
     if principal.require(Permission::TenantWrite).is_err() {
         return Err((StatusCode::FORBIDDEN, "TenantWrite required").into_response());
     }
-    let tenant_uuid = Uuid::parse_str(&tenant_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid tenant_id: {e}")).into_response())?;
+    let tenant_uuid = Uuid::parse_str(&tenant_id).map_err(|e| {
+        (StatusCode::BAD_REQUEST, format!("invalid tenant_id: {e}")).into_response()
+    })?;
     if principal.assert_tenant(&tenant_uuid.to_string()).is_err() {
         return Err((StatusCode::FORBIDDEN, "cross-tenant").into_response());
     }
@@ -399,10 +401,11 @@ pub async fn update_plugin<S: PluginAppState>(
     // register.
     if let Some(url) = &req.endpoint_url {
         if !(url.starts_with("http://") || url.starts_with("https://")) {
-            return Err(
-                (StatusCode::BAD_REQUEST, "endpoint_url must start with http:// or https://")
-                    .into_response(),
-            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "endpoint_url must start with http:// or https://",
+            )
+                .into_response());
         }
         // R2 M4 (Security F8): same https://-under-production gate as
         // register_plugin. Without this, an operator could register
@@ -412,9 +415,11 @@ pub async fn update_plugin<S: PluginAppState>(
             return Err((code, msg).into_response());
         }
         if url.len() > 2048 {
-            return Err(
-                (StatusCode::BAD_REQUEST, "endpoint_url exceeds 2048 byte cap").into_response(),
-            );
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "endpoint_url exceeds 2048 byte cap",
+            )
+                .into_response());
         }
     }
     if let Some(fp) = &req.server_cert_fingerprint {
@@ -428,7 +433,11 @@ pub async fn update_plugin<S: PluginAppState>(
     }
     if let Some(cid) = &req.client_cert_id {
         if cid.is_empty() || cid.len() > 256 {
-            return Err((StatusCode::BAD_REQUEST, "client_cert_id must be 1-256 bytes").into_response());
+            return Err((
+                StatusCode::BAD_REQUEST,
+                "client_cert_id must be 1-256 bytes",
+            )
+                .into_response());
         }
     }
 
@@ -472,7 +481,11 @@ pub async fn update_plugin<S: PluginAppState>(
             // No row → return 404. Auth + tenant guard already passed;
             // safe to surface "not found" without leaking tenant
             // existence.
-            return Err((StatusCode::NOT_FOUND, "plugin endpoint not registered for tenant").into_response());
+            return Err((
+                StatusCode::NOT_FOUND,
+                "plugin endpoint not registered for tenant",
+            )
+                .into_response());
         }
     };
 
@@ -483,7 +496,10 @@ pub async fn update_plugin<S: PluginAppState>(
     // resolved them to the same value.
     let fields_changed: Vec<&str> = [
         ("endpoint_url", req.endpoint_url.is_some()),
-        ("server_cert_fingerprint", req.server_cert_fingerprint.is_some()),
+        (
+            "server_cert_fingerprint",
+            req.server_cert_fingerprint.is_some(),
+        ),
         ("client_cert_id", req.client_cert_id.is_some()),
         ("enabled", req.enabled.is_some()),
     ]
@@ -509,7 +525,9 @@ pub async fn update_plugin<S: PluginAppState>(
         return Err(internal_err(e).into_response());
     }
 
-    tx.commit().await.map_err(|e| internal_err(e).into_response())?;
+    tx.commit()
+        .await
+        .map_err(|e| internal_err(e).into_response())?;
 
     info!(
         subject = %principal.subject,
@@ -542,8 +560,9 @@ pub async fn delete_plugin<S: PluginAppState>(
     if principal.require(Permission::TenantWrite).is_err() {
         return Err((StatusCode::FORBIDDEN, "TenantWrite required").into_response());
     }
-    let tenant_uuid = Uuid::parse_str(&tenant_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid tenant_id: {e}")).into_response())?;
+    let tenant_uuid = Uuid::parse_str(&tenant_id).map_err(|e| {
+        (StatusCode::BAD_REQUEST, format!("invalid tenant_id: {e}")).into_response()
+    })?;
     if principal.assert_tenant(&tenant_uuid.to_string()).is_err() {
         return Err((StatusCode::FORBIDDEN, "cross-tenant").into_response());
     }
@@ -559,19 +578,21 @@ pub async fn delete_plugin<S: PluginAppState>(
         .await
         .map_err(|e| internal_err(e).into_response())?;
 
-    let res = sqlx::query(
-        "DELETE FROM predictor_plugin_endpoints WHERE tenant_id = $1",
-    )
-    .bind(tenant_uuid)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| internal_err(e).into_response())?;
+    let res = sqlx::query("DELETE FROM predictor_plugin_endpoints WHERE tenant_id = $1")
+        .bind(tenant_uuid)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| internal_err(e).into_response())?;
 
     if res.rows_affected() == 0 {
         // No row to delete — DO NOT emit an audit event; surface 404.
         // tx.commit() is still safe (no changes).
         let _ = tx.commit().await;
-        return Err((StatusCode::NOT_FOUND, "plugin endpoint not registered for tenant").into_response());
+        return Err((
+            StatusCode::NOT_FOUND,
+            "plugin endpoint not registered for tenant",
+        )
+            .into_response());
     }
 
     // R2 M1: signed CloudEvent emission inside the same tx as the DELETE.
@@ -589,7 +610,9 @@ pub async fn delete_plugin<S: PluginAppState>(
         return Err(internal_err(e).into_response());
     }
 
-    tx.commit().await.map_err(|e| internal_err(e).into_response())?;
+    tx.commit()
+        .await
+        .map_err(|e| internal_err(e).into_response())?;
 
     info!(
         subject = %principal.subject,
@@ -614,8 +637,9 @@ pub async fn get_plugin<S: PluginAppState>(
     if principal.require(Permission::TenantWrite).is_err() {
         return Err((StatusCode::FORBIDDEN, "TenantWrite required").into_response());
     }
-    let tenant_uuid = Uuid::parse_str(&tenant_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid tenant_id: {e}")).into_response())?;
+    let tenant_uuid = Uuid::parse_str(&tenant_id).map_err(|e| {
+        (StatusCode::BAD_REQUEST, format!("invalid tenant_id: {e}")).into_response()
+    })?;
     if principal.assert_tenant(&tenant_uuid.to_string()).is_err() {
         return Err((StatusCode::FORBIDDEN, "cross-tenant").into_response());
     }
@@ -645,9 +669,17 @@ pub async fn get_plugin<S: PluginAppState>(
     .await
     .map_err(|e| internal_err(e).into_response())?;
 
-    tx.commit().await.map_err(|e| internal_err(e).into_response())?;
+    tx.commit()
+        .await
+        .map_err(|e| internal_err(e).into_response())?;
 
-    let row = row.ok_or((StatusCode::NOT_FOUND, "plugin endpoint not registered for tenant").into_response())?;
+    let row = row.ok_or(
+        (
+            StatusCode::NOT_FOUND,
+            "plugin endpoint not registered for tenant",
+        )
+            .into_response(),
+    )?;
 
     Ok(Json(RegisterResp {
         plugin_endpoint_id: row.0,
@@ -695,8 +727,9 @@ pub async fn force_reset_plugin<S: PluginAppState>(
     if principal.require(Permission::TenantWrite).is_err() {
         return Err((StatusCode::FORBIDDEN, "TenantWrite required").into_response());
     }
-    let tenant_uuid = Uuid::parse_str(&tenant_id)
-        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid tenant_id: {e}")).into_response())?;
+    let tenant_uuid = Uuid::parse_str(&tenant_id).map_err(|e| {
+        (StatusCode::BAD_REQUEST, format!("invalid tenant_id: {e}")).into_response()
+    })?;
     if principal.assert_tenant(&tenant_uuid.to_string()).is_err() {
         return Err((StatusCode::FORBIDDEN, "cross-tenant").into_response());
     }
@@ -729,7 +762,13 @@ pub async fn force_reset_plugin<S: PluginAppState>(
     .await
     .map_err(|e| internal_err(e).into_response())?;
 
-    let row = row.ok_or((StatusCode::NOT_FOUND, "plugin endpoint not registered for tenant").into_response())?;
+    let row = row.ok_or(
+        (
+            StatusCode::NOT_FOUND,
+            "plugin endpoint not registered for tenant",
+        )
+            .into_response(),
+    )?;
 
     // R2 M1: signed CloudEvent emission inside the same tx. The reason
     // is operator-supplied free text; we already enforce non-empty +
@@ -751,7 +790,9 @@ pub async fn force_reset_plugin<S: PluginAppState>(
         return Err(internal_err(e).into_response());
     }
 
-    tx.commit().await.map_err(|e| internal_err(e).into_response())?;
+    tx.commit()
+        .await
+        .map_err(|e| internal_err(e).into_response())?;
 
     info!(
         subject = %principal.subject,
@@ -774,7 +815,10 @@ pub async fn force_reset_plugin<S: PluginAppState>(
 
 fn internal_err(e: sqlx::Error) -> (StatusCode, String) {
     warn!(error = ?e, "predictor_plugins handler SQL error");
-    (StatusCode::INTERNAL_SERVER_ERROR, "internal error".to_string())
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "internal error".to_string(),
+    )
 }
 
 #[cfg(test)]
@@ -784,7 +828,9 @@ mod tests {
     #[test]
     fn lowercase_hex_64_accepts_valid() {
         assert!(is_lowercase_hex_64(&"a".repeat(64)));
-        assert!(is_lowercase_hex_64(&"f0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde"));
+        assert!(is_lowercase_hex_64(
+            &"f0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde"
+        ));
     }
 
     #[test]
@@ -932,8 +978,8 @@ mod tests {
     #[test]
     fn enforce_https_rejects_http_under_production() {
         with_profile(Some("production"), || {
-            let err =
-                enforce_https_under_production("http://plugin.example/predict").expect_err("blocked");
+            let err = enforce_https_under_production("http://plugin.example/predict")
+                .expect_err("blocked");
             assert_eq!(err.0, StatusCode::BAD_REQUEST);
             assert!(err.1.contains("https://"));
             assert!(err.1.contains("SPENDGUARD_PROFILE=production"));

@@ -48,36 +48,23 @@ fn mirror_crate_public_api_compiles() {
     // Don't assert outcomes — that's the mirror crate's job. Only
     // assert the calls type-check.
 
-    let p = column_to_proto_sentinel(
-        MirrorField::PredictedBTokens,
-        ColumnValue::NullBigInt,
-    );
+    let p = column_to_proto_sentinel(MirrorField::PredictedBTokens, ColumnValue::NullBigInt);
     let _ = proto_to_column_value(MirrorField::PredictedBTokens, p);
 
-    let p =
-        column_to_proto_sentinel(MirrorField::PredictedATokens, ColumnValue::BigInt(1024));
+    let p = column_to_proto_sentinel(MirrorField::PredictedATokens, ColumnValue::BigInt(1024));
     let _ = proto_to_column_value(MirrorField::PredictedATokens, p);
 
     let u = Uuid::nil();
     let p = column_to_proto_sentinel(MirrorField::TokenizerVersionId, ColumnValue::Uuid(u));
     let _ = proto_to_column_value(MirrorField::TokenizerVersionId, p);
 
-    let p = column_to_proto_sentinel(
-        MirrorField::TokenizerVersionId,
-        ColumnValue::NullUuid,
-    );
+    let p = column_to_proto_sentinel(MirrorField::TokenizerVersionId, ColumnValue::NullUuid);
     let _ = proto_to_column_value(MirrorField::TokenizerVersionId, p);
 
-    let p = column_to_proto_sentinel(
-        MirrorField::PredictionConfidence,
-        ColumnValue::Real(0.5),
-    );
+    let p = column_to_proto_sentinel(MirrorField::PredictionConfidence, ColumnValue::Real(0.5));
     let _ = proto_to_column_value(MirrorField::PredictionConfidence, p);
 
-    let p = column_to_proto_sentinel(
-        MirrorField::PredictionSampleSize,
-        ColumnValue::BigInt(64),
-    );
+    let p = column_to_proto_sentinel(MirrorField::PredictionSampleSize, ColumnValue::BigInt(64));
     let _ = proto_to_column_value(MirrorField::PredictionSampleSize, p);
 
     let p = column_to_proto_sentinel(
@@ -86,10 +73,7 @@ fn mirror_crate_public_api_compiles() {
     );
     let _ = proto_to_column_value(MirrorField::ColdStartLayerUsed, p);
 
-    let p = column_to_proto_sentinel(
-        MirrorField::ColdStartLayerUsed,
-        ColumnValue::NullText,
-    );
+    let p = column_to_proto_sentinel(MirrorField::ColdStartLayerUsed, ColumnValue::NullText);
     let _ = proto_to_column_value(MirrorField::ColdStartLayerUsed, p);
 
     let p = column_to_proto_sentinel(
@@ -98,24 +82,15 @@ fn mirror_crate_public_api_compiles() {
     );
     let _ = proto_to_column_value(MirrorField::RunPredictedRemainingSteps, p);
 
-    let p = column_to_proto_sentinel(
-        MirrorField::RunPredictedRemainingSteps,
-        ColumnValue::Int(7),
-    );
+    let p = column_to_proto_sentinel(MirrorField::RunPredictedRemainingSteps, ColumnValue::Int(7));
     let _ = proto_to_column_value(MirrorField::RunPredictedRemainingSteps, p);
 
     // Round-4 M10: RunStepsCompletedSoFar exercise — fails to build if
     // the variant is dropped or its mapping arms removed.
-    let p = column_to_proto_sentinel(
-        MirrorField::RunStepsCompletedSoFar,
-        ColumnValue::NullBigInt,
-    );
+    let p = column_to_proto_sentinel(MirrorField::RunStepsCompletedSoFar, ColumnValue::NullBigInt);
     let _ = proto_to_column_value(MirrorField::RunStepsCompletedSoFar, p);
 
-    let p = column_to_proto_sentinel(
-        MirrorField::RunStepsCompletedSoFar,
-        ColumnValue::BigInt(99),
-    );
+    let p = column_to_proto_sentinel(MirrorField::RunStepsCompletedSoFar, ColumnValue::BigInt(99));
     let _ = proto_to_column_value(MirrorField::RunStepsCompletedSoFar, p);
 
     let p = column_to_proto_sentinel(MirrorField::DeltaBRatio, ColumnValue::NullReal);

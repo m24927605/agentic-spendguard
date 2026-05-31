@@ -22,7 +22,7 @@
 
 use sqlx::PgPool;
 
-use super::worker::{SampleRow, SamplePersister};
+use super::worker::{SamplePersister, SampleRow};
 
 /// Persister that writes one row per sample directly to Postgres.
 #[derive(Debug, Clone)]
@@ -42,13 +42,13 @@ impl SamplePersister for SqlSamplePersister {
         // The migration declares `t2_tokenizer_version_id UUID NOT NULL`
         // — we parse the string here and surface a typed error so the
         // worker logs the failure cleanly.
-        let tokenizer_version_id = uuid::Uuid::parse_str(
-            sample.t2_tokenizer_version_id.as_str(),
-        )
-        .map_err(|e| anyhow::anyhow!(
-            "parse tokenizer_version_id `{}`: {e}",
-            sample.t2_tokenizer_version_id
-        ))?;
+        let tokenizer_version_id = uuid::Uuid::parse_str(sample.t2_tokenizer_version_id.as_str())
+            .map_err(|e| {
+            anyhow::anyhow!(
+                "parse tokenizer_version_id `{}`: {e}",
+                sample.t2_tokenizer_version_id
+            )
+        })?;
 
         sqlx::query(
             r#"

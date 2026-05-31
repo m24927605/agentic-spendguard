@@ -52,7 +52,7 @@ spec:
             - name: SPENDGUARD_TTL_SWEEPER_LEDGER_URL
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
             - name: SPENDGUARD_TTL_SWEEPER_DATABASE_URL
-              value: {{ .Values.postgres.ledgerUrl | quote }}
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.ledgerUrlKey) | nindent 14 }}
             - { name: SPENDGUARD_TTL_SWEEPER_POLL_INTERVAL_SECONDS, value: {{ .Values.ttlSweeper.pollIntervalSeconds | quote }} }
             - { name: SPENDGUARD_TTL_SWEEPER_BATCH_SIZE,            value: {{ .Values.ttlSweeper.batchSize | quote }} }
             # Round-2 #3: Config::from_env() reads TLS_CLIENT_{CERT,KEY}

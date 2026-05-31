@@ -143,7 +143,8 @@ BEGIN
         RAISE EXCEPTION 'canonical_events_prompt_class_enum_chk not validated';
     END IF;
     PERFORM 1 FROM pg_indexes
-        WHERE indexname = 'canonical_events_aggregator_bucket_idx';
+        WHERE schemaname = 'public'
+          AND indexname = 'canonical_events_aggregator_bucket_idx';
     IF NOT FOUND THEN
         RAISE EXCEPTION 'canonical_events_aggregator_bucket_idx missing';
     END IF;

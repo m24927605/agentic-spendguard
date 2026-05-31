@@ -72,7 +72,8 @@ pub fn map_pg_error(err: sqlx::Error) -> DomainError {
                     } else if constraint.contains("canonical_ingest_positions_pkey") {
                         DomainError::Internal(anyhow::anyhow!(
                             "ingest position collision: {}: {}",
-                            constraint, msg
+                            constraint,
+                            msg
                         ))
                     } else if constraint.is_empty() {
                         // event_id PK on global_keys — handled by ON CONFLICT,
@@ -81,14 +82,12 @@ pub fn map_pg_error(err: sqlx::Error) -> DomainError {
                     } else {
                         DomainError::Internal(anyhow::anyhow!(
                             "unique violation {}: {}",
-                            constraint, msg
+                            constraint,
+                            msg
                         ))
                     }
                 }
-                "42P10" => DomainError::Internal(anyhow::anyhow!(
-                    "immutability trigger: {}",
-                    msg
-                )),
+                "42P10" => DomainError::Internal(anyhow::anyhow!("immutability trigger: {}", msg)),
                 _ => DomainError::Db(err),
             };
         }

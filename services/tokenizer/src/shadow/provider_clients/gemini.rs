@@ -89,10 +89,7 @@ impl GeminiClient {
         // The model path segment may carry a leading "models/" prefix in
         // the wild; normalise so callers can pass either form.
         let model_segment = model.strip_prefix("models/").unwrap_or(model);
-        let url = format!(
-            "{}/v1/models/{}:countTokens",
-            self.base_url, model_segment,
-        );
+        let url = format!("{}/v1/models/{}:countTokens", self.base_url, model_segment,);
 
         let start = Instant::now();
         let resp = self
@@ -119,9 +116,7 @@ impl GeminiClient {
                 .get("totalTokens")
                 .and_then(|v| v.as_u64())
                 .ok_or_else(|| {
-                    ProviderError::Schema(format!(
-                        "missing or non-u64 `totalTokens` in: {parsed}"
-                    ))
+                    ProviderError::Schema(format!("missing or non-u64 `totalTokens` in: {parsed}"))
                 })?;
             return Ok(ProviderCount {
                 input_tokens: count,
@@ -206,16 +201,17 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/models/gemini-1.5-flash:countTokens"))
             .and(query_param("key", "test-key"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({
-                    "totalTokens": 17,
-                    "totalBillableCharacters": 60
-                })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "totalTokens": 17,
+                "totalBillableCharacters": 60
+            })))
             .mount(&server)
             .await;
         let c = client_for_server(&server).await;
-        let resp = c.count_tokens("gemini-1.5-flash", "hello").await.expect("ok");
+        let resp = c
+            .count_tokens("gemini-1.5-flash", "hello")
+            .await
+            .expect("ok");
         assert_eq!(resp.input_tokens, 17);
         assert!(resp.request_id.is_none());
     }
@@ -225,9 +221,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/models/gemini-1.5-flash:countTokens"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({ "totalTokens": 1 })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "totalTokens": 1 })))
             .mount(&server)
             .await;
         let c = client_for_server(&server).await;
@@ -244,9 +238,7 @@ mod tests {
         // Vendor changed key from totalTokens to tokenCount.
         Mock::given(method("POST"))
             .and(path("/v1/models/g:countTokens"))
-            .respond_with(
-                ResponseTemplate::new(200).set_body_json(json!({ "tokenCount": 5 })),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tokenCount": 5 })))
             .mount(&server)
             .await;
         let c = client_for_server(&server).await;
@@ -276,9 +268,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/models/g:countTokens"))
-            .respond_with(
-                ResponseTemplate::new(429).insert_header("retry-after", "8"),
-            )
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "8"))
             .mount(&server)
             .await;
         let c = client_for_server(&server).await;

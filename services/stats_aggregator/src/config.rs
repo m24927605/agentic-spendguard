@@ -73,7 +73,6 @@ pub struct Config {
     //
     // Mirrors the outbox_forwarder env contract
     // (services/outbox_forwarder/src/config.rs + outbox-forwarder.yaml).
-
     /// UUID string identifying the schema bundle stats_aggregator's
     /// outgoing drift_alert CloudEvents conform to. Same format as
     /// outboxForwarder.schemaBundleId in the Helm chart. Required at
@@ -116,7 +115,10 @@ impl std::fmt::Debug for Config {
             .field("sink_tls_sni", &self.sink_tls_sni)
             .field("event_source_override", &self.event_source_override)
             .field("schema_bundle_id", &self.schema_bundle_id)
-            .field("schema_bundle_hash_hex_present", &!self.schema_bundle_hash_hex.is_empty())
+            .field(
+                "schema_bundle_hash_hex_present",
+                &!self.schema_bundle_hash_hex.is_empty(),
+            )
             .field("canonical_schema_version", &self.canonical_schema_version)
             .finish()
     }
@@ -159,11 +161,12 @@ mod tests {
 
     #[test]
     fn defaults_load_with_minimum_env() {
-        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![(
-            "TEST_CFG_DATABASE_URL".to_string(),
-            "postgres://example/db".to_string(),
-        )])
-        .expect("config loads");
+        let cfg = envy::prefixed("TEST_CFG_")
+            .from_iter::<_, Config>(vec![(
+                "TEST_CFG_DATABASE_URL".to_string(),
+                "postgres://example/db".to_string(),
+            )])
+            .expect("config loads");
         assert_eq!(cfg.cycle_seconds, 3600);
         assert_eq!(cfg.min_samples_for_alert, 100);
         assert!((cfg.drift_z_threshold - 2.0).abs() < 1e-6);
@@ -172,11 +175,12 @@ mod tests {
 
     #[test]
     fn debug_format_masks_database_url() {
-        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![(
-            "TEST_CFG_DATABASE_URL".to_string(),
-            "postgres://user:hidden-secret-password@host/db".to_string(),
-        )])
-        .expect("config loads");
+        let cfg = envy::prefixed("TEST_CFG_")
+            .from_iter::<_, Config>(vec![(
+                "TEST_CFG_DATABASE_URL".to_string(),
+                "postgres://user:hidden-secret-password@host/db".to_string(),
+            )])
+            .expect("config loads");
         let dbg = format!("{cfg:?}");
         assert!(
             !dbg.contains("hidden-secret-password"),

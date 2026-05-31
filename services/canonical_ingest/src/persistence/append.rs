@@ -157,14 +157,12 @@ pub async fn append_event(
     }
 
     // 2) Allocate ingest offset INSIDE the tx so rollback restores it.
-    let offset: i64 = sqlx::query_scalar(
-        "SELECT next_ingest_offset($1, $2)",
-    )
-    .bind(input.region_id)
-    .bind(input.ingest_shard_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(map_pg_error)?;
+    let offset: i64 = sqlx::query_scalar("SELECT next_ingest_offset($1, $2)")
+        .bind(input.region_id)
+        .bind(input.ingest_shard_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_pg_error)?;
 
     // 3) Insert into the partitioned canonical_events table.
     // failure_class column added in CA-P0 (migration 0011). Classifier
@@ -314,12 +312,12 @@ pub async fn release_quarantined_outcomes(
     // Hold per-row FOR UPDATE locks for the duration of the tx; concurrent
     // releasers SKIP LOCKED rows we hold.
     //
-    // Round-3 fix B2: extend the SELECT tuple with the 18 prediction
-    // columns so the release path can re-hydrate them into canonical_events.
-    // Without these the canonical_events_outcome_required_cols_chk CHECK
-    // would fail on outcomes past the 2027-01-01 cutoff. Type wrapper
-    // QuarantinedRow used to keep the tuple readable (Rust caps generic
-    // tuple impls at 16 elements; we need 34).
+    // Round-3 fix B2/HARDEN_03 R2: extend the SELECT tuple with
+    // prediction and aggregator mirror columns so the release path can
+    // re-hydrate them into canonical_events. Without these the
+    // canonical_events_outcome_required_cols_chk CHECK would fail on
+    // outcomes past the 2027-01-01 cutoff and stats_aggregator would
+    // silently skip released outcomes whose bucket mirrors were lost.
     let rows: Vec<QuarantinedRow> = sqlx::query_as::<_, QuarantinedRow>(
         "SELECT event_id, storage_class,
                 producer_sequence, producer_signature,
@@ -328,6 +326,8 @@ pub async fn release_quarantined_outcomes(
                 payload_json, payload_blob_ref, run_id,
                 specversion,
                 schema_bundle_id, schema_bundle_hash, datacontenttype,
+                model, agent_id, run_id_mirror, prompt_class,
+                prompt_class_fingerprint,
                 predicted_a_tokens, predicted_b_tokens, predicted_c_tokens,
                 reserved_strategy, prediction_strategy_used,
                 prediction_policy_used, tokenizer_tier, tokenizer_version_id,
@@ -381,11 +381,9 @@ pub async fn release_quarantined_outcomes(
         // classify here from the same payload we're about to
         // persist (idempotent: classify.rs is pure).
         let decoded_data = crate::classify::decode_payload_data(&payload_json);
-        let release_failure_class = crate::classify::classify_audit_outcome(
-            &r.event_type,
-            decoded_data.as_ref(),
-        )
-        .map(|c| c.as_db_str());
+        let release_failure_class =
+            crate::classify::classify_audit_outcome(&r.event_type, decoded_data.as_ref())
+                .map(|c| c.as_db_str());
 
         // Append into canonical_events + global_keys + ingest_positions in
         // the SAME tx as the quarantine SELECT/UPDATE. We inline the insert
@@ -414,16 +412,12 @@ pub async fn release_quarantined_outcomes(
                 .await
                 .map_err(map_pg_error)?;
 
-            // Round-3 fix B2: extend INSERT with 18 prediction columns
-            // carried forward from the quarantined row. Without this the
-            // canonical_events_outcome_required_cols_chk CHECK constraint
-            // would fail on outcomes past the 2027-01-01 cutoff, because
-            // actual_input_tokens / actual_output_tokens would be NULL
-            // even though the payload (CloudEvent proto bytes) carries
-            // the values. The producer's signature still covers the
-            // proto payload — the first-class columns are SQL
-            // accelerators; preserving them through release keeps the
-            // mirror cross-check (verify-chain §11.2) consistent.
+            // Round-3 fix B2/HARDEN_03 R2: extend INSERT with prediction
+            // and aggregator mirror columns carried forward from the
+            // quarantined row. The producer's signature still covers the
+            // proto payload; these first-class columns are SQL accelerators
+            // that must survive quarantine so mirror checks and aggregation
+            // stay consistent.
             sqlx::query(
                 "INSERT INTO canonical_events (
                     event_id, tenant_id, decision_id, run_id, event_type,
@@ -434,6 +428,8 @@ pub async fn release_quarantined_outcomes(
                     payload_json, payload_blob_ref,
                     region_id, ingest_shard_id, ingest_log_offset, ingest_at,
                     recorded_month, failure_class,
+                    model, agent_id, run_id_mirror, prompt_class,
+                    prompt_class_fingerprint,
                     predicted_a_tokens, predicted_b_tokens, predicted_c_tokens,
                     reserved_strategy, prediction_strategy_used,
                     prediction_policy_used, tokenizer_tier, tokenizer_version_id,
@@ -452,15 +448,17 @@ pub async fn release_quarantined_outcomes(
                     $17, $18,
                     $19, $20, $21, clock_timestamp(),
                     date_trunc('month', $15)::DATE, $22,
-                    $23, $24, $25,
-                    $26, $27,
+                    $23, $24, $25, $26,
+                    $27,
                     $28, $29, $30,
                     $31, $32,
-                    $33,
-                    $34,
-                    $35, $36,
-                    $37, $38,
-                    $39, $40
+                    $33, $34, $35,
+                    $36, $37,
+                    $38,
+                    $39,
+                    $40, $41,
+                    $42, $43,
+                    $44, $45
                  )",
             )
             .bind(event_id)
@@ -485,6 +483,11 @@ pub async fn release_quarantined_outcomes(
             .bind(ingest_shard_id)
             .bind(offset)
             .bind(release_failure_class)
+            .bind(&r.model)
+            .bind(&r.agent_id)
+            .bind(r.run_id_mirror)
+            .bind(&r.prompt_class)
+            .bind(&r.prompt_class_fingerprint)
             .bind(r.predicted_a_tokens)
             .bind(r.predicted_b_tokens)
             .bind(r.predicted_c_tokens)
@@ -553,10 +556,10 @@ pub async fn quarantine_audit_outcome(
         .decision_id
         .ok_or_else(|| DomainError::InvalidRequest("audit.outcome missing decision_id".into()))?;
 
-    // Round-3 fix B2: bind 18 prediction columns into quarantine so the
-    // release path can re-hydrate them. SLICE_01 callers pass Default
-    // (all None → SQL NULL); SLICE_06 callers populate from decoded
-    // CloudEvent.
+    // Round-3 fix B2/HARDEN_03 R2: bind prediction and aggregator mirror
+    // columns into quarantine so the release path can re-hydrate them.
+    // SLICE_01 callers pass Default (all None → SQL NULL); SLICE_06+
+    // callers populate from decoded CloudEvent.
     sqlx::query(
         "INSERT INTO audit_outcome_quarantine (
             quarantine_id, event_id, tenant_id, decision_id,
@@ -567,6 +570,8 @@ pub async fn quarantine_audit_outcome(
             payload_json, payload_blob_ref,
             region_id, ingest_shard_id, ingest_log_offset, run_id,
             orphan_after,
+            model, agent_id, run_id_mirror, prompt_class,
+            prompt_class_fingerprint,
             predicted_a_tokens, predicted_b_tokens, predicted_c_tokens,
             reserved_strategy, prediction_strategy_used,
             prediction_policy_used, tokenizer_tier, tokenizer_version_id,
@@ -585,15 +590,17 @@ pub async fn quarantine_audit_outcome(
             $17, $18,
             $19, $20, $21, $22,
             $23,
-            $24, $25, $26,
-            $27, $28,
+            $24, $25, $26, $27,
+            $28,
             $29, $30, $31,
             $32, $33,
-            $34,
-            $35,
-            $36, $37,
-            $38, $39,
-            $40, $41
+            $34, $35, $36,
+            $37, $38,
+            $39,
+            $40,
+            $41, $42,
+            $43, $44,
+            $45, $46
          )
          ON CONFLICT (event_id) DO NOTHING",
     )
@@ -620,6 +627,11 @@ pub async fn quarantine_audit_outcome(
     .bind(0i64) // placeholder offset; assigned at release time
     .bind(input.run_id)
     .bind(orphan_after)
+    .bind(input.model)
+    .bind(input.agent_id)
+    .bind(input.run_id_mirror)
+    .bind(input.prompt_class)
+    .bind(input.prompt_class_fingerprint)
     .bind(input.prediction.predicted_a_tokens)
     .bind(input.prediction.predicted_b_tokens)
     .bind(input.prediction.predicted_c_tokens)
@@ -648,9 +660,9 @@ pub async fn quarantine_audit_outcome(
 // ============================================================================
 // Round-3 fix B2: typed quarantine row for release_quarantined_outcomes.
 //
-// sqlx's tuple FromRow impl caps at 16 elements; we now SELECT 34 columns
+// sqlx's tuple FromRow impl caps at 16 elements; we now SELECT 39 columns
 // from audit_outcome_quarantine. The named struct also makes the call
-// site readable (no more positional destructuring with 34 elements).
+// site readable.
 // ============================================================================
 #[derive(Debug, Clone, sqlx::FromRow)]
 struct QuarantinedRow {
@@ -670,6 +682,11 @@ struct QuarantinedRow {
     schema_bundle_id: Uuid,
     schema_bundle_hash: Vec<u8>,
     datacontenttype: String,
+    model: Option<String>,
+    agent_id: Option<String>,
+    run_id_mirror: Option<Uuid>,
+    prompt_class: Option<String>,
+    prompt_class_fingerprint: Option<String>,
     // Round-3 B2 prediction columns.
     predicted_a_tokens: Option<i64>,
     predicted_b_tokens: Option<i64>,

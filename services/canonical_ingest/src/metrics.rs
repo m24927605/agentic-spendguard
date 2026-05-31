@@ -213,7 +213,9 @@ mod tests {
         let m = IngestMetrics::new();
         let txt = m.render();
         assert!(txt.contains("spendguard_ingest_events_accepted_total{route=\"enforcement\"} 0"));
-        assert!(txt.contains("spendguard_ingest_events_quarantined_total{reason=\"unknown_key\"} 0"));
+        assert!(
+            txt.contains("spendguard_ingest_events_quarantined_total{reason=\"unknown_key\"} 0")
+        );
     }
 
     #[test]
@@ -228,8 +230,12 @@ mod tests {
         let txt = m.render();
         assert!(txt.contains("spendguard_ingest_events_accepted_total{route=\"enforcement\"} 2"));
         assert!(txt.contains("spendguard_ingest_events_accepted_total{route=\"observability\"} 1"));
-        assert!(txt.contains("spendguard_ingest_events_quarantined_total{reason=\"unknown_key\"} 1"));
-        assert!(txt.contains("spendguard_ingest_events_rejected_invalid_signature_total{route=\"enforcement\"} 1"));
+        assert!(
+            txt.contains("spendguard_ingest_events_quarantined_total{reason=\"unknown_key\"} 1")
+        );
+        assert!(txt.contains(
+            "spendguard_ingest_events_rejected_invalid_signature_total{route=\"enforcement\"} 1"
+        ));
         assert!(txt.contains("spendguard_ingest_events_pre_s6_admitted_total 1"));
     }
 

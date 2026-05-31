@@ -23,18 +23,15 @@
 use bigdecimal::BigDecimal;
 use chrono::Utc;
 use prost_types::Timestamp;
+use spendguard_signing::{Verifier, VerifyFailure};
 use sqlx::PgPool;
-use spendguard_signing::{VerifyFailure, Verifier};
 use std::str::FromStr;
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
 
 use crate::{
     config::Config,
-    domain::{
-        error::DomainError,
-        event_routing::classify,
-    },
+    domain::{error::DomainError, event_routing::classify},
     metrics::{IngestMetrics, QuarantineReason, Route as MetricsRoute},
     persistence::{
         append::{self, AppendInput, AppendOutcome},
@@ -42,10 +39,10 @@ use crate::{
     },
     proto::{
         canonical_ingest::v1::{
-            event_result::Status as EventStatus, AppendEventsRequest, AppendEventsResponse,
-            EventResult, IngestPosition, append_events_request::Route,
+            append_events_request::Route, event_result::Status as EventStatus, AppendEventsRequest,
+            AppendEventsResponse, EventResult, IngestPosition,
         },
-        common::v1::{CloudEvent, Error as ProtoError, error::Code as ProtoCode},
+        common::v1::{error::Code as ProtoCode, CloudEvent, Error as ProtoError},
     },
     verifier::canonical_bytes,
 };
@@ -75,14 +72,15 @@ pub async fn handle(
         .ok_or_else(|| tonic::Status::invalid_argument("schema_bundle required"))?;
 
     // Verify schema bundle existence + hash.
-    let bundle_id = parse_uuid(&bundle_ref.schema_bundle_id, "schema_bundle.schema_bundle_id")
-        .map_err(|e| e.to_status())?;
+    let bundle_id = parse_uuid(
+        &bundle_ref.schema_bundle_id,
+        "schema_bundle.schema_bundle_id",
+    )
+    .map_err(|e| e.to_status())?;
     let bundle = match schema_bundle::lookup(pool, bundle_id, &bundle_ref.schema_bundle_hash).await
     {
         Ok(Some(b)) => b,
-        Ok(None) => {
-            return Err(DomainError::SchemaBundleUnknown(bundle_id.to_string()).to_status())
-        }
+        Ok(None) => return Err(DomainError::SchemaBundleUnknown(bundle_id.to_string()).to_status()),
         Err(e) => return Err(e.to_status()),
     };
 
@@ -202,8 +200,8 @@ async fn process_one(
     };
 
     // Per-event schema_bundle_id MUST match the batch-level bundle (Trace §12).
-    if !evt.schema_bundle_id.is_empty() && evt.schema_bundle_id
-        != bundle.schema_bundle_id.to_string()
+    if !evt.schema_bundle_id.is_empty()
+        && evt.schema_bundle_id != bundle.schema_bundle_id.to_string()
     {
         return error_result(
             &evt.id,
@@ -303,11 +301,8 @@ async fn process_one(
     // is fault-tolerant: malformed data_b64 maps to FailureClass
     // ::Unknown rather than aborting the INSERT.
     let decoded_data = crate::classify::decode_payload_data(&payload_json);
-    let failure_class = crate::classify::classify_audit_outcome(
-        &evt.r#type,
-        decoded_data.as_ref(),
-    )
-    .map(|c| c.as_db_str());
+    let failure_class = crate::classify::classify_audit_outcome(&evt.r#type, decoded_data.as_ref())
+        .map(|c| c.as_db_str());
     let aggregator = aggregator_mirrors_from_event(evt, decoded_data.as_ref(), run_id);
 
     let input = AppendInput {
@@ -356,7 +351,8 @@ async fn process_one(
         match append::has_preceding_decision(pool, tenant_id, dec_id).await {
             Ok(true) => { /* fall through to normal append */ }
             Ok(false) => {
-                let orphan_after = Utc::now() + chrono::Duration::seconds(cfg.orphan_after_seconds as i64);
+                let orphan_after =
+                    Utc::now() + chrono::Duration::seconds(cfg.orphan_after_seconds as i64);
                 if let Err(e) =
                     append::quarantine_audit_outcome(pool, input.clone(), orphan_after).await
                 {
@@ -443,15 +439,13 @@ async fn process_one(
             let orphan_after =
                 Utc::now() + chrono::Duration::seconds(cfg.orphan_after_seconds as i64);
             // Rebuild input — original was moved.
-            let payload_json = serde_json::to_value(cloudevent_to_json(evt))
-                .unwrap_or(serde_json::Value::Null);
+            let payload_json =
+                serde_json::to_value(cloudevent_to_json(evt)).unwrap_or(serde_json::Value::Null);
             // Re-classify for the quarantine path's audit row.
             let decoded_data = crate::classify::decode_payload_data(&payload_json);
-            let failure_class = crate::classify::classify_audit_outcome(
-                &evt.r#type,
-                decoded_data.as_ref(),
-            )
-            .map(|c| c.as_db_str());
+            let failure_class =
+                crate::classify::classify_audit_outcome(&evt.r#type, decoded_data.as_ref())
+                    .map(|c| c.as_db_str());
             let aggregator = aggregator_mirrors_from_event(evt, decoded_data.as_ref(), run_id);
             let input = AppendInput {
                 event_id,
@@ -519,8 +513,7 @@ fn validate_envelope(evt: &CloudEvent) -> Result<(), DomainError> {
     // partial UNIQUE indexes on (tenant_id, decision_id) cannot enforce
     // per-decision uniqueness because Postgres treats multiple NULLs as
     // distinct.
-    if (evt.r#type == "spendguard.audit.decision"
-        || evt.r#type == "spendguard.audit.outcome")
+    if (evt.r#type == "spendguard.audit.decision" || evt.r#type == "spendguard.audit.outcome")
         && evt.decision_id.is_empty()
     {
         return Err(DomainError::InvalidRequest(format!(
@@ -584,7 +577,7 @@ fn aggregator_mirrors_from_event<'a>(
     decoded_data: Option<&'a serde_json::Value>,
     run_id: Option<Uuid>,
 ) -> AggregatorMirrors<'a> {
-    if evt.r#type != "spendguard.audit.decision" {
+    if evt.r#type != "spendguard.audit.decision" && evt.r#type != "spendguard.audit.outcome" {
         return AggregatorMirrors::default();
     }
     let Some(data) = decoded_data.and_then(|v| v.as_object()) else {
@@ -867,6 +860,73 @@ mod tests {
         assert_eq!(cols.actual_input_tokens, None);
         assert_eq!(cols.actual_output_tokens, None);
     }
+
+    #[test]
+    fn decision_payload_populates_aggregator_mirror_columns() {
+        let run_id = Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap();
+        let evt = CloudEvent {
+            r#type: "spendguard.audit.decision".to_string(),
+            ..Default::default()
+        };
+        let data = serde_json::json!({
+            "model": "gpt-4o-mini",
+            "agent_id": "agent-alpha",
+            "prompt_class": "support_triage",
+            "prompt_class_fingerprint": "pcfp_123"
+        });
+
+        let mirrors = aggregator_mirrors_from_event(&evt, Some(&data), Some(run_id));
+
+        assert_eq!(mirrors.model, Some("gpt-4o-mini"));
+        assert_eq!(mirrors.agent_id, Some("agent-alpha"));
+        assert_eq!(mirrors.run_id_mirror, Some(run_id));
+        assert_eq!(mirrors.prompt_class, Some("support_triage"));
+        assert_eq!(mirrors.prompt_class_fingerprint, Some("pcfp_123"));
+    }
+
+    #[test]
+    fn decision_payload_model_family_fallback_populates_model_mirror() {
+        let evt = CloudEvent {
+            r#type: "spendguard.audit.decision".to_string(),
+            ..Default::default()
+        };
+        let data = serde_json::json!({
+            "model_family": "claude-3-5-sonnet",
+            "agent_id": "agent-beta",
+            "prompt_class": "code_gen",
+            "prompt_class_fingerprint": "pcfp_456"
+        });
+
+        let mirrors = aggregator_mirrors_from_event(&evt, Some(&data), None);
+
+        assert_eq!(mirrors.model, Some("claude-3-5-sonnet"));
+        assert_eq!(mirrors.agent_id, Some("agent-beta"));
+        assert_eq!(mirrors.prompt_class, Some("code_gen"));
+        assert_eq!(mirrors.prompt_class_fingerprint, Some("pcfp_456"));
+    }
+
+    #[test]
+    fn outcome_payload_populates_aggregator_mirror_columns() {
+        let run_id = Uuid::parse_str("00000000-0000-7000-8000-000000000002").unwrap();
+        let evt = CloudEvent {
+            r#type: "spendguard.audit.outcome".to_string(),
+            ..Default::default()
+        };
+        let data = serde_json::json!({
+            "model": "gpt-4o-mini",
+            "agent_id": "agent-alpha",
+            "prompt_class": "support_triage",
+            "prompt_class_fingerprint": "pcfp_outcome"
+        });
+
+        let mirrors = aggregator_mirrors_from_event(&evt, Some(&data), Some(run_id));
+
+        assert_eq!(mirrors.model, Some("gpt-4o-mini"));
+        assert_eq!(mirrors.agent_id, Some("agent-alpha"));
+        assert_eq!(mirrors.run_id_mirror, Some(run_id));
+        assert_eq!(mirrors.prompt_class, Some("support_triage"));
+        assert_eq!(mirrors.prompt_class_fingerprint, Some("pcfp_outcome"));
+    }
 }
 
 fn parse_uuid(s: &str, field: &str) -> Result<Uuid, DomainError> {
@@ -1016,7 +1076,9 @@ async fn write_quarantine(
         return error_result(
             &evt.id,
             EventStatus::Quarantined,
-            DomainError::InvalidRequest("oversized canonical bytes; dropped at quarantine boundary".into()),
+            DomainError::InvalidRequest(
+                "oversized canonical bytes; dropped at quarantine boundary".into(),
+            ),
         );
     }
     if let Err(e) = signature_quarantine::insert(pool, evt, &canonical, reason).await {
@@ -1025,8 +1087,6 @@ async fn write_quarantine(
     error_result(
         &evt.id,
         EventStatus::Quarantined,
-        DomainError::InvalidRequest(format!(
-            "signature verification failed ({reason})"
-        )),
+        DomainError::InvalidRequest(format!("signature verification failed ({reason})")),
     )
 }

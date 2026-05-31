@@ -67,6 +67,18 @@ pub struct VerifyChainArgs {
     pub to: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Audit event types that carry the predictor mirror column contract.
+///
+/// Tokenizer/stats `*_drift_alert` events are audit-routed and must be
+/// admitted by verify-chain, but they are not decision/outcome rows and do
+/// not carry the 18 prediction mirror columns.
+pub fn event_type_requires_prediction_mirror(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "spendguard.audit.decision" | "spendguard.audit.outcome"
+    )
+}
+
 /// Run the verify-chain replay over the configured Postgres pool.
 ///
 /// SLICE_13 Phase C ships this as a thin scan loop that mirrors the
@@ -105,13 +117,30 @@ pub async fn verify_chain(
     }
 
     // SQL is deliberately defensive: tenant_id filter is optional
-    // (covers the bin's --no-tenant mode), prediction-mirror filter
+    // (covers the bin's --no-tenant mode), prediction-mirror counting
     // is optional. The COUNT(*) is the rows_scanned signal.
-    let mut sql = String::from(
+    let legacy_count_sql = if args.check_prediction_mirror {
+        "COUNT(*) FILTER (\
+            WHERE (event_type = 'spendguard.audit.decision' \
+                   AND (predicted_a_tokens IS NULL \
+                        OR reserved_strategy IS NULL \
+                        OR prediction_strategy_used IS NULL \
+                        OR prediction_policy_used IS NULL \
+                        OR tokenizer_tier IS NULL \
+                        OR run_projection_at_decision_atomic IS NULL \
+                        OR run_steps_completed_so_far IS NULL)) \
+               OR (event_type = 'spendguard.audit.outcome' \
+                   AND (actual_input_tokens IS NULL \
+                        OR actual_output_tokens IS NULL))\
+        )::bigint"
+    } else {
+        "0::bigint"
+    };
+    let mut sql = format!(
         "SELECT \
             COUNT(*)::bigint AS rows_total, \
-            COUNT(*) FILTER (WHERE predicted_b_tokens IS NULL)::bigint AS rows_legacy \
-         FROM canonical_events WHERE event_type LIKE 'spendguard.audit.%'",
+            {legacy_count_sql} AS rows_legacy \
+         FROM canonical_events WHERE event_type LIKE 'spendguard.audit.%'"
     );
     if args.tenant_id.is_some() {
         sql.push_str(" AND tenant_id = $1");
@@ -192,5 +221,25 @@ mod tests {
             to: None,
         };
         assert!(args.from.is_none());
+    }
+
+    #[test]
+    fn tokenizer_drift_alert_is_admitted_without_prediction_mirror_columns() {
+        assert!(!event_type_requires_prediction_mirror(
+            "spendguard.audit.tokenizer_drift_alert.v1alpha1"
+        ));
+        assert!(!event_type_requires_prediction_mirror(
+            "spendguard.audit.prediction_drift_alert.v1alpha1"
+        ));
+    }
+
+    #[test]
+    fn decision_and_outcome_require_prediction_mirror_columns() {
+        assert!(event_type_requires_prediction_mirror(
+            "spendguard.audit.decision"
+        ));
+        assert!(event_type_requires_prediction_mirror(
+            "spendguard.audit.outcome"
+        ));
     }
 }

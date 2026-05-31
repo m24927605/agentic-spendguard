@@ -130,13 +130,8 @@ pub fn classify_audit_outcome(
     }
 
     // Provider response classification: HTTP status × usage field.
-    let http_status = data
-        .get("provider_http_status")
-        .and_then(|v| v.as_i64());
-    let has_usage = data
-        .get("usage")
-        .map(|v| !v.is_null())
-        .unwrap_or(false);
+    let http_status = data.get("provider_http_status").and_then(|v| v.as_i64());
+    let has_usage = data.get("usage").map(|v| !v.is_null()).unwrap_or(false);
 
     if let Some(status) = http_status {
         if (500..600).contains(&status) {
@@ -194,11 +189,8 @@ pub fn classify_audit_outcome(
 /// `cost_advisor_safe_release_reason`).
 pub fn decode_payload_data(payload_json: &serde_json::Value) -> Option<serde_json::Value> {
     let data_b64 = payload_json.get("data_b64")?.as_str()?;
-    let bytes = base64::Engine::decode(
-        &base64::engine::general_purpose::STANDARD,
-        data_b64,
-    )
-    .ok()?;
+    let bytes =
+        base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_b64).ok()?;
     let text = std::str::from_utf8(&bytes).ok()?;
     serde_json::from_str(text).ok()
 }
@@ -222,7 +214,8 @@ mod tests {
 
     #[test]
     fn provider_500_billed() {
-        let data = json!({"kind": "error", "provider_http_status": 503, "usage": {"input_tokens": 100}});
+        let data =
+            json!({"kind": "error", "provider_http_status": 503, "usage": {"input_tokens": 100}});
         let c = classify_audit_outcome("spendguard.audit.outcome", Some(&data));
         assert_eq!(c, Some(FailureClass::Provider5xx));
     }
