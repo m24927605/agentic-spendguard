@@ -10,6 +10,7 @@ postgres:
   ledgerUrlKey: ledger-url
   canonicalUrlKey: canonical-url
   controlPlaneUrlKey: control-plane-url
+  controlPlaneAuditForwarderUrlKey: control-plane-audit-forwarder-url
   tokenizerUrlKey: tokenizer-url
   outputPredictorUrlKey: output-predictor-url
   outputPredictorPluginEndpointUrlKey: output-predictor-plugin-endpoint-url
@@ -65,3 +66,12 @@ statsAggregator:
 
 outboxForwarder:
   schemaBundleHashHex: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+
+controlPlane:
+  canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
+  auditSchemaBundleHashHex: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  auth:
+    mode: jwt
+    oidcIssuer: https://issuer.example.test/
+    oidcAudience: spendguard-control-plane
+    oidcJwksUrl: https://issuer.example.test/.well-known/jwks.json

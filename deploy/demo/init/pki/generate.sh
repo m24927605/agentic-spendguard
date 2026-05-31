@@ -56,7 +56,7 @@ fi
 # Per-cert idempotent: skip individual cert if already minted. This lets
 # new services (e.g. webhook_receiver) get certs on existing pki-data
 # volumes without rotating the others.
-for svc in ledger canonical_ingest sidecar endpoint_catalog webhook_receiver ttl_sweeper outbox_forwarder; do
+for svc in ledger canonical_ingest sidecar endpoint_catalog webhook_receiver ttl_sweeper outbox_forwarder control_plane; do
     if [ -f "$OUT/$svc.crt" ] && [ -f "$OUT/$svc.key" ]; then
         echo "[pki] $svc cert already exists, skipping"
         continue
@@ -130,7 +130,7 @@ done
 # Each service mounts its own pem at /etc/spendguard/signing/<service>.pem.
 SIGN_OUT="$OUT/signing"
 mkdir -p "$SIGN_OUT"
-for svc in ledger sidecar webhook-receiver ttl-sweeper; do
+for svc in ledger sidecar webhook-receiver ttl-sweeper control_plane; do
     if [ -f "$SIGN_OUT/$svc.pem" ]; then
         echo "[pki] signing key for $svc already present, skipping"
         continue

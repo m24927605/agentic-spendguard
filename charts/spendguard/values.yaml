@@ -49,7 +49,8 @@ secrets:
   tls:
     # Name of pre-created Secret containing:
     #   ca.crt, ledger.crt, ledger.key, canonical-ingest.crt,
-    #   canonical-ingest.key, sidecar.crt, sidecar.key,
+    #   canonical-ingest.key, control-plane.crt, control-plane.key,
+    #   sidecar.crt, sidecar.key,
     #   webhook-receiver.crt, webhook-receiver.key,
     #   outbox-forwarder.crt, outbox-forwarder.key,
     #   ttl-sweeper.crt, ttl-sweeper.key.
@@ -87,6 +88,10 @@ postgres:
   # and control_plane_audit_outbox. Keep it as a distinct logical DB URL
   # even when co-located on the same Postgres server.
   controlPlaneUrlKey: control-plane-url
+  # HARDEN_06: production control-plane audit forwarding reads and marks
+  # control_plane_audit_outbox under a dedicated RLS role, not the
+  # request-serving control_plane_application_role.
+  controlPlaneAuditForwarderUrlKey: control-plane-audit-forwarder-url
   tokenizerShadowUrlKey: tokenizer-shadow-url
   tokenizerUrlKey: tokenizer-url
   outputPredictorUrlKey: output-predictor-url
@@ -122,6 +127,32 @@ canonicalIngest:
   resources:
     requests: { cpu: "200m", memory: "256Mi" }
     limits:   { cpu: "1",    memory: "1Gi"   }
+
+controlPlane:
+  enabled: true
+  replicas: 1
+  image:
+    repository: spendguard/control-plane
+    tag: "0.1.0-alpha.1"
+  # Empty defaults to https://<release>-spendguard-canonical-ingest:50052.
+  canonicalIngestUrl: ""
+  auditSchemaBundleId: "22222222-2222-4222-8222-222222222222"
+  auditSchemaBundleHashHex: ""
+  auditCanonicalSchemaVersion: "spendguard.v1alpha1"
+  auditForwarderPollIntervalSeconds: 5
+  auditForwarderBatchSize: 32
+  auth:
+    mode: "static_token" # demo only; production requires jwt
+    staticToken: "demo-admin-token-replace-in-production"
+    staticTokenSubject: "demo-operator"
+    staticTokenTenantIds: "00000000-0000-4000-8000-000000000001"
+    oidcIssuer: ""
+    oidcAudience: ""
+    oidcJwksUrl: ""
+    groupPolicyJson: ""
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
 
 sidecar:
   enabled: true
@@ -663,7 +694,8 @@ signing:
   mode: "local"
   profile: "production"
   # Single Secret holding ed25519.pem keys, one per producer service.
-  # Keys: ledger.pem, sidecar.pem, webhook-receiver.pem, ttl-sweeper.pem
+  # Keys: ledger.pem, sidecar.pem, webhook-receiver.pem, ttl-sweeper.pem,
+  #       control-plane.pem
   existingSecret: spendguard-signing-keys
   # KMS arns per-service (used only when mode=kms; ignored otherwise).
   kms:
@@ -671,6 +703,7 @@ signing:
     sidecarArn: ""
     webhookReceiverArn: ""
     ttlSweeperArn: ""
+    controlPlaneArn: ""
   # Phase 5 GA hardening S8: canonical_ingest strict verification.
   # When true, canonical_ingest mounts the same Secret as a trust
   # store and rejects/quarantines events with bad / unknown / pre-S6 /

@@ -52,6 +52,7 @@ contains_item() {
 }
 
 CHART_WORKLOADS=(
+    control-plane
     sidecar
     canonical-ingest
     ledger
@@ -132,7 +133,7 @@ TRUST_SPKI_SHA256=$(openssl x509 -in "${PKI}/ca.crt" -outform DER \
 # dashed service names per charts/spendguard/README.md). Predictor
 # services default to plaintext/UDS in demo profile and do not mount
 # this shared TLS Secret unless mTLS is explicitly enabled.
-MTLS_SERVICES=(ledger canonical-ingest sidecar webhook-receiver outbox-forwarder ttl-sweeper)
+MTLS_SERVICES=(ledger canonical-ingest control-plane sidecar webhook-receiver outbox-forwarder ttl-sweeper)
 for svc in "${MTLS_SERVICES[@]}"; do
     openssl genrsa -out "${PKI}/${svc}.key" 2048 2>/dev/null
     openssl req -new -key "${PKI}/${svc}.key" \
@@ -148,7 +149,7 @@ done
 # Ed25519 signing keys (one per producer service).
 SIGNING="${WORK_DIR}/signing"
 mkdir -p "${SIGNING}"
-for svc in ledger sidecar webhook-receiver ttl-sweeper; do
+for svc in ledger sidecar webhook-receiver ttl-sweeper control-plane; do
     "${OPENSSL}" genpkey -algorithm ed25519 -out "${SIGNING}/${svc}.pem" 2>/dev/null
 done
 
@@ -250,6 +251,8 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create secret generic spend
     --from-file=ledger.key="${PKI}/ledger.key" \
     --from-file=canonical-ingest.crt="${PKI}/canonical-ingest.crt" \
     --from-file=canonical-ingest.key="${PKI}/canonical-ingest.key" \
+    --from-file=control-plane.crt="${PKI}/control-plane.crt" \
+    --from-file=control-plane.key="${PKI}/control-plane.key" \
     --from-file=sidecar.crt="${PKI}/sidecar.crt" \
     --from-file=sidecar.key="${PKI}/sidecar.key" \
     --from-file=webhook-receiver.crt="${PKI}/webhook-receiver.crt" \
@@ -290,6 +293,7 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create secret generic spend
     --from-file=sidecar.pem="${SIGNING}/sidecar.pem" \
     --from-file=webhook-receiver.pem="${SIGNING}/webhook-receiver.pem" \
     --from-file=ttl-sweeper.pem="${SIGNING}/ttl-sweeper.pem" \
+    --from-file=control-plane.pem="${SIGNING}/control-plane.pem" \
     --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" apply -f -
 
 # 4.6 — trust root CA PEM (chart's trustSecret.caPemKey: ca.pem)
@@ -383,6 +387,7 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create secret generic spend
     --from-literal=ledger-url="${LEDGER_DB_URL}" \
     --from-literal=canonical-url="${CANONICAL_DB_URL}" \
     --from-literal=control-plane-url="${CONTROL_PLANE_DB_URL}" \
+    --from-literal=control-plane-audit-forwarder-url="${CONTROL_PLANE_DB_URL}" \
     --from-literal=tokenizer-url="${CANONICAL_DB_URL}" \
     --from-literal=output-predictor-url="${CANONICAL_DB_URL}" \
     --from-literal=output-predictor-plugin-endpoint-url="${CONTROL_PLANE_DB_URL}" \

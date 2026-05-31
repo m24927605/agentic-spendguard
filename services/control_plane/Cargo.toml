@@ -28,9 +28,14 @@ anyhow = "1"
 envy = "0.4"
 sha2 = "0.10"
 hex = "0.4"
+bytes = "1"
+prost = "0.13"
+prost-types = "0.13"
+tonic = { version = "0.12", features = ["tls", "transport"] }
 
 # Phase 5 GA hardening S17: shared OIDC JWT validator + middleware.
 spendguard-auth = { path = "../auth" }
+spendguard-signing = { path = "../signing" }
 
 # Round-2 #11: Prometheus /metrics endpoint. Reuse the same hyper /
 # hyper-util / http-body-util triple as ledger + sidecar so the render
@@ -38,3 +43,7 @@ spendguard-auth = { path = "../auth" }
 hyper = { version = "1", features = ["server", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = "0.1"
+
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"

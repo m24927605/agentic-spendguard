@@ -21,6 +21,7 @@ postgres:
   ledgerUrlKey: ledger-url
   canonicalUrlKey: canonical-url
   controlPlaneUrlKey: control-plane-url
+  controlPlaneAuditForwarderUrlKey: control-plane-audit-forwarder-url
   tokenizerShadowUrlKey: tokenizer-shadow-url
   tokenizerUrlKey: tokenizer-url
   outputPredictorUrlKey: output-predictor-url
@@ -65,6 +66,15 @@ statsAggregator:
   signingKeySecretName: spendguard-stats-aggregator-signing-key
   signingKeyPath: /etc/spendguard/signing/signing-key.pem
   schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+
+controlPlane:
+  canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
+  auditSchemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  auth:
+    mode: jwt
+    oidcIssuer: https://issuer.example.invalid/
+    oidcAudience: spendguard-control-plane
+    oidcJwksUrl: https://issuer.example.invalid/.well-known/jwks.json
 
 networkPolicy:
   acknowledgeNoNetworkPolicy: true

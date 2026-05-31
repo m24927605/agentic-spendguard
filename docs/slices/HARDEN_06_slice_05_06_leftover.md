@@ -144,6 +144,7 @@ No public proto changes expected. Control-plane DB schema may gain outbox forwar
 
 - Risk: forwarder creates duplicate signed events. Mitigation: idempotent outbox status plus HARDEN_05 replay dedup.
 - Risk: production boot fails due to signing config. Mitigation: explicit Helm required values and clear error.
+- Risk: request-serving RLS hides pending outbox rows from the worker. Mitigation: production requires a separate audit-forwarder database URL using `control_plane_audit_forwarder_role` RLS policies; no `BYPASSRLS` shortcut is used.
 - Rollback: disable forwarder only in demo/dev; production rollback requires reverting this slice and reopening blocker issues.
 
 ---
@@ -165,17 +166,26 @@ Reviewer must inspect real integration tests for tokenizer envelope admission an
 | Design | Security Engineer | Production signing key config must fail fast | §7 and §8 require production gates |
 | Design | Database Optimizer | Outbox forwarding must record durable status | §4 allows schema bookkeeping |
 | Design | Audit-chain domain expert | `spendguard.audit.*` routing is mandatory | §6 and §9 enforce prefix |
+| Implementation | Backend Architect | Keep tokenizer envelope as-is and harden canonical_ingest fail-fast tests | `append_events_rejects_*_before_storage` added |
+| Implementation | Security Engineer | Use mTLS plus per-event Ed25519 signatures for control-plane forwarding | Helm/compose mount TLS and `control-plane.pem` |
+| Implementation | Software Architect | Add a real Helm control-plane surface instead of compose-only wiring | `templates/control-plane.yaml` added |
+| Review R1 | codex CLI adversarial reviewer | Demo Helm must not enable forwarder without schema hash; compose must source runtime schema hash and generate signing key | Fixed with `$forwarderEnabled`, control-plane entrypoint, and PKI signing key generation |
+| Review R2 | codex CLI adversarial reviewer | Forwarder must not query RLS-protected outbox through the request-serving role | Added `control_plane_audit_forwarder_role`, production audit-forwarder DB URL, Helm secret key, and boot-time production validation |
+| Review R3 | codex CLI adversarial reviewer | Demo image must install `protoc`; forwarder must preserve stored CloudEvent time | Added `protobuf-compiler`/`libprotobuf-dev` and RFC3339 payload-time parsing regression assertion |
+| Review R4 | codex CLI adversarial reviewer | Production Helm values and kind inventory must include the new control-plane workload | Updated `scripts/helm-validate-test-values.yaml`, kind validation workload/TLS/signing/DB secrets, and chart README secret contract |
+| Review R5 / Staff+ | Software Architect, Backend Architect, Security Engineer, Database Optimizer, Audit-chain domain expert | Fix both R5 P2s anyway: provenance fields and KMS Secret mount are in-slice production-readiness issues | Folded `subject`/`actor_subject` into forwarded JSON `data`; guarded signing volume/mount to `signing.mode=local` |
+| Demo verification | codex CLI implementer/reviewer | Fresh compose must apply control-plane migrations before proving the forwarder path | Added demo init hook for `services/control_plane/migrations`; verified plugin registration forwards to canonical_ingest with `route=Observability`, `storage_class=immutable_audit_log`, signed producer `control-plane:demo`, and data provenance fields |
 
 ---
 
 ## §14. Merge checklist
 
-- [ ] Tokenizer AppendEventsRequest envelope fixed and tested
-- [ ] Control-plane Ed25519 forwarder implemented and tested
-- [ ] Plugin lifecycle audit event reaches canonical_ingest in demo
-- [ ] Helm production signing gates render correctly
-- [ ] Affected service tests pass
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded
+- [x] Tokenizer AppendEventsRequest envelope fixed and tested
+- [x] Control-plane Ed25519 forwarder implemented and tested
+- [x] Plugin lifecycle audit event reaches canonical_ingest in demo
+- [x] Helm production signing gates render correctly
+- [x] Affected service tests pass
+- [x] AIT adversarial review passes or Staff+ arbitration is recorded
 
 ---
 
