@@ -332,13 +332,20 @@ async fn claim_replay_key(
         "INSERT INTO canonical_event_replay_dedup
             (producer_id, event_id, tenant_id, payload_hash, expires_at)
          VALUES
-            ($1, $2, $3, $4, clock_timestamp() + ($5::TEXT)::INTERVAL)
+            (
+                $1, $2, $3, $4,
+                CASE
+                    WHEN $5 THEN 'infinity'::TIMESTAMPTZ
+                    ELSE clock_timestamp() + ($6::TEXT)::INTERVAL
+                END
+            )
          ON CONFLICT (event_id) DO NOTHING",
     )
     .bind(input.producer_id)
     .bind(input.event_id)
     .bind(input.tenant_id)
     .bind(input.event_hash)
+    .bind(input.event_type == "spendguard.audit.outcome")
     .bind(EVENT_REPLAY_WINDOW_SQL)
     .execute(&mut **tx)
     .await
@@ -348,8 +355,8 @@ async fn claim_replay_key(
         return Ok(ReplayClaim::New);
     }
 
-    let existing: (String, Vec<u8>) = sqlx::query_as(
-        "SELECT producer_id, payload_hash
+    let existing: (String, Vec<u8>, bool) = sqlx::query_as(
+        "SELECT producer_id, payload_hash, reservation_only
            FROM canonical_event_replay_dedup
           WHERE event_id = $1
           FOR UPDATE",
@@ -359,7 +366,7 @@ async fn claim_replay_key(
     .await
     .map_err(map_pg_error)?;
 
-    if existing.0 == input.producer_id && existing.1 == input.event_hash {
+    if !existing.2 && existing.0 == input.producer_id && existing.1 == input.event_hash {
         Ok(ReplayClaim::DuplicateSamePayload)
     } else {
         Ok(ReplayClaim::DuplicateHashMismatch)

@@ -29,6 +29,14 @@ struct PgFixture {
 }
 
 async fn setup_postgres() -> Option<PgFixture> {
+    setup_postgres_with_migrations(None).await
+}
+
+async fn setup_postgres_before(stop_before: &str) -> Option<PgFixture> {
+    setup_postgres_with_migrations(Some(stop_before)).await
+}
+
+async fn setup_postgres_with_migrations(stop_before: Option<&str>) -> Option<PgFixture> {
     let container = match Postgres::default().with_tag("16-alpine").start().await {
         Ok(c) => c,
         Err(e) => {
@@ -50,14 +58,14 @@ async fn setup_postgres() -> Option<PgFixture> {
         .await
         .expect("connect owner pool");
 
-    apply_canonical_migrations(&pool).await;
+    apply_canonical_migrations_filtered(&pool, stop_before).await;
     seed_schema_bundle(&pool).await;
 
     Box::leak(Box::new(container));
     Some(PgFixture { pool })
 }
 
-async fn apply_canonical_migrations(pool: &PgPool) {
+async fn apply_canonical_migrations_filtered(pool: &PgPool, stop_before: Option<&str>) {
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let mut migrations = fs::read_dir(&dir)
         .unwrap_or_else(|e| panic!("read migrations dir {}: {e}", dir.display()))
@@ -73,14 +81,32 @@ async fn apply_canonical_migrations(pool: &PgPool) {
     migrations.sort();
 
     for path in migrations {
-        let sql = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("read migration {}: {e}", path.display()));
-        let sql = sql.replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX");
-        sqlx::raw_sql(&sql)
-            .execute(pool)
-            .await
-            .unwrap_or_else(|e| panic!("apply migration {}: {e}", path.display()));
+        let name = path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .expect("migration file name");
+        if stop_before.is_some_and(|stop| name >= stop) {
+            continue;
+        }
+        apply_canonical_migration_path(pool, &path).await;
     }
+}
+
+async fn apply_canonical_migration(pool: &PgPool, migration_name: &str) {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("migrations")
+        .join(migration_name);
+    apply_canonical_migration_path(pool, &path).await;
+}
+
+async fn apply_canonical_migration_path(pool: &PgPool, path: &std::path::Path) {
+    let sql = fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("read migration {}: {e}", path.display()));
+    let sql = sql.replace("CREATE INDEX CONCURRENTLY", "CREATE INDEX");
+    sqlx::raw_sql(&sql)
+        .execute(pool)
+        .await
+        .unwrap_or_else(|e| panic!("apply migration {}: {e}", path.display()));
 }
 
 async fn seed_schema_bundle(pool: &PgPool) {
@@ -439,6 +465,145 @@ async fn replay_dedup_rejects_cross_producer_hijack_while_outcome_quarantined() 
             .await
             .expect("read released producer");
     assert_eq!(producer_id, "canonical-ingest-test");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_migration_backfills_existing_quarantine_event_id_reservations() {
+    let Some(fx) = setup_postgres_before("0020_event_replay_dedup.sql").await else {
+        return;
+    };
+    let tenant_id = Uuid::parse_str("01918000-0000-7c10-8c10-000000000120").unwrap();
+    let decision_id = Uuid::parse_str("01918000-0000-7c10-8c10-000000000121").unwrap();
+    let run_id = Uuid::parse_str("01918000-0000-7c10-8c10-000000000122").unwrap();
+    let outcome_event_id = Uuid::parse_str("01918000-0000-7c10-8c10-000000000123").unwrap();
+    let decision_event_id = Uuid::parse_str("01918000-0000-7c10-8c10-000000000124").unwrap();
+    let outcome = base_append_input(
+        outcome_event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.outcome",
+        2,
+    );
+
+    sqlx::query(
+        r#"
+        INSERT INTO audit_outcome_quarantine (
+            quarantine_id, event_id, tenant_id, decision_id,
+            storage_class, producer_id, producer_sequence,
+            producer_signature, signing_key_id,
+            schema_bundle_id, schema_bundle_hash,
+            event_type, specversion, source, event_time, datacontenttype,
+            payload_json, payload_blob_ref,
+            region_id, ingest_shard_id, ingest_log_offset, run_id,
+            orphan_after
+        ) VALUES (
+            $1, $2, $3, $4,
+            $5, $6, $7,
+            $8, $9,
+            $10, $11,
+            $12, $13, $14, $15, $16,
+            $17, $18,
+            $19, $20, $21, $22,
+            $23
+        )
+        "#,
+    )
+    .bind(Uuid::parse_str("01918000-0000-7c10-8c10-000000000125").unwrap())
+    .bind(outcome.event_id)
+    .bind(outcome.tenant_id)
+    .bind(outcome.decision_id)
+    .bind(outcome.storage_class.as_db_str())
+    .bind(outcome.producer_id)
+    .bind(outcome.producer_sequence)
+    .bind(outcome.producer_signature)
+    .bind(outcome.signing_key_id)
+    .bind(outcome.schema_bundle_id)
+    .bind(outcome.schema_bundle_hash)
+    .bind(outcome.event_type)
+    .bind(outcome.specversion)
+    .bind(outcome.source)
+    .bind(outcome.event_time)
+    .bind(outcome.datacontenttype)
+    .bind(outcome.payload_json)
+    .bind(outcome.payload_blob_ref)
+    .bind(outcome.region_id)
+    .bind(outcome.ingest_shard_id)
+    .bind(0i64)
+    .bind(outcome.run_id)
+    .bind(Utc::now() + chrono::Duration::seconds(30))
+    .execute(&fx.pool)
+    .await
+    .expect("seed legacy quarantine row before replay migration");
+
+    apply_canonical_migration(&fx.pool, "0020_event_replay_dedup.sql").await;
+
+    let reservation_only: bool = sqlx::query_scalar(
+        "SELECT reservation_only FROM canonical_event_replay_dedup WHERE event_id = $1",
+    )
+    .bind(outcome_event_id)
+    .fetch_one(&fx.pool)
+    .await
+    .expect("read migration backfill reservation");
+    assert!(reservation_only);
+
+    let mut hijack = base_append_input(
+        outcome_event_id,
+        tenant_id,
+        Uuid::parse_str("01918000-0000-7c10-8c10-000000000126").unwrap(),
+        run_id,
+        "spendguard.audit.decision",
+        1,
+    );
+    hijack.producer_id = "canonical-ingest-hijacker";
+    hijack.source = "spendguard://canonical-ingest-hijacker";
+    hijack.event_hash = &[0x67; 32];
+
+    let err = append_event(&fx.pool, hijack)
+        .await
+        .expect_err("migration-reserved event_id collision rejected");
+    assert!(
+        err.to_string().contains("event_id collision"),
+        "unexpected error: {err}"
+    );
+
+    let mut decision = base_append_input(
+        decision_event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.decision",
+        1,
+    );
+    decision.prediction.predicted_a_tokens = Some(64);
+    decision.prediction.reserved_strategy = Some("A");
+    decision.prediction.prediction_strategy_used = Some("A");
+    decision.prediction.prediction_policy_used = Some("STRICT_CEILING");
+    decision.prediction.tokenizer_tier = Some("T2");
+    decision.prediction.run_projection_at_decision_atomic = Some(bigdecimal::BigDecimal::from(64));
+    decision.prediction.run_steps_completed_so_far = Some(0);
+    append_event(&fx.pool, decision)
+        .await
+        .expect("append decision");
+
+    let released = release_quarantined_outcomes(
+        &fx.pool,
+        tenant_id,
+        decision_id,
+        "test-region",
+        "test-shard",
+    )
+    .await
+    .expect("release backfilled quarantine row");
+    assert_eq!(released, 1);
+
+    let canonical_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM canonical_events WHERE event_id = $1")
+            .bind(outcome_event_id)
+            .fetch_one(&fx.pool)
+            .await
+            .expect("count released outcome");
+    assert_eq!(canonical_count, 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

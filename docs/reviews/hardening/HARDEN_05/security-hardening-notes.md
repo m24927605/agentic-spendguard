@@ -12,6 +12,7 @@
 
 - The replay horizon is operationally bounded by `expires_at` and indexed for cleanup, but canonical `event_id` is globally reserved during quarantine and remains globally unique through `canonical_events_global_keys` after append.
 - A replay with identical `(producer_id, event_id, payload_hash)` is idempotently `DEDUPED`; a hash mismatch or cross-producer `event_id` collision returns a duplicate/tamper error and does not append.
+- Migration 0020 backfills non-released quarantine rows as `reservation_only=true` with non-expiring `event_id` reservations because the original CloudEvent hash cannot be reconstructed from legacy quarantine rows.
 - Missing tenant shadow security settings mean `pii_shadow_enabled=false` and `count_tokens_quota_per_minute=0`.
 - Provider keys alone are insufficient to send raw prompt text; control-plane tenant opt-in is required.
 - Quota exhaustion or quota-DB failure skips only the async shadow path and does not touch the Tier 2 tokenizer hot path.
