@@ -1,0 +1,130 @@
+{{- if .Values.controlPlane.enabled }}
+{{- $component := "control-plane" }}
+{{- $canonicalUrl := .Values.controlPlane.canonicalIngestUrl | default (printf "https://%s-canonical-ingest:50052" (include "spendguard.fullname" .)) }}
+{{- if eq .Values.chart.profile "production" }}
+{{- if ne .Values.controlPlane.auth.mode "jwt" }}
+{{- fail "controlPlane.auth.mode=jwt is required under chart.profile=production (static_token is demo-only)" }}
+{{- end }}
+{{- if not .Values.controlPlane.auth.oidcIssuer }}
+{{- fail "controlPlane.auth.oidcIssuer is required under chart.profile=production" }}
+{{- end }}
+{{- if not .Values.controlPlane.auth.oidcAudience }}
+{{- fail "controlPlane.auth.oidcAudience is required under chart.profile=production" }}
+{{- end }}
+{{- if not .Values.controlPlane.auth.oidcJwksUrl }}
+{{- fail "controlPlane.auth.oidcJwksUrl is required under chart.profile=production" }}
+{{- end }}
+{{- if not .Values.controlPlane.auditSchemaBundleHashHex }}
+{{- fail "controlPlane.auditSchemaBundleHashHex is required under chart.profile=production (canonical_ingest rejects control-plane audit events without the registered schema bundle hash)" }}
+{{- end }}
+{{- if not .Values.controlPlane.auditSchemaBundleId }}
+{{- fail "controlPlane.auditSchemaBundleId is required under chart.profile=production" }}
+{{- end }}
+{{- if eq .Values.signing.mode "disabled" }}
+{{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo; control-plane audit forwarding requires signed CloudEvents in production" }}
+{{- end }}
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "spendguard.fullname" . }}-control-plane
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.controlPlane.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: control-plane
+          image: {{ include "spendguard.image" (merge (dict "image" .Values.controlPlane.image "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: http, containerPort: 8091 }
+            - { name: metrics, containerPort: 9094 }
+          env:
+            - { name: SPENDGUARD_PROFILE, value: {{ .Values.chart.profile | quote }} }
+            - { name: SPENDGUARD_CONTROL_PLANE_BIND_ADDR, value: "0.0.0.0:8091" }
+            - { name: SPENDGUARD_CONTROL_PLANE_METRICS_ADDR, value: "0.0.0.0:9094" }
+            - name: SPENDGUARD_CONTROL_PLANE_DATABASE_URL
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.controlPlaneUrlKey) | nindent 14 }}
+            - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_URL, value: {{ $canonicalUrl | quote }} }
+            - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_CERT, value: "/etc/ssl/spendguard/control-plane.crt" }
+            - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_KEY, value: "/etc/ssl/spendguard/control-plane.key" }
+            - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CA_PEM, value: "/etc/ssl/spendguard/ca.crt" }
+            - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_SCHEMA_BUNDLE_ID, value: {{ .Values.controlPlane.auditSchemaBundleId | quote }} }
+            {{- if .Values.controlPlane.auditSchemaBundleHashHex }}
+            - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_SCHEMA_BUNDLE_HASH_HEX, value: {{ .Values.controlPlane.auditSchemaBundleHashHex | quote }} }
+            {{- end }}
+            - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_CANONICAL_SCHEMA_VERSION, value: {{ .Values.controlPlane.auditCanonicalSchemaVersion | quote }} }
+            - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_FORWARDER_POLL_INTERVAL_SECONDS, value: {{ .Values.controlPlane.auditForwarderPollIntervalSeconds | quote }} }
+            - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_FORWARDER_BATCH_SIZE, value: {{ .Values.controlPlane.auditForwarderBatchSize | quote }} }
+            - { name: SPENDGUARD_CONTROL_PLANE_AUTH_MODE, value: {{ .Values.controlPlane.auth.mode | quote }} }
+            {{- if eq .Values.controlPlane.auth.mode "static_token" }}
+            - { name: SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN, value: {{ .Values.controlPlane.auth.staticToken | quote }} }
+            - { name: SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN_SUBJECT, value: {{ .Values.controlPlane.auth.staticTokenSubject | quote }} }
+            - { name: SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN_TENANT_IDS, value: {{ .Values.controlPlane.auth.staticTokenTenantIds | quote }} }
+            {{- else }}
+            - { name: SPENDGUARD_CONTROL_PLANE_OIDC_ISSUER, value: {{ .Values.controlPlane.auth.oidcIssuer | quote }} }
+            - { name: SPENDGUARD_CONTROL_PLANE_OIDC_AUDIENCE, value: {{ .Values.controlPlane.auth.oidcAudience | quote }} }
+            - { name: SPENDGUARD_CONTROL_PLANE_OIDC_JWKS_URL, value: {{ .Values.controlPlane.auth.oidcJwksUrl | quote }} }
+            {{- end }}
+            {{- if .Values.controlPlane.auth.groupPolicyJson }}
+            - { name: SPENDGUARD_CONTROL_PLANE_GROUP_POLICY_JSON, value: {{ .Values.controlPlane.auth.groupPolicyJson | quote }} }
+            {{- end }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - { name: SPENDGUARD_CONTROL_PLANE_SIGNING_MODE, value: {{ .Values.signing.mode | quote }} }
+            - { name: SPENDGUARD_CONTROL_PLANE_SIGNING_PRODUCER_IDENTITY, value: "control-plane:$(POD_NAME)" }
+            {{- if eq .Values.signing.mode "local" }}
+            - { name: SPENDGUARD_CONTROL_PLANE_SIGNING_KEY_PATH, value: "/etc/spendguard/signing/control-plane.pem" }
+            {{- else if eq .Values.signing.mode "kms" }}
+            - { name: SPENDGUARD_CONTROL_PLANE_SIGNING_KMS_ARN, value: {{ .Values.signing.kms.controlPlaneArn | quote }} }
+            {{- end }}
+          volumeMounts:
+            - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+          resources:
+            {{- toYaml .Values.controlPlane.resources | nindent 12 }}
+      volumes:
+        - name: tls
+          secret:
+            secretName: {{ .Values.secrets.tls.existingSecret }}
+        - name: signing
+          secret:
+            secretName: {{ .Values.signing.existingSecret }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "spendguard.fullname" . }}-control-plane
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: http, port: 8091, targetPort: http }
+    - { name: metrics, port: 9094, targetPort: metrics }
+  selector:
+    {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+{{- end }}

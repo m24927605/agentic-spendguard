@@ -65,3 +65,12 @@ statsAggregator:
 
 outboxForwarder:
   schemaBundleHashHex: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+
+controlPlane:
+  canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
+  auditSchemaBundleHashHex: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  auth:
+    mode: jwt
+    oidcIssuer: https://issuer.example.test/
+    oidcAudience: spendguard-control-plane
+    oidcJwksUrl: https://issuer.example.test/.well-known/jwks.json
