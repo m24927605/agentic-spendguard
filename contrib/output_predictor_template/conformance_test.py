@@ -413,7 +413,7 @@ def test_tenant_id_required(stub: plugin_pb2_grpc.CustomerPredictorStub):
 
 def test_client_svid_subject_matches_tenant():
     subject = expected_svid_subject("018fcf9a-3d2d-7b37-9f21-0f27de0b20c1")
-    auth_context = {"x509_subject_alternative_name": [f"URI:{subject}".encode("utf-8")]}
+    auth_context = {b"x509_subject_alternative_name": [f"URI:{subject}".encode("utf-8")]}
     assert extract_spiffe_uri_from_auth_context(auth_context) == subject
     validate_auth_context_tenant(
         auth_context=auth_context,

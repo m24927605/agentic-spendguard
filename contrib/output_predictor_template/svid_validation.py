@@ -25,11 +25,15 @@ def _normalise_auth_value(value: bytes | str) -> str:
     return text
 
 
-def extract_spiffe_uri_from_auth_context(auth_context: dict[str, list[bytes]]) -> str | None:
+def extract_spiffe_uri_from_auth_context(auth_context: dict[str | bytes, list[bytes]]) -> str | None:
     """Extract the SpendGuard SPIFFE URI SAN from ``grpc.ServicerContext`` auth data."""
     candidates: list[str] = []
+    normalised: dict[str, list[bytes]] = {}
+    for key, values in auth_context.items():
+        key_text = key.decode("utf-8", errors="replace") if isinstance(key, bytes) else key
+        normalised.setdefault(key_text, []).extend(values)
     for key in ("x509_subject_alternative_name", "x509_common_name"):
-        for raw in auth_context.get(key, []):
+        for raw in normalised.get(key, []):
             value = _normalise_auth_value(raw)
             if value.startswith(SVID_PREFIX):
                 candidates.append(value)
