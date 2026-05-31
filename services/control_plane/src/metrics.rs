@@ -204,9 +204,7 @@ pub async fn record_metrics(
         .unwrap_or_else(|| request.uri().path().to_string());
     let route = Route::from_matched(&method, &matched);
     let response = next.run(request).await;
-    let outcome = if response.status().is_server_error()
-        || response.status().is_client_error()
-    {
+    let outcome = if response.status().is_server_error() || response.status().is_client_error() {
         Outcome::Err
     } else {
         Outcome::Ok
@@ -224,7 +222,9 @@ mod tests {
     fn counters_default_to_zero_in_render_output() {
         let m = ControlPlaneMetrics::new();
         let txt = m.render();
-        assert!(txt.contains("spendguard_control_plane_route_calls_total{route=\"create_tenant\",outcome=\"ok\"} 0"));
+        assert!(txt.contains(
+            "spendguard_control_plane_route_calls_total{route=\"create_tenant\",outcome=\"ok\"} 0"
+        ));
         assert!(txt.contains("spendguard_control_plane_route_calls_total{route=\"resolve_approval\",outcome=\"err\"} 0"));
     }
 
