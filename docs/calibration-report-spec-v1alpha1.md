@@ -401,7 +401,7 @@ Cold-start L1（無 distribution）→ ratio 顯示為 A 的 expected conservati
 | Tier 3 hit rate > 0.1% | Warning | List top 5 contributing models; suggest dispatch table PR |
 | Tier 3 hit rate > 1.0% | Critical | Same + page on-call |
 | Strategy B P95 ratio > 1.30 over 7 days | Warning | Suggest reviewing prompt class definitions or refreshing stats_aggregator baseline because actual output is exceeding predictions |
-| Strategy B P95 ratio > 1.50 over 7 days | Critical | Suggest investigating systematic agent behavior change or under-reservation |
+| Any strategy P95 ratio > 1.50 over 7 days | Critical | Suggest investigating systematic agent behavior change or under-reservation |
 | Strategy C error rate > 5% over 7 days | Warning | List customer plugin error reasons; suggest plugin maintenance |
 | Strategy C P95 > 1.05 (under-prediction) | Critical | Suggest plugin retraining (risky territory) |
 | RUN_BUDGET_PROJECTION_EXCEEDED rate > 5% of runs | Info | Suggest reviewing per-run budget caps |

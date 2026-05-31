@@ -128,7 +128,7 @@ for batch ingestion.
 
 | # | Code | Severity | Trigger |
 |---|---|---|---|
-| 1 | `P95_CRITICAL_OVER_1_50` | critical | non-A strategy P95 > 1.50 |
+| 1 | `P95_CRITICAL_OVER_1_50` | critical | any strategy P95 > 1.50 |
 | 2 | `TIER3_BURST` | warning / critical | T3 pct > 0.1% / > 1.0% |
 | 3 | `PREDICTION_DRIFT_ALERTS_PRESENT` | warning | drift_alerts > 0 in window |
 | 4 | `STRATEGY_C_UNDER_PREDICTION` | critical | C P95 > 1.05, n >= 30 |

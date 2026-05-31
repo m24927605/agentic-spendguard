@@ -45,7 +45,7 @@ use serde_json::json;
 pub fn evaluate(report: &Report) -> Vec<Recommendation> {
     let mut out = Vec::new();
 
-    // Rule 1: actual/predicted P95 > 1.50 for non-A strategies.
+    // Rule 1: actual/predicted P95 > 1.50 for any strategy.
     if let Some(rec) = rule1_p95_over_critical(report) {
         out.push(rec);
     }
@@ -99,7 +99,7 @@ fn rule1_p95_over_critical(report: &Report) -> Option<Recommendation> {
     let violators: Vec<_> = report
         .calibration_ratios
         .iter()
-        .filter(|r| r.strategy != "A" && r.p95 > crate::report::CRITICAL_P95_THRESHOLD)
+        .filter(|r| r.p95 > crate::report::CRITICAL_P95_THRESHOLD)
         .collect();
     if violators.is_empty() {
         return None;
@@ -462,12 +462,20 @@ mod tests {
     }
 
     #[test]
-    fn rule1_ignores_strategy_a() {
+    fn rule1_ignores_conservative_strategy_a() {
         // Strategy A is the ceiling; conservative actual/predicted P95 is expected.
         let mut r = base();
         r.calibration_ratios.push(ratio("gpt-4o", "A", 0.8, 100));
         let recs = evaluate(&r);
         assert!(!recs.iter().any(|x| x.code == "P95_CRITICAL_OVER_1_50"));
+    }
+
+    #[test]
+    fn rule1_fires_when_strategy_a_under_predicts() {
+        let mut r = base();
+        r.calibration_ratios.push(ratio("gpt-4o", "A", 1.6, 100));
+        let recs = evaluate(&r);
+        assert!(recs.iter().any(|x| x.code == "P95_CRITICAL_OVER_1_50"));
     }
 
     #[test]

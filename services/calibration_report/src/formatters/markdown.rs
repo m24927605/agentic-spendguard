@@ -163,19 +163,16 @@ fn format_tier_row(tier: &TierDistribution) -> String {
 }
 
 fn format_calibration_row(r: &CalibrationRatio) -> String {
-    let health = match r.strategy.as_str() {
-        "A" => "(ceiling)",
-        _ => {
-            if r.p95 > crate::report::CRITICAL_P95_THRESHOLD {
-                "⚠ critical"
-            } else if r.p95 > 1.30 {
-                "⚠ warning"
-            } else if r.p95 > 1.05 && r.strategy == "C" {
-                "⚠ under-pred"
-            } else {
-                "✓ healthy"
-            }
-        }
+    let health = if r.p95 > crate::report::CRITICAL_P95_THRESHOLD {
+        "⚠ critical"
+    } else if r.p95 > 1.30 {
+        "⚠ warning"
+    } else if r.strategy == "A" {
+        "(ceiling)"
+    } else if r.p95 > 1.05 && r.strategy == "C" {
+        "⚠ under-pred"
+    } else {
+        "✓ healthy"
     };
     format!(
         "| `{}` | `{}` | {:.2} | {:.2} | {:.2} | {} | {} |\n",
@@ -284,6 +281,26 @@ mod tests {
         assert!(out.contains("## Per-(model, strategy) calibration ratio"));
         assert!(out.contains("| Model | Strategy | P50 | P95 | P99 | Samples | Health |"));
         assert!(out.contains("| `gpt-4o` | `B` | 1.04 | 1.18 | 1.34 | 50000 | ✓ healthy |"));
+    }
+
+    #[test]
+    fn strategy_a_high_actual_over_predicted_ratio_marks_critical() {
+        let mut r = fixture();
+        r.calibration_ratios = vec![CalibrationRatio {
+            model: "gpt-4o".into(),
+            strategy: "A".into(),
+            p50: 1.1,
+            p95: 1.6,
+            p99: 2.0,
+            sample_size: 100,
+        }];
+        let out = render(&r, &opts(true, false));
+        assert!(out.contains(
+            "| `gpt-4o` | `A` | 1.10 | 1.60 | 2.00 | 100 | ⚠ critical |"
+        ));
+        assert!(!out.contains(
+            "| `gpt-4o` | `A` | 1.10 | 1.60 | 2.00 | 100 | (ceiling) |"
+        ));
     }
 
     #[test]
