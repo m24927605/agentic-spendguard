@@ -42,7 +42,7 @@ GA_04 adds a checked-in migration inventory, operator playbooks for migration an
 
 | Round | Reviewer | Outcome |
 |---|---|---|
-| R1 | codex CLI via AIT fallback | Pending |
+| R1 | codex CLI via AIT fallback | 3 Major and 1 Minor; all fixed in follow-up commits. |
 | R1 fixes | implementer | Moved write freeze before backups, enforced Postgres 16.x server version, made release bundle inventory consume the checked-in inventory, and added reproducible evidence references. |
 
 ## Staff+ Decisions
