@@ -72,6 +72,16 @@ pub async fn handle(
         .as_ref()
         .ok_or_else(|| tonic::Status::invalid_argument("schema_bundle required"))?;
 
+    // Reject ROUTE_UNSPECIFIED before touching storage. The route is part
+    // of the batch envelope and must fail closed even if the schema bundle
+    // would otherwise be unknown.
+    let route = req.route();
+    if route == Route::Unspecified {
+        return Err(tonic::Status::invalid_argument(
+            "route is unspecified; clients MUST set ENFORCEMENT or OBSERVABILITY",
+        ));
+    }
+
     // Verify schema bundle existence + hash.
     let bundle_id = parse_uuid(
         &bundle_ref.schema_bundle_id,
@@ -94,14 +104,6 @@ pub async fn handle(
             "strict_signatures=true but no trust store configured; \
              set SPENDGUARD_CANONICAL_INGEST_TRUST_STORE_DIR or flip \
              strict_signatures=false",
-        ));
-    }
-
-    // Reject ROUTE_UNSPECIFIED — fail-closed default per Stage 2 §8.2.2.
-    let route = req.route();
-    if route == Route::Unspecified {
-        return Err(tonic::Status::invalid_argument(
-            "route is unspecified; clients MUST set ENFORCEMENT or OBSERVABILITY",
         ));
     }
 
@@ -741,6 +743,111 @@ fn nonzero_f32_decimal(value: f32) -> Option<BigDecimal> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::common::v1::SchemaBundleRef;
+    use sqlx::postgres::PgPoolOptions;
+
+    fn test_config() -> Config {
+        Config {
+            bind_addr: "127.0.0.1:0".to_string(),
+            database_url: "postgres://postgres:postgres@127.0.0.1:1/postgres".to_string(),
+            db_max_connections: 1,
+            region: "test-region".to_string(),
+            ingest_shard_id: "test-shard".to_string(),
+            orphan_after_seconds: 30,
+            backpressure_threshold: 10_000,
+            strict_signatures: false,
+            trust_store_dir: None,
+            metrics_addr: String::new(),
+            tls_cert_pem: None,
+            tls_key_pem: None,
+            tls_ca_pem: None,
+        }
+    }
+
+    fn lazy_pool() -> PgPool {
+        PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/postgres")
+            .expect("lazy postgres pool")
+    }
+
+    fn minimal_event() -> CloudEvent {
+        CloudEvent {
+            id: "00000000-0000-7000-8000-000000000101".to_string(),
+            source: "spendguard://test/canonical-envelope".to_string(),
+            specversion: "1.0".to_string(),
+            r#type: "spendguard.audit.prediction_drift_alert.v1alpha1".to_string(),
+            tenant_id: "00000000-0000-7000-8000-000000000102".to_string(),
+            data: b"{}".to_vec().into(),
+            producer_sequence: 1,
+            ..Default::default()
+        }
+    }
+
+    fn schema_bundle_ref() -> SchemaBundleRef {
+        SchemaBundleRef {
+            schema_bundle_id: "00000000-0000-7000-8000-000000000103".to_string(),
+            schema_bundle_hash: b"sha256:test".to_vec().into(),
+            canonical_schema_version: "spendguard.v1alpha1".to_string(),
+        }
+    }
+
+    async fn handle_for_status(req: AppendEventsRequest) -> tonic::Status {
+        handle(
+            &lazy_pool(),
+            &test_config(),
+            None,
+            &IngestMetrics::new(),
+            req,
+        )
+        .await
+        .expect_err("request should be rejected before storage access")
+    }
+
+    #[tokio::test]
+    async fn append_events_rejects_missing_producer_id_before_storage() {
+        let status = handle_for_status(AppendEventsRequest {
+            producer_id: String::new(),
+            schema_bundle: Some(schema_bundle_ref()),
+            events: vec![minimal_event()],
+            route: Route::Observability as i32,
+            ..Default::default()
+        })
+        .await;
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("producer_id required"));
+    }
+
+    #[tokio::test]
+    async fn append_events_rejects_missing_schema_bundle_before_storage() {
+        let status = handle_for_status(AppendEventsRequest {
+            producer_id: "tokenizer-shadow".to_string(),
+            schema_bundle: None,
+            events: vec![minimal_event()],
+            route: Route::Observability as i32,
+            ..Default::default()
+        })
+        .await;
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("schema_bundle required"));
+    }
+
+    #[tokio::test]
+    async fn append_events_rejects_unspecified_route_before_storage() {
+        let status = handle_for_status(AppendEventsRequest {
+            producer_id: "tokenizer-shadow".to_string(),
+            schema_bundle: Some(schema_bundle_ref()),
+            events: vec![minimal_event()],
+            route: Route::Unspecified as i32,
+            ..Default::default()
+        })
+        .await;
+
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(status.message().contains("route is unspecified"));
+    }
 
     #[test]
     fn prediction_columns_preserve_first_run_step_zero() {
