@@ -73,8 +73,8 @@ psql_exec spendguard_ledger -c "
 SELECT
   to_regclass('public.audit_outbox') AS audit_outbox,
   to_regclass('public.tokenizer_t1_samples') AS tokenizer_t1_samples,
-  EXISTS (
-    SELECT 1 FROM information_schema.columns
+  (
+    SELECT COUNT(*) = 3 FROM information_schema.columns
     WHERE table_name='audit_outbox'
       AND column_name IN ('predicted_a_tokens', 'run_projection_at_decision_atomic', 'prediction_strategy_used')
   ) AS has_prediction_columns;
@@ -85,8 +85,8 @@ psql_exec spendguard_canonical -c "
 SELECT
   to_regclass('public.canonical_events') AS canonical_events,
   to_regclass('public.canonical_event_replay_dedup') AS replay_dedup,
-  EXISTS (
-    SELECT 1 FROM information_schema.columns
+  (
+    SELECT COUNT(*) = 3 FROM information_schema.columns
     WHERE table_name='canonical_events'
       AND column_name IN ('payload_json', 'prediction_strategy_used', 'run_id_mirror')
   ) AS has_mirror_columns;
