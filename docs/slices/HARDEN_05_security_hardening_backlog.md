@@ -171,17 +171,22 @@ Reviewer should run security-focused grep checks for replay keys, raw prompt egr
 | Design | Security Engineer | PII shadow default must be opt-out by absence, not opt-in by chart profile | §8 requires production default off |
 | Design | Database Optimizer | Replay table needs bounded indexed window | §7 and §9 require it |
 | Design | Tokenizer domain expert | Quota cap must not affect Tier 2 hot path | §6 and §7 state shadow-only behavior |
+| R1 | codex CLI adversarial review `review:01KSYF6Z3Z7FWTZE7Z9TE9RE9A` | Replay ledger needed runtime grants and quarantine-path replay hash checks | Fixed in commit `b2d269a` |
+| R2 | codex CLI adversarial review `review:01KSYFSVJMXCSJXDW3GZAH2ZYS` | Quarantined event IDs needed global reservation; quota needed shared state | Fixed in commits `61a4c74` and `2115cfb` |
+| R3 | codex CLI adversarial review `review:01KSYGXR55EMNA7P9HDVGQMENW` | Existing non-released quarantine rows needed migration-time replay reservations | Fixed in commit `6010333` |
+| R4 | codex CLI adversarial review `review:01KSYHGGP0YHMTHYT5J1B5SA1V` | Tokenizer shadow runtime needed least-privilege DB credentials | Fixed in commit `61adfa3` |
+| R5 | codex CLI adversarial review `review:01KSYJ7RMQWNPQ5WN0Y3PPZXNM` | No findings | Passed; no Staff+ arbitration required |
 
 ---
 
 ## §14. Merge checklist
 
-- [ ] Replay dedup migration and tests pass
-- [ ] PII opt-in and quota tests pass
-- [ ] rustls provider installed explicitly in affected services
-- [ ] tonic gzip feature removed where unused
-- [ ] Helm demo/production templates pass
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded
+- [x] Replay dedup migration and tests pass
+- [x] PII opt-in and quota tests pass
+- [x] rustls provider installed explicitly in affected services
+- [x] tonic gzip feature removed where unused
+- [x] Helm demo/production templates pass
+- [x] AIT adversarial review passes or Staff+ arbitration is recorded
 
 ---
 
