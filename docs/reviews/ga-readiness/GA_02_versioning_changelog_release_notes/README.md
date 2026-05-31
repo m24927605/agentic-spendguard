@@ -2,7 +2,7 @@
 
 Date: 2026-05-31
 Branch: `ga/GA_02_versioning_changelog_release_notes`
-Tested implementation head: `dc86a3b199644392e5661f7ece90272ddeda9180`
+Tested implementation head: `5821f65123ec59e319a33c75e2d38d22bd311a7d`
 Evidence commit: this file is updated after gate reruns; current branch head may be the evidence-only commit that records this result.
 
 ## Commands
@@ -41,6 +41,9 @@ helm template spendguard charts/spendguard -f scripts/helm-validate-test-values.
 - N/A final-section negative gate: PASS, failed closed
 - Dash-only final-section negative gate: PASS, failed closed
 - Not-applicable final-section negative gate: PASS, failed closed
+- `Migrations=N/A` exact R4 regression: PASS, failed closed
+- `Migrations=Not applicable` exact R4 regression: PASS, failed closed
+- `Migrations=-` exact R4 regression: PASS, failed closed
 - Missing `Migrations` section negative gate: PASS, failed closed
 - Empty `Migrations` section negative gate: PASS, failed closed
 - Changelog includes predictor upgrade and HARDEN summary: PASS
