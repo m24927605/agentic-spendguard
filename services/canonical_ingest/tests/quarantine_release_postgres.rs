@@ -12,6 +12,7 @@ use spendguard_canonical_ingest::persistence::append::{
     append_event, quarantine_audit_outcome, release_quarantined_outcomes, AppendInput,
     PredictionColumns,
 };
+use spendguard_canonical_ingest::verify_chain_lib::{verify_chain, VerifyChainArgs};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use testcontainers::runners::AsyncRunner;
@@ -206,7 +207,7 @@ async fn quarantined_outcome_release_preserves_aggregator_mirrors() {
         prompt_fingerprint
     );
 
-    let decision = base_append_input(
+    let mut decision = base_append_input(
         decision_event_id,
         tenant_id,
         decision_id,
@@ -214,6 +215,13 @@ async fn quarantined_outcome_release_preserves_aggregator_mirrors() {
         "spendguard.audit.decision",
         1,
     );
+    decision.prediction.predicted_a_tokens = Some(64);
+    decision.prediction.reserved_strategy = Some("A");
+    decision.prediction.prediction_strategy_used = Some("A");
+    decision.prediction.prediction_policy_used = Some("STRICT_CEILING");
+    decision.prediction.tokenizer_tier = Some("T2");
+    decision.prediction.run_projection_at_decision_atomic = Some(bigdecimal::BigDecimal::from(64));
+    decision.prediction.run_steps_completed_so_far = Some(0);
     append_event(&fx.pool, decision)
         .await
         .expect("append decision");
@@ -251,4 +259,18 @@ async fn quarantined_outcome_release_preserves_aggregator_mirrors() {
         prompt_fingerprint
     );
     assert_eq!(row.get::<i64, _>("actual_output_tokens"), 29);
+
+    let summary = verify_chain(
+        &fx.pool,
+        &VerifyChainArgs {
+            tenant_id: Some(tenant_id),
+            check_prediction_mirror: true,
+            from: None,
+            to: None,
+        },
+    )
+    .await
+    .expect("verify chain summary");
+    assert_eq!(summary.rows_scanned, 2);
+    assert_eq!(summary.rows_skipped_legacy, 0);
 }

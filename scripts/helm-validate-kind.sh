@@ -7,12 +7,13 @@
 # (cert-manager rotation, KMS-backed signing) and is the next layer up.
 #
 # What this script proves:
-#   * helm install --set chart.profile=demo brings up postgres + the 6
-#     service pods + 1 migration Job
+#   * helm install --set chart.profile=demo brings up postgres + the 10
+#     default-enabled chart workloads + 1 migration Job
 #   * Required Secrets (TLS, bundles, webhook HMAC, signing keys,
 #     manifest verify key, trust root, mTLS bootstrap) have the right
 #     keys when generated from the demo PKI / bundle scripts
-#   * 6 pods reach Ready within the wait deadline
+#   * all default-enabled chart workloads are rendered and reach a valid
+#     lifecycle phase; with BUILD_IMAGES=1 they all reach Ready
 #   * /healthz on ledger + canonical-ingest + webhook-receiver responds
 #
 # What it does NOT prove:
@@ -39,6 +40,34 @@ KUBECTL_CTX="kind-${CLUSTER_NAME}"
 
 log() { echo "[helm-validate-kind] $*" >&2; }
 trap 'log "tempdir: ${WORK_DIR}"' EXIT
+
+contains_item() {
+    local needle="$1"
+    shift
+    local item
+    for item in "$@"; do
+        [ "$item" = "$needle" ] && return 0
+    done
+    return 1
+}
+
+CHART_WORKLOADS=(
+    sidecar
+    canonical-ingest
+    ledger
+    outbox-forwarder
+    output-predictor
+    run-cost-projector
+    stats-aggregator
+    tokenizer
+    ttl-sweeper
+    webhook-receiver
+)
+EXPECTED_PODS=()
+for svc in "${CHART_WORKLOADS[@]}"; do
+    EXPECTED_PODS+=("spendguard-spendguard-${svc}")
+done
+EXPECTED_COUNT="${#EXPECTED_PODS[@]}"
 
 # Pick an openssl with Ed25519 support. macOS ships LibreSSL by default
 # (no ed25519). brew openssl@3 + Ubuntu's openssl both support it.
@@ -99,10 +128,12 @@ TRUST_SPKI_SHA256=$(openssl x509 -in "${PKI}/ca.crt" -outform DER \
     | openssl dgst -sha256 -binary \
     | xxd -p -c 256)
 
-# Per-service workload certs (chart's TLS Secret expects these dashed
-# service names per charts/spendguard/README.md).
-SERVICES=(ledger canonical-ingest sidecar webhook-receiver outbox-forwarder ttl-sweeper)
-for svc in "${SERVICES[@]}"; do
+# Per-service workload certs (chart's shared TLS Secret expects these
+# dashed service names per charts/spendguard/README.md). Predictor
+# services default to plaintext/UDS in demo profile and do not mount
+# this shared TLS Secret unless mTLS is explicitly enabled.
+MTLS_SERVICES=(ledger canonical-ingest sidecar webhook-receiver outbox-forwarder ttl-sweeper)
+for svc in "${MTLS_SERVICES[@]}"; do
     openssl genrsa -out "${PKI}/${svc}.key" 2048 2>/dev/null
     openssl req -new -key "${PKI}/${svc}.key" \
         -out "${PKI}/${svc}.csr" \
@@ -392,9 +423,10 @@ if [ "${BUILD_IMAGES:-0}" = "1" ]; then
         cd "${REPO_ROOT}/deploy/demo"
         docker compose -f compose.yaml build \
             ledger canonical-ingest sidecar webhook-receiver \
-            outbox-forwarder ttl-sweeper
+            outbox-forwarder ttl-sweeper tokenizer output-predictor \
+            run-cost-projector stats-aggregator
     )
-    for svc in ledger canonical-ingest sidecar webhook-receiver outbox-forwarder ttl-sweeper; do
+    for svc in "${CHART_WORKLOADS[@]}"; do
         # docker compose tags images as spendguard-demo-<svc>:latest.
         # The chart's values.yaml expects spendguard/<svc>:0.1.0-alpha.1.
         docker tag "spendguard-demo-${svc}:latest" "spendguard/${svc}:0.1.0-alpha.1"
@@ -430,6 +462,38 @@ signing:
   strictVerification: false
 EOF
 
+log "validating rendered workload inventory..."
+RENDERED_WORKLOADS=()
+while IFS= read -r rendered_workload; do
+    [ -z "$rendered_workload" ] || RENDERED_WORKLOADS+=("$rendered_workload")
+done < <(
+    helm template spendguard "${REPO_ROOT}/charts/spendguard" \
+        --namespace "${NAMESPACE}" \
+        -f "${WORK_DIR}/values.yaml" \
+    | awk '/^kind: (Deployment|DaemonSet)$/ {kind=$2; want=1; next}
+           want && /^metadata:/ {meta=1; next}
+           want && meta && /^  name:/ {print $2; want=0; meta=0}'
+)
+UNEXPECTED_RENDERED=()
+for rendered in "${RENDERED_WORKLOADS[@]}"; do
+    if ! contains_item "$rendered" "${EXPECTED_PODS[@]}"; then
+        UNEXPECTED_RENDERED+=("$rendered")
+    fi
+done
+MISSING_RENDERED=()
+for prefix in "${EXPECTED_PODS[@]}"; do
+    if ! contains_item "$prefix" "${RENDERED_WORKLOADS[@]}"; then
+        MISSING_RENDERED+=("$prefix")
+    fi
+done
+if [ "${#MISSING_RENDERED[@]}" -gt 0 ] || [ "${#UNEXPECTED_RENDERED[@]}" -gt 0 ]; then
+    log "FAIL: rendered workload inventory drifted from script expectations"
+    [ "${#MISSING_RENDERED[@]}" -eq 0 ] || log "  missing expected: ${MISSING_RENDERED[*]}"
+    [ "${#UNEXPECTED_RENDERED[@]}" -eq 0 ] || log "  unexpected rendered: ${UNEXPECTED_RENDERED[*]}"
+    exit 1
+fi
+log "  rendered ${#RENDERED_WORKLOADS[@]}/${EXPECTED_COUNT} expected chart workloads"
+
 helm --kube-context "${KUBECTL_CTX}" upgrade --install spendguard "${REPO_ROOT}/charts/spendguard" \
     --namespace "${NAMESPACE}" \
     -f "${WORK_DIR}/values.yaml" \
@@ -449,24 +513,23 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" get events --sort-by='.last
 # ---------------------------------------------------------------------
 # 8. Pass criteria:
 #    * postgres pod Ready (cluster + pre-deploy works)
-#    * helm install succeeded — all 6 chart Deployments + 1 DaemonSet
+#    * helm install succeeded — all default-enabled Deployments/DaemonSets
 #      created (chart render + secret refs + value validation OK)
 #    * each chart pod reached at least Pending → ContainerCreating →
 #      Running or ImagePullBackOff (NOT stuck on InvalidImageName /
 #      MountVolume.SetUp.failed / CreateContainerConfigError — those
 #      indicate chart bugs, not registry gaps)
 #
-#    Full Ready=8/8 requires the chart's service images published or
+#    Full Ready requires the chart's service images published or
 #    loaded into kind. Set BUILD_IMAGES=1 to do that locally:
 #      BUILD_IMAGES=1 bash scripts/helm-validate-kind.sh
 # ---------------------------------------------------------------------
 log "validating chart-applied state..."
-EXPECTED_PODS="spendguard-spendguard-ledger spendguard-spendguard-canonical-ingest spendguard-spendguard-sidecar spendguard-spendguard-webhook-receiver spendguard-spendguard-outbox-forwarder spendguard-spendguard-ttl-sweeper"
 MISSING=()
 PHASE_OK=0
 PHASE_FAIL=0
 READY=0
-for prefix in $EXPECTED_PODS; do
+for prefix in "${EXPECTED_PODS[@]}"; do
     pod=$(kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" get pods \
         -o name 2>/dev/null | grep "/${prefix}-" | head -1)
     if [ -z "$pod" ]; then
@@ -499,17 +562,17 @@ for prefix in $EXPECTED_PODS; do
 done
 
 # Issue #61 slice 5: when BUILD_IMAGES=1 (images available), enforce
-# Ready=6/6 strictly. Without BUILD_IMAGES, ImagePullBackOff is OK
+# Ready strictly. Without BUILD_IMAGES, ImagePullBackOff is OK
 # (structural validation only). CI's kind job uses ghcr.io images +
-# overrides values.yaml's image refs, so it should also reach Ready=6/6.
+# overrides values.yaml's image refs, so it should also reach Ready.
 STRICT_READY="${STRICT_READY:-$([ "${BUILD_IMAGES:-0}" = "1" ] && echo "1" || echo "0")}"
 if [ "$STRICT_READY" = "1" ]; then
-    log "STRICT_READY=1: requiring Ready=6/6 (BUILD_IMAGES=1 or CI with published images)"
-    if [ "$READY" -ne 6 ]; then
-        log "FAIL: STRICT_READY=1 expected Ready=6/6 chart pods, got Ready=${READY}/6"
+    log "STRICT_READY=1: requiring Ready=${EXPECTED_COUNT}/${EXPECTED_COUNT} (BUILD_IMAGES=1 or CI with published images)"
+    if [ "$READY" -ne "$EXPECTED_COUNT" ]; then
+        log "FAIL: STRICT_READY=1 expected Ready=${EXPECTED_COUNT}/${EXPECTED_COUNT} chart pods, got Ready=${READY}/${EXPECTED_COUNT}"
         exit 1
     fi
-    log "  ✓ all 6 chart pods reached Ready"
+    log "  all ${EXPECTED_COUNT} chart pods reached Ready"
 fi
 
 if [ ${#MISSING[@]} -gt 0 ]; then
@@ -525,7 +588,7 @@ log ""
 log "PASS — chart-level validation:"
 log "  * kind cluster + namespace + 7 Secrets created"
 log "  * Postgres deployed + Ready + spendguard_canonical DB created"
-log "  * helm install succeeded; ${PHASE_OK}/6 chart pods reached expected lifecycle phase"
+log "  * helm install succeeded; ${PHASE_OK}/${EXPECTED_COUNT} chart pods reached expected lifecycle phase"
 log ""
 log "Pods may show ImagePullBackOff if the chart's image references"
 log "(spendguard/*:0.1.0-alpha.1) are not pushed to a registry. That is"
