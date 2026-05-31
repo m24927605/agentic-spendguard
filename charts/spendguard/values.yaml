@@ -87,6 +87,7 @@ postgres:
   # and control_plane_audit_outbox. Keep it as a distinct logical DB URL
   # even when co-located on the same Postgres server.
   controlPlaneUrlKey: control-plane-url
+  tokenizerShadowUrlKey: tokenizer-shadow-url
   tokenizerUrlKey: tokenizer-url
   outputPredictorUrlKey: output-predictor-url
   outputPredictorPluginEndpointUrlKey: output-predictor-plugin-endpoint-url
@@ -281,10 +282,14 @@ tokenizer:
   # so the shadow worker can use its documented drop-only fallback;
   # production renders the env var regardless when shadowEnabled=true.
   databaseSecretEnabled: false
-  # Control-plane Postgres URL for tokenizer_sampling_rate_overrides is
-  # read from postgres.existingSecret / controlPlaneUrlKey. The shadow
-  # worker refreshes the current tenant/model under RLS before rate
-  # gating, so persisted operator overrides actually affect sampling.
+  # Control-plane Postgres URL for tokenizer_sampling_rate_overrides and
+  # tokenizer_shadow_security_settings and tokenizer_count_tokens_quota_usage
+  # are read from postgres.existingSecret / tokenizerShadowUrlKey. That URL
+  # must use tokenizer_shadow_runtime_role: read-only for settings/overrides,
+  # write-only for quota claims. The worker refreshes the current tenant and
+  # claims provider quota under RLS before rate gating/provider egress, so
+  # persisted operator overrides, PII opt-in, and count_tokens quotas actually
+  # affect sampling across replicas without control-plane writer credentials.
   samplingOverrideDatabaseSecretEnabled: false
   # Optional Secret holding Anthropic + Gemini Tier 1 count_tokens
   # API keys. Expected keys inside the Secret:

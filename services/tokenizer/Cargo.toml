@@ -32,7 +32,7 @@ rustls = "0.23"
 
 # gRPC + protobuf (server side only — tokenizer is a leaf service
 # with no outbound RPCs in SLICE_03).
-tonic = { version = "0.12", features = ["tls", "transport", "gzip"] }
+tonic = { version = "0.12", features = ["tls", "transport"] }
 prost = "0.13"
 prost-types = "0.13"
 
@@ -126,6 +126,8 @@ tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
 # spins up a tokio HTTP server per test fixture, so the Anthropic /
 # Gemini clients can be unit-tested without provider credentials.
 wiremock = "0.6"
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = ["postgres"] }
 
 [features]
 default = []

@@ -47,7 +47,7 @@ clap = { version = "4", features = ["derive", "env"] }
 
 # Self-audit CloudEvent emission to canonical_ingest. Phase C wires the
 # AppendEvents call; Phase A scaffolds the dependency.
-tonic = { version = "0.12", features = ["tls", "transport", "gzip"] }
+tonic = { version = "0.12", features = ["tls", "transport"] }
 prost = "0.13"
 prost-types = "0.13"
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }

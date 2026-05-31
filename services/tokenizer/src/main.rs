@@ -46,6 +46,10 @@ use spendguard_tokenizer_service::{
         persistence::SqlSamplePersister,
         provider_clients::{anthropic::AnthropicClient, gemini::GeminiClient},
         sample_rate_state::{SampleRateConfig, SampleRateState, ShadowKey},
+        security::{
+            LocalCountTokensQuota, PgCountTokensQuota, PgShadowSecurityStore,
+            StaticShadowSecurityStore,
+        },
         sink::{CanonicalIngestDriftAlertSink, SinkMTlsConfig},
         worker::{
             spawn_drop_handle, spawn_shadow_worker, DriftAlertSink, ProviderRoster,
@@ -249,6 +253,8 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
         ..SampleRateConfig::default()
     });
     let sample_rate_overrides = build_sampling_override_store(cfg).await?;
+    let security = build_shadow_security_store(cfg).await?;
+    let count_tokens_quota = build_count_tokens_quota(cfg).await?;
     let circuit_breaker = CircuitBreakerState::new(CircuitBreakerConfig::default());
 
     let deps = ShadowWorkerDeps {
@@ -258,6 +264,8 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
         persister,
         alert_sink,
         sample_rate_overrides,
+        security,
+        count_tokens_quota,
         signer,
         event_source,
         channel_capacity: 1024,
@@ -265,6 +273,39 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
     let handle = spawn_shadow_worker(deps);
     info!("shadow worker spawned (real provider clients + SQL persister + canonical_ingest sink)");
     Ok(handle)
+}
+
+async fn build_shadow_security_store(
+    cfg: &Config,
+) -> Result<Arc<dyn spendguard_tokenizer_service::shadow::security::ShadowSecurityStore>> {
+    if cfg.sampling_override_database_url.is_empty() {
+        warn!(
+            "tokenizer control-plane DB URL unset; raw-text shadow provider calls are default-denied"
+        );
+        return Ok(Arc::new(StaticShadowSecurityStore::deny_all()));
+    }
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&cfg.sampling_override_database_url)
+        .await
+        .context("connect tokenizer shadow security control_plane DB")?;
+    info!("tokenizer shadow security DB connected");
+    Ok(Arc::new(PgShadowSecurityStore::new(pool)))
+}
+
+async fn build_count_tokens_quota(
+    cfg: &Config,
+) -> Result<Arc<dyn spendguard_tokenizer_service::shadow::security::CountTokensQuota>> {
+    if cfg.sampling_override_database_url.is_empty() {
+        return Ok(Arc::new(LocalCountTokensQuota::default()));
+    }
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&cfg.sampling_override_database_url)
+        .await
+        .context("connect tokenizer count_tokens quota control_plane DB")?;
+    info!("tokenizer count_tokens quota DB connected");
+    Ok(Arc::new(PgCountTokensQuota::new(pool)))
 }
 
 async fn build_sampling_override_store(

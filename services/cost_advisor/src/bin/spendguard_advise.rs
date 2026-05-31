@@ -19,8 +19,8 @@
 use anyhow::{Context, Result};
 use chrono::NaiveDate;
 use clap::Parser;
-use sqlx::postgres::PgPoolOptions;
 use spendguard_cost_advisor::runtime;
+use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 #[derive(Parser, Debug)]
@@ -82,6 +82,10 @@ struct Cli {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .map_err(|_| anyhow::anyhow!("failed to install rustls aws_lc_rs default provider"))?;
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -91,9 +95,7 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
-    let bucket_date = cli
-        .date
-        .unwrap_or_else(|| chrono::Utc::now().date_naive());
+    let bucket_date = cli.date.unwrap_or_else(|| chrono::Utc::now().date_naive());
 
     let ledger = PgPoolOptions::new()
         .max_connections(2)

@@ -73,8 +73,8 @@
 {{- if not .Values.postgres.tokenizerUrlKey -}}
 {{- fail "postgres.tokenizerUrlKey is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B1 + M12: tokenizer_t1_samples persistence required for drift attribution)" -}}
 {{- end -}}
-{{- if not .Values.postgres.controlPlaneUrlKey -}}
-{{- fail "postgres.controlPlaneUrlKey is required under chart.profile=production when tokenizer.shadowEnabled=true (HARDEN_03 #137: tokenizer sampling overrides must be read from control_plane under tenant RLS)" -}}
+{{- if not .Values.postgres.tokenizerShadowUrlKey -}}
+{{- fail "postgres.tokenizerShadowUrlKey is required under chart.profile=production when tokenizer.shadowEnabled=true (HARDEN_05: tokenizer shadow runtime must use least-privilege DB credentials for sampling overrides, PII opt-in reads, and quota claims)" -}}
 {{- end -}}
 {{- if not .Values.tokenizer.sinkMtlsSecretName -}}
 {{- fail "tokenizer.sinkMtlsSecretName is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B4 + M12: plaintext canonical_ingest sink is forbidden — drift_alert CloudEvents carry signed audit-chain bytes)" -}}
@@ -177,11 +177,14 @@ spec:
               {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.tokenizerUrlKey) | nindent 14 }}
             {{- end }}
             {{- if or (eq .Values.chart.profile "production") .Values.tokenizer.samplingOverrideDatabaseSecretEnabled }}
-            # Control-plane DB read path for durable per-(tenant, model)
-            # sample-rate overrides. The worker sets app.current_tenant_id
-            # per event, so RLS remains the isolation boundary.
+            # Least-privilege control-plane DB path for durable per-(tenant, model)
+            # sample-rate overrides plus HARDEN_05 per-tenant PII opt-in
+            # and shared count_tokens quota claims. The worker sets
+            # app.current_tenant_id per event, so RLS remains the isolation
+            # boundary across tokenizer replicas. This Secret key must map
+            # to tokenizer_shadow_runtime_role, not the control-plane writer.
             - name: SPENDGUARD_TOKENIZER_SAMPLING_OVERRIDE_DATABASE_URL
-              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.controlPlaneUrlKey) | nindent 14 }}
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.tokenizerShadowUrlKey) | nindent 14 }}
             {{- end }}
             {{- if .Values.tokenizer.providerSecretName }}
             # Provider API keys for Anthropic / Gemini Tier 1

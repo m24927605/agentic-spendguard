@@ -51,7 +51,7 @@ num-bigint = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream"] }
 
 # Slice 4a: sidecar UDS gRPC client (mirrors services/ttl_sweeper)
-tonic = { version = "0.12", features = ["transport", "gzip"] }
+tonic = { version = "0.12", features = ["transport"] }
 prost = "0.13"
 prost-types = "0.13"
 hyper-util = { version = "0.1", features = ["tokio"] }

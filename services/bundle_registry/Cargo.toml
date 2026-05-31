@@ -10,6 +10,8 @@ name = "spendguard-bundle-registry"
 path = "src/main.rs"
 
 [dependencies]
+# Direct rustls dep so main() can install aws_lc_rs before sqlx TLS use.
+rustls = "0.23"
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", features = [
     "runtime-tokio",

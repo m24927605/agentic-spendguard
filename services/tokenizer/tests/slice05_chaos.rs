@@ -21,6 +21,7 @@ use spendguard_tokenizer_service::shadow::{
     circuit_breaker::{CircuitBreakerConfig, CircuitBreakerState},
     provider_clients::anthropic::AnthropicClient,
     sample_rate_state::{SampleRateConfig, SampleRateState, ShadowKey},
+    security::{LocalCountTokensQuota, StaticShadowSecurityStore},
     worker::{
         process_one, DriftAlertSink, InMemoryDriftAlertSink, InMemorySamplePersister,
         ProviderRoster, SamplePersister, ShadowEvent, ShadowOutcome, ShadowWorkerDeps,
@@ -43,6 +44,8 @@ fn deps_with(
         persister,
         alert_sink,
         sample_rate_overrides: None,
+        security: Arc::new(StaticShadowSecurityStore::allow_all_for_tests(1_000)),
+        count_tokens_quota: Arc::new(LocalCountTokensQuota::default()),
         signer: Arc::new(DisabledSigner::for_test("tokenizer-chaos:test".into())),
         event_source: "spendguard://tokenizer-service/chaos".into(),
         channel_capacity: 16,
