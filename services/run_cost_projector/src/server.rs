@@ -202,158 +202,163 @@ impl RunCostProjector for RunCostProjectorSvc {
             }
         };
 
-        {
-            let mut st = state_arc.lock();
-            if let Some(response) = st.cached_project_response(&req.decision_id) {
-                info!(
+        loop {
+            // ── Acquire per-run mutex; snapshot inputs we need under the lock.
+            let (
+                cumulative_cost_atomic,
+                steps_completed,
+                last_predicted_remaining_cost,
+                drift_consecutive_count,
+                hint_latched,
+            );
+            {
+                let mut st = state_arc.lock();
+                if let Some(response) = st.cached_project_response(&req.decision_id) {
+                    info!(
+                        tenant_id = %tenant_id,
+                        run_id = %run_id,
+                        decision_id = %req.decision_id,
+                        "Project RPC idempotent replay"
+                    );
+                    return Ok(Response::new(response));
+                }
+                cumulative_cost_atomic = st.cumulative_cost_atomic;
+                steps_completed = st.steps_completed;
+                last_predicted_remaining_cost = st.last_predicted_remaining_cost;
+                drift_consecutive_count = st.drift_consecutive_count;
+                hint_latched = st.signal3_hint_planned_steps;
+            }
+
+            // ── Resolve effective hint: prefer latched value over fresh request.
+            //
+            // Spec §5.2 implies the hint stays stable across the run; we latch
+            // on first non-zero observation. Subsequent calls that send a
+            // different hint are ignored (a defense-in-depth against
+            // client-side mutation racing between concurrent runs).
+            let effective_hint = match hint_latched {
+                Some(h) => h,
+                None if req.planned_steps_hint > 0 => req.planned_steps_hint,
+                None => 0,
+            };
+
+            // ── Signal 1: historical P95 or cold-start.
+            let (s1_predicted_steps, s1_is_cold) = signal_1_predicted_remaining_steps(
+                self.pool.as_ref(),
+                tenant_id,
+                &req.agent_id,
+                steps_completed,
+                self.cfg.cold_start_run_length,
+            )
+            .await
+            .unwrap_or_else(|e| {
+                // Per spec §10: stats_aggregator cache unreachable → fall to cold-start.
+                warn!(
                     tenant_id = %tenant_id,
                     run_id = %run_id,
-                    decision_id = %req.decision_id,
-                    "Project RPC idempotent replay"
+                    err = %e,
+                    "Signal 1 query failed; using cold-start default"
                 );
-                return Ok(Response::new(response));
+                (self.cfg.cold_start_run_length, true)
+            });
+
+            // ── Layering compute (pure).
+            let inputs = LayeringInputs {
+                cumulative_cost_atomic,
+                this_call_reservation_atomic: req.this_call_reservation_atomic,
+                steps_completed,
+                budget_remaining_atomic: req.budget_remaining_atomic,
+                signal1_predicted_remaining_steps: s1_predicted_steps,
+                signal1_is_cold_start: s1_is_cold,
+                planned_steps_hint: effective_hint,
+                drift_confirmed: false, // filled below after Signal 2.
+                per_step_baseline_atomic: req.this_call_reservation_atomic,
+            };
+
+            // ── Signal 2 drift on the would-be predicted_remaining_cost.
+            let provisional = compute_layering(&inputs);
+            let (drift_verdict, new_drift_count) = evaluate_drift(
+                provisional.predicted_remaining_cost_atomic,
+                last_predicted_remaining_cost,
+                drift_consecutive_count,
+                self.cfg.drift_ratio_threshold,
+                self.cfg.drift_consecutive_threshold,
+            );
+            let drift_confirmed = matches!(drift_verdict, DriftVerdict::Confirmed);
+
+            // ── Re-run layering with drift verdict + finalize.
+            let final_inputs = LayeringInputs {
+                drift_confirmed,
+                ..inputs
+            };
+            let result = compute_layering(&final_inputs);
+
+            // Confidence shape: higher when historical S1 is in play, lower
+            // on cold-start. Not signed into audit chain.
+            let projection_confidence = if s1_is_cold { 0.5_f32 } else { 0.9_f32 };
+
+            let response = ProjectResponse {
+                run_projection_at_decision_atomic: result.projection_atomic,
+                run_predicted_remaining_steps: result.predicted_remaining_steps,
+                run_steps_completed_so_far: result.steps_completed_so_far,
+                strategy_used: result.strategy_used as i32,
+                emitted_code: result
+                    .emitted_code
+                    .map(|c| c.as_str().to_string())
+                    .unwrap_or_default(),
+                considered_codes: result
+                    .considered_codes
+                    .iter()
+                    .map(|c| c.as_str().to_string())
+                    .collect(),
+                projection_confidence,
+            };
+
+            // ── Update RunState atomically before returning. If another
+            // distinct Project mutated this run while Signal 1 was awaited,
+            // recompute against the fresh state instead of returning an
+            // undercounted projection.
+            {
+                let mut st = state_arc.lock();
+                if let Some(cached) = st.cached_project_response(&req.decision_id) {
+                    info!(
+                        tenant_id = %tenant_id,
+                        run_id = %run_id,
+                        decision_id = %req.decision_id,
+                        "Project RPC idempotent replay after concurrent compute"
+                    );
+                    return Ok(Response::new(cached));
+                }
+                if st.cumulative_cost_atomic != cumulative_cost_atomic
+                    || st.steps_completed != steps_completed
+                    || st.last_predicted_remaining_cost != last_predicted_remaining_cost
+                    || st.drift_consecutive_count != drift_consecutive_count
+                    || st.signal3_hint_planned_steps != hint_latched
+                {
+                    continue;
+                }
+                st.record_step(req.this_call_reservation_atomic);
+                st.last_predicted_remaining_cost = Some(result.predicted_remaining_cost_atomic);
+                st.drift_consecutive_count = new_drift_count;
+                if st.signal3_hint_planned_steps.is_none() && effective_hint > 0 {
+                    st.signal3_hint_planned_steps = Some(effective_hint);
+                }
+                st.record_project_response(req.decision_id.clone(), response.clone());
             }
-        }
 
-        // ── Acquire per-run mutex; snapshot inputs we need under the lock.
-        let (
-            cumulative_cost_atomic,
-            steps_completed,
-            last_predicted_remaining_cost,
-            drift_consecutive_count,
-            hint_latched,
-        );
-        {
-            let st = state_arc.lock();
-            cumulative_cost_atomic = st.cumulative_cost_atomic;
-            steps_completed = st.steps_completed;
-            last_predicted_remaining_cost = st.last_predicted_remaining_cost;
-            drift_consecutive_count = st.drift_consecutive_count;
-            hint_latched = st.signal3_hint_planned_steps;
-        }
-
-        // ── Resolve effective hint: prefer latched value over fresh request.
-        //
-        // Spec §5.2 implies the hint stays stable across the run; we latch
-        // on first non-zero observation. Subsequent calls that send a
-        // different hint are ignored (a defense-in-depth against
-        // client-side mutation racing between concurrent runs).
-        let effective_hint = match hint_latched {
-            Some(h) => h,
-            None if req.planned_steps_hint > 0 => req.planned_steps_hint,
-            None => 0,
-        };
-
-        // ── Signal 1: historical P95 or cold-start.
-        let (s1_predicted_steps, s1_is_cold) = signal_1_predicted_remaining_steps(
-            self.pool.as_ref(),
-            tenant_id,
-            &req.agent_id,
-            steps_completed,
-            self.cfg.cold_start_run_length,
-        )
-        .await
-        .unwrap_or_else(|e| {
-            // Per spec §10: stats_aggregator cache unreachable → fall to cold-start.
-            warn!(
+            info!(
                 tenant_id = %tenant_id,
                 run_id = %run_id,
-                err = %e,
-                "Signal 1 query failed; using cold-start default"
+                projection = response.run_projection_at_decision_atomic,
+                predicted_remaining_steps = response.run_predicted_remaining_steps,
+                steps_completed_so_far = response.run_steps_completed_so_far,
+                strategy_used = ?StrategyUsed::try_from(response.strategy_used),
+                emitted_code = %response.emitted_code,
+                drift_consecutive_count = new_drift_count,
+                "Project RPC completed"
             );
-            (self.cfg.cold_start_run_length, true)
-        });
 
-        // ── Layering compute (pure).
-        let inputs = LayeringInputs {
-            cumulative_cost_atomic,
-            this_call_reservation_atomic: req.this_call_reservation_atomic,
-            steps_completed,
-            budget_remaining_atomic: req.budget_remaining_atomic,
-            signal1_predicted_remaining_steps: s1_predicted_steps,
-            signal1_is_cold_start: s1_is_cold,
-            planned_steps_hint: effective_hint,
-            drift_confirmed: false, // filled below after Signal 2.
-            per_step_baseline_atomic: req.this_call_reservation_atomic,
-        };
-
-        // ── Signal 2 drift on the would-be predicted_remaining_cost.
-        let provisional = compute_layering(&inputs);
-        let (drift_verdict, new_drift_count) = evaluate_drift(
-            provisional.predicted_remaining_cost_atomic,
-            last_predicted_remaining_cost,
-            drift_consecutive_count,
-            self.cfg.drift_ratio_threshold,
-            self.cfg.drift_consecutive_threshold,
-        );
-        let drift_confirmed = matches!(drift_verdict, DriftVerdict::Confirmed);
-
-        // ── Re-run layering with drift verdict + finalize.
-        let final_inputs = LayeringInputs {
-            drift_confirmed,
-            ..inputs
-        };
-        let result = compute_layering(&final_inputs);
-
-        // Confidence shape: higher when historical S1 is in play, lower
-        // on cold-start. Not signed into audit chain.
-        let projection_confidence = if s1_is_cold { 0.5_f32 } else { 0.9_f32 };
-
-        let response = ProjectResponse {
-            run_projection_at_decision_atomic: result.projection_atomic,
-            run_predicted_remaining_steps: result.predicted_remaining_steps,
-            run_steps_completed_so_far: result.steps_completed_so_far,
-            strategy_used: result.strategy_used as i32,
-            emitted_code: result
-                .emitted_code
-                .map(|c| c.as_str().to_string())
-                .unwrap_or_default(),
-            considered_codes: result
-                .considered_codes
-                .iter()
-                .map(|c| c.as_str().to_string())
-                .collect(),
-            projection_confidence,
-        };
-
-        // ── Update RunState atomically before returning. Record THIS
-        // call's reservation as the most-recent step (steps_completed +=
-        // 1 happens inside record_step). Re-check the decision cache under
-        // the same lock so concurrent duplicate Project RPCs do not both
-        // advance the mutable RunState.
-        {
-            let mut st = state_arc.lock();
-            if let Some(cached) = st.cached_project_response(&req.decision_id) {
-                info!(
-                    tenant_id = %tenant_id,
-                    run_id = %run_id,
-                    decision_id = %req.decision_id,
-                    "Project RPC idempotent replay after concurrent compute"
-                );
-                return Ok(Response::new(cached));
-            }
-            st.record_step(req.this_call_reservation_atomic);
-            st.last_predicted_remaining_cost = Some(result.predicted_remaining_cost_atomic);
-            st.drift_consecutive_count = new_drift_count;
-            if st.signal3_hint_planned_steps.is_none() && effective_hint > 0 {
-                st.signal3_hint_planned_steps = Some(effective_hint);
-            }
-            st.record_project_response(req.decision_id.clone(), response.clone());
+            return Ok(Response::new(response));
         }
-
-        info!(
-            tenant_id = %tenant_id,
-            run_id = %run_id,
-            projection = response.run_projection_at_decision_atomic,
-            predicted_remaining_steps = response.run_predicted_remaining_steps,
-            steps_completed_so_far = response.run_steps_completed_so_far,
-            strategy_used = ?StrategyUsed::try_from(response.strategy_used),
-            emitted_code = %response.emitted_code,
-            drift_consecutive_count = new_drift_count,
-            "Project RPC completed"
-        );
-
-        Ok(Response::new(response))
     }
 
     async fn terminate_run(
@@ -534,6 +539,34 @@ mod tests {
             .expect("next ok")
             .into_inner();
         assert_eq!(r3.run_steps_completed_so_far, 1);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_distinct_projects_see_serialized_steps() {
+        let svc = std::sync::Arc::new(RunCostProjectorSvc::new(test_cfg(), None));
+        let tenant = Uuid::new_v4();
+        let run = Uuid::new_v4();
+
+        let mut handles = Vec::new();
+        for idx in 0..16 {
+            let svc = svc.clone();
+            handles.push(tokio::spawn(async move {
+                let mut req = mk_req(tenant, run, 100, 1_000_000_000, 0);
+                req.decision_id = format!("concurrent-{idx}");
+                svc.project(Request::new(req))
+                    .await
+                    .expect("project ok")
+                    .into_inner()
+                    .run_steps_completed_so_far
+            }));
+        }
+
+        let mut steps = Vec::new();
+        for handle in handles {
+            steps.push(handle.await.expect("join"));
+        }
+        steps.sort_unstable();
+        assert_eq!(steps, (0..16).collect::<Vec<_>>());
     }
 
     #[tokio::test]

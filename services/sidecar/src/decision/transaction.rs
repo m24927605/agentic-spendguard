@@ -331,8 +331,7 @@ async fn call_projector_safe(
     // doesn't see a wraparound.
     let this_call_atomic: i64 = i64::try_from(total).unwrap_or(i64::MAX);
 
-    let budget_remaining =
-        projector_budget_remaining_atomic(req, state.inner.allow_untrusted_budget_metadata);
+    let budget_remaining = projector_budget_remaining_atomic(state, ctx, req, claims).await;
     // Signal 3 hint: passed through from DecisionRequest.planned_steps_hint
     // (SLICE_09 additive proto field; SLICE_12 SDK with_run_plan decorator
     // populates it).
@@ -376,14 +375,23 @@ fn projector_decision_id_from_idempotency_key(adapter_idempotency_key: &str) -> 
 /// only accepted budget snapshot is an explicit adapter metadata field.
 /// Missing, malformed, or negative snapshots remain non-triggering so the
 /// projector never invents a false `RUN_BUDGET_PROJECTION_EXCEEDED`.
-fn projector_budget_remaining_atomic(
+async fn projector_budget_remaining_atomic(
+    state: &SidecarState,
+    ctx: &DecisionContext,
     req: &DecisionRequest,
-    allow_untrusted_budget_metadata: bool,
+    claims: &[BudgetClaim],
 ) -> i64 {
-    if !allow_untrusted_budget_metadata {
-        return i64::MAX;
+    if state.inner.allow_untrusted_budget_metadata {
+        return projector_budget_remaining_from_runtime_metadata(req).unwrap_or(i64::MAX);
     }
 
+    match authoritative_budget_remaining_atomic(state, ctx, claims).await {
+        Some(value) => value,
+        None => i64::MAX,
+    }
+}
+
+fn projector_budget_remaining_from_runtime_metadata(req: &DecisionRequest) -> Option<i64> {
     req.inputs
         .as_ref()
         .and_then(|i| i.runtime_metadata.as_ref())
@@ -396,7 +404,46 @@ fn projector_budget_remaining_atomic(
                         .and_then(nonnegative_i64_from_struct_value)
                 })
         })
-        .unwrap_or(i64::MAX)
+}
+
+async fn authoritative_budget_remaining_atomic(
+    state: &SidecarState,
+    ctx: &DecisionContext,
+    claims: &[BudgetClaim],
+) -> Option<i64> {
+    let mut min_remaining: Option<i64> = None;
+    for claim in claims {
+        if claim.direction == crate::proto::common::v1::budget_claim::Direction::Credit as i32 {
+            continue;
+        }
+        let unit_id = claim.unit.as_ref()?.unit_id.clone();
+        let now = Utc::now();
+        let response = state
+            .inner
+            .ledger
+            .query_budget_state(crate::proto::ledger::v1::QueryBudgetStateRequest {
+                tenant_id: ctx.tenant_id.clone(),
+                budget_id: claim.budget_id.clone(),
+                window_instance_id: claim.window_instance_id.clone(),
+                snapshot_at: Some(prost_types::Timestamp {
+                    seconds: now.timestamp(),
+                    nanos: now.timestamp_subsec_nanos() as i32,
+                }),
+                unit_id,
+            })
+            .await
+            .ok()?;
+        let remaining = nonnegative_i64_from_decimal_str(&response.available_atomic)?;
+        min_remaining = Some(match min_remaining {
+            Some(current) => current.min(remaining),
+            None => remaining,
+        });
+    }
+    min_remaining
+}
+
+fn nonnegative_i64_from_decimal_str(raw: &str) -> Option<i64> {
+    raw.trim().parse::<i64>().ok().map(|value| value.max(0))
 }
 
 fn nonnegative_i64_from_struct_value(value: &prost_types::Value) -> Option<i64> {
@@ -947,13 +994,9 @@ fn build_audit_decision_cloudevent(
         ce.predicted_c_tokens = est.predicted_c_tokens;
         ce.reserved_strategy = est.reserved_strategy.clone();
         ce.prediction_strategy_used = est.prediction_strategy_used.clone();
-        // prediction_policy_used already set above from contract.
-        // If the egress_proxy supplied a different value (matched its
-        // STRICT_CEILING default), prefer the contract's value as
-        // canonical. SLICE_10 keeps both the same in practice.
-        if !est.prediction_policy_used.is_empty() {
-            ce.prediction_policy_used = est.prediction_policy_used.clone();
-        }
+        // prediction_policy_used is authoritative from the loaded
+        // contract bundle. ClaimEstimate is caller input and must not
+        // rewrite the signed audit policy.
         ce.tokenizer_tier = est.tokenizer_tier.clone();
         ce.tokenizer_version_id = est.tokenizer_version_id.clone();
         ce.prediction_confidence = est.prediction_confidence;
@@ -1145,9 +1188,9 @@ async fn run_record_denied_decision(
         cloudevent.predicted_c_tokens = est.predicted_c_tokens;
         cloudevent.reserved_strategy = est.reserved_strategy.clone();
         cloudevent.prediction_strategy_used = est.prediction_strategy_used.clone();
-        if !est.prediction_policy_used.is_empty() {
-            cloudevent.prediction_policy_used = est.prediction_policy_used.clone();
-        }
+        // prediction_policy_used is authoritative from the loaded
+        // contract bundle. ClaimEstimate is caller input and must not
+        // rewrite the signed audit policy.
         cloudevent.tokenizer_tier = est.tokenizer_tier.clone();
         cloudevent.tokenizer_version_id = est.tokenizer_version_id.clone();
         cloudevent.prediction_confidence = est.prediction_confidence;
@@ -2414,8 +2457,8 @@ mod slice_02_decision_match_tests {
             ..Default::default()
         };
         assert_eq!(
-            projector_budget_remaining_atomic(&req, true),
-            i64::MAX,
+            projector_budget_remaining_from_runtime_metadata(&req),
+            None,
             "missing budget snapshot must not synthesize budget=0 and trigger RUN_BUDGET_PROJECTION_EXCEEDED"
         );
     }
@@ -2439,7 +2482,7 @@ mod slice_02_decision_match_tests {
                 }),
                 ..Default::default()
             };
-            assert_eq!(projector_budget_remaining_atomic(&req, true), i64::MAX);
+            assert_eq!(projector_budget_remaining_from_runtime_metadata(&req), None);
         }
     }
 
@@ -2453,8 +2496,8 @@ mod slice_02_decision_match_tests {
             ..Default::default()
         };
         assert_eq!(
-            projector_budget_remaining_atomic(&req, true),
-            i64::MAX,
+            projector_budget_remaining_from_runtime_metadata(&req),
+            None,
             "projected_p90_atomic is a risk-band hint, not remaining budget"
         );
     }
@@ -2476,30 +2519,17 @@ mod slice_02_decision_match_tests {
             }),
             ..Default::default()
         };
-        assert_eq!(projector_budget_remaining_atomic(&req, true), 999);
+        assert_eq!(
+            projector_budget_remaining_from_runtime_metadata(&req),
+            Some(999)
+        );
     }
 
     #[test]
-    fn projector_budget_remaining_ignores_runtime_snapshot_without_trust_gate() {
-        let mut fields = std::collections::BTreeMap::new();
-        fields.insert(
-            "budget_remaining_atomic".to_string(),
-            prost_types::Value {
-                kind: Some(prost_types::value::Kind::StringValue("999".into())),
-            },
-        );
-        let req = DecisionRequest {
-            inputs: Some(Inputs {
-                runtime_metadata: Some(prost_types::Struct { fields }),
-                ..Default::default()
-            }),
-            ..Default::default()
-        };
-        assert_eq!(
-            projector_budget_remaining_atomic(&req, false),
-            i64::MAX,
-            "production path must not trust caller-controlled runtime_metadata for budget remaining"
-        );
+    fn authoritative_budget_remaining_clamps_negative_available_to_zero() {
+        assert_eq!(nonnegative_i64_from_decimal_str("-1"), Some(0));
+        assert_eq!(nonnegative_i64_from_decimal_str("123"), Some(123));
+        assert_eq!(nonnegative_i64_from_decimal_str("not-a-number"), None);
     }
 
     #[test]
@@ -2589,6 +2619,43 @@ mod slice_02_decision_match_tests {
         assert_eq!(ce.run_projection_at_decision_atomic, 900);
         assert_eq!(ce.run_predicted_remaining_steps, 8);
         assert_eq!(ce.run_steps_completed_so_far, 4);
+    }
+
+    #[test]
+    fn claim_estimate_cannot_override_contract_prediction_policy() {
+        let ctx = DecisionContext {
+            session_id: "session-test".to_string(),
+            workload_instance_id: "sidecar-test".to_string(),
+            tenant_id: Uuid::nil().to_string(),
+            region: "test-region".to_string(),
+        };
+        let enrichment = AuditEnrichment {
+            run_id: Uuid::nil().to_string(),
+            agent_id: "agent-test".to_string(),
+            model_family: "model-test".to_string(),
+            prompt_hash: "prompt-test".to_string(),
+            spendguard_context: serde_json::Value::Null,
+        };
+        let claim = ClaimEstimate {
+            prediction_policy_used: "STRICT_CEILING".into(),
+            ..Default::default()
+        };
+
+        let ce = build_audit_decision_cloudevent(
+            &ctx,
+            &Uuid::nil(),
+            &Uuid::nil(),
+            1,
+            &[0u8; 32],
+            &[],
+            &[],
+            &enrichment,
+            "ADAPTIVE_CEILING",
+            None,
+            Some(&claim),
+        );
+
+        assert_eq!(ce.prediction_policy_used, "ADAPTIVE_CEILING");
     }
 
     #[test]

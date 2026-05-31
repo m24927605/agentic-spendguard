@@ -150,9 +150,10 @@ sidecar:
   endpointCatalogManifestUrl: "https://endpoint-catalog.spendguard:8443/v1/catalog/manifest"
   # SLICE_09/HARDEN_02: optional run-cost projector RPC endpoint. Demo
   # compose sets this only for scenarios that explicitly start the
-  # projector. Production leaves it empty by default until the sidecar has
-  # an authoritative signed/fenced budget snapshot; operators may wire it
-  # explicitly for non-budget RUN_DRIFT/RUN_STEPS projection semantics.
+  # projector. Production leaves it empty by default to avoid accidental
+  # TCP wiring for UDS-only deployments; operators may wire it explicitly.
+  # With the demo/test metadata gate off, budget projection uses
+  # Ledger.QueryBudgetState rather than caller-supplied metadata.
   runCostProjectorUrl: ""
   # Demo/test-only. When true, sidecar accepts caller-supplied
   # runtime_metadata.budget_remaining_atomic for RUN_BUDGET_PROJECTION_EXCEEDED.

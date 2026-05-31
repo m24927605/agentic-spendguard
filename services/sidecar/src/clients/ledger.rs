@@ -15,14 +15,13 @@ use crate::{
     domain::error::DomainError,
     proto::ledger::v1::{
         ledger_client::LedgerClient as LedgerProtoClient, AcquireFencingLeaseRequest,
-        AcquireFencingLeaseResponse, CommitEstimatedRequest,
-        CommitEstimatedResponse, GetApprovalForResumeRequest,
-        GetApprovalForResumeResponse, MarkApprovalBundledRequest,
-        MarkApprovalBundledResponse, QueryDecisionOutcomeRequest,
-        QueryDecisionOutcomeResponse, QueryReservationContextRequest,
-        QueryReservationContextResponse, RecordDeniedDecisionRequest,
-        RecordDeniedDecisionResponse, ReleaseRequest, ReleaseResponse,
-        ReplayAuditFromCursorRequest, ReserveSetRequest, ReserveSetResponse,
+        AcquireFencingLeaseResponse, CommitEstimatedRequest, CommitEstimatedResponse,
+        GetApprovalForResumeRequest, GetApprovalForResumeResponse, MarkApprovalBundledRequest,
+        MarkApprovalBundledResponse, QueryBudgetStateRequest, QueryBudgetStateResponse,
+        QueryDecisionOutcomeRequest, QueryDecisionOutcomeResponse, QueryReservationContextRequest,
+        QueryReservationContextResponse, RecordDeniedDecisionRequest, RecordDeniedDecisionResponse,
+        ReleaseRequest, ReleaseResponse, ReplayAuditFromCursorRequest, ReserveSetRequest,
+        ReserveSetResponse,
     },
 };
 
@@ -37,9 +36,8 @@ impl LedgerClient {
         sni: &str,
         mtls: &MTlsPaths,
     ) -> Result<Self, DomainError> {
-        let tls = build_client_tls(mtls, sni).map_err(|e| {
-            DomainError::LedgerClient(format!("build tls: {e}"))
-        })?;
+        let tls = build_client_tls(mtls, sni)
+            .map_err(|e| DomainError::LedgerClient(format!("build tls: {e}")))?;
         let endpoint = Endpoint::from_shared(endpoint_url.clone())
             .map_err(|e| DomainError::LedgerClient(format!("endpoint parse: {e}")))?
             .tls_config(tls)
@@ -62,9 +60,10 @@ impl LedgerClient {
         req: ReserveSetRequest,
     ) -> Result<ReserveSetResponse, DomainError> {
         let mut client = (*self.inner).clone();
-        let resp = client.reserve_set(req).await.map_err(|e| {
-            DomainError::LedgerClient(format!("ReserveSet: {e}"))
-        })?;
+        let resp = client
+            .reserve_set(req)
+            .await
+            .map_err(|e| DomainError::LedgerClient(format!("ReserveSet: {e}")))?;
         Ok(resp.into_inner())
     }
 
@@ -124,9 +123,19 @@ impl LedgerClient {
         let resp = client
             .query_reservation_context(req)
             .await
-            .map_err(|e| {
-                DomainError::LedgerClient(format!("QueryReservationContext: {e}"))
-            })?;
+            .map_err(|e| DomainError::LedgerClient(format!("QueryReservationContext: {e}")))?;
+        Ok(resp.into_inner())
+    }
+
+    pub async fn query_budget_state(
+        &self,
+        req: QueryBudgetStateRequest,
+    ) -> Result<QueryBudgetStateResponse, DomainError> {
+        let mut client = (*self.inner).clone();
+        let resp = client
+            .query_budget_state(req)
+            .await
+            .map_err(|e| DomainError::LedgerClient(format!("QueryBudgetState: {e}")))?;
         Ok(resp.into_inner())
     }
 
@@ -145,8 +154,7 @@ impl LedgerClient {
     pub async fn replay_audit_from_cursor(
         &self,
         req: ReplayAuditFromCursorRequest,
-    ) -> Result<tonic::Streaming<crate::proto::ledger::v1::ReplayAuditEvent>, DomainError>
-    {
+    ) -> Result<tonic::Streaming<crate::proto::ledger::v1::ReplayAuditEvent>, DomainError> {
         let mut client = (*self.inner).clone();
         let resp = client
             .replay_audit_from_cursor(req)

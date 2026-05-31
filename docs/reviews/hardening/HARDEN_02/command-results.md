@@ -100,3 +100,27 @@ Round 2 command results:
 - Negative Helm gate with `sidecar.allowUntrustedBudgetMetadata=true` in production: FAILS as expected.
 - `make -C deploy/demo demo-up DEMO_MODE=m1_benchmark_runaway_loop`: PASS; `RUN_BUDGET_PROJECTION_EXCEEDED` observed and canonical_events matching count = 1.
 - `make -C deploy/demo demo-down`: PASS.
+
+## AIT Round 3 Fix Evidence
+
+Reviewer: `review_01KSXQ6WGVBHEPD276771DW4GN`.
+
+| Finding | Fix | Verification |
+|---|---|---|
+| Production budget projection cannot fire | When `sidecar.allowUntrustedBudgetMetadata=false`, sidecar now derives `ProjectRequest.budget_remaining_atomic` from authoritative `Ledger.QueryBudgetState` over debit claims and uses the minimum available budget. The demo metadata path remains behind the demo/test gate. | `cargo test --manifest-path services/sidecar/Cargo.toml` includes budget snapshot parsing/clamping tests; m1 demo still passes through the explicit demo gate. |
+| Concurrent Project calls undercount run state | run_cost_projector now rechecks the per-run state under lock before committing a Project response. If another distinct decision mutated the run during Signal 1 await, it recomputes from the fresh state instead of returning an undercounted projection. | `cargo test --manifest-path services/run_cost_projector/Cargo.toml` includes `concurrent_distinct_projects_see_serialized_steps`. |
+| Caller can rewrite audited prediction policy | Sidecar no longer copies `ClaimEstimate.prediction_policy_used` into signed ALLOW or DENY CloudEvents; the field remains authoritative from `bundle.parsed.prediction_policy`. | `cargo test --manifest-path services/sidecar/Cargo.toml` includes `claim_estimate_cannot_override_contract_prediction_policy`. |
+
+Round 3 command results:
+
+- `cargo build --manifest-path services/run_cost_projector/Cargo.toml`: PASS.
+- `cargo build --manifest-path services/sidecar/Cargo.toml`: PASS (existing `schema_bundle_canonical_version` dead-code warning).
+- `cargo test --manifest-path services/run_cost_projector/Cargo.toml`: PASS (`53 + 5 + 3` tests).
+- `cargo test --manifest-path services/sidecar/Cargo.toml`: PASS (`113 + 6` tests; existing warning).
+- `cargo test -p spendguard-predictor-upgrade-benchmarks`: PASS.
+- `helm template charts/spendguard --set chart.profile=demo`: PASS.
+- `helm template charts/spendguard --set chart.profile=production -f docs/reviews/hardening/HARDEN_02/kind-production-values.example.yaml`: PASS.
+- Explicit production sidecar projector URL render: PASS; only `SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL` appears.
+- Negative Helm gate with both sidecar and egress proxy projector URLs: FAILS as expected.
+- `make -C deploy/demo demo-up DEMO_MODE=m1_benchmark_runaway_loop`: PASS; `RUN_BUDGET_PROJECTION_EXCEEDED` observed and canonical_events matching count = 1.
+- `make -C deploy/demo demo-down`: PASS.
