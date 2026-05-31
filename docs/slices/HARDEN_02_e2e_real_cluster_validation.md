@@ -169,17 +169,23 @@ The reviewer must inspect `docs/reviews/hardening/HARDEN_02/command-results.md` 
 | Design | Security Engineer | Production Helm install must keep strict gates | §8 requires production values instead of disabling checks |
 | Design | Database Optimizer | Audit column verification must query produced rows | §6 requires audit event IDs |
 | Design | Performance Benchmarker | Benchmark numbers must come from release binary | §8.4 gates release benchmark execution |
+| AIT R1 | codex adversarial reviewer `review_01KSXMST512E6H23FEST1VGJE3` | Fix all findings in-slice | Closed proxy double-advance, untrusted budget metadata, and denied mirror gaps |
+| AIT R2 | codex adversarial reviewer `review_01KSXNXYHSRM7JBWP93B9W6TE0` | Fix all findings in-slice | Closed projector idempotency, authoritative audit field, and production auto-wiring issues |
+| AIT R3 | codex adversarial reviewer `review_01KSXQ6WGVBHEPD276771DW4GN` | Fix all findings in-slice | Closed production budget source, projector concurrency, and policy override issues |
+| AIT R4 | codex adversarial reviewer `review_01KSXRBRK7H72G9A5NXA9PTP7A` | Fix all findings in-slice | Closed ledger balance double-counting and durable decision replay after cache loss |
+| AIT R5 | codex adversarial reviewer `review_01KSXT8P6C2XT2Y2Z4G5PEJ1FD` | Escalate after max codex rounds | Two high findings remained: replay request validation and production example projector wiring |
+| Staff+ arbitration | Software Architect, Backend Architect, Security Engineer, Database Optimizer, SpendGuard Predictor Domain Expert | Fix both remaining findings in HARDEN_02; no round 6 | Added durable and in-memory idempotency request fingerprints, fail-closed replay conflicts, and explicit production sidecar projector URL |
 
 ---
 
 ## §14. Merge checklist
 
-- [ ] All required demo commands run and results committed
-- [ ] Docker-compose E2E exits 0
-- [ ] kind production install succeeds
-- [ ] Release benchmark completes with recorded numbers
-- [ ] Any environment-only skips are explicit and justified
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded
+- [x] All required demo commands run and results committed
+- [x] Docker-compose E2E exits 0
+- [x] kind production install succeeds
+- [x] Release benchmark completes with recorded numbers
+- [x] Any environment-only skips are explicit and justified
+- [x] AIT adversarial review passes or Staff+ arbitration is recorded
 
 ---
 

@@ -148,3 +148,46 @@ Round 4 command results:
 - `helm template charts/spendguard --set chart.profile=production -f docs/reviews/hardening/HARDEN_02/kind-production-values.example.yaml`: PASS.
 - `make -C deploy/demo demo-up DEMO_MODE=m1_benchmark_runaway_loop`: PASS; `RUN_BUDGET_PROJECTION_EXCEEDED` observed and canonical_events matching count = 1.
 - `OPENAI_API_KEY=dummy ANTHROPIC_API_KEY=dummy make -C deploy/demo demo-down`: PASS.
+
+## AIT Round 5 and Staff+ Arbitration
+
+Reviewer: `review_01KSXT8P6C2XT2Y2Z4G5PEJ1FD`.
+
+Round 5 returned two remaining high-severity findings:
+
+- Durable idempotency replay accepted the adapter key without validating that the replayed request matched the original request.
+- The production kind values example deployed `run_cost_projector` without wiring the sidecar to call it.
+
+Per HARDEN_02 §12, codex review iteration stopped after round 5 and a Staff+ panel arbitrated the remaining findings.
+
+| Panelist | Finding 1 decision | Finding 2 decision |
+|---|---|---|
+| Software Architect | Fix in-slice with request fingerprint validation before replay | Fix the production example explicitly; avoid broad chart auto-wiring |
+| Backend Architect | Fix in-slice across durable replay and in-memory cache | Set `sidecar.runCostProjectorUrl` in the production example |
+| Security Engineer | Fix in-slice and fail closed on missing or mismatched fingerprint | Keep production posture explicit and non-implicit |
+| Database Optimizer | Fix in-slice using stored audit metadata as replay ledger input | Avoid chart-wide behavior changes |
+| SpendGuard Predictor Domain Expert | Fix in-slice; duplicate adapter keys must not replay different claims | Wire the example so projection can actually fire |
+
+Final arbitration: fix both findings in HARDEN_02, with no AIT round 6. The panel decision is final for merge readiness.
+
+Fixes applied:
+
+- Sidecar computes a stable idempotency request fingerprint from tenant, region, and the encoded `DecisionRequest`.
+- Sidecar writes the fingerprint into reserve and denied decision CloudEvents as `idempotency_request_fingerprint`.
+- Ledger `QueryDecisionOutcome` returns the stored fingerprint with durable replay metadata.
+- Sidecar rejects durable replay before any projector mutation when the stored fingerprint is missing or mismatched.
+- Sidecar in-memory idempotency cache now stores the same fingerprint and rejects same-key/different-request conflicts.
+- `kind-production-values.example.yaml` now explicitly sets `sidecar.runCostProjectorUrl: https://spendguard-spendguard-run-cost-projector:50055`.
+
+Staff+ arbitration verification:
+
+- `make -C sdk/python proto`: PASS; no tracked Python generated diff.
+- `cargo test --manifest-path services/ledger/Cargo.toml`: PASS (`14` tests; existing `estimated` warning).
+- `cargo test --manifest-path services/sidecar/Cargo.toml`: PASS (`116 + 6` tests; existing `schema_bundle_canonical_version` warning).
+- `cargo test --manifest-path services/run_cost_projector/Cargo.toml`: PASS (`54 + 5 + 3` tests).
+- `cargo test -p spendguard-predictor-upgrade-benchmarks`: PASS.
+- `helm template charts/spendguard --set chart.profile=demo`: PASS.
+- `helm template charts/spendguard --set chart.profile=production -f docs/reviews/hardening/HARDEN_02/kind-production-values.example.yaml`: PASS; renders `SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL=https://spendguard-spendguard-run-cost-projector:50055`.
+- `make -C deploy/demo demo-up DEMO_MODE=m1_benchmark_runaway_loop`: PASS; `RUN_BUDGET_PROJECTION_EXCEEDED` observed and canonical_events matching count = 1.
+- `OPENAI_API_KEY=dummy ANTHROPIC_API_KEY=dummy make -C deploy/demo demo-down`: PASS.
+- `git diff --check`: PASS.

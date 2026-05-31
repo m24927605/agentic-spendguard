@@ -90,8 +90,7 @@ impl SidecarAdapter for AdapterUds {
         result
     }
 
-    type EmitTraceEventsStream =
-        ReceiverStream<Result<TraceEventAck, Status>>;
+    type EmitTraceEventsStream = ReceiverStream<Result<TraceEventAck, Status>>;
 
     async fn emit_trace_events(
         &self,
@@ -106,7 +105,8 @@ impl SidecarAdapter for AdapterUds {
         &self,
         _req: Request<IssueBudgetGrantRequest>,
     ) -> Result<Response<IssueBudgetGrantResponse>, Status> {
-        self.metrics.inc_handler(Handler::IssueBudgetGrant, Outcome::Err);
+        self.metrics
+            .inc_handler(Handler::IssueBudgetGrant, Outcome::Err);
         Err(Status::unimplemented(
             "IssueBudgetGrant: vertical slice expansion (Phase 1 sub-agent flow)",
         ))
@@ -115,15 +115,21 @@ impl SidecarAdapter for AdapterUds {
         &self,
         _req: Request<RevokeBudgetGrantRequest>,
     ) -> Result<Response<RevokeBudgetGrantResponse>, Status> {
-        self.metrics.inc_handler(Handler::RevokeBudgetGrant, Outcome::Err);
-        Err(Status::unimplemented("RevokeBudgetGrant: vertical slice expansion"))
+        self.metrics
+            .inc_handler(Handler::RevokeBudgetGrant, Outcome::Err);
+        Err(Status::unimplemented(
+            "RevokeBudgetGrant: vertical slice expansion",
+        ))
     }
     async fn consume_budget_grant(
         &self,
         _req: Request<ConsumeBudgetGrantRequest>,
     ) -> Result<Response<ConsumeBudgetGrantResponse>, Status> {
-        self.metrics.inc_handler(Handler::ConsumeBudgetGrant, Outcome::Err);
-        Err(Status::unimplemented("ConsumeBudgetGrant: vertical slice expansion"))
+        self.metrics
+            .inc_handler(Handler::ConsumeBudgetGrant, Outcome::Err);
+        Err(Status::unimplemented(
+            "ConsumeBudgetGrant: vertical slice expansion",
+        ))
     }
 
     type StreamDrainSignalStream = ReceiverStream<Result<DrainSignal, Status>>;
@@ -140,10 +146,8 @@ impl SidecarAdapter for AdapterUds {
     async fn resume_after_approval(
         &self,
         req: Request<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalRequest>,
-    ) -> Result<
-        Response<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalResponse>,
-        Status,
-    > {
+    ) -> Result<Response<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalResponse>, Status>
+    {
         let result = self.resume_after_approval_inner(req).await;
         record_outcome(&self.metrics, Handler::ResumeAfterApproval, &result);
         result
@@ -152,10 +156,8 @@ impl SidecarAdapter for AdapterUds {
     async fn release_reservation(
         &self,
         req: Request<crate::proto::sidecar_adapter::v1::ReleaseReservationRequest>,
-    ) -> Result<
-        Response<crate::proto::sidecar_adapter::v1::ReleaseReservationResponse>,
-        Status,
-    > {
+    ) -> Result<Response<crate::proto::sidecar_adapter::v1::ReleaseReservationResponse>, Status>
+    {
         let result = self.release_reservation_inner(req).await;
         record_outcome(&self.metrics, Handler::ReleaseReservation, &result);
         result
@@ -200,10 +202,12 @@ impl AdapterUds {
                 signing_key_id: b.signing_key_id,
             }),
             capability_required: 0x40, // L3 (per Sidecar §3.3)
-            active_key_epochs: Some(crate::proto::sidecar_adapter::v1::handshake_response::KeyEpochs {
-                producer_signing_key_epochs: vec!["epoch-2026-Q2".into()],
-                hmac_tenant_salt_epochs: vec!["epoch-2026-Q2".into()],
-            }),
+            active_key_epochs: Some(
+                crate::proto::sidecar_adapter::v1::handshake_response::KeyEpochs {
+                    producer_signing_key_epochs: vec!["epoch-2026-Q2".into()],
+                    hmac_tenant_salt_epochs: vec!["epoch-2026-Q2".into()],
+                },
+            ),
             protocol_version: 1,
             session_id,
             // Announcement signing deferred to vertical slice; POC sidecars
@@ -223,10 +227,19 @@ impl AdapterUds {
             return Err(DomainError::Draining.to_status());
         }
 
+        let ctx = DecisionContext {
+            session_id: req.session_id.clone(),
+            workload_instance_id: self.cfg.workload_instance_id.clone(),
+            tenant_id: self.cfg.tenant_id.clone(),
+            region: self.cfg.region.clone(),
+        };
+
         // Idempotency short-circuit (Contract §6). Adapter retries with the
         // same Idempotency.key MUST collapse to the same cached response;
         // otherwise sidecar mints a fresh decision_id per call and the
-        // ledger sees a duplicate logical request.
+        // ledger sees a duplicate logical request. The fingerprint prevents
+        // a reused key from replaying the previous decision for a different
+        // request while the in-memory cache is still hot.
         let idempotency_key = req
             .idempotency
             .as_ref()
@@ -238,29 +251,41 @@ impl AdapterUds {
             )
             .to_status());
         }
-        if let Some(cached) = self.state.inner.idempotency.get(&idempotency_key) {
-            tracing::debug!(key = %idempotency_key, "idempotent decision cache hit");
-            return Ok(Response::new(cached));
+        let request_fingerprint_hex = transaction::idempotency_request_fingerprint_hex(&ctx, &req);
+        match self
+            .state
+            .inner
+            .idempotency
+            .get(&idempotency_key, &request_fingerprint_hex)
+        {
+            crate::decision::idempotency::Lookup::Hit(cached) => {
+                tracing::debug!(key = %idempotency_key, "idempotent decision cache hit");
+                return Ok(Response::new(cached));
+            }
+            crate::decision::idempotency::Lookup::Conflict {
+                existing_fingerprint_hex,
+            } => {
+                return Err(DomainError::IdempotencyConflict(format!(
+                    "DecisionRequest.idempotency.key reused with different request fingerprint (existing={}, current={})",
+                    existing_fingerprint_hex, request_fingerprint_hex
+                ))
+                .to_status());
+            }
+            crate::decision::idempotency::Lookup::Miss => {}
         }
 
         crate::fencing::check_active(&self.state).map_err(|e| e.to_status())?;
-
-        let ctx = DecisionContext {
-            session_id: req.session_id.clone(),
-            workload_instance_id: self.cfg.workload_instance_id.clone(),
-            tenant_id: self.cfg.tenant_id.clone(),
-            region: self.cfg.region.clone(),
-        };
 
         let out = transaction::run_through_reserve(&self.cfg, &self.state, &ctx, &req)
             .await
             .map_err(|e| e.to_status())?;
 
         let response = transaction::build_response(out);
-        self.state
-            .inner
-            .idempotency
-            .put(idempotency_key, response.clone());
+        self.state.inner.idempotency.put(
+            idempotency_key,
+            request_fingerprint_hex,
+            response.clone(),
+        );
         Ok(Response::new(response))
     }
 
@@ -407,11 +432,11 @@ impl AdapterUds {
         let cfg = self.cfg.clone();
 
         tokio::spawn(async move {
+            use crate::decision::transaction::{self, DecisionContext, ReleaseReason};
             use crate::proto::sidecar_adapter::v1::{
                 llm_call_post_payload::Outcome as LlmOutcome, trace_event::EventKind,
                 trace_event_ack::Status as AckStatus,
             };
-            use crate::decision::transaction::{self, DecisionContext, ReleaseReason};
             while let Some(ev_res) = input.message().await.transpose() {
                 let ev = match ev_res {
                     Ok(e) => e,
@@ -436,7 +461,9 @@ impl AdapterUds {
                 }
 
                 let payload = match ev.payload {
-                    Some(crate::proto::sidecar_adapter::v1::trace_event::Payload::LlmCallPost(p)) => p,
+                    Some(crate::proto::sidecar_adapter::v1::trace_event::Payload::LlmCallPost(
+                        p,
+                    )) => p,
                     _ => {
                         let _ = tx
                             .send(Ok(TraceEventAck {
@@ -462,10 +489,12 @@ impl AdapterUds {
 
                 // Phase 2B Step 7.5: split routing by outcome BEFORE
                 // amount/commit validation (Codex P2.3 fix).
-                let outcome = LlmOutcome::try_from(payload.outcome).unwrap_or(LlmOutcome::Unspecified);
+                let outcome =
+                    LlmOutcome::try_from(payload.outcome).unwrap_or(LlmOutcome::Unspecified);
                 let result: Result<String, crate::domain::error::DomainError> = match outcome {
                     LlmOutcome::Success => {
-                        match transaction::run_commit_estimated(&cfg, &state, &dctx, &payload).await {
+                        match transaction::run_commit_estimated(&cfg, &state, &dctx, &payload).await
+                        {
                             Ok(out) => {
                                 info!(
                                     reservation_id = %out.reservation_id,
@@ -478,13 +507,16 @@ impl AdapterUds {
                             Err(e) => Err(e),
                         }
                     }
-                    LlmOutcome::ProviderError | LlmOutcome::ClientTimeout | LlmOutcome::RunAborted => {
+                    LlmOutcome::ProviderError
+                    | LlmOutcome::ClientTimeout
+                    | LlmOutcome::RunAborted => {
                         let reason = if outcome == LlmOutcome::RunAborted {
                             ReleaseReason::RunAborted
                         } else {
                             ReleaseReason::RuntimeError
                         };
-                        let reservation_uuid = match uuid::Uuid::parse_str(&payload.reservation_id) {
+                        let reservation_uuid = match uuid::Uuid::parse_str(&payload.reservation_id)
+                        {
                             Ok(u) => u,
                             Err(e) => {
                                 let _ = tx
@@ -492,7 +524,8 @@ impl AdapterUds {
                                         event_id,
                                         status: AckStatus::Rejected as i32,
                                         error: Some(crate::proto::common::v1::Error {
-                                            code: crate::proto::common::v1::error::Code::Unspecified as i32,
+                                            code: crate::proto::common::v1::error::Code::Unspecified
+                                                as i32,
                                             message: format!("reservation_id parse: {e}"),
                                             details: Default::default(),
                                         }),
@@ -502,7 +535,11 @@ impl AdapterUds {
                             }
                         };
                         match transaction::run_release(
-                            &cfg, &state, &dctx, reservation_uuid, reason,
+                            &cfg,
+                            &state,
+                            &dctx,
+                            reservation_uuid,
+                            reason,
                             if payload.provider_event_id.is_empty() {
                                 None
                             } else {
@@ -525,11 +562,11 @@ impl AdapterUds {
                             Err(e) => Err(e),
                         }
                     }
-                    LlmOutcome::Unspecified => Err(
-                        crate::domain::error::DomainError::InvalidRequest(
+                    LlmOutcome::Unspecified => {
+                        Err(crate::domain::error::DomainError::InvalidRequest(
                             "LLM_CALL_POST outcome=UNSPECIFIED".into(),
-                        ),
-                    ),
+                        ))
+                    }
                 };
 
                 match result {
@@ -617,19 +654,15 @@ impl AdapterUds {
     async fn resume_after_approval_inner(
         &self,
         req: Request<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalRequest>,
-    ) -> Result<
-        Response<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalResponse>,
-        Status,
-    > {
+    ) -> Result<Response<crate::proto::sidecar_adapter::v1::ResumeAfterApprovalResponse>, Status>
+    {
         use crate::proto::common::v1::error::Code as ProtoCode;
         use crate::proto::ledger::v1::{
-            get_approval_for_resume_response::Outcome as GetOutcome,
-            GetApprovalForResumeRequest,
+            get_approval_for_resume_response::Outcome as GetOutcome, GetApprovalForResumeRequest,
         };
         use crate::proto::sidecar_adapter::v1::{
-            decision_response::Decision,
-            resume_after_approval_response::Outcome as ResumeOutcome, DecisionResponse,
-            ResumeAfterApprovalDenied, ResumeAfterApprovalResponse,
+            decision_response::Decision, resume_after_approval_response::Outcome as ResumeOutcome,
+            DecisionResponse, ResumeAfterApprovalDenied, ResumeAfterApprovalResponse,
         };
 
         let req = req.into_inner();
@@ -677,8 +710,7 @@ impl AdapterUds {
             }
             None => {
                 return into_err(
-                    "[LEDGER_RESPONSE_EMPTY] GetApprovalForResume returned no oneof"
-                        .into(),
+                    "[LEDGER_RESPONSE_EMPTY] GetApprovalForResume returned no oneof".into(),
                 );
             }
         };
@@ -703,9 +735,7 @@ impl AdapterUds {
                         matched_rule_ids: vec![],
                         mutation_patch_json: String::new(),
                         effect_hash: vec![].into(),
-                        ledger_transaction_id: context
-                            .bundled_ledger_transaction_id
-                            .clone(),
+                        ledger_transaction_id: context.bundled_ledger_transaction_id.clone(),
                         reservation_ids: vec![],
                         ttl_expires_at: None,
                         approval_request_id: context.approval_id.clone(),
@@ -761,7 +791,8 @@ impl AdapterUds {
                         }
                     };
 
-                    let reserve_resp = match self.state.inner.ledger.reserve_set(reserve_req).await {
+                    let reserve_resp = match self.state.inner.ledger.reserve_set(reserve_req).await
+                    {
                         Ok(r) => r,
                         Err(e) => {
                             return into_err(format!("[LEDGER_RPC_FAILED] ReserveSet: {e}"));
@@ -773,7 +804,10 @@ impl AdapterUds {
                         Some(ReserveOutcome::Success(s)) => (
                             s.ledger_transaction_id.clone(),
                             s.audit_decision_event_id.clone(),
-                            s.reservations.iter().map(|r| r.reservation_id.clone()).collect::<Vec<_>>(),
+                            s.reservations
+                                .iter()
+                                .map(|r| r.reservation_id.clone())
+                                .collect::<Vec<_>>(),
                         ),
                         Some(ReserveOutcome::Replay(r)) => (
                             r.ledger_transaction_id.clone(),
@@ -806,7 +840,9 @@ impl AdapterUds {
                     {
                         Ok(r) => r,
                         Err(e) => {
-                            return into_err(format!("[LEDGER_RPC_FAILED] MarkApprovalBundled: {e}"));
+                            return into_err(format!(
+                                "[LEDGER_RPC_FAILED] MarkApprovalBundled: {e}"
+                            ));
                         }
                     };
                     if let Some(MarkOutcome::Error(e)) = mark_resp.outcome {
@@ -872,10 +908,8 @@ impl AdapterUds {
     async fn release_reservation_inner(
         &self,
         req: Request<crate::proto::sidecar_adapter::v1::ReleaseReservationRequest>,
-    ) -> Result<
-        Response<crate::proto::sidecar_adapter::v1::ReleaseReservationResponse>,
-        Status,
-    > {
+    ) -> Result<Response<crate::proto::sidecar_adapter::v1::ReleaseReservationResponse>, Status>
+    {
         use crate::decision::transaction::{self, DecisionContext, ReleaseReason};
         use crate::proto::sidecar_adapter::v1::ReleaseReservationResponse;
 
@@ -1073,15 +1107,11 @@ mod approval_resume_payload {
         pub effect: RequestedEffect,
     }
 
-    pub fn parse(
-        ctx: &crate::proto::ledger::v1::ApprovalResumeContext,
-    ) -> Result<Parsed, String> {
-        let decision: DecisionContext =
-            serde_json::from_slice(&ctx.decision_context_json)
-                .map_err(|e| format!("decision_context_json: {e}"))?;
-        let effect: RequestedEffect =
-            serde_json::from_slice(&ctx.requested_effect_json)
-                .map_err(|e| format!("requested_effect_json: {e}"))?;
+    pub fn parse(ctx: &crate::proto::ledger::v1::ApprovalResumeContext) -> Result<Parsed, String> {
+        let decision: DecisionContext = serde_json::from_slice(&ctx.decision_context_json)
+            .map_err(|e| format!("decision_context_json: {e}"))?;
+        let effect: RequestedEffect = serde_json::from_slice(&ctx.requested_effect_json)
+            .map_err(|e| format!("requested_effect_json: {e}"))?;
         Ok(Parsed { decision, effect })
     }
 
@@ -1151,14 +1181,8 @@ mod approval_resume_payload {
             // The v1alpha1 default-fill path (parse.rs §6.4) yields
             // STRICT_CEILING for every v1alpha1 contract; resume CloudEvent
             // must emit the literal token the CHECK constraint accepts.
-            let b = _fixture_bundle(
-                PredictionPolicy::StrictCeiling,
-                "spendguard.ai/v1alpha1",
-            );
-            assert_eq!(
-                resume_audit_decision_policy_field(&b),
-                "STRICT_CEILING"
-            );
+            let b = _fixture_bundle(PredictionPolicy::StrictCeiling, "spendguard.ai/v1alpha1");
+            assert_eq!(resume_audit_decision_policy_field(&b), "STRICT_CEILING");
         }
 
         #[test]
@@ -1178,22 +1202,13 @@ mod approval_resume_payload {
 
         #[test]
         fn resume_policy_field_adaptive_ceiling() {
-            let b = _fixture_bundle(
-                PredictionPolicy::AdaptiveCeiling,
-                "spendguard.ai/v1alpha2",
-            );
-            assert_eq!(
-                resume_audit_decision_policy_field(&b),
-                "ADAPTIVE_CEILING"
-            );
+            let b = _fixture_bundle(PredictionPolicy::AdaptiveCeiling, "spendguard.ai/v1alpha2");
+            assert_eq!(resume_audit_decision_policy_field(&b), "ADAPTIVE_CEILING");
         }
 
         #[test]
         fn resume_policy_field_shadow_only() {
-            let b = _fixture_bundle(
-                PredictionPolicy::ShadowOnly,
-                "spendguard.ai/v1alpha2",
-            );
+            let b = _fixture_bundle(PredictionPolicy::ShadowOnly, "spendguard.ai/v1alpha2");
             assert_eq!(resume_audit_decision_policy_field(&b), "SHADOW_ONLY");
         }
 
@@ -1248,9 +1263,8 @@ mod approval_resume_payload {
             idempotency_key: String,
         ) -> Result<crate::proto::ledger::v1::ReserveSetRequest, String> {
             use crate::proto::common::v1::{
-                budget_claim::Direction, unit_ref::Kind as UnitKind, BudgetClaim,
-                CloudEvent, ContractBundleRef, Fencing, Idempotency, PricingFreeze,
-                UnitRef,
+                budget_claim::Direction, unit_ref::Kind as UnitKind, BudgetClaim, CloudEvent,
+                ContractBundleRef, Fencing, Idempotency, PricingFreeze, UnitRef,
             };
             use chrono::Utc;
             use num_bigint::BigInt;
@@ -1400,8 +1414,7 @@ mod approval_resume_payload {
             // bundle-hash hot-reload guard above ensures the live bundle
             // matches the operator's approved bundle, so the policy value
             // we emit here is the policy the operator approved under.
-            cloudevent.prediction_policy_used =
-                resume_audit_decision_policy_field(&live_bundle);
+            cloudevent.prediction_policy_used = resume_audit_decision_policy_field(&live_bundle);
             crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent)
                 .await
                 .map_err(|e| format!("sign resume cloudevent: {e}"))?;
@@ -1424,7 +1437,7 @@ mod approval_resume_payload {
             let ttl_expires_at = prost_types::Timestamp {
                 seconds: (Utc::now()
                     + chrono::Duration::seconds(state.inner.reservation_ttl_seconds))
-                    .timestamp(),
+                .timestamp(),
                 nanos: 0,
             };
 
@@ -1459,12 +1472,15 @@ mod approval_resume_payload {
             })
         }
     }
-
 }
 
 /// Build a tower stack for the UDS-bound gRPC server.
 pub fn make_service(state: SidecarState, cfg: Config, metrics: SidecarMetrics) -> AdapterUds {
-    AdapterUds { state, cfg, metrics }
+    AdapterUds {
+        state,
+        cfg,
+        metrics,
+    }
 }
 
 // Silence unused warning until vertical slice consumes it.

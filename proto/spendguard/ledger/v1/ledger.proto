@@ -676,6 +676,7 @@ message QueryDecisionOutcomeResponse {
   repeated string matched_rule_ids = 13;
   repeated string reason_codes = 14;
   string run_code_triggered = 15;
+  string request_fingerprint_hex = 16;
 }
 
 // ============================================================================

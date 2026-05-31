@@ -19,6 +19,13 @@ use parking_lot::Mutex;
 
 use crate::proto::sidecar_adapter::v1::DecisionResponse;
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Lookup {
+    Hit(DecisionResponse),
+    Miss,
+    Conflict { existing_fingerprint_hex: String },
+}
+
 #[derive(Clone)]
 pub struct IdempotencyCache {
     inner: Arc<Mutex<Inner>>,
@@ -35,6 +42,7 @@ struct Inner {
 
 #[derive(Clone)]
 struct Entry {
+    request_fingerprint_hex: String,
     response: DecisionResponse,
     inserted_at: DateTime<Utc>,
 }
@@ -51,26 +59,35 @@ impl IdempotencyCache {
         }
     }
 
-    pub fn get(&self, key: &str) -> Option<DecisionResponse> {
+    pub fn get(&self, key: &str, request_fingerprint_hex: &str) -> Lookup {
         let mut g = self.inner.lock();
         let now = Utc::now();
         if let Some(entry) = g.map.get(key) {
             if (now - entry.inserted_at).num_seconds() <= self.ttl_secs {
-                return Some(entry.response.clone());
+                if entry.request_fingerprint_hex == request_fingerprint_hex {
+                    return Lookup::Hit(entry.response.clone());
+                }
+                return Lookup::Conflict {
+                    existing_fingerprint_hex: entry.request_fingerprint_hex.clone(),
+                };
             }
         }
         // Expired or missing.
         g.map.remove(key);
-        None
+        Lookup::Miss
     }
 
-    pub fn put(&self, key: String, response: DecisionResponse) {
+    pub fn put(&self, key: String, request_fingerprint_hex: String, response: DecisionResponse) {
         let mut g = self.inner.lock();
         if g.map.contains_key(&key) {
-            g.map.insert(key, Entry {
-                response,
-                inserted_at: Utc::now(),
-            });
+            g.map.insert(
+                key,
+                Entry {
+                    request_fingerprint_hex,
+                    response,
+                    inserted_at: Utc::now(),
+                },
+            );
             return;
         }
         if g.order.len() >= self.capacity {
@@ -82,6 +99,7 @@ impl IdempotencyCache {
         g.map.insert(
             key,
             Entry {
+                request_fingerprint_hex,
                 response,
                 inserted_at: Utc::now(),
             },
@@ -105,19 +123,35 @@ mod tests {
     #[test]
     fn round_trip_returns_same_response() {
         let c = IdempotencyCache::new(8, 600);
-        c.put("key-1".into(), fake_response("decision-1"));
-        let got = c.get("key-1").expect("cache hit");
-        assert_eq!(got.decision_id, "decision-1");
+        c.put("key-1".into(), "fp-1".into(), fake_response("decision-1"));
+        let got = c.get("key-1", "fp-1");
+        match got {
+            Lookup::Hit(resp) => assert_eq!(resp.decision_id, "decision-1"),
+            other => panic!("expected cache hit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn same_key_different_fingerprint_conflicts() {
+        let c = IdempotencyCache::new(8, 600);
+        c.put("key-1".into(), "fp-1".into(), fake_response("decision-1"));
+        let got = c.get("key-1", "fp-2");
+        assert_eq!(
+            got,
+            Lookup::Conflict {
+                existing_fingerprint_hex: "fp-1".into()
+            }
+        );
     }
 
     #[test]
     fn evicts_oldest_on_capacity() {
         let c = IdempotencyCache::new(2, 600);
-        c.put("a".into(), fake_response("1"));
-        c.put("b".into(), fake_response("2"));
-        c.put("c".into(), fake_response("3"));
-        assert!(c.get("a").is_none());
-        assert!(c.get("b").is_some());
-        assert!(c.get("c").is_some());
+        c.put("a".into(), "fp-a".into(), fake_response("1"));
+        c.put("b".into(), "fp-b".into(), fake_response("2"));
+        c.put("c".into(), "fp-c".into(), fake_response("3"));
+        assert!(matches!(c.get("a", "fp-a"), Lookup::Miss));
+        assert!(matches!(c.get("b", "fp-b"), Lookup::Hit(_)));
+        assert!(matches!(c.get("c", "fp-c"), Lookup::Hit(_)));
     }
 }

@@ -17,6 +17,7 @@
 //! deferred to a future slice.
 
 use chrono::Utc;
+use prost::Message as _;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -469,6 +470,7 @@ async fn replay_existing_decision_by_idempotency(
     ctx: &DecisionContext,
     req: &DecisionRequest,
     adapter_idempotency_key: &str,
+    request_fingerprint_hex: &str,
 ) -> Result<Option<DecisionOutput>, DomainError> {
     let response = state
         .inner
@@ -486,6 +488,18 @@ async fn replay_existing_decision_by_idempotency(
         QueryDecisionStage::NotFound | QueryDecisionStage::Unspecified
     ) {
         return Ok(None);
+    }
+    if response.request_fingerprint_hex.is_empty() {
+        return Err(DomainError::IdempotencyConflict(format!(
+            "ledger idempotency replay for key '{}' has no request fingerprint; refusing ambiguous replay before projector mutation",
+            adapter_idempotency_key
+        )));
+    }
+    if response.request_fingerprint_hex != request_fingerprint_hex {
+        return Err(DomainError::IdempotencyConflict(format!(
+            "DecisionRequest.idempotency.key reused with different request fingerprint (existing={}, current={})",
+            response.request_fingerprint_hex, request_fingerprint_hex
+        )));
     }
 
     let decision_id = parse_replay_uuid("decision_id", &response.decision_id)?;
@@ -576,6 +590,22 @@ fn replay_decision_kind(
     }
 }
 
+pub fn idempotency_request_fingerprint_hex(ctx: &DecisionContext, req: &DecisionRequest) -> String {
+    let mut h = Sha256::new();
+    h.update(b"spendguard.sidecar.decision_idempotency_request.v1:");
+    h.update((ctx.tenant_id.len() as u64).to_be_bytes());
+    h.update(ctx.tenant_id.as_bytes());
+    h.update((ctx.region.len() as u64).to_be_bytes());
+    h.update(ctx.region.as_bytes());
+
+    let mut encoded = Vec::with_capacity(req.encoded_len());
+    req.encode(&mut encoded)
+        .expect("DecisionRequest encoding to Vec cannot fail");
+    h.update((encoded.len() as u64).to_be_bytes());
+    h.update(&encoded);
+    hex::encode(h.finalize())
+}
+
 /// Drive the decision transaction end-to-end through stage 4 (reserve +
 /// atomic audit_decision). Stage 6 (publish_effect) is performed by the
 /// adapter handler after this returns; that handler reads `effect_hash`
@@ -611,8 +641,15 @@ pub async fn run_through_reserve(
     // per-run state, so cache loss or sidecar restart must not let a retry
     // recompute a different RUN_* decision before the ledger can replay the
     // first decision for this adapter idempotency key.
-    if let Some(replay) =
-        replay_existing_decision_by_idempotency(state, ctx, req, &adapter_idempotency_key).await?
+    let request_fingerprint_hex = idempotency_request_fingerprint_hex(ctx, req);
+    if let Some(replay) = replay_existing_decision_by_idempotency(
+        state,
+        ctx,
+        req,
+        &adapter_idempotency_key,
+        &request_fingerprint_hex,
+    )
+    .await?
     {
         return Ok(replay);
     }
@@ -758,6 +795,7 @@ pub async fn run_through_reserve(
             &fencing,
             &bundle,
             &adapter_idempotency_key,
+            &request_fingerprint_hex,
             effect_hash,
             &enrichment,
             projector_response_ref,
@@ -797,6 +835,7 @@ pub async fn run_through_reserve(
         &reason_codes,
         &enrichment,
         prediction_policy_str,
+        &request_fingerprint_hex,
         projector_response_ref,
         claim_estimate_ref,
     );
@@ -1014,6 +1053,7 @@ fn build_audit_decision_cloudevent(
     reason_codes: &[String],
     enrichment: &AuditEnrichment,
     prediction_policy: &str,
+    request_fingerprint_hex: &str,
     projector_response: Option<&crate::proto::run_cost_projector::v1::ProjectResponse>,
     claim_estimate: Option<&crate::proto::sidecar_adapter::v1::ClaimEstimate>,
 ) -> CloudEvent {
@@ -1021,6 +1061,7 @@ fn build_audit_decision_cloudevent(
         "snapshot_hash":   hex::encode(snapshot_hash),
         "matched_rules":   matched_rules,
         "reason_codes":    reason_codes,
+        "idempotency_request_fingerprint": request_fingerprint_hex,
         "session_id":      ctx.session_id,
         // Cost Advisor P0.5 enrichment fields. Empty strings indicate
         // the SDK adapter did not provide enrichment for this call —
@@ -1204,6 +1245,7 @@ async fn run_record_denied_decision(
     fencing: &Fencing,
     bundle: &crate::domain::state::CachedContractBundle,
     adapter_idempotency_key: &str,
+    request_fingerprint_hex: &str,
     effect_hash: [u8; 32],
     enrichment: &AuditEnrichment,
     projector_response: Option<&crate::proto::run_cost_projector::v1::ProjectResponse>,
@@ -1240,6 +1282,7 @@ async fn run_record_denied_decision(
         "snapshot_hash":     hex::encode(snapshot_hash),
         "matched_rules":     matched_rules,
         "reason_codes":      reason_codes,
+        "idempotency_request_fingerprint": request_fingerprint_hex,
         "final_decision":    final_decision_str,
         "session_id":        ctx.session_id,
         "attempted_claims":  claims.iter().map(|c| serde_json::json!({
@@ -2670,6 +2713,53 @@ mod slice_02_decision_match_tests {
     }
 
     #[test]
+    fn idempotency_request_fingerprint_changes_with_claims_and_ids() {
+        let ctx = DecisionContext {
+            session_id: "session-test".to_string(),
+            workload_instance_id: "sidecar-test".to_string(),
+            tenant_id: Uuid::nil().to_string(),
+            region: "test-region".to_string(),
+        };
+        let mut req = DecisionRequest {
+            session_id: "session-test".into(),
+            route: "llm.openai.chat".into(),
+            ids: Some(crate::proto::common::v1::SpendGuardIds {
+                run_id: "run-1".into(),
+                step_id: "step-1".into(),
+                llm_call_id: "call-1".into(),
+                decision_id: "decision-1".into(),
+                ..Default::default()
+            }),
+            inputs: Some(Inputs {
+                projected_claims: vec![BudgetClaim {
+                    budget_id: "budget-1".into(),
+                    amount_atomic: "100".into(),
+                    window_instance_id: "window-1".into(),
+                    unit: Some(UnitRef {
+                        unit_id: "usd-micros".into(),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            idempotency: Some(Idempotency {
+                key: "idem-1".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let original = idempotency_request_fingerprint_hex(&ctx, &req);
+
+        req.ids.as_mut().unwrap().decision_id = "decision-2".into();
+        assert_ne!(original, idempotency_request_fingerprint_hex(&ctx, &req));
+
+        req.ids.as_mut().unwrap().decision_id = "decision-1".into();
+        req.inputs.as_mut().unwrap().projected_claims[0].amount_atomic = "101".into();
+        assert_ne!(original, idempotency_request_fingerprint_hex(&ctx, &req));
+    }
+
+    #[test]
     fn claim_estimate_payload_mirrors_include_model_prompt_class_and_fingerprint() {
         let mut payload = serde_json::json!({
             "snapshot_hash": "00",
@@ -2748,6 +2838,7 @@ mod slice_02_decision_match_tests {
             &[],
             &enrichment,
             "STRICT_CEILING",
+            "test-fingerprint",
             Some(&projector),
             Some(&claim),
         );
@@ -2788,6 +2879,7 @@ mod slice_02_decision_match_tests {
             &[],
             &enrichment,
             "ADAPTIVE_CEILING",
+            "test-fingerprint",
             None,
             Some(&claim),
         );
@@ -2823,6 +2915,7 @@ mod slice_02_decision_match_tests {
             &reason_codes,
             &enrichment,
             "STRICT_CEILING",
+            "test-fingerprint",
             None,
             None,
         );

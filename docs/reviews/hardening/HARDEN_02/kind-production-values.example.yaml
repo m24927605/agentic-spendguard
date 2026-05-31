@@ -13,6 +13,7 @@ postgres:
 
 sidecar:
   endpointCatalogManifestUrl: https://endpoint-catalog.spendguard.svc.cluster.local:8443/v1/catalog/manifest
+  runCostProjectorUrl: https://spendguard-spendguard-run-cost-projector:50055
   contractBundleHashHex: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   trustRootSpkiSha256Hex: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 

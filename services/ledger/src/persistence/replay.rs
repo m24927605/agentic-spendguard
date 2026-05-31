@@ -297,6 +297,12 @@ fn replay_metadata(
     let data = cloudevent_data_json(&cloudevent_payload);
     let reason_codes = string_array(data.as_ref(), "reason_codes");
     let matched_rule_ids = string_array(data.as_ref(), "matched_rules");
+    let request_fingerprint_hex = data
+        .as_ref()
+        .and_then(|v| v.get("idempotency_request_fingerprint"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
     let run_code_triggered = reason_codes
         .iter()
         .find(|code| code.starts_with("RUN_"))
@@ -342,6 +348,7 @@ fn replay_metadata(
         matched_rule_ids,
         reason_codes,
         run_code_triggered,
+        request_fingerprint_hex,
     }
 }
 
@@ -421,6 +428,7 @@ pub struct ReplayMetadata {
     pub matched_rule_ids: Vec<String>,
     pub reason_codes: Vec<String>,
     pub run_code_triggered: String,
+    pub request_fingerprint_hex: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -443,6 +451,7 @@ mod tests {
         let payload_data = json!({
             "matched_rules": [],
             "reason_codes": [],
+            "idempotency_request_fingerprint": "fp-reserve",
         });
         let cloudevent_payload = json!({
             "data_b64": base64::engine::general_purpose::STANDARD
@@ -462,6 +471,7 @@ mod tests {
         assert_eq!(metadata.decision_id, Some(decision_id));
         assert_eq!(metadata.operation_kind, "reserve");
         assert_eq!(metadata.final_decision, "CONTINUE");
+        assert_eq!(metadata.request_fingerprint_hex, "fp-reserve");
         assert_eq!(metadata.projection_ids.len(), 1);
         assert!(metadata.ttl_expires_at.is_some());
         assert_eq!(
@@ -476,6 +486,7 @@ mod tests {
             "final_decision": "STOP",
             "matched_rules": ["projection-stop"],
             "reason_codes": ["RUN_BUDGET_PROJECTION_EXCEEDED"],
+            "idempotency_request_fingerprint": "fp-denied",
         });
         let metadata = replay_metadata(
             "denied_decision".to_string(),
@@ -493,6 +504,7 @@ mod tests {
             metadata.run_code_triggered,
             "RUN_BUDGET_PROJECTION_EXCEEDED"
         );
+        assert_eq!(metadata.request_fingerprint_hex, "fp-denied");
         assert_eq!(metadata.matched_rule_ids, vec!["projection-stop"]);
     }
 }

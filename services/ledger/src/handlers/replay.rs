@@ -160,6 +160,7 @@ pub async fn query_decision_outcome(
         matched_rule_ids: outcome.replay.matched_rule_ids,
         reason_codes: outcome.replay.reason_codes,
         run_code_triggered: outcome.replay.run_code_triggered,
+        request_fingerprint_hex: outcome.replay.request_fingerprint_hex,
     })
 }
 
