@@ -36,9 +36,15 @@ if grep -R "postgres://[^[:space:]\"']*" "${OUT_DIR}" >/dev/null; then
     exit 1
 fi
 
-if grep -n "spendguard-signing-keys" "${OUT_DIR}/production-kms.yaml" >/dev/null; then
-    log "FATAL: KMS render still references local signing Secret"
-    grep -n "spendguard-signing-keys" "${OUT_DIR}/production-kms.yaml" >&2
+CONTROL_PLANE_KMS_SECTION="${OUT_DIR}/production-kms-control-plane.yaml"
+awk '
+    /^# Source: spendguard\/templates\/control-plane.yaml$/ { in_section=1 }
+    /^# Source: / && $0 !~ /control-plane.yaml$/ { in_section=0 }
+    in_section { print }
+' "${OUT_DIR}/production-kms.yaml" >"${CONTROL_PLANE_KMS_SECTION}"
+if grep -n "spendguard-signing-keys\\|/etc/spendguard/signing\\|control-plane.pem" "${CONTROL_PLANE_KMS_SECTION}" >/dev/null; then
+    log "FATAL: KMS control-plane render still references local signing material"
+    grep -n "spendguard-signing-keys\\|/etc/spendguard/signing\\|control-plane.pem" "${CONTROL_PLANE_KMS_SECTION}" >&2
     exit 1
 fi
 

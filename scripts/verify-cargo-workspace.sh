@@ -8,31 +8,31 @@ cd "${REPO_ROOT}"
 
 log() { echo "[verify-cargo] $*" >&2; }
 
-mapfile -t MANIFESTS < <(
-    find . \
-        -path './.git' -prune -o \
-        -path './.ait' -prune -o \
-        -path '*/target' -prune -o \
-        -name Cargo.toml -print \
-    | sort
-)
+MANIFEST_LIST="$(mktemp -t spendguard-cargo-manifests.XXXXXX)"
+find . \
+    -path './.git' -prune -o \
+    -path './.ait' -prune -o \
+    -path '*/target' -prune -o \
+    -name Cargo.toml -print \
+    | sort >"${MANIFEST_LIST}"
 
-if [ "${#MANIFESTS[@]}" -eq 0 ]; then
+MANIFEST_COUNT="$(wc -l <"${MANIFEST_LIST}" | tr -d ' ')"
+if [ "${MANIFEST_COUNT}" -eq 0 ]; then
     log "FATAL: no Cargo.toml files found"
     exit 1
 fi
 
-log "checking metadata for ${#MANIFESTS[@]} manifests"
-for manifest in "${MANIFESTS[@]}"; do
+log "checking metadata for ${MANIFEST_COUNT} manifests"
+while IFS= read -r manifest; do
     dir="$(dirname "${manifest}")"
     if [ -f "${dir}/Cargo.lock" ]; then
         log "metadata --locked ${manifest}"
         cargo metadata --locked --manifest-path "${manifest}" --format-version 1 >/dev/null
     else
-        log "metadata ${manifest}"
-        cargo metadata --manifest-path "${manifest}" --format-version 1 >/dev/null
+        log "metadata --no-deps ${manifest}"
+        cargo metadata --no-deps --manifest-path "${manifest}" --format-version 1 >/dev/null
     fi
-done
+done <"${MANIFEST_LIST}"
 
 BUILD_MANIFESTS=(
     "benchmarks/predictor-upgrade/Cargo.toml"

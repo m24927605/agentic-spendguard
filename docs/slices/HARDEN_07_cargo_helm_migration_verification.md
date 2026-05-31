@@ -172,16 +172,19 @@ Reviewer should run or inspect the verification scripts and reject any script th
 | Design | Security Engineer | Rendered manifests must preserve container baseline and secret handling | §6 and §9 require checks |
 | Design | Database Optimizer | Migration application must use fresh Postgres 16 | §2 and §8 require it |
 | Design | Kubernetes domain expert | NetworkPolicy must be chaos-tested, not template-only | §8.4 gates enforcement |
+| Implementation | codex CLI implementer/reviewer | Verification scripts must run on the local macOS/Bash 3 environment, not just Linux CI | Replaced `mapfile`; used `cargo metadata --no-deps` for manifests without committed lockfiles |
+| Implementation | codex CLI implementer/reviewer | KMS signing check must target control-plane local signing material, not canonical-ingest trust-store material | Narrowed production KMS check to the control-plane rendered section |
+| Implementation | codex CLI implementer/reviewer | Demo regression remains a hard gate after verification fixes | `make demo-up DEMO_MODE=default` passed Step 8, outbox drain, and canonical_events verification |
 
 ---
 
 ## §14. Merge checklist
 
-- [ ] Cargo verification passes
-- [ ] Helm profile matrix passes
-- [ ] Fresh Postgres 16 migration application passes
-- [ ] NetworkPolicy egress chaos test passes
-- [ ] Verification results committed
+- [x] Cargo verification passes
+- [x] Helm profile matrix passes
+- [x] Fresh Postgres 16 migration application passes
+- [x] NetworkPolicy egress chaos test passes
+- [x] Verification results committed
 - [ ] AIT adversarial review passes or Staff+ arbitration is recorded
 
 ---
