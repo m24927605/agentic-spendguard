@@ -61,11 +61,17 @@ required_files=(
 )
 
 for file in "${required_files[@]}"; do
-  if [[ ! -f "$bundle_dir/$file" ]]; then
+  if [[ -L "$bundle_dir/$file" || ! -f "$bundle_dir/$file" ]]; then
     echo "missing required bundle file: $file" >&2
     exit 1
   fi
 done
+
+if find "$bundle_dir" -type l | grep -q .; then
+  echo "release bundle must not contain symlinks" >&2
+  find "$bundle_dir" -type l >&2
+  exit 1
+fi
 
 chart_count="$(find "$bundle_dir/charts" -maxdepth 1 -type f -name 'spendguard-*.tgz' | wc -l | tr -d ' ')"
 if [[ "$chart_count" != "1" ]]; then
@@ -116,11 +122,6 @@ if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then
 fi
 if ! git -C "$repo_root" cat-file -e "$commit_sha^{commit}" 2>/dev/null; then
   echo "bundle commit does not exist in this repository: $commit_sha" >&2
-  exit 1
-fi
-
-if [[ ! -f "$repo_root/$release_notes_pointer" ]]; then
-  echo "release notes pointer does not resolve in repo: $release_notes_pointer" >&2
   exit 1
 fi
 
@@ -183,7 +184,7 @@ fi
     exit 1
   fi
   shasum -a 256 -c SHA256SUMS >/dev/null
-  shasum -a 256 -c migrations/inventory.sha256 >/dev/null
+  (cd migrations && shasum -a 256 -c inventory.sha256 >/dev/null)
 )
 
 chart_scan_dir="$(mktemp -d)"

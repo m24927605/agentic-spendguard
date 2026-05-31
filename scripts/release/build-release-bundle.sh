@@ -124,7 +124,10 @@ docs/release/release-notes-template.md
 POINTER
 
 release_migration_inventory "$repo_root" "$commit_sha" > "$output_real/migrations/inventory.txt"
-shasum -a 256 "$output_real/migrations/inventory.txt" > "$output_real/migrations/inventory.sha256"
+(
+  cd "$output_real/migrations"
+  shasum -a 256 inventory.txt > inventory.sha256
+)
 
 cat > "$output_real/sbom/README.md" <<'SBOM'
 # SBOM Status
