@@ -191,7 +191,7 @@ Reviewer should run or inspect the verification scripts and reject any script th
 - [x] Fresh Postgres 16 migration application passes
 - [x] NetworkPolicy egress chaos test passes
 - [x] Verification results committed
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded
+- [x] AIT adversarial review passes or Staff+ arbitration is recorded
 
 ---
 
