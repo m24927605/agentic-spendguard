@@ -131,7 +131,8 @@ validate_file() {
         echo "release notes section still contains template text: $section" >&2
         exit 1
       fi
-      if [[ "$body" =~ ^[Nn]one\.?$ && "$section" != "Breaking Changes" ]]; then
+      compact_body="$(printf '%s' "$body" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
+      if [[ "$section" != "Breaking Changes" ]] && [[ "$compact_body" =~ ^(none\.?|n/a|na|notapplicable|-|--|_)$ ]]; then
         echo "release notes section must contain concrete content: $section" >&2
         exit 1
       fi
