@@ -176,6 +176,7 @@ Reviewer must inspect cert subject construction, tenant UUID comparison, Helm pr
 | Design | Plugin domain expert | Reference plugin must validate subject, not just trust CA | §8.3 and §9 require it |
 | Implementation | Backend Architect | Reuse existing `predictor_plugin_endpoints.client_cert_id`; no schema migration needed | `client_cert_id` selects the SVID subdirectory |
 | Implementation | Security Engineer | Include mounted cert/key/CA fingerprint in channel cache identity | Rotation rebuilds channels on the next request |
+| Review R1 | codex CLI adversarial reviewer | Fix 4 Majors + 1 Minor: TLS without client CA, rotation reload fallback, control-plane `client_cert_id` validation, real mTLS demo/test, exact URI SAN | Commit `0209c42` closes all R1 findings |
 
 ---
 
@@ -187,7 +188,7 @@ Reviewer must inspect cert subject construction, tenant UUID comparison, Helm pr
 - [x] Cross-tenant mismatch test fails closed
 - [x] `plugin_c_synthetic` demo runs with SVID validation
 - [ ] GH #171 closed with fixing commit
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded
+- [ ] AIT adversarial review passes or Staff+ arbitration is recorded (R1 fixed; R2 pending)
 
 ---
 

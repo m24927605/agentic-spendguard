@@ -15,12 +15,19 @@
 - The reference plugin validates peer certificate SVID subject against
   `PredictRequest.tenant_id` and fails closed on missing or mismatched SVID
   when mTLS client CA is configured.
+- R1 hardening requires `--tls-client-ca` whenever the reference plugin starts
+  in TLS mode; TLS without client auth is no longer a supported "secure" mode.
+- Control-plane plugin registration/update validation now uses the same
+  `[A-Za-z0-9_-]` `client_cert_id` shape that Helm and runtime mounts require.
 
 ## Local verification
 
 ```text
 cargo test --manifest-path services/output_predictor/Cargo.toml -- --nocapture
-PASS: 149 lib tests, 7 binary tests, 19 integration tests/doc tests
+PASS: 150 lib tests, 7 binary tests, 20 integration tests/doc tests
+
+cargo test --manifest-path services/control_plane/Cargo.toml validate_register -- --nocapture
+PASS: 8 validation tests
 
 python3 -m pytest contrib/output_predictor_template/conformance_test.py -q
 PASS: 68 passed
@@ -46,6 +53,6 @@ helm template spendguard charts/spendguard -f scripts/helm-validate-test-values.
 PASS: render failed closed without explicit legacy opt-in
 
 make demo-up DEMO_MODE=plugin_c_synthetic
-PASS: breaker regression, Rust SVID helper checks, and Python reference
-plugin SVID fail-closed checks ran successfully
+PASS: breaker regression, real Rust PluginClient mTLS/SVID integration,
+and Python reference plugin SVID fail-closed checks ran successfully
 ```
