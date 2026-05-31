@@ -2,7 +2,7 @@
 #
 # Required by the operator before install:
 #   - secrets.tls.existingSecret    — Secret with ca.crt + per-service
-  #                                     keypairs (ledger.{crt,key}, etc.)
+#                                     keypairs (ledger.{crt,key}, etc.)
 #   - secrets.bundles.existingSecret— Secret with contract bundle .tgz
 #                                     + metadata.json + runtime.env
 #   - postgres.existingSecret       — Secret with DB URL keys listed

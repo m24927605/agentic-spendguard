@@ -1,5 +1,6 @@
 {{- if .Values.controlPlane.enabled }}
 {{- $component := "control-plane" }}
+{{- $forwarderEnabled := or (eq .Values.chart.profile "production") .Values.controlPlane.auditSchemaBundleHashHex }}
 {{- $canonicalUrl := .Values.controlPlane.canonicalIngestUrl | default (printf "https://%s-canonical-ingest:50052" (include "spendguard.fullname" .)) }}
 {{- if eq .Values.chart.profile "production" }}
 {{- if ne .Values.controlPlane.auth.mode "jwt" }}
@@ -66,6 +67,7 @@ spec:
             - { name: SPENDGUARD_CONTROL_PLANE_METRICS_ADDR, value: "0.0.0.0:9094" }
             - name: SPENDGUARD_CONTROL_PLANE_DATABASE_URL
               {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.controlPlaneUrlKey) | nindent 14 }}
+            {{- if $forwarderEnabled }}
             - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_URL, value: {{ $canonicalUrl | quote }} }
             - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_CERT, value: "/etc/ssl/spendguard/control-plane.crt" }
             - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_KEY, value: "/etc/ssl/spendguard/control-plane.key" }
@@ -77,6 +79,7 @@ spec:
             - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_CANONICAL_SCHEMA_VERSION, value: {{ .Values.controlPlane.auditCanonicalSchemaVersion | quote }} }
             - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_FORWARDER_POLL_INTERVAL_SECONDS, value: {{ .Values.controlPlane.auditForwarderPollIntervalSeconds | quote }} }
             - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_FORWARDER_BATCH_SIZE, value: {{ .Values.controlPlane.auditForwarderBatchSize | quote }} }
+            {{- end }}
             - { name: SPENDGUARD_CONTROL_PLANE_AUTH_MODE, value: {{ .Values.controlPlane.auth.mode | quote }} }
             {{- if eq .Values.controlPlane.auth.mode "static_token" }}
             - { name: SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN, value: {{ .Values.controlPlane.auth.staticToken | quote }} }

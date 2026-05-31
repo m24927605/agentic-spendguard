@@ -130,7 +130,7 @@ done
 # Each service mounts its own pem at /etc/spendguard/signing/<service>.pem.
 SIGN_OUT="$OUT/signing"
 mkdir -p "$SIGN_OUT"
-for svc in ledger sidecar webhook-receiver ttl-sweeper; do
+for svc in ledger sidecar webhook-receiver ttl-sweeper control_plane; do
     if [ -f "$SIGN_OUT/$svc.pem" ]; then
         echo "[pki] signing key for $svc already present, skipping"
         continue
