@@ -23,8 +23,9 @@
   makes the reference plugin reject extra SPIFFE URI identities.
 - R3 hardening starts the 60-second rotation grace window at first reload
   failure, prevents Kubernetes resource-name truncation collisions by capping
-  `client_cert_id` to 44 bytes, and requires URI SAN rather than commonName in
-  the reference plugin.
+  `client_cert_id` to 44 bytes, requires URI SAN rather than commonName in
+  the reference plugin, and extends the real mTLS test to reject tenant-B
+  SVIDs while accepting same-tenant rotated material.
 
 ## Local verification
 
@@ -36,7 +37,7 @@ cargo test --manifest-path services/control_plane/Cargo.toml validate_register -
 PASS: 8 validation tests
 
 python3 -m pytest contrib/output_predictor_template/conformance_test.py -q
-PASS: 69 passed
+PASS: 70 passed
 
 helm template spendguard charts/spendguard --set chart.profile=demo
 PASS
