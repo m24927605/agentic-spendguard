@@ -48,8 +48,34 @@ command -v helm >/dev/null 2>&1 || {
   exit 1
 }
 
+release_migration_inventory() {
+  local root="$1"
+  local commit="$2"
+  (
+    cd "$root"
+    printf '# SpendGuard migration inventory\n'
+    printf 'commit=%s\n' "$commit"
+    printf '\n'
+    find services -type f -name '*.sql' | sort | while read -r migration; do
+      case "$migration" in
+        services/*/migrations/*.sql)
+          case "$migration" in
+            services/*/migrations/*/*.sql) continue ;;
+          esac
+          ;;
+        *) continue ;;
+      esac
+      checksum="$(shasum -a 256 "$migration" | awk '{print $1}')"
+      printf '%s  %s\n' "$checksum" "$migration"
+    done
+  )
+}
+
 output_parent="$(dirname "$output_dir")"
-mkdir -p "$output_parent"
+if [[ ! -d "$output_parent" ]]; then
+  echo "release bundle output parent must already exist: $output_parent" >&2
+  exit 1
+fi
 output_parent_real="$(cd "$output_parent" && pwd -P)"
 output_base="$(basename "$output_dir")"
 output_real="$output_parent_real/$output_base"
@@ -97,15 +123,7 @@ cat > "$output_real/release-notes.pointer" <<'POINTER'
 docs/release/release-notes-template.md
 POINTER
 
-{
-  printf '# SpendGuard migration inventory\n'
-  printf 'commit=%s\n' "$commit_sha"
-  printf '\n'
-  find services -path '*/migrations/*.sql' -type f | sort | while read -r migration; do
-    checksum="$(shasum -a 256 "$migration" | awk '{print $1}')"
-    printf '%s  %s\n' "$checksum" "$migration"
-  done
-} > "$output_real/migrations/inventory.txt"
+release_migration_inventory "$repo_root" "$commit_sha" > "$output_real/migrations/inventory.txt"
 shasum -a 256 "$output_real/migrations/inventory.txt" > "$output_real/migrations/inventory.sha256"
 
 cat > "$output_real/sbom/README.md" <<'SBOM'
