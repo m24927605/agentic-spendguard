@@ -1,7 +1,7 @@
 # HARDEN 04 — Spec/implementation drift reconciliation
 
 > **Branch**: `harden/HARDEN_04_spec_impl_drift_reconciliation`
-> **Status**: draft
+> **Status**: implementation complete; Staff+ arbitration fixed in-slice
 > **Spec ancestor(s)**: `predictor-upgrade-hardening-spec-v1alpha1.md`
 > **Depends on prior slices**: HARDEN_01 through HARDEN_03
 > **Blocks subsequent slices**: HARDEN_05 through HARDEN_08
@@ -54,13 +54,19 @@ The spec set locked on 2026-05-30, but some text still describes round-1 drafts 
 
 - `docs/stats-aggregator-spec-v1alpha1.md`
 - `docs/contract-dsl-spec-v1alpha2.md`
+- `docs/calibration-report-spec-v1alpha1.md`
+- `docs/slices/SLICE_13_calibration_report_cli.md`
+- `proto/spendguard/sidecar_adapter/v1/adapter.proto` comment text only
+- `services/calibration_report/README.md`
+- `services/calibration_report/src/{formatters,report,recommendations,sql_queries}.rs`
+- `services/calibration_report/tests/scenarios.rs`
 - Any other predictor spec where grep proves a stale CloudEvent type, stale column name, or contradictory failure behavior
 
 ---
 
 ## §5. Schema / proto changes
 
-No schema or proto changes. This slice reconciles documentation to already-shipped schema and proto behavior.
+No schema or generated proto changes. This slice reconciles documentation to already-shipped schema and proto behavior; proto edits, if any, are comment-only corrections.
 
 ---
 
@@ -130,7 +136,7 @@ The audit-chain impact is documentary but production-critical:
 |---|---|
 | Full docs site rewrite | This is a correctness patch |
 | v1beta1 spec preparation | Future phase |
-| Operator-facing migration guide | Only needed if behavior changes; this slice should not change behavior |
+| Operator-facing migration guide | Cache-mode ratio behavior is documented in the CLI README and spec; broader migration guide is not needed |
 
 ---
 
@@ -138,7 +144,8 @@ The audit-chain impact is documentary but production-critical:
 
 - Risk: a doc edit accidentally changes a normative promise. Mitigation: require commit-backed citations and adversarial review.
 - Risk: grep misses generated docs. Mitigation: use `rg --files` and include site docs if they mirror specs.
-- Rollback: revert the documentation patch; no runtime state changes.
+- Risk: cache-mode calibration rows are less detailed than before. Mitigation: they were fabricated exact ratios; the CLI now tells operators to use canonical mode for actual/predicted evidence.
+- Rollback: revert the HARDEN_04 merge; no schema or durable-state migration is introduced.
 
 ---
 
@@ -159,16 +166,28 @@ Reviewer should prioritize citation truthfulness and grep completeness over pros
 | Design | Security Engineer | Audit-routed CloudEvents must retain `spendguard.audit.*` | stats-aggregator §7.2 is in scope |
 | Design | Database Optimizer | Column names must be verified against migrations | stats-aggregator §4.1 is in scope |
 | Design | Technical Writer | Avoid broad prose churn | §9 includes minimal-diff review |
+| Implementation | codex CLI | Broad grep found calibration-report spec drift too | Added calibration-report spec corrections and grep artifacts |
+| AIT R1 | codex CLI adversarial reviewer | Calibration ratio direction and stats bucket key still drifted | Fixed actual/predicted wording, Strategy C threshold/tests, and `prompt_class` bucket-key prose |
+| AIT R2 | codex CLI adversarial reviewer | Strategy A critical actual/predicted ratios were hidden by formatter special-case | Threshold checks now precede the Strategy A label; recommendation Rule 1 covers any strategy |
+| AIT R3 | codex CLI adversarial reviewer | Strategy C critical under-prediction could render as generic warning | Strategy C under-prediction label now precedes generic warning; text/markdown regressions added |
+| AIT R4 | codex CLI adversarial reviewer | Stale Strategy A scenario fixtures and unsubstantiated audit pass-count claims | Fixtures now use actual/predicted values with absence assertions; final review attempt runs tests for raw evidence |
+| AIT R5 | codex CLI adversarial reviewer | Cache mode fabricated healthy ratios; Strategy C critical could exit 0; README pinned unsupported pass counts | Max review rounds reached; Staff+ arbitration invoked |
+| Staff+ | Software Architect | FIX_IN_SLICE | Cache exact ratios must be computed, forced canonical, or unavailable; exit code and evidence claims must be fixed |
+| Staff+ | Backend Architect | FIX_IN_SLICE | Same; add regressions for cache-mode non-fabrication and Strategy C exit 1 |
+| Staff+ | Security Engineer | FIX_IN_SLICE | Same; default-path false healthy output is production unsafe |
+| Staff+ | Database Optimizer | FIX_IN_SLICE | Same; cache lacks predicted denominators and cannot supply exact ratios |
+| Staff+ | Calibration domain expert | FIX_IN_SLICE | Same; default cache path must not suppress calibration alerts with literal 1.0 rows |
+| Arbitration final | codex CLI implementer | Fixed per unanimous panel | Cache mode returns no exact calibration rows and explains canonical requirement; Strategy C P95 > 1.05 with n >= 30 exits 1; README pass-count claim removed; focused service suite passed |
 
 ---
 
 ## §14. Merge checklist
 
-- [ ] Required spec drift edits complete
-- [ ] Commit-hash citations added
-- [ ] CloudEvent and stale-column grep audit recorded
-- [ ] No unrelated spec redesign
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded
+- [x] Required spec drift edits complete
+- [x] Commit-hash citations added
+- [x] CloudEvent and stale-column grep audit recorded
+- [x] No unrelated spec redesign
+- [x] AIT adversarial review passes or Staff+ arbitration is recorded
 
 ---
 

@@ -4,12 +4,14 @@
 //!
 //! ## Rule set (spec §8.1 + slice §B.2)
 //!
-//! 1. P95 > 1.50 for any (model, strategy != A) → critical;
-//!    suggest reservation tightening.
+//! 1. actual/predicted P95 > 1.50 for any
+//!    (model, strategy != A) → critical;
+//!    suggest more conservative reservation or baseline refresh.
 //! 2. Tier 3 > 0.1% → warning; top contributing models, dispatch
 //!    update suggestion. > 1.0% → critical.
 //! 3. drift alert > 0 → warning; suggest plugin retraining.
-//! 4. Strategy C P95 < 0.95 → critical; under-prediction.
+//! 4. Strategy C actual/predicted P95 > 1.05 → critical;
+//!    under-prediction.
 //! 5. cold_start_layer_used L1 > 50% → warning; suggest L2 TOML
 //!    population. (Phase B: heuristic derived from CalibrationRatio
 //!    samples; full implementation requires cold-start telemetry.)
@@ -33,7 +35,10 @@
 //! Only the report-run metadata (self-audit CloudEvent, Phase C) lands
 //! in canonical_events.
 
-use crate::report::{Recommendation, Report, Severity};
+use crate::report::{
+    Recommendation, Report, Severity, STRATEGY_C_MIN_SAMPLE_SIZE,
+    STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD,
+};
 use serde_json::json;
 
 /// Run all 9 rules and return the union of triggered recommendations.
@@ -43,7 +48,7 @@ use serde_json::json;
 pub fn evaluate(report: &Report) -> Vec<Recommendation> {
     let mut out = Vec::new();
 
-    // Rule 1: P95 > 1.50 for non-A strategies.
+    // Rule 1: actual/predicted P95 > 1.50 for any strategy.
     if let Some(rec) = rule1_p95_over_critical(report) {
         out.push(rec);
     }
@@ -97,7 +102,7 @@ fn rule1_p95_over_critical(report: &Report) -> Option<Recommendation> {
     let violators: Vec<_> = report
         .calibration_ratios
         .iter()
-        .filter(|r| r.strategy != "A" && r.p95 > crate::report::CRITICAL_P95_THRESHOLD)
+        .filter(|r| r.p95 > crate::report::CRITICAL_P95_THRESHOLD)
         .collect();
     if violators.is_empty() {
         return None;
@@ -115,10 +120,10 @@ fn rule1_p95_over_critical(report: &Report) -> Option<Recommendation> {
             violators.len()
         ),
         possible_cause: format!(
-            "Recent agent prompt-template change or systematic over-reservation. \
+            "Recent agent prompt-template change or systematic under-prediction. \
              Buckets: {summary}"
         ),
-        suggested_action: "Tighten reservation policy or refresh stats_aggregator baseline \
+        suggested_action: "Increase reservation conservatism or refresh stats_aggregator baseline \
              (see Strategy B P95 lookup in output-predictor spec §4)"
             .into(),
         details: json!({ "violators": violators }),
@@ -189,7 +194,11 @@ fn rule4_c_under_prediction(report: &Report) -> Option<Recommendation> {
     let violators: Vec<_> = report
         .calibration_ratios
         .iter()
-        .filter(|r| r.strategy == "C" && r.p95 < 0.95 && r.sample_size >= 30)
+        .filter(|r| {
+            r.strategy == "C"
+                && r.p95 > STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD
+                && r.sample_size >= STRATEGY_C_MIN_SAMPLE_SIZE
+        })
         .collect();
     if violators.is_empty() {
         return None;
@@ -198,7 +207,7 @@ fn rule4_c_under_prediction(report: &Report) -> Option<Recommendation> {
         severity: Severity::Critical,
         code: "STRATEGY_C_UNDER_PREDICTION".into(),
         headline: format!(
-            "Strategy C P95 < 0.95 on {} (model) bucket(s) — customer plugin under-predicts",
+            "Strategy C P95 > 1.05 on {} (model) bucket(s) — customer plugin under-predicts",
             violators.len()
         ),
         possible_cause: "Customer plugin output distribution shifted; current model produces \
@@ -287,19 +296,15 @@ fn rule7_run_projection_exceeded(report: &Report) -> Option<Recommendation> {
     if report.run_total_count == 0 {
         return None;
     }
-    let rate = report.run_budget_projection_exceeded_count as f64
-        / report.run_total_count as f64
-        * 100.0;
+    let rate =
+        report.run_budget_projection_exceeded_count as f64 / report.run_total_count as f64 * 100.0;
     if rate <= 5.0 {
         return None;
     }
     Some(Recommendation {
         severity: Severity::Info,
         code: "RUN_PROJECTION_EXCEEDED_HIGH".into(),
-        headline: format!(
-            "{:.1}% of runs hit RUN_BUDGET_PROJECTION_EXCEEDED",
-            rate
-        ),
+        headline: format!("{:.1}% of runs hit RUN_BUDGET_PROJECTION_EXCEEDED", rate),
         possible_cause: "Per-run budget caps may be tighter than actual run cost, or agents \
              may be running stuck loops that trigger the run_cost_projector circuit"
             .into(),
@@ -324,10 +329,7 @@ fn rule8_tier3_known_vendor(report: &Report) -> Option<Recommendation> {
         .iter()
         .filter(|r| {
             let m = r.model.to_lowercase();
-            m.contains("gpt")
-                || m.contains("claude")
-                || m.contains("gemini")
-                || m.contains("llama")
+            m.contains("gpt") || m.contains("claude") || m.contains("gemini") || m.contains("llama")
         })
         .collect();
     let t3 = report
@@ -460,12 +462,20 @@ mod tests {
     }
 
     #[test]
-    fn rule1_ignores_strategy_a() {
-        // Strategy A is the ceiling; high P95 is expected.
+    fn rule1_ignores_conservative_strategy_a() {
+        // Strategy A is the ceiling; conservative actual/predicted P95 is expected.
         let mut r = base();
-        r.calibration_ratios.push(ratio("gpt-4o", "A", 4.0, 100));
+        r.calibration_ratios.push(ratio("gpt-4o", "A", 0.8, 100));
         let recs = evaluate(&r);
         assert!(!recs.iter().any(|x| x.code == "P95_CRITICAL_OVER_1_50"));
+    }
+
+    #[test]
+    fn rule1_fires_when_strategy_a_under_predicts() {
+        let mut r = base();
+        r.calibration_ratios.push(ratio("gpt-4o", "A", 1.6, 100));
+        let recs = evaluate(&r);
+        assert!(recs.iter().any(|x| x.code == "P95_CRITICAL_OVER_1_50"));
     }
 
     #[test]
@@ -519,7 +529,9 @@ mod tests {
             z_score: 2.4,
         });
         let recs = evaluate(&r);
-        assert!(recs.iter().any(|x| x.code == "PREDICTION_DRIFT_ALERTS_PRESENT"));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "PREDICTION_DRIFT_ALERTS_PRESENT"));
     }
 
     #[test]
@@ -528,9 +540,9 @@ mod tests {
         r.calibration_ratios.push(CalibrationRatio {
             model: "gpt-4o".into(),
             strategy: "C".into(),
-            p50: 0.85,
-            p95: 0.88,
-            p99: 0.92,
+            p50: 1.02,
+            p95: 1.08,
+            p99: 1.14,
             sample_size: 50,
         });
         let recs = evaluate(&r);
@@ -546,9 +558,9 @@ mod tests {
         r.calibration_ratios.push(CalibrationRatio {
             model: "gpt-4o".into(),
             strategy: "C".into(),
-            p50: 0.85,
-            p95: 0.88,
-            p99: 0.92,
+            p50: 1.02,
+            p95: 1.08,
+            p99: 1.14,
             sample_size: 10, // below 30
         });
         let recs = evaluate(&r);
@@ -556,9 +568,32 @@ mod tests {
     }
 
     #[test]
+    fn rule4_direction_matches_actual_over_predicted_ratio() {
+        let mut over_reserved = base();
+        // predicted=200, actual=100 -> actual/predicted=0.50: conservative,
+        // not under-prediction.
+        over_reserved
+            .calibration_ratios
+            .push(ratio("gpt-4o", "C", 0.50, 50));
+        assert!(!evaluate(&over_reserved)
+            .iter()
+            .any(|x| x.code == "STRATEGY_C_UNDER_PREDICTION"));
+
+        let mut under_predicted = base();
+        // predicted=100, actual=200 -> actual/predicted=2.00: unsafe
+        // under-prediction.
+        under_predicted
+            .calibration_ratios
+            .push(ratio("gpt-4o", "C", 2.00, 50));
+        assert!(evaluate(&under_predicted)
+            .iter()
+            .any(|x| x.code == "STRATEGY_C_UNDER_PREDICTION"));
+    }
+
+    #[test]
     fn rule5_fires_on_strategy_a_above_80pct() {
         let mut r = base();
-        r.calibration_ratios.push(ratio("gpt-4o", "A", 4.0, 90));
+        r.calibration_ratios.push(ratio("gpt-4o", "A", 0.8, 90));
         r.calibration_ratios.push(ratio("gpt-4o", "B", 1.1, 10));
         let recs = evaluate(&r);
         assert!(recs.iter().any(|x| x.code == "COLD_START_L1_DOMINANT"));
@@ -588,7 +623,9 @@ mod tests {
         r.run_total_count = 100;
         r.run_budget_projection_exceeded_count = 10; // 10%
         let recs = evaluate(&r);
-        assert!(recs.iter().any(|x| x.code == "RUN_PROJECTION_EXCEEDED_HIGH"));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "RUN_PROJECTION_EXCEEDED_HIGH"));
     }
 
     #[test]
@@ -597,7 +634,9 @@ mod tests {
         r.run_total_count = 100;
         r.run_budget_projection_exceeded_count = 3;
         let recs = evaluate(&r);
-        assert!(!recs.iter().any(|x| x.code == "RUN_PROJECTION_EXCEEDED_HIGH"));
+        assert!(!recs
+            .iter()
+            .any(|x| x.code == "RUN_PROJECTION_EXCEEDED_HIGH"));
     }
 
     #[test]
@@ -609,9 +648,12 @@ mod tests {
             pct: 0.5,
             threshold_violation: true,
         });
-        r.calibration_ratios.push(ratio("gpt-4o-custom-2024-12", "B", 1.1, 100));
+        r.calibration_ratios
+            .push(ratio("gpt-4o-custom-2024-12", "B", 1.1, 100));
         let recs = evaluate(&r);
-        assert!(recs.iter().any(|x| x.code == "TIER3_KNOWN_VENDOR_FINGERPRINT"));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "TIER3_KNOWN_VENDOR_FINGERPRINT"));
     }
 
     #[test]
@@ -623,9 +665,12 @@ mod tests {
             pct: 0.5,
             threshold_violation: true,
         });
-        r.calibration_ratios.push(ratio("custom-fine-tune-v3", "B", 1.1, 100));
+        r.calibration_ratios
+            .push(ratio("custom-fine-tune-v3", "B", 1.1, 100));
         let recs = evaluate(&r);
-        assert!(!recs.iter().any(|x| x.code == "TIER3_KNOWN_VENDOR_FINGERPRINT"));
+        assert!(!recs
+            .iter()
+            .any(|x| x.code == "TIER3_KNOWN_VENDOR_FINGERPRINT"));
     }
 
     #[test]
@@ -633,10 +678,12 @@ mod tests {
         // A at 60% triggers rule 9 (warm-up) AND rule 5 (L1 dominant)
         // because both signals are valid at the same time.
         let mut r = base();
-        r.calibration_ratios.push(ratio("gpt-4o", "A", 4.0, 60));
+        r.calibration_ratios.push(ratio("gpt-4o", "A", 0.8, 60));
         r.calibration_ratios.push(ratio("gpt-4o", "B", 1.1, 40));
         let recs = evaluate(&r);
-        assert!(recs.iter().any(|x| x.code == "STRATEGY_A_DOMINANT_CACHE_WARMUP"));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "STRATEGY_A_DOMINANT_CACHE_WARMUP"));
         assert!(recs.iter().any(|x| x.code == "COLD_START_L1_DOMINANT"));
     }
 
@@ -646,10 +693,12 @@ mod tests {
         // stays silent so the operator doesn't see two contradictory
         // diagnoses.
         let mut r = base();
-        r.calibration_ratios.push(ratio("gpt-4o", "A", 4.0, 90));
+        r.calibration_ratios.push(ratio("gpt-4o", "A", 0.8, 90));
         r.calibration_ratios.push(ratio("gpt-4o", "B", 1.1, 10));
         let recs = evaluate(&r);
-        assert!(!recs.iter().any(|x| x.code == "STRATEGY_A_DOMINANT_CACHE_WARMUP"));
+        assert!(!recs
+            .iter()
+            .any(|x| x.code == "STRATEGY_A_DOMINANT_CACHE_WARMUP"));
     }
 
     // -- §8.2 discipline: every recommendation must carry both
@@ -681,12 +730,12 @@ mod tests {
         r.calibration_ratios.push(CalibrationRatio {
             model: "gpt-4o".into(),
             strategy: "C".into(),
-            p50: 0.8,
-            p95: 0.85,
-            p99: 0.9,
+            p50: 1.02,
+            p95: 1.08,
+            p99: 1.14,
             sample_size: 50,
         });
-        r.calibration_ratios.push(ratio("gpt-4o", "A", 4.0, 200));
+        r.calibration_ratios.push(ratio("gpt-4o", "A", 0.8, 200));
         r.run_total_count = 100;
         r.run_budget_projection_exceeded_count = 20;
 
@@ -749,13 +798,15 @@ mod tests {
             });
         }
         let recs = evaluate(&r);
-        assert!(recs.iter().any(|x| x.code == "PREDICTION_DRIFT_ALERTS_PRESENT"));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "PREDICTION_DRIFT_ALERTS_PRESENT"));
     }
 
     #[test]
     fn scenario_cold_start_dominated() {
         let mut r = base();
-        r.calibration_ratios.push(ratio("gpt-4o", "A", 4.0, 900));
+        r.calibration_ratios.push(ratio("gpt-4o", "A", 0.8, 900));
         r.calibration_ratios.push(ratio("gpt-4o", "B", 1.1, 100));
         let recs = evaluate(&r);
         assert!(recs.iter().any(|x| x.code == "COLD_START_L1_DOMINANT"));
@@ -764,7 +815,7 @@ mod tests {
     #[test]
     fn scenario_plugin_failing() {
         let mut r = base();
-        r.calibration_ratios.push(ratio("gpt-4o", "A", 4.0, 200));
+        r.calibration_ratios.push(ratio("gpt-4o", "A", 0.8, 200));
         r.calibration_ratios.push(ratio("gpt-4o", "B", 1.1, 200));
         // No C entries → plugin missing / failing.
         let recs = evaluate(&r);
@@ -790,6 +841,8 @@ mod tests {
         let recs = evaluate(&r);
         assert!(recs.iter().any(|x| x.code == "TIER3_BURST"));
         // Critical because pct > 1.0%.
-        assert!(recs.iter().any(|x| x.code == "TIER3_BURST" && x.severity == Severity::Critical));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "TIER3_BURST" && x.severity == Severity::Critical));
     }
 }

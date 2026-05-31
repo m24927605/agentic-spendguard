@@ -20,7 +20,7 @@
 2. SQL query layer（直接讀 canonical_events 不靠 cache，為 tamper-evident proof）
 3. Output formats（text / JSON / Markdown）
 4. Per-tenant access control
-5. Calibration metric 定義（reserved/actual ratio P50/P95/P99 等）
+5. Calibration metric 定義（actual/predicted ratio P50/P95/P99 等）
 6. Recommendation engine 規則
 
 **不在本 spec 範圍**：
@@ -67,7 +67,7 @@ per `predictor-architecture-spec-v1alpha1.md` §1.4：
 | Reader | 看 report 的目的 | 想找的訊號 |
 |---|---|---|
 | Platform operator | 日常 health monitoring | Tier 3 hit rate、drift alerts、plugin error rate |
-| CFO / FinOps | 月度 budget audit | 各 (model, strategy) 的 reserved/actual ratio、overspend 風險 |
+| CFO / FinOps | 月度 budget audit | 各 (model, strategy) 的 actual/predicted ratio、overspend 風險 |
 | 第三方審計 / 規範 | 合規證明（SOX / FedRAMP / FINRA） | Cryptographic chain integrity + reservation discipline 證據 |
 
 CLI 必須對三類 audience 都 actionable。
@@ -82,6 +82,11 @@ CLI 必須對三類 audience 都 actionable。
 
 - `--proof-mode=cache`（fast；default for operator daily use；幾秒）
 - `--proof-mode=canonical`（tamper-evident；for audit；數十秒-數分鐘）
+
+Cache mode can use derived stats for fast tier/run summaries, but it MUST NOT
+fabricate `actual / predicted` calibration ratios. Exact calibration ratios,
+ratio-derived recommendations, and ratio-derived exit-code decisions require
+`--proof-mode=canonical`, because the cache has no predicted-token denominator.
 
 ### 1.4 v1alpha1 核心哲學
 
@@ -126,7 +131,7 @@ spendguard calibration-report \
 ### 2.3 Exit codes
 
 - `0` — report generated, no critical findings
-- `1` — report generated, critical findings present（Tier 3 hit > 0.1%; drift alerts > 0; calibration P95 > 1.50）
+- `1` — report generated, critical findings present（Tier 3 hit > 0.1%; drift alerts > 0; calibration P95 > 1.50; Strategy C P95 > 1.05 with n >= 30）
 - `2` — error: cannot query；canonical_events unreachable
 - `3` — error: verify-chain failed（chain integrity violated）
 
@@ -146,29 +151,42 @@ SELECT
 FROM canonical_events
 WHERE tenant_id = $1
   AND event_type = 'spendguard.audit.decision'
-  AND recorded_at BETWEEN $2 AND $3
+  AND event_time BETWEEN $2 AND $3
 GROUP BY tokenizer_tier
 ORDER BY tokenizer_tier;
 ```
+
+HARDEN_04 reconciliation: the implementation uses `canonical_events.event_time`
+for the report window and unversioned `spendguard.audit.decision`; see
+calibration-report commits `dabc6fb` / `15a3f3d`.
 
 ### 3.2 Per-(model, strategy) calibration ratio query
 
 ```sql
 WITH paired AS (
   SELECT
-    decision.cloudevent_payload->>'model' AS model,
+    COALESCE(
+      decision_payload->>'model_family',
+      decision_payload #>> '{spendguard,model}',
+      decision_payload->>'model',
+      '(unknown)'
+    ) AS model,
     decision.prediction_strategy_used AS strategy,
     decision.predicted_b_tokens,
     decision.predicted_c_tokens,
     decision.predicted_a_tokens,
     outcome.actual_output_tokens
   FROM canonical_events decision
+  CROSS JOIN LATERAL (
+    SELECT cost_advisor_safe_decode_payload(decision.payload_json) AS decision_payload
+  ) decoded
   JOIN canonical_events outcome
     ON decision.decision_id = outcome.decision_id
     AND outcome.event_type = 'spendguard.audit.outcome'
+    AND outcome.tenant_id = decision.tenant_id
   WHERE decision.tenant_id = $1
     AND decision.event_type = 'spendguard.audit.decision'
-    AND decision.recorded_at BETWEEN $2 AND $3
+    AND decision.event_time BETWEEN $2 AND $3
     AND outcome.actual_output_tokens IS NOT NULL
 )
 SELECT
@@ -194,15 +212,24 @@ GROUP BY model, strategy
 ORDER BY model, strategy;
 ```
 
+HARDEN_04 reconciliation: the shipped CLI decodes `canonical_events.payload_json`
+with `cost_advisor_safe_decode_payload` rather than reading the ledger-only
+`audit_outbox.cloudevent_payload` column; see calibration-report commit
+`c4fbab6`.
+
 ### 3.3 Drift alert count query
 
 ```sql
 SELECT count(*) AS drift_alerts_in_window
 FROM canonical_events
 WHERE tenant_id = $1
-  AND event_type = 'spendguard.prediction.drift_alert'
-  AND recorded_at BETWEEN $2 AND $3;
+  AND event_type = 'spendguard.audit.prediction_drift_alert.v1alpha1'
+  AND event_time BETWEEN $2 AND $3;
 ```
+
+HARDEN_04 reconciliation: drift alerts route through ImmutableAuditLog with
+the audit-prefixed event type emitted by stats_aggregator commit `f8dc34c`
+and queried by calibration-report commit `c4fbab6`.
 
 ### 3.4 verify-chain integration
 
@@ -222,19 +249,19 @@ WHERE tenant_id = $1
 SpendGuard Calibration Report
 Tenant: acme-corp
 Window: 2026-05-01 → 2026-05-29
-Proof mode: cache (use --proof-mode=canonical for tamper-evident proof)
+Proof mode: canonical (reads canonical_events directly — tamper-evident)
 
 === Tokenizer tier distribution ===
   Tier 1 (provider API shadow):  N/A (off hot path)
   Tier 2 (local exact):  98.5%
   Tier 3 (heuristic):     1.5%        ⚠ exceeds 0.1% target — see recommendations
 
-=== Per-(model, strategy) calibration ratio (reserved / actual) ===
-  gpt-4o + Strategy A:     P50=2.14  P95=4.32  P99=8.10   (ceiling; expected high ratio)
+=== Per-(model, strategy) calibration ratio (actual / predicted) ===
+  gpt-4o + Strategy A:     P50=0.47  P95=0.80  P99=0.95   (ceiling; expected conservative ratio)
   gpt-4o + Strategy B:     P50=1.04  P95=1.18  P99=1.34   ✓ healthy
-  gpt-4o + Strategy C:     P50=0.98  P95=1.05  P99=1.12   ✓ excellent
+  gpt-4o + Strategy C:     P50=0.98  P95=1.03  P99=1.08   ✓ excellent
   claude-3-5-sonnet + B:   P50=1.02  P95=1.11  P99=1.22   ✓ healthy
-  gpt-4o-mini + A (cold):  P50=2.13  P95=4.02  P99=8.50   (cold start; expected)
+  gpt-4o-mini + A (cold):  P50=0.48  P95=0.82  P99=0.96   (cold start; expected conservative ratio)
 
 === Drift alerts in window ===
   prediction_drift_alert events: 3
@@ -257,7 +284,7 @@ Proof mode: cache (use --proof-mode=canonical for tamper-evident proof)
      - Recent agent prompt template change → re-baseline expected
      - Vendor tokenizer update → check tokenizer_t1_samples for matching window
 
-  3. Strategy C calibration excellent (P95=1.05). Consider gradually
+  3. Strategy C calibration excellent (P95=1.03). Consider gradually
      adopting EMPIRICAL_RUN_CEILING policy for non-regulated tenants.
 
 Report integrity: Audit chain verify-chain check NOT run.
@@ -315,13 +342,16 @@ CLI 認證模式：
 
 ### 5.3 Audit log
 
-每次 CLI run 自身 emit `spendguard.calibration.report_generated` CloudEvent，記錄：
+每次 CLI run 自身 emit `spendguard.audit.calibration.report_generated.v1alpha1` CloudEvent，記錄：
 
 - 跑 report 的 user identity
 - tenant_id + 時間範圍
 - exit code + summary
 
 Signed + immutable per audit chain。確保「誰看了 calibration report」也有 trail。
+HARDEN_04 reconciliation: implementation commit `dabc6fb` added self-audit,
+and `services/calibration_report/src/self_audit.rs` now uses the audit-prefixed
+constant `spendguard.audit.calibration.report_generated.v1alpha1`.
 
 ---
 
@@ -335,30 +365,35 @@ per HANDOFF §3.6 範例已在 §4.1 verbatim 重現。
 
 ## §7. Calibration metric 定義
 
-### 7.1 Reserved / actual ratio
+### 7.1 Actual / predicted ratio
 
 ```
-ratio = predicted_strategy_tokens / actual_output_tokens
+ratio = actual_output_tokens / predicted_strategy_tokens
 ```
 
 P50 / P95 / P99 計算 over 所有 paired (decision, outcome) rows。
 
-- ratio > 1.0：reserved 超過 actual（over-reservation；浪費 budget 但不 unsafe）
-- ratio < 1.0：reserved 少於 actual（under-reservation；可能觸發 BUDGET_EXHAUSTED 或 overrun debt）
+- ratio > 1.0：actual 超過 predicted（under-prediction；可能觸發 BUDGET_EXHAUSTED 或 overrun debt）
+- ratio < 1.0：actual 少於 predicted（over-reservation；浪費 budget 但不 unsafe）
+
+HARDEN_04 reconciliation: the shipped canonical query in
+`services/calibration_report/src/sql_queries.rs` computes
+`actual_output_tokens / predicted_<strategy>_tokens`; formatter and
+recommendation wording are aligned to that direction in this slice.
 
 ### 7.2 預期 ratio 分布
 
 | Strategy | Expected P50 | Expected P95 | Healthy ratio |
 |---|---|---|---|
-| A (ceiling) | > 2.0 | > 4.0 | A 是 ceiling；高 ratio 正常 |
+| A (ceiling) | < 0.75 | < 1.0 | A 是 ceiling；低 ratio / conservative reservation 正常 |
 | B (P95 lookup) | 0.95–1.15 | 1.10–1.30 | Calibrated；窄 distribution |
-| C (plugin) | 0.95–1.15 | 1.05–1.20 | Tightest（客戶自訓有 advantage） |
+| C (plugin) | 0.95–1.05 | 1.00–1.05 | Tightest（客戶自訓有 advantage） |
 
 突破 healthy 範圍 → recommendation engine 觸發 alert。
 
 ### 7.3 Cold-start 影響
 
-Cold-start L1（無 distribution）→ ratio 顯示為 A 的 expected 分布。Report 區分 `Strategy A (cold)` vs `Strategy A (no cold)` 為了讓 reader 看出哪些 audit row 是 cold-start fallback。
+Cold-start L1（無 distribution）→ ratio 顯示為 A 的 expected conservative 分布。Report 區分 `Strategy A (cold)` vs `Strategy A (no cold)` 為了讓 reader 看出哪些 audit row 是 cold-start fallback。
 
 ---
 
@@ -370,10 +405,10 @@ Cold-start L1（無 distribution）→ ratio 顯示為 A 的 expected 分布。R
 |---|---|---|
 | Tier 3 hit rate > 0.1% | Warning | List top 5 contributing models; suggest dispatch table PR |
 | Tier 3 hit rate > 1.0% | Critical | Same + page on-call |
-| Strategy B P95 ratio > 1.30 over 7 days | Warning | Suggest reviewing prompt class definitions or refreshing stats_aggregator baseline |
-| Strategy B P95 ratio > 1.50 over 7 days | Critical | Suggest investigating systematic agent behavior change |
+| Strategy B P95 ratio > 1.30 over 7 days | Warning | Suggest reviewing prompt class definitions or refreshing stats_aggregator baseline because actual output is exceeding predictions |
+| Any strategy P95 ratio > 1.50 over 7 days | Critical | Suggest investigating systematic agent behavior change or under-reservation |
 | Strategy C error rate > 5% over 7 days | Warning | List customer plugin error reasons; suggest plugin maintenance |
-| Strategy C P95 < 0.95 (under-prediction) | Critical | Suggest plugin retraining (risky territory) |
+| Strategy C P95 > 1.05 (under-prediction) | Critical | Suggest plugin retraining (risky territory) |
 | RUN_BUDGET_PROJECTION_EXCEEDED rate > 5% of runs | Info | Suggest reviewing per-run budget caps |
 | RUN_DRIFT_DETECTED rate > 1% of runs | Warning | Suggest reviewing agent stability |
 | Tier 1 drift_alert count > 1 in window | Info | Vendor tokenizer may have updated; review |
@@ -396,7 +431,7 @@ Recommendations 是 derived 從 stable audit data；本身不需要 audit chain 
 | Tenant scope mismatch | exit code 2 + audit log 記嘗試 |
 | Window too large (event count > 100M) | warn user; suggest 縮小 window；仍跑但可能超 30s |
 | verify-chain fail | exit code 3 + 標記 row + 整 report aborted |
-| JSON parse fail on cloudevent_payload | skip row + emit metric `report_skipped_rows` |
+| JSON parse fail on `payload_json` | skip row + emit metric `report_skipped_rows` |
 
 ---
 

@@ -129,7 +129,10 @@ impl Report {
     /// Apply spec §2.3 exit-code rules.
     ///
     /// Critical-findings criteria per spec §2.3:
-    ///   - any (model, strategy) P95 > 1.50 (over-reservation outlier),
+    ///   - any (model, strategy) actual/predicted P95 > 1.50
+    ///     (under-prediction outlier),
+    ///   - any Strategy C actual/predicted P95 > 1.05 with n >= 30
+    ///     (plugin under-prediction),
     ///   - any Tier 3 entry with pct > 0.1% (T3 burst), or
     ///   - drift alerts > 0 in window.
     pub fn exit_code(&self) -> ReportExitCode {
@@ -140,11 +143,25 @@ impl Report {
             .calibration_ratios
             .iter()
             .any(|r| r.p95 > CRITICAL_P95_THRESHOLD);
+        let strategy_c_under_prediction = self.calibration_ratios.iter().any(|r| {
+            r.strategy == "C"
+                && r.p95 > STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD
+                && r.sample_size >= STRATEGY_C_MIN_SAMPLE_SIZE
+        });
         let tier3_violation = self.tier_distribution.iter().any(|t| {
             t.tier.as_deref() == Some(TIER3_LABEL) && t.pct > TIER3_CRITICAL_PCT_THRESHOLD
         });
         let drift_violation = !self.drift_alerts.is_empty();
-        if p95_violation || tier3_violation || drift_violation {
+        let critical_recommendation = self
+            .recommendations
+            .iter()
+            .any(|r| r.severity == Severity::Critical);
+        if p95_violation
+            || strategy_c_under_prediction
+            || tier3_violation
+            || drift_violation
+            || critical_recommendation
+        {
             ReportExitCode::CriticalFindings
         } else {
             ReportExitCode::Success
@@ -155,6 +172,10 @@ impl Report {
 /// Spec §2.3 critical threshold. Strategy B P95 1.50 is also the §8.1
 /// "Critical" trigger for `Strategy B P95 ratio > 1.50 over 7 days`.
 pub const CRITICAL_P95_THRESHOLD: f64 = 1.50;
+/// Spec §8.1 Rule 4: Strategy C actual/predicted P95 > 1.05 is
+/// critical when enough paired samples are present.
+pub const STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD: f64 = 1.05;
+pub const STRATEGY_C_MIN_SAMPLE_SIZE: i64 = 30;
 /// Spec §8.1: Tier 3 hit rate > 0.1% → warning. Exit-code §2.3 promotes
 /// the same threshold to "critical findings" for CI semantics.
 pub const TIER3_CRITICAL_PCT_THRESHOLD: f64 = 0.1;
@@ -204,6 +225,34 @@ mod tests {
             sample_size: 100,
         });
         assert_eq!(r.exit_code(), ReportExitCode::CriticalFindings);
+    }
+
+    #[test]
+    fn exit_one_when_strategy_c_under_prediction_is_critical() {
+        let mut r = empty_report();
+        r.calibration_ratios.push(CalibrationRatio {
+            model: "gpt-4o".into(),
+            strategy: "C".into(),
+            p50: 1.01,
+            p95: 1.08,
+            p99: 1.12,
+            sample_size: 50,
+        });
+        assert_eq!(r.exit_code(), ReportExitCode::CriticalFindings);
+    }
+
+    #[test]
+    fn exit_zero_when_strategy_c_under_prediction_sample_is_too_small() {
+        let mut r = empty_report();
+        r.calibration_ratios.push(CalibrationRatio {
+            model: "gpt-4o".into(),
+            strategy: "C".into(),
+            p50: 1.01,
+            p95: 1.08,
+            p99: 1.12,
+            sample_size: 10,
+        });
+        assert_eq!(r.exit_code(), ReportExitCode::Success);
     }
 
     #[test]
@@ -270,7 +319,10 @@ mod tests {
             format!("{:?}", std::process::ExitCode::from(0))
         );
         assert_eq!(
-            format!("{:?}", ReportExitCode::CriticalFindings.to_process_exit_code()),
+            format!(
+                "{:?}",
+                ReportExitCode::CriticalFindings.to_process_exit_code()
+            ),
             format!("{:?}", std::process::ExitCode::from(1))
         );
         assert_eq!(
@@ -278,7 +330,10 @@ mod tests {
             format!("{:?}", std::process::ExitCode::from(2))
         );
         assert_eq!(
-            format!("{:?}", ReportExitCode::VerifyChainFailed.to_process_exit_code()),
+            format!(
+                "{:?}",
+                ReportExitCode::VerifyChainFailed.to_process_exit_code()
+            ),
             format!("{:?}", std::process::ExitCode::from(3))
         );
     }

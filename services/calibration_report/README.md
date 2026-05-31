@@ -15,7 +15,9 @@ cache for the fast path) and produces:
    window. Tier 3 > 0.1% triggers a warning (spec §8.1 rule 2).
 2. **Per-(model, strategy) calibration ratio** — P50/P95/P99 of
    `actual_output_tokens / predicted_<strategy>_tokens`. The
-   healthy band for Strategy B is 0.95-1.30 (spec §7.2).
+   healthy band for Strategy B is 0.95-1.30 (spec §7.2). These exact
+   ratios require `--proof-mode=canonical`; cache mode omits the
+   ratio table because the cache has no predicted-token denominator.
 3. **Drift alerts** — events emitted by stats_aggregator when a
    bucket's distribution drifts.
 4. **Recommendations** — 9 heuristic rules covering tier burst,
@@ -57,7 +59,8 @@ spendguard-calibration-report \
 ### Exit codes (spec §2.3)
 
 - `0` — success, no critical findings.
-- `1` — critical findings present (P95 > 1.50, Tier 3 > 0.1%, drift > 0).
+- `1` — critical findings present (P95 > 1.50, Strategy C P95 > 1.05
+  with n >= 30, Tier 3 > 0.1%, drift > 0).
 - `2` — query / canonical_events unreachable / cross-tenant rejection.
 - `3` — verify-chain integrity violation.
 
@@ -67,13 +70,13 @@ spendguard-calibration-report \
 SpendGuard Calibration Report
 Tenant: 00000000-0000-4000-8000-000000000001
 Window: 2026-05-22 00:00 → 2026-05-29 00:00
-Proof mode: cache (use --proof-mode=canonical for tamper-evident proof)
+Proof mode: canonical (reads canonical_events directly — tamper-evident)
 
 === Tokenizer tier distribution ===
   Tier 2 (local exact)         :   98.5%   (985000 events)
   Tier 3 (heuristic)           :    1.5%   (15000 events)        ⚠ exceeds 0.1% target — see recommendations
 
-=== Per-(model, strategy) calibration ratio (reserved / actual) ===
+=== Per-(model, strategy) calibration ratio (actual / predicted) ===
   gpt-4o                   + Strategy B:  P50= 1.04  P95= 1.18  P99= 1.34  (n=50000)  ✓ healthy
   gpt-4o                   + Strategy C:  P50= 0.98  P95= 1.05  P99= 1.12  (n=12000)  ✓ healthy
 
@@ -128,10 +131,10 @@ for batch ingestion.
 
 | # | Code | Severity | Trigger |
 |---|---|---|---|
-| 1 | `P95_CRITICAL_OVER_1_50` | critical | non-A strategy P95 > 1.50 |
+| 1 | `P95_CRITICAL_OVER_1_50` | critical | any strategy P95 > 1.50 |
 | 2 | `TIER3_BURST` | warning / critical | T3 pct > 0.1% / > 1.0% |
 | 3 | `PREDICTION_DRIFT_ALERTS_PRESENT` | warning | drift_alerts > 0 in window |
-| 4 | `STRATEGY_C_UNDER_PREDICTION` | critical | C P95 < 0.95, n ≥ 30 |
+| 4 | `STRATEGY_C_UNDER_PREDICTION` | critical | C P95 > 1.05, n >= 30 |
 | 5 | `COLD_START_L1_DOMINANT` | warning | Strategy A sample share ≥ 50% |
 | 6 | `STRATEGY_C_ABSENT` | warning | no C samples + > 100 non-C samples |
 | 7 | `RUN_PROJECTION_EXCEEDED_HIGH` | info | RUN_BUDGET_PROJECTION_EXCEEDED > 5% of runs |
@@ -159,9 +162,11 @@ Set `values.calibrationReport.cronEnabled=true` to schedule a daily
 
 ## Tests
 
-- 88 unit tests (CLI, formatters, recommendations, SQL parsers).
-- 13 integration tests covering 5 synthetic scenarios per spec §0.2:
-  healthy, drift, cold-start dominated, plugin failing, Tier 3 burst.
-- 7 CLI smoke tests exercising the binary surface.
+Run the focused service suite before release:
 
-Total: 108 tests passing.
+```bash
+cargo test --manifest-path services/calibration_report/Cargo.toml
+```
+
+Pass counts are intentionally not pinned in this README; use the raw
+test output from the release run as the trusted evidence.

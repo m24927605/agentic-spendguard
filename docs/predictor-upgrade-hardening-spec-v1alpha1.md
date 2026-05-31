@@ -21,7 +21,7 @@ The 2026-05-31 honest gap list — produced by the maintainer after the spec-set
 1. **Adversarial-review skipped on 8 slices**: SLICE_08–SLICE_15 batch-shipped on implementer self-validation only (per the user's notify-when-done directive). The 4-reviewer R1 panel was not run; Blockers and Majors that the panel would have caught are now latent in main.
 2. **E2E never actually ran end-to-end**: `make demo-up` modes were exercised piecewise during slice review, but no single audit ran the 5+ demo modes back-to-back on real docker, and the kind cluster + Helm + chaos NetworkPolicy path was never executed against the SLICE_11 chart.
 3. **81 deferred GH issues**: across SLICE_02–SLICE_07, 81 residual issues were filed with target-slice annotations. ~10 of them are production blockers (verify-chain admission, plaintext DB URL, SVID per-tenant cert, etc.) that must close before any external customer is onboarded.
-4. **Spec/impl drift accumulated**: stats-aggregator-spec §4.1 still references the round-1 column names `recorded_at` / `cloudevent_payload`; the actual canonical_events schema uses `ingest_at` / `payload_json`. contract-dsl-spec-v1alpha2 §6.1 still uses round-1 wording "graceful STOP fallback" that the implementation no longer matches.
+4. **Spec/impl drift accumulated**: the pre-HARDEN_04 audit found round-1 column names (`recorded_at` / `cloudevent_payload`) in predictor specs where the actual canonical_events schema uses `ingest_at` / `payload_json`; it also found contract-dsl wording that implied permissive fallback for STOP-like decisions where shipped code fails closed.
 
 The HARDEN phase is strictly additive: no locked spec invariant is reopened; every change either (a) closes a gap that the spec already implied, (b) reconciles spec text with the shipping implementation, or (c) hardens a deferred residual that the slice itself acknowledged.
 
@@ -155,7 +155,7 @@ The "no locked spec edits" invariant (§2.6) has one carved-out exception: HARDE
 
 - Stale column-name references in spec §N body text (e.g., `recorded_at` → `ingest_at` in stats-aggregator-spec §4.1).
 - Stale CloudEvent type names (e.g., `prediction.drift_alert` → `spendguard.audit.prediction_drift_alert.v1alpha1` in stats-aggregator-spec §7.2).
-- Round-1 wording that contradicts shipped behavior (e.g., contract-dsl-spec-v1alpha2 §6.1 "graceful STOP fallback").
+- Round-1 wording that contradicts shipped behavior (for example, contract-dsl-spec-v1alpha2 §6.1 text that implied permissive fallback for STOP-like decisions).
 
 The edit MUST be in-place + flagged with a Round-N comment annotation per the existing convention. Every edit MUST cite the SLICE_NN commit hash where the implementation diverged. HARDEN_04 may NOT change a spec's locked invariant under cover of "drift".
 

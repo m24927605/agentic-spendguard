@@ -19,7 +19,10 @@
 //! readable layout because each row is independent.
 
 use crate::formatters::FormatOptions;
-use crate::report::{CalibrationRatio, Recommendation, Report, Severity, TierDistribution};
+use crate::report::{
+    CalibrationRatio, Recommendation, Report, Severity, TierDistribution,
+    STRATEGY_C_MIN_SAMPLE_SIZE, STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD,
+};
 
 pub fn render(report: &Report, opts: &FormatOptions) -> String {
     let mut out = String::new();
@@ -55,9 +58,15 @@ pub fn render(report: &Report, opts: &FormatOptions) -> String {
     out.push('\n');
 
     // ----- Calibration ratios -----
-    out.push_str("=== Per-(model, strategy) calibration ratio (reserved / actual) ===\n");
+    out.push_str("=== Per-(model, strategy) calibration ratio (actual / predicted) ===\n");
     if report.calibration_ratios.is_empty() {
-        out.push_str("  (no paired decision/outcome events in window)\n");
+        if report.proof_mode == "cache" {
+            out.push_str(
+                "  (exact ratios unavailable in cache mode; re-run with --proof-mode=canonical)\n",
+            );
+        } else {
+            out.push_str("  (no paired decision/outcome events in window)\n");
+        }
     } else {
         for r in &report.calibration_ratios {
             out.push_str(&format_calibration_row(r));
@@ -133,7 +142,12 @@ fn format_tier_row(tier: &TierDistribution) -> String {
         Some("T1") => "Tier 1 (provider API shadow)",
         Some("T2") => "Tier 2 (local exact)         ",
         Some("T3") => "Tier 3 (heuristic)           ",
-        Some(other) => return format!("  {:30}  {:.1}%   ({} events)\n", other, tier.pct, tier.count),
+        Some(other) => {
+            return format!(
+                "  {:30}  {:.1}%   ({} events)\n",
+                other, tier.pct, tier.count
+            )
+        }
         None => "(unspecified)                ",
     };
     let warning_marker = if tier.threshold_violation {
@@ -148,19 +162,19 @@ fn format_tier_row(tier: &TierDistribution) -> String {
 }
 
 fn format_calibration_row(r: &CalibrationRatio) -> String {
-    let health_marker = match r.strategy.as_str() {
-        "A" => "  (ceiling; expected high ratio)",
-        _ => {
-            if r.p95 > crate::report::CRITICAL_P95_THRESHOLD {
-                "  ⚠ P95 exceeds 1.50 critical threshold"
-            } else if r.p95 > 1.30 {
-                "  ⚠ P95 exceeds 1.30 warning threshold"
-            } else if r.p95 < 0.95 && r.strategy == "C" {
-                "  ⚠ under-prediction (C P95 < 0.95)"
-            } else {
-                "  ✓ healthy"
-            }
-        }
+    let health_marker = if r.p95 > crate::report::CRITICAL_P95_THRESHOLD {
+        "  ⚠ P95 exceeds 1.50 critical threshold"
+    } else if r.p95 > STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD
+        && r.strategy == "C"
+        && r.sample_size >= STRATEGY_C_MIN_SAMPLE_SIZE
+    {
+        "  ⚠ critical under-prediction (C P95 > 1.05)"
+    } else if r.p95 > 1.30 {
+        "  ⚠ P95 exceeds 1.30 warning threshold"
+    } else if r.strategy == "A" {
+        "  (ceiling; expected conservative ratio)"
+    } else {
+        "  ✓ healthy"
     };
     format!(
         "  {:24} + Strategy {}:  P50={:>5.2}  P95={:>5.2}  P99={:>5.2}  (n={}){}\n",
@@ -379,11 +393,23 @@ mod tests {
     #[test]
     fn renders_empty_window_gracefully() {
         let mut r = fixture();
+        r.proof_mode = "canonical".into();
         r.tier_distribution.clear();
         r.calibration_ratios.clear();
         let out = render(&r, &opts(true, false));
         assert!(out.contains("(no decision events in window)"));
         assert!(out.contains("(no paired decision/outcome events in window)"));
+    }
+
+    #[test]
+    fn cache_mode_empty_calibration_explains_exact_ratios_unavailable() {
+        let mut r = fixture();
+        r.proof_mode = "cache".into();
+        r.calibration_ratios.clear();
+        let out = render(&r, &opts(true, false));
+        assert!(out.contains("exact ratios unavailable in cache mode"));
+        assert!(out.contains("--proof-mode=canonical"));
+        assert!(!out.contains("✓ healthy"));
     }
 
     #[test]
@@ -424,5 +450,37 @@ mod tests {
         };
         let out = render(&r, &opts(false, false));
         assert!(out.contains("P95 exceeds 1.50"));
+    }
+
+    #[test]
+    fn strategy_a_high_actual_over_predicted_ratio_marks_critical() {
+        let mut r = fixture();
+        r.calibration_ratios = vec![CalibrationRatio {
+            model: "gpt-4o".into(),
+            strategy: "A".into(),
+            p50: 1.1,
+            p95: 1.6,
+            p99: 2.0,
+            sample_size: 100,
+        }];
+        let out = render(&r, &opts(false, false));
+        assert!(out.contains("P95 exceeds 1.50 critical threshold"));
+        assert!(!out.contains("expected conservative ratio"));
+    }
+
+    #[test]
+    fn strategy_c_under_prediction_beats_generic_warning() {
+        let mut r = fixture();
+        r.calibration_ratios = vec![CalibrationRatio {
+            model: "gpt-4o".into(),
+            strategy: "C".into(),
+            p50: 1.1,
+            p95: 1.31,
+            p99: 1.4,
+            sample_size: 100,
+        }];
+        let out = render(&r, &opts(false, false));
+        assert!(out.contains("critical under-prediction"));
+        assert!(!out.contains("P95 exceeds 1.30 warning threshold"));
     }
 }

@@ -30,8 +30,9 @@ per `calibration-report-spec-v1alpha1.md` (full). Operator-facing differentiator
 - Two proof modes: `--proof-mode=cache` (fast; reads stats_aggregator cache), `--proof-mode=canonical` (tamper-evident; reads canonical_events)
 - Per-tenant access control per spec §5: mTLS production / env var dev; cross-tenant query → exit 2
 - Recommendation engine per spec §8.1 (9 heuristic rules)
-- Self-audit: each report run emits `spendguard.calibration.report_generated` CloudEvent
-- Exit codes: 0 / 1 / 2 / 3 per spec §2.3
+- Self-audit: each report run emits `spendguard.audit.calibration.report_generated.v1alpha1` CloudEvent (implementation commit `dabc6fb`)
+- Exit codes: 0 / 1 / 2 / 3 per spec §2.3; critical findings include
+  Strategy C P95 > 1.05 with n >= 30 after HARDEN_04 reconciliation.
 
 ---
 
@@ -69,7 +70,7 @@ No proto changes. SQL-only.
 ## §6. Audit-chain impact
 
 - Read-only consumption of audit_outbox / canonical_events
-- Self-audit: every CLI run emits CloudEvent `spendguard.calibration.report_generated` (signed; immutable per audit chain)
+- Self-audit: every CLI run emits CloudEvent `spendguard.audit.calibration.report_generated.v1alpha1` (signed; immutable per audit chain; implementation commit `dabc6fb`)
 
 ---
 
@@ -81,7 +82,7 @@ No proto changes. SQL-only.
 | Cross-tenant query | exit code 2 + audit event |
 | verify-chain failure | exit code 3 + row id flagged |
 | Window event count > 100M | warning + suggest narrowing |
-| JSON parse fail on cloudevent_payload row | skip + emit metric `report_skipped_rows` |
+| JSON parse fail on `payload_json` row | skip + emit metric `report_skipped_rows` |
 
 ---
 
@@ -125,7 +126,7 @@ No proto changes. SQL-only.
 7. Window large: 100M events fails gracefully with suggestion.
 8. mTLS production auth: cert validation per Sidecar §5 pattern.
 9. Self-audit CloudEvent: report run records run identity in audit chain.
-10. Exit code 1 (critical findings) criteria: P95 > 1.50 / Tier 3 > 0.1% / drift > 0; criteria documented.
+10. Exit code 1 (critical findings) criteria: P95 > 1.50 / Strategy C P95 > 1.05 with n >= 30 / Tier 3 > 0.1% / drift > 0; criteria documented.
 
 ---
 

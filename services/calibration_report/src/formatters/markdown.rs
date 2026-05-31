@@ -15,7 +15,10 @@
 //! monospace fallback (unlike ANSI colour codes).
 
 use crate::formatters::FormatOptions;
-use crate::report::{CalibrationRatio, Recommendation, Report, Severity, TierDistribution};
+use crate::report::{
+    CalibrationRatio, Recommendation, Report, Severity, TierDistribution,
+    STRATEGY_C_MIN_SAMPLE_SIZE, STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD,
+};
 
 pub fn render(report: &Report, opts: &FormatOptions) -> String {
     let mut out = String::new();
@@ -67,7 +70,11 @@ pub fn render(report: &Report, opts: &FormatOptions) -> String {
     out.push_str("| Model | Strategy | P50 | P95 | P99 | Samples | Health |\n");
     out.push_str("|---|---|---:|---:|---:|---:|---|\n");
     if report.calibration_ratios.is_empty() {
-        out.push_str("| _(none)_ | | | | | | _(no paired events)_ |\n");
+        if report.proof_mode == "cache" {
+            out.push_str("| _(none)_ | | | | | | _(exact ratios unavailable in cache mode; use canonical)_ |\n");
+        } else {
+            out.push_str("| _(none)_ | | | | | | _(no paired events)_ |\n");
+        }
     } else {
         for r in &report.calibration_ratios {
             out.push_str(&format_calibration_row(r));
@@ -163,19 +170,19 @@ fn format_tier_row(tier: &TierDistribution) -> String {
 }
 
 fn format_calibration_row(r: &CalibrationRatio) -> String {
-    let health = match r.strategy.as_str() {
-        "A" => "(ceiling)",
-        _ => {
-            if r.p95 > crate::report::CRITICAL_P95_THRESHOLD {
-                "⚠ critical"
-            } else if r.p95 > 1.30 {
-                "⚠ warning"
-            } else if r.p95 < 0.95 && r.strategy == "C" {
-                "⚠ under-pred"
-            } else {
-                "✓ healthy"
-            }
-        }
+    let health = if r.p95 > crate::report::CRITICAL_P95_THRESHOLD {
+        "⚠ critical"
+    } else if r.p95 > STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD
+        && r.strategy == "C"
+        && r.sample_size >= STRATEGY_C_MIN_SAMPLE_SIZE
+    {
+        "⚠ critical under-pred"
+    } else if r.p95 > 1.30 {
+        "⚠ warning"
+    } else if r.strategy == "A" {
+        "(ceiling)"
+    } else {
+        "✓ healthy"
     };
     format!(
         "| `{}` | `{}` | {:.2} | {:.2} | {:.2} | {} | {} |\n",
@@ -284,6 +291,51 @@ mod tests {
         assert!(out.contains("## Per-(model, strategy) calibration ratio"));
         assert!(out.contains("| Model | Strategy | P50 | P95 | P99 | Samples | Health |"));
         assert!(out.contains("| `gpt-4o` | `B` | 1.04 | 1.18 | 1.34 | 50000 | ✓ healthy |"));
+    }
+
+    #[test]
+    fn cache_mode_empty_calibration_explains_exact_ratios_unavailable() {
+        let mut r = fixture();
+        r.proof_mode = "cache".into();
+        r.calibration_ratios.clear();
+        let out = render(&r, &opts(true, false));
+        assert!(out.contains("exact ratios unavailable in cache mode"));
+        assert!(out.contains("use canonical"));
+        assert!(!out.contains("✓ healthy"));
+    }
+
+    #[test]
+    fn strategy_a_high_actual_over_predicted_ratio_marks_critical() {
+        let mut r = fixture();
+        r.calibration_ratios = vec![CalibrationRatio {
+            model: "gpt-4o".into(),
+            strategy: "A".into(),
+            p50: 1.1,
+            p95: 1.6,
+            p99: 2.0,
+            sample_size: 100,
+        }];
+        let out = render(&r, &opts(true, false));
+        assert!(out.contains("| `gpt-4o` | `A` | 1.10 | 1.60 | 2.00 | 100 | ⚠ critical |"));
+        assert!(!out.contains("| `gpt-4o` | `A` | 1.10 | 1.60 | 2.00 | 100 | (ceiling) |"));
+    }
+
+    #[test]
+    fn strategy_c_under_prediction_beats_generic_warning() {
+        let mut r = fixture();
+        r.calibration_ratios = vec![CalibrationRatio {
+            model: "gpt-4o".into(),
+            strategy: "C".into(),
+            p50: 1.1,
+            p95: 1.31,
+            p99: 1.4,
+            sample_size: 100,
+        }];
+        let out = render(&r, &opts(true, false));
+        assert!(
+            out.contains("| `gpt-4o` | `C` | 1.10 | 1.31 | 1.40 | 100 | ⚠ critical under-pred |")
+        );
+        assert!(!out.contains("| `gpt-4o` | `C` | 1.10 | 1.31 | 1.40 | 100 | ⚠ warning |"));
     }
 
     #[test]

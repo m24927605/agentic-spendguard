@@ -404,12 +404,11 @@ message DecisionResponse {
     // Backwards compat (per contract-dsl-spec-v1alpha2.md §6.1 +
     // §8.1): v1alpha1 sidecar binaries cannot emit this value
     // (their loader refuses v1alpha2 contract bundles via
-    // capability_required mismatch); a v1alpha1 client deserialising
-    // a v1alpha2 response sees DECISION_UNSPECIFIED on this enum and
-    // is expected to fall back to inspecting `decision` mapped to STOP
-    // via the projection rule. SLICE_02 evaluator does NOT yet emit
-    // this enum value (no run_cost_projector wired); SLICE_09 lights
-    // it up.
+    // capability_required mismatch). Old clients that deserialize an
+    // unknown enum value as DECISION_UNSPECIFIED must fail closed, not
+    // gracefully continue; supported SDKs map STOP_RUN_PROJECTION to
+    // the same terminal exception path as STOP. SLICE_09 lights this
+    // enum up when run_cost_projector is wired.
     STOP_RUN_PROJECTION = 6;
   }
   Decision decision = 3;
