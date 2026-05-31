@@ -67,6 +67,7 @@ from _proto.spendguard.output_predictor_plugin.v1 import (  # noqa: E402
 )
 from feature_extractor import SCHEMA, vectorize  # noqa: E402
 from model_predictor_stub import StubModel  # noqa: E402
+from svid_validation import validate_auth_context_tenant  # noqa: E402
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from collections.abc import Callable
@@ -94,10 +95,12 @@ class PredictorServicer(plugin_pb2_grpc.CustomerPredictorServicer):
         *,
         model: StubModel,
         expected_tenant_id: str | None,
+        require_client_svid: bool,
         health_servicer: health.HealthServicer,
     ) -> None:
         self._model = model
         self._expected_tenant_id = (expected_tenant_id or "").strip() or None
+        self._require_client_svid = require_client_svid
         self._health = health_servicer
         # Register the CustomerPredictor service under the standard
         # gRPC health probe so an operator can verify both the
@@ -143,6 +146,16 @@ class PredictorServicer(plugin_pb2_grpc.CustomerPredictorServicer):
                 grpc.StatusCode.INVALID_ARGUMENT,
                 "input_tokens must be non-negative",
             )
+            return False
+        try:
+            validate_auth_context_tenant(
+                auth_context=context.auth_context(),
+                tenant_id=request.tenant_id,
+                require_svid=self._require_client_svid,
+            )
+        except ValueError as exc:
+            LOGGER.warning("client SVID validation failed: %s", exc)
+            context.abort(grpc.StatusCode.PERMISSION_DENIED, str(exc))
             return False
         if self._expected_tenant_id and request.tenant_id != self._expected_tenant_id:
             # Spec §7.2 — plugin SHOULD verify tenant_id matches its
@@ -271,6 +284,7 @@ def _load_credentials(
 def build_server(
     *,
     expected_tenant_id: str | None = None,
+    require_client_svid: bool = False,
     max_workers: int = 8,
     model: StubModel | None = None,
 ) -> tuple[grpc.Server, PredictorServicer]:
@@ -296,6 +310,7 @@ def build_server(
     servicer = PredictorServicer(
         model=model,
         expected_tenant_id=expected_tenant_id,
+        require_client_svid=require_client_svid,
         health_servicer=health_servicer,
     )
     plugin_pb2_grpc.add_CustomerPredictorServicer_to_server(servicer, server)
@@ -346,6 +361,16 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--require-client-svid",
+        action="store_true",
+        default=os.environ.get("PREDICTOR_REQUIRE_CLIENT_SVID", "").lower()
+        in {"1", "true", "yes"},
+        help=(
+            "Require peer certificate URI SAN "
+            "spiffe://spendguard.platform/predictor-client/<tenant_id> on Predict."
+        ),
+    )
+    parser.add_argument(
         "--max-workers",
         type=int,
         default=int(os.environ.get("PREDICTOR_MAX_WORKERS", "8")),
@@ -381,6 +406,7 @@ def main(argv: list[str] | None = None) -> int:
 
     server, _ = build_server(
         expected_tenant_id=args.tenant_id,
+        require_client_svid=args.require_client_svid or bool(args.tls_client_ca),
         max_workers=args.max_workers,
     )
 

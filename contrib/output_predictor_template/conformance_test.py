@@ -50,6 +50,11 @@ from predictor_server import (  # noqa: E402
     MIN_OUTPUT_TOKENS,
     build_server,
 )
+from svid_validation import (  # noqa: E402
+    expected_svid_subject,
+    extract_spiffe_uri_from_auth_context,
+    validate_auth_context_tenant,
+)
 
 
 PROMPT_CLASSES = (
@@ -314,8 +319,10 @@ def test_failure_mode_tls_handshake_error():
         .issuer_name(subject)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.datetime.now(datetime.UTC) - datetime.timedelta(minutes=1))
-        .not_valid_after(datetime.datetime.now(datetime.UTC) + datetime.timedelta(days=1))
+        .not_valid_before(
+            datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)
+        )
+        .not_valid_after(datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(days=1))
         .sign(key, hashes.SHA256())
     )
     cert_pem = cert.public_bytes(serialization.Encoding.PEM)
@@ -402,6 +409,46 @@ def test_tenant_id_required(stub: plugin_pb2_grpc.CustomerPredictorStub):
     with pytest.raises(grpc.RpcError) as exc:
         stub.Predict(req, timeout=1.0)
     assert exc.value.code() == grpc.StatusCode.INVALID_ARGUMENT
+
+
+def test_client_svid_subject_matches_tenant():
+    subject = expected_svid_subject("018fcf9a-3d2d-7b37-9f21-0f27de0b20c1")
+    auth_context = {"x509_subject_alternative_name": [f"URI:{subject}".encode("utf-8")]}
+    assert extract_spiffe_uri_from_auth_context(auth_context) == subject
+    validate_auth_context_tenant(
+        auth_context=auth_context,
+        tenant_id="018fcf9a-3d2d-7b37-9f21-0f27de0b20c1",
+        require_svid=True,
+    )
+
+
+def test_client_svid_tenant_mismatch_rejected():
+    auth_context = {
+        "x509_subject_alternative_name": [
+            b"URI:spiffe://spendguard.platform/predictor-client/018fcf9a-3d2d-7b37-9f21-0f27de0b20c1"
+        ]
+    }
+    with pytest.raises(ValueError, match="SVID tenant mismatch"):
+        validate_auth_context_tenant(
+            auth_context=auth_context,
+            tenant_id="018fcf9a-3d2d-7b37-9f21-0f27de0b20c2",
+            require_svid=True,
+        )
+
+
+def test_client_svid_missing_cert_fails_closed():
+    srv, _ = build_server(expected_tenant_id="tenant-a", require_client_svid=True)
+    port = srv.add_insecure_port("127.0.0.1:0")
+    srv.start()
+    try:
+        channel = grpc.insecure_channel(f"127.0.0.1:{port}")
+        stub = plugin_pb2_grpc.CustomerPredictorStub(channel)
+        with pytest.raises(grpc.RpcError) as exc:
+            stub.Predict(_make_request(tenant_id="tenant-a"), timeout=1.0)
+        assert exc.value.code() == grpc.StatusCode.PERMISSION_DENIED
+        channel.close()
+    finally:
+        srv.stop(grace=0).wait()
 
 
 def test_oversized_field_rejected(stub: plugin_pb2_grpc.CustomerPredictorStub):
