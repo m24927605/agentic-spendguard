@@ -6,7 +6,7 @@ use prost::Message as _;
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Transaction};
 use tokio::time::sleep;
-use tonic::transport::{Channel, Endpoint};
+use tonic::transport::{Certificate, Channel, ClientTlsConfig, Endpoint, Identity};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -26,6 +26,13 @@ pub struct AuditForwarderConfig {
     pub batch_size: i64,
 }
 
+#[derive(Debug, Clone)]
+pub struct CanonicalClientTlsFiles {
+    pub client_cert_pem: String,
+    pub client_key_pem: String,
+    pub ca_pem: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForwardSummary {
     pub forwarded: usize,
@@ -41,16 +48,32 @@ struct PendingOutboxRow {
 }
 
 pub async fn build_canonical_client(
-    endpoint: &str,
+    endpoint_url: &str,
+    tls_files: Option<&CanonicalClientTlsFiles>,
 ) -> Result<CanonicalIngestClient<Channel>, anyhow::Error> {
-    let channel = Endpoint::from_shared(endpoint.to_owned())
-        .with_context(|| format!("invalid canonical_ingest_url `{endpoint}`"))?
+    let mut endpoint = Endpoint::from_shared(endpoint_url.to_owned())
+        .with_context(|| format!("invalid canonical_ingest_url `{endpoint_url}`"))?
         .connect_timeout(Duration::from_secs(5))
-        .timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(5));
+    if let Some(files) = tls_files {
+        endpoint = endpoint.tls_config(load_client_tls(files)?)?;
+    }
+    let channel = endpoint
         .connect()
         .await
-        .with_context(|| format!("connect canonical_ingest `{endpoint}`"))?;
+        .with_context(|| format!("connect canonical_ingest `{endpoint_url}`"))?;
     Ok(CanonicalIngestClient::new(channel))
+}
+
+fn load_client_tls(files: &CanonicalClientTlsFiles) -> Result<ClientTlsConfig, anyhow::Error> {
+    let cert = std::fs::read(&files.client_cert_pem)
+        .with_context(|| format!("read {}", files.client_cert_pem))?;
+    let key = std::fs::read(&files.client_key_pem)
+        .with_context(|| format!("read {}", files.client_key_pem))?;
+    let ca = std::fs::read(&files.ca_pem).with_context(|| format!("read {}", files.ca_pem))?;
+    Ok(ClientTlsConfig::new()
+        .identity(Identity::from_pem(cert, key))
+        .ca_certificate(Certificate::from_pem(ca)))
 }
 
 pub fn spawn_audit_forwarder(

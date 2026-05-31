@@ -766,14 +766,36 @@ services:
       # `demo-admins` group; in production, set GROUP_POLICY_JSON
       # to map your IdP's group claims to roles.
       SPENDGUARD_CONTROL_PLANE_STATIC_TOKEN_TENANT_IDS:       "00000000-0000-4000-8000-000000000001"
+      # HARDEN_06: signed control-plane audit outbox forwarding to
+      # canonical_ingest's observability route. The entrypoint sources
+      # /var/lib/spendguard/bundles/runtime.env so the hash matches the
+      # schema_bundles row inserted by canonical-seed-init.
+      SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_URL:          "https://canonical-ingest:50052"
+      SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_CERT: "/etc/ssl/spendguard/control_plane.crt"
+      SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_KEY:  "/etc/ssl/spendguard/control_plane.key"
+      SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CA_PEM:      "/etc/ssl/spendguard/ca.crt"
+      SPENDGUARD_CONTROL_PLANE_AUDIT_SCHEMA_BUNDLE_ID:        "22222222-2222-4222-8222-222222222222"
+      SPENDGUARD_CONTROL_PLANE_AUDIT_SCHEMA_BUNDLE_HASH_HEX:  "${SPENDGUARD_SCHEMA_BUNDLE_HASH_HEX:-}"
+      SPENDGUARD_CONTROL_PLANE_SIGNING_MODE:                  "local"
+      SPENDGUARD_CONTROL_PLANE_SIGNING_PRODUCER_IDENTITY:     "control-plane:demo"
+      SPENDGUARD_CONTROL_PLANE_SIGNING_KEY_PATH:              "/etc/ssl/spendguard/signing/control_plane.pem"
       # Round-2 #11: Prometheus /metrics endpoint.
       SPENDGUARD_CONTROL_PLANE_METRICS_ADDR:                  "0.0.0.0:9094"
     ports:
       - "8091:8091"
       - "9094:9094"
+    volumes:
+      - pki-data:/etc/ssl/spendguard:ro
+      - bundles-data:/var/lib/spendguard/bundles:ro
     depends_on:
       postgres:
         condition: service_healthy
+      canonical-ingest:
+        condition: service_started
+      canonical-seed-init:
+        condition: service_completed_successfully
+      pki-init:
+        condition: service_completed_successfully
     networks: [spendguard-net]
 
   dashboard:

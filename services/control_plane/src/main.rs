@@ -45,7 +45,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::metrics::ControlPlaneMetrics;
-use audit_forwarder::{build_canonical_client, spawn_audit_forwarder, AuditForwarderConfig};
+use audit_forwarder::{
+    build_canonical_client, spawn_audit_forwarder, AuditForwarderConfig, CanonicalClientTlsFiles,
+};
 use spendguard_auth::{AuthConfig, Authenticator, Permission, Principal};
 use spendguard_signing::Signer;
 use sqlx::postgres::PgPoolOptions;
@@ -65,6 +67,12 @@ struct Config {
     metrics_addr: String,
     #[serde(default)]
     canonical_ingest_url: String,
+    #[serde(default)]
+    canonical_ingest_tls_client_cert: String,
+    #[serde(default)]
+    canonical_ingest_tls_client_key: String,
+    #[serde(default)]
+    canonical_ingest_tls_ca_pem: String,
     #[serde(default)]
     audit_schema_bundle_id: String,
     #[serde(default)]
@@ -137,13 +145,14 @@ async fn main() -> anyhow::Result<()> {
             .map_err(|e| anyhow::anyhow!("S17: init authenticator: {e}"))?,
     );
 
-    if let Some(forwarder_cfg) = build_audit_forwarder_config(&cfg, &profile)? {
+    if let Some((forwarder_cfg, tls_files)) = build_audit_forwarder_config(&cfg, &profile)? {
         let signer: Arc<dyn Signer> = Arc::from(
             spendguard_signing::signer_from_env("SPENDGUARD_CONTROL_PLANE")
                 .await
                 .map_err(|e| anyhow::anyhow!("load control-plane audit signer: {e}"))?,
         );
-        let canonical_client = build_canonical_client(&forwarder_cfg.canonical_ingest_url).await?;
+        let canonical_client =
+            build_canonical_client(&forwarder_cfg.canonical_ingest_url, tls_files.as_ref()).await?;
         spawn_audit_forwarder(pg.clone(), signer, forwarder_cfg, canonical_client);
     } else {
         tracing::warn!(
@@ -229,7 +238,7 @@ async fn main() -> anyhow::Result<()> {
 fn build_audit_forwarder_config(
     cfg: &Config,
     profile: &str,
-) -> anyhow::Result<Option<AuditForwarderConfig>> {
+) -> anyhow::Result<Option<(AuditForwarderConfig, Option<CanonicalClientTlsFiles>)>> {
     if cfg.canonical_ingest_url.is_empty() {
         if profile == "production" {
             anyhow::bail!("SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_URL required in production");
@@ -244,15 +253,51 @@ fn build_audit_forwarder_config(
     }
     let schema_bundle_hash = hex::decode(&cfg.audit_schema_bundle_hash_hex)
         .context("SPENDGUARD_CONTROL_PLANE_AUDIT_SCHEMA_BUNDLE_HASH_HEX must be hex")?;
-    Ok(Some(AuditForwarderConfig {
-        canonical_ingest_url: cfg.canonical_ingest_url.clone(),
-        schema_bundle: proto::common::v1::SchemaBundleRef {
-            schema_bundle_id: cfg.audit_schema_bundle_id.clone(),
-            schema_bundle_hash: schema_bundle_hash.into(),
-            canonical_schema_version: cfg.audit_canonical_schema_version.clone(),
+    let tls_files = build_canonical_tls_files(cfg, profile)?;
+    Ok(Some((
+        AuditForwarderConfig {
+            canonical_ingest_url: cfg.canonical_ingest_url.clone(),
+            schema_bundle: proto::common::v1::SchemaBundleRef {
+                schema_bundle_id: cfg.audit_schema_bundle_id.clone(),
+                schema_bundle_hash: schema_bundle_hash.into(),
+                canonical_schema_version: cfg.audit_canonical_schema_version.clone(),
+            },
+            poll_interval_seconds: cfg.audit_forwarder_poll_interval_seconds,
+            batch_size: cfg.audit_forwarder_batch_size,
         },
-        poll_interval_seconds: cfg.audit_forwarder_poll_interval_seconds,
-        batch_size: cfg.audit_forwarder_batch_size,
+        tls_files,
+    )))
+}
+
+fn build_canonical_tls_files(
+    cfg: &Config,
+    profile: &str,
+) -> anyhow::Result<Option<CanonicalClientTlsFiles>> {
+    let any = !cfg.canonical_ingest_tls_client_cert.is_empty()
+        || !cfg.canonical_ingest_tls_client_key.is_empty()
+        || !cfg.canonical_ingest_tls_ca_pem.is_empty();
+    if !any {
+        if profile == "production" {
+            anyhow::bail!(
+                "SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_CERT, \
+                 _KEY, and _CA_PEM are required in production"
+            );
+        }
+        return Ok(None);
+    }
+    if cfg.canonical_ingest_tls_client_cert.is_empty() {
+        anyhow::bail!("SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_CERT required");
+    }
+    if cfg.canonical_ingest_tls_client_key.is_empty() {
+        anyhow::bail!("SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_KEY required");
+    }
+    if cfg.canonical_ingest_tls_ca_pem.is_empty() {
+        anyhow::bail!("SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CA_PEM required");
+    }
+    Ok(Some(CanonicalClientTlsFiles {
+        client_cert_pem: cfg.canonical_ingest_tls_client_cert.clone(),
+        client_key_pem: cfg.canonical_ingest_tls_client_key.clone(),
+        ca_pem: cfg.canonical_ingest_tls_ca_pem.clone(),
     }))
 }
 
