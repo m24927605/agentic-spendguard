@@ -129,7 +129,8 @@ impl Report {
     /// Apply spec §2.3 exit-code rules.
     ///
     /// Critical-findings criteria per spec §2.3:
-    ///   - any (model, strategy) P95 > 1.50 (over-reservation outlier),
+    ///   - any (model, strategy) actual/predicted P95 > 1.50
+    ///     (under-prediction outlier),
     ///   - any Tier 3 entry with pct > 0.1% (T3 burst), or
     ///   - drift alerts > 0 in window.
     pub fn exit_code(&self) -> ReportExitCode {

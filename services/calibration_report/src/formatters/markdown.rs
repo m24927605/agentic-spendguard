@@ -170,7 +170,7 @@ fn format_calibration_row(r: &CalibrationRatio) -> String {
                 "⚠ critical"
             } else if r.p95 > 1.30 {
                 "⚠ warning"
-            } else if r.p95 < 0.95 && r.strategy == "C" {
+            } else if r.p95 > 1.05 && r.strategy == "C" {
                 "⚠ under-pred"
             } else {
                 "✓ healthy"

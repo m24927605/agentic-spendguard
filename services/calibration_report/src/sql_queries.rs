@@ -559,6 +559,23 @@ mod tests {
     }
 
     #[test]
+    fn calibration_ratio_uses_actual_over_predicted_direction() {
+        for strategy in ["a", "b", "c"] {
+            assert!(
+                CALIBRATION_RATIO_SQL.contains(&format!(
+                    "actual_output_tokens::float / NULLIF(predicted_{strategy}_tokens, 0)"
+                )),
+                "canonical proof-mode ratio must be actual_output_tokens / predicted_{strategy}_tokens"
+            );
+        }
+        assert!(
+            !CALIBRATION_RATIO_SQL
+                .contains("predicted_b_tokens::float / NULLIF(actual_output_tokens"),
+            "reversing the ratio makes under-prediction look healthy"
+        );
+    }
+
+    #[test]
     fn run_level_counts_read_run_codes_from_decision_payload() {
         assert!(RUN_LEVEL_COUNTS_SQL.contains("cost_advisor_safe_decode_payload(payload_json)"));
         assert!(RUN_LEVEL_COUNTS_SQL.contains("payload->'reason_codes'"));

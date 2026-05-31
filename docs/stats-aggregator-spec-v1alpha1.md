@@ -148,15 +148,21 @@ WHERE event_type = 'spendguard.audit.outcome'
 四元組（per HANDOFF §3.4 + `output-predictor-service-spec-v1alpha1.md` §7）：
 
 ```
-(tenant_id, model, agent_id, prompt_class_fingerprint)
+(tenant_id, model, agent_id, prompt_class)
 ```
 
 - `tenant_id`：multi-tenant isolation
 - `model`：跨 model token 分布顯著不同（per `proto/spendguard/common/v1/common.proto` UnitRef.model_family doc）
 - `agent_id`：同 tenant 不同 agent（customer-support vs code-review）有極大分布差異
-- `prompt_class_fingerprint`：hash over canonicalized template structure（NOT content）；7 個 buckets per `predictor-architecture-spec-v1alpha1.md` 提及（chat_short / chat_long / code_gen / summarization / rag / tool_calling / vision）
+- `prompt_class`：7-class classifier label（chat_short / chat_long / code_gen / summarization / rag / tool_calling / vision）used by the hot output-predictor lookup and by `output_distribution_cache` primary key.
+- `prompt_class_fingerprint`：non-key audit metadata over canonicalized template structure（NOT content）for later forensic inspection; it is carried in `canonical_events` but not used as the stats_aggregator bucket key.
 
-### 3.3 Prompt class fingerprint derivation
+HARDEN_04 reconciliation: shipped migrations `0016_output_distribution_cache.sql`
+and `0018_canonical_events_aggregator_mirror_columns.sql`, plus implementation
+commit `8436cd4`, key aggregation rows on `prompt_class`; the fingerprint is
+retained only as mirror/audit metadata.
+
+### 3.3 Prompt class and fingerprint derivation
 
 `prompt_class_fingerprint` 是 sidecar 在 decision time 算出來寫進 audit row 的 hash。算法：
 
@@ -169,7 +175,7 @@ fn prompt_class_fingerprint(messages: &[Message], model: &str) -> String {
 }
 ```
 
-完整 classifier 規則 + 7 個 bucket 邊界定義在 `output-predictor-service-spec-v1alpha1.md` §8。stats_aggregator **不**重算 fingerprint，只 group by。
+完整 classifier 規則 + 7 個 bucket 邊界定義在 `output-predictor-service-spec-v1alpha1.md` §8。stats_aggregator **不**重算 fingerprint；it groups by the stored `prompt_class` mirror column and preserves the fingerprint only for audit/debug correlation.
 
 ---
 

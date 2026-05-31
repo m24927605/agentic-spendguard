@@ -378,9 +378,9 @@ fn recommendation_order_is_deterministic_across_runs() {
     r.calibration_ratios.push(CalibrationRatio {
         model: "gpt-4o".into(),
         strategy: "C".into(),
-        p50: 0.8,
-        p95: 0.85,
-        p99: 0.9,
+        p50: 1.02,
+        p95: 1.08,
+        p99: 1.14,
         sample_size: 50,
     });
 
@@ -424,17 +424,17 @@ fn every_recommendation_has_required_fields() {
     r.calibration_ratios.push(CalibrationRatio {
         model: "gpt-4o".into(),
         strategy: "C".into(),
-        p50: 0.8,
-        p95: 0.85,
-        p99: 0.9,
+        p50: 1.02,
+        p95: 1.08,
+        p99: 1.14,
         sample_size: 50,
     });
     r.calibration_ratios.push(CalibrationRatio {
         model: "gpt-4o".into(),
         strategy: "A".into(),
-        p50: 4.0,
-        p95: 8.0,
-        p99: 12.0,
+        p50: 0.5,
+        p95: 0.8,
+        p99: 0.95,
         sample_size: 200,
     });
     r.run_total_count = 100;

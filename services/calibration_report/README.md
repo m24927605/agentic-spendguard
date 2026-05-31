@@ -73,7 +73,7 @@ Proof mode: cache (use --proof-mode=canonical for tamper-evident proof)
   Tier 2 (local exact)         :   98.5%   (985000 events)
   Tier 3 (heuristic)           :    1.5%   (15000 events)        ⚠ exceeds 0.1% target — see recommendations
 
-=== Per-(model, strategy) calibration ratio (reserved / actual) ===
+=== Per-(model, strategy) calibration ratio (actual / predicted) ===
   gpt-4o                   + Strategy B:  P50= 1.04  P95= 1.18  P99= 1.34  (n=50000)  ✓ healthy
   gpt-4o                   + Strategy C:  P50= 0.98  P95= 1.05  P99= 1.12  (n=12000)  ✓ healthy
 
@@ -131,7 +131,7 @@ for batch ingestion.
 | 1 | `P95_CRITICAL_OVER_1_50` | critical | non-A strategy P95 > 1.50 |
 | 2 | `TIER3_BURST` | warning / critical | T3 pct > 0.1% / > 1.0% |
 | 3 | `PREDICTION_DRIFT_ALERTS_PRESENT` | warning | drift_alerts > 0 in window |
-| 4 | `STRATEGY_C_UNDER_PREDICTION` | critical | C P95 < 0.95, n ≥ 30 |
+| 4 | `STRATEGY_C_UNDER_PREDICTION` | critical | C P95 > 1.05, n >= 30 |
 | 5 | `COLD_START_L1_DOMINANT` | warning | Strategy A sample share ≥ 50% |
 | 6 | `STRATEGY_C_ABSENT` | warning | no C samples + > 100 non-C samples |
 | 7 | `RUN_PROJECTION_EXCEEDED_HIGH` | info | RUN_BUDGET_PROJECTION_EXCEEDED > 5% of runs |

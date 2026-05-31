@@ -57,6 +57,9 @@ The spec set locked on 2026-05-30, but some text still describes round-1 drafts 
 - `docs/calibration-report-spec-v1alpha1.md`
 - `docs/slices/SLICE_13_calibration_report_cli.md`
 - `proto/spendguard/sidecar_adapter/v1/adapter.proto` comment text only
+- `services/calibration_report/README.md`
+- `services/calibration_report/src/{formatters,report,recommendations,sql_queries}.rs`
+- `services/calibration_report/tests/scenarios.rs`
 - Any other predictor spec where grep proves a stale CloudEvent type, stale column name, or contradictory failure behavior
 
 ---
@@ -163,6 +166,7 @@ Reviewer should prioritize citation truthfulness and grep completeness over pros
 | Design | Database Optimizer | Column names must be verified against migrations | stats-aggregator §4.1 is in scope |
 | Design | Technical Writer | Avoid broad prose churn | §9 includes minimal-diff review |
 | Implementation | codex CLI | Broad grep found calibration-report spec drift too | Added calibration-report spec corrections and grep artifacts |
+| AIT R1 | codex CLI adversarial reviewer | Calibration ratio direction and stats bucket key still drifted | Fixed actual/predicted wording, Strategy C threshold/tests, and `prompt_class` bucket-key prose |
 
 ---
 

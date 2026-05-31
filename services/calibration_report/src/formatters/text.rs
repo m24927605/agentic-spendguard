@@ -55,7 +55,7 @@ pub fn render(report: &Report, opts: &FormatOptions) -> String {
     out.push('\n');
 
     // ----- Calibration ratios -----
-    out.push_str("=== Per-(model, strategy) calibration ratio (reserved / actual) ===\n");
+    out.push_str("=== Per-(model, strategy) calibration ratio (actual / predicted) ===\n");
     if report.calibration_ratios.is_empty() {
         out.push_str("  (no paired decision/outcome events in window)\n");
     } else {
@@ -149,14 +149,14 @@ fn format_tier_row(tier: &TierDistribution) -> String {
 
 fn format_calibration_row(r: &CalibrationRatio) -> String {
     let health_marker = match r.strategy.as_str() {
-        "A" => "  (ceiling; expected high ratio)",
+        "A" => "  (ceiling; expected conservative ratio)",
         _ => {
             if r.p95 > crate::report::CRITICAL_P95_THRESHOLD {
                 "  ⚠ P95 exceeds 1.50 critical threshold"
             } else if r.p95 > 1.30 {
                 "  ⚠ P95 exceeds 1.30 warning threshold"
-            } else if r.p95 < 0.95 && r.strategy == "C" {
-                "  ⚠ under-prediction (C P95 < 0.95)"
+            } else if r.p95 > 1.05 && r.strategy == "C" {
+                "  ⚠ under-prediction (C P95 > 1.05)"
             } else {
                 "  ✓ healthy"
             }
