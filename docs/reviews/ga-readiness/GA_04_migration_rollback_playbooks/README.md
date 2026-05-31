@@ -12,8 +12,8 @@ GA_04 adds a checked-in migration inventory, operator playbooks for migration an
 | `CONTAINER=spendguard-ga04-migrations EVIDENCE_PREFIX=/tmp/spendguard-ga04 scripts/verify-migrations-postgres16.sh` | PASS - applied 77 direct deploy migrations on Postgres 16.14 |
 | `helm template spendguard charts/spendguard --set chart.profile=demo` | PASS |
 | `helm template spendguard charts/spendguard -f charts/spendguard/values-production.example.yaml` | PASS |
-| `scripts/release/build-release-bundle.sh --output /tmp/spendguard-ga04-release-bundle-r2` | PASS |
-| `scripts/release/check-release-bundle.sh /tmp/spendguard-ga04-release-bundle-r2` | PASS |
+| `scripts/release/build-release-bundle.sh --output /tmp/spendguard-ga04-release-bundle-current` | PASS |
+| `scripts/release/check-release-bundle.sh /tmp/spendguard-ga04-release-bundle-current` | PASS |
 | `POSTGRES_IMAGE=postgres:15-alpine CONTAINER=spendguard-ga04-pg15-negative ... scripts/verify-migrations-postgres16.sh` | PASS - failed closed with `expected Postgres 16.x` |
 | Migration playbook backup/restore checkpoints | Covered in `docs/operations/migration-playbook.md` |
 | Rollback decision tree and forward-fix warnings | Covered in `docs/operations/rollback-playbook.md` |
@@ -22,12 +22,12 @@ GA_04 adds a checked-in migration inventory, operator playbooks for migration an
 
 | Item | Value |
 |---|---|
-| Release commit artifact | `/tmp/spendguard-ga04-release-bundle-r2/commit.txt`; rerun `git rev-parse HEAD` from the checked-out release branch |
-| Postgres image | `postgres:16-alpine` |
-| Server version evidence | `/tmp/spendguard-ga04-postgres-version.txt`: `server_version_num=160014`, `server_version=16.14` |
+| Release commit artifact | `/tmp/spendguard-ga04-release-bundle-current/commit.txt`; must match `git rev-parse HEAD` from the checked-out release branch |
+| Postgres image | `postgres:16-alpine`; digest recorded in `/tmp/spendguard-ga04-postgres-version.txt` |
+| Server version evidence | `/tmp/spendguard-ga04-postgres-version.txt`: `image_repo_digest=postgres@sha256:...`, `server_version_num=160014`, `server_version=16.14` |
 | Helm demo render | `/tmp/spendguard-ga04-helm-demo.yaml` |
 | Helm production render | `/tmp/spendguard-ga04-helm-production.yaml` |
-| Release bundle | `/tmp/spendguard-ga04-release-bundle-r2` |
+| Release bundle | `/tmp/spendguard-ga04-release-bundle-current` |
 | Postgres 15 negative transcript | `/tmp/spendguard-ga04-pg15-negative.out` |
 
 ## Postgres 16 Smoke Output
@@ -44,6 +44,7 @@ GA_04 adds a checked-in migration inventory, operator playbooks for migration an
 |---|---|---|
 | R1 | codex CLI via AIT fallback | 3 Major and 1 Minor; all fixed in follow-up commits. |
 | R1 fixes | implementer | Moved write freeze before backups, enforced Postgres 16.x server version, made release bundle inventory consume the checked-in inventory, and added reproducible evidence references. |
+| R2 | codex CLI via AIT fallback | 1 Major and 1 Minor; fixed by rebuilding current-HEAD bundle evidence and recording the Postgres image repo digest. |
 
 ## Staff+ Decisions
 

@@ -27,6 +27,10 @@ docker run -d --name "${CONTAINER}" \
     -e POSTGRES_PASSWORD="${PASSWORD}" \
     -e POSTGRES_DB=postgres \
     "${IMAGE}" >/dev/null
+image_repo_digest="$(docker image inspect "${IMAGE}" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null | awk 'NF {print; exit}' || true)"
+if [[ -z "${image_repo_digest}" && "${IMAGE}" == *@sha256:* ]]; then
+    image_repo_digest="${IMAGE}"
+fi
 
 for _ in $(seq 1 60); do
     if docker exec "${CONTAINER}" pg_isready -U spendguard -d postgres >/dev/null 2>&1; then
@@ -65,6 +69,7 @@ if [[ ! "${server_version_num}" =~ ^[0-9]+$ || "${server_version_num}" -lt 16000
 fi
 {
     printf 'image=%s\n' "${IMAGE}"
+    printf 'image_repo_digest=%s\n' "${image_repo_digest:-unavailable}"
     printf 'server_version_num=%s\n' "${server_version_num}"
     printf 'server_version=%s\n' "${server_version}"
 } | tee "${EVIDENCE_PREFIX}-postgres-version.txt"
