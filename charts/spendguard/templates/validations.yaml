@@ -13,6 +13,7 @@ evaluates the {{- fail -}} directives at template render time.
 {{- $zero64 := "0000000000000000000000000000000000000000000000000000000000000000" -}}
 {{- $sha64 := "^[0-9a-f]{64}$" -}}
 {{- $secretNameOrKey := "^[A-Za-z0-9._-]+$" -}}
+{{- $dns1123Name := "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" -}}
 {{- if not .Values.postgres.existingSecret -}}
 {{- fail "postgres.existingSecret is required under chart.profile=production (database URLs are credentials and must be supplied via Secret, not literal Helm values)" -}}
 {{- end -}}
@@ -47,6 +48,16 @@ evaluates the {{- fail -}} directives at template render time.
 {{- fail "postgres.statsAggregatorUrlKey is required under chart.profile=production" -}}
 {{- end -}}
 {{- $secretRefs := dict
+  "secrets.tls.existingSecret" .Values.secrets.tls.existingSecret
+  "secrets.bundles.existingSecret" .Values.secrets.bundles.existingSecret
+  "sidecar.trustSecret.name" .Values.sidecar.trustSecret.name
+  "sidecar.trustSecret.caPemKey" .Values.sidecar.trustSecret.caPemKey
+  "sidecar.mtlsBootstrapTokenSecret.name" .Values.sidecar.mtlsBootstrapTokenSecret.name
+  "sidecar.mtlsBootstrapTokenSecret.tokenKey" .Values.sidecar.mtlsBootstrapTokenSecret.tokenKey
+  "sidecar.manifestVerifyKey.existingSecret" .Values.sidecar.manifestVerifyKey.existingSecret
+  "sidecar.manifestVerifyKey.pemKey" .Values.sidecar.manifestVerifyKey.pemKey
+  "signing.existingSecret" .Values.signing.existingSecret
+  "webhookReceiver.hmacSecretName" .Values.webhookReceiver.hmacSecretName
   "postgres.existingSecret" .Values.postgres.existingSecret
   "postgres.ledgerUrlKey" .Values.postgres.ledgerUrlKey
   "postgres.canonicalUrlKey" .Values.postgres.canonicalUrlKey
@@ -60,11 +71,29 @@ evaluates the {{- fail -}} directives at template render time.
   "postgres.statsAggregatorUrlKey" .Values.postgres.statsAggregatorUrlKey
 -}}
 {{- range $name, $value := $secretRefs -}}
+{{- if not $value -}}
+{{- fail (printf "%s is required under chart.profile=production" $name) -}}
+{{- end -}}
 {{- if regexMatch "(?i)(postgresql?|mysql|mongodb)://" (toString $value) -}}
 {{- fail (printf "%s must be a Kubernetes Secret name/key, not a plaintext database URL" $name) -}}
 {{- end -}}
 {{- if not (regexMatch $secretNameOrKey (toString $value)) -}}
 {{- fail (printf "%s must match Kubernetes Secret name/key characters [A-Za-z0-9._-]+" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- $secretNames := dict
+  "secrets.tls.existingSecret" .Values.secrets.tls.existingSecret
+  "secrets.bundles.existingSecret" .Values.secrets.bundles.existingSecret
+  "postgres.existingSecret" .Values.postgres.existingSecret
+  "sidecar.trustSecret.name" .Values.sidecar.trustSecret.name
+  "sidecar.mtlsBootstrapTokenSecret.name" .Values.sidecar.mtlsBootstrapTokenSecret.name
+  "sidecar.manifestVerifyKey.existingSecret" .Values.sidecar.manifestVerifyKey.existingSecret
+  "signing.existingSecret" .Values.signing.existingSecret
+  "webhookReceiver.hmacSecretName" .Values.webhookReceiver.hmacSecretName
+-}}
+{{- range $name, $value := $secretNames -}}
+{{- if not (regexMatch $dns1123Name (toString $value)) -}}
+{{- fail (printf "%s must be a DNS-1123 Kubernetes Secret name under chart.profile=production" $name) -}}
 {{- end -}}
 {{- end -}}
 {{- if and .Values.sidecar.hostPath.enabled (ne (toString .Values.sidecar.hostPath.type) "Directory") -}}

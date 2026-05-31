@@ -171,3 +171,5 @@ migrations:
 
 calibrationReport:
   cronEnabled: false
+  image:
+    tag: v0.1.0

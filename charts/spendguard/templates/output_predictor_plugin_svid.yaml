@@ -28,6 +28,7 @@ spec:
 {{- end }}
 {{- $seenClientCertIds := dict -}}
 {{- $seenTenantIds := dict -}}
+{{- $seenSecretNames := dict -}}
 {{- range $idx, $binding := .Values.outputPredictor.pluginClientSvid.bindings }}
 {{- if not $binding.tenantId -}}
 {{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].tenantId is required" $idx) -}}
@@ -50,6 +51,13 @@ spec:
 {{- end -}}
 {{- $_ := set $seenTenantIds (toString $binding.tenantId) true -}}
 {{- $secretName := default (printf "%s-plugin-client-%s" $fullname $binding.clientCertId) $binding.secretName -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" (toString $secretName)) -}}
+{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].secretName %q must be a DNS-1123 Kubernetes Secret name" $idx (toString $secretName)) -}}
+{{- end -}}
+{{- if hasKey $seenSecretNames (toString $secretName) -}}
+{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].secretName %q duplicates an earlier SVID secretName" $idx (toString $secretName)) -}}
+{{- end -}}
+{{- $_ := set $seenSecretNames (toString $secretName) true -}}
 apiVersion: cert-manager.io/v1
 kind: Certificate
 metadata:

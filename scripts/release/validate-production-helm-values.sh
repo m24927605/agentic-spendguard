@@ -105,6 +105,12 @@ def validate_image_tag(name: str, tag: str) -> None:
         fail(f"{name}.image.tag must be semver or @sha256 digest under production values")
 
 
+def validate_dns1123_secret_name(path: str) -> None:
+    value = require_string(path)
+    if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", value):
+        fail(f"{path} must be a DNS-1123 Kubernetes Secret name")
+
+
 if get(values, "chart.profile") != "production":
     fail("chart.profile must be production")
 
@@ -138,6 +144,18 @@ for path in required_value_refs:
     require_string(path)
 
 for path in [
+    "secrets.tls.existingSecret",
+    "secrets.bundles.existingSecret",
+    "postgres.existingSecret",
+    "sidecar.trustSecret.name",
+    "sidecar.mtlsBootstrapTokenSecret.name",
+    "sidecar.manifestVerifyKey.existingSecret",
+    "signing.existingSecret",
+    "webhookReceiver.hmacSecretName",
+]:
+    validate_dns1123_secret_name(path)
+
+for path in [
     "sidecar.contractBundleHashHex",
     "sidecar.trustRootSpkiSha256Hex",
     "controlPlane.auditSchemaBundleHashHex",
@@ -167,6 +185,12 @@ for image_name in [
     "ttlSweeper",
 ]:
     validate_image_tag(image_name, get(values, f"{image_name}.image.tag", ""))
+
+if get(values, "calibrationReport.cronEnabled") is True:
+    validate_image_tag("calibrationReport", get(values, "calibrationReport.image.tag", ""))
+    tenant = require_string("calibrationReport.tenant")
+    if not re.fullmatch(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", tenant):
+        fail("calibrationReport.tenant must be a UUID when cronEnabled=true")
 
 if get(values, "tokenizer.shadowEnabled") is True:
     for path in [
@@ -275,6 +299,16 @@ for binding in bindings:
     if expected_uri not in cert_uris:
         fail(f"missing Certificate URI SAN for tenant binding: {expected_uri}")
 
+cert_secret_names = [
+    str((doc.get("spec") or {}).get("secretName", ""))
+    for doc in certificates
+]
+for secret_name in cert_secret_names:
+    if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", secret_name):
+        fail(f"SVID Certificate secretName {secret_name!r} must be DNS-1123")
+if len(cert_secret_names) != len(set(cert_secret_names)):
+    fail("SVID Certificate secretName values must be unique")
+
 
 def pod_spec_for(doc):
     kind = doc.get("kind")
@@ -367,16 +401,21 @@ if [[ "$skip_negative_tests" == "false" ]]; then
   tmp_latest_image="$(mktemp)"
   tmp_empty_issuer="$(mktemp)"
   tmp_dead_canonical_image="$(mktemp)"
+  tmp_empty_secret="$(mktemp)"
+  tmp_cron_latest="$(mktemp)"
+  tmp_cron_empty_tenant="$(mktemp)"
+  tmp_duplicate_svid_secret="$(mktemp)"
+  tmp_bad_svid_secret="$(mktemp)"
   tmp_render_bad="$(mktemp)"
   cleanup() {
-    rm -f "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_latest_image" "$tmp_empty_issuer" "$tmp_dead_canonical_image" "$tmp_render_bad"
+    rm -f "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_latest_image" "$tmp_empty_issuer" "$tmp_dead_canonical_image" "$tmp_empty_secret" "$tmp_cron_latest" "$tmp_cron_empty_tenant" "$tmp_duplicate_svid_secret" "$tmp_bad_svid_secret" "$tmp_render_bad"
     if [[ -z "$rendered_manifest" ]]; then
       rm -f "$render_file"
     fi
   }
   trap cleanup EXIT
 
-  python3 - "$values_file" "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_latest_image" "$tmp_empty_issuer" "$tmp_dead_canonical_image" <<'PY'
+  python3 - "$values_file" "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_latest_image" "$tmp_empty_issuer" "$tmp_dead_canonical_image" "$tmp_empty_secret" "$tmp_cron_latest" "$tmp_cron_empty_tenant" "$tmp_duplicate_svid_secret" "$tmp_bad_svid_secret" <<'PY'
 from pathlib import Path
 import sys
 
@@ -392,6 +431,11 @@ bad_migration_image = Path(sys.argv[7])
 latest_image = Path(sys.argv[8])
 empty_issuer = Path(sys.argv[9])
 dead_canonical_image = Path(sys.argv[10])
+empty_secret = Path(sys.argv[11])
+cron_latest = Path(sys.argv[12])
+cron_empty_tenant = Path(sys.argv[13])
+duplicate_svid_secret = Path(sys.argv[14])
+bad_svid_secret = Path(sys.argv[15])
 values = yaml.safe_load(source.read_text(encoding="utf-8"))
 
 bad = yaml.safe_load(source.read_text(encoding="utf-8"))
@@ -429,6 +473,30 @@ empty_issuer.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
 bad = yaml.safe_load(source.read_text(encoding="utf-8"))
 bad["migrations"]["canonicalImage"] = "docker.io/library/postgres:16-alpine"
 dead_canonical_image.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["secrets"]["tls"]["existingSecret"] = ""
+empty_secret.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["calibrationReport"]["cronEnabled"] = True
+bad["calibrationReport"]["tenant"] = "00000000-0000-4000-8000-000000000001"
+bad["calibrationReport"].setdefault("image", {})["tag"] = "latest"
+cron_latest.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["calibrationReport"]["cronEnabled"] = True
+bad["calibrationReport"]["tenant"] = ""
+cron_empty_tenant.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["outputPredictor"]["pluginClientSvid"]["bindings"][0]["secretName"] = "shared-plugin-client"
+bad["outputPredictor"]["pluginClientSvid"]["bindings"][1]["secretName"] = "shared-plugin-client"
+duplicate_svid_secret.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["outputPredictor"]["pluginClientSvid"]["bindings"][0]["secretName"] = "bad/name"
+bad_svid_secret.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
 PY
 
   if "$0" "$tmp_plaintext" --skip-negative-tests >/tmp/spendguard-ga03-plaintext.out 2>/tmp/spendguard-ga03-plaintext.err; then
@@ -465,6 +533,26 @@ PY
   fi
   if "$0" "$tmp_dead_canonical_image" --skip-negative-tests >/tmp/spendguard-ga03-dead-canonical-image.out 2>/tmp/spendguard-ga03-dead-canonical-image.err; then
     echo "dead canonicalImage value negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_empty_secret" --skip-negative-tests >/tmp/spendguard-ga03-empty-secret.out 2>/tmp/spendguard-ga03-empty-secret.err; then
+    echo "empty critical Secret negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_cron_latest" --skip-negative-tests >/tmp/spendguard-ga03-cron-latest.out 2>/tmp/spendguard-ga03-cron-latest.err; then
+    echo "calibrationReport latest image negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_cron_empty_tenant" --skip-negative-tests >/tmp/spendguard-ga03-cron-empty-tenant.out 2>/tmp/spendguard-ga03-cron-empty-tenant.err; then
+    echo "calibrationReport empty tenant negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_duplicate_svid_secret" --skip-negative-tests >/tmp/spendguard-ga03-duplicate-svid-secret.out 2>/tmp/spendguard-ga03-duplicate-svid-secret.err; then
+    echo "duplicate SVID secretName negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_bad_svid_secret" --skip-negative-tests >/tmp/spendguard-ga03-bad-svid-secret.out 2>/tmp/spendguard-ga03-bad-svid-secret.err; then
+    echo "invalid SVID secretName negative test unexpectedly passed" >&2
     exit 1
   fi
 
