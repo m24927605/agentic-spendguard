@@ -55,7 +55,7 @@ for service_dir in "${required_services[@]}"; do
     echo "missing required migration directory: $service_dir" >&2
     exit 1
   fi
-  if ! find "$service_dir" -maxdepth 1 -type f -name '*.sql' | grep -q .; then
+  if [[ -z "$(find "$service_dir" -maxdepth 1 -type f -name '*.sql' -print -quit)" ]]; then
     echo "missing direct deploy migrations for: $service_dir" >&2
     exit 1
   fi
@@ -80,6 +80,20 @@ for service_dir in "${required_services[@]}"; do
     exit 1
   fi
 done
+while IFS= read -r service_dir; do
+  found=0
+  for required_service in "${required_services[@]}"; do
+    if [[ "$service_dir" == "$required_service" ]]; then
+      found=1
+      break
+    fi
+  done
+  if [[ "$found" -ne 1 ]]; then
+    echo "unexpected direct deploy migration service: $service_dir" >&2
+    echo "update GA_04 playbooks and Postgres verification before adding this service" >&2
+    exit 1
+  fi
+done < "$tmp_seen_services"
 
 {
   printf '# SpendGuard migration inventory v1alpha1\n'
