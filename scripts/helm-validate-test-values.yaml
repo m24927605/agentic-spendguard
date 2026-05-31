@@ -9,15 +9,23 @@
 # is worse than no gate).
 #
 # Real operators should NOT use these values verbatim — they are
-# structurally valid placeholders, not secrets, not real URLs.
+# structurally valid placeholders, not secrets. Database URLs are not
+# literal Helm values; the rendered chart references this Secret by key.
 # =====================================================================
 
 chart:
   profile: production
 
 postgres:
-  ledgerUrl: "postgres://spendguard:test-pass@postgres.spendguard.svc.cluster.local:5432/spendguard_ledger?sslmode=require"
-  canonicalUrl: "postgres://spendguard:test-pass@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical?sslmode=require"
+  existingSecret: spendguard-postgres-urls
+  ledgerUrlKey: ledger-url
+  canonicalUrlKey: canonical-url
+  controlPlaneUrlKey: control-plane-url
+  tokenizerUrlKey: tokenizer-url
+  outputPredictorUrlKey: output-predictor-url
+  outputPredictorPluginEndpointUrlKey: output-predictor-plugin-endpoint-url
+  runCostProjectorUrlKey: run-cost-projector-url
+  statsAggregatorUrlKey: stats-aggregator-url
 
 sidecar:
   # Byte-exact hash of the contract bundle .tgz (sha256 hex). Real value
@@ -31,6 +39,34 @@ sidecar:
 outboxForwarder:
   # Byte-exact hash of the schema bundle .tgz (sha256 hex).
   schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+
+tokenizer:
+  image:
+    tag: v0.1.0
+  mtlsSecretName: spendguard-tokenizer-mtls
+  shadowEnabled: false
+
+outputPredictor:
+  image:
+    tag: v0.1.0
+  mtlsSecretName: spendguard-output-predictor-mtls
+
+runCostProjector:
+  image:
+    tag: v0.1.0
+  mtlsSecretName: spendguard-run-cost-projector-mtls
+
+statsAggregator:
+  image:
+    tag: v0.1.0
+  canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
+  sinkMtlsSecretName: spendguard-stats-aggregator-sink-mtls
+  signingKeySecretName: spendguard-stats-aggregator-signing-key
+  signingKeyPath: /etc/spendguard/signing/signing-key.pem
+  schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+
+networkPolicy:
+  acknowledgeNoNetworkPolicy: true
 
 # signing defaults: mode=local, profile=production, strictVerification=true
 # all satisfy their gates. No override needed here.

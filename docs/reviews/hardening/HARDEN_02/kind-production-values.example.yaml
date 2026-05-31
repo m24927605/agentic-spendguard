@@ -6,9 +6,15 @@ global:
   imagePullPolicy: IfNotPresent
 
 postgres:
-  ledgerUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_ledger
-  canonicalUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical
-  controlPlaneUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_control_plane
+  existingSecret: spendguard-postgres-urls
+  ledgerUrlKey: ledger-url
+  canonicalUrlKey: canonical-url
+  controlPlaneUrlKey: control-plane-url
+  tokenizerUrlKey: tokenizer-url
+  outputPredictorUrlKey: output-predictor-url
+  outputPredictorPluginEndpointUrlKey: output-predictor-plugin-endpoint-url
+  runCostProjectorUrlKey: run-cost-projector-url
+  statsAggregatorUrlKey: stats-aggregator-url
   applyMigrationsOnInstall: false
 
 sidecar:
@@ -23,22 +29,20 @@ tokenizer:
   mtlsSecretName: spendguard-tokenizer-mtls
   providerSecretName: spendguard-tokenizer-provider-keys
   canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
-  databaseUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical
   sinkMtlsSecretName: spendguard-tokenizer-sink-mtls
   signingKeySecretName: spendguard-tokenizer-signing-key
   signingKeyPath: /etc/spendguard/signing/signing-key.pem
+  schemaBundleHashHex: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 
 outputPredictor:
   image:
     tag: v0.1.0
   mtlsSecretName: spendguard-output-predictor-mtls
-  databaseUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical
 
 runCostProjector:
   image:
     tag: v0.1.0
   mtlsSecretName: spendguard-run-cost-projector-mtls
-  databaseUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical
 
 egressProxy:
   enabled: true
@@ -53,7 +57,6 @@ networkPolicy:
 statsAggregator:
   image:
     tag: v0.1.0
-  databaseUrl: postgres://spendguard:spendguard@postgres.spendguard.svc.cluster.local:5432/spendguard_canonical
   canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
   sinkMtlsSecretName: spendguard-stats-aggregator-sink-mtls
   signingKeySecretName: spendguard-stats-aggregator-signing-key

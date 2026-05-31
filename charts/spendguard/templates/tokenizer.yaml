@@ -70,8 +70,8 @@
 {{- if not .Values.tokenizer.schemaBundleHashHex -}}
 {{- fail "tokenizer.schemaBundleHashHex is required under chart.profile=production when tokenizer.shadowEnabled=true (HARDEN_03 #168: byte-exact schema bundle hash for tokenizer_drift_alert AppendEventsRequest)" -}}
 {{- end -}}
-{{- if not .Values.tokenizer.databaseUrl -}}
-{{- fail "tokenizer.databaseUrl is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B1 + M12: tokenizer_t1_samples persistence required for drift attribution)" -}}
+{{- if not .Values.postgres.tokenizerUrlKey -}}
+{{- fail "postgres.tokenizerUrlKey is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B1 + M12: tokenizer_t1_samples persistence required for drift attribution)" -}}
 {{- end -}}
 {{- if not .Values.tokenizer.sinkMtlsSecretName -}}
 {{- fail "tokenizer.sinkMtlsSecretName is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B4 + M12: plaintext canonical_ingest sink is forbidden — drift_alert CloudEvents carry signed audit-chain bytes)" -}}
@@ -161,10 +161,11 @@ spec:
             - { name: SPENDGUARD_TOKENIZER_SCHEMA_BUNDLE_HASH_HEX, value: {{ .Values.tokenizer.schemaBundleHashHex | quote }} }
             {{- end }}
             - { name: SPENDGUARD_TOKENIZER_CANONICAL_SCHEMA_VERSION, value: {{ .Values.tokenizer.canonicalSchemaVersion | quote }} }
-            {{- if .Values.tokenizer.databaseUrl }}
+            {{- if or (eq .Values.chart.profile "production") .Values.tokenizer.databaseSecretEnabled }}
             # Postgres URL for tokenizer_t1_samples persistence.
             # Migration 0051 owns the schema.
-            - { name: SPENDGUARD_TOKENIZER_DATABASE_URL,          value: {{ .Values.tokenizer.databaseUrl | quote }} }
+            - name: SPENDGUARD_TOKENIZER_DATABASE_URL
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.tokenizerUrlKey) | nindent 14 }}
             {{- end }}
             {{- if .Values.tokenizer.providerSecretName }}
             # Provider API keys for Anthropic / Gemini Tier 1

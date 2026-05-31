@@ -334,12 +334,30 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" wait \
 # Create the second DB the chart expects. Idempotent (re-runs against
 # an existing kind cluster skip the CREATE if the DB already exists).
 POD=$(kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" get pod -l app=postgres -o name | head -1)
-kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" exec "${POD}" -- \
-    psql -U spendguard -d postgres -tc \
-    "SELECT 1 FROM pg_database WHERE datname = 'spendguard_canonical'" \
-    | grep -q 1 || \
-kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" exec "${POD}" -- \
-    psql -U spendguard -d postgres -c 'CREATE DATABASE spendguard_canonical;'
+for db in spendguard_canonical spendguard_control_plane; do
+    kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" exec "${POD}" -- \
+        psql -U spendguard -d postgres -tc \
+        "SELECT 1 FROM pg_database WHERE datname = '${db}'" \
+        | grep -q 1 || \
+    kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" exec "${POD}" -- \
+        psql -U spendguard -d postgres -c "CREATE DATABASE ${db};"
+done
+
+DB_SCHEME="postgres"
+LEDGER_DB_URL="${DB_SCHEME}://spendguard:test-pass@postgres.${NAMESPACE}.svc.cluster.local:5432/spendguard_ledger?sslmode=disable"
+CANONICAL_DB_URL="${DB_SCHEME}://spendguard:test-pass@postgres.${NAMESPACE}.svc.cluster.local:5432/spendguard_canonical?sslmode=disable"
+CONTROL_PLANE_DB_URL="${DB_SCHEME}://spendguard:test-pass@postgres.${NAMESPACE}.svc.cluster.local:5432/spendguard_control_plane?sslmode=disable"
+
+kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create secret generic spendguard-postgres-urls \
+    --from-literal=ledger-url="${LEDGER_DB_URL}" \
+    --from-literal=canonical-url="${CANONICAL_DB_URL}" \
+    --from-literal=control-plane-url="${CONTROL_PLANE_DB_URL}" \
+    --from-literal=tokenizer-url="${CANONICAL_DB_URL}" \
+    --from-literal=output-predictor-url="${CANONICAL_DB_URL}" \
+    --from-literal=output-predictor-plugin-endpoint-url="${CONTROL_PLANE_DB_URL}" \
+    --from-literal=run-cost-projector-url="${CANONICAL_DB_URL}" \
+    --from-literal=stats-aggregator-url="${CANONICAL_DB_URL}" \
+    --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" apply -f -
 
 # ---------------------------------------------------------------------
 # 5.4. Create migration ConfigMaps (issue #61 slice 6).
@@ -396,8 +414,7 @@ cat > "${WORK_DIR}/values.yaml" <<EOF
 chart:
   profile: demo
 postgres:
-  ledgerUrl: "postgres://spendguard:test-pass@postgres.${NAMESPACE}.svc.cluster.local:5432/spendguard_ledger?sslmode=disable"
-  canonicalUrl: "postgres://spendguard:test-pass@postgres.${NAMESPACE}.svc.cluster.local:5432/spendguard_canonical?sslmode=disable"
+  existingSecret: spendguard-postgres-urls
 sidecar:
   contractBundleHashHex: "${CONTRACT_HASH}"
   trustRootSpkiSha256Hex: "${TRUST_SPKI_SHA256}"

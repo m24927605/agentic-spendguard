@@ -4,7 +4,7 @@
        Spec: docs/output-predictor-service-spec-v1alpha1.md §2.
        Pattern mirrors charts/spendguard/templates/tokenizer.yaml SLICE_03 R3 N2:
          - chart.profile=production: image.tag semver/digest + UDS xor mTLS gate
-         - chart.profile=production: databaseUrl required for L4 cache lookups
+         - chart.profile=production: DB URL Secret key required for L4 cache lookups
          - container security baseline: USER 65532 + readOnlyRootFilesystem
            + cap_drop ALL (SLICE_03 R2 M7)
 
@@ -27,20 +27,20 @@
 {{- if and (not .Values.outputPredictor.udsHostPath) (not .Values.outputPredictor.mtlsSecretName) -}}
 {{- fail "outputPredictor must configure either udsHostPath (for in-cluster on-node sidecar callers) or mtlsSecretName (for cross-node mTLS) under chart.profile=production (plaintext TCP forbidden per spec §2.2 + sidecar §5)" -}}
 {{- end -}}
-{{- if not .Values.outputPredictor.databaseUrl -}}
-{{- fail "outputPredictor.databaseUrl is required under chart.profile=production (output_distribution_cache lookup per spec §4.2 — empty databaseUrl forces every Predict to L1 cold-start which defeats SLICE_06's purpose)" -}}
+{{- if not .Values.postgres.outputPredictorUrlKey -}}
+{{- fail "postgres.outputPredictorUrlKey is required under chart.profile=production (output_distribution_cache lookup per spec §4.2 — missing DB URL forces every Predict to L1 cold-start which defeats SLICE_06's purpose)" -}}
 {{- end -}}
 {{- /* SLICE_07 Phase D: Strategy C plugin wiring.
        per output-predictor-plugin-contract-v1alpha1.md:
          - §3.1: mTLS-only auth — production MUST provide plugin client cert
          - §8.1: plugin endpoints registered via control plane REST API;
            output_predictor reads from control_plane DB
-       When the operator sets `pluginEndpointDatabaseUrl`, they are
+       When the operator sets `pluginEndpointDatabaseEnabled`, they are
        enabling Strategy C — the plugin client mTLS secret MUST also be
        set; partial config is a spec §3.1 violation. */ -}}
-{{- if .Values.outputPredictor.pluginEndpointDatabaseUrl -}}
+{{- if .Values.outputPredictor.pluginEndpointDatabaseEnabled -}}
 {{- if not .Values.outputPredictor.pluginClientSecretName -}}
-{{- fail "outputPredictor.pluginClientSecretName is required when pluginEndpointDatabaseUrl is set under chart.profile=production (spec §3.1 mTLS-only auth — plaintext to a customer plugin endpoint is forbidden)" -}}
+{{- fail "outputPredictor.pluginClientSecretName is required when pluginEndpointDatabaseEnabled=true under chart.profile=production (spec §3.1 mTLS-only auth — plaintext to a customer plugin endpoint is forbidden)" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -88,8 +88,9 @@ spec:
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_PROFILE,                    value: {{ .Values.chart.profile | quote }} }
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_CACHE_TTL_SECONDS,          value: {{ .Values.outputPredictor.cacheTtlSeconds | quote }} }
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_UNKNOWN_MODEL_CONTEXT_WINDOW, value: {{ .Values.outputPredictor.unknownModelContextWindow | quote }} }
-            {{- if .Values.outputPredictor.databaseUrl }}
-            - { name: SPENDGUARD_OUTPUT_PREDICTOR_DATABASE_URL,               value: {{ .Values.outputPredictor.databaseUrl | quote }} }
+            {{- if or (eq .Values.chart.profile "production") .Values.outputPredictor.databaseSecretEnabled }}
+            - name: SPENDGUARD_OUTPUT_PREDICTOR_DATABASE_URL
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.outputPredictorUrlKey) | nindent 14 }}
             {{- end }}
             {{- if .Values.outputPredictor.udsHostPath }}
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_UDS_PATH,                   value: "/var/run/spendguard/output-predictor.sock" }
@@ -100,14 +101,15 @@ spec:
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_TLS_CA_PEM,                 value: "/etc/spendguard/tls/ca.crt"  }
             {{- end }}
             {{- /* SLICE_07 Phase D: Strategy C plugin wiring.
-                   pluginEndpointDatabaseUrl points at the control_plane DB
+                   pluginEndpointDatabaseEnabled points at the control_plane DB Secret key
                    for the predictor_plugin_endpoints registry (spec §8).
                    pluginEndpointCacheTtlSeconds is the cache TTL (60s default
                    per spec §6.3). pluginClientSecretName mounts SpendGuard's
                    client cert + key + the customer trust CA for the mTLS
                    handshake to the customer plugin endpoint (spec §3.1). */ -}}
-            {{- if .Values.outputPredictor.pluginEndpointDatabaseUrl }}
-            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_ENDPOINT_DATABASE_URL, value: {{ .Values.outputPredictor.pluginEndpointDatabaseUrl | quote }} }
+            {{- if .Values.outputPredictor.pluginEndpointDatabaseEnabled }}
+            - name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_ENDPOINT_DATABASE_URL
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.outputPredictorPluginEndpointUrlKey) | nindent 14 }}
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_ENDPOINT_CACHE_TTL_SECONDS, value: {{ .Values.outputPredictor.pluginEndpointCacheTtlSeconds | quote }} }
             {{- end }}
             {{- if .Values.outputPredictor.pluginClientSecretName }}

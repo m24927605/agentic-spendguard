@@ -82,7 +82,8 @@ spec:
                 - --verify-chain
                 {{- end }}
               env:
-                - { name: SPENDGUARD_CALIBRATION_CANONICAL_URL, value: {{ .Values.postgres.canonicalUrl | quote }} }
+                - name: SPENDGUARD_CALIBRATION_CANONICAL_URL
+                  {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.canonicalUrlKey) | nindent 18 }}
                 - { name: SPENDGUARD_CALIBRATION_AUTH_SUBJECT, value: {{ .Values.calibrationReport.authSubject | default "cron:calibration-report" | quote }} }
                 - { name: SPENDGUARD_CALIBRATION_AUTH_TENANTS, value: {{ .Values.calibrationReport.tenant | quote }} }
                 - { name: RUST_LOG, value: {{ .Values.calibrationReport.rustLog | default "info" | quote }} }

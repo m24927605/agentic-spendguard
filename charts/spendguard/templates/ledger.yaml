@@ -3,7 +3,7 @@
 {{- if and (eq .Values.signing.mode "disabled") (ne .Values.signing.profile "demo") }}
 {{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo" }}
 {{- end }}
-{{- /* postgres.ledgerUrl CHANGE_ME gate lives in templates/validations.yaml
+{{- /* postgres Secret key gates live in templates/validations.yaml
        (must fire even when ledger.enabled=false but consumers are on). */ -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -31,7 +31,8 @@ spec:
           env:
             - { name: SPENDGUARD_LEDGER_BIND_ADDR,           value: "0.0.0.0:50051" }
             - { name: SPENDGUARD_LEDGER_METRICS_ADDR,        value: "0.0.0.0:9092" }
-            - { name: SPENDGUARD_LEDGER_DATABASE_URL,        value: {{ .Values.postgres.ledgerUrl | quote }} }
+            - name: SPENDGUARD_LEDGER_DATABASE_URL
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.ledgerUrlKey) | nindent 14 }}
             - { name: SPENDGUARD_LEDGER_TENANT_ID,           value: {{ .Values.global.tenantId | quote }} }
             - { name: SPENDGUARD_LEDGER_REGION,              value: {{ .Values.global.region | quote }} }
             - { name: SPENDGUARD_LEDGER_WORKLOAD_INSTANCE_ID, value: "ledger-helm-1" }

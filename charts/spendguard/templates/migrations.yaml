@@ -146,11 +146,11 @@ spec:
               fi
           env:
             - name: PG_LEDGER_URL
-              value: {{ .Values.postgres.ledgerUrl | quote }}
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.ledgerUrlKey) | nindent 14 }}
             - name: PG_CANONICAL_URL
-              value: {{ .Values.postgres.canonicalUrl | quote }}
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.canonicalUrlKey) | nindent 14 }}
             - name: PG_CONTROL_PLANE_URL
-              value: {{ .Values.postgres.controlPlaneUrl | quote }}
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.controlPlaneUrlKey) | nindent 14 }}
           volumeMounts:
             - name: migrations-ledger
               mountPath: /etc/migrations/ledger

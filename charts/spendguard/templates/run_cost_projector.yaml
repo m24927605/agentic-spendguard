@@ -5,7 +5,7 @@
        Pattern mirrors charts/spendguard/templates/output_predictor.yaml
        SLICE_06 R3 N2:
          - chart.profile=production: image.tag semver/digest + UDS xor mTLS gate
-         - chart.profile=production: databaseUrl required for Signal 1 +
+         - chart.profile=production: DB URL Secret key required for Signal 1 +
            audit-chain recovery
          - container security baseline: USER 65532 + readOnlyRootFilesystem
            + cap_drop ALL (SLICE_03 R2 M7)
@@ -20,8 +20,8 @@
 {{- if and (not .Values.runCostProjector.udsHostPath) (not .Values.runCostProjector.mtlsSecretName) -}}
 {{- fail "runCostProjector must configure either udsHostPath (for in-cluster on-node sidecar callers) or mtlsSecretName (for cross-node mTLS) under chart.profile=production (plaintext TCP forbidden per spec §2.2 + sidecar §5)" -}}
 {{- end -}}
-{{- if not .Values.runCostProjector.databaseUrl -}}
-{{- fail "runCostProjector.databaseUrl is required under chart.profile=production (Signal 1 run_length_distribution_cache lookup + audit_outbox cold-recovery replay per spec §3 + §7.4 — empty databaseUrl forces every Project to skeleton-mode cold-start with no recovery, which defeats SLICE_09's purpose)" -}}
+{{- if not .Values.postgres.runCostProjectorUrlKey -}}
+{{- fail "postgres.runCostProjectorUrlKey is required under chart.profile=production (Signal 1 run_length_distribution_cache lookup + audit_outbox cold-recovery replay per spec §3 + §7.4 — missing DB URL forces every Project to skeleton-mode cold-start with no recovery, which defeats SLICE_09's purpose)" -}}
 {{- end -}}
 {{- end -}}
 apiVersion: apps/v1
@@ -72,8 +72,9 @@ spec:
             - { name: SPENDGUARD_RUN_COST_PROJECTOR_COLD_START_RUN_LENGTH,      value: {{ .Values.runCostProjector.coldStartRunLength | quote }} }
             - { name: SPENDGUARD_RUN_COST_PROJECTOR_DRIFT_CONSECUTIVE_THRESHOLD, value: {{ .Values.runCostProjector.driftConsecutiveThreshold | quote }} }
             - { name: SPENDGUARD_RUN_COST_PROJECTOR_DRIFT_RATIO_THRESHOLD,      value: {{ .Values.runCostProjector.driftRatioThreshold | quote }} }
-            {{- if .Values.runCostProjector.databaseUrl }}
-            - { name: SPENDGUARD_RUN_COST_PROJECTOR_DATABASE_URL,               value: {{ .Values.runCostProjector.databaseUrl | quote }} }
+            {{- if or (eq .Values.chart.profile "production") .Values.runCostProjector.databaseSecretEnabled }}
+            - name: SPENDGUARD_RUN_COST_PROJECTOR_DATABASE_URL
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.runCostProjectorUrlKey) | nindent 14 }}
             {{- end }}
             {{- if .Values.runCostProjector.udsHostPath }}
             - { name: SPENDGUARD_RUN_COST_PROJECTOR_UDS_PATH,                   value: "/var/run/spendguard/run-cost-projector.sock" }

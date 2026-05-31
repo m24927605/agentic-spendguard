@@ -42,3 +42,18 @@ the per-service repository doesn't include a registry prefix.
 {{- printf "%s:%s" $repo .image.tag -}}
 {{- end -}}
 {{- end -}}
+
+{{/*
+Render an env.valueFrom.secretKeyRef for database URLs.
+
+HARDEN_03 / issue #145: Postgres URLs contain credentials and must not
+land as literal values in rendered Kubernetes manifests. Operators
+pre-create .Values.postgres.existingSecret with one key per logical DB
+URL, and workloads reference the key by name.
+*/}}
+{{- define "spendguard.postgresSecretRef" -}}
+valueFrom:
+  secretKeyRef:
+    name: {{ .root.Values.postgres.existingSecret | quote }}
+    key: {{ .key | quote }}
+{{- end -}}

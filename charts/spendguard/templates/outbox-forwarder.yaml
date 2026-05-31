@@ -50,7 +50,7 @@ spec:
             - { name: SPENDGUARD_OUTBOX_FORWARDER_WORKLOAD_INSTANCE_ID, value: "outbox-forwarder-$(_POD_NAME)" }
             {{- end }}
             - name: SPENDGUARD_OUTBOX_FORWARDER_DATABASE_URL
-              value: {{ .Values.postgres.ledgerUrl | quote }}
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.ledgerUrlKey) | nindent 14 }}
             - name: SPENDGUARD_OUTBOX_FORWARDER_CANONICAL_INGEST_URL
               value: "https://{{ include "spendguard.fullname" . }}-canonical-ingest:50052"
             - { name: SPENDGUARD_OUTBOX_FORWARDER_POLL_INTERVAL_SECONDS, value: {{ .Values.outboxForwarder.pollIntervalSeconds | quote }} }
