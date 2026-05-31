@@ -1,5 +1,6 @@
 //! ReplayAuditFromCursor query (per Stage 2 §4.7).
 
+use base64::Engine as _;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -150,12 +151,28 @@ pub async fn query_decision_outcome(
     tenant_id: Uuid,
     decision_id: Uuid,
 ) -> Result<DecisionOutcome, DomainError> {
-    let rows = sqlx::query_as::<_, (String, Uuid, Uuid, chrono::DateTime<chrono::Utc>)>(
-        "SELECT event_type, audit_decision_event_id, ledger_transaction_id, recorded_at
-           FROM audit_outbox
-          WHERE tenant_id = $1
-            AND decision_id = $2
-          ORDER BY recorded_at ASC",
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            Uuid,
+            Uuid,
+            chrono::DateTime<chrono::Utc>,
+            String,
+            Uuid,
+            Option<serde_json::Value>,
+            serde_json::Value,
+        ),
+    >(
+        "SELECT ao.event_type, ao.audit_decision_event_id, ao.ledger_transaction_id,
+                ao.recorded_at, lt.operation_kind, lt.decision_id,
+                lt.minimal_replay_response, ao.cloudevent_payload
+           FROM audit_outbox ao
+           JOIN ledger_transactions lt
+             ON lt.ledger_transaction_id = ao.ledger_transaction_id
+          WHERE ao.tenant_id = $1
+            AND ao.decision_id = $2
+          ORDER BY ao.recorded_at ASC",
     )
     .bind(tenant_id)
     .bind(decision_id)
@@ -167,12 +184,24 @@ pub async fn query_decision_outcome(
     let mut outcome_event = None;
     let mut last_updated = None;
     let mut tx_id = None;
+    let mut replay = ReplayMetadata::default();
 
-    for (kind, audit_id, ltx, recorded) in rows {
+    for (kind, audit_id, ltx, recorded, operation_kind, original_decision_id, minimal, payload) in
+        rows
+    {
         last_updated = Some(recorded);
         tx_id = Some(ltx);
         match kind.as_str() {
-            "spendguard.audit.decision" => decision_event = Some(audit_id),
+            "spendguard.audit.decision" => {
+                decision_event = Some(audit_id);
+                replay = replay_metadata(
+                    operation_kind,
+                    original_decision_id,
+                    ltx,
+                    minimal.unwrap_or(serde_json::Value::Null),
+                    payload,
+                );
+            }
             "spendguard.audit.outcome" => outcome_event = Some(audit_id),
             _ => {}
         }
@@ -192,7 +221,170 @@ pub async fn query_decision_outcome(
         audit_decision_event_id: decision_event,
         audit_outcome_event_id: outcome_event,
         last_updated_at: last_updated,
+        replay,
     })
+}
+
+/// Query the original reserve/deny decision for an adapter idempotency key.
+///
+/// The sidecar uses this before calling the mutating run-cost projector so a
+/// retry after process/cache loss replays the durable first decision instead
+/// of recomputing under a changed budget or contract snapshot.
+pub async fn query_decision_outcome_by_idempotency_key(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    idempotency_key: &str,
+) -> Result<DecisionOutcome, DomainError> {
+    let row = sqlx::query_as::<
+        _,
+        (
+            String,
+            Uuid,
+            Uuid,
+            Uuid,
+            chrono::DateTime<chrono::Utc>,
+            Option<serde_json::Value>,
+            serde_json::Value,
+        ),
+    >(
+        "SELECT lt.operation_kind, lt.ledger_transaction_id,
+                lt.audit_decision_event_id, lt.decision_id, lt.recorded_at,
+                lt.minimal_replay_response, ao.cloudevent_payload
+           FROM ledger_transactions lt
+           JOIN audit_outbox ao
+             ON ao.ledger_transaction_id = lt.ledger_transaction_id
+            AND ao.event_type = 'spendguard.audit.decision'
+          WHERE lt.tenant_id = $1
+            AND lt.idempotency_key = $2
+            AND lt.operation_kind IN ('reserve', 'denied_decision')
+          ORDER BY lt.recorded_at ASC
+          LIMIT 1",
+    )
+    .bind(tenant_id)
+    .bind(idempotency_key)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_pg_error)?;
+
+    let Some((operation_kind, tx_id, audit_id, decision_id, recorded_at, minimal, payload)) = row
+    else {
+        return Ok(DecisionOutcome::not_found());
+    };
+
+    Ok(DecisionOutcome {
+        stage: Stage::AuditDecisionRecorded,
+        ledger_transaction_id: Some(tx_id),
+        audit_decision_event_id: Some(audit_id),
+        audit_outcome_event_id: None,
+        last_updated_at: Some(recorded_at),
+        replay: replay_metadata(
+            operation_kind,
+            decision_id,
+            tx_id,
+            minimal.unwrap_or(serde_json::Value::Null),
+            payload,
+        ),
+    })
+}
+
+fn replay_metadata(
+    operation_kind: String,
+    decision_id: Uuid,
+    ledger_transaction_id: Uuid,
+    minimal: serde_json::Value,
+    cloudevent_payload: serde_json::Value,
+) -> ReplayMetadata {
+    let data = cloudevent_data_json(&cloudevent_payload);
+    let reason_codes = string_array(data.as_ref(), "reason_codes");
+    let matched_rule_ids = string_array(data.as_ref(), "matched_rules");
+    let run_code_triggered = reason_codes
+        .iter()
+        .find(|code| code.starts_with("RUN_"))
+        .cloned()
+        .unwrap_or_default();
+
+    let mut final_decision = data
+        .as_ref()
+        .and_then(|v| v.get("final_decision"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    if final_decision.is_empty() && operation_kind == "reserve" {
+        final_decision = "CONTINUE".to_string();
+    }
+
+    let projection_ids = minimal
+        .get("reservation_ids")
+        .and_then(|v| v.as_array())
+        .map(|ids| {
+            ids.iter()
+                .filter_map(|id| id.as_str().map(ToString::to_string))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    let operation_id = if operation_kind == "reserve" {
+        derive_reservation_set_id(&decision_id).to_string()
+    } else {
+        ledger_transaction_id.to_string()
+    };
+
+    ReplayMetadata {
+        decision_id: Some(decision_id),
+        operation_kind,
+        operation_id,
+        projection_ids,
+        ttl_expires_at: minimal
+            .get("ttl_expires_at")
+            .and_then(|v| v.as_str())
+            .and_then(parse_rfc3339_timestamp),
+        final_decision,
+        matched_rule_ids,
+        reason_codes,
+        run_code_triggered,
+    }
+}
+
+fn cloudevent_data_json(payload: &serde_json::Value) -> Option<serde_json::Value> {
+    let raw = payload.get("data_b64")?.as_str()?;
+    let bytes = base64::engine::general_purpose::STANDARD.decode(raw).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn string_array(payload: Option<&serde_json::Value>, field: &str) -> Vec<String> {
+    payload
+        .and_then(|v| v.get(field))
+        .and_then(|v| v.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| value.as_str().map(ToString::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn parse_rfc3339_timestamp(raw: &str) -> Option<prost_types::Timestamp> {
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw)
+        .ok()?
+        .with_timezone(&chrono::Utc);
+    Some(prost_types::Timestamp {
+        seconds: parsed.timestamp(),
+        nanos: parsed.timestamp_subsec_nanos() as i32,
+    })
+}
+
+fn derive_reservation_set_id(decision_id: &Uuid) -> Uuid {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(decision_id.as_bytes());
+    h.update(b":reservation_set");
+    let bytes: [u8; 32] = h.finalize().into();
+    let mut buf = [0u8; 16];
+    buf.copy_from_slice(&bytes[..16]);
+    buf[6] = (buf[6] & 0x0f) | 0x40;
+    buf[8] = (buf[8] & 0x3f) | 0x80;
+    Uuid::from_bytes(buf)
 }
 
 #[derive(Debug, Clone)]
@@ -202,6 +394,33 @@ pub struct DecisionOutcome {
     pub audit_decision_event_id: Option<Uuid>,
     pub audit_outcome_event_id: Option<Uuid>,
     pub last_updated_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub replay: ReplayMetadata,
+}
+
+impl DecisionOutcome {
+    fn not_found() -> Self {
+        Self {
+            stage: Stage::NotFound,
+            ledger_transaction_id: None,
+            audit_decision_event_id: None,
+            audit_outcome_event_id: None,
+            last_updated_at: None,
+            replay: ReplayMetadata::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ReplayMetadata {
+    pub decision_id: Option<Uuid>,
+    pub operation_kind: String,
+    pub operation_id: String,
+    pub projection_ids: Vec<String>,
+    pub ttl_expires_at: Option<prost_types::Timestamp>,
+    pub final_decision: String,
+    pub matched_rule_ids: Vec<String>,
+    pub reason_codes: Vec<String>,
+    pub run_code_triggered: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,4 +428,71 @@ pub enum Stage {
     NotFound,
     AuditDecisionRecorded,
     AuditOutcomeRecorded,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn replay_metadata_extracts_reserve_projection_fields() {
+        let decision_id = Uuid::new_v4();
+        let tx_id = Uuid::new_v4();
+        let reservation_id = Uuid::new_v4().to_string();
+        let payload_data = json!({
+            "matched_rules": [],
+            "reason_codes": [],
+        });
+        let cloudevent_payload = json!({
+            "data_b64": base64::engine::general_purpose::STANDARD
+                .encode(serde_json::to_vec(&payload_data).unwrap()),
+        });
+        let metadata = replay_metadata(
+            "reserve".to_string(),
+            decision_id,
+            tx_id,
+            json!({
+                "reservation_ids": [reservation_id],
+                "ttl_expires_at": "2026-05-31T00:00:00Z",
+            }),
+            cloudevent_payload,
+        );
+
+        assert_eq!(metadata.decision_id, Some(decision_id));
+        assert_eq!(metadata.operation_kind, "reserve");
+        assert_eq!(metadata.final_decision, "CONTINUE");
+        assert_eq!(metadata.projection_ids.len(), 1);
+        assert!(metadata.ttl_expires_at.is_some());
+        assert_eq!(
+            metadata.operation_id,
+            derive_reservation_set_id(&decision_id).to_string()
+        );
+    }
+
+    #[test]
+    fn replay_metadata_extracts_denied_run_code() {
+        let payload_data = json!({
+            "final_decision": "STOP",
+            "matched_rules": ["projection-stop"],
+            "reason_codes": ["RUN_BUDGET_PROJECTION_EXCEEDED"],
+        });
+        let metadata = replay_metadata(
+            "denied_decision".to_string(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            serde_json::Value::Null,
+            json!({
+                "data_b64": base64::engine::general_purpose::STANDARD
+                    .encode(serde_json::to_vec(&payload_data).unwrap()),
+            }),
+        );
+
+        assert_eq!(metadata.final_decision, "STOP");
+        assert_eq!(
+            metadata.run_code_triggered,
+            "RUN_BUDGET_PROJECTION_EXCEEDED"
+        );
+        assert_eq!(metadata.matched_rule_ids, vec!["projection-stop"]);
+    }
 }

@@ -34,13 +34,15 @@ use crate::{
         },
         ledger::v1::{
             commit_estimated_response::Outcome as CommitOutcome,
+            query_decision_outcome_response::Stage as QueryDecisionStage,
             query_reservation_context_response::Outcome as QrcOutcome,
             record_denied_decision_response::Outcome as DeniedOutcome,
             release_request::Reason as ReleaseReasonProto,
             release_response::Outcome as ReleaseOutcome, reserve_set_response::Outcome,
-            CommitEstimatedRequest, CommitEstimatedResponse, QueryReservationContextRequest,
-            RecordDeniedDecisionRequest, RecordDeniedDecisionResponse, ReleaseRequest,
-            ReleaseResponse, ReserveSetRequest, ReserveSetResponse,
+            CommitEstimatedRequest, CommitEstimatedResponse, QueryDecisionOutcomeRequest,
+            QueryReservationContextRequest, RecordDeniedDecisionRequest,
+            RecordDeniedDecisionResponse, ReleaseRequest, ReleaseResponse, ReserveSetRequest,
+            ReserveSetResponse,
         },
         sidecar_adapter::v1::{
             decision_response::Decision, ClaimEstimate, DecisionRequest, DecisionResponse,
@@ -462,6 +464,118 @@ fn nonnegative_i64_from_struct_value(value: &prost_types::Value) -> Option<i64> 
     }
 }
 
+async fn replay_existing_decision_by_idempotency(
+    state: &SidecarState,
+    ctx: &DecisionContext,
+    req: &DecisionRequest,
+    adapter_idempotency_key: &str,
+) -> Result<Option<DecisionOutput>, DomainError> {
+    let response = state
+        .inner
+        .ledger
+        .query_decision_outcome(QueryDecisionOutcomeRequest {
+            tenant_id: ctx.tenant_id.clone(),
+            decision_id: String::new(),
+            idempotency_key: adapter_idempotency_key.to_string(),
+        })
+        .await?;
+    let stage =
+        QueryDecisionStage::try_from(response.stage).unwrap_or(QueryDecisionStage::Unspecified);
+    if matches!(
+        stage,
+        QueryDecisionStage::NotFound | QueryDecisionStage::Unspecified
+    ) {
+        return Ok(None);
+    }
+
+    let decision_id = parse_replay_uuid("decision_id", &response.decision_id)?;
+    let audit_decision_event_id =
+        parse_replay_uuid("audit_decision_event_id", &response.audit_decision_event_id)?;
+    let decision = replay_decision_kind(
+        &response.operation_kind,
+        &response.final_decision,
+        &response.run_code_triggered,
+        &response.reason_codes,
+    )?;
+    let snapshot_hash = compute_snapshot_hash(req, &ctx.tenant_id);
+    let effect_hash = compute_effect_hash(&snapshot_hash, decision);
+
+    let reservation_set_id = if response.operation_kind == "reserve" {
+        if response.operation_id.is_empty() {
+            derive_reservation_set_id(&decision_id).to_string()
+        } else {
+            response.operation_id.clone()
+        }
+    } else {
+        String::new()
+    };
+    let reservation_ids = if response.operation_kind == "reserve" {
+        response.projection_ids.clone()
+    } else {
+        Vec::new()
+    };
+
+    Ok(Some(DecisionOutput {
+        decision_id,
+        audit_decision_event_id,
+        effect_hash,
+        decision,
+        reservation_set_id,
+        reservation_ids,
+        ledger_transaction_id: response.ledger_transaction_id,
+        approval_request_id: String::new(),
+        ttl_expires_at: response.ttl_expires_at,
+        matched_rule_ids: response.matched_rule_ids,
+        reason_codes: response.reason_codes.clone(),
+        run_code_triggered: if response.run_code_triggered.is_empty() {
+            response
+                .reason_codes
+                .iter()
+                .find(|code| code.starts_with("RUN_"))
+                .cloned()
+                .unwrap_or_default()
+        } else {
+            response.run_code_triggered
+        },
+    }))
+}
+
+fn parse_replay_uuid(field: &str, raw: &str) -> Result<Uuid, DomainError> {
+    Uuid::parse_str(raw).map_err(|e| {
+        DomainError::DecisionStage(format!(
+            "ledger idempotency replay returned malformed {field} '{raw}': {e}"
+        ))
+    })
+}
+
+fn replay_decision_kind(
+    operation_kind: &str,
+    final_decision: &str,
+    run_code_triggered: &str,
+    reason_codes: &[String],
+) -> Result<Decision, DomainError> {
+    if operation_kind == "reserve" {
+        return Ok(Decision::Continue);
+    }
+    if operation_kind != "denied_decision" {
+        return Err(DomainError::DecisionStage(format!(
+            "ledger idempotency replay returned unsupported operation_kind '{operation_kind}'"
+        )));
+    }
+    let run_projection =
+        !run_code_triggered.is_empty() || reason_codes.iter().any(|code| code.starts_with("RUN_"));
+    match final_decision {
+        "STOP" if run_projection => Ok(Decision::StopRunProjection),
+        "STOP" => Ok(Decision::Stop),
+        "REQUIRE_APPROVAL" => Ok(Decision::RequireApproval),
+        "DEGRADE" => Ok(Decision::Degrade),
+        "SKIP" => Ok(Decision::Skip),
+        other => Err(DomainError::DecisionStage(format!(
+            "ledger idempotency replay returned unsupported final_decision '{other}'"
+        ))),
+    }
+}
+
 /// Drive the decision transaction end-to-end through stage 4 (reserve +
 /// atomic audit_decision). Stage 6 (publish_effect) is performed by the
 /// adapter handler after this returns; that handler reads `effect_hash`
@@ -491,6 +605,16 @@ pub async fn run_through_reserve(
         return Err(DomainError::InvalidRequest(
             "DecisionRequest.idempotency.key required".into(),
         ));
+    }
+
+    // Durable replay check before the run-cost projector. Project mutates
+    // per-run state, so cache loss or sidecar restart must not let a retry
+    // recompute a different RUN_* decision before the ledger can replay the
+    // first decision for this adapter idempotency key.
+    if let Some(replay) =
+        replay_existing_decision_by_idempotency(state, ctx, req, &adapter_idempotency_key).await?
+    {
+        return Ok(replay);
     }
 
     // Stage 1: snapshot
@@ -2530,6 +2654,19 @@ mod slice_02_decision_match_tests {
         assert_eq!(nonnegative_i64_from_decimal_str("-1"), Some(0));
         assert_eq!(nonnegative_i64_from_decimal_str("123"), Some(123));
         assert_eq!(nonnegative_i64_from_decimal_str("not-a-number"), None);
+    }
+
+    #[test]
+    fn idempotency_replay_decision_kind_preserves_projection_stop() {
+        let reason_codes = vec!["RUN_BUDGET_PROJECTION_EXCEEDED".to_string()];
+        assert_eq!(
+            replay_decision_kind("denied_decision", "STOP", "", &reason_codes).unwrap(),
+            Decision::StopRunProjection
+        );
+        assert_eq!(
+            replay_decision_kind("reserve", "", "", &[]).unwrap(),
+            Decision::Continue
+        );
     }
 
     #[test]

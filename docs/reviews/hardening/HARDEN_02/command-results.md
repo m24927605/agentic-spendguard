@@ -124,3 +124,27 @@ Round 3 command results:
 - Negative Helm gate with both sidecar and egress proxy projector URLs: FAILS as expected.
 - `make -C deploy/demo demo-up DEMO_MODE=m1_benchmark_runaway_loop`: PASS; `RUN_BUDGET_PROJECTION_EXCEEDED` observed and canonical_events matching count = 1.
 - `make -C deploy/demo demo-down`: PASS.
+
+## AIT Round 4 Fix Evidence
+
+Reviewer: `review_01KSXRBRK7H72G9A5NXA9PTP7A`.
+
+| Finding | Fix | Verification |
+|---|---|---|
+| Ledger available balance double-counts prior run spend | run_cost_projector now keeps `projection_atomic = cumulative + this_call + predicted_remaining` for audit forensics, but compares only the future commitment (`this_call + predicted_remaining`) against the live ledger `available_atomic` budget snapshot. The m1 runaway-loop harness now decrements the live budget balance before each call, matching ledger semantics. | `cargo test --manifest-path services/run_cost_projector/Cargo.toml` includes `live_available_budget_does_not_double_count_prior_spend`; `make -C deploy/demo demo-up DEMO_MODE=m1_benchmark_runaway_loop` still emits `RUN_BUDGET_PROJECTION_EXCEEDED` and lands it in `canonical_events`. |
+| Projector can change replayed decisions after cache loss | Ledger `QueryDecisionOutcome` now accepts an idempotency key lookup and returns durable replay metadata from the original reserve/deny audit row. Sidecar checks that durable replay before any mutating Project call, reconstructing the original CONTINUE or denied RUN_* decision without advancing projector state. | `cargo test --manifest-path services/ledger/Cargo.toml` includes replay metadata extraction coverage; `cargo test --manifest-path services/sidecar/Cargo.toml` includes `idempotency_replay_decision_kind_preserves_projection_stop`. |
+
+Round 4 command results:
+
+- `git diff --check`: PASS.
+- `cargo build --manifest-path services/run_cost_projector/Cargo.toml`: PASS.
+- `cargo build --manifest-path services/sidecar/Cargo.toml`: PASS (existing `schema_bundle_canonical_version` dead-code warning).
+- `cargo build --manifest-path services/ledger/Cargo.toml`: PASS (existing `estimated` warning).
+- `cargo test --manifest-path services/run_cost_projector/Cargo.toml`: PASS (`54 + 5 + 3` tests).
+- `cargo test --manifest-path services/sidecar/Cargo.toml`: PASS (`114 + 6` tests; existing warning).
+- `cargo test --manifest-path services/ledger/Cargo.toml`: PASS (`14` tests; existing warning).
+- `cargo test -p spendguard-predictor-upgrade-benchmarks`: PASS.
+- `helm template charts/spendguard --set chart.profile=demo`: PASS.
+- `helm template charts/spendguard --set chart.profile=production -f docs/reviews/hardening/HARDEN_02/kind-production-values.example.yaml`: PASS.
+- `make -C deploy/demo demo-up DEMO_MODE=m1_benchmark_runaway_loop`: PASS; `RUN_BUDGET_PROJECTION_EXCEEDED` observed and canonical_events matching count = 1.
+- `OPENAI_API_KEY=dummy ANTHROPIC_API_KEY=dummy make -C deploy/demo demo-down`: PASS.

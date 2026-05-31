@@ -111,17 +111,20 @@ pub fn compute_layering(inputs: &LayeringInputs) -> LayeringResult {
     };
 
     // Step 3 + 4: project.
-    let predicted_remaining_cost_atomic = (predicted_remaining_steps as i64)
-        .saturating_mul(inputs.per_step_baseline_atomic.max(0));
+    let predicted_remaining_cost_atomic =
+        (predicted_remaining_steps as i64).saturating_mul(inputs.per_step_baseline_atomic.max(0));
     let projection_atomic = crate::signal_2::compute_projection(
         inputs.cumulative_cost_atomic,
         inputs.this_call_reservation_atomic,
         predicted_remaining_cost_atomic,
     );
+    let future_commitment_atomic = inputs
+        .this_call_reservation_atomic
+        .saturating_add(predicted_remaining_cost_atomic);
 
     // Step 5: code detection.
     let mut considered = Vec::with_capacity(3);
-    if projection_atomic > inputs.budget_remaining_atomic {
+    if future_commitment_atomic > inputs.budget_remaining_atomic {
         considered.push(RunCode::BudgetProjectionExceeded);
     }
     if signal3_active
@@ -145,7 +148,11 @@ pub fn compute_layering(inputs: &LayeringInputs) -> LayeringResult {
     };
 
     // Diagnostic strategy_used.
-    let strategy_used = match (signal3_active, inputs.signal1_is_cold_start, inputs.drift_confirmed) {
+    let strategy_used = match (
+        signal3_active,
+        inputs.signal1_is_cold_start,
+        inputs.drift_confirmed,
+    ) {
         (true, true, _) => StrategyUsed::S3,
         (true, false, true) => StrategyUsed::S1s2s3,
         (true, false, false) => StrategyUsed::S1s2s3, // S3 + S1 historical; S2 always-on so S1S2S3
@@ -196,10 +203,31 @@ mod tests {
     #[test]
     fn budget_projection_exceeded_fires() {
         let mut i = baseline_inputs();
-        i.budget_remaining_atomic = 500; // projection 1100 > budget 500.
+        i.budget_remaining_atomic = 500; // future 100 + 1000 > remaining 500.
         let r = compute_layering(&i);
         assert_eq!(r.emitted_code, Some(RunCode::BudgetProjectionExceeded));
         assert_eq!(r.considered_codes, vec![RunCode::BudgetProjectionExceeded]);
+    }
+
+    #[test]
+    fn live_available_budget_does_not_double_count_prior_spend() {
+        let mut i = baseline_inputs();
+        i.cumulative_cost_atomic = 100;
+        i.this_call_reservation_atomic = 100;
+        i.signal1_predicted_remaining_steps = 9;
+        i.per_step_baseline_atomic = 100;
+        i.budget_remaining_atomic = 1000;
+        let r = compute_layering(&i);
+        assert_eq!(r.projection_atomic, 1100);
+        assert_eq!(r.predicted_remaining_cost_atomic, 900);
+        assert_eq!(
+            r.emitted_code, None,
+            "available budget is live remaining balance, so compare only this call plus future predicted cost"
+        );
+
+        i.budget_remaining_atomic = 999;
+        let r = compute_layering(&i);
+        assert_eq!(r.emitted_code, Some(RunCode::BudgetProjectionExceeded));
     }
 
     #[test]
@@ -228,25 +256,27 @@ mod tests {
         // §6.1 precedence (BUDGET > STEPS > DRIFT).
         //   - STEPS_EXCEEDED: hint=5, steps_completed=6 → 6 > 5
         //   - DRIFT: drift_confirmed=true
-        //   - BUDGET: projection > budget
+        //   - BUDGET: this_call + future predicted cost > live remaining budget
         //
         // For Signal 3-overridden remaining_steps to be non-zero (so BUDGET
-        // projection has meaningful magnitude), we'd need
+        // future predicted cost has meaningful magnitude), we'd need
         // steps_completed <= hint. Spec §5.2 max(0, hint - completed) caps
         // remaining_steps at 0 when steps_completed > hint, so BUDGET here
-        // depends purely on cumulative + this_call.
+        // depends purely on this_call.
         let mut i = baseline_inputs();
         i.planned_steps_hint = 5;
-        i.steps_completed = 6;       // STEPS_EXCEEDED fires (6 > 5).
+        i.steps_completed = 6; // STEPS_EXCEEDED fires (6 > 5).
         i.cumulative_cost_atomic = 800; // Already burned 800 of budget.
         i.this_call_reservation_atomic = 200; // This call adds 200.
-        i.drift_confirmed = true;    // DRIFT fires.
-        i.budget_remaining_atomic = 500; // 800 + 200 + 0 = 1000 > 500 → BUDGET fires.
+        i.drift_confirmed = true; // DRIFT fires.
+        i.budget_remaining_atomic = 100; // this_call 200 > remaining 100 → BUDGET fires.
         let r = compute_layering(&i);
         // Precedence per §6.1: BUDGET > STEPS > DRIFT.
         assert_eq!(r.emitted_code, Some(RunCode::BudgetProjectionExceeded));
         // All three considered codes recorded for SIEM forensics.
-        assert!(r.considered_codes.contains(&RunCode::BudgetProjectionExceeded));
+        assert!(r
+            .considered_codes
+            .contains(&RunCode::BudgetProjectionExceeded));
         assert!(r.considered_codes.contains(&RunCode::StepsExceeded));
         assert!(r.considered_codes.contains(&RunCode::DriftDetected));
     }

@@ -106,12 +106,17 @@ pub async fn query_decision_outcome(
 ) -> Result<QueryDecisionOutcomeResponse, Status> {
     let tenant_id = Uuid::parse_str(&req.tenant_id)
         .map_err(|e| Status::invalid_argument(format!("tenant_id: {}", e)))?;
-    let decision_id = Uuid::parse_str(&req.decision_id)
-        .map_err(|e| Status::invalid_argument(format!("decision_id: {}", e)))?;
-
-    let outcome = replay::query_decision_outcome(pool, tenant_id, decision_id)
-        .await
-        .map_err(|e: DomainError| e.to_status())?;
+    let outcome = if !req.idempotency_key.is_empty() {
+        replay::query_decision_outcome_by_idempotency_key(pool, tenant_id, &req.idempotency_key)
+            .await
+            .map_err(|e: DomainError| e.to_status())?
+    } else {
+        let decision_id = Uuid::parse_str(&req.decision_id)
+            .map_err(|e| Status::invalid_argument(format!("decision_id: {}", e)))?;
+        replay::query_decision_outcome(pool, tenant_id, decision_id)
+            .await
+            .map_err(|e: DomainError| e.to_status())?
+    };
 
     let stage = match outcome.stage {
         Stage::NotFound => ProtoStage::NotFound,
@@ -142,6 +147,19 @@ pub async fn query_decision_outcome(
         // it up locally before re-publishing. The proto field exists for
         // forward compatibility with a future ledger-side effect_hash store.
         effect_hash: Default::default(),
+        decision_id: outcome
+            .replay
+            .decision_id
+            .map(|u| u.to_string())
+            .unwrap_or_default(),
+        operation_kind: outcome.replay.operation_kind,
+        operation_id: outcome.replay.operation_id,
+        projection_ids: outcome.replay.projection_ids,
+        ttl_expires_at: outcome.replay.ttl_expires_at,
+        final_decision: outcome.replay.final_decision,
+        matched_rule_ids: outcome.replay.matched_rule_ids,
+        reason_codes: outcome.replay.reason_codes,
+        run_code_triggered: outcome.replay.run_code_triggered,
     })
 }
 
