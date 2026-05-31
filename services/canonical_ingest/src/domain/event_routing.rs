@@ -31,9 +31,7 @@ impl StorageClass {
 /// Unknown types default to canonical_raw_log; ingest will quarantine for
 /// schema validation if the bundle does not declare the type.
 pub fn classify(event_type: &str) -> StorageClass {
-    if event_type.starts_with("spendguard.audit.")
-        || event_type == "spendguard.tombstone"
-    {
+    if event_type.starts_with("spendguard.audit.") || event_type == "spendguard.tombstone" {
         StorageClass::ImmutableAuditLog
     } else if event_type.starts_with("spendguard.ledger.")
         || event_type.starts_with("spendguard.approval.")
@@ -55,16 +53,34 @@ mod tests {
 
     #[test]
     fn audit_events_go_to_immutable_log() {
-        assert_eq!(classify("spendguard.audit.decision"), StorageClass::ImmutableAuditLog);
-        assert_eq!(classify("spendguard.audit.outcome"), StorageClass::ImmutableAuditLog);
-        assert_eq!(classify("spendguard.tombstone"), StorageClass::ImmutableAuditLog);
+        assert_eq!(
+            classify("spendguard.audit.decision"),
+            StorageClass::ImmutableAuditLog
+        );
+        assert_eq!(
+            classify("spendguard.audit.outcome"),
+            StorageClass::ImmutableAuditLog
+        );
+        assert_eq!(
+            classify("spendguard.tombstone"),
+            StorageClass::ImmutableAuditLog
+        );
     }
 
     #[test]
     fn ledger_lifecycle_go_to_raw_log() {
-        assert_eq!(classify("spendguard.ledger.reservation"), StorageClass::CanonicalRawLog);
-        assert_eq!(classify("spendguard.ledger.commit"), StorageClass::CanonicalRawLog);
-        assert_eq!(classify("spendguard.refund.credit_received"), StorageClass::CanonicalRawLog);
+        assert_eq!(
+            classify("spendguard.ledger.reservation"),
+            StorageClass::CanonicalRawLog
+        );
+        assert_eq!(
+            classify("spendguard.ledger.commit"),
+            StorageClass::CanonicalRawLog
+        );
+        assert_eq!(
+            classify("spendguard.refund.credit_received"),
+            StorageClass::CanonicalRawLog
+        );
     }
 
     #[test]

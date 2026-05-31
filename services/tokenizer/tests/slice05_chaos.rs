@@ -42,6 +42,7 @@ fn deps_with(
         providers,
         persister,
         alert_sink,
+        sample_rate_overrides: None,
         signer: Arc::new(DisabledSigner::for_test("tokenizer-chaos:test".into())),
         event_source: "spendguard://tokenizer-service/chaos".into(),
         channel_capacity: 16,

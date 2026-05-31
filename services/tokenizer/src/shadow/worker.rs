@@ -51,6 +51,7 @@
 
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use bytes::Bytes;
 use chrono::Utc;
 use prost::Message as _;
@@ -136,11 +137,22 @@ pub enum ShadowOutcome {
     ProviderSchemaOrAuth,
 }
 
+/// Optional source of durable per-(tenant, model) sampling overrides.
+///
+/// The control-plane API persists overrides under RLS. The shadow worker
+/// refreshes the specific tenant/model key it is about to evaluate, so
+/// it never needs an all-tenant read path or a BYPASSRLS role.
+#[async_trait]
+pub trait SampleRateOverrideStore: Send + Sync {
+    async fn load_override(&self, key: &ShadowKey) -> anyhow::Result<Option<f64>>;
+}
+
 /// Handle returned to main.rs for graceful shutdown + best-effort
 /// event submission from the gRPC handler.
 #[derive(Debug, Clone)]
 pub struct ShadowWorkerHandle {
     sender: mpsc::Sender<ShadowEvent>,
+    sample_rate: Option<Arc<SampleRateState>>,
 }
 
 impl ShadowWorkerHandle {
@@ -153,6 +165,13 @@ impl ShadowWorkerHandle {
         event: ShadowEvent,
     ) -> Result<(), mpsc::error::TrySendError<ShadowEvent>> {
         self.sender.try_send(event)
+    }
+
+    /// Sampling state owned by the real shadow worker. Drop-only handles
+    /// return None; production paths use this for the durable override
+    /// sync that feeds the same state used by the rate gate.
+    pub fn sample_rate_state(&self) -> Option<Arc<SampleRateState>> {
+        self.sample_rate.clone()
     }
 }
 
@@ -239,6 +258,7 @@ pub struct ShadowWorkerDeps {
     pub providers: ProviderRoster,
     pub persister: Arc<dyn SamplePersister>,
     pub alert_sink: Arc<dyn DriftAlertSink>,
+    pub sample_rate_overrides: Option<Arc<dyn SampleRateOverrideStore>>,
     pub signer: Arc<dyn Signer>,
     /// Producer source URI for the signed CloudEvent, e.g.
     /// `spendguard://tokenizer-service/region-us-west2`.
@@ -262,8 +282,12 @@ impl ShadowWorkerDeps {
 pub fn spawn_shadow_worker(deps: ShadowWorkerDeps) -> ShadowWorkerHandle {
     let cap = deps.channel_capacity_or_default();
     let (tx, rx) = mpsc::channel::<ShadowEvent>(cap);
+    let sample_rate = Some(Arc::clone(&deps.sample_rate));
     tokio::spawn(run_loop(rx, deps));
-    ShadowWorkerHandle { sender: tx }
+    ShadowWorkerHandle {
+        sender: tx,
+        sample_rate,
+    }
 }
 
 /// Inert handle for `services/tokenizer/src/main.rs` to use during the
@@ -282,7 +306,10 @@ pub fn spawn_drop_handle(buffer: usize) -> ShadowWorkerHandle {
             // Drain. Demo mode.
         }
     });
-    ShadowWorkerHandle { sender: tx }
+    ShadowWorkerHandle {
+        sender: tx,
+        sample_rate: None,
+    }
 }
 
 async fn run_loop(mut rx: mpsc::Receiver<ShadowEvent>, deps: ShadowWorkerDeps) {
@@ -298,6 +325,8 @@ async fn run_loop(mut rx: mpsc::Receiver<ShadowEvent>, deps: ShadowWorkerDeps) {
 /// addition to the channel-driven loop.
 pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> ShadowOutcome {
     let key = event.shadow_key();
+
+    refresh_sampling_override(&key, deps).await;
 
     // Rate gate — should_sample handles the cool-down 100% case.
     if !deps.sample_rate.should_sample(&key) {
@@ -432,6 +461,21 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
         ShadowOutcome::Alerted
     } else {
         ShadowOutcome::Sampled
+    }
+}
+
+async fn refresh_sampling_override(key: &ShadowKey, deps: &ShadowWorkerDeps) {
+    let Some(store) = deps.sample_rate_overrides.as_ref() else {
+        return;
+    };
+    match store.load_override(key).await {
+        Ok(rate) => deps.sample_rate.set_override_rate(key, rate),
+        Err(e) => warn!(
+            error = ?e,
+            tenant = %key.tenant_id,
+            model = %key.model,
+            "failed to refresh tokenizer sampling-rate override; using last known/default rate"
+        ),
     }
 }
 
@@ -635,6 +679,15 @@ mod tests {
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    struct StaticOverrideStore(Option<f64>);
+
+    #[async_trait::async_trait]
+    impl SampleRateOverrideStore for StaticOverrideStore {
+        async fn load_override(&self, _key: &ShadowKey) -> anyhow::Result<Option<f64>> {
+            Ok(self.0)
+        }
+    }
+
     fn deps_for_test(providers: ProviderRoster) -> ShadowWorkerDeps {
         let sample_rate = SampleRateState::new(SampleRateConfig {
             // Always-sample so tests don't deal with probabilistic gating.
@@ -652,6 +705,7 @@ mod tests {
             providers,
             persister: Arc::new(InMemorySamplePersister::default()),
             alert_sink: Arc::new(InMemoryDriftAlertSink::default()),
+            sample_rate_overrides: None,
             signer: Arc::new(DisabledSigner::for_test("tokenizer-service:test".into())),
             event_source: "spendguard://tokenizer-service/test".into(),
             channel_capacity: 16,
@@ -666,6 +720,23 @@ mod tests {
             cool_down_rate: 1.0,
         });
         d
+    }
+
+    #[tokio::test]
+    async fn persisted_sampling_override_feeds_rate_gate_state() {
+        let mut deps = deps_for_test(ProviderRoster {
+            anthropic: None,
+            gemini: None,
+        });
+        deps.sample_rate_overrides = Some(Arc::new(StaticOverrideStore(Some(0.0))));
+        let key = ShadowKey {
+            tenant_id: test_tenant_id().to_string(),
+            model: "claude-3-5-sonnet-20241022".into(),
+        };
+
+        refresh_sampling_override(&key, &deps).await;
+
+        assert_eq!(deps.sample_rate.effective_rate(&key), 0.0);
     }
 
     fn test_tenant_id() -> uuid::Uuid {

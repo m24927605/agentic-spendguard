@@ -2,8 +2,8 @@
 //!
 //! Append-only. Schema in `services/canonical_ingest/migrations/0007`.
 
-use sqlx::PgPool;
 use serde_json::json;
+use sqlx::PgPool;
 
 use crate::{domain::error::DomainError, proto::common::v1::CloudEvent};
 
@@ -50,8 +50,16 @@ pub async fn insert(
     .bind(&evt.id)
     .bind(&evt.tenant_id)
     .bind(&evt.r#type)
-    .bind(if evt.decision_id.is_empty() { None } else { Some(&evt.decision_id) })
-    .bind(if evt.run_id.is_empty() { None } else { Some(&evt.run_id) })
+    .bind(if evt.decision_id.is_empty() {
+        None
+    } else {
+        Some(&evt.decision_id)
+    })
+    .bind(if evt.run_id.is_empty() {
+        None
+    } else {
+        Some(&evt.run_id)
+    })
     .bind(&evt.producer_id)
     .bind(evt.producer_sequence as i64)
     .bind(canonical_bytes)
@@ -62,7 +70,9 @@ pub async fn insert(
     .bind(debug_info)
     .execute(pool)
     .await
-    .map_err(|e| DomainError::Internal(anyhow::anyhow!("audit_signature_quarantine insert: {e}")))?;
+    .map_err(|e| {
+        DomainError::Internal(anyhow::anyhow!("audit_signature_quarantine insert: {e}"))
+    })?;
 
     Ok(())
 }

@@ -50,9 +50,7 @@ pub async fn query_chain_by_decision(
     storage_class_filter: Option<Vec<&str>>,
 ) -> Result<Vec<ChainRow>, DomainError> {
     let classes: Vec<String> = storage_class_filter
-        .unwrap_or_else(|| {
-            vec!["immutable_audit_log", "canonical_raw_log"]
-        })
+        .unwrap_or_else(|| vec!["immutable_audit_log", "canonical_raw_log"])
         .into_iter()
         .map(|s| s.to_string())
         .collect();

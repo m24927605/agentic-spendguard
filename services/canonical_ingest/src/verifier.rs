@@ -27,10 +27,7 @@ use crate::proto::common::v1::CloudEvent;
 /// Ok(()) on match. Returns Err(VerifyFailure) for typed failure modes.
 /// Caller decides how to react (strict-mode reject vs quarantine vs
 /// admit-with-metric).
-pub fn verify_cloudevent(
-    verifier: &dyn Verifier,
-    evt: &CloudEvent,
-) -> Result<(), VerifyFailure> {
+pub fn verify_cloudevent(verifier: &dyn Verifier, evt: &CloudEvent) -> Result<(), VerifyFailure> {
     let canonical = canonical_bytes(evt);
     // S7: pass event_time so the verifier can enforce the key's
     // validity window. We use the CloudEvent's producer-attested
@@ -107,7 +104,10 @@ mod tests {
             r#type: "spendguard.audit.decision".into(),
             source: "sidecar://demo/wl-1".into(),
             id: "01999d4f-1234-7000-8000-000000000001".into(),
-            time: Some(Timestamp { seconds: 1_700_000_000, nanos: 0 }),
+            time: Some(Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 0,
+            }),
             datacontenttype: "application/json".into(),
             data: b"{}".to_vec().into(),
             tenant_id: "00000000-0000-4000-8000-000000000001".into(),
@@ -267,8 +267,8 @@ mod tests {
     fn prost_roundtrip_preserves_tag_300_to_317_fields() {
         let original = make_event_with_prediction_fields();
         let encoded = original.encode_to_vec();
-        let decoded = CloudEvent::decode(&*encoded)
-            .expect("CloudEvent with tag 300-317 fields must decode");
+        let decoded =
+            CloudEvent::decode(&*encoded).expect("CloudEvent with tag 300-317 fields must decode");
 
         // Field-by-field compare. We avoid `assert_eq!(original, decoded)`
         // because we want any drift to point to the exact field.
@@ -294,7 +294,10 @@ mod tests {
             decoded.prediction_sample_size,
             original.prediction_sample_size
         );
-        assert_eq!(decoded.cold_start_layer_used, original.cold_start_layer_used);
+        assert_eq!(
+            decoded.cold_start_layer_used,
+            original.cold_start_layer_used
+        );
         assert_eq!(
             decoded.run_projection_at_decision_atomic,
             original.run_projection_at_decision_atomic

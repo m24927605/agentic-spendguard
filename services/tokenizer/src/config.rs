@@ -96,6 +96,13 @@ pub struct Config {
     #[serde(default)]
     pub database_url: String,
 
+    /// Optional Postgres URL for control_plane's durable
+    /// `tokenizer_sampling_rate_overrides` table. When configured, the
+    /// shadow worker refreshes the current event's (tenant, model)
+    /// override under that tenant's RLS context before rate-gating.
+    #[serde(default)]
+    pub sampling_override_database_url: String,
+
     /// canonical_ingest gRPC URL for the signed `tokenizer_drift_alert`
     /// CloudEvent sink. Empty = use in-memory sink (demo only —
     /// production Helm profile requires this set).
@@ -183,6 +190,10 @@ impl std::fmt::Debug for Config {
             )
             .field("gemini_api_key_present", &!self.gemini_api_key.is_empty())
             .field("database_url_present", &!self.database_url.is_empty())
+            .field(
+                "sampling_override_database_url_present",
+                &!self.sampling_override_database_url.is_empty(),
+            )
             .field("canonical_ingest_url", &self.canonical_ingest_url)
             .field("schema_bundle_id", &self.schema_bundle_id)
             .field(

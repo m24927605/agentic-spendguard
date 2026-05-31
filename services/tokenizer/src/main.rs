@@ -28,9 +28,12 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use async_trait::async_trait;
+use sqlx::{postgres::PgPoolOptions, PgPool};
 use tonic::transport::{Certificate, Identity, Server, ServerTlsConfig};
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+use uuid::Uuid;
 
 use spendguard_signing::Signer;
 use spendguard_tokenizer::Tokenizer;
@@ -42,11 +45,11 @@ use spendguard_tokenizer_service::{
         circuit_breaker::{CircuitBreakerConfig, CircuitBreakerState},
         persistence::SqlSamplePersister,
         provider_clients::{anthropic::AnthropicClient, gemini::GeminiClient},
-        sample_rate_state::{SampleRateConfig, SampleRateState},
+        sample_rate_state::{SampleRateConfig, SampleRateState, ShadowKey},
         sink::{CanonicalIngestDriftAlertSink, SinkMTlsConfig},
         worker::{
             spawn_drop_handle, spawn_shadow_worker, DriftAlertSink, ProviderRoster,
-            SamplePersister, ShadowWorkerDeps, ShadowWorkerHandle,
+            SamplePersister, SampleRateOverrideStore, ShadowWorkerDeps, ShadowWorkerHandle,
         },
     },
 };
@@ -245,6 +248,7 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
         default_rate: cfg.shadow_default_sample_rate,
         ..SampleRateConfig::default()
     });
+    let sample_rate_overrides = build_sampling_override_store(cfg).await?;
     let circuit_breaker = CircuitBreakerState::new(CircuitBreakerConfig::default());
 
     let deps = ShadowWorkerDeps {
@@ -253,6 +257,7 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
         providers,
         persister,
         alert_sink,
+        sample_rate_overrides,
         signer,
         event_source,
         channel_capacity: 1024,
@@ -260,6 +265,55 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
     let handle = spawn_shadow_worker(deps);
     info!("shadow worker spawned (real provider clients + SQL persister + canonical_ingest sink)");
     Ok(handle)
+}
+
+async fn build_sampling_override_store(
+    cfg: &Config,
+) -> Result<Option<Arc<dyn SampleRateOverrideStore>>> {
+    if cfg.sampling_override_database_url.is_empty() {
+        info!(
+            "tokenizer sampling override DB URL unset; using configured default sample rates only"
+        );
+        return Ok(None);
+    }
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&cfg.sampling_override_database_url)
+        .await
+        .context("connect tokenizer sampling override control_plane DB")?;
+    info!("tokenizer sampling override DB connected");
+    Ok(Some(Arc::new(PgSamplingOverrideStore { pool })))
+}
+
+struct PgSamplingOverrideStore {
+    pool: PgPool,
+}
+
+#[async_trait]
+impl SampleRateOverrideStore for PgSamplingOverrideStore {
+    async fn load_override(&self, key: &ShadowKey) -> Result<Option<f64>> {
+        let Ok(tenant_id) = Uuid::parse_str(&key.tenant_id) else {
+            return Ok(None);
+        };
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+            .bind(tenant_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        let row: Option<(f64,)> = sqlx::query_as(
+            r#"
+            SELECT rate
+              FROM tokenizer_sampling_rate_overrides
+             WHERE tenant_id = $1 AND model = $2
+            "#,
+        )
+        .bind(tenant_id)
+        .bind(&key.model)
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(row.map(|r| r.0))
+    }
 }
 
 fn build_schema_bundle_ref(

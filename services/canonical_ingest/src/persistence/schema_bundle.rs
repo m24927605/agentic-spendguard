@@ -100,8 +100,7 @@ mod tests {
         // understanding the round-2 history, this test fails before
         // the bundle starts silently accepting the deprecated hash.
         // sha256("spendguard.v1alpha1+prediction") computed offline:
-        let expected_hex =
-            "e9229188458ed12eb49796cb23422080b9b68ddf571fc7ae7db79bcc3be17576";
+        let expected_hex = "e9229188458ed12eb49796cb23422080b9b68ddf571fc7ae7db79bcc3be17576";
         let actual_hex = hex::encode(ROUND2_PLACEHOLDER_BUNDLE_HASH);
         assert_eq!(actual_hex, expected_hex);
     }

@@ -73,8 +73,17 @@
 {{- if not .Values.postgres.tokenizerUrlKey -}}
 {{- fail "postgres.tokenizerUrlKey is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B1 + M12: tokenizer_t1_samples persistence required for drift attribution)" -}}
 {{- end -}}
+{{- if not .Values.postgres.controlPlaneUrlKey -}}
+{{- fail "postgres.controlPlaneUrlKey is required under chart.profile=production when tokenizer.shadowEnabled=true (HARDEN_03 #137: tokenizer sampling overrides must be read from control_plane under tenant RLS)" -}}
+{{- end -}}
 {{- if not .Values.tokenizer.sinkMtlsSecretName -}}
 {{- fail "tokenizer.sinkMtlsSecretName is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B4 + M12: plaintext canonical_ingest sink is forbidden — drift_alert CloudEvents carry signed audit-chain bytes)" -}}
+{{- end -}}
+{{- if not .Values.tokenizer.signingKeySecretName -}}
+{{- fail "tokenizer.signingKeySecretName is required under chart.profile=production when tokenizer.shadowEnabled=true (HARDEN_03 #168: signed tokenizer_drift_alert CloudEvents require an Ed25519 key)" -}}
+{{- end -}}
+{{- if not .Values.tokenizer.signingKeyPath -}}
+{{- fail "tokenizer.signingKeyPath is required under chart.profile=production when tokenizer.shadowEnabled=true (HARDEN_03 #168: signer_from_env needs the mounted Ed25519 key path)" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -166,6 +175,13 @@ spec:
             # Migration 0051 owns the schema.
             - name: SPENDGUARD_TOKENIZER_DATABASE_URL
               {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.tokenizerUrlKey) | nindent 14 }}
+            {{- end }}
+            {{- if or (eq .Values.chart.profile "production") .Values.tokenizer.samplingOverrideDatabaseSecretEnabled }}
+            # Control-plane DB read path for durable per-(tenant, model)
+            # sample-rate overrides. The worker sets app.current_tenant_id
+            # per event, so RLS remains the isolation boundary.
+            - name: SPENDGUARD_TOKENIZER_SAMPLING_OVERRIDE_DATABASE_URL
+              {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.controlPlaneUrlKey) | nindent 14 }}
             {{- end }}
             {{- if .Values.tokenizer.providerSecretName }}
             # Provider API keys for Anthropic / Gemini Tier 1

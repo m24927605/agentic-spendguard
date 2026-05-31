@@ -157,14 +157,12 @@ pub async fn append_event(
     }
 
     // 2) Allocate ingest offset INSIDE the tx so rollback restores it.
-    let offset: i64 = sqlx::query_scalar(
-        "SELECT next_ingest_offset($1, $2)",
-    )
-    .bind(input.region_id)
-    .bind(input.ingest_shard_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(map_pg_error)?;
+    let offset: i64 = sqlx::query_scalar("SELECT next_ingest_offset($1, $2)")
+        .bind(input.region_id)
+        .bind(input.ingest_shard_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_pg_error)?;
 
     // 3) Insert into the partitioned canonical_events table.
     // failure_class column added in CA-P0 (migration 0011). Classifier
@@ -381,11 +379,9 @@ pub async fn release_quarantined_outcomes(
         // classify here from the same payload we're about to
         // persist (idempotent: classify.rs is pure).
         let decoded_data = crate::classify::decode_payload_data(&payload_json);
-        let release_failure_class = crate::classify::classify_audit_outcome(
-            &r.event_type,
-            decoded_data.as_ref(),
-        )
-        .map(|c| c.as_db_str());
+        let release_failure_class =
+            crate::classify::classify_audit_outcome(&r.event_type, decoded_data.as_ref())
+                .map(|c| c.as_db_str());
 
         // Append into canonical_events + global_keys + ingest_positions in
         // the SAME tx as the quarantine SELECT/UPDATE. We inline the insert

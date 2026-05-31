@@ -8,9 +8,7 @@ use tracing::{info, warn};
 use tracing_subscriber::EnvFilter;
 
 use spendguard_canonical_ingest::{
-    config::Config,
-    metrics::IngestMetrics,
-    persistence,
+    config::Config, metrics::IngestMetrics, persistence,
     proto::canonical_ingest::v1::canonical_ingest_server::CanonicalIngestServer,
     server::CanonicalIngestService,
 };
@@ -72,8 +70,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr: SocketAddr = cfg.bind_addr.parse().context("parsing bind addr")?;
 
-    let tls = build_server_tls_config(&cfg)
-        .context("loading mTLS server config")?;
+    let tls = build_server_tls_config(&cfg).context("loading mTLS server config")?;
     info!(addr = %addr, mtls = tls.is_some(), "listening");
 
     let mut builder = Server::builder();
@@ -103,12 +100,12 @@ async fn main() -> anyhow::Result<()> {
 /// renders the IngestMetrics Prometheus text. No external prometheus
 /// crate to keep the dep tree lean.
 async fn serve_metrics(addr: SocketAddr, metrics: IngestMetrics) -> anyhow::Result<()> {
+    use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
-    use http_body_util::Full;
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind(addr).await?;
@@ -144,12 +141,11 @@ fn build_server_tls_config(cfg: &Config) -> anyhow::Result<Option<ServerTlsConfi
     match (&cfg.tls_cert_pem, &cfg.tls_key_pem, &cfg.tls_ca_pem) {
         (None, None, None) => Ok(None),
         (Some(cert_path), Some(key_path), Some(ca_path)) => {
-            let cert = std::fs::read(cert_path)
-                .with_context(|| format!("read tls cert {cert_path}"))?;
-            let key = std::fs::read(key_path)
-                .with_context(|| format!("read tls key {key_path}"))?;
-            let ca = std::fs::read(ca_path)
-                .with_context(|| format!("read tls ca {ca_path}"))?;
+            let cert =
+                std::fs::read(cert_path).with_context(|| format!("read tls cert {cert_path}"))?;
+            let key =
+                std::fs::read(key_path).with_context(|| format!("read tls key {key_path}"))?;
+            let ca = std::fs::read(ca_path).with_context(|| format!("read tls ca {ca_path}"))?;
             Ok(Some(
                 ServerTlsConfig::new()
                     .identity(Identity::from_pem(cert, key))

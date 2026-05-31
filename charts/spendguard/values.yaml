@@ -281,6 +281,11 @@ tokenizer:
   # so the shadow worker can use its documented drop-only fallback;
   # production renders the env var regardless when shadowEnabled=true.
   databaseSecretEnabled: false
+  # Control-plane Postgres URL for tokenizer_sampling_rate_overrides is
+  # read from postgres.existingSecret / controlPlaneUrlKey. The shadow
+  # worker refreshes the current tenant/model under RLS before rate
+  # gating, so persisted operator overrides actually affect sampling.
+  samplingOverrideDatabaseSecretEnabled: false
   # Optional Secret holding Anthropic + Gemini Tier 1 count_tokens
   # API keys. Expected keys inside the Secret:
   #   anthropic-api-key: <api key string>

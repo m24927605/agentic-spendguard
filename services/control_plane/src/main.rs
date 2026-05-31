@@ -231,10 +231,10 @@ async fn healthz() -> &'static str {
 // Per tokenizer-service-spec-v1alpha1.md §4.1 the default sample rate
 // is 1% with operator override via this REST surface. HARDEN_03 wires
 // durable Postgres persistence for the control-plane API; tokenizer
-// service polling can consume the same table/control-plane surface. The
-// route is auth-gated by `require_auth` so only
-// authenticated operators (TenantWrite permission required for POST)
-// can mutate.
+// service reads consume the same table under per-event tenant RLS. The
+// route is auth-gated by `require_auth`; POST requires TenantWrite,
+// GET requires ReadView, and both assert the requested tenant against
+// the authenticated Principal before setting the RLS tenant.
 // ============================================================================
 
 #[derive(Debug, Deserialize)]
@@ -275,6 +275,7 @@ async fn post_tokenizer_sampling_rate(
         return Err(StatusCode::BAD_REQUEST);
     }
     let tenant_id = parse_tokenizer_sampling_tenant(&req.tenant_id)?;
+    authorize_tokenizer_sampling_tenant(&principal, &tenant_id, Permission::TenantWrite)?;
     let model = req.model.trim().to_string();
     if model.len() > 256 || principal.subject.len() > 256 {
         return Err(StatusCode::BAD_REQUEST);
@@ -362,12 +363,11 @@ async fn get_tokenizer_sampling_rate(
     State(state): State<Arc<AppState>>,
     axum::extract::Query(q): axum::extract::Query<TokenizerSamplingRateQuery>,
 ) -> Result<Json<TokenizerSamplingRateResp>, StatusCode> {
-    // Any authenticated principal can read.
-    let _ = principal;
     if q.tenant_id.is_empty() || q.model.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
     let tenant_id = parse_tokenizer_sampling_tenant(&q.tenant_id)?;
+    authorize_tokenizer_sampling_tenant(&principal, &tenant_id, Permission::ReadView)?;
     let model = q.model.trim().to_string();
     if model.len() > 256 {
         return Err(StatusCode::BAD_REQUEST);
@@ -419,6 +419,19 @@ async fn get_tokenizer_sampling_rate(
 
 fn parse_tokenizer_sampling_tenant(raw: &str) -> Result<Uuid, StatusCode> {
     Uuid::parse_str(raw).map_err(|_| StatusCode::BAD_REQUEST)
+}
+
+fn authorize_tokenizer_sampling_tenant(
+    principal: &Principal,
+    tenant_id: &Uuid,
+    permission: Permission,
+) -> Result<(), StatusCode> {
+    principal
+        .require(permission)
+        .map_err(|_| StatusCode::FORBIDDEN)?;
+    principal
+        .assert_tenant(&tenant_id.to_string())
+        .map_err(|_| StatusCode::FORBIDDEN)
 }
 
 async fn emit_tokenizer_sampling_rate_audit_event(
@@ -1509,6 +1522,55 @@ async fn resolve_approval(
         event_id: row.2,
     })
     .into_response())
+}
+
+#[cfg(test)]
+mod tokenizer_sampling_auth_tests {
+    use super::{authorize_tokenizer_sampling_tenant, Permission, Principal};
+    use uuid::Uuid;
+
+    fn principal(roles: &[&str], tenants: &[&str]) -> Principal {
+        Principal {
+            issuer: "test".into(),
+            subject: "operator".into(),
+            groups: Vec::new(),
+            tenant_ids: tenants.iter().map(|s| s.to_string()).collect(),
+            roles: roles.iter().map(|s| s.to_string()).collect(),
+            mode: "test".into(),
+        }
+    }
+
+    #[test]
+    fn tokenizer_sampling_write_requires_tenant_scope() {
+        let tenant = Uuid::new_v4();
+        let p = principal(&["admin"], &[&tenant.to_string()]);
+
+        authorize_tokenizer_sampling_tenant(&p, &tenant, Permission::TenantWrite).unwrap();
+    }
+
+    #[test]
+    fn tokenizer_sampling_write_rejects_cross_tenant_admin() {
+        let requested = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let p = principal(&["admin"], &[&other.to_string()]);
+
+        assert_eq!(
+            authorize_tokenizer_sampling_tenant(&p, &requested, Permission::TenantWrite)
+                .unwrap_err(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+    }
+
+    #[test]
+    fn tokenizer_sampling_read_requires_read_view() {
+        let tenant = Uuid::new_v4();
+        let p = principal(&[], &[&tenant.to_string()]);
+
+        assert_eq!(
+            authorize_tokenizer_sampling_tenant(&p, &tenant, Permission::ReadView).unwrap_err(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+    }
 }
 
 #[cfg(test)]
