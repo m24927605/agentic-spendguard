@@ -2,7 +2,7 @@
 
 Date: 2026-05-31
 Branch: `ga/GA_03_production_helm_values`
-Tested implementation head: `7591962623a41799d8b18877ba5c5eb39bf18617`
+Tested implementation head: `eed99446374bf5ddc1013a5767475bdc44b72366`
 
 ## Commands
 
@@ -36,6 +36,11 @@ rg -n 'postgres(ql)?://|DATABASE_URL:|password:|api[_-]?key:' charts/spendguard/
 - `calibrationReport` empty tenant negative test: PASS, failed closed.
 - Duplicate SVID `secretName` negative test: PASS, failed closed.
 - Invalid SVID `secretName` negative test: PASS, failed closed.
+- Non-empty production egress-proxy predictor endpoint negative test (`http://` and `https://`): PASS, failed closed.
+- Tokenizer/output-predictor/run-cost-projector UDS `DirectoryOrCreate` negative test: PASS, failed closed.
+- Invalid SVID `clientCertId` negative test: PASS, failed closed.
+- Invalid optional production Secret refs negative test: PASS, failed closed.
+- Invalid SVID issuer name negative test: PASS, failed closed.
 - Disabled security context negative test: PASS, failed closed.
 - Sidecar NetworkPolicy ports match rendered ledger/canonical/tokenizer/predictor/projector service ports: PASS.
 - Production images render with `global.imageRegistry`: PASS.
@@ -51,3 +56,4 @@ rg -n 'postgres(ql)?://|DATABASE_URL:|password:|api[_-]?key:' charts/spendguard/
 - R2: 2 Blockers, 2 Majors, 1 Minor. Fixed egress-proxy `https://` predictor overclaim, egress-proxy UDS hostPath type, digest image rendering, migration image qualification, and stale evidence.
 - R3: 0 Blockers, 4 Majors, 2 Minors. Fixed chart-level plaintext DB URL rejection, first-party image tag gates, Strategy C issuer required fields, migration image mutable-tag policy, dead `canonicalImage` config, and stale evidence.
 - R4: 1 Blocker, 2 Majors, 1 Minor. Fixed non-DB critical Secret fail gates, calibrationReport production image/tenant validation, SVID secretName DNS/duplicate validation, and stale evidence.
+- R5: 3 Blockers, 2 Majors, 1 Minor. Staff+ Release/Helm Architect, Security Engineer, and SRE/Ops Engineer unanimously decided "fix anyway before merge"; no R6 review was run. Fixed production egress-proxy predictor endpoint rejection, all non-root UDS hostPath type gates, DNS-safe SVID `clientCertId`, optional Secret DNS validation, issuer-name validation, and stale evidence.

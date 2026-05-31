@@ -92,11 +92,14 @@ Reviewer must inspect production render, plaintext secret prevention, SVID bindi
 |---|---|---|
 | Release Engineering Architect | Production Helm values need a dedicated slice | GA_03 owns values |
 | Security Engineer | Example values must be credential-free | Secret-only contract |
+| Release/Helm Architect | R5 unsupported predictor endpoint and UDS hostPath gaps are in-scope | Production chart rejects unsupported egress-proxy predictor wiring and all non-root `DirectoryOrCreate` UDS mounts |
+| Security Engineer | R5 invalid Secret/SVID names are security-baseline gaps | Helm and validator enforce DNS-safe Secret, issuer, and client cert IDs |
+| SRE/Ops Engineer | R5 runtime-broken green renders are unacceptable | All R5 repros fail closed before merge |
 
 ## §14. Merge Checklist
 
-- [ ] Production values example exists
-- [ ] Validator passes
-- [ ] Demo and production Helm renders pass
-- [ ] AIT review clean or arbitration recorded
+- [x] Production values example exists
+- [x] Validator passes
+- [x] Demo and production Helm renders pass
+- [x] AIT review clean or arbitration recorded
 - [ ] Memory updated
