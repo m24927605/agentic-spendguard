@@ -13,6 +13,7 @@
 {{- end -}}
 {{- /* Followup #5: K8sLease backend now real; fail-gate removed.
        See ttl-sweeper.yaml for the operator-side RBAC requirement. */ -}}
+{{- include "spendguard.validateProductionImageTag" (dict "root" . "name" "outboxForwarder" "tag" .Values.outboxForwarder.image.tag) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

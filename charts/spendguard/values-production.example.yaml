@@ -168,7 +168,6 @@ networkPolicy:
 
 migrations:
   ledgerImage: docker.io/library/postgres:16-alpine
-  canonicalImage: docker.io/library/postgres:16-alpine
 
 calibrationReport:
   cronEnabled: false

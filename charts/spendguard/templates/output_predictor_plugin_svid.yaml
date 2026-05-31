@@ -2,6 +2,15 @@
 {{- $fullname := include "spendguard.fullname" . -}}
 {{- $component := "output-predictor" -}}
 {{- $issuer := .Values.outputPredictor.pluginClientSvid.issuer -}}
+{{- if not $issuer.name -}}
+{{- fail "outputPredictor.pluginClientSvid.issuer.name is required when pluginClientSvid.enabled=true" -}}
+{{- end -}}
+{{- if not $issuer.kind -}}
+{{- fail "outputPredictor.pluginClientSvid.issuer.kind is required when pluginClientSvid.enabled=true" -}}
+{{- end -}}
+{{- if not $issuer.group -}}
+{{- fail "outputPredictor.pluginClientSvid.issuer.group is required when pluginClientSvid.enabled=true" -}}
+{{- end -}}
 {{- if and $issuer.create (not $issuer.caSecretName) -}}
 {{- fail "outputPredictor.pluginClientSvid.issuer.caSecretName is required when issuer.create=true" -}}
 {{- end -}}

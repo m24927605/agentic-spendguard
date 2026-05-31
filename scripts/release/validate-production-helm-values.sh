@@ -100,6 +100,11 @@ def require_sha256_hex(path: str) -> str:
     return value
 
 
+def validate_image_tag(name: str, tag: str) -> None:
+    if not re.fullmatch(r"(@sha256:[0-9a-f]{64}|v?[0-9]+\.[0-9]+\.[0-9]+(-[a-z0-9.]+)?)", str(tag)):
+        fail(f"{name}.image.tag must be semver or @sha256 digest under production values")
+
+
 if get(values, "chart.profile") != "production":
     fail("chart.profile must be production")
 
@@ -147,6 +152,22 @@ if get(values, "tokenizer.shadowEnabled") is True:
 if get(values, "networkPolicy.enabled") is not True:
     fail("networkPolicy.enabled must be true in the production example")
 
+for image_name in [
+    "ledger",
+    "canonicalIngest",
+    "controlPlane",
+    "sidecar",
+    "tokenizer",
+    "outputPredictor",
+    "runCostProjector",
+    "egressProxy",
+    "statsAggregator",
+    "webhookReceiver",
+    "outboxForwarder",
+    "ttlSweeper",
+]:
+    validate_image_tag(image_name, get(values, f"{image_name}.image.tag", ""))
+
 if get(values, "tokenizer.shadowEnabled") is True:
     for path in [
         "tokenizer.providerSecretName",
@@ -175,6 +196,14 @@ for path in [
     "statsAggregator.schemaBundleHashHex",
 ]:
     require_string(path)
+
+migration_image = require_string("migrations.ledgerImage")
+if not re.fullmatch(r"(localhost(:[0-9]+)?|[A-Za-z0-9.-]+\.[A-Za-z0-9.-]+|[A-Za-z0-9.-]+:[0-9]+)/.+", migration_image):
+    fail("migrations.ledgerImage must include an explicit registry")
+if re.search(r":(latest|dev|edge|main|master|snapshot)$", migration_image):
+    fail("migrations.ledgerImage must not use mutable tags like latest/dev/edge/main/master/snapshot")
+if "canonicalImage" in (get(values, "migrations", {}) or {}):
+    fail("migrations.canonicalImage is not used by the chart; remove the dead value")
 
 components = {
     str((doc.get("metadata") or {}).get("labels", {}).get("app.kubernetes.io/component"))
@@ -335,16 +364,19 @@ if [[ "$skip_negative_tests" == "false" ]]; then
   tmp_https_predictor="$(mktemp)"
   tmp_bad_hostpath="$(mktemp)"
   tmp_bad_migration_image="$(mktemp)"
+  tmp_latest_image="$(mktemp)"
+  tmp_empty_issuer="$(mktemp)"
+  tmp_dead_canonical_image="$(mktemp)"
   tmp_render_bad="$(mktemp)"
   cleanup() {
-    rm -f "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_render_bad"
+    rm -f "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_latest_image" "$tmp_empty_issuer" "$tmp_dead_canonical_image" "$tmp_render_bad"
     if [[ -z "$rendered_manifest" ]]; then
       rm -f "$render_file"
     fi
   }
   trap cleanup EXIT
 
-  python3 - "$values_file" "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" <<'PY'
+  python3 - "$values_file" "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_latest_image" "$tmp_empty_issuer" "$tmp_dead_canonical_image" <<'PY'
 from pathlib import Path
 import sys
 
@@ -357,6 +389,9 @@ zero_hash = Path(sys.argv[4])
 https_predictor = Path(sys.argv[5])
 bad_hostpath = Path(sys.argv[6])
 bad_migration_image = Path(sys.argv[7])
+latest_image = Path(sys.argv[8])
+empty_issuer = Path(sys.argv[9])
+dead_canonical_image = Path(sys.argv[10])
 values = yaml.safe_load(source.read_text(encoding="utf-8"))
 
 bad = yaml.safe_load(source.read_text(encoding="utf-8"))
@@ -382,6 +417,18 @@ bad_hostpath.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
 bad = yaml.safe_load(source.read_text(encoding="utf-8"))
 bad["migrations"]["ledgerImage"] = "postgres:16-alpine"
 bad_migration_image.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["ledger"]["image"]["tag"] = "latest"
+latest_image.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["outputPredictor"]["pluginClientSvid"]["issuer"]["name"] = ""
+empty_issuer.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["migrations"]["canonicalImage"] = "docker.io/library/postgres:16-alpine"
+dead_canonical_image.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
 PY
 
   if "$0" "$tmp_plaintext" --skip-negative-tests >/tmp/spendguard-ga03-plaintext.out 2>/tmp/spendguard-ga03-plaintext.err; then
@@ -406,6 +453,18 @@ PY
   fi
   if "$0" "$tmp_bad_migration_image" --skip-negative-tests >/tmp/spendguard-ga03-migration-image.out 2>/tmp/spendguard-ga03-migration-image.err; then
     echo "unqualified migration image negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_latest_image" --skip-negative-tests >/tmp/spendguard-ga03-latest-image.out 2>/tmp/spendguard-ga03-latest-image.err; then
+    echo "mutable first-party image tag negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_empty_issuer" --skip-negative-tests >/tmp/spendguard-ga03-empty-issuer.out 2>/tmp/spendguard-ga03-empty-issuer.err; then
+    echo "empty SVID issuer negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_dead_canonical_image" --skip-negative-tests >/tmp/spendguard-ga03-dead-canonical-image.out 2>/tmp/spendguard-ga03-dead-canonical-image.err; then
+    echo "dead canonicalImage value negative test unexpectedly passed" >&2
     exit 1
   fi
 

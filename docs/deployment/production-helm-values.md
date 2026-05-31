@@ -115,6 +115,9 @@ The validation script includes negative checks for:
 ## Operator Fill-In Checklist
 
 - Replace example image tags with the exact GA release images.
+- Use semver release tags or digest pins for first-party images. Migration jobs
+  must use an explicit registry and must not use mutable tags such as
+  `latest`, `dev`, or `main`.
 - Pre-create every referenced Secret in the release namespace.
 - Replace placeholder bundle and trust-root hashes with byte-exact SHA-256 hex
   values from the release bundle.

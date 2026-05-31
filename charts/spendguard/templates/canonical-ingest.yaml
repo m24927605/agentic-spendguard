@@ -9,6 +9,7 @@
 {{- if and (eq .Values.signing.profile "production") (not .Values.signing.strictVerification) }}
 {{- fail "S8: signing.profile=production requires signing.strictVerification=true (set strictVerification=true or change profile to demo)" }}
 {{- end }}
+{{- include "spendguard.validateProductionImageTag" (dict "root" . "name" "canonicalIngest" "tag" .Values.canonicalIngest.image.tag) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

@@ -12,6 +12,7 @@ evaluates the {{- fail -}} directives at template render time.
 {{- if eq .Values.chart.profile "production" -}}
 {{- $zero64 := "0000000000000000000000000000000000000000000000000000000000000000" -}}
 {{- $sha64 := "^[0-9a-f]{64}$" -}}
+{{- $secretNameOrKey := "^[A-Za-z0-9._-]+$" -}}
 {{- if not .Values.postgres.existingSecret -}}
 {{- fail "postgres.existingSecret is required under chart.profile=production (database URLs are credentials and must be supplied via Secret, not literal Helm values)" -}}
 {{- end -}}
@@ -45,6 +46,27 @@ evaluates the {{- fail -}} directives at template render time.
 {{- if not .Values.postgres.statsAggregatorUrlKey -}}
 {{- fail "postgres.statsAggregatorUrlKey is required under chart.profile=production" -}}
 {{- end -}}
+{{- $secretRefs := dict
+  "postgres.existingSecret" .Values.postgres.existingSecret
+  "postgres.ledgerUrlKey" .Values.postgres.ledgerUrlKey
+  "postgres.canonicalUrlKey" .Values.postgres.canonicalUrlKey
+  "postgres.controlPlaneUrlKey" .Values.postgres.controlPlaneUrlKey
+  "postgres.controlPlaneAuditForwarderUrlKey" .Values.postgres.controlPlaneAuditForwarderUrlKey
+  "postgres.tokenizerShadowUrlKey" .Values.postgres.tokenizerShadowUrlKey
+  "postgres.tokenizerUrlKey" .Values.postgres.tokenizerUrlKey
+  "postgres.outputPredictorUrlKey" .Values.postgres.outputPredictorUrlKey
+  "postgres.outputPredictorPluginEndpointUrlKey" .Values.postgres.outputPredictorPluginEndpointUrlKey
+  "postgres.runCostProjectorUrlKey" .Values.postgres.runCostProjectorUrlKey
+  "postgres.statsAggregatorUrlKey" .Values.postgres.statsAggregatorUrlKey
+-}}
+{{- range $name, $value := $secretRefs -}}
+{{- if regexMatch "(?i)(postgresql?|mysql|mongodb)://" (toString $value) -}}
+{{- fail (printf "%s must be a Kubernetes Secret name/key, not a plaintext database URL" $name) -}}
+{{- end -}}
+{{- if not (regexMatch $secretNameOrKey (toString $value)) -}}
+{{- fail (printf "%s must match Kubernetes Secret name/key characters [A-Za-z0-9._-]+" $name) -}}
+{{- end -}}
+{{- end -}}
 {{- if and .Values.sidecar.hostPath.enabled (ne (toString .Values.sidecar.hostPath.type) "Directory") -}}
 {{- fail "sidecar.hostPath.type must be Directory under chart.profile=production; pre-create sidecar.hostPath.socketDir writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
 {{- end -}}
@@ -53,6 +75,9 @@ evaluates the {{- fail -}} directives at template render time.
 {{- end -}}
 {{- if not (regexMatch "^(localhost(:[0-9]+)?|[A-Za-z0-9.-]+\\.[A-Za-z0-9.-]+|[A-Za-z0-9.-]+:[0-9]+)/.+" (toString .Values.migrations.ledgerImage)) -}}
 {{- fail "migrations.ledgerImage must include an explicit registry under chart.profile=production (for example docker.io/library/postgres:16-alpine)" -}}
+{{- end -}}
+{{- if or (regexMatch ":latest$" (toString .Values.migrations.ledgerImage)) (regexMatch ":(dev|edge|main|master|snapshot)$" (toString .Values.migrations.ledgerImage)) -}}
+{{- fail "migrations.ledgerImage must not use mutable tags like latest/dev/edge/main/master/snapshot under chart.profile=production" -}}
 {{- end -}}
 {{- $requiredHashes := dict
   "sidecar.contractBundleHashHex" .Values.sidecar.contractBundleHashHex

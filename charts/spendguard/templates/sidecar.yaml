@@ -32,6 +32,7 @@
 {{- if and (eq .Values.chart.profile "production") .Values.sidecar.allowUntrustedBudgetMetadata -}}
 {{- fail "sidecar.allowUntrustedBudgetMetadata is demo/test-only and must be false under chart.profile=production" -}}
 {{- end -}}
+{{- include "spendguard.validateProductionImageTag" (dict "root" . "name" "sidecar" "tag" .Values.sidecar.image.tag) }}
 {{- /* Phase 5 GA hardening S5: multi-pod safety gates. */ -}}
 {{- if gt (int .Values.sidecar.replicas) 1 }}
 {{- if not .Values.sidecar.acknowledgeMultiPod }}

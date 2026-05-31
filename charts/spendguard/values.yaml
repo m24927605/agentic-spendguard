@@ -799,7 +799,6 @@ failPolicy:
 # /migrations/*.sql before helm install.
 migrations:
   ledgerImage: postgres:16-alpine
-  canonicalImage: postgres:16-alpine
   ledgerConfigMapName: spendguard-migrations-ledger
   canonicalConfigMapName: spendguard-migrations-canonical
   # R2 M3 (Security F5): control_plane migrations live under

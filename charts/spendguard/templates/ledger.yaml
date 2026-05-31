@@ -5,6 +5,7 @@
 {{- end }}
 {{- /* postgres Secret key gates live in templates/validations.yaml
        (must fire even when ledger.enabled=false but consumers are on). */ -}}
+{{- include "spendguard.validateProductionImageTag" (dict "root" . "name" "ledger" "tag" .Values.ledger.image.tag) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
