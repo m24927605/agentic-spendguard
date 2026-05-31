@@ -219,6 +219,6 @@ spec:
         - name: uds
           hostPath:
             path: {{ .Values.sidecar.hostPath.socketDir }}
-            type: DirectoryOrCreate
+            type: {{ .Values.sidecar.hostPath.type | quote }}
         {{- end }}
 {{- end }}

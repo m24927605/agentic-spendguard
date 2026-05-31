@@ -91,6 +91,15 @@ def require_string(path: str) -> str:
     return value
 
 
+def require_sha256_hex(path: str) -> str:
+    value = require_string(path)
+    if not re.fullmatch(r"[0-9a-f]{64}", value):
+        fail(f"{path} must be a lowercase 64-character SHA-256 hex value")
+    if value == "0" * 64:
+        fail(f"{path} must not be the all-zero placeholder")
+    return value
+
+
 if get(values, "chart.profile") != "production":
     fail("chart.profile must be production")
 
@@ -123,6 +132,18 @@ required_value_refs = [
 for path in required_value_refs:
     require_string(path)
 
+for path in [
+    "sidecar.contractBundleHashHex",
+    "sidecar.trustRootSpkiSha256Hex",
+    "controlPlane.auditSchemaBundleHashHex",
+    "outboxForwarder.schemaBundleHashHex",
+    "statsAggregator.schemaBundleHashHex",
+]:
+    require_sha256_hex(path)
+
+if get(values, "tokenizer.shadowEnabled") is True:
+    require_sha256_hex("tokenizer.schemaBundleHashHex")
+
 if get(values, "networkPolicy.enabled") is not True:
     fail("networkPolicy.enabled must be true in the production example")
 
@@ -132,7 +153,6 @@ if get(values, "tokenizer.shadowEnabled") is True:
         "tokenizer.sinkMtlsSecretName",
         "tokenizer.signingKeySecretName",
         "tokenizer.signingKeyPath",
-        "tokenizer.schemaBundleHashHex",
         "tokenizer.canonicalIngestUrl",
     ]:
         require_string(path)
@@ -184,6 +204,33 @@ network_policies = [doc for doc in docs if doc.get("kind") == "NetworkPolicy"]
 if len(network_policies) < 3:
     fail("production render must include NetworkPolicy resources")
 
+for policy in network_policies:
+    if str((policy.get("metadata") or {}).get("name", "")).endswith("allow-sidecar-internal"):
+        expected_ports = {
+            "ledger": 50051,
+            "canonical-ingest": 50052,
+            "tokenizer": 50053,
+            "output-predictor": 50054,
+            "run-cost-projector": 50055,
+        }
+        egress_rules = ((policy.get("spec") or {}).get("egress") or [])
+        for component, port in expected_ports.items():
+            matched = False
+            for rule in egress_rules:
+                selectors = [
+                    (target.get("podSelector") or {}).get("matchLabels") or {}
+                    for target in (rule.get("to") or [])
+                ]
+                ports = [entry.get("port") for entry in (rule.get("ports") or [])]
+                if any(selector.get("app.kubernetes.io/component") == component for selector in selectors) and port in ports:
+                    matched = True
+                    break
+            if not matched:
+                fail(f"allow-sidecar-internal NetworkPolicy must allow {component} on TCP {port}")
+        break
+else:
+    fail("production render missing allow-sidecar-internal NetworkPolicy")
+
 certificates = [doc for doc in docs if doc.get("kind") == "Certificate"]
 cert_uris = {
     uri
@@ -217,6 +264,16 @@ for doc in docs:
     if pod_spec is None:
         continue
     resource_name = (doc.get("metadata") or {}).get("name", doc.get("kind", "<unknown>"))
+    if doc.get("kind") == "DaemonSet" and str(resource_name).endswith("sidecar"):
+        for volume in pod_spec.get("volumes", []) or []:
+            if volume.get("name") != "uds":
+                continue
+            host_path = volume.get("hostPath") or {}
+            if host_path.get("type") != "Directory":
+                fail("sidecar UDS hostPath must use type=Directory in production so node prep owns write permissions for UID/GID 65532")
+            break
+        else:
+            fail("sidecar DaemonSet must mount the UDS hostPath volume")
     pod_sc = pod_spec.get("securityContext") or {}
     for container in pod_spec.get("containers", []):
         name = container.get("name", "<unnamed>")
@@ -234,6 +291,10 @@ for doc in docs:
         drops = (((c_sc.get("capabilities") or {}).get("drop")) or [])
         if "ALL" not in drops:
             fail(f"{resource_name}/{name} must drop ALL Linux capabilities")
+
+        image = str(container.get("image", ""))
+        if image.startswith("spendguard/"):
+            fail(f"{resource_name}/{name} rendered unqualified image {image!r}; global.imageRegistry was not applied")
 
         for env in container.get("env", []) or []:
             env_name = env.get("name", "")
@@ -255,16 +316,17 @@ PY
 if [[ "$skip_negative_tests" == "false" ]]; then
   tmp_plaintext="$(mktemp)"
   tmp_svid="$(mktemp)"
+  tmp_zero_hash="$(mktemp)"
   tmp_render_bad="$(mktemp)"
   cleanup() {
-    rm -f "$tmp_plaintext" "$tmp_svid" "$tmp_render_bad"
+    rm -f "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_render_bad"
     if [[ -z "$rendered_manifest" ]]; then
       rm -f "$render_file"
     fi
   }
   trap cleanup EXIT
 
-  python3 - "$values_file" "$tmp_plaintext" "$tmp_svid" <<'PY'
+  python3 - "$values_file" "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" <<'PY'
 from pathlib import Path
 import sys
 
@@ -273,6 +335,7 @@ import yaml
 source = Path(sys.argv[1])
 plaintext = Path(sys.argv[2])
 missing_svid = Path(sys.argv[3])
+zero_hash = Path(sys.argv[4])
 values = yaml.safe_load(source.read_text(encoding="utf-8"))
 
 bad = yaml.safe_load(source.read_text(encoding="utf-8"))
@@ -282,6 +345,10 @@ plaintext.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
 bad = yaml.safe_load(source.read_text(encoding="utf-8"))
 bad["outputPredictor"]["pluginClientSvid"]["bindings"] = []
 missing_svid.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["sidecar"]["contractBundleHashHex"] = "0" * 64
+zero_hash.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
 PY
 
   if "$0" "$tmp_plaintext" --skip-negative-tests >/tmp/spendguard-ga03-plaintext.out 2>/tmp/spendguard-ga03-plaintext.err; then
@@ -290,6 +357,10 @@ PY
   fi
   if "$0" "$tmp_svid" --skip-negative-tests >/tmp/spendguard-ga03-svid.out 2>/tmp/spendguard-ga03-svid.err; then
     echo "missing SVID binding negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_zero_hash" --skip-negative-tests >/tmp/spendguard-ga03-zero-hash.out 2>/tmp/spendguard-ga03-zero-hash.err; then
+    echo "zero hash placeholder negative test unexpectedly passed" >&2
     exit 1
   fi
 

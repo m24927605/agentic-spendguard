@@ -46,7 +46,7 @@ controlPlane:
   image:
     tag: v0.1.0
   canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
-  auditSchemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  auditSchemaBundleHashHex: "1111111111111111111111111111111111111111111111111111111111111111"
   auth:
     mode: jwt
     oidcIssuer: https://issuer.example.invalid/
@@ -58,17 +58,24 @@ sidecar:
     tag: v0.1.0
   endpointCatalogManifestUrl: https://endpoint-catalog.example.invalid/v1/catalog/manifest
   runCostProjectorUrl: https://spendguard-spendguard-run-cost-projector:50055
-  contractBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  contractBundleHashHex: "2222222222222222222222222222222222222222222222222222222222222222"
   trustSecret:
     name: spendguard-prod-trust
     caPemKey: ca.pem
-  trustRootSpkiSha256Hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  trustRootSpkiSha256Hex: "3333333333333333333333333333333333333333333333333333333333333333"
   mtlsBootstrapTokenSecret:
     name: spendguard-prod-mtls-bootstrap
     tokenKey: token
   manifestVerifyKey:
     existingSecret: spendguard-prod-manifest-verify-key
     pemKey: manifest_verify_key.pub.pem
+  hostPath:
+    enabled: true
+    socketDir: /var/run/spendguard
+    # Production node prep must create this path writable by UID/GID 65532.
+    # DirectoryOrCreate is intentionally not used in production because kubelet
+    # may create a root-owned directory that the non-root sidecar cannot write.
+    type: Directory
 
 tokenizer:
   image:
@@ -76,7 +83,7 @@ tokenizer:
   mtlsSecretName: spendguard-prod-tokenizer-mtls
   shadowEnabled: true
   canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
-  schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  schemaBundleHashHex: "4444444444444444444444444444444444444444444444444444444444444444"
   databaseSecretEnabled: true
   samplingOverrideDatabaseSecretEnabled: true
   providerSecretName: spendguard-prod-tokenizer-provider-keys
@@ -125,7 +132,7 @@ statsAggregator:
   sinkMtlsSecretName: spendguard-prod-stats-aggregator-sink-mtls
   signingKeySecretName: spendguard-prod-stats-aggregator-signing-key
   signingKeyPath: /etc/spendguard/signing/signing-key.pem
-  schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  schemaBundleHashHex: "5555555555555555555555555555555555555555555555555555555555555555"
 
 webhookReceiver:
   image:
@@ -135,7 +142,7 @@ webhookReceiver:
 outboxForwarder:
   image:
     tag: v0.1.0
-  schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  schemaBundleHashHex: "6666666666666666666666666666666666666666666666666666666666666666"
 
 ttlSweeper:
   image:

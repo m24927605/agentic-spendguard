@@ -36,10 +36,11 @@ the per-service repository doesn't include a registry prefix.
 */}}
 {{- define "spendguard.image" -}}
 {{- $repo := .image.repository -}}
-{{- if not (contains "/" $repo) -}}
-{{- printf "%s/%s:%s" .global.imageRegistry $repo .image.tag -}}
-{{- else -}}
+{{- $first := first (splitList "/" $repo) -}}
+{{- if or (contains "." $first) (contains ":" $first) (eq $first "localhost") -}}
 {{- printf "%s:%s" $repo .image.tag -}}
+{{- else -}}
+{{- printf "%s/%s:%s" .global.imageRegistry $repo .image.tag -}}
 {{- end -}}
 {{- end -}}
 

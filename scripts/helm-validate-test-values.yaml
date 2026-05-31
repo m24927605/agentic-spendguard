@@ -32,15 +32,17 @@ postgres:
 sidecar:
   # Byte-exact hash of the contract bundle .tgz (sha256 hex). Real value
   # comes from the operator's bundle-publisher. Placeholder hex for CI.
-  contractBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  contractBundleHashHex: "1111111111111111111111111111111111111111111111111111111111111111"
   # sha256(SubjectPublicKeyInfo) of the trust-root CA, hex.
-  trustRootSpkiSha256Hex: "0000000000000000000000000000000000000000000000000000000000000000"
+  trustRootSpkiSha256Hex: "2222222222222222222222222222222222222222222222222222222222222222"
   # Real endpoint-catalog manifest URL (not the chart placeholder).
   endpointCatalogManifestUrl: "https://endpoint-catalog.example.invalid/v1/catalog/manifest"
+  hostPath:
+    type: Directory
 
 outboxForwarder:
   # Byte-exact hash of the schema bundle .tgz (sha256 hex).
-  schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  schemaBundleHashHex: "3333333333333333333333333333333333333333333333333333333333333333"
 
 tokenizer:
   image:
@@ -65,11 +67,11 @@ statsAggregator:
   sinkMtlsSecretName: spendguard-stats-aggregator-sink-mtls
   signingKeySecretName: spendguard-stats-aggregator-signing-key
   signingKeyPath: /etc/spendguard/signing/signing-key.pem
-  schemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  schemaBundleHashHex: "4444444444444444444444444444444444444444444444444444444444444444"
 
 controlPlane:
   canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
-  auditSchemaBundleHashHex: "0000000000000000000000000000000000000000000000000000000000000000"
+  auditSchemaBundleHashHex: "5555555555555555555555555555555555555555555555555555555555555555"
   auth:
     mode: jwt
     oidcIssuer: https://issuer.example.invalid/

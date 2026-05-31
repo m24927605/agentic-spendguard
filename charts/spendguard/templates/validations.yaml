@@ -10,6 +10,8 @@ This file emits no Kubernetes resources; it exists only so Helm
 evaluates the {{- fail -}} directives at template render time.
 */ -}}
 {{- if eq .Values.chart.profile "production" -}}
+{{- $zero64 := "0000000000000000000000000000000000000000000000000000000000000000" -}}
+{{- $sha64 := "^[0-9a-f]{64}$" -}}
 {{- if not .Values.postgres.existingSecret -}}
 {{- fail "postgres.existingSecret is required under chart.profile=production (database URLs are credentials and must be supplied via Secret, not literal Helm values)" -}}
 {{- end -}}
@@ -42,5 +44,26 @@ evaluates the {{- fail -}} directives at template render time.
 {{- end -}}
 {{- if not .Values.postgres.statsAggregatorUrlKey -}}
 {{- fail "postgres.statsAggregatorUrlKey is required under chart.profile=production" -}}
+{{- end -}}
+{{- if and .Values.sidecar.hostPath.enabled (ne (toString .Values.sidecar.hostPath.type) "Directory") -}}
+{{- fail "sidecar.hostPath.type must be Directory under chart.profile=production; pre-create sidecar.hostPath.socketDir writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
+{{- end -}}
+{{- $requiredHashes := dict
+  "sidecar.contractBundleHashHex" .Values.sidecar.contractBundleHashHex
+  "sidecar.trustRootSpkiSha256Hex" .Values.sidecar.trustRootSpkiSha256Hex
+  "outboxForwarder.schemaBundleHashHex" .Values.outboxForwarder.schemaBundleHashHex
+  "controlPlane.auditSchemaBundleHashHex" .Values.controlPlane.auditSchemaBundleHashHex
+  "statsAggregator.schemaBundleHashHex" .Values.statsAggregator.schemaBundleHashHex
+-}}
+{{- if .Values.tokenizer.shadowEnabled -}}
+{{- $_ := set $requiredHashes "tokenizer.schemaBundleHashHex" .Values.tokenizer.schemaBundleHashHex -}}
+{{- end -}}
+{{- range $name, $value := $requiredHashes -}}
+{{- if not (regexMatch $sha64 (toString $value)) -}}
+{{- fail (printf "%s must be a lowercase 64-character SHA-256 hex value under chart.profile=production" $name) -}}
+{{- end -}}
+{{- if eq (toString $value) $zero64 -}}
+{{- fail (printf "%s must not be the all-zero placeholder under chart.profile=production" $name) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

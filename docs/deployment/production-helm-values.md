@@ -14,9 +14,9 @@ chart:
 ```
 
 The production profile is fail-closed at render time for missing database Secret
-references, unsigned audit mode, placeholder bundle hashes, missing mTLS/SVID
-settings, disabled NetworkPolicy without explicit acknowledgement, and missing
-control-plane JWT issuer configuration.
+references, unsigned audit mode, all-zero bundle/hash placeholders, missing
+mTLS/SVID settings, disabled NetworkPolicy without explicit acknowledgement,
+and missing control-plane JWT issuer configuration.
 
 ## Secret Contract
 
@@ -118,6 +118,9 @@ The validation script includes negative checks for:
 - Pre-create every referenced Secret in the release namespace.
 - Replace placeholder bundle and trust-root hashes with byte-exact SHA-256 hex
   values from the release bundle.
+- Pre-create `sidecar.hostPath.socketDir` on every node as a directory writable
+  by UID/GID 65532. Production values use hostPath `type: Directory` so kubelet
+  does not create a root-owned socket directory at first boot.
 - Set `networkPolicy.externalProviderCidrs` and `networkPolicy.postgresCidrs` to
   environment-specific ranges.
 - Confirm cert-manager issuer names and SVID Secret names match the customer

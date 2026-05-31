@@ -232,6 +232,9 @@ sidecar:
   hostPath:
     enabled: true
     socketDir: /var/run/spendguard
+    # Demo may use DirectoryOrCreate. Production values should set Directory
+    # and pre-create a writable directory owned by UID/GID 65532 on every node.
+    type: DirectoryOrCreate
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
