@@ -273,8 +273,7 @@ impl PluginCircuitBreaker {
         let entry = entries.entry(*tenant).or_default();
         match entry.state {
             BreakerStateName::Closed => {
-                entry.consecutive_failures =
-                    entry.consecutive_failures.saturating_add(1);
+                entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
                 if entry.consecutive_failures >= self.config.failure_threshold {
                     entry.state = BreakerStateName::Open;
                     entry.open_until = Some(now + self.config.open_duration);

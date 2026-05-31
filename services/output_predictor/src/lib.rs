@@ -40,6 +40,7 @@ pub mod context_window;
 pub mod endpoint_cache;
 pub mod fingerprint;
 pub mod plugin_client;
+pub mod plugin_svid;
 pub mod selector;
 pub mod server;
 pub mod strategy_a;

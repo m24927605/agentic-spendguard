@@ -29,6 +29,9 @@ tower = { version = "0.5", features = ["util"] }
 # parse_pinned_fingerprint + build_rustls_client_config can call it
 # directly.
 rustls-pemfile = "2"
+# HARDEN_08: parse predictor-client SVID URI SANs before presenting
+# tenant-bound client certificates to customer Strategy C plugins.
+x509-parser = "0.16"
 
 # gRPC + protobuf (server + client; client is for future SLICE_10 dispatch
 # from sidecar/egress_proxy).

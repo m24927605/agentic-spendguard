@@ -48,7 +48,7 @@
 //! layer.
 
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -61,8 +61,8 @@ use tokio_rustls::rustls::client::danger::{
 };
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName as RustlsServerName, UnixTime};
 use tokio_rustls::rustls::{
-    crypto::aws_lc_rs::default_provider as aws_lc_default_provider, ClientConfig as RustlsClientConfig,
-    DigitallySignedStruct, RootCertStore, SignatureScheme,
+    crypto::aws_lc_rs::default_provider as aws_lc_default_provider,
+    ClientConfig as RustlsClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme,
 };
 use tokio_rustls::TlsConnector as RustlsTlsConnector;
 use tonic::transport::{Channel, Endpoint};
@@ -71,6 +71,7 @@ use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::endpoint_cache::PluginEndpoint;
+use crate::plugin_svid::load_tenant_svid_materials;
 use crate::proto::output_predictor_plugin::v1::{
     customer_predictor_client::CustomerPredictorClient, HealthCheckRequest, HealthCheckResponse,
     PredictRequest, PredictResponse,
@@ -87,40 +88,65 @@ pub const HANDSHAKE_DEADLINE: Duration = Duration::from_millis(500);
 /// `tokio::time::timeout(50ms)` so this fallback is belt-and-suspenders.
 pub const PER_CALL_TIMEOUT_FALLBACK: Duration = Duration::from_millis(50);
 
-/// SpendGuard's own client identity (cert + key + sni). Loaded once at
-/// boot from disk; the same identity is presented to every tenant's
-/// plugin endpoint. The plugin verifies SpendGuard's SVID subject +
-/// re-verifies the `x-spendguard-tenant-id` metadata against its
-/// configured expected tenant.
+/// SpendGuard's plugin client identity source.
 #[derive(Debug, Clone)]
-pub struct PluginClientTls {
-    /// Path to SpendGuard's client cert PEM. SLICE_14 will mint
-    /// per-tenant SVID certs; v1alpha1 ships a single deploy-wide cert.
-    pub client_cert_pem: PathBuf,
-    /// Path to SpendGuard's client key PEM.
-    pub client_key_pem: PathBuf,
-    /// Path to the customer plugin's CA PEM (one CA per deploy is the
-    /// v1alpha1 simplification; v1beta1 will support per-tenant trust
-    /// bundles per spec §3.2 "force re-fetch SpendGuard's trust roots").
-    pub trust_ca_pem: PathBuf,
+pub enum PluginClientTls {
+    /// HARDEN_08 production path. Each endpoint row carries
+    /// `client_cert_id`; the client reads:
+    /// `<svid_dir>/<client_cert_id>/{tls.crt,tls.key,ca.crt}` and
+    /// verifies tls.crt contains URI SAN
+    /// `spiffe://spendguard.platform/predictor-client/<tenant_id>`.
+    PerTenantSvidDir { svid_dir: PathBuf },
+    /// Legacy SLICE_07 path retained for explicit demo/upgrade use.
+    /// Production Helm requires an explicit legacy opt-in before this
+    /// shape is rendered when Strategy C is enabled.
+    LegacyGlobal {
+        client_cert_pem: PathBuf,
+        client_key_pem: PathBuf,
+        trust_ca_pem: PathBuf,
+    },
 }
 
 impl PluginClientTls {
     /// Materialise an `Arc<PluginClientMaterials>` from the on-disk PEMs.
     /// Reads the cert+key+CA bytes once at boot; the resulting
     /// `Materials` is cloned cheaply into each per-tenant TLS config.
-    fn build_materials(&self) -> Result<Arc<PluginClientMaterials>, anyhow::Error> {
-        let cert_pem = std::fs::read(&self.client_cert_pem)
-            .with_context(|| format!("read plugin client cert {}", self.client_cert_pem.display()))?;
-        let key_pem = std::fs::read(&self.client_key_pem)
-            .with_context(|| format!("read plugin client key {}", self.client_key_pem.display()))?;
-        let ca_pem = std::fs::read(&self.trust_ca_pem)
-            .with_context(|| format!("read plugin trust CA {}", self.trust_ca_pem.display()))?;
-        Ok(Arc::new(PluginClientMaterials {
-            cert_pem,
-            key_pem,
-            ca_pem,
-        }))
+    fn into_material_source(self) -> Result<PluginClientMaterialSource, anyhow::Error> {
+        match self {
+            PluginClientTls::PerTenantSvidDir { svid_dir } => {
+                if !svid_dir.is_dir() {
+                    anyhow::bail!(
+                        "plugin client SVID dir {} is not a directory",
+                        svid_dir.display()
+                    );
+                }
+                Ok(PluginClientMaterialSource::PerTenantSvidDir { svid_dir })
+            }
+            PluginClientTls::LegacyGlobal {
+                client_cert_pem,
+                client_key_pem,
+                trust_ca_pem,
+            } => {
+                let cert_pem = std::fs::read(&client_cert_pem).with_context(|| {
+                    format!("read plugin client cert {}", client_cert_pem.display())
+                })?;
+                let key_pem = std::fs::read(&client_key_pem).with_context(|| {
+                    format!("read plugin client key {}", client_key_pem.display())
+                })?;
+                let ca_pem = std::fs::read(&trust_ca_pem)
+                    .with_context(|| format!("read plugin trust CA {}", trust_ca_pem.display()))?;
+                let fingerprint_hex = material_fingerprint_hex(&cert_pem, &key_pem, &ca_pem);
+                Ok(PluginClientMaterialSource::LegacyGlobal(Arc::new(
+                    PluginClientMaterials {
+                        cert_pem,
+                        key_pem,
+                        ca_pem,
+                        subject_uri: None,
+                        fingerprint_hex,
+                    },
+                )))
+            }
+        }
     }
 }
 
@@ -132,6 +158,46 @@ struct PluginClientMaterials {
     cert_pem: Vec<u8>,
     key_pem: Vec<u8>,
     ca_pem: Vec<u8>,
+    subject_uri: Option<String>,
+    fingerprint_hex: String,
+}
+
+#[derive(Debug, Clone)]
+enum PluginClientMaterialSource {
+    PerTenantSvidDir { svid_dir: PathBuf },
+    LegacyGlobal(Arc<PluginClientMaterials>),
+}
+
+impl PluginClientMaterialSource {
+    fn resolve(
+        &self,
+        tenant: &Uuid,
+        endpoint: &PluginEndpoint,
+    ) -> Result<Arc<PluginClientMaterials>, anyhow::Error> {
+        match self {
+            PluginClientMaterialSource::PerTenantSvidDir { svid_dir } => {
+                let materials = load_tenant_svid_materials(
+                    Path::new(svid_dir),
+                    &endpoint.client_cert_id,
+                    tenant,
+                )
+                .with_context(|| {
+                    format!(
+                        "load tenant SVID materials for tenant {} client_cert_id `{}`",
+                        tenant, endpoint.client_cert_id
+                    )
+                })?;
+                Ok(Arc::new(PluginClientMaterials {
+                    cert_pem: materials.cert_pem,
+                    key_pem: materials.key_pem,
+                    ca_pem: materials.ca_pem,
+                    subject_uri: Some(materials.subject_uri),
+                    fingerprint_hex: materials.fingerprint_hex,
+                }))
+            }
+            PluginClientMaterialSource::LegacyGlobal(materials) => Ok(materials.clone()),
+        }
+    }
 }
 
 /// Cached channel + the endpoint metadata that produced it. The cached
@@ -144,6 +210,7 @@ struct CachedChannel {
     /// registry updates the URL or fingerprint, we evict + rebuild.
     /// Cloning is cheap (Arc-backed PluginEndpoint).
     endpoint_snapshot: Arc<PluginEndpoint>,
+    material_fingerprint_hex: Option<String>,
     channel: Channel,
 }
 
@@ -154,7 +221,7 @@ struct CachedChannel {
 pub struct PluginClient {
     /// Set when mTLS is configured; carries pre-loaded PEM bytes so
     /// per-tenant channel rebuilds do not re-read disk.
-    materials: Option<Arc<PluginClientMaterials>>,
+    material_source: Option<PluginClientMaterialSource>,
     channels: RwLock<HashMap<Uuid, CachedChannel>>,
 }
 
@@ -165,8 +232,8 @@ impl PluginClient {
     /// `anyhow::Error`. When `tls` is `None` (demo / skeleton mode) the
     /// constructor logs a single warn and returns successfully.
     pub fn new(tls: Option<PluginClientTls>) -> Result<Arc<Self>, anyhow::Error> {
-        let materials = match tls {
-            Some(t) => Some(t.build_materials()?),
+        let material_source = match tls {
+            Some(t) => Some(t.into_material_source()?),
             None => {
                 warn!(
                     "PluginClient initialised WITHOUT mTLS — demo only; production \
@@ -177,7 +244,7 @@ impl PluginClient {
             }
         };
         Ok(Arc::new(Self {
-            materials,
+            material_source,
             channels: RwLock::new(HashMap::new()),
         }))
     }
@@ -196,16 +263,13 @@ impl PluginClient {
         endpoint: Arc<PluginEndpoint>,
         request: PredictRequest,
     ) -> Result<PredictResponse, tonic::Status> {
-        let channel = self
-            .get_or_connect(tenant, endpoint)
-            .await
-            .map_err(|e| {
-                // Connect failure surfaces as Unavailable so strategy_c.rs
-                // tags it as `customer_predictor_grpc_error` per spec §5.1
-                // (the more-specific tls_error variant is set by the TLS
-                // layer when handshake itself fails).
-                tonic::Status::unavailable(format!("plugin connect failed: {e:#}"))
-            })?;
+        let channel = self.get_or_connect(tenant, endpoint).await.map_err(|e| {
+            // Connect failure surfaces as Unavailable so strategy_c.rs
+            // tags it as `customer_predictor_grpc_error` per spec §5.1
+            // (the more-specific tls_error variant is set by the TLS
+            // layer when handshake itself fails).
+            tonic::Status::unavailable(format!("plugin connect failed: {e:#}"))
+        })?;
         let mut client = CustomerPredictorClient::new(channel);
         let mut req = tonic::Request::new(request);
         // Belt-and-suspenders: tonic per-call timeout below the strategy_c
@@ -269,28 +333,50 @@ impl PluginClient {
         tenant: &Uuid,
         endpoint: Arc<PluginEndpoint>,
     ) -> Result<Channel, anyhow::Error> {
-        // Fast path — cached channel still matches the endpoint.
+        let materials = match &self.material_source {
+            Some(source) => Some(source.resolve(tenant, &endpoint)?),
+            None => None,
+        };
+        let material_fingerprint_hex = materials
+            .as_ref()
+            .map(|materials| materials.fingerprint_hex.clone());
+
+        // Fast path — cached channel still matches the endpoint and
+        // SVID material. Rotation rewrites the mounted Secret bytes;
+        // the changed material fingerprint forces a fresh channel on
+        // the next request without a process restart.
         {
             let read = self.channels.read();
             if let Some(cached) = read.get(tenant) {
-                if cached.endpoint_snapshot.same_wire_shape(&endpoint) {
+                if cached.endpoint_snapshot.same_wire_shape(&endpoint)
+                    && cached.material_fingerprint_hex == material_fingerprint_hex
+                {
                     return Ok(cached.channel.clone());
                 }
             }
         }
         // Slow path — build a new channel. Drop the read lock first so
         // we don't hold it across the await.
-        let channel = build_channel(self.materials.as_deref(), &endpoint).await?;
+        let channel = build_channel(materials.as_deref(), &endpoint).await?;
         let mut write = self.channels.write();
         write.insert(
             *tenant,
             CachedChannel {
                 endpoint_snapshot: endpoint.clone(),
+                material_fingerprint_hex,
                 channel: channel.clone(),
             },
         );
         Ok(channel)
     }
+}
+
+fn material_fingerprint_hex(cert_pem: &[u8], key_pem: &[u8], ca_pem: &[u8]) -> String {
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(cert_pem);
+    hasher.update(key_pem);
+    hasher.update(ca_pem);
+    hex::encode(hasher.finalize())
 }
 
 /// Construct a fresh tonic Channel against the customer plugin endpoint.
@@ -357,9 +443,13 @@ async fn build_channel(
                 )
             })?;
 
-        let port = uri
-            .port_u16()
-            .unwrap_or_else(|| if uri.scheme_str() == Some("https") { 443 } else { 80 });
+        let port = uri.port_u16().unwrap_or_else(|| {
+            if uri.scheme_str() == Some("https") {
+                443
+            } else {
+                80
+            }
+        });
 
         let rustls_cfg = build_rustls_client_config(materials, expected_fp)
             .context("build pinned rustls client config")?;
@@ -409,6 +499,8 @@ async fn build_channel(
     info!(
         endpoint = %endpoint.endpoint_url,
         cert_fingerprint = %endpoint.server_cert_fingerprint,
+        client_cert_id = %endpoint.client_cert_id,
+        client_svid_subject = materials.and_then(|m| m.subject_uri.as_deref()).unwrap_or("legacy-or-none"),
         mtls = materials.is_some(),
         "plugin channel established"
     );
@@ -449,7 +541,9 @@ fn build_rustls_client_config(
         anyhow::bail!("customer CA PEM contained zero certificates");
     }
     for cert in ca_certs {
-        roots.add(cert).context("install customer CA into rustls root store")?;
+        roots
+            .add(cert)
+            .context("install customer CA into rustls root store")?;
     }
 
     // 2. SpendGuard client identity (presented to the plugin for mTLS).
@@ -592,7 +686,7 @@ mod tests {
         // Constructor itself should not panic on tls=None; the warn
         // is logged once at boot.
         let client = PluginClient::new(None).expect("skeleton-mode constructor");
-        assert!(client.materials.is_none());
+        assert!(client.material_source.is_none());
         assert!(client.channels.read().is_empty());
     }
 
@@ -695,8 +789,11 @@ mod tests {
         let der_b = b"leaf-b".as_ref();
         let hash_a = sha2::Sha256::digest(der_a);
         let hash_b = sha2::Sha256::digest(der_b);
-        assert_ne!(hash_a.as_slice(), hash_b.as_slice(),
-            "distinct DER must produce distinct sha256 — pin mismatch path is reachable");
+        assert_ne!(
+            hash_a.as_slice(),
+            hash_b.as_slice(),
+            "distinct DER must produce distinct sha256 — pin mismatch path is reachable"
+        );
     }
 
     #[test]

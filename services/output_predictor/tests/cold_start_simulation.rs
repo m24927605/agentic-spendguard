@@ -53,7 +53,10 @@ impl Lcg64 {
     /// Next uniform in [0, 1).
     fn next_uniform(&mut self) -> f64 {
         // LCG constants from Numerical Recipes
-        self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        self.state = self
+            .state
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         // Use the high 52 bits as the f64 mantissa region.
         (self.state >> 12) as f64 / (1u64 << 52) as f64
     }

@@ -283,7 +283,10 @@ mod tests {
         let cache = OutputDistributionCache::new(None, Duration::from_secs(300));
         let tenant = Uuid::new_v4();
         let r = compute_b(&cache, None, tenant, "gpt-4o", "agent-a", "chat_short").await;
-        assert!(r.is_none(), "skeleton mode must return None (L1 cold-start)");
+        assert!(
+            r.is_none(),
+            "skeleton mode must return None (L1 cold-start)"
+        );
     }
 
     #[tokio::test]
@@ -291,11 +294,18 @@ mod tests {
         // SLICE_08 — cache empty (skeleton mode), but cold_start table
         // has the (model, class) entry → L2 fallback fires.
         let cache = OutputDistributionCache::new(None, Duration::from_secs(300));
-        let table = Arc::new(
-            ModelDefaultDistribution::load_embedded().expect("load embedded toml"),
-        );
+        let table =
+            Arc::new(ModelDefaultDistribution::load_embedded().expect("load embedded toml"));
         let tenant = Uuid::new_v4();
-        let r = compute_b(&cache, Some(&table), tenant, "gpt-4o", "agent-a", "chat_short").await;
+        let r = compute_b(
+            &cache,
+            Some(&table),
+            tenant,
+            "gpt-4o",
+            "agent-a",
+            "chat_short",
+        )
+        .await;
         let pred = r.expect("L2 must hit");
         assert_eq!(pred.layer, Some("L2".to_string()));
         // gpt-4o / chat_short fixture P95 from Layer B check
@@ -309,9 +319,8 @@ mod tests {
         // SLICE_08 — cold_start table loaded but (model, class) absent →
         // L2 misses → L1 fallback (None return).
         let cache = OutputDistributionCache::new(None, Duration::from_secs(300));
-        let table = Arc::new(
-            ModelDefaultDistribution::load_embedded().expect("load embedded toml"),
-        );
+        let table =
+            Arc::new(ModelDefaultDistribution::load_embedded().expect("load embedded toml"));
         let tenant = Uuid::new_v4();
         let r = compute_b(
             &cache,
@@ -322,6 +331,9 @@ mod tests {
             "chat_short",
         )
         .await;
-        assert!(r.is_none(), "unknown model must return None (L1 cold-start)");
+        assert!(
+            r.is_none(),
+            "unknown model must return None (L1 cold-start)"
+        );
     }
 }

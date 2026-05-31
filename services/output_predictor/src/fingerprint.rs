@@ -44,7 +44,11 @@ pub fn compute_fingerprint(model: &str, prompt_class: &str) -> String {
 /// Spec §8.2 includes `messages.len()` in the canonical hash payload;
 /// expose the message-count parameter for callers that have it (the
 /// sidecar passes it through `PredictRequest`).
-pub fn compute_fingerprint_with_count(model: &str, prompt_class: &str, message_count: usize) -> String {
+pub fn compute_fingerprint_with_count(
+    model: &str,
+    prompt_class: &str,
+    message_count: usize,
+) -> String {
     let canonical = format!("{FINGERPRINT_VERSION}:{prompt_class}|{model}|{message_count}");
     let mut hasher = Sha256::new();
     hasher.update(canonical.as_bytes());
@@ -93,7 +97,12 @@ mod tests {
         );
         // hex body is 64 chars (SHA-256 → 32 bytes → 64 hex chars).
         let body = f.strip_prefix(&format!("{FINGERPRINT_VERSION}:")).unwrap();
-        assert_eq!(body.len(), 64, "hex body length expected 64; got {}", body.len());
+        assert_eq!(
+            body.len(),
+            64,
+            "hex body length expected 64; got {}",
+            body.len()
+        );
     }
 
     #[test]

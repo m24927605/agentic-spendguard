@@ -54,8 +54,7 @@ use tracing::{info, warn};
 /// Hot-reload is NOT supported in SLICE_08 (per spec §8 — "TOML hot-
 /// reload triggered (rare): reload with sanity check; revert if invalid"
 /// is post-launch). Refresh requires a new binary build.
-const EMBEDDED_TOML_BYTES: &[u8] =
-    include_bytes!("../data/model_default_distribution.toml");
+const EMBEDDED_TOML_BYTES: &[u8] = include_bytes!("../data/model_default_distribution.toml");
 
 /// SHA-256 of `EMBEDDED_TOML_BYTES` baked at build time.
 ///
@@ -90,10 +89,7 @@ const MIN_SAMPLE_SIZE_QUALITY_BAR: i32 = 500;
 #[derive(Debug, Error)]
 pub enum LoadError {
     #[error("asset signature mismatch (Layer A): expected sha256={expected}, computed={computed} — refusing to start to prevent post-compile asset tampering")]
-    AssetSignatureMismatch {
-        expected: String,
-        computed: String,
-    },
+    AssetSignatureMismatch { expected: String, computed: String },
     #[error("Layer B fixture cross-check failed: expected ({model}, {class}) → P50={expected_p50}/P95={expected_p95}/P99={expected_p99}, got {actual:?} — TOML may be corrupted or fixture out of date")]
     LayerBFixtureMismatch {
         model: String,
@@ -123,7 +119,9 @@ pub enum LoadError {
         p95: i64,
         p99: i64,
     },
-    #[error("entry (model={model}, class={class}) sample_size {sample_size} below hard floor {floor}")]
+    #[error(
+        "entry (model={model}, class={class}) sample_size {sample_size} below hard floor {floor}"
+    )]
     SampleSizeBelowFloor {
         model: String,
         class: String,
@@ -138,7 +136,9 @@ pub enum LoadError {
         p95: i64,
         p99: i64,
     },
-    #[error("entry (model={model}, class={class}) unknown prompt_class — must be one of: {expected}")]
+    #[error(
+        "entry (model={model}, class={class}) unknown prompt_class — must be one of: {expected}"
+    )]
     UnknownPromptClass {
         model: String,
         class: String,
@@ -218,8 +218,8 @@ impl ModelDefaultDistribution {
         // ── Parse TOML bytes ───────────────────────────────────────────
         let text = std::str::from_utf8(EMBEDDED_TOML_BYTES)
             .map_err(|e| LoadError::ParseError(format!("invalid utf8: {e}")))?;
-        let parsed: TomlFile = toml::from_str(text)
-            .map_err(|e| LoadError::ParseError(e.to_string()))?;
+        let parsed: TomlFile =
+            toml::from_str(text).map_err(|e| LoadError::ParseError(e.to_string()))?;
 
         // ── schema_version gate (refuse-to-start on unknown) ───────────
         if parsed.schema_version != EXPECTED_SCHEMA_VERSION {
@@ -326,7 +326,8 @@ impl ModelDefaultDistribution {
             Some(entry)
                 if entry.p50 == LAYER_B_FIXTURE_P50
                     && entry.p95 == LAYER_B_FIXTURE_P95
-                    && entry.p99 == LAYER_B_FIXTURE_P99 => { /* ok */ }
+                    && entry.p99 == LAYER_B_FIXTURE_P99 =>
+            { /* ok */ }
             other => {
                 return Err(LoadError::LayerBFixtureMismatch {
                     model: LAYER_B_FIXTURE_MODEL.to_string(),
@@ -425,8 +426,7 @@ mod tests {
 
     #[test]
     fn load_embedded_succeeds_and_has_70_entries() {
-        let table = ModelDefaultDistribution::load_embedded()
-            .expect("embedded TOML must load");
+        let table = ModelDefaultDistribution::load_embedded().expect("embedded TOML must load");
         assert_eq!(
             table.len(),
             70,
@@ -485,10 +485,7 @@ mod tests {
                 entry.p95 <= entry.p99,
                 "p95 must be <= p99 for ({model}, {class})"
             );
-            assert!(
-                entry.p50 > 0,
-                "p50 must be positive for ({model}, {class})"
-            );
+            assert!(entry.p50 > 0, "p50 must be positive for ({model}, {class})");
             assert!(
                 (0.0..=1.0).contains(&entry.confidence),
                 "confidence must be in [0,1] for ({model}, {class})"
@@ -518,10 +515,7 @@ mod tests {
         let required_classes = crate::classifier::classes::ALL;
         for m in &required_models {
             for c in required_classes {
-                assert!(
-                    table.contains_key(m, c),
-                    "missing ({m}, {c}) entry"
-                );
+                assert!(table.contains_key(m, c), "missing ({m}, {c}) entry");
             }
         }
     }

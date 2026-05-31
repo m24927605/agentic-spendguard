@@ -106,14 +106,23 @@ pub struct Config {
 
     /// Plugin client TLS cert PEM path. SpendGuard presents this cert
     /// to the customer plugin endpoint per spec §3.1 (mTLS-only auth).
-    /// All three (cert / key / ca) must be set together; partial config
-    /// fails at boot.
+    /// HARDEN_08 adds `plugin_client_svid_dir`, which supersedes these
+    /// legacy deploy-wide paths when Strategy C is enabled.
+    /// All three legacy paths (cert / key / ca) must be set together;
+    /// partial config fails at boot.
     #[serde(default)]
     pub plugin_client_cert_pem: Option<String>,
     #[serde(default)]
     pub plugin_client_key_pem: Option<String>,
     #[serde(default)]
     pub plugin_trust_ca_pem: Option<String>,
+
+    /// Directory containing per-tenant SVID material subdirectories:
+    /// `<plugin_client_svid_dir>/<client_cert_id>/{tls.crt,tls.key,ca.crt}`.
+    /// `client_cert_id` comes from predictor_plugin_endpoints and is
+    /// path-sanitized before use.
+    #[serde(default)]
+    pub plugin_client_svid_dir: Option<String>,
 }
 
 impl std::fmt::Debug for Config {
@@ -132,7 +141,10 @@ impl std::fmt::Debug for Config {
             .field("profile", &self.profile)
             .field("database_url_present", &!self.database_url.is_empty())
             .field("cache_ttl_seconds", &self.cache_ttl_seconds)
-            .field("unknown_model_context_window", &self.unknown_model_context_window)
+            .field(
+                "unknown_model_context_window",
+                &self.unknown_model_context_window,
+            )
             .field("context_window_toml_path", &self.context_window_toml_path)
             .field(
                 "plugin_endpoint_database_url_present",
@@ -145,6 +157,7 @@ impl std::fmt::Debug for Config {
             .field("plugin_client_cert_pem", &self.plugin_client_cert_pem)
             .field("plugin_client_key_pem", &self.plugin_client_key_pem)
             .field("plugin_trust_ca_pem", &self.plugin_trust_ca_pem)
+            .field("plugin_client_svid_dir", &self.plugin_client_svid_dir)
             .finish()
     }
 }
@@ -199,11 +212,12 @@ mod tests {
 
     #[test]
     fn defaults_load_with_minimum_env() {
-        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![(
-            "TEST_CFG_LISTEN_ADDR".to_string(),
-            "127.0.0.1:50054".to_string(),
-        )])
-        .expect("config loads");
+        let cfg = envy::prefixed("TEST_CFG_")
+            .from_iter::<_, Config>(vec![(
+                "TEST_CFG_LISTEN_ADDR".to_string(),
+                "127.0.0.1:50054".to_string(),
+            )])
+            .expect("config loads");
         assert_eq!(cfg.listen_addr, "127.0.0.1:50054");
         assert!(cfg.uds_path.is_none());
         assert_eq!(cfg.metrics_addr, "0.0.0.0:9100");
@@ -213,17 +227,18 @@ mod tests {
 
     #[test]
     fn debug_format_masks_database_url() {
-        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![
-            (
-                "TEST_CFG_LISTEN_ADDR".to_string(),
-                "127.0.0.1:50054".to_string(),
-            ),
-            (
-                "TEST_CFG_DATABASE_URL".to_string(),
-                "postgres://user:secret-pass-DO-NOT-LEAK@host/db".to_string(),
-            ),
-        ])
-        .expect("config loads");
+        let cfg = envy::prefixed("TEST_CFG_")
+            .from_iter::<_, Config>(vec![
+                (
+                    "TEST_CFG_LISTEN_ADDR".to_string(),
+                    "127.0.0.1:50054".to_string(),
+                ),
+                (
+                    "TEST_CFG_DATABASE_URL".to_string(),
+                    "postgres://user:secret-pass-DO-NOT-LEAK@host/db".to_string(),
+                ),
+            ])
+            .expect("config loads");
         let dbg = format!("{cfg:?}");
         assert!(
             !dbg.contains("secret-pass-DO-NOT-LEAK"),
@@ -234,11 +249,12 @@ mod tests {
 
     #[test]
     fn debug_format_reports_missing_database_url() {
-        let cfg = envy::prefixed("TEST_CFG_").from_iter::<_, Config>(vec![(
-            "TEST_CFG_LISTEN_ADDR".to_string(),
-            "127.0.0.1:50054".to_string(),
-        )])
-        .expect("config loads");
+        let cfg = envy::prefixed("TEST_CFG_")
+            .from_iter::<_, Config>(vec![(
+                "TEST_CFG_LISTEN_ADDR".to_string(),
+                "127.0.0.1:50054".to_string(),
+            )])
+            .expect("config loads");
         let dbg = format!("{cfg:?}");
         assert!(dbg.contains("database_url_present: false"));
     }
