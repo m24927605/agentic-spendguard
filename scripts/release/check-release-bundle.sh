@@ -55,7 +55,7 @@ fi
   shasum -a 256 -c migrations/inventory.sha256 >/dev/null
 )
 
-if grep -RInE '(postgres(ql)?://|BEGIN (RSA |EC |OPENSSH |)PRIVATE KEY|AKIA[0-9A-Z]{16}|xox[baprs]-|sk-[A-Za-z0-9_-]{20,})' "$bundle_dir" >/tmp/spendguard-release-secret-scan.txt; then
+if grep -RInE '(postgres(ql)?://|BEGIN ((RSA|EC|OPENSSH) )?PRIVATE KEY|AKIA[0-9A-Z]{16}|xox[baprs]-|sk-[A-Za-z0-9_-]{20,})' "$bundle_dir" >/tmp/spendguard-release-secret-scan.txt; then
   echo "release bundle contains a possible secret pattern" >&2
   cat /tmp/spendguard-release-secret-scan.txt >&2
   exit 1
