@@ -8,6 +8,25 @@ cd "${REPO_ROOT}"
 
 log() { echo "[verify-cargo] $*" >&2; }
 
+metadata_locked() {
+    local manifest="$1"
+    local lock_file
+    lock_file="$(dirname "${manifest}")/Cargo.lock"
+    if cargo metadata --locked --manifest-path "${manifest}" --format-version 1 >/dev/null; then
+        return 0
+    fi
+
+    log "metadata --locked failed for ${manifest}; checking whether Cargo would mutate ${lock_file}"
+    cargo metadata --manifest-path "${manifest}" --format-version 1 >/dev/null
+    if ! git diff --quiet -- "${lock_file}"; then
+        log "FATAL: ${lock_file} changed after unlocked metadata; commit or revert intentional lock drift"
+        git diff -- "${lock_file}" >&2
+        exit 1
+    fi
+
+    cargo metadata --locked --manifest-path "${manifest}" --format-version 1 >/dev/null
+}
+
 MANIFEST_LIST="$(mktemp -t spendguard-cargo-manifests.XXXXXX)"
 find . \
     -path './.git' -prune -o \
@@ -27,7 +46,7 @@ while IFS= read -r manifest; do
     dir="$(dirname "${manifest}")"
     if [ -f "${dir}/Cargo.lock" ]; then
         log "metadata --locked ${manifest}"
-        cargo metadata --locked --manifest-path "${manifest}" --format-version 1 >/dev/null
+        metadata_locked "${manifest}"
     else
         log "metadata --no-deps ${manifest}"
         cargo metadata --no-deps --manifest-path "${manifest}" --format-version 1 >/dev/null
