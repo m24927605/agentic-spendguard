@@ -2,7 +2,7 @@
 
 Date: 2026-05-31
 Branch: `ga/GA_03_production_helm_values`
-Tested implementation head: `dc2ee8f725a9a23d8efb2922f78c31290368d152`
+Tested implementation head: `7591962623a41799d8b18877ba5c5eb39bf18617`
 
 ## Commands
 
@@ -31,6 +31,11 @@ rg -n 'postgres(ql)?://|DATABASE_URL:|password:|api[_-]?key:' charts/spendguard/
 - Mutable first-party image tag negative test: PASS, failed closed.
 - Empty Strategy C SVID issuer name negative test: PASS, failed closed.
 - Dead `migrations.canonicalImage` value negative test: PASS, failed closed.
+- Empty critical Secret reference negative test: PASS, failed closed.
+- `calibrationReport` mutable image tag negative test: PASS, failed closed.
+- `calibrationReport` empty tenant negative test: PASS, failed closed.
+- Duplicate SVID `secretName` negative test: PASS, failed closed.
+- Invalid SVID `secretName` negative test: PASS, failed closed.
 - Disabled security context negative test: PASS, failed closed.
 - Sidecar NetworkPolicy ports match rendered ledger/canonical/tokenizer/predictor/projector service ports: PASS.
 - Production images render with `global.imageRegistry`: PASS.
@@ -45,3 +50,4 @@ rg -n 'postgres(ql)?://|DATABASE_URL:|password:|api[_-]?key:' charts/spendguard/
 - R1: 3 Blockers, 1 Major, 1 Minor. Fixed sidecar NetworkPolicy ledger/canonical port swap, sidecar non-root hostPath writability posture, ignored `global.imageRegistry`, all-zero hash placeholder acceptance, and stale evidence.
 - R2: 2 Blockers, 2 Majors, 1 Minor. Fixed egress-proxy `https://` predictor overclaim, egress-proxy UDS hostPath type, digest image rendering, migration image qualification, and stale evidence.
 - R3: 0 Blockers, 4 Majors, 2 Minors. Fixed chart-level plaintext DB URL rejection, first-party image tag gates, Strategy C issuer required fields, migration image mutable-tag policy, dead `canonicalImage` config, and stale evidence.
+- R4: 1 Blocker, 2 Majors, 1 Minor. Fixed non-DB critical Secret fail gates, calibrationReport production image/tenant validation, SVID secretName DNS/duplicate validation, and stale evidence.
