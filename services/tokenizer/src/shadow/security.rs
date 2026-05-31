@@ -258,7 +258,12 @@ mod tests {
     use testcontainers::ImageExt;
     use testcontainers_modules::postgres::Postgres;
 
-    async fn setup_control_plane_postgres() -> Option<PgPool> {
+    struct ControlPlaneFixture {
+        owner_pool: PgPool,
+        runtime_pool: PgPool,
+    }
+
+    async fn setup_control_plane_postgres() -> Option<ControlPlaneFixture> {
         let container = match Postgres::default().with_tag("16-alpine").start().await {
             Ok(c) => c,
             Err(e) => {
@@ -314,28 +319,78 @@ mod tests {
         .await
         .expect("bootstrap minimal control_plane schema");
 
-        let migration = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../control_plane/migrations/0004_tokenizer_shadow_security_settings.sql");
-        let sql = fs::read_to_string(&migration)
-            .unwrap_or_else(|e| panic!("read migration {}: {e}", migration.display()));
-        sqlx::raw_sql(&sql)
-            .execute(&pool)
+        for migration_name in [
+            "0003_tokenizer_sampling_rate_overrides.sql",
+            "0004_tokenizer_shadow_security_settings.sql",
+        ] {
+            let migration = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../control_plane/migrations")
+                .join(migration_name);
+            let sql = fs::read_to_string(&migration)
+                .unwrap_or_else(|e| panic!("read migration {}: {e}", migration.display()));
+            sqlx::raw_sql(&sql)
+                .execute(&pool)
+                .await
+                .unwrap_or_else(|e| panic!("apply migration {}: {e}", migration.display()));
+        }
+
+        sqlx::raw_sql(
+            r#"
+            CREATE ROLE tokenizer_shadow_runtime_test
+                LOGIN PASSWORD 'tokenizer-shadow-test'
+                IN ROLE tokenizer_shadow_runtime_role;
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("create runtime login role");
+
+        let runtime_url = format!(
+            "postgres://tokenizer_shadow_runtime_test:tokenizer-shadow-test@127.0.0.1:{host_port}/postgres?sslmode=disable"
+        );
+        let runtime_pool = PgPoolOptions::new()
+            .max_connections(5)
+            .acquire_timeout(Duration::from_secs(10))
+            .connect(&runtime_url)
             .await
-            .unwrap_or_else(|e| panic!("apply migration {}: {e}", migration.display()));
+            .expect("connect runtime pool");
 
         Box::leak(Box::new(container));
-        Some(pool)
+        Some(ControlPlaneFixture {
+            owner_pool: pool,
+            runtime_pool,
+        })
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn pg_count_tokens_quota_is_shared_across_workers() {
-        let Some(pool) = setup_control_plane_postgres().await else {
+    async fn pg_count_tokens_quota_is_shared_across_runtime_role_workers() {
+        let Some(fx) = setup_control_plane_postgres().await else {
             return;
         };
         let tenant_id =
             Uuid::parse_str("01918000-0000-7c10-8c10-0000000000b5").expect("fixed tenant uuid");
-        let first_worker = PgCountTokensQuota::new(pool.clone());
-        let second_worker = PgCountTokensQuota::new(pool);
+        sqlx::query(
+            r#"
+            INSERT INTO tokenizer_shadow_security_settings (
+                tenant_id, pii_shadow_enabled, count_tokens_quota_per_minute, updated_by
+            )
+            VALUES ($1, TRUE, 1, 'security-test')
+            "#,
+        )
+        .bind(tenant_id)
+        .execute(&fx.owner_pool)
+        .await
+        .expect("seed shadow security settings as owner");
+
+        let settings = PgShadowSecurityStore::new(fx.runtime_pool.clone())
+            .load_settings(tenant_id)
+            .await
+            .expect("runtime role reads settings");
+        assert!(settings.pii_shadow_enabled);
+        assert_eq!(settings.count_tokens_quota_per_minute, 1);
+
+        let first_worker = PgCountTokensQuota::new(fx.runtime_pool.clone());
+        let second_worker = PgCountTokensQuota::new(fx.runtime_pool.clone());
 
         assert!(first_worker
             .try_acquire(tenant_id, "anthropic", 1)
@@ -348,5 +403,26 @@ mod tests {
                 .expect("second quota claim"),
             "second worker bypassed the shared DB-backed quota"
         );
+
+        let mut tx = fx.runtime_pool.begin().await.expect("runtime tx");
+        sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+            .bind(tenant_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .expect("set runtime tenant");
+        let err = sqlx::query(
+            "UPDATE tokenizer_shadow_security_settings
+                SET pii_shadow_enabled = FALSE
+              WHERE tenant_id = $1",
+        )
+        .bind(tenant_id)
+        .execute(&mut *tx)
+        .await
+        .expect_err("runtime role must not mutate PII opt-in settings");
+        assert!(
+            err.to_string().contains("permission denied"),
+            "unexpected update error: {err}"
+        );
+        tx.rollback().await.expect("rollback denied mutation tx");
     }
 }

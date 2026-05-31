@@ -15,6 +15,7 @@
 - Migration 0020 backfills non-released quarantine rows as `reservation_only=true` with non-expiring `event_id` reservations because the original CloudEvent hash cannot be reconstructed from legacy quarantine rows.
 - Missing tenant shadow security settings mean `pii_shadow_enabled=false` and `count_tokens_quota_per_minute=0`.
 - Provider keys alone are insufficient to send raw prompt text; control-plane tenant opt-in is required.
+- The tokenizer shadow worker uses the dedicated `tokenizer_shadow_runtime_role` DB URL: SELECT on sampling/security settings plus DML only on quota usage, not control-plane setting mutation privileges.
 - Quota exhaustion or quota-DB failure skips only the async shadow path and does not touch the Tier 2 tokenizer hot path.
 
 ## Verification Greps

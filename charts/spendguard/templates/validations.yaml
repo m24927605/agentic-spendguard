@@ -22,6 +22,9 @@ evaluates the {{- fail -}} directives at template render time.
 {{- if not .Values.postgres.controlPlaneUrlKey -}}
 {{- fail "postgres.controlPlaneUrlKey is required under chart.profile=production" -}}
 {{- end -}}
+{{- if not .Values.postgres.tokenizerShadowUrlKey -}}
+{{- fail "postgres.tokenizerShadowUrlKey is required under chart.profile=production" -}}
+{{- end -}}
 {{- if not .Values.postgres.tokenizerUrlKey -}}
 {{- fail "postgres.tokenizerUrlKey is required under chart.profile=production" -}}
 {{- end -}}

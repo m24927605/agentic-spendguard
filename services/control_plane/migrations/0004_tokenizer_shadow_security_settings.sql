@@ -3,6 +3,13 @@
 -- tokenizer Tier 1 raw-text shadow calls and per-tenant count_tokens quotas.
 -- ============================================================================
 
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'tokenizer_shadow_runtime_role') THEN
+        CREATE ROLE tokenizer_shadow_runtime_role NOLOGIN;
+    END IF;
+END $$;
+
 CREATE TABLE tokenizer_shadow_security_settings (
     tenant_id                      UUID        PRIMARY KEY,
     pii_shadow_enabled             BOOLEAN     NOT NULL DEFAULT FALSE,
@@ -38,6 +45,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE
     TO control_plane_application_role;
 
 GRANT SELECT ON tokenizer_shadow_security_settings TO control_plane_reader_role;
+GRANT SELECT ON tokenizer_shadow_security_settings TO tokenizer_shadow_runtime_role;
+
+GRANT SELECT ON tokenizer_sampling_rate_overrides TO tokenizer_shadow_runtime_role;
 
 COMMENT ON TABLE tokenizer_shadow_security_settings IS
     'Durable per-tenant controls for tokenizer Tier 1 shadow provider calls. Absence of a row means raw-text PII shadow disabled and count_tokens quota 0.';
@@ -79,7 +89,7 @@ REVOKE SELECT, INSERT, UPDATE, DELETE ON tokenizer_count_tokens_quota_usage FROM
 
 GRANT SELECT, INSERT, UPDATE, DELETE
     ON tokenizer_count_tokens_quota_usage
-    TO control_plane_application_role;
+    TO control_plane_application_role, tokenizer_shadow_runtime_role;
 
 CREATE INDEX tokenizer_count_tokens_quota_usage_cleanup_idx
     ON tokenizer_count_tokens_quota_usage (tenant_id, window_start);

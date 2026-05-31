@@ -21,6 +21,7 @@ postgres:
   ledgerUrlKey: ledger-url
   canonicalUrlKey: canonical-url
   controlPlaneUrlKey: control-plane-url
+  tokenizerShadowUrlKey: tokenizer-shadow-url
   tokenizerUrlKey: tokenizer-url
   outputPredictorUrlKey: output-predictor-url
   outputPredictorPluginEndpointUrlKey: output-predictor-plugin-endpoint-url
