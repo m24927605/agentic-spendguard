@@ -110,6 +110,14 @@ Additional defect found by the clean verifier:
 
 - `run_cost_projector` had a cold-miss race where concurrent first `Project` calls for the same run could each insert a separate `RunState` and bypass the intended per-run mutex. Fixed with `RunStateCache::get_or_insert` and regression coverage; `cargo test --manifest-path services/run_cost_projector/Cargo.toml -- --nocapture` passed with 55 library tests, 5 binary tests, and 3 integration tests.
 
+## Adversarial Review Round 2
+
+Reviewer: separate codex CLI reviewer via AIT-compatible subagent after local `ait run` rejected the documented `--review-mode`/`--base` flags.
+
+Finding fixed in-slice:
+
+- Minor: `scripts/verify-cargo-workspace.sh` used `exec` after registering a cleanup trap, so successful verifier runs leaked detached temp worktrees. Fixed by invoking the child verifier normally and allowing the parent shell's `EXIT` trap to remove the worktree. Final `CARGO_TARGET_DIR=/tmp/spendguard-harden07-clean-target scripts/verify-cargo-workspace.sh` passed, and `git worktree list | rg 'spendguard-cargo-clean'` returned no entries.
+
 ## Demo Regression
 
 Command:

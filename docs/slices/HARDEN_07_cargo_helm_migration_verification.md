@@ -180,6 +180,7 @@ Reviewer should run or inspect the verification scripts and reject any script th
 | Review R1 | codex CLI adversarial reviewer | NetworkPolicy denial must be attributable to policy enforcement | Added unlabeled control pod external egress proof before enforced-pod deny |
 | Review R1 | codex CLI adversarial reviewer | Helm security checks must inspect rendered objects, not global strings | Added YAML-level container security and database `secretKeyRef` assertions |
 | Verification | codex CLI implementer/reviewer | Clean verifier exposed a real run_cost_projector cold-miss race | Added `RunStateCache::get_or_insert` so concurrent first Project calls share one per-run mutex |
+| Review R2 | codex CLI adversarial reviewer | Cargo verifier must not leak detached temp worktrees | Removed `exec` so parent cleanup trap runs; verified no `spendguard-cargo-clean` worktrees remain |
 
 ---
 
