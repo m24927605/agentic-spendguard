@@ -23,7 +23,8 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use spendguard_run_cost_projector::{
-    config::Config, proto::run_cost_projector::v1::run_cost_projector_server::RunCostProjectorServer,
+    config::Config,
+    proto::run_cost_projector::v1::run_cost_projector_server::RunCostProjectorServer,
     server::RunCostProjectorSvc,
 };
 
@@ -146,8 +147,8 @@ async fn bind_uds(
 
     cleanup_stale_uds(path).await?;
 
-    let listener = UnixListener::bind(path)
-        .with_context(|| format!("bind uds listener `{uds_path}`"))?;
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("bind uds listener `{uds_path}`"))?;
 
     // SLICE_03 R3 N1: socket file perms 0660. Default umask leaves the socket
     // world-readable; under hostPath mount this lets any UID on the host
@@ -220,12 +221,11 @@ fn build_server_tls_config(cfg: &Config) -> Result<Option<ServerTlsConfig>> {
     match (&cfg.tls_cert_pem, &cfg.tls_key_pem, &cfg.tls_ca_pem) {
         (None, None, None) => Ok(None),
         (Some(cert_path), Some(key_path), Some(ca_path)) => {
-            let cert = std::fs::read(cert_path)
-                .with_context(|| format!("read tls cert {cert_path}"))?;
-            let key = std::fs::read(key_path)
-                .with_context(|| format!("read tls key {key_path}"))?;
-            let ca = std::fs::read(ca_path)
-                .with_context(|| format!("read tls ca {ca_path}"))?;
+            let cert =
+                std::fs::read(cert_path).with_context(|| format!("read tls cert {cert_path}"))?;
+            let key =
+                std::fs::read(key_path).with_context(|| format!("read tls key {key_path}"))?;
+            let ca = std::fs::read(ca_path).with_context(|| format!("read tls ca {ca_path}"))?;
             Ok(Some(
                 ServerTlsConfig::new()
                     .identity(Identity::from_pem(cert, key))
@@ -254,16 +254,46 @@ async fn shutdown_signal() {
 }
 
 fn render_metrics() -> String {
-    // Phase A: minimal metrics (extended in Phase D/F with real counters).
-    "# HELP spendguard_run_cost_projector_project_total \
-     Total Project RPCs handled.\n\
-     # TYPE spendguard_run_cost_projector_project_total counter\n\
-     spendguard_run_cost_projector_project_total 0\n\
-     # HELP spendguard_run_cost_projector_terminate_run_total \
-     Total TerminateRun RPCs handled.\n\
-     # TYPE spendguard_run_cost_projector_terminate_run_total counter\n\
-     spendguard_run_cost_projector_terminate_run_total 0\n"
-        .to_string()
+    use spendguard_run_cost_projector::server::{
+        project_latency_bucket_samples, project_latency_count, project_latency_sum_seconds,
+        project_outcome_samples, terminate_run_outcome_samples,
+    };
+
+    let mut body = String::new();
+    body.push_str(
+        "# HELP spendguard_run_cost_projector_project_total Total Project RPCs handled.\n\
+         # TYPE spendguard_run_cost_projector_project_total counter\n",
+    );
+    for (outcome, value) in project_outcome_samples() {
+        body.push_str(&format!(
+            "spendguard_run_cost_projector_project_total{{outcome=\"{outcome}\"}} {value}\n"
+        ));
+    }
+    body.push_str(
+        "# HELP spendguard_run_cost_projector_project_latency_seconds Project RPC latency histogram in seconds.\n\
+         # TYPE spendguard_run_cost_projector_project_latency_seconds histogram\n",
+    );
+    for (le, value) in project_latency_bucket_samples() {
+        body.push_str(&format!(
+            "spendguard_run_cost_projector_project_latency_seconds_bucket{{le=\"{le}\"}} {value}\n"
+        ));
+    }
+    body.push_str(&format!(
+        "spendguard_run_cost_projector_project_latency_seconds_sum {:.9}\n\
+         spendguard_run_cost_projector_project_latency_seconds_count {}\n",
+        project_latency_sum_seconds(),
+        project_latency_count()
+    ));
+    body.push_str(
+        "# HELP spendguard_run_cost_projector_terminate_run_total Total TerminateRun RPCs handled.\n\
+         # TYPE spendguard_run_cost_projector_terminate_run_total counter\n",
+    );
+    for (outcome, value) in terminate_run_outcome_samples() {
+        body.push_str(&format!(
+            "spendguard_run_cost_projector_terminate_run_total{{outcome=\"{outcome}\"}} {value}\n"
+        ));
+    }
+    body
 }
 
 /// Minimal /metrics + /livez + /healthz + /readyz hyper server.
@@ -401,9 +431,10 @@ mod tests {
     }
 
     #[test]
-    fn render_metrics_contains_known_names() {
-        let body = render_metrics();
-        assert!(body.contains("spendguard_run_cost_projector_project_total"));
-        assert!(body.contains("spendguard_run_cost_projector_terminate_run_total"));
-    }
+	    fn render_metrics_contains_known_names() {
+	        let body = render_metrics();
+	        assert!(body.contains("spendguard_run_cost_projector_project_total"));
+	        assert!(body.contains("spendguard_run_cost_projector_project_latency_seconds_bucket"));
+	        assert!(body.contains("spendguard_run_cost_projector_terminate_run_total"));
+	    }
 }
