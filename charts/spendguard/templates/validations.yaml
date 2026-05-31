@@ -10,6 +10,10 @@ This file emits no Kubernetes resources; it exists only so Helm
 evaluates the {{- fail -}} directives at template render time.
 */ -}}
 {{- if eq .Values.chart.profile "production" -}}
+{{- $zero64 := "0000000000000000000000000000000000000000000000000000000000000000" -}}
+{{- $sha64 := "^[0-9a-f]{64}$" -}}
+{{- $secretNameOrKey := "^[A-Za-z0-9._-]+$" -}}
+{{- $dns1123Name := "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" -}}
 {{- if not .Values.postgres.existingSecret -}}
 {{- fail "postgres.existingSecret is required under chart.profile=production (database URLs are credentials and must be supplied via Secret, not literal Helm values)" -}}
 {{- end -}}
@@ -42,5 +46,114 @@ evaluates the {{- fail -}} directives at template render time.
 {{- end -}}
 {{- if not .Values.postgres.statsAggregatorUrlKey -}}
 {{- fail "postgres.statsAggregatorUrlKey is required under chart.profile=production" -}}
+{{- end -}}
+{{- $secretRefs := dict
+  "secrets.tls.existingSecret" .Values.secrets.tls.existingSecret
+  "secrets.bundles.existingSecret" .Values.secrets.bundles.existingSecret
+  "sidecar.trustSecret.name" .Values.sidecar.trustSecret.name
+  "sidecar.trustSecret.caPemKey" .Values.sidecar.trustSecret.caPemKey
+  "sidecar.mtlsBootstrapTokenSecret.name" .Values.sidecar.mtlsBootstrapTokenSecret.name
+  "sidecar.mtlsBootstrapTokenSecret.tokenKey" .Values.sidecar.mtlsBootstrapTokenSecret.tokenKey
+  "sidecar.manifestVerifyKey.existingSecret" .Values.sidecar.manifestVerifyKey.existingSecret
+  "sidecar.manifestVerifyKey.pemKey" .Values.sidecar.manifestVerifyKey.pemKey
+  "signing.existingSecret" .Values.signing.existingSecret
+  "webhookReceiver.hmacSecretName" .Values.webhookReceiver.hmacSecretName
+  "postgres.existingSecret" .Values.postgres.existingSecret
+  "postgres.ledgerUrlKey" .Values.postgres.ledgerUrlKey
+  "postgres.canonicalUrlKey" .Values.postgres.canonicalUrlKey
+  "postgres.controlPlaneUrlKey" .Values.postgres.controlPlaneUrlKey
+  "postgres.controlPlaneAuditForwarderUrlKey" .Values.postgres.controlPlaneAuditForwarderUrlKey
+  "postgres.tokenizerShadowUrlKey" .Values.postgres.tokenizerShadowUrlKey
+  "postgres.tokenizerUrlKey" .Values.postgres.tokenizerUrlKey
+  "postgres.outputPredictorUrlKey" .Values.postgres.outputPredictorUrlKey
+  "postgres.outputPredictorPluginEndpointUrlKey" .Values.postgres.outputPredictorPluginEndpointUrlKey
+  "postgres.runCostProjectorUrlKey" .Values.postgres.runCostProjectorUrlKey
+  "postgres.statsAggregatorUrlKey" .Values.postgres.statsAggregatorUrlKey
+-}}
+{{- range $name, $value := $secretRefs -}}
+{{- if not $value -}}
+{{- fail (printf "%s is required under chart.profile=production" $name) -}}
+{{- end -}}
+{{- if regexMatch "(?i)(postgresql?|mysql|mongodb)://" (toString $value) -}}
+{{- fail (printf "%s must be a Kubernetes Secret name/key, not a plaintext database URL" $name) -}}
+{{- end -}}
+{{- if not (regexMatch $secretNameOrKey (toString $value)) -}}
+{{- fail (printf "%s must match Kubernetes Secret name/key characters [A-Za-z0-9._-]+" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- $secretNames := dict
+  "secrets.tls.existingSecret" .Values.secrets.tls.existingSecret
+  "secrets.bundles.existingSecret" .Values.secrets.bundles.existingSecret
+  "postgres.existingSecret" .Values.postgres.existingSecret
+  "sidecar.trustSecret.name" .Values.sidecar.trustSecret.name
+  "sidecar.mtlsBootstrapTokenSecret.name" .Values.sidecar.mtlsBootstrapTokenSecret.name
+  "sidecar.manifestVerifyKey.existingSecret" .Values.sidecar.manifestVerifyKey.existingSecret
+  "signing.existingSecret" .Values.signing.existingSecret
+  "webhookReceiver.hmacSecretName" .Values.webhookReceiver.hmacSecretName
+-}}
+{{- range $name, $value := $secretNames -}}
+{{- if not (regexMatch $dns1123Name (toString $value)) -}}
+{{- fail (printf "%s must be a DNS-1123 Kubernetes Secret name under chart.profile=production" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- if and .Values.sidecar.hostPath.enabled (ne (toString .Values.sidecar.hostPath.type) "Directory") -}}
+{{- fail "sidecar.hostPath.type must be Directory under chart.profile=production; pre-create sidecar.hostPath.socketDir writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
+{{- end -}}
+{{- if and .Values.egressProxy.enabled (ne (toString .Values.egressProxy.sidecarUdsHostPathType) "Directory") -}}
+{{- fail "egressProxy.sidecarUdsHostPathType must be Directory under chart.profile=production; pre-create egressProxy.sidecarUdsHostPath writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
+{{- end -}}
+{{- if and .Values.egressProxy.enabled .Values.egressProxy.outputPredictorEndpoint -}}
+{{- fail "egressProxy.outputPredictorEndpoint must be empty under chart.profile=production until egress_proxy ships mTLS client support; the current proxy client is plaintext-only and would silently fall back to Strategy A" -}}
+{{- end -}}
+{{- if and .Values.tokenizer.udsHostPath (ne (toString .Values.tokenizer.udsHostPathType) "Directory") -}}
+{{- fail "tokenizer.udsHostPathType must be Directory under chart.profile=production; pre-create tokenizer.udsHostPath writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
+{{- end -}}
+{{- if and .Values.outputPredictor.udsHostPath (ne (toString .Values.outputPredictor.udsHostPathType) "Directory") -}}
+{{- fail "outputPredictor.udsHostPathType must be Directory under chart.profile=production; pre-create outputPredictor.udsHostPath writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
+{{- end -}}
+{{- if and .Values.runCostProjector.udsHostPath (ne (toString .Values.runCostProjector.udsHostPathType) "Directory") -}}
+{{- fail "runCostProjector.udsHostPathType must be Directory under chart.profile=production; pre-create runCostProjector.udsHostPath writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
+{{- end -}}
+{{- $productionSecretNames := dict
+  "tokenizer.mtlsSecretName" .Values.tokenizer.mtlsSecretName
+  "tokenizer.providerSecretName" .Values.tokenizer.providerSecretName
+  "tokenizer.sinkMtlsSecretName" .Values.tokenizer.sinkMtlsSecretName
+  "tokenizer.signingKeySecretName" .Values.tokenizer.signingKeySecretName
+  "outputPredictor.mtlsSecretName" .Values.outputPredictor.mtlsSecretName
+  "outputPredictor.pluginClientSecretName" .Values.outputPredictor.pluginClientSecretName
+  "runCostProjector.mtlsSecretName" .Values.runCostProjector.mtlsSecretName
+  "statsAggregator.sinkMtlsSecretName" .Values.statsAggregator.sinkMtlsSecretName
+  "statsAggregator.signingKeySecretName" .Values.statsAggregator.signingKeySecretName
+-}}
+{{- range $name, $value := $productionSecretNames -}}
+{{- if $value -}}
+{{- if not (regexMatch $dns1123Name (toString $value)) -}}
+{{- fail (printf "%s must be a DNS-1123 Kubernetes Secret name under chart.profile=production" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if not (regexMatch "^(localhost(:[0-9]+)?|[A-Za-z0-9.-]+\\.[A-Za-z0-9.-]+|[A-Za-z0-9.-]+:[0-9]+)/.+" (toString .Values.migrations.ledgerImage)) -}}
+{{- fail "migrations.ledgerImage must include an explicit registry under chart.profile=production (for example docker.io/library/postgres:16-alpine)" -}}
+{{- end -}}
+{{- if or (regexMatch ":latest$" (toString .Values.migrations.ledgerImage)) (regexMatch ":(dev|edge|main|master|snapshot)$" (toString .Values.migrations.ledgerImage)) -}}
+{{- fail "migrations.ledgerImage must not use mutable tags like latest/dev/edge/main/master/snapshot under chart.profile=production" -}}
+{{- end -}}
+{{- $requiredHashes := dict
+  "sidecar.contractBundleHashHex" .Values.sidecar.contractBundleHashHex
+  "sidecar.trustRootSpkiSha256Hex" .Values.sidecar.trustRootSpkiSha256Hex
+  "outboxForwarder.schemaBundleHashHex" .Values.outboxForwarder.schemaBundleHashHex
+  "controlPlane.auditSchemaBundleHashHex" .Values.controlPlane.auditSchemaBundleHashHex
+  "statsAggregator.schemaBundleHashHex" .Values.statsAggregator.schemaBundleHashHex
+-}}
+{{- if .Values.tokenizer.shadowEnabled -}}
+{{- $_ := set $requiredHashes "tokenizer.schemaBundleHashHex" .Values.tokenizer.schemaBundleHashHex -}}
+{{- end -}}
+{{- range $name, $value := $requiredHashes -}}
+{{- if not (regexMatch $sha64 (toString $value)) -}}
+{{- fail (printf "%s must be a lowercase 64-character SHA-256 hex value under chart.profile=production" $name) -}}
+{{- end -}}
+{{- if eq (toString $value) $zero64 -}}
+{{- fail (printf "%s must not be the all-zero placeholder under chart.profile=production" $name) -}}
+{{- end -}}
 {{- end -}}
 {{- end -}}

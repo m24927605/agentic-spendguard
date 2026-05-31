@@ -232,6 +232,9 @@ sidecar:
   hostPath:
     enabled: true
     socketDir: /var/run/spendguard
+    # Demo may use DirectoryOrCreate. Production values should set Directory
+    # and pre-create a writable directory owned by UID/GID 65532 on every node.
+    type: DirectoryOrCreate
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
@@ -283,6 +286,7 @@ tokenizer:
   #                 set, the chart renders the ClusterIP Service so
   #                 callers can resolve `<release>-spendguard-tokenizer:50053`.
   udsHostPath: ""
+  udsHostPathType: DirectoryOrCreate
   mtlsSecretName: ""
   # ── SLICE_05: Tier 1 shadow drift detection ────────────────────────
   # Master kill-switch for the shadow worker. When false the Tier 2
@@ -371,6 +375,7 @@ outputPredictor:
   # Set EXACTLY ONE under chart.profile=production. Demo falls back to
   # plaintext TCP with a loud warn.
   udsHostPath: ""
+  udsHostPathType: DirectoryOrCreate
   mtlsSecretName: ""
   # ── canonical_ingest DB for output_distribution_cache lookup (spec §4.2)
   # Read from postgres.existingSecret / outputPredictorUrlKey. Demo
@@ -461,6 +466,7 @@ runCostProjector:
   # Set EXACTLY ONE under chart.profile=production. Demo falls back to
   # plaintext TCP with a loud warn.
   udsHostPath: ""
+  udsHostPathType: DirectoryOrCreate
   mtlsSecretName: ""
   # ── canonical_ingest DB for Signal 1 + audit-chain recovery ──
   # Read from postgres.existingSecret / runCostProjectorUrlKey. Demo
@@ -512,6 +518,9 @@ egressProxy:
   # ── Sidecar UDS path (proxy dials sidecar here) ──
   # Shared hostPath with the sidecar DaemonSet.
   sidecarUdsHostPath: "/var/run/spendguard"
+  # Demo may use DirectoryOrCreate. Production values should set Directory
+  # and pre-create the path writable by UID/GID 65532 on every node.
+  sidecarUdsHostPathType: DirectoryOrCreate
   # ── SLICE_10 — output_predictor + run_cost_projector endpoints ──
   # Both optional. When unset, decision::estimate_call_cost falls back per
   # spec §11:
@@ -520,8 +529,11 @@ egressProxy:
   #   * projector unset → no RUN_* code; run_predicted_remaining_steps=-1
   #     sentinel per audit-chain-prediction-extension-v1alpha1.md §3.3.
   #
-  # Production deployments SHOULD set outputPredictorEndpoint, or leave it
-  # empty to use the chart's production default when outputPredictor.enabled.
+  # Egress proxy currently supports plaintext tonic channels only for the
+  # output_predictor client. Production values leave this empty because the
+  # in-chart output_predictor serves mTLS. Until egress_proxy gains mTLS
+  # client support, setting an https endpoint would silently degrade to
+  # local Strategy A after connect failure.
   # Do not wire runCostProjectorEndpoint when the sidecar is explicitly wired
   # to run_cost_projector: Project is mutating and one logical call must
   # advance RunState exactly once.
@@ -790,7 +802,6 @@ failPolicy:
 # /migrations/*.sql before helm install.
 migrations:
   ledgerImage: postgres:16-alpine
-  canonicalImage: postgres:16-alpine
   ledgerConfigMapName: spendguard-migrations-ledger
   canonicalConfigMapName: spendguard-migrations-canonical
   # R2 M3 (Security F5): control_plane migrations live under

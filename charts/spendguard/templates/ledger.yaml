@@ -5,6 +5,7 @@
 {{- end }}
 {{- /* postgres Secret key gates live in templates/validations.yaml
        (must fire even when ledger.enabled=false but consumers are on). */ -}}
+{{- include "spendguard.validateProductionImageTag" (dict "root" . "name" "ledger" "tag" .Values.ledger.image.tag) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,6 +22,8 @@ spec:
       labels:
         {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
     spec:
+      securityContext:
+        {{- include "spendguard.podSecurityContext" . | nindent 8 }}
       containers:
         - name: ledger
           image: {{ include "spendguard.image" (merge (dict "image" .Values.ledger.image "global" .Values.global) .) }}

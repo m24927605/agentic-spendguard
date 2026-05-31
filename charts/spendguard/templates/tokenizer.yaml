@@ -295,7 +295,7 @@ spec:
         - name: uds
           hostPath:
             path: {{ .Values.tokenizer.udsHostPath | quote }}
-            type: DirectoryOrCreate
+            type: {{ .Values.tokenizer.udsHostPathType | quote }}
         {{- end }}
         {{- if .Values.tokenizer.mtlsSecretName }}
         - name: tls

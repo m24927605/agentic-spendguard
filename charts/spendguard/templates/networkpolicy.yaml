@@ -236,14 +236,14 @@ spec:
             matchLabels:
               {{- include "spendguard.selector" (merge (dict "component" "canonical-ingest") .) | nindent 14 }}
       ports:
-        - { protocol: TCP, port: 50051 }
+        - { protocol: TCP, port: 50052 }
     # ledger gRPC.
     - to:
         - podSelector:
             matchLabels:
               {{- include "spendguard.selector" (merge (dict "component" "ledger") .) | nindent 14 }}
       ports:
-        - { protocol: TCP, port: 50052 }
+        - { protocol: TCP, port: 50051 }
     # DNS.
     - to:
         - namespaceSelector:

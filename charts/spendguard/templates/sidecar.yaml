@@ -32,6 +32,7 @@
 {{- if and (eq .Values.chart.profile "production") .Values.sidecar.allowUntrustedBudgetMetadata -}}
 {{- fail "sidecar.allowUntrustedBudgetMetadata is demo/test-only and must be false under chart.profile=production" -}}
 {{- end -}}
+{{- include "spendguard.validateProductionImageTag" (dict "root" . "name" "sidecar" "tag" .Values.sidecar.image.tag) }}
 {{- /* Phase 5 GA hardening S5: multi-pod safety gates. */ -}}
 {{- if gt (int .Values.sidecar.replicas) 1 }}
 {{- if not .Values.sidecar.acknowledgeMultiPod }}
@@ -62,10 +63,14 @@ spec:
       labels:
         {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
     spec:
+      securityContext:
+        {{- include "spendguard.podSecurityContext" . | nindent 8 }}
       containers:
         - name: sidecar
           image: {{ include "spendguard.image" (merge (dict "image" .Values.sidecar.image "global" .Values.global) .) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "spendguard.containerSecurityContext" . | nindent 12 }}
           ports:
             - { name: metrics, containerPort: 9093 }
           env:
@@ -215,6 +220,6 @@ spec:
         - name: uds
           hostPath:
             path: {{ .Values.sidecar.hostPath.socketDir }}
-            type: DirectoryOrCreate
+            type: {{ .Values.sidecar.hostPath.type | quote }}
         {{- end }}
 {{- end }}

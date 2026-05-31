@@ -1,5 +1,12 @@
 {{- if .Values.calibrationReport.cronEnabled }}
 {{- $component := "calibration-report" }}
+{{- include "spendguard.validateProductionImageTag" (dict "root" . "name" "calibrationReport" "tag" .Values.calibrationReport.image.tag) }}
+{{- if and (eq .Values.chart.profile "production") (not .Values.calibrationReport.tenant) -}}
+{{- fail "calibrationReport.tenant is required when calibrationReport.cronEnabled=true under chart.profile=production" -}}
+{{- end -}}
+{{- if and (eq .Values.chart.profile "production") (not (regexMatch "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" (toString .Values.calibrationReport.tenant))) -}}
+{{- fail "calibrationReport.tenant must be a UUID when calibrationReport.cronEnabled=true under chart.profile=production" -}}
+{{- end -}}
 # SLICE_13 Phase D: scheduled calibration-report emission.
 #
 # Spec ancestor: docs/calibration-report-spec-v1alpha1.md §5.3 +

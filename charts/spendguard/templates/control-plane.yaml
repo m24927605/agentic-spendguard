@@ -25,6 +25,7 @@
 {{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo; control-plane audit forwarding requires signed CloudEvents in production" }}
 {{- end }}
 {{- end }}
+{{- include "spendguard.validateProductionImageTag" (dict "root" . "name" "controlPlane" "tag" .Values.controlPlane.image.tag) }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

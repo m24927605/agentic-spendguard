@@ -174,7 +174,7 @@ spec:
         - name: uds
           hostPath:
             path: {{ .Values.outputPredictor.udsHostPath | quote }}
-            type: DirectoryOrCreate
+            type: {{ .Values.outputPredictor.udsHostPathType | quote }}
         {{- end }}
         {{- if .Values.outputPredictor.mtlsSecretName }}
         - name: tls
