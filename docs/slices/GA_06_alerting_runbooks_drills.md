@@ -1,7 +1,7 @@
 # GA 06 - Alerting, Runbooks, and Drills
 
 > **Branch**: `ga/GA_06_alerting_runbooks_drills`
-> **Status**: design
+> **Status**: implementation
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium-large; alert rules, runbooks, drill scripts
 
@@ -93,11 +93,14 @@ Reviewer must check runbook usefulness, not just file existence.
 |---|---|---|
 | SRE/Operations Architect | Runbooks must be drill-backed | Drill evidence required |
 | Security Engineer | Runbooks cannot bypass audit immutability | Unsafe mitigations blocked |
+| SRE/Operations Architect | Outbox lag drill must use a real successfully forwarded runtime audit row | Drill excludes demo seed/bootstrap rows and changes only forwarder-state columns |
+| Backend Architect | Alert expressions must reference emitted metrics inventoried by GA_05 | Validator cross-checks every metric against `docs/operations/metrics-inventory.md` and source files |
+| Security Engineer | Operator remediation must preserve signature verification and audit-chain immutability | Validator rejects unsafe runbook phrases; runbooks explicitly preserve signed audit paths |
 
 ## §14. Merge Checklist
 
-- [ ] Alert/runbook validator passes
-- [ ] Prometheus rules parse
-- [ ] Drill evidence recorded
+- [x] Alert/runbook validator passes
+- [x] Prometheus rules parse
+- [x] Drill evidence recorded
 - [ ] AIT review clean or arbitration recorded
 - [ ] Memory updated

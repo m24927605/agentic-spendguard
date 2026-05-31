@@ -58,6 +58,8 @@ REARMED="$(
       SELECT recorded_month, audit_outbox_id
         FROM audit_outbox
        WHERE pending_forward = FALSE
+         AND forwarded_at IS NOT NULL
+         AND last_forward_error IS NULL
        ORDER BY recorded_at ASC
        LIMIT 1
     )
@@ -73,6 +75,7 @@ REARMED="$(
               EXTRACT(EPOCH FROM (clock_timestamp() - a.recorded_at))::bigint;
   "
 )"
+REARMED="$(printf '%s\n' "$REARMED" | head -n1)"
 if [[ -z "$REARMED" ]]; then
   echo "no forwarded audit_outbox row was available to rearm" >&2
   exit 1

@@ -20,7 +20,7 @@ This drill exercises the demo Postgres, ledger, canonical-ingest, sidecar, and o
 tests/e2e/outbox_lag_recovery.sh
 ```
 
-The script resets the demo stack, runs `make demo-up DEMO_MODE=default`, stops canonical-ingest, reopens one real forwarded outbox row by changing only forwarder-state columns, waits until the outbox lag metric crosses the alert threshold, restarts canonical-ingest, and waits for the backlog to drain.
+The script resets the demo stack, runs `make demo-up DEMO_MODE=default`, stops canonical-ingest, reopens one real successfully forwarded runtime outbox row by changing only forwarder-state columns, waits until the outbox lag metric crosses the alert threshold, restarts canonical-ingest, and waits for the backlog to drain.
 
 ## Expected Alert
 

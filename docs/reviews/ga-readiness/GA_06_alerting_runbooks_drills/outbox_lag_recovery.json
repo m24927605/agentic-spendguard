@@ -1,0 +1,27 @@
+{
+  "finished_at": "2026-05-31T19:25:48Z",
+  "lag_metric_after_recovery": 0,
+  "lag_metric_during_outage": 60,
+  "metrics_excerpt_after_recovery": [
+    "# HELP spendguard_outbox_pending_oldest_age_seconds Age in seconds of the oldest pending audit_outbox row observed from Postgres.",
+    "# TYPE spendguard_outbox_pending_oldest_age_seconds gauge",
+    "spendguard_outbox_pending_oldest_age_seconds 0",
+    "# HELP spendguard_outbox_forwarder_is_leader Whether this outbox-forwarder pod currently owns the forwarding lease (1=yes, 0=no).",
+    "# TYPE spendguard_outbox_forwarder_is_leader gauge",
+    "spendguard_outbox_forwarder_is_leader 1"
+  ],
+  "metrics_excerpt_during_outage": [
+    "# HELP spendguard_outbox_pending_oldest_age_seconds Age in seconds of the oldest pending audit_outbox row observed from Postgres.",
+    "# TYPE spendguard_outbox_pending_oldest_age_seconds gauge",
+    "spendguard_outbox_pending_oldest_age_seconds 60",
+    "# HELP spendguard_outbox_forwarder_is_leader Whether this outbox-forwarder pod currently owns the forwarding lease (1=yes, 0=no).",
+    "# TYPE spendguard_outbox_forwarder_is_leader gauge",
+    "spendguard_outbox_forwarder_is_leader 1"
+  ],
+  "pending_after_recovery": 0,
+  "pending_during_outage": 1,
+  "rearmed_audit_outbox_id": "019e7f7e-da27-75b3-92c3-02c4dd8e7746",
+  "rearmed_row_age_seconds": 18,
+  "result": "pass",
+  "started_at": "2026-05-31T19:23:45Z"
+}
