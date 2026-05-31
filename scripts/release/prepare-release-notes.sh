@@ -71,6 +71,62 @@ required_sections=(
   "Verification"
 )
 
+visible_markdown_file() {
+  local source="$1"
+  local output="$2"
+  python3 - "$source" "$output" <<'PY'
+from pathlib import Path
+import sys
+
+source = Path(sys.argv[1])
+output = Path(sys.argv[2])
+
+in_comment = False
+in_fence = False
+visible_lines = []
+
+for raw_line in source.read_text(encoding="utf-8").splitlines():
+    line = raw_line
+    stripped = line.lstrip()
+    if stripped.startswith("```") or stripped.startswith("~~~"):
+        in_fence = not in_fence
+        visible_lines.append("")
+        continue
+    if in_fence:
+        visible_lines.append("")
+        continue
+
+    rendered = []
+    index = 0
+    while index < len(line):
+        if in_comment:
+            end = line.find("-->", index)
+            if end == -1:
+                index = len(line)
+                break
+            index = end + 3
+            in_comment = False
+            continue
+
+        start = line.find("<!--", index)
+        if start == -1:
+            rendered.append(line[index:])
+            break
+
+        rendered.append(line[index:start])
+        end = line.find("-->", start + 4)
+        if end == -1:
+            in_comment = True
+            index = len(line)
+            break
+        index = end + 3
+
+    visible_lines.append("".join(rendered).rstrip())
+
+output.write_text("\n".join(visible_lines) + "\n", encoding="utf-8")
+PY
+}
+
 validate_file() {
   local target="$1"
   local allow_placeholders="${2:-false}"
@@ -79,10 +135,15 @@ validate_file() {
     exit 1
   fi
 
+  local visible_target
+  visible_target="$(mktemp)"
+  trap "rm -f '$visible_target'" EXIT
+  visible_markdown_file "$target" "$visible_target"
+
   local release_line commit_line date_line
-  release_line="$(awk -F': *' '/^> \*\*Release\*\*/ {print $2; exit}' "$target" | tr -d '`<>')"
-  commit_line="$(awk -F': *' '/^> \*\*Commit\*\*/ {print $2; exit}' "$target" | tr -d '`<>')"
-  date_line="$(awk -F': *' '/^> \*\*Date\*\*/ {print $2; exit}' "$target" | tr -d '`<>')"
+  release_line="$(awk -F': *' '/^> \*\*Release\*\*/ {print $2; exit}' "$visible_target" | tr -d '`<>')"
+  commit_line="$(awk -F': *' '/^> \*\*Commit\*\*/ {print $2; exit}' "$visible_target" | tr -d '`<>')"
+  date_line="$(awk -F': *' '/^> \*\*Date\*\*/ {print $2; exit}' "$visible_target" | tr -d '`<>')"
 
   if [[ "$release_line" == "version" || "$commit_line" == "40-character git SHA" || "$date_line" == "YYYY-MM-DD" ]]; then
     if [[ "$allow_placeholders" != "true" ]]; then
@@ -113,7 +174,7 @@ validate_file() {
   fi
 
   for section in "${required_sections[@]}"; do
-    if ! grep -q "^## $section$" "$target"; then
+    if ! grep -q "^## $section$" "$visible_target"; then
       echo "release notes missing required section: $section" >&2
       exit 1
     fi
@@ -122,7 +183,7 @@ validate_file() {
         $0 == "## " section {in_section=1; next}
         in_section && /^## / {exit}
         in_section {print}
-      ' "$target" | sed '/^[[:space:]]*$/d' | sed '/^<!--/,/^-->/d')"
+      ' "$visible_target" | sed '/^[[:space:]]*$/d')"
       if [[ -z "$body" ]]; then
         echo "release notes section is empty: $section" >&2
         exit 1
@@ -131,18 +192,21 @@ validate_file() {
         echo "release notes section still contains template text: $section" >&2
         exit 1
       fi
-      compact_body="$(printf '%s' "$body" | tr -d '[:space:]' | tr '[:upper:]' '[:lower:]')"
-      if [[ "$section" != "Breaking Changes" ]] && [[ "$compact_body" =~ ^(none\.?|n/a|na|notapplicable|-|--|_)$ ]]; then
+      compact_body="$(printf '%s' "$body" | tr '[:upper:]' '[:lower:]' | tr -cd '[:alnum:]')"
+      if [[ "$section" != "Breaking Changes" ]] && [[ -z "$compact_body" || "$compact_body" =~ ^(none|na|notapplicable)$ ]]; then
         echo "release notes section must contain concrete content: $section" >&2
         exit 1
       fi
     fi
   done
 
-  if grep -Eiq '(^|[^[:alpha:]])(latest|current|stable)([^[:alpha:]]|$)' "$target"; then
+  if grep -Eiq '(^|[^[:alpha:]])(latest|current|stable)([^[:alpha:]]|$)' "$visible_target"; then
     echo "release notes must avoid ambiguous latest/current/stable release wording" >&2
     exit 1
   fi
+
+  rm -f "$visible_target"
+  trap - EXIT
 }
 
 valid_version() {
