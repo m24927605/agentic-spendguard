@@ -88,8 +88,9 @@ static CODE_KEYWORD_REGEX: Lazy<Regex> =
 
 /// Retrieval markers per spec §8.1 `contains_retrieval_markers`. Common
 /// RAG envelope markers — "Document 1:", "Source: ...", "[3] ...".
-static RAG_MARKER_REGEX: Lazy<Regex> =
-    Lazy::new(|| Regex::new(r"(Document \d+:|Source: |^\[\d+\] )").expect("compile RAG_MARKER_REGEX"));
+static RAG_MARKER_REGEX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"(Document \d+:|Source: |^\[\d+\] )").expect("compile RAG_MARKER_REGEX")
+});
 
 // ---------------------------------------------------------------------------
 // Input features
@@ -175,7 +176,11 @@ pub fn is_known_class(class: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn features_for(class_hint_content: &str, input_tokens: i64, message_count: usize) -> ClassifierFeatures<'_> {
+    fn features_for(
+        class_hint_content: &str,
+        input_tokens: i64,
+        message_count: usize,
+    ) -> ClassifierFeatures<'_> {
         ClassifierFeatures {
             has_image_content: false,
             tool_definitions_count: 0,

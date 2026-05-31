@@ -11,8 +11,8 @@ fn bundled_toml_loads_and_contains_canonical_models() {
     // Resolve relative to the crate root (CARGO_MANIFEST_DIR) so the
     // test works regardless of the working directory at `cargo test`
     // invocation.
-    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("data/model_context_window.toml");
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("data/model_context_window.toml");
     let table = ContextWindowTable::load_from_path(&path);
 
     // Canonical entries Phase C ships — these vendor identifiers are

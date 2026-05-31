@@ -39,8 +39,16 @@
        enabling Strategy C — the plugin client mTLS secret MUST also be
        set; partial config is a spec §3.1 violation. */ -}}
 {{- if .Values.outputPredictor.pluginEndpointDatabaseEnabled -}}
-{{- if not .Values.outputPredictor.pluginClientSecretName -}}
-{{- fail "outputPredictor.pluginClientSecretName is required when pluginEndpointDatabaseEnabled=true under chart.profile=production (spec §3.1 mTLS-only auth — plaintext to a customer plugin endpoint is forbidden)" -}}
+{{- if .Values.outputPredictor.pluginClientSvid.enabled -}}
+{{- if not .Values.outputPredictor.pluginClientSvid.bindings -}}
+{{- fail "outputPredictor.pluginClientSvid.bindings must contain at least one tenant binding when pluginEndpointDatabaseEnabled=true under chart.profile=production" -}}
+{{- end -}}
+{{- else if .Values.outputPredictor.pluginClientSecretName -}}
+{{- if not .Values.outputPredictor.pluginClientSvid.legacyGlobalCertAllowed -}}
+{{- fail "outputPredictor.pluginClientSecretName is legacy global-client-cert mode; set outputPredictor.pluginClientSvid.enabled=true with per-tenant bindings or explicitly set pluginClientSvid.legacyGlobalCertAllowed=true for a migration window" -}}
+{{- end -}}
+{{- else -}}
+{{- fail "outputPredictor.pluginClientSvid.enabled=true with bindings is required when pluginEndpointDatabaseEnabled=true under chart.profile=production (spec §3.1 + §7.2 per-tenant SVID mTLS)" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -117,6 +125,9 @@ spec:
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_CLIENT_KEY_PEM,  value: "/etc/spendguard/plugin-client/tls.key" }
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_TRUST_CA_PEM,    value: "/etc/spendguard/plugin-client/ca.crt"  }
             {{- end }}
+            {{- if .Values.outputPredictor.pluginClientSvid.enabled }}
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_CLIENT_SVID_DIR, value: "/etc/spendguard/plugin-client-svid" }
+            {{- end }}
           volumeMounts:
             # read-only rootfs requires /tmp writable
             - name: tmp
@@ -134,6 +145,13 @@ spec:
             - name: plugin-client-tls
               mountPath: /etc/spendguard/plugin-client
               readOnly: true
+            {{- end }}
+            {{- if .Values.outputPredictor.pluginClientSvid.enabled }}
+            {{- range $binding := .Values.outputPredictor.pluginClientSvid.bindings }}
+            - name: {{ printf "plugin-client-svid-%s" $binding.clientCertId | trunc 63 | trimSuffix "-" }}
+              mountPath: {{ printf "/etc/spendguard/plugin-client-svid/%s" $binding.clientCertId | quote }}
+              readOnly: true
+            {{- end }}
             {{- end }}
           livenessProbe:
             httpGet:
@@ -167,6 +185,14 @@ spec:
         - name: plugin-client-tls
           secret:
             secretName: {{ .Values.outputPredictor.pluginClientSecretName | quote }}
+        {{- end }}
+        {{- if .Values.outputPredictor.pluginClientSvid.enabled }}
+        {{- $fullname := include "spendguard.fullname" . -}}
+        {{- range $binding := .Values.outputPredictor.pluginClientSvid.bindings }}
+        - name: {{ printf "plugin-client-svid-%s" $binding.clientCertId | trunc 63 | trimSuffix "-" }}
+          secret:
+            secretName: {{ default (printf "%s-plugin-client-%s" $fullname $binding.clientCertId) $binding.secretName | quote }}
+        {{- end }}
         {{- end }}
 {{- /* Service gating mirrors tokenizer SLICE_03 R3 N2 — UDS-only mode
        does NOT render a Service (main.rs binds UDS xor TCP). */ -}}

@@ -1,7 +1,7 @@
 # HARDEN 08 — Per-tenant SVID certificate minting
 
 > **Branch**: `harden/HARDEN_08_per_tenant_svid_cert`
-> **Status**: draft
+> **Status**: shipped
 > **Spec ancestor(s)**: `predictor-upgrade-hardening-spec-v1alpha1.md`, `output-predictor-plugin-contract-v1alpha1.md`
 > **Depends on prior slices**: HARDEN_01 through HARDEN_07
 > **Blocks subsequent slices**: production-ready completion
@@ -50,17 +50,17 @@ SLICE_07 shipped Strategy C with global client cert fingerprint pinning as an in
 
 ### 4.1 New files
 
-- `charts/spendguard/templates/plugin-client-issuer.yaml`
-- `charts/spendguard/templates/plugin-client-certificate.yaml`
-- `services/output_predictor/src/plugin/svid.rs`
+- `charts/spendguard/templates/output_predictor_plugin_svid.yaml`
+- `services/output_predictor/src/plugin_svid.rs`
 - `services/output_predictor/tests/plugin_svid_mtls.rs`
-- `contrib/output_predictor_template/svid_validation.py` or equivalent template validation helper
+- `contrib/output_predictor_template/svid_validation.py`
 - `docs/reviews/hardening/HARDEN_08/svid-cert-validation.md`
 
 ### 4.2 Modified files
 
-- `services/output_predictor/src/plugin/client.rs` and endpoint cache wiring
-- `services/output_predictor/src/plugin/config.rs`
+- `services/output_predictor/src/plugin_client.rs` and endpoint cache wiring
+- `services/output_predictor/src/config.rs`
+- `services/output_predictor/src/main.rs`
 - `charts/spendguard/templates/output_predictor.yaml`
 - `charts/spendguard/values.yaml` and production values documentation
 - `contrib/output_predictor_template/predictor_server.py` and `mtls_setup.md`
@@ -174,18 +174,27 @@ Reviewer must inspect cert subject construction, tenant UUID comparison, Helm pr
 | Design | Security Engineer | Tenant mismatch is fail-closed, not fallback-to-B | §6, §7, and §9 require rejection |
 | Design | Database Optimizer | Binding schema changes are allowed only if existing rows cannot reference cert secret | §5 constrains schema |
 | Design | Plugin domain expert | Reference plugin must validate subject, not just trust CA | §8.3 and §9 require it |
+| Implementation | Backend Architect | Reuse existing `predictor_plugin_endpoints.client_cert_id`; no schema migration needed | `client_cert_id` selects the SVID subdirectory |
+| Implementation | Security Engineer | Include mounted cert/key/CA fingerprint in channel cache identity | Rotation rebuilds channels on the next request |
+| Review R1 | codex CLI adversarial reviewer | Fix 4 Majors + 1 Minor: TLS without client CA, rotation reload fallback, control-plane `client_cert_id` validation, real mTLS demo/test, exact URI SAN | Commit `0209c42` closes all R1 findings |
+| Review R2 | codex CLI adversarial reviewer | Bound rotation fallback, cap `client_cert_id` for K8s-safe names, reject extra Python peer SVID URI identities | Commit `4c34877` closes all R2 findings |
+| Review R3 | codex CLI adversarial reviewer | Start rotation grace at first reload failure, prevent Helm name truncation collisions, validate real server-side SVID tenant, reject CN-only plugin SVID | Commit `654ad6c` closes all R3 findings |
+| Review R4 | codex CLI adversarial reviewer | Reuse cached channel for bounded new-channel failures during rotation, remove Certificate-name truncation, reject non-SPIFFE extra URI SANs | Commit `df575af` closes all R4 findings |
+| Review R5 | codex CLI adversarial reviewer | Found duplicate Helm binding gap, DB CHECK drift, and `urn:` URI SAN parser gap | Staff+ panel required by workflow |
+| Staff+ arbitration | Software Architect + Backend Architect + Security Engineer + Database Optimizer + Plugin domain expert | Unanimous: fix all R5 findings in-slice; none accepted out-of-scope | Commit `66e8c5f` closes R5 under final arbitration |
+| Issue closure | codex CLI implementer | Close GH #171 only after Helm, migration, Rust, Python, and demo gates passed | GH #171 closed 2026-05-31 |
 
 ---
 
 ## §14. Merge checklist
 
-- [ ] Per-tenant cert Issuer/Certificate templates render
-- [ ] output_predictor uses tenant-specific certs
-- [ ] Reference plugin validates subject tenant
-- [ ] Cross-tenant mismatch test fails closed
-- [ ] `plugin_c_synthetic` demo runs with SVID validation
-- [ ] GH #171 closed with fixing commit
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded
+- [x] Per-tenant cert Issuer/Certificate templates render
+- [x] output_predictor uses tenant-specific certs
+- [x] Reference plugin validates subject tenant
+- [x] Cross-tenant mismatch test fails closed
+- [x] `plugin_c_synthetic` demo runs with SVID validation
+- [x] GH #171 closed with fixing commit
+- [x] AIT adversarial review passes or Staff+ arbitration is recorded (R1-R5 fixed; Staff+ arbitration recorded)
 
 ---
 

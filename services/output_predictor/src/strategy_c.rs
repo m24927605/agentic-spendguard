@@ -327,7 +327,9 @@ pub async fn compute_c(
             confidence = outcome.confidence,
             "Strategy C: plugin returned out-of-range confidence; falling to B"
         );
-        return Ok(StrategyCOutcome::FallToB(StrategyCFailure::InvalidConfidence));
+        return Ok(StrategyCOutcome::FallToB(
+            StrategyCFailure::InvalidConfidence,
+        ));
     }
 
     breaker.record_success(&input.tenant_id);
@@ -414,11 +416,7 @@ fn classify_status(status: &tonic::Status) -> StrategyCFailure {
 /// Surface-area helper used by the cache eviction path on PUT/DELETE.
 /// Forwards to both the endpoint cache and the channel cache so the
 /// next Predict call rebuilds against the updated registry row.
-pub fn evict_tenant(
-    cache: &Arc<EndpointCache>,
-    client: &Arc<PluginClient>,
-    tenant: &Uuid,
-) {
+pub fn evict_tenant(cache: &Arc<EndpointCache>, client: &Arc<PluginClient>, tenant: &Uuid) {
     cache.evict(tenant);
     client.evict(tenant);
 }
@@ -572,10 +570,7 @@ mod tests {
         );
         assert_eq!(StrategyCFailure::TlsError.as_label(), "tls_error");
         assert_eq!(StrategyCFailure::NotServing.as_label(), "not_serving");
-        assert_eq!(
-            StrategyCFailure::NotConfigured.as_label(),
-            "not_configured"
-        );
+        assert_eq!(StrategyCFailure::NotConfigured.as_label(), "not_configured");
         assert_eq!(StrategyCFailure::BreakerOpen.as_label(), "breaker_open");
     }
 

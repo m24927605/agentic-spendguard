@@ -76,11 +76,14 @@ kubectl -n predictor get secret predictor-plugin-server-tls -o jsonpath='{.data.
 
 Record the resulting 64-character hex string; you upload it in §3.
 
-## 2. Trust SpendGuard's client-cert CA
+## 2. Trust SpendGuard's client-cert CA and SVID subject
 
 SpendGuard issues a per-tenant client SVID with subject
 `spiffe://spendguard.platform/predictor-client/${TENANT_ID}` (spec §3.1).
-Your plugin must verify this client cert.
+Your plugin must verify both the client cert chain and that URI SAN exactly
+matches the `tenant_id` in `PredictRequest`. The template does this when
+`PREDICTOR_TLS_CLIENT_CA` is set; `--require-client-svid` is available for
+tests and local mTLS smoke runs.
 
 Get SpendGuard's CA bundle from the control plane:
 
@@ -168,6 +171,8 @@ spec:
           value: /certs/server/tls.key
         - name: PREDICTOR_TLS_CLIENT_CA
           value: /trust/spendguard-ca.pem
+        - name: PREDICTOR_REQUIRE_CLIENT_SVID
+          value: "true"
         args: []        # no --insecure in production
         volumeMounts:
         - name: server-cert
@@ -187,8 +192,15 @@ spec:
 
 ## 5. Verify the round trip
 
-From a host that holds the SpendGuard-issued client cert (e.g. a
-SpendGuard "predictor smoke-test" pod), call HealthCheck:
+From a host that holds the SpendGuard-issued tenant client cert mounted as
+`tls.crt` / `tls.key`, verify the cert subject first:
+
+```
+openssl x509 -in tls.crt -noout -ext subjectAltName \
+  | grep "spiffe://spendguard.platform/predictor-client/${TENANT_ID}"
+```
+
+Then call HealthCheck:
 
 ```
 grpc_health_probe \

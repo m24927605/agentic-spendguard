@@ -344,8 +344,7 @@ impl OutputPredictorTrait for OutputPredictorSvc {
                 (None, None, None)
             }
             Err(StrategyCError::TenantBindingViolation { requested, got }) => {
-                CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL
-                    .fetch_add(1, Ordering::Relaxed);
+                CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL.fetch_add(1, Ordering::Relaxed);
                 error!(
                     requested_tenant = %requested,
                     got_tenant = %got,
@@ -366,7 +365,12 @@ impl OutputPredictorTrait for OutputPredictorSvc {
         // chosen B/C. SLICE_07: Strategy C populates from PredictionC
         // when c_result was Ok; Strategy B populates from the cache row.
         let (b_value, b_confidence, b_sample_size, b_layer) = match &b {
-            Some(p) => (Some(p.value), Some(p.confidence), Some(p.sample_size), p.layer.clone()),
+            Some(p) => (
+                Some(p.value),
+                Some(p.confidence),
+                Some(p.sample_size),
+                p.layer.clone(),
+            ),
             None => (None, None, None, Some("L1".to_string())),
         };
 
@@ -488,8 +492,7 @@ mod tests {
         let plugin_client = PluginClient::new(None).expect("skeleton-mode constructor");
         let plugin_breaker = PluginCircuitBreaker::new(CircuitBreakerConfig::default());
         let cold_start = Some(Arc::new(
-            ModelDefaultDistribution::load_embedded()
-                .expect("embedded TOML loads in tests"),
+            ModelDefaultDistribution::load_embedded().expect("embedded TOML loads in tests"),
         ));
         OutputPredictorSvc::new(
             cache,
@@ -586,7 +589,10 @@ mod tests {
         req.model = "made-up-model-not-in-toml".into();
         svc.predict(Request::new(req)).await.expect("ok");
         let after = UNKNOWN_CONTEXT_WINDOW_TOTAL.load(Ordering::Relaxed);
-        assert!(after > before, "unknown_context_window counter must increment");
+        assert!(
+            after > before,
+            "unknown_context_window counter must increment"
+        );
     }
 
     // ── SLICE_08 — cold-start L2 wiring tests ──────────────────────────

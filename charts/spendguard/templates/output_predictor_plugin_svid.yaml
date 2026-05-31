@@ -1,0 +1,69 @@
+{{- if and .Values.outputPredictor.enabled .Values.outputPredictor.pluginClientSvid.enabled }}
+{{- $fullname := include "spendguard.fullname" . -}}
+{{- $component := "output-predictor" -}}
+{{- $issuer := .Values.outputPredictor.pluginClientSvid.issuer -}}
+{{- if and $issuer.create (not $issuer.caSecretName) -}}
+{{- fail "outputPredictor.pluginClientSvid.issuer.caSecretName is required when issuer.create=true" -}}
+{{- end -}}
+{{- if $issuer.create }}
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: {{ $issuer.name | quote }}
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  ca:
+    secretName: {{ $issuer.caSecretName | quote }}
+---
+{{- end }}
+{{- $seenClientCertIds := dict -}}
+{{- $seenTenantIds := dict -}}
+{{- range $idx, $binding := .Values.outputPredictor.pluginClientSvid.bindings }}
+{{- if not $binding.tenantId -}}
+{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].tenantId is required" $idx) -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" (toString $binding.tenantId)) -}}
+{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].tenantId must be a UUID" $idx) -}}
+{{- end -}}
+{{- if not $binding.clientCertId -}}
+{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].clientCertId is required" $idx) -}}
+{{- end -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]{1,44}$" (toString $binding.clientCertId)) -}}
+{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].clientCertId must match ^[A-Za-z0-9_-]{1,44}$" $idx) -}}
+{{- end -}}
+{{- if hasKey $seenClientCertIds (toString $binding.clientCertId) -}}
+{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].clientCertId %q duplicates an earlier binding" $idx (toString $binding.clientCertId)) -}}
+{{- end -}}
+{{- $_ := set $seenClientCertIds (toString $binding.clientCertId) true -}}
+{{- if hasKey $seenTenantIds (toString $binding.tenantId) -}}
+{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].tenantId %q duplicates an earlier binding" $idx (toString $binding.tenantId)) -}}
+{{- end -}}
+{{- $_ := set $seenTenantIds (toString $binding.tenantId) true -}}
+{{- $secretName := default (printf "%s-plugin-client-%s" $fullname $binding.clientCertId) $binding.secretName -}}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ printf "plugin-client-svid-%s" $binding.clientCertId | quote }}
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) $) | nindent 4 }}
+    spendguard.com/client-cert-id: {{ $binding.clientCertId | quote }}
+    spendguard.com/tenant-id: {{ $binding.tenantId | quote }}
+spec:
+  secretName: {{ $secretName | quote }}
+  duration: {{ default $.Values.outputPredictor.pluginClientSvid.defaultDuration $binding.duration | quote }}
+  renewBefore: {{ default $.Values.outputPredictor.pluginClientSvid.defaultRenewBefore $binding.renewBefore | quote }}
+  commonName: {{ printf "spendguard-predictor-client-%s" $binding.clientCertId | trunc 64 | quote }}
+  uris:
+    - {{ printf "spiffe://spendguard.platform/predictor-client/%s" $binding.tenantId | quote }}
+  usages:
+    - client auth
+    - digital signature
+    - key encipherment
+  issuerRef:
+    name: {{ $issuer.name | quote }}
+    kind: {{ $issuer.kind | quote }}
+    group: {{ $issuer.group | quote }}
+---
+{{- end }}
+{{- end }}

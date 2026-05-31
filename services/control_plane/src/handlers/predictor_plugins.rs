@@ -219,13 +219,27 @@ fn validate_register_input(req: &RegisterReq) -> Result<Uuid, (StatusCode, Strin
             ),
         ));
     }
-    if req.client_cert_id.is_empty() || req.client_cert_id.len() > 256 {
+    validate_client_cert_id(&req.client_cert_id)?;
+    Ok(tenant_uuid)
+}
+
+fn validate_client_cert_id(client_cert_id: &str) -> Result<(), (StatusCode, String)> {
+    if client_cert_id.is_empty() || client_cert_id.len() > 44 {
         return Err((
             StatusCode::BAD_REQUEST,
-            "client_cert_id must be 1-256 bytes".into(),
+            "client_cert_id must be 1-44 bytes".into(),
         ));
     }
-    Ok(tenant_uuid)
+    if !client_cert_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "client_cert_id may contain only [A-Za-z0-9_-]".into(),
+        ));
+    }
+    Ok(())
 }
 
 /// R2 M4 — refuse `http://` plugin endpoints when running under
@@ -432,12 +446,8 @@ pub async fn update_plugin<S: PluginAppState>(
         }
     }
     if let Some(cid) = &req.client_cert_id {
-        if cid.is_empty() || cid.len() > 256 {
-            return Err((
-                StatusCode::BAD_REQUEST,
-                "client_cert_id must be 1-256 bytes",
-            )
-                .into_response());
+        if let Err((code, msg)) = validate_client_cert_id(cid) {
+            return Err((code, msg).into_response());
         }
     }
 
@@ -925,10 +935,25 @@ mod tests {
             tenant_id: Uuid::new_v4().to_string(),
             endpoint_url: "https://plugin.example/predict".into(),
             server_cert_fingerprint: "a".repeat(64),
-            client_cert_id: "x".repeat(257),
+            client_cert_id: "x".repeat(45),
         };
         let (code, _msg) = validate_register_input(&req).expect_err("oversize");
         assert_eq!(code, StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn validate_register_rejects_runtime_unsafe_client_cert_id() {
+        for bad in ["tenant/a", "tenant.one", "tenant one", "../tenant"] {
+            let req = RegisterReq {
+                tenant_id: Uuid::new_v4().to_string(),
+                endpoint_url: "https://plugin.example/predict".into(),
+                server_cert_fingerprint: "a".repeat(64),
+                client_cert_id: bad.into(),
+            };
+            let (code, msg) = validate_register_input(&req).expect_err("unsafe client_cert_id");
+            assert_eq!(code, StatusCode::BAD_REQUEST);
+            assert!(msg.contains("[A-Za-z0-9_-]"), "got: {msg}");
+        }
     }
 
     // ─── R2 M4 — https://-under-production gate ──────────────────────

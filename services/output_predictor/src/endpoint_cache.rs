@@ -87,14 +87,16 @@ pub struct PluginEndpoint {
 
 impl PluginEndpoint {
     /// Comparison used by plugin_client.rs to decide whether a cached
-    /// gRPC channel can be reused. Includes the URL + cert fingerprint
-    /// (the two attributes that change the on-the-wire connection
-    /// identity); excludes `enabled` (channel reuse is still valid;
-    /// strategy_c.rs short-circuits on the enabled flag separately) and
-    /// `last_health_check_at` (cache metadata).
+    /// gRPC channel can be reused. Includes the URL, server cert
+    /// fingerprint, and client_cert_id (the attributes that change the
+    /// on-the-wire connection identity); excludes `enabled` (channel
+    /// reuse is still valid; strategy_c.rs short-circuits on the
+    /// enabled flag separately) and `last_health_check_at` (cache
+    /// metadata).
     pub fn same_wire_shape(&self, other: &PluginEndpoint) -> bool {
         self.endpoint_url == other.endpoint_url
             && self.server_cert_fingerprint == other.server_cert_fingerprint
+            && self.client_cert_id == other.client_cert_id
     }
 }
 
@@ -160,10 +162,7 @@ impl EndpointCache {
     /// Look up the endpoint for `tenant`. Returns `NotConfigured` if no
     /// row exists or the row has `enabled = FALSE` (strategy_c.rs
     /// treats both as "fall to B silently" per spec §11).
-    pub async fn lookup(
-        &self,
-        tenant: &Uuid,
-    ) -> Result<Arc<PluginEndpoint>, EndpointCacheError> {
+    pub async fn lookup(&self, tenant: &Uuid) -> Result<Arc<PluginEndpoint>, EndpointCacheError> {
         // Fast path — cached + fresh.
         {
             let entries = self.entries.read();
@@ -244,10 +243,7 @@ impl EndpointCache {
 /// for correctness, the explicit tenant_id check in code makes the
 /// adversarial-injection guarantee from spec §7.3 visible at the
 /// CALL SITE in strategy_c.rs rather than hidden in a migration file.
-async fn load_one(
-    pool: &PgPool,
-    tenant: &Uuid,
-) -> Result<PluginEndpoint, EndpointCacheError> {
+async fn load_one(pool: &PgPool, tenant: &Uuid) -> Result<PluginEndpoint, EndpointCacheError> {
     let mut tx = pool.begin().await?;
     // SLICE_06 R2 B1 convention: set_config(..., true) is SET LOCAL —
     // auto-resets at tx commit. Bound parameter avoids SQL injection
@@ -316,20 +312,34 @@ mod tests {
     }
 
     #[test]
-    fn same_wire_shape_compares_url_and_fingerprint() {
-        let mut a = ep(true);
+    fn same_wire_shape_compares_url_fingerprint_and_client_cert_id() {
+        let a = ep(true);
         let mut b = a.clone();
         assert!(a.same_wire_shape(&b), "identical endpoints match");
         b.enabled = false;
-        assert!(a.same_wire_shape(&b), "enabled flag does not affect wire shape");
+        assert!(
+            a.same_wire_shape(&b),
+            "enabled flag does not affect wire shape"
+        );
         b.endpoint_url = "https://other.example/predict".into();
         assert!(!a.same_wire_shape(&b), "different url breaks wire shape");
         b = a.clone();
         b.server_cert_fingerprint = "b".repeat(64);
-        assert!(!a.same_wire_shape(&b), "different fingerprint breaks wire shape");
-        // Restore URL to prove fingerprint dominates.
-        a.server_cert_fingerprint = "b".repeat(64);
-        assert!(a.same_wire_shape(&b), "matching url + fingerprint match");
+        assert!(
+            !a.same_wire_shape(&b),
+            "different fingerprint breaks wire shape"
+        );
+        b = a.clone();
+        b.client_cert_id = "spendguard-client-002".into();
+        assert!(
+            !a.same_wire_shape(&b),
+            "different client_cert_id breaks wire shape"
+        );
+        b = a.clone();
+        assert!(
+            a.same_wire_shape(&b),
+            "matching url + fingerprint + client_cert_id match"
+        );
     }
 
     #[tokio::test]

@@ -105,10 +105,8 @@ async fn main() -> Result<()> {
         info!("output_distribution_cache pool connected");
         Some(p)
     };
-    let cache = OutputDistributionCache::new(
-        pool.clone(),
-        Duration::from_secs(cfg.cache_ttl_seconds),
-    );
+    let cache =
+        OutputDistributionCache::new(pool.clone(), Duration::from_secs(cfg.cache_ttl_seconds));
 
     // ── SLICE_07 Phase D: Strategy C wiring ───────────────────────
     //
@@ -150,8 +148,8 @@ async fn main() -> Result<()> {
     // server-side mTLS uses (build_server_tls_config). Partial
     // config is a hard boot failure to fail-closed against
     // accidental production plaintext.
-    let plugin_client_tls = build_plugin_client_tls_config(&cfg)
-        .context("loading plugin client mTLS config")?;
+    let plugin_client_tls =
+        build_plugin_client_tls_config(&cfg).context("loading plugin client mTLS config")?;
     // R2 B1: PluginClient::new now eagerly reads + parses cert/key/CA
     // PEMs (so a typo in the path / bad PEM byte ordering surfaces at
     // boot rather than on the first Predict call). `?` here propagates
@@ -232,11 +230,9 @@ async fn main() -> Result<()> {
         // dependency — production Helm gate rejects that fallback.
         let plugin_pool_for_health = plugin_endpoint_pool.clone();
         tokio::spawn(async move {
-            if let Err(e) = run_metrics_server(
-                metrics_addr,
-                pool_for_health,
-                plugin_pool_for_health,
-            ).await {
+            if let Err(e) =
+                run_metrics_server(metrics_addr, pool_for_health, plugin_pool_for_health).await
+            {
                 error!(?e, "metrics server exited with error");
             }
         });
@@ -301,8 +297,8 @@ async fn bind_uds(
 
     cleanup_stale_uds(path).await?;
 
-    let listener = UnixListener::bind(path)
-        .with_context(|| format!("bind uds listener `{uds_path}`"))?;
+    let listener =
+        UnixListener::bind(path).with_context(|| format!("bind uds listener `{uds_path}`"))?;
 
     // SLICE_03 R3 N1: socket file perms 0660. Default umask leaves the
     // socket world-readable; under hostPath mount this lets any UID on
@@ -372,11 +368,10 @@ async fn bind_tcp(
         .context("tonic TCP gRPC server failed")
 }
 
-/// SLICE_07 Phase D: build the SpendGuard side of the plugin mTLS
-/// (cert + key + customer trust CA). All-or-none like
-/// `build_server_tls_config` — partial config is a hard boot failure
-/// because plaintext to a customer endpoint violates spec §3.1
-/// (mTLS-only auth contract).
+/// HARDEN_08 / SLICE_07 Phase D: build the SpendGuard side of the
+/// plugin mTLS (per-tenant SVID dir or legacy cert + key + customer
+/// trust CA). Partial config is a hard boot failure because plaintext
+/// to a customer endpoint violates spec §3.1.
 ///
 /// Empty config = `Ok(None)`: skeleton/demo mode where strategy_c.rs
 /// still works (the plugin_client logs a warn at boot and tonic
@@ -384,13 +379,28 @@ async fn bind_tcp(
 /// fallback via the chart's required-input gate (Phase D values).
 fn build_plugin_client_tls_config(cfg: &Config) -> Result<Option<PluginClientTls>> {
     use std::path::PathBuf;
+    if let Some(dir) = &cfg.plugin_client_svid_dir {
+        if cfg.plugin_client_cert_pem.is_some()
+            || cfg.plugin_client_key_pem.is_some()
+            || cfg.plugin_trust_ca_pem.is_some()
+        {
+            return Err(anyhow::anyhow!(
+                "plugin client mTLS config must use either \
+                 SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_CLIENT_SVID_DIR or the legacy \
+                 PLUGIN_CLIENT_CERT_PEM / PLUGIN_CLIENT_KEY_PEM / PLUGIN_TRUST_CA_PEM trio, not both"
+            ));
+        }
+        return Ok(Some(PluginClientTls::PerTenantSvidDir {
+            svid_dir: PathBuf::from(dir),
+        }));
+    }
     match (
         &cfg.plugin_client_cert_pem,
         &cfg.plugin_client_key_pem,
         &cfg.plugin_trust_ca_pem,
     ) {
         (None, None, None) => Ok(None),
-        (Some(cert), Some(key), Some(ca)) => Ok(Some(PluginClientTls {
+        (Some(cert), Some(key), Some(ca)) => Ok(Some(PluginClientTls::LegacyGlobal {
             client_cert_pem: PathBuf::from(cert),
             client_key_pem: PathBuf::from(key),
             trust_ca_pem: PathBuf::from(ca),
@@ -398,7 +408,8 @@ fn build_plugin_client_tls_config(cfg: &Config) -> Result<Option<PluginClientTls
         _ => Err(anyhow::anyhow!(
             "partial plugin client mTLS config: must set all of \
              SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_CLIENT_CERT_PEM / \
-             PLUGIN_CLIENT_KEY_PEM / PLUGIN_TRUST_CA_PEM, or none. Spec §3.1 \
+             PLUGIN_CLIENT_KEY_PEM / PLUGIN_TRUST_CA_PEM, set \
+             PLUGIN_CLIENT_SVID_DIR, or set none. Spec §3.1 \
              requires mTLS for customer plugin endpoints; plaintext to a \
              customer service is a security policy violation."
         )),
@@ -577,12 +588,11 @@ fn build_server_tls_config(cfg: &Config) -> Result<Option<ServerTlsConfig>> {
     match (&cfg.tls_cert_pem, &cfg.tls_key_pem, &cfg.tls_ca_pem) {
         (None, None, None) => Ok(None),
         (Some(cert_path), Some(key_path), Some(ca_path)) => {
-            let cert = std::fs::read(cert_path)
-                .with_context(|| format!("read tls cert {cert_path}"))?;
-            let key = std::fs::read(key_path)
-                .with_context(|| format!("read tls key {key_path}"))?;
-            let ca = std::fs::read(ca_path)
-                .with_context(|| format!("read tls ca {ca_path}"))?;
+            let cert =
+                std::fs::read(cert_path).with_context(|| format!("read tls cert {cert_path}"))?;
+            let key =
+                std::fs::read(key_path).with_context(|| format!("read tls key {key_path}"))?;
+            let ca = std::fs::read(ca_path).with_context(|| format!("read tls ca {ca_path}"))?;
             Ok(Some(
                 ServerTlsConfig::new()
                     .identity(Identity::from_pem(cert, key))
@@ -611,18 +621,16 @@ async fn shutdown_signal() {
 }
 
 fn render_metrics() -> String {
-    use std::sync::atomic::Ordering;
     use spendguard_output_predictor::server::{
+        CUSTOMER_PREDICTOR_CALL_FALL_TO_B_TOTAL, CUSTOMER_PREDICTOR_CALL_SUCCESS_TOTAL,
+        CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL, FAILURE_BY_MODE_BREAKER_OPEN,
+        FAILURE_BY_MODE_DESERIALIZATION_ERROR, FAILURE_BY_MODE_GRPC_ERROR,
+        FAILURE_BY_MODE_INVALID_CONFIDENCE, FAILURE_BY_MODE_INVALID_OVERFLOW,
+        FAILURE_BY_MODE_INVALID_ZERO_OR_NEGATIVE, FAILURE_BY_MODE_NOT_CONFIGURED,
+        FAILURE_BY_MODE_NOT_SERVING, FAILURE_BY_MODE_TIMEOUT, FAILURE_BY_MODE_TLS_ERROR,
         UNKNOWN_CONTEXT_WINDOW_TOTAL,
-        CUSTOMER_PREDICTOR_CALL_SUCCESS_TOTAL,
-        CUSTOMER_PREDICTOR_CALL_FALL_TO_B_TOTAL,
-        CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL,
-        FAILURE_BY_MODE_TIMEOUT, FAILURE_BY_MODE_GRPC_ERROR,
-        FAILURE_BY_MODE_INVALID_ZERO_OR_NEGATIVE, FAILURE_BY_MODE_INVALID_OVERFLOW,
-        FAILURE_BY_MODE_INVALID_CONFIDENCE, FAILURE_BY_MODE_DESERIALIZATION_ERROR,
-        FAILURE_BY_MODE_TLS_ERROR, FAILURE_BY_MODE_NOT_SERVING,
-        FAILURE_BY_MODE_NOT_CONFIGURED, FAILURE_BY_MODE_BREAKER_OPEN,
     };
+    use std::sync::atomic::Ordering;
     // SLICE_07 Phase E: surface the spec §9.1 customer_predictor_* counters.
     // The 10 per-mode counters cover the spec §5.1 8 documented failure
     // modes + the 2 SLICE_07 metric-only modes (not_configured + breaker_open).
@@ -712,98 +720,103 @@ async fn run_metrics_server(
                 let pool = pool_clone.clone();
                 let plugin_pool = plugin_pool_clone.clone();
                 async move {
-                    let (status, content_type, body): (StatusCode, &str, String) =
-                        match (req.method(), req.uri().path()) {
-                            (&Method::GET, "/metrics") => (
-                                StatusCode::OK,
-                                "text/plain; version=0.0.4; charset=utf-8",
-                                render_metrics(),
-                            ),
-                            (&Method::GET, "/livez") => (
-                                StatusCode::OK,
-                                "text/plain; charset=utf-8",
-                                "ok".to_string(),
-                            ),
-                            (&Method::GET, "/healthz") => match pool {
-                                Some(ref p) => {
-                                    match sqlx::query("SELECT 1").execute(p).await {
-                                        Ok(_) => (
-                                            StatusCode::OK,
-                                            "text/plain; charset=utf-8",
-                                            "ok".to_string(),
-                                        ),
-                                        Err(e) => (
-                                            StatusCode::SERVICE_UNAVAILABLE,
-                                            "text/plain; charset=utf-8",
-                                            format!("db ping failed: {e}"),
-                                        ),
-                                    }
-                                }
-                                None => (
-                                    // Skeleton mode — no DB to ping; healthz
-                                    // is about the *process* health, return OK.
+                    let (status, content_type, body): (StatusCode, &str, String) = match (
+                        req.method(),
+                        req.uri().path(),
+                    ) {
+                        (&Method::GET, "/metrics") => (
+                            StatusCode::OK,
+                            "text/plain; version=0.0.4; charset=utf-8",
+                            render_metrics(),
+                        ),
+                        (&Method::GET, "/livez") => (
+                            StatusCode::OK,
+                            "text/plain; charset=utf-8",
+                            "ok".to_string(),
+                        ),
+                        (&Method::GET, "/healthz") => match pool {
+                            Some(ref p) => match sqlx::query("SELECT 1").execute(p).await {
+                                Ok(_) => (
                                     StatusCode::OK,
                                     "text/plain; charset=utf-8",
-                                    "ok (skeleton mode)".to_string(),
+                                    "ok".to_string(),
+                                ),
+                                Err(e) => (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "text/plain; charset=utf-8",
+                                    format!("db ping failed: {e}"),
                                 ),
                             },
-                            (&Method::GET, "/readyz") => {
-                                // First gate: canonical_ingest DB (Strategy B
-                                // cache lookup pool).
-                                let mut status_lines = Vec::new();
-                                let mut overall_ok = true;
-                                match &pool {
-                                    Some(p) => match sqlx::query("SELECT 1").execute(p).await {
-                                        Ok(_) => status_lines.push("canonical_ingest: ok".to_string()),
-                                        Err(e) => {
-                                            overall_ok = false;
-                                            status_lines.push(format!("canonical_ingest: db not ready ({e})"));
-                                        }
-                                    },
-                                    None => status_lines.push("canonical_ingest: skeleton".to_string()),
-                                }
-                                // R2 M3 (Security F5) second gate: control_plane
-                                // DB plus SLICE_07 migration freshness. The
-                                // `SELECT FROM predictor_plugin_endpoints LIMIT 0`
-                                // succeeds as long as the table exists; if the
-                                // operator forgot to mount the control-plane
-                                // ConfigMap (Security F5), the table is missing
-                                // and /readyz fails — surfaces in Helm
-                                // --wait, kubectl rollout, and the canary.
-                                match &plugin_pool {
-                                    Some(p) => match sqlx::query(
-                                        "SELECT 1 FROM predictor_plugin_endpoints LIMIT 0",
-                                    )
-                                    .execute(p)
-                                    .await
-                                    {
-                                        Ok(_) => status_lines.push("control_plane: ok".to_string()),
-                                        Err(e) => {
-                                            overall_ok = false;
-                                            status_lines.push(format!(
+                            None => (
+                                // Skeleton mode — no DB to ping; healthz
+                                // is about the *process* health, return OK.
+                                StatusCode::OK,
+                                "text/plain; charset=utf-8",
+                                "ok (skeleton mode)".to_string(),
+                            ),
+                        },
+                        (&Method::GET, "/readyz") => {
+                            // First gate: canonical_ingest DB (Strategy B
+                            // cache lookup pool).
+                            let mut status_lines = Vec::new();
+                            let mut overall_ok = true;
+                            match &pool {
+                                Some(p) => match sqlx::query("SELECT 1").execute(p).await {
+                                    Ok(_) => status_lines.push("canonical_ingest: ok".to_string()),
+                                    Err(e) => {
+                                        overall_ok = false;
+                                        status_lines
+                                            .push(format!("canonical_ingest: db not ready ({e})"));
+                                    }
+                                },
+                                None => status_lines.push("canonical_ingest: skeleton".to_string()),
+                            }
+                            // R2 M3 (Security F5) second gate: control_plane
+                            // DB plus SLICE_07 migration freshness. The
+                            // `SELECT FROM predictor_plugin_endpoints LIMIT 0`
+                            // succeeds as long as the table exists; if the
+                            // operator forgot to mount the control-plane
+                            // ConfigMap (Security F5), the table is missing
+                            // and /readyz fails — surfaces in Helm
+                            // --wait, kubectl rollout, and the canary.
+                            match &plugin_pool {
+                                Some(p) => match sqlx::query(
+                                    "SELECT 1 FROM predictor_plugin_endpoints LIMIT 0",
+                                )
+                                .execute(p)
+                                .await
+                                {
+                                    Ok(_) => status_lines.push("control_plane: ok".to_string()),
+                                    Err(e) => {
+                                        overall_ok = false;
+                                        status_lines.push(format!(
                                                 "control_plane: predictor_plugin_endpoints missing ({e}) — operator must apply services/control_plane/migrations/"
                                             ));
-                                        }
-                                    },
-                                    None => status_lines.push("control_plane: skeleton".to_string()),
-                                }
-                                let body = status_lines.join("; ");
-                                if overall_ok {
-                                    (StatusCode::OK, "text/plain; charset=utf-8", format!("ready ({body})"))
-                                } else {
-                                    (
-                                        StatusCode::SERVICE_UNAVAILABLE,
-                                        "text/plain; charset=utf-8",
-                                        format!("not ready ({body})"),
-                                    )
-                                }
-                            },
-                            _ => (
-                                StatusCode::NOT_FOUND,
-                                "text/plain; charset=utf-8",
-                                "not found".to_string(),
-                            ),
-                        };
+                                    }
+                                },
+                                None => status_lines.push("control_plane: skeleton".to_string()),
+                            }
+                            let body = status_lines.join("; ");
+                            if overall_ok {
+                                (
+                                    StatusCode::OK,
+                                    "text/plain; charset=utf-8",
+                                    format!("ready ({body})"),
+                                )
+                            } else {
+                                (
+                                    StatusCode::SERVICE_UNAVAILABLE,
+                                    "text/plain; charset=utf-8",
+                                    format!("not ready ({body})"),
+                                )
+                            }
+                        }
+                        _ => (
+                            StatusCode::NOT_FOUND,
+                            "text/plain; charset=utf-8",
+                            "not found".to_string(),
+                        ),
+                    };
                     Ok::<_, std::convert::Infallible>(
                         Response::builder()
                             .status(status)
@@ -906,6 +919,7 @@ mod tests {
             plugin_client_cert_pem: None,
             plugin_client_key_pem: None,
             plugin_trust_ca_pem: None,
+            plugin_client_svid_dir: None,
         };
         // None set → Ok(None): demo / skeleton mode.
         assert!(build_plugin_client_tls_config(&cfg).expect("ok").is_none());
@@ -913,15 +927,46 @@ mod tests {
         cfg.plugin_client_cert_pem = Some("/tmp/plugin-cert.pem".into());
         let err = build_plugin_client_tls_config(&cfg).expect_err("partial rejected");
         let msg = format!("{err:#}");
-        assert!(msg.contains("partial plugin client mTLS config"), "got: {msg}");
+        assert!(
+            msg.contains("partial plugin client mTLS config"),
+            "got: {msg}"
+        );
         // All three → Ok(Some).
         cfg.plugin_client_key_pem = Some("/tmp/plugin-key.pem".into());
         cfg.plugin_trust_ca_pem = Some("/tmp/plugin-ca.pem".into());
         let tls = build_plugin_client_tls_config(&cfg).expect("ok");
         let tls = tls.expect("should be Some");
-        assert_eq!(tls.client_cert_pem.to_string_lossy(), "/tmp/plugin-cert.pem");
-        assert_eq!(tls.client_key_pem.to_string_lossy(), "/tmp/plugin-key.pem");
-        assert_eq!(tls.trust_ca_pem.to_string_lossy(), "/tmp/plugin-ca.pem");
+        match tls {
+            PluginClientTls::LegacyGlobal {
+                client_cert_pem,
+                client_key_pem,
+                trust_ca_pem,
+            } => {
+                assert_eq!(client_cert_pem.to_string_lossy(), "/tmp/plugin-cert.pem");
+                assert_eq!(client_key_pem.to_string_lossy(), "/tmp/plugin-key.pem");
+                assert_eq!(trust_ca_pem.to_string_lossy(), "/tmp/plugin-ca.pem");
+            }
+            other => panic!("expected legacy global config, got {other:?}"),
+        }
+
+        cfg.plugin_client_cert_pem = None;
+        cfg.plugin_client_key_pem = None;
+        cfg.plugin_trust_ca_pem = None;
+        cfg.plugin_client_svid_dir = Some("/tmp/plugin-svid".into());
+        let tls = build_plugin_client_tls_config(&cfg).expect("ok");
+        match tls.expect("svid config") {
+            PluginClientTls::PerTenantSvidDir { svid_dir } => {
+                assert_eq!(svid_dir.to_string_lossy(), "/tmp/plugin-svid");
+            }
+            other => panic!("expected per-tenant SVID config, got {other:?}"),
+        }
+
+        cfg.plugin_client_cert_pem = Some("/tmp/plugin-cert.pem".into());
+        let err = build_plugin_client_tls_config(&cfg).expect_err("mixed config rejected");
+        assert!(
+            format!("{err:#}").contains("must use either"),
+            "got: {err:#}"
+        );
     }
 
     #[test]
@@ -944,6 +989,7 @@ mod tests {
             plugin_client_cert_pem: None,
             plugin_client_key_pem: None,
             plugin_trust_ca_pem: None,
+            plugin_client_svid_dir: None,
         };
         // None set → Ok(None).
         assert!(build_server_tls_config(&cfg).expect("ok").is_none());
