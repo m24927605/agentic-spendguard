@@ -172,17 +172,26 @@ Reviewer should run or inspect the verification scripts and reject any script th
 | Design | Security Engineer | Rendered manifests must preserve container baseline and secret handling | §6 and §9 require checks |
 | Design | Database Optimizer | Migration application must use fresh Postgres 16 | §2 and §8 require it |
 | Design | Kubernetes domain expert | NetworkPolicy must be chaos-tested, not template-only | §8.4 gates enforcement |
+| Implementation | codex CLI implementer/reviewer | Verification scripts must run on the local macOS/Bash 3 environment, not just Linux CI | Replaced `mapfile`; used `cargo metadata --no-deps` for manifests without committed lockfiles |
+| Implementation | codex CLI implementer/reviewer | KMS signing check must target control-plane local signing material, not canonical-ingest trust-store material | Narrowed production KMS check to the control-plane rendered section |
+| Implementation | codex CLI implementer/reviewer | Demo regression remains a hard gate after verification fixes | `make demo-up DEMO_MODE=default` passed Step 8, outbox drain, and canonical_events verification |
+| Review R1 | codex CLI adversarial reviewer | Migration checks must fail on missing state, not print diagnostics | Added `RAISE EXCEPTION` assertions for ledger, canonical_ingest, and control_plane required objects |
+| Review R1 | codex CLI adversarial reviewer | Cargo verification must not depend on ignored local lockfiles and must run affected tests | Re-runs in a clean detached worktree and adds seven focused regression test commands |
+| Review R1 | codex CLI adversarial reviewer | NetworkPolicy denial must be attributable to policy enforcement | Added unlabeled control pod external egress proof before enforced-pod deny |
+| Review R1 | codex CLI adversarial reviewer | Helm security checks must inspect rendered objects, not global strings | Added YAML-level container security and database `secretKeyRef` assertions |
+| Verification | codex CLI implementer/reviewer | Clean verifier exposed a real run_cost_projector cold-miss race | Added `RunStateCache::get_or_insert` so concurrent first Project calls share one per-run mutex |
+| Review R2 | codex CLI adversarial reviewer | Cargo verifier must not leak detached temp worktrees | Removed `exec` so parent cleanup trap runs; verified no `spendguard-cargo-clean` worktrees remain |
 
 ---
 
 ## §14. Merge checklist
 
-- [ ] Cargo verification passes
-- [ ] Helm profile matrix passes
-- [ ] Fresh Postgres 16 migration application passes
-- [ ] NetworkPolicy egress chaos test passes
-- [ ] Verification results committed
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded
+- [x] Cargo verification passes
+- [x] Helm profile matrix passes
+- [x] Fresh Postgres 16 migration application passes
+- [x] NetworkPolicy egress chaos test passes
+- [x] Verification results committed
+- [x] AIT adversarial review passes or Staff+ arbitration is recorded
 
 ---
 

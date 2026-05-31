@@ -25,6 +25,8 @@ spec:
         - name: ledger
           image: {{ include "spendguard.image" (merge (dict "image" .Values.ledger.image "global" .Values.global) .) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "spendguard.containerSecurityContext" . | nindent 12 }}
           ports:
             - { name: grpc, containerPort: 50051 }
             - { name: metrics, containerPort: 9092 }

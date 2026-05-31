@@ -216,6 +216,21 @@ impl RunStateCache {
         arc
     }
 
+    /// Return the existing entry for `key`, or insert `state` if absent.
+    ///
+    /// This closes the cold-miss race where concurrent first Project calls for
+    /// the same run each recovered/created a separate RunState and overwrote
+    /// the cache with distinct per-run mutexes.
+    pub fn get_or_insert(&self, key: RunStateKey, state: RunState) -> Arc<Mutex<RunState>> {
+        let mut cache = self.inner.write();
+        if let Some(existing) = cache.get(&key).cloned() {
+            return existing;
+        }
+        let arc = Arc::new(Mutex::new(state));
+        cache.put(key, arc.clone());
+        arc
+    }
+
     /// Remove an entry if present. Returns true if the entry existed.
     /// Idempotent: calling on a non-existent key is a no-op.
     pub fn remove(&self, key: &RunStateKey) -> bool {
@@ -310,6 +325,21 @@ mod tests {
             !cache.remove(&key),
             "second remove returns false (idempotent)"
         );
+    }
+
+    #[test]
+    fn get_or_insert_preserves_first_state_for_concurrent_miss_winner() {
+        let cache = RunStateCache::new(4, Duration::from_secs(60));
+        let key = make_key(12);
+
+        let first = cache.get_or_insert(key.clone(), make_state(12));
+        let second = cache.get_or_insert(key.clone(), make_state(13));
+
+        assert!(Arc::ptr_eq(&first, &second));
+        let st = second.lock();
+        assert_eq!(st.tenant_id, key.tenant_id);
+        assert_eq!(st.run_id, key.run_id);
+        assert_eq!(st.agent_id, "agent-12");
     }
 
     #[test]

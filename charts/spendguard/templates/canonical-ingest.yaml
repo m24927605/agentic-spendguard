@@ -29,6 +29,8 @@ spec:
         - name: canonical-ingest
           image: {{ include "spendguard.image" (merge (dict "image" .Values.canonicalIngest.image "global" .Values.global) .) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "spendguard.containerSecurityContext" . | nindent 12 }}
           ports:
             - { name: grpc, containerPort: 50052 }
             - { name: metrics, containerPort: 9091 }

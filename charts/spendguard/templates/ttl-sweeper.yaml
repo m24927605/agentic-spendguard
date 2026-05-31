@@ -35,6 +35,8 @@ spec:
         - name: ttl-sweeper
           image: {{ include "spendguard.image" (merge (dict "image" .Values.ttlSweeper.image "global" .Values.global) .) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "spendguard.containerSecurityContext" . | nindent 12 }}
           ports:
             - { name: metrics, containerPort: 9097 }
           env:

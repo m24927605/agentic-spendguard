@@ -23,6 +23,8 @@ spec:
         - name: webhook-receiver
           image: {{ include "spendguard.image" (merge (dict "image" .Values.webhookReceiver.image "global" .Values.global) .) }}
           imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "spendguard.containerSecurityContext" . | nindent 12 }}
           ports:
             - { name: https, containerPort: {{ .Values.webhookReceiver.service.httpsPort }} }
             - { name: health, containerPort: 8080 }

@@ -57,3 +57,13 @@ valueFrom:
     name: {{ .root.Values.postgres.existingSecret | quote }}
     key: {{ .key | quote }}
 {{- end -}}
+
+{{/*
+Container security baseline shared by production workloads.
+*/}}
+{{- define "spendguard.containerSecurityContext" -}}
+readOnlyRootFilesystem: true
+allowPrivilegeEscalation: false
+capabilities:
+  drop: ["ALL"]
+{{- end -}}
