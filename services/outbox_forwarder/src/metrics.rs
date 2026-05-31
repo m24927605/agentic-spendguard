@@ -51,6 +51,10 @@ pub struct OutboxForwarderMetricsInner {
     /// Total rows forwarded successfully + total rows that errored.
     rows_forwarded_ok: AtomicU64,
     rows_forwarded_err: AtomicU64,
+    /// Oldest pending audit_outbox row age in seconds, refreshed by every pod.
+    pending_oldest_age_seconds: AtomicU64,
+    /// 1 when this pod currently owns the forwarding lease, 0 otherwise.
+    is_leader: AtomicU64,
 }
 
 #[derive(Clone, Default)]
@@ -90,11 +94,27 @@ impl OutboxForwarderMetrics {
         target.fetch_add(n, Ordering::Relaxed);
     }
 
+    pub fn set_pending_oldest_age_seconds(&self, seconds: u64) {
+        self.inner
+            .pending_oldest_age_seconds
+            .store(seconds, Ordering::Relaxed);
+    }
+
+    pub fn set_is_leader(&self, is_leader: bool) {
+        self.inner
+            .is_leader
+            .store(u64::from(is_leader), Ordering::Relaxed);
+    }
+
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
         out.push_str("# HELP spendguard_outbox_forwarder_loop_iterations_total Outbox forwarder poll-loop iterations broken out by outcome.\n");
         out.push_str("# TYPE spendguard_outbox_forwarder_loop_iterations_total counter\n");
-        for outcome in [LoopOutcome::Processed, LoopOutcome::Skipped, LoopOutcome::Error] {
+        for outcome in [
+            LoopOutcome::Processed,
+            LoopOutcome::Skipped,
+            LoopOutcome::Error,
+        ] {
             let i = match outcome {
                 LoopOutcome::Processed => 0,
                 LoopOutcome::Skipped => 1,
@@ -109,7 +129,11 @@ impl OutboxForwarderMetrics {
         }
         out.push_str("# HELP spendguard_outbox_forwarder_skip_total Outbox forwarder skip reasons (non-leader path).\n");
         out.push_str("# TYPE spendguard_outbox_forwarder_skip_total counter\n");
-        for reason in [SkipReason::LeaseExpired, SkipReason::Standby, SkipReason::Unknown] {
+        for reason in [
+            SkipReason::LeaseExpired,
+            SkipReason::Standby,
+            SkipReason::Unknown,
+        ] {
             let i = match reason {
                 SkipReason::LeaseExpired => 0,
                 SkipReason::Standby => 1,
@@ -131,6 +155,20 @@ impl OutboxForwarderMetrics {
         out.push_str(&format!(
             "spendguard_outbox_forwarder_rows_forwarded_total{{outcome=\"err\"}} {}\n",
             self.inner.rows_forwarded_err.load(Ordering::Relaxed),
+        ));
+        out.push_str("# HELP spendguard_outbox_pending_oldest_age_seconds Age in seconds of the oldest pending audit_outbox row observed from Postgres.\n");
+        out.push_str("# TYPE spendguard_outbox_pending_oldest_age_seconds gauge\n");
+        out.push_str(&format!(
+            "spendguard_outbox_pending_oldest_age_seconds {}\n",
+            self.inner
+                .pending_oldest_age_seconds
+                .load(Ordering::Relaxed),
+        ));
+        out.push_str("# HELP spendguard_outbox_forwarder_is_leader Whether this outbox-forwarder pod currently owns the forwarding lease (1=yes, 0=no).\n");
+        out.push_str("# TYPE spendguard_outbox_forwarder_is_leader gauge\n");
+        out.push_str(&format!(
+            "spendguard_outbox_forwarder_is_leader {}\n",
+            self.inner.is_leader.load(Ordering::Relaxed),
         ));
         out
     }
@@ -173,6 +211,26 @@ mod tests {
         let txt = m.render();
         assert!(txt.contains("rows_forwarded_total{outcome=\"ok\"} 8"));
         assert!(txt.contains("rows_forwarded_total{outcome=\"err\"} 2"));
+    }
+
+    #[test]
+    fn pending_oldest_age_gauge_renders() {
+        let m = OutboxForwarderMetrics::new();
+        m.set_pending_oldest_age_seconds(42);
+        let txt = m.render();
+        assert!(txt.contains("spendguard_outbox_pending_oldest_age_seconds 42"));
+    }
+
+    #[test]
+    fn leader_gauge_renders() {
+        let m = OutboxForwarderMetrics::new();
+        assert!(m
+            .render()
+            .contains("spendguard_outbox_forwarder_is_leader 0"));
+        m.set_is_leader(true);
+        assert!(m
+            .render()
+            .contains("spendguard_outbox_forwarder_is_leader 1"));
     }
 
     #[test]

@@ -419,12 +419,15 @@ async fn process_one(
                 error: None,
             }
         }
-        Ok(AppendOutcome::Deduped) => EventResult {
-            event_id: evt.id.clone(),
-            status: EventStatus::Deduped as i32,
-            ingest_position: None,
-            error: None,
-        },
+        Ok(AppendOutcome::Deduped) => {
+            metrics.inc_deduped(route_to_metric(route));
+            EventResult {
+                event_id: evt.id.clone(),
+                status: EventStatus::Deduped as i32,
+                ingest_position: None,
+                error: None,
+            }
+        }
         Err(DomainError::Duplicate(msg)) => EventResult {
             event_id: evt.id.clone(),
             status: EventStatus::Duplicate as i32,
