@@ -99,6 +99,7 @@ Reviewer must verify metrics are real and labels do not introduce cardinality or
 | Performance/Database Architect | p99 and lag panels are mandatory | Tail metrics required |
 | R1 codex adversarial review | Inventory endpoints, cache ratio, stale lag, output predictor live scrape, and Grafana link had to be fixed | Real endpoint validator, `increase` cache ratio, leader gauge, live scrape evidence, and empty dashboard links adopted |
 | R2 codex adversarial review | Leader-filtered lag could hide no-leader backlog growth | Every outbox-forwarder pod refreshes pending oldest-row age; leader count is shown separately |
+| R4 codex adversarial review | Raw pipe characters in inventory label cells could break Markdown parsing and weaken validator checks | Label enums use comma separators and validator now rejects inventory rows that do not have exactly seven cells |
 
 ## §14. Merge Checklist
 

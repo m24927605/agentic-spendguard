@@ -22,26 +22,32 @@ except Exception as exc:  # noqa: BLE001
     print(f"dashboard JSON parse failed: {exc}", file=sys.stderr)
     sys.exit(1)
 
-inventory: dict[str, pathlib.Path] = {}
-inventory_endpoints: dict[str, str] = {}
-inventory_labels: dict[str, str] = {}
-for raw in inventory_path.read_text().splitlines():
+inventory_rows: list[tuple[str, list[str]]] = []
+for line_no, raw in enumerate(inventory_path.read_text().splitlines(), start=1):
     if not raw.startswith("| `"):
         continue
     cells = [cell.strip() for cell in raw.strip().strip("|").split("|")]
-    if len(cells) < 4:
+    if len(cells) != 7:
+        errors.append(
+            f"metrics inventory row {line_no} has {len(cells)} cells; expected 7. "
+            "Avoid raw pipe characters inside cells."
+        )
         continue
+    inventory_rows.append((raw, cells))
+
+inventory: dict[str, pathlib.Path] = {}
+inventory_endpoints: dict[str, str] = {}
+inventory_labels: dict[str, str] = {}
+for raw, cells in inventory_rows:
     metric_match = re.fullmatch(r"`([^`]+)`", cells[0])
     source_match = re.fullmatch(r"`([^`]+)`", cells[3])
     if metric_match and source_match:
         metric = metric_match.group(1)
         inventory[metric] = root / source_match.group(1)
-        if len(cells) > 2:
-            endpoint_match = re.fullmatch(r"`([^`]+)`", cells[2])
-            if endpoint_match:
-                inventory_endpoints[metric] = endpoint_match.group(1)
-        if len(cells) > 4:
-            inventory_labels[metric] = cells[4].lower()
+        endpoint_match = re.fullmatch(r"`([^`]+)`", cells[2])
+        if endpoint_match:
+            inventory_endpoints[metric] = endpoint_match.group(1)
+        inventory_labels[metric] = cells[4].lower()
 
 if not inventory:
     errors.append("metrics inventory did not yield any metric/source rows")
@@ -107,12 +113,7 @@ expected_endpoints = {
     "stats_aggregator": ":9101/metrics",
     "run_cost_projector": ":9102/metrics",
 }
-for raw in inventory_path.read_text().splitlines():
-    if not raw.startswith("| `"):
-        continue
-    cells = [cell.strip() for cell in raw.strip().strip("|").split("|")]
-    if len(cells) < 3:
-        continue
+for _raw, cells in inventory_rows:
     metric_match = re.fullmatch(r"`([^`]+)`", cells[0])
     endpoint_match = re.fullmatch(r"`([^`]+)`", cells[2])
     if not metric_match or not endpoint_match:

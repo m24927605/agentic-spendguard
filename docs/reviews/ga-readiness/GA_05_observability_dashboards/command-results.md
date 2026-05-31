@@ -27,3 +27,4 @@ Notes:
 - The placeholder grep only matches the validator's explicit rejection list and the inventory explanation, not emitted service source.
 - AIT CLI compatibility: `ait run --adapter codex --review-mode adversarial ...` failed locally with `unrecognized arguments: --review-mode`; codex subagent adversarial review is used as fallback and recorded per round.
 - R2 fixed no-leader audit lag masking by refreshing pending oldest-row age on every outbox-forwarder pod and adding an `Outbox Forwarder Leaders` panel.
+- R4 fixed metrics-inventory Markdown parsing by replacing raw pipe separators in label enum text and making the validator reject rows that do not have exactly seven cells.
