@@ -19,7 +19,7 @@ rustls = "0.23"
 
 # gRPC client only — talks to canonical_ingest's AppendEvents RPC for
 # signed CloudEvent drift_alert emission per spec §7.2.
-tonic = { version = "0.12", features = ["tls", "transport", "gzip"] }
+tonic = { version = "0.12", features = ["tls", "transport"] }
 prost = "0.13"
 prost-types = "0.13"
 

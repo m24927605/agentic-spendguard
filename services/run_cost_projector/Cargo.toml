@@ -19,7 +19,7 @@ path = "src/lib.rs"
 rustls = "0.23"
 
 # gRPC + protobuf (server side per SLICE_09; sidecar wires the client in Phase E).
-tonic = { version = "0.12", features = ["tls", "transport", "gzip"] }
+tonic = { version = "0.12", features = ["tls", "transport"] }
 prost = "0.13"
 prost-types = "0.13"
 

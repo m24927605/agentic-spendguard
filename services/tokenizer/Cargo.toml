@@ -32,7 +32,7 @@ rustls = "0.23"
 
 # gRPC + protobuf (server side only — tokenizer is a leaf service
 # with no outbound RPCs in SLICE_03).
-tonic = { version = "0.12", features = ["tls", "transport", "gzip"] }
+tonic = { version = "0.12", features = ["tls", "transport"] }
 prost = "0.13"
 prost-types = "0.13"
 
