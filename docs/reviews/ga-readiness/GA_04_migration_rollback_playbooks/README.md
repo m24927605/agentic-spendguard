@@ -22,7 +22,7 @@ GA_04 adds a checked-in migration inventory, operator playbooks for migration an
 
 | Item | Value |
 |---|---|
-| Evidence refresh commit | `e0b708c7aa97ba47562a439d8e1f9e842626f14f` before this evidence-note update |
+| Release commit artifact | `/tmp/spendguard-ga04-release-bundle-r2/commit.txt`; rerun `git rev-parse HEAD` from the checked-out release branch |
 | Postgres image | `postgres:16-alpine` |
 | Server version evidence | `/tmp/spendguard-ga04-postgres-version.txt`: `server_version_num=160014`, `server_version=16.14` |
 | Helm demo render | `/tmp/spendguard-ga04-helm-demo.yaml` |
