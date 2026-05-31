@@ -2,7 +2,7 @@
 
 Date: 2026-05-31
 Branch: `ga/GA_03_production_helm_values`
-Tested implementation head: `670bfefa8cffee22e6404dfcbcbbba300cb21d8b`
+Tested implementation head: `2c6f5bad8a820c987fc94c6c8d1b369c87669569`
 
 ## Commands
 
@@ -23,11 +23,15 @@ rg -n 'postgres(ql)?://|DATABASE_URL:|password:|api[_-]?key:' charts/spendguard/
 - Validator confirms effective UID 65532, read-only root filesystem, no privilege escalation, and `capabilities.drop=[ALL]`: PASS.
 - Plaintext database URL negative test: PASS, failed closed.
 - Missing Strategy C SVID binding negative test: PASS, failed closed.
+- All-zero hash placeholder negative test: PASS, failed closed.
 - Disabled security context negative test: PASS, failed closed.
+- Sidecar NetworkPolicy ports match rendered ledger/canonical/tokenizer/predictor/projector service ports: PASS.
+- Production images render with `global.imageRegistry`: PASS.
+- Sidecar UDS hostPath uses pre-created `Directory`, not `DirectoryOrCreate`: PASS.
 - Demo Helm render: PASS.
 - Production example Helm render: PASS.
 - Plaintext credential grep on production example: PASS, no matches.
 
 ## Adversarial Review
 
-Pending codex adversarial review rounds.
+- R1: 3 Blockers, 1 Major, 1 Minor. Fixed sidecar NetworkPolicy ledger/canonical port swap, sidecar non-root hostPath writability posture, ignored `global.imageRegistry`, all-zero hash placeholder acceptance, and stale evidence.
