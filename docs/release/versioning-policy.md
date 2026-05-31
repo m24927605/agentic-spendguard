@@ -44,7 +44,7 @@ The release notes helper provides the same check:
 scripts/release/prepare-release-notes.sh --check-tag v2026.05.31-ga.0
 ```
 
-Creating or pushing the tag is a maintainer release action and is not performed by GA_02 automation.
+The helper rejects invalid calendar dates, existing local tags, and existing `origin` remote tags. Creating or pushing the tag is a maintainer release action and is not performed by GA_02 automation.
 
 ## Changelog Requirements
 

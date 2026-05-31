@@ -29,8 +29,20 @@ Version tags follow `vYYYY.MM.DD-ga.N` for GA release candidates and GA releases
 - Ledger, canonical ingest, and control-plane migrations must be applied in documented order.
 - Immutable audit data must be treated as forward-fix only; do not plan destructive rollback for canonical audit history.
 
+### Helm / Config Notes
+
+- Production values must reference Kubernetes Secrets for database URLs and signing material.
+- Strategy C production deployments require per-tenant SVID bindings unless an explicit legacy global-cert opt-in is used.
+- Demo profile remains separate from production validation values.
+
 ### Security Notes
 
 - Database URLs are expected to come from Kubernetes Secret references in production Helm.
 - Container security baseline remains required: non-root user, read-only root filesystem, no privilege escalation, and dropped capabilities.
 - Supply-chain signing, SBOM, and vulnerability scan gates are owned by GA_09.
+
+### Rollback / Forward-Fix Notes
+
+- Release rollback must follow migration classification from GA_04 once available.
+- Canonical audit history is append-only; use forward-fix for audit-chain data corrections.
+- If Strategy C plugin onboarding fails, disable the affected binding or fall back according to the documented Strategy B path rather than weakening tenant SVID validation.

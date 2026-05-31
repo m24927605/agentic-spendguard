@@ -7,11 +7,11 @@ Tested head: `7d6d057fc75f01b50dbd025960efeb5e2ef96562`
 ## Commands
 
 ```bash
-scripts/release/prepare-release-notes.sh --check docs/release/release-notes-template.md
+scripts/release/prepare-release-notes.sh --check-template docs/release/release-notes-template.md
 commit=$(git rev-parse HEAD)
 tmp=$(mktemp)
 scripts/release/prepare-release-notes.sh --version v2026.05.31-ga.1 --commit "$commit" --output "$tmp"
-scripts/release/prepare-release-notes.sh --check "$tmp"
+scripts/release/prepare-release-notes.sh --check "$tmp" # after filling required sections
 scripts/release/prepare-release-notes.sh --check-tag v2099.12.31-ga.0
 scripts/release/prepare-release-notes.sh --version 2026.05.31 --commit "$commit" --output /tmp/bad-notes.md
 scripts/release/prepare-release-notes.sh --check <template-without-migrations-section>
@@ -24,7 +24,7 @@ helm template spendguard charts/spendguard -f scripts/helm-validate-test-values.
 ## Result
 
 - Release notes template check: PASS
-- Generated release notes check: PASS
+- Generated release notes placeholder check: PASS; final `--check` requires filled sections
 - Tag availability dry-run: PASS
 - Invalid version negative gate: PASS, failed closed
 - Missing `Migrations` section negative gate: PASS, failed closed

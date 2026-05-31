@@ -57,7 +57,8 @@ Release notes must surface security-relevant changes, migration risk, and operat
 
 ## §8. Acceptance Gates
 
-- `scripts/release/prepare-release-notes.sh --check docs/release/release-notes-template.md`
+- `scripts/release/prepare-release-notes.sh --check-template docs/release/release-notes-template.md`
+- `scripts/release/prepare-release-notes.sh --check docs/reviews/ga-readiness/GA_02_versioning_changelog_release_notes/sample-release-notes.md`
 - Product changelog includes predictor upgrade and HARDEN summary
 - Version policy forbids ambiguous "latest" wording
 - GA_01 bundle points to release notes format
