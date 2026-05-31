@@ -26,8 +26,8 @@
 //! returns a 100% Strategy-A response with `predicted_b_tokens` unset,
 //! mirroring the spec §3.4 "A is always callable" invariant.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tonic::{Request, Response, Status};
@@ -42,8 +42,8 @@ use crate::endpoint_cache::EndpointCache;
 use crate::fingerprint::FINGERPRINT_VERSION;
 use crate::plugin_client::PluginClient;
 use crate::proto::output_predictor::v1::{
-    output_predictor_server::OutputPredictor as OutputPredictorTrait, PredictRequest,
-    PredictResponse,
+    PredictRequest, PredictResponse,
+    output_predictor_server::OutputPredictor as OutputPredictorTrait,
 };
 use crate::selector::{self, Strategy};
 use crate::strategy_a;

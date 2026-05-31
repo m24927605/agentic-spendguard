@@ -38,14 +38,14 @@
 //! rows; in-memory TTL is the additional 5min freshness gate per spec §4.3.
 
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use lru::LruCache;
 use parking_lot::Mutex;
-use sqlx::postgres::PgPool;
 use sqlx::Row;
+use sqlx::postgres::PgPool;
 use tracing::{debug, warn};
 use uuid::Uuid;
 
