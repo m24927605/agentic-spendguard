@@ -57,7 +57,8 @@ Release notes must surface security-relevant changes, migration risk, and operat
 
 ## §8. Acceptance Gates
 
-- `scripts/release/prepare-release-notes.sh --check docs/release/release-notes-template.md`
+- `scripts/release/prepare-release-notes.sh --check-template docs/release/release-notes-template.md`
+- `scripts/release/prepare-release-notes.sh --check docs/reviews/ga-readiness/GA_02_versioning_changelog_release_notes/sample-release-notes.md`
 - Product changelog includes predictor upgrade and HARDEN summary
 - Version policy forbids ambiguous "latest" wording
 - GA_01 bundle points to release notes format
@@ -92,11 +93,16 @@ Reviewer must check that release notes cannot pass while omitting migrations, He
 |---|---|---|
 | Release Engineering Architect | Release notes are their own slice | Prevents release bundle scope creep |
 | Software Architect | Tags are documented but not pushed automatically | Avoids accidental public release |
+| Software Architect | R5 hidden/vacuous mandatory sections are in-scope blockers | Validator must fail closed before merge |
+| Release Engineering Architect | Required headings must be visible Markdown headings only | HTML-comment headings do not satisfy release evidence |
+| Security Engineer | Release notes are part of release-integrity evidence | Hidden sections and vacuous bodies are release-evidence bypasses |
+| SRE/Ops Engineer | Operator sections require concrete operational text | `N/A`, `none`, and punctuation/list variants fail outside `Breaking Changes` |
+| Product/Customer Release Expert | Customer release notes are a GA contract | Mandatory sections require meaningful visible text |
 
 ## §14. Merge Checklist
 
-- [ ] Changelog updated
-- [ ] Versioning policy exists
-- [ ] Release notes template validates
-- [ ] AIT review clean or arbitration recorded
+- [x] Changelog updated
+- [x] Versioning policy exists
+- [x] Release notes template validates
+- [x] AIT review clean or arbitration recorded
 - [ ] Memory updated
