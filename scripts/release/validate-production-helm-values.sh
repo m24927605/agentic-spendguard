@@ -111,6 +111,11 @@ def validate_dns1123_secret_name(path: str) -> None:
         fail(f"{path} must be a DNS-1123 Kubernetes Secret name")
 
 
+def validate_dns_fragment(label: str, value: str) -> None:
+    if not re.fullmatch(r"[a-z0-9]([-a-z0-9]{0,42}[a-z0-9])?", str(value)):
+        fail(f"{label} must be a DNS-safe lowercase name fragment")
+
+
 if get(values, "chart.profile") != "production":
     fail("chart.profile must be production")
 
@@ -154,6 +159,22 @@ for path in [
     "webhookReceiver.hmacSecretName",
 ]:
     validate_dns1123_secret_name(path)
+
+for path in [
+    "tokenizer.mtlsSecretName",
+    "tokenizer.providerSecretName",
+    "tokenizer.sinkMtlsSecretName",
+    "tokenizer.signingKeySecretName",
+    "outputPredictor.mtlsSecretName",
+    "outputPredictor.pluginClientSecretName",
+    "runCostProjector.mtlsSecretName",
+    "statsAggregator.sinkMtlsSecretName",
+    "statsAggregator.signingKeySecretName",
+]:
+    value = get(values, path, "")
+    if value:
+        if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", str(value)):
+            fail(f"{path} must be a DNS-1123 Kubernetes Secret name")
 
 for path in [
     "sidecar.contractBundleHashHex",
@@ -208,6 +229,9 @@ if get(values, "outputPredictor.pluginEndpointDatabaseEnabled") is True:
     bindings = get(values, "outputPredictor.pluginClientSvid.bindings", [])
     if not isinstance(bindings, list) or not bindings:
         fail("Strategy C production example requires at least one per-tenant SVID binding")
+    issuer_name = require_string("outputPredictor.pluginClientSvid.issuer.name")
+    if not re.fullmatch(r"[a-z0-9]([-a-z0-9]*[a-z0-9])?", issuer_name):
+        fail("outputPredictor.pluginClientSvid.issuer.name must be a DNS-1123 Kubernetes resource name")
 else:
     bindings = []
 
@@ -295,6 +319,7 @@ for binding in bindings:
     client_cert_id = str(binding.get("clientCertId", ""))
     if not tenant_id or not client_cert_id:
         fail("each SVID binding must include tenantId and clientCertId")
+    validate_dns_fragment("SVID clientCertId", client_cert_id)
     expected_uri = f"spiffe://spendguard.platform/predictor-client/{tenant_id}"
     if expected_uri not in cert_uris:
         fail(f"missing Certificate URI SAN for tenant binding: {expected_uri}")
@@ -327,14 +352,12 @@ for doc in docs:
     if pod_spec is None:
         continue
     resource_name = (doc.get("metadata") or {}).get("name", doc.get("kind", "<unknown>"))
-    has_sidecar_uds = False
     for volume in pod_spec.get("volumes", []) or []:
         host_path = volume.get("hostPath") or {}
-        if host_path.get("path") != "/var/run/spendguard":
+        if not host_path:
             continue
-        has_sidecar_uds = True
         if host_path.get("type") != "Directory":
-            fail(f"{resource_name} UDS hostPath must use type=Directory in production so node prep owns write permissions for UID/GID 65532")
+            fail(f"{resource_name} hostPath {host_path.get('path')!r} must use type=Directory in production so node prep owns write permissions for UID/GID 65532")
     if doc.get("kind") == "DaemonSet" and str(resource_name).endswith("sidecar"):
         for volume in pod_spec.get("volumes", []) or []:
             if volume.get("name") != "uds":
@@ -374,8 +397,8 @@ for doc in docs:
 
         for env in container.get("env", []) or []:
             env_name = env.get("name", "")
-            if env_name == "SPENDGUARD_PROXY_OUTPUT_PREDICTOR_ENDPOINT" and str(env.get("value", "")).startswith("https://"):
-                fail("egress-proxy must not render https output_predictor endpoint until mTLS client support lands")
+            if env_name == "SPENDGUARD_PROXY_OUTPUT_PREDICTOR_ENDPOINT":
+                fail("egress-proxy must not render an output_predictor endpoint under production until mTLS client support lands")
             if "DATABASE_URL" not in env_name:
                 continue
             if "value" in env:
@@ -406,16 +429,21 @@ if [[ "$skip_negative_tests" == "false" ]]; then
   tmp_cron_empty_tenant="$(mktemp)"
   tmp_duplicate_svid_secret="$(mktemp)"
   tmp_bad_svid_secret="$(mktemp)"
+  tmp_http_predictor="$(mktemp)"
+  tmp_uds_service_hostpath="$(mktemp)"
+  tmp_bad_client_cert_id="$(mktemp)"
+  tmp_bad_optional_secret="$(mktemp)"
+  tmp_bad_issuer_name="$(mktemp)"
   tmp_render_bad="$(mktemp)"
   cleanup() {
-    rm -f "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_latest_image" "$tmp_empty_issuer" "$tmp_dead_canonical_image" "$tmp_empty_secret" "$tmp_cron_latest" "$tmp_cron_empty_tenant" "$tmp_duplicate_svid_secret" "$tmp_bad_svid_secret" "$tmp_render_bad"
+    rm -f "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_latest_image" "$tmp_empty_issuer" "$tmp_dead_canonical_image" "$tmp_empty_secret" "$tmp_cron_latest" "$tmp_cron_empty_tenant" "$tmp_duplicate_svid_secret" "$tmp_bad_svid_secret" "$tmp_http_predictor" "$tmp_uds_service_hostpath" "$tmp_bad_client_cert_id" "$tmp_bad_optional_secret" "$tmp_bad_issuer_name" "$tmp_render_bad"
     if [[ -z "$rendered_manifest" ]]; then
       rm -f "$render_file"
     fi
   }
   trap cleanup EXIT
 
-  python3 - "$values_file" "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_latest_image" "$tmp_empty_issuer" "$tmp_dead_canonical_image" "$tmp_empty_secret" "$tmp_cron_latest" "$tmp_cron_empty_tenant" "$tmp_duplicate_svid_secret" "$tmp_bad_svid_secret" <<'PY'
+  python3 - "$values_file" "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_latest_image" "$tmp_empty_issuer" "$tmp_dead_canonical_image" "$tmp_empty_secret" "$tmp_cron_latest" "$tmp_cron_empty_tenant" "$tmp_duplicate_svid_secret" "$tmp_bad_svid_secret" "$tmp_http_predictor" "$tmp_uds_service_hostpath" "$tmp_bad_client_cert_id" "$tmp_bad_optional_secret" "$tmp_bad_issuer_name" <<'PY'
 from pathlib import Path
 import sys
 
@@ -436,6 +464,11 @@ cron_latest = Path(sys.argv[12])
 cron_empty_tenant = Path(sys.argv[13])
 duplicate_svid_secret = Path(sys.argv[14])
 bad_svid_secret = Path(sys.argv[15])
+http_predictor = Path(sys.argv[16])
+uds_service_hostpath = Path(sys.argv[17])
+bad_client_cert_id = Path(sys.argv[18])
+bad_optional_secret = Path(sys.argv[19])
+bad_issuer_name = Path(sys.argv[20])
 values = yaml.safe_load(source.read_text(encoding="utf-8"))
 
 bad = yaml.safe_load(source.read_text(encoding="utf-8"))
@@ -497,6 +530,29 @@ duplicate_svid_secret.write_text(yaml.safe_dump(bad, sort_keys=False), encoding=
 bad = yaml.safe_load(source.read_text(encoding="utf-8"))
 bad["outputPredictor"]["pluginClientSvid"]["bindings"][0]["secretName"] = "bad/name"
 bad_svid_secret.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["egressProxy"]["outputPredictorEndpoint"] = "http://spendguard-spendguard-output-predictor:50054"
+http_predictor.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["outputPredictor"]["udsHostPath"] = "/var/run/spendguard-output"
+bad["outputPredictor"].pop("mtlsSecretName", None)
+bad["outputPredictor"]["udsHostPathType"] = "DirectoryOrCreate"
+uds_service_hostpath.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["outputPredictor"]["pluginClientSvid"]["bindings"][0]["clientCertId"] = "Tenant_One"
+bad["outputPredictor"]["pluginClientSvid"]["bindings"][0]["secretName"] = "tenant-one-secret"
+bad_client_cert_id.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["outputPredictor"]["mtlsSecretName"] = "bad/name"
+bad_optional_secret.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["outputPredictor"]["pluginClientSvid"]["issuer"]["name"] = "bad/name"
+bad_issuer_name.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
 PY
 
   if "$0" "$tmp_plaintext" --skip-negative-tests >/tmp/spendguard-ga03-plaintext.out 2>/tmp/spendguard-ga03-plaintext.err; then
@@ -553,6 +609,26 @@ PY
   fi
   if "$0" "$tmp_bad_svid_secret" --skip-negative-tests >/tmp/spendguard-ga03-bad-svid-secret.out 2>/tmp/spendguard-ga03-bad-svid-secret.err; then
     echo "invalid SVID secretName negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_http_predictor" --skip-negative-tests >/tmp/spendguard-ga03-http-predictor.out 2>/tmp/spendguard-ga03-http-predictor.err; then
+    echo "http egress-proxy predictor endpoint negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_uds_service_hostpath" --skip-negative-tests >/tmp/spendguard-ga03-uds-service-hostpath.out 2>/tmp/spendguard-ga03-uds-service-hostpath.err; then
+    echo "UDS service DirectoryOrCreate hostPath negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_bad_client_cert_id" --skip-negative-tests >/tmp/spendguard-ga03-bad-client-cert-id.out 2>/tmp/spendguard-ga03-bad-client-cert-id.err; then
+    echo "bad SVID clientCertId negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_bad_optional_secret" --skip-negative-tests >/tmp/spendguard-ga03-bad-optional-secret.out 2>/tmp/spendguard-ga03-bad-optional-secret.err; then
+    echo "bad optional Secret name negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_bad_issuer_name" --skip-negative-tests >/tmp/spendguard-ga03-bad-issuer-name.out 2>/tmp/spendguard-ga03-bad-issuer-name.err; then
+    echo "bad SVID issuer name negative test unexpectedly passed" >&2
     exit 1
   fi
 

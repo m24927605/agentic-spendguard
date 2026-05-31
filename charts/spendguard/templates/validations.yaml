@@ -102,6 +102,36 @@ evaluates the {{- fail -}} directives at template render time.
 {{- if and .Values.egressProxy.enabled (ne (toString .Values.egressProxy.sidecarUdsHostPathType) "Directory") -}}
 {{- fail "egressProxy.sidecarUdsHostPathType must be Directory under chart.profile=production; pre-create egressProxy.sidecarUdsHostPath writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
 {{- end -}}
+{{- if and .Values.egressProxy.enabled .Values.egressProxy.outputPredictorEndpoint -}}
+{{- fail "egressProxy.outputPredictorEndpoint must be empty under chart.profile=production until egress_proxy ships mTLS client support; the current proxy client is plaintext-only and would silently fall back to Strategy A" -}}
+{{- end -}}
+{{- if and .Values.tokenizer.udsHostPath (ne (toString .Values.tokenizer.udsHostPathType) "Directory") -}}
+{{- fail "tokenizer.udsHostPathType must be Directory under chart.profile=production; pre-create tokenizer.udsHostPath writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
+{{- end -}}
+{{- if and .Values.outputPredictor.udsHostPath (ne (toString .Values.outputPredictor.udsHostPathType) "Directory") -}}
+{{- fail "outputPredictor.udsHostPathType must be Directory under chart.profile=production; pre-create outputPredictor.udsHostPath writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
+{{- end -}}
+{{- if and .Values.runCostProjector.udsHostPath (ne (toString .Values.runCostProjector.udsHostPathType) "Directory") -}}
+{{- fail "runCostProjector.udsHostPathType must be Directory under chart.profile=production; pre-create runCostProjector.udsHostPath writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
+{{- end -}}
+{{- $productionSecretNames := dict
+  "tokenizer.mtlsSecretName" .Values.tokenizer.mtlsSecretName
+  "tokenizer.providerSecretName" .Values.tokenizer.providerSecretName
+  "tokenizer.sinkMtlsSecretName" .Values.tokenizer.sinkMtlsSecretName
+  "tokenizer.signingKeySecretName" .Values.tokenizer.signingKeySecretName
+  "outputPredictor.mtlsSecretName" .Values.outputPredictor.mtlsSecretName
+  "outputPredictor.pluginClientSecretName" .Values.outputPredictor.pluginClientSecretName
+  "runCostProjector.mtlsSecretName" .Values.runCostProjector.mtlsSecretName
+  "statsAggregator.sinkMtlsSecretName" .Values.statsAggregator.sinkMtlsSecretName
+  "statsAggregator.signingKeySecretName" .Values.statsAggregator.signingKeySecretName
+-}}
+{{- range $name, $value := $productionSecretNames -}}
+{{- if $value -}}
+{{- if not (regexMatch $dns1123Name (toString $value)) -}}
+{{- fail (printf "%s must be a DNS-1123 Kubernetes Secret name under chart.profile=production" $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- if not (regexMatch "^(localhost(:[0-9]+)?|[A-Za-z0-9.-]+\\.[A-Za-z0-9.-]+|[A-Za-z0-9.-]+:[0-9]+)/.+" (toString .Values.migrations.ledgerImage)) -}}
 {{- fail "migrations.ledgerImage must include an explicit registry under chart.profile=production (for example docker.io/library/postgres:16-alpine)" -}}
 {{- end -}}

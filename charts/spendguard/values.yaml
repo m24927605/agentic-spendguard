@@ -286,6 +286,7 @@ tokenizer:
   #                 set, the chart renders the ClusterIP Service so
   #                 callers can resolve `<release>-spendguard-tokenizer:50053`.
   udsHostPath: ""
+  udsHostPathType: DirectoryOrCreate
   mtlsSecretName: ""
   # ── SLICE_05: Tier 1 shadow drift detection ────────────────────────
   # Master kill-switch for the shadow worker. When false the Tier 2
@@ -374,6 +375,7 @@ outputPredictor:
   # Set EXACTLY ONE under chart.profile=production. Demo falls back to
   # plaintext TCP with a loud warn.
   udsHostPath: ""
+  udsHostPathType: DirectoryOrCreate
   mtlsSecretName: ""
   # ── canonical_ingest DB for output_distribution_cache lookup (spec §4.2)
   # Read from postgres.existingSecret / outputPredictorUrlKey. Demo
@@ -464,6 +466,7 @@ runCostProjector:
   # Set EXACTLY ONE under chart.profile=production. Demo falls back to
   # plaintext TCP with a loud warn.
   udsHostPath: ""
+  udsHostPathType: DirectoryOrCreate
   mtlsSecretName: ""
   # ── canonical_ingest DB for Signal 1 + audit-chain recovery ──
   # Read from postgres.existingSecret / runCostProjectorUrlKey. Demo

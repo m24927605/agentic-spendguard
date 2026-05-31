@@ -118,7 +118,7 @@ spec:
         - name: uds
           hostPath:
             path: {{ .Values.runCostProjector.udsHostPath | quote }}
-            type: DirectoryOrCreate
+            type: {{ .Values.runCostProjector.udsHostPathType | quote }}
         {{- end }}
         {{- if .Values.runCostProjector.mtlsSecretName }}
         - name: tls
