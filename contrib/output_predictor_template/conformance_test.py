@@ -441,7 +441,7 @@ def test_client_svid_extra_uri_identity_rejected():
     auth_context = {
         "x509_subject_alternative_name": [
             f"URI:{subject}".encode("utf-8"),
-            b"URI:https://example.invalid/id",
+            b"URI:urn:example:id",
         ]
     }
     with pytest.raises(ValueError, match="multiple URI SAN identities"):

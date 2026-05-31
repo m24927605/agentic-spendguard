@@ -17,6 +17,8 @@ spec:
     secretName: {{ $issuer.caSecretName | quote }}
 ---
 {{- end }}
+{{- $seenClientCertIds := dict -}}
+{{- $seenTenantIds := dict -}}
 {{- range $idx, $binding := .Values.outputPredictor.pluginClientSvid.bindings }}
 {{- if not $binding.tenantId -}}
 {{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].tenantId is required" $idx) -}}
@@ -30,6 +32,14 @@ spec:
 {{- if not (regexMatch "^[A-Za-z0-9_-]{1,44}$" (toString $binding.clientCertId)) -}}
 {{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].clientCertId must match ^[A-Za-z0-9_-]{1,44}$" $idx) -}}
 {{- end -}}
+{{- if hasKey $seenClientCertIds (toString $binding.clientCertId) -}}
+{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].clientCertId %q duplicates an earlier binding" $idx (toString $binding.clientCertId)) -}}
+{{- end -}}
+{{- $_ := set $seenClientCertIds (toString $binding.clientCertId) true -}}
+{{- if hasKey $seenTenantIds (toString $binding.tenantId) -}}
+{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].tenantId %q duplicates an earlier binding" $idx (toString $binding.tenantId)) -}}
+{{- end -}}
+{{- $_ := set $seenTenantIds (toString $binding.tenantId) true -}}
 {{- $secretName := default (printf "%s-plugin-client-%s" $fullname $binding.clientCertId) $binding.secretName -}}
 apiVersion: cert-manager.io/v1
 kind: Certificate

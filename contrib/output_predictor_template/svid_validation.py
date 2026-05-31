@@ -25,6 +25,11 @@ def _normalise_auth_value(value: bytes | str) -> str:
     return text
 
 
+def _is_uri_san_value(value: bytes | str) -> bool:
+    text = value.decode("utf-8", errors="replace") if isinstance(value, bytes) else value
+    return text.startswith("URI:") or "://" in text
+
+
 def extract_spiffe_uri_from_auth_context(auth_context: dict[str | bytes, list[bytes]]) -> str | None:
     """Extract the SpendGuard SPIFFE URI SAN from ``grpc.ServicerContext`` auth data."""
     normalised: dict[str, list[bytes]] = {}
@@ -33,9 +38,8 @@ def extract_spiffe_uri_from_auth_context(auth_context: dict[str | bytes, list[by
         normalised.setdefault(key_text, []).extend(values)
     uri_values: list[str] = []
     for raw in normalised.get("x509_subject_alternative_name", []):
-        value = _normalise_auth_value(raw)
-        if "://" in value:
-            uri_values.append(value)
+        if _is_uri_san_value(raw):
+            uri_values.append(_normalise_auth_value(raw))
     unique = sorted(set(uri_values))
     if len(unique) > 1:
         raise ValueError("multiple URI SAN identities presented")

@@ -30,6 +30,10 @@
   material changes, uses the bounded `plugin-client-svid-<clientCertId>`
   Certificate name without release-name truncation, and rejects any extra URI
   SAN identity in the reference plugin.
+- Staff+ arbitration after R5 was unanimous: fix in-slice. Final closure adds
+  Helm duplicate `clientCertId`/`tenantId` fail gates, a control-plane forward
+  migration enforcing `client_cert_id ~ ^[A-Za-z0-9_-]{1,44}$`, and URI SAN
+  parsing that catches `urn:` identities.
 
 ## Local verification
 
@@ -69,4 +73,10 @@ and Python reference plugin SVID fail-closed checks ran successfully
 
 helm template ... clientCertId=45-byte-string
 PASS: render failed closed with `clientCertId must match ^[A-Za-z0-9_-]{1,44}$`
+
+helm template ... duplicate clientCertId / duplicate tenantId
+PASS: both renders failed closed with `duplicates an earlier binding`
+
+CONTAINER=spendguard-harden08-migrations scripts/verify-migrations-postgres16.sh
+PASS: control_plane migrations applied through 0006 and smoke checks passed
 ```
