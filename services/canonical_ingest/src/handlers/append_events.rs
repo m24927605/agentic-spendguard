@@ -867,6 +867,50 @@ mod tests {
         assert_eq!(cols.actual_input_tokens, None);
         assert_eq!(cols.actual_output_tokens, None);
     }
+
+    #[test]
+    fn decision_payload_populates_aggregator_mirror_columns() {
+        let run_id = Uuid::parse_str("00000000-0000-7000-8000-000000000001").unwrap();
+        let evt = CloudEvent {
+            r#type: "spendguard.audit.decision".to_string(),
+            ..Default::default()
+        };
+        let data = serde_json::json!({
+            "model": "gpt-4o-mini",
+            "agent_id": "agent-alpha",
+            "prompt_class": "support_triage",
+            "prompt_class_fingerprint": "pcfp_123"
+        });
+
+        let mirrors = aggregator_mirrors_from_event(&evt, Some(&data), Some(run_id));
+
+        assert_eq!(mirrors.model, Some("gpt-4o-mini"));
+        assert_eq!(mirrors.agent_id, Some("agent-alpha"));
+        assert_eq!(mirrors.run_id_mirror, Some(run_id));
+        assert_eq!(mirrors.prompt_class, Some("support_triage"));
+        assert_eq!(mirrors.prompt_class_fingerprint, Some("pcfp_123"));
+    }
+
+    #[test]
+    fn decision_payload_model_family_fallback_populates_model_mirror() {
+        let evt = CloudEvent {
+            r#type: "spendguard.audit.decision".to_string(),
+            ..Default::default()
+        };
+        let data = serde_json::json!({
+            "model_family": "claude-3-5-sonnet",
+            "agent_id": "agent-beta",
+            "prompt_class": "code_gen",
+            "prompt_class_fingerprint": "pcfp_456"
+        });
+
+        let mirrors = aggregator_mirrors_from_event(&evt, Some(&data), None);
+
+        assert_eq!(mirrors.model, Some("claude-3-5-sonnet"));
+        assert_eq!(mirrors.agent_id, Some("agent-beta"));
+        assert_eq!(mirrors.prompt_class, Some("code_gen"));
+        assert_eq!(mirrors.prompt_class_fingerprint, Some("pcfp_456"));
+    }
 }
 
 fn parse_uuid(s: &str, field: &str) -> Result<Uuid, DomainError> {

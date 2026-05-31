@@ -67,6 +67,18 @@ pub struct VerifyChainArgs {
     pub to: Option<chrono::DateTime<chrono::Utc>>,
 }
 
+/// Audit event types that carry the predictor mirror column contract.
+///
+/// Tokenizer/stats `*_drift_alert` events are audit-routed and must be
+/// admitted by verify-chain, but they are not decision/outcome rows and do
+/// not carry the 18 prediction mirror columns.
+pub fn event_type_requires_prediction_mirror(event_type: &str) -> bool {
+    matches!(
+        event_type,
+        "spendguard.audit.decision" | "spendguard.audit.outcome"
+    )
+}
+
 /// Run the verify-chain replay over the configured Postgres pool.
 ///
 /// SLICE_13 Phase C ships this as a thin scan loop that mirrors the
@@ -110,7 +122,10 @@ pub async fn verify_chain(
     let mut sql = String::from(
         "SELECT \
             COUNT(*)::bigint AS rows_total, \
-            COUNT(*) FILTER (WHERE predicted_b_tokens IS NULL)::bigint AS rows_legacy \
+            COUNT(*) FILTER (\
+                WHERE event_type IN ('spendguard.audit.decision', 'spendguard.audit.outcome') \
+                  AND predicted_b_tokens IS NULL\
+            )::bigint AS rows_legacy \
          FROM canonical_events WHERE event_type LIKE 'spendguard.audit.%'",
     );
     if args.tenant_id.is_some() {
@@ -192,5 +207,25 @@ mod tests {
             to: None,
         };
         assert!(args.from.is_none());
+    }
+
+    #[test]
+    fn tokenizer_drift_alert_is_admitted_without_prediction_mirror_columns() {
+        assert!(!event_type_requires_prediction_mirror(
+            "spendguard.audit.tokenizer_drift_alert.v1alpha1"
+        ));
+        assert!(!event_type_requires_prediction_mirror(
+            "spendguard.audit.prediction_drift_alert.v1alpha1"
+        ));
+    }
+
+    #[test]
+    fn decision_and_outcome_require_prediction_mirror_columns() {
+        assert!(event_type_requires_prediction_mirror(
+            "spendguard.audit.decision"
+        ));
+        assert!(event_type_requires_prediction_mirror(
+            "spendguard.audit.outcome"
+        ));
     }
 }

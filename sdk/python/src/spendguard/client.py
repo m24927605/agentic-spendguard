@@ -542,9 +542,9 @@ class SpendGuardClient:
                 reason_codes=tuple(resp.reason_codes),
                 matched_rule_ids=tuple(resp.matched_rule_ids),
             )
-        if decision_name == "STOP":
+        if decision_name in ("STOP", "STOP_RUN_PROJECTION"):
             raise DecisionStopped(
-                f"sidecar STOP terminal={resp.terminal} reasons={list(resp.reason_codes)}",
+                f"sidecar {decision_name} terminal={resp.terminal} reasons={list(resp.reason_codes)}",
                 decision_id=resp.decision_id,
                 reason_codes=list(resp.reason_codes),
                 audit_decision_event_id=resp.audit_decision_event_id,
@@ -969,7 +969,7 @@ class SpendGuardClient:
             adapter_pb2.DecisionResponse.SKIP: "SKIP",
             adapter_pb2.DecisionResponse.STOP: "STOP",
             adapter_pb2.DecisionResponse.REQUIRE_APPROVAL: "REQUIRE_APPROVAL",
-            adapter_pb2.DecisionResponse.STOP_RUN_PROJECTION: "STOP",
+            adapter_pb2.DecisionResponse.STOP_RUN_PROJECTION: "STOP_RUN_PROJECTION",
         }
         return mapping.get(decision_enum, "UNKNOWN")
 
