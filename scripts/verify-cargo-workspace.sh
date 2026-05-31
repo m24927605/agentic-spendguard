@@ -18,7 +18,8 @@ if [ "${SPENDGUARD_VERIFY_CARGO_IN_ARCHIVE:-0}" != "1" ]; then
     log "creating clean detached worktree at ${WORK_DIR}"
     git worktree add --detach "${WORK_DIR}" HEAD >/dev/null
     log "re-running inside clean worktree so ignored per-crate Cargo.lock files cannot mask local drift"
-    exec env SPENDGUARD_VERIFY_CARGO_IN_ARCHIVE=1 "${WORK_DIR}/scripts/verify-cargo-workspace.sh"
+    env SPENDGUARD_VERIFY_CARGO_IN_ARCHIVE=1 "${WORK_DIR}/scripts/verify-cargo-workspace.sh"
+    exit $?
 fi
 
 metadata_locked() {
