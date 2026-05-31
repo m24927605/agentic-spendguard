@@ -9,6 +9,7 @@ Command:
 
 ```bash
 scripts/verify-cargo-workspace.sh
+CARGO_TARGET_DIR=/tmp/spendguard-harden07-clean-target scripts/verify-cargo-workspace.sh
 ```
 
 Result: PASS.
@@ -29,6 +30,7 @@ Result: PASS.
   - `services/tokenizer/Cargo.toml`
 - No Cargo.lock drift remained after verification.
 - Runs affected regression tests for canonical_ingest, control_plane, egress_proxy, output_predictor, run_cost_projector, stats_aggregator, and tokenizer.
+- Final rerun from commit `dd9d477` passed after fixing the `run_cost_projector` cold-miss race.
 
 ## Helm
 
@@ -124,3 +126,4 @@ Result: PASS.
 - Phase 2B Step 8 SQL assertions passed with provider-reported commit state.
 - Outbox forwarder drained 7/7 audit rows.
 - `canonical_events` verification passed with count 5.
+- Final rerun after the `run_cost_projector` race fix rebuilt the run-cost-projector image and passed the same assertions.
