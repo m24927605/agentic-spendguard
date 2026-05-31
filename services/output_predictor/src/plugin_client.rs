@@ -333,8 +333,29 @@ impl PluginClient {
         tenant: &Uuid,
         endpoint: Arc<PluginEndpoint>,
     ) -> Result<Channel, anyhow::Error> {
+        let cached_for_endpoint = {
+            let read = self.channels.read();
+            read.get(tenant)
+                .filter(|cached| cached.endpoint_snapshot.same_wire_shape(&endpoint))
+                .cloned()
+        };
+
         let materials = match &self.material_source {
-            Some(source) => Some(source.resolve(tenant, &endpoint)?),
+            Some(source) => match source.resolve(tenant, &endpoint) {
+                Ok(materials) => Some(materials),
+                Err(err) => {
+                    if let Some(cached) = cached_for_endpoint {
+                        warn!(
+                            tenant = %tenant,
+                            client_cert_id = %endpoint.client_cert_id,
+                            error = ?err,
+                            "tenant SVID material reload failed; reusing existing cached plugin channel during rotation window"
+                        );
+                        return Ok(cached.channel);
+                    }
+                    return Err(err);
+                }
+            },
             None => None,
         };
         let material_fingerprint_hex = materials
@@ -344,7 +365,9 @@ impl PluginClient {
         // Fast path — cached channel still matches the endpoint and
         // SVID material. Rotation rewrites the mounted Secret bytes;
         // the changed material fingerprint forces a fresh channel on
-        // the next request without a process restart.
+        // the next request without a process restart. If the rewrite is
+        // transiently inconsistent, the block above keeps using the old
+        // valid channel rather than failing the hot path.
         {
             let read = self.channels.read();
             if let Some(cached) = read.get(tenant) {
@@ -413,7 +436,15 @@ async fn build_channel(
     endpoint: &PluginEndpoint,
 ) -> Result<Channel, anyhow::Error> {
     let endpoint_url = endpoint.endpoint_url.clone();
-    let ep_builder = Endpoint::from_shared(endpoint_url.clone())
+    let tonic_endpoint_url = if materials.is_some() {
+        endpoint_url
+            .strip_prefix("https://")
+            .map(|rest| format!("http://{rest}"))
+            .unwrap_or_else(|| endpoint_url.clone())
+    } else {
+        endpoint_url.clone()
+    };
+    let ep_builder = Endpoint::from_shared(tonic_endpoint_url.clone())
         .with_context(|| format!("invalid plugin endpoint url `{endpoint_url}`"))?
         .connect_timeout(HANDSHAKE_DEADLINE)
         .timeout(HANDSHAKE_DEADLINE)

@@ -265,20 +265,18 @@ def _load_credentials(
         server_cert = f.read()
     with open(server_key_path, "rb") as f:
         server_key = f.read()
-    if client_ca_path:
-        with open(client_ca_path, "rb") as f:
-            client_ca = f.read()
-        return grpc.ssl_server_credentials(
-            [(server_key, server_cert)],
-            root_certificates=client_ca,
-            require_client_auth=True,
+    if not client_ca_path:
+        raise ValueError(
+            "mTLS requires --tls-client-ca so the plugin can verify "
+            "SpendGuard predictor-client SVIDs"
         )
-    LOGGER.warning(
-        "Starting WITHOUT client-cert verification. This is acceptable"
-        " for local development but violates spec §3.1 — production must"
-        " supply --tls-client-ca."
+    with open(client_ca_path, "rb") as f:
+        client_ca = f.read()
+    return grpc.ssl_server_credentials(
+        [(server_key, server_cert)],
+        root_certificates=client_ca,
+        require_client_auth=True,
     )
-    return grpc.ssl_server_credentials([(server_key, server_cert)])
 
 
 def build_server(
@@ -397,6 +395,8 @@ def main(argv: list[str] | None = None) -> int:
             missing.append("--tls-server-cert")
         if not args.tls_server_key:
             missing.append("--tls-server-key")
+        if not args.tls_client_ca:
+            missing.append("--tls-client-ca")
         if missing:
             LOGGER.error(
                 "mTLS misconfigured: %s required (or pass --insecure for local dev)",

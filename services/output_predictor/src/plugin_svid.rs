@@ -130,16 +130,17 @@ pub fn extract_spiffe_uri_from_cert_pem(cert_pem: &[u8]) -> Result<String, anyho
         })
         .collect();
 
-    let matching: Vec<&str> = uris
-        .into_iter()
-        .filter(|uri| uri.starts_with(PREDICTOR_CLIENT_SVID_PREFIX))
-        .collect();
-    match matching.as_slice() {
-        [uri] => Ok((*uri).to_string()),
-        [] => anyhow::bail!(
-            "SVID certificate has no URI SAN with `{PREDICTOR_CLIENT_SVID_PREFIX}` prefix"
+    select_exact_spendguard_uri_san(&uris)
+}
+
+fn select_exact_spendguard_uri_san(uris: &[&str]) -> Result<String, anyhow::Error> {
+    match uris {
+        [uri] if uri.starts_with(PREDICTOR_CLIENT_SVID_PREFIX) => Ok((*uri).to_string()),
+        [] => anyhow::bail!("SVID certificate has no URI SAN"),
+        [_] => anyhow::bail!(
+            "SVID certificate URI SAN must start with `{PREDICTOR_CLIENT_SVID_PREFIX}`"
         ),
-        _ => anyhow::bail!("SVID certificate has multiple SpendGuard predictor-client URI SANs"),
+        _ => anyhow::bail!("SVID certificate must contain exactly one URI SAN"),
     }
 }
 
@@ -192,5 +193,14 @@ mod tests {
         for good in ["tenant-a", "tenant_a", "tenantA01"] {
             validate_client_cert_id(good).expect("safe client_cert_id accepted");
         }
+    }
+
+    #[test]
+    fn exact_uri_san_rejects_extra_uri_identity() {
+        let tenant = Uuid::parse_str("018fcf9a-3d2d-7b37-9f21-0f27de0b20c1").unwrap();
+        let good = subject_uri_for_tenant(&tenant);
+        assert_eq!(select_exact_spendguard_uri_san(&[&good]).unwrap(), good);
+        assert!(select_exact_spendguard_uri_san(&[&good, "spiffe://other/id"]).is_err());
+        assert!(select_exact_spendguard_uri_san(&["spiffe://other/id"]).is_err());
     }
 }

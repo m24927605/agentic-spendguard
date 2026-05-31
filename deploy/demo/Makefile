@@ -120,7 +120,7 @@ else ifeq ($(DEMO_MODE),plugin_c_synthetic)
 	    breaker_open_skips_predict_without_recording_extra_failure -- --nocapture
 	@echo "[demo] verifying HARDEN_08 per-tenant plugin client SVID path..."
 	@cd ../.. && cargo test --manifest-path services/output_predictor/Cargo.toml \
-	    plugin_svid -- --nocapture
+	    --test plugin_svid_mtls -- --nocapture
 	@cd ../.. && python3 -m pytest contrib/output_predictor_template/conformance_test.py \
 	    -q -k 'client_svid'
 	@echo "[demo] plugin_c_synthetic PASS — Strategy C breaker open skips plugin Predict"
