@@ -8,7 +8,8 @@ cd "${REPO_ROOT}"
 
 CONTAINER="${CONTAINER:-spendguard-harden07-migrations}"
 IMAGE="${POSTGRES_IMAGE:-postgres:16-alpine}"
-PASSWORD="${POSTGRES_PASSWORD:-spendguard_harden07}"
+PASSWORD="${POSTGRES_PASSWORD:-spendguard_migrations}"
+EVIDENCE_PREFIX="${EVIDENCE_PREFIX:-/tmp/spendguard-migrations}"
 
 log() { echo "[verify-migrations] $*" >&2; }
 
@@ -18,12 +19,18 @@ cleanup() {
 trap cleanup EXIT
 
 cleanup
+scripts/release/verify-migration-inventory.sh
+
 log "starting ${IMAGE}"
 docker run -d --name "${CONTAINER}" \
     -e POSTGRES_USER=spendguard \
     -e POSTGRES_PASSWORD="${PASSWORD}" \
     -e POSTGRES_DB=postgres \
     "${IMAGE}" >/dev/null
+image_repo_digest="$(docker image inspect "${IMAGE}" --format '{{range .RepoDigests}}{{println .}}{{end}}' 2>/dev/null | awk 'NF {print; exit}' || true)"
+if [[ -z "${image_repo_digest}" && "${IMAGE}" == *@sha256:* ]]; then
+    image_repo_digest="${IMAGE}"
+fi
 
 for _ in $(seq 1 60); do
     if docker exec "${CONTAINER}" pg_isready -U spendguard -d postgres >/dev/null 2>&1; then
@@ -39,6 +46,33 @@ psql_exec() {
     docker exec -e PGPASSWORD="${PASSWORD}" -i "${CONTAINER}" \
         psql -v ON_ERROR_STOP=1 -U spendguard -d "${db}" "$@"
 }
+
+version_error_file="$(mktemp)"
+server_version_num=""
+server_version=""
+for _ in $(seq 1 30); do
+    if server_version_num="$(psql_exec postgres -At -c "SHOW server_version_num;" 2>"${version_error_file}" | tr -d '[:space:]')" &&
+        server_version="$(psql_exec postgres -At -c "SHOW server_version;" 2>>"${version_error_file}" | tr -d '\r')"; then
+        break
+    fi
+    sleep 1
+done
+if [[ -z "${server_version_num}" ]]; then
+    log "FATAL: unable to query Postgres server version"
+    cat "${version_error_file}" >&2
+    exit 1
+fi
+rm -f "${version_error_file}"
+if [[ ! "${server_version_num}" =~ ^[0-9]+$ || "${server_version_num}" -lt 160000 || "${server_version_num}" -ge 170000 ]]; then
+    log "FATAL: expected Postgres 16.x, got server_version_num=${server_version_num} (${server_version})"
+    exit 1
+fi
+{
+    printf 'image=%s\n' "${IMAGE}"
+    printf 'image_repo_digest=%s\n' "${image_repo_digest:-unavailable}"
+    printf 'server_version_num=%s\n' "${server_version_num}"
+    printf 'server_version=%s\n' "${server_version}"
+} | tee "${EVIDENCE_PREFIX}-postgres-version.txt"
 
 psql_exec postgres -c "CREATE DATABASE spendguard_ledger;"
 psql_exec postgres -c "CREATE DATABASE spendguard_canonical;"
@@ -108,7 +142,7 @@ SELECT
     WHERE table_name='audit_outbox'
       AND column_name IN ('predicted_a_tokens', 'run_projection_at_decision_atomic', 'prediction_strategy_used')
   ) AS has_prediction_columns;
-" | tee /tmp/spendguard-harden07-ledger-smoke.txt
+" | tee "${EVIDENCE_PREFIX}-ledger-smoke.txt"
 
 log "canonical smoke checks"
 psql_exec spendguard_canonical -c "
@@ -150,7 +184,7 @@ SELECT
     WHERE table_name='canonical_events'
       AND column_name IN ('payload_json', 'prediction_strategy_used', 'run_id_mirror')
   ) AS has_mirror_columns;
-" | tee /tmp/spendguard-harden07-canonical-smoke.txt
+" | tee "${EVIDENCE_PREFIX}-canonical-smoke.txt"
 
 log "control-plane smoke checks"
 psql_exec spendguard_control_plane -c "
@@ -182,6 +216,6 @@ SELECT
     WHERE tablename='control_plane_audit_outbox'
       AND policyname='control_plane_audit_outbox_forwarder_update'
   ) AS has_forwarder_update_policy;
-" | tee /tmp/spendguard-harden07-control-plane-smoke.txt
+" | tee "${EVIDENCE_PREFIX}-control-plane-smoke.txt"
 
 log "PASS"
