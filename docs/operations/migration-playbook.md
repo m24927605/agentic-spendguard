@@ -18,14 +18,14 @@ The migration inventory must match the release commit. A checksum mismatch means
 
 ## 2. Production Readiness Checks
 
-Confirm all items before the maintenance window:
+Confirm all planning and access items before the maintenance window. Do not create the production rollback backup until the write freeze checkpoint in section 3.
 
 | Check | Required evidence |
 |---|---|
 | Release commit | Full 40-character commit SHA from the signed release bundle |
 | Inventory | `scripts/release/verify-migration-inventory.sh` output |
-| Backup | Fresh logical backup plus provider snapshot identifiers |
-| Restore rehearsal | Restore completed in an isolated database from the exact backup artifact |
+| Backup plan | Dump destination, provider snapshot procedure, encryption, retention, and operator access prechecked |
+| Restore rehearsal environment | Empty isolated restore databases or cluster available; restore credentials tested with non-production data |
 | App compatibility | New application image is backward compatible with the current schema until migration completion |
 | Audit chain | Current immutable audit verification job is green |
 | Pager coverage | Migration owner, database owner, security owner, and incident commander assigned |
@@ -55,7 +55,7 @@ pg_dump --format=custom --no-owner --file="$BACKUP_DIR/control_plane.dump" "$CON
 shasum -a 256 "$BACKUP_DIR"/*.dump > "$BACKUP_DIR/SHA256SUMS"
 ```
 
-Also record provider-native snapshot identifiers for each database. Logical dumps are the portable restore artifact; provider snapshots are the fast restore artifact.
+Also record provider-native snapshot identifiers for each database. Logical dumps are the portable restore artifact; provider snapshots are the fast restore artifact. The backup transcript must include the cutoff timestamp recorded in section 3.
 
 ## 5. Restore Rehearsal Checkpoint
 
@@ -71,7 +71,7 @@ pg_restore --exit-on-error --dbname=spendguard_restore_canonical "$BACKUP_DIR/ca
 pg_restore --exit-on-error --dbname=spendguard_restore_control_plane "$BACKUP_DIR/control_plane.dump"
 ```
 
-The restore rehearsal is a hard gate. If restore fails, do not apply production migrations.
+The restore rehearsal is a hard gate and must use the post-freeze, post-cutoff backup artifacts from section 4. If restore fails, do not apply production migrations.
 
 ## 6. Apply Order
 
@@ -136,6 +136,7 @@ Store the following with the release record:
 - `docs/operations/migration-inventory-v1alpha1.txt`
 - Migration command transcript
 - Backup paths and snapshot identifiers
-- Restore rehearsal transcript
+- Post-freeze cutoff timestamp
+- Restore rehearsal transcript from the post-freeze backup artifacts
 - Post-apply smoke outputs
 - Incident decision record if any migration required rerun, forward-fix, or restore
