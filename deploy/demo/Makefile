@@ -84,7 +84,9 @@ else ifeq ($(DEMO_MODE),multi_provider_usd)
 	    endpoint-catalog ledger canonical-ingest sidecar egress-proxy
 else ifeq ($(DEMO_MODE),m1_benchmark_runaway_loop)
 	@echo "[demo] DEMO_MODE=m1_benchmark_runaway_loop → sidecar wired to run_cost_projector."
-	@SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL=http://run-cost-projector:50055 $(COMPOSE) up -d --build \
+	@SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL=http://run-cost-projector:50055 \
+	  SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA=true \
+	  $(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest run-cost-projector sidecar webhook-receiver \
 	    outbox-forwarder

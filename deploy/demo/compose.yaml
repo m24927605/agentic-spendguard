@@ -548,6 +548,9 @@ services:
       SPENDGUARD_SIDECAR_LEDGER_URL:               "https://ledger:50051"
       SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL:     "https://canonical-ingest:50052"
       SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL:    "${SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL:-}"
+      # Demo-only gate. Production Helm refuses this setting; the real
+      # production budget source must be a signed/fenced ledger snapshot.
+      SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA: "${SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA:-false}"
       # Health probe
       SPENDGUARD_SIDECAR_HEALTH_ADDR:              "0.0.0.0:8080"
       # Round-2 #11: Prometheus /metrics endpoint (sidecar = port 9093

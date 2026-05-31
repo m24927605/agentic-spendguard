@@ -131,7 +131,14 @@ async fn main() -> Result<()> {
         cfg.reservation_ttl_seconds,
         signer,
         fail_policy,
+        cfg.allow_untrusted_budget_metadata,
     );
+    if cfg.allow_untrusted_budget_metadata {
+        tracing::warn!(
+            "SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA=true; \
+             caller-supplied budget_remaining metadata is enabled for demo/test only"
+        );
+    }
     if cfg.run_cost_projector_url.trim().is_empty() {
         info!("run_cost_projector not configured; RUN_* projection path disabled");
     } else {

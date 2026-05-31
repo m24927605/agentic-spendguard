@@ -66,3 +66,13 @@ Artifacts:
 - `make demo-up DEMO_MODE=m1_benchmark_runaway_loop` originally recreated sidecar without the projector URL. Fixed by running the demo container with `--no-deps` after stack bring-up.
 - `verify_audit_columns.py` could not run `verify-chain` from the canonical-ingest image. Fixed the demo Dockerfile to copy the binary.
 - Benchmark harness originally timed reserve+commit for the decision SLO and included shim logging/threadpool overhead. Fixed to report decision-only reserve/deny latency, keep runaway-loop as the reserve+commit receipt benchmark, disable shim access/audit logging for latency runs, and warm at least two full burst waves.
+
+## AIT Round 1 Fix Evidence
+
+Reviewer: `review_01KSXMST512E6H23FEST1VGJE3`.
+
+| Finding | Fix | Verification |
+|---|---|---|
+| Production proxy path double-advances projector state | Removed the production default for `egressProxy.runCostProjectorEndpoint`; sidecar remains the only default mutating Project caller, and Helm now rejects explicit proxy projector wiring when sidecar projector is configured. | `helm template ... production` renders only `SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL`; negative Helm gate rejects explicit proxy run-cost endpoint. |
+| Run-budget projection is caller-controlled | Added `sidecar.allowUntrustedBudgetMetadata` / `SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA`, default false and rejected in production; m1 demo is the only path that enables it. | `cargo test --manifest-path services/sidecar/Cargo.toml`; production negative Helm gate rejects unsafe flag; `make demo-up DEMO_MODE=m1_benchmark_runaway_loop` still passes. |
+| Denied projection rows drop aggregator mirrors | Shared ClaimEstimate payload mirror insertion across allow and denied decision payloads. | `cargo test --manifest-path services/sidecar/Cargo.toml claim_estimate_payload_mirrors -- --nocapture`. |

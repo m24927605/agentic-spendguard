@@ -43,7 +43,8 @@ use crate::{
             ReleaseResponse, ReserveSetRequest, ReserveSetResponse,
         },
         sidecar_adapter::v1::{
-            decision_response::Decision, DecisionRequest, DecisionResponse, LlmCallPostPayload,
+            decision_response::Decision, ClaimEstimate, DecisionRequest, DecisionResponse,
+            LlmCallPostPayload,
         },
     },
 };
@@ -293,13 +294,13 @@ pub struct DecisionOutput {
 ///     across all projected_claims (parsed to i64; clamps on overflow).
 ///     This is what the per-call reservation would be if we accepted
 ///     unchanged; projector uses it as Signal 2's baseline.
-///   * `budget_remaining_atomic` is read only from explicit runtime metadata
-///     keys (`budget_remaining_atomic` / `run_budget_remaining_atomic`).
-///     `inputs.projected_p90_atomic` is a risk-band hint, not available
-///     budget. Missing or malformed snapshots fall back to the unknown-budget
-///     sentinel so the projector records trajectory without inventing a false
-///     RUN_BUDGET_PROJECTION_EXCEEDED. The ledger reserve path remains the
-///     hard budget oracle.
+///   * `budget_remaining_atomic` is read from explicit runtime metadata only
+///     when the demo/test `allow_untrusted_budget_metadata` gate is enabled.
+///     Production keeps that gate false until the sidecar derives budget
+///     remaining from a signed/fenced ledger snapshot. Missing, malformed, or
+///     disabled snapshots fall back to the unknown-budget sentinel so the
+///     projector records trajectory without trusting caller-controlled budget
+///     values. The ledger reserve path remains the hard budget oracle.
 async fn call_projector_safe(
     state: &SidecarState,
     ctx: &DecisionContext,
@@ -329,7 +330,8 @@ async fn call_projector_safe(
     // doesn't see a wraparound.
     let this_call_atomic: i64 = i64::try_from(total).unwrap_or(i64::MAX);
 
-    let budget_remaining = projector_budget_remaining_atomic(req);
+    let budget_remaining =
+        projector_budget_remaining_atomic(req, state.inner.allow_untrusted_budget_metadata);
     // Signal 3 hint: passed through from DecisionRequest.planned_steps_hint
     // (SLICE_09 additive proto field; SLICE_12 SDK with_run_plan decorator
     // populates it).
@@ -370,7 +372,14 @@ async fn call_projector_safe(
 /// only accepted budget snapshot is an explicit adapter metadata field.
 /// Missing, malformed, or negative snapshots remain non-triggering so the
 /// projector never invents a false `RUN_BUDGET_PROJECTION_EXCEEDED`.
-fn projector_budget_remaining_atomic(req: &DecisionRequest) -> i64 {
+fn projector_budget_remaining_atomic(
+    req: &DecisionRequest,
+    allow_untrusted_budget_metadata: bool,
+) -> i64 {
+    if !allow_untrusted_budget_metadata {
+        return i64::MAX;
+    }
+
     req.inputs
         .as_ref()
         .and_then(|i| i.runtime_metadata.as_ref())
@@ -788,6 +797,27 @@ fn extract_claim_estimate(
     req.inputs.as_ref().and_then(|i| i.claim_estimate.as_ref())
 }
 
+fn insert_claim_estimate_payload_mirrors(payload: &mut serde_json::Value, est: &ClaimEstimate) {
+    let Some(obj) = payload.as_object_mut() else {
+        return;
+    };
+    if !est.model.is_empty() {
+        obj.insert("model".into(), serde_json::Value::String(est.model.clone()));
+    }
+    if !est.prompt_class.is_empty() {
+        obj.insert(
+            "prompt_class".into(),
+            serde_json::Value::String(est.prompt_class.clone()),
+        );
+    }
+    if !est.prompt_class_fingerprint.is_empty() {
+        obj.insert(
+            "prompt_class_fingerprint".into(),
+            serde_json::Value::String(est.prompt_class_fingerprint.clone()),
+        );
+    }
+}
+
 fn build_audit_decision_cloudevent(
     ctx: &DecisionContext,
     decision_id: &Uuid,
@@ -825,23 +855,7 @@ fn build_audit_decision_cloudevent(
         }
     }
     if let Some(est) = claim_estimate {
-        if let Some(obj) = payload.as_object_mut() {
-            if !est.model.is_empty() {
-                obj.insert("model".into(), serde_json::Value::String(est.model.clone()));
-            }
-            if !est.prompt_class.is_empty() {
-                obj.insert(
-                    "prompt_class".into(),
-                    serde_json::Value::String(est.prompt_class.clone()),
-                );
-            }
-            if !est.prompt_class_fingerprint.is_empty() {
-                obj.insert(
-                    "prompt_class_fingerprint".into(),
-                    serde_json::Value::String(est.prompt_class_fingerprint.clone()),
-                );
-            }
-        }
+        insert_claim_estimate_payload_mirrors(&mut payload, est);
     }
     let payload_bytes =
         serde_json::to_vec(&payload).expect("snapshot json serialization is infallible");
@@ -1079,6 +1093,9 @@ async fn run_record_denied_decision(
         if let Some(obj) = payload.as_object_mut() {
             obj.insert("spendguard".into(), enrichment.spendguard_context.clone());
         }
+    }
+    if let Some(est) = claim_estimate {
+        insert_claim_estimate_payload_mirrors(&mut payload, est);
     }
     let payload_bytes =
         serde_json::to_vec(&payload).expect("denied decision json serialization is infallible");
@@ -2400,7 +2417,7 @@ mod slice_02_decision_match_tests {
             ..Default::default()
         };
         assert_eq!(
-            projector_budget_remaining_atomic(&req),
+            projector_budget_remaining_atomic(&req, true),
             i64::MAX,
             "missing budget snapshot must not synthesize budget=0 and trigger RUN_BUDGET_PROJECTION_EXCEEDED"
         );
@@ -2425,7 +2442,7 @@ mod slice_02_decision_match_tests {
                 }),
                 ..Default::default()
             };
-            assert_eq!(projector_budget_remaining_atomic(&req), i64::MAX);
+            assert_eq!(projector_budget_remaining_atomic(&req, true), i64::MAX);
         }
     }
 
@@ -2439,7 +2456,7 @@ mod slice_02_decision_match_tests {
             ..Default::default()
         };
         assert_eq!(
-            projector_budget_remaining_atomic(&req),
+            projector_budget_remaining_atomic(&req, true),
             i64::MAX,
             "projected_p90_atomic is a risk-band hint, not remaining budget"
         );
@@ -2462,7 +2479,59 @@ mod slice_02_decision_match_tests {
             }),
             ..Default::default()
         };
-        assert_eq!(projector_budget_remaining_atomic(&req), 999);
+        assert_eq!(projector_budget_remaining_atomic(&req, true), 999);
+    }
+
+    #[test]
+    fn projector_budget_remaining_ignores_runtime_snapshot_without_trust_gate() {
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert(
+            "budget_remaining_atomic".to_string(),
+            prost_types::Value {
+                kind: Some(prost_types::value::Kind::StringValue("999".into())),
+            },
+        );
+        let req = DecisionRequest {
+            inputs: Some(Inputs {
+                runtime_metadata: Some(prost_types::Struct { fields }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            projector_budget_remaining_atomic(&req, false),
+            i64::MAX,
+            "production path must not trust caller-controlled runtime_metadata for budget remaining"
+        );
+    }
+
+    #[test]
+    fn claim_estimate_payload_mirrors_include_model_prompt_class_and_fingerprint() {
+        let mut payload = serde_json::json!({
+            "snapshot_hash": "00",
+            "reason_codes": ["RUN_BUDGET_PROJECTION_EXCEEDED"],
+        });
+        let est = ClaimEstimate {
+            model: "gpt-4o-mini".into(),
+            prompt_class: "support_triage".into(),
+            prompt_class_fingerprint: "pcfp_123".into(),
+            ..Default::default()
+        };
+
+        insert_claim_estimate_payload_mirrors(&mut payload, &est);
+
+        assert_eq!(
+            payload.get("model"),
+            Some(&serde_json::json!("gpt-4o-mini"))
+        );
+        assert_eq!(
+            payload.get("prompt_class"),
+            Some(&serde_json::json!("support_triage"))
+        );
+        assert_eq!(
+            payload.get("prompt_class_fingerprint"),
+            Some(&serde_json::json!("pcfp_123"))
+        );
     }
 
     #[test]

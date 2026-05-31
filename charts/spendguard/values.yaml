@@ -154,6 +154,11 @@ sidecar:
   # run-cost-projector Service so RUN_* projection stops are available
   # before Ledger Reserve.
   runCostProjectorUrl: ""
+  # Demo/test-only. When true, sidecar accepts caller-supplied
+  # runtime_metadata.budget_remaining_atomic for RUN_BUDGET_PROJECTION_EXCEEDED.
+  # Production renders fail if this is enabled; production must derive budget
+  # remaining from a signed/fenced ledger snapshot.
+  allowUntrustedBudgetMetadata: false
   # Round-2 #3: Contract + schema bundle bootstrap. The chart's bundles
   # init container pre-pulls these .tgz files into the bundles-data
   # secret; the sidecar verifies the byte-exact hash before installing.
@@ -428,8 +433,11 @@ egressProxy:
   #   * projector unset → no RUN_* code; run_predicted_remaining_steps=-1
   #     sentinel per audit-chain-prediction-extension-v1alpha1.md §3.3.
   #
-  # Production deployments SHOULD set both — that's the entire point of
-  # SLICE_10 (lighting up all 17 audit columns in production).
+  # Production deployments SHOULD set outputPredictorEndpoint, or leave it
+  # empty to use the chart's production default when outputPredictor.enabled.
+  # Do not wire runCostProjectorEndpoint when the sidecar is also wired to
+  # run_cost_projector: Project is mutating and one logical call must advance
+  # RunState exactly once. The sidecar is the authoritative default caller.
   #
   # Format: gRPC endpoint URL (http://host:port for plaintext or
   # https://host:port + chart.profile=production for mTLS once SLICE_07
@@ -437,9 +445,9 @@ egressProxy:
   outputPredictorEndpoint: ""
   runCostProjectorEndpoint: ""
   # ── Production gate ──
-  # Under chart.profile=production both endpoints SHOULD be set; warn
-  # (not fail) for now since the proxy is opt-in and demo deployments
-  # may not need predictor enrichment.
+  # Under chart.profile=production the output predictor endpoint SHOULD be set;
+  # run_cost_projector stays empty by default to avoid double-advancing mutable
+  # run state through both proxy and sidecar.
   resources:
     requests: { cpu: "50m",  memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }

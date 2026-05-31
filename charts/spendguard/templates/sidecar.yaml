@@ -32,6 +32,9 @@
 {{- if and (eq .Values.chart.profile "production") .Values.runCostProjector.enabled (eq $runCostProjectorUrl "") -}}
 {{- $runCostProjectorUrl = printf "https://%s-run-cost-projector:50055" (include "spendguard.fullname" .) -}}
 {{- end -}}
+{{- if and (eq .Values.chart.profile "production") .Values.sidecar.allowUntrustedBudgetMetadata -}}
+{{- fail "sidecar.allowUntrustedBudgetMetadata is demo/test-only and must be false under chart.profile=production" -}}
+{{- end -}}
 {{- /* Phase 5 GA hardening S5: multi-pod safety gates. */ -}}
 {{- if gt (int .Values.sidecar.replicas) 1 }}
 {{- if not .Values.sidecar.acknowledgeMultiPod }}
@@ -87,6 +90,9 @@ spec:
             - { name: SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID, value: "sidecar-$(_POD_NAME)" }
             {{- end }}
             - { name: SPENDGUARD_SIDECAR_RESERVATION_TTL_SECONDS, value: {{ .Values.sidecar.reservationTtlSeconds | quote }} }
+            {{- if .Values.sidecar.allowUntrustedBudgetMetadata }}
+            - { name: SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA, value: "true" }
+            {{- end }}
             - name: SPENDGUARD_SIDECAR_LEDGER_URL
               value: "https://{{ include "spendguard.fullname" . }}-ledger:50051"
             - name: SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL
