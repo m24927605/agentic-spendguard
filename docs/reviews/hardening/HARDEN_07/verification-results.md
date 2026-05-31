@@ -104,6 +104,10 @@ Findings fixed in-slice:
 - Major: NetworkPolicy chaos could false-pass if the cluster had no external egress. Fixed by adding an unlabeled control pod external egress check before the enforced deny check.
 - Minor: Helm checks were global string greps. Fixed with YAML-level per-workload container security and database secret assertions.
 
+Additional defect found by the clean verifier:
+
+- `run_cost_projector` had a cold-miss race where concurrent first `Project` calls for the same run could each insert a separate `RunState` and bypass the intended per-run mutex. Fixed with `RunStateCache::get_or_insert` and regression coverage; `cargo test --manifest-path services/run_cost_projector/Cargo.toml -- --nocapture` passed with 55 library tests, 5 binary tests, and 3 integration tests.
+
 ## Demo Regression
 
 Command:

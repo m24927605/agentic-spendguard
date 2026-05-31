@@ -198,7 +198,7 @@ impl RunCostProjector for RunCostProjectorSvc {
                 let fresh = recovered.unwrap_or_else(|| {
                     RunState::new(tenant_id, run_id, req.agent_id.clone(), req.model.clone())
                 });
-                self.state_cache.insert(key.clone(), fresh)
+                self.state_cache.get_or_insert(key.clone(), fresh)
             }
         };
 
