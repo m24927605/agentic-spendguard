@@ -63,7 +63,7 @@ use tracing::{debug, error, info, warn};
 use super::circuit_breaker::{CircuitBreakerState, Permit};
 use super::provider_clients::{anthropic::AnthropicClient, gemini::GeminiClient, ProviderError};
 use super::sample_rate_state::{SampleRateState, ShadowKey};
-use super::security::{CountTokensQuota, DynShadowSecurityStore};
+use super::security::{DynCountTokensQuota, DynShadowSecurityStore};
 use crate::proto::common::v1::CloudEvent;
 
 /// CloudEvent type string for tokenizer drift alerts (spec §4 +
@@ -261,7 +261,7 @@ pub struct ShadowWorkerDeps {
     pub alert_sink: Arc<dyn DriftAlertSink>,
     pub sample_rate_overrides: Option<Arc<dyn SampleRateOverrideStore>>,
     pub security: DynShadowSecurityStore,
-    pub count_tokens_quota: Arc<CountTokensQuota>,
+    pub count_tokens_quota: DynCountTokensQuota,
     pub signer: Arc<dyn Signer>,
     /// Producer source URI for the signed CloudEvent, e.g.
     /// `spendguard://tokenizer-service/region-us-west2`.
@@ -382,18 +382,34 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
         );
         return ShadowOutcome::Skipped;
     }
-    if !deps.count_tokens_quota.try_acquire(
-        event.tenant_id,
-        provider,
-        settings.count_tokens_quota_per_minute,
-    ) {
-        debug!(
-            tenant = %event.tenant_id,
+    match deps
+        .count_tokens_quota
+        .try_acquire(
+            event.tenant_id,
             provider,
-            quota_per_minute = settings.count_tokens_quota_per_minute,
-            "tokenizer count_tokens quota exhausted; skipping provider call"
-        );
-        return ShadowOutcome::Skipped;
+            settings.count_tokens_quota_per_minute,
+        )
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            debug!(
+                tenant = %event.tenant_id,
+                provider,
+                quota_per_minute = settings.count_tokens_quota_per_minute,
+                "tokenizer count_tokens quota exhausted; skipping provider call"
+            );
+            return ShadowOutcome::Skipped;
+        }
+        Err(e) => {
+            warn!(
+                error = ?e,
+                tenant = %event.tenant_id,
+                provider,
+                "failed to claim tokenizer count_tokens quota; failing closed"
+            );
+            return ShadowOutcome::Skipped;
+        }
     }
 
     // Dispatch to the right provider only after tenant opt-in and quota pass.
@@ -717,7 +733,7 @@ impl DriftAlertSink for InMemoryDriftAlertSink {
 mod tests {
     use super::super::circuit_breaker::CircuitBreakerConfig;
     use super::super::sample_rate_state::SampleRateConfig;
-    use super::super::security::StaticShadowSecurityStore;
+    use super::super::security::{LocalCountTokensQuota, StaticShadowSecurityStore};
     use super::*;
     use spendguard_signing::DisabledSigner;
     use std::time::Duration;
@@ -752,7 +768,7 @@ mod tests {
             alert_sink: Arc::new(InMemoryDriftAlertSink::default()),
             sample_rate_overrides: None,
             security: Arc::new(StaticShadowSecurityStore::allow_all_for_tests(60)),
-            count_tokens_quota: Arc::new(CountTokensQuota::default()),
+            count_tokens_quota: Arc::new(LocalCountTokensQuota::default()),
             signer: Arc::new(DisabledSigner::for_test("tokenizer-service:test".into())),
             event_source: "spendguard://tokenizer-service/test".into(),
             channel_capacity: 16,

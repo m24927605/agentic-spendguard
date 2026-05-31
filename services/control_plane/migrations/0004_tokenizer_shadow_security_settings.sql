@@ -46,6 +46,49 @@ COMMENT ON COLUMN tokenizer_shadow_security_settings.pii_shadow_enabled IS
 COMMENT ON COLUMN tokenizer_shadow_security_settings.count_tokens_quota_per_minute IS
     'Per-provider count_tokens calls allowed per tenant per minute. Zero blocks all provider calls.';
 
+CREATE TABLE tokenizer_count_tokens_quota_usage (
+    tenant_id     UUID        NOT NULL,
+    provider      TEXT        NOT NULL CHECK (octet_length(provider) BETWEEN 1 AND 64),
+    window_start  TIMESTAMPTZ NOT NULL,
+    used_count    INTEGER     NOT NULL DEFAULT 0 CHECK (used_count >= 0),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+
+    PRIMARY KEY (tenant_id, provider, window_start)
+);
+
+ALTER TABLE tokenizer_count_tokens_quota_usage ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tokenizer_count_tokens_quota_usage FORCE ROW LEVEL SECURITY;
+
+CREATE POLICY tokenizer_count_tokens_quota_usage_tenant_isolation
+    ON tokenizer_count_tokens_quota_usage
+    FOR ALL
+    USING (
+        tenant_id = COALESCE(
+            NULLIF(current_setting('app.current_tenant_id', TRUE), ''),
+            '00000000-0000-0000-0000-000000000000'
+        )::uuid
+    )
+    WITH CHECK (
+        tenant_id = COALESCE(
+            NULLIF(current_setting('app.current_tenant_id', TRUE), ''),
+            '00000000-0000-0000-0000-000000000000'
+        )::uuid
+    );
+
+REVOKE SELECT, INSERT, UPDATE, DELETE ON tokenizer_count_tokens_quota_usage FROM PUBLIC;
+
+GRANT SELECT, INSERT, UPDATE, DELETE
+    ON tokenizer_count_tokens_quota_usage
+    TO control_plane_application_role;
+
+CREATE INDEX tokenizer_count_tokens_quota_usage_cleanup_idx
+    ON tokenizer_count_tokens_quota_usage (tenant_id, window_start);
+
+COMMENT ON TABLE tokenizer_count_tokens_quota_usage IS
+    'Shared per-(tenant, provider, minute) usage ledger for tokenizer provider count_tokens quota. Tokenizer replicas claim quota here atomically so horizontal scaling cannot multiply the configured cap.';
+COMMENT ON COLUMN tokenizer_count_tokens_quota_usage.window_start IS
+    'UTC minute bucket from date_trunc(''minute'', clock_timestamp()).';
+
 ALTER TABLE control_plane_audit_outbox
     DROP CONSTRAINT IF EXISTS control_plane_audit_outbox_event_type_check;
 
@@ -70,5 +113,10 @@ BEGIN
      WHERE polname = 'tokenizer_shadow_security_settings_tenant_isolation';
     IF NOT FOUND THEN
         RAISE EXCEPTION 'tokenizer_shadow_security_settings_tenant_isolation policy missing';
+    END IF;
+    PERFORM 1 FROM pg_policy
+     WHERE polname = 'tokenizer_count_tokens_quota_usage_tenant_isolation';
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'tokenizer_count_tokens_quota_usage_tenant_isolation policy missing';
     END IF;
 END $$;

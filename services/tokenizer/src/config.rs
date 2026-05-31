@@ -97,12 +97,13 @@ pub struct Config {
     pub database_url: String,
 
     /// Optional Postgres URL for control_plane's durable tokenizer shadow
-    /// tables: `tokenizer_sampling_rate_overrides` and
-    /// `tokenizer_shadow_security_settings`. When configured, the worker
-    /// refreshes the current event's tenant/model overrides under that
-    /// tenant's RLS context before rate-gating or provider raw-text egress.
-    /// When unset, sampling overrides are absent and raw-text provider calls
-    /// are default-denied.
+    /// tables: `tokenizer_sampling_rate_overrides`,
+    /// `tokenizer_shadow_security_settings`, and
+    /// `tokenizer_count_tokens_quota_usage`. When configured, the worker
+    /// refreshes the current event's tenant/model overrides and claims
+    /// count_tokens quota under that tenant's RLS context before provider
+    /// raw-text egress. When unset, sampling overrides are absent and raw-text
+    /// provider calls are default-denied.
     #[serde(default)]
     pub sampling_override_database_url: String,
 

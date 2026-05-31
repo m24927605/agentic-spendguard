@@ -282,10 +282,11 @@ tokenizer:
   # production renders the env var regardless when shadowEnabled=true.
   databaseSecretEnabled: false
   # Control-plane Postgres URL for tokenizer_sampling_rate_overrides and
-  # tokenizer_shadow_security_settings is read from postgres.existingSecret /
-  # controlPlaneUrlKey. The shadow worker refreshes the current tenant under
-  # RLS before rate gating/provider egress, so persisted operator overrides,
-  # PII opt-in, and count_tokens quotas actually affect sampling.
+  # tokenizer_shadow_security_settings and tokenizer_count_tokens_quota_usage
+  # are read from postgres.existingSecret / controlPlaneUrlKey. The shadow
+  # worker refreshes the current tenant and claims provider quota under RLS
+  # before rate gating/provider egress, so persisted operator overrides, PII
+  # opt-in, and count_tokens quotas actually affect sampling across replicas.
   samplingOverrideDatabaseSecretEnabled: false
   # Optional Secret holding Anthropic + Gemini Tier 1 count_tokens
   # API keys. Expected keys inside the Secret:
