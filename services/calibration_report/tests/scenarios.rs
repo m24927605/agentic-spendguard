@@ -161,9 +161,9 @@ fn scenario_cold_start_dominated_triggers_l1_dominance() {
     r.calibration_ratios.push(CalibrationRatio {
         model: "gpt-4o".into(),
         strategy: "A".into(),
-        p50: 4.0,
-        p95: 8.0,
-        p99: 12.0,
+        p50: 0.5,
+        p95: 0.8,
+        p99: 0.95,
         sample_size: 900,
     });
     r.calibration_ratios.push(CalibrationRatio {
@@ -180,6 +180,10 @@ fn scenario_cold_start_dominated_triggers_l1_dominance() {
         codes.contains(&"COLD_START_L1_DOMINANT"),
         "cold-start scenario should fire COLD_START_L1_DOMINANT; got {codes:?}"
     );
+    assert!(
+        !codes.contains(&"P95_CRITICAL_OVER_1_50"),
+        "cold-start scenario should not smuggle in the old reserved/actual Strategy A ratio direction; got {codes:?}"
+    );
 }
 
 // ---- Scenario 4: plugin failing --------------------------------------------
@@ -190,9 +194,9 @@ fn scenario_plugin_failing_triggers_c_absent() {
     r.calibration_ratios.push(CalibrationRatio {
         model: "gpt-4o".into(),
         strategy: "A".into(),
-        p50: 4.0,
-        p95: 8.0,
-        p99: 12.0,
+        p50: 0.5,
+        p95: 0.8,
+        p99: 0.95,
         sample_size: 200,
     });
     r.calibration_ratios.push(CalibrationRatio {
@@ -209,6 +213,10 @@ fn scenario_plugin_failing_triggers_c_absent() {
     assert!(
         codes.contains(&"STRATEGY_C_ABSENT"),
         "plugin-failing scenario should fire STRATEGY_C_ABSENT; got {codes:?}"
+    );
+    assert!(
+        !codes.contains(&"P95_CRITICAL_OVER_1_50"),
+        "plugin-failing scenario should not smuggle in the old reserved/actual Strategy A ratio direction; got {codes:?}"
     );
 }
 
