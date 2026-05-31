@@ -46,8 +46,8 @@ pub fn validate_client_cert_id(client_cert_id: &str) -> Result<(), anyhow::Error
     if client_cert_id.is_empty() {
         anyhow::bail!("client_cert_id is empty");
     }
-    if client_cert_id.len() > 63 {
-        anyhow::bail!("client_cert_id `{client_cert_id}` exceeds 63 bytes");
+    if client_cert_id.len() > 44 {
+        anyhow::bail!("client_cert_id `{client_cert_id}` exceeds 44 bytes");
     }
     if client_cert_id == "." || client_cert_id == ".." {
         anyhow::bail!("client_cert_id `{client_cert_id}` is path traversal");
@@ -187,7 +187,7 @@ mod tests {
             "tenant/a",
             "tenant.a",
             "tenant a",
-            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
         ] {
             assert!(
                 validate_client_cert_id(bad).is_err(),

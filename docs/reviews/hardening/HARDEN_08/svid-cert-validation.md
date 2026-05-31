@@ -18,9 +18,13 @@
 - R1 hardening requires `--tls-client-ca` whenever the reference plugin starts
   in TLS mode; TLS without client auth is no longer a supported "secure" mode.
 - Control-plane plugin registration/update validation now uses the same
-  `[A-Za-z0-9_-]{1,63}` `client_cert_id` shape that Helm and runtime mounts require.
+  `[A-Za-z0-9_-]{1,44}` `client_cert_id` shape that Helm and runtime mounts require.
 - R2 hardening bounds SVID reload cached-channel reuse to 60 seconds and
   makes the reference plugin reject extra SPIFFE URI identities.
+- R3 hardening starts the 60-second rotation grace window at first reload
+  failure, prevents Kubernetes resource-name truncation collisions by capping
+  `client_cert_id` to 44 bytes, and requires URI SAN rather than commonName in
+  the reference plugin.
 
 ## Local verification
 
@@ -58,6 +62,6 @@ make demo-up DEMO_MODE=plugin_c_synthetic
 PASS: breaker regression, real Rust PluginClient mTLS/SVID integration,
 and Python reference plugin SVID fail-closed checks ran successfully
 
-helm template ... clientCertId=64-byte-string
-PASS: render failed closed with `clientCertId must match ^[A-Za-z0-9_-]{1,63}$`
+helm template ... clientCertId=45-byte-string
+PASS: render failed closed with `clientCertId must match ^[A-Za-z0-9_-]{1,44}$`
 ```

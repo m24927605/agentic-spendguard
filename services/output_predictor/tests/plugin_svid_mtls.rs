@@ -43,7 +43,7 @@ fn client_cert_id_path_traversal_fails_closed() {
         "tenant.one",
         "tenant one",
         "..",
-        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
     ] {
         assert!(
             validate_client_cert_id(bad).is_err(),
@@ -74,6 +74,7 @@ async fn plugin_client_presents_tenant_svid_over_real_mtls() {
     use tempfile::TempDir;
     use tonic::transport::{Certificate as TonicCertificate, Identity, Server, ServerTlsConfig};
     use tonic::{Request, Response, Status};
+    use x509_parser::extensions::GeneralName;
 
     #[derive(Default)]
     struct MockPlugin;
@@ -89,6 +90,29 @@ async fn plugin_client_presents_tenant_svid_over_real_mtls() {
                 .ok_or_else(|| Status::permission_denied("missing client cert"))?;
             if auth.is_empty() {
                 return Err(Status::permission_denied("missing client cert"));
+            }
+            let (_, cert) = x509_parser::parse_x509_certificate(auth[0].as_ref())
+                .map_err(|_| Status::permission_denied("bad client cert"))?;
+            let san = cert
+                .tbs_certificate
+                .subject_alternative_name()
+                .map_err(|_| Status::permission_denied("bad client cert san"))?
+                .ok_or_else(|| Status::permission_denied("missing client cert san"))?;
+            let uris: Vec<&str> = san
+                .value
+                .general_names
+                .iter()
+                .filter_map(|name| match name {
+                    GeneralName::URI(uri) => Some(*uri),
+                    _ => None,
+                })
+                .collect();
+            let expected = subject_uri_for_tenant(
+                &Uuid::parse_str(&request.get_ref().tenant_id)
+                    .map_err(|_| Status::invalid_argument("bad tenant_id"))?,
+            );
+            if uris.as_slice() != [expected.as_str()] {
+                return Err(Status::permission_denied("client SVID tenant mismatch"));
             }
             Ok(Response::new(PredictResponse {
                 predicted_output_tokens: 42,
@@ -205,7 +229,7 @@ async fn plugin_client_presents_tenant_svid_over_real_mtls() {
     let response = client
         .predict(
             &tenant,
-            endpoint,
+            endpoint.clone(),
             PredictRequest {
                 spendguard_call_id: "018fcf9a-3d2d-7b37-9f21-0f27de0b20c2".into(),
                 tenant_id: tenant.to_string(),
@@ -222,5 +246,70 @@ async fn plugin_client_presents_tenant_svid_over_real_mtls() {
         .await
         .unwrap();
     assert_eq!(response.predicted_output_tokens, 42);
+
+    let tenant_b = Uuid::parse_str("018fcf9a-3d2d-7b37-9f21-0f27de0b20c2").unwrap();
+    let (tenant_b_cert_pem, tenant_b_key_pem) = signed_cert(
+        &ca,
+        &ca_key,
+        "spendguard-predictor-client-b",
+        vec![SanType::URI(
+            subject_uri_for_tenant(&tenant_b).try_into().unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
+    std::fs::write(svid_dir.join("tls.crt"), &tenant_b_cert_pem).unwrap();
+    std::fs::write(svid_dir.join("tls.key"), &tenant_b_key_pem).unwrap();
+    let err = client
+        .predict(
+            &tenant,
+            endpoint.clone(),
+            PredictRequest {
+                spendguard_call_id: "018fcf9a-3d2d-7b37-9f21-0f27de0b20c3".into(),
+                tenant_id: tenant.to_string(),
+                model: "gpt-4o".into(),
+                agent_id: "agent-a".into(),
+                prompt_class: "chat_short".into(),
+                input_tokens: 10,
+                max_tokens_requested: 100,
+                classifier_version: "v1alpha1".into(),
+                prompt_class_fingerprint: "abc".into(),
+                features: None,
+            },
+        )
+        .await
+        .expect_err("tenant-B SVID must fail closed for tenant A");
+    assert!(err.message().contains("subject mismatch"), "got: {err:?}");
+
+    let (rotated_cert_pem, rotated_key_pem) = signed_cert(
+        &ca,
+        &ca_key,
+        "spendguard-predictor-client-rotated",
+        vec![SanType::URI(
+            subject_uri_for_tenant(&tenant).try_into().unwrap(),
+        )],
+        ExtendedKeyUsagePurpose::ClientAuth,
+    );
+    std::fs::write(svid_dir.join("tls.crt"), &rotated_cert_pem).unwrap();
+    std::fs::write(svid_dir.join("tls.key"), &rotated_key_pem).unwrap();
+    let rotated = client
+        .predict(
+            &tenant,
+            endpoint,
+            PredictRequest {
+                spendguard_call_id: "018fcf9a-3d2d-7b37-9f21-0f27de0b20c4".into(),
+                tenant_id: tenant.to_string(),
+                model: "gpt-4o".into(),
+                agent_id: "agent-a".into(),
+                prompt_class: "chat_short".into(),
+                input_tokens: 10,
+                max_tokens_requested: 100,
+                classifier_version: "v1alpha1".into(),
+                prompt_class_fingerprint: "abc".into(),
+                features: None,
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(rotated.predicted_output_tokens, 42);
     server.abort();
 }

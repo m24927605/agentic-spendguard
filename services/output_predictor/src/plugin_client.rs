@@ -218,7 +218,7 @@ struct CachedChannel {
     /// Cloning is cheap (Arc-backed PluginEndpoint).
     endpoint_snapshot: Arc<PluginEndpoint>,
     material_fingerprint_hex: Option<String>,
-    established_at: Instant,
+    svid_reload_failure_started_at: Option<Instant>,
     channel: Channel,
 }
 
@@ -352,8 +352,24 @@ impl PluginClient {
             Some(source) => match source.resolve(tenant, &endpoint) {
                 Ok(materials) => Some(materials),
                 Err(err) => {
+                    if !is_transient_svid_reload_error(&err) {
+                        return Err(err);
+                    }
                     if let Some(cached) = cached_for_endpoint {
-                        if cached.established_at.elapsed() > SVID_ROTATION_RELOAD_GRACE {
+                        let now = Instant::now();
+                        let failure_started_at = {
+                            let mut write = self.channels.write();
+                            let entry = write.get_mut(tenant).filter(|cached| {
+                                cached.endpoint_snapshot.same_wire_shape(&endpoint)
+                            });
+                            match entry {
+                                Some(entry) => {
+                                    *entry.svid_reload_failure_started_at.get_or_insert(now)
+                                }
+                                None => now,
+                            }
+                        };
+                        if now.duration_since(failure_started_at) > SVID_ROTATION_RELOAD_GRACE {
                             return Err(err).with_context(|| {
                                 format!(
                                     "tenant SVID material reload still failing after {}s grace",
@@ -390,7 +406,12 @@ impl PluginClient {
                 if cached.endpoint_snapshot.same_wire_shape(&endpoint)
                     && cached.material_fingerprint_hex == material_fingerprint_hex
                 {
-                    return Ok(cached.channel.clone());
+                    let channel = cached.channel.clone();
+                    drop(read);
+                    if let Some(cached) = self.channels.write().get_mut(tenant) {
+                        cached.svid_reload_failure_started_at = None;
+                    }
+                    return Ok(channel);
                 }
             }
         }
@@ -403,7 +424,7 @@ impl PluginClient {
             CachedChannel {
                 endpoint_snapshot: endpoint.clone(),
                 material_fingerprint_hex,
-                established_at: Instant::now(),
+                svid_reload_failure_started_at: None,
                 channel: channel.clone(),
             },
         );
@@ -417,6 +438,16 @@ fn material_fingerprint_hex(cert_pem: &[u8], key_pem: &[u8], ca_pem: &[u8]) -> S
     hasher.update(key_pem);
     hasher.update(ca_pem);
     hex::encode(hasher.finalize())
+}
+
+fn is_transient_svid_reload_error(err: &anyhow::Error) -> bool {
+    let msg = format!("{err:#}");
+    msg.contains("read tenant SVID cert")
+        || msg.contains("read tenant SVID key")
+        || msg.contains("read tenant plugin trust CA")
+        || msg.contains("parse SVID PEM block")
+        || msg.contains("parse SVID x509 certificate")
+        || msg.contains("parse SVID subjectAltName extension")
 }
 
 /// Construct a fresh tonic Channel against the customer plugin endpoint.

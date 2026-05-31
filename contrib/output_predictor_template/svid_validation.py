@@ -32,11 +32,10 @@ def extract_spiffe_uri_from_auth_context(auth_context: dict[str | bytes, list[by
         key_text = key.decode("utf-8", errors="replace") if isinstance(key, bytes) else key
         normalised.setdefault(key_text, []).extend(values)
     uri_values: list[str] = []
-    for key in ("x509_subject_alternative_name", "x509_common_name"):
-        for raw in normalised.get(key, []):
-            value = _normalise_auth_value(raw)
-            if value.startswith("spiffe://"):
-                uri_values.append(value)
+    for raw in normalised.get("x509_subject_alternative_name", []):
+        value = _normalise_auth_value(raw)
+        if value.startswith("spiffe://"):
+            uri_values.append(value)
     unique = sorted(set(uri_values))
     if len(unique) > 1:
         raise ValueError("multiple SVID URI subjects presented")

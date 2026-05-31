@@ -27,8 +27,8 @@ spec:
 {{- if not $binding.clientCertId -}}
 {{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].clientCertId is required" $idx) -}}
 {{- end -}}
-{{- if not (regexMatch "^[A-Za-z0-9_-]{1,63}$" (toString $binding.clientCertId)) -}}
-{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].clientCertId must match ^[A-Za-z0-9_-]{1,63}$" $idx) -}}
+{{- if not (regexMatch "^[A-Za-z0-9_-]{1,44}$" (toString $binding.clientCertId)) -}}
+{{- fail (printf "outputPredictor.pluginClientSvid.bindings[%d].clientCertId must match ^[A-Za-z0-9_-]{1,44}$" $idx) -}}
 {{- end -}}
 {{- $secretName := default (printf "%s-plugin-client-%s" $fullname $binding.clientCertId) $binding.secretName -}}
 apiVersion: cert-manager.io/v1
