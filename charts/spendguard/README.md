@@ -105,10 +105,15 @@ kubectl get pods -l app.kubernetes.io/name=spendguard
 ```bash
 helm lint charts/spendguard
 helm template spendguard charts/spendguard --namespace test | kubectl apply --dry-run=client -f -
+scripts/release/validate-production-helm-values.sh
 ```
 
-A `kind create cluster` + `helm install` end-to-end is the next
-validation layer (deferred to operator docs).
+For production values, start from
+[`values-production.example.yaml`](values-production.example.yaml) and read
+[`../../docs/deployment/production-helm-values.md`](../../docs/deployment/production-helm-values.md).
+The production values validator renders the chart, checks that database URLs are
+Secret references, verifies per-tenant SVID Certificate coverage when Strategy C
+is enabled, and enforces the container security baseline.
 
 ## Versioning
 
