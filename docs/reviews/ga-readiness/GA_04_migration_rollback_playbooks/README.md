@@ -9,13 +9,24 @@ GA_04 adds a checked-in migration inventory, operator playbooks for migration an
 | Gate | Result |
 |---|---|
 | `scripts/release/verify-migration-inventory.sh` | PASS - verified `docs/operations/migration-inventory-v1alpha1.txt` |
-| `CONTAINER=spendguard-ga04-migrations EVIDENCE_PREFIX=/tmp/spendguard-ga04 scripts/verify-migrations-postgres16.sh` | PASS - applied 77 direct deploy migrations on Postgres 16 |
+| `CONTAINER=spendguard-ga04-migrations EVIDENCE_PREFIX=/tmp/spendguard-ga04 scripts/verify-migrations-postgres16.sh` | PASS - applied 77 direct deploy migrations on Postgres 16.14 |
 | `helm template spendguard charts/spendguard --set chart.profile=demo` | PASS |
 | `helm template spendguard charts/spendguard -f charts/spendguard/values-production.example.yaml` | PASS |
 | `scripts/release/build-release-bundle.sh --output /tmp/spendguard-ga04-release-bundle` | PASS |
 | `scripts/release/check-release-bundle.sh /tmp/spendguard-ga04-release-bundle` | PASS |
 | Migration playbook backup/restore checkpoints | Covered in `docs/operations/migration-playbook.md` |
 | Rollback decision tree and forward-fix warnings | Covered in `docs/operations/rollback-playbook.md` |
+
+## Reproducibility Record
+
+| Item | Value |
+|---|---|
+| Evidence refresh commit | `6586c694da03b52ad5bc105f943ab87994f5a2e0` plus R1 retry-stability patch in this branch |
+| Postgres image | `postgres:16-alpine` |
+| Server version evidence | `/tmp/spendguard-ga04-postgres-version.txt`: `server_version_num=160014`, `server_version=16.14` |
+| Helm demo render | `/tmp/spendguard-ga04-helm-demo.yaml` |
+| Helm production render | `/tmp/spendguard-ga04-helm-production.yaml` |
+| Release bundle | `/tmp/spendguard-ga04-release-bundle-r1` |
 
 ## Postgres 16 Smoke Output
 
@@ -30,6 +41,7 @@ GA_04 adds a checked-in migration inventory, operator playbooks for migration an
 | Round | Reviewer | Outcome |
 |---|---|---|
 | R1 | codex CLI via AIT fallback | Pending |
+| R1 fixes | implementer | Moved write freeze before backups, enforced Postgres 16.x server version, made release bundle inventory consume the checked-in inventory, and added reproducible evidence references. |
 
 ## Staff+ Decisions
 

@@ -43,8 +43,22 @@ psql_exec() {
         psql -v ON_ERROR_STOP=1 -U spendguard -d "${db}" "$@"
 }
 
-server_version_num="$(psql_exec postgres -At -c "SHOW server_version_num;" | tr -d '[:space:]')"
-server_version="$(psql_exec postgres -At -c "SHOW server_version;" | tr -d '\r')"
+version_error_file="$(mktemp)"
+server_version_num=""
+server_version=""
+for _ in $(seq 1 30); do
+    if server_version_num="$(psql_exec postgres -At -c "SHOW server_version_num;" 2>"${version_error_file}" | tr -d '[:space:]')" &&
+        server_version="$(psql_exec postgres -At -c "SHOW server_version;" 2>>"${version_error_file}" | tr -d '\r')"; then
+        break
+    fi
+    sleep 1
+done
+if [[ -z "${server_version_num}" ]]; then
+    log "FATAL: unable to query Postgres server version"
+    cat "${version_error_file}" >&2
+    exit 1
+fi
+rm -f "${version_error_file}"
 if [[ ! "${server_version_num}" =~ ^[0-9]+$ || "${server_version_num}" -lt 160000 || "${server_version_num}" -ge 170000 ]]; then
     log "FATAL: expected Postgres 16.x, got server_version_num=${server_version_num} (${server_version})"
     exit 1
