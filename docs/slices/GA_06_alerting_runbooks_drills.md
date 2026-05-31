@@ -1,7 +1,7 @@
 # GA 06 - Alerting, Runbooks, and Drills
 
 > **Branch**: `ga/GA_06_alerting_runbooks_drills`
-> **Status**: implementation
+> **Status**: implementation review
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium-large; alert rules, runbooks, drill scripts
 
@@ -99,11 +99,12 @@ Reviewer must check runbook usefulness, not just file existence.
 | R1 Reviewer (codex CLI) | `SpendGuardOutboxNoLeader` must page when all forwarder series are absent | Added `absent(spendguard_outbox_forwarder_is_leader)` branch and validator guard |
 | R1 Reviewer (codex CLI) | PrometheusRule metadata name must remain stable for `kubectl apply` upgrades | Restored `metadata.name: spendguard-slos` |
 | R1 Reviewer (codex CLI) | Outbox lag drill must hold the actual `> 60` predicate through alert `for: 5m` | Drill now waits for `> 60` and holds for `ALERT_FOR_SECONDS=300` by default |
+| R2 Reviewer (codex CLI) | Alert rules, runbook validator, runbooks, and drill are consistent with GA_06 scope | No actionable regressions found; no Staff+ arbitration required |
 
 ## §14. Merge Checklist
 
 - [x] Alert/runbook validator passes
 - [x] Prometheus rules parse
 - [x] Drill evidence recorded
-- [ ] AIT review clean or arbitration recorded
+- [x] AIT review clean or arbitration recorded
 - [ ] Memory updated

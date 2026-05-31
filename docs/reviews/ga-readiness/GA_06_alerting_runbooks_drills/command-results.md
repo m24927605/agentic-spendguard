@@ -12,6 +12,9 @@ Date: 2026-05-31
 | `make demo-up DEMO_MODE=default` | PASS | Exercised inside `tests/e2e/outbox_lag_recovery.sh` |
 | `git diff --check` | PASS | No whitespace errors |
 | Cargo build/test | N/A | No Rust service code changed in GA_06 |
+| `ait run --adapter codex --review-mode adversarial ...` | CLI FAIL | Local AIT rejected `--review-mode`; direct codex CLI review used as the recorded reviewer fallback |
+| Codex CLI adversarial review R1 | FINDINGS FIXED | Fixed absent-series no-leader alerting, stable PrometheusRule name, and strict `>60` plus 5m hold drill semantics |
+| Codex CLI adversarial review R2 | PASS | Reviewer found no actionable regressions in alert rules, validator, runbooks, or drill |
 
 ## Drill Evidence
 
@@ -25,3 +28,8 @@ Date: 2026-05-31
 | `alert_predicate_hold_seconds` | `300` |
 | `pending_after_recovery` | `0` |
 | `lag_metric_after_recovery` | `0` |
+
+Notes:
+
+- AIT CLI compatibility: `ait run --adapter codex --review-mode adversarial ...` failed locally with `unrecognized arguments: --review-mode`; direct codex CLI review was run with `codex review --base main` and recorded per round.
+- R1 findings were fixed in-slice. R2 was clean, so no Staff+ arbitration was needed.
