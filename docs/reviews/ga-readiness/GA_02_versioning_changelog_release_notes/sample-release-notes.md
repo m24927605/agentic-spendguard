@@ -10,7 +10,7 @@ GA readiness release-note validation covers the hardened predictor upgrade basel
 
 ## Breaking Changes
 
-None for this sample validation note. Actual release notes must list any API, chart, migration, or operator behavior changes.
+None for this sample validation note. The GA_02 validator still requires this section so a real release has an explicit breaking-change decision.
 
 ## Migrations
 

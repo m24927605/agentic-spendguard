@@ -127,8 +127,12 @@ validate_file() {
         echo "release notes section is empty: $section" >&2
         exit 1
       fi
-      if grep -Eq '<[^>]+>|Describe the|List ' <<<"$body"; then
+      if grep -Eiq '<[^>]+>|Describe the|List |TODO|TBD|fill in|to be determined|replace this|placeholder' <<<"$body"; then
         echo "release notes section still contains template text: $section" >&2
+        exit 1
+      fi
+      if [[ "$body" =~ ^[Nn]one\.?$ && "$section" != "Breaking Changes" ]]; then
+        echo "release notes section must contain concrete content: $section" >&2
         exit 1
       fi
     fi

@@ -32,19 +32,13 @@ Do not use `latest`, `current`, or `stable` as a release identifier in operator 
 
 ## Dry-Run Tag Check
 
-This command is non-destructive and checks whether a candidate tag already exists:
-
-```bash
-git rev-parse -q --verify refs/tags/v2026.05.31-ga.0 >/dev/null && echo "tag exists" || echo "tag available"
-```
-
-The release notes helper provides the same check:
+Use the release notes helper for tag availability checks:
 
 ```bash
 scripts/release/prepare-release-notes.sh --check-tag v2026.05.31-ga.0
 ```
 
-The helper rejects invalid calendar dates, existing local tags, and existing `origin` remote tags. Creating or pushing the tag is a maintainer release action and is not performed by GA_02 automation.
+The helper rejects invalid calendar dates, existing local tags, and existing `origin` remote tags. A local-only `git rev-parse refs/tags/...` check is not sufficient for GA release decisions because a published tag may exist only on the remote. Creating or pushing the tag is a maintainer release action and is not performed by GA_02 automation.
 
 ## Changelog Requirements
 
