@@ -2,7 +2,7 @@
 
 Date: 2026-05-31
 Branch: `ga/GA_02_versioning_changelog_release_notes`
-Tested implementation head: `0402d71a97f73449e894367cd0cc497d588c0577`
+Tested implementation head: `d14682272d645099139bf16a6851d2403299812e`
 Evidence commit: this file is updated after gate reruns; current branch head may be the evidence-only commit that records this result.
 
 ## Commands
@@ -36,6 +36,8 @@ helm template spendguard charts/spendguard -f scripts/helm-validate-test-values.
 - Invalid version negative gate: PASS, failed closed
 - Invalid calendar date negative gate: PASS, failed closed
 - Fake commit negative gate: PASS, failed closed
+- TODO/TBD final-section negative gate: PASS, failed closed
+- Non-breaking `None` outside Breaking Changes negative gate: PASS, failed closed
 - Missing `Migrations` section negative gate: PASS, failed closed
 - Empty `Migrations` section negative gate: PASS, failed closed
 - Changelog includes predictor upgrade and HARDEN summary: PASS
@@ -44,4 +46,4 @@ helm template spendguard charts/spendguard -f scripts/helm-validate-test-values.
 - GA_01 bundle release-notes pointer remains `docs/release/release-notes-template.md`: PASS
 - Bundle build/check: PASS
 - Helm demo and production validation renders: PASS
-- Bundle checksum manifest checksum: `994ce84c55a3950962943493c93022e7dfd383e98dd6d6a8e00f1d1148a83fff`
+- Bundle checksum manifest checksum: `d98597366922cc9a94afdb70d52db351ad3b122edd29d60ee572ab32259e8dcb`
