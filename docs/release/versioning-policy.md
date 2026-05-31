@@ -38,6 +38,12 @@ This command is non-destructive and checks whether a candidate tag already exist
 git rev-parse -q --verify refs/tags/v2026.05.31-ga.0 >/dev/null && echo "tag exists" || echo "tag available"
 ```
 
+The release notes helper provides the same check:
+
+```bash
+scripts/release/prepare-release-notes.sh --check-tag v2026.05.31-ga.0
+```
+
 Creating or pushing the tag is a maintainer release action and is not performed by GA_02 automation.
 
 ## Changelog Requirements

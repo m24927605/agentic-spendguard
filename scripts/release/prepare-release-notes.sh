@@ -5,6 +5,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   scripts/release/prepare-release-notes.sh --check FILE
+  scripts/release/prepare-release-notes.sh --check-tag vYYYY.MM.DD-ga.N
   scripts/release/prepare-release-notes.sh --version vYYYY.MM.DD-ga.N --commit SHA --output FILE
 
 Validate or generate SpendGuard release notes.
@@ -25,6 +26,11 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     --version)
+      version="${2:-}"
+      shift 2
+      ;;
+    --check-tag)
+      mode="check-tag"
       version="${2:-}"
       shift 2
       ;;
@@ -100,6 +106,19 @@ validate_file() {
 if [[ "$mode" == "check" ]]; then
   validate_file "$file"
   echo "release notes validated: $file"
+  exit 0
+fi
+
+if [[ "$mode" == "check-tag" ]]; then
+  if [[ ! "$version" =~ ^v[0-9]{4}\.[0-9]{2}\.[0-9]{2}-ga\.[0-9]+$ ]]; then
+    echo "--check-tag value must match vYYYY.MM.DD-ga.N" >&2
+    exit 1
+  fi
+  if git rev-parse -q --verify "refs/tags/$version" >/dev/null; then
+    echo "tag already exists: $version" >&2
+    exit 1
+  fi
+  echo "tag available: $version"
   exit 0
 fi
 
