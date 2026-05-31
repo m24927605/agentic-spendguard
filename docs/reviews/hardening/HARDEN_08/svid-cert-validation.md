@@ -44,4 +44,8 @@ helm template spendguard charts/spendguard -f scripts/helm-validate-test-values.
   --set outputPredictor.pluginEndpointDatabaseEnabled=true \
   --set outputPredictor.pluginClientSecretName=legacy-global
 PASS: render failed closed without explicit legacy opt-in
+
+make demo-up DEMO_MODE=plugin_c_synthetic
+PASS: breaker regression, Rust SVID helper checks, and Python reference
+plugin SVID fail-closed checks ran successfully
 ```

@@ -185,7 +185,7 @@ Reviewer must inspect cert subject construction, tenant UUID comparison, Helm pr
 - [x] output_predictor uses tenant-specific certs
 - [x] Reference plugin validates subject tenant
 - [x] Cross-tenant mismatch test fails closed
-- [ ] `plugin_c_synthetic` demo runs with SVID validation
+- [x] `plugin_c_synthetic` demo runs with SVID validation
 - [ ] GH #171 closed with fixing commit
 - [ ] AIT adversarial review passes or Staff+ arbitration is recorded
 
