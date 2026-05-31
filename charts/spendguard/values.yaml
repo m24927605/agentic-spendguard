@@ -401,9 +401,37 @@ outputPredictor:
   pluginEndpointCacheTtlSeconds: 5
   # Secret name carrying SpendGuard's client cert + key + the
   # customer trust CA (PEMs under keys tls.crt / tls.key / ca.crt).
-  # Required under chart.profile=production when Strategy C is
-  # enabled. Mounted at /etc/spendguard/plugin-client/.
+  # Legacy SLICE_07 shape. HARDEN_08 production Strategy C should use
+  # pluginClientSvid instead. Legacy global cert rendering requires
+  # pluginClientSvid.legacyGlobalCertAllowed=true under production.
   pluginClientSecretName: ""
+  pluginClientSvid:
+    enabled: false
+    # Explicit migration opt-in for the legacy deploy-wide client cert.
+    # Keep false for production; the template fails Strategy C renders
+    # without per-tenant SVID bindings unless this is deliberately set.
+    legacyGlobalCertAllowed: false
+    # cert-manager issuer used to mint SpendGuard predictor-client
+    # SVIDs. create=true renders an Issuer that references caSecretName;
+    # create=false expects issuer.name/kind/group to already exist.
+    issuer:
+      create: false
+      name: spendguard-predictor-client-issuer
+      kind: Issuer
+      group: cert-manager.io
+      caSecretName: ""
+    defaultDuration: 720h
+    defaultRenewBefore: 240h
+    # Each binding creates/mounts one tenant-bound client cert:
+    #   subject URI SAN = spiffe://spendguard.platform/predictor-client/<tenantId>
+    #   mount path      = /etc/spendguard/plugin-client-svid/<clientCertId>
+    # predictor_plugin_endpoints.client_cert_id must equal clientCertId.
+    bindings: []
+    # - tenantId: "00000000-0000-4000-8000-000000000001"
+    #   clientCertId: "tenant-0001"
+    #   secretName: ""
+    #   duration: ""
+    #   renewBefore: ""
   resources:
     requests: { cpu: "100m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
