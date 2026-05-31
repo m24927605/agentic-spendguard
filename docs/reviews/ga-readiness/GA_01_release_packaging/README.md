@@ -2,7 +2,7 @@
 
 Date: 2026-05-31
 Branch: `ga/GA_01_release_packaging`
-Head: `0da3639352d9101b243d0d95ffd9bc12b9d65287`
+Head: `5b171a5b7ec4d84453f71f5268c84dce42becfd1`
 
 ## Commands
 
@@ -19,6 +19,6 @@ helm template spendguard charts/spendguard -f scripts/helm-validate-test-values.
 - Release bundle check: PASS
 - Helm demo render: PASS
 - Helm production validation render: PASS
-- Bundle checksum manifest checksum: `08317a933ce5b00b9b57df20b3c5e19e92f7320293485f557c00fc95d9f51fc2`
+- Bundle checksum manifest checksum: `03952e75962e340ec46569b6d363e29f0fa0fcbccab04e5530ca0e62ac0c2de5`
 
-The bundle checker validated required files, chart package presence, commit SHA shape, checksums, migration inventory checksum, and common secret-pattern absence.
+The bundle checker validated required files, chart package presence and chart metadata, commit SHA shape, manifest consistency, release notes pointer resolution, full checksum coverage, migration inventory checksum, and common secret-pattern absence across both bundle files and unpacked chart content.
