@@ -174,6 +174,7 @@ Reviewer must inspect real integration tests for tokenizer envelope admission an
 | Review R3 | codex CLI adversarial reviewer | Demo image must install `protoc`; forwarder must preserve stored CloudEvent time | Added `protobuf-compiler`/`libprotobuf-dev` and RFC3339 payload-time parsing regression assertion |
 | Review R4 | codex CLI adversarial reviewer | Production Helm values and kind inventory must include the new control-plane workload | Updated `scripts/helm-validate-test-values.yaml`, kind validation workload/TLS/signing/DB secrets, and chart README secret contract |
 | Review R5 / Staff+ | Software Architect, Backend Architect, Security Engineer, Database Optimizer, Audit-chain domain expert | Fix both R5 P2s anyway: provenance fields and KMS Secret mount are in-slice production-readiness issues | Folded `subject`/`actor_subject` into forwarded JSON `data`; guarded signing volume/mount to `signing.mode=local` |
+| Demo verification | codex CLI implementer/reviewer | Fresh compose must apply control-plane migrations before proving the forwarder path | Added demo init hook for `services/control_plane/migrations`; verified plugin registration forwards to canonical_ingest with `route=Observability`, `storage_class=immutable_audit_log`, signed producer `control-plane:demo`, and data provenance fields |
 
 ---
 
@@ -181,10 +182,10 @@ Reviewer must inspect real integration tests for tokenizer envelope admission an
 
 - [x] Tokenizer AppendEventsRequest envelope fixed and tested
 - [x] Control-plane Ed25519 forwarder implemented and tested
-- [ ] Plugin lifecycle audit event reaches canonical_ingest in demo
+- [x] Plugin lifecycle audit event reaches canonical_ingest in demo
 - [x] Helm production signing gates render correctly
 - [x] Affected service tests pass
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded
+- [x] AIT adversarial review passes or Staff+ arbitration is recorded
 
 ---
 

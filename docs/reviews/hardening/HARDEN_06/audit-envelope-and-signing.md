@@ -8,6 +8,7 @@
 - canonical_ingest now rejects missing `producer_id`, missing `schema_bundle`, and `ROUTE_UNSPECIFIED` before storage access, so broken producers fail fast without DB side effects.
 - Helm and compose both wire the control-plane forwarder through mTLS, the shared schema bundle, and a dedicated control-plane Ed25519 key.
 - Production control-plane audit forwarding uses `SPENDGUARD_CONTROL_PLANE_AUDIT_FORWARDER_DATABASE_URL`, which must point at a login role granted the dedicated `control_plane_audit_forwarder_role`; this keeps request-serving RLS separate from outbox forwarding.
+- Demo Postgres initialization mounts and applies `services/control_plane/migrations` so a fresh compose stack creates the plugin registry, audit outbox, and forwarder RLS role before control-plane boots.
 
 ## Locked Decisions
 
@@ -25,6 +26,10 @@
 - `helm template charts/spendguard --set chart.profile=demo`
 - `helm template charts/spendguard -f docs/reviews/hardening/HARDEN_02/kind-production-values.example.yaml`
 - `rg -n "control_plane_audit_forwarder_role|control_plane_audit_outbox_forwarder" services/control_plane/migrations/0005_control_plane_audit_forwarder_role.sql`
+- `docker compose -f deploy/demo/compose.yaml up -d --build postgres pki-init bundles-init canonical-seed-init canonical-ingest control-plane`
+- `curl -sS -i -X POST http://localhost:8091/v1/predictor/plugins ...` returned `200 OK` for tenant `00000000-0000-4000-8000-000000000001`.
+- `control-plane` logged `control-plane audit outbox forwarded` with `forwarded=1`; `canonical-ingest` logged append with `producer_id=control-plane:demo` and `route=Observability`.
+- `canonical_events` contained `spendguard.audit.plugin_registered.v1alpha1` with `storage_class=immutable_audit_log`, `producer_id=control-plane:demo`, 128 hex chars of signature material, and forwarded JSON data containing `subject` plus `actor_subject`.
 
 ## Review Focus
 
