@@ -104,6 +104,10 @@ if [[ "$release_notes_pointer" != "$manifest_release_notes_pointer" ]]; then
   echo "release notes pointer does not match manifest" >&2
   exit 1
 fi
+if [[ "$release_notes_pointer" != "docs/release/release-notes-template.md" ]]; then
+  echo "release notes pointer must be docs/release/release-notes-template.md for v1alpha1 bundles" >&2
+  exit 1
+fi
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 if [[ -n "$(git -C "$repo_root" status --porcelain)" ]]; then
   echo "release bundle verification requires a clean git worktree" >&2
@@ -135,9 +139,18 @@ for field in "${required_manifest_fields[@]}"; do
     exit 1
   fi
 done
+bundle_version="$(awk -F= '$1 == "release_bundle_version" {print $2}' "$bundle_dir/manifest.txt")"
+if [[ "$bundle_version" != "v1alpha1" ]]; then
+  echo "unsupported release bundle version: $bundle_version" >&2
+  exit 1
+fi
 
 committed_tree="$(mktemp -d)"
 git -C "$repo_root" archive "$commit_sha" | tar -x -C "$committed_tree"
+if [[ ! -f "$committed_tree/$release_notes_pointer" ]]; then
+  echo "release notes pointer does not resolve in committed release tree: $release_notes_pointer" >&2
+  exit 1
+fi
 
 expected_inventory="$(mktemp)"
 release_migration_inventory "$committed_tree" "$commit_sha" > "$expected_inventory"
