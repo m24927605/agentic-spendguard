@@ -374,6 +374,10 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create configmap spendguard
     $(for f in "${REPO_ROOT}/services/canonical_ingest/migrations"/*.sql; do echo --from-file="$(basename "$f")=$f"; done) \
     --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" apply -f -
 
+kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create configmap spendguard-migrations-control-plane \
+    $(for f in "${REPO_ROOT}/services/control_plane/migrations"/*.sql; do echo --from-file="$(basename "$f")=$f"; done) \
+    --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" apply -f -
+
 # ---------------------------------------------------------------------
 # 5.5. (optional) Build chart service images locally + load into kind.
 #

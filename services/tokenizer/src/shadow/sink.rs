@@ -30,7 +30,7 @@ use tracing::{info, warn};
 use super::worker::DriftAlertSink;
 use crate::proto::canonical_ingest::v1::{
     append_events_request::Route, canonical_ingest_client::CanonicalIngestClient,
-    AppendEventsRequest,
+    event_result::Status as EventStatus, AppendEventsRequest, AppendEventsResponse,
 };
 use crate::proto::common::v1::{CloudEvent, SchemaBundleRef};
 
@@ -169,19 +169,43 @@ impl DriftAlertSink for CanonicalIngestDriftAlertSink {
         );
         let mut client = self.client.lock().await;
         match client.append_events(req).await {
-            Ok(resp) => {
-                let resp = resp.into_inner();
-                for r in &resp.results {
-                    if let Some(err) = r.error.as_ref() {
-                        if !err.message.is_empty() {
-                            warn!(event_id = %r.event_id, err = %err.message,
-                                  "canonical_ingest rejected drift_alert");
-                        }
-                    }
-                }
-                Ok(())
-            }
+            Ok(resp) => ensure_append_accepted(resp.into_inner()),
             Err(e) => Err(anyhow::anyhow!("AppendEvents drift_alert: {e}")),
+        }
+    }
+}
+
+pub(crate) fn ensure_append_accepted(resp: AppendEventsResponse) -> Result<(), anyhow::Error> {
+    if resp.results.len() != 1 {
+        return Err(anyhow::anyhow!(
+            "AppendEvents drift_alert returned {} results for one event",
+            resp.results.len()
+        ));
+    }
+
+    let result = &resp.results[0];
+    let status = EventStatus::try_from(result.status).unwrap_or(EventStatus::Unspecified);
+    match status {
+        EventStatus::Appended | EventStatus::Deduped => Ok(()),
+        other => {
+            let error_message = result
+                .error
+                .as_ref()
+                .map(|err| err.message.as_str())
+                .filter(|msg| !msg.is_empty())
+                .unwrap_or("canonical_ingest returned no error detail");
+            warn!(
+                event_id = %result.event_id,
+                status = ?other,
+                err = %error_message,
+                "canonical_ingest rejected drift_alert"
+            );
+            Err(anyhow::anyhow!(
+                "AppendEvents drift_alert rejected event_id={} status={:?}: {}",
+                result.event_id,
+                other,
+                error_message
+            ))
         }
     }
 }
@@ -189,6 +213,7 @@ impl DriftAlertSink for CanonicalIngestDriftAlertSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proto::canonical_ingest::v1::EventResult;
 
     #[test]
     fn append_request_carries_required_observability_envelope() {
@@ -219,5 +244,33 @@ mod tests {
             req.events[0].r#type,
             "spendguard.audit.tokenizer_drift_alert.v1alpha1"
         );
+    }
+
+    #[test]
+    fn append_response_must_be_durable_success() {
+        assert!(ensure_append_accepted(AppendEventsResponse {
+            results: vec![EventResult {
+                event_id: "evt-1".to_string(),
+                status: EventStatus::Appended as i32,
+                ingest_position: None,
+                error: None,
+            }],
+        })
+        .is_ok());
+
+        let err = ensure_append_accepted(AppendEventsResponse {
+            results: vec![EventResult {
+                event_id: "evt-2".to_string(),
+                status: EventStatus::Quarantined as i32,
+                ingest_position: None,
+                error: None,
+            }],
+        })
+        .expect_err("QUARANTINED must not mark drift alert as emitted");
+        assert!(err.to_string().contains("Quarantined"));
+
+        let err = ensure_append_accepted(AppendEventsResponse { results: vec![] })
+            .expect_err("missing result must fail delivery");
+        assert!(err.to_string().contains("0 results"));
     }
 }
