@@ -26,12 +26,14 @@
 //! so audit chain + fencing CAS + per-unit balance invariants are
 //! exercised on every provisioning step.
 
+mod audit_forwarder;
 mod handlers;
 mod metrics;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
 
+use anyhow::Context;
 use axum::{
     extract::{Path, State},
     http::StatusCode,
@@ -43,7 +45,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::metrics::ControlPlaneMetrics;
+use audit_forwarder::{build_canonical_client, spawn_audit_forwarder, AuditForwarderConfig};
 use spendguard_auth::{AuthConfig, Authenticator, Permission, Principal};
+use spendguard_signing::Signer;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
 use tracing::info;
@@ -59,10 +63,34 @@ struct Config {
     /// port table; ledger=9092, sidecar=9093).
     #[serde(default = "default_metrics_addr")]
     metrics_addr: String,
+    #[serde(default)]
+    canonical_ingest_url: String,
+    #[serde(default)]
+    audit_schema_bundle_id: String,
+    #[serde(default)]
+    audit_schema_bundle_hash_hex: String,
+    #[serde(default = "default_canonical_schema_version")]
+    audit_canonical_schema_version: String,
+    #[serde(default = "default_audit_forwarder_poll_interval_seconds")]
+    audit_forwarder_poll_interval_seconds: u64,
+    #[serde(default = "default_audit_forwarder_batch_size")]
+    audit_forwarder_batch_size: i64,
 }
 
 fn default_metrics_addr() -> String {
     "0.0.0.0:9094".to_string()
+}
+
+fn default_canonical_schema_version() -> String {
+    "spendguard.v1alpha1".to_string()
+}
+
+fn default_audit_forwarder_poll_interval_seconds() -> u64 {
+    5
+}
+
+fn default_audit_forwarder_batch_size() -> i64 {
+    32
 }
 
 struct AppState {
@@ -94,7 +122,7 @@ async fn main() -> anyhow::Result<()> {
         .connect(&cfg.database_url)
         .await?;
 
-    let state = Arc::new(AppState { pg });
+    let state = Arc::new(AppState { pg: pg.clone() });
 
     // Phase 5 GA hardening S17: build Authenticator before binding
     // listener so misconfig (missing OIDC issuer, static_token outside
@@ -108,6 +136,20 @@ async fn main() -> anyhow::Result<()> {
             .await
             .map_err(|e| anyhow::anyhow!("S17: init authenticator: {e}"))?,
     );
+
+    if let Some(forwarder_cfg) = build_audit_forwarder_config(&cfg, &profile)? {
+        let signer: Arc<dyn Signer> = Arc::from(
+            spendguard_signing::signer_from_env("SPENDGUARD_CONTROL_PLANE")
+                .await
+                .map_err(|e| anyhow::anyhow!("load control-plane audit signer: {e}"))?,
+        );
+        let canonical_client = build_canonical_client(&forwarder_cfg.canonical_ingest_url).await?;
+        spawn_audit_forwarder(pg.clone(), signer, forwarder_cfg, canonical_client);
+    } else {
+        tracing::warn!(
+            "control-plane audit forwarder disabled; demo only unless chart.profile=production gates are off"
+        );
+    }
 
     // Round-2 #11: shared metrics counter store + middleware applied
     // to every route. Spawn the /metrics HTTP server before binding
@@ -182,6 +224,49 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn build_audit_forwarder_config(
+    cfg: &Config,
+    profile: &str,
+) -> anyhow::Result<Option<AuditForwarderConfig>> {
+    if cfg.canonical_ingest_url.is_empty() {
+        if profile == "production" {
+            anyhow::bail!("SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_URL required in production");
+        }
+        return Ok(None);
+    }
+    if cfg.audit_schema_bundle_id.is_empty() {
+        anyhow::bail!("SPENDGUARD_CONTROL_PLANE_AUDIT_SCHEMA_BUNDLE_ID required");
+    }
+    if cfg.audit_schema_bundle_hash_hex.is_empty() {
+        anyhow::bail!("SPENDGUARD_CONTROL_PLANE_AUDIT_SCHEMA_BUNDLE_HASH_HEX required");
+    }
+    let schema_bundle_hash = hex::decode(&cfg.audit_schema_bundle_hash_hex)
+        .context("SPENDGUARD_CONTROL_PLANE_AUDIT_SCHEMA_BUNDLE_HASH_HEX must be hex")?;
+    Ok(Some(AuditForwarderConfig {
+        canonical_ingest_url: cfg.canonical_ingest_url.clone(),
+        schema_bundle: proto::common::v1::SchemaBundleRef {
+            schema_bundle_id: cfg.audit_schema_bundle_id.clone(),
+            schema_bundle_hash: schema_bundle_hash.into(),
+            canonical_schema_version: cfg.audit_canonical_schema_version.clone(),
+        },
+        poll_interval_seconds: cfg.audit_forwarder_poll_interval_seconds,
+        batch_size: cfg.audit_forwarder_batch_size,
+    }))
+}
+
+pub mod proto {
+    pub mod common {
+        pub mod v1 {
+            tonic::include_proto!("spendguard.common.v1");
+        }
+    }
+    pub mod canonical_ingest {
+        pub mod v1 {
+            tonic::include_proto!("spendguard.canonical_ingest.v1");
+        }
+    }
 }
 
 /// Round-2 #11: minimal HTTP /metrics endpoint that renders the
