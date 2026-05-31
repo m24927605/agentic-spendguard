@@ -1,7 +1,7 @@
 # GA 05 - Observability Dashboards
 
 > **Branch**: `ga/GA_05_observability_dashboards`
-> **Status**: design
+> **Status**: implementation review
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; metrics inventory and dashboard assets
 
@@ -43,7 +43,7 @@ Existing observability docs and Prometheus rules predate the predictor upgrade h
 
 ## §5. Schema / Config / API Impact
 
-No schema changes. Metric names become an operator contract.
+Metric names become an operator contract. GA_05 also adds a narrow ledger migration, `0053_audit_outbox_pending_age_idx.sql`, to index `audit_outbox(recorded_at) WHERE pending_forward = TRUE` for the audit lag gauge.
 
 ## §6. Audit / Security / Operational Impact
 
@@ -97,11 +97,15 @@ Reviewer must verify metrics are real and labels do not introduce cardinality or
 |---|---|---|
 | SRE/Operations Architect | Dashboards and alerts are separate slices | GA_05 owns dashboards only |
 | Performance/Database Architect | p99 and lag panels are mandatory | Tail metrics required |
+| R1 codex adversarial review | Inventory endpoints, cache ratio, stale lag, output predictor live scrape, and Grafana link had to be fixed | Real endpoint validator, `increase` cache ratio, leader gauge, live scrape evidence, and empty dashboard links adopted |
+| R2 codex adversarial review | Leader-filtered lag could hide no-leader backlog growth | Every outbox-forwarder pod refreshes pending oldest-row age; leader count is shown separately |
+| R4 codex adversarial review | Raw pipe characters in inventory label cells could break Markdown parsing and weaken validator checks | Label enums use comma separators and validator now rejects inventory rows that do not have exactly seven cells |
+| R5 Staff+ arbitration | Rust formatting still regressed after max review rounds; DB reviewer required proof that every-pod lag polling is index-backed | Panel voted fix anyway. Rustfmt applied only to GA_05-touched files; `0053_audit_outbox_pending_age_idx.sql` added; fresh demo bootstrap and EXPLAIN verified index-only lag plan |
 
 ## §14. Merge Checklist
 
-- [ ] Metrics inventory exists
-- [ ] Dashboard JSON validates
-- [ ] Metric validator passes
-- [ ] AIT review clean or arbitration recorded
+- [x] Metrics inventory exists
+- [x] Dashboard JSON validates
+- [x] Metric validator passes
+- [x] AIT review clean or arbitration recorded
 - [ ] Memory updated

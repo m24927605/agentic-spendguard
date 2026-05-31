@@ -17,13 +17,15 @@
 //! The metrics HTTP server is started by `serve_metrics` from
 //! `services/canonical_ingest/src/main.rs`.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Default)]
 pub struct IngestMetricsInner {
     pub accepted_enforcement: AtomicU64,
     pub accepted_observability: AtomicU64,
+    pub deduped_enforcement: AtomicU64,
+    pub deduped_observability: AtomicU64,
     pub rejected_invalid_sig_enforcement: AtomicU64,
     pub rejected_invalid_sig_observability: AtomicU64,
     pub quarantined_unknown_key: AtomicU64,
@@ -58,6 +60,14 @@ impl IngestMetrics {
         match route {
             Route::Enforcement => &self.inner.accepted_enforcement,
             Route::Observability => &self.inner.accepted_observability,
+        }
+        .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn inc_deduped(&self, route: Route) {
+        match route {
+            Route::Enforcement => &self.inner.deduped_enforcement,
+            Route::Observability => &self.inner.deduped_observability,
         }
         .fetch_add(1, Ordering::Relaxed);
     }
@@ -118,6 +128,17 @@ impl IngestMetrics {
         out.push_str(&format!(
             "spendguard_ingest_events_accepted_total{{route=\"observability\"}} {}\n",
             i.accepted_observability.load(Ordering::Relaxed)
+        ));
+
+        out.push_str("# HELP spendguard_ingest_events_deduped_total Events rejected by producer-scoped replay deduplication as duplicate retries.\n");
+        out.push_str("# TYPE spendguard_ingest_events_deduped_total counter\n");
+        out.push_str(&format!(
+            "spendguard_ingest_events_deduped_total{{route=\"enforcement\"}} {}\n",
+            i.deduped_enforcement.load(Ordering::Relaxed)
+        ));
+        out.push_str(&format!(
+            "spendguard_ingest_events_deduped_total{{route=\"observability\"}} {}\n",
+            i.deduped_observability.load(Ordering::Relaxed)
         ));
 
         out.push_str("# HELP spendguard_ingest_events_rejected_invalid_signature_total Events rejected with invalid signature in strict mode.\n");
@@ -213,6 +234,7 @@ mod tests {
         let m = IngestMetrics::new();
         let txt = m.render();
         assert!(txt.contains("spendguard_ingest_events_accepted_total{route=\"enforcement\"} 0"));
+        assert!(txt.contains("spendguard_ingest_events_deduped_total{route=\"enforcement\"} 0"));
         assert!(
             txt.contains("spendguard_ingest_events_quarantined_total{reason=\"unknown_key\"} 0")
         );
@@ -224,12 +246,14 @@ mod tests {
         m.inc_accepted(Route::Enforcement);
         m.inc_accepted(Route::Enforcement);
         m.inc_accepted(Route::Observability);
+        m.inc_deduped(Route::Observability);
         m.inc_quarantined(QuarantineReason::UnknownKey);
         m.inc_rejected_invalid_sig(Route::Enforcement);
         m.inc_pre_s6_admitted();
         let txt = m.render();
         assert!(txt.contains("spendguard_ingest_events_accepted_total{route=\"enforcement\"} 2"));
         assert!(txt.contains("spendguard_ingest_events_accepted_total{route=\"observability\"} 1"));
+        assert!(txt.contains("spendguard_ingest_events_deduped_total{route=\"observability\"} 1"));
         assert!(
             txt.contains("spendguard_ingest_events_quarantined_total{reason=\"unknown_key\"} 1")
         );

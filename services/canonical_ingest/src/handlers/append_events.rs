@@ -40,10 +40,10 @@ use crate::{
     },
     proto::{
         canonical_ingest::v1::{
-            append_events_request::Route, event_result::Status as EventStatus, AppendEventsRequest,
-            AppendEventsResponse, EventResult, IngestPosition,
+            AppendEventsRequest, AppendEventsResponse, EventResult, IngestPosition,
+            append_events_request::Route, event_result::Status as EventStatus,
         },
-        common::v1::{error::Code as ProtoCode, CloudEvent, Error as ProtoError},
+        common::v1::{CloudEvent, Error as ProtoError, error::Code as ProtoCode},
     },
     verifier::canonical_bytes,
 };
@@ -157,7 +157,7 @@ async fn process_one(
                 &evt.id,
                 EventStatus::Quarantined,
                 DomainError::InvalidRequest(format!("event_id: {}", e)),
-            )
+            );
         }
     };
     let tenant_id = match Uuid::parse_str(&evt.tenant_id) {
@@ -167,7 +167,7 @@ async fn process_one(
                 &evt.id,
                 EventStatus::Quarantined,
                 DomainError::InvalidRequest(format!("tenant_id: {}", e)),
-            )
+            );
         }
     };
 
@@ -181,7 +181,7 @@ async fn process_one(
                     &evt.id,
                     EventStatus::Quarantined,
                     DomainError::InvalidRequest(format!("decision_id: {}", e)),
-                )
+                );
             }
         }
     };
@@ -197,7 +197,7 @@ async fn process_one(
                     &evt.id,
                     EventStatus::Quarantined,
                     DomainError::InvalidRequest(format!("run_id: {}", e)),
-                )
+                );
             }
         }
     };
@@ -227,7 +227,7 @@ async fn process_one(
                     "producer_sequence {} overflows i64",
                     evt.producer_sequence
                 )),
-            )
+            );
         }
     };
 
@@ -280,7 +280,7 @@ async fn process_one(
                             "event_time seconds {} out of range",
                             seconds
                         )),
-                    )
+                    );
                 }
             }
         }
@@ -289,7 +289,7 @@ async fn process_one(
                 &evt.id,
                 EventStatus::Quarantined,
                 DomainError::InvalidRequest("event_time required".into()),
-            )
+            );
         }
     };
 
@@ -349,7 +349,7 @@ async fn process_one(
                     &evt.id,
                     EventStatus::Quarantined,
                     DomainError::InvalidRequest("audit.outcome missing decision_id".into()),
-                )
+                );
             }
         };
 
@@ -419,12 +419,15 @@ async fn process_one(
                 error: None,
             }
         }
-        Ok(AppendOutcome::Deduped) => EventResult {
-            event_id: evt.id.clone(),
-            status: EventStatus::Deduped as i32,
-            ingest_position: None,
-            error: None,
-        },
+        Ok(AppendOutcome::Deduped) => {
+            metrics.inc_deduped(route_to_metric(route));
+            EventResult {
+                event_id: evt.id.clone(),
+                status: EventStatus::Deduped as i32,
+                ingest_position: None,
+                error: None,
+            }
+        }
         Err(DomainError::Duplicate(msg)) => EventResult {
             event_id: evt.id.clone(),
             status: EventStatus::Duplicate as i32,
@@ -681,11 +684,7 @@ fn prediction_columns_from_event(evt: &CloudEvent) -> append::PredictionColumns<
 }
 
 fn nonempty(value: &str) -> Option<&str> {
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn uuid_nonempty(value: &str) -> Option<Uuid> {
@@ -697,11 +696,7 @@ fn uuid_nonempty(value: &str) -> Option<Uuid> {
 }
 
 fn nonzero_i64(value: i64) -> Option<i64> {
-    if value == 0 {
-        None
-    } else {
-        Some(value)
-    }
+    if value == 0 { None } else { Some(value) }
 }
 
 fn nonzero_i64_decimal(value: i64) -> Option<BigDecimal> {
@@ -729,11 +724,7 @@ fn json_i64(value: &serde_json::Value) -> Option<i64> {
 }
 
 fn nonzero_f32(value: f32) -> Option<f32> {
-    if value == 0.0 {
-        None
-    } else {
-        Some(value)
-    }
+    if value == 0.0 { None } else { Some(value) }
 }
 
 fn nonzero_f32_decimal(value: f32) -> Option<BigDecimal> {

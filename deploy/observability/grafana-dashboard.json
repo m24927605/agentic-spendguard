@@ -1,0 +1,460 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 0
+      },
+      "id": 1,
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(spendguard_output_predictor_predict_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "Predict p99",
+          "refId": "A"
+        }
+      ],
+      "title": "Output Predictor p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "max": 1,
+          "min": 0,
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 0
+      },
+      "id": 2,
+      "targets": [
+        {
+          "expr": "sum(increase(spendguard_output_predictor_cache_hit_total[5m])) / clamp_min(sum(increase(spendguard_output_predictor_cache_lookup_total[5m])), 1)",
+          "legendFormat": "L4 hit ratio",
+          "refId": "A"
+        }
+      ],
+      "title": "Strategy B Cache Hit Ratio",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 0
+      },
+      "id": 3,
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(spendguard_run_cost_projector_project_latency_seconds_bucket[5m])) by (le))",
+          "legendFormat": "Project p99",
+          "refId": "A"
+        }
+      ],
+      "title": "Run Cost Projector p99",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 8
+      },
+      "id": 4,
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(spendguard_output_predictor_predict_total[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Output Predictor RPC Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 8
+      },
+      "id": 5,
+      "targets": [
+        {
+          "expr": "sum by (outcome) (rate(spendguard_run_cost_projector_project_total[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (outcome) (rate(spendguard_run_cost_projector_terminate_run_total[5m]))",
+          "legendFormat": "terminate {{outcome}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Run Cost Projector RPC Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 8
+      },
+      "id": 6,
+      "targets": [
+        {
+          "expr": "max(spendguard_outbox_pending_oldest_age_seconds)",
+          "legendFormat": "oldest pending row",
+          "refId": "A"
+        }
+      ],
+      "title": "Audit Outbox Lag",
+      "type": "stat"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 16
+      },
+      "id": 7,
+      "targets": [
+        {
+          "expr": "sum by (route) (rate(spendguard_ingest_events_deduped_total[5m]))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Replay Dedup Rate",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 16
+      },
+      "id": 8,
+      "targets": [
+        {
+          "expr": "sum by (route) (rate(spendguard_ingest_events_rejected_invalid_signature_total[5m]))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (reason) (rate(spendguard_ingest_events_quarantined_total[5m]))",
+          "legendFormat": "quarantine {{reason}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Canonical Ingest Rejects",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 16
+      },
+      "id": 9,
+      "targets": [
+        {
+          "expr": "increase(spendguard_stats_aggregator_drift_alerts_total[1h])",
+          "legendFormat": "prediction drift",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(spendguard_tokenizer_drift_alert_oncall_escalation_total[1h])",
+          "legendFormat": "tokenizer escalation",
+          "refId": "B"
+        }
+      ],
+      "title": "Drift Alerts",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 24
+      },
+      "id": 10,
+      "targets": [
+        {
+          "expr": "sum(rate(customer_predictor_call_total{outcome=\"fall_to_b\"}[5m]))",
+          "legendFormat": "fall_to_b",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (mode) (rate(customer_predictor_failure_mode_total[5m]))",
+          "legendFormat": "{{mode}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Strategy C Fall-to-B",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 8,
+        "y": 24
+      },
+      "id": 11,
+      "targets": [
+        {
+          "expr": "increase(customer_predictor_tenant_isolation_violation_total[5m])",
+          "legendFormat": "tenant isolation",
+          "refId": "A"
+        },
+        {
+          "expr": "increase(customer_predictor_failure_mode_total{mode=\"tls_error\"}[5m])",
+          "legendFormat": "tls_error",
+          "refId": "B"
+        }
+      ],
+      "title": "SVID and Tenant Isolation Failures",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 16,
+        "y": 24
+      },
+      "id": 12,
+      "targets": [
+        {
+          "expr": "sum by (route) (rate(spendguard_control_plane_route_calls_total{outcome=\"err\"}[5m]))",
+          "legendFormat": "{{route}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by (handler) (rate(spendguard_ledger_handler_calls_total{outcome=\"err\"}[5m]))",
+          "legendFormat": "ledger {{handler}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Control Plane and Ledger Errors",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${DS_PROMETHEUS}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 8,
+        "x": 0,
+        "y": 32
+      },
+      "id": 13,
+      "targets": [
+        {
+          "expr": "sum(spendguard_outbox_forwarder_is_leader)",
+          "legendFormat": "leaders",
+          "refId": "A"
+        }
+      ],
+      "title": "Outbox Forwarder Leaders",
+      "type": "stat"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "spendguard",
+    "ga",
+    "predictor"
+  ],
+  "templating": {
+    "list": [
+      {
+        "current": {
+          "selected": false,
+          "text": "Prometheus",
+          "value": "Prometheus"
+        },
+        "hide": 0,
+        "includeAll": false,
+        "label": "Prometheus",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "title": "SpendGuard GA Predictor Operations",
+  "uid": "spendguard-ga-predictor-ops",
+  "version": 1,
+  "weekStart": ""
+}

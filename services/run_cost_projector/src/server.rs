@@ -29,20 +29,22 @@
 //!     via conservative pass-through (no RUN_* emitted; reservation = A).
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::layering::{compute_layering, LayeringInputs};
+use crate::layering::{LayeringInputs, compute_layering};
 use crate::proto::run_cost_projector::v1::{
-    run_cost_projector_server::RunCostProjector, ProjectRequest, ProjectResponse, StrategyUsed,
-    TerminateRunRequest, TerminateRunResponse,
+    ProjectRequest, ProjectResponse, StrategyUsed, TerminateRunRequest, TerminateRunResponse,
+    run_cost_projector_server::RunCostProjector,
 };
 use crate::recovery::recover_from_audit_chain;
 use crate::signal_1::signal_1_predicted_remaining_steps;
-use crate::signal_2::{evaluate_drift, DriftVerdict};
+use crate::signal_2::{DriftVerdict, evaluate_drift};
 use crate::state_cache::{RunState, RunStateCache, RunStateKey};
 
 /// Bounded request input limits (DoS defense; mirrors output_predictor
@@ -52,6 +54,197 @@ const MAX_AGENT_ID_LEN: usize = 256;
 const MAX_MODEL_LEN: usize = 128;
 const MAX_DECISION_ID_LEN: usize = 64;
 const MAX_PLANNED_STEPS: i32 = 10_000;
+
+pub static RUN_COST_PROJECTOR_PROJECT_OK_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_ERR_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_TERMINATE_RUN_OK_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_TERMINATE_RUN_ERR_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_001_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_005_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_010_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_025_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_050_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_100_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_250_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_500_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_1000_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_INF_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_SUM_NS: AtomicU64 = AtomicU64::new(0);
+pub static RUN_COST_PROJECTOR_PROJECT_LATENCY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn project_outcome_samples() -> [(&'static str, u64); 2] {
+    [
+        (
+            "ok",
+            RUN_COST_PROJECTOR_PROJECT_OK_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "err",
+            RUN_COST_PROJECTOR_PROJECT_ERR_TOTAL.load(Ordering::Relaxed),
+        ),
+    ]
+}
+
+pub fn terminate_run_outcome_samples() -> [(&'static str, u64); 2] {
+    [
+        (
+            "ok",
+            RUN_COST_PROJECTOR_TERMINATE_RUN_OK_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "err",
+            RUN_COST_PROJECTOR_TERMINATE_RUN_ERR_TOTAL.load(Ordering::Relaxed),
+        ),
+    ]
+}
+
+pub fn project_latency_bucket_samples() -> [(&'static str, u64); 10] {
+    [
+        (
+            "0.001",
+            RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_001_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.005",
+            RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_005_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.01",
+            RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_010_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.025",
+            RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_025_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.05",
+            RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_050_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.1",
+            RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_100_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.25",
+            RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_250_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.5",
+            RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_500_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "1",
+            RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_1000_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "+Inf",
+            RUN_COST_PROJECTOR_PROJECT_LATENCY_INF_TOTAL.load(Ordering::Relaxed),
+        ),
+    ]
+}
+
+pub fn project_latency_sum_seconds() -> f64 {
+    RUN_COST_PROJECTOR_PROJECT_LATENCY_SUM_NS.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+}
+
+pub fn project_latency_count() -> u64 {
+    RUN_COST_PROJECTOR_PROJECT_LATENCY_COUNT.load(Ordering::Relaxed)
+}
+
+fn record_project_metrics(ok: bool, elapsed: Duration) {
+    if ok {
+        RUN_COST_PROJECTOR_PROJECT_OK_TOTAL.fetch_add(1, Ordering::Relaxed);
+    } else {
+        RUN_COST_PROJECTOR_PROJECT_ERR_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    let seconds = elapsed.as_secs_f64();
+    if seconds <= 0.001 {
+        RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_001_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.005 {
+        RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_005_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.01 {
+        RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_010_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.025 {
+        RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_025_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.05 {
+        RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_050_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.1 {
+        RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_100_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.25 {
+        RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_250_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.5 {
+        RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_500_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 1.0 {
+        RUN_COST_PROJECTOR_PROJECT_LATENCY_LE_1000_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    RUN_COST_PROJECTOR_PROJECT_LATENCY_INF_TOTAL.fetch_add(1, Ordering::Relaxed);
+    RUN_COST_PROJECTOR_PROJECT_LATENCY_SUM_NS.fetch_add(
+        elapsed.as_nanos().min(u64::MAX as u128) as u64,
+        Ordering::Relaxed,
+    );
+    RUN_COST_PROJECTOR_PROJECT_LATENCY_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_terminate_run_metrics(ok: bool) {
+    if ok {
+        RUN_COST_PROJECTOR_TERMINATE_RUN_OK_TOTAL.fetch_add(1, Ordering::Relaxed);
+    } else {
+        RUN_COST_PROJECTOR_TERMINATE_RUN_ERR_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+struct ProjectMetricsGuard {
+    start: Instant,
+    ok: bool,
+}
+
+impl ProjectMetricsGuard {
+    fn start() -> Self {
+        Self {
+            start: Instant::now(),
+            ok: false,
+        }
+    }
+
+    fn mark_ok(&mut self) {
+        self.ok = true;
+    }
+}
+
+impl Drop for ProjectMetricsGuard {
+    fn drop(&mut self) {
+        record_project_metrics(self.ok, self.start.elapsed());
+    }
+}
+
+struct TerminateRunMetricsGuard {
+    ok: bool,
+}
+
+impl TerminateRunMetricsGuard {
+    fn start() -> Self {
+        Self { ok: false }
+    }
+
+    fn mark_ok(&mut self) {
+        self.ok = true;
+    }
+}
+
+impl Drop for TerminateRunMetricsGuard {
+    fn drop(&mut self) {
+        record_terminate_run_metrics(self.ok);
+    }
+}
 
 /// gRPC service handle.
 pub struct RunCostProjectorSvc {
@@ -149,6 +342,7 @@ impl RunCostProjector for RunCostProjectorSvc {
         &self,
         request: Request<ProjectRequest>,
     ) -> Result<Response<ProjectResponse>, Status> {
+        let mut metrics_guard = ProjectMetricsGuard::start();
         let req = request.into_inner();
         let (tenant_id, run_id) = validate_project_request(&req)?;
 
@@ -220,6 +414,7 @@ impl RunCostProjector for RunCostProjectorSvc {
                         decision_id = %req.decision_id,
                         "Project RPC idempotent replay"
                     );
+                    metrics_guard.mark_ok();
                     return Ok(Response::new(response));
                 }
                 cumulative_cost_atomic = st.cumulative_cost_atomic;
@@ -326,6 +521,7 @@ impl RunCostProjector for RunCostProjectorSvc {
                         decision_id = %req.decision_id,
                         "Project RPC idempotent replay after concurrent compute"
                     );
+                    metrics_guard.mark_ok();
                     return Ok(Response::new(cached));
                 }
                 if st.cumulative_cost_atomic != cumulative_cost_atomic
@@ -357,6 +553,7 @@ impl RunCostProjector for RunCostProjectorSvc {
                 "Project RPC completed"
             );
 
+            metrics_guard.mark_ok();
             return Ok(Response::new(response));
         }
     }
@@ -365,6 +562,7 @@ impl RunCostProjector for RunCostProjectorSvc {
         &self,
         request: Request<TerminateRunRequest>,
     ) -> Result<Response<TerminateRunResponse>, Status> {
+        let mut metrics_guard = TerminateRunMetricsGuard::start();
         let req = request.into_inner();
         let (tenant_id, run_id) = validate_terminate_request(&req)?;
         let key = RunStateKey { tenant_id, run_id };
@@ -376,6 +574,7 @@ impl RunCostProjector for RunCostProjectorSvc {
             removed,
             "TerminateRun completed (idempotent)"
         );
+        metrics_guard.mark_ok();
         Ok(Response::new(TerminateRunResponse {
             removed_from_cache: removed,
         }))
@@ -464,9 +663,10 @@ mod tests {
             .expect("project ok")
             .into_inner();
         assert_eq!(resp.emitted_code, "RUN_BUDGET_PROJECTION_EXCEEDED");
-        assert!(resp
-            .considered_codes
-            .contains(&"RUN_BUDGET_PROJECTION_EXCEEDED".to_string()));
+        assert!(
+            resp.considered_codes
+                .contains(&"RUN_BUDGET_PROJECTION_EXCEEDED".to_string())
+        );
     }
 
     #[tokio::test]

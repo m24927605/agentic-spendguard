@@ -2,8 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use spendguard_leases::{
-    spawn_lease_loop, DisabledLease, K8sLease, LeaseConfig, LeaseManager,
-    LeaseState, PostgresLease,
+    DisabledLease, K8sLease, LeaseConfig, LeaseManager, LeaseState, PostgresLease, spawn_lease_loop,
 };
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -12,7 +11,7 @@ use spendguard_outbox_forwarder::{
     config::Config,
     forward::forward_batch,
     metrics::{LoopOutcome, OutboxForwarderMetrics, SkipReason},
-    state::{build_canonical_client, build_pg_pool, AppState},
+    state::{AppState, build_canonical_client, build_pg_pool},
 };
 
 #[tokio::main(flavor = "multi_thread")]
@@ -64,10 +63,7 @@ async fn main() -> anyhow::Result<()> {
             // for context.
             let namespace = std::env::var("SPENDGUARD_LEADER_K8S_NAMESPACE")
                 .unwrap_or_else(|_| "default".into());
-            let ttl_seconds = std::cmp::max(
-                1,
-                (config.leader_lease_ttl_ms / 1000) as i32,
-            );
+            let ttl_seconds = std::cmp::max(1, (config.leader_lease_ttl_ms / 1000) as i32);
             Arc::new(
                 K8sLease::new(
                     namespace,
@@ -112,6 +108,9 @@ async fn main() -> anyhow::Result<()> {
                 // S1 invariant: only the leader processes work. Standby
                 // pods sleep + wait for state changes.
                 let s = guard.state_rx.borrow().clone();
+                if let Err(e) = refresh_pending_oldest_age_metric(&state.pg, &metrics).await {
+                    warn!(err = %e, "failed to refresh pending outbox age metric");
+                }
                 // Codex round-9 P2: use expiry-aware is_leader_now()
                 // instead of plain pattern match. A stalled renewal
                 // task could leave the watch channel holding a stale
@@ -119,6 +118,7 @@ async fn main() -> anyhow::Result<()> {
                 // would let two pods double-send the same outbox row
                 // to the same downstream sink.
                 if s.is_leader_now() {
+                    metrics.set_is_leader(true);
                     match forward_batch(&mut state).await {
                         Ok(0) => {
                             metrics.inc_loop(LoopOutcome::Processed);
@@ -135,7 +135,11 @@ async fn main() -> anyhow::Result<()> {
                             error!(error = ?e, "forward_batch failed");
                         }
                     }
+                    if let Err(e) = refresh_pending_oldest_age_metric(&state.pg, &metrics).await {
+                        warn!(err = %e, "failed to refresh pending outbox age metric after batch");
+                    }
                 } else {
+                    metrics.set_is_leader(false);
                     metrics.inc_loop(LoopOutcome::Skipped);
                     match &s {
                         LeaseState::Leader { expires_at, .. } => {
@@ -160,17 +164,40 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn refresh_pending_oldest_age_metric(
+    pg: &sqlx::PgPool,
+    metrics: &OutboxForwarderMetrics,
+) -> anyhow::Result<()> {
+    let age_seconds: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(
+            GREATEST(
+                EXTRACT(EPOCH FROM (clock_timestamp() - MIN(recorded_at)))::BIGINT,
+                0
+            ),
+            0
+        )::BIGINT
+          FROM audit_outbox
+         WHERE pending_forward = TRUE
+        "#,
+    )
+    .fetch_one(pg)
+    .await?;
+    metrics.set_pending_oldest_age_seconds(age_seconds.max(0) as u64);
+    Ok(())
+}
+
 /// Round-2 #11: minimal HTTP /metrics endpoint that renders the
 /// OutboxForwarderMetrics Prometheus text. Same hyper-based pattern
 /// as the other services.
 async fn serve_metrics(addr: String, metrics: OutboxForwarderMetrics) -> anyhow::Result<()> {
-    use std::convert::Infallible;
+    use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
-    use http_body_util::Full;
+    use std::convert::Infallible;
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind(&addr).await?;
@@ -191,10 +218,7 @@ async fn serve_metrics(addr: String, metrics: OutboxForwarderMetrics) -> anyhow:
                     };
                     Ok::<_, Infallible>(
                         Response::builder()
-                            .header(
-                                "content-type",
-                                "text/plain; version=0.0.4; charset=utf-8",
-                            )
+                            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
                             .body(Full::new(Bytes::from(body)))
                             .unwrap(),
                     )
