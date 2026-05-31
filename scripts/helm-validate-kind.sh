@@ -457,6 +457,8 @@ sidecar:
   endpointCatalogManifestUrl: "http://endpoint-catalog-stub.${NAMESPACE}.svc.cluster.local:8080/v1/catalog/manifest"
 outboxForwarder:
   schemaBundleHashHex: "${SCHEMA_HASH}"
+statsAggregator:
+  databaseSecretEnabled: true
 signing:
   profile: demo
   strictVerification: false
@@ -493,6 +495,21 @@ if [ "${#MISSING_RENDERED[@]}" -gt 0 ] || [ "${#UNEXPECTED_RENDERED[@]}" -gt 0 ]
     exit 1
 fi
 log "  rendered ${#RENDERED_WORKLOADS[@]}/${EXPECTED_COUNT} expected chart workloads"
+if ! helm template spendguard "${REPO_ROOT}/charts/spendguard" \
+    --namespace "${NAMESPACE}" \
+    -f "${WORK_DIR}/values.yaml" \
+    | awk '
+        /^kind: Deployment$/ {in_deploy=1; in_stats=0; next}
+        in_deploy && /^metadata:/ {in_metadata=1; next}
+        in_deploy && in_metadata && /^  name: spendguard-spendguard-stats-aggregator$/ {in_stats=1; next}
+        in_stats && /name: SPENDGUARD_STATS_AGGREGATOR_DATABASE_URL/ {found=1}
+        in_deploy && /^---$/ {in_deploy=0; in_metadata=0; in_stats=0}
+        END {exit found ? 0 : 1}
+    '; then
+    log "FAIL: stats-aggregator rendered without SPENDGUARD_STATS_AGGREGATOR_DATABASE_URL"
+    exit 1
+fi
+log "  stats-aggregator DB Secret env rendered"
 
 helm --kube-context "${KUBECTL_CTX}" upgrade --install spendguard "${REPO_ROOT}/charts/spendguard" \
     --namespace "${NAMESPACE}" \
