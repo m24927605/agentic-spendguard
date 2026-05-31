@@ -143,6 +143,13 @@ async fn main() -> anyhow::Result<()> {
             "/v1/tokenizer/sampling-rate",
             post(post_tokenizer_sampling_rate).get(get_tokenizer_sampling_rate),
         )
+        // HARDEN_05: tenant opt-in for raw-text tokenizer shadow and
+        // per-tenant count_tokens quota. Absence of a row means
+        // provider shadow calls fail closed.
+        .route(
+            "/v1/tokenizer/shadow-security",
+            post(post_tokenizer_shadow_security).get(get_tokenizer_shadow_security),
+        )
         // SLICE_07: Strategy C plugin endpoint registry.
         // Spec: docs/output-predictor-plugin-contract-v1alpha1.md §8.
         .route(
@@ -472,6 +479,222 @@ async fn emit_tokenizer_sampling_rate_audit_event(
             "tenant_id": tenant_id.to_string(),
             "model": model,
             "rate": rate
+        }
+    });
+
+    sqlx::query(
+        r#"
+        INSERT INTO control_plane_audit_outbox
+            (audit_outbox_id, tenant_id, event_type, cloudevent_payload,
+             cloudevent_payload_signature_hex, producer_sequence)
+        VALUES ($1, $2, $3, $4::JSONB, '', $5)
+        "#,
+    )
+    .bind(audit_outbox_id)
+    .bind(tenant_id)
+    .bind(event_type)
+    .bind(&cloudevent)
+    .bind(producer_sequence)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+// ============================================================================
+// HARDEN_05: Tokenizer raw-text shadow security API.
+//
+// This endpoint owns the durable row the tokenizer worker reads before it
+// sends raw prompt text to Anthropic/Gemini count_tokens. POST requires
+// TenantWrite and is operator-audited; GET requires ReadView. The DB table is
+// RLS-protected and the worker treats a missing row as `pii_shadow_enabled=false`
+// and quota 0.
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct TokenizerShadowSecurityReq {
+    tenant_id: String,
+    pii_shadow_enabled: bool,
+    count_tokens_quota_per_minute: i32,
+}
+
+#[derive(Debug, Serialize)]
+struct TokenizerShadowSecurityResp {
+    tenant_id: String,
+    pii_shadow_enabled: bool,
+    count_tokens_quota_per_minute: i32,
+}
+
+async fn post_tokenizer_shadow_security(
+    Extension(principal): Extension<Principal>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<TokenizerShadowSecurityReq>,
+) -> Result<Json<TokenizerShadowSecurityResp>, StatusCode> {
+    let tenant_id = parse_tokenizer_sampling_tenant(&req.tenant_id)?;
+    authorize_tokenizer_sampling_tenant(&principal, &tenant_id, Permission::TenantWrite)?;
+    if !(0..=100_000).contains(&req.count_tokens_quota_per_minute) || principal.subject.len() > 256
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let mut tx = state
+        .pg
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "set tokenizer shadow security RLS tenant");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO tokenizer_shadow_security_settings
+            (tenant_id, pii_shadow_enabled, count_tokens_quota_per_minute, updated_by)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (tenant_id)
+        DO UPDATE SET
+            pii_shadow_enabled = EXCLUDED.pii_shadow_enabled,
+            count_tokens_quota_per_minute = EXCLUDED.count_tokens_quota_per_minute,
+            updated_at = clock_timestamp(),
+            updated_by = EXCLUDED.updated_by
+        "#,
+    )
+    .bind(tenant_id)
+    .bind(req.pii_shadow_enabled)
+    .bind(req.count_tokens_quota_per_minute)
+    .bind(&principal.subject)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = ?e, "persist tokenizer shadow security settings");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    emit_tokenizer_shadow_security_audit_event(
+        &mut tx,
+        tenant_id,
+        req.pii_shadow_enabled,
+        req.count_tokens_quota_per_minute,
+        &principal.subject,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(error = ?e, "emit tokenizer shadow security audit event");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        tracing::error!(error = ?e, "commit tokenizer shadow security settings");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(TokenizerShadowSecurityResp {
+        tenant_id: tenant_id.to_string(),
+        pii_shadow_enabled: req.pii_shadow_enabled,
+        count_tokens_quota_per_minute: req.count_tokens_quota_per_minute,
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+struct TokenizerShadowSecurityQuery {
+    tenant_id: String,
+}
+
+async fn get_tokenizer_shadow_security(
+    Extension(principal): Extension<Principal>,
+    State(state): State<Arc<AppState>>,
+    axum::extract::Query(q): axum::extract::Query<TokenizerShadowSecurityQuery>,
+) -> Result<Json<TokenizerShadowSecurityResp>, StatusCode> {
+    let tenant_id = parse_tokenizer_sampling_tenant(&q.tenant_id)?;
+    authorize_tokenizer_sampling_tenant(&principal, &tenant_id, Permission::ReadView)?;
+
+    let mut tx = state
+        .pg
+        .begin()
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = ?e, "set tokenizer shadow security RLS tenant");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let row: Option<(bool, i32)> = sqlx::query_as(
+        r#"
+        SELECT pii_shadow_enabled, count_tokens_quota_per_minute
+          FROM tokenizer_shadow_security_settings
+         WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| {
+        tracing::error!(error = ?e, "read tokenizer shadow security settings");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    tx.commit().await.map_err(|e| {
+        tracing::error!(error = ?e, "commit tokenizer shadow security lookup");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let (pii_shadow_enabled, count_tokens_quota_per_minute) = row.unwrap_or((false, 0));
+    Ok(Json(TokenizerShadowSecurityResp {
+        tenant_id: tenant_id.to_string(),
+        pii_shadow_enabled,
+        count_tokens_quota_per_minute,
+    }))
+}
+
+async fn emit_tokenizer_shadow_security_audit_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+    pii_shadow_enabled: bool,
+    count_tokens_quota_per_minute: i32,
+    actor_subject: &str,
+) -> Result<(), sqlx::Error> {
+    let audit_outbox_id = Uuid::now_v7();
+    let event_id = Uuid::now_v7();
+    let event_type = "spendguard.audit.tokenizer_shadow_security_settings.v1alpha1";
+
+    let next_seq: (i64,) = sqlx::query_as(
+        r#"
+        SELECT COALESCE(MAX(producer_sequence), 0) + 1
+          FROM control_plane_audit_outbox
+         WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    let producer_sequence = next_seq.0;
+
+    let now = chrono::Utc::now();
+    let cloudevent = serde_json::json!({
+        "specversion": "1.0",
+        "type": event_type,
+        "id": event_id.to_string(),
+        "source": "spendguard-control-plane",
+        "tenantid": tenant_id.to_string(),
+        "subject": "tokenizer/shadow-security",
+        "time": now.to_rfc3339(),
+        "actor_subject": actor_subject,
+        "producer_sequence": producer_sequence,
+        "data": {
+            "tenant_id": tenant_id.to_string(),
+            "pii_shadow_enabled": pii_shadow_enabled,
+            "count_tokens_quota_per_minute": count_tokens_quota_per_minute
         }
     });
 

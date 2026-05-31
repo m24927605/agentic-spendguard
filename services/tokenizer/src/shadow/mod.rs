@@ -38,6 +38,7 @@ pub mod circuit_breaker;
 pub mod persistence;
 pub mod provider_clients;
 pub mod sample_rate_state;
+pub mod security;
 pub mod sink;
 pub mod worker;
 

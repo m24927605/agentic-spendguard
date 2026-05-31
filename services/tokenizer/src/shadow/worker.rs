@@ -63,6 +63,7 @@ use tracing::{debug, error, info, warn};
 use super::circuit_breaker::{CircuitBreakerState, Permit};
 use super::provider_clients::{anthropic::AnthropicClient, gemini::GeminiClient, ProviderError};
 use super::sample_rate_state::{SampleRateState, ShadowKey};
+use super::security::{CountTokensQuota, DynShadowSecurityStore};
 use crate::proto::common::v1::CloudEvent;
 
 /// CloudEvent type string for tokenizer drift alerts (spec §4 +
@@ -259,6 +260,8 @@ pub struct ShadowWorkerDeps {
     pub persister: Arc<dyn SamplePersister>,
     pub alert_sink: Arc<dyn DriftAlertSink>,
     pub sample_rate_overrides: Option<Arc<dyn SampleRateOverrideStore>>,
+    pub security: DynShadowSecurityStore,
+    pub count_tokens_quota: Arc<CountTokensQuota>,
     pub signer: Arc<dyn Signer>,
     /// Producer source URI for the signed CloudEvent, e.g.
     /// `spendguard://tokenizer-service/region-us-west2`.
@@ -339,28 +342,70 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
         Permit::Allow => {}
     }
 
-    // Dispatch to the right provider.
-    let provider_call = match event.encoder_kind {
-        EncoderKind::Anthropic => match deps.providers.anthropic.as_ref() {
-            Some(c) => c.count_tokens(&event.model, &event.raw_text).await,
-            None => {
-                debug!(model = %event.model,
-                       "anthropic shadow client not configured; skipping sample");
-                return ShadowOutcome::Skipped;
-            }
-        },
-        EncoderKind::Gemini => match deps.providers.gemini.as_ref() {
-            Some(c) => c.count_tokens(&event.model, &event.raw_text).await,
-            None => {
-                debug!(model = %event.model,
-                       "gemini shadow client not configured; skipping sample");
-                return ShadowOutcome::Skipped;
-            }
-        },
+    let provider = match event.encoder_kind {
+        EncoderKind::Anthropic => "anthropic",
+        EncoderKind::Gemini => "gemini",
         // SLICE_05 ships providers for Anthropic + Gemini only.
         // OpenAI's tiktoken is byte-exact (per spec §4.2 threshold 0.0)
         // — drift detection lives elsewhere (CI golden fixture diff).
         // Cohere / Llama Tier 1 endpoints are deferred to SLICE-extra.
+        _ => return ShadowOutcome::Skipped,
+    };
+    match provider {
+        "anthropic" if deps.providers.anthropic.is_none() => {
+            debug!(model = %event.model, "anthropic shadow client not configured; skipping sample");
+            return ShadowOutcome::Skipped;
+        }
+        "gemini" if deps.providers.gemini.is_none() => {
+            debug!(model = %event.model, "gemini shadow client not configured; skipping sample");
+            return ShadowOutcome::Skipped;
+        }
+        _ => {}
+    }
+
+    let settings = match deps.security.load_settings(event.tenant_id).await {
+        Ok(settings) => settings,
+        Err(e) => {
+            warn!(
+                error = ?e,
+                tenant = %event.tenant_id,
+                "failed to load tokenizer shadow security settings; failing closed"
+            );
+            return ShadowOutcome::Skipped;
+        }
+    };
+    if !settings.pii_shadow_enabled {
+        debug!(
+            tenant = %event.tenant_id,
+            provider,
+            "tenant has not opted into raw-text tokenizer shadow; skipping provider call"
+        );
+        return ShadowOutcome::Skipped;
+    }
+    if !deps.count_tokens_quota.try_acquire(
+        event.tenant_id,
+        provider,
+        settings.count_tokens_quota_per_minute,
+    ) {
+        debug!(
+            tenant = %event.tenant_id,
+            provider,
+            quota_per_minute = settings.count_tokens_quota_per_minute,
+            "tokenizer count_tokens quota exhausted; skipping provider call"
+        );
+        return ShadowOutcome::Skipped;
+    }
+
+    // Dispatch to the right provider only after tenant opt-in and quota pass.
+    let provider_call = match event.encoder_kind {
+        EncoderKind::Anthropic => match deps.providers.anthropic.as_ref() {
+            Some(c) => c.count_tokens(&event.model, &event.raw_text).await,
+            None => return ShadowOutcome::Skipped,
+        },
+        EncoderKind::Gemini => match deps.providers.gemini.as_ref() {
+            Some(c) => c.count_tokens(&event.model, &event.raw_text).await,
+            None => return ShadowOutcome::Skipped,
+        },
         _ => return ShadowOutcome::Skipped,
     };
 
@@ -671,8 +716,8 @@ impl DriftAlertSink for InMemoryDriftAlertSink {
 #[cfg(test)]
 mod tests {
     use super::super::circuit_breaker::CircuitBreakerConfig;
-    use super::super::provider_clients::ProviderCount;
     use super::super::sample_rate_state::SampleRateConfig;
+    use super::super::security::StaticShadowSecurityStore;
     use super::*;
     use spendguard_signing::DisabledSigner;
     use std::time::Duration;
@@ -706,6 +751,8 @@ mod tests {
             persister: Arc::new(InMemorySamplePersister::default()),
             alert_sink: Arc::new(InMemoryDriftAlertSink::default()),
             sample_rate_overrides: None,
+            security: Arc::new(StaticShadowSecurityStore::allow_all_for_tests(60)),
+            count_tokens_quota: Arc::new(CountTokensQuota::default()),
             signer: Arc::new(DisabledSigner::for_test("tokenizer-service:test".into())),
             event_source: "spendguard://tokenizer-service/test".into(),
             channel_capacity: 16,
@@ -806,6 +853,53 @@ mod tests {
         let deps = deps_for_test_sample_rate_zero(providers);
         let out = process_one(&ev_anthropic(100, "hi"), &deps).await;
         assert_eq!(out, ShadowOutcome::Skipped);
+    }
+
+    #[tokio::test]
+    async fn raw_text_not_sent_without_tenant_pii_opt_in() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages/count_tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "input_tokens": 100
+            })))
+            .mount(&server)
+            .await;
+        let client = AnthropicClient::with_base_url("test-key", server.uri()).unwrap();
+        let providers = ProviderRoster {
+            anthropic: Some(client),
+            gemini: None,
+        };
+        let mut deps = deps_for_test(providers);
+        deps.security = Arc::new(StaticShadowSecurityStore::deny_all());
+
+        let out = process_one(&ev_anthropic(100, "sensitive prompt body"), &deps).await;
+        assert_eq!(out, ShadowOutcome::Skipped);
+
+        let requests = server.received_requests().await.unwrap_or_default();
+        assert!(
+            requests.is_empty(),
+            "provider received raw prompt despite tenant opt-in=false"
+        );
+    }
+
+    #[tokio::test]
+    async fn count_tokens_quota_blocks_excess_per_tenant_provider_calls() {
+        let (_server, c) = anthropic_mock_returning(100).await;
+        let providers = ProviderRoster {
+            anthropic: Some(c),
+            gemini: None,
+        };
+        let persister = Arc::new(InMemorySamplePersister::default());
+        let mut deps = deps_for_test(providers);
+        deps.security = Arc::new(StaticShadowSecurityStore::allow_all_for_tests(1));
+        deps.persister = persister.clone();
+
+        let first = process_one(&ev_anthropic(100, "first"), &deps).await;
+        assert_eq!(first, ShadowOutcome::Sampled);
+        let second = process_one(&ev_anthropic(100, "second"), &deps).await;
+        assert_eq!(second, ShadowOutcome::Skipped);
+        assert_eq!(persister.rows.lock().len(), 1);
     }
 
     #[tokio::test]

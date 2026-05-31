@@ -96,10 +96,13 @@ pub struct Config {
     #[serde(default)]
     pub database_url: String,
 
-    /// Optional Postgres URL for control_plane's durable
-    /// `tokenizer_sampling_rate_overrides` table. When configured, the
-    /// shadow worker refreshes the current event's (tenant, model)
-    /// override under that tenant's RLS context before rate-gating.
+    /// Optional Postgres URL for control_plane's durable tokenizer shadow
+    /// tables: `tokenizer_sampling_rate_overrides` and
+    /// `tokenizer_shadow_security_settings`. When configured, the worker
+    /// refreshes the current event's tenant/model overrides under that
+    /// tenant's RLS context before rate-gating or provider raw-text egress.
+    /// When unset, sampling overrides are absent and raw-text provider calls
+    /// are default-denied.
     #[serde(default)]
     pub sampling_override_database_url: String,
 
