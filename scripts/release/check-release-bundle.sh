@@ -77,8 +77,45 @@ if [[ "$release_notes_pointer" != "$manifest_release_notes_pointer" ]]; then
   exit 1
 fi
 repo_root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+current_commit="$(git -C "$repo_root" rev-parse HEAD 2>/dev/null || true)"
+if [[ -z "$current_commit" || "$commit_sha" != "$current_commit" ]]; then
+  echo "bundle commit must match current checkout HEAD" >&2
+  echo "bundle: $commit_sha" >&2
+  echo "checkout: ${current_commit:-unknown}" >&2
+  exit 1
+fi
+
 if [[ ! -f "$repo_root/$release_notes_pointer" ]]; then
   echo "release notes pointer does not resolve in repo: $release_notes_pointer" >&2
+  exit 1
+fi
+
+expected_inventory="$(mktemp)"
+{
+  printf '# SpendGuard migration inventory\n'
+  printf 'commit=%s\n' "$commit_sha"
+  printf '\n'
+  find "$repo_root/services" -path '*/migrations/*.sql' -type f | sort | while read -r migration; do
+    checksum="$(shasum -a 256 "$migration" | awk '{print $1}')"
+    rel="${migration#"$repo_root"/}"
+    printf '%s  %s\n' "$checksum" "$rel"
+  done
+} > "$expected_inventory"
+if ! diff -u "$expected_inventory" "$bundle_dir/migrations/inventory.txt" >/tmp/spendguard-release-inventory.diff; then
+  echo "migration inventory does not match current checkout" >&2
+  cat /tmp/spendguard-release-inventory.diff >&2
+  exit 1
+fi
+
+chart_compare_dir="$(mktemp -d)"
+helm package "$repo_root/charts/spendguard" --destination "$chart_compare_dir" >/dev/null
+expected_chart="$(find "$chart_compare_dir" -maxdepth 1 -type f -name 'spendguard-*.tgz' | sort | head -n 1)"
+expected_chart_hash="$(shasum -a 256 "$expected_chart" | awk '{print $1}')"
+actual_chart_hash="$(shasum -a 256 "$chart_pkg" | awk '{print $1}')"
+if [[ "$actual_chart_hash" != "$expected_chart_hash" ]]; then
+  echo "packaged chart digest does not match chart rebuilt from current checkout" >&2
+  echo "bundle:   $actual_chart_hash" >&2
+  echo "checkout: $expected_chart_hash" >&2
   exit 1
 fi
 
@@ -96,7 +133,7 @@ fi
 )
 
 chart_scan_dir="$(mktemp -d)"
-trap 'rm -rf "$chart_scan_dir"' EXIT
+trap 'rm -rf "$chart_scan_dir" "$chart_compare_dir" "$expected_inventory"' EXIT
 tar -xzf "$chart_pkg" -C "$chart_scan_dir"
 
 if grep -RInE '(postgres(ql)?://|BEGIN ((RSA|EC|OPENSSH) )?PRIVATE KEY|AKIA[0-9A-Z]{16}|xox[baprs]-|sk-[A-Za-z0-9_-]{20,})' "$bundle_dir" "$chart_scan_dir" >/tmp/spendguard-release-secret-scan.txt; then
