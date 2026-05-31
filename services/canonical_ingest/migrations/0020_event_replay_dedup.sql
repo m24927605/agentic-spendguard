@@ -27,6 +27,12 @@ CREATE INDEX canonical_event_replay_dedup_expires_idx
 CREATE INDEX canonical_event_replay_dedup_tenant_idx
     ON canonical_event_replay_dedup (tenant_id, first_seen_at DESC);
 
+REVOKE SELECT, INSERT, UPDATE, DELETE ON canonical_event_replay_dedup FROM PUBLIC;
+
+GRANT SELECT, INSERT, UPDATE
+    ON canonical_event_replay_dedup
+    TO canonical_ingest_application_role;
+
 COMMENT ON TABLE canonical_event_replay_dedup IS
     'Producer-scoped replay ledger for canonical_ingest AppendEvents. PRIMARY KEY(producer_id,event_id) rejects CloudEvent replays before immutable append; expires_at bounds operational cleanup while canonical_events_global_keys remains the permanent event_id uniqueness guard.';
 COMMENT ON COLUMN canonical_event_replay_dedup.payload_hash IS

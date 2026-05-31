@@ -251,6 +251,102 @@ async fn replay_dedup_rejects_same_producer_event_id_hash_mismatch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_dedup_runtime_role_has_required_table_privileges() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+
+    let row: (bool, bool, bool) = sqlx::query_as(
+        r#"
+        SELECT
+            has_table_privilege(
+                'canonical_ingest_application_role',
+                'canonical_event_replay_dedup',
+                'INSERT'
+            ),
+            has_table_privilege(
+                'canonical_ingest_application_role',
+                'canonical_event_replay_dedup',
+                'SELECT'
+            ),
+            has_table_privilege(
+                'canonical_ingest_application_role',
+                'canonical_event_replay_dedup',
+                'UPDATE'
+            )
+        "#,
+    )
+    .fetch_one(&fx.pool)
+    .await
+    .expect("read replay table grants");
+
+    assert_eq!(row, (true, true, true));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_dedup_rejects_quarantined_outcome_hash_mismatch() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let tenant_id = Uuid::new_v4();
+    let decision_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let event_id = Uuid::new_v4();
+
+    let outcome = base_append_input(
+        event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.outcome",
+        2,
+    );
+    quarantine_audit_outcome(
+        &fx.pool,
+        outcome,
+        Utc::now() + chrono::Duration::seconds(30),
+    )
+    .await
+    .expect("quarantine first outcome");
+
+    let mut replay = base_append_input(
+        event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.outcome",
+        3,
+    );
+    replay.event_hash = &[0x77; 32];
+    replay.payload_json = serde_json::json!({"data": {"tampered": true}});
+    let err =
+        quarantine_audit_outcome(&fx.pool, replay, Utc::now() + chrono::Duration::seconds(30))
+            .await
+            .expect_err("quarantine replay hash mismatch rejected");
+    assert!(
+        err.to_string().contains("replay hash mismatch"),
+        "unexpected error: {err}"
+    );
+
+    let quarantine_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM audit_outcome_quarantine WHERE event_id = $1")
+            .bind(event_id)
+            .fetch_one(&fx.pool)
+            .await
+            .expect("count quarantine rows");
+    assert_eq!(quarantine_count, 1);
+
+    let replay_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM canonical_event_replay_dedup WHERE producer_id = $1 AND event_id = $2")
+            .bind("canonical-ingest-test")
+            .bind(event_id)
+            .fetch_one(&fx.pool)
+            .await
+            .expect("count replay ledger rows");
+    assert_eq!(replay_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn quarantined_outcome_release_preserves_aggregator_mirrors() {
     let Some(fx) = setup_postgres().await else {
         return;

@@ -638,6 +638,22 @@ pub async fn quarantine_audit_outcome(
         .decision_id
         .ok_or_else(|| DomainError::InvalidRequest("audit.outcome missing decision_id".into()))?;
 
+    let mut tx = pool.begin().await.map_err(map_pg_error)?;
+    match claim_replay_key(&mut tx, &input).await? {
+        ReplayClaim::New => {}
+        ReplayClaim::DuplicateSamePayload => {
+            tx.rollback().await.map_err(map_pg_error)?;
+            return Ok(());
+        }
+        ReplayClaim::DuplicateHashMismatch => {
+            tx.rollback().await.map_err(map_pg_error)?;
+            return Err(DomainError::Duplicate(format!(
+                "CloudEvent replay hash mismatch for producer_id={} event_id={}",
+                input.producer_id, input.event_id
+            )));
+        }
+    }
+
     // Round-3 fix B2/HARDEN_03 R2: bind prediction and aggregator mirror
     // columns into quarantine so the release path can re-hydrate them.
     // SLICE_01 callers pass Default (all None → SQL NULL); SLICE_06+
@@ -732,10 +748,11 @@ pub async fn quarantine_audit_outcome(
     .bind(input.prediction.actual_output_tokens)
     .bind(input.prediction.delta_b_ratio)
     .bind(input.prediction.delta_c_ratio)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(map_pg_error)?;
 
+    tx.commit().await.map_err(map_pg_error)?;
     Ok(())
 }
 
