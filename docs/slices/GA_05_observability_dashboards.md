@@ -1,7 +1,7 @@
 # GA 05 - Observability Dashboards
 
 > **Branch**: `ga/GA_05_observability_dashboards`
-> **Status**: design
+> **Status**: implementation review
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; metrics inventory and dashboard assets
 
@@ -97,11 +97,13 @@ Reviewer must verify metrics are real and labels do not introduce cardinality or
 |---|---|---|
 | SRE/Operations Architect | Dashboards and alerts are separate slices | GA_05 owns dashboards only |
 | Performance/Database Architect | p99 and lag panels are mandatory | Tail metrics required |
+| R1 codex adversarial review | Inventory endpoints, cache ratio, stale lag, output predictor live scrape, and Grafana link had to be fixed | Real endpoint validator, `increase` cache ratio, leader gauge, live scrape evidence, and empty dashboard links adopted |
+| R2 codex adversarial review | Leader-filtered lag could hide no-leader backlog growth | Every outbox-forwarder pod refreshes pending oldest-row age; leader count is shown separately |
 
 ## §14. Merge Checklist
 
-- [ ] Metrics inventory exists
-- [ ] Dashboard JSON validates
-- [ ] Metric validator passes
+- [x] Metrics inventory exists
+- [x] Dashboard JSON validates
+- [x] Metric validator passes
 - [ ] AIT review clean or arbitration recorded
 - [ ] Memory updated
