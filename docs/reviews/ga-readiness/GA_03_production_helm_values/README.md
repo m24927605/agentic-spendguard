@@ -2,7 +2,7 @@
 
 Date: 2026-05-31
 Branch: `ga/GA_03_production_helm_values`
-Tested implementation head: pending final evidence refresh
+Tested implementation head: `670bfefa8cffee22e6404dfcbcbbba300cb21d8b`
 
 ## Commands
 
