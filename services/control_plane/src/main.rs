@@ -1794,6 +1794,25 @@ mod tokenizer_sampling_auth_tests {
             axum::http::StatusCode::FORBIDDEN
         );
     }
+
+    #[test]
+    fn tokenizer_shadow_security_write_requires_tenant_scope() {
+        let tenant = Uuid::new_v4();
+        let p = principal(&["admin"], &[&tenant.to_string()]);
+
+        authorize_tokenizer_sampling_tenant(&p, &tenant, Permission::TenantWrite).unwrap();
+    }
+
+    #[test]
+    fn tokenizer_shadow_security_read_rejects_missing_read_view() {
+        let tenant = Uuid::new_v4();
+        let p = principal(&[], &[&tenant.to_string()]);
+
+        assert_eq!(
+            authorize_tokenizer_sampling_tenant(&p, &tenant, Permission::ReadView).unwrap_err(),
+            axum::http::StatusCode::FORBIDDEN
+        );
+    }
 }
 
 #[cfg(test)]
