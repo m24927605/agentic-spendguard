@@ -10,6 +10,10 @@ GA_04 adds a checked-in migration inventory, operator playbooks for migration an
 |---|---|
 | `scripts/release/verify-migration-inventory.sh` | PASS - verified `docs/operations/migration-inventory-v1alpha1.txt` |
 | `CONTAINER=spendguard-ga04-migrations EVIDENCE_PREFIX=/tmp/spendguard-ga04 scripts/verify-migrations-postgres16.sh` | PASS - applied 77 direct deploy migrations on Postgres 16 |
+| `helm template spendguard charts/spendguard --set chart.profile=demo` | PASS |
+| `helm template spendguard charts/spendguard -f charts/spendguard/values-production.example.yaml` | PASS |
+| `scripts/release/build-release-bundle.sh --output /tmp/spendguard-ga04-release-bundle` | PASS |
+| `scripts/release/check-release-bundle.sh /tmp/spendguard-ga04-release-bundle` | PASS |
 | Migration playbook backup/restore checkpoints | Covered in `docs/operations/migration-playbook.md` |
 | Rollback decision tree and forward-fix warnings | Covered in `docs/operations/rollback-playbook.md` |
 
