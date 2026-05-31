@@ -15,4 +15,4 @@ GA_06 replaces placeholder/stale alert rules with metrics emitted by checked-in 
 
 ## Drill Summary
 
-The drill ran `make demo-up DEMO_MODE=default`, reopened one successfully forwarded runtime audit outbox row by changing only forwarder-state columns, stopped canonical-ingest to produce backlog, observed `spendguard_outbox_pending_oldest_age_seconds >= 60`, restarted canonical-ingest, and verified pending rows returned to zero.
+The drill ran `make demo-up DEMO_MODE=default`, reopened one successfully forwarded runtime audit outbox row by changing only forwarder-state columns, stopped canonical-ingest to produce backlog, observed `spendguard_outbox_pending_oldest_age_seconds > 60` continuously through the alert `for` duration, restarted canonical-ingest, and verified pending rows returned to zero.

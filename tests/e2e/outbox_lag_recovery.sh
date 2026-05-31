@@ -5,6 +5,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 COMPOSE=(docker compose -f "$ROOT/deploy/demo/compose.yaml")
 EVIDENCE_DIR="${EVIDENCE_DIR:-$ROOT/docs/reviews/ga-readiness/GA_06_alerting_runbooks_drills}"
 EVIDENCE_FILE="$EVIDENCE_DIR/outbox_lag_recovery.json"
+ALERT_FOR_SECONDS="${ALERT_FOR_SECONDS:-300}"
 STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 require_cmd() {
@@ -93,15 +94,27 @@ echo "[drill] waiting for lag metric to cross 60s alert threshold"
 LAG_DURING=0
 for _ in $(seq 1 90); do
   LAG_DURING="$(outbox_lag_metric)"
-  if [[ "$LAG_DURING" -ge 60 ]]; then
+  if [[ "$LAG_DURING" -gt 60 ]]; then
     break
   fi
   sleep 2
 done
-if [[ "$LAG_DURING" -lt 60 ]]; then
-  echo "outbox lag metric did not cross 60s; last value=$LAG_DURING" >&2
+if [[ "$LAG_DURING" -le 60 ]]; then
+  echo "outbox lag metric did not exceed 60s; last value=$LAG_DURING" >&2
   exit 1
 fi
+
+echo "[drill] holding lag predicate true for ${ALERT_FOR_SECONDS}s"
+HELD_SECONDS=0
+while [[ "$HELD_SECONDS" -lt "$ALERT_FOR_SECONDS" ]]; do
+  sleep 10
+  HELD_SECONDS=$((HELD_SECONDS + 10))
+  LAG_DURING="$(outbox_lag_metric)"
+  if [[ "$LAG_DURING" -le 60 ]]; then
+    echo "outbox lag predicate dropped before alert for-duration; value=$LAG_DURING held=${HELD_SECONDS}s" >&2
+    exit 1
+  fi
+done
 
 METRICS_DURING="$(scrape_outbox_metrics | grep -E 'spendguard_outbox_(pending_oldest_age_seconds|forwarder_is_leader)' || true)"
 
@@ -130,6 +143,7 @@ REARMED_ID="$REARMED_ID" \
 REARMED_AGE="$REARMED_AGE" \
 PENDING_DURING="$PENDING_DURING" \
 LAG_DURING="$LAG_DURING" \
+ALERT_FOR_SECONDS="$ALERT_FOR_SECONDS" \
 PENDING_AFTER="$PENDING_AFTER" \
 LAG_AFTER="$LAG_AFTER" \
 METRICS_DURING="$METRICS_DURING" \
@@ -148,6 +162,7 @@ evidence = {
     "rearmed_row_age_seconds": int(os.environ["REARMED_AGE"]),
     "pending_during_outage": int(os.environ["PENDING_DURING"]),
     "lag_metric_during_outage": int(os.environ["LAG_DURING"]),
+    "alert_predicate_hold_seconds": int(os.environ["ALERT_FOR_SECONDS"]),
     "pending_after_recovery": int(os.environ["PENDING_AFTER"]),
     "lag_metric_after_recovery": int(os.environ["LAG_AFTER"]),
     "metrics_excerpt_during_outage": os.environ["METRICS_DURING"].splitlines(),

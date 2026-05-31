@@ -7,7 +7,7 @@
 apiVersion: monitoring.coreos.com/v1
 kind: PrometheusRule
 metadata:
-  name: spendguard-ga-alerts
+  name: spendguard-slos
   labels:
     app.kubernetes.io/part-of: spendguard
     spendguard.dev/track: ga
@@ -96,6 +96,8 @@ spec:
 
         - alert: SpendGuardOutboxNoLeader
           expr: |
+            absent(spendguard_outbox_forwarder_is_leader)
+            or
             sum(spendguard_outbox_forwarder_is_leader) != 1
           for: 5m
           labels:

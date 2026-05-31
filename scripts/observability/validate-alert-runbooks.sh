@@ -104,6 +104,8 @@ for group in groups:
             fail(f"{alert} uses placeholder vector(0)")
         if "spendguard_outbox_pending_seconds_bucket" in expr:
             fail(f"{alert} uses stale outbox histogram placeholder")
+        if alert == "SpendGuardOutboxNoLeader" and "absent(" not in expr:
+            fail("SpendGuardOutboxNoLeader must alert when all leader metric series are absent")
         labels = rule.get("labels") or {}
         severity = labels.get("severity")
         if severity not in {"page", "warn", "info"}:

@@ -96,6 +96,9 @@ Reviewer must check runbook usefulness, not just file existence.
 | SRE/Operations Architect | Outbox lag drill must use a real successfully forwarded runtime audit row | Drill excludes demo seed/bootstrap rows and changes only forwarder-state columns |
 | Backend Architect | Alert expressions must reference emitted metrics inventoried by GA_05 | Validator cross-checks every metric against `docs/operations/metrics-inventory.md` and source files |
 | Security Engineer | Operator remediation must preserve signature verification and audit-chain immutability | Validator rejects unsafe runbook phrases; runbooks explicitly preserve signed audit paths |
+| R1 Reviewer (codex CLI) | `SpendGuardOutboxNoLeader` must page when all forwarder series are absent | Added `absent(spendguard_outbox_forwarder_is_leader)` branch and validator guard |
+| R1 Reviewer (codex CLI) | PrometheusRule metadata name must remain stable for `kubectl apply` upgrades | Restored `metadata.name: spendguard-slos` |
+| R1 Reviewer (codex CLI) | Outbox lag drill must hold the actual `> 60` predicate through alert `for: 5m` | Drill now waits for `> 60` and holds for `ALERT_FOR_SECONDS=300` by default |
 
 ## §14. Merge Checklist
 
