@@ -8,7 +8,8 @@ cd "${REPO_ROOT}"
 
 CONTAINER="${CONTAINER:-spendguard-harden07-migrations}"
 IMAGE="${POSTGRES_IMAGE:-postgres:16-alpine}"
-PASSWORD="${POSTGRES_PASSWORD:-spendguard_harden07}"
+PASSWORD="${POSTGRES_PASSWORD:-spendguard_migrations}"
+EVIDENCE_PREFIX="${EVIDENCE_PREFIX:-/tmp/spendguard-migrations}"
 
 log() { echo "[verify-migrations] $*" >&2; }
 
@@ -18,6 +19,8 @@ cleanup() {
 trap cleanup EXIT
 
 cleanup
+scripts/release/verify-migration-inventory.sh
+
 log "starting ${IMAGE}"
 docker run -d --name "${CONTAINER}" \
     -e POSTGRES_USER=spendguard \
@@ -108,7 +111,7 @@ SELECT
     WHERE table_name='audit_outbox'
       AND column_name IN ('predicted_a_tokens', 'run_projection_at_decision_atomic', 'prediction_strategy_used')
   ) AS has_prediction_columns;
-" | tee /tmp/spendguard-harden07-ledger-smoke.txt
+" | tee "${EVIDENCE_PREFIX}-ledger-smoke.txt"
 
 log "canonical smoke checks"
 psql_exec spendguard_canonical -c "
@@ -150,7 +153,7 @@ SELECT
     WHERE table_name='canonical_events'
       AND column_name IN ('payload_json', 'prediction_strategy_used', 'run_id_mirror')
   ) AS has_mirror_columns;
-" | tee /tmp/spendguard-harden07-canonical-smoke.txt
+" | tee "${EVIDENCE_PREFIX}-canonical-smoke.txt"
 
 log "control-plane smoke checks"
 psql_exec spendguard_control_plane -c "
@@ -182,6 +185,6 @@ SELECT
     WHERE tablename='control_plane_audit_outbox'
       AND policyname='control_plane_audit_outbox_forwarder_update'
   ) AS has_forwarder_update_policy;
-" | tee /tmp/spendguard-harden07-control-plane-smoke.txt
+" | tee "${EVIDENCE_PREFIX}-control-plane-smoke.txt"
 
 log "PASS"

@@ -34,15 +34,7 @@ release_migration_inventory() {
     printf '# SpendGuard migration inventory\n'
     printf 'commit=%s\n' "$commit"
     printf '\n'
-    find services -type f -name '*.sql' | sort | while read -r migration; do
-      case "$migration" in
-        services/*/migrations/*.sql)
-          case "$migration" in
-            services/*/migrations/*/*.sql) continue ;;
-          esac
-          ;;
-        *) continue ;;
-      esac
+    find services -maxdepth 3 -type f -path 'services/*/migrations/*.sql' | sort | while read -r migration; do
       checksum="$(shasum -a 256 "$migration" | awk '{print $1}')"
       printf '%s  %s\n' "$checksum" "$migration"
     done
