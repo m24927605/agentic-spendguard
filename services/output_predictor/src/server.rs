@@ -28,6 +28,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, warn};
@@ -62,6 +63,161 @@ pub const MAX_PROMPT_CLASS_LEN: usize = 32;
 /// the unknown default, increment this counter so operators see
 /// per-model unknown-rate trends in Prometheus.
 pub static UNKNOWN_CONTEXT_WINDOW_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Total Predict RPCs by terminal outcome.
+pub static OUTPUT_PREDICTOR_PREDICT_OK_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_ERR_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Cumulative Predict RPC latency histogram buckets in seconds.
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_001_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_005_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_010_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_025_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_050_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_100_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_250_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_500_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_1000_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_INF_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_SUM_NS: AtomicU64 = AtomicU64::new(0);
+pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub fn predict_outcome_samples() -> [(&'static str, u64); 2] {
+    [
+        (
+            "ok",
+            OUTPUT_PREDICTOR_PREDICT_OK_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "err",
+            OUTPUT_PREDICTOR_PREDICT_ERR_TOTAL.load(Ordering::Relaxed),
+        ),
+    ]
+}
+
+pub fn predict_latency_bucket_samples() -> [(&'static str, u64); 10] {
+    [
+        (
+            "0.001",
+            OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_001_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.005",
+            OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_005_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.01",
+            OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_010_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.025",
+            OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_025_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.05",
+            OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_050_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.1",
+            OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_100_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.25",
+            OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_250_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "0.5",
+            OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_500_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "1",
+            OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_1000_TOTAL.load(Ordering::Relaxed),
+        ),
+        (
+            "+Inf",
+            OUTPUT_PREDICTOR_PREDICT_LATENCY_INF_TOTAL.load(Ordering::Relaxed),
+        ),
+    ]
+}
+
+pub fn predict_latency_sum_seconds() -> f64 {
+    OUTPUT_PREDICTOR_PREDICT_LATENCY_SUM_NS.load(Ordering::Relaxed) as f64 / 1_000_000_000.0
+}
+
+pub fn predict_latency_count() -> u64 {
+    OUTPUT_PREDICTOR_PREDICT_LATENCY_COUNT.load(Ordering::Relaxed)
+}
+
+fn record_predict_metrics(ok: bool, elapsed: Duration) {
+    if ok {
+        OUTPUT_PREDICTOR_PREDICT_OK_TOTAL.fetch_add(1, Ordering::Relaxed);
+    } else {
+        OUTPUT_PREDICTOR_PREDICT_ERR_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+
+    let seconds = elapsed.as_secs_f64();
+    if seconds <= 0.001 {
+        OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_001_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.005 {
+        OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_005_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.01 {
+        OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_010_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.025 {
+        OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_025_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.05 {
+        OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_050_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.1 {
+        OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_100_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.25 {
+        OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_250_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 0.5 {
+        OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_500_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    if seconds <= 1.0 {
+        OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_1000_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    OUTPUT_PREDICTOR_PREDICT_LATENCY_INF_TOTAL.fetch_add(1, Ordering::Relaxed);
+    OUTPUT_PREDICTOR_PREDICT_LATENCY_SUM_NS.fetch_add(
+        elapsed.as_nanos().min(u64::MAX as u128) as u64,
+        Ordering::Relaxed,
+    );
+    OUTPUT_PREDICTOR_PREDICT_LATENCY_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+struct PredictMetricsGuard {
+    start: Instant,
+    ok: bool,
+}
+
+impl PredictMetricsGuard {
+    fn start() -> Self {
+        Self {
+            start: Instant::now(),
+            ok: false,
+        }
+    }
+
+    fn mark_ok(&mut self) {
+        self.ok = true;
+    }
+
+    fn elapsed_nanos(&self) -> i64 {
+        self.start.elapsed().as_nanos().min(i64::MAX as u128) as i64
+    }
+}
+
+impl Drop for PredictMetricsGuard {
+    fn drop(&mut self) {
+        record_predict_metrics(self.ok, self.start.elapsed());
+    }
+}
 
 // ── SLICE_07: customer plugin call outcome counters ────────────────
 //
@@ -168,7 +324,7 @@ impl OutputPredictorTrait for OutputPredictorSvc {
         &self,
         request: Request<PredictRequest>,
     ) -> Result<Response<PredictResponse>, Status> {
-        let start = std::time::Instant::now();
+        let mut metrics_guard = PredictMetricsGuard::start();
         let req = request.into_inner();
 
         // Parse tenant_id at gRPC boundary per SLICE_05 R2 B5 convention.
@@ -416,7 +572,7 @@ impl OutputPredictorTrait for OutputPredictorSvc {
             (None, _) => Some("L1".to_string()),
         };
 
-        let total_latency_ns = start.elapsed().as_nanos() as i64;
+        let total_latency_ns = metrics_guard.elapsed_nanos();
 
         debug!(
             tenant_id = %req.tenant_id,
@@ -431,6 +587,7 @@ impl OutputPredictorTrait for OutputPredictorSvc {
             "predict"
         );
 
+        metrics_guard.mark_ok();
         Ok(Response::new(PredictResponse {
             predicted_a_tokens: a,
             predicted_b_tokens: b_value,

@@ -38,6 +38,7 @@
 //! rows; in-memory TTL is the additional 5min freshness gate per spec §4.3.
 
 use std::num::NonZeroUsize;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -55,6 +56,12 @@ use uuid::Uuid;
 /// 2 agents × 7 classes (= 700K theoretical max — beyond this the LRU
 /// evicts cold entries instead of OOM-ing the process).
 pub const MAX_IN_MEMORY_ENTRIES: usize = 100_000;
+
+/// Total Strategy B cache lookups issued by Predict.
+pub static OUTPUT_DISTRIBUTION_CACHE_LOOKUP_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Total Strategy B cache hits that returned a promoted L4 row.
+pub static OUTPUT_DISTRIBUTION_CACHE_HIT_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Cache row consumed by Strategy B per spec §4.2.
 #[derive(Debug, Clone)]
@@ -119,6 +126,7 @@ impl OutputDistributionCache {
         agent_id: &str,
         prompt_class: &str,
     ) -> Option<CacheRow> {
+        OUTPUT_DISTRIBUTION_CACHE_LOOKUP_TOTAL.fetch_add(1, Ordering::Relaxed);
         let key = BucketKey {
             tenant_id,
             model: model.to_string(),
@@ -131,6 +139,9 @@ impl OutputDistributionCache {
             let mut guard = self.entries.lock();
             if let Some(entry) = guard.get(&key) {
                 if entry.expires_at > Instant::now() {
+                    if entry.value.is_some() {
+                        OUTPUT_DISTRIBUTION_CACHE_HIT_TOTAL.fetch_add(1, Ordering::Relaxed);
+                    }
                     return entry.value.clone();
                 }
             }
@@ -168,6 +179,9 @@ impl OutputDistributionCache {
         match sql_outcome {
             Ok(value) => {
                 // Authoritative result — populate cache with TTL stamp.
+                if value.is_some() {
+                    OUTPUT_DISTRIBUTION_CACHE_HIT_TOTAL.fetch_add(1, Ordering::Relaxed);
+                }
                 let mut guard = self.entries.lock();
                 guard.put(
                     key,

@@ -621,29 +621,60 @@ async fn shutdown_signal() {
 }
 
 fn render_metrics() -> String {
+    use spendguard_output_predictor::cache::{
+        OUTPUT_DISTRIBUTION_CACHE_HIT_TOTAL, OUTPUT_DISTRIBUTION_CACHE_LOOKUP_TOTAL,
+    };
     use spendguard_output_predictor::server::{
-        CUSTOMER_PREDICTOR_CALL_FALL_TO_B_TOTAL, CUSTOMER_PREDICTOR_CALL_SUCCESS_TOTAL,
-        CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL, FAILURE_BY_MODE_BREAKER_OPEN,
-        FAILURE_BY_MODE_DESERIALIZATION_ERROR, FAILURE_BY_MODE_GRPC_ERROR,
-        FAILURE_BY_MODE_INVALID_CONFIDENCE, FAILURE_BY_MODE_INVALID_OVERFLOW,
-        FAILURE_BY_MODE_INVALID_ZERO_OR_NEGATIVE, FAILURE_BY_MODE_NOT_CONFIGURED,
-        FAILURE_BY_MODE_NOT_SERVING, FAILURE_BY_MODE_TIMEOUT, FAILURE_BY_MODE_TLS_ERROR,
-        UNKNOWN_CONTEXT_WINDOW_TOTAL,
+        predict_latency_bucket_samples, predict_latency_count, predict_latency_sum_seconds,
+        predict_outcome_samples, CUSTOMER_PREDICTOR_CALL_FALL_TO_B_TOTAL,
+        CUSTOMER_PREDICTOR_CALL_SUCCESS_TOTAL, CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL,
+        FAILURE_BY_MODE_BREAKER_OPEN, FAILURE_BY_MODE_DESERIALIZATION_ERROR,
+        FAILURE_BY_MODE_GRPC_ERROR, FAILURE_BY_MODE_INVALID_CONFIDENCE,
+        FAILURE_BY_MODE_INVALID_OVERFLOW, FAILURE_BY_MODE_INVALID_ZERO_OR_NEGATIVE,
+        FAILURE_BY_MODE_NOT_CONFIGURED, FAILURE_BY_MODE_NOT_SERVING, FAILURE_BY_MODE_TIMEOUT,
+        FAILURE_BY_MODE_TLS_ERROR, UNKNOWN_CONTEXT_WINDOW_TOTAL,
     };
     use std::sync::atomic::Ordering;
     // SLICE_07 Phase E: surface the spec §9.1 customer_predictor_* counters.
     // The 10 per-mode counters cover the spec §5.1 8 documented failure
     // modes + the 2 SLICE_07 metric-only modes (not_configured + breaker_open).
-    let body = format!(
-        "# HELP spendguard_output_predictor_predict_total \
-         Total Predict RPCs handled.\n\
-         # TYPE spendguard_output_predictor_predict_total counter\n\
-         spendguard_output_predictor_predict_total 0\n\
-         # HELP spendguard_output_predictor_cache_hit_rate \
-         Phase-D cache hit rate (count of L4 hits / total predict calls).\n\
-         # TYPE spendguard_output_predictor_cache_hit_rate gauge\n\
-         spendguard_output_predictor_cache_hit_rate 0\n\
-         # HELP spendguard_output_predictor_unknown_context_window_total \
+    let mut body = String::new();
+    body.push_str(
+        "# HELP spendguard_output_predictor_predict_total Total Predict RPCs handled.\n\
+         # TYPE spendguard_output_predictor_predict_total counter\n",
+    );
+    for (outcome, value) in predict_outcome_samples() {
+        body.push_str(&format!(
+            "spendguard_output_predictor_predict_total{{outcome=\"{outcome}\"}} {value}\n"
+        ));
+    }
+    body.push_str(
+        "# HELP spendguard_output_predictor_predict_latency_seconds Predict RPC latency histogram in seconds.\n\
+         # TYPE spendguard_output_predictor_predict_latency_seconds histogram\n",
+    );
+    for (le, value) in predict_latency_bucket_samples() {
+        body.push_str(&format!(
+            "spendguard_output_predictor_predict_latency_seconds_bucket{{le=\"{le}\"}} {value}\n"
+        ));
+    }
+    body.push_str(&format!(
+        "spendguard_output_predictor_predict_latency_seconds_sum {:.9}\n\
+         spendguard_output_predictor_predict_latency_seconds_count {}\n",
+        predict_latency_sum_seconds(),
+        predict_latency_count()
+    ));
+    body.push_str(&format!(
+        "# HELP spendguard_output_predictor_cache_lookup_total Strategy B output_distribution_cache lookups.\n\
+         # TYPE spendguard_output_predictor_cache_lookup_total counter\n\
+         spendguard_output_predictor_cache_lookup_total {}\n\
+         # HELP spendguard_output_predictor_cache_hit_total Strategy B output_distribution_cache L4 hits.\n\
+         # TYPE spendguard_output_predictor_cache_hit_total counter\n\
+         spendguard_output_predictor_cache_hit_total {}\n",
+        OUTPUT_DISTRIBUTION_CACHE_LOOKUP_TOTAL.load(Ordering::Relaxed),
+        OUTPUT_DISTRIBUTION_CACHE_HIT_TOTAL.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "# HELP spendguard_output_predictor_unknown_context_window_total \
          Predict calls that fell back to the unknown model_context_window default per spec §3.3.\n\
          # TYPE spendguard_output_predictor_unknown_context_window_total counter\n\
          spendguard_output_predictor_unknown_context_window_total {unknown}\n\
@@ -683,7 +714,7 @@ fn render_metrics() -> String {
         m_ns = FAILURE_BY_MODE_NOT_SERVING.load(Ordering::Relaxed),
         m_nc = FAILURE_BY_MODE_NOT_CONFIGURED.load(Ordering::Relaxed),
         m_brk = FAILURE_BY_MODE_BREAKER_OPEN.load(Ordering::Relaxed),
-    );
+    ));
     body
 }
 
@@ -1004,7 +1035,9 @@ mod tests {
     fn render_metrics_contains_known_names() {
         let body = render_metrics();
         assert!(body.contains("spendguard_output_predictor_predict_total"));
-        assert!(body.contains("spendguard_output_predictor_cache_hit_rate"));
+        assert!(body.contains("spendguard_output_predictor_predict_latency_seconds_bucket"));
+        assert!(body.contains("spendguard_output_predictor_cache_lookup_total"));
+        assert!(body.contains("spendguard_output_predictor_cache_hit_total"));
         // SLICE_07 Phase E: customer_predictor_* metric surface per spec §9.1.
         assert!(body.contains("customer_predictor_call_total"));
         assert!(body.contains("customer_predictor_tenant_isolation_violation_total"));
