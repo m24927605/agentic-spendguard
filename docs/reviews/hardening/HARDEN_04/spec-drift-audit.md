@@ -11,6 +11,8 @@ rg -n 'spendguard\.prediction\.drift_alert|spendguard\.audit\.prediction_drift_a
 rg -n 'STOP_RUN_PROJECTION|StopRunProjection|DECISION_UNSPECIFIED|unknown decision|unsupported.*decision|fail.*closed|DecisionStopped' services/egress_proxy/src services/sidecar/src sdk/python/src/spendguard/client.py proto/spendguard/sidecar_adapter/v1/adapter.proto docs/contract-dsl-spec-v1alpha2.md
 rg -n 'reserved / actual|predicted_strategy_tokens / actual_output_tokens|P95 < 0\.95|C P95 < 0\.95|expected high ratio|systematic over-reservation|over-reservation outlier' docs/calibration-report-spec-v1alpha1.md services/calibration_report docs/slices/SLICE_13_calibration_report_cli.md
 rg -n '\(tenant_id, model, agent_id, prompt_class_fingerprint\)|GROUP BY[^\n]*prompt_class_fingerprint|group by[^\n]*prompt_class_fingerprint|bucket key[^\n]*prompt_class_fingerprint' docs/stats-aggregator-spec-v1alpha1.md services/stats_aggregator services/canonical_ingest -g '*.rs' -g '*.sql' -g '*.md'
+rg -n 'Total: [0-9]+ tests passing|tests passing|1\.0::float AS p95|CALIBRATION_RATIO_CACHE_SQL|Proof mode: cache \(use --proof-mode=canonical' services/calibration_report docs/calibration-report-spec-v1alpha1.md docs/slices/SLICE_13_calibration_report_cli.md
+cargo test --manifest-path services/calibration_report/Cargo.toml
 ```
 
 ## Findings And Disposition
@@ -27,7 +29,8 @@ rg -n '\(tenant_id, model, agent_id, prompt_class_fingerprint\)|GROUP BY[^\n]*pr
 | AIT Round 1 found stats-aggregator §3.2 still naming `prompt_class_fingerprint` as the bucket key. | Corrected §3.2/§3.3 to key on `prompt_class` and define `prompt_class_fingerprint` as non-key audit metadata. The authoritative schema is `0016_output_distribution_cache.sql` primary key plus migration `0018` comments and stats_aggregator aggregation code. |
 | AIT Round 2 found high Strategy A actual/predicted ratios rendered as expected because formatter special-cased A before threshold checks. | Fixed text and markdown formatters to apply warning/critical P95 checks before the Strategy A conservative-ratio label. Rule 1 now recommends on any strategy with P95 > 1.50, including a failed Strategy A ceiling. |
 | AIT Round 3 found Strategy C P95 1.31-1.50 downgraded to the generic warning formatter label even though Rule 4 classifies C P95 > 1.05 as critical under-prediction. | Fixed text and markdown formatter ordering so Strategy C under-prediction beats generic warning labels. Added regressions for C P95 1.31. |
-| AIT Round 4 found scenario fixtures still using old reserved/actual Strategy A ratios and found test-pass claims without direct AIT-observed command evidence. | Updated the stale scenario fixtures to conservative actual/predicted ratios and asserted `P95_CRITICAL_OVER_1_50` stays absent in cold-start/plugin-failing scenarios. Removed unsubstantiated pass-count claims from this audit artifact; the final AIT review attempt runs `cargo test --manifest-path services/calibration_report/Cargo.toml` after cherry-picking so the review brief has raw command/output/exit-code evidence. |
+| AIT Round 4 found scenario fixtures still using old reserved/actual Strategy A ratios and found test-pass claims without direct AIT-observed command evidence. | Updated the stale scenario fixtures to conservative actual/predicted ratios and asserted `P95_CRITICAL_OVER_1_50` stays absent in cold-start/plugin-failing scenarios. Removed unsubstantiated pass-count claims from this audit artifact; the R5 seed attempt ran `cargo test --manifest-path services/calibration_report/Cargo.toml` after cherry-picking so the review brief had raw command/output/exit-code evidence. |
+| AIT Round 5 found cache mode fabricated healthy exact ratios via `1.0::float`, Strategy C critical under-prediction could still exit 0, and README pinned unsupported pass counts. | Staff+ arbitration unanimously voted `FIX_IN_SLICE`. Cache mode now returns no exact calibration rows because `output_distribution_cache` lacks predicted denominators; text/markdown explain canonical mode is required for exact ratios and tests assert no healthy cache rows. `Report::exit_code()` now treats Strategy C P95 > 1.05 with n >= 30 and any critical recommendation as exit 1, with regressions. README now points to the test command and intentionally avoids pinned pass counts. |
 
 ## Reviewed Remaining Grep Hits
 
@@ -68,4 +71,20 @@ $ rg -n "reserved / actual|predicted_strategy_tokens / actual_output_tokens|P95 
 
 $ rg -n "\(tenant_id, model, agent_id, prompt_class_fingerprint\)|GROUP BY[^\n]*prompt_class_fingerprint|group by[^\n]*prompt_class_fingerprint|bucket key[^\n]*prompt_class_fingerprint" docs/stats-aggregator-spec-v1alpha1.md services/stats_aggregator services/canonical_ingest -g '*.rs' -g '*.sql' -g '*.md'
 services/canonical_ingest/migrations/0018_canonical_events_aggregator_mirror_columns.sql:127: ... Used as the stats_aggregator bucket key -- NOT prompt_class_fingerprint ...
+```
+
+```text
+$ rg -n "Total: [0-9]+ tests passing|tests passing|1\.0::float AS p95|CALIBRATION_RATIO_CACHE_SQL|Proof mode: cache \(use --proof-mode=canonical" services/calibration_report docs/calibration-report-spec-v1alpha1.md docs/slices/SLICE_13_calibration_report_cli.md
+<no matches>
+```
+
+## Final Focused Test Evidence
+
+```text
+$ cargo test --manifest-path services/calibration_report/Cargo.toml
+test result: ok. 104 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+Doc-tests spendguard_calibration_report: ok. 0 passed; 0 failed
 ```

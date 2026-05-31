@@ -35,7 +35,10 @@
 //! Only the report-run metadata (self-audit CloudEvent, Phase C) lands
 //! in canonical_events.
 
-use crate::report::{Recommendation, Report, Severity};
+use crate::report::{
+    Recommendation, Report, Severity, STRATEGY_C_MIN_SAMPLE_SIZE,
+    STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD,
+};
 use serde_json::json;
 
 /// Run all 9 rules and return the union of triggered recommendations.
@@ -191,7 +194,11 @@ fn rule4_c_under_prediction(report: &Report) -> Option<Recommendation> {
     let violators: Vec<_> = report
         .calibration_ratios
         .iter()
-        .filter(|r| r.strategy == "C" && r.p95 > 1.05 && r.sample_size >= 30)
+        .filter(|r| {
+            r.strategy == "C"
+                && r.p95 > STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD
+                && r.sample_size >= STRATEGY_C_MIN_SAMPLE_SIZE
+        })
         .collect();
     if violators.is_empty() {
         return None;
@@ -289,19 +296,15 @@ fn rule7_run_projection_exceeded(report: &Report) -> Option<Recommendation> {
     if report.run_total_count == 0 {
         return None;
     }
-    let rate = report.run_budget_projection_exceeded_count as f64
-        / report.run_total_count as f64
-        * 100.0;
+    let rate =
+        report.run_budget_projection_exceeded_count as f64 / report.run_total_count as f64 * 100.0;
     if rate <= 5.0 {
         return None;
     }
     Some(Recommendation {
         severity: Severity::Info,
         code: "RUN_PROJECTION_EXCEEDED_HIGH".into(),
-        headline: format!(
-            "{:.1}% of runs hit RUN_BUDGET_PROJECTION_EXCEEDED",
-            rate
-        ),
+        headline: format!("{:.1}% of runs hit RUN_BUDGET_PROJECTION_EXCEEDED", rate),
         possible_cause: "Per-run budget caps may be tighter than actual run cost, or agents \
              may be running stuck loops that trigger the run_cost_projector circuit"
             .into(),
@@ -326,10 +329,7 @@ fn rule8_tier3_known_vendor(report: &Report) -> Option<Recommendation> {
         .iter()
         .filter(|r| {
             let m = r.model.to_lowercase();
-            m.contains("gpt")
-                || m.contains("claude")
-                || m.contains("gemini")
-                || m.contains("llama")
+            m.contains("gpt") || m.contains("claude") || m.contains("gemini") || m.contains("llama")
         })
         .collect();
     let t3 = report
@@ -529,7 +529,9 @@ mod tests {
             z_score: 2.4,
         });
         let recs = evaluate(&r);
-        assert!(recs.iter().any(|x| x.code == "PREDICTION_DRIFT_ALERTS_PRESENT"));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "PREDICTION_DRIFT_ALERTS_PRESENT"));
     }
 
     #[test]
@@ -621,7 +623,9 @@ mod tests {
         r.run_total_count = 100;
         r.run_budget_projection_exceeded_count = 10; // 10%
         let recs = evaluate(&r);
-        assert!(recs.iter().any(|x| x.code == "RUN_PROJECTION_EXCEEDED_HIGH"));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "RUN_PROJECTION_EXCEEDED_HIGH"));
     }
 
     #[test]
@@ -630,7 +634,9 @@ mod tests {
         r.run_total_count = 100;
         r.run_budget_projection_exceeded_count = 3;
         let recs = evaluate(&r);
-        assert!(!recs.iter().any(|x| x.code == "RUN_PROJECTION_EXCEEDED_HIGH"));
+        assert!(!recs
+            .iter()
+            .any(|x| x.code == "RUN_PROJECTION_EXCEEDED_HIGH"));
     }
 
     #[test]
@@ -642,9 +648,12 @@ mod tests {
             pct: 0.5,
             threshold_violation: true,
         });
-        r.calibration_ratios.push(ratio("gpt-4o-custom-2024-12", "B", 1.1, 100));
+        r.calibration_ratios
+            .push(ratio("gpt-4o-custom-2024-12", "B", 1.1, 100));
         let recs = evaluate(&r);
-        assert!(recs.iter().any(|x| x.code == "TIER3_KNOWN_VENDOR_FINGERPRINT"));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "TIER3_KNOWN_VENDOR_FINGERPRINT"));
     }
 
     #[test]
@@ -656,9 +665,12 @@ mod tests {
             pct: 0.5,
             threshold_violation: true,
         });
-        r.calibration_ratios.push(ratio("custom-fine-tune-v3", "B", 1.1, 100));
+        r.calibration_ratios
+            .push(ratio("custom-fine-tune-v3", "B", 1.1, 100));
         let recs = evaluate(&r);
-        assert!(!recs.iter().any(|x| x.code == "TIER3_KNOWN_VENDOR_FINGERPRINT"));
+        assert!(!recs
+            .iter()
+            .any(|x| x.code == "TIER3_KNOWN_VENDOR_FINGERPRINT"));
     }
 
     #[test]
@@ -669,7 +681,9 @@ mod tests {
         r.calibration_ratios.push(ratio("gpt-4o", "A", 0.8, 60));
         r.calibration_ratios.push(ratio("gpt-4o", "B", 1.1, 40));
         let recs = evaluate(&r);
-        assert!(recs.iter().any(|x| x.code == "STRATEGY_A_DOMINANT_CACHE_WARMUP"));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "STRATEGY_A_DOMINANT_CACHE_WARMUP"));
         assert!(recs.iter().any(|x| x.code == "COLD_START_L1_DOMINANT"));
     }
 
@@ -682,7 +696,9 @@ mod tests {
         r.calibration_ratios.push(ratio("gpt-4o", "A", 0.8, 90));
         r.calibration_ratios.push(ratio("gpt-4o", "B", 1.1, 10));
         let recs = evaluate(&r);
-        assert!(!recs.iter().any(|x| x.code == "STRATEGY_A_DOMINANT_CACHE_WARMUP"));
+        assert!(!recs
+            .iter()
+            .any(|x| x.code == "STRATEGY_A_DOMINANT_CACHE_WARMUP"));
     }
 
     // -- §8.2 discipline: every recommendation must carry both
@@ -782,7 +798,9 @@ mod tests {
             });
         }
         let recs = evaluate(&r);
-        assert!(recs.iter().any(|x| x.code == "PREDICTION_DRIFT_ALERTS_PRESENT"));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "PREDICTION_DRIFT_ALERTS_PRESENT"));
     }
 
     #[test]
@@ -823,6 +841,8 @@ mod tests {
         let recs = evaluate(&r);
         assert!(recs.iter().any(|x| x.code == "TIER3_BURST"));
         // Critical because pct > 1.0%.
-        assert!(recs.iter().any(|x| x.code == "TIER3_BURST" && x.severity == Severity::Critical));
+        assert!(recs
+            .iter()
+            .any(|x| x.code == "TIER3_BURST" && x.severity == Severity::Critical));
     }
 }

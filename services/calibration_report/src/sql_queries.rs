@@ -269,72 +269,19 @@ pub async fn fetch_calibration_ratios(
 
 /// Cache-mode calibration ratio (fast path; spec §1.3).
 ///
-/// Reads from `output_distribution_cache` populated by stats_aggregator
-/// (SLICE_06). The cache stores PER-BUCKET 30-day percentiles of
-/// actual_output_tokens; we expose those as the "B" strategy ratio
-/// proxy. The bucket key (model, agent_id, prompt_class) is summarized
-/// to (model, "B") for the report's coarser view.
-///
-/// NOTE: cache rows lack the predicted token columns; we cannot
-/// compute `actual / predicted` here. Instead we return the actual
-/// P95 of token counts as a proxy — the formatter labels these rows
-/// `B` so the operator sees them in the same table. Operators wanting
-/// the exact `actual / predicted` ratio MUST pass `--proof-mode=canonical`.
-pub const CALIBRATION_RATIO_CACHE_SQL: &str = r#"
-SELECT
-    model,
-    'B' AS strategy,
-    -- The cache stores actual P50/P95/P99 of OUTPUT TOKENS (not of the
-    -- ratio). For the cache-mode "fast view" we surface the ratio of
-    -- cache percentiles to itself as 1.0 across the board so the
-    -- table is shape-stable with the canonical path. Operators see
-    -- "✓ healthy" for every cached row and a hint to use canonical
-    -- for the true ratio.
-    --
-    -- The integration spec (§1.3) explicitly accepts this trade-off:
-    -- cache mode is FAST + LOSSY; canonical mode is SLOW + EXACT.
-    1.0::float AS p50,
-    1.0::float AS p95,
-    1.0::float AS p99,
-    SUM(sample_size_30d)::bigint AS sample_size
-FROM output_distribution_cache
-WHERE tenant_id = $1
-  AND computed_at BETWEEN $2 AND $3
-  AND sample_size_30d IS NOT NULL
-GROUP BY model
-ORDER BY model
-"#;
-
+/// `output_distribution_cache` stores derived actual-output percentiles,
+/// not paired `actual / predicted` denominators. Cache mode therefore
+/// cannot produce exact calibration ratios. Returning an empty set is
+/// intentional: it prevents false "healthy" rows and forces operators
+/// to use `--proof-mode=canonical` for calibration health, ratio-derived
+/// recommendations, and exit-code decisions.
 pub async fn fetch_calibration_ratios_cache_mode(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant: &Uuid,
-    from: DateTime<Utc>,
-    to: DateTime<Utc>,
+    _tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    _tenant: &Uuid,
+    _from: DateTime<Utc>,
+    _to: DateTime<Utc>,
 ) -> Result<Vec<CalibrationRatio>, QueryError> {
-    let rows = sqlx::query(CALIBRATION_RATIO_CACHE_SQL)
-        .bind(tenant)
-        .bind(from)
-        .bind(to)
-        .fetch_all(&mut **tx)
-        .await?;
-    let mut out = Vec::with_capacity(rows.len());
-    for row in rows {
-        let model: String = row.try_get(0)?;
-        let strategy: String = row.try_get(1)?;
-        let p50: Option<f64> = row.try_get(2)?;
-        let p95: Option<f64> = row.try_get(3)?;
-        let p99: Option<f64> = row.try_get(4)?;
-        let sample_size: i64 = row.try_get(5)?;
-        out.push(CalibrationRatio {
-            model,
-            strategy,
-            p50: p50.unwrap_or(0.0),
-            p95: p95.unwrap_or(0.0),
-            p99: p99.unwrap_or(0.0),
-            sample_size,
-        });
-    }
-    Ok(out)
+    Ok(Vec::new())
 }
 
 /// §3.3 — drift alert count (and detail rows for the text formatter).
@@ -572,6 +519,21 @@ mod tests {
             !CALIBRATION_RATIO_SQL
                 .contains("predicted_b_tokens::float / NULLIF(actual_output_tokens"),
             "reversing the ratio makes under-prediction look healthy"
+        );
+    }
+
+    #[test]
+    fn cache_mode_does_not_define_fabricated_ratio_sql() {
+        let source = include_str!("sql_queries.rs");
+        let fabricated_p95 = concat!("1.0::float", " AS p95");
+        let removed_cache_sql_const = concat!("CALIBRATION_RATIO", "_CACHE_SQL");
+        assert!(
+            !source.contains(fabricated_p95),
+            "cache proof mode must not fabricate healthy ratios"
+        );
+        assert!(
+            !source.contains(removed_cache_sql_const),
+            "cache proof mode has no exact ratio SQL because the cache lacks predicted denominators"
         );
     }
 

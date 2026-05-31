@@ -19,7 +19,10 @@
 //! readable layout because each row is independent.
 
 use crate::formatters::FormatOptions;
-use crate::report::{CalibrationRatio, Recommendation, Report, Severity, TierDistribution};
+use crate::report::{
+    CalibrationRatio, Recommendation, Report, Severity, TierDistribution,
+    STRATEGY_C_MIN_SAMPLE_SIZE, STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD,
+};
 
 pub fn render(report: &Report, opts: &FormatOptions) -> String {
     let mut out = String::new();
@@ -57,7 +60,13 @@ pub fn render(report: &Report, opts: &FormatOptions) -> String {
     // ----- Calibration ratios -----
     out.push_str("=== Per-(model, strategy) calibration ratio (actual / predicted) ===\n");
     if report.calibration_ratios.is_empty() {
-        out.push_str("  (no paired decision/outcome events in window)\n");
+        if report.proof_mode == "cache" {
+            out.push_str(
+                "  (exact ratios unavailable in cache mode; re-run with --proof-mode=canonical)\n",
+            );
+        } else {
+            out.push_str("  (no paired decision/outcome events in window)\n");
+        }
     } else {
         for r in &report.calibration_ratios {
             out.push_str(&format_calibration_row(r));
@@ -133,7 +142,12 @@ fn format_tier_row(tier: &TierDistribution) -> String {
         Some("T1") => "Tier 1 (provider API shadow)",
         Some("T2") => "Tier 2 (local exact)         ",
         Some("T3") => "Tier 3 (heuristic)           ",
-        Some(other) => return format!("  {:30}  {:.1}%   ({} events)\n", other, tier.pct, tier.count),
+        Some(other) => {
+            return format!(
+                "  {:30}  {:.1}%   ({} events)\n",
+                other, tier.pct, tier.count
+            )
+        }
         None => "(unspecified)                ",
     };
     let warning_marker = if tier.threshold_violation {
@@ -150,7 +164,10 @@ fn format_tier_row(tier: &TierDistribution) -> String {
 fn format_calibration_row(r: &CalibrationRatio) -> String {
     let health_marker = if r.p95 > crate::report::CRITICAL_P95_THRESHOLD {
         "  ⚠ P95 exceeds 1.50 critical threshold"
-    } else if r.p95 > 1.05 && r.strategy == "C" {
+    } else if r.p95 > STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD
+        && r.strategy == "C"
+        && r.sample_size >= STRATEGY_C_MIN_SAMPLE_SIZE
+    {
         "  ⚠ critical under-prediction (C P95 > 1.05)"
     } else if r.p95 > 1.30 {
         "  ⚠ P95 exceeds 1.30 warning threshold"
@@ -376,11 +393,23 @@ mod tests {
     #[test]
     fn renders_empty_window_gracefully() {
         let mut r = fixture();
+        r.proof_mode = "canonical".into();
         r.tier_distribution.clear();
         r.calibration_ratios.clear();
         let out = render(&r, &opts(true, false));
         assert!(out.contains("(no decision events in window)"));
         assert!(out.contains("(no paired decision/outcome events in window)"));
+    }
+
+    #[test]
+    fn cache_mode_empty_calibration_explains_exact_ratios_unavailable() {
+        let mut r = fixture();
+        r.proof_mode = "cache".into();
+        r.calibration_ratios.clear();
+        let out = render(&r, &opts(true, false));
+        assert!(out.contains("exact ratios unavailable in cache mode"));
+        assert!(out.contains("--proof-mode=canonical"));
+        assert!(!out.contains("✓ healthy"));
     }
 
     #[test]

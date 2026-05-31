@@ -15,7 +15,10 @@
 //! monospace fallback (unlike ANSI colour codes).
 
 use crate::formatters::FormatOptions;
-use crate::report::{CalibrationRatio, Recommendation, Report, Severity, TierDistribution};
+use crate::report::{
+    CalibrationRatio, Recommendation, Report, Severity, TierDistribution,
+    STRATEGY_C_MIN_SAMPLE_SIZE, STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD,
+};
 
 pub fn render(report: &Report, opts: &FormatOptions) -> String {
     let mut out = String::new();
@@ -67,7 +70,11 @@ pub fn render(report: &Report, opts: &FormatOptions) -> String {
     out.push_str("| Model | Strategy | P50 | P95 | P99 | Samples | Health |\n");
     out.push_str("|---|---|---:|---:|---:|---:|---|\n");
     if report.calibration_ratios.is_empty() {
-        out.push_str("| _(none)_ | | | | | | _(no paired events)_ |\n");
+        if report.proof_mode == "cache" {
+            out.push_str("| _(none)_ | | | | | | _(exact ratios unavailable in cache mode; use canonical)_ |\n");
+        } else {
+            out.push_str("| _(none)_ | | | | | | _(no paired events)_ |\n");
+        }
     } else {
         for r in &report.calibration_ratios {
             out.push_str(&format_calibration_row(r));
@@ -165,7 +172,10 @@ fn format_tier_row(tier: &TierDistribution) -> String {
 fn format_calibration_row(r: &CalibrationRatio) -> String {
     let health = if r.p95 > crate::report::CRITICAL_P95_THRESHOLD {
         "⚠ critical"
-    } else if r.p95 > 1.05 && r.strategy == "C" {
+    } else if r.p95 > STRATEGY_C_UNDER_PREDICTION_P95_THRESHOLD
+        && r.strategy == "C"
+        && r.sample_size >= STRATEGY_C_MIN_SAMPLE_SIZE
+    {
         "⚠ critical under-pred"
     } else if r.p95 > 1.30 {
         "⚠ warning"
@@ -284,6 +294,17 @@ mod tests {
     }
 
     #[test]
+    fn cache_mode_empty_calibration_explains_exact_ratios_unavailable() {
+        let mut r = fixture();
+        r.proof_mode = "cache".into();
+        r.calibration_ratios.clear();
+        let out = render(&r, &opts(true, false));
+        assert!(out.contains("exact ratios unavailable in cache mode"));
+        assert!(out.contains("use canonical"));
+        assert!(!out.contains("✓ healthy"));
+    }
+
+    #[test]
     fn strategy_a_high_actual_over_predicted_ratio_marks_critical() {
         let mut r = fixture();
         r.calibration_ratios = vec![CalibrationRatio {
@@ -295,12 +316,8 @@ mod tests {
             sample_size: 100,
         }];
         let out = render(&r, &opts(true, false));
-        assert!(out.contains(
-            "| `gpt-4o` | `A` | 1.10 | 1.60 | 2.00 | 100 | ⚠ critical |"
-        ));
-        assert!(!out.contains(
-            "| `gpt-4o` | `A` | 1.10 | 1.60 | 2.00 | 100 | (ceiling) |"
-        ));
+        assert!(out.contains("| `gpt-4o` | `A` | 1.10 | 1.60 | 2.00 | 100 | ⚠ critical |"));
+        assert!(!out.contains("| `gpt-4o` | `A` | 1.10 | 1.60 | 2.00 | 100 | (ceiling) |"));
     }
 
     #[test]
@@ -315,12 +332,10 @@ mod tests {
             sample_size: 100,
         }];
         let out = render(&r, &opts(true, false));
-        assert!(out.contains(
-            "| `gpt-4o` | `C` | 1.10 | 1.31 | 1.40 | 100 | ⚠ critical under-pred |"
-        ));
-        assert!(!out.contains(
-            "| `gpt-4o` | `C` | 1.10 | 1.31 | 1.40 | 100 | ⚠ warning |"
-        ));
+        assert!(
+            out.contains("| `gpt-4o` | `C` | 1.10 | 1.31 | 1.40 | 100 | ⚠ critical under-pred |")
+        );
+        assert!(!out.contains("| `gpt-4o` | `C` | 1.10 | 1.31 | 1.40 | 100 | ⚠ warning |"));
     }
 
     #[test]

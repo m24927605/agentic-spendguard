@@ -83,6 +83,11 @@ CLI 必須對三類 audience 都 actionable。
 - `--proof-mode=cache`（fast；default for operator daily use；幾秒）
 - `--proof-mode=canonical`（tamper-evident；for audit；數十秒-數分鐘）
 
+Cache mode can use derived stats for fast tier/run summaries, but it MUST NOT
+fabricate `actual / predicted` calibration ratios. Exact calibration ratios,
+ratio-derived recommendations, and ratio-derived exit-code decisions require
+`--proof-mode=canonical`, because the cache has no predicted-token denominator.
+
 ### 1.4 v1alpha1 核心哲學
 
 > **Operator-facing 不是 marketing surface**；CLI 簡單到 oncall 半夜也能 run。
@@ -126,7 +131,7 @@ spendguard calibration-report \
 ### 2.3 Exit codes
 
 - `0` — report generated, no critical findings
-- `1` — report generated, critical findings present（Tier 3 hit > 0.1%; drift alerts > 0; calibration P95 > 1.50）
+- `1` — report generated, critical findings present（Tier 3 hit > 0.1%; drift alerts > 0; calibration P95 > 1.50; Strategy C P95 > 1.05 with n >= 30）
 - `2` — error: cannot query；canonical_events unreachable
 - `3` — error: verify-chain failed（chain integrity violated）
 
@@ -244,7 +249,7 @@ and queried by calibration-report commit `c4fbab6`.
 SpendGuard Calibration Report
 Tenant: acme-corp
 Window: 2026-05-01 → 2026-05-29
-Proof mode: cache (use --proof-mode=canonical for tamper-evident proof)
+Proof mode: canonical (reads canonical_events directly — tamper-evident)
 
 === Tokenizer tier distribution ===
   Tier 1 (provider API shadow):  N/A (off hot path)

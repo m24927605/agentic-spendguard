@@ -31,7 +31,8 @@ per `calibration-report-spec-v1alpha1.md` (full). Operator-facing differentiator
 - Per-tenant access control per spec §5: mTLS production / env var dev; cross-tenant query → exit 2
 - Recommendation engine per spec §8.1 (9 heuristic rules)
 - Self-audit: each report run emits `spendguard.audit.calibration.report_generated.v1alpha1` CloudEvent (implementation commit `dabc6fb`)
-- Exit codes: 0 / 1 / 2 / 3 per spec §2.3
+- Exit codes: 0 / 1 / 2 / 3 per spec §2.3; critical findings include
+  Strategy C P95 > 1.05 with n >= 30 after HARDEN_04 reconciliation.
 
 ---
 
@@ -125,7 +126,7 @@ No proto changes. SQL-only.
 7. Window large: 100M events fails gracefully with suggestion.
 8. mTLS production auth: cert validation per Sidecar §5 pattern.
 9. Self-audit CloudEvent: report run records run identity in audit chain.
-10. Exit code 1 (critical findings) criteria: P95 > 1.50 / Tier 3 > 0.1% / drift > 0; criteria documented.
+10. Exit code 1 (critical findings) criteria: P95 > 1.50 / Strategy C P95 > 1.05 with n >= 30 / Tier 3 > 0.1% / drift > 0; criteria documented.
 
 ---
 
