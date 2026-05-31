@@ -171,6 +171,7 @@ Reviewer must inspect real integration tests for tokenizer envelope admission an
 | Implementation | Software Architect | Add a real Helm control-plane surface instead of compose-only wiring | `templates/control-plane.yaml` added |
 | Review R1 | codex CLI adversarial reviewer | Demo Helm must not enable forwarder without schema hash; compose must source runtime schema hash and generate signing key | Fixed with `$forwarderEnabled`, control-plane entrypoint, and PKI signing key generation |
 | Review R2 | codex CLI adversarial reviewer | Forwarder must not query RLS-protected outbox through the request-serving role | Added `control_plane_audit_forwarder_role`, production audit-forwarder DB URL, Helm secret key, and boot-time production validation |
+| Review R3 | codex CLI adversarial reviewer | Demo image must install `protoc`; forwarder must preserve stored CloudEvent time | Added `protobuf-compiler`/`libprotobuf-dev` and RFC3339 payload-time parsing regression assertion |
 
 ---
 

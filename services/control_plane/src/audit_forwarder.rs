@@ -218,6 +218,7 @@ fn row_to_cloudevent(
     let id = required_str(payload, "id")?.to_owned();
     let source = required_str(payload, "source")?.to_owned();
     let specversion = required_str(payload, "specversion")?.to_owned();
+    let time = payload_timestamp(payload)?;
     let data = payload.get("data").cloned().unwrap_or(Value::Null);
     let decision_id = data
         .get("decision_id")
@@ -230,10 +231,7 @@ fn row_to_cloudevent(
         r#type: row.event_type.clone(),
         source,
         id,
-        time: Some(prost_types::Timestamp {
-            seconds: chrono::Utc::now().timestamp(),
-            nanos: 0,
-        }),
+        time: Some(time),
         datacontenttype: "application/json".to_string(),
         data: serde_json::to_vec(&data)?,
         tenant_id: row.tenant_id.to_string(),
@@ -254,6 +252,17 @@ fn required_str<'a>(payload: &'a Value, key: &str) -> Result<&'a str, anyhow::Er
         .and_then(Value::as_str)
         .filter(|v| !v.is_empty())
         .ok_or_else(|| anyhow::anyhow!("control-plane audit payload missing `{key}`"))
+}
+
+fn payload_timestamp(payload: &Value) -> Result<prost_types::Timestamp, anyhow::Error> {
+    let raw = required_str(payload, "time")?;
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw)
+        .with_context(|| format!("parse control-plane audit payload `time` `{raw}`"))?
+        .with_timezone(&chrono::Utc);
+    Ok(prost_types::Timestamp {
+        seconds: parsed.timestamp(),
+        nanos: parsed.timestamp_subsec_nanos() as i32,
+    })
 }
 
 pub fn ensure_append_accepted(resp: AppendEventsResponse) -> Result<(), anyhow::Error> {
@@ -303,6 +312,7 @@ mod tests {
                 "id": "01918000-0000-7c10-8c10-000000000603",
                 "source": "spendguard-control-plane",
                 "tenantid": tenant_id.to_string(),
+                "time": "2026-05-31T12:34:56.789123456Z",
                 "data": {
                     "tenant_id": tenant_id.to_string(),
                     "endpoint_url": "https://plugin.example.invalid",
@@ -340,6 +350,8 @@ mod tests {
         assert_eq!(req.events.len(), 1);
         assert_eq!(req.events[0].producer_id, "control-plane:test");
         assert_eq!(req.events[0].producer_sequence, 7);
+        assert_eq!(req.events[0].time.as_ref().unwrap().seconds, 1_780_230_896);
+        assert_eq!(req.events[0].time.as_ref().unwrap().nanos, 789_123_456);
         assert_eq!(
             req.events[0].r#type,
             "spendguard.audit.plugin_registered.v1alpha1"
