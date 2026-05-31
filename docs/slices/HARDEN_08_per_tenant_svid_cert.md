@@ -1,7 +1,7 @@
 # HARDEN 08 — Per-tenant SVID certificate minting
 
 > **Branch**: `harden/HARDEN_08_per_tenant_svid_cert`
-> **Status**: implementation in review
+> **Status**: shipped
 > **Spec ancestor(s)**: `predictor-upgrade-hardening-spec-v1alpha1.md`, `output-predictor-plugin-contract-v1alpha1.md`
 > **Depends on prior slices**: HARDEN_01 through HARDEN_07
 > **Blocks subsequent slices**: production-ready completion
@@ -179,9 +179,10 @@ Reviewer must inspect cert subject construction, tenant UUID comparison, Helm pr
 | Review R1 | codex CLI adversarial reviewer | Fix 4 Majors + 1 Minor: TLS without client CA, rotation reload fallback, control-plane `client_cert_id` validation, real mTLS demo/test, exact URI SAN | Commit `0209c42` closes all R1 findings |
 | Review R2 | codex CLI adversarial reviewer | Bound rotation fallback, cap `client_cert_id` for K8s-safe names, reject extra Python peer SVID URI identities | Commit `4c34877` closes all R2 findings |
 | Review R3 | codex CLI adversarial reviewer | Start rotation grace at first reload failure, prevent Helm name truncation collisions, validate real server-side SVID tenant, reject CN-only plugin SVID | Commit `654ad6c` closes all R3 findings |
-| Review R4 | codex CLI adversarial reviewer | Reuse cached channel for bounded new-channel failures during rotation, remove Certificate-name truncation, reject non-SPIFFE extra URI SANs | Commit pending closes all R4 findings |
+| Review R4 | codex CLI adversarial reviewer | Reuse cached channel for bounded new-channel failures during rotation, remove Certificate-name truncation, reject non-SPIFFE extra URI SANs | Commit `df575af` closes all R4 findings |
 | Review R5 | codex CLI adversarial reviewer | Found duplicate Helm binding gap, DB CHECK drift, and `urn:` URI SAN parser gap | Staff+ panel required by workflow |
-| Staff+ arbitration | Software Architect + Backend Architect + Security Engineer + Database Optimizer + Plugin domain expert | Unanimous: fix all R5 findings in-slice; none accepted out-of-scope | Commit pending closes R5 under final arbitration |
+| Staff+ arbitration | Software Architect + Backend Architect + Security Engineer + Database Optimizer + Plugin domain expert | Unanimous: fix all R5 findings in-slice; none accepted out-of-scope | Commit `66e8c5f` closes R5 under final arbitration |
+| Issue closure | codex CLI implementer | Close GH #171 only after Helm, migration, Rust, Python, and demo gates passed | GH #171 closed 2026-05-31 |
 
 ---
 
@@ -192,8 +193,8 @@ Reviewer must inspect cert subject construction, tenant UUID comparison, Helm pr
 - [x] Reference plugin validates subject tenant
 - [x] Cross-tenant mismatch test fails closed
 - [x] `plugin_c_synthetic` demo runs with SVID validation
-- [ ] GH #171 closed with fixing commit
-- [ ] AIT adversarial review passes or Staff+ arbitration is recorded (R1-R5 fixed; Staff+ arbitration recorded)
+- [x] GH #171 closed with fixing commit
+- [x] AIT adversarial review passes or Staff+ arbitration is recorded (R1-R5 fixed; Staff+ arbitration recorded)
 
 ---
 
