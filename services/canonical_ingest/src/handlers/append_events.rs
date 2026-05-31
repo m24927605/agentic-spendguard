@@ -23,6 +23,7 @@
 use bigdecimal::BigDecimal;
 use chrono::Utc;
 use prost_types::Timestamp;
+use sha2::{Digest, Sha256};
 use spendguard_signing::{Verifier, VerifyFailure};
 use sqlx::PgPool;
 use std::str::FromStr;
@@ -293,6 +294,7 @@ async fn process_one(
     // Build append input.
     let payload_json =
         serde_json::to_value(cloudevent_to_json(evt)).unwrap_or(serde_json::Value::Null);
+    let event_hash = Sha256::digest(canonical_bytes(evt)).to_vec();
 
     // Cost Advisor P1.5 (issue #51, spec §5.1.2): classify audit
     // .outcome events into one of the 9 failure_class enum values.
@@ -316,6 +318,7 @@ async fn process_one(
         producer_sequence,
         producer_signature: &evt.producer_signature,
         signing_key_id: &evt.signing_key_id,
+        event_hash: &event_hash,
         schema_bundle_id: bundle.schema_bundle_id,
         schema_bundle_hash: &bundle.schema_bundle_hash,
         specversion: &evt.specversion,
@@ -458,6 +461,7 @@ async fn process_one(
                 producer_sequence,
                 producer_signature: &evt.producer_signature,
                 signing_key_id: &evt.signing_key_id,
+                event_hash: &event_hash,
                 schema_bundle_id: bundle.schema_bundle_id,
                 schema_bundle_hash: &bundle.schema_bundle_hash,
                 specversion: &evt.specversion,

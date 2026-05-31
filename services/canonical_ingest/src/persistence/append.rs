@@ -11,7 +11,7 @@
 
 use bigdecimal::BigDecimal;
 use chrono::{DateTime, Utc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
 use crate::domain::{
@@ -73,6 +73,10 @@ pub struct AppendInput<'a> {
     pub producer_sequence: i64,
     pub producer_signature: &'a [u8],
     pub signing_key_id: &'a str,
+    /// SHA-256 over the canonical CloudEvent bytes admitted by the
+    /// handler. Used by HARDEN_05 replay protection to distinguish an
+    /// idempotent retry from same `(producer_id,event_id)` tampering.
+    pub event_hash: &'a [u8],
 
     pub schema_bundle_id: Uuid,
     pub schema_bundle_hash: &'a [u8],
@@ -116,6 +120,15 @@ pub enum AppendOutcome {
     Deduped,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplayClaim {
+    New,
+    DuplicateSamePayload,
+    DuplicateHashMismatch,
+}
+
+const EVENT_REPLAY_WINDOW_SQL: &str = "24 hours";
+
 /// Insert into canonical_events + canonical_events_global_keys +
 /// canonical_ingest_positions atomically.
 ///
@@ -134,7 +147,25 @@ pub async fn append_event(
 ) -> Result<AppendOutcome, DomainError> {
     let mut tx = pool.begin().await.map_err(map_pg_error)?;
 
-    // 1) Insert into global_keys first (fires trigger). Dedupe via ON CONFLICT.
+    // 1) Producer-scoped replay protection before immutable append.
+    // This rejects/acknowledges repeated `(producer_id,event_id)` without
+    // allocating an ingest offset or writing canonical_events.
+    match claim_replay_key(&mut tx, &input).await? {
+        ReplayClaim::New => {}
+        ReplayClaim::DuplicateSamePayload => {
+            tx.rollback().await.map_err(map_pg_error)?;
+            return Ok(AppendOutcome::Deduped);
+        }
+        ReplayClaim::DuplicateHashMismatch => {
+            tx.rollback().await.map_err(map_pg_error)?;
+            return Err(DomainError::Duplicate(format!(
+                "CloudEvent replay hash mismatch for producer_id={} event_id={}",
+                input.producer_id, input.event_id
+            )));
+        }
+    }
+
+    // 2) Insert into global_keys first (fires trigger). Dedupe via ON CONFLICT.
     let inserted_keys = sqlx::query(
         "INSERT INTO canonical_events_global_keys
             (event_id, tenant_id, decision_id, event_type, recorded_month)
@@ -156,7 +187,7 @@ pub async fn append_event(
         return Ok(AppendOutcome::Deduped);
     }
 
-    // 2) Allocate ingest offset INSIDE the tx so rollback restores it.
+    // 3) Allocate ingest offset INSIDE the tx so rollback restores it.
     let offset: i64 = sqlx::query_scalar("SELECT next_ingest_offset($1, $2)")
         .bind(input.region_id)
         .bind(input.ingest_shard_id)
@@ -164,7 +195,7 @@ pub async fn append_event(
         .await
         .map_err(map_pg_error)?;
 
-    // 3) Insert into the partitioned canonical_events table.
+    // 4) Insert into the partitioned canonical_events table.
     // failure_class column added in CA-P0 (migration 0011). Classifier
     // populates it for audit.outcome events; NULL for all others.
     //
@@ -264,7 +295,7 @@ pub async fn append_event(
     .await
     .map_err(map_pg_error)?;
 
-    // 4) Mirror position into non-partitioned table for global UNIQUE.
+    // 5) Mirror position into non-partitioned table for global UNIQUE.
     sqlx::query(
         "INSERT INTO canonical_ingest_positions
             (region_id, ingest_shard_id, ingest_log_offset,
@@ -284,6 +315,57 @@ pub async fn append_event(
     Ok(AppendOutcome::Appended {
         ingest_log_offset: offset,
     })
+}
+
+async fn claim_replay_key(
+    tx: &mut Transaction<'_, Postgres>,
+    input: &AppendInput<'_>,
+) -> Result<ReplayClaim, DomainError> {
+    if input.event_hash.len() != 32 {
+        return Err(DomainError::InvalidRequest(format!(
+            "event_hash must be 32 bytes, got {}",
+            input.event_hash.len()
+        )));
+    }
+
+    let inserted = sqlx::query(
+        "INSERT INTO canonical_event_replay_dedup
+            (producer_id, event_id, tenant_id, payload_hash, expires_at)
+         VALUES
+            ($1, $2, $3, $4, clock_timestamp() + ($5::TEXT)::INTERVAL)
+         ON CONFLICT (producer_id, event_id) DO NOTHING",
+    )
+    .bind(input.producer_id)
+    .bind(input.event_id)
+    .bind(input.tenant_id)
+    .bind(input.event_hash)
+    .bind(EVENT_REPLAY_WINDOW_SQL)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_pg_error)?;
+
+    if inserted.rows_affected() == 1 {
+        return Ok(ReplayClaim::New);
+    }
+
+    let existing_hash: Vec<u8> = sqlx::query_scalar(
+        "SELECT payload_hash
+           FROM canonical_event_replay_dedup
+          WHERE producer_id = $1
+            AND event_id = $2
+          FOR UPDATE",
+    )
+    .bind(input.producer_id)
+    .bind(input.event_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(map_pg_error)?;
+
+    if existing_hash == input.event_hash {
+        Ok(ReplayClaim::DuplicateSamePayload)
+    } else {
+        Ok(ReplayClaim::DuplicateHashMismatch)
+    }
 }
 
 /// Release quarantined audit.outcome events after the matching audit.decision

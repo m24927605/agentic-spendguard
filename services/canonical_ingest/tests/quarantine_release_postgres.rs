@@ -22,6 +22,7 @@ use uuid::Uuid;
 
 const SCHEMA_BUNDLE_ID: &str = "22222222-2222-4222-8222-222222222222";
 const SCHEMA_BUNDLE_HASH: &[u8] = &[0xcc; 32];
+const TEST_EVENT_HASH: &[u8] = &[0x42; 32];
 
 struct PgFixture {
     pool: PgPool,
@@ -117,6 +118,7 @@ fn base_append_input<'a>(
         producer_sequence,
         producer_signature: &[0x51, 0x52, 0x53, 0x54],
         signing_key_id: "test-key",
+        event_hash: TEST_EVENT_HASH,
         schema_bundle_id: Uuid::parse_str(SCHEMA_BUNDLE_ID).expect("schema bundle uuid"),
         schema_bundle_hash: SCHEMA_BUNDLE_HASH,
         specversion: "1.0",
@@ -138,6 +140,114 @@ fn base_append_input<'a>(
         prompt_class_fingerprint: None,
         prediction: PredictionColumns::default(),
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_dedup_same_producer_event_id_does_not_append_twice() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let tenant_id = Uuid::new_v4();
+    let decision_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let event_id = Uuid::new_v4();
+
+    let first = base_append_input(
+        event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.decision",
+        1,
+    );
+    let first_outcome = append_event(&fx.pool, first)
+        .await
+        .expect("append first event");
+    assert!(matches!(
+        first_outcome,
+        spendguard_canonical_ingest::persistence::append::AppendOutcome::Appended { .. }
+    ));
+
+    let retry = base_append_input(
+        event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.decision",
+        1,
+    );
+    let retry_outcome = append_event(&fx.pool, retry)
+        .await
+        .expect("dedupe replay retry");
+    assert!(matches!(
+        retry_outcome,
+        spendguard_canonical_ingest::persistence::append::AppendOutcome::Deduped
+    ));
+
+    let canonical_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM canonical_events WHERE event_id = $1")
+            .bind(event_id)
+            .fetch_one(&fx.pool)
+            .await
+            .expect("count canonical rows");
+    assert_eq!(canonical_count, 1);
+
+    let replay_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM canonical_event_replay_dedup WHERE producer_id = $1 AND event_id = $2")
+            .bind("canonical-ingest-test")
+            .bind(event_id)
+            .fetch_one(&fx.pool)
+            .await
+            .expect("count replay ledger rows");
+    assert_eq!(replay_count, 1);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_dedup_rejects_same_producer_event_id_hash_mismatch() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let tenant_id = Uuid::new_v4();
+    let decision_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let event_id = Uuid::new_v4();
+
+    let first = base_append_input(
+        event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.decision",
+        1,
+    );
+    append_event(&fx.pool, first)
+        .await
+        .expect("append first event");
+
+    let mut replay = base_append_input(
+        event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.decision",
+        1,
+    );
+    replay.event_hash = &[0x99; 32];
+    let err = append_event(&fx.pool, replay)
+        .await
+        .expect_err("hash mismatch replay is rejected");
+    assert!(
+        err.to_string().contains("replay hash mismatch"),
+        "unexpected error: {err}"
+    );
+
+    let canonical_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM canonical_events WHERE event_id = $1")
+            .bind(event_id)
+            .fetch_one(&fx.pool)
+            .await
+            .expect("count canonical rows");
+    assert_eq!(canonical_count, 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
