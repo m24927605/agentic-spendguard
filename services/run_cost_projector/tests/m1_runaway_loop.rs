@@ -18,9 +18,7 @@
 
 use spendguard_run_cost_projector::{
     config::Config,
-    proto::run_cost_projector::v1::{
-        run_cost_projector_server::RunCostProjector, ProjectRequest,
-    },
+    proto::run_cost_projector::v1::{run_cost_projector_server::RunCostProjector, ProjectRequest},
     server::RunCostProjectorSvc,
 };
 use tonic::Request;
@@ -52,6 +50,7 @@ fn build_req(
     this_call: i64,
     budget_remaining: i64,
     hint: i32,
+    decision_id: String,
 ) -> ProjectRequest {
     ProjectRequest {
         tenant_id: tenant.to_string(),
@@ -59,7 +58,7 @@ fn build_req(
         agent_id: "ag-runaway".into(),
         model: "gpt-4o".into(),
         step_id: String::new(),
-        decision_id: "dec-runaway".into(),
+        decision_id,
         this_call_reservation_atomic: this_call,
         unit_id: "USD".into(),
         budget_remaining_atomic: budget_remaining,
@@ -87,7 +86,14 @@ async fn m1_runaway_loop_stops_well_before_47_calls() {
     let mut emitted_count = 0;
     for call_idx in 1..=47 {
         let resp = svc
-            .project(Request::new(build_req(tenant, run, 100, budget, 0)))
+            .project(Request::new(build_req(
+                tenant,
+                run,
+                100,
+                budget,
+                0,
+                format!("runaway-{call_idx}"),
+            )))
             .await
             .expect("project ok")
             .into_inner();
@@ -125,7 +131,14 @@ async fn m1_runaway_loop_drift_detection_simulation() {
     let mut drift_fired_at: Option<usize> = None;
     for (idx, cost) in costs.iter().enumerate() {
         let resp = svc
-            .project(Request::new(build_req(tenant, run, *cost, budget, 0)))
+            .project(Request::new(build_req(
+                tenant,
+                run,
+                *cost,
+                budget,
+                0,
+                format!("drift-{idx}"),
+            )))
             .await
             .expect("project ok")
             .into_inner();
@@ -160,7 +173,14 @@ async fn m1_runaway_loop_signal3_hint_caps_run_length() {
     let mut steps_fired_at: Option<i64> = None;
     for call_idx in 1..=10 {
         let resp = svc
-            .project(Request::new(build_req(tenant, run, 100, budget, 2)))
+            .project(Request::new(build_req(
+                tenant,
+                run,
+                100,
+                budget,
+                2,
+                format!("steps-{call_idx}"),
+            )))
             .await
             .expect("project ok")
             .into_inner();

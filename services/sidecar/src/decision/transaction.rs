@@ -307,6 +307,7 @@ async fn call_projector_safe(
     req: &DecisionRequest,
     claims: &[BudgetClaim],
     enrichment: &AuditEnrichment,
+    adapter_idempotency_key: &str,
 ) -> Result<crate::proto::run_cost_projector::v1::ProjectResponse, DomainError> {
     use num_bigint::BigInt;
     use std::str::FromStr;
@@ -347,11 +348,7 @@ async fn call_projector_safe(
             .as_ref()
             .map(|i| i.step_id.clone())
             .unwrap_or_default(),
-        decision_id: req
-            .ids
-            .as_ref()
-            .map(|i| i.decision_id.clone())
-            .unwrap_or_default(),
+        decision_id: projector_decision_id_from_idempotency_key(adapter_idempotency_key),
         this_call_reservation_atomic: this_call_atomic,
         unit_id: claims
             .first()
@@ -364,6 +361,13 @@ async fn call_projector_safe(
     };
 
     client.project(project_req).await
+}
+
+fn projector_decision_id_from_idempotency_key(adapter_idempotency_key: &str) -> String {
+    let mut h = Sha256::new();
+    h.update(b"spendguard:run-cost-projector:decision:v1:");
+    h.update(adapter_idempotency_key.as_bytes());
+    hex::encode(h.finalize())
 }
 
 /// Extract the run projector's budget snapshot from DecisionRequest.
@@ -426,6 +430,22 @@ pub async fn run_through_reserve(
     }
     crate::bootstrap::catalog::enforce_freshness_gate(state, cfg)?;
 
+    // Validate the adapter idempotency key before any mutating downstream
+    // call. The run-cost projector Project RPC mutates per-run state, so
+    // retries must carry a stable key that Project can use as its own
+    // idempotency discriminator.
+    let adapter_idempotency_key = req
+        .idempotency
+        .as_ref()
+        .ok_or_else(|| DomainError::InvalidRequest("DecisionRequest.idempotency required".into()))?
+        .key
+        .clone();
+    if adapter_idempotency_key.is_empty() {
+        return Err(DomainError::InvalidRequest(
+            "DecisionRequest.idempotency.key required".into(),
+        ));
+    }
+
     // Stage 1: snapshot
     let _snapshot_id = Uuid::now_v7();
     let snapshot_hash = compute_snapshot_hash(req, &ctx.tenant_id);
@@ -477,7 +497,15 @@ pub async fn run_through_reserve(
     // audit rows to before Phase E — the only NEW field populated when
     // the projector IS wired is `reason_codes` (plus the 3 audit columns
     // wired to the same proto envelope).
-    let projector_result = call_projector_safe(state, ctx, req, &claims, &enrichment).await;
+    let projector_result = call_projector_safe(
+        state,
+        ctx,
+        req,
+        &claims,
+        &enrichment,
+        &adapter_idempotency_key,
+    )
+    .await;
     let projector_response_ref = projector_result.as_ref().ok();
     let combined_outcome = match projector_response_ref {
         Some(resp) if !resp.emitted_code.is_empty() => {
@@ -531,19 +559,6 @@ pub async fn run_through_reserve(
         workload_instance_id: ctx.workload_instance_id.clone(),
     };
 
-    // Use the adapter-supplied idempotency key directly so retries from
-    // the same logical trigger collapse via ledger UNIQUE
-    // (tenant_id, operation_kind, idempotency_key) — even after a sidecar
-    // process restart that wipes the local IdempotencyCache.
-    let adapter_idempotency = req.idempotency.as_ref().ok_or_else(|| {
-        DomainError::InvalidRequest("DecisionRequest.idempotency required".into())
-    })?;
-    if adapter_idempotency.key.is_empty() {
-        return Err(DomainError::InvalidRequest(
-            "DecisionRequest.idempotency.key required".into(),
-        ));
-    }
-
     // Cost Advisor P0.5 enrichment: extracted ONCE above for projector
     // call. Same value flows into both CONTINUE + DENY audit.decision
     // emissions below per the pre-SLICE_09 invariant.
@@ -571,7 +586,7 @@ pub async fn run_through_reserve(
             &pricing,
             &fencing,
             &bundle,
-            &adapter_idempotency.key,
+            &adapter_idempotency_key,
             effect_hash,
             &enrichment,
             projector_response_ref,
@@ -581,7 +596,7 @@ pub async fn run_through_reserve(
     }
 
     let idempotency = Idempotency {
-        key: adapter_idempotency.key.clone(),
+        key: adapter_idempotency_key.clone(),
         // Leave empty so the ledger computes its canonical hash server-side
         // and uses THAT for replay verification (see
         // services/ledger/src/handlers/reserve_set.rs `canonical_request_hash`).
@@ -919,11 +934,13 @@ fn build_audit_decision_cloudevent(
     // (= SQL NULL via the prediction-mirror crate) — backwards-compat
     // with pre-SLICE_10 producers.
     //
-    // The 3 run-level columns are sourced from the projector response
-    // when claim_estimate is None (SLICE_09 path); when claim_estimate
-    // is present, egress_proxy has already merged the projector data
-    // into it so we read from claim_estimate exclusively to keep a
-    // single source of truth.
+    // The tokenizer/output-predictor/cold-start columns come from
+    // ClaimEstimate. The 3 run-level columns are authoritative from the
+    // sidecar's projector_response when present because the sidecar is
+    // the single mutating Project caller in hardened production wiring.
+    // If the projector is not wired, keep ClaimEstimate's run fields for
+    // legacy proxy callers; otherwise use the SLICE_09 unreachable
+    // sentinels.
     if let Some(est) = claim_estimate {
         ce.predicted_a_tokens = est.predicted_a_tokens;
         ce.predicted_b_tokens = est.predicted_b_tokens;
@@ -947,29 +964,15 @@ fn build_audit_decision_cloudevent(
         ce.run_predicted_remaining_steps = est.run_predicted_remaining_steps;
         ce.run_steps_completed_so_far = est.run_steps_completed_so_far;
     } else {
-        // SLICE_09 Phase E: 3 run-level audit columns per audit-chain-
-        // prediction-extension-v1alpha1.md §2.2 (mirrored into
-        // CloudEvent tags 311/312/313). When projector is None or its
-        // call failed, set the spec §3.3 sentinels:
-        //   * run_projection_at_decision_atomic = 0  (proto3 default)
-        //   * run_predicted_remaining_steps     = -1 (sentinel "unreachable")
-        //   * run_steps_completed_so_far        = 0  (proto3 default)
-        // canonical_ingest's mirror layer treats -1 specifically as
-        // "NULL" when populating the audit_outbox column (per
-        // audit-chain-extension §3.3 sentinel design).
-        match projector_response {
-            Some(resp) => {
-                ce.run_projection_at_decision_atomic = resp.run_projection_at_decision_atomic;
-                ce.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
-                ce.run_steps_completed_so_far = resp.run_steps_completed_so_far;
-            }
-            None => {
-                // Projector unreachable / not wired — sentinel.
-                ce.run_projection_at_decision_atomic = 0;
-                ce.run_predicted_remaining_steps = -1;
-                ce.run_steps_completed_so_far = 0;
-            }
-        }
+        // Projector unreachable / not wired — sentinel.
+        ce.run_projection_at_decision_atomic = 0;
+        ce.run_predicted_remaining_steps = -1;
+        ce.run_steps_completed_so_far = 0;
+    }
+    if let Some(resp) = projector_response {
+        ce.run_projection_at_decision_atomic = resp.run_projection_at_decision_atomic;
+        ce.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
+        ce.run_steps_completed_so_far = resp.run_steps_completed_so_far;
     }
 
     ce
@@ -1133,9 +1136,9 @@ async fn run_record_denied_decision(
     // columns identical to the ALLOW lane. STOP / REQUIRE_APPROVAL /
     // DEGRADE / SKIP rows still carry the predictor + projector
     // observations so calibration-report can backtest precision against
-    // realized decisions. When claim_estimate is None (legacy SDK
-    // wrapper), fall back to the SLICE_09 path of populating just the
-    // 3 run-level cols from the projector_response.
+    // realized decisions. ClaimEstimate supplies tokenizer/output
+    // predictor fields; the sidecar's projector_response overrides the
+    // 3 run-level fields whenever it exists.
     if let Some(est) = claim_estimate {
         cloudevent.predicted_a_tokens = est.predicted_a_tokens;
         cloudevent.predicted_b_tokens = est.predicted_b_tokens;
@@ -1155,20 +1158,14 @@ async fn run_record_denied_decision(
         cloudevent.run_predicted_remaining_steps = est.run_predicted_remaining_steps;
         cloudevent.run_steps_completed_so_far = est.run_steps_completed_so_far;
     } else {
-        // SLICE_09 fallback: 3 run-level cols only, from projector_response.
-        match projector_response {
-            Some(resp) => {
-                cloudevent.run_projection_at_decision_atomic =
-                    resp.run_projection_at_decision_atomic;
-                cloudevent.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
-                cloudevent.run_steps_completed_so_far = resp.run_steps_completed_so_far;
-            }
-            None => {
-                cloudevent.run_projection_at_decision_atomic = 0;
-                cloudevent.run_predicted_remaining_steps = -1;
-                cloudevent.run_steps_completed_so_far = 0;
-            }
-        }
+        cloudevent.run_projection_at_decision_atomic = 0;
+        cloudevent.run_predicted_remaining_steps = -1;
+        cloudevent.run_steps_completed_so_far = 0;
+    }
+    if let Some(resp) = projector_response {
+        cloudevent.run_projection_at_decision_atomic = resp.run_projection_at_decision_atomic;
+        cloudevent.run_predicted_remaining_steps = resp.run_predicted_remaining_steps;
+        cloudevent.run_steps_completed_so_far = resp.run_steps_completed_so_far;
     }
 
     crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent).await?;
@@ -2532,6 +2529,66 @@ mod slice_02_decision_match_tests {
             payload.get("prompt_class_fingerprint"),
             Some(&serde_json::json!("pcfp_123"))
         );
+    }
+
+    #[test]
+    fn projector_decision_id_is_stable_bounded_hash() {
+        let a = projector_decision_id_from_idempotency_key("adapter-key-1");
+        let b = projector_decision_id_from_idempotency_key("adapter-key-1");
+        let c = projector_decision_id_from_idempotency_key("adapter-key-2");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn projector_response_overrides_claim_estimate_run_fields() {
+        let ctx = DecisionContext {
+            session_id: "session-test".to_string(),
+            workload_instance_id: "sidecar-test".to_string(),
+            tenant_id: Uuid::nil().to_string(),
+            region: "test-region".to_string(),
+        };
+        let enrichment = AuditEnrichment {
+            run_id: Uuid::nil().to_string(),
+            agent_id: "agent-test".to_string(),
+            model_family: "model-test".to_string(),
+            prompt_hash: "prompt-test".to_string(),
+            spendguard_context: serde_json::Value::Null,
+        };
+        let claim = ClaimEstimate {
+            predicted_a_tokens: 12,
+            run_projection_at_decision_atomic: 1,
+            run_predicted_remaining_steps: 2,
+            run_steps_completed_so_far: 3,
+            ..Default::default()
+        };
+        let projector = crate::proto::run_cost_projector::v1::ProjectResponse {
+            run_projection_at_decision_atomic: 900,
+            run_predicted_remaining_steps: 8,
+            run_steps_completed_so_far: 4,
+            ..Default::default()
+        };
+
+        let ce = build_audit_decision_cloudevent(
+            &ctx,
+            &Uuid::nil(),
+            &Uuid::nil(),
+            1,
+            &[0u8; 32],
+            &[],
+            &[],
+            &enrichment,
+            "STRICT_CEILING",
+            Some(&projector),
+            Some(&claim),
+        );
+
+        assert_eq!(ce.predicted_a_tokens, 12);
+        assert_eq!(ce.run_projection_at_decision_atomic, 900);
+        assert_eq!(ce.run_predicted_remaining_steps, 8);
+        assert_eq!(ce.run_steps_completed_so_far, 4);
     }
 
     #[test]

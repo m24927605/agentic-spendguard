@@ -29,9 +29,6 @@
 {{- fail "S6: signing.mode=disabled is only allowed when signing.profile=demo (set signing.profile=demo in values.yaml or pick mode=local|kms)" }}
 {{- end }}
 {{- $runCostProjectorUrl := .Values.sidecar.runCostProjectorUrl -}}
-{{- if and (eq .Values.chart.profile "production") .Values.runCostProjector.enabled (eq $runCostProjectorUrl "") -}}
-{{- $runCostProjectorUrl = printf "https://%s-run-cost-projector:50055" (include "spendguard.fullname" .) -}}
-{{- end -}}
 {{- if and (eq .Values.chart.profile "production") .Values.sidecar.allowUntrustedBudgetMetadata -}}
 {{- fail "sidecar.allowUntrustedBudgetMetadata is demo/test-only and must be false under chart.profile=production" -}}
 {{- end -}}

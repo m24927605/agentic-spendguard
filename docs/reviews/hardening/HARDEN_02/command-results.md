@@ -73,6 +73,30 @@ Reviewer: `review_01KSXMST512E6H23FEST1VGJE3`.
 
 | Finding | Fix | Verification |
 |---|---|---|
-| Production proxy path double-advances projector state | Removed the production default for `egressProxy.runCostProjectorEndpoint`; sidecar remains the only default mutating Project caller, and Helm now rejects explicit proxy projector wiring when sidecar projector is configured. | `helm template ... production` renders only `SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL`; negative Helm gate rejects explicit proxy run-cost endpoint. |
+| Production proxy path double-advances projector state | Removed the production default for `egressProxy.runCostProjectorEndpoint`; sidecar remains the only mutating Project caller when explicitly configured, and Helm rejects explicit proxy projector wiring when sidecar projector is configured. | `helm template ... production` renders no proxy projector endpoint; negative Helm gate rejects explicit proxy run-cost endpoint when sidecar projector is set. |
 | Run-budget projection is caller-controlled | Added `sidecar.allowUntrustedBudgetMetadata` / `SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA`, default false and rejected in production; m1 demo is the only path that enables it. | `cargo test --manifest-path services/sidecar/Cargo.toml`; production negative Helm gate rejects unsafe flag; `make demo-up DEMO_MODE=m1_benchmark_runaway_loop` still passes. |
 | Denied projection rows drop aggregator mirrors | Shared ClaimEstimate payload mirror insertion across allow and denied decision payloads. | `cargo test --manifest-path services/sidecar/Cargo.toml claim_estimate_payload_mirrors -- --nocapture`. |
+
+## AIT Round 2 Fix Evidence
+
+Reviewer: `review_01KSXNXYHSRM7JBWP93B9W6TE0`.
+
+| Finding | Fix | Verification |
+|---|---|---|
+| Projector advances before idempotency is resolved | Sidecar now validates adapter idempotency before Project and derives ProjectRequest.decision_id from a stable SHA-256 of the adapter key. run_cost_projector caches ProjectResponse by decision_id per run and returns replay responses without calling `record_step`. | `cargo test --manifest-path services/run_cost_projector/Cargo.toml` includes `project_is_idempotent_by_decision_id`; `cargo test --manifest-path services/sidecar/Cargo.toml` includes `projector_decision_id_is_stable_bounded_hash`. |
+| ClaimEstimate drops authoritative projector audit fields | ALLOW and DENY CloudEvents still take tokenizer/output predictor fields from ClaimEstimate, but projector_response now overrides the 3 run-level audit fields whenever present. | `cargo test --manifest-path services/sidecar/Cargo.toml` includes `projector_response_overrides_claim_estimate_run_fields`. |
+| Production budget projection remains disabled but chart advertised it | Production Helm no longer auto-wires sidecar to run_cost_projector. Operators must explicitly set `sidecar.runCostProjectorUrl`; unsafe caller-supplied budget metadata remains rejected in production. | `helm template charts/spendguard --set chart.profile=production -f docs/reviews/hardening/HARDEN_02/kind-production-values.example.yaml` renders without `SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL`; explicit sidecar URL renders when set; unsafe budget metadata negative gate fails. |
+| UDS projector mode renders dead sidecar wiring | Removing production auto-wiring means UDS-only run_cost_projector no longer produces a dead TCP sidecar endpoint by default. | Same production Helm render as above; default production output has no sidecar run_cost_projector env var. |
+
+Round 2 command results:
+
+- `cargo build --manifest-path services/run_cost_projector/Cargo.toml`: PASS.
+- `cargo build --manifest-path services/sidecar/Cargo.toml`: PASS (existing `schema_bundle_canonical_version` dead-code warning).
+- `cargo test --manifest-path services/run_cost_projector/Cargo.toml`: PASS (`52 + 5 + 3` tests).
+- `cargo test --manifest-path services/sidecar/Cargo.toml`: PASS (`112 + 6` tests; existing warning).
+- `helm template charts/spendguard --set chart.profile=demo`: PASS.
+- `helm template charts/spendguard --set chart.profile=production -f docs/reviews/hardening/HARDEN_02/kind-production-values.example.yaml`: PASS; no default sidecar projector URL rendered.
+- Negative Helm gate with both `sidecar.runCostProjectorUrl` and `egressProxy.runCostProjectorEndpoint`: FAILS as expected.
+- Negative Helm gate with `sidecar.allowUntrustedBudgetMetadata=true` in production: FAILS as expected.
+- `make -C deploy/demo demo-up DEMO_MODE=m1_benchmark_runaway_loop`: PASS; `RUN_BUDGET_PROJECTION_EXCEEDED` observed and canonical_events matching count = 1.
+- `make -C deploy/demo demo-down`: PASS.

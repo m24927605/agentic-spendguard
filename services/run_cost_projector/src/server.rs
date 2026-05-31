@@ -84,15 +84,11 @@ impl RunCostProjectorSvc {
 
 /// Validate the incoming ProjectRequest. Returns parsed (tenant_id, run_id)
 /// on success; surfaces `InvalidArgument` Status on any boundary violation.
-fn validate_project_request(
-    req: &ProjectRequest,
-) -> Result<(Uuid, Uuid), Status> {
-    let tenant_id = Uuid::parse_str(&req.tenant_id).map_err(|e| {
-        Status::invalid_argument(format!("tenant_id is not a valid UUID: {e}"))
-    })?;
-    let run_id = Uuid::parse_str(&req.run_id).map_err(|e| {
-        Status::invalid_argument(format!("run_id is not a valid UUID: {e}"))
-    })?;
+fn validate_project_request(req: &ProjectRequest) -> Result<(Uuid, Uuid), Status> {
+    let tenant_id = Uuid::parse_str(&req.tenant_id)
+        .map_err(|e| Status::invalid_argument(format!("tenant_id is not a valid UUID: {e}")))?;
+    let run_id = Uuid::parse_str(&req.run_id)
+        .map_err(|e| Status::invalid_argument(format!("run_id is not a valid UUID: {e}")))?;
     if req.agent_id.is_empty() {
         return Err(Status::invalid_argument("agent_id required"));
     }
@@ -134,15 +130,11 @@ fn validate_project_request(
     Ok((tenant_id, run_id))
 }
 
-fn validate_terminate_request(
-    req: &TerminateRunRequest,
-) -> Result<(Uuid, Uuid), Status> {
-    let tenant_id = Uuid::parse_str(&req.tenant_id).map_err(|e| {
-        Status::invalid_argument(format!("tenant_id is not a valid UUID: {e}"))
-    })?;
-    let run_id = Uuid::parse_str(&req.run_id).map_err(|e| {
-        Status::invalid_argument(format!("run_id is not a valid UUID: {e}"))
-    })?;
+fn validate_terminate_request(req: &TerminateRunRequest) -> Result<(Uuid, Uuid), Status> {
+    let tenant_id = Uuid::parse_str(&req.tenant_id)
+        .map_err(|e| Status::invalid_argument(format!("tenant_id is not a valid UUID: {e}")))?;
+    let run_id = Uuid::parse_str(&req.run_id)
+        .map_err(|e| Status::invalid_argument(format!("run_id is not a valid UUID: {e}")))?;
     if req.run_id.len() > MAX_RUN_ID_LEN {
         return Err(Status::invalid_argument(format!(
             "run_id exceeds {MAX_RUN_ID_LEN} bytes"
@@ -204,16 +196,24 @@ impl RunCostProjector for RunCostProjectorSvc {
                     None => None,
                 };
                 let fresh = recovered.unwrap_or_else(|| {
-                    RunState::new(
-                        tenant_id,
-                        run_id,
-                        req.agent_id.clone(),
-                        req.model.clone(),
-                    )
+                    RunState::new(tenant_id, run_id, req.agent_id.clone(), req.model.clone())
                 });
                 self.state_cache.insert(key.clone(), fresh)
             }
         };
+
+        {
+            let mut st = state_arc.lock();
+            if let Some(response) = st.cached_project_response(&req.decision_id) {
+                info!(
+                    tenant_id = %tenant_id,
+                    run_id = %run_id,
+                    decision_id = %req.decision_id,
+                    "Project RPC idempotent replay"
+                );
+                return Ok(Response::new(response));
+            }
+        }
 
         // ── Acquire per-run mutex; snapshot inputs we need under the lock.
         let (
@@ -295,20 +295,6 @@ impl RunCostProjector for RunCostProjectorSvc {
         };
         let result = compute_layering(&final_inputs);
 
-        // ── Update RunState atomically before returning. Record THIS
-        // call's reservation as the most-recent step (steps_completed +=
-        // 1 happens inside record_step).
-        {
-            let mut st = state_arc.lock();
-            st.record_step(req.this_call_reservation_atomic);
-            st.last_predicted_remaining_cost =
-                Some(result.predicted_remaining_cost_atomic);
-            st.drift_consecutive_count = new_drift_count;
-            if st.signal3_hint_planned_steps.is_none() && effective_hint > 0 {
-                st.signal3_hint_planned_steps = Some(effective_hint);
-            }
-        }
-
         // Confidence shape: higher when historical S1 is in play, lower
         // on cold-start. Not signed into audit chain.
         let projection_confidence = if s1_is_cold { 0.5_f32 } else { 0.9_f32 };
@@ -318,7 +304,10 @@ impl RunCostProjector for RunCostProjectorSvc {
             run_predicted_remaining_steps: result.predicted_remaining_steps,
             run_steps_completed_so_far: result.steps_completed_so_far,
             strategy_used: result.strategy_used as i32,
-            emitted_code: result.emitted_code.map(|c| c.as_str().to_string()).unwrap_or_default(),
+            emitted_code: result
+                .emitted_code
+                .map(|c| c.as_str().to_string())
+                .unwrap_or_default(),
             considered_codes: result
                 .considered_codes
                 .iter()
@@ -326,6 +315,31 @@ impl RunCostProjector for RunCostProjectorSvc {
                 .collect(),
             projection_confidence,
         };
+
+        // ── Update RunState atomically before returning. Record THIS
+        // call's reservation as the most-recent step (steps_completed +=
+        // 1 happens inside record_step). Re-check the decision cache under
+        // the same lock so concurrent duplicate Project RPCs do not both
+        // advance the mutable RunState.
+        {
+            let mut st = state_arc.lock();
+            if let Some(cached) = st.cached_project_response(&req.decision_id) {
+                info!(
+                    tenant_id = %tenant_id,
+                    run_id = %run_id,
+                    decision_id = %req.decision_id,
+                    "Project RPC idempotent replay after concurrent compute"
+                );
+                return Ok(Response::new(cached));
+            }
+            st.record_step(req.this_call_reservation_atomic);
+            st.last_predicted_remaining_cost = Some(result.predicted_remaining_cost_atomic);
+            st.drift_consecutive_count = new_drift_count;
+            if st.signal3_hint_planned_steps.is_none() && effective_hint > 0 {
+                st.signal3_hint_planned_steps = Some(effective_hint);
+            }
+            st.record_project_response(req.decision_id.clone(), response.clone());
+        }
 
         info!(
             tenant_id = %tenant_id,
@@ -456,15 +470,19 @@ mod tests {
         let tenant = Uuid::new_v4();
         let run = Uuid::new_v4();
         // Call 1.
+        let mut req1 = mk_req(tenant, run, 100, 1_000_000_000, 0);
+        req1.decision_id = "dec-1".into();
         let r1 = svc
-            .project(Request::new(mk_req(tenant, run, 100, 1_000_000_000, 0)))
+            .project(Request::new(req1))
             .await
             .expect("ok")
             .into_inner();
         assert_eq!(r1.run_steps_completed_so_far, 0);
         // Call 2 — should see steps_completed_so_far=1 from prior record_step.
+        let mut req2 = mk_req(tenant, run, 100, 1_000_000_000, 0);
+        req2.decision_id = "dec-2".into();
         let r2 = svc
-            .project(Request::new(mk_req(tenant, run, 100, 1_000_000_000, 0)))
+            .project(Request::new(req2))
             .await
             .expect("ok")
             .into_inner();
@@ -474,12 +492,48 @@ mod tests {
         // So predicted_remaining = 9 × 100 = 900. proj = 100 + 100 + 900 = 1100.
         assert_eq!(r2.run_projection_at_decision_atomic, 1100);
         // Call 3.
+        let mut req3 = mk_req(tenant, run, 100, 1_000_000_000, 0);
+        req3.decision_id = "dec-3".into();
         let r3 = svc
-            .project(Request::new(mk_req(tenant, run, 100, 1_000_000_000, 0)))
+            .project(Request::new(req3))
             .await
             .expect("ok")
             .into_inner();
         assert_eq!(r3.run_steps_completed_so_far, 2);
+    }
+
+    #[tokio::test]
+    async fn project_is_idempotent_by_decision_id() {
+        let svc = RunCostProjectorSvc::new(test_cfg(), None);
+        let tenant = Uuid::new_v4();
+        let run = Uuid::new_v4();
+
+        let mut first = mk_req(tenant, run, 100, 1_000_000_000, 0);
+        first.decision_id = "same-decision".into();
+        let r1 = svc
+            .project(Request::new(first.clone()))
+            .await
+            .expect("first ok")
+            .into_inner();
+        let r2 = svc
+            .project(Request::new(first))
+            .await
+            .expect("replay ok")
+            .into_inner();
+        assert_eq!(r1.run_steps_completed_so_far, r2.run_steps_completed_so_far);
+        assert_eq!(
+            r1.run_projection_at_decision_atomic,
+            r2.run_projection_at_decision_atomic
+        );
+
+        let mut next = mk_req(tenant, run, 100, 1_000_000_000, 0);
+        next.decision_id = "next-decision".into();
+        let r3 = svc
+            .project(Request::new(next))
+            .await
+            .expect("next ok")
+            .into_inner();
+        assert_eq!(r3.run_steps_completed_so_far, 1);
     }
 
     #[tokio::test]
@@ -488,13 +542,14 @@ mod tests {
         let tenant = Uuid::new_v4();
         let run = Uuid::new_v4();
         // Call 1 with hint=5.
-        let _ = svc
-            .project(Request::new(mk_req(tenant, run, 100, 1_000_000_000, 5)))
-            .await
-            .expect("ok");
+        let mut req1 = mk_req(tenant, run, 100, 1_000_000_000, 5);
+        req1.decision_id = "hint-1".into();
+        let _ = svc.project(Request::new(req1)).await.expect("ok");
         // Call 2 with hint=999 → ignored (latched at 5).
+        let mut req2 = mk_req(tenant, run, 100, 1_000_000_000, 999);
+        req2.decision_id = "hint-2".into();
         let r2 = svc
-            .project(Request::new(mk_req(tenant, run, 100, 1_000_000_000, 999)))
+            .project(Request::new(req2))
             .await
             .expect("ok")
             .into_inner();
@@ -510,14 +565,15 @@ mod tests {
         // Hint = 2. Need to make 3 calls so steps_completed_so_far = 2
         // on call 3 and Signal 3 yields STEPS_EXCEEDED on call 4 where
         // steps_completed = 3 > hint = 2.
-        for _ in 0..3 {
-            let _ = svc
-                .project(Request::new(mk_req(tenant, run, 100, 1_000_000_000, 2)))
-                .await
-                .expect("ok");
+        for idx in 0..3 {
+            let mut req = mk_req(tenant, run, 100, 1_000_000_000, 2);
+            req.decision_id = format!("steps-{idx}");
+            let _ = svc.project(Request::new(req)).await.expect("ok");
         }
+        let mut req4 = mk_req(tenant, run, 100, 1_000_000_000, 2);
+        req4.decision_id = "steps-4".into();
         let r4 = svc
-            .project(Request::new(mk_req(tenant, run, 100, 1_000_000_000, 2)))
+            .project(Request::new(req4))
             .await
             .expect("ok")
             .into_inner();
@@ -599,7 +655,13 @@ mod tests {
     #[tokio::test]
     async fn project_rejects_overlarge_hint() {
         let svc = RunCostProjectorSvc::new(test_cfg(), None);
-        let req = mk_req(Uuid::new_v4(), Uuid::new_v4(), 1, 1000, MAX_PLANNED_STEPS + 1);
+        let req = mk_req(
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            1,
+            1000,
+            MAX_PLANNED_STEPS + 1,
+        );
         let err = svc.project(Request::new(req)).await.expect_err("rejected");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
     }
@@ -640,8 +702,10 @@ mod tests {
         let run = Uuid::new_v4();
         let mut fired_at: Option<i64> = None;
         for i in 0..47 {
+            let mut req = mk_req(tenant, run, 100, 999, 0);
+            req.decision_id = format!("runaway-{i}");
             let resp = svc
-                .project(Request::new(mk_req(tenant, run, 100, 999, 0)))
+                .project(Request::new(req))
                 .await
                 .expect("ok")
                 .into_inner();

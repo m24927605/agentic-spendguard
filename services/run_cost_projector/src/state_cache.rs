@@ -27,12 +27,17 @@
 //! while preventing the "two concurrent Project for same run_id" corruption
 //! risk (e.g. retry-during-flight from sidecar).
 
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
 use uuid::Uuid;
+
+use crate::proto::run_cost_projector::v1::ProjectResponse;
+
+const PROJECT_RESPONSE_CACHE_CAP: usize = 256;
 
 /// Per-run in-memory state. All cost values are atomic-micros int64.
 #[derive(Debug, Clone)]
@@ -74,6 +79,12 @@ pub struct RunState {
 
     /// Instant of first Project call (for diagnostics / lifetime metrics).
     pub started_at: Instant,
+
+    /// Idempotency cache keyed by ProjectRequest.decision_id. Stored inside
+    /// the per-run mutex so duplicate Project RPCs for the same logical
+    /// decision return the original response without advancing steps/cost.
+    pub project_responses_by_decision_id: HashMap<String, ProjectResponse>,
+    project_response_order: VecDeque<String>,
 }
 
 impl RunState {
@@ -92,6 +103,8 @@ impl RunState {
             signal3_hint_planned_steps: None,
             last_activity_at: now,
             started_at: now,
+            project_responses_by_decision_id: HashMap::new(),
+            project_response_order: VecDeque::new(),
         }
     }
 
@@ -108,6 +121,42 @@ impl RunState {
         }
         self.cumulative_cost_atomic = self.cumulative_cost_atomic.saturating_add(step_cost_atomic);
         self.steps_completed += 1;
+        self.last_activity_at = Instant::now();
+    }
+
+    pub fn cached_project_response(&mut self, decision_id: &str) -> Option<ProjectResponse> {
+        if decision_id.is_empty() {
+            return None;
+        }
+        let response = self
+            .project_responses_by_decision_id
+            .get(decision_id)
+            .cloned();
+        if response.is_some() {
+            self.last_activity_at = Instant::now();
+        }
+        response
+    }
+
+    pub fn record_project_response(&mut self, decision_id: String, response: ProjectResponse) {
+        if decision_id.is_empty() {
+            return;
+        }
+        if self
+            .project_responses_by_decision_id
+            .insert(decision_id.clone(), response)
+            .is_none()
+        {
+            self.project_response_order.push_back(decision_id);
+        }
+        while self.project_responses_by_decision_id.len() > PROJECT_RESPONSE_CACHE_CAP {
+            match self.project_response_order.pop_front() {
+                Some(oldest) => {
+                    self.project_responses_by_decision_id.remove(&oldest);
+                }
+                None => break,
+            }
+        }
         self.last_activity_at = Instant::now();
     }
 }
@@ -207,7 +256,12 @@ mod tests {
 
     fn make_state(tag: u8) -> RunState {
         let key = make_key(tag);
-        RunState::new(key.tenant_id, key.run_id, format!("agent-{tag}"), "m".into())
+        RunState::new(
+            key.tenant_id,
+            key.run_id,
+            format!("agent-{tag}"),
+            "m".into(),
+        )
     }
 
     #[test]
@@ -252,7 +306,10 @@ mod tests {
         assert!(!cache.remove(&key), "missing key returns false");
         cache.insert(key.clone(), make_state(1));
         assert!(cache.remove(&key), "existing key returns true");
-        assert!(!cache.remove(&key), "second remove returns false (idempotent)");
+        assert!(
+            !cache.remove(&key),
+            "second remove returns false (idempotent)"
+        );
     }
 
     #[test]
@@ -269,6 +326,48 @@ mod tests {
         let expected_sum: i64 = (0..300).sum();
         assert_eq!(st.cumulative_cost_atomic, expected_sum);
         assert_eq!(st.steps_completed, 300);
+    }
+
+    #[test]
+    fn project_response_cache_is_bounded_and_non_empty_keyed() {
+        let mut st = make_state(1);
+        let response = ProjectResponse {
+            run_projection_at_decision_atomic: 123,
+            run_predicted_remaining_steps: 4,
+            run_steps_completed_so_far: 2,
+            strategy_used: 1,
+            emitted_code: "RUN_BUDGET_PROJECTION_EXCEEDED".into(),
+            considered_codes: vec!["RUN_BUDGET_PROJECTION_EXCEEDED".into()],
+            projection_confidence: 0.9,
+        };
+        st.record_project_response(String::new(), response.clone());
+        assert!(st.cached_project_response("").is_none());
+
+        st.record_project_response("decision-1".into(), response.clone());
+        assert_eq!(
+            st.cached_project_response("decision-1")
+                .expect("cached")
+                .run_projection_at_decision_atomic,
+            123
+        );
+
+        for idx in 0..300 {
+            let mut next = response.clone();
+            next.run_projection_at_decision_atomic = idx;
+            st.record_project_response(format!("decision-{idx}"), next);
+        }
+        assert_eq!(
+            st.project_responses_by_decision_id.len(),
+            PROJECT_RESPONSE_CACHE_CAP
+        );
+        assert!(
+            st.cached_project_response("decision-1").is_none(),
+            "oldest decision response should be evicted"
+        );
+        assert!(
+            st.cached_project_response("decision-299").is_some(),
+            "newest decision response should remain cached"
+        );
     }
 
     #[test]
@@ -331,7 +430,13 @@ mod tests {
         cache.insert(key_a.clone(), state_a);
         cache.insert(key_b.clone(), state_b);
 
-        assert_eq!(cache.get(&key_a).expect("a").lock().cumulative_cost_atomic, 111);
-        assert_eq!(cache.get(&key_b).expect("b").lock().cumulative_cost_atomic, 222);
+        assert_eq!(
+            cache.get(&key_a).expect("a").lock().cumulative_cost_atomic,
+            111
+        );
+        assert_eq!(
+            cache.get(&key_b).expect("b").lock().cumulative_cost_atomic,
+            222
+        );
     }
 }

@@ -149,10 +149,10 @@ sidecar:
   # pointing at their endpoint-catalog deployment (not provisioned here).
   endpointCatalogManifestUrl: "https://endpoint-catalog.spendguard:8443/v1/catalog/manifest"
   # SLICE_09/HARDEN_02: optional run-cost projector RPC endpoint. Demo
-  # compose leaves this empty unless a scenario explicitly starts the
-  # projector. Production deployments should point at the in-cluster
-  # run-cost-projector Service so RUN_* projection stops are available
-  # before Ledger Reserve.
+  # compose sets this only for scenarios that explicitly start the
+  # projector. Production leaves it empty by default until the sidecar has
+  # an authoritative signed/fenced budget snapshot; operators may wire it
+  # explicitly for non-budget RUN_DRIFT/RUN_STEPS projection semantics.
   runCostProjectorUrl: ""
   # Demo/test-only. When true, sidecar accepts caller-supplied
   # runtime_metadata.budget_remaining_atomic for RUN_BUDGET_PROJECTION_EXCEEDED.
@@ -435,9 +435,9 @@ egressProxy:
   #
   # Production deployments SHOULD set outputPredictorEndpoint, or leave it
   # empty to use the chart's production default when outputPredictor.enabled.
-  # Do not wire runCostProjectorEndpoint when the sidecar is also wired to
-  # run_cost_projector: Project is mutating and one logical call must advance
-  # RunState exactly once. The sidecar is the authoritative default caller.
+  # Do not wire runCostProjectorEndpoint when the sidecar is explicitly wired
+  # to run_cost_projector: Project is mutating and one logical call must
+  # advance RunState exactly once.
   #
   # Format: gRPC endpoint URL (http://host:port for plaintext or
   # https://host:port + chart.profile=production for mTLS once SLICE_07
@@ -446,8 +446,8 @@ egressProxy:
   runCostProjectorEndpoint: ""
   # ── Production gate ──
   # Under chart.profile=production the output predictor endpoint SHOULD be set;
-  # run_cost_projector stays empty by default to avoid double-advancing mutable
-  # run state through both proxy and sidecar.
+  # run_cost_projector stays empty by default until a non-mutating proxy
+  # preview RPC exists.
   resources:
     requests: { cpu: "50m",  memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
