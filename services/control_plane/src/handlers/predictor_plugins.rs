@@ -30,11 +30,11 @@
 //!
 //! Per spec §8 every mutation emits a signed CloudEvent
 //! `spendguard.audit.plugin_{registered, updated, deleted, force_reset}`
-//! via the canonical_ingest AppendEvents RPC. SLICE_07 ships the API
-//! shape + database write; the CloudEvent emission is staged to the
-//! existing audit_outbox pattern used by post_ledger_transaction (a
-//! follow-up SLICE-extra wires the actual emit because canonical_ingest
-//! channel needs a mTLS config in main.rs that v1alpha1 doesn't have).
+//! via the canonical_ingest AppendEvents RPC. Handlers use the
+//! transactional outbox pattern; HARDEN_06's control-plane audit
+//! forwarder signs each pending row and relays it to canonical_ingest
+//! with the same `AppendEventsRequest` envelope required from other
+//! audit producers.
 //!
 //! ## RLS
 //!
