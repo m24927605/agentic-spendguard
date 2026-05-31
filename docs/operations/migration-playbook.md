@@ -95,7 +95,7 @@ These tables are forward-fix only in production:
 | canonical_ingest | `canonical_events`, `audit_outcome_quarantine`, `canonical_event_replay_dedup`, signing key registry tables |
 | control_plane | `control_plane_audit_outbox`, predictor endpoint configuration audit rows |
 
-Do not truncate, delete, rewrite, or run down migrations against immutable audit data to make a rollback easier. If a migration corrupts immutable state, restore into a new database from the backup checkpoint and reconcile through the audit-chain incident process.
+Do not truncate, delete, rewrite, or run down migrations against immutable audit data to make a rollback easier. If a migration corrupts immutable state, restore into a new database from the post-freeze, post-cutoff backup checkpoint and reconcile through the audit-chain incident process.
 
 ## 8. Partial Failure Recovery
 

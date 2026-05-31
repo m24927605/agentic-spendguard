@@ -12,7 +12,7 @@
 | Additive migrations applied, old app is schema-compatible | Roll back application image only. Keep database schema. |
 | Migration failed before commit and left no schema changes | Fix the migration command/environment, then rerun the same file after database owner approval. |
 | Migration committed partial schema changes | Ship a higher-numbered forward-fix migration. Do not edit the shipped migration. |
-| Migration touched immutable audit/signing/RLS state | Forward-fix only, or restore to a new database from the preflight backup. |
+| Migration touched immutable audit/signing/RLS state | Forward-fix only, or restore to a new database from the post-freeze, post-cutoff backup checkpoint in the migration playbook. |
 | Data corruption suspected | Freeze writes, preserve evidence, restore to a new database, reconcile audit chain before traffic returns. |
 
 If the safe action is unclear, freeze writes and escalate to Staff+ database, security, and backend owners. Do not improvise destructive SQL.
@@ -24,7 +24,7 @@ These actions are allowed during a rollback:
 - Revert Kubernetes Deployment image tags and config references to the prior release.
 - Disable new feature flags that have not changed persisted state.
 - Re-run idempotent verification queries.
-- Restore a full database into a new database or cluster from the backup checkpoint.
+- Restore a full database into a new database or cluster from the post-freeze, post-cutoff backup checkpoint.
 - Ship a forward-fix migration with a new version number.
 
 ## 3. Prohibited Rollback Actions
@@ -59,11 +59,11 @@ These actions are not allowed in production:
 
 ## 6. Restore-To-New-Database Procedure
 
-Use restore when immutable data corruption or incompatible schema state makes forward-fix unsafe.
+Use restore when immutable data corruption or incompatible schema state makes forward-fix unsafe. The restore artifact must be the post-freeze, post-cutoff backup checkpoint from the migration playbook, not a planning-time preflight artifact.
 
 1. Keep production writes frozen.
 2. Create new databases or a new cluster.
-3. Restore the backup checkpoint with `pg_restore --exit-on-error`.
+3. Restore the post-freeze, post-cutoff backup checkpoint with `pg_restore --exit-on-error`.
 4. Verify dump checksums from `SHA256SUMS`.
 5. Run schema, RLS, and audit-chain checks.
 6. Point application Secrets to the restored databases through the approved secret manager.
