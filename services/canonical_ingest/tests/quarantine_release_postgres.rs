@@ -347,6 +347,177 @@ async fn replay_dedup_rejects_quarantined_outcome_hash_mismatch() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn replay_dedup_rejects_cross_producer_hijack_while_outcome_quarantined() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let tenant_id = Uuid::new_v4();
+    let decision_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let outcome_event_id = Uuid::new_v4();
+    let decision_event_id = Uuid::new_v4();
+
+    let outcome = base_append_input(
+        outcome_event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.outcome",
+        2,
+    );
+    quarantine_audit_outcome(
+        &fx.pool,
+        outcome,
+        Utc::now() + chrono::Duration::seconds(30),
+    )
+    .await
+    .expect("quarantine outcome first");
+
+    let mut hijack = base_append_input(
+        outcome_event_id,
+        tenant_id,
+        Uuid::new_v4(),
+        run_id,
+        "spendguard.audit.decision",
+        1,
+    );
+    hijack.producer_id = "canonical-ingest-hijacker";
+    hijack.source = "spendguard://canonical-ingest-hijacker";
+    hijack.event_hash = &[0x66; 32];
+    hijack.payload_json = serde_json::json!({"data": {"hijack": true}});
+
+    let err = append_event(&fx.pool, hijack)
+        .await
+        .expect_err("cross-producer event_id collision rejected");
+    assert!(
+        err.to_string().contains("replay hash mismatch"),
+        "unexpected error: {err}"
+    );
+
+    let mut decision = base_append_input(
+        decision_event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.decision",
+        1,
+    );
+    decision.prediction.predicted_a_tokens = Some(64);
+    decision.prediction.reserved_strategy = Some("A");
+    decision.prediction.prediction_strategy_used = Some("A");
+    decision.prediction.prediction_policy_used = Some("STRICT_CEILING");
+    decision.prediction.tokenizer_tier = Some("T2");
+    decision.prediction.run_projection_at_decision_atomic = Some(bigdecimal::BigDecimal::from(64));
+    decision.prediction.run_steps_completed_so_far = Some(0);
+    append_event(&fx.pool, decision)
+        .await
+        .expect("append decision");
+
+    let released = release_quarantined_outcomes(
+        &fx.pool,
+        tenant_id,
+        decision_id,
+        "test-region",
+        "test-shard",
+    )
+    .await
+    .expect("release original outcome");
+    assert_eq!(released, 1);
+
+    let canonical_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM canonical_events WHERE event_id = $1")
+            .bind(outcome_event_id)
+            .fetch_one(&fx.pool)
+            .await
+            .expect("count canonical rows");
+    assert_eq!(canonical_count, 1);
+
+    let producer_id: String =
+        sqlx::query_scalar("SELECT producer_id FROM canonical_events WHERE event_id = $1")
+            .bind(outcome_event_id)
+            .fetch_one(&fx.pool)
+            .await
+            .expect("read released producer");
+    assert_eq!(producer_id, "canonical-ingest-test");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn quarantine_release_refuses_global_key_conflict_without_state_transition() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let tenant_id = Uuid::new_v4();
+    let decision_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let outcome_event_id = Uuid::new_v4();
+    let decision_event_id = Uuid::new_v4();
+
+    let outcome = base_append_input(
+        outcome_event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.outcome",
+        2,
+    );
+    quarantine_audit_outcome(
+        &fx.pool,
+        outcome,
+        Utc::now() + chrono::Duration::seconds(30),
+    )
+    .await
+    .expect("quarantine outcome");
+
+    sqlx::query(
+        r#"
+        INSERT INTO canonical_events_global_keys
+            (event_id, tenant_id, decision_id, event_type, recorded_month)
+        VALUES ($1, $2, $3, 'spendguard.audit.hijack', DATE '2026-05-01')
+        "#,
+    )
+    .bind(outcome_event_id)
+    .bind(tenant_id)
+    .bind(Uuid::new_v4())
+    .execute(&fx.pool)
+    .await
+    .expect("seed conflicting global key");
+
+    let decision = base_append_input(
+        decision_event_id,
+        tenant_id,
+        decision_id,
+        run_id,
+        "spendguard.audit.decision",
+        1,
+    );
+    append_event(&fx.pool, decision)
+        .await
+        .expect("append decision");
+
+    let err = release_quarantined_outcomes(
+        &fx.pool,
+        tenant_id,
+        decision_id,
+        "test-region",
+        "test-shard",
+    )
+    .await
+    .expect_err("release refuses global-key collision");
+    assert!(
+        err.to_string().contains("refusing release"),
+        "unexpected error: {err}"
+    );
+
+    let state: String =
+        sqlx::query_scalar("SELECT state FROM audit_outcome_quarantine WHERE event_id = $1")
+            .bind(outcome_event_id)
+            .fetch_one(&fx.pool)
+            .await
+            .expect("read quarantine state");
+    assert_eq!(state, "awaiting_decision");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn quarantined_outcome_release_preserves_aggregator_mirrors() {
     let Some(fx) = setup_postgres().await else {
         return;

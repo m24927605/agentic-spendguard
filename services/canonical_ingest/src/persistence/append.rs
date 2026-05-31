@@ -159,7 +159,7 @@ pub async fn append_event(
         ReplayClaim::DuplicateHashMismatch => {
             tx.rollback().await.map_err(map_pg_error)?;
             return Err(DomainError::Duplicate(format!(
-                "CloudEvent replay hash mismatch for producer_id={} event_id={}",
+                "CloudEvent replay hash mismatch or event_id collision for producer_id={} event_id={}",
                 input.producer_id, input.event_id
             )));
         }
@@ -333,7 +333,7 @@ async fn claim_replay_key(
             (producer_id, event_id, tenant_id, payload_hash, expires_at)
          VALUES
             ($1, $2, $3, $4, clock_timestamp() + ($5::TEXT)::INTERVAL)
-         ON CONFLICT (producer_id, event_id) DO NOTHING",
+         ON CONFLICT (event_id) DO NOTHING",
     )
     .bind(input.producer_id)
     .bind(input.event_id)
@@ -348,20 +348,18 @@ async fn claim_replay_key(
         return Ok(ReplayClaim::New);
     }
 
-    let existing_hash: Vec<u8> = sqlx::query_scalar(
-        "SELECT payload_hash
+    let existing: (String, Vec<u8>) = sqlx::query_as(
+        "SELECT producer_id, payload_hash
            FROM canonical_event_replay_dedup
-          WHERE producer_id = $1
-            AND event_id = $2
+          WHERE event_id = $1
           FOR UPDATE",
     )
-    .bind(input.producer_id)
     .bind(input.event_id)
     .fetch_one(&mut **tx)
     .await
     .map_err(map_pg_error)?;
 
-    if existing_hash == input.event_hash {
+    if existing.0 == input.producer_id && existing.1 == input.event_hash {
         Ok(ReplayClaim::DuplicateSamePayload)
     } else {
         Ok(ReplayClaim::DuplicateHashMismatch)
@@ -486,129 +484,135 @@ pub async fn release_quarantined_outcomes(
         .await
         .map_err(map_pg_error)?;
 
-        if inserted_keys.rows_affected() > 0 {
-            let offset: i64 = sqlx::query_scalar("SELECT next_ingest_offset($1, $2)")
-                .bind(region_id)
-                .bind(ingest_shard_id)
-                .fetch_one(&mut *tx)
-                .await
-                .map_err(map_pg_error)?;
-
-            // Round-3 fix B2/HARDEN_03 R2: extend INSERT with prediction
-            // and aggregator mirror columns carried forward from the
-            // quarantined row. The producer's signature still covers the
-            // proto payload; these first-class columns are SQL accelerators
-            // that must survive quarantine so mirror checks and aggregation
-            // stay consistent.
-            sqlx::query(
-                "INSERT INTO canonical_events (
-                    event_id, tenant_id, decision_id, run_id, event_type,
-                    storage_class,
-                    producer_id, producer_sequence, producer_signature, signing_key_id,
-                    schema_bundle_id, schema_bundle_hash,
-                    specversion, source, event_time, datacontenttype,
-                    payload_json, payload_blob_ref,
-                    region_id, ingest_shard_id, ingest_log_offset, ingest_at,
-                    recorded_month, failure_class,
-                    model, agent_id, run_id_mirror, prompt_class,
-                    prompt_class_fingerprint,
-                    predicted_a_tokens, predicted_b_tokens, predicted_c_tokens,
-                    reserved_strategy, prediction_strategy_used,
-                    prediction_policy_used, tokenizer_tier, tokenizer_version_id,
-                    prediction_confidence, prediction_sample_size,
-                    cold_start_layer_used,
-                    run_projection_at_decision_atomic,
-                    run_predicted_remaining_steps, run_steps_completed_so_far,
-                    actual_input_tokens, actual_output_tokens,
-                    delta_b_ratio, delta_c_ratio
-                 ) VALUES (
-                    $1, $2, $3, $4, $5,
-                    $6,
-                    $7, $8, $9, $10,
-                    $11, $12,
-                    $13, $14, $15, $16,
-                    $17, $18,
-                    $19, $20, $21, clock_timestamp(),
-                    date_trunc('month', $15)::DATE, $22,
-                    $23, $24, $25, $26,
-                    $27,
-                    $28, $29, $30,
-                    $31, $32,
-                    $33, $34, $35,
-                    $36, $37,
-                    $38,
-                    $39,
-                    $40, $41,
-                    $42, $43,
-                    $44, $45
-                 )",
-            )
-            .bind(event_id)
-            .bind(tenant_id)
-            .bind(decision_id)
-            .bind(run_id)
-            .bind(&r.event_type)
-            .bind(storage_class.as_db_str())
-            .bind(&r.producer_id)
-            .bind(producer_sequence)
-            .bind(&r.producer_signature)
-            .bind(&r.signing_key_id)
-            .bind(orig_schema_bundle_id)
-            .bind(&r.schema_bundle_hash)
-            .bind(&r.specversion)
-            .bind(&r.source)
-            .bind(event_time)
-            .bind(&r.datacontenttype)
-            .bind(&payload_json)
-            .bind(payload_blob_ref_opt.as_deref())
-            .bind(region_id)
-            .bind(ingest_shard_id)
-            .bind(offset)
-            .bind(release_failure_class)
-            .bind(&r.model)
-            .bind(&r.agent_id)
-            .bind(r.run_id_mirror)
-            .bind(&r.prompt_class)
-            .bind(&r.prompt_class_fingerprint)
-            .bind(r.predicted_a_tokens)
-            .bind(r.predicted_b_tokens)
-            .bind(r.predicted_c_tokens)
-            .bind(&r.reserved_strategy)
-            .bind(&r.prediction_strategy_used)
-            .bind(&r.prediction_policy_used)
-            .bind(&r.tokenizer_tier)
-            .bind(r.tokenizer_version_id)
-            .bind(r.prediction_confidence.as_ref())
-            .bind(r.prediction_sample_size)
-            .bind(&r.cold_start_layer_used)
-            .bind(r.run_projection_at_decision_atomic.as_ref())
-            .bind(r.run_predicted_remaining_steps)
-            .bind(r.run_steps_completed_so_far)
-            .bind(r.actual_input_tokens)
-            .bind(r.actual_output_tokens)
-            .bind(r.delta_b_ratio)
-            .bind(r.delta_c_ratio)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_pg_error)?;
-
-            sqlx::query(
-                "INSERT INTO canonical_ingest_positions
-                    (region_id, ingest_shard_id, ingest_log_offset,
-                     event_id, recorded_month)
-                 VALUES ($1, $2, $3, $4, date_trunc('month', $5)::DATE)",
-            )
-            .bind(region_id)
-            .bind(ingest_shard_id)
-            .bind(offset)
-            .bind(event_id)
-            .bind(event_time)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_pg_error)?;
+        if inserted_keys.rows_affected() == 0 {
+            tx.rollback().await.map_err(map_pg_error)?;
+            return Err(DomainError::Duplicate(format!(
+                "quarantined audit outcome event_id={} already exists in canonical_events_global_keys; refusing release",
+                event_id
+            )));
         }
 
-        // Transition state regardless (released even if globally deduped).
+        let offset: i64 = sqlx::query_scalar("SELECT next_ingest_offset($1, $2)")
+            .bind(region_id)
+            .bind(ingest_shard_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(map_pg_error)?;
+
+        // Round-3 fix B2/HARDEN_03 R2: extend INSERT with prediction
+        // and aggregator mirror columns carried forward from the
+        // quarantined row. The producer's signature still covers the
+        // proto payload; these first-class columns are SQL accelerators
+        // that must survive quarantine so mirror checks and aggregation
+        // stay consistent.
+        sqlx::query(
+            "INSERT INTO canonical_events (
+                event_id, tenant_id, decision_id, run_id, event_type,
+                storage_class,
+                producer_id, producer_sequence, producer_signature, signing_key_id,
+                schema_bundle_id, schema_bundle_hash,
+                specversion, source, event_time, datacontenttype,
+                payload_json, payload_blob_ref,
+                region_id, ingest_shard_id, ingest_log_offset, ingest_at,
+                recorded_month, failure_class,
+                model, agent_id, run_id_mirror, prompt_class,
+                prompt_class_fingerprint,
+                predicted_a_tokens, predicted_b_tokens, predicted_c_tokens,
+                reserved_strategy, prediction_strategy_used,
+                prediction_policy_used, tokenizer_tier, tokenizer_version_id,
+                prediction_confidence, prediction_sample_size,
+                cold_start_layer_used,
+                run_projection_at_decision_atomic,
+                run_predicted_remaining_steps, run_steps_completed_so_far,
+                actual_input_tokens, actual_output_tokens,
+                delta_b_ratio, delta_c_ratio
+             ) VALUES (
+                $1, $2, $3, $4, $5,
+                $6,
+                $7, $8, $9, $10,
+                $11, $12,
+                $13, $14, $15, $16,
+                $17, $18,
+                $19, $20, $21, clock_timestamp(),
+                date_trunc('month', $15)::DATE, $22,
+                $23, $24, $25, $26,
+                $27,
+                $28, $29, $30,
+                $31, $32,
+                $33, $34, $35,
+                $36, $37,
+                $38,
+                $39,
+                $40, $41,
+                $42, $43,
+                $44, $45
+             )",
+        )
+        .bind(event_id)
+        .bind(tenant_id)
+        .bind(decision_id)
+        .bind(run_id)
+        .bind(&r.event_type)
+        .bind(storage_class.as_db_str())
+        .bind(&r.producer_id)
+        .bind(producer_sequence)
+        .bind(&r.producer_signature)
+        .bind(&r.signing_key_id)
+        .bind(orig_schema_bundle_id)
+        .bind(&r.schema_bundle_hash)
+        .bind(&r.specversion)
+        .bind(&r.source)
+        .bind(event_time)
+        .bind(&r.datacontenttype)
+        .bind(&payload_json)
+        .bind(payload_blob_ref_opt.as_deref())
+        .bind(region_id)
+        .bind(ingest_shard_id)
+        .bind(offset)
+        .bind(release_failure_class)
+        .bind(&r.model)
+        .bind(&r.agent_id)
+        .bind(r.run_id_mirror)
+        .bind(&r.prompt_class)
+        .bind(&r.prompt_class_fingerprint)
+        .bind(r.predicted_a_tokens)
+        .bind(r.predicted_b_tokens)
+        .bind(r.predicted_c_tokens)
+        .bind(&r.reserved_strategy)
+        .bind(&r.prediction_strategy_used)
+        .bind(&r.prediction_policy_used)
+        .bind(&r.tokenizer_tier)
+        .bind(r.tokenizer_version_id)
+        .bind(r.prediction_confidence.as_ref())
+        .bind(r.prediction_sample_size)
+        .bind(&r.cold_start_layer_used)
+        .bind(r.run_projection_at_decision_atomic.as_ref())
+        .bind(r.run_predicted_remaining_steps)
+        .bind(r.run_steps_completed_so_far)
+        .bind(r.actual_input_tokens)
+        .bind(r.actual_output_tokens)
+        .bind(r.delta_b_ratio)
+        .bind(r.delta_c_ratio)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_pg_error)?;
+
+        sqlx::query(
+            "INSERT INTO canonical_ingest_positions
+                (region_id, ingest_shard_id, ingest_log_offset,
+                 event_id, recorded_month)
+             VALUES ($1, $2, $3, $4, date_trunc('month', $5)::DATE)",
+        )
+        .bind(region_id)
+        .bind(ingest_shard_id)
+        .bind(offset)
+        .bind(event_id)
+        .bind(event_time)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_pg_error)?;
+
+        // Transition state only after the canonical append succeeds.
         sqlx::query(
             "UPDATE audit_outcome_quarantine
                 SET state = 'released',
@@ -648,7 +652,7 @@ pub async fn quarantine_audit_outcome(
         ReplayClaim::DuplicateHashMismatch => {
             tx.rollback().await.map_err(map_pg_error)?;
             return Err(DomainError::Duplicate(format!(
-                "CloudEvent replay hash mismatch for producer_id={} event_id={}",
+                "CloudEvent replay hash mismatch or event_id collision for producer_id={} event_id={}",
                 input.producer_id, input.event_id
             )));
         }

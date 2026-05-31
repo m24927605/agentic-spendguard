@@ -18,6 +18,7 @@ CREATE TABLE canonical_event_replay_dedup (
     expires_at    TIMESTAMPTZ NOT NULL,
 
     PRIMARY KEY (producer_id, event_id),
+    CONSTRAINT canonical_event_replay_dedup_event_id_key UNIQUE (event_id),
     CHECK (expires_at > first_seen_at)
 );
 
@@ -34,7 +35,7 @@ GRANT SELECT, INSERT, UPDATE
     TO canonical_ingest_application_role;
 
 COMMENT ON TABLE canonical_event_replay_dedup IS
-    'Producer-scoped replay ledger for canonical_ingest AppendEvents. PRIMARY KEY(producer_id,event_id) rejects CloudEvent replays before immutable append; expires_at bounds operational cleanup while canonical_events_global_keys remains the permanent event_id uniqueness guard.';
+    'Replay ledger for canonical_ingest AppendEvents. PRIMARY KEY(producer_id,event_id) detects idempotent producer retries; UNIQUE(event_id) reserves globally while audit outcomes are quarantined so cross-producer hijacks cannot preempt release.';
 COMMENT ON COLUMN canonical_event_replay_dedup.payload_hash IS
     'SHA-256 over canonical CloudEvent bytes as verified/admitted by canonical_ingest. Same producer+event_id with different bytes is a replay/tamper signal.';
 COMMENT ON COLUMN canonical_event_replay_dedup.expires_at IS
