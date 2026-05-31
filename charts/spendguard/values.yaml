@@ -515,6 +515,9 @@ egressProxy:
   # ── Sidecar UDS path (proxy dials sidecar here) ──
   # Shared hostPath with the sidecar DaemonSet.
   sidecarUdsHostPath: "/var/run/spendguard"
+  # Demo may use DirectoryOrCreate. Production values should set Directory
+  # and pre-create the path writable by UID/GID 65532 on every node.
+  sidecarUdsHostPathType: DirectoryOrCreate
   # ── SLICE_10 — output_predictor + run_cost_projector endpoints ──
   # Both optional. When unset, decision::estimate_call_cost falls back per
   # spec §11:
@@ -523,8 +526,11 @@ egressProxy:
   #   * projector unset → no RUN_* code; run_predicted_remaining_steps=-1
   #     sentinel per audit-chain-prediction-extension-v1alpha1.md §3.3.
   #
-  # Production deployments SHOULD set outputPredictorEndpoint, or leave it
-  # empty to use the chart's production default when outputPredictor.enabled.
+  # Egress proxy currently supports plaintext tonic channels only for the
+  # output_predictor client. Production values leave this empty because the
+  # in-chart output_predictor serves mTLS. Until egress_proxy gains mTLS
+  # client support, setting an https endpoint would silently degrade to
+  # local Strategy A after connect failure.
   # Do not wire runCostProjectorEndpoint when the sidecar is explicitly wired
   # to run_cost_projector: Project is mutating and one logical call must
   # advance RunState exactly once.

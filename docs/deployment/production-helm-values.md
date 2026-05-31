@@ -121,6 +121,10 @@ The validation script includes negative checks for:
 - Pre-create `sidecar.hostPath.socketDir` on every node as a directory writable
   by UID/GID 65532. Production values use hostPath `type: Directory` so kubelet
   does not create a root-owned socket directory at first boot.
+- Keep `egressProxy.outputPredictorEndpoint` empty until the egress proxy ships
+  mTLS client support for the in-chart output predictor. The current proxy
+  client is plaintext-only; production values must not point it at an
+  `https://` predictor endpoint.
 - Set `networkPolicy.externalProviderCidrs` and `networkPolicy.postgresCidrs` to
   environment-specific ranges.
 - Confirm cert-manager issuer names and SVID Secret names match the customer

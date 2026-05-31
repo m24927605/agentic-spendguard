@@ -264,6 +264,14 @@ for doc in docs:
     if pod_spec is None:
         continue
     resource_name = (doc.get("metadata") or {}).get("name", doc.get("kind", "<unknown>"))
+    has_sidecar_uds = False
+    for volume in pod_spec.get("volumes", []) or []:
+        host_path = volume.get("hostPath") or {}
+        if host_path.get("path") != "/var/run/spendguard":
+            continue
+        has_sidecar_uds = True
+        if host_path.get("type") != "Directory":
+            fail(f"{resource_name} UDS hostPath must use type=Directory in production so node prep owns write permissions for UID/GID 65532")
     if doc.get("kind") == "DaemonSet" and str(resource_name).endswith("sidecar"):
         for volume in pod_spec.get("volumes", []) or []:
             if volume.get("name") != "uds":
@@ -295,9 +303,16 @@ for doc in docs:
         image = str(container.get("image", ""))
         if image.startswith("spendguard/"):
             fail(f"{resource_name}/{name} rendered unqualified image {image!r}; global.imageRegistry was not applied")
+        first_segment = image.split("/", 1)[0]
+        if "/" not in image or ("." not in first_segment and ":" not in first_segment and first_segment != "localhost"):
+            fail(f"{resource_name}/{name} rendered image {image!r} without an explicit registry")
+        if ":@" in image:
+            fail(f"{resource_name}/{name} rendered invalid digest image reference {image!r}")
 
         for env in container.get("env", []) or []:
             env_name = env.get("name", "")
+            if env_name == "SPENDGUARD_PROXY_OUTPUT_PREDICTOR_ENDPOINT" and str(env.get("value", "")).startswith("https://"):
+                fail("egress-proxy must not render https output_predictor endpoint until mTLS client support lands")
             if "DATABASE_URL" not in env_name:
                 continue
             if "value" in env:
@@ -317,16 +332,19 @@ if [[ "$skip_negative_tests" == "false" ]]; then
   tmp_plaintext="$(mktemp)"
   tmp_svid="$(mktemp)"
   tmp_zero_hash="$(mktemp)"
+  tmp_https_predictor="$(mktemp)"
+  tmp_bad_hostpath="$(mktemp)"
+  tmp_bad_migration_image="$(mktemp)"
   tmp_render_bad="$(mktemp)"
   cleanup() {
-    rm -f "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_render_bad"
+    rm -f "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" "$tmp_render_bad"
     if [[ -z "$rendered_manifest" ]]; then
       rm -f "$render_file"
     fi
   }
   trap cleanup EXIT
 
-  python3 - "$values_file" "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" <<'PY'
+  python3 - "$values_file" "$tmp_plaintext" "$tmp_svid" "$tmp_zero_hash" "$tmp_https_predictor" "$tmp_bad_hostpath" "$tmp_bad_migration_image" <<'PY'
 from pathlib import Path
 import sys
 
@@ -336,6 +354,9 @@ source = Path(sys.argv[1])
 plaintext = Path(sys.argv[2])
 missing_svid = Path(sys.argv[3])
 zero_hash = Path(sys.argv[4])
+https_predictor = Path(sys.argv[5])
+bad_hostpath = Path(sys.argv[6])
+bad_migration_image = Path(sys.argv[7])
 values = yaml.safe_load(source.read_text(encoding="utf-8"))
 
 bad = yaml.safe_load(source.read_text(encoding="utf-8"))
@@ -349,6 +370,18 @@ missing_svid.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
 bad = yaml.safe_load(source.read_text(encoding="utf-8"))
 bad["sidecar"]["contractBundleHashHex"] = "0" * 64
 zero_hash.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["egressProxy"]["outputPredictorEndpoint"] = "https://spendguard-spendguard-output-predictor:50054"
+https_predictor.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["egressProxy"]["sidecarUdsHostPathType"] = "DirectoryOrCreate"
+bad_hostpath.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
+
+bad = yaml.safe_load(source.read_text(encoding="utf-8"))
+bad["migrations"]["ledgerImage"] = "postgres:16-alpine"
+bad_migration_image.write_text(yaml.safe_dump(bad, sort_keys=False), encoding="utf-8")
 PY
 
   if "$0" "$tmp_plaintext" --skip-negative-tests >/tmp/spendguard-ga03-plaintext.out 2>/tmp/spendguard-ga03-plaintext.err; then
@@ -361,6 +394,18 @@ PY
   fi
   if "$0" "$tmp_zero_hash" --skip-negative-tests >/tmp/spendguard-ga03-zero-hash.out 2>/tmp/spendguard-ga03-zero-hash.err; then
     echo "zero hash placeholder negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_https_predictor" --skip-negative-tests >/tmp/spendguard-ga03-https-predictor.out 2>/tmp/spendguard-ga03-https-predictor.err; then
+    echo "https egress-proxy predictor endpoint negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_bad_hostpath" --skip-negative-tests >/tmp/spendguard-ga03-hostpath.out 2>/tmp/spendguard-ga03-hostpath.err; then
+    echo "egress-proxy DirectoryOrCreate hostPath negative test unexpectedly passed" >&2
+    exit 1
+  fi
+  if "$0" "$tmp_bad_migration_image" --skip-negative-tests >/tmp/spendguard-ga03-migration-image.out 2>/tmp/spendguard-ga03-migration-image.err; then
+    echo "unqualified migration image negative test unexpectedly passed" >&2
     exit 1
   fi
 

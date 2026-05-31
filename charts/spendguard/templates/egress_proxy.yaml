@@ -11,10 +11,9 @@
          - hostPath shared with the sidecar DaemonSet so the proxy
            pod can dial /var/run/spendguard/adapter.sock.
        Production warnings (not fails):
-         - outputPredictorEndpoint / runCostProjectorEndpoint unset
-           ⇒ proxy boots in degraded mode (Strategy A only, no RUN_*).
-           This is documented under spec §11 failure modes; we WARN at
-           helm template time so operators see the implication.
+         - outputPredictorEndpoint unset ⇒ proxy boots in documented
+           Strategy A local fallback mode. Do not auto-wire HTTPS here:
+           egress_proxy's output_predictor client is plaintext-only today.
     */ -}}
 {{- if eq .Values.chart.profile "production" -}}
 {{- if eq .Values.egressProxy.image.tag "" -}}
@@ -23,18 +22,11 @@
 {{- if not (or (regexMatch "@sha256:[0-9a-f]{64}$" (toString .Values.egressProxy.image.tag)) (regexMatch "^v?[0-9]+\\.[0-9]+\\.[0-9]+(-[a-z0-9.]+)?$" (toString .Values.egressProxy.image.tag))) -}}
 {{- fail (printf "egressProxy.image.tag=%q must be a semver tag (vN.N.N) or digest-pinned (@sha256:HEX) under chart.profile=production" (toString .Values.egressProxy.image.tag)) -}}
 {{- end -}}
-{{- if eq .Values.egressProxy.outputPredictorEndpoint "" -}}
-{{- /* WARN only — degraded mode (Strategy A only) is documented as
-       valid under spec §11 failure modes. The audit row will carry
-       predicted_b_tokens=0, predicted_c_tokens=0, reserved_strategy="A". */ -}}
-{{- /* Helm doesn't have a built-in WARN; embed in NOTES.txt or
-       use an annotation. For now we document via this comment. */ -}}
+{{- if and .Values.egressProxy.outputPredictorEndpoint (hasPrefix "https://" (toString .Values.egressProxy.outputPredictorEndpoint)) -}}
+{{- fail "egressProxy.outputPredictorEndpoint must not be https:// under chart.profile=production until egress_proxy ships mTLS client support; leave it empty for documented Strategy A fallback or use a vetted plaintext in-pod endpoint" -}}
 {{- end -}}
 {{- end -}}
 {{- $outputPredictorEndpoint := .Values.egressProxy.outputPredictorEndpoint -}}
-{{- if and (eq .Values.chart.profile "production") .Values.outputPredictor.enabled (eq $outputPredictorEndpoint "") -}}
-{{- $outputPredictorEndpoint = printf "https://%s-output-predictor:50054" (include "spendguard.fullname" .) -}}
-{{- end -}}
 {{- $runCostProjectorEndpoint := .Values.egressProxy.runCostProjectorEndpoint -}}
 {{- $sidecarProjectorConfigured := and .Values.sidecar.enabled .Values.sidecar.runCostProjectorUrl -}}
 {{- if and (eq .Values.chart.profile "production") $sidecarProjectorConfigured $runCostProjectorEndpoint -}}
@@ -114,7 +106,7 @@ spec:
         - name: sidecar-uds
           hostPath:
             path: {{ .Values.egressProxy.sidecarUdsHostPath }}
-            type: DirectoryOrCreate
+            type: {{ .Values.egressProxy.sidecarUdsHostPathType | quote }}
 ---
 apiVersion: v1
 kind: Service

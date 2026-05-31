@@ -48,6 +48,12 @@ evaluates the {{- fail -}} directives at template render time.
 {{- if and .Values.sidecar.hostPath.enabled (ne (toString .Values.sidecar.hostPath.type) "Directory") -}}
 {{- fail "sidecar.hostPath.type must be Directory under chart.profile=production; pre-create sidecar.hostPath.socketDir writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
 {{- end -}}
+{{- if and .Values.egressProxy.enabled (ne (toString .Values.egressProxy.sidecarUdsHostPathType) "Directory") -}}
+{{- fail "egressProxy.sidecarUdsHostPathType must be Directory under chart.profile=production; pre-create egressProxy.sidecarUdsHostPath writable by UID/GID 65532 instead of letting kubelet create a root-owned DirectoryOrCreate path" -}}
+{{- end -}}
+{{- if not (regexMatch "^(localhost(:[0-9]+)?|[A-Za-z0-9.-]+\\.[A-Za-z0-9.-]+|[A-Za-z0-9.-]+:[0-9]+)/.+" (toString .Values.migrations.ledgerImage)) -}}
+{{- fail "migrations.ledgerImage must include an explicit registry under chart.profile=production (for example docker.io/library/postgres:16-alpine)" -}}
+{{- end -}}
 {{- $requiredHashes := dict
   "sidecar.contractBundleHashHex" .Values.sidecar.contractBundleHashHex
   "sidecar.trustRootSpkiSha256Hex" .Values.sidecar.trustRootSpkiSha256Hex

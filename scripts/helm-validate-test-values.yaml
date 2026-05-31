@@ -81,5 +81,11 @@ controlPlane:
 networkPolicy:
   acknowledgeNoNetworkPolicy: true
 
+egressProxy:
+  sidecarUdsHostPathType: Directory
+
+migrations:
+  ledgerImage: docker.io/library/postgres:16-alpine
+
 # signing defaults: mode=local, profile=production, strictVerification=true
 # all satisfy their gates. No override needed here.

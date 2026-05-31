@@ -121,7 +121,11 @@ egressProxy:
   enabled: true
   image:
     tag: v0.1.0
-  outputPredictorEndpoint: https://spendguard-spendguard-output-predictor:50054
+  sidecarUdsHostPath: /var/run/spendguard
+  sidecarUdsHostPathType: Directory
+  # Leave empty until egress_proxy ships mTLS client support for the
+  # in-chart output_predictor. A https:// value is rejected by the chart.
+  outputPredictorEndpoint: ""
   runCostProjectorEndpoint: ""
 
 statsAggregator:
@@ -163,8 +167,8 @@ networkPolicy:
     - 198.51.100.10/32
 
 migrations:
-  ledgerImage: postgres:16-alpine
-  canonicalImage: postgres:16-alpine
+  ledgerImage: docker.io/library/postgres:16-alpine
+  canonicalImage: docker.io/library/postgres:16-alpine
 
 calibrationReport:
   cronEnabled: false
