@@ -47,7 +47,10 @@ use spendguard_tokenizer_service::{
     shadow::{
         circuit_breaker::{CircuitBreakerConfig, CircuitBreakerState},
         persistence::SqlSamplePersister,
-        provider_clients::{anthropic::AnthropicClient, gemini::GeminiClient},
+        provider_clients::{
+            anthropic::AnthropicClient, cohere::CohereClient, gemini::GeminiClient,
+            llama::LlamaClient,
+        },
         sample_rate_state::{SampleRateConfig, SampleRateState, ShadowKey},
         security::{
             LocalCountTokensQuota, PgCountTokensQuota, PgShadowSecurityStore,
@@ -128,11 +131,11 @@ async fn main() -> Result<()> {
     //     CloudEvents (audit-routed; see worker.rs::DRIFT_ALERT_EVENT_TYPE).
     //   * LocalEd25519Signer reading PKCS8 PEM from
     //     `SPENDGUARD_TOKENIZER_SIGNING_KEY_PATH` (via signer_from_env).
-    //   * Provider clients for whichever vendor keys are present.
+    //   * Provider clients for whichever vendor configs are present.
     //
     // Drop-handle fallback paths:
     //   * shadow_enabled=false                              → drop-only
-    //   * no Anthropic + no Gemini key                      → drop-only
+    //   * no provider key/config                            → drop-only
     //   * canonical_ingest_url empty OR database_url empty  → drop-only
     //
     // Production Helm profile rejects the drop-only fallback under
@@ -179,9 +182,25 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
         return Ok(spawn_drop_handle(0));
     }
 
-    let no_provider_keys = cfg.anthropic_api_key.is_empty() && cfg.gemini_api_key.is_empty();
-    if no_provider_keys {
-        info!("no provider API keys configured — shadow worker in drop-only mode (demo)");
+    if cfg.llama_bedrock_region.is_empty()
+        && (cfg.llama_api_key.is_empty() ^ cfg.llama_count_tokens_base_url.is_empty())
+    {
+        anyhow::bail!(
+            "partial Llama HTTP-compatible config: set both \
+             SPENDGUARD_TOKENIZER_LLAMA_API_KEY and \
+             SPENDGUARD_TOKENIZER_LLAMA_COUNT_TOKENS_BASE_URL, or set \
+             SPENDGUARD_TOKENIZER_LLAMA_BEDROCK_REGION for AWS SDK mode"
+        );
+    }
+
+    let no_provider_config = cfg.anthropic_api_key.is_empty()
+        && cfg.gemini_api_key.is_empty()
+        && cfg.cohere_api_key.is_empty()
+        && cfg.llama_bedrock_region.is_empty()
+        && cfg.llama_api_key.is_empty()
+        && cfg.llama_count_tokens_base_url.is_empty();
+    if no_provider_config {
+        info!("no provider API keys/config configured — shadow worker in drop-only mode (demo)");
         return Ok(spawn_drop_handle(0));
     }
 
@@ -199,6 +218,10 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
     info!(
         anthropic_api_key_present = !cfg.anthropic_api_key.is_empty(),
         gemini_api_key_present = !cfg.gemini_api_key.is_empty(),
+        cohere_api_key_present = !cfg.cohere_api_key.is_empty(),
+        llama_api_key_present = !cfg.llama_api_key.is_empty(),
+        llama_bedrock_region_present = !cfg.llama_bedrock_region.is_empty(),
+        llama_count_tokens_base_url_present = !cfg.llama_count_tokens_base_url.is_empty(),
         canonical_ingest_url = %cfg.canonical_ingest_url,
         database_url_present = !cfg.database_url.is_empty(),
         sink_mtls = cfg.sink_tls_cert_pem.is_some(),
@@ -257,6 +280,15 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
                     .map_err(|e| anyhow::anyhow!("build Gemini client: {e}"))?,
             )
         },
+        cohere: if cfg.cohere_api_key.is_empty() {
+            None
+        } else {
+            Some(
+                CohereClient::new(cfg.cohere_api_key.clone())
+                    .map_err(|e| anyhow::anyhow!("build Cohere client: {e}"))?,
+            )
+        },
+        llama: build_llama_client(cfg).await?,
     };
 
     let event_source = if cfg.event_source_override.is_empty() {
@@ -290,6 +322,45 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
     let handle = spawn_shadow_worker(deps);
     info!("shadow worker spawned (real provider clients + SQL persister + canonical_ingest sink)");
     Ok(handle)
+}
+
+async fn build_llama_client(cfg: &Config) -> Result<Option<LlamaClient>> {
+    if !cfg.llama_bedrock_region.is_empty() {
+        return Ok(Some(
+            LlamaClient::new_bedrock(
+                cfg.llama_bedrock_region.clone(),
+                non_empty_string(&cfg.llama_count_tokens_base_url),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("build Llama Bedrock client: {e}"))?,
+        ));
+    }
+    if cfg.llama_api_key.is_empty() && cfg.llama_count_tokens_base_url.is_empty() {
+        return Ok(None);
+    }
+    if cfg.llama_api_key.is_empty() || cfg.llama_count_tokens_base_url.is_empty() {
+        anyhow::bail!(
+            "partial Llama HTTP-compatible config: set both \
+             SPENDGUARD_TOKENIZER_LLAMA_API_KEY and \
+             SPENDGUARD_TOKENIZER_LLAMA_COUNT_TOKENS_BASE_URL, or set \
+             SPENDGUARD_TOKENIZER_LLAMA_BEDROCK_REGION for AWS SDK mode"
+        );
+    }
+    Ok(Some(
+        LlamaClient::with_base_url(
+            cfg.llama_api_key.clone(),
+            cfg.llama_count_tokens_base_url.clone(),
+        )
+        .map_err(|e| anyhow::anyhow!("build Llama HTTP-compatible client: {e}"))?,
+    ))
+}
+
+fn non_empty_string(value: &str) -> Option<String> {
+    if value.trim().is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
 }
 
 async fn build_shadow_security_store(
@@ -951,6 +1022,25 @@ mod tests {
         let h = boot_shadow_worker(&cfg).await.expect("drop-only boots");
         let ev = make_shadow_event();
         h.try_send(ev).expect("drop handle accepts");
+    }
+
+    #[tokio::test]
+    async fn boot_rejects_partial_llama_http_config_before_drop_only() {
+        let mut cfg = minimal_cfg();
+        cfg.shadow_enabled = true;
+        cfg.llama_api_key = "llama-token".into();
+        cfg.llama_count_tokens_base_url = "".into();
+        cfg.canonical_ingest_url = "".into();
+        cfg.database_url = "".into();
+
+        let err = boot_shadow_worker(&cfg)
+            .await
+            .expect_err("partial Llama HTTP config must fail closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("partial Llama HTTP-compatible config"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[tokio::test]

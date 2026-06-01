@@ -98,6 +98,7 @@ async fn tier1_endpoint_outage_opens_the_breaker() {
     let providers = ProviderRoster {
         anthropic: Some(client),
         gemini: None,
+        ..ProviderRoster::default()
     };
     let persister = Arc::new(InMemorySamplePersister::default());
     let alert_sink = Arc::new(InMemoryDriftAlertSink::default());
@@ -173,6 +174,7 @@ async fn tier1_endpoint_recovery_closes_the_breaker_via_probe() {
         let providers = ProviderRoster {
             anthropic: Some(outage_client),
             gemini: None,
+            ..ProviderRoster::default()
         };
         let deps = deps_with(
             sample_rate.clone(),
@@ -196,6 +198,7 @@ async fn tier1_endpoint_recovery_closes_the_breaker_via_probe() {
         let providers = ProviderRoster {
             anthropic: Some(recovery_client),
             gemini: None,
+            ..ProviderRoster::default()
         };
         let deps = deps_with(
             sample_rate.clone(),
@@ -234,6 +237,7 @@ async fn drift_alert_cool_down_lifts_sampling_to_one_hundred_percent() {
     let providers = ProviderRoster {
         anthropic: Some(client),
         gemini: None,
+        ..ProviderRoster::default()
     };
     let persister = Arc::new(InMemorySamplePersister::default());
     let alert_sink = Arc::new(InMemoryDriftAlertSink::default());

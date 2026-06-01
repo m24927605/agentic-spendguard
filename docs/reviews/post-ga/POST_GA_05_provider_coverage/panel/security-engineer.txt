@@ -1,0 +1,101 @@
+ait warning: spawning a nested wrapped codex session from inside attempt 'd22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KSX3H3F2MX6QXEKAXYGQG2WH'. The inner agent may lose its parent OAuth context and fail with auth errors. To bypass: prefix with `AIT_BYPASS=1`, or run `ait off` in the outer shell first.
+Reading additional input from stdin...
+OpenAI Codex v0.135.0
+--------
+workdir: /Users/michael.chen/products/agentic-spendguard
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019e8594-3150-7e32-9c55-dba26359be8f
+--------
+user
+You are a Staff+ arbitration reviewer for Agent SpendGuard POST_GA_05 provider coverage.
+Role: Security Engineer.
+
+Context:
+- Branch: post-ga/POST_GA_05_provider_coverage, base main.
+- Round 5 adversarial codex review reached the max configured review round and reported one remaining P2:
+  [P2] Preserve Bedrock request IDs — services/tokenizer/src/shadow/provider_clients/llama.rs:173
+  For production Llama samples using the Bedrock SDK backend, CountTokensOutput carries the AWS x-amzn-requestid via the SDK request-id trait, but this path always stores None. As a result, Llama drift sample rows and alert CloudEvents cannot be correlated with AWS Bedrock logs, unlike the HTTP-compatible backend; please populate this from the SDK response instead of discarding it.
+
+Current code facts:
+- HTTP-compatible Llama path already extracts provider-request-id header.
+- Bedrock path uses aws_sdk_bedrockruntime::Client.count_tokens().send().await and currently sets request_id: None.
+- Local SDK source shows CountTokensOutput implements aws_types::request_id::RequestId with request_id(&self) -> Option<&str>.
+- ProviderCount.request_id is Option<String> and is persisted into tokenizer_t1_samples/provider evidence.
+
+Arbitration requirement:
+- This is NOT a new review round. Decide final handling after max round 5: fix anyway / accept as out-of-scope / arbitrate Option A vs B.
+- Prefer a concrete production-readiness decision. If fixing, specify exact acceptance checks required.
+- Keep output concise, with sections: Decision, Rationale, Required implementation/tests, Residual risk.
+codex
+**Decision**
+
+Fix anyway before POST_GA_05 is accepted. This is a valid remaining P2, not out-of-scope, and no waiver is appropriate.
+
+**Rationale**
+
+The Bedrock SDK path drops a provider correlation identifier that the HTTP-compatible path already preserves. Since `ProviderCount.request_id` is already part of persisted evidence, this is a narrow parity and production-readiness fix, not a schema or scope expansion. Losing `x-amzn-requestid` weakens incident investigation and alert-to-provider-log correlation for Bedrock-backed Llama drift samples.
+
+**Required implementation/tests**
+
+- In `services/tokenizer/src/shadow/provider_clients/llama.rs`, import/use `aws_types::request_id::RequestId`.
+- After `client.count_tokens().send().await`, extract:
+
+```rust
+let request_id = output.request_id().map(str::to_owned);
+```
+
+- Store that value in the Bedrock `ProviderCount.request_id` instead of `None`.
+- Add/adjust a focused test proving the Bedrock success path propagates a request id into `ProviderCount`.
+- Existing HTTP-compatible request-id behavior must remain unchanged.
+- Acceptance checks:
+  - Targeted tokenizer/provider client tests pass.
+  - Any existing tokenizer shadow/persistence tests pass.
+  - A test fixture or mock verifies `Some("...")` from `CountTokensOutput::request_id()` reaches persisted sample evidence.
+
+**Residual risk**
+
+AWS SDK may still return `None` for some responses or errors, so correlation is best-effort. This fix closes the avoidable success-path gap; error-path request-id capture can be handled separately if current telemetry does not already preserve it.
+tokens used
+3,579
+AIT recorded the run
+Status: succeeded
+Exit code: 0
+Changed: 0 files
+Outcome: succeeded_noop
+Attempt: a319
+Description: Attempt 01KT2S78CFZP has no indexed changed files yet; status succeeded.
+Result: ready to apply
+Next: ait apply a319
+**Decision**
+
+Fix anyway before POST_GA_05 is accepted. This is a valid remaining P2, not out-of-scope, and no waiver is appropriate.
+
+**Rationale**
+
+The Bedrock SDK path drops a provider correlation identifier that the HTTP-compatible path already preserves. Since `ProviderCount.request_id` is already part of persisted evidence, this is a narrow parity and production-readiness fix, not a schema or scope expansion. Losing `x-amzn-requestid` weakens incident investigation and alert-to-provider-log correlation for Bedrock-backed Llama drift samples.
+
+**Required implementation/tests**
+
+- In `services/tokenizer/src/shadow/provider_clients/llama.rs`, import/use `aws_types::request_id::RequestId`.
+- After `client.count_tokens().send().await`, extract:
+
+```rust
+let request_id = output.request_id().map(str::to_owned);
+```
+
+- Store that value in the Bedrock `ProviderCount.request_id` instead of `None`.
+- Add/adjust a focused test proving the Bedrock success path propagates a request id into `ProviderCount`.
+- Existing HTTP-compatible request-id behavior must remain unchanged.
+- Acceptance checks:
+  - Targeted tokenizer/provider client tests pass.
+  - Any existing tokenizer shadow/persistence tests pass.
+  - A test fixture or mock verifies `Some("...")` from `CountTokensOutput::request_id()` reaches persisted sample evidence.
+
+**Residual risk**
+
+AWS SDK may still return `None` for some responses or errors, so correlation is best-effort. This fix closes the avoidable success-path gap; error-path request-id capture can be handled separately if current telemetry does not already preserve it.

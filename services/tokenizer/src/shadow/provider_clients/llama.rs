@@ -1,0 +1,477 @@
+//! Meta Llama Tier 1 count client via Amazon Bedrock Runtime CountTokens.
+//!
+//! Locked tokenizer spec §3.1/§3.4 routes Llama only for Bedrock
+//! `meta.llama3-*-instruct-v1:0` model IDs. Use the official Bedrock
+//! Runtime CountTokens API instead of hand-rolled SigV4. The CountTokens
+//! request uses the InvokeModel shape so Tier 1 sees the same raw prompt
+//! envelope as Tier 2's Llama estimator:
+//! <https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html>
+//!
+//! Test fixtures use the HTTP-compatible backend so normal unit tests do
+//! not require AWS credentials. Production boot uses the AWS SDK backend
+//! when `SPENDGUARD_TOKENIZER_LLAMA_BEDROCK_REGION` is set.
+
+use std::time::{Duration, Instant};
+
+use aws_config::BehaviorVersion;
+use aws_sdk_bedrockruntime::{
+    config::{timeout::TimeoutConfig, Region},
+    error::SdkError,
+    operation::count_tokens::CountTokensError,
+    operation::RequestId,
+    primitives::Blob,
+    types::{CountTokensInput, InvokeModelTokensRequest},
+    Client as BedrockClient,
+};
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
+use reqwest::{Client, StatusCode};
+use serde_json::json;
+
+use super::{ProviderCount, ProviderError};
+
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[derive(Clone)]
+pub struct LlamaClient {
+    backend: LlamaBackend,
+}
+
+#[derive(Clone)]
+enum LlamaBackend {
+    Bedrock {
+        client: BedrockClient,
+    },
+    HttpCompat {
+        http: Client,
+        base_url: String,
+        api_key: String,
+    },
+}
+
+impl std::fmt::Debug for LlamaClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let backend = match &self.backend {
+            LlamaBackend::Bedrock { .. } => "bedrock-sdk",
+            LlamaBackend::HttpCompat { .. } => "http-compat",
+        };
+        f.debug_struct("LlamaClient")
+            .field("backend", &backend)
+            .finish()
+    }
+}
+
+impl LlamaClient {
+    pub async fn new_bedrock(
+        region: impl Into<String>,
+        endpoint_override: Option<String>,
+    ) -> Result<Self, ProviderError> {
+        let region = region.into();
+        if region.trim().is_empty() {
+            return Err(ProviderError::Auth("llama bedrock region empty".into()));
+        }
+
+        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+            .region(Region::new(region))
+            .load()
+            .await;
+        let mut builder = aws_sdk_bedrockruntime::config::Builder::from(&sdk_config)
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .operation_timeout(REQUEST_TIMEOUT)
+                    .operation_attempt_timeout(REQUEST_TIMEOUT)
+                    .build(),
+            );
+        if let Some(endpoint) = endpoint_override {
+            if !endpoint.trim().is_empty() {
+                builder = builder.endpoint_url(endpoint);
+            }
+        }
+
+        Ok(Self {
+            backend: LlamaBackend::Bedrock {
+                client: BedrockClient::from_conf(builder.build()),
+            },
+        })
+    }
+
+    /// Test / private gateway backend. It speaks the Bedrock CountTokens
+    /// wire shape but authenticates with a bearer token instead of SigV4,
+    /// which keeps unit tests and signed internal gateways simple.
+    pub fn with_base_url(
+        api_key: impl Into<String>,
+        base_url: impl Into<String>,
+    ) -> Result<Self, ProviderError> {
+        let api_key = api_key.into();
+        if api_key.trim().is_empty() {
+            return Err(ProviderError::Auth("llama api key empty".into()));
+        }
+        let http = Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(Duration::from_secs(2))
+            .tcp_keepalive(Some(Duration::from_secs(30)))
+            .user_agent(concat!(
+                "spendguard-tokenizer/",
+                env!("CARGO_PKG_VERSION"),
+                " (+https://github.com/spendguard)"
+            ))
+            .build()
+            .map_err(|e| ProviderError::Other(format!("build client: {e}")))?;
+        Ok(Self {
+            backend: LlamaBackend::HttpCompat {
+                http,
+                base_url: base_url.into(),
+                api_key,
+            },
+        })
+    }
+
+    pub async fn count_tokens(
+        &self,
+        model: &str,
+        text: &str,
+    ) -> Result<ProviderCount, ProviderError> {
+        match &self.backend {
+            LlamaBackend::Bedrock { client } => count_tokens_bedrock(client, model, text).await,
+            LlamaBackend::HttpCompat {
+                http,
+                base_url,
+                api_key,
+            } => count_tokens_http_compat(http, base_url, api_key, model, text).await,
+        }
+    }
+}
+
+async fn count_tokens_bedrock(
+    client: &BedrockClient,
+    model: &str,
+    text: &str,
+) -> Result<ProviderCount, ProviderError> {
+    let body = llama_invoke_model_body(text)?;
+    let input = CountTokensInput::InvokeModel(
+        InvokeModelTokensRequest::builder()
+            .body(Blob::new(body))
+            .build()
+            .map_err(|e| ProviderError::Schema(format!("build bedrock invokeModel body: {e}")))?,
+    );
+
+    let start = Instant::now();
+    let resp = client
+        .count_tokens()
+        .model_id(model)
+        .input(input)
+        .send()
+        .await
+        .map_err(map_bedrock_error)?;
+    let latency = start.elapsed();
+    let input_tokens = resp.input_tokens();
+    if input_tokens < 0 {
+        return Err(ProviderError::Schema(format!(
+            "bedrock returned negative inputTokens: {input_tokens}"
+        )));
+    }
+    let request_id = resp.request_id().map(str::to_owned);
+    Ok(ProviderCount {
+        input_tokens: input_tokens as u64,
+        request_id,
+        latency,
+    })
+}
+
+fn llama_invoke_model_body(text: &str) -> Result<Vec<u8>, ProviderError> {
+    serde_json::to_vec(&json!({
+        "prompt": text,
+        "max_gen_len": 1,
+        "temperature": 0.0,
+        "top_p": 1.0
+    }))
+    .map_err(|e| ProviderError::Schema(format!("build llama invokeModel JSON: {e}")))
+}
+
+async fn count_tokens_http_compat(
+    http: &Client,
+    base_url: &str,
+    api_key: &str,
+    model: &str,
+    text: &str,
+) -> Result<ProviderCount, ProviderError> {
+    let url = format!(
+        "{}/model/{}/count-tokens",
+        base_url.trim_end_matches('/'),
+        model
+    );
+    let invoke_body = llama_invoke_model_body(text)?;
+    let body = json!({
+        "input": {
+            "invokeModel": {
+                "body": BASE64_STANDARD.encode(&invoke_body)
+            }
+        }
+    });
+
+    let start = Instant::now();
+    let resp = http
+        .post(&url)
+        .bearer_auth(api_key)
+        .json(&body)
+        .send()
+        .await
+        .map_err(map_send_error)?;
+    let latency = start.elapsed();
+
+    let status = resp.status();
+    let request_id = resp
+        .headers()
+        .get("x-amzn-requestid")
+        .or_else(|| resp.headers().get("x-request-id"))
+        .and_then(|h| h.to_str().ok())
+        .map(|s| s.to_owned());
+
+    if status.is_success() {
+        let parsed: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| ProviderError::Schema(format!("read body: {e}")))?;
+        let count = parsed
+            .get("inputTokens")
+            .and_then(|v| v.as_u64())
+            .ok_or_else(|| ProviderError::Schema("missing or non-u64 `inputTokens`".into()))?;
+        return Ok(ProviderCount {
+            input_tokens: count,
+            request_id,
+            latency,
+        });
+    }
+
+    if status == StatusCode::TOO_MANY_REQUESTS {
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|h| h.to_str().ok())
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(Duration::from_secs(30));
+        return Err(ProviderError::RateLimit { retry_after });
+    }
+    if status == StatusCode::UNAUTHORIZED || status == StatusCode::FORBIDDEN {
+        return Err(ProviderError::Auth(format!(
+            "llama {} {}",
+            status,
+            body_summary(resp.text().await.unwrap_or_default())
+        )));
+    }
+    if status == StatusCode::BAD_REQUEST {
+        return Err(ProviderError::Schema(format!(
+            "llama {} {}",
+            status,
+            body_summary(resp.text().await.unwrap_or_default())
+        )));
+    }
+    Err(ProviderError::Other(format!(
+        "llama {} {}",
+        status,
+        body_summary(resp.text().await.unwrap_or_default())
+    )))
+}
+
+fn map_bedrock_error(err: SdkError<CountTokensError>) -> ProviderError {
+    match err {
+        SdkError::TimeoutError(_) => ProviderError::Timeout,
+        SdkError::ServiceError(service) => match service.err() {
+            CountTokensError::AccessDeniedException(_) => {
+                ProviderError::Auth(bedrock_redacted_error("AccessDeniedException"))
+            }
+            CountTokensError::ResourceNotFoundException(_) => {
+                ProviderError::Auth(bedrock_redacted_error("ResourceNotFoundException"))
+            }
+            CountTokensError::ThrottlingException(_) => ProviderError::RateLimit {
+                retry_after: Duration::from_secs(30),
+            },
+            CountTokensError::ValidationException(_) => {
+                ProviderError::Schema(bedrock_redacted_error("ValidationException"))
+            }
+            CountTokensError::InternalServerException(_) => {
+                ProviderError::Other(bedrock_redacted_error("InternalServerException"))
+            }
+            CountTokensError::ServiceUnavailableException(_) => {
+                ProviderError::Other(bedrock_redacted_error("ServiceUnavailableException"))
+            }
+            _ => ProviderError::Other(bedrock_redacted_error("ServiceError")),
+        },
+        _ => ProviderError::Other("bedrock llama sdk error: <details redacted>".into()),
+    }
+}
+
+fn bedrock_redacted_error(kind: &str) -> String {
+    format!("bedrock llama {kind}: <provider error redacted>")
+}
+
+fn map_send_error(e: reqwest::Error) -> ProviderError {
+    if e.is_timeout() {
+        ProviderError::Timeout
+    } else {
+        let safe = e.without_url();
+        ProviderError::Other(format!("llama send: {safe}"))
+    }
+}
+
+fn body_summary(body: String) -> String {
+    format!("<provider body redacted: {}B>", body.len())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aws_sdk_bedrockruntime::config::{BehaviorVersion as BedrockBehaviorVersion, Credentials};
+    use wiremock::matchers::{body_json, header, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const MODEL: &str = "meta.llama3-1-8b-instruct-v1:0";
+
+    async fn client_for_server(server: &MockServer) -> LlamaClient {
+        LlamaClient::with_base_url("test-key", server.uri()).expect("client builds")
+    }
+
+    fn bedrock_client_for_server(server: &MockServer) -> LlamaClient {
+        let conf = aws_sdk_bedrockruntime::config::Builder::new()
+            .behavior_version(BedrockBehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(Credentials::new(
+                "test-access-key",
+                "test-secret-key",
+                None,
+                None,
+                "post-ga-05-test",
+            ))
+            .endpoint_url(server.uri())
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .operation_timeout(REQUEST_TIMEOUT)
+                    .operation_attempt_timeout(REQUEST_TIMEOUT)
+                    .build(),
+            )
+            .build();
+        LlamaClient {
+            backend: LlamaBackend::Bedrock {
+                client: BedrockClient::from_conf(conf),
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn count_tokens_success_returns_input_tokens() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/model/meta.llama3-1-8b-instruct-v1:0/count-tokens"))
+            .and(header("authorization", "Bearer test-key"))
+            .and(body_json(json!({
+                "input": {
+                    "invokeModel": {
+                        "body": BASE64_STANDARD.encode(llama_invoke_model_body("hello llama").expect("body"))
+                    }
+                }
+            })))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-amzn-requestid", "bedrock_req_123")
+                    .set_body_json(json!({ "inputTokens": 11 })),
+            )
+            .mount(&server)
+            .await;
+
+        let c = client_for_server(&server).await;
+        let resp = c.count_tokens(MODEL, "hello llama").await.expect("ok");
+        assert_eq!(resp.input_tokens, 11);
+        assert_eq!(resp.request_id.as_deref(), Some("bedrock_req_123"));
+    }
+
+    #[tokio::test]
+    async fn bedrock_success_preserves_request_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/model/meta.llama3-1-8b-instruct-v1%3A0/count-tokens"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-amzn-requestid", "bedrock_req_456")
+                    .set_body_json(json!({ "inputTokens": 17 })),
+            )
+            .mount(&server)
+            .await;
+
+        let c = bedrock_client_for_server(&server);
+        let resp = c.count_tokens(MODEL, "hello bedrock").await.expect("ok");
+        assert_eq!(resp.input_tokens, 17);
+        assert_eq!(resp.request_id.as_deref(), Some("bedrock_req_456"));
+    }
+
+    #[tokio::test]
+    async fn bedrock_success_without_request_id_remains_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/model/meta.llama3-1-8b-instruct-v1%3A0/count-tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "inputTokens": 17 })))
+            .mount(&server)
+            .await;
+
+        let c = bedrock_client_for_server(&server);
+        let resp = c.count_tokens(MODEL, "hello bedrock").await.expect("ok");
+        assert_eq!(resp.input_tokens, 17);
+        assert_eq!(resp.request_id, None);
+    }
+
+    #[tokio::test]
+    async fn schema_drift_missing_input_tokens_is_schema_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/model/meta.llama3-1-8b-instruct-v1:0/count-tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tokens": 11 })))
+            .mount(&server)
+            .await;
+        let c = client_for_server(&server).await;
+        let err = c.count_tokens(MODEL, "hello").await.expect_err("schema");
+        assert!(matches!(err, ProviderError::Schema(_)));
+        assert!(!err.counts_as_breaker_failure());
+    }
+
+    #[tokio::test]
+    async fn access_denied_maps_to_auth_variant() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/model/meta.llama3-1-8b-instruct-v1:0/count-tokens"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("not entitled"))
+            .mount(&server)
+            .await;
+        let c = client_for_server(&server).await;
+        let err = c.count_tokens(MODEL, "hello").await.expect_err("auth");
+        assert!(matches!(err, ProviderError::Auth(_)));
+        assert!(!err.counts_as_breaker_failure());
+    }
+
+    #[tokio::test]
+    async fn throttling_maps_to_rate_limit() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/model/meta.llama3-1-8b-instruct-v1:0/count-tokens"))
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "9"))
+            .mount(&server)
+            .await;
+        let c = client_for_server(&server).await;
+        let err = c.count_tokens(MODEL, "hello").await.expect_err("rate");
+        match err {
+            ProviderError::RateLimit { retry_after } => {
+                assert_eq!(retry_after, Duration::from_secs(9));
+            }
+            other => panic!("expected rate limit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bedrock_redacted_error_omits_provider_detail() {
+        let msg = bedrock_redacted_error("ValidationException");
+        assert_eq!(
+            msg,
+            "bedrock llama ValidationException: <provider error redacted>"
+        );
+        assert!(!msg.contains("prompt"));
+        assert!(!msg.contains("raw"));
+    }
+}

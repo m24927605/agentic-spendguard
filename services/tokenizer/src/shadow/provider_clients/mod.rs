@@ -1,4 +1,4 @@
-//! Provider HTTP clients for Anthropic + Gemini count_tokens APIs.
+//! Provider HTTP clients for Tier 1 count_tokens APIs.
 //!
 //! Spec refs:
 //!   - `tokenizer-service-spec-v1alpha1.md` §4 (Tier 1 shadow architecture)
@@ -22,7 +22,9 @@
 //! `services/sidecar/` or `services/egress_proxy/`.
 
 pub mod anthropic;
+pub mod cohere;
 pub mod gemini;
+pub mod llama;
 
 use std::time::Duration;
 

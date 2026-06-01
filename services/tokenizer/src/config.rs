@@ -8,7 +8,7 @@ use serde::Deserialize;
 
 /// Configuration loaded from env at boot.
 ///
-/// R2 M13: custom Debug impl masks `anthropic_api_key` + `gemini_api_key`
+/// R2 M13: custom Debug impl masks provider API keys
 /// so structured logs / panic backtraces / error chains never leak the
 /// raw keys. The startup log emits `*_api_key_present: bool` so
 /// operators can verify configuration without leaking the secret.
@@ -103,6 +103,30 @@ pub struct Config {
     /// Empty = Gemini shadow path disabled.
     #[serde(default)]
     pub gemini_api_key: String,
+
+    /// Cohere API key for `POST /v1/tokenize`.
+    /// Empty = Cohere shadow path disabled.
+    #[serde(default)]
+    pub cohere_api_key: String,
+
+    /// AWS region enabling Bedrock Runtime CountTokens for Llama model
+    /// IDs. Empty = Bedrock Llama shadow path disabled. AWS credentials
+    /// are resolved by the AWS SDK default provider chain / IRSA.
+    #[serde(default)]
+    pub llama_bedrock_region: String,
+
+    /// Optional endpoint override for Llama CountTokens. With
+    /// `llama_bedrock_region`, this points the AWS SDK at a localstack
+    /// or private Bedrock-compatible endpoint. Without a Bedrock region,
+    /// it enables the bearer-token HTTP-compatible backend when
+    /// `llama_api_key` is also set.
+    #[serde(default)]
+    pub llama_count_tokens_base_url: String,
+
+    /// Bearer token for the optional Llama HTTP-compatible gateway.
+    /// Not used for the AWS SDK Bedrock path.
+    #[serde(default)]
+    pub llama_api_key: String,
 
     /// Postgres URL for the shadow worker's `tokenizer_t1_samples`
     /// persistence. Empty = use in-memory persister (demo only —
@@ -209,6 +233,13 @@ impl std::fmt::Debug for Config {
                 &!self.anthropic_api_key.is_empty(),
             )
             .field("gemini_api_key_present", &!self.gemini_api_key.is_empty())
+            .field("cohere_api_key_present", &!self.cohere_api_key.is_empty())
+            .field("llama_api_key_present", &!self.llama_api_key.is_empty())
+            .field("llama_bedrock_region", &self.llama_bedrock_region)
+            .field(
+                "llama_count_tokens_base_url_present",
+                &!self.llama_count_tokens_base_url.is_empty(),
+            )
             .field("database_url_present", &!self.database_url.is_empty())
             .field(
                 "sampling_override_database_url_present",
@@ -371,6 +402,18 @@ mod tests {
                     "TEST_CFG_GEMINI_API_KEY".to_string(),
                     "AIza-extremely-secret-DO-NOT-LEAK".to_string(),
                 ),
+                (
+                    "TEST_CFG_COHERE_API_KEY".to_string(),
+                    "coh-extremely-secret-DO-NOT-LEAK".to_string(),
+                ),
+                (
+                    "TEST_CFG_LLAMA_API_KEY".to_string(),
+                    "llama-extremely-secret-DO-NOT-LEAK".to_string(),
+                ),
+                (
+                    "TEST_CFG_LLAMA_COUNT_TOKENS_BASE_URL".to_string(),
+                    "https://user:secret@example.internal/count-tokens".to_string(),
+                ),
             ])
             .expect("config loads");
         let dbg = format!("{cfg:?}");
@@ -382,9 +425,24 @@ mod tests {
             !dbg.contains("AIza-extremely-secret"),
             "Gemini key leaked into Debug output: {dbg}"
         );
+        assert!(
+            !dbg.contains("coh-extremely-secret"),
+            "Cohere key leaked into Debug output: {dbg}"
+        );
+        assert!(
+            !dbg.contains("llama-extremely-secret"),
+            "Llama key leaked into Debug output: {dbg}"
+        );
+        assert!(
+            !dbg.contains("user:secret@example.internal"),
+            "Llama CountTokens base URL leaked into Debug output: {dbg}"
+        );
         // Both presence booleans rendered.
         assert!(dbg.contains("anthropic_api_key_present: true"));
         assert!(dbg.contains("gemini_api_key_present: true"));
+        assert!(dbg.contains("cohere_api_key_present: true"));
+        assert!(dbg.contains("llama_api_key_present: true"));
+        assert!(dbg.contains("llama_count_tokens_base_url_present: true"));
     }
 
     #[test]
@@ -398,5 +456,8 @@ mod tests {
         let dbg = format!("{cfg:?}");
         assert!(dbg.contains("anthropic_api_key_present: false"));
         assert!(dbg.contains("gemini_api_key_present: false"));
+        assert!(dbg.contains("cohere_api_key_present: false"));
+        assert!(dbg.contains("llama_api_key_present: false"));
+        assert!(dbg.contains("llama_count_tokens_base_url_present: false"));
     }
 }

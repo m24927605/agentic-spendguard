@@ -301,6 +301,14 @@ services:
       SPENDGUARD_TOKENIZER_SHADOW_ENABLED:           "${SPENDGUARD_TOKENIZER_SHADOW_ENABLED:-true}"
       SPENDGUARD_TOKENIZER_ANTHROPIC_API_KEY:        "${ANTHROPIC_API_KEY:-}"
       SPENDGUARD_TOKENIZER_GEMINI_API_KEY:           "${GEMINI_API_KEY:-}"
+      SPENDGUARD_TOKENIZER_COHERE_API_KEY:           "${COHERE_API_KEY:-}"
+      # Llama Tier 1 uses Bedrock CountTokens when a region is supplied.
+      # Demo leaves it empty unless the operator exports AWS credentials
+      # and LLAMA_BEDROCK_REGION. The base URL is only for local/private
+      # Bedrock-compatible testing.
+      SPENDGUARD_TOKENIZER_LLAMA_BEDROCK_REGION:     "${LLAMA_BEDROCK_REGION:-}"
+      SPENDGUARD_TOKENIZER_LLAMA_COUNT_TOKENS_BASE_URL: "${LLAMA_COUNT_TOKENS_BASE_URL:-}"
+      SPENDGUARD_TOKENIZER_LLAMA_API_KEY:            "${LLAMA_API_KEY:-}"
       # Demo defaults: canonical_ingest reachable on the compose
       # network at gRPC 50052 (plaintext for compose — Helm production
       # profile rejects this and demands mTLS via the sink_tls_* fields
