@@ -28,11 +28,20 @@ const DEFAULT_BASE_URL: &str = "https://api.cohere.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const COHERE_BEDROCK_BOS_COUNT: u64 = 1;
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CohereClient {
     http: Client,
     base_url: String,
     api_key: String,
+}
+
+impl std::fmt::Debug for CohereClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CohereClient")
+            .field("base_url", &redacted_base_url(&self.base_url))
+            .field("api_key", &"<redacted>")
+            .finish_non_exhaustive()
+    }
 }
 
 impl CohereClient {
@@ -153,9 +162,12 @@ fn normalize_model_for_cohere_api(model: &str) -> Cow<'_, str> {
     else {
         return Cow::Borrowed(model);
     };
-    let Some(no_revision) = suffix.strip_suffix(":0") else {
+    let Some((no_revision, revision)) = suffix.rsplit_once(':') else {
         return Cow::Borrowed(model);
     };
+    if revision.is_empty() || !revision.bytes().all(|b| b.is_ascii_digit()) {
+        return Cow::Borrowed(model);
+    }
     let Some((native, version)) = no_revision.rsplit_once("-v") else {
         return Cow::Borrowed(model);
     };
@@ -166,6 +178,18 @@ fn normalize_model_for_cohere_api(model: &str) -> Cow<'_, str> {
         "command" | "command-r" | "command-r-plus" => Cow::Owned(native.to_owned()),
         _ => Cow::Borrowed(model),
     }
+}
+
+fn redacted_base_url(base_url: &str) -> String {
+    let Some((scheme, rest)) = base_url.split_once("://") else {
+        return "<redacted-invalid-url>".to_owned();
+    };
+    let authority = rest.split('/').next().unwrap_or(rest);
+    let host_port = authority
+        .rsplit_once('@')
+        .map(|(_, host)| host)
+        .unwrap_or(authority);
+    format!("{scheme}://{host_port}")
 }
 
 fn map_send_error(e: reqwest::Error) -> ProviderError {
@@ -285,6 +309,44 @@ mod tests {
             .await
             .expect("ok");
         assert_eq!(resp.input_tokens, 3);
+    }
+
+    #[tokio::test]
+    async fn non_zero_bedrock_revision_normalizes_to_native_model() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/tokenize"))
+            .and(body_json(json!({
+                "text": "hello revision",
+                "model": "command-r-plus"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "tokens": [1, 2]
+            })))
+            .mount(&server)
+            .await;
+
+        let c = client_for_server(&server).await;
+        let resp = c
+            .count_tokens("us.cohere.command-r-plus-v1:12", "hello revision")
+            .await
+            .expect("ok");
+        assert_eq!(resp.input_tokens, 3);
+    }
+
+    #[test]
+    fn debug_redacts_api_key_and_base_url_userinfo() {
+        let c = CohereClient::with_base_url(
+            "cohere-secret-key",
+            "https://user:pass@cohere.test.example/private/path",
+        )
+        .expect("client");
+        let dbg = format!("{c:?}");
+        assert!(dbg.contains("CohereClient"));
+        assert!(dbg.contains("https://cohere.test.example"));
+        assert!(!dbg.contains("cohere-secret-key"));
+        assert!(!dbg.contains("user:pass"));
+        assert!(!dbg.contains("private/path"));
     }
 
     #[tokio::test]

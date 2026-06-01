@@ -1,0 +1,3 @@
+usage: ait [-h] [--version] [--no-hints]
+           {init,intent,attempt,query,demo,blame,session,config,policy,metadata,cleanup,apply,recover,resume,continue,off,on,agent-continue,review,whereami,next,merge,run,dev,context,memory,bootstrap,doctor,status,upgrade,graph,console,repair,enable,shell,adapter,reconcile,daemon,bug-report,self-update} ...
+ait: error: unrecognized arguments: --review-mode
