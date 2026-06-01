@@ -19,11 +19,9 @@
 //! rejects this fallback via the chart's required-input gate.
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use tokio::sync::Mutex;
 use tonic::transport::{Certificate, ClientTlsConfig, Endpoint, Identity};
 use tracing::{info, warn};
 
@@ -51,7 +49,7 @@ pub struct SinkMTlsConfig {
 /// simplicity; SLICE-extra can batch.
 #[derive(Clone)]
 pub struct CanonicalIngestDriftAlertSink {
-    client: Arc<Mutex<CanonicalIngestClient<tonic::transport::Channel>>>,
+    client: CanonicalIngestClient<tonic::transport::Channel>,
     producer_id: String,
     schema_bundle_ref: SchemaBundleRef,
     signing_key_id: String,
@@ -114,7 +112,7 @@ impl CanonicalIngestDriftAlertSink {
             .map_err(|e| anyhow::anyhow!("connect canonical_ingest `{endpoint}`: {e}"))?;
 
         Ok(Self {
-            client: Arc::new(Mutex::new(CanonicalIngestClient::new(channel))),
+            client: CanonicalIngestClient::new(channel),
             producer_id: producer_id.into(),
             schema_bundle_ref,
             signing_key_id: signing_key_id.into(),
@@ -167,7 +165,7 @@ impl DriftAlertSink for CanonicalIngestDriftAlertSink {
             self.schema_bundle_ref.clone(),
             event,
         );
-        let mut client = self.client.lock().await;
+        let mut client = self.client.clone();
         match client.append_events(req).await {
             Ok(resp) => ensure_append_accepted(resp.into_inner()),
             Err(e) => Err(anyhow::anyhow!("AppendEvents drift_alert: {e}")),
@@ -213,7 +211,18 @@ pub(crate) fn ensure_append_accepted(resp: AppendEventsResponse) -> Result<(), a
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::canonical_ingest::v1::EventResult;
+    use crate::proto::canonical_ingest::v1::{
+        canonical_ingest_server::{CanonicalIngest, CanonicalIngestServer},
+        AuditChainEvent, EventResult, QueryAuditChainRequest, VerifySchemaBundleRequest,
+        VerifySchemaBundleResponse,
+    };
+    use std::pin::Pin;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::time::{sleep, Duration};
+    use tonic::{Request, Response, Status};
 
     #[test]
     fn append_request_carries_required_observability_envelope() {
@@ -272,5 +281,132 @@ mod tests {
         let err = ensure_append_accepted(AppendEventsResponse { results: vec![] })
             .expect_err("missing result must fail delivery");
         assert!(err.to_string().contains("0 results"));
+    }
+
+    #[derive(Clone, Default)]
+    struct SlowCanonicalIngest {
+        in_flight: Arc<AtomicUsize>,
+        max_in_flight: Arc<AtomicUsize>,
+    }
+
+    impl SlowCanonicalIngest {
+        fn observe_enter(&self) {
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            let mut current = self.max_in_flight.load(Ordering::SeqCst);
+            while now > current {
+                match self.max_in_flight.compare_exchange(
+                    current,
+                    now,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                ) {
+                    Ok(_) => break,
+                    Err(observed) => current = observed,
+                }
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl CanonicalIngest for SlowCanonicalIngest {
+        async fn verify_schema_bundle(
+            &self,
+            _request: Request<VerifySchemaBundleRequest>,
+        ) -> Result<Response<VerifySchemaBundleResponse>, Status> {
+            Err(Status::unimplemented("not used by sink concurrency test"))
+        }
+
+        type QueryAuditChainStream =
+            Pin<Box<dyn tokio_stream::Stream<Item = Result<AuditChainEvent, Status>> + Send>>;
+
+        async fn query_audit_chain(
+            &self,
+            _request: Request<QueryAuditChainRequest>,
+        ) -> Result<Response<Self::QueryAuditChainStream>, Status> {
+            Ok(Response::new(Box::pin(tokio_stream::empty())))
+        }
+
+        async fn append_events(
+            &self,
+            request: Request<AppendEventsRequest>,
+        ) -> Result<Response<AppendEventsResponse>, Status> {
+            self.observe_enter();
+            sleep(Duration::from_millis(150)).await;
+            self.in_flight.fetch_sub(1, Ordering::SeqCst);
+
+            let event_id = request
+                .into_inner()
+                .events
+                .first()
+                .map(|event| event.id.clone())
+                .unwrap_or_default();
+            Ok(Response::new(AppendEventsResponse {
+                results: vec![EventResult {
+                    event_id,
+                    status: EventStatus::Appended as i32,
+                    ingest_position: None,
+                    error: None,
+                }],
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_ingest_sink_clones_client_for_concurrent_emit() {
+        let server = SlowCanonicalIngest::default();
+        let max_in_flight = Arc::clone(&server.max_in_flight);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test canonical_ingest");
+        let addr = listener.local_addr().expect("local addr");
+        let incoming = async_stream::stream! {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => yield Ok::<_, std::io::Error>(stream),
+                    Err(e) => yield Err(e),
+                }
+            }
+        };
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(CanonicalIngestServer::new(server))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("test canonical_ingest server");
+        });
+
+        let sink = CanonicalIngestDriftAlertSink::connect(
+            format!("http://{addr}"),
+            "tokenizer-service:test",
+            SchemaBundleRef {
+                schema_bundle_id: "018fa6b3-0f59-7a4d-bbd2-4be8f4f14a10".to_string(),
+                schema_bundle_hash: bytes::Bytes::from_static(&[0xab; 32]),
+                canonical_schema_version: "spendguard.v1alpha1".to_string(),
+            },
+            "tokenizer-key-v1",
+            None,
+        )
+        .await
+        .expect("connect sink");
+
+        let event_a = CloudEvent {
+            id: "evt-a".to_string(),
+            r#type: "spendguard.audit.tokenizer_drift_alert.v1alpha1".to_string(),
+            ..Default::default()
+        };
+        let event_b = CloudEvent {
+            id: "evt-b".to_string(),
+            r#type: "spendguard.audit.tokenizer_drift_alert.v1alpha1".to_string(),
+            ..Default::default()
+        };
+
+        let (a, b) = tokio::join!(sink.emit(event_a), sink.emit(event_b));
+
+        a.expect("event a appended");
+        b.expect("event b appended");
+        assert!(
+            max_in_flight.load(Ordering::SeqCst) >= 2,
+            "emit calls were serialized; expected cloned tonic clients to overlap"
+        );
     }
 }
