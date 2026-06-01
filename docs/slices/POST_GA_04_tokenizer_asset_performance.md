@@ -1,7 +1,7 @@
 # POST_GA 04 - Tokenizer Asset Performance
 
 > **Branch**: `post-ga/POST_GA_04_tokenizer_asset_performance`
-> **Status**: implementation complete; adversarial review clean in 2 rounds
+> **Status**: shipped to main at `1503312`; adversarial review clean in 2 rounds
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `tokenizer-service-spec-v1alpha1.md`
 > **Issues**: #95, #102, #104, #108, #116, #120, #122, #125, #130, #134, #140
 > **Estimated change size**: medium-large; assets, dispatch, benchmarks
@@ -126,4 +126,4 @@ test pass/fail.
 - [x] Asset checksums complete
 - [x] All mapped issues have evidence
 - [x] AIT review clean or Staff+ arbitration recorded
-- [ ] Memory updated
+- [x] Memory updated
