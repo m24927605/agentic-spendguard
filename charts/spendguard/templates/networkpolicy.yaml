@@ -299,14 +299,17 @@ spec:
 {{- if .Values.networkPolicy.metricsIngress.enabled }}
 ---
 # ────────────────────────────────────────────────────────────────────────
-# Allow metrics scraping while preserving internal service ingress.
+# Allow metrics scraping while preserving internal and public service ingress.
 #
 # POST_GA_03 / #103: once any Ingress NetworkPolicy selects a pod, all
 # unlisted ingress is denied. This policy therefore includes:
 #   * same-release pod-to-pod ingress on all ports, preserving existing
 #     gRPC/service traffic;
 #   * L2-enforced app pods to egress_proxy on :9000;
-#   * Prometheus namespace to first-party metrics ports.
+#   * Prometheus namespace to first-party metrics ports;
+#   * explicitly configured public API ports from any source so an ingress
+#     controller / load balancer / webhook provider is not cut off merely
+#     because metrics scraping was enabled.
 # ────────────────────────────────────────────────────────────────────────
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -322,6 +325,15 @@ spec:
   policyTypes:
     - Ingress
   ingress:
+{{ with .Values.networkPolicy.metricsIngress.publicPorts }}
+    # Preserve public service ingress. A NetworkPolicy rule with ports and
+    # no `from` allows all sources on those ports, matching the pre-policy
+    # service reachability while keeping all other ports isolated.
+    - ports:
+{{- range . }}
+        - { protocol: TCP, port: {{ . }} }
+{{- end }}
+{{ end }}
     # Preserve first-party service-to-service calls inside this release.
     - from:
         - podSelector:

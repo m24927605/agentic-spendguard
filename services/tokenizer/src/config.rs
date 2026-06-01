@@ -54,6 +54,13 @@ pub struct Config {
     #[serde(default = "default_metrics_addr")]
     pub metrics_addr: String,
 
+    /// Per-request synchronous encode timeout in milliseconds for the
+    /// gRPC service form. Defaults to 30s so the 4 MiB accepted request
+    /// cap has a compatible upper-bound budget; operators can lower this
+    /// if they also lower the request cap or run tighter ingress limits.
+    #[serde(default = "default_encode_timeout_ms")]
+    pub encode_timeout_ms: u64,
+
     /// Threshold for emitting `tokenizer_tier3_hit_alert` events.
     /// Default 0.001 (0.1%) per spec §5.3 health invariant.
     /// SLICE_03: the value is plumbed but the alert wire-up itself
@@ -181,6 +188,7 @@ impl std::fmt::Debug for Config {
             .field("tls_key_pem", &self.tls_key_pem)
             .field("tls_ca_pem", &self.tls_ca_pem)
             .field("metrics_addr", &self.metrics_addr)
+            .field("encode_timeout_ms", &self.encode_timeout_ms)
             .field("tier3_alert_threshold", &self.tier3_alert_threshold)
             .field("region", &self.region)
             .field("shadow_enabled", &self.shadow_enabled)
@@ -234,6 +242,10 @@ fn default_tier3_alert_threshold() -> f32 {
     0.001
 }
 
+fn default_encode_timeout_ms() -> u64 {
+    30_000
+}
+
 fn default_shadow_enabled() -> bool {
     // SLICE_05: enabled by default — operators disable via env var per
     // §11 rollback plan. Helm production profile honours the value
@@ -277,6 +289,7 @@ mod tests {
         assert_eq!(cfg.listen_addr, "127.0.0.1:50053");
         assert!(cfg.uds_path.is_none());
         assert_eq!(cfg.metrics_addr, "0.0.0.0:9099");
+        assert_eq!(cfg.encode_timeout_ms, 30_000);
         assert!((cfg.tier3_alert_threshold - 0.001).abs() < 1e-6);
     }
 
@@ -295,6 +308,20 @@ mod tests {
             ])
             .expect("config loads");
         assert!((cfg.tier3_alert_threshold - 0.005).abs() < 1e-6);
+    }
+
+    #[test]
+    fn encode_timeout_overridable() {
+        let cfg = envy::prefixed("TEST_CFG_")
+            .from_iter::<_, Config>(vec![
+                (
+                    "TEST_CFG_LISTEN_ADDR".to_string(),
+                    "127.0.0.1:50053".to_string(),
+                ),
+                ("TEST_CFG_ENCODE_TIMEOUT_MS".to_string(), "7500".to_string()),
+            ])
+            .expect("config loads");
+        assert_eq!(cfg.encode_timeout_ms, 7500);
     }
 
     /// R2 M13: Debug must not spill the raw API keys.

@@ -81,6 +81,7 @@ sidecar:
 tokenizer:
   image:
     tag: v0.1.0
+  encodeTimeoutMs: 30000
   mtlsSecretName: spendguard-prod-tokenizer-mtls
   shadowEnabled: true
   canonicalIngestUrl: https://spendguard-spendguard-canonical-ingest:50052
@@ -169,6 +170,9 @@ networkPolicy:
   metricsIngress:
     enabled: true
     prometheusNamespace: monitoring
+    publicPorts:
+      - 8443
+      - 8091
 
 migrations:
   ledgerImage: docker.io/library/postgres:16-alpine

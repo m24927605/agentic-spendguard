@@ -846,6 +846,13 @@ Benchmark methodology：對 <=1K-char steady-state prompts與 10K-char stress pr
 
 Tier 2 <=1K-char p99 < 1ms 是 GA prerequisite #2 of this spec。10K-char stress p99 <5ms 是 runtime hardening gate，用來抓 BPE asset 或 envelope implementation 的階段性退化。
 
+POST_GA_03 gRPC service form additionally wraps synchronous encode work
+with `SPENDGUARD_TOKENIZER_ENCODE_TIMEOUT_MS` (Helm:
+`tokenizer.encodeTimeoutMs`). The default is 30s, intentionally larger
+than the 10K stress SLO and compatible with the 4 MiB accepted request
+cap; operators lowering this timeout must also lower upstream request
+caps or prove long-prompt benchmarks stay below the configured value.
+
 ### 10.2 Shadow availability
 
 Tier 1 shadow path SLO：**no hot-path SLO**（async；hot path 不依賴）。但 shadow worker 自己的 SLO：

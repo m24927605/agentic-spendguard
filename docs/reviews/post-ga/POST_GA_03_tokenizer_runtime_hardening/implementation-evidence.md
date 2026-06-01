@@ -20,6 +20,7 @@ Mapped issues: #92, #94, #96, #98, #100, #103, #105, #110, #111, #112, #114, #11
 | `b0de004` | Real shadow worker boot coverage with Postgres testcontainer and canonical-ingest tonic mock |
 | `09e08f2` | Benchmark feature declaration for opt-in Cohere benches |
 | `de3a668` | Demo gate unblock: webhook receiver maps typed `IDEMPOTENCY_CONFLICT` to HTTP 409 |
+| pending Round 1 fix | Metrics NetworkPolicy preserves public ingress and tokenizer encode timeout is configurable/sized for the accepted request cap |
 
 ## Issue Closure Map
 
@@ -82,3 +83,43 @@ Second attempt reached the demo assertions but failed because the previous parti
 - canonical_events count observed as 5
 
 `helm template --notes` was not used because the installed Helm rejects `--notes`; the NOTES template was inspected directly and normal demo/production templates rendered cleanly.
+
+## Adversarial Review Round 1
+
+Required AIT command was run and recorded in `round-1-ait-command.txt`.
+Local AIT rejected `--review-mode`, so codex CLI fallback review was run
+and recorded in `round-1-codex-review.txt`.
+
+Findings:
+
+- P1: metrics ingress NetworkPolicy selected all SpendGuard pods and
+  isolated public service ingress unless the ingress source was
+  same-release, L2-enforced app pods, or Prometheus.
+- P2: tokenizer accepted up to 4 MiB but used a fixed 100ms encode
+  timeout, making legitimate long prompts vulnerable to timeout.
+
+Round 1 fixes:
+
+- `charts/spendguard/templates/networkpolicy.yaml` now preserves public
+  service ingress on configured public ports while retaining same-release
+  pod ingress, egress_proxy listener ingress, and Prometheus metrics
+  ingress.
+- `networkPolicy.metricsIngress.publicPorts` defaults to webhook
+  receiver HTTPS `8443` and control-plane HTTP `8091` in demo and
+  production values.
+- `SPENDGUARD_TOKENIZER_ENCODE_TIMEOUT_MS` is now a service config field
+  wired through Helm as `tokenizer.encodeTimeoutMs`, defaulting to 30s.
+- `TokenizerSvc` accepts a per-instance timeout; zero is coerced to the
+  safe default.
+- `docs/tokenizer-service-spec-v1alpha1.md` now documents that operators
+  lowering the encode timeout must also lower upstream request caps or
+  prove long-prompt benchmarks stay below the configured value.
+
+Round 1 fix verification:
+
+- `cargo test --manifest-path services/tokenizer/Cargo.toml encode_timeout`
+- `cargo test --manifest-path services/tokenizer/Cargo.toml defaults_load_with_minimum_env`
+- `helm template charts/spendguard --set chart.profile=demo`
+- `helm template charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production`
+- `rg "public service ingress|port: 8443|SPENDGUARD_TOKENIZER_ENCODE_TIMEOUT_MS|port: 8091" /tmp/spendguard-postga03-r1fix-prod.yaml`
+- `cargo build --manifest-path services/tokenizer/Cargo.toml && cargo test --manifest-path services/tokenizer/Cargo.toml`

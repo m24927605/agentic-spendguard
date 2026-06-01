@@ -83,10 +83,11 @@ pub(crate) const MAX_MODEL_LEN: usize = 256;
 /// without weakening the layered cap invariant.
 pub const TOKENIZER_REQUEST_CAP_BYTES: usize = 4 << 20;
 
-/// POST_GA_03 / #127: bound synchronous BPE work from the gRPC service
-/// form. The in-process library form keeps its direct synchronous API;
-/// callers that need a timeout should wrap it at their trust boundary.
-const ENCODE_TIMEOUT: Duration = Duration::from_millis(100);
+/// POST_GA_03 / #127: default bound for synchronous BPE work from the
+/// gRPC service form. The default is intentionally compatible with the
+/// 4 MiB accepted request cap; operators can override it through
+/// `SPENDGUARD_TOKENIZER_ENCODE_TIMEOUT_MS`.
+pub const DEFAULT_ENCODE_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub static INVALID_REQUEST_ID_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static REQUEST_ID_V4_ACCEPTED_TOTAL: AtomicU64 = AtomicU64::new(0);
@@ -121,6 +122,7 @@ pub(crate) const MAX_MESSAGE_CONTENT_LEN: usize = TOKENIZER_REQUEST_CAP_BYTES;
 pub struct TokenizerSvc {
     tokenizer: Arc<Tokenizer>,
     shadow_worker: Option<ShadowWorkerHandle>,
+    encode_timeout: Duration,
     /// Per-request tenant id pulled from a gRPC metadata header.
     /// Empty when the caller is anonymous (test / library form).
     /// Phase F's control plane API references this for the per-(tenant,
@@ -133,6 +135,7 @@ impl TokenizerSvc {
         Self {
             tokenizer,
             shadow_worker: None,
+            encode_timeout: DEFAULT_ENCODE_TIMEOUT,
             tenant_header_name: DEFAULT_TENANT_METADATA_HEADER.to_string(),
         }
     }
@@ -141,6 +144,18 @@ impl TokenizerSvc {
     /// in main.rs's boot sequence.
     pub fn with_shadow_worker(mut self, h: ShadowWorkerHandle) -> Self {
         self.shadow_worker = Some(h);
+        self
+    }
+
+    /// Override the per-request encode timeout. A zero duration is
+    /// coerced back to the safe default so a malformed env value cannot
+    /// make every request fail closed.
+    pub fn with_encode_timeout(mut self, timeout: Duration) -> Self {
+        self.encode_timeout = if timeout.is_zero() {
+            DEFAULT_ENCODE_TIMEOUT
+        } else {
+            timeout
+        };
         self
     }
 
@@ -225,7 +240,7 @@ impl TokenizerSvcTrait for TokenizerSvc {
         let encode_req = lib_req.clone();
         let tokenizer = Arc::clone(&self.tokenizer);
         let encode_task = tokio::task::spawn_blocking(move || tokenizer.tokenize(&encode_req));
-        let lib_resp = match tokio::time::timeout(ENCODE_TIMEOUT, encode_task).await {
+        let lib_resp = match tokio::time::timeout(self.encode_timeout, encode_task).await {
             Ok(Ok(Ok(resp))) => resp,
             Ok(Ok(Err(err))) => return Err(map_tokenizer_error(err)),
             Ok(Err(join_err)) => {
@@ -397,6 +412,13 @@ mod tests {
     fn svc() -> TokenizerSvc {
         let tokenizer = Tokenizer::new_with_embedded_assets().expect("load");
         TokenizerSvc::new(Arc::new(tokenizer))
+    }
+
+    #[test]
+    fn zero_encode_timeout_uses_default() {
+        let tokenizer = Tokenizer::new_with_embedded_assets().expect("load");
+        let svc = TokenizerSvc::new(Arc::new(tokenizer)).with_encode_timeout(Duration::ZERO);
+        assert_eq!(svc.encode_timeout, DEFAULT_ENCODE_TIMEOUT);
     }
 
     #[tokio::test]

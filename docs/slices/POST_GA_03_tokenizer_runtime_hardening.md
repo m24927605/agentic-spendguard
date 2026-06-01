@@ -129,6 +129,7 @@ grep/tests.
 | Implementer | Runtime hardening landed in eight atomic commits | Evidence: `docs/reviews/post-ga/POST_GA_03_tokenizer_runtime_hardening/implementation-evidence.md` |
 | Backend Architect | Demo gate compile blocker in webhook receiver was in-scope because it blocked `make demo-up` | `IDEMPOTENCY_CONFLICT` now maps to HTTP 409 with regression test |
 | Test Lead | Dirty demo volume failure is not acceptable evidence; rerun after `make demo-down` | Clean `make demo-up DEMO_MODE=default` passed Step 8 and outbox closure |
+| Adversarial Reviewer R1 | Metrics NetworkPolicy must preserve public ingress; encode timeout must match accepted request size | Both fixed; evidence in `round-1-codex-review.txt` and implementation evidence |
 
 ## §14. Merge Checklist
 

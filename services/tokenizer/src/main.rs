@@ -140,7 +140,9 @@ async fn main() -> Result<()> {
         .await
         .context("boot shadow worker")?;
 
-    let svc = TokenizerSvc::new(Arc::clone(&tokenizer)).with_shadow_worker(shadow_handle);
+    let svc = TokenizerSvc::new(Arc::clone(&tokenizer))
+        .with_encode_timeout(std::time::Duration::from_millis(cfg.encode_timeout_ms))
+        .with_shadow_worker(shadow_handle);
     let tonic_svc = TokenizerServer::new(svc)
         // Round-2 fix M6 + Round-3 fix N3 + POST_GA_03 / #114:
         // protocol-layer cap matches the field caps in server.rs (4 MiB
