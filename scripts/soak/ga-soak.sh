@@ -29,6 +29,27 @@ Options:
 USAGE
 }
 
+quote_command_line() {
+  local quoted
+  local out
+  printf -v out '%q' "$1"
+  shift
+  for arg in "$@"; do
+    printf -v quoted '%q' "$arg"
+    out+=" $quoted"
+  done
+  echo "$out"
+}
+
+COMMAND_LINE="$(quote_command_line "$0" "$@")"
+GIT_COMMIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
+GIT_BRANCH="$(git -C "$ROOT" branch --show-current)"
+if [[ -z "$GIT_BRANCH" ]]; then
+  GIT_BRANCH="$(git -C "$ROOT" rev-parse --short HEAD)"
+fi
+GIT_SOURCE_STATUS="$(git -C "$ROOT" status --short)"
+MACHINE_DESCRIPTOR="$(uname -a)"
+
 parse_duration() {
   local raw="$1"
   local n unit
@@ -211,21 +232,21 @@ append_snapshot() {
   local inspect_output
   local stats_output
 
-  now_unix="$(date -u +%s)"
+  now_unix="$(date -u +%s)" || return $?
   elapsed=$((now_unix - started_unix))
 
-  ledger_out="$(psql_db spendguard_ledger "SELECT count(*) FILTER (WHERE pending_forward = TRUE)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - min(recorded_at)))::bigint, 0) FROM audit_outbox WHERE pending_forward = TRUE;")"
-  canonical_out="$(psql_db spendguard_canonical "SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(ingest_at)))::bigint, 999999) FROM canonical_events WHERE tenant_id = '$TENANT_ID';")"
-  cache_out="$(psql_db spendguard_canonical "SELECT set_config('app.current_tenant_id', '$TENANT_ID', true); SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(computed_at)))::bigint, 999999) FROM output_distribution_cache WHERE tenant_id = '$TENANT_ID';" | tail -n1)"
-  run_cache_out="$(psql_db spendguard_canonical "SELECT set_config('app.current_tenant_id', '$TENANT_ID', true); SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(computed_at)))::bigint, 999999) FROM run_length_distribution_cache WHERE tenant_id = '$TENANT_ID';" | tail -n1)"
+  ledger_out="$(psql_db spendguard_ledger "SELECT count(*) FILTER (WHERE pending_forward = TRUE)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - min(recorded_at)))::bigint, 0) FROM audit_outbox WHERE pending_forward = TRUE;")" || return $?
+  canonical_out="$(psql_db spendguard_canonical "SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(ingest_at)))::bigint, 999999) FROM canonical_events WHERE tenant_id = '$TENANT_ID';")" || return $?
+  cache_out="$(psql_db spendguard_canonical "SELECT set_config('app.current_tenant_id', '$TENANT_ID', true); SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(computed_at)))::bigint, 999999) FROM output_distribution_cache WHERE tenant_id = '$TENANT_ID';" | tail -n1)" || return $?
+  run_cache_out="$(psql_db spendguard_canonical "SELECT set_config('app.current_tenant_id', '$TENANT_ID', true); SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(computed_at)))::bigint, 999999) FROM run_length_distribution_cache WHERE tenant_id = '$TENANT_ID';" | tail -n1)" || return $?
 
-  outbox_lag="$(metric_gauge "http://127.0.0.1:9096/metrics" "spendguard_outbox_pending_oldest_age_seconds")"
-  leader_count="$(metric_sum "http://127.0.0.1:9096/metrics" "spendguard_outbox_forwarder_is_leader")"
-  dedup_total="$(canonical_metric_sum "spendguard_ingest_events_deduped_total")"
-  stats_cycles="$(metric_sum "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_cycles_total")"
-  stats_errors="$(metric_sum "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_cycle_error_total")"
-  stats_last_cycle="$(metric_gauge "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_last_cycle_start_unix_secs")"
-  tokenizer_escalations="$(metric_sum "http://127.0.0.1:9099/metrics" "spendguard_tokenizer_drift_alert_oncall_escalation_total")"
+  outbox_lag="$(metric_gauge "http://127.0.0.1:9096/metrics" "spendguard_outbox_pending_oldest_age_seconds")" || return $?
+  leader_count="$(metric_sum "http://127.0.0.1:9096/metrics" "spendguard_outbox_forwarder_is_leader")" || return $?
+  dedup_total="$(canonical_metric_sum "spendguard_ingest_events_deduped_total")" || return $?
+  stats_cycles="$(metric_sum "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_cycles_total")" || return $?
+  stats_errors="$(metric_sum "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_cycle_error_total")" || return $?
+  stats_last_cycle="$(metric_gauge "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_last_cycle_start_unix_secs")" || return $?
+  tokenizer_escalations="$(metric_sum "http://127.0.0.1:9099/metrics" "spendguard_tokenizer_drift_alert_oncall_escalation_total")" || return $?
 
   if svid_output="$(run_svid_probe 2>&1)"; then
     svid_status=0
@@ -242,11 +263,11 @@ append_snapshot() {
   inspect_output="$(docker inspect --format '{{json .}}' \
     spendguard-postgres spendguard-ledger spendguard-canonical-ingest spendguard-sidecar \
     spendguard-outbox-forwarder spendguard-stats-aggregator spendguard-output-predictor \
-    spendguard-run-cost-projector spendguard-tokenizer spendguard-control-plane)"
+    spendguard-run-cost-projector spendguard-tokenizer spendguard-control-plane)" || return $?
   stats_output="$(docker stats --no-stream --format '{{json .}}' \
     spendguard-postgres spendguard-ledger spendguard-canonical-ingest spendguard-sidecar \
     spendguard-outbox-forwarder spendguard-stats-aggregator spendguard-output-predictor \
-    spendguard-run-cost-projector spendguard-tokenizer spendguard-control-plane)"
+    spendguard-run-cost-projector spendguard-tokenizer spendguard-control-plane)" || return $?
 
   SNAPSHOT_INDEX="$index" \
   SNAPSHOT_UNIX="$now_unix" \
@@ -454,6 +475,13 @@ write_summary() {
   INTERVAL_SECONDS="$INTERVAL_SECONDS" \
   PROFILE="$PROFILE" \
   DEMO_MODE="$DEMO_MODE" \
+  COMMAND_LINE="$COMMAND_LINE" \
+  EVIDENCE_DATE="$(date -u +%F)" \
+  GIT_COMMIT_SHA="$GIT_COMMIT_SHA" \
+  GIT_BRANCH="$GIT_BRANCH" \
+  GIT_SOURCE_STATUS="$GIT_SOURCE_STATUS" \
+  MACHINE_DESCRIPTOR="$MACHINE_DESCRIPTOR" \
+  CLUSTER_DESCRIPTOR="docker-compose:deploy/demo/compose.yaml;profile=$PROFILE;demo_mode=$DEMO_MODE" \
   SNAPSHOTS_FILE="$SNAPSHOTS_FILE" \
   SUMMARY_FILE="$SUMMARY_FILE" \
   python3 - <<'PY'
@@ -470,6 +498,15 @@ snapshots = [
 failures = [f for snapshot in snapshots for f in snapshot.get("failures", [])]
 summary = {
     "result": os.environ["RESULT"],
+    "commit_sha": os.environ["GIT_COMMIT_SHA"],
+    "branch": os.environ["GIT_BRANCH"],
+    "date": os.environ["EVIDENCE_DATE"],
+    "command_line": os.environ["COMMAND_LINE"],
+    "environment_profile": os.environ["PROFILE"],
+    "machine_descriptor": os.environ["MACHINE_DESCRIPTOR"],
+    "cluster_descriptor": os.environ["CLUSTER_DESCRIPTOR"],
+    "git_dirty": bool(os.environ["GIT_SOURCE_STATUS"].strip()),
+    "git_status": [line for line in os.environ["GIT_SOURCE_STATUS"].splitlines() if line.strip()],
     "boot_started_at": os.environ["BOOT_STARTED_AT"],
     "started_at": os.environ["STARTED_AT"],
     "finished_at": os.environ["FINISHED_AT"],
@@ -538,6 +575,8 @@ STARTED_UNIX="$(date -u +%s)"
 INDEX=0
 RESULT="pass"
 while true; do
+  # append_snapshot has explicit return guards on each probe so the loop can
+  # still write a structured failure summary without making probes fail-open.
   append_snapshot "$INDEX" "$STARTED_UNIX" "$BASELINE_FILE" || RESULT="fail"
   if [[ "$RESULT" != "pass" ]]; then
     break
