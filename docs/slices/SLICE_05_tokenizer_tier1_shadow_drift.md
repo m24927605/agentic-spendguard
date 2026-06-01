@@ -1,7 +1,7 @@
 # Slice 05 — Tokenizer Tier 1 shadow + drift alert
 
 > **Branch**: `slice/SLICE_05_tokenizer_tier1_shadow_drift`
-> **Status**: draft
+> **Status**: shipped; POST_GA_02 reconciled §13/§14 checklist drift
 > **Spec ancestor(s)**: `tokenizer-service-spec-v1alpha1.md` §4, §4.5; `stats-aggregator-spec-v1alpha1.md` (drift_alert event semantics)
 > **Depends on prior slices**: SLICE_04 (Anthropic / Gemini Tier 2 needed for shadow comparison)
 > **Blocks subsequent slices**: none directly, but informs calibration-report (SLICE_13) and ops dashboard
@@ -178,11 +178,11 @@ per `tokenizer-service-spec-v1alpha1.md` §11.1:
 
 ## §14. Merge checklist
 
-- [ ] §8 + §11.1 chaos green
-- [ ] §9 specific clear
-- [ ] Tier 1 strictly off hot path verified (universal §1.2)
-- [ ] Drift alert CloudEvent verified by canonical_ingest
-- [ ] PR references `tokenizer-service-spec-v1alpha1.md` §4
+- [x] §8 + §11.1 chaos green
+- [x] §9 specific clear
+- [x] Tier 1 strictly off hot path verified (universal §1.2)
+- [x] Drift alert CloudEvent verified by canonical_ingest
+- [x] Merge evidence references `tokenizer-service-spec-v1alpha1.md` §4
 
 ---
 

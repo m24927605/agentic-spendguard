@@ -186,6 +186,49 @@ SELECT
   ) AS has_mirror_columns;
 " | tee "${EVIDENCE_PREFIX}-canonical-smoke.txt"
 
+log "canonical sample-size CHECK smoke"
+psql_exec spendguard_canonical -c "
+DO \$\$
+DECLARE
+  tenant uuid := '00000000-0000-4000-8000-000000000167'::uuid;
+  output_cache_check_hit boolean := false;
+  run_length_check_hit boolean := false;
+BEGIN
+  SET LOCAL search_path = pg_catalog, pg_temp;
+  PERFORM set_config('app.current_tenant_id', tenant::text, TRUE);
+
+  BEGIN
+    INSERT INTO public.output_distribution_cache (
+      tenant_id, model, agent_id, prompt_class,
+      sample_size_7d, sample_size_30d, computed_at
+    ) VALUES (
+      tenant, 'post-ga-02-model', 'post-ga-02-agent', 'chat_short',
+      -1, 0, clock_timestamp()
+    );
+  EXCEPTION WHEN check_violation THEN
+    output_cache_check_hit := true;
+  END;
+  IF NOT output_cache_check_hit THEN
+    RAISE EXCEPTION 'negative output_distribution_cache.sample_size_7d was accepted';
+  END IF;
+
+  BEGIN
+    INSERT INTO public.run_length_distribution_cache (
+      tenant_id, agent_id, sample_size_30d, computed_at
+    ) VALUES (
+      tenant, 'post-ga-02-agent', -1, clock_timestamp()
+    );
+  EXCEPTION WHEN check_violation THEN
+    run_length_check_hit := true;
+  END;
+  IF NOT run_length_check_hit THEN
+    RAISE EXCEPTION 'negative run_length_distribution_cache.sample_size_30d was accepted';
+  END IF;
+END
+\$\$;
+SELECT 'sample_size_check_constraints_reject_negative' AS check_name, TRUE AS passed;
+" | tee "${EVIDENCE_PREFIX}-canonical-sample-size-checks.txt"
+
 log "control-plane smoke checks"
 psql_exec spendguard_control_plane -c "
 DO \$\$

@@ -262,7 +262,8 @@ deadline_exceeded = plugin error = fallback to Strategy B + emit metric.
 | Plugin returns `confidence < 0` or `confidence > 1` | fall to B + metric `customer_predictor_invalid_confidence` |
 | Plugin RPC throws deserialization error | fall to B + metric `customer_predictor_deserialization_error` |
 | Plugin endpoint TLS handshake failure | fall to B + metric `customer_predictor_tls_error` |
-| `HealthCheck` returns `NOT_SERVING` | skip Predict for this period（per circuit-breaker §6） |
+| `HealthCheck` returns `NOT_SERVING` | circuit breaker opens and SpendGuard skips Predict for this period（per circuit-breaker §6） |
+| Predict returns `Code::Unavailable` with `not_serving` sentinel | fall to B + metric `customer_predictor_not_serving` |
 
 ### 5.2 Audit row 行為
 

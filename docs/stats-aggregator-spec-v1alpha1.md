@@ -282,7 +282,7 @@ CREATE TABLE output_distribution_cache (
     p99_7d               REAL,
     mean_7d              REAL,
     stddev_7d            REAL,
-    sample_size_7d       INT,
+    sample_size_7d       INT CHECK (sample_size_7d IS NULL OR sample_size_7d >= 0),
 
     -- 30-day rolling window
     p50_30d              REAL,
@@ -290,7 +290,7 @@ CREATE TABLE output_distribution_cache (
     p99_30d              REAL,
     mean_30d             REAL,
     stddev_30d           REAL,
-    sample_size_30d      INT,
+    sample_size_30d      INT CHECK (sample_size_30d IS NULL OR sample_size_30d >= 0),
 
     -- Metadata
     computed_at          TIMESTAMPTZ NOT NULL,
@@ -312,6 +312,11 @@ CREATE POLICY output_distribution_cache_tenant_isolation
   ON output_distribution_cache
   USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
 ```
+
+`sample_size_7d` and `sample_size_30d` are COUNT-derived values and must
+never be negative. Migrations pin this with CHECK constraints; the
+aggregation writer only produces non-negative integers, and migration
+smoke checks assert explicit negative inserts are rejected.
 
 ### 5.1 為什麼不 partition
 
@@ -367,7 +372,10 @@ ON CONFLICT (tenant_id, agent_id)
     computed_at = EXCLUDED.computed_at;
 ```
 
-Table schema 與 `output_distribution_cache` 平行（同 RLS + 同新鮮度 index）。
+Table schema 與 `output_distribution_cache` 平行（同 RLS + 同新鮮度 index）。`sample_size_30d`
+is also constrained as `CHECK (sample_size_30d IS NULL OR sample_size_30d >= 0)`;
+it is derived from `count(*)` and is therefore a non-negative hard
+invariant, not an advisory convention.
 
 ---
 
@@ -409,6 +417,12 @@ data:
 ```
 
 Implementation reference: `services/stats_aggregator/src/drift_detector.rs` commit `f8dc34c` defines `PREDICTION_DRIFT_ALERT_EVENT_TYPE = "spendguard.audit.prediction_drift_alert.v1alpha1"`; calibration-report commit `8ee35ca` reads the same event type from `canonical_events.payload_json`.
+
+Audit routing discipline: the `spendguard.audit.*` prefix is required so
+canonical_ingest routes this event to ImmutableAuditLog. The source URI
+format matches `build_drift_alert`: `spendguard://stats-aggregator/<tenant_id>`.
+Older examples that used `stats-aggregator://<instance>` or
+`spendguard.prediction.drift_alert` are non-authoritative draft text.
 
 Signed + immutable per audit chain。
 
