@@ -25,7 +25,7 @@ Main branch pushes publish `sha-<short>` tags only. Version tag pushes publish t
 
 | Control | Workflow requirement |
 |---|---|
-| Repository vulnerability scan | `aquasecurity/trivy-action` filesystem scan with `CRITICAL,HIGH` gate |
+| Repository vulnerability scan | Single pre-matrix `aquasecurity/trivy-action` filesystem scan with `CRITICAL,HIGH` gate |
 | Image vulnerability scan | `aquasecurity/trivy-action` scan against the pushed digest |
 | SBOM | Docker Buildx `sbom` attestation enabled for pushed images |
 | Provenance | Docker Buildx `provenance` attestation enabled for pushed images |
@@ -42,7 +42,7 @@ brew install syft trivy cosign cargo-audit
 scripts/security/ga-security-scan.sh --require-external-tools
 ```
 
-Release-mode requires a clean git worktree before any evidence is written, so the recorded `commit_sha` always identifies the scanned contents. The gate emits:
+Release-mode requires a clean git worktree before any evidence directory is created or written, so the recorded `commit_sha` always identifies the scanned contents. The gate emits:
 
 - `tool-versions.txt`
 - `helm-demo.txt`
@@ -62,7 +62,7 @@ Default local acceptance may run without external scanners:
 scripts/security/ga-security-scan.sh
 ```
 
-That mode still validates repository invariants, records missing tools, and points release operators to the fail-closed release-mode command.
+That mode still validates repository invariants, records missing tools, records optional external scanner execution failures, and points release operators to the fail-closed release-mode command. Release-mode fails closed if any required scanner is missing or exits nonzero.
 
 ## Release Bundle Relationship
 

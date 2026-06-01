@@ -18,7 +18,7 @@ Local development and slice acceptance may run the deterministic gate without ex
 scripts/security/ga-security-scan.sh
 ```
 
-Release-mode is intentionally stricter. It fails closed unless `syft`, `trivy`, `cosign`, and `cargo-audit` are installed.
+Release-mode is intentionally stricter. It fails closed unless `syft`, `trivy`, `cosign`, and `cargo-audit` are installed and complete successfully.
 
 ## Coverage
 
@@ -31,7 +31,7 @@ Release-mode is intentionally stricter. It fails closed unless `syft`, `trivy`, 
 | PII boundary | Tokenizer raw-text shadow calls default-deny and require tenant opt-in | `services/tokenizer/src/shadow/security.rs`; `services/tokenizer/src/shadow/worker.rs` |
 | Provider quota | `count_tokens` calls are tenant-quota guarded | `services/tokenizer/src/shadow/security.rs` |
 | Containers | Runtime images set `USER 65532:65532`; Helm renders `runAsUser=65532`, `readOnlyRootFilesystem=true`, `allowPrivilegeEscalation=false`, and `capabilities.drop=[ALL]` | runtime Dockerfiles; Helm production validator |
-| Supply chain | Published images are scanned, SBOM/provenance-attested, and signed by digest; mutable `latest` promotion is forbidden | `.github/workflows/publish-images.yml`; `docs/security/supply-chain.md` |
+| Supply chain | Repository code is scanned once before the image matrix; published images are scanned, SBOM/provenance-attested, and signed by digest; mutable `latest` promotion is forbidden | `.github/workflows/publish-images.yml`; `docs/security/supply-chain.md` |
 
 ## Release Blockers
 

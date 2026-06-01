@@ -36,8 +36,28 @@ env:
   IMAGE_OWNER: ${{ github.repository_owner }}
 
 jobs:
+  repository-scan:
+    name: Repository vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Trivy repository scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
   build-and-push:
     name: ${{ matrix.service }}
+    needs: repository-scan
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -73,16 +93,6 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
-
-      - name: Trivy repository scan
-        uses: aquasecurity/trivy-action@0.28.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
-          format: table
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3

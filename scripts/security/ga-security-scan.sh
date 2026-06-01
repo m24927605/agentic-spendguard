@@ -18,9 +18,10 @@ Runs the GA_09 security and supply-chain gate:
   - container, SVID, RLS, replay, PII, and workflow invariant checks
   - deterministic Cargo dependency SBOM evidence
 
-By default the gate is fully local and records missing optional scanners.
-Use --require-external-tools for release signoff; that mode fails closed unless
-syft, trivy, cosign, and cargo-audit are installed.
+By default the gate is fully local and records missing optional scanners or
+optional scanner execution failures. Use --require-external-tools for release
+signoff; that mode fails closed unless syft, trivy, cosign, and cargo-audit are
+installed and complete successfully.
 USAGE
 }
 
@@ -46,9 +47,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-mkdir -p "$output_dir"
-output_dir="$(cd "$output_dir" && pwd -P)"
-
 commit_sha="$(git rev-parse HEAD)"
 branch_name="$(git rev-parse --abbrev-ref HEAD)"
 scan_started_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
@@ -63,6 +61,9 @@ if [[ "$require_external_tools" == "true" && "$worktree_dirty_at_start" == "true
   git status --short >&2
   exit 1
 fi
+
+mkdir -p "$output_dir"
+output_dir="$(cd "$output_dir" && pwd -P)"
 
 run_and_capture() {
   local name="$1"
@@ -80,8 +81,14 @@ tool_version() {
   local tool="$1"
   shift
   if command -v "$tool" >/dev/null 2>&1; then
+    local first_line
+    first_line="$("$@" 2>&1 | head -n 1 || true)"
     printf '%s: ' "$tool"
-    "$@" 2>&1 | head -n 1
+    if [[ -n "$first_line" ]]; then
+      printf '%s\n' "$first_line"
+    else
+      printf 'installed; version command failed\n'
+    fi
   else
     printf '%s: MISSING\n' "$tool"
   fi
@@ -97,8 +104,13 @@ tool_version() {
   tool_version syft syft version
   tool_version trivy trivy --version
   if command -v cosign >/dev/null 2>&1; then
+    cosign_version="$(cosign version --json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["gitVersion"])' 2>/dev/null || true)"
     printf 'cosign: '
-    cosign version --json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["gitVersion"])'
+    if [[ -n "$cosign_version" ]]; then
+      printf '%s\n' "$cosign_version"
+    else
+      printf 'installed; version command failed\n'
+    fi
   else
     printf 'cosign: MISSING\n'
   fi
@@ -118,6 +130,20 @@ if [[ "$require_external_tools" == "true" && ${#missing_external[@]} -gt 0 ]]; t
   printf '  brew install syft trivy cosign cargo-audit\n' >&2
   exit 1
 fi
+
+external_scanner_failures=()
+handle_external_scanner_failure() {
+  local tool="$1"
+  local log_file="$2"
+  if [[ "$require_external_tools" == "true" ]]; then
+    printf '%s scanner failed in release mode; see %s\n' "$tool" "$log_file" >&2
+    return 1
+  fi
+  external_scanner_failures+=("$tool")
+  printf '%s optional scanner failed in default mode; release mode fails closed. See %s.\n' \
+    "$tool" "$log_file" >"$output_dir/${tool}-optional-failure.txt"
+  return 0
+}
 
 run_and_capture helm-demo helm template spendguard charts/spendguard --set chart.profile=demo
 helm template spendguard charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production >"$output_dir/helm-production.yaml"
@@ -206,27 +232,46 @@ PY
 rm -f "$metadata_raw"
 
 if command -v syft >/dev/null 2>&1; then
-  syft file:Cargo.lock \
+  if ! SYFT_CHECK_FOR_APP_UPDATE=false syft file:Cargo.lock \
     --source-name agentic-spendguard-cargo-lock \
     --source-version "$commit_sha" \
-    -o spdx-json >"$output_dir/syft-sbom.spdx.json"
+    -o spdx-json >"$output_dir/syft-sbom.spdx.json" 2>"$output_dir/syft-sbom.spdx.err"; then
+    rm -f "$output_dir/syft-sbom.spdx.json"
+    handle_external_scanner_failure syft "$output_dir/syft-sbom.spdx.err" || exit 1
+  else
+    rm -f "$output_dir/syft-sbom.spdx.err"
+  fi
 fi
 
 if command -v trivy >/dev/null 2>&1; then
-  trivy fs \
+  if ! trivy fs \
     --scanners vuln \
     --severity HIGH,CRITICAL \
     --ignore-unfixed \
     --exit-code 1 \
     --format json \
-    --output "$output_dir/trivy-fs.json" Cargo.lock
+    --output "$output_dir/trivy-fs.json" Cargo.lock 2>"$output_dir/trivy-fs.err"; then
+    rm -f "$output_dir/trivy-fs.json"
+    handle_external_scanner_failure trivy "$output_dir/trivy-fs.err" || exit 1
+  else
+    rm -f "$output_dir/trivy-fs.err"
+  fi
 fi
 
 if command -v cargo-audit >/dev/null 2>&1; then
-  cargo audit --json >"$output_dir/cargo-audit.json"
+  cargo_audit_args=(cargo audit --json)
+  if [[ "$require_external_tools" != "true" ]]; then
+    cargo_audit_args+=(--no-fetch --stale)
+  fi
+  if ! "${cargo_audit_args[@]}" >"$output_dir/cargo-audit.json" 2>"$output_dir/cargo-audit.err"; then
+    rm -f "$output_dir/cargo-audit.json"
+    handle_external_scanner_failure cargo-audit "$output_dir/cargo-audit.err" || exit 1
+  else
+    rm -f "$output_dir/cargo-audit.err"
+  fi
 fi
 
-python3 - "$output_dir" "$commit_sha" "$branch_name" "$scan_started_utc" "${missing_external[*]-}" "$worktree_dirty_at_start" <<'PY'
+python3 - "$output_dir" "$commit_sha" "$branch_name" "$scan_started_utc" "${missing_external[*]-}" "${external_scanner_failures[*]-}" "$worktree_dirty_at_start" <<'PY'
 import json
 import re
 import subprocess
@@ -238,7 +283,8 @@ commit_sha = sys.argv[2]
 branch_name = sys.argv[3]
 scan_started_utc = sys.argv[4]
 missing_external = [item for item in sys.argv[5].split() if item]
-worktree_dirty_at_start = sys.argv[6] == "true"
+external_scanner_failures = [item for item in sys.argv[6].split() if item]
+worktree_dirty_at_start = sys.argv[7] == "true"
 root = Path.cwd()
 errors = []
 checks = {}
@@ -289,6 +335,13 @@ record(
     else f"mutable tokens present: {', '.join(mutable_hits)}",
 )
 record("publish_workflow_oidc", "id-token: write" in workflow, "OIDC permission present for keyless signing")
+record(
+    "publish_workflow_repo_scan_single_job",
+    "repository-scan:" in workflow
+    and "needs: repository-scan" in workflow
+    and workflow.count("Trivy repository scan") == 1,
+    "repository Trivy scan runs once before the image matrix",
+)
 record(
     "publish_workflow_dispatch_has_sha_tag",
     "github.event_name == 'workflow_dispatch'" in workflow
@@ -434,6 +487,7 @@ summary = {
     "scan_started_utc": scan_started_utc,
     "worktree_dirty_at_start": worktree_dirty_at_start,
     "missing_external_tools": missing_external,
+    "external_scanner_failures": external_scanner_failures,
     "external_tool_install": "brew install syft trivy cosign cargo-audit",
     "release_mode": "scripts/security/ga-security-scan.sh --require-external-tools",
     "checks": checks,
@@ -450,6 +504,7 @@ report_lines = [
     f"- Started UTC: `{scan_started_utc}`",
     f"- Worktree dirty at start: `{str(worktree_dirty_at_start).lower()}`",
     f"- Missing optional external tools: {', '.join(missing_external) if missing_external else 'none'}",
+    f"- Optional external scanner failures: {', '.join(external_scanner_failures) if external_scanner_failures else 'none'}",
     f"- Release-mode command: `{summary['release_mode']}`",
     "",
     "## Checks",
@@ -468,6 +523,20 @@ if missing_external:
             "",
             "```bash",
             summary["external_tool_install"],
+            "scripts/security/ga-security-scan.sh --require-external-tools",
+            "```",
+        ]
+    )
+if external_scanner_failures:
+    report_lines.extend(
+        [
+            "",
+            "## Optional External Scanner Failures",
+            "",
+            "Default mode records these failures instead of blocking deterministic local acceptance.",
+            "Release mode fails closed on any scanner execution failure:",
+            "",
+            "```bash",
             "scripts/security/ga-security-scan.sh --require-external-tools",
             "```",
         ]

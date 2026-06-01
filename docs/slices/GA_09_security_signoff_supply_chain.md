@@ -1,7 +1,7 @@
 # GA 09 - Security Signoff and Supply Chain
 
 > **Branch**: `ga/GA_09_security_signoff_supply_chain`
-> **Status**: implemented; adversarial review R4 pending
+> **Status**: implemented; adversarial review R5 pending
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; threat model, scan scripts, supply-chain docs
 
@@ -101,6 +101,13 @@ R3 regression coverage added after adversarial review:
 - `scripts/security/ga-security-scan.sh --require-external-tools` now fails closed on a dirty worktree before writing evidence, preventing a PASS summary from being attributed to an unscanned HEAD.
 - `scripts/security/ga-security-scan.sh` now compares the production Helm render image set with the publish workflow matrix.
 
+R4 regression coverage added after adversarial review:
+
+- `scripts/security/ga-security-scan.sh --require-external-tools --output-dir <new repo path>` now checks clean worktree before creating the evidence directory, so the intended output path cannot make the precondition fail itself.
+- Default local scan mode now records optional external scanner execution failures instead of aborting before `scan-summary.json`; release mode still fails closed on missing or failed Syft, Trivy, Cosign, or cargo-audit.
+- `.github/workflows/publish-images.yml` now runs the repository Trivy scan once in a pre-matrix job and gates the image matrix on that job.
+- `scripts/security/ga-security-scan.sh` now fails if the repository scan is moved back into the image matrix.
+
 Evidence:
 
 - `docs/reviews/ga-readiness/GA_09_security_signoff_supply_chain/README.md`
@@ -150,6 +157,9 @@ Reviewer must treat unhandled high-severity findings as blockers.
 | Release Engineering Architect | R2 found committed evidence must not leak developer-local absolute paths | Sanitized cargo metadata/SBOM evidence and added a path-leak scan guard |
 | Release Engineering Architect | R3 found the publish workflow signed old six-image refs instead of all production Helm refs | Aligned workflow repositories with `spendguard/<component>` and expanded the matrix to 12 production components |
 | Security Engineer | R3 found release-mode scan could attribute dirty worktree output to HEAD | Added a clean-worktree precondition before release-mode evidence generation |
+| Security Engineer | R4 found release-mode output directory creation could make a clean repo look dirty | Moved the clean-worktree gate before evidence directory creation |
+| Security Engineer | R4 found default local scans could abort on optional cargo-audit fetch/lock errors | Default mode now records scanner execution failures while release mode fails closed |
+| Release Engineering Architect | R4 found repository Trivy scan repeated across every image matrix entry | Split repository scan into a single pre-matrix job and added a scan invariant |
 
 ## §14. Merge Checklist
 
