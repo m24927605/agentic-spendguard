@@ -141,6 +141,8 @@ spec:
             - { name: SPENDGUARD_TOKENIZER_LISTEN_ADDR,           value: "0.0.0.0:50053" }
             - { name: SPENDGUARD_TOKENIZER_METRICS_ADDR,          value: "0.0.0.0:9099"  }
             - { name: SPENDGUARD_TOKENIZER_REGION,                value: {{ .Values.global.region | quote }} }
+            - { name: SPENDGUARD_TOKENIZER_ENCODE_TIMEOUT_MS,     value: {{ .Values.tokenizer.encodeTimeoutMs | quote }} }
+            - { name: SPENDGUARD_TOKENIZER_ENCODE_MAX_CONCURRENT, value: {{ .Values.tokenizer.encodeMaxConcurrent | quote }} }
             # Per spec §5.3 health invariant — Tier 3 hit-rate
             # alerting threshold. SLICE_03 plumbs the value through
             # Config; the alert wire-up itself lands in SLICE-extra.

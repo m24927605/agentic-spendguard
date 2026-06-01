@@ -26,6 +26,14 @@ Sanity check:
 Application pods that want to talk to the sidecar should mount:
   - hostPath: {{ .Values.sidecar.hostPath.socketDir }}/adapter.sock  (UDS gRPC)
 
+{{- if .Values.tokenizer.udsHostPath }}
+TOKENIZER UDS HOSTPATH:
+  Pre-provision {{ .Values.tokenizer.udsHostPath }} on every node before install.
+  The directory must be owned/writable by UID/GID 65532 and the hostPath
+  type should be Directory in production. See:
+    docs/operations/runbooks/tokenizer-uds-hostpath.md
+{{- end }}
+
 POC limits in this chart (call out before scaling):
   - sidecar.replicas / outboxForwarder.replicas / ttlSweeper.replicas
     must stay at 1 until the GA gates land (multi-pod producer_sequence

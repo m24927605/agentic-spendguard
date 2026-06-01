@@ -16,7 +16,7 @@
 // verify-chain can reproduce historical decisions even after an
 // encoder refresh (per §7.3).
 //
-// Protocol-layer cap: max_decoding_message_size = 1 MiB is configured
+// Protocol-layer cap: max_decoding_message_size = 4 MiB is configured
 // server-side in services/tokenizer/src/main.rs. The per-field caps
 // below are redundant defense-in-depth and produce field-specific
 // InvalidArgument errors after a request has already passed the tonic
@@ -59,13 +59,13 @@ service Tokenizer {
 // TokenizerSvc rejects requests that exceed the following per-field
 // caps with gRPC InvalidArgument:
 //   model.len()      <= 256 bytes
-//   raw_text.len()   <= 1 MiB
+//   raw_text.len()   <= 4 MiB
 //   messages.len()   <= 1000 elements
-//   message.content  <= 1 MiB each
+//   message.content  <= 4 MiB each
 // Plus a protocol-layer cap configured in main.rs:
-//   max_decoding_message_size = 1 MiB     (matches field caps)
+//   max_decoding_message_size = 4 MiB     (matches field caps)
 // The protocol cap is the dominant hard cap — anything larger than
-// 1 MiB is rejected by tonic with ResourceExhausted BEFORE proto
+// 4 MiB is rejected by tonic with ResourceExhausted BEFORE proto
 // deserialisation. The field caps are redundant defense-in-depth that
 // also defend the in-process library form (no tonic protocol layer)
 // and provide more specific InvalidArgument errors for callers that
@@ -84,12 +84,14 @@ message TokenizeRequest {
   repeated Message messages = 2;
 
   // Mutually exclusive with messages; for text-completion shape.
-  // PROTOCOL CAP: 1 MiB.
-  // Server rejects with InvalidArgument if len > 1 MiB (M6 / R3 N3).
+  // PROTOCOL CAP: 4 MiB.
+  // Server rejects with InvalidArgument if len > 4 MiB (M6 / R3 N3 / POST_GA_03 #114).
   string raw_text = 3;
 
   // Caller-supplied request_id for tracing/audit; mints UUIDv7 if
-  // empty. Surfaced in tokenize span (per trace-schema-spec §3.1).
+  // empty. Non-empty ids must parse as UUIDv7; UUIDv4 remains accepted
+  // for backward compatibility and increments a migration metric.
+  // Surfaced in tokenize span (per trace-schema-spec §3.1).
   string request_id = 4;
 
   message Message {
@@ -98,8 +100,8 @@ message TokenizeRequest {
 
     // Text content; vision/multimodal v2 will add binary
     // content_parts as a separate additive field.
-    // PROTOCOL CAP: 1 MiB.
-    // Server rejects with InvalidArgument if len > 1 MiB (M6 / R3 N3).
+    // PROTOCOL CAP: 4 MiB.
+    // Server rejects with InvalidArgument if len > 4 MiB (M6 / R3 N3 / POST_GA_03 #114).
     string content = 2;
 
     // Tool call payload tokens count for tool-using agents.

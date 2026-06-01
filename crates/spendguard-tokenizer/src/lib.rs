@@ -89,7 +89,7 @@ pub use tier3::tier3_fallback;
 pub use versions::{
     initial_seed_rows, slice04_seed_rows, TokenizerVersionId, TokenizerVersionRow,
     ANTHROPIC_CLAUDE3_VERSION_ID, COHERE_COMMAND_R_VERSION_ID, GEMINI_15_VERSION_ID,
-    HEURISTIC_FALLBACK_VERSION_ID, LLAMA_31_VERSION_ID, TIKTOKEN_CL100K_BASE_VERSION_ID,
+    LLAMA_31_VERSION_ID, TIER3_NULL_SENTINEL_VERSION_ID, TIKTOKEN_CL100K_BASE_VERSION_ID,
     TIKTOKEN_O200K_BASE_VERSION_ID, TIKTOKEN_P50K_BASE_VERSION_ID,
 };
 
@@ -117,13 +117,11 @@ pub mod asset_sha256 {
 
     /// sha256 of the embedded o200k_base.tiktoken bytes (used by
     /// gpt-4o / gpt-4o-mini families).
-    pub const O200K_BASE: &str =
-        "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d";
+    pub const O200K_BASE: &str = "446a9538cb6c348e3516120d7c08b09f57c36495e2acfffe59a5bf8b0cfb1a2d";
 
     /// sha256 of the embedded p50k_base.tiktoken bytes (used by
     /// text-davinci-003 / older models).
-    pub const P50K_BASE: &str =
-        "94b5ca7dff4d00767bc256fdd1b27e5b17361d7b8a5f968547f9f23eb70d2069";
+    pub const P50K_BASE: &str = "94b5ca7dff4d00767bc256fdd1b27e5b17361d7b8a5f968547f9f23eb70d2069";
 
     // ──────────────────────────────────────────────────────────────
     // SLICE_04 — Tier 2 expansion (Anthropic + Cohere via tokenizers
@@ -150,13 +148,11 @@ pub mod asset_sha256 {
     /// approximation since Google's official Gemini tokenizer is
     /// API-only). Spec §4.2 0.01 drift threshold accommodates the
     /// approximation gap; SLICE_05 shadow worker measures.
-    pub const GEMINI_15: &str =
-        "05e97791a5e007260de1db7e1692e53150e08cea481e2bf25435553380c147ee";
+    pub const GEMINI_15: &str = "05e97791a5e007260de1db7e1692e53150e08cea481e2bf25435553380c147ee";
 
     /// sha256 of the vendored Llama 3.1 tokenizer.json
     /// (from Xenova/Meta-Llama-3.1-Tokenizer on Hugging Face).
-    pub const LLAMA_31: &str =
-        "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4";
+    pub const LLAMA_31: &str = "79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4";
 }
 
 /// Public-surface request shape.
@@ -260,10 +256,7 @@ impl Tokenizer {
         };
 
         let latency_ns = start.elapsed().as_nanos() as i64;
-        Ok(TokenizeResponse {
-            latency_ns,
-            ..resp
-        })
+        Ok(TokenizeResponse { latency_ns, ..resp })
     }
 
     /// Read-only access to the compiled dispatch table — useful for

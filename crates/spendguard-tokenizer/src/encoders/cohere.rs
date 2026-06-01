@@ -51,8 +51,7 @@ use crate::{TokenizeRequest, ToolCall};
 use sha2::{Digest, Sha256};
 use tokenizers::Tokenizer;
 
-const ASSET_BYTES: &[u8] =
-    include_bytes!("../../data/cohere-command-r/tokenizer.json");
+const ASSET_BYTES: &[u8] = include_bytes!("../../data/cohere-command-r/tokenizer.json");
 
 const CROSS_CHECK_FIXTURE: &str = "spendguard-cross-check-fixture-v1alpha1";
 
@@ -78,12 +77,11 @@ impl CohereEncoder {
             crate::asset_sha256::COHERE_COMMAND_R,
         )?;
 
-        let tokenizer = Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| {
-            TokenizerError::AssetLoadFailed {
+        let tokenizer =
+            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
                 encoder: "cohere-command-r",
                 message: format!("Tokenizer::from_bytes failed: {e}"),
-            }
-        })?;
+            })?;
 
         cross_check(&tokenizer, EXPECTED_COHERE_FIXTURE)?;
 
@@ -227,13 +225,13 @@ fn verify_asset_sha256(
 }
 
 fn cross_check(tokenizer: &Tokenizer, expected: &[u32]) -> Result<(), TokenizerError> {
-    let enc = tokenizer
-        .encode(CROSS_CHECK_FIXTURE, false)
-        .map_err(|e| TokenizerError::AssetSignatureMismatch {
+    let enc = tokenizer.encode(CROSS_CHECK_FIXTURE, false).map_err(|e| {
+        TokenizerError::AssetSignatureMismatch {
             encoder: "cohere-command-r",
             expected: "cross_check_fixture_vector",
             actual: format!("fixture-encode-error: {e}"),
-        })?;
+        }
+    })?;
     let actual = enc.get_ids();
     if actual != expected {
         let expected_summary: String = expected
@@ -335,7 +333,9 @@ mod tests {
     #[test]
     fn cohere_empty_request_is_0() {
         let enc = CohereEncoder::new().expect("boot");
-        let r = enc.count_tokens_request(&TokenizeRequest::default()).unwrap();
+        let r = enc
+            .count_tokens_request(&TokenizeRequest::default())
+            .unwrap();
         assert_eq!(r.input_tokens, 0);
     }
 

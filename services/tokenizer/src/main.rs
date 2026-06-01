@@ -25,7 +25,10 @@
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -94,13 +97,20 @@ async fn main() -> Result<()> {
     );
 
     // ── Spawn the metrics hyper server (best-effort). ─────────────
+    //
+    // POST_GA_03 / #96: /readyz must not report ready until the gRPC
+    // listener is actually bound. The metrics server starts first so
+    // kubelet startup probes can observe health, but readiness stays
+    // false until bind_uds/bind_tcp flips this flag after listener bind.
+    let grpc_ready = Arc::new(AtomicBool::new(false));
     if !cfg.metrics_addr.is_empty() {
         let metrics_addr: SocketAddr = cfg
             .metrics_addr
             .parse()
             .with_context(|| format!("invalid metrics_addr `{}`", cfg.metrics_addr))?;
+        let metrics_ready = Arc::clone(&grpc_ready);
         tokio::spawn(async move {
-            if let Err(e) = run_metrics_server(metrics_addr).await {
+            if let Err(e) = run_metrics_server(metrics_addr, metrics_ready).await {
                 error!(?e, "metrics server exited with error");
             }
         });
@@ -130,22 +140,27 @@ async fn main() -> Result<()> {
         .await
         .context("boot shadow worker")?;
 
-    let svc = TokenizerSvc::new(Arc::clone(&tokenizer)).with_shadow_worker(shadow_handle);
+    let svc = TokenizerSvc::new(Arc::clone(&tokenizer))
+        .with_encode_timeout(std::time::Duration::from_millis(cfg.encode_timeout_ms))
+        .with_encode_max_concurrent(cfg.encode_max_concurrent)
+        .with_shadow_worker(shadow_handle);
     let tonic_svc = TokenizerServer::new(svc)
-        // Round-2 fix M6 + Round-3 fix N3: protocol-layer cap matches
-        // the field caps in server.rs (1 MiB raw_text + 1 MiB per
-        // message). Anything bigger is rejected by tonic with
+        // Round-2 fix M6 + Round-3 fix N3 + POST_GA_03 / #114:
+        // protocol-layer cap matches the field caps in server.rs (4 MiB
+        // raw_text + 4 MiB per message). Anything bigger is rejected by tonic with
         // ResourceExhausted before deserialisation; the field caps
         // are redundant defense-in-depth that also defend the
         // in-process library form. See server.rs:50 area for the
         // layered design rationale.
-        .max_decoding_message_size(1 << 20);
+        .max_decoding_message_size(
+            spendguard_tokenizer_service::server::TOKENIZER_REQUEST_CAP_BYTES,
+        );
 
     // ── Bind the gRPC server. ─────────────────────────────────────
     if let Some(uds_path) = cfg.uds_path.as_deref() {
-        bind_uds(uds_path, tonic_svc).await?;
+        bind_uds(uds_path, tonic_svc, Arc::clone(&grpc_ready)).await?;
     } else {
-        bind_tcp(&cfg, tonic_svc).await?;
+        bind_tcp(&cfg, tonic_svc, Arc::clone(&grpc_ready)).await?;
     }
 
     info!("spendguard-tokenizer-service shut down cleanly");
@@ -464,7 +479,11 @@ async fn cleanup_stale_uds(path: &Path) -> Result<()> {
 ///         target — potentially anywhere on the filesystem the
 ///         process can write. We refuse to follow symlinks and
 ///         only `unlink(2)` regular socket files.
-async fn bind_uds(uds_path: &str, tonic_svc: TokenizerServer<TokenizerSvc>) -> Result<()> {
+async fn bind_uds(
+    uds_path: &str,
+    tonic_svc: TokenizerServer<TokenizerSvc>,
+    grpc_ready: Arc<AtomicBool>,
+) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
     use tokio::net::UnixListener;
     let path = Path::new(uds_path);
@@ -493,6 +512,7 @@ async fn bind_uds(uds_path: &str, tonic_svc: TokenizerServer<TokenizerSvc>) -> R
         mode = "0660",
         "tokenizer UDS socket permissions set"
     );
+    grpc_ready.store(true, Ordering::Release);
 
     let incoming = async_stream::stream! {
         loop {
@@ -517,7 +537,11 @@ async fn bind_uds(uds_path: &str, tonic_svc: TokenizerServer<TokenizerSvc>) -> R
 
 /// TCP bind path. mTLS when cert+key+ca are all configured; plaintext
 /// otherwise (with a loud warn — production Helm profile rejects this).
-async fn bind_tcp(cfg: &Config, tonic_svc: TokenizerServer<TokenizerSvc>) -> Result<()> {
+async fn bind_tcp(
+    cfg: &Config,
+    tonic_svc: TokenizerServer<TokenizerSvc>,
+    grpc_ready: Arc<AtomicBool>,
+) -> Result<()> {
     let listen_addr: SocketAddr = cfg
         .listen_addr
         .parse()
@@ -548,9 +572,23 @@ async fn bind_tcp(cfg: &Config, tonic_svc: TokenizerServer<TokenizerSvc>) -> Res
         );
     }
 
+    let listener = tokio::net::TcpListener::bind(listen_addr)
+        .await
+        .with_context(|| format!("bind tokenizer tcp listener `{}`", cfg.listen_addr))?;
+    grpc_ready.store(true, Ordering::Release);
+
+    let incoming = async_stream::stream! {
+        loop {
+            match listener.accept().await {
+                Ok((stream, _addr)) => yield Ok::<_, std::io::Error>(stream),
+                Err(e) => yield Err(e),
+            }
+        }
+    };
+
     builder
         .add_service(tonic_svc)
-        .serve_with_shutdown(listen_addr, shutdown_signal())
+        .serve_with_incoming_shutdown(incoming, shutdown_signal())
         .await
         .context("tonic TCP gRPC server failed")
 }
@@ -595,9 +633,13 @@ fn init_tracing() {
 /// shadow worker counters. Held in a separate fn so tests can exercise
 /// rendering without binding a socket.
 fn render_metrics() -> String {
+    use spendguard_tokenizer_service::server::{
+        ENCODE_CONCURRENCY_LIMITED_TOTAL, ENCODE_TIMEOUT_TOTAL, INVALID_REQUEST_ID_TOTAL,
+        REQUEST_ID_V4_ACCEPTED_TOTAL,
+    };
     use spendguard_tokenizer_service::shadow::worker::{
         ALERT_ONCALL_ESCALATION_TOTAL, PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT, SHADOW_DROPPED_FULL,
-        SHADOW_SKIPPED_CHAT_SHAPE, SHADOW_WORKER_DEAD,
+        SHADOW_SKIPPED_CHAT_SHAPE, SHADOW_WORKER_DEAD, TOKENIZER_RATE_LIMITED_TOTAL,
     };
     use std::sync::atomic::Ordering;
     let dropped_full = SHADOW_DROPPED_FULL.load(Ordering::Relaxed);
@@ -605,6 +647,11 @@ fn render_metrics() -> String {
     let chat_skipped = SHADOW_SKIPPED_CHAT_SHAPE.load(Ordering::Relaxed);
     let schema_drift = PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT.load(Ordering::Relaxed);
     let escalations = ALERT_ONCALL_ESCALATION_TOTAL.load(Ordering::Relaxed);
+    let invalid_request_ids = INVALID_REQUEST_ID_TOTAL.load(Ordering::Relaxed);
+    let request_id_v4 = REQUEST_ID_V4_ACCEPTED_TOTAL.load(Ordering::Relaxed);
+    let encode_timeouts = ENCODE_TIMEOUT_TOTAL.load(Ordering::Relaxed);
+    let encode_concurrency_limited = ENCODE_CONCURRENCY_LIMITED_TOTAL.load(Ordering::Relaxed);
+    let rate_limited = TOKENIZER_RATE_LIMITED_TOTAL.load(Ordering::Relaxed);
     format!(
         "# HELP spendguard_tokenizer_tier3_hit_total \
          Number of Tier 3 fallback hits (spec §5.2).\n\
@@ -632,7 +679,27 @@ fn render_metrics() -> String {
          # HELP spendguard_tokenizer_drift_alert_oncall_escalation_total \
          Per-(tenant, model) drift alert reached the on-call escalation threshold (≥3 within 1h; R2 M10).\n\
          # TYPE spendguard_tokenizer_drift_alert_oncall_escalation_total counter\n\
-         spendguard_tokenizer_drift_alert_oncall_escalation_total {escalations}\n",
+         spendguard_tokenizer_drift_alert_oncall_escalation_total {escalations}\n\
+         # HELP spendguard_tokenizer_invalid_request_id_total \
+         Caller supplied an invalid or unsupported request_id UUID version.\n\
+         # TYPE spendguard_tokenizer_invalid_request_id_total counter\n\
+         spendguard_tokenizer_invalid_request_id_total {invalid_request_ids}\n\
+         # HELP spendguard_tokenizer_request_id_v4_accepted_total \
+         Caller supplied a valid UUIDv4 request_id accepted for backward compatibility.\n\
+         # TYPE spendguard_tokenizer_request_id_v4_accepted_total counter\n\
+         spendguard_tokenizer_request_id_v4_accepted_total {request_id_v4}\n\
+         # HELP spendguard_tokenizer_encode_timeout_total \
+         Tokenize requests that exceeded the service encode timeout.\n\
+         # TYPE spendguard_tokenizer_encode_timeout_total counter\n\
+         spendguard_tokenizer_encode_timeout_total {encode_timeouts}\n\
+         # HELP spendguard_tokenizer_encode_concurrency_limited_total \
+         Tokenize requests rejected because the encode work budget was exhausted.\n\
+         # TYPE spendguard_tokenizer_encode_concurrency_limited_total counter\n\
+         spendguard_tokenizer_encode_concurrency_limited_total {encode_concurrency_limited}\n\
+         # HELP spendguard_tokenizer_rate_limited_total \
+         Tier 1 count_tokens shadow samples skipped by per-tenant quota.\n\
+         # TYPE spendguard_tokenizer_rate_limited_total counter\n\
+         spendguard_tokenizer_rate_limited_total{{reason=\"count_tokens_quota\"}} {rate_limited}\n",
     )
 }
 
@@ -645,7 +712,7 @@ async fn shutdown_signal() {
 /// raw-hyper pattern used by services/canonical_ingest and
 /// services/ledger so the chart can scrape Prometheus + run the
 /// startup probe without an additional crate dependency.
-async fn run_metrics_server(addr: SocketAddr) -> Result<()> {
+async fn run_metrics_server(addr: SocketAddr, grpc_ready: Arc<AtomicBool>) -> Result<()> {
     use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::service::service_fn;
@@ -657,38 +724,52 @@ async fn run_metrics_server(addr: SocketAddr) -> Result<()> {
     loop {
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
+        let ready_for_conn = Arc::clone(&grpc_ready);
         tokio::spawn(async move {
-            let svc = service_fn(|req: Request<hyper::body::Incoming>| async move {
-                let (status, content_type, body): (StatusCode, &str, String) =
-                    match (req.method(), req.uri().path()) {
-                        (&Method::GET, "/metrics") => (
-                            StatusCode::OK,
-                            "text/plain; version=0.0.4; charset=utf-8",
-                            render_metrics(),
-                        ),
-                        (&Method::GET, "/healthz") => (
-                            StatusCode::OK,
-                            "text/plain; charset=utf-8",
-                            "ok".to_string(),
-                        ),
-                        (&Method::GET, "/readyz") => (
-                            StatusCode::OK,
-                            "text/plain; charset=utf-8",
-                            "ready".to_string(),
-                        ),
-                        _ => (
-                            StatusCode::NOT_FOUND,
-                            "text/plain; charset=utf-8",
-                            "not found".to_string(),
-                        ),
-                    };
-                Ok::<_, std::convert::Infallible>(
-                    Response::builder()
-                        .status(status)
-                        .header("content-type", content_type)
-                        .body(Full::new(Bytes::from(body)))
-                        .unwrap(),
-                )
+            let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
+                let ready = Arc::clone(&ready_for_conn);
+                async move {
+                    let (status, content_type, body): (StatusCode, &str, String) =
+                        match (req.method(), req.uri().path()) {
+                            (&Method::GET, "/metrics") => (
+                                StatusCode::OK,
+                                "text/plain; version=0.0.4; charset=utf-8",
+                                render_metrics(),
+                            ),
+                            (&Method::GET, "/healthz") => (
+                                StatusCode::OK,
+                                "text/plain; charset=utf-8",
+                                "ok".to_string(),
+                            ),
+                            (&Method::GET, "/readyz") => {
+                                if ready.load(Ordering::Acquire) {
+                                    (
+                                        StatusCode::OK,
+                                        "text/plain; charset=utf-8",
+                                        "ready".to_string(),
+                                    )
+                                } else {
+                                    (
+                                        StatusCode::SERVICE_UNAVAILABLE,
+                                        "text/plain; charset=utf-8",
+                                        "not ready: grpc listener not bound".to_string(),
+                                    )
+                                }
+                            }
+                            _ => (
+                                StatusCode::NOT_FOUND,
+                                "text/plain; charset=utf-8",
+                                "not found".to_string(),
+                            ),
+                        };
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(status)
+                            .header("content-type", content_type)
+                            .body(Full::new(Bytes::from(body)))
+                            .unwrap(),
+                    )
+                }
             });
             if let Err(err) = hyper::server::conn::http1::Builder::new()
                 .serve_connection(io, svc)
@@ -716,8 +797,18 @@ mod tests {
     //!
     //! Cases 3+4 are the actual attack defense; case 5 is paranoia.
     use super::*;
+    use spendguard_tokenizer_service::proto::canonical_ingest::v1::{
+        canonical_ingest_server::{CanonicalIngest, CanonicalIngestServer},
+        AuditChainEvent, EventResult, QueryAuditChainRequest, VerifySchemaBundleRequest,
+        VerifySchemaBundleResponse,
+    };
+    use std::pin::Pin;
     use tempfile::TempDir;
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers::ImageExt;
+    use testcontainers_modules::postgres::Postgres;
     use tokio::net::UnixListener;
+    use tonic::{Request, Response, Status};
 
     #[tokio::test]
     async fn cleanup_uds_notfound_is_noop() {
@@ -860,6 +951,121 @@ mod tests {
         h.try_send(ev).expect("drop handle accepts");
     }
 
+    #[derive(Clone, Default)]
+    struct BootCanonicalIngest;
+
+    #[tonic::async_trait]
+    impl CanonicalIngest for BootCanonicalIngest {
+        async fn verify_schema_bundle(
+            &self,
+            _request: Request<VerifySchemaBundleRequest>,
+        ) -> Result<Response<VerifySchemaBundleResponse>, Status> {
+            Err(Status::unimplemented("not used by boot_shadow_worker test"))
+        }
+
+        type QueryAuditChainStream =
+            Pin<Box<dyn tokio_stream::Stream<Item = Result<AuditChainEvent, Status>> + Send>>;
+
+        async fn query_audit_chain(
+            &self,
+            _request: Request<QueryAuditChainRequest>,
+        ) -> Result<Response<Self::QueryAuditChainStream>, Status> {
+            Ok(Response::new(Box::pin(tokio_stream::empty())))
+        }
+
+        async fn append_events(
+            &self,
+            request: Request<
+                spendguard_tokenizer_service::proto::canonical_ingest::v1::AppendEventsRequest,
+            >,
+        ) -> Result<
+            Response<
+                spendguard_tokenizer_service::proto::canonical_ingest::v1::AppendEventsResponse,
+            >,
+            Status,
+        > {
+            let event_id = request
+                .into_inner()
+                .events
+                .first()
+                .map(|event| event.id.clone())
+                .unwrap_or_default();
+            Ok(Response::new(spendguard_tokenizer_service::proto::canonical_ingest::v1::AppendEventsResponse {
+                results: vec![EventResult {
+                    event_id,
+                    status: spendguard_tokenizer_service::proto::canonical_ingest::v1::event_result::Status::Appended as i32,
+                    ingest_position: None,
+                    error: None,
+                }],
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn boot_shadow_worker_real_wiring_connects_postgres_and_canonical_ingest() {
+        let container = match Postgres::default().with_tag("16-alpine").start().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[tokenizer boot] Postgres not available: {e}");
+                return;
+            }
+        };
+        let host_port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("postgres host port");
+        let database_url =
+            format!("postgres://postgres:postgres@127.0.0.1:{host_port}/postgres?sslmode=disable");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test canonical_ingest");
+        let addr = listener.local_addr().expect("local addr");
+        let incoming = async_stream::stream! {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => yield Ok::<_, std::io::Error>(stream),
+                    Err(e) => yield Err(e),
+                }
+            }
+        };
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(CanonicalIngestServer::new(BootCanonicalIngest))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("test canonical_ingest server");
+        });
+
+        std::env::set_var("SPENDGUARD_PROFILE", "demo");
+        std::env::set_var("SPENDGUARD_TOKENIZER_SIGNING_MODE", "disabled");
+        std::env::set_var(
+            "SPENDGUARD_TOKENIZER_SIGNING_PRODUCER_IDENTITY",
+            "tokenizer-service:boot-test",
+        );
+
+        let mut cfg = minimal_cfg();
+        cfg.shadow_enabled = true;
+        cfg.anthropic_api_key = "test-anthropic-key".into();
+        cfg.canonical_ingest_url = format!("http://{addr}");
+        cfg.database_url = database_url;
+        cfg.sampling_override_database_url = String::new();
+        cfg.schema_bundle_id = "22222222-2222-7222-8222-222222222222".into();
+        cfg.schema_bundle_hash_hex = "ab".repeat(32);
+        cfg.canonical_schema_version = "spendguard.v1alpha1".into();
+
+        let handle = boot_shadow_worker(&cfg)
+            .await
+            .expect("real shadow worker boots with DB + canonical_ingest");
+        handle
+            .try_send(make_shadow_event())
+            .expect("real worker handle accepts");
+
+        std::env::remove_var("SPENDGUARD_TOKENIZER_SIGNING_PRODUCER_IDENTITY");
+        std::env::remove_var("SPENDGUARD_TOKENIZER_SIGNING_MODE");
+        std::env::remove_var("SPENDGUARD_PROFILE");
+    }
+
     #[test]
     fn build_sink_mtls_config_all_or_none() {
         let mut cfg = minimal_cfg();
@@ -887,6 +1093,11 @@ mod tests {
         assert!(body.contains("spendguard_tokenizer_shadow_skipped_chat_shape_total"));
         assert!(body.contains("spendguard_tokenizer_provider_count_tokens_schema_drift_total"));
         assert!(body.contains("spendguard_tokenizer_drift_alert_oncall_escalation_total"));
+        assert!(body.contains("spendguard_tokenizer_invalid_request_id_total"));
+        assert!(body.contains("spendguard_tokenizer_request_id_v4_accepted_total"));
+        assert!(body.contains("spendguard_tokenizer_encode_timeout_total"));
+        assert!(body.contains("spendguard_tokenizer_encode_concurrency_limited_total"));
+        assert!(body.contains("spendguard_tokenizer_rate_limited_total"));
     }
 
     fn make_shadow_event() -> spendguard_tokenizer_service::shadow::worker::ShadowEvent {

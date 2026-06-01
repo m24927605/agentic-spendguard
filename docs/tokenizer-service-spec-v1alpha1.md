@@ -148,6 +148,8 @@ message TokenizeRequest {
   string raw_text = 3;  // mutually exclusive with messages; for text-completion shape
 
   // Caller-supplied request_id for tracing/audit; mints UUIDv7 if empty.
+  // Non-empty values must be UUIDv7. UUIDv4 remains accepted for
+  // backward compatibility and increments a migration metric.
   string request_id = 4;
 
   message Message {
@@ -834,14 +836,28 @@ CloudEvent proto mirror（per audit-chain extension §3.2）對應 tags 306-307�
 
 | Tier | p50 | p99 | p99.9 |
 |---|---|---|---|
-| Tier 2 (library form, in-process) | < 0.1 ms | **< 1 ms** | < 5 ms |
-| Tier 2 (gRPC form, mTLS roundtrip) | < 0.5 ms | < 3 ms | < 10 ms |
+| Tier 2 (library form, in-process, <=1K chars) | < 0.1 ms | **< 1 ms** | < 5 ms |
+| Tier 2 (library form, in-process, 10K-char stress) | < 0.8 ms | < 5 ms | < 20 ms |
+| Tier 2 (gRPC form, mTLS roundtrip, <=1K chars) | < 0.5 ms | < 3 ms | < 10 ms |
 | Tier 3 (heuristic) | < 0.01 ms | < 0.05 ms | < 0.1 ms |
 | Tier 1 (shadow, off hot path) | N/A | N/A | N/A |
 
-Benchmark methodology：對 10K-token average input、所有 supported models、commodity hardware (8 vCPU, 16 GB RAM, c5/c6 EC2 baseline)。Bench harness 在 SLICE 03 acceptance 必含 + 持續 CI run。
+Benchmark methodology：對 <=1K-char steady-state prompts與 10K-char stress prompts 分開量測，覆蓋所有 supported encoder families，commodity hardware (8 vCPU, 16 GB RAM, c5/c6 EC2 baseline)。POST_GA_03 修正原先把「10K average input」也承諾 <1ms p99 的過度嚴格文字；10K-char payloads 仍必須在固定 stress bucket 內通過，不能拿 steady-state SLO 掩蓋長 prompt 退化。
 
-Tier 2 p99 < 1ms 是 GA prerequisite #2 of this spec。
+Tier 2 <=1K-char p99 < 1ms 是 GA prerequisite #2 of this spec。10K-char stress p99 <5ms 是 runtime hardening gate，用來抓 BPE asset 或 envelope implementation 的階段性退化。
+
+POST_GA_03 gRPC service form additionally wraps synchronous encode work
+with `SPENDGUARD_TOKENIZER_ENCODE_TIMEOUT_MS` (Helm:
+`tokenizer.encodeTimeoutMs`). The default is 30s, intentionally larger
+than the 10K stress SLO and compatible with the 4 MiB accepted request
+cap; operators lowering this timeout must also lower upstream request
+caps or prove long-prompt benchmarks stay below the configured value.
+Because `spawn_blocking` work is not cancellable by dropping the client
+wait handle, the service also enforces
+`SPENDGUARD_TOKENIZER_ENCODE_MAX_CONCURRENT` (Helm:
+`tokenizer.encodeMaxConcurrent`, default 32). The concurrency permit is
+held inside the blocking encode closure until the actual encode returns,
+so timed-out RPCs cannot create unbounded background CPU work.
 
 ### 10.2 Shadow availability
 

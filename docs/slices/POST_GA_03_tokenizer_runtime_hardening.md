@@ -1,7 +1,7 @@
 # POST_GA 03 - Tokenizer Runtime Hardening
 
 > **Branch**: `post-ga/POST_GA_03_tokenizer_runtime_hardening`
-> **Status**: draft
+> **Status**: adversarial review clean; pending merge
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `tokenizer-service-spec-v1alpha1.md`
 > **Issues**: #92, #94, #96, #98, #100, #103, #105, #110, #111, #112, #114, #115, #117, #118, #119, #126, #127, #129, #133, #135, #148, #149, #151, #152, #156
 > **Estimated change size**: large; tokenizer runtime, security, tests, Helm
@@ -126,11 +126,18 @@ grep/tests.
 | Security Engineer | Request IDs and metrics exposure are security-relevant | #103 and #111 in scope |
 | Database Optimizer | Event-time sampling fixes require migration review | #148 and #149 |
 | Tokenizer Domain Expert | Provider parity tests must avoid tautological fixtures | #117, #119, #133 |
+| Implementer | Runtime hardening landed in eight atomic commits | Evidence: `docs/reviews/post-ga/POST_GA_03_tokenizer_runtime_hardening/implementation-evidence.md` |
+| Backend Architect | Demo gate compile blocker in webhook receiver was in-scope because it blocked `make demo-up` | `IDEMPOTENCY_CONFLICT` now maps to HTTP 409 with regression test |
+| Test Lead | Dirty demo volume failure is not acceptable evidence; rerun after `make demo-down` | Clean `make demo-up DEMO_MODE=default` passed Step 8 and outbox closure |
+| Adversarial Reviewer R1 | Metrics NetworkPolicy must preserve public ingress; encode timeout must match accepted request size | Both fixed; evidence in `round-1-codex-review.txt` and implementation evidence |
+| Adversarial Reviewer R2 | Timeout alone does not cancel `spawn_blocking` encode work | Added semaphore work budget held inside blocking closure until encode completion |
+| Adversarial Reviewer R3 | Encode work-budget rejections must be visible to operators | Exported `spendguard_tokenizer_encode_concurrency_limited_total` in `/metrics` |
+| Adversarial Reviewer R4 | No findings | Clean review; no Staff+ arbitration required |
 
 ## §14. Merge Checklist
 
-- [ ] Runtime tokenizer tests pass
-- [ ] Helm/demo gates pass
-- [ ] All mapped issues have closure evidence
-- [ ] AIT review clean or Staff+ arbitration recorded
+- [x] Runtime tokenizer tests pass
+- [x] Helm/demo gates pass
+- [x] All mapped issues have closure evidence
+- [x] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated

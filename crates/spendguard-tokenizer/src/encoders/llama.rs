@@ -59,19 +59,17 @@ use tokenizers::Tokenizer;
 
 const ASSET_BYTES: &[u8] = include_bytes!("../../data/llama-3.1/tokenizer.json");
 
-const CROSS_CHECK_FIXTURE: &str = "spendguard-cross-check-fixture-v1alpha1";
+const CROSS_CHECK_FIXTURE: &str = "spendguard-llama-cross-check-v1alpha1 你好 llama-ñ";
 
 /// Expected token vector when [`CROSS_CHECK_FIXTURE`] is encoded with
 /// the pinned Xenova Meta-Llama-3.1-Tokenizer revision.
 ///
-/// Notable: this vector matches the SLICE_03 `EXPECTED_CL100K_FIXTURE`
-/// because Llama 3.1's BPE vocabulary uses the same byte IDs as
-/// OpenAI cl100k_base for the ASCII subset that the fixture string
-/// uses. This is a vocab-id coincidence; the encoders are distinct
-/// (separate `Tokenizer` instances) and they would diverge on
-/// non-ASCII input.
+/// POST_GA_03 / #119: the fixture intentionally includes non-ASCII
+/// bytes so it cannot accidentally match OpenAI cl100k's ASCII-subset
+/// vector and mask a wrong asset.
 const EXPECTED_LLAMA_FIXTURE: &[u32] = &[
-    2203, 408, 27190, 77529, 16313, 2269, 13025, 8437, 16, 7288, 16,
+    2203, 408, 27190, 12, 657, 3105, 77529, 16313, 8437, 16, 7288, 16, 118195, 53901, 94776, 12,
+    5771,
 ];
 
 pub struct LlamaEncoder {
@@ -230,13 +228,13 @@ fn verify_asset_sha256(
 }
 
 fn cross_check(tokenizer: &Tokenizer, expected: &[u32]) -> Result<(), TokenizerError> {
-    let enc = tokenizer
-        .encode(CROSS_CHECK_FIXTURE, false)
-        .map_err(|e| TokenizerError::AssetSignatureMismatch {
+    let enc = tokenizer.encode(CROSS_CHECK_FIXTURE, false).map_err(|e| {
+        TokenizerError::AssetSignatureMismatch {
             encoder: "llama-3.1",
             expected: "cross_check_fixture_vector",
             actual: format!("fixture-encode-error: {e}"),
-        })?;
+        }
+    })?;
     let actual = enc.get_ids();
     if actual != expected {
         let expected_summary: String = expected
@@ -270,6 +268,23 @@ mod tests {
     #[test]
     fn llama_loads_and_passes_integrity() {
         let _enc = LlamaEncoder::new().expect("Llama encoder boots clean");
+    }
+
+    #[test]
+    fn llama_rejects_tampered_asset_bytes() {
+        let mut tampered = ASSET_BYTES.to_vec();
+        tampered[2048] ^= 0x01;
+
+        let err = verify_asset_sha256("llama-3.1", &tampered, crate::asset_sha256::LLAMA_31)
+            .expect_err("tamper must fail");
+
+        assert!(matches!(
+            err,
+            TokenizerError::AssetSignatureMismatch {
+                encoder: "llama-3.1",
+                ..
+            }
+        ));
     }
 
     #[test]

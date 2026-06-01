@@ -87,11 +87,7 @@ pub struct GeminiEncoder {
 
 impl GeminiEncoder {
     pub fn new() -> Result<Self, TokenizerError> {
-        verify_asset_sha256(
-            "gemini-1.5",
-            ASSET_BYTES,
-            crate::asset_sha256::GEMINI_15,
-        )?;
+        verify_asset_sha256("gemini-1.5", ASSET_BYTES, crate::asset_sha256::GEMINI_15)?;
 
         let tokenizer =
             Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
@@ -239,13 +235,13 @@ fn verify_asset_sha256(
 }
 
 fn cross_check(tokenizer: &Tokenizer, expected: &[u32]) -> Result<(), TokenizerError> {
-    let enc = tokenizer
-        .encode(CROSS_CHECK_FIXTURE, false)
-        .map_err(|e| TokenizerError::AssetSignatureMismatch {
+    let enc = tokenizer.encode(CROSS_CHECK_FIXTURE, false).map_err(|e| {
+        TokenizerError::AssetSignatureMismatch {
             encoder: "gemini-1.5",
             expected: "cross_check_fixture_vector",
             actual: format!("fixture-encode-error: {e}"),
-        })?;
+        }
+    })?;
     let actual = enc.get_ids();
     if actual != expected {
         let expected_summary: String = expected
@@ -279,6 +275,23 @@ mod tests {
     #[test]
     fn gemini_loads_and_passes_integrity() {
         let _enc = GeminiEncoder::new().expect("Gemini encoder boots clean");
+    }
+
+    #[test]
+    fn gemini_rejects_tampered_asset_bytes() {
+        let mut tampered = ASSET_BYTES.to_vec();
+        tampered[2048] ^= 0x01;
+
+        let err = verify_asset_sha256("gemini-1.5", &tampered, crate::asset_sha256::GEMINI_15)
+            .expect_err("tamper must fail");
+
+        assert!(matches!(
+            err,
+            TokenizerError::AssetSignatureMismatch {
+                encoder: "gemini-1.5",
+                ..
+            }
+        ));
     }
 
     #[test]

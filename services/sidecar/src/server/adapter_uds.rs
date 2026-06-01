@@ -1151,11 +1151,19 @@ mod approval_resume_payload {
         live_bundle.parsed.prediction_policy.as_str().to_string()
     }
 
+    pub(super) fn apply_resume_audit_decision_policy_field(
+        cloudevent: &mut crate::proto::common::v1::CloudEvent,
+        live_bundle: &crate::domain::state::CachedContractBundle,
+    ) {
+        cloudevent.prediction_policy_used = resume_audit_decision_policy_field(live_bundle);
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
         use crate::contract::types::{Contract, PredictionPolicy};
         use crate::domain::state::CachedContractBundle;
+        use crate::proto::common::v1::CloudEvent;
         use std::sync::Arc;
         use uuid::Uuid;
 
@@ -1250,6 +1258,19 @@ mod approval_resume_payload {
                     s
                 );
             }
+        }
+
+        #[test]
+        fn resume_emit_helper_populates_cloud_event_policy_field() {
+            let b = _fixture_bundle(PredictionPolicy::AdaptiveCeiling, "spendguard.ai/v1alpha2");
+            let mut ce = CloudEvent {
+                r#type: "spendguard.audit.decision".into(),
+                ..Default::default()
+            };
+
+            apply_resume_audit_decision_policy_field(&mut ce, &b);
+
+            assert_eq!(ce.prediction_policy_used, "ADAPTIVE_CEILING");
         }
     }
 
@@ -1419,7 +1440,7 @@ mod approval_resume_payload {
             // bundle-hash hot-reload guard above ensures the live bundle
             // matches the operator's approved bundle, so the policy value
             // we emit here is the policy the operator approved under.
-            cloudevent.prediction_policy_used = resume_audit_decision_policy_field(&live_bundle);
+            apply_resume_audit_decision_policy_field(&mut cloudevent, &live_bundle);
             crate::audit::sign_cloudevent_in_place(&*state.inner.signer, &mut cloudevent)
                 .await
                 .map_err(|e| format!("sign resume cloudevent: {e}"))?;

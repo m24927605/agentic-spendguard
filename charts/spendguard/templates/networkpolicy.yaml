@@ -296,6 +296,78 @@ spec:
               {{- include "spendguard.selector" (merge (dict "component" "run-cost-projector") .) | nindent 14 }}
       ports:
         - { protocol: TCP, port: 50055 }
+{{- if .Values.networkPolicy.metricsIngress.enabled }}
+---
+# ────────────────────────────────────────────────────────────────────────
+# Allow metrics scraping while preserving internal and public service ingress.
+#
+# POST_GA_03 / #103: once any Ingress NetworkPolicy selects a pod, all
+# unlisted ingress is denied. This policy therefore includes:
+#   * same-release pod-to-pod ingress on all ports, preserving existing
+#     gRPC/service traffic;
+#   * L2-enforced app pods to egress_proxy on :9000;
+#   * Prometheus namespace to first-party metrics ports;
+#   * explicitly configured public API ports from any source so an ingress
+#     controller / load balancer / webhook provider is not cut off merely
+#     because metrics scraping was enabled.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-metrics-ingress
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" "networkpolicy") .) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "spendguard.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+{{ with .Values.networkPolicy.metricsIngress.publicPorts }}
+    # Preserve public service ingress. A NetworkPolicy rule with ports and
+    # no `from` allows all sources on those ports, matching the pre-policy
+    # service reachability while keeping all other ports isolated.
+    - ports:
+{{- range . }}
+        - { protocol: TCP, port: {{ . }} }
+{{- end }}
+{{ end }}
+    # Preserve first-party service-to-service calls inside this release.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "spendguard.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+    # L2-enforced app pods reach only the egress_proxy listener.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $appNamespace | quote }}
+          podSelector:
+            matchLabels:
+              spendguard.io/enforced: "true"
+      ports:
+        - { protocol: TCP, port: 9000 }
+    # Prometheus / metrics collector.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.metricsIngress.prometheusNamespace | quote }}
+      ports:
+        - { protocol: TCP, port: 9091 }
+        - { protocol: TCP, port: 9092 }
+        - { protocol: TCP, port: 9093 }
+        - { protocol: TCP, port: 9094 }
+        - { protocol: TCP, port: 9096 }
+        - { protocol: TCP, port: 9097 }
+        - { protocol: TCP, port: 9098 }
+        - { protocol: TCP, port: 9099 }
+        - { protocol: TCP, port: 9100 }
+        - { protocol: TCP, port: 9101 }
+        - { protocol: TCP, port: 9102 }
+{{- end }}
 {{- end -}}
 {{- /* SLICE_11 Phase D — production-profile gate.
 

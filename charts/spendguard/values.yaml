@@ -274,6 +274,14 @@ tokenizer:
   # Round-2 fix M4: production profile bounds-checks this to
   # (0.00001, 0.05] and tolerates string-from-helm-set.
   tier3AlertThreshold: 0.001
+  # POST_GA_03 / #127: timeout for synchronous tokenizer encode work
+  # in the gRPC service form. Default is sized for the 4 MiB accepted
+  # request cap; lower this only with a correspondingly lower ingress cap.
+  encodeTimeoutMs: 30000
+  # POST_GA_03 / Round 2: max concurrent blocking encode jobs. This is
+  # a CPU work budget held until encode completion, even if the caller's
+  # RPC has already timed out.
+  encodeMaxConcurrent: 32
   # Round-2 fix B3.3 + Round-3 Backend N2: secure-transport gates for
   # production profile. Set EXACTLY ONE of these under
   # chart.profile=production. Demo profile leaves both empty and falls
@@ -601,6 +609,23 @@ networkPolicy:
   # internal Postgres add it via internal podSelector + extraEgressRules).
   # Most managed-Postgres deployments use a known CIDR — set it here.
   postgresCidrs: []
+  # POST_GA_03 / #103: when NetworkPolicy is enabled, explicitly allow
+  # Prometheus-style scrapers to reach SpendGuard metrics ports. Same-
+  # release pod ingress remains allowed by the rendered policy so this
+  # does not break gRPC service traffic. Public service ports are listed
+  # separately because any Ingress policy selecting a pod isolates all
+  # other ingress unless explicitly allowed.
+  metricsIngress:
+    enabled: true
+    prometheusNamespace: monitoring
+    # Preserve externally routed traffic through ingress controllers /
+    # load balancers for public SpendGuard APIs while metrics scraping is
+    # enabled. Defaults cover webhook-receiver HTTPS and control-plane
+    # HTTP. Operators can set [] and provide stricter external ingress
+    # policies if their platform owns those allows elsewhere.
+    publicPorts:
+      - 8443
+      - 8091
 
 # ── stats_aggregator service (SLICE_06) ─────────────────────────────
 # Spec: docs/stats-aggregator-spec-v1alpha1.md (full).

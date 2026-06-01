@@ -105,8 +105,8 @@ pub struct ShadowEvent {
     pub encoder_kind: EncoderKind,
     pub t2_input_tokens: i64,
     pub t2_tokenizer_version_id: String,
-    /// Raw text the caller tokenized. Bounded upstream by spec §10.1
-    /// 1 MiB cap so channel memory pressure is bounded.
+    /// Raw text the caller tokenized. Bounded upstream by the shared
+    /// 4 MiB tokenizer request cap so channel memory pressure is bounded.
     pub raw_text: String,
 }
 
@@ -393,6 +393,7 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
     {
         Ok(true) => {}
         Ok(false) => {
+            TOKENIZER_RATE_LIMITED_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             debug!(
                 tenant = %event.tenant_id,
                 provider,
@@ -565,6 +566,13 @@ pub static SHADOW_SKIPPED_CHAT_SHAPE: std::sync::atomic::AtomicU64 =
 pub static PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
+/// POST_GA_03 / #110 — Tier 1 provider count_tokens calls skipped by the
+/// shared per-tenant quota. Kept aggregate to avoid high-cardinality tenant
+/// labels on the built-in endpoint; logs carry tenant/model for forensic
+/// correlation.
+pub static TOKENIZER_RATE_LIMITED_TOTAL: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 async fn on_provider_error(
     key: &ShadowKey,
     err: &ProviderError,
@@ -618,6 +626,7 @@ async fn emit_drift_alert(
         "sample_id": sample_id.to_string(),
         "tenant_id": event.tenant_id.to_string(),
         "model": event.model,
+        "canonical_model": event.model,
         "tokenizer_version_id": event.t2_tokenizer_version_id,
         "tier2_count": event.t2_input_tokens,
         "tier1_count": provider_count.input_tokens,
@@ -948,6 +957,64 @@ mod tests {
         assert!(events.is_empty(), "no alert event for no-drift sample");
     }
 
+    #[derive(Debug, Default)]
+    struct SlowSamplePersister {
+        rows: parking_lot::Mutex<Vec<SampleRow>>,
+        persist_finished_at: parking_lot::Mutex<Option<chrono::DateTime<chrono::Utc>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl SamplePersister for SlowSamplePersister {
+        async fn persist(&self, sample: SampleRow) -> Result<(), anyhow::Error> {
+            tokio::time::sleep(Duration::from_millis(75)).await;
+            let finished_at = Utc::now();
+            self.rows.lock().push(sample);
+            *self.persist_finished_at.lock() = Some(finished_at);
+            Ok(())
+        }
+
+        async fn mark_drift_alert_emitted(
+            &self,
+            _sample_id: uuid::Uuid,
+            _sampled_at: chrono::DateTime<chrono::Utc>,
+            _emitted_at: chrono::DateTime<chrono::Utc>,
+        ) -> Result<(), anyhow::Error> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn sampled_at_is_captured_before_persistence_latency() {
+        let (_server, c) = anthropic_mock_returning(100).await;
+        let providers = ProviderRoster {
+            anthropic: Some(c),
+            gemini: None,
+        };
+        let persister = Arc::new(SlowSamplePersister::default());
+        let mut deps = deps_for_test(providers);
+        deps.persister = persister.clone();
+
+        let before = Utc::now();
+        let out = process_one(&ev_anthropic(100, "hi"), &deps).await;
+        let after = Utc::now();
+
+        assert_eq!(out, ShadowOutcome::Sampled);
+        let rows = persister.rows.lock();
+        assert_eq!(rows.len(), 1);
+        let sampled_at = rows[0].sampled_at;
+        drop(rows);
+        let finished_at = persister
+            .persist_finished_at
+            .lock()
+            .expect("persist finished");
+        assert!(sampled_at >= before);
+        assert!(sampled_at <= after);
+        assert!(
+            sampled_at < finished_at,
+            "sampled_at regressed to persistence completion time"
+        );
+    }
+
     #[tokio::test]
     async fn drift_above_threshold_emits_signed_cloudevent() {
         // Anthropic threshold is 0.01. T1=100, T2=90 → drift=10% ≫ 0.01.
@@ -987,6 +1054,7 @@ mod tests {
         // Decode the JSON data and verify required fields.
         let data: serde_json::Value = serde_json::from_slice(&ce.data).unwrap();
         assert_eq!(data["model"], "claude-3-5-sonnet-20241022");
+        assert_eq!(data["canonical_model"], "claude-3-5-sonnet-20241022");
         assert_eq!(data["tier1_count"], 100);
         assert_eq!(data["tier2_count"], 90);
         assert_eq!(data["encoder_kind"], "ANTHROPIC_BPE");
