@@ -1,7 +1,7 @@
 # POST_GA 01 - Ledger Release Replay Semantics
 
 > **Branch**: `post-ga/POST_GA_01_ledger_replay_semantics`
-> **Status**: draft
+> **Status**: implementation complete; adversarial review round 1 clean
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `ledger-storage-spec-v1alpha1.md`, `proto/spendguard/ledger/v1/ledger.proto`, `proto/spendguard/common/v1/common.proto`, `proto/spendguard/sidecar_adapter/v1/adapter.proto`
 > **Issues**: #85, #86, #87
 > **Estimated change size**: medium; ledger/sidecar release semantics, shared error code, tests, docs
@@ -147,12 +147,14 @@ before accepting.
 | Security Engineer | Do not let replay bypass fencing for new mutations | §7 blocks stale mutation |
 | Database Optimizer | Avoid ledger schema migration until replay response grows a durable signature field | §5 |
 | Ledger Domain Expert | Original audit signature is the user-visible replay truth | §6 |
+| Implementer | Added same-process release signature cache, moved explicit preflight fencing into `run_release`, and mapped `IdempotencyConflict` to `IDEMPOTENCY_CONFLICT` | Commits `2447887`, `064de5b`, `ea5bbc1`, `99cb23b` |
+| Reviewer | AIT parser rejected `--review-mode`; fallback codex CLI adversarial review inspected diff and tests | Round 1 clean; no findings |
 
 ## §14. Merge Checklist
 
-- [ ] #85 fixed and tested
-- [ ] #86 fixed and tested
-- [ ] #87 fixed and tested
-- [ ] Ledger tests and evidence pass
-- [ ] AIT review clean or Staff+ arbitration recorded
-- [ ] Memory updated
+- [x] #85 fixed and tested
+- [x] #86 fixed and tested
+- [x] #87 fixed and tested
+- [x] Ledger tests and evidence pass
+- [x] AIT review clean or Staff+ arbitration recorded
+- [ ] Memory updated after merge

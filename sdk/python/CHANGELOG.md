@@ -108,7 +108,7 @@ reservation via the wire shape the spec defines.
 - **`ReleaseOutcome` dataclass** — exported from top-level
   `spendguard` package. Detached Ed25519 signature of the emitted
   `audit.release` CloudEvent (non-empty on first success; empty on
-  ledger replay branch — see GH #85).
+  cache-miss ledger replay branch).
 - Demo coverage: `DEMO_MODE=decision` now exercises the explicit
   Release RPC as a smoke step before the main commit flow. Verifies
   SDK → sidecar → ledger → audit chain end-to-end. Output line:
@@ -145,16 +145,17 @@ async with SpendGuardClient(socket_path=..., tenant_id=...) as c:
 - ASP Draft-01 §8 closed-deltas section now lists this as the first
   closed delta with end-to-end SDK exercise.
 
-### Known v1 limitations
+### Post-GA hardening update — 2026-06-02
 
-- Replay branch returns empty `audit_event_signature` —
-  [GH #85](https://github.com/m24927605/agentic-spendguard/issues/85)
-- Retries fail with `FENCING_EPOCH_STALE` if the sidecar's fencing
-  lease changed since the original call —
-  [GH #86](https://github.com/m24927605/agentic-spendguard/issues/86)
-- Ledger `IdempotencyConflict` surfaces as gRPC `INTERNAL` rather
-  than `FailedPrecondition` —
-  [GH #87](https://github.com/m24927605/agentic-spendguard/issues/87)
+- Same-process `ReleaseReservation` replay now returns the original
+  `audit_event_signature` from the sidecar replay cache. Cache-miss
+  replay still returns empty bytes rather than fabricating a receipt.
+- Retry replay is allowed to reach the ledger idempotency branch after
+  local fencing TTL movement; first-time release mutations still require
+  active fencing.
+- Ledger `IdempotencyConflict` now uses the shared
+  `IDEMPOTENCY_CONFLICT` proto code and maps to gRPC
+  `FailedPrecondition`.
 
 ### Unchanged
 
