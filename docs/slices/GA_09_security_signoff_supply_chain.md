@@ -1,7 +1,7 @@
 # GA 09 - Security Signoff and Supply Chain
 
 > **Branch**: `ga/GA_09_security_signoff_supply_chain`
-> **Status**: implemented; adversarial review R5 pending
+> **Status**: implemented; Staff+ arbitration accepted final fix
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; threat model, scan scripts, supply-chain docs
 
@@ -108,6 +108,12 @@ R4 regression coverage added after adversarial review:
 - `.github/workflows/publish-images.yml` now runs the repository Trivy scan once in a pre-matrix job and gates the image matrix on that job.
 - `scripts/security/ga-security-scan.sh` now fails if the repository scan is moved back into the image matrix.
 
+R5 Staff+ arbitration coverage:
+
+- Round 5 adversarial review found one remaining P2: `production-helm-validator.txt` captured a developer-local absolute path because `ga-security-scan.sh` canonicalized `output_dir` before logging the validator command.
+- Staff+ Software Architect, Backend Architect, Security Engineer, Database Optimizer, and SpendGuard domain expert each voted `fix anyway`; no panel member accepted it as out-of-scope.
+- `scripts/security/ga-security-scan.sh` now passes a repo-relative `--rendered-manifest` path when possible, sanitizes generated evidence files, and scans the whole GA_09 evidence bundle for developer-local root/home paths before reporting PASS.
+
 Evidence:
 
 - `docs/reviews/ga-readiness/GA_09_security_signoff_supply_chain/README.md`
@@ -160,11 +166,12 @@ Reviewer must treat unhandled high-severity findings as blockers.
 | Security Engineer | R4 found release-mode output directory creation could make a clean repo look dirty | Moved the clean-worktree gate before evidence directory creation |
 | Security Engineer | R4 found default local scans could abort on optional cargo-audit fetch/lock errors | Default mode now records scanner execution failures while release mode fails closed |
 | Release Engineering Architect | R4 found repository Trivy scan repeated across every image matrix entry | Split repository scan into a single pre-matrix job and added a scan invariant |
+| Staff+ panel | R5 found GA_09 evidence leaked a developer-local absolute path after five review rounds | Panel unanimously voted `fix anyway`; scan now sanitizes evidence and guards the whole evidence bundle |
 
 ## §14. Merge Checklist
 
 - [x] Security signoff exists
 - [x] Scan script passes or fails closed with documented missing tool
 - [x] Helm security baseline still passes
-- [ ] AIT review clean or arbitration recorded
+- [x] AIT review clean or arbitration recorded
 - [ ] Memory updated

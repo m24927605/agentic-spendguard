@@ -65,6 +65,18 @@ fi
 mkdir -p "$output_dir"
 output_dir="$(cd "$output_dir" && pwd -P)"
 
+repo_relative_path() {
+  local path="$1"
+  case "$path" in
+    "$repo_root"/*)
+      printf '%s\n' "${path#"$repo_root"/}"
+      ;;
+    *)
+      printf '%s\n' "$path"
+      ;;
+  esac
+}
+
 run_and_capture() {
   local name="$1"
   shift
@@ -75,6 +87,39 @@ run_and_capture() {
     printf '\n\n'
     "$@"
   } >"$log_file" 2>&1
+}
+
+sanitize_evidence_paths() {
+  python3 - "$output_dir" "$repo_root" "$HOME" <<'PY'
+import sys
+from pathlib import Path
+
+output_dir = Path(sys.argv[1])
+repo_root = Path(sys.argv[2]).resolve()
+home = Path(sys.argv[3]).resolve()
+cargo_registry_src = home / ".cargo" / "registry" / "src"
+
+replacements = [
+    (str(cargo_registry_src), "$CARGO_REGISTRY_SRC"),
+    (str(repo_root), "$REPO"),
+    (str(home), "$HOME"),
+]
+replacements.sort(key=lambda item: len(item[0]), reverse=True)
+
+for path in sorted(output_dir.rglob("*")):
+    if not path.is_file():
+        continue
+    try:
+        contents = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
+    sanitized = contents
+    for needle, replacement in replacements:
+        if needle:
+            sanitized = sanitized.replace(needle, replacement)
+    if sanitized != contents:
+        path.write_text(sanitized, encoding="utf-8")
+PY
 }
 
 tool_version() {
@@ -146,8 +191,10 @@ handle_external_scanner_failure() {
 }
 
 run_and_capture helm-demo helm template spendguard charts/spendguard --set chart.profile=demo
-helm template spendguard charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production >"$output_dir/helm-production.yaml"
-run_and_capture production-helm-validator scripts/release/validate-production-helm-values.sh charts/spendguard/values-production.example.yaml --rendered-manifest "$output_dir/helm-production.yaml"
+helm_production_manifest="$output_dir/helm-production.yaml"
+helm_production_manifest_arg="$(repo_relative_path "$helm_production_manifest")"
+helm template spendguard charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production >"$helm_production_manifest"
+run_and_capture production-helm-validator scripts/release/validate-production-helm-values.sh charts/spendguard/values-production.example.yaml --rendered-manifest "$helm_production_manifest_arg"
 
 metadata_raw="$(mktemp)"
 cargo metadata --format-version 1 --locked >"$metadata_raw"
@@ -270,6 +317,8 @@ if command -v cargo-audit >/dev/null 2>&1; then
     rm -f "$output_dir/cargo-audit.err"
   fi
 fi
+
+sanitize_evidence_paths
 
 python3 - "$output_dir" "$commit_sha" "$branch_name" "$scan_started_utc" "${missing_external[*]-}" "${external_scanner_failures[*]-}" "$worktree_dirty_at_start" <<'PY'
 import json
@@ -461,20 +510,20 @@ record("svid_runtime_exact_uri", svid_runtime_ok, "runtime validator uses exact 
 sbom = json.loads((output_dir / "cargo-sbom.json").read_text(encoding="utf-8"))
 record("cargo_sbom_generated", sbom.get("package_count", 0) > 0, f"{sbom.get('package_count', 0)} Cargo packages recorded")
 local_path_tokens = [str(Path.home()), str(root)]
-evidence_paths = [
-    output_dir / "cargo-metadata.txt",
-    output_dir / "cargo-sbom.json",
-]
+evidence_paths = sorted(path for path in output_dir.rglob("*") if path.is_file())
 local_path_hits = []
 for evidence_path in evidence_paths:
-    contents = evidence_path.read_text(encoding="utf-8")
+    try:
+        contents = evidence_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        continue
     for token in local_path_tokens:
         if token and token in contents:
-            local_path_hits.append(f"{evidence_path.name}:{token}")
+            local_path_hits.append(f"{evidence_path.relative_to(output_dir)}:{token}")
 record(
-    "cargo_evidence_no_local_paths",
+    "evidence_no_local_paths",
     not local_path_hits,
-    "cargo metadata/SBOM evidence strips developer-local paths"
+    "GA_09 evidence strips developer-local paths"
     if not local_path_hits
     else ", ".join(local_path_hits),
 )

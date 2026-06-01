@@ -62,7 +62,7 @@ Default local acceptance may run without external scanners:
 scripts/security/ga-security-scan.sh
 ```
 
-That mode still validates repository invariants, records missing tools, records optional external scanner execution failures, and points release operators to the fail-closed release-mode command. Release-mode fails closed if any required scanner is missing or exits nonzero.
+That mode still validates repository invariants, records missing tools, records optional external scanner execution failures, sanitizes developer-local filesystem paths from evidence files, and points release operators to the fail-closed release-mode command. Release-mode fails closed if any required scanner is missing or exits nonzero.
 
 ## Release Bundle Relationship
 
