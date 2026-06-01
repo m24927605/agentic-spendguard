@@ -9,61 +9,61 @@
     "runs": 100
   },
   "completed_operations": 100,
-  "duration_seconds": 1.175,
+  "duration_seconds": 1.664,
   "error_count": 0,
   "errors": [],
   "expected_operations": 100,
   "failures": [],
-  "finished_at_unix": 1780291440.7200768,
+  "finished_at_unix": 1780292925.631962,
   "latency": {
     "end_to_end": {
       "count": 100,
-      "max_ms": 220.552,
-      "p50_ms": 34.342,
-      "p95_ms": 115.698,
-      "p99_ms": 208.951
+      "max_ms": 327.412,
+      "p50_ms": 46.159,
+      "p95_ms": 161.447,
+      "p99_ms": 310.217
     },
     "output_predictor": {
       "count": 100,
-      "max_ms": 15.728,
-      "p50_ms": 0.404,
-      "p95_ms": 4.153,
-      "p99_ms": 15.621
+      "max_ms": 26.774,
+      "p50_ms": 0.526,
+      "p95_ms": 3.792,
+      "p99_ms": 26.529
     },
     "run_cost_projector": {
       "count": 100,
-      "max_ms": 41.088,
-      "p50_ms": 1.113,
-      "p95_ms": 13.486,
-      "p99_ms": 39.343
+      "max_ms": 48.621,
+      "p50_ms": 1.574,
+      "p95_ms": 27.114,
+      "p99_ms": 48.104
     },
     "sidecar_confirm_publish_outcome": {
       "count": 100,
-      "max_ms": 2.349,
-      "p50_ms": 0.334,
-      "p95_ms": 0.938,
-      "p99_ms": 1.215
+      "max_ms": 3.043,
+      "p50_ms": 0.51,
+      "p95_ms": 1.798,
+      "p99_ms": 2.98
     },
     "sidecar_decision": {
       "count": 100,
-      "max_ms": 113.493,
-      "p50_ms": 16.723,
-      "p95_ms": 55.547,
-      "p99_ms": 95.676
+      "max_ms": 178.316,
+      "p50_ms": 22.489,
+      "p95_ms": 71.053,
+      "p99_ms": 142.43
     },
     "sidecar_emit_trace_events": {
       "count": 100,
-      "max_ms": 72.43,
-      "p50_ms": 16.03,
-      "p95_ms": 40.35,
-      "p99_ms": 54.237
+      "max_ms": 128.011,
+      "p50_ms": 19.98,
+      "p95_ms": 65.63,
+      "p99_ms": 86.305
     },
     "tokenizer": {
       "count": 100,
-      "max_ms": 12.301,
-      "p50_ms": 0.476,
-      "p95_ms": 1.429,
-      "p99_ms": 11.205
+      "max_ms": 20.318,
+      "p50_ms": 0.663,
+      "p95_ms": 2.646,
+      "p99_ms": 18.244
     }
   },
   "result": "pass",
@@ -111,6 +111,17 @@
       "tokenizer_p99_ms": 500
     }
   },
+  "service_metric_deltas": {
+    "output_predictor_cache_lookups": 100.0,
+    "output_predictor_predict_count": 100.0,
+    "output_predictor_predict_ok_total": 100.0,
+    "run_cost_projector_project_count": 200.0,
+    "run_cost_projector_project_ok_total": 200.0,
+    "sidecar_confirm_publish_outcome_ok": 100.0,
+    "sidecar_emit_trace_events_ok": 100.0,
+    "sidecar_request_decision_ok": 100.0,
+    "tokenizer_tier3_hits": 0.0
+  },
   "service_metrics": {
     "output_predictor_cache_lookups": 100.0,
     "output_predictor_predict_count": 100.0,
@@ -122,5 +133,5 @@
     "sidecar_request_decision_ok": 100.0,
     "tokenizer_tier3_hits": 0.0
   },
-  "started_at_unix": 1780291439.5450552
+  "started_at_unix": 1780292923.9683032
 }
