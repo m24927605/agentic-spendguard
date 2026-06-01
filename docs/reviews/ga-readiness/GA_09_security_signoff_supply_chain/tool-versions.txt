@@ -1,6 +1,6 @@
-commit=670291783cdadc9e3405e330adf5aa37529092b6
+commit=a3d2424b1a2be1cb8bbf6d31d68c2f0ff6d0e53c
 branch=ga/GA_09_security_signoff_supply_chain
-scan_started_utc=2026-06-01T07:33:29Z
+scan_started_utc=2026-06-01T07:56:33Z
 helm: v4.1.4+g05fa379
 python3: Python 3.9.6
 cargo: cargo 1.96.0 (30a34c682 2026-05-25)

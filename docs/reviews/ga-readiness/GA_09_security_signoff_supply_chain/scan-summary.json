@@ -5,8 +5,16 @@
       "detail": "bundles-init hands writable bundle volume to runtime UID 65532",
       "ok": true
     },
+    "cargo_evidence_no_local_paths": {
+      "detail": "cargo metadata/SBOM evidence strips developer-local paths",
+      "ok": true
+    },
     "cargo_sbom_generated": {
       "detail": "226 Cargo packages recorded",
+      "ok": true
+    },
+    "compose_sidecar_uds_volume_handoff": {
+      "detail": "compose hands existing sidecar UDS named volume to runtime UID before sidecar starts",
       "ok": true
     },
     "count_tokens_quota_present": {
@@ -19,6 +27,10 @@
     },
     "pii_shadow_worker_guard": {
       "detail": "shadow worker checks tenant opt-in",
+      "ok": true
+    },
+    "pki_ca_key_remains_root_only": {
+      "detail": "pki-init keeps demo CA private key out of runtime UID",
       "ok": true
     },
     "pki_volume_chowned_for_runtime_uid": {
@@ -102,12 +114,12 @@
       "ok": true
     }
   },
-  "commit_sha": "670291783cdadc9e3405e330adf5aa37529092b6",
+  "commit_sha": "a3d2424b1a2be1cb8bbf6d31d68c2f0ff6d0e53c",
   "errors": [],
   "external_tool_install": "brew install syft trivy cosign cargo-audit",
   "missing_external_tools": [],
   "release_mode": "scripts/security/ga-security-scan.sh --require-external-tools",
   "result": "pass",
-  "scan_started_utc": "2026-06-01T07:33:29Z",
+  "scan_started_utc": "2026-06-01T07:56:33Z",
   "schema": "spendguard.ga09.security_scan.v1alpha1"
 }

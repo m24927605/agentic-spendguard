@@ -1,9 +1,9 @@
 # GA_09 Security Scan Evidence
 
 - Result: pass
-- Commit: `670291783cdadc9e3405e330adf5aa37529092b6`
+- Commit: `a3d2424b1a2be1cb8bbf6d31d68c2f0ff6d0e53c`
 - Branch: `ga/GA_09_security_signoff_supply_chain`
-- Started UTC: `2026-06-01T07:33:29Z`
+- Started UTC: `2026-06-01T07:56:33Z`
 - Missing optional external tools: none
 - Release-mode command: `scripts/security/ga-security-scan.sh --require-external-tools`
 
@@ -20,7 +20,9 @@
 - PASS `sidecar_image_precreates_secret_links`: sidecar image prepares root-owned paths before USER switch
 - PASS `sidecar_entrypoint_nonroot_safe`: sidecar entrypoint only verifies mounted paths after USER switch
 - PASS `pki_volume_chowned_for_runtime_uid`: pki-init hands cert/key volume to runtime UID 65532
+- PASS `pki_ca_key_remains_root_only`: pki-init keeps demo CA private key out of runtime UID
 - PASS `bundles_volume_chowned_for_runtime_uid`: bundles-init hands writable bundle volume to runtime UID 65532
+- PASS `compose_sidecar_uds_volume_handoff`: compose hands existing sidecar UDS named volume to runtime UID before sidecar starts
 - PASS `production_values_no_plaintext_db`: no plaintext DB URL in production values
 - PASS `production_render_no_plaintext_db`: no plaintext DB URL in production render
 - PASS `production_render_has_networkpolicy`: NetworkPolicy rendered
@@ -34,3 +36,4 @@
 - PASS `svid_template_exact_uri`: Helm Certificate URI uses exact predictor-client tenant prefix
 - PASS `svid_runtime_exact_uri`: runtime validator uses exact predictor-client tenant prefix
 - PASS `cargo_sbom_generated`: 226 Cargo packages recorded
+- PASS `cargo_evidence_no_local_paths`: cargo metadata/SBOM evidence strips developer-local paths
