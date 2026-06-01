@@ -1,7 +1,7 @@
 # GA 10 - Customer Plugin Onboarding and Backlog Triage
 
 > **Branch**: `ga/GA_10_customer_plugin_onboarding_backlog`
-> **Status**: implementation
+> **Status**: accepted
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; docs, conformance checks, issue triage
 
@@ -106,11 +106,12 @@ Reviewer must inspect triage honesty and reject undocumented customer-critical f
 | Review R2 | codex CLI adversarial reviewer | Fixed reference-image `--insecure` override guidance and replaced invalid multi-issue `gh issue close` evidence with a reproducible loop |
 | Review R3 | codex CLI adversarial reviewer | Expanded TLS classification for SVID/URI-SAN/client-cert permission denials and clarified metadata fields as certification hard-fails rather than runtime fallback triggers |
 | Review R4 | codex CLI adversarial reviewer | Fixed checklist certification gap by requiring explicit reference-image `command`/`args` override or runtime proof that `--insecure` was not used |
+| Review R5 | codex CLI adversarial reviewer | Clean: no blocking correctness issues found; validator and Strategy C tests checked by reviewer |
 
 ## §14. Merge Checklist
 
 - [x] Plugin onboarding docs exist
 - [x] Conformance tests pass
 - [x] Backlog triage report exists
-- [ ] AIT review clean or arbitration recorded
-- [ ] Memory updated
+- [x] AIT review clean or arbitration recorded
+- [x] Memory updated

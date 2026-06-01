@@ -14,6 +14,7 @@ Branch: `ga/GA_10_customer_plugin_onboarding_backlog`
 | `helm template spendguard charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production` | PASS | Rendered cleanly to `/tmp/ga10-helm-production.yaml`. |
 | `make demo-up DEMO_MODE=plugin_c_synthetic` | PASS | Strategy C breaker-open regression passed, HARDEN_08 per-tenant SVID tests passed, and Python SVID subset passed. |
 | `codex review --base main` R4 | FINDING FIXED | P1 checklist gap closed: certification now requires explicit reference-image `command`/`args` override or runtime proof that `--insecure` was not used. |
+| `codex review --base main` R5 | PASS | No blocking correctness issues found. Reviewer checked the updated Strategy C classification tests and GA_10 validation script. |
 
 ## Current Evidence
 
