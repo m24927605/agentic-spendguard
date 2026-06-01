@@ -1,7 +1,7 @@
 # POST_GA 02 - Contract and Spec Cleanup
 
 > **Branch**: `post-ga/POST_GA_02_contract_spec_cleanup`
-> **Status**: review round 1 findings fixed; awaiting round 2 adversarial review
+> **Status**: review round 2 findings fixed; awaiting round 3 adversarial review
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `contract-dsl-spec-v1alpha2.md`, `tokenizer-service-spec-v1alpha1.md`, `stats-aggregator-spec-v1alpha1.md`
 > **Issues**: #91, #93, #97, #99, #101, #113, #121, #123, #131, #136, #141, #147, #154, #158, #159, #167, #177
 > **Estimated change size**: medium; docs/spec cleanup with grep validation
@@ -117,6 +117,7 @@ findings.
 | Technical Writer | Titles must describe shipped boundaries, not planned behavior | #91 and #136 |
 | Implementer | Reconciled all mapped doc/comment drift and added sample-size CHECK smoke coverage | Commits `d972a6e`, `38829a0`, `c63b871` |
 | Reviewer | Round 1 found unsafe deployable RUN_* example, unsafe CJK fail-closed wording, and wrong UUIDv7 prefix date | Fixed in `POST_GA_02 fix review round 1 findings`; see `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-1.md` |
+| Reviewer | Round 2 found tokenizer key rotation runbook deployment-name and metric drift | Fixed in `POST_GA_02 fix review round 2 findings`; see `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-2.md` |
 
 ## §14. Merge Checklist
 

@@ -20,7 +20,7 @@ Branch: `post-ga/POST_GA_02_contract_spec_cleanup`
 | #123 | `crates/spendguard-tokenizer/Cargo.toml` onig justification now distinguishes Gemini from Anthropic/Cohere/Llama. |
 | #131 | `crates/spendguard-tokenizer/src/versions.rs` states UUID timestamp half is decorative and decodes to `2024-08-23T16:09:29.344Z`. |
 | #136 | Gemini §7.1 disclosure is split into source/license/honest-disclosure bullets. |
-| #141 | Added `docs/operations/runbooks/tokenizer-key-rotation.md`. |
+| #141 | Added `docs/operations/runbooks/tokenizer-key-rotation.md` with Helm-rendered Deployment name and exported metric/log validation. |
 | #147 | `docs/tokenizer-service-spec-v1alpha1.md` uses `tokenizer_t1_samples_alert_idx`. |
 | #154 | `docs/slices/SLICE_05_tokenizer_tier1_shadow_drift.md` §13/§14 are coherent. |
 | #158 | `docs/stats-aggregator-spec-v1alpha1.md` source URI matches `build_drift_alert`. |
@@ -46,6 +46,7 @@ Results:
 - Targeted output_predictor test: pass, 1 test
 - `scripts/verify-migrations-postgres16.sh`: pass against `postgres:16-alpine`
 - Round 1 reviewer-fix reruns: `scripts/ga/validate-post-ga-docs.sh`, `git diff --check main..HEAD`, targeted output_predictor test, stale-text grep, and `scripts/verify-migrations-postgres16.sh` all pass
+- Round 2 reviewer-fix reruns: `scripts/ga/validate-post-ga-docs.sh`, `git diff --check main..HEAD`, targeted output_predictor test, runbook stale-text grep, and Helm-name grep all pass
 
 Postgres evidence:
 

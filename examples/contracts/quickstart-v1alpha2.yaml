@@ -22,26 +22,19 @@
 # SLICE_02 round-1 m2 — SAFETY NOTE for operators copying this file
 # =========================================================================
 #
-# This sample exposes the v1alpha2 spec surface. The
-# `require_approval_on_projected_overrun` rule near the bottom of this
-# file is DOCUMENTATION-ONLY and is commented out by default.
-# Uncomment it ONLY after the `run_cost_projector` (SLICE_09) ships —
-# see docs/run-cost-projector-spec-v1alpha1.md §3.
+# This sample exposes the v1alpha2 spec surface. The projection block
+# near the bottom of this file is DOCUMENTATION-ONLY and must stay
+# commented out. RUN_* activation is owned by run_cost_projector wiring,
+# not by a pasteable contract rule.
 #
-# Why disabled by default: SLICE_02 ships the v1alpha2 spec surface
-# (prediction_policy enum, RUN_* codes, run_projection_action) BEFORE
-# SLICE_09 wires the projector that emits the matching RUN_* codes.
-# The wedge evaluator in SLICE_02 keys on amount thresholds (claim_amount_atomic_gt)
-# rather than projector signals; a rule like
-# `claim_amount_atomic_gt: "1"` therefore matches EVERY non-zero
-# claim and would flag every single LLM call for human approval —
-# a denial-of-service for any operator copy-pasting this sample
-# unchanged before SLICE_09 lands.
+# Why disabled by default: the supported declarative wedge keys on amount
+# thresholds (`claim_amount_atomic_gt` / `claim_amount_atomic_gte`) do not
+# read projector signals. A rule like `claim_amount_atomic_gt: "1"` matches
+# every non-zero claim and would flag every single LLM call for human
+# approval.
 #
-# When SLICE_09 ships, the rule's `when:` block will be a CEL
-# condition referencing `run_projection.at_decision_micros` (per
-# spec §6.3); operators uncommenting this rule then will get
-# projection-driven approval flow, not amount-threshold-driven.
+# Current v1alpha2 sidecars reject CEL `condition:` fields fail-closed;
+# use run_cost_projector integration instead of uncommenting this block.
 # =========================================================================
 
 apiVersion: spendguard.ai/v1alpha2
