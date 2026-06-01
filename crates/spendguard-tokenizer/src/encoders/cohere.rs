@@ -44,11 +44,11 @@
 //! Bedrock invokeModel for Cohere prepends `<|START_OF_TURN|>` to the
 //! prompt. `bos_token_count() = 1` accounts for it on raw_text encode.
 
+use crate::encoders::tokenizers_common;
 use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
 use crate::error::TokenizerError;
 use crate::versions::COHERE_COMMAND_R_VERSION_ID;
-use crate::{TokenizeRequest, ToolCall};
-use sha2::{Digest, Sha256};
+use crate::TokenizeRequest;
 use tokenizers::Tokenizer;
 
 const ASSET_BYTES: &[u8] = include_bytes!("../../data/cohere-command-r/tokenizer.json");
@@ -71,19 +71,20 @@ pub struct CohereEncoder {
 
 impl CohereEncoder {
     pub fn new() -> Result<Self, TokenizerError> {
-        verify_asset_sha256(
+        tokenizers_common::verify_asset_sha256(
             "cohere-command-r",
             ASSET_BYTES,
             crate::asset_sha256::COHERE_COMMAND_R,
         )?;
 
-        let tokenizer =
-            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
-                encoder: "cohere-command-r",
-                message: format!("Tokenizer::from_bytes failed: {e}"),
-            })?;
+        let tokenizer = tokenizers_common::load_tokenizer("cohere-command-r", ASSET_BYTES)?;
 
-        cross_check(&tokenizer, EXPECTED_COHERE_FIXTURE)?;
+        tokenizers_common::cross_check(
+            "cohere-command-r",
+            &tokenizer,
+            CROSS_CHECK_FIXTURE,
+            EXPECTED_COHERE_FIXTURE,
+        )?;
 
         Ok(Self { tokenizer })
     }
@@ -145,116 +146,22 @@ fn count_tokens_cohere(
         for msg in &req.messages {
             total += env.per_message;
             total += env.per_turn_boundary;
-            total += encode_count(tokenizer, &msg.role)?;
-            total += encode_count(tokenizer, &msg.content)?;
+            total += tokenizers_common::encode_count("cohere-v2-bpe", tokenizer, &msg.role)?;
+            total += tokenizers_common::encode_count("cohere-v2-bpe", tokenizer, &msg.content)?;
             for tc in &msg.tool_calls {
-                total += tool_call_tokens(tokenizer, tc)?;
+                total += tokenizers_common::tool_call_tokens("cohere-v2-bpe", tokenizer, tc)?;
             }
         }
         total += env.reply_priming;
     }
 
     if !req.raw_text.is_empty() {
-        total += encode_count(tokenizer, &req.raw_text)?;
+        total += tokenizers_common::encode_count("cohere-v2-bpe", tokenizer, &req.raw_text)?;
         // R2 M4: BOS prepended by Bedrock invokeModel.
         total += COHERE_BOS_COUNT;
     }
 
     Ok(total)
-}
-
-fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
-    const TOOL_CALL_OVERHEAD: usize = 1;
-    Ok(TOOL_CALL_OVERHEAD
-        + encode_count(tokenizer, &tc.name)?
-        + encode_count(tokenizer, &tc.arguments_json)?)
-}
-
-fn encode_count(tokenizer: &Tokenizer, text: &str) -> Result<usize, TokenizerError> {
-    if text.is_empty() {
-        return Ok(0);
-    }
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tokenizer.encode(text, false)
-    }));
-    match result {
-        Ok(Ok(enc)) => Ok(enc.get_ids().len()),
-        Ok(Err(e)) => Err(TokenizerError::EncoderInternal {
-            kind: "cohere-v2-bpe",
-            message: format!("tokenizers encode error: {e}"),
-        }),
-        Err(_) => Err(TokenizerError::EncoderInternal {
-            kind: "cohere-v2-bpe",
-            message: "tokenizers encode panicked on input".to_string(),
-        }),
-    }
-}
-
-fn verify_asset_sha256(
-    encoder: &'static str,
-    bytes: &[u8],
-    expected: &'static str,
-) -> Result<(), TokenizerError> {
-    use subtle::ConstantTimeEq;
-
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let actual_bytes: [u8; 32] = hasher.finalize().into();
-    let actual_hex = hex::encode(actual_bytes);
-
-    let expected_vec = match hex::decode(expected) {
-        Ok(v) if v.len() == 32 => v,
-        _ => {
-            return Err(TokenizerError::AssetSignatureMismatch {
-                encoder,
-                expected,
-                actual: format!("expected-const-malformed (got {actual_hex})"),
-            });
-        }
-    };
-
-    if actual_bytes.as_slice().ct_eq(&expected_vec).into() {
-        Ok(())
-    } else {
-        Err(TokenizerError::AssetSignatureMismatch {
-            encoder,
-            expected,
-            actual: actual_hex,
-        })
-    }
-}
-
-fn cross_check(tokenizer: &Tokenizer, expected: &[u32]) -> Result<(), TokenizerError> {
-    let enc = tokenizer.encode(CROSS_CHECK_FIXTURE, false).map_err(|e| {
-        TokenizerError::AssetSignatureMismatch {
-            encoder: "cohere-command-r",
-            expected: "cross_check_fixture_vector",
-            actual: format!("fixture-encode-error: {e}"),
-        }
-    })?;
-    let actual = enc.get_ids();
-    if actual != expected {
-        let expected_summary: String = expected
-            .iter()
-            .take(6)
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let actual_summary: String = actual
-            .iter()
-            .take(6)
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        return Err(TokenizerError::AssetSignatureMismatch {
-            encoder: "cohere-command-r",
-            expected: "cross_check_fixture_vector",
-            actual: format!(
-                "fixture-vector-mismatch: expected first 6 tokens=[{expected_summary}], got=[{actual_summary}]"
-            ),
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -345,7 +252,7 @@ mod tests {
         if tampered.len() > 1024 {
             tampered[1024] ^= 0x01;
         }
-        let err = verify_asset_sha256(
+        let err = tokenizers_common::verify_asset_sha256(
             "cohere-command-r",
             &tampered,
             crate::asset_sha256::COHERE_COMMAND_R,

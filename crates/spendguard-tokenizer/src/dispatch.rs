@@ -29,7 +29,7 @@ use crate::error::TokenizerError;
 use crate::versions::{
     TIKTOKEN_CL100K_BASE_VERSION_ID, TIKTOKEN_O200K_BASE_VERSION_ID, TIKTOKEN_P50K_BASE_VERSION_ID,
 };
-use regex::Regex;
+use regex::{Regex, RegexSet};
 
 // `EncoderKind` moved to `crate::encoders` in SLICE_04 so all five
 // kinds (OpenAi, Anthropic, Gemini, Cohere, Llama) live alongside the
@@ -413,6 +413,7 @@ const COHERE_ENTRIES: &[(&str, EncoderResolver)] = &[
 /// The compiled dispatch table — one `DispatchEntry` per row.
 #[derive(Debug)]
 pub struct DispatchTable {
+    patterns: RegexSet,
     entries: Vec<DispatchEntry>,
 }
 
@@ -429,6 +430,7 @@ impl DispatchTable {
         #[cfg(not(feature = "cohere"))]
         let total = RAW_ENTRIES.len();
         let mut entries = Vec::with_capacity(total);
+        let mut pattern_sources = Vec::with_capacity(total);
 
         #[cfg(feature = "cohere")]
         let raw_iter = RAW_ENTRIES.iter().chain(COHERE_ENTRIES.iter());
@@ -436,6 +438,7 @@ impl DispatchTable {
         let raw_iter = RAW_ENTRIES.iter();
 
         for (pattern, resolver) in raw_iter {
+            pattern_sources.push(*pattern);
             let regex =
                 Regex::new(pattern).map_err(|e| TokenizerError::DispatchPatternInvalid {
                     pattern: (*pattern).to_string(),
@@ -457,15 +460,22 @@ impl DispatchTable {
                 resolver: *resolver,
             });
         }
-        Ok(Self { entries })
+        let patterns = RegexSet::new(&pattern_sources).map_err(|e| {
+            TokenizerError::DispatchPatternInvalid {
+                pattern: "<dispatch regex set>".to_string(),
+                source: e,
+            }
+        })?;
+        Ok(Self { patterns, entries })
     }
 
     /// First-match lookup. Returns `None` for unknown models so the
-    /// caller can route to Tier 3.
+    /// caller can route to Tier 3. POST_GA_04 uses a `RegexSet` to
+    /// evaluate all dispatch patterns in one automaton pass; the first
+    /// matched index preserves the append-only table order.
     pub fn lookup(&self, model: &str) -> Option<&DispatchEntry> {
-        self.entries
-            .iter()
-            .find(|entry| entry.pattern.is_match(model))
+        let matches = self.patterns.matches(model);
+        matches.iter().next().and_then(|idx| self.entries.get(idx))
     }
 
     /// Number of compiled entries. Used by acceptance test §8.1.
@@ -490,6 +500,13 @@ mod tests {
 
     fn table() -> DispatchTable {
         DispatchTable::compile().expect("dispatch compiles")
+    }
+
+    #[test]
+    fn regex_set_and_entry_table_stay_aligned() {
+        let t = table();
+        assert_eq!(t.patterns.len(), t.entries.len());
+        assert_eq!(t.patterns.len(), t.len());
     }
 
     #[test]

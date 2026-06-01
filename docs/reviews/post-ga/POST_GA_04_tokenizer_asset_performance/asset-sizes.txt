@@ -1,0 +1,7 @@
+1.6M	crates/spendguard-tokenizer/data/cl100k_base.tiktoken
+3.4M	crates/spendguard-tokenizer/data/o200k_base.tiktoken
+820K	crates/spendguard-tokenizer/data/p50k_base.tiktoken
+1.7M	crates/spendguard-tokenizer/data/anthropic-claude3/tokenizer.json
+ 12M	crates/spendguard-tokenizer/data/cohere-command-r/tokenizer.json
+ 17M	crates/spendguard-tokenizer/data/gemini-1.5/tokenizer.json
+8.7M	crates/spendguard-tokenizer/data/llama-3.1/tokenizer.json

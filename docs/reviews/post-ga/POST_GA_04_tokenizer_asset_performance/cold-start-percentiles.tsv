@@ -1,0 +1,2 @@
+metric	samples	p50_ns	p95_ns	p99_ns	p50_human	p95_human	p99_human
+fresh_process_total_boot	10	1287633167.000	1369503666.000	1369503666.000	1.288s	1.370s	1.370s

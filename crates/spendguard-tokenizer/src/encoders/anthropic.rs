@@ -83,11 +83,11 @@
 //! SLICE_05 shadow worker measures the residual gap and the spec
 //! tightens if needed.
 
+use crate::encoders::tokenizers_common;
 use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
 use crate::error::TokenizerError;
 use crate::versions::ANTHROPIC_CLAUDE3_VERSION_ID;
-use crate::{TokenizeRequest, ToolCall};
-use sha2::{Digest, Sha256};
+use crate::TokenizeRequest;
 use tokenizers::Tokenizer;
 
 /// Embedded `tokenizer.json` bytes for Anthropic Claude 3 BPE.
@@ -124,7 +124,7 @@ impl AnthropicEncoder {
     /// `Tokenizer::new()` refuses to start.
     pub fn new() -> Result<Self, TokenizerError> {
         // Layer A — sha256 over our embedded bytes.
-        verify_asset_sha256(
+        tokenizers_common::verify_asset_sha256(
             "anthropic-claude3",
             ASSET_BYTES,
             crate::asset_sha256::ANTHROPIC_CLAUDE3,
@@ -133,17 +133,18 @@ impl AnthropicEncoder {
         // Load the BPE config from the vendored JSON. The tokenizers
         // crate parses the JSON, builds an internal trie + BPE merges
         // table, and returns a thread-safe `Tokenizer` handle.
-        let tokenizer =
-            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
-                encoder: "anthropic-claude3",
-                message: format!("Tokenizer::from_bytes failed: {e}"),
-            })?;
+        let tokenizer = tokenizers_common::load_tokenizer("anthropic-claude3", ASSET_BYTES)?;
 
         // Layer B — encode the fixture string and compare against
         // the hard-coded expected vector. Catches a future asset
         // swap that passes sha256 (e.g., somebody substituted a
         // genuinely different tokenizer.json from the same vendor).
-        cross_check(&tokenizer, EXPECTED_ANTHROPIC_FIXTURE)?;
+        tokenizers_common::cross_check(
+            "anthropic-claude3",
+            &tokenizer,
+            CROSS_CHECK_FIXTURE,
+            EXPECTED_ANTHROPIC_FIXTURE,
+        )?;
 
         Ok(Self { tokenizer })
     }
@@ -257,17 +258,17 @@ fn count_tokens_anthropic(
         for msg in &req.messages {
             total += env.per_message;
             total += env.per_turn_boundary;
-            total += encode_count(tokenizer, &msg.role)?;
-            total += encode_count(tokenizer, &msg.content)?;
+            total += tokenizers_common::encode_count("anthropic-v3-bpe", tokenizer, &msg.role)?;
+            total += tokenizers_common::encode_count("anthropic-v3-bpe", tokenizer, &msg.content)?;
             for tc in &msg.tool_calls {
-                total += tool_call_tokens(tokenizer, tc)?;
+                total += tokenizers_common::tool_call_tokens("anthropic-v3-bpe", tokenizer, tc)?;
             }
         }
         total += env.reply_priming;
     }
 
     if !req.raw_text.is_empty() {
-        total += encode_count(tokenizer, &req.raw_text)?;
+        total += tokenizers_common::encode_count("anthropic-v3-bpe", tokenizer, &req.raw_text)?;
         // R3 N1: BOS gated on Bedrock routing detection. Native API
         // (e.g., `claude-3-haiku`) → 0; Bedrock direct or cross-region
         // (e.g., `anthropic.claude-3-…`, `us.anthropic.claude-3-…`) → 1.
@@ -275,107 +276,6 @@ fn count_tokens_anthropic(
     }
 
     Ok(total)
-}
-
-fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
-    const TOOL_CALL_OVERHEAD: usize = 1;
-    Ok(TOOL_CALL_OVERHEAD
-        + encode_count(tokenizer, &tc.name)?
-        + encode_count(tokenizer, &tc.arguments_json)?)
-}
-
-fn encode_count(tokenizer: &Tokenizer, text: &str) -> Result<usize, TokenizerError> {
-    if text.is_empty() {
-        return Ok(0);
-    }
-    // `false` add_special_tokens — we measure raw vocabulary tokens;
-    // chat envelope is added by `count_tokens_anthropic` above.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        tokenizer.encode(text, false)
-    }));
-    match result {
-        Ok(Ok(enc)) => Ok(enc.get_ids().len()),
-        Ok(Err(e)) => Err(TokenizerError::EncoderInternal {
-            kind: "anthropic-v3-bpe",
-            message: format!("tokenizers encode error: {e}"),
-        }),
-        Err(_) => Err(TokenizerError::EncoderInternal {
-            kind: "anthropic-v3-bpe",
-            message: "tokenizers encode panicked on input".to_string(),
-        }),
-    }
-}
-
-/// Layer A — sha256 of the embedded bytes against
-/// [`crate::asset_sha256::ANTHROPIC_CLAUDE3`]. Constant-time compare
-/// via `subtle::ConstantTimeEq` (same approach as SLICE_03 R2 m14).
-fn verify_asset_sha256(
-    encoder: &'static str,
-    bytes: &[u8],
-    expected: &'static str,
-) -> Result<(), TokenizerError> {
-    use subtle::ConstantTimeEq;
-
-    let mut hasher = Sha256::new();
-    hasher.update(bytes);
-    let actual_bytes: [u8; 32] = hasher.finalize().into();
-    let actual_hex = hex::encode(actual_bytes);
-
-    let expected_vec = match hex::decode(expected) {
-        Ok(v) if v.len() == 32 => v,
-        _ => {
-            return Err(TokenizerError::AssetSignatureMismatch {
-                encoder,
-                expected,
-                actual: format!("expected-const-malformed (got {actual_hex})"),
-            });
-        }
-    };
-
-    if actual_bytes.as_slice().ct_eq(&expected_vec).into() {
-        Ok(())
-    } else {
-        Err(TokenizerError::AssetSignatureMismatch {
-            encoder,
-            expected,
-            actual: actual_hex,
-        })
-    }
-}
-
-/// Layer B — runtime cross-check of the loaded tokenizer against the
-/// hard-coded fixture vector (per spec §7.4.1).
-fn cross_check(tokenizer: &Tokenizer, expected: &[u32]) -> Result<(), TokenizerError> {
-    let enc = tokenizer.encode(CROSS_CHECK_FIXTURE, false).map_err(|e| {
-        TokenizerError::AssetSignatureMismatch {
-            encoder: "anthropic-claude3",
-            expected: "cross_check_fixture_vector",
-            actual: format!("fixture-encode-error: {e}"),
-        }
-    })?;
-    let actual = enc.get_ids();
-    if actual != expected {
-        let expected_summary: String = expected
-            .iter()
-            .take(6)
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        let actual_summary: String = actual
-            .iter()
-            .take(6)
-            .map(|t| t.to_string())
-            .collect::<Vec<_>>()
-            .join(",");
-        return Err(TokenizerError::AssetSignatureMismatch {
-            encoder: "anthropic-claude3",
-            expected: "cross_check_fixture_vector",
-            actual: format!(
-                "fixture-vector-mismatch: expected first 6 tokens=[{expected_summary}], got=[{actual_summary}]"
-            ),
-        });
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -543,7 +443,13 @@ mod tests {
         // the wrong-expected error surface (Layer B).
         let tokenizer = Tokenizer::from_bytes(ASSET_BYTES).expect("load");
         let bad: &[u32] = &[999, 999, 999];
-        let err = cross_check(&tokenizer, bad).expect_err("Layer B must reject wrong expected");
+        let err = tokenizers_common::cross_check(
+            "anthropic-claude3",
+            &tokenizer,
+            CROSS_CHECK_FIXTURE,
+            bad,
+        )
+        .expect_err("Layer B must reject wrong expected");
         match err {
             TokenizerError::AssetSignatureMismatch {
                 encoder, expected, ..
@@ -562,7 +468,7 @@ mod tests {
         if tampered.len() > 1024 {
             tampered[1024] ^= 0x01;
         }
-        let err = verify_asset_sha256(
+        let err = tokenizers_common::verify_asset_sha256(
             "anthropic-claude3",
             &tampered,
             crate::asset_sha256::ANTHROPIC_CLAUDE3,

@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "description": "Tokenizer Layer B cross-check fixture manifest. Runtime fail-fast vectors remain compiled into the library; this file is the extensible maintenance surface for asset rotations.",
+  "kinds": {
+    "OPENAI_TIKTOKEN": {
+      "cases": [
+        {
+          "encoder": "cl100k_base",
+          "input": "spendguard-cross-check-fixture-v1alpha1",
+          "expected_token_ids": [2203, 408, 27190, 77529, 16313, 2269, 13025, 8437, 16, 7288, 16]
+        },
+        {
+          "encoder": "o200k_base",
+          "input": "spendguard-cross-check-fixture-v1alpha1",
+          "expected_token_ids": [1148, 419, 29190, 154059, 30411, 52253, 10978, 9827, 16, 15453, 16]
+        },
+        {
+          "encoder": "p50k_base",
+          "input": "spendguard-cross-check-fixture-v1alpha1",
+          "expected_token_ids": [2777, 437, 14864, 12, 19692, 12, 9122, 12, 69, 9602, 12, 85, 16, 26591, 16]
+        }
+      ]
+    },
+    "ANTHROPIC_BPE": {
+      "cases": [
+        {
+          "encoder": "anthropic-claude3",
+          "input": "spendguard-cross-check-fixture-v1alpha1",
+          "expected_token_ids": [39995, 17973, 17, 9258, 17, 1584, 17, 12488, 17, 90, 21, 2741, 21]
+        }
+      ]
+    },
+    "GEMINI_BPE": {
+      "cases": [
+        {
+          "encoder": "gemini-1.5",
+          "input": "spendguard-cross-check-fixture-v1alpha1",
+          "expected_token_ids": [120479, 14413, 235290, 16100, 235290, 3534, 235290, 35693, 235290, 235272, 235274, 4705, 235274]
+        }
+      ]
+    },
+    "COHERE_BPE": {
+      "cases": [
+        {
+          "encoder": "cohere-command-r",
+          "input": "spendguard-cross-check-fixture-v1alpha1",
+          "expected_token_ids": [221325, 37315, 20, 32374, 20, 7399, 20, 61774, 20, 93, 24, 21159, 24]
+        }
+      ]
+    },
+    "SENTENCEPIECE_LLAMA": {
+      "cases": [
+        {
+          "encoder": "llama-3.1",
+          "input": "spendguard-llama-cross-check-v1alpha1 你好 llama-\u00f1",
+          "expected_token_ids": [2203, 408, 27190, 12, 657, 3105, 77529, 16313, 8437, 16, 7288, 16, 118195, 53901, 94776, 12, 5771]
+        }
+      ]
+    }
+  }
+}

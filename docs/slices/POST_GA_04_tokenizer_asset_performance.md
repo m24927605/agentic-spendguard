@@ -1,7 +1,7 @@
 # POST_GA 04 - Tokenizer Asset Performance
 
 > **Branch**: `post-ga/POST_GA_04_tokenizer_asset_performance`
-> **Status**: draft
+> **Status**: implementation complete; adversarial review clean in 2 rounds
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `tokenizer-service-spec-v1alpha1.md`
 > **Issues**: #95, #102, #104, #108, #116, #120, #122, #125, #130, #134, #140
 > **Estimated change size**: medium-large; assets, dispatch, benchmarks
@@ -113,11 +113,17 @@ test pass/fail.
 | Security Engineer | Checksum enumeration is part of supply-chain integrity | #125 |
 | Performance Engineer | Benchmarks must include cold/warm and p99 | §8 |
 | Tokenizer Domain Expert | Llama tuning must wait for real envelope evidence | #140 dependency |
+| Software Architect | Keep OpenAI dual-copy integrity design, remove only stale sidecar placeholder dependency | #95/#102 closed without weakening Layer A/B checks |
+| Backend Architect | RegexSet dispatch is acceptable only with entry-order alignment test | `regex_set_and_entry_table_stay_aligned` |
+| Security Engineer | Checksum evidence must enumerate all 7 vendored assets | `checksums.txt` |
+| Performance Engineer | Criterion cold-start was misleading after round 1; use fresh process probe instead | Round 1 P2 fixed by `tokenizer_cold_start_once` + `cold-start-percentiles.tsv` |
+| Tokenizer Domain Expert | Do not retune Llama without Tier 1 provider evidence; pin current Bedrock envelope instead | `per_message=5`, `BOS=1`, no version-id change |
+| Reviewer | codex CLI fallback review after AIT parser incompatibility | Round 1 P2 fixed; round 2 clean |
 
 ## §14. Merge Checklist
 
-- [ ] Benchmarks and tests pass
-- [ ] Asset checksums complete
-- [ ] All mapped issues have evidence
-- [ ] AIT review clean or Staff+ arbitration recorded
+- [x] Benchmarks and tests pass
+- [x] Asset checksums complete
+- [x] All mapped issues have evidence
+- [x] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated

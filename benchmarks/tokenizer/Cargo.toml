@@ -10,6 +10,10 @@ publish = false
 name = "tier2_library"
 harness = false
 
+[[bin]]
+name = "tokenizer_cold_start_once"
+path = "src/bin/cold_start_once.rs"
+
 [dependencies]
 spendguard-tokenizer = { path = "../../crates/spendguard-tokenizer" }
 

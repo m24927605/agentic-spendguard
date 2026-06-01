@@ -81,6 +81,7 @@ use crate::error::TokenizerError;
 use crate::Message;
 use crate::{TokenizeRequest, TokenizeResponse};
 use sha2::{Digest, Sha256};
+use std::time::Instant;
 use tiktoken_rs::CoreBPE;
 
 /// Embedded asset bytes. The bytes here are byte-equal to the
@@ -146,6 +147,18 @@ struct EncoderRow {
     encoder: &'static CoreBPE,
 }
 
+/// One boot-time duration sample for an eager-loaded encoder step.
+///
+/// POST_GA_04 / #122: eager-loading remains the production default,
+/// but its cost must be visible. The tokenizer service exports these
+/// samples as Prometheus gauges and the library exposes them for
+/// in-process callers that want the same startup regression signal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncoderBootMetric {
+    pub encoder_name: &'static str,
+    pub duration_ms: u128,
+}
+
 /// Eager-loaded encoder bundle.
 ///
 /// Constructed exactly once per [`crate::Tokenizer`] instance via
@@ -169,6 +182,7 @@ pub struct EncoderCache {
     #[cfg(feature = "cohere")]
     cohere: Option<CohereEncoder>,
     llama: Option<LlamaEncoder>,
+    boot_metrics: Vec<EncoderBootMetric>,
 }
 
 impl EncoderCache {
@@ -183,44 +197,62 @@ impl EncoderCache {
     ///      EXPECTED_* hard-coded vectors. Catches divergence between
     ///      our verified bytes and what the singletons actually use.
     pub fn with_embedded_assets() -> Result<Self, TokenizerError> {
+        let mut boot_metrics = Vec::new();
+
         // Layer A — sha256 of the embedded asset bytes.
-        verify_asset_sha256(
-            "cl100k_base",
-            ASSET_CL100K_BASE,
-            crate::asset_sha256::CL100K_BASE,
-        )?;
-        verify_asset_sha256(
-            "o200k_base",
-            ASSET_O200K_BASE,
-            crate::asset_sha256::O200K_BASE,
-        )?;
-        verify_asset_sha256("p50k_base", ASSET_P50K_BASE, crate::asset_sha256::P50K_BASE)?;
+        timed_boot_step(&mut boot_metrics, "openai_sha256", || {
+            verify_asset_sha256(
+                "cl100k_base",
+                ASSET_CL100K_BASE,
+                crate::asset_sha256::CL100K_BASE,
+            )?;
+            verify_asset_sha256(
+                "o200k_base",
+                ASSET_O200K_BASE,
+                crate::asset_sha256::O200K_BASE,
+            )?;
+            verify_asset_sha256("p50k_base", ASSET_P50K_BASE, crate::asset_sha256::P50K_BASE)?;
+            Ok(())
+        })?;
 
         // Eager-load via tiktoken-rs singletons. The first call to a
         // singleton triggers `cl100k_base()` / `o200k_base()` etc which
         // parse the embedded base64 → CoreBPE struct. Spec §3.2:
         // encoders are pre-loaded so the hot path has no lazy-init cost.
-        let cl100k_ref = tiktoken_rs::cl100k_base_singleton();
-        let o200k_ref = tiktoken_rs::o200k_base_singleton();
-        let p50k_ref = tiktoken_rs::p50k_base_singleton();
+        let cl100k_ref = timed_boot_step(&mut boot_metrics, "cl100k_base", || {
+            Ok(tiktoken_rs::cl100k_base_singleton())
+        })?;
+        let o200k_ref = timed_boot_step(&mut boot_metrics, "o200k_base", || {
+            Ok(tiktoken_rs::o200k_base_singleton())
+        })?;
+        let p50k_ref = timed_boot_step(&mut boot_metrics, "p50k_base", || {
+            Ok(tiktoken_rs::p50k_base_singleton())
+        })?;
 
         // Layer B — runtime cross-check against the fixture vector to
         // catch divergence between data/*.tiktoken (we sha256ed) and
         // the bytes the singletons actually use (vendored upstream).
-        cross_check_encoder("cl100k_base", cl100k_ref, EXPECTED_CL100K_FIXTURE)?;
-        cross_check_encoder("o200k_base", o200k_ref, EXPECTED_O200K_FIXTURE)?;
-        cross_check_encoder("p50k_base", p50k_ref, EXPECTED_P50K_FIXTURE)?;
+        timed_boot_step(&mut boot_metrics, "openai_cross_check", || {
+            cross_check_encoder("cl100k_base", cl100k_ref, EXPECTED_CL100K_FIXTURE)?;
+            cross_check_encoder("o200k_base", o200k_ref, EXPECTED_O200K_FIXTURE)?;
+            cross_check_encoder("p50k_base", p50k_ref, EXPECTED_P50K_FIXTURE)?;
+            Ok(())
+        })?;
 
         // SLICE_04 — eager-load Tier 2 vendor encoders. Each
         // constructor runs its own two-layer (sha256 + cross-check
         // fixture) integrity check per spec §7.4.1; failure → boot-
         // fast `AssetSignatureMismatch` surfaces here.
-        let anthropic = AnthropicEncoder::new()?;
-        let gemini = GeminiEncoder::new()?;
+        let anthropic = timed_boot_step(&mut boot_metrics, "anthropic-v3-bpe", || {
+            AnthropicEncoder::new()
+        })?;
+        let gemini = timed_boot_step(&mut boot_metrics, "gemini-1.5-bpe", || GeminiEncoder::new())?;
         // R2 M6: Cohere encoder behind `cohere` feature flag.
         #[cfg(feature = "cohere")]
-        let cohere = CohereEncoder::new()?;
-        let llama = LlamaEncoder::new()?;
+        let cohere = timed_boot_step(&mut boot_metrics, "cohere-v2-bpe", || CohereEncoder::new())?;
+        let llama = timed_boot_step(&mut boot_metrics, "llama-sentencepiece", || {
+            LlamaEncoder::new()
+        })?;
 
         Ok(Self {
             cl100k: Some(EncoderRow {
@@ -233,6 +265,7 @@ impl EncoderCache {
             #[cfg(feature = "cohere")]
             cohere: Some(cohere),
             llama: Some(llama),
+            boot_metrics,
         })
     }
 
@@ -252,7 +285,14 @@ impl EncoderCache {
             #[cfg(feature = "cohere")]
             cohere: None,
             llama: None,
+            boot_metrics: Vec::new(),
         }
+    }
+
+    /// Boot-time duration samples captured while eager-loading encoder
+    /// assets. Empty for [`test_empty`].
+    pub fn boot_durations(&self) -> &[EncoderBootMetric] {
+        &self.boot_metrics
     }
 
     /// Tokenize using a known dispatch entry.
@@ -380,6 +420,34 @@ impl EncoderCache {
             TiktokenEncoder::P50kBase => self.p50k.as_ref(),
         }
     }
+}
+
+fn timed_boot_step<T>(
+    metrics: &mut Vec<EncoderBootMetric>,
+    encoder_name: &'static str,
+    op: impl FnOnce() -> Result<T, TokenizerError>,
+) -> Result<T, TokenizerError> {
+    let started = Instant::now();
+    let result = op();
+    let duration_ms = started.elapsed().as_millis();
+    metrics.push(EncoderBootMetric {
+        encoder_name,
+        duration_ms,
+    });
+    match &result {
+        Ok(_) => tracing::info!(
+            encoder = encoder_name,
+            duration_ms,
+            "tokenizer encoder booted"
+        ),
+        Err(error) => tracing::error!(
+            encoder = encoder_name,
+            duration_ms,
+            ?error,
+            "tokenizer encoder boot failed"
+        ),
+    }
+    result
 }
 
 fn encoder_static_name(enc: TiktokenEncoder) -> &'static str {
@@ -588,6 +656,24 @@ mod tests {
         assert!(cache.cl100k.is_some());
         assert!(cache.o200k.is_some());
         assert!(cache.p50k.is_some());
+    }
+
+    #[test]
+    fn encoder_cache_records_boot_durations() {
+        let cache = EncoderCache::with_embedded_assets().expect("cache loads");
+        let names: Vec<&str> = cache
+            .boot_durations()
+            .iter()
+            .map(|metric| metric.encoder_name)
+            .collect();
+        assert!(names.contains(&"openai_sha256"));
+        assert!(names.contains(&"cl100k_base"));
+        assert!(names.contains(&"o200k_base"));
+        assert!(names.contains(&"p50k_base"));
+        assert!(names.contains(&"openai_cross_check"));
+        assert!(names.contains(&"anthropic-v3-bpe"));
+        assert!(names.contains(&"gemini-1.5-bpe"));
+        assert!(names.contains(&"llama-sentencepiece"));
     }
 
     #[test]

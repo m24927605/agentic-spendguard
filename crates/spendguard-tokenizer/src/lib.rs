@@ -82,7 +82,7 @@ use std::sync::Arc;
 // re-export below preserves `spendguard_tokenizer::EncoderKind` as the
 // stable public path (the trait module is the source of truth).
 pub use dispatch::DispatchEntry;
-pub use encoder_cache::EncoderCache;
+pub use encoder_cache::{EncoderBootMetric, EncoderCache};
 pub use encoders::{EncodeResult, Encoder, EncoderKind};
 pub use error::TokenizerError;
 pub use tier3::tier3_fallback;
@@ -209,11 +209,10 @@ pub struct TokenizeResponse {
 ///   1. `Tokenizer::new_with_embedded_assets()` once at sidecar boot;
 ///      panics-or-errors-out on asset signature mismatch (spec §7.4
 ///      fail-fast).
-///   2. Share a single `Arc<Tokenizer>` across worker threads — the
-///      [`EncoderCache`] uses [`parking_lot::RwLock`] internally so
-///      reads are lock-free in the steady state (encoders are
-///      eagerly loaded in step 1; no runtime mutation in SLICE_03 —
-///      hot-reload is SLICE-extra).
+///   2. Share a single `Arc<Tokenizer>` across worker threads. The
+///      [`EncoderCache`] is immutable after construction; encoders are
+///      eagerly loaded in step 1 and there is no runtime mutation in
+///      the shipped hot path (hot-reload is a future slice).
 ///   3. Each request hits `tokenize(&req)`; the dispatcher returns a
 ///      Tier 2 result for known models or a Tier 3 fallback for
 ///      unknown ones.
@@ -264,6 +263,12 @@ impl Tokenizer {
     /// must reconstruct the encoder lookup that the producer used.
     pub fn dispatch(&self) -> &dispatch::DispatchTable {
         &self.dispatch
+    }
+
+    /// Boot-time duration samples captured while eager-loading
+    /// encoder assets. Empty only for dispatch-only test tokenizers.
+    pub fn encoder_boot_durations(&self) -> &[EncoderBootMetric] {
+        self.cache.boot_durations()
     }
 }
 

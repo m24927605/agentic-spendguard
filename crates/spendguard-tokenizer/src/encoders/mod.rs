@@ -44,6 +44,7 @@ pub mod cohere;
 pub mod gemini;
 pub mod llama;
 pub mod openai;
+pub(crate) mod tokenizers_common;
 
 /// Stable string discriminant matching `tokenizer_versions.kind`
 /// CHECK constraint values. Used for `TokenizeResponse.kind` and for
@@ -222,4 +223,72 @@ pub trait Encoder: Send + Sync {
         &self,
         req: &crate::TokenizeRequest,
     ) -> Result<EncodeResult, TokenizerError>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ChatEnvelope;
+
+    #[test]
+    fn fixed_overhead_matches_spec_table_for_three_messages() {
+        // Spec §3.4 table, excluding role/content/tool-call payload
+        // tokens. OpenAI gpt-3.5-turbo-0301's legacy name-field
+        // special case is intentionally not represented by the common
+        // envelope helper.
+        let cases = [
+            (
+                "openai",
+                ChatEnvelope {
+                    per_message: 3,
+                    per_turn_boundary: 0,
+                    reply_priming: 3,
+                },
+                12,
+            ),
+            (
+                "anthropic",
+                ChatEnvelope {
+                    per_message: 0,
+                    per_turn_boundary: 4,
+                    reply_priming: 0,
+                },
+                12,
+            ),
+            (
+                "gemini",
+                ChatEnvelope {
+                    per_message: 0,
+                    per_turn_boundary: 0,
+                    reply_priming: 0,
+                },
+                0,
+            ),
+            (
+                "cohere",
+                ChatEnvelope {
+                    per_message: 3,
+                    per_turn_boundary: 0,
+                    reply_priming: 0,
+                },
+                9,
+            ),
+            (
+                "llama",
+                ChatEnvelope {
+                    per_message: 5,
+                    per_turn_boundary: 0,
+                    reply_priming: 0,
+                },
+                15,
+            ),
+        ];
+
+        for (name, envelope, expected) in cases {
+            assert_eq!(
+                envelope.fixed_overhead(3),
+                expected,
+                "{name} fixed overhead drifted from spec §3.4"
+            );
+        }
+    }
 }

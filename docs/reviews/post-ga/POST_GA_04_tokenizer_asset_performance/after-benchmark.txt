@@ -1,0 +1,130 @@
+   Compiling spendguard-tokenizer-benchmarks v0.1.0-alpha (/Users/michael.chen/products/agentic-spendguard/benchmarks/tokenizer)
+    Finished `bench` profile [optimized] target(s) in 4.84s
+     Running benches/tier2_library.rs (benchmarks/tokenizer/target/release/deps/tier2_library-a56b021efa9b9e46)
+Benchmarking tier2_library/tiny_gpt_4o_hello_world
+Benchmarking tier2_library/tiny_gpt_4o_hello_world: Warming up for 1.0000 s
+Benchmarking tier2_library/tiny_gpt_4o_hello_world: Collecting 10 samples in estimated 3.0000 s (3.4M iterations)
+Benchmarking tier2_library/tiny_gpt_4o_hello_world: Analyzing
+tier2_library/tiny_gpt_4o_hello_world
+                        time:   [879.51 ns 896.86 ns 928.59 ns]
+                        change: [-1.0795% +1.6450% +4.5603%] (p = 0.32 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+Benchmarking tier2_library/raw_text_gpt_4o_chars/100
+Benchmarking tier2_library/raw_text_gpt_4o_chars/100: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gpt_4o_chars/100: Collecting 10 samples in estimated 3.0002 s (445k iterations)
+Benchmarking tier2_library/raw_text_gpt_4o_chars/100: Analyzing
+tier2_library/raw_text_gpt_4o_chars/100
+                        time:   [6.6582 µs 6.7161 µs 6.7850 µs]
+                        change: [-3.9056% -1.9959% -0.3762%] (p = 0.04 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking tier2_library/raw_text_gpt_4o_chars/1000
+Benchmarking tier2_library/raw_text_gpt_4o_chars/1000: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gpt_4o_chars/1000: Collecting 10 samples in estimated 3.0019 s (7535 iterations)
+Benchmarking tier2_library/raw_text_gpt_4o_chars/1000: Analyzing
+tier2_library/raw_text_gpt_4o_chars/1000
+                        time:   [395.68 µs 396.26 µs 396.71 µs]
+                        change: [+6.3239% +7.5729% +8.4183%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Benchmarking tier2_library/raw_text_gpt_4o_chars/10000
+Benchmarking tier2_library/raw_text_gpt_4o_chars/10000: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gpt_4o_chars/10000: Collecting 10 samples in estimated 3.8513 s (110 iterations)
+Benchmarking tier2_library/raw_text_gpt_4o_chars/10000: Analyzing
+tier2_library/raw_text_gpt_4o_chars/10000
+                        time:   [35.015 ms 35.043 ms 35.078 ms]
+                        change: [-1.7586% +0.0115% +1.0156%] (p = 0.99 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking tier2_library/chat_5_messages_gpt_4o_mini
+Benchmarking tier2_library/chat_5_messages_gpt_4o_mini: Warming up for 1.0000 s
+Benchmarking tier2_library/chat_5_messages_gpt_4o_mini: Collecting 10 samples in estimated 3.0002 s (217k iterations)
+Benchmarking tier2_library/chat_5_messages_gpt_4o_mini: Analyzing
+tier2_library/chat_5_messages_gpt_4o_mini
+                        time:   [13.824 µs 13.889 µs 14.024 µs]
+                        change: [-1.5240% -0.7313% +0.1175%] (p = 0.12 > 0.05)
+                        No change in performance detected.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking tier2_library/raw_text_gpt_4_1000_chars
+Benchmarking tier2_library/raw_text_gpt_4_1000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gpt_4_1000_chars: Collecting 10 samples in estimated 3.0082 s (7590 iterations)
+Benchmarking tier2_library/raw_text_gpt_4_1000_chars: Analyzing
+tier2_library/raw_text_gpt_4_1000_chars
+                        time:   [397.61 µs 405.27 µs 415.74 µs]
+                        change: [+6.9417% +9.5536% +12.313%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+Benchmarking tier2_library/tier3_fallback_1000_chars
+Benchmarking tier2_library/tier3_fallback_1000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/tier3_fallback_1000_chars: Collecting 10 samples in estimated 3.0000 s (13M iterations)
+Benchmarking tier2_library/tier3_fallback_1000_chars: Analyzing
+tier2_library/tier3_fallback_1000_chars
+                        time:   [231.49 ns 232.84 ns 234.94 ns]
+                        change: [-3.5801% -3.0673% -2.4236%] (p = 0.00 < 0.05)
+                        Performance has improved.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) high mild
+  1 (10.00%) high severe
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_1000_chars
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_1000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_1000_chars: Collecting 10 samples in estimated 3.0008 s (12k iterations)
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_1000_chars: Analyzing
+tier2_library/raw_text_claude_3_5_sonnet_1000_chars
+                        time:   [255.42 µs 274.37 µs 301.89 µs]
+                        change: [-13.080% -3.8856% +5.1405%] (p = 0.52 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_10000_chars
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_10000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_10000_chars: Collecting 10 samples in estimated 3.0053 s (1375 iterations)
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_10000_chars: Analyzing
+tier2_library/raw_text_claude_3_5_sonnet_10000_chars
+                        time:   [2.1785 ms 2.1846 ms 2.1982 ms]
+                        change: [+1.5518% +1.9482% +2.3867%] (p = 0.00 < 0.05)
+                        Performance has regressed.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_1000_chars
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_1000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_1000_chars: Collecting 10 samples in estimated 3.0100 s (14k iterations)
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_1000_chars: Analyzing
+tier2_library/raw_text_gemini_1_5_pro_1000_chars
+                        time:   [209.15 µs 209.23 µs 209.38 µs]
+                        change: [+0.3633% +0.4912% +0.6342%] (p = 0.00 < 0.05)
+                        Change within noise threshold.
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_10000_chars
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_10000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_10000_chars: Collecting 10 samples in estimated 3.0112 s (1210 iterations)
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_10000_chars: Analyzing
+tier2_library/raw_text_gemini_1_5_pro_10000_chars
+                        time:   [2.4817 ms 2.4880 ms 2.4943 ms]
+                        change: [+0.0559% +0.3959% +0.7530%] (p = 0.04 < 0.05)
+                        Change within noise threshold.
+Benchmarking tier2_library/raw_text_llama_3_1_70b_1000_chars
+Benchmarking tier2_library/raw_text_llama_3_1_70b_1000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_llama_3_1_70b_1000_chars: Collecting 10 samples in estimated 3.0117 s (13k iterations)
+Benchmarking tier2_library/raw_text_llama_3_1_70b_1000_chars: Analyzing
+tier2_library/raw_text_llama_3_1_70b_1000_chars
+                        time:   [227.03 µs 227.27 µs 227.56 µs]
+                        change: [+0.1731% +0.4586% +0.7510%] (p = 0.01 < 0.05)
+                        Change within noise threshold.
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking tier2_library/raw_text_llama_3_1_70b_10000_chars
+Benchmarking tier2_library/raw_text_llama_3_1_70b_10000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_llama_3_1_70b_10000_chars: Collecting 10 samples in estimated 3.0386 s (1320 iterations)
+Benchmarking tier2_library/raw_text_llama_3_1_70b_10000_chars: Analyzing
+tier2_library/raw_text_llama_3_1_70b_10000_chars
+                        time:   [2.2945 ms 2.3618 ms 2.4998 ms]
+                        change: [+0.6857% +2.6905% +6.3546%] (p = 0.09 > 0.05)
+                        No change in performance detected.
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high severe
