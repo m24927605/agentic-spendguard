@@ -12,6 +12,8 @@ DEMO_MODE="default"
 EVIDENCE_DIR="$ROOT/docs/reviews/ga-readiness/GA_07_soak_harness"
 MAX_OUTBOX_LAG_SECONDS="${MAX_OUTBOX_LAG_SECONDS:-30}"
 MAX_MEMORY_GROWTH_BYTES="${MAX_MEMORY_GROWTH_BYTES:-268435456}"
+HTTP_CONNECT_TIMEOUT_SECONDS="${HTTP_CONNECT_TIMEOUT_SECONDS:-2}"
+HTTP_MAX_TIME_SECONDS="${HTTP_MAX_TIME_SECONDS:-5}"
 RESET_STACK=1
 
 usage() {
@@ -71,11 +73,21 @@ parse_duration() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --duration) DURATION="$2"; shift 2 ;;
-    --interval) INTERVAL="$2"; shift 2 ;;
-    --profile) PROFILE="$2"; shift 2 ;;
-    --demo-mode) DEMO_MODE="$2"; shift 2 ;;
-    --evidence-dir) EVIDENCE_DIR="$2"; shift 2 ;;
+    --duration)
+      [[ $# -ge 2 ]] || { echo "--duration requires a value" >&2; usage >&2; exit 2; }
+      DURATION="$2"; shift 2 ;;
+    --interval)
+      [[ $# -ge 2 ]] || { echo "--interval requires a value" >&2; usage >&2; exit 2; }
+      INTERVAL="$2"; shift 2 ;;
+    --profile)
+      [[ $# -ge 2 ]] || { echo "--profile requires a value" >&2; usage >&2; exit 2; }
+      PROFILE="$2"; shift 2 ;;
+    --demo-mode)
+      [[ $# -ge 2 ]] || { echo "--demo-mode requires a value" >&2; usage >&2; exit 2; }
+      DEMO_MODE="$2"; shift 2 ;;
+    --evidence-dir)
+      [[ $# -ge 2 ]] || { echo "--evidence-dir requires a value" >&2; usage >&2; exit 2; }
+      EVIDENCE_DIR="$2"; shift 2 ;;
     --no-reset) RESET_STACK=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -119,7 +131,7 @@ psql_db() {
 metric_sum() {
   local url="$1"
   local metric="$2"
-  curl -fsS "$url" | awk -v metric="$metric" '
+  curl -fsS --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECONDS" --max-time "$HTTP_MAX_TIME_SECONDS" "$url" | awk -v metric="$metric" '
     $1 ~ ("^" metric "(\\{|$)") { sum += $2 }
     END { printf "%.0f\n", sum + 0 }
   '
@@ -128,7 +140,7 @@ metric_sum() {
 metric_gauge() {
   local url="$1"
   local metric="$2"
-  curl -fsS "$url" | awk -v metric="$metric" '
+  curl -fsS --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECONDS" --max-time "$HTTP_MAX_TIME_SECONDS" "$url" | awk -v metric="$metric" '
     $1 ~ ("^" metric "(\\{|$)") { value = $2; found = 1 }
     END { if (found) printf "%.0f\n", value; else print 0 }
   '
@@ -137,7 +149,7 @@ metric_gauge() {
 canonical_metric_sum() {
   local metric="$1"
   "${COMPOSE[@]}" exec -T canonical-ingest \
-    wget -q -O - http://127.0.0.1:9091/metrics | awk -v metric="$metric" '
+    wget -T "$HTTP_MAX_TIME_SECONDS" -q -O - http://127.0.0.1:9091/metrics | awk -v metric="$metric" '
       $1 ~ ("^" metric "(\\{|$)") { sum += $2 }
       END { printf "%.0f\n", sum + 0 }
     '
@@ -147,7 +159,7 @@ wait_for_http() {
   local url="$1"
   local label="$2"
   for _ in $(seq 1 90); do
-    if curl -fsS "$url" >/dev/null 2>&1; then
+    if curl -fsS --connect-timeout "$HTTP_CONNECT_TIMEOUT_SECONDS" --max-time "$HTTP_MAX_TIME_SECONDS" "$url" >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -159,7 +171,7 @@ wait_for_http() {
 wait_for_canonical_metrics() {
   for _ in $(seq 1 90); do
     if "${COMPOSE[@]}" exec -T canonical-ingest \
-      wget -q -O - http://127.0.0.1:9091/metrics >/dev/null 2>&1; then
+      wget -T "$HTTP_MAX_TIME_SECONDS" -q -O - http://127.0.0.1:9091/metrics >/dev/null 2>&1; then
       return 0
     fi
     sleep 2
@@ -174,7 +186,8 @@ wait_for_metric_positive() {
   local label="$3"
   local value
   for _ in $(seq 1 120); do
-    value="$(metric_sum "$url" "$metric" || echo 0)"
+    value="$(metric_sum "$url" "$metric" 2>/dev/null || echo 0)"
+    value="$(printf '%s\n' "$value" | tail -n1)"
     if [[ "$value" -gt 0 ]]; then
       return 0
     fi
@@ -222,6 +235,34 @@ record_probe_failure() {
   local output="$3"
   local cleaned="${output//$'\n'/ }"
   PROBE_FAILURES+="${label} failed with status ${status}: ${cleaned}"$'\n'
+}
+
+record_preflight_failure() {
+  local label="$1"
+  local status="$2"
+  local output="$3"
+  local cleaned="${output//$'\n'/ }"
+  PREFLIGHT_FAILURES+="${label} failed with status ${status}: ${cleaned}"$'\n'
+}
+
+run_preflight_gate() {
+  local label="$1"
+  shift
+  local output
+  local status
+  if output="$("$@" 2>&1)"; then
+    if [[ -n "$output" ]]; then
+      printf '%s\n' "$output"
+    fi
+    return 0
+  else
+    status=$?
+  fi
+  if [[ -n "$output" ]]; then
+    printf '%s\n' "$output" >&2
+  fi
+  record_preflight_failure "$label" "$status" "$output"
+  return "$status"
 }
 
 append_snapshot() {
@@ -565,6 +606,7 @@ write_summary() {
   local started_at="$1"
   local finished_at="$2"
   local result="$3"
+  local extra_failures="${4:-}"
   STARTED_AT="$started_at" \
   FINISHED_AT="$finished_at" \
   BOOT_STARTED_AT="$BOOT_STARTED_AT" \
@@ -582,18 +624,26 @@ write_summary() {
   CLUSTER_DESCRIPTOR="docker-compose:deploy/demo/compose.yaml;profile=$PROFILE;demo_mode=$DEMO_MODE" \
   SNAPSHOTS_FILE="$SNAPSHOTS_FILE" \
   SUMMARY_FILE="$SUMMARY_FILE" \
+  EXTRA_FAILURES="$extra_failures" \
   python3 - <<'PY'
 import json
 import os
 from pathlib import Path
 
 snapshots_path = Path(os.environ["SNAPSHOTS_FILE"])
-snapshots = [
-    json.loads(line)
-    for line in snapshots_path.read_text(encoding="utf-8").splitlines()
-    if line.strip()
+snapshots = []
+if snapshots_path.exists():
+    snapshots = [
+        json.loads(line)
+        for line in snapshots_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+extra_failures = [
+    line for line in os.environ["EXTRA_FAILURES"].splitlines() if line.strip()
 ]
-failures = [f for snapshot in snapshots for f in snapshot.get("failures", [])]
+failures = extra_failures + [
+    f for snapshot in snapshots for f in snapshot.get("failures", [])
+]
 summary = {
     "result": os.environ["RESULT"],
     "commit_sha": os.environ["GIT_COMMIT_SHA"],
@@ -664,14 +714,25 @@ wait_for_http "http://127.0.0.1:9099/healthz" "tokenizer healthz"
 wait_for_http "http://127.0.0.1:9094/metrics" "control-plane metrics"
 wait_for_metric_positive "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_cycles_total" "stats-aggregator cycle"
 
-echo "[soak] validating real SVID/mTLS test once before sustained snapshots"
-cargo test --manifest-path services/output_predictor/Cargo.toml --test plugin_svid_mtls -- --nocapture
-python3 -m pytest contrib/output_predictor_template/conformance_test.py -q -k 'client_svid'
-
 STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 STARTED_UNIX="$(date -u +%s)"
-INDEX=0
+PREFLIGHT_FAILURES=""
 RESULT="pass"
+
+echo "[soak] validating real SVID/mTLS test once before sustained snapshots"
+run_preflight_gate "Rust SVID/mTLS test" \
+  cargo test --manifest-path services/output_predictor/Cargo.toml --test plugin_svid_mtls -- --nocapture || RESULT="fail"
+run_preflight_gate "Python SVID conformance test" \
+  python3 -m pytest contrib/output_predictor_template/conformance_test.py -q -k 'client_svid' || RESULT="fail"
+
+if [[ "$RESULT" != "pass" ]]; then
+  FINISHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+  write_summary "$STARTED_AT" "$FINISHED_AT" "$RESULT" "$PREFLIGHT_FAILURES"
+  echo "[soak] FAIL: see $SUMMARY_FILE" >&2
+  exit 1
+fi
+
+INDEX=0
 while true; do
   # append_snapshot has explicit return guards on each probe so the loop can
   # still write a structured failure summary without making probes fail-open.
