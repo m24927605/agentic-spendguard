@@ -77,6 +77,7 @@ pub fn ledger_code_to_http(code: i32, message: &str) -> StatusCode {
         PC::AuditInvariantViolated | PC::DuplicateDecisionEvent => {
             StatusCode::INTERNAL_SERVER_ERROR
         }
+        PC::IdempotencyConflict => StatusCode::CONFLICT,
         PC::MultiReservationCommitDeferred => StatusCode::NOT_IMPLEMENTED,
         PC::Unspecified => {
             // Receiver guardrail v3 V3.1: ledger maps "idempotency_key reused"
@@ -91,5 +92,19 @@ pub fn ledger_code_to_http(code: i32, message: &str) -> StatusCode {
                 StatusCode::BAD_GATEWAY
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proto::common::v1::error::Code as ProtoCode;
+
+    #[test]
+    fn idempotency_conflict_maps_to_http_409() {
+        assert_eq!(
+            ledger_code_to_http(ProtoCode::IdempotencyConflict as i32, "same key different body"),
+            StatusCode::CONFLICT
+        );
     }
 }
