@@ -1,0 +1,83 @@
+BEGIN
+SET
+SET
+CREATE TABLE
+CREATE FUNCTION
+CREATE FUNCTION
+ ga_require_index
+------------------
+
+(1 row)
+
+ ga_assert_no_seq_scan
+-----------------------
+
+(1 row)
+
+ ga_require_index
+------------------
+
+(1 row)
+
+ ga_assert_no_seq_scan
+-----------------------
+
+(1 row)
+
+ ga_require_index
+------------------
+
+(1 row)
+
+ ga_assert_no_seq_scan
+-----------------------
+
+(1 row)
+
+ ga_require_index
+------------------
+
+(1 row)
+
+ ga_assert_no_seq_scan
+-----------------------
+
+(1 row)
+
+ ga_require_index
+------------------
+
+(1 row)
+
+ ga_assert_no_seq_scan
+-----------------------
+
+(1 row)
+
+ ga_require_index
+------------------
+
+(1 row)
+
+ ga_assert_no_seq_scan
+-----------------------
+
+(1 row)
+
+                    check_name                    | status |                              details
+--------------------------------------------------+--------+--------------------------------------------------------------------
+ canonical_events_aggregator_bucket_index         | PASS   | required index present: canonical_events_aggregator_bucket_idx
+ canonical_events_decision_join_index             | PASS   | required index present: canonical_events_decision_idx
+ canonical_events_decision_outcome_join           | PASS   | no Seq Scan over GA production tables
+ canonical_events_output_distribution_aggregation | PASS   | no Seq Scan over GA production tables
+ canonical_events_run_length_aggregation          | PASS   | no Seq Scan over GA production tables
+ canonical_events_run_length_index                | PASS   | required index present: canonical_events_aggregator_run_length_idx
+ canonical_events_run_recovery_index              | PASS   | required index present: canonical_events_run_recovery_idx
+ canonical_events_run_recovery_lookup             | PASS   | no Seq Scan over GA production tables
+ output_distribution_cache_hot_lookup             | PASS   | no Seq Scan over GA production tables
+ output_distribution_cache_hot_lookup_index       | PASS   | required index present: output_distribution_cache_pkey
+ run_length_distribution_cache_hot_lookup         | PASS   | no Seq Scan over GA production tables
+ run_length_distribution_cache_hot_lookup_index   | PASS   | required index present: run_length_distribution_cache_pkey
+(12 rows)
+
+COMMIT

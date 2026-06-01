@@ -36,6 +36,8 @@ The migration index as of HARDEN_03 R2:
 | 0017 | SLICE_06      | run_length_distribution_cache (mirror RLS shape)                       |
 | 0018 | SLICE_06 R2   | canonical_events aggregator mirror columns (R2 B4 Option A)            |
 | 0019 | HARDEN_03 R2  | audit_outcome_quarantine aggregator mirror columns                     |
+| 0020 | HARDEN_05     | CloudEvent replay dedup ledger                                         |
+| 0021 | GA_08         | canonical_events run recovery index for run_cost_projector             |
 
 ## The 0014 gap
 
@@ -78,6 +80,9 @@ ALTER TABLE canonical_events
     DROP COLUMN IF EXISTS model;
 DROP INDEX IF EXISTS canonical_events_aggregator_bucket_idx;
 DROP INDEX IF EXISTS canonical_events_aggregator_run_length_idx;
+
+-- 0021
+DROP INDEX IF EXISTS canonical_events_run_recovery_idx;
 ```
 
 ## RLS contract (SLICE_06 R2)

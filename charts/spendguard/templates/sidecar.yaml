@@ -101,6 +101,7 @@ spec:
               value: "https://{{ include "spendguard.fullname" . }}-canonical-ingest:50052"
             {{- if $runCostProjectorUrl }}
             - { name: SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL, value: {{ $runCostProjectorUrl | quote }} }
+            - { name: SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_TIMEOUT_MS, value: {{ .Values.sidecar.runCostProjectorTimeoutMs | quote }} }
             {{- end }}
             # NOTE: sidecar/src/clients/mtls.rs uses MTlsPaths::default()
             # which hardcodes the workload-cert paths. Files come from the

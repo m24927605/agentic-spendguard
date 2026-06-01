@@ -8,7 +8,7 @@
 //!     signal layering per spec §6.
 //!   * [`crate::state_cache`] — in-memory RunState cache with TTL +
 //!     LRU bounded eviction per spec §7.
-//!   * [`crate::recovery`] — audit_outbox replay on cold cache miss
+//!   * [`crate::recovery`] — canonical_events replay on cold cache miss
 //!     per spec §7.4 (30-min replay window only).
 //!   * [`crate::signal_1`] — induced from history (run_length_distribution_cache)
 //!     per spec §3.

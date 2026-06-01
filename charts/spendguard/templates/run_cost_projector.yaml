@@ -6,7 +6,7 @@
        SLICE_06 R3 N2:
          - chart.profile=production: image.tag semver/digest + UDS xor mTLS gate
          - chart.profile=production: DB URL Secret key required for Signal 1 +
-           audit-chain recovery
+           canonical audit-chain recovery
          - container security baseline: USER 65532 + readOnlyRootFilesystem
            + cap_drop ALL (SLICE_03 R2 M7)
     */ -}}
@@ -21,7 +21,7 @@
 {{- fail "runCostProjector must configure either udsHostPath (for in-cluster on-node sidecar callers) or mtlsSecretName (for cross-node mTLS) under chart.profile=production (plaintext TCP forbidden per spec §2.2 + sidecar §5)" -}}
 {{- end -}}
 {{- if not .Values.postgres.runCostProjectorUrlKey -}}
-{{- fail "postgres.runCostProjectorUrlKey is required under chart.profile=production (Signal 1 run_length_distribution_cache lookup + audit_outbox cold-recovery replay per spec §3 + §7.4 — missing DB URL forces every Project to skeleton-mode cold-start with no recovery, which defeats SLICE_09's purpose)" -}}
+{{- fail "postgres.runCostProjectorUrlKey is required under chart.profile=production (Signal 1 run_length_distribution_cache lookup + canonical_events cold-recovery replay per spec §3 + §7.4 — missing DB URL forces every Project to skeleton-mode cold-start with no recovery, which defeats SLICE_09's purpose)" -}}
 {{- end -}}
 {{- end -}}
 apiVersion: apps/v1

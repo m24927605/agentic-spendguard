@@ -195,6 +195,10 @@ sidecar:
   # With the demo/test metadata gate off, budget projection uses
   # Ledger.QueryBudgetState rather than caller-supplied metadata.
   runCostProjectorUrl: ""
+  # Per-RPC timeout for sidecar -> run_cost_projector.Project. Production
+  # default stays below the 50ms decision budget; local smoke gates may
+  # override it to absorb Docker Desktop tail latency.
+  runCostProjectorTimeoutMs: 25
   # Demo/test-only. When true, sidecar accepts caller-supplied
   # runtime_metadata.budget_remaining_atomic for RUN_BUDGET_PROJECTION_EXCEEDED.
   # Production renders fail if this is enabled; production must derive budget
@@ -449,7 +453,7 @@ outputPredictor:
 # Signal 2 (per-step drift) + Signal 3 (SDK with_run_plan pass-through)
 # + 3 RUN_* code emission (BUDGET > STEPS > DRIFT precedence) +
 # in-memory RunState cache (10K cap, 30-min TTL) + audit-chain replay
-# recovery on cold miss.
+# canonical audit-chain recovery on cold miss.
 #
 # Resource ceiling (spec §10): 256 MiB worst case for 10K concurrent
 # runs × ~1 KiB RunState; default request 64 MiB.

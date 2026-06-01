@@ -1,0 +1,177 @@
+{
+  "audit": {
+    "canonical_after": 200,
+    "canonical_before": 0,
+    "canonical_decision_after": 100,
+    "canonical_decision_before": 0,
+    "canonical_decision_delta": 100,
+    "canonical_delta": 200,
+    "canonical_outcome_after": 100,
+    "canonical_outcome_before": 0,
+    "canonical_outcome_delta": 100,
+    "ledger_outbox_after": 202,
+    "ledger_outbox_before": 2,
+    "ledger_outbox_decision_after": 102,
+    "ledger_outbox_decision_before": 2,
+    "ledger_outbox_decision_delta": 100,
+    "ledger_outbox_delta": 200,
+    "ledger_outbox_outcome_after": 100,
+    "ledger_outbox_outcome_before": 0,
+    "ledger_outbox_outcome_delta": 100,
+    "oldest_pending_lag_after_seconds": 0,
+    "outbox_drain_status": 0,
+    "pending_after": 0,
+    "verify_audit_columns_status": 0
+  },
+  "branch": "ga/GA_08_scale_performance_slo_proof",
+  "command_line": "benchmarks/ga-load/run.sh",
+  "commit_sha": "e660678953adfa1aa56c9d6203518bd382d29308",
+  "date": "2026-06-01",
+  "db_plan_status": 0,
+  "failures": [],
+  "finished_at": "2026-06-01T06:35:42.162521+00:00",
+  "git_dirty": false,
+  "git_status": [],
+  "load": {
+    "cardinality": {
+      "actual_tenants": 1,
+      "agents": 20,
+      "logical_tenants": 100,
+      "models": 4,
+      "prompt_classes": 4,
+      "providers": 4,
+      "runs": 100
+    },
+    "completed_operations": 100,
+    "duration_seconds": 1.325,
+    "error_count": 0,
+    "errors": [],
+    "expected_operations": 100,
+    "failures": [],
+    "finished_at_unix": 1780295730.0301843,
+    "latency": {
+      "end_to_end": {
+        "count": 100,
+        "max_ms": 277.087,
+        "p50_ms": 40.455,
+        "p95_ms": 87.934,
+        "p99_ms": 256.852
+      },
+      "output_predictor": {
+        "count": 100,
+        "max_ms": 15.11,
+        "p50_ms": 0.431,
+        "p95_ms": 3.519,
+        "p99_ms": 14.435
+      },
+      "run_cost_projector": {
+        "count": 100,
+        "max_ms": 53.157,
+        "p50_ms": 1.168,
+        "p95_ms": 6.762,
+        "p99_ms": 51.073
+      },
+      "sidecar_confirm_publish_outcome": {
+        "count": 100,
+        "max_ms": 1.108,
+        "p50_ms": 0.434,
+        "p95_ms": 0.865,
+        "p99_ms": 1.048
+      },
+      "sidecar_decision": {
+        "count": 100,
+        "max_ms": 121.008,
+        "p50_ms": 19.5,
+        "p95_ms": 49.629,
+        "p99_ms": 101.917
+      },
+      "sidecar_emit_trace_events": {
+        "count": 100,
+        "max_ms": 94.344,
+        "p50_ms": 18.483,
+        "p95_ms": 42.373,
+        "p99_ms": 83.512
+      },
+      "tokenizer": {
+        "count": 100,
+        "max_ms": 10.158,
+        "p50_ms": 0.544,
+        "p95_ms": 2.402,
+        "p99_ms": 10.071
+      }
+    },
+    "result": "pass",
+    "scenario": {
+      "actual_input_tokens": 12,
+      "actual_output_tokens": 1,
+      "actual_tenant_id": "00000000-0000-4000-8000-000000000001",
+      "budget_remaining_atomic": 1000000,
+      "claim_amount_atomic": 1,
+      "concurrency": 4,
+      "description": "GA_08 local real-stack load: one certified demo tenant plus 100 logical tenant workloads expressed as distinct run/agent/provider/prompt buckets.",
+      "environment_profile": "local-compose",
+      "gate_kind": "local_real_stack_smoke",
+      "local_smoke_limits": {
+        "end_to_end_p99_ms": 1000,
+        "max_outbox_drain_wait_seconds": 120,
+        "max_outbox_lag_seconds": 30,
+        "output_predictor_p99_ms": 500,
+        "run_cost_projector_p99_ms": 500,
+        "sidecar_commit_p99_ms": 250,
+        "sidecar_decision_p99_ms": 500,
+        "sidecar_emit_p99_ms": 500,
+        "tokenizer_p99_ms": 500
+      },
+      "logical_tenants": 100,
+      "models": [
+        "gpt-4o-mini",
+        "claude-3-5-haiku-20241022",
+        "gemini-1.5-flash",
+        "command-r-plus"
+      ],
+      "name": "local-100-tenants",
+      "planned_calls": 2,
+      "planned_tools": 1,
+      "prompt_classes": [
+        "chat_short",
+        "summarization",
+        "rag",
+        "tool_calling"
+      ],
+      "providers": [
+        "openai",
+        "anthropic",
+        "google",
+        "cohere"
+      ],
+      "requests_per_logical_tenant": 1
+    },
+    "service_metric_deltas": {
+      "output_predictor_cache_lookups": 100.0,
+      "output_predictor_predict_count": 100.0,
+      "output_predictor_predict_ok_total": 100.0,
+      "run_cost_projector_project_count": 200.0,
+      "run_cost_projector_project_ok_total": 200.0,
+      "sidecar_confirm_publish_outcome_ok": 100.0,
+      "sidecar_emit_trace_events_ok": 100.0,
+      "sidecar_request_decision_ok": 100.0,
+      "tokenizer_tier3_hits": 0.0
+    },
+    "service_metrics": {
+      "output_predictor_cache_lookups": 100.0,
+      "output_predictor_predict_count": 100.0,
+      "output_predictor_predict_ok_total": 100.0,
+      "run_cost_projector_project_count": 200.0,
+      "run_cost_projector_project_ok_total": 200.0,
+      "sidecar_confirm_publish_outcome_ok": 100.0,
+      "sidecar_emit_trace_events_ok": 100.0,
+      "sidecar_request_decision_ok": 100.0,
+      "tokenizer_tier3_hits": 0.0
+    },
+    "started_at_unix": 1780295728.7049458
+  },
+  "machine_descriptor": "Darwin TW168020225M.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:56:34 PST 2026; root:xnu-12377.91.3~2/RELEASE_ARM64_T8122 arm64",
+  "result": "pass",
+  "scenario_path": "/Users/michael.chen/products/agentic-spendguard/benchmarks/ga-load/scenarios/local-100-tenants.yaml",
+  "tenant_id": "00000000-0000-4000-8000-000000000001"
+}
