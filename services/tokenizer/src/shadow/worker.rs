@@ -61,7 +61,10 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::circuit_breaker::{CircuitBreakerState, Permit};
-use super::provider_clients::{anthropic::AnthropicClient, gemini::GeminiClient, ProviderError};
+use super::provider_clients::{
+    anthropic::AnthropicClient, cohere::CohereClient, gemini::GeminiClient, llama::LlamaClient,
+    ProviderError,
+};
 use super::sample_rate_state::{SampleRateState, ShadowKey};
 use super::security::{DynCountTokensQuota, DynShadowSecurityStore};
 use crate::proto::common::v1::CloudEvent;
@@ -239,14 +242,18 @@ pub trait DriftAlertSink: Send + Sync {
 #[derive(Clone, Default)]
 pub struct ProviderRoster {
     pub anthropic: Option<AnthropicClient>,
+    pub cohere: Option<CohereClient>,
     pub gemini: Option<GeminiClient>,
+    pub llama: Option<LlamaClient>,
 }
 
 impl std::fmt::Debug for ProviderRoster {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProviderRoster")
             .field("anthropic", &self.anthropic.is_some())
+            .field("cohere", &self.cohere.is_some())
             .field("gemini", &self.gemini.is_some())
+            .field("llama", &self.llama.is_some())
             .finish()
     }
 }
@@ -344,11 +351,11 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
 
     let provider = match event.encoder_kind {
         EncoderKind::Anthropic => "anthropic",
+        EncoderKind::Cohere => "cohere",
         EncoderKind::Gemini => "gemini",
-        // SLICE_05 ships providers for Anthropic + Gemini only.
+        EncoderKind::Llama => "llama",
         // OpenAI's tiktoken is byte-exact (per spec §4.2 threshold 0.0)
         // — drift detection lives elsewhere (CI golden fixture diff).
-        // Cohere / Llama Tier 1 endpoints are deferred to SLICE-extra.
         _ => return ShadowOutcome::Skipped,
     };
     match provider {
@@ -356,8 +363,16 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
             debug!(model = %event.model, "anthropic shadow client not configured; skipping sample");
             return ShadowOutcome::Skipped;
         }
+        "cohere" if deps.providers.cohere.is_none() => {
+            debug!(model = %event.model, "cohere shadow client not configured; skipping sample");
+            return ShadowOutcome::Skipped;
+        }
         "gemini" if deps.providers.gemini.is_none() => {
             debug!(model = %event.model, "gemini shadow client not configured; skipping sample");
+            return ShadowOutcome::Skipped;
+        }
+        "llama" if deps.providers.llama.is_none() => {
+            debug!(model = %event.model, "llama shadow client not configured; skipping sample");
             return ShadowOutcome::Skipped;
         }
         _ => {}
@@ -419,7 +434,15 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
             Some(c) => c.count_tokens(&event.model, &event.raw_text).await,
             None => return ShadowOutcome::Skipped,
         },
+        EncoderKind::Cohere => match deps.providers.cohere.as_ref() {
+            Some(c) => c.count_tokens(&event.model, &event.raw_text).await,
+            None => return ShadowOutcome::Skipped,
+        },
         EncoderKind::Gemini => match deps.providers.gemini.as_ref() {
+            Some(c) => c.count_tokens(&event.model, &event.raw_text).await,
+            None => return ShadowOutcome::Skipped,
+        },
+        EncoderKind::Llama => match deps.providers.llama.as_ref() {
             Some(c) => c.count_tokens(&event.model, &event.raw_text).await,
             None => return ShadowOutcome::Skipped,
         },
@@ -799,6 +822,7 @@ mod tests {
         let mut deps = deps_for_test(ProviderRoster {
             anthropic: None,
             gemini: None,
+            ..ProviderRoster::default()
         });
         deps.sample_rate_overrides = Some(Arc::new(StaticOverrideStore(Some(0.0))));
         let key = ShadowKey {
@@ -837,6 +861,28 @@ mod tests {
         }
     }
 
+    fn ev_cohere(t2_count: i64, raw: &str) -> ShadowEvent {
+        ShadowEvent {
+            tenant_id: test_tenant_id(),
+            model: "command-r-plus-08-2024".into(),
+            encoder_kind: EncoderKind::Cohere,
+            t2_input_tokens: t2_count,
+            t2_tokenizer_version_id: "01918000-0000-7c10-8c10-000000000030".into(),
+            raw_text: raw.into(),
+        }
+    }
+
+    fn ev_llama(t2_count: i64, raw: &str) -> ShadowEvent {
+        ShadowEvent {
+            tenant_id: test_tenant_id(),
+            model: "meta.llama3-1-8b-instruct-v1:0".into(),
+            encoder_kind: EncoderKind::Llama,
+            t2_input_tokens: t2_count,
+            t2_tokenizer_version_id: "01918000-0000-7c10-8c10-000000000040".into(),
+            raw_text: raw.into(),
+        }
+    }
+
     async fn anthropic_mock_returning(tokens: u64) -> (MockServer, AnthropicClient) {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
@@ -849,6 +895,34 @@ mod tests {
             .mount(&server)
             .await;
         let c = AnthropicClient::with_base_url("test-key", server.uri()).unwrap();
+        (server, c)
+    }
+
+    async fn cohere_mock_returning(tokens: u64) -> (MockServer, CohereClient) {
+        let server = MockServer::start().await;
+        let token_ids: Vec<u64> = (0..tokens).collect();
+        Mock::given(method("POST"))
+            .and(path("/v1/tokenize"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "tokens": token_ids,
+                "token_strings": []
+            })))
+            .mount(&server)
+            .await;
+        let c = CohereClient::with_base_url("test-key", server.uri()).unwrap();
+        (server, c)
+    }
+
+    async fn llama_mock_returning(tokens: u64) -> (MockServer, LlamaClient) {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/model/meta.llama3-1-8b-instruct-v1:0/count-tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "inputTokens": tokens
+            })))
+            .mount(&server)
+            .await;
+        let c = LlamaClient::with_base_url("test-key", server.uri()).unwrap();
         (server, c)
     }
 
@@ -874,6 +948,7 @@ mod tests {
         let providers = ProviderRoster {
             anthropic: Some(c),
             gemini: None,
+            ..ProviderRoster::default()
         };
         let deps = deps_for_test_sample_rate_zero(providers);
         let out = process_one(&ev_anthropic(100, "hi"), &deps).await;
@@ -894,6 +969,7 @@ mod tests {
         let providers = ProviderRoster {
             anthropic: Some(client),
             gemini: None,
+            ..ProviderRoster::default()
         };
         let mut deps = deps_for_test(providers);
         deps.security = Arc::new(StaticShadowSecurityStore::deny_all());
@@ -909,11 +985,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn raw_text_not_sent_to_new_providers_without_tenant_pii_opt_in() {
+        let (cohere_server, cohere) = cohere_mock_returning(100).await;
+        let (llama_server, llama) = llama_mock_returning(100).await;
+        let providers = ProviderRoster {
+            cohere: Some(cohere),
+            llama: Some(llama),
+            ..ProviderRoster::default()
+        };
+        let mut deps = deps_for_test(providers);
+        deps.security = Arc::new(StaticShadowSecurityStore::deny_all());
+
+        let cohere_out = process_one(&ev_cohere(100, "sensitive cohere body"), &deps).await;
+        let llama_out = process_one(&ev_llama(100, "sensitive llama body"), &deps).await;
+
+        assert_eq!(cohere_out, ShadowOutcome::Skipped);
+        assert_eq!(llama_out, ShadowOutcome::Skipped);
+        assert!(cohere_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+        assert!(llama_server
+            .received_requests()
+            .await
+            .unwrap_or_default()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn count_tokens_quota_blocks_excess_per_tenant_provider_calls() {
         let (_server, c) = anthropic_mock_returning(100).await;
         let providers = ProviderRoster {
             anthropic: Some(c),
             gemini: None,
+            ..ProviderRoster::default()
         };
         let persister = Arc::new(InMemorySamplePersister::default());
         let mut deps = deps_for_test(providers);
@@ -928,12 +1034,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn count_tokens_quota_is_per_tenant_and_provider_for_new_clients() {
+        let (_cohere_server, cohere) = cohere_mock_returning(100).await;
+        let (_llama_server, llama) = llama_mock_returning(100).await;
+        let providers = ProviderRoster {
+            cohere: Some(cohere),
+            llama: Some(llama),
+            ..ProviderRoster::default()
+        };
+        let persister = Arc::new(InMemorySamplePersister::default());
+        let mut deps = deps_for_test(providers);
+        deps.security = Arc::new(StaticShadowSecurityStore::allow_all_for_tests(1));
+        deps.persister = persister.clone();
+
+        let first_cohere = process_one(&ev_cohere(100, "first cohere"), &deps).await;
+        let second_cohere = process_one(&ev_cohere(100, "second cohere"), &deps).await;
+        let first_llama = process_one(&ev_llama(100, "first llama"), &deps).await;
+
+        assert_eq!(first_cohere, ShadowOutcome::Sampled);
+        assert_eq!(second_cohere, ShadowOutcome::Skipped);
+        assert_eq!(first_llama, ShadowOutcome::Sampled);
+        assert_eq!(persister.rows.lock().len(), 2);
+    }
+
+    #[tokio::test]
     async fn happy_path_no_drift_persists_sample() {
         // T1 = T2 = 100 → drift_ratio = 0 ≤ threshold 0.01 → no alert.
         let (_server, c) = anthropic_mock_returning(100).await;
         let providers = ProviderRoster {
             anthropic: Some(c),
             gemini: None,
+            ..ProviderRoster::default()
         };
         let persister = Arc::new(InMemorySamplePersister::default());
         let alert_sink = Arc::new(InMemoryDriftAlertSink::default());
@@ -989,6 +1120,7 @@ mod tests {
         let providers = ProviderRoster {
             anthropic: Some(c),
             gemini: None,
+            ..ProviderRoster::default()
         };
         let persister = Arc::new(SlowSamplePersister::default());
         let mut deps = deps_for_test(providers);
@@ -1022,6 +1154,7 @@ mod tests {
         let providers = ProviderRoster {
             anthropic: Some(c),
             gemini: None,
+            ..ProviderRoster::default()
         };
         let persister = Arc::new(InMemorySamplePersister::default());
         let alert_sink = Arc::new(InMemoryDriftAlertSink::default());
@@ -1081,6 +1214,7 @@ mod tests {
         let providers = ProviderRoster {
             anthropic: Some(c),
             gemini: None,
+            ..ProviderRoster::default()
         };
         let deps = deps_for_test(providers);
         let sample_rate = deps.sample_rate.clone();
@@ -1107,6 +1241,7 @@ mod tests {
         let providers = ProviderRoster {
             anthropic: Some(c),
             gemini: None,
+            ..ProviderRoster::default()
         };
         let deps = deps_for_test(providers);
         let key = ShadowKey {
@@ -1140,6 +1275,7 @@ mod tests {
         let providers = ProviderRoster {
             anthropic: Some(c),
             gemini: None,
+            ..ProviderRoster::default()
         };
         let deps = deps_for_test(providers);
         let key = ShadowKey {
@@ -1156,7 +1292,7 @@ mod tests {
 
     #[tokio::test]
     async fn unsupported_encoder_kind_skips() {
-        // OpenAI / Cohere / Llama all skipped in SLICE_05.
+        // OpenAI is byte-exact Tier 2 and has no Tier 1 shadow provider.
         let providers = ProviderRoster::default();
         let deps = deps_for_test(providers);
         let mut ev = ev_anthropic(100, "hi");
@@ -1180,6 +1316,7 @@ mod tests {
         let providers = ProviderRoster {
             anthropic: None,
             gemini: Some(c),
+            ..ProviderRoster::default()
         };
         let persister = Arc::new(InMemorySamplePersister::default());
         let mut deps = deps_for_test(providers);
@@ -1188,6 +1325,44 @@ mod tests {
         let out = process_one(&ev_gemini(100, "hi"), &deps).await;
         assert_eq!(out, ShadowOutcome::Sampled);
         assert_eq!(persister.rows.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn cohere_dispatch_path() {
+        let (_server, c) = cohere_mock_returning(100).await;
+        let providers = ProviderRoster {
+            cohere: Some(c),
+            ..ProviderRoster::default()
+        };
+        let persister = Arc::new(InMemorySamplePersister::default());
+        let mut deps = deps_for_test(providers);
+        deps.persister = persister.clone();
+
+        let out = process_one(&ev_cohere(100, "hi"), &deps).await;
+        assert_eq!(out, ShadowOutcome::Sampled);
+        let rows = persister.rows.lock();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model, "command-r-plus-08-2024");
+        assert_eq!(rows[0].t1_input_tokens, 100);
+    }
+
+    #[tokio::test]
+    async fn llama_dispatch_path() {
+        let (_server, c) = llama_mock_returning(100).await;
+        let providers = ProviderRoster {
+            llama: Some(c),
+            ..ProviderRoster::default()
+        };
+        let persister = Arc::new(InMemorySamplePersister::default());
+        let mut deps = deps_for_test(providers);
+        deps.persister = persister.clone();
+
+        let out = process_one(&ev_llama(100, "hi"), &deps).await;
+        assert_eq!(out, ShadowOutcome::Sampled);
+        let rows = persister.rows.lock();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model, "meta.llama3-1-8b-instruct-v1:0");
+        assert_eq!(rows[0].t1_input_tokens, 100);
     }
 
     #[tokio::test]
