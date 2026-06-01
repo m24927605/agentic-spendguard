@@ -1,0 +1,44 @@
+{
+  "name": "local-100-tenants",
+  "description": "GA_08 local real-stack load: one certified demo tenant plus 100 logical tenant workloads expressed as distinct run/agent/provider/prompt buckets.",
+  "environment_profile": "local-compose",
+  "actual_tenant_id": "00000000-0000-4000-8000-000000000001",
+  "logical_tenants": 100,
+  "requests_per_logical_tenant": 1,
+  "concurrency": 4,
+  "claim_amount_atomic": 1,
+  "actual_input_tokens": 12,
+  "actual_output_tokens": 1,
+  "budget_remaining_atomic": 1000000,
+  "planned_calls": 2,
+  "planned_tools": 1,
+  "models": [
+    "gpt-4o-mini",
+    "claude-3-5-haiku-20241022",
+    "gemini-1.5-flash",
+    "command-r-plus"
+  ],
+  "providers": [
+    "openai",
+    "anthropic",
+    "google",
+    "cohere"
+  ],
+  "prompt_classes": [
+    "chat_short",
+    "summarization",
+    "rag",
+    "tool_calling"
+  ],
+  "slos": {
+    "tokenizer_p99_ms": 500,
+    "output_predictor_p99_ms": 500,
+    "run_cost_projector_p99_ms": 500,
+    "sidecar_decision_p99_ms": 500,
+    "sidecar_commit_p99_ms": 250,
+    "sidecar_emit_p99_ms": 500,
+    "end_to_end_p99_ms": 1000,
+    "max_outbox_lag_seconds": 30,
+    "max_outbox_drain_wait_seconds": 120
+  }
+}

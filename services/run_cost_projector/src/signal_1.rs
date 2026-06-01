@@ -82,7 +82,7 @@ pub async fn signal_1_predicted_remaining_steps(
 /// Look up the 30-day P95 run length from the canonical_ingest DB.
 /// Returns `None` on cache miss (the bucket has no aggregation row yet).
 ///
-/// RLS-aware: wraps the SELECT in a tx that SETs app.current_tenant_id
+/// RLS-aware: wraps the SELECT in a tx that sets app.current_tenant_id
 /// per the run_length_distribution_cache table's RLS policy
 /// (services/canonical_ingest/migrations/0017_run_length_distribution_cache.sql).
 async fn query_p95_steps(
@@ -91,7 +91,7 @@ async fn query_p95_steps(
     agent_id: &str,
 ) -> Result<Option<f32>, sqlx::Error> {
     let mut tx = pool.begin().await?;
-    sqlx::query("SET LOCAL app.current_tenant_id = $1")
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
         .bind(tenant_id.to_string())
         .execute(&mut *tx)
         .await?;

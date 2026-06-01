@@ -6,9 +6,10 @@
 //!
 //! ## Source of truth
 //!
-//! `audit_outbox` is the audit chain primary. Each `spendguard.audit.decision`
-//! row carries the run-level columns wired by audit-chain-prediction-
-//! extension-v1alpha1.md §2.2:
+//! `canonical_events` is the database visible to run_cost_projector in demo
+//! and Helm (`SPENDGUARD_RUN_COST_PROJECTOR_DATABASE_URL` points at the
+//! canonical DB). Each `spendguard.audit.decision` row carries the run-level
+//! columns wired by audit-chain-prediction-extension-v1alpha1.md §2.2:
 //!
 //!   * `run_steps_completed_so_far` (BIGINT) — counter
 //!   * `run_projection_at_decision_atomic` (NUMERIC(38,0)) — diagnostic
@@ -18,7 +19,8 @@
 //!
 //! For SLICE_09 we use a simpler approximation: read the
 //! `run_steps_completed_so_far` AND `run_projection_at_decision_atomic`
-//! columns from the LAST row in the replay window for this run, then
+//! columns from the latest canonical row in the replay window for this run,
+//! then
 //! initialize RunState from those values. The per_step_costs Vec is
 //! reconstructed as zero (drift detection rebuilds organically on
 //! subsequent calls). This is acceptable per spec §7.4 — "無資料遺失"
@@ -35,15 +37,37 @@
 //!
 //! ## RLS
 //!
-//! RLS is enforced on audit_outbox per services/ledger/migrations/0009.
-//! Reader transactions MUST `SET LOCAL app.current_tenant_id = $1` before
-//! the SELECT. This mirrors stats_aggregator SLICE_06 R2 B1 pattern.
+//! RLS is enforced on canonical_events per services/canonical_ingest
+//! migrations.
+//! Reader transactions MUST set `app.current_tenant_id` before the SELECT.
+//! Use parameterized `set_config(..., true)` because PostgreSQL does not
+//! accept bind parameters in `SET LOCAL` statements. This mirrors the
+//! stats_aggregator SLICE_06 R2 B1 pattern.
 
 use sqlx::{PgPool, Row};
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::state_cache::RunState;
+
+const SET_TENANT_SQL: &str = "SELECT set_config('app.current_tenant_id', $1, true)";
+
+const RECOVERY_SQL: &str = r#"
+        SELECT
+            run_steps_completed_so_far,
+            run_projection_at_decision_atomic::text AS run_projection_at_decision_atomic
+        FROM canonical_events
+        WHERE tenant_id = $1
+          AND event_type = 'spendguard.audit.decision'
+          AND ingest_at >= clock_timestamp() - make_interval(mins => $2::int)
+          AND recorded_month >= date_trunc(
+                'month',
+                clock_timestamp() - make_interval(mins => $2::int)
+              )::date
+          AND run_id_mirror = $3
+        ORDER BY producer_sequence DESC
+        LIMIT 1
+        "#;
 
 #[derive(Debug, Error)]
 pub enum RecoveryError {
@@ -74,16 +98,17 @@ pub async fn recover_from_audit_chain(
     model: &str,
     replay_window_minutes: u32,
 ) -> Result<Option<RunState>, RecoveryError> {
-    // Begin a short-lived RO transaction so SET LOCAL app.current_tenant_id
-    // scopes to just this query (RLS-aware per stats_aggregator R2 B1).
+    // Begin a short-lived RO transaction so set_config(..., true) scopes
+    // app.current_tenant_id to just this query (RLS-aware per
+    // stats_aggregator R2 B1).
     let mut tx = pool.begin().await?;
 
-    sqlx::query("SET LOCAL app.current_tenant_id = $1")
+    sqlx::query(SET_TENANT_SQL)
         .bind(tenant_id.to_string())
         .execute(&mut *tx)
         .await?;
 
-    // The audit_outbox column run_steps_completed_so_far is BIGINT;
+    // The canonical_events column run_steps_completed_so_far is BIGINT;
     // run_projection_at_decision_atomic is NUMERIC(38,0). We project them
     // alongside the cloudevent_payload's `cumulative_cost_atomic` derivation
     // hint. For SLICE_09 simplicity we use run_projection_at_decision_atomic
@@ -95,22 +120,9 @@ pub async fn recover_from_audit_chain(
     // NOT yet populated by sidecar (Phase E wires it); for cold-recovery
     // before Phase E lands in production we fall back to recording
     // steps_completed only and zeroing cumulative_cost_atomic.
-    let row = sqlx::query(
-        r#"
-        SELECT
-            run_steps_completed_so_far,
-            run_projection_at_decision_atomic
-        FROM audit_outbox
-        WHERE tenant_id = $1
-          AND event_type = 'spendguard.audit.decision'
-          AND recorded_at >= clock_timestamp() - ($2 || ' minutes')::interval
-          AND (cloudevent_payload->>'run_id')::uuid = $3
-        ORDER BY producer_sequence DESC
-        LIMIT 1
-        "#,
-    )
+    let row = sqlx::query(RECOVERY_SQL)
     .bind(tenant_id)
-    .bind(replay_window_minutes.to_string())
+    .bind(replay_window_minutes as i32)
     .bind(run_id)
     .fetch_optional(&mut *tx)
     .await?;
@@ -176,5 +188,13 @@ mod tests {
         assert!(st.per_step_costs.is_empty());
         assert_eq!(st.agent_id, "ag");
         assert_eq!(st.model, "mdl");
+    }
+
+    #[test]
+    fn recovery_sql_targets_canonical_events() {
+        assert!(RECOVERY_SQL.contains("FROM canonical_events"));
+        assert!(RECOVERY_SQL.contains("run_id_mirror = $3"));
+        assert!(!RECOVERY_SQL.contains("audit_outbox"));
+        assert!(SET_TENANT_SQL.contains("set_config('app.current_tenant_id'"));
     }
 }
