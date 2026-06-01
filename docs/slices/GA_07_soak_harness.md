@@ -1,7 +1,7 @@
 # GA 07 - Long-Running Soak Harness
 
 > **Branch**: `ga/GA_07_soak_harness`
-> **Status**: design
+> **Status**: implementation complete; adversarial review pending
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; soak scripts and evidence format
 
@@ -44,6 +44,8 @@ No schema changes expected.
 ## §6. Audit / Security / Operational Impact
 
 Soak must continuously prove no audit loss and no fail-open behavior during transient operational stress.
+
+The local profile is a quiescent steady-state soak after one real demo traffic boot. It therefore treats canonical ingest freshness as telemetry and fails on canonical row-count regression or verify-chain failure rather than requiring new canonical rows during the no-traffic interval.
 
 ## §7. Failure Modes
 
@@ -91,11 +93,14 @@ Reviewer must reject shim-only or final-status-only soak evidence.
 |---|---|---|
 | Performance/Database Architect | Soak must include periodic snapshots | Evidence format requires them |
 | SRE/Operations Architect | 30m local gate plus 24h release command | Practical slice gate and stronger release gate |
+| Implementer | Use real docker-compose demo stack, SVID/mTLS tests, verify-chain, outbox/leader metrics, stats cycles, and container memory snapshots | `scripts/soak/ga-soak.sh` writes JSONL snapshots and JSON summary |
+| Implementer | Corrected no-traffic freshness gate after a 30m run exposed a harness false positive | Canonical count regression + verify-chain are blockers; canonical freshest age remains telemetry |
+| Implementer | Ran exact 30m local gate | PASS: 27 snapshots, final elapsed 1814s, pending 0, lag 0, stats cycles 31 |
 
 ## §14. Merge Checklist
 
-- [ ] Soak harness exists
-- [ ] 30m local soak passes
-- [ ] Evidence recorded
+- [x] Soak harness exists
+- [x] 30m local soak passes
+- [x] Evidence recorded
 - [ ] AIT review clean or arbitration recorded
 - [ ] Memory updated

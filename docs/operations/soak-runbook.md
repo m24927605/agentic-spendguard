@@ -25,7 +25,7 @@ The release gate should run from a clean checkout with no unrelated compose stac
 - Any nonzero `audit_outbox.pending_forward` count.
 - Outbox lag above the configured `MAX_OUTBOX_LAG_SECONDS`.
 - Outbox leader count different from one.
-- Zero canonical audit rows or stale canonical ingest freshness.
+- Zero canonical audit rows or canonical row-count regression after the initial demo traffic.
 - No stats aggregation cycle, stale last-cycle timestamp, or cycle errors.
 - Failed `verify-chain` / audit-column probe.
 - Failed predictor-client SVID subject probe.

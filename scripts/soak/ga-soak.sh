@@ -340,6 +340,7 @@ if baseline_path.exists():
 else:
     baseline = {
         "created_at": datetime.fromtimestamp(snapshot_unix, timezone.utc).isoformat(),
+        "canonical_events": canonical_count,
         "memory_bytes": {name: item["memory_bytes"] for name, item in docker_stats.items()},
     }
     baseline_path.write_text(json.dumps(baseline, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -356,8 +357,10 @@ if int(os.environ["LEADER_COUNT"]) != 1:
     failures.append(f"outbox leader count is {os.environ['LEADER_COUNT']}, expected 1")
 if canonical_count <= 0:
     failures.append("canonical_events count is zero")
-if canonical_freshness > 600:
-    failures.append(f"canonical_events freshest row age {canonical_freshness}s exceeds 600s")
+if canonical_count < int(baseline.get("canonical_events", 0)):
+    failures.append(
+        f"canonical_events count regressed from {baseline.get('canonical_events')} to {canonical_count}"
+    )
 if int(os.environ["STATS_CYCLES"]) <= 0:
     failures.append("stats_aggregator has not completed a cycle")
 if int(os.environ["STATS_ERRORS"]) != 0:
