@@ -1,7 +1,7 @@
 # GA 09 - Security Signoff and Supply Chain
 
 > **Branch**: `ga/GA_09_security_signoff_supply_chain`
-> **Status**: implemented; adversarial review pending
+> **Status**: implemented; adversarial review in progress
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; threat model, scan scripts, supply-chain docs
 
@@ -67,7 +67,7 @@ This is the release security gate. It must not waive known high-severity finding
 
 Local evidence on 2026-06-01:
 
-- `scripts/security/ga-security-scan.sh --require-external-tools` passed.
+- `scripts/security/ga-security-scan.sh --require-external-tools` passed after R1 non-root runtime fixes.
 - External tools installed and recorded: Syft 1.44.0, Trivy 0.70.0, Cosign 3.0.6, cargo-audit 0.22.1.
 - `cargo-audit.json` reports 0 vulnerabilities and no warnings.
 - `trivy-fs.json` reports 0 high/critical vulnerabilities for `Cargo.lock`.
@@ -76,6 +76,15 @@ Local evidence on 2026-06-01:
 - `scripts/release/validate-production-helm-values.sh charts/spendguard/values-production.example.yaml --rendered-manifest /tmp/ga09-helm-prod.yaml` passed with negative tests failed closed.
 - `scripts/release/build-release-bundle.sh --output /tmp/spendguard-ga09-release` passed.
 - `scripts/release/check-release-bundle.sh /tmp/spendguard-ga09-release` passed.
+- `make demo-up DEMO_MODE=default` passed after R1 non-root volume ownership fixes; demo completed handshake, decision, provider_report, Step 8 SQL assertions, outbox closure, and canonical_events forwarding checks.
+
+R1 regression coverage added after adversarial review:
+
+- `pki-init` now hands `/etc/ssl/spendguard` cert/key and signing-key volume contents to UID/GID `65532:65532` while preserving `0640` private-key permissions.
+- `bundles-init` now hands `/var/lib/spendguard/bundles` to UID/GID `65532:65532` on both generate and idempotent skip paths, preserving bundle-registry hot-reload writes.
+- `Dockerfile.sidecar` pre-creates `/var/run/secrets/spendguard` symlinks and `/var/run/spendguard` before `USER 65532:65532`.
+- `sidecar-entrypoint.sh` no longer creates root-owned paths, mutates the OS trust store, or chmods the UDS directory after the USER switch.
+- `scripts/security/ga-security-scan.sh` now fails if the above non-root runtime invariants regress.
 
 Evidence:
 
@@ -119,6 +128,8 @@ Reviewer must treat unhandled high-severity findings as blockers.
 | Security Engineer | Runtime image `USER 65532:65532` is required even when Helm sets `runAsUser=65532` | Added USER to every `deploy/demo/runtime/Dockerfile.*` |
 | Release Engineering Architect | Mutable `latest` and `latest-main` promotion are incompatible with GA signoff | Publish workflow now emits sha/tag refs only and signs pushed digests |
 | Release Engineering Architect | Release bundle gate must include migrations added after GA_04 | Refreshed migration inventory for canonical `0021` and ledger `0053` |
+| Security Engineer | R1 P1/P2 findings showed image `USER 65532` must be paired with compose volume ownership handoff | Fixed PKI, bundle, and sidecar runtime ownership and added scan guards |
+| Release Engineering Architect | Manual publish dispatch must still produce an immutable image tag | Restored workflow_dispatch `sha-<short>` tag without reintroducing mutable `latest` |
 
 ## §14. Merge Checklist
 

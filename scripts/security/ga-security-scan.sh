@@ -231,6 +231,47 @@ record(
     else f"mutable tokens present: {', '.join(mutable_hits)}",
 )
 record("publish_workflow_oidc", "id-token: write" in workflow, "OIDC permission present for keyless signing")
+record(
+    "publish_workflow_dispatch_has_sha_tag",
+    "github.event_name == 'workflow_dispatch'" in workflow
+    and "type=sha,prefix=sha-,format=short" in workflow,
+    "manual dispatch publishes immutable sha tag",
+)
+
+sidecar_dockerfile = text("deploy/demo/runtime/Dockerfile.sidecar")
+sidecar_entrypoint = text("deploy/demo/runtime/sidecar-entrypoint.sh")
+pki_init = text("deploy/demo/init/pki/generate.sh")
+bundles_init = text("deploy/demo/init/bundles/generate.sh")
+record(
+    "sidecar_image_precreates_secret_links",
+    "/var/run/secrets/spendguard/tls.crt" in sidecar_dockerfile
+    and "chown -R 65532:65532 /var/run/secrets/spendguard /var/run/spendguard" in sidecar_dockerfile,
+    "sidecar image prepares root-owned paths before USER switch",
+)
+root_only_sidecar_tokens = [
+    "update-ca-certificates",
+    "/usr/local/share/ca-certificates",
+    "mkdir -p /var/run/secrets/spendguard",
+    "chmod 0755 /var/run/spendguard",
+]
+root_only_sidecar_hits = [token for token in root_only_sidecar_tokens if token in sidecar_entrypoint]
+record(
+    "sidecar_entrypoint_nonroot_safe",
+    not root_only_sidecar_hits and "/var/run/spendguard is not writable" in sidecar_entrypoint,
+    "sidecar entrypoint only verifies mounted paths after USER switch"
+    if not root_only_sidecar_hits
+    else f"root-only runtime operations present: {', '.join(root_only_sidecar_hits)}",
+)
+record(
+    "pki_volume_chowned_for_runtime_uid",
+    'chown -R 65532:65532 "$OUT"' in pki_init,
+    "pki-init hands cert/key volume to runtime UID 65532",
+)
+record(
+    "bundles_volume_chowned_for_runtime_uid",
+    'chown -R 65532:65532 "$OUT"' in bundles_init and "ensure_nonroot_ownership" in bundles_init,
+    "bundles-init hands writable bundle volume to runtime UID 65532",
+)
 
 production_values = text("charts/spendguard/values-production.example.yaml")
 rendered = (output_dir / "helm-production.yaml").read_text(encoding="utf-8")

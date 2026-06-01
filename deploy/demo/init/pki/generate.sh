@@ -145,6 +145,10 @@ done
 chmod 0644 "$OUT"/*.crt "$OUT/ca.spki.sha256.hex"
 chmod 0640 "$OUT"/*.key
 
+# Runtime images run as USER 65532:65532. Preserve tight key permissions while
+# making mounted cert/key volumes readable to the service UID.
+chown -R 65532:65532 "$OUT"
+
 echo "[pki] generated artifacts:"
 ls -la "$OUT"
 echo "[pki] signing keys:"

@@ -35,7 +35,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=builder /spendguard-sidecar /usr/local/bin/spendguard-sidecar
 
 COPY deploy/demo/runtime/sidecar-entrypoint.sh /usr/local/bin/sidecar-entrypoint.sh
-RUN chmod +x /usr/local/bin/sidecar-entrypoint.sh
+RUN chmod +x /usr/local/bin/sidecar-entrypoint.sh \
+    && mkdir -p /var/run/secrets/spendguard /var/run/spendguard \
+    && ln -sf /etc/ssl/spendguard/sidecar.crt /var/run/secrets/spendguard/tls.crt \
+    && ln -sf /etc/ssl/spendguard/sidecar.key /var/run/secrets/spendguard/tls.key \
+    && ln -sf /etc/ssl/spendguard/ca.crt /var/run/secrets/spendguard/ca.crt \
+    && chown -R 65532:65532 /var/run/secrets/spendguard /var/run/spendguard
 
 USER 65532:65532
 

@@ -89,7 +89,7 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard-${{ matrix.service }}
           tags: |
-            type=sha,prefix=sha-,format=short,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,format=short,enable=${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
             type=ref,event=tag
           labels: |
             org.opencontainers.image.title=spendguard-${{ matrix.service }}
