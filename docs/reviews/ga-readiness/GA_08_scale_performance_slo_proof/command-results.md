@@ -7,12 +7,12 @@ Scope: local real-stack smoke and DB-plan gate. Contract §14 latency certificat
 | Gate | Result | Evidence |
 |---|---|---|
 | `benchmarks/ga-load/run.sh --scenario benchmarks/ga-load/scenarios/local-100-tenants.yaml` | PASS | ops 100/100; logical tenants 100; providers 4; canonical decision/outcome 100/100; ledger decision/outcome 100/100; pending 0; failures 0 |
-| local smoke latency `tokenizer` | PASS | count 100, p50 1.045ms, p95 4.531ms, p99 22.109ms, max 23.902ms |
-| local smoke latency `output_predictor` | PASS | count 100, p50 0.952ms, p95 6.033ms, p99 24.174ms, max 33.209ms |
-| local smoke latency `run_cost_projector` | PASS | count 100, p50 3.122ms, p95 12.517ms, p99 69.283ms, max 74.357ms |
-| local smoke latency `sidecar_decision` | PASS | count 100, p50 40.024ms, p95 111.25ms, p99 264.867ms, max 321.524ms |
-| local smoke latency `sidecar_confirm_publish_outcome` | PASS | count 100, p50 0.91ms, p95 2.443ms, p99 3.893ms, max 4.751ms |
-| local smoke latency `sidecar_emit_trace_events` | PASS | count 100, p50 36.965ms, p95 89.228ms, p99 133.125ms, max 185.751ms |
-| local smoke latency `end_to_end` | PASS | count 100, p50 84.776ms, p95 214.78ms, p99 491.592ms, max 510.357ms |
+| local smoke latency `tokenizer` | PASS | count 100, p50 0.858ms, p95 10.842ms, p99 16.059ms, max 17.567ms |
+| local smoke latency `output_predictor` | PASS | count 100, p50 0.836ms, p95 10.754ms, p99 45.87ms, max 46.855ms |
+| local smoke latency `run_cost_projector` | PASS | count 100, p50 2.423ms, p95 65.452ms, p99 82.577ms, max 143.997ms |
+| local smoke latency `sidecar_decision` | PASS | count 100, p50 34.278ms, p95 262.625ms, p99 288.978ms, max 490.564ms |
+| local smoke latency `sidecar_confirm_publish_outcome` | PASS | count 100, p50 0.85ms, p95 3.774ms, p99 7.581ms, max 10.397ms |
+| local smoke latency `sidecar_emit_trace_events` | PASS | count 100, p50 30.178ms, p95 167.317ms, p99 362.628ms, max 377.267ms |
+| local smoke latency `end_to_end` | PASS | count 100, p50 72.619ms, p95 458.178ms, p99 779.052ms, max 915.346ms |
 | `python3 tests/e2e/verify_audit_columns.py --tenant 00000000-0000-4000-8000-000000000001` | PASS | `verify-audit-columns.txt` |
 | `psql -d spendguard_canonical -f scripts/db/explain-ga-plans.sql` | PASS | `explain-ga-plans.txt` |

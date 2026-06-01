@@ -9,61 +9,61 @@
     "runs": 100
   },
   "completed_operations": 100,
-  "duration_seconds": 2.644,
+  "duration_seconds": 3.339,
   "error_count": 0,
   "errors": [],
   "expected_operations": 100,
   "failures": [],
-  "finished_at_unix": 1780294778.7351732,
+  "finished_at_unix": 1780295603.7941475,
   "latency": {
     "end_to_end": {
       "count": 100,
-      "max_ms": 510.357,
-      "p50_ms": 84.776,
-      "p95_ms": 214.78,
-      "p99_ms": 491.592
+      "max_ms": 915.346,
+      "p50_ms": 72.619,
+      "p95_ms": 458.178,
+      "p99_ms": 779.052
     },
     "output_predictor": {
       "count": 100,
-      "max_ms": 33.209,
-      "p50_ms": 0.952,
-      "p95_ms": 6.033,
-      "p99_ms": 24.174
+      "max_ms": 46.855,
+      "p50_ms": 0.836,
+      "p95_ms": 10.754,
+      "p99_ms": 45.87
     },
     "run_cost_projector": {
       "count": 100,
-      "max_ms": 74.357,
-      "p50_ms": 3.122,
-      "p95_ms": 12.517,
-      "p99_ms": 69.283
+      "max_ms": 143.997,
+      "p50_ms": 2.423,
+      "p95_ms": 65.452,
+      "p99_ms": 82.577
     },
     "sidecar_confirm_publish_outcome": {
       "count": 100,
-      "max_ms": 4.751,
-      "p50_ms": 0.91,
-      "p95_ms": 2.443,
-      "p99_ms": 3.893
+      "max_ms": 10.397,
+      "p50_ms": 0.85,
+      "p95_ms": 3.774,
+      "p99_ms": 7.581
     },
     "sidecar_decision": {
       "count": 100,
-      "max_ms": 321.524,
-      "p50_ms": 40.024,
-      "p95_ms": 111.25,
-      "p99_ms": 264.867
+      "max_ms": 490.564,
+      "p50_ms": 34.278,
+      "p95_ms": 262.625,
+      "p99_ms": 288.978
     },
     "sidecar_emit_trace_events": {
       "count": 100,
-      "max_ms": 185.751,
-      "p50_ms": 36.965,
-      "p95_ms": 89.228,
-      "p99_ms": 133.125
+      "max_ms": 377.267,
+      "p50_ms": 30.178,
+      "p95_ms": 167.317,
+      "p99_ms": 362.628
     },
     "tokenizer": {
       "count": 100,
-      "max_ms": 23.902,
-      "p50_ms": 1.045,
-      "p95_ms": 4.531,
-      "p99_ms": 22.109
+      "max_ms": 17.567,
+      "p50_ms": 0.858,
+      "p95_ms": 10.842,
+      "p99_ms": 16.059
     }
   },
   "result": "pass",
@@ -134,5 +134,5 @@
     "sidecar_request_decision_ok": 100.0,
     "tokenizer_tier3_hits": 0.0
   },
-  "started_at_unix": 1780294776.0910666
+  "started_at_unix": 1780295600.4548779
 }

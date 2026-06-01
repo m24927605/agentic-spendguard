@@ -61,17 +61,30 @@ BEGIN
                LATERAL jsonb_array_elements(COALESCE(node->'Plans', '[]'::jsonb)) AS child
     )
     SELECT string_agg(
-               COALESCE(node->>'Relation Name', '<unknown>')
+               COALESCE(node->>'Schema', 'public')
+               || '.'
+               || COALESCE(node->>'Relation Name', '<unknown>')
                || ' via ' || COALESCE(node->>'Node Type', '<unknown>'),
                ', '
            )
       INTO seq_details
       FROM nodes
      WHERE node->>'Node Type' = 'Seq Scan'
-       AND COALESCE(node->>'Relation Name', '') IN (
-           'canonical_events',
-           'output_distribution_cache',
-           'run_length_distribution_cache'
+       AND (
+           COALESCE(node->>'Relation Name', '') IN (
+               'output_distribution_cache',
+               'run_length_distribution_cache'
+           )
+           OR EXISTS (
+               SELECT 1
+                 FROM pg_partition_tree('public.canonical_events'::regclass) AS pt
+                 JOIN pg_class AS c
+                   ON c.oid = pt.relid
+                 JOIN pg_namespace AS n
+                   ON n.oid = c.relnamespace
+                WHERE n.nspname = COALESCE(node->>'Schema', 'public')
+                  AND c.relname = COALESCE(node->>'Relation Name', '')
+           )
        );
 
     IF seq_details IS NOT NULL THEN
