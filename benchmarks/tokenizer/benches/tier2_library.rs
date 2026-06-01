@@ -17,8 +17,6 @@
 //! 7. Tier 3 fallback (unknown model) — heuristic path bench.
 //! 8. POST_GA_03 10K-char stress prompts for every vendor encoder
 //!    family, tracked separately from the <=1K-char steady-state SLO.
-//! 9. POST_GA_04 cold-start eager-load timing, tracked separately
-//!    from warm tokenize latency.
 //!
 //! ## Local measurements (developer baseline; not CI gate)
 //!
@@ -278,17 +276,5 @@ fn bench_tier2_library(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_tokenizer_cold_start(c: &mut Criterion) {
-    let mut group = c.benchmark_group("tier2_cold_start");
-    group.sample_size(10);
-    group.bench_function("new_with_embedded_assets", |b| {
-        b.iter(|| {
-            let tokenizer = Tokenizer::new_with_embedded_assets().expect("boot tokenizer");
-            black_box(tokenizer)
-        });
-    });
-    group.finish();
-}
-
-criterion_group!(benches, bench_tier2_library, bench_tokenizer_cold_start);
+criterion_group!(benches, bench_tier2_library);
 criterion_main!(benches);
