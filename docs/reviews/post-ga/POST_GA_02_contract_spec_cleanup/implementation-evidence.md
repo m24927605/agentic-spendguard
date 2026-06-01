@@ -36,6 +36,8 @@ git diff --check main..HEAD
 bash -n scripts/verify-migrations-postgres16.sh
 cargo test --manifest-path services/output_predictor/Cargo.toml classify_status_unavailable_with_not_serving_sentinel_is_not_serving
 scripts/verify-migrations-postgres16.sh
+cargo test --manifest-path services/sidecar/Cargo.toml
+cargo test --manifest-path services/sidecar/Cargo.toml quickstart_v1alpha2_sample_still_parses_after_round1_m2_disable
 ```
 
 Results:
@@ -47,6 +49,9 @@ Results:
 - `scripts/verify-migrations-postgres16.sh`: pass against `postgres:16-alpine`
 - Round 1 reviewer-fix reruns: `scripts/ga/validate-post-ga-docs.sh`, `git diff --check main..HEAD`, targeted output_predictor test, stale-text grep, and `scripts/verify-migrations-postgres16.sh` all pass
 - Round 2 reviewer-fix reruns: `scripts/ga/validate-post-ga-docs.sh`, `git diff --check main..HEAD`, targeted output_predictor test, runbook stale-text grep, and Helm-name grep all pass
+- Round 3 reviewer-fix reruns: `scripts/ga/validate-post-ga-docs.sh`, `git diff --check main..HEAD`, and full sidecar test suite all pass
+- Round 4 reviewer-fix reruns: `scripts/ga/validate-post-ga-docs.sh`, `git diff --check main..HEAD`, and stale CEL-accessor grep all pass
+- Round 5 Staff+ arbitration-fix reruns: `scripts/ga/validate-post-ga-docs.sh`, `git diff --check main..HEAD`, targeted sidecar quickstart sample test, and stale quickstart/runbook grep all pass
 
 Postgres evidence:
 
@@ -69,4 +74,13 @@ Runtime build scope:
 
 - No schema/proto fields changed.
 - Rust edits are comments only except `scripts/verify-migrations-postgres16.sh` smoke coverage.
+- Sidecar parser error text and tests were updated to keep the unsafe projection-rule migration fail-closed.
 - Targeted output_predictor test was run because Strategy C comments/tests were touched.
+
+## Review Evidence
+
+- Round 1: `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-1.md`
+- Round 2: `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-2.md`
+- Round 3: `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-3.md`
+- Round 4: `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-4.md`
+- Round 5 Staff+ arbitration: `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-5-staff-arbitration.md`

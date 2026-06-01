@@ -37,8 +37,13 @@ renders the Deployment as `<release>-spendguard-tokenizer`.
 
    ```sh
    kubectl -n <namespace> logs deployment/<release>-spendguard-tokenizer --since=5m
-   kubectl -n <namespace> port-forward deployment/<release>-spendguard-tokenizer 9099:9099
+   kubectl -n <namespace> port-forward deployment/<release>-spendguard-tokenizer 9099:9099 &
+   PF_PID=$!
+   trap 'kill "${PF_PID}" 2>/dev/null || true' EXIT
+   sleep 2
    curl -fsS http://127.0.0.1:9099/metrics | grep -E 'spendguard_tokenizer_shadow_(dropped_full|worker_dead)_total|spendguard_tokenizer_provider_count_tokens_schema_drift_total'
+   kill "${PF_PID}" 2>/dev/null || true
+   trap - EXIT
    ```
 
 4. Verify Tier 1 shadow resumes without hot-path impact:

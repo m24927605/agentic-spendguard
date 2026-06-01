@@ -2,14 +2,16 @@
 #
 # Spec: docs/contract-dsl-spec-v1alpha2.md §11 "Lock 後的下一步 #4".
 # Spec ancestor: docs/contract-dsl-spec-v1alpha1.md §18 (the v1alpha1
-# quickstart this file extends — adds prediction_policy +
-# run_projection_action with sample RUN_BUDGET_PROJECTION_EXCEEDED rule).
+# quickstart this file extends — adds prediction_policy and a commented,
+# non-deployable RUN_BUDGET_PROJECTION_EXCEEDED illustration).
 #
-# Use this as the starting point for a v1alpha2 contract that opts into
-# per-run projection enforcement (EMPIRICAL_RUN_CEILING) and asks for
-# human approval on projected overruns. Swap to STRICT_CEILING +
-# BLOCK_NEXT_CALL for regulated workloads (healthcare / finance /
-# government) where projection-based stops should be terminal.
+# Use this as the starting point for a v1alpha2 contract that declares
+# EMPIRICAL_RUN_CEILING while keeping only the v1alpha1 hard-cap rule
+# active. The commented projection block documents the future
+# projected-overrun approval shape; RUN_* activation is projector-owned.
+# For regulated workloads (healthcare / finance / government), use
+# STRICT_CEILING; projection stops are enforced through run_cost_projector
+# wiring, not by uncommenting this block.
 #
 # IMPORTANT (per spec §4.2): changing prediction_policy on a deployed
 # contract requires:

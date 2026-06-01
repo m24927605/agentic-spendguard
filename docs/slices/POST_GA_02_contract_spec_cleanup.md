@@ -1,7 +1,7 @@
 # POST_GA 02 - Contract and Spec Cleanup
 
 > **Branch**: `post-ga/POST_GA_02_contract_spec_cleanup`
-> **Status**: review round 2 findings fixed; awaiting round 3 adversarial review
+> **Status**: Staff+ arbitration applied after review round 5; ready to merge
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `contract-dsl-spec-v1alpha2.md`, `tokenizer-service-spec-v1alpha1.md`, `stats-aggregator-spec-v1alpha1.md`
 > **Issues**: #91, #93, #97, #99, #101, #113, #121, #123, #131, #136, #141, #147, #154, #158, #159, #167, #177
 > **Estimated change size**: medium; docs/spec cleanup with grep validation
@@ -118,11 +118,15 @@ findings.
 | Implementer | Reconciled all mapped doc/comment drift and added sample-size CHECK smoke coverage | Commits `d972a6e`, `38829a0`, `c63b871` |
 | Reviewer | Round 1 found unsafe deployable RUN_* example, unsafe CJK fail-closed wording, and wrong UUIDv7 prefix date | Fixed in `POST_GA_02 fix review round 1 findings`; see `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-1.md` |
 | Reviewer | Round 2 found tokenizer key rotation runbook deployment-name and metric drift | Fixed in `POST_GA_02 fix review round 2 findings`; see `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-2.md` |
+| Reviewer | Round 3 found the projection upgrade path still mapped unsafe CEL rules to unsupported `when:` thresholds | Fixed in `POST_GA_02 fix review round 3 finding`; see `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-3.md` |
+| Reviewer | Round 4 found stale SLICE_09 CEL-accessor wording in changelog and Helm values | Fixed in `POST_GA_02 fix review round 4 finding`; see `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-4.md` |
+| Reviewer | Round 5 found foreground `port-forward` runbook blocking and quickstart intro contradiction | Staff+ panel voted fix anyway; see `docs/reviews/post-ga/POST_GA_02_contract_spec_cleanup/round-5-staff-arbitration.md` |
+| Staff+ Panel | Stop codex review at max 5 rounds, apply the two doc fixes, and merge after verification | Arbitration final |
 
 ## §14. Merge Checklist
 
 - [x] All 17 issues have doc evidence
 - [x] Grep checks pass
 - [x] No runtime drift introduced
-- [ ] AIT review clean or Staff+ arbitration recorded
+- [x] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated
