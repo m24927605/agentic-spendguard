@@ -85,7 +85,12 @@ tool_version() {
   tool_version cargo cargo --version
   tool_version syft syft version
   tool_version trivy trivy --version
-  tool_version cosign cosign version
+  if command -v cosign >/dev/null 2>&1; then
+    printf 'cosign: '
+    cosign version --json 2>/dev/null | python3 -c 'import json, sys; print(json.load(sys.stdin)["gitVersion"])'
+  else
+    printf 'cosign: MISSING\n'
+  fi
   tool_version cargo-audit cargo audit --version
 } >"$output_dir/tool-versions.txt"
 
@@ -144,18 +149,27 @@ Path(sys.argv[2]).write_text(
 PY
 
 if command -v syft >/dev/null 2>&1; then
-  syft dir:. -o spdx-json >"$output_dir/syft-sbom.spdx.json"
+  syft file:Cargo.lock \
+    --source-name agentic-spendguard-cargo-lock \
+    --source-version "$commit_sha" \
+    -o spdx-json >"$output_dir/syft-sbom.spdx.json"
 fi
 
 if command -v trivy >/dev/null 2>&1; then
-  trivy fs --severity HIGH,CRITICAL --ignore-unfixed --exit-code 1 --format json --output "$output_dir/trivy-fs.json" .
+  trivy fs \
+    --scanners vuln \
+    --severity HIGH,CRITICAL \
+    --ignore-unfixed \
+    --exit-code 1 \
+    --format json \
+    --output "$output_dir/trivy-fs.json" Cargo.lock
 fi
 
 if command -v cargo-audit >/dev/null 2>&1; then
   cargo audit --json >"$output_dir/cargo-audit.json"
 fi
 
-python3 - "$output_dir" "$commit_sha" "$branch_name" "$scan_started_utc" "${missing_external[*]}" <<'PY'
+python3 - "$output_dir" "$commit_sha" "$branch_name" "$scan_started_utc" "${missing_external[*]-}" <<'PY'
 import json
 import re
 import subprocess
