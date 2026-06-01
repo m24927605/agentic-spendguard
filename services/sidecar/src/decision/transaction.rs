@@ -2162,19 +2162,39 @@ fn map_proto_error_to_domain<T>(code: i32, message: String) -> Result<T, DomainE
         PC::PricingFreezeMismatch => DomainError::PricingFreezeMismatch(message),
         PC::OverrunReservation => DomainError::OverrunReservation(message),
         PC::MultiReservationCommitDeferred => DomainError::MultiReservationCommitDeferred(message),
-        // Note: IdempotencyConflict from the ledger comes through as
-        // (code=Unspecified, message=Display-string-from-thiserror).
-        // The Display string differs from the details["summary"]
-        // string, so a text-match here is brittle. Sidecar surfaces
-        // IdempotencyConflict as DecisionStage (INTERNAL) for now —
-        // a known limitation tracked in the §8 deltas. Fixing this
-        // properly requires either a dedicated proto error code on
-        // the ledger side or stable Display text. Until then, the
-        // explicit RPC's design (no request_body_hash sent) ensures
-        // IdempotencyConflict is not reachable from the explicit
-        // release path in practice.
+        PC::IdempotencyConflict => DomainError::IdempotencyConflict(message),
         _ => DomainError::DecisionStage(format!("ledger error code={code} msg={message}")),
     })
+}
+
+#[cfg(test)]
+mod release_error_mapping_tests {
+    use super::*;
+    use crate::proto::common::v1::error::Code as ProtoCode;
+
+    #[test]
+    fn idempotency_conflict_maps_to_failed_precondition_domain_error() {
+        let err = map_proto_error_to_domain::<()>(
+            ProtoCode::IdempotencyConflict as i32,
+            "idempotency_key reused with different request_hash".into(),
+        )
+        .unwrap_err();
+
+        let status_code = err.to_status().code();
+        match err {
+            DomainError::IdempotencyConflict(message) => {
+                assert!(message.contains("idempotency_key reused"));
+                assert_eq!(status_code, tonic::Code::FailedPrecondition);
+            }
+            other => panic!("expected IdempotencyConflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_proto_code_still_maps_to_internal_domain_error() {
+        let err = map_proto_error_to_domain::<()>(9999, "unexpected".into()).unwrap_err();
+        assert!(matches!(err, DomainError::DecisionStage(_)));
+    }
 }
 
 async fn recover_reservation_ctx(

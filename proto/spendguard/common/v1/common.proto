@@ -218,6 +218,7 @@ message Error {
     OVERRUN_RESERVATION = 15;
     RESERVATION_TTL_EXPIRED = 16;
     MULTI_RESERVATION_COMMIT_DEFERRED = 17;
+    IDEMPOTENCY_CONFLICT = 18;
   }
   Code code = 1;
   string message = 2;

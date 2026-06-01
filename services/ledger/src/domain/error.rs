@@ -105,7 +105,7 @@ impl DomainError {
             DomainError::MultiReservationCommitDeferred(d) => (ProtoCode::MultiReservationCommitDeferred, d.clone()),
             DomainError::ReservationNotFound(d) => (ProtoCode::Unspecified, d.clone()),
             DomainError::IdempotencyConflict => (
-                ProtoCode::Unspecified,
+                ProtoCode::IdempotencyConflict,
                 "idempotency_key reused with different request_hash".to_string(),
             ),
             DomainError::InvalidRequest(d) => (ProtoCode::Unspecified, d.clone()),
@@ -162,6 +162,21 @@ impl DomainError {
                 Status::internal(self.to_string())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idempotency_conflict_uses_dedicated_proto_code() {
+        let proto = DomainError::IdempotencyConflict.to_proto();
+        assert_eq!(proto.code, ProtoCode::IdempotencyConflict as i32);
+        assert_eq!(
+            proto.details.get("summary").map(String::as_str),
+            Some("idempotency_key reused with different request_hash")
+        );
     }
 }
 

@@ -81,7 +81,7 @@ impl DomainError {
                 (ProtoCode::MultiReservationCommitDeferred, d.clone())
             }
             DomainError::ReservationNotFound(d) => (ProtoCode::Unspecified, d.clone()),
-            DomainError::IdempotencyConflict(d) => (ProtoCode::Unspecified, d.clone()),
+            DomainError::IdempotencyConflict(d) => (ProtoCode::IdempotencyConflict, d.clone()),
             DomainError::InvalidRequest(d) => (ProtoCode::Unspecified, d.clone()),
             DomainError::TrustBootstrap(d)
             | DomainError::ManifestSignatureInvalid(d)
@@ -131,5 +131,20 @@ impl DomainError {
             | DomainError::AuditInvariantViolated(_)
             | DomainError::Internal(_) => Status::internal(self.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idempotency_conflict_uses_dedicated_proto_code() {
+        let proto = DomainError::IdempotencyConflict("same key, different body".into()).to_proto();
+        assert_eq!(proto.code, ProtoCode::IdempotencyConflict as i32);
+        assert_eq!(
+            proto.details.get("summary").map(String::as_str),
+            Some("same key, different body")
+        );
     }
 }
