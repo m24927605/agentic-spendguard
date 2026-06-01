@@ -4,14 +4,20 @@ Status: GA_09 release gate
 
 ## Image Publication
 
-`.github/workflows/publish-images.yml` publishes the six chart service images:
+`.github/workflows/publish-images.yml` publishes every first-party image rendered by the production chart example under `ghcr.io/<owner>/spendguard/<component>`:
 
-- `spendguard-ledger`
-- `spendguard-canonical-ingest`
-- `spendguard-sidecar`
-- `spendguard-webhook-receiver`
-- `spendguard-outbox-forwarder`
-- `spendguard-ttl-sweeper`
+- `spendguard/canonical-ingest`
+- `spendguard/control-plane`
+- `spendguard/egress-proxy`
+- `spendguard/ledger`
+- `spendguard/outbox-forwarder`
+- `spendguard/output-predictor`
+- `spendguard/run-cost-projector`
+- `spendguard/sidecar`
+- `spendguard/stats-aggregator`
+- `spendguard/tokenizer`
+- `spendguard/ttl-sweeper`
+- `spendguard/webhook-receiver`
 
 Main branch pushes publish `sha-<short>` tags only. Version tag pushes publish the version tag only. The workflow intentionally does not publish `latest` or `latest-main`.
 
@@ -36,7 +42,7 @@ brew install syft trivy cosign cargo-audit
 scripts/security/ga-security-scan.sh --require-external-tools
 ```
 
-The gate emits:
+Release-mode requires a clean git worktree before any evidence is written, so the recorded `commit_sha` always identifies the scanned contents. The gate emits:
 
 - `tool-versions.txt`
 - `helm-demo.txt`

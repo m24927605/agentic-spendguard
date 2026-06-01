@@ -1,7 +1,7 @@
 name: Publish chart images
 
-# Builds + pushes the six chart service images to GitHub Container
-# Registry (ghcr.io/m24927605/spendguard-*).
+# Builds + pushes the production chart service images to GitHub Container
+# Registry (ghcr.io/<owner>/spendguard/<component>).
 #
 # Triggers:
 #   push tag v*       → publishes :<tag>, signs digest, emits SBOM/provenance
@@ -43,18 +43,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - service: ledger
-            dockerfile: deploy/demo/runtime/Dockerfile.ledger
           - service: canonical-ingest
             dockerfile: deploy/demo/runtime/Dockerfile.canonical_ingest
-          - service: sidecar
-            dockerfile: deploy/demo/runtime/Dockerfile.sidecar
-          - service: webhook-receiver
-            dockerfile: deploy/demo/runtime/Dockerfile.webhook_receiver
+          - service: control-plane
+            dockerfile: deploy/demo/runtime/Dockerfile.control_plane
+          - service: egress-proxy
+            dockerfile: deploy/demo/runtime/Dockerfile.egress_proxy
+          - service: ledger
+            dockerfile: deploy/demo/runtime/Dockerfile.ledger
           - service: outbox-forwarder
             dockerfile: deploy/demo/runtime/Dockerfile.outbox_forwarder
+          - service: output-predictor
+            dockerfile: deploy/demo/runtime/Dockerfile.output_predictor
+          - service: run-cost-projector
+            dockerfile: deploy/demo/runtime/Dockerfile.run_cost_projector
+          - service: sidecar
+            dockerfile: deploy/demo/runtime/Dockerfile.sidecar
+          - service: stats-aggregator
+            dockerfile: deploy/demo/runtime/Dockerfile.stats_aggregator
+          - service: tokenizer
+            dockerfile: deploy/demo/runtime/Dockerfile.tokenizer
           - service: ttl-sweeper
             dockerfile: deploy/demo/runtime/Dockerfile.ttl_sweeper
+          - service: webhook-receiver
+            dockerfile: deploy/demo/runtime/Dockerfile.webhook_receiver
 
     steps:
       - name: Checkout
@@ -87,12 +99,12 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard-${{ matrix.service }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard/${{ matrix.service }}
           tags: |
             type=sha,prefix=sha-,format=short,enable=${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
             type=ref,event=tag
           labels: |
-            org.opencontainers.image.title=spendguard-${{ matrix.service }}
+            org.opencontainers.image.title=spendguard/${{ matrix.service }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=Apache-2.0
@@ -115,7 +127,7 @@ jobs:
         if: github.event_name != 'pull_request'
         uses: aquasecurity/trivy-action@0.28.0
         with:
-          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard-${{ matrix.service }}@${{ steps.build.outputs.digest }}
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: "1"
@@ -130,5 +142,5 @@ jobs:
       - name: Sign image digest
         if: github.event_name != 'pull_request'
         env:
-          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard-${{ matrix.service }}@${{ steps.build.outputs.digest }}
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard/${{ matrix.service }}@${{ steps.build.outputs.digest }}
         run: cosign sign --yes "${IMAGE_REF}"

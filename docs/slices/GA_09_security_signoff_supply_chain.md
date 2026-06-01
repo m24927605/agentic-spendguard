@@ -1,7 +1,7 @@
 # GA 09 - Security Signoff and Supply Chain
 
 > **Branch**: `ga/GA_09_security_signoff_supply_chain`
-> **Status**: implemented; adversarial review R3 pending
+> **Status**: implemented; adversarial review R4 pending
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; threat model, scan scripts, supply-chain docs
 
@@ -94,6 +94,13 @@ R2 regression coverage added after adversarial review:
 - `scripts/security/ga-security-scan.sh` sanitizes `cargo metadata` and local Cargo SBOM evidence so committed evidence strips developer-local absolute paths.
 - `scripts/security/ga-security-scan.sh` now fails if the CA-key isolation, sidecar UDS volume handoff, or cargo evidence path-sanitization invariants regress.
 
+R3 regression coverage added after adversarial review:
+
+- `.github/workflows/publish-images.yml` now publishes/signs the same `ghcr.io/<owner>/spendguard/<component>` image refs that production Helm renders.
+- The publish matrix covers every first-party production-chart component in `values-production.example.yaml`: canonical-ingest, control-plane, egress-proxy, ledger, outbox-forwarder, output-predictor, run-cost-projector, sidecar, stats-aggregator, tokenizer, ttl-sweeper, and webhook-receiver.
+- `scripts/security/ga-security-scan.sh --require-external-tools` now fails closed on a dirty worktree before writing evidence, preventing a PASS summary from being attributed to an unscanned HEAD.
+- `scripts/security/ga-security-scan.sh` now compares the production Helm render image set with the publish workflow matrix.
+
 Evidence:
 
 - `docs/reviews/ga-readiness/GA_09_security_signoff_supply_chain/README.md`
@@ -141,6 +148,8 @@ Reviewer must treat unhandled high-severity findings as blockers.
 | Security Engineer | R2 found the demo CA private key must not become readable by runtime UID 65532 | Re-rooted `ca.key` to `root:root 0600` after PKI runtime handoff and added a scan guard |
 | Platform Runtime Architect | R2 found named Docker volumes from pre-GA runs can mask image-level sidecar UDS ownership | Added `sidecar-uds-init` to repair the named volume before sidecar startup |
 | Release Engineering Architect | R2 found committed evidence must not leak developer-local absolute paths | Sanitized cargo metadata/SBOM evidence and added a path-leak scan guard |
+| Release Engineering Architect | R3 found the publish workflow signed old six-image refs instead of all production Helm refs | Aligned workflow repositories with `spendguard/<component>` and expanded the matrix to 12 production components |
+| Security Engineer | R3 found release-mode scan could attribute dirty worktree output to HEAD | Added a clean-worktree precondition before release-mode evidence generation |
 
 ## §14. Merge Checklist
 

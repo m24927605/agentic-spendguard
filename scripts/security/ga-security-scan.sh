@@ -52,6 +52,17 @@ output_dir="$(cd "$output_dir" && pwd -P)"
 commit_sha="$(git rev-parse HEAD)"
 branch_name="$(git rev-parse --abbrev-ref HEAD)"
 scan_started_utc="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+worktree_status="$(git status --porcelain)"
+worktree_dirty_at_start=false
+if [[ -n "$worktree_status" ]]; then
+  worktree_dirty_at_start=true
+fi
+
+if [[ "$require_external_tools" == "true" && "$worktree_dirty_at_start" == "true" ]]; then
+  echo "release-mode security scan requires a clean git worktree" >&2
+  git status --short >&2
+  exit 1
+fi
 
 run_and_capture() {
   local name="$1"
@@ -215,7 +226,7 @@ if command -v cargo-audit >/dev/null 2>&1; then
   cargo audit --json >"$output_dir/cargo-audit.json"
 fi
 
-python3 - "$output_dir" "$commit_sha" "$branch_name" "$scan_started_utc" "${missing_external[*]-}" <<'PY'
+python3 - "$output_dir" "$commit_sha" "$branch_name" "$scan_started_utc" "${missing_external[*]-}" "$worktree_dirty_at_start" <<'PY'
 import json
 import re
 import subprocess
@@ -227,6 +238,7 @@ commit_sha = sys.argv[2]
 branch_name = sys.argv[3]
 scan_started_utc = sys.argv[4]
 missing_external = [item for item in sys.argv[5].split() if item]
+worktree_dirty_at_start = sys.argv[6] == "true"
 root = Path.cwd()
 errors = []
 checks = {}
@@ -334,6 +346,19 @@ record(
 
 production_values = text("charts/spendguard/values-production.example.yaml")
 rendered = (output_dir / "helm-production.yaml").read_text(encoding="utf-8")
+published_services = set(re.findall(r"^\s*-\s+service:\s+([a-z0-9-]+)\s*$", workflow, re.M))
+rendered_chart_services = set(
+    re.findall(r"image:\s+\S+/spendguard/([a-z0-9-]+)(?=[:@])", rendered)
+)
+missing_published_images = sorted(rendered_chart_services - published_services)
+record(
+    "publish_workflow_covers_production_chart_images",
+    not missing_published_images
+    and "${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard/${{ matrix.service }}" in workflow,
+    f"publish workflow covers {len(rendered_chart_services)} production chart images under spendguard/<component>"
+    if not missing_published_images
+    else f"missing workflow images: {', '.join(missing_published_images)}",
+)
 plaintext_db = re.compile(r"(?i)\b(postgres(?:ql)?|mysql|mongodb)://")
 record("production_values_no_plaintext_db", not plaintext_db.search(production_values), "no plaintext DB URL in production values")
 record("production_render_no_plaintext_db", not plaintext_db.search(rendered), "no plaintext DB URL in production render")
@@ -407,6 +432,7 @@ summary = {
     "commit_sha": commit_sha,
     "branch": branch_name,
     "scan_started_utc": scan_started_utc,
+    "worktree_dirty_at_start": worktree_dirty_at_start,
     "missing_external_tools": missing_external,
     "external_tool_install": "brew install syft trivy cosign cargo-audit",
     "release_mode": "scripts/security/ga-security-scan.sh --require-external-tools",
@@ -422,6 +448,7 @@ report_lines = [
     f"- Commit: `{commit_sha}`",
     f"- Branch: `{branch_name}`",
     f"- Started UTC: `{scan_started_utc}`",
+    f"- Worktree dirty at start: `{str(worktree_dirty_at_start).lower()}`",
     f"- Missing optional external tools: {', '.join(missing_external) if missing_external else 'none'}",
     f"- Release-mode command: `{summary['release_mode']}`",
     "",
