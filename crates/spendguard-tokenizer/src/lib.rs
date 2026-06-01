@@ -209,11 +209,10 @@ pub struct TokenizeResponse {
 ///   1. `Tokenizer::new_with_embedded_assets()` once at sidecar boot;
 ///      panics-or-errors-out on asset signature mismatch (spec §7.4
 ///      fail-fast).
-///   2. Share a single `Arc<Tokenizer>` across worker threads — the
-///      [`EncoderCache`] uses [`parking_lot::RwLock`] internally so
-///      reads are lock-free in the steady state (encoders are
-///      eagerly loaded in step 1; no runtime mutation in SLICE_03 —
-///      hot-reload is SLICE-extra).
+///   2. Share a single `Arc<Tokenizer>` across worker threads. The
+///      [`EncoderCache`] is immutable after construction; encoders are
+///      eagerly loaded in step 1 and there is no runtime mutation in
+///      the shipped hot path (hot-reload is a future slice).
 ///   3. Each request hits `tokenize(&req)`; the dispatcher returns a
 ///      Tier 2 result for known models or a Tier 3 fallback for
 ///      unknown ones.

@@ -26,9 +26,8 @@ const SEED_SQL: &str =
     include_str!("../../../services/ledger/migrations/0049_tokenizer_versions_initial_seed.sql");
 
 /// SLICE_04 seed migration (additive — separate file from 0049).
-const SLICE04_SEED_SQL: &str = include_str!(
-    "../../../services/ledger/migrations/0050_tokenizer_versions_slice04_seed.sql"
-);
+const SLICE04_SEED_SQL: &str =
+    include_str!("../../../services/ledger/migrations/0050_tokenizer_versions_slice04_seed.sql");
 
 #[test]
 fn each_rust_seed_row_id_appears_in_sql() {

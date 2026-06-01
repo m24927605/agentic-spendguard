@@ -17,10 +17,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 
-for asset in cl100k_base.tiktoken o200k_base.tiktoken p50k_base.tiktoken; do
+assets=(
+  "cl100k_base.tiktoken"
+  "o200k_base.tiktoken"
+  "p50k_base.tiktoken"
+  "anthropic-claude3/tokenizer.json"
+  "gemini-1.5/tokenizer.json"
+  "cohere-command-r/tokenizer.json"
+  "llama-3.1/tokenizer.json"
+)
+
+for asset in "${assets[@]}"; do
   if [[ -f "$asset" ]]; then
     hash="$(shasum -a 256 "$asset" | awk '{print $1}')"
-    printf '%-30s %s\n' "$asset" "$hash"
+    printf '%-42s %s\n' "$asset" "$hash"
   else
     printf 'WARN: asset %s not found in data/ directory\n' "$asset" >&2
   fi

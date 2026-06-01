@@ -43,9 +43,15 @@
 //! exact equality so the bump is loud.
 
 use spendguard_tokenizer::{Message, TokenizeRequest, Tokenizer};
+use std::sync::OnceLock;
+
+fn shared_tokenizer() -> &'static Tokenizer {
+    static TOKENIZER: OnceLock<Tokenizer> = OnceLock::new();
+    TOKENIZER.get_or_init(|| Tokenizer::new_with_embedded_assets().expect("boot tokenizer"))
+}
 
 fn tokenize_raw(model: &str, text: &str) -> i64 {
-    let tokenizer = Tokenizer::new_with_embedded_assets().expect("boot");
+    let tokenizer = shared_tokenizer();
     let req = TokenizeRequest {
         model: model.to_string(),
         raw_text: text.to_string(),
@@ -57,7 +63,7 @@ fn tokenize_raw(model: &str, text: &str) -> i64 {
 }
 
 fn tokenize_chat(model: &str, role: &str, content: &str) -> i64 {
-    let tokenizer = Tokenizer::new_with_embedded_assets().expect("boot");
+    let tokenizer = shared_tokenizer();
     let req = TokenizeRequest {
         model: model.to_string(),
         messages: vec![Message {

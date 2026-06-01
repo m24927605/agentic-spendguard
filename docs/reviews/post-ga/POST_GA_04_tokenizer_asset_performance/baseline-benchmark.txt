@@ -1,0 +1,219 @@
+   Compiling proc-macro2 v1.0.106
+   Compiling quote v1.0.45
+   Compiling unicode-ident v1.0.24
+   Compiling libc v0.2.186
+   Compiling cfg-if v1.0.4
+   Compiling memchr v2.8.1
+   Compiling zerocopy v0.8.50
+   Compiling serde_core v1.0.228
+   Compiling either v1.16.0
+   Compiling crossbeam-utils v0.8.21
+   Compiling strsim v0.11.1
+   Compiling ident_case v1.0.1
+   Compiling aho-corasick v1.1.4
+   Compiling version_check v0.9.5
+   Compiling serde v1.0.228
+   Compiling fnv v1.0.7
+   Compiling regex-syntax v0.8.10
+   Compiling generic-array v0.14.7
+   Compiling find-msvc-tools v0.1.9
+   Compiling zmij v1.0.21
+   Compiling regex-automata v0.4.14
+   Compiling shlex v2.0.1
+   Compiling cc v1.2.63
+   Compiling syn v2.0.117
+   Compiling crossbeam-epoch v0.9.18
+   Compiling typenum v1.20.1
+   Compiling pkg-config v0.3.33
+   Compiling rayon-core v1.13.0
+   Compiling once_cell v1.21.4
+   Compiling serde_json v1.0.150
+   Compiling onig_sys v69.9.3
+   Compiling crossbeam-deque v0.8.6
+   Compiling getrandom v0.2.17
+   Compiling itoa v1.0.18
+   Compiling smallvec v1.15.1
+   Compiling paste v1.0.15
+   Compiling rand_core v0.6.4
+   Compiling parking_lot_core v0.9.12
+   Compiling getrandom v0.4.2
+   Compiling darling_core v0.20.11
+   Compiling regex v1.12.3
+   Compiling zerocopy-derive v0.8.50
+   Compiling serde_derive v1.0.228
+   Compiling autocfg v1.5.1
+   Compiling bit-vec v0.8.0
+   Compiling minimal-lexical v0.2.1
+   Compiling esaxx-rs v0.1.10
+   Compiling thiserror v1.0.69
+   Compiling anyhow v1.0.102
+   Compiling nom v7.1.3
+   Compiling num-traits v0.2.19
+   Compiling bit-set v0.8.0
+   Compiling monostate-impl v0.1.18
+   Compiling darling_macro v0.20.11
+   Compiling thiserror-impl v1.0.69
+   Compiling rayon v1.12.0
+   Compiling darling v0.20.11
+   Compiling derive_builder_core v0.20.2
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling itertools v0.11.0
+   Compiling macro_rules_attribute-proc_macro v0.2.2
+   Compiling derive_builder_macro v0.20.2
+   Compiling base64 v0.13.1
+   Compiling scopeguard v1.2.0
+   Compiling unicode-segmentation v1.13.2
+   Compiling lazy_static v1.5.0
+   Compiling ppv-lite86 v0.2.21
+   Compiling half v2.7.1
+   Compiling bitflags v2.11.1
+   Compiling rand_chacha v0.3.1
+   Compiling anstyle v1.0.14
+   Compiling clap_lex v1.1.0
+   Compiling ciborium-io v0.2.2
+   Compiling clap_builder v4.6.0
+   Compiling ciborium-ll v0.2.2
+   Compiling rand v0.8.6
+   Compiling spm_precompiled v0.1.4
+   Compiling rayon-cond v0.3.0
+   Compiling lock_api v0.4.14
+   Compiling macro_rules_attribute v0.2.2
+   Compiling derive_builder v0.20.2
+   Compiling digest v0.10.7
+   Compiling monostate v0.1.18
+   Compiling fancy-regex v0.17.0
+   Compiling tracing-attributes v0.1.31
+   Compiling bstr v1.12.1
+   Compiling unicode-normalization-alignments v0.1.12
+   Compiling tracing-core v0.1.36
+   Compiling cpufeatures v0.2.17
+   Compiling itertools v0.12.1
+   Compiling itertools v0.10.5
+   Compiling same-file v1.0.6
+   Compiling unicode_categories v0.1.1
+   Compiling base64 v0.22.1
+   Compiling pin-project-lite v0.2.17
+   Compiling cast v0.3.0
+   Compiling rustc-hash v1.1.0
+   Compiling log v0.4.30
+   Compiling tiktoken-rs v0.11.0
+   Compiling tracing v0.1.44
+   Compiling criterion-plot v0.5.0
+   Compiling onig v6.5.3
+   Compiling walkdir v2.5.0
+   Compiling sha2 v0.10.9
+   Compiling tokenizers v0.20.4
+   Compiling clap v4.6.1
+   Compiling uuid v1.23.2
+   Compiling parking_lot v0.12.5
+   Compiling ciborium v0.2.2
+   Compiling tinytemplate v1.2.1
+   Compiling is-terminal v0.4.17
+   Compiling oorandom v11.1.5
+   Compiling anes v0.1.6
+   Compiling subtle v2.6.1
+   Compiling hex v0.4.3
+   Compiling criterion v0.5.1
+   Compiling spendguard-tokenizer v0.1.0-alpha (/Users/michael.chen/products/agentic-spendguard/crates/spendguard-tokenizer)
+   Compiling spendguard-tokenizer-benchmarks v0.1.0-alpha (/Users/michael.chen/products/agentic-spendguard/benchmarks/tokenizer)
+    Finished `bench` profile [optimized] target(s) in 1m 15s
+     Running benches/tier2_library.rs (benchmarks/tokenizer/target/release/deps/tier2_library-341f18006f15a9e6)
+Benchmarking tier2_library/tiny_gpt_4o_hello_world
+Benchmarking tier2_library/tiny_gpt_4o_hello_world: Warming up for 1.0000 s
+Benchmarking tier2_library/tiny_gpt_4o_hello_world: Collecting 10 samples in estimated 3.0000 s (3.6M iterations)
+Benchmarking tier2_library/tiny_gpt_4o_hello_world: Analyzing
+tier2_library/tiny_gpt_4o_hello_world
+                        time:   [825.77 ns 829.23 ns 833.40 ns]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low mild
+  1 (10.00%) high mild
+Benchmarking tier2_library/raw_text_gpt_4o_chars/100
+Benchmarking tier2_library/raw_text_gpt_4o_chars/100: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gpt_4o_chars/100: Collecting 10 samples in estimated 3.0000 s (452k iterations)
+Benchmarking tier2_library/raw_text_gpt_4o_chars/100: Analyzing
+tier2_library/raw_text_gpt_4o_chars/100
+                        time:   [6.6030 µs 6.6160 µs 6.6273 µs]
+Benchmarking tier2_library/raw_text_gpt_4o_chars/1000
+Benchmarking tier2_library/raw_text_gpt_4o_chars/1000: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gpt_4o_chars/1000: Collecting 10 samples in estimated 3.0191 s (8250 iterations)
+Benchmarking tier2_library/raw_text_gpt_4o_chars/1000: Analyzing
+tier2_library/raw_text_gpt_4o_chars/1000
+                        time:   [365.22 µs 365.45 µs 365.73 µs]
+Benchmarking tier2_library/raw_text_gpt_4o_chars/10000
+Benchmarking tier2_library/raw_text_gpt_4o_chars/10000: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gpt_4o_chars/10000: Collecting 10 samples in estimated 3.8176 s (110 iterations)
+Benchmarking tier2_library/raw_text_gpt_4o_chars/10000: Analyzing
+tier2_library/raw_text_gpt_4o_chars/10000
+                        time:   [34.703 ms 34.798 ms 34.989 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking tier2_library/chat_5_messages_gpt_4o_mini
+Benchmarking tier2_library/chat_5_messages_gpt_4o_mini: Warming up for 1.0000 s
+Benchmarking tier2_library/chat_5_messages_gpt_4o_mini: Collecting 10 samples in estimated 3.0001 s (215k iterations)
+Benchmarking tier2_library/chat_5_messages_gpt_4o_mini: Analyzing
+tier2_library/chat_5_messages_gpt_4o_mini
+                        time:   [13.814 µs 13.865 µs 13.901 µs]
+Found 4 outliers among 10 measurements (40.00%)
+  2 (20.00%) low severe
+  2 (20.00%) high mild
+Benchmarking tier2_library/raw_text_gpt_4_1000_chars
+Benchmarking tier2_library/raw_text_gpt_4_1000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gpt_4_1000_chars: Collecting 10 samples in estimated 3.0196 s (8250 iterations)
+Benchmarking tier2_library/raw_text_gpt_4_1000_chars: Analyzing
+tier2_library/raw_text_gpt_4_1000_chars
+                        time:   [365.79 µs 366.14 µs 366.40 µs]
+Benchmarking tier2_library/tier3_fallback_1000_chars
+Benchmarking tier2_library/tier3_fallback_1000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/tier3_fallback_1000_chars: Collecting 10 samples in estimated 3.0000 s (9.5M iterations)
+Benchmarking tier2_library/tier3_fallback_1000_chars: Analyzing
+tier2_library/tier3_fallback_1000_chars
+                        time:   [316.17 ns 316.66 ns 317.29 ns]
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_1000_chars
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_1000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_1000_chars: Collecting 10 samples in estimated 3.0040 s (12k iterations)
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_1000_chars: Analyzing
+tier2_library/raw_text_claude_3_5_sonnet_1000_chars
+                        time:   [254.49 µs 265.60 µs 292.86 µs]
+Found 2 outliers among 10 measurements (20.00%)
+  2 (20.00%) high severe
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_10000_chars
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_10000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_10000_chars: Collecting 10 samples in estimated 3.0855 s (1430 iterations)
+Benchmarking tier2_library/raw_text_claude_3_5_sonnet_10000_chars: Analyzing
+tier2_library/raw_text_claude_3_5_sonnet_10000_chars
+                        time:   [2.1404 ms 2.1442 ms 2.1526 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high mild
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_1000_chars
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_1000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_1000_chars: Collecting 10 samples in estimated 3.0042 s (14k iterations)
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_1000_chars: Analyzing
+tier2_library/raw_text_gemini_1_5_pro_1000_chars
+                        time:   [207.18 µs 207.54 µs 208.12 µs]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_10000_chars
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_10000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_10000_chars: Collecting 10 samples in estimated 3.1311 s (1265 iterations)
+Benchmarking tier2_library/raw_text_gemini_1_5_pro_10000_chars: Analyzing
+tier2_library/raw_text_gemini_1_5_pro_10000_chars
+                        time:   [2.4683 ms 2.4702 ms 2.4722 ms]
+Found 2 outliers among 10 measurements (20.00%)
+  1 (10.00%) low severe
+  1 (10.00%) high mild
+Benchmarking tier2_library/raw_text_llama_3_1_70b_1000_chars
+Benchmarking tier2_library/raw_text_llama_3_1_70b_1000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_llama_3_1_70b_1000_chars: Collecting 10 samples in estimated 3.0112 s (13k iterations)
+Benchmarking tier2_library/raw_text_llama_3_1_70b_1000_chars: Analyzing
+tier2_library/raw_text_llama_3_1_70b_1000_chars
+                        time:   [227.22 µs 227.68 µs 228.02 µs]
+Benchmarking tier2_library/raw_text_llama_3_1_70b_10000_chars
+Benchmarking tier2_library/raw_text_llama_3_1_70b_10000_chars: Warming up for 1.0000 s
+Benchmarking tier2_library/raw_text_llama_3_1_70b_10000_chars: Collecting 10 samples in estimated 3.0052 s (1320 iterations)
+Benchmarking tier2_library/raw_text_llama_3_1_70b_10000_chars: Analyzing
+tier2_library/raw_text_llama_3_1_70b_10000_chars
+                        time:   [2.2759 ms 2.2957 ms 2.3294 ms]
+Found 1 outliers among 10 measurements (10.00%)
+  1 (10.00%) high severe
+
