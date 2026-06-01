@@ -25,11 +25,11 @@
   },
   "branch": "ga/GA_08_scale_performance_slo_proof",
   "command_line": "benchmarks/ga-load/run.sh",
-  "commit_sha": "4ba7b5ac365bc5a9ed29accd5ff1bc8523f8760e",
+  "commit_sha": "052d4f13080245b236abf1bef86ecb0d82380baa",
   "date": "2026-06-01",
   "db_plan_status": 0,
   "failures": [],
-  "finished_at": "2026-06-01T05:48:58.396443+00:00",
+  "finished_at": "2026-06-01T06:19:51.214795+00:00",
   "git_dirty": false,
   "git_status": [],
   "load": {
@@ -43,61 +43,61 @@
       "runs": 100
     },
     "completed_operations": 100,
-    "duration_seconds": 1.664,
+    "duration_seconds": 2.644,
     "error_count": 0,
     "errors": [],
     "expected_operations": 100,
     "failures": [],
-    "finished_at_unix": 1780292925.631962,
+    "finished_at_unix": 1780294778.7351732,
     "latency": {
       "end_to_end": {
         "count": 100,
-        "max_ms": 327.412,
-        "p50_ms": 46.159,
-        "p95_ms": 161.447,
-        "p99_ms": 310.217
+        "max_ms": 510.357,
+        "p50_ms": 84.776,
+        "p95_ms": 214.78,
+        "p99_ms": 491.592
       },
       "output_predictor": {
         "count": 100,
-        "max_ms": 26.774,
-        "p50_ms": 0.526,
-        "p95_ms": 3.792,
-        "p99_ms": 26.529
+        "max_ms": 33.209,
+        "p50_ms": 0.952,
+        "p95_ms": 6.033,
+        "p99_ms": 24.174
       },
       "run_cost_projector": {
         "count": 100,
-        "max_ms": 48.621,
-        "p50_ms": 1.574,
-        "p95_ms": 27.114,
-        "p99_ms": 48.104
+        "max_ms": 74.357,
+        "p50_ms": 3.122,
+        "p95_ms": 12.517,
+        "p99_ms": 69.283
       },
       "sidecar_confirm_publish_outcome": {
         "count": 100,
-        "max_ms": 3.043,
-        "p50_ms": 0.51,
-        "p95_ms": 1.798,
-        "p99_ms": 2.98
+        "max_ms": 4.751,
+        "p50_ms": 0.91,
+        "p95_ms": 2.443,
+        "p99_ms": 3.893
       },
       "sidecar_decision": {
         "count": 100,
-        "max_ms": 178.316,
-        "p50_ms": 22.489,
-        "p95_ms": 71.053,
-        "p99_ms": 142.43
+        "max_ms": 321.524,
+        "p50_ms": 40.024,
+        "p95_ms": 111.25,
+        "p99_ms": 264.867
       },
       "sidecar_emit_trace_events": {
         "count": 100,
-        "max_ms": 128.011,
-        "p50_ms": 19.98,
-        "p95_ms": 65.63,
-        "p99_ms": 86.305
+        "max_ms": 185.751,
+        "p50_ms": 36.965,
+        "p95_ms": 89.228,
+        "p99_ms": 133.125
       },
       "tokenizer": {
         "count": 100,
-        "max_ms": 20.318,
-        "p50_ms": 0.663,
-        "p95_ms": 2.646,
-        "p99_ms": 18.244
+        "max_ms": 23.902,
+        "p50_ms": 1.045,
+        "p95_ms": 4.531,
+        "p99_ms": 22.109
       }
     },
     "result": "pass",
@@ -110,6 +110,18 @@
       "concurrency": 4,
       "description": "GA_08 local real-stack load: one certified demo tenant plus 100 logical tenant workloads expressed as distinct run/agent/provider/prompt buckets.",
       "environment_profile": "local-compose",
+      "gate_kind": "local_real_stack_smoke",
+      "local_smoke_limits": {
+        "end_to_end_p99_ms": 1000,
+        "max_outbox_drain_wait_seconds": 120,
+        "max_outbox_lag_seconds": 30,
+        "output_predictor_p99_ms": 500,
+        "run_cost_projector_p99_ms": 500,
+        "sidecar_commit_p99_ms": 250,
+        "sidecar_decision_p99_ms": 500,
+        "sidecar_emit_p99_ms": 500,
+        "tokenizer_p99_ms": 500
+      },
       "logical_tenants": 100,
       "models": [
         "gpt-4o-mini",
@@ -132,18 +144,7 @@
         "google",
         "cohere"
       ],
-      "requests_per_logical_tenant": 1,
-      "slos": {
-        "end_to_end_p99_ms": 1000,
-        "max_outbox_drain_wait_seconds": 120,
-        "max_outbox_lag_seconds": 30,
-        "output_predictor_p99_ms": 500,
-        "run_cost_projector_p99_ms": 500,
-        "sidecar_commit_p99_ms": 250,
-        "sidecar_decision_p99_ms": 500,
-        "sidecar_emit_p99_ms": 500,
-        "tokenizer_p99_ms": 500
-      }
+      "requests_per_logical_tenant": 1
     },
     "service_metric_deltas": {
       "output_predictor_cache_lookups": 100.0,
@@ -167,7 +168,7 @@
       "sidecar_request_decision_ok": 100.0,
       "tokenizer_tier3_hits": 0.0
     },
-    "started_at_unix": 1780292923.9683032
+    "started_at_unix": 1780294776.0910666
   },
   "machine_descriptor": "Darwin TW168020225M.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:56:34 PST 2026; root:xnu-12377.91.3~2/RELEASE_ARM64_T8122 arm64",
   "result": "pass",
