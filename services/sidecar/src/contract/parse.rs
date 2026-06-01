@@ -315,10 +315,11 @@ fn parse_yaml(bytes: &[u8]) -> Result<Contract> {
                     ApiVersion::V1alpha2 => {
                         return Err(anyhow!(
                             "bundle_validation_failed: rule '{}' uses CEL `condition:` \
-                             field; CEL conditions wired in SLICE_09 — use \
-                             claim_amount_atomic_gt / claim_amount_atomic_gte under \
-                             `when:` in SLICE_02. See contract-dsl-spec-v1alpha2.md \
-                             §6.3 SLICE_02-vs-SLICE_09 wiring boundary.",
+                             field. SLICE_02 only supports amount thresholds under \
+                             `when:`; projection CEL has no SLICE_02 replacement. \
+                             Remove or keep projection rules disabled until \
+                             SLICE_09/10 run_cost_projector owns RUN_* activation. See \
+                             contract-dsl-spec-v1alpha2.md §6.3/§8.4.",
                             r.id
                         ));
                     }
@@ -696,14 +697,23 @@ spec:
 "#;
         let err = parse_yaml(yaml.as_bytes()).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("bundle_validation_failed"),
-            "expected bundle_validation_failed marker, got: {msg}");
-        assert!(msg.contains("CEL"),
-            "expected CEL mention, got: {msg}");
-        assert!(msg.contains("SLICE_09"),
-            "expected SLICE_09 mention, got: {msg}");
-        assert!(msg.contains("claim_amount_atomic_gt"),
-            "expected pointer to SLICE_02 condition surface, got: {msg}");
+        assert!(
+            msg.contains("bundle_validation_failed"),
+            "expected bundle_validation_failed marker, got: {msg}"
+        );
+        assert!(msg.contains("CEL"), "expected CEL mention, got: {msg}");
+        assert!(
+            msg.contains("SLICE_09"),
+            "expected SLICE_09 mention, got: {msg}"
+        );
+        assert!(
+            msg.contains("projection CEL has no SLICE_02 replacement"),
+            "expected no-translation guidance for projection CEL, got: {msg}"
+        );
+        assert!(
+            msg.contains("run_cost_projector owns RUN_* activation"),
+            "expected projector-owned activation guidance, got: {msg}"
+        );
     }
 
     #[test]
