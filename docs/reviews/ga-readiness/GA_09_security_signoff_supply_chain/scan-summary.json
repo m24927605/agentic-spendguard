@@ -1,6 +1,10 @@
 {
   "branch": "ga/GA_09_security_signoff_supply_chain",
   "checks": {
+    "bundles_volume_chowned_for_runtime_uid": {
+      "detail": "bundles-init hands writable bundle volume to runtime UID 65532",
+      "ok": true
+    },
     "cargo_sbom_generated": {
       "detail": "226 Cargo packages recorded",
       "ok": true
@@ -15,6 +19,10 @@
     },
     "pii_shadow_worker_guard": {
       "detail": "shadow worker checks tenant opt-in",
+      "ok": true
+    },
+    "pki_volume_chowned_for_runtime_uid": {
+      "detail": "pki-init hands cert/key volume to runtime UID 65532",
       "ok": true
     },
     "production_render_has_networkpolicy": {
@@ -35,6 +43,10 @@
     },
     "publish_workflow_cosign": {
       "detail": "cosign signing step present",
+      "ok": true
+    },
+    "publish_workflow_dispatch_has_sha_tag": {
+      "detail": "manual dispatch publishes immutable sha tag",
       "ok": true
     },
     "publish_workflow_no_latest_promotion": {
@@ -73,6 +85,14 @@
       "detail": "all runtime Dockerfiles set USER 65532:65532",
       "ok": true
     },
+    "sidecar_entrypoint_nonroot_safe": {
+      "detail": "sidecar entrypoint only verifies mounted paths after USER switch",
+      "ok": true
+    },
+    "sidecar_image_precreates_secret_links": {
+      "detail": "sidecar image prepares root-owned paths before USER switch",
+      "ok": true
+    },
     "svid_runtime_exact_uri": {
       "detail": "runtime validator uses exact predictor-client tenant prefix",
       "ok": true
@@ -82,12 +102,12 @@
       "ok": true
     }
   },
-  "commit_sha": "60ae0e20403d1811d35c6c67bb2bd5dacb4feb29",
+  "commit_sha": "670291783cdadc9e3405e330adf5aa37529092b6",
   "errors": [],
   "external_tool_install": "brew install syft trivy cosign cargo-audit",
   "missing_external_tools": [],
   "release_mode": "scripts/security/ga-security-scan.sh --require-external-tools",
   "result": "pass",
-  "scan_started_utc": "2026-06-01T07:21:53Z",
+  "scan_started_utc": "2026-06-01T07:33:29Z",
   "schema": "spendguard.ga09.security_scan.v1alpha1"
 }

@@ -1,9 +1,9 @@
 # GA_09 Security Scan Evidence
 
 - Result: pass
-- Commit: `60ae0e20403d1811d35c6c67bb2bd5dacb4feb29`
+- Commit: `670291783cdadc9e3405e330adf5aa37529092b6`
 - Branch: `ga/GA_09_security_signoff_supply_chain`
-- Started UTC: `2026-06-01T07:21:53Z`
+- Started UTC: `2026-06-01T07:33:29Z`
 - Missing optional external tools: none
 - Release-mode command: `scripts/security/ga-security-scan.sh --require-external-tools`
 
@@ -16,6 +16,11 @@
 - PASS `publish_workflow_cosign`: cosign signing step present
 - PASS `publish_workflow_no_latest_promotion`: no latest/latest-main promotion
 - PASS `publish_workflow_oidc`: OIDC permission present for keyless signing
+- PASS `publish_workflow_dispatch_has_sha_tag`: manual dispatch publishes immutable sha tag
+- PASS `sidecar_image_precreates_secret_links`: sidecar image prepares root-owned paths before USER switch
+- PASS `sidecar_entrypoint_nonroot_safe`: sidecar entrypoint only verifies mounted paths after USER switch
+- PASS `pki_volume_chowned_for_runtime_uid`: pki-init hands cert/key volume to runtime UID 65532
+- PASS `bundles_volume_chowned_for_runtime_uid`: bundles-init hands writable bundle volume to runtime UID 65532
 - PASS `production_values_no_plaintext_db`: no plaintext DB URL in production values
 - PASS `production_render_no_plaintext_db`: no plaintext DB URL in production render
 - PASS `production_render_has_networkpolicy`: NetworkPolicy rendered
