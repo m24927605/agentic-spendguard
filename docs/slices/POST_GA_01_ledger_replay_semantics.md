@@ -1,10 +1,10 @@
 # POST_GA 01 - Ledger Release Replay Semantics
 
 > **Branch**: `post-ga/POST_GA_01_ledger_replay_semantics`
-> **Status**: draft
-> **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `ledger-storage-spec-v1alpha1.md`, `proto/spendguard/ledger/v1/ledger.proto`
+> **Status**: implementation complete; adversarial review round 1 clean
+> **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `ledger-storage-spec-v1alpha1.md`, `proto/spendguard/ledger/v1/ledger.proto`, `proto/spendguard/common/v1/common.proto`, `proto/spendguard/sidecar_adapter/v1/adapter.proto`
 > **Issues**: #85, #86, #87
-> **Estimated change size**: medium; ledger release semantics, tests, docs
+> **Estimated change size**: medium; ledger/sidecar release semantics, shared error code, tests, docs
 
 ---
 
@@ -17,20 +17,32 @@ to `FailedPrecondition` instead of `Internal`.
 
 ## §1. Architectural Context
 
-Ledger release is part of the reservation lifecycle and audit chain. A
-release retry may arrive after the writer lease has advanced; the server
-must distinguish safe idempotent replay from stale mutation. The audit
-signature produced by the first release is the durable identity of that
-operation and must be returned consistently.
+ReleaseReservation spans the adapter UDS surface, sidecar transaction
+orchestration, and ledger idempotency procedure. The ledger procedure
+already checks the release idempotency key before fencing, which is the
+right ordering for safe replay, but the explicit sidecar RPC had a
+preflight fencing gate that prevented that replay path. The sidecar also
+receives no original release signature from the ledger replay response,
+so it must preserve the signature it emitted for short-window adapter
+retries without fabricating signatures for audit events that were not
+persisted. Idempotency conflicts must use a stable shared proto error
+code so sidecar maps them to `FailedPrecondition`.
 
 ## §2. Scope
 
-- #85: release replay branch returns the original audit event signature
-- #86: fencing preflight permits legitimate replay after lease change
-- #87: idempotency conflict maps to `FailedPrecondition`
-- Add regression tests for release success, replay, stale mutation, and
-  idempotency conflict mapping
-- Update ledger docs and proto comments where semantics were ambiguous
+- #85: same-process release replay returns the original audit event
+  signature from a bounded sidecar replay cache keyed by tenant and
+  ledger release idempotency key
+- #86: explicit `ReleaseReservation` defers fencing enforcement to
+  `transaction::run_release`, whose first-mutation path still checks
+  fencing while replay can reach ledger idempotency-first handling
+- #87: shared `Error.Code.IDEMPOTENCY_CONFLICT` maps ledger body errors
+  to sidecar `DomainError::IdempotencyConflict` and gRPC
+  `FailedPrecondition`
+- Add regression tests for replay signature cache behavior, proto error
+  mapping, and explicit release preflight semantics
+- Update SDK, ASP Draft-01 status text, and proto comments where
+  limitations are closed
 
 ## §3. Out of Scope
 
@@ -38,34 +50,49 @@ operation and must be returned consistently.
 |---|---|
 | New reservation lifecycle states | Future ledger spec |
 | Changing ReserveSet semantics | Not needed for release replay |
+| Durable ledger storage of original release signatures in replay body | Later proto/schema evolution; POST_GA_01 uses sidecar short-window cache |
 | Cross-service SDK API redesign | Separate SDK compatibility work |
 
 ## §4. File-Level Changes
 
-- Modify ledger Release handler and idempotency helper code under `services/ledger/src/**`
-- Add or update tests under `services/ledger/tests/**`
-- Update `docs/ledger-storage-spec-v1alpha1.md`
-- Update `proto/spendguard/ledger/v1/ledger.proto` comments only if needed
+- Add `IDEMPOTENCY_CONFLICT` to `proto/spendguard/common/v1/common.proto`
+- Regenerate Python SDK proto stubs under `sdk/python/src/spendguard/_proto/**`
+- Modify ledger and sidecar error mapping under `services/ledger/src/domain/error.rs` and `services/sidecar/src/domain/error.rs`
+- Modify release orchestration under `services/sidecar/src/decision/transaction.rs`
+- Modify explicit adapter handler under `services/sidecar/src/server/adapter_uds.rs`
+- Add targeted unit tests in the same Rust modules
+- Update SDK and ASP docs under `sdk/python/src/spendguard/client.py` and `docs/specs/agent-spend-protocol/draft-01.md`
+- Update `proto/spendguard/sidecar_adapter/v1/adapter.proto` comments
 - Add evidence under `docs/reviews/post-ga/POST_GA_01_ledger_replay_semantics/`
 
 ## §5. Schema / Proto
 
-No breaking proto field changes are expected. If the original audit
-signature is not stored in an accessible release idempotency row, add a
-forward-only migration that stores the replay response material without
-changing existing audit rows.
+Additive enum-only proto change:
+
+- `spendguard.common.v1.Error.Code.IDEMPOTENCY_CONFLICT = 18`
+
+No message fields change. The release signature fix is intentionally not
+a ledger schema migration in this slice; the ledger replay response does
+not currently carry the persisted CloudEvent signature, so sidecar caches
+the first response signature for bounded retry windows and otherwise
+fails closed by returning no fabricated signature.
 
 ## §6. Audit-Chain Impact
 
 Replay must not append a second audit event. A safe replay returns the
-first release result and original signature. A stale non-idempotent
-mutation is rejected before audit append.
+first release result and, when the sidecar retry cache still contains the
+first signature, the original signature bytes. A cache miss returns an
+empty signature rather than a regenerated signature, because returning a
+signature for an audit event the ledger did not persist would corrupt the
+receipt chain. A stale non-idempotent mutation remains rejected by
+`run_release` and the ledger procedure before audit append.
 
 ## §7. Failure Modes
 
 | Scenario | Expected behavior |
 |---|---|
-| Same release request replayed | Return original response and audit signature |
+| Same release request replayed in retry cache window | Return original response and audit signature |
+| Same release request replayed after cache expiry or sidecar restart | Return original response and empty signature; never return a fabricated signature |
 | Replay after lease epoch advances | Permit replay if idempotency key and request fingerprint match |
 | Same idempotency key with different payload | `FailedPrecondition` |
 | Stale writer attempts new release | Fencing rejection |
@@ -74,7 +101,9 @@ mutation is rejected before audit append.
 ## §8. Acceptance Gates
 
 - `cargo build && cargo test` for `services/ledger`
-- Targeted release replay tests cover #85, #86, and #87
+- `cargo build && cargo test` for `services/sidecar`
+- `make proto` in `sdk/python`
+- Targeted tests cover #85, #86, and #87
 - Migration apply smoke if SQL is added
 - `git diff --check`
 - `helm template spendguard charts/spendguard --set chart.profile=demo`
@@ -114,16 +143,18 @@ before accepting.
 | Role | Decision | Outcome |
 |---|---|---|
 | Software Architect | Keep release replay isolated from ReserveSet | Scope limited to #85-#87 |
-| Backend Architect | Replay identity is idempotency key plus request fingerprint | §7 and §9 require it |
+| Backend Architect | Replay identity is ledger release idempotency key plus request fingerprint; signature recovery can be sidecar cache-scoped for this slice | §5-§7 require it |
 | Security Engineer | Do not let replay bypass fencing for new mutations | §7 blocks stale mutation |
-| Database Optimizer | Add schema only if response material is not already durable | §5 |
+| Database Optimizer | Avoid ledger schema migration until replay response grows a durable signature field | §5 |
 | Ledger Domain Expert | Original audit signature is the user-visible replay truth | §6 |
+| Implementer | Added same-process release signature cache, moved explicit preflight fencing into `run_release`, and mapped `IdempotencyConflict` to `IDEMPOTENCY_CONFLICT` | Commits `2447887`, `064de5b`, `ea5bbc1`, `99cb23b` |
+| Reviewer | AIT parser rejected `--review-mode`; fallback codex CLI adversarial review inspected diff and tests | Round 1 clean; no findings |
 
 ## §14. Merge Checklist
 
-- [ ] #85 fixed and tested
-- [ ] #86 fixed and tested
-- [ ] #87 fixed and tested
-- [ ] Ledger tests and evidence pass
-- [ ] AIT review clean or Staff+ arbitration recorded
-- [ ] Memory updated
+- [x] #85 fixed and tested
+- [x] #86 fixed and tested
+- [x] #87 fixed and tested
+- [x] Ledger tests and evidence pass
+- [x] AIT review clean or Staff+ arbitration recorded
+- [ ] Memory updated after merge

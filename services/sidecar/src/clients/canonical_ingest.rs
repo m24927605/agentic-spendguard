@@ -24,14 +24,20 @@ pub struct CanonicalIngestClient {
 }
 
 impl CanonicalIngestClient {
+    #[cfg(test)]
+    pub(crate) fn from_channel_for_test(channel: Channel) -> Self {
+        Self {
+            inner: Arc::new(CIProtoClient::new(channel)),
+        }
+    }
+
     pub async fn connect(
         endpoint_url: String,
         sni: &str,
         mtls: &MTlsPaths,
     ) -> Result<Self, DomainError> {
-        let tls = build_client_tls(mtls, sni).map_err(|e| {
-            DomainError::CanonicalIngestClient(format!("build tls: {e}"))
-        })?;
+        let tls = build_client_tls(mtls, sni)
+            .map_err(|e| DomainError::CanonicalIngestClient(format!("build tls: {e}")))?;
         let endpoint = Endpoint::from_shared(endpoint_url.clone())
             .map_err(|e| DomainError::CanonicalIngestClient(format!("endpoint parse: {e}")))?
             .tls_config(tls)

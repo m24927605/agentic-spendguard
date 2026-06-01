@@ -31,6 +31,13 @@ pub struct LedgerClient {
 }
 
 impl LedgerClient {
+    #[cfg(test)]
+    pub(crate) fn from_channel_for_test(channel: Channel) -> Self {
+        Self {
+            inner: Arc::new(LedgerProtoClient::new(channel)),
+        }
+    }
+
     pub async fn connect(
         endpoint_url: String,
         sni: &str,

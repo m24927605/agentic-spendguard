@@ -951,8 +951,13 @@ impl AdapterUds {
             })
             .unwrap_or(ReleaseReason::Explicit);
 
-        // Fencing parity with all other state-mutating RPCs.
-        crate::fencing::check_active(&self.state).map_err(|e| e.to_status())?;
+        // Do not preflight fencing here. `transaction::run_release`
+        // enforces active fencing for first-time mutations after it
+        // recovers reservation state, but lets an already-released
+        // reservation reach the ledger idempotency-first replay branch.
+        // A preflight check here would reject legitimate same-key
+        // ReleaseReservation retries after local fencing movement before
+        // the ledger can replay the original outcome (GH #86).
 
         // Honor the request's workload_instance_id when non-empty
         // (per adapter.proto field semantics — fencing parity with
@@ -1480,6 +1485,384 @@ pub fn make_service(state: SidecarState, cfg: Config, metrics: SidecarMetrics) -
         state,
         cfg,
         metrics,
+    }
+}
+
+#[cfg(test)]
+mod post_ga_01_release_tests {
+    use super::*;
+    use crate::{
+        clients::{canonical_ingest::CanonicalIngestClient, ledger::LedgerClient},
+        decision::idempotency::IdempotencyCache,
+        domain::state::SidecarState,
+        proto::{
+            common::v1::{PricingFreeze, Replay, UnitRef},
+            ledger::v1::{
+                ledger_server::{Ledger, LedgerServer},
+                AcquireFencingLeaseRequest, AcquireFencingLeaseResponse, CommitEstimatedRequest,
+                CommitEstimatedResponse, CompensateRequest, CompensateResponse,
+                DisputeAdjustmentRequest, DisputeAdjustmentResponse, GetApprovalForResumeRequest,
+                GetApprovalForResumeResponse, InvoiceReconcileRequest, InvoiceReconcileResponse,
+                MarkApprovalBundledRequest, MarkApprovalBundledResponse, ProviderReportRequest,
+                ProviderReportResponse, QueryBudgetStateRequest, QueryBudgetStateResponse,
+                QueryDecisionOutcomeRequest, QueryDecisionOutcomeResponse,
+                QueryReservationContextRequest, QueryReservationContextResponse,
+                RecordDeniedDecisionRequest, RecordDeniedDecisionResponse, RefundCreditRequest,
+                RefundCreditResponse, ReleaseRequest, ReleaseResponse, ReleaseSuccess,
+                ReplayAuditEvent, ReplayAuditFromCursorRequest, ReservationContext,
+                ReserveSetRequest, ReserveSetResponse,
+            },
+            sidecar_adapter::v1::ReleaseReservationRequest,
+        },
+    };
+    use ed25519_dalek::SigningKey;
+    use spendguard_policy::FailPolicyMatrix;
+    use spendguard_signing::LocalEd25519Signer;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    use tokio::sync::mpsc;
+    use tokio_stream::wrappers::ReceiverStream;
+    use tonic::transport::{Endpoint, Server};
+    use uuid::Uuid;
+
+    #[derive(Clone)]
+    struct FakeReleaseLedger {
+        tenant_id: String,
+        reservation_id: Uuid,
+        decision_id: Uuid,
+        fencing_scope_id: Uuid,
+        release_calls: Arc<AtomicUsize>,
+        audit_signatures_seen: Arc<parking_lot::Mutex<Vec<Vec<u8>>>>,
+    }
+
+    impl FakeReleaseLedger {
+        fn reservation_context(&self) -> ReservationContext {
+            let released = self.release_calls.load(Ordering::SeqCst) > 0;
+            ReservationContext {
+                reservation_id: self.reservation_id.to_string(),
+                budget_id: Uuid::new_v4().to_string(),
+                window_instance_id: Uuid::new_v4().to_string(),
+                unit: Some(UnitRef {
+                    unit_id: Uuid::new_v4().to_string(),
+                    ..Default::default()
+                }),
+                original_reserved_amount_atomic: "100".into(),
+                pricing: Some(PricingFreeze {
+                    pricing_version: "test-pricing".into(),
+                    price_snapshot_hash: vec![7; 32].into(),
+                    fx_rate_version: "fx-test".into(),
+                    unit_conversion_version: "unit-test".into(),
+                }),
+                fencing_scope_id: self.fencing_scope_id.to_string(),
+                fencing_epoch_at_post: 7,
+                decision_id: self.decision_id.to_string(),
+                ttl_expires_at: Some(prost_types::Timestamp {
+                    seconds: (Utc::now() + chrono::Duration::seconds(600)).timestamp(),
+                    nanos: 0,
+                }),
+                current_state: if released { "released" } else { "reserved" }.into(),
+                source_ledger_transaction_id: "tx-release-1".into(),
+                tenant_id: self.tenant_id.clone(),
+            }
+        }
+    }
+
+    #[tonic::async_trait]
+    impl Ledger for FakeReleaseLedger {
+        type ReplayAuditFromCursorStream = ReceiverStream<Result<ReplayAuditEvent, Status>>;
+
+        async fn reserve_set(
+            &self,
+            _req: Request<ReserveSetRequest>,
+        ) -> Result<Response<ReserveSetResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn record_denied_decision(
+            &self,
+            _req: Request<RecordDeniedDecisionRequest>,
+        ) -> Result<Response<RecordDeniedDecisionResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn acquire_fencing_lease(
+            &self,
+            _req: Request<AcquireFencingLeaseRequest>,
+        ) -> Result<Response<AcquireFencingLeaseResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn release(
+            &self,
+            req: Request<ReleaseRequest>,
+        ) -> Result<Response<ReleaseResponse>, Status> {
+            let req = req.into_inner();
+            let signature = req
+                .audit_event
+                .as_ref()
+                .map(|event| event.producer_signature.to_vec())
+                .unwrap_or_default();
+            self.audit_signatures_seen.lock().push(signature);
+
+            let call = self.release_calls.fetch_add(1, Ordering::SeqCst);
+            let outcome = if call == 0 {
+                Some(
+                    crate::proto::ledger::v1::release_response::Outcome::Success(ReleaseSuccess {
+                        ledger_transaction_id: "tx-release-1".into(),
+                        released_reservation_ids: vec![self.reservation_id.to_string()],
+                        recorded_at: Some(prost_types::Timestamp {
+                            seconds: Utc::now().timestamp(),
+                            nanos: 0,
+                        }),
+                    }),
+                )
+            } else {
+                Some(crate::proto::ledger::v1::release_response::Outcome::Replay(
+                    Replay {
+                        ledger_transaction_id: "tx-release-1".into(),
+                        operation_kind: "release".into(),
+                        operation_id: self.reservation_id.to_string(),
+                        decision_id: self.decision_id.to_string(),
+                        ..Default::default()
+                    },
+                ))
+            };
+
+            Ok(Response::new(ReleaseResponse { outcome }))
+        }
+
+        async fn commit_estimated(
+            &self,
+            _req: Request<CommitEstimatedRequest>,
+        ) -> Result<Response<CommitEstimatedResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn provider_report(
+            &self,
+            _req: Request<ProviderReportRequest>,
+        ) -> Result<Response<ProviderReportResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn invoice_reconcile(
+            &self,
+            _req: Request<InvoiceReconcileRequest>,
+        ) -> Result<Response<InvoiceReconcileResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn refund_credit(
+            &self,
+            _req: Request<RefundCreditRequest>,
+        ) -> Result<Response<RefundCreditResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn dispute_adjustment(
+            &self,
+            _req: Request<DisputeAdjustmentRequest>,
+        ) -> Result<Response<DisputeAdjustmentResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn compensate(
+            &self,
+            _req: Request<CompensateRequest>,
+        ) -> Result<Response<CompensateResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn query_budget_state(
+            &self,
+            _req: Request<QueryBudgetStateRequest>,
+        ) -> Result<Response<QueryBudgetStateResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn query_reservation_context(
+            &self,
+            _req: Request<QueryReservationContextRequest>,
+        ) -> Result<Response<QueryReservationContextResponse>, Status> {
+            Ok(Response::new(QueryReservationContextResponse {
+                outcome: Some(
+                    crate::proto::ledger::v1::query_reservation_context_response::Outcome::Context(
+                        self.reservation_context(),
+                    ),
+                ),
+            }))
+        }
+
+        async fn replay_audit_from_cursor(
+            &self,
+            _req: Request<ReplayAuditFromCursorRequest>,
+        ) -> Result<Response<Self::ReplayAuditFromCursorStream>, Status> {
+            let (_tx, rx) = mpsc::channel(1);
+            Ok(Response::new(ReceiverStream::new(rx)))
+        }
+
+        async fn query_decision_outcome(
+            &self,
+            _req: Request<QueryDecisionOutcomeRequest>,
+        ) -> Result<Response<QueryDecisionOutcomeResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn get_approval_for_resume(
+            &self,
+            _req: Request<GetApprovalForResumeRequest>,
+        ) -> Result<Response<GetApprovalForResumeResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+
+        async fn mark_approval_bundled(
+            &self,
+            _req: Request<MarkApprovalBundledRequest>,
+        ) -> Result<Response<MarkApprovalBundledResponse>, Status> {
+            Err(Status::unimplemented("unused"))
+        }
+    }
+
+    fn test_config(tenant_id: &str, fencing_scope_id: Uuid) -> Config {
+        Config {
+            uds_path: "/tmp/spendguard-test.sock".into(),
+            tenant_id: tenant_id.into(),
+            workload_instance_id: "workload-a".into(),
+            region: "test-region".into(),
+            endpoint_catalog_manifest_url: String::new(),
+            trust_root_ca_pem: String::new(),
+            trust_root_spki_sha256_hex: String::new(),
+            mtls_bootstrap_token: String::new(),
+            capability_level: "L3_POLICY_HOOK".into(),
+            enforcement_strength: "semantic_adapter".into(),
+            manifest_pull_seconds: 60,
+            critical_max_stale_seconds: 300,
+            drain_window_seconds: 60,
+            decision_p99_ms: 50,
+            run_cost_projector_url: String::new(),
+            run_cost_projector_timeout_ms: 25,
+            allow_untrusted_budget_metadata: false,
+            metrics_addr: "127.0.0.1:0".into(),
+            health_addr: "127.0.0.1:0".into(),
+            bundle_root: String::new(),
+            contract_bundle_id: Uuid::nil().to_string(),
+            contract_bundle_hash_hex: "00".repeat(32),
+            schema_bundle_id: Uuid::nil().to_string(),
+            schema_bundle_canonical_version: "spendguard.v1alpha1".into(),
+            fencing_scope_id: fencing_scope_id.to_string(),
+            fencing_initial_epoch: 7,
+            fencing_ttl_seconds: 120,
+            idempotency_cache_size: 16,
+            idempotency_cache_ttl_secs: 600,
+            reservation_ttl_seconds: 600,
+            runtime_env_path: String::new(),
+            hot_reload_poll_ms: 0,
+        }
+    }
+
+    async fn test_service(
+        fake_ledger: FakeReleaseLedger,
+    ) -> (AdapterUds, tokio::task::JoinHandle<()>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind test ledger");
+        let addr = listener.local_addr().expect("local addr");
+        drop(listener);
+
+        let server_ledger = fake_ledger.clone();
+        let server = tokio::spawn(async move {
+            Server::builder()
+                .add_service(LedgerServer::new(server_ledger))
+                .serve(addr)
+                .await
+                .expect("test ledger server");
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+
+        let channel = Endpoint::from_shared(format!("http://{addr}"))
+            .expect("endpoint")
+            .connect()
+            .await
+            .expect("connect test ledger");
+        let ledger = LedgerClient::from_channel_for_test(channel.clone());
+        let canonical_ingest = CanonicalIngestClient::from_channel_for_test(channel);
+        let cfg = test_config(&fake_ledger.tenant_id, fake_ledger.fencing_scope_id);
+        let signer = LocalEd25519Signer::from_key(
+            SigningKey::from_bytes(&[7u8; 32]),
+            "sidecar:workload-a".into(),
+        );
+        let state = SidecarState::new(
+            ledger,
+            canonical_ingest,
+            IdempotencyCache::new(16, 600),
+            1,
+            600,
+            Arc::new(signer),
+            Arc::new(FailPolicyMatrix::default_fail_closed()),
+            false,
+        );
+        crate::fencing::install_active(&state, fake_ledger.fencing_scope_id, 7, 120);
+
+        (make_service(state, cfg, SidecarMetrics::new()), server)
+    }
+
+    #[tokio::test]
+    async fn release_replay_after_local_fencing_expiry_returns_original_signature() {
+        let fake_ledger = FakeReleaseLedger {
+            tenant_id: "tenant-a".into(),
+            reservation_id: Uuid::new_v4(),
+            decision_id: Uuid::new_v4(),
+            fencing_scope_id: Uuid::new_v4(),
+            release_calls: Arc::new(AtomicUsize::new(0)),
+            audit_signatures_seen: Arc::new(parking_lot::Mutex::new(Vec::new())),
+        };
+        let signatures_seen = fake_ledger.audit_signatures_seen.clone();
+        let release_calls = fake_ledger.release_calls.clone();
+        let reservation_id = fake_ledger.reservation_id;
+        let (service, server) = test_service(fake_ledger).await;
+
+        let req = ReleaseReservationRequest {
+            reservation_id: reservation_id.to_string(),
+            idempotency_key: "idem-1".into(),
+            reason_codes: vec!["runtime_error".into()],
+            tenant_id: "tenant-a".into(),
+            workload_instance_id: "workload-a".into(),
+            session_id: "session-a".into(),
+        };
+
+        let first = service
+            .release_reservation_inner(Request::new(req.clone()))
+            .await
+            .expect("first release")
+            .into_inner();
+        assert!(!first.audit_event_signature.is_empty());
+
+        service
+            .state
+            .inner
+            .fencing
+            .write()
+            .as_mut()
+            .expect("active fencing")
+            .ttl_expires_at = Utc::now() - chrono::Duration::seconds(1);
+
+        let replay = service
+            .release_reservation_inner(Request::new(req))
+            .await
+            .expect("same-key replay after local lease expiry")
+            .into_inner();
+
+        assert_eq!(release_calls.load(Ordering::SeqCst), 2);
+        assert_eq!(replay.ledger_transaction_id, first.ledger_transaction_id);
+        assert_eq!(replay.audit_event_signature, first.audit_event_signature);
+        let seen = signatures_seen.lock();
+        assert_eq!(seen.len(), 2);
+        assert_ne!(
+            seen[1], replay.audit_event_signature,
+            "replay must return cached original signature, not retry-event signature",
+        );
+
+        server.abort();
     }
 }
 
