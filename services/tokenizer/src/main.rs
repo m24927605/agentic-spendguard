@@ -39,7 +39,7 @@ use tracing_subscriber::EnvFilter;
 use uuid::Uuid;
 
 use spendguard_signing::Signer;
-use spendguard_tokenizer::Tokenizer;
+use spendguard_tokenizer::{EncoderBootMetric, Tokenizer};
 use spendguard_tokenizer_service::{
     config::Config,
     proto::tokenizer::v1::tokenizer_server::TokenizerServer,
@@ -95,6 +95,7 @@ async fn main() -> Result<()> {
         entries = tokenizer.dispatch().len(),
         "tokenizer dispatch table compiled + encoder cache eager-loaded"
     );
+    let encoder_boot_metrics = Arc::new(tokenizer.encoder_boot_durations().to_vec());
 
     // ── Spawn the metrics hyper server (best-effort). ─────────────
     //
@@ -109,8 +110,9 @@ async fn main() -> Result<()> {
             .parse()
             .with_context(|| format!("invalid metrics_addr `{}`", cfg.metrics_addr))?;
         let metrics_ready = Arc::clone(&grpc_ready);
+        let boot_metrics = Arc::clone(&encoder_boot_metrics);
         tokio::spawn(async move {
-            if let Err(e) = run_metrics_server(metrics_addr, metrics_ready).await {
+            if let Err(e) = run_metrics_server(metrics_addr, metrics_ready, boot_metrics).await {
                 error!(?e, "metrics server exited with error");
             }
         });
@@ -632,7 +634,7 @@ fn init_tracing() {
 /// R2 M5 + M10 + M11 — render Prometheus payload including the SLICE_05
 /// shadow worker counters. Held in a separate fn so tests can exercise
 /// rendering without binding a socket.
-fn render_metrics() -> String {
+fn render_metrics(encoder_boot_metrics: &[EncoderBootMetric]) -> String {
     use spendguard_tokenizer_service::server::{
         ENCODE_CONCURRENCY_LIMITED_TOTAL, ENCODE_TIMEOUT_TOTAL, INVALID_REQUEST_ID_TOTAL,
         REQUEST_ID_V4_ACCEPTED_TOTAL,
@@ -652,7 +654,7 @@ fn render_metrics() -> String {
     let encode_timeouts = ENCODE_TIMEOUT_TOTAL.load(Ordering::Relaxed);
     let encode_concurrency_limited = ENCODE_CONCURRENCY_LIMITED_TOTAL.load(Ordering::Relaxed);
     let rate_limited = TOKENIZER_RATE_LIMITED_TOTAL.load(Ordering::Relaxed);
-    format!(
+    let mut body = format!(
         "# HELP spendguard_tokenizer_tier3_hit_total \
          Number of Tier 3 fallback hits (spec §5.2).\n\
          # TYPE spendguard_tokenizer_tier3_hit_total counter\n\
@@ -700,7 +702,27 @@ fn render_metrics() -> String {
          Tier 1 count_tokens shadow samples skipped by per-tenant quota.\n\
          # TYPE spendguard_tokenizer_rate_limited_total counter\n\
          spendguard_tokenizer_rate_limited_total{{reason=\"count_tokens_quota\"}} {rate_limited}\n",
-    )
+    );
+    body.push_str(
+        "# HELP spendguard_tokenizer_encoder_boot_duration_ms \
+         Encoder eager-load duration captured at process startup.\n\
+         # TYPE spendguard_tokenizer_encoder_boot_duration_ms gauge\n",
+    );
+    for metric in encoder_boot_metrics {
+        body.push_str(&format!(
+            "spendguard_tokenizer_encoder_boot_duration_ms{{encoder=\"{}\"}} {}\n",
+            prometheus_label_value(metric.encoder_name),
+            metric.duration_ms
+        ));
+    }
+    body
+}
+
+fn prometheus_label_value(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 async fn shutdown_signal() {
@@ -712,7 +734,11 @@ async fn shutdown_signal() {
 /// raw-hyper pattern used by services/canonical_ingest and
 /// services/ledger so the chart can scrape Prometheus + run the
 /// startup probe without an additional crate dependency.
-async fn run_metrics_server(addr: SocketAddr, grpc_ready: Arc<AtomicBool>) -> Result<()> {
+async fn run_metrics_server(
+    addr: SocketAddr,
+    grpc_ready: Arc<AtomicBool>,
+    encoder_boot_metrics: Arc<Vec<EncoderBootMetric>>,
+) -> Result<()> {
     use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::service::service_fn;
@@ -725,16 +751,18 @@ async fn run_metrics_server(addr: SocketAddr, grpc_ready: Arc<AtomicBool>) -> Re
         let (stream, _) = listener.accept().await?;
         let io = TokioIo::new(stream);
         let ready_for_conn = Arc::clone(&grpc_ready);
+        let boot_metrics_for_conn = Arc::clone(&encoder_boot_metrics);
         tokio::spawn(async move {
             let svc = service_fn(move |req: Request<hyper::body::Incoming>| {
                 let ready = Arc::clone(&ready_for_conn);
+                let boot_metrics = Arc::clone(&boot_metrics_for_conn);
                 async move {
                     let (status, content_type, body): (StatusCode, &str, String) =
                         match (req.method(), req.uri().path()) {
                             (&Method::GET, "/metrics") => (
                                 StatusCode::OK,
                                 "text/plain; version=0.0.4; charset=utf-8",
-                                render_metrics(),
+                                render_metrics(&boot_metrics),
                             ),
                             (&Method::GET, "/healthz") => (
                                 StatusCode::OK,
@@ -1086,7 +1114,7 @@ mod tests {
 
     #[test]
     fn render_metrics_contains_shadow_counters() {
-        let body = render_metrics();
+        let body = render_metrics(&[]);
         // R2 M5 + M10 + M11 names are stable for chart scraping.
         assert!(body.contains("spendguard_tokenizer_shadow_dropped_full_total"));
         assert!(body.contains("spendguard_tokenizer_shadow_worker_dead_total"));
@@ -1098,6 +1126,20 @@ mod tests {
         assert!(body.contains("spendguard_tokenizer_encode_timeout_total"));
         assert!(body.contains("spendguard_tokenizer_encode_concurrency_limited_total"));
         assert!(body.contains("spendguard_tokenizer_rate_limited_total"));
+        assert!(body.contains("spendguard_tokenizer_encoder_boot_duration_ms"));
+    }
+
+    #[test]
+    fn render_metrics_contains_encoder_boot_duration_gauge() {
+        let samples = vec![EncoderBootMetric {
+            encoder_name: "llama-sentencepiece",
+            duration_ms: 42,
+        }];
+        let body = render_metrics(&samples);
+        assert!(body.contains("# TYPE spendguard_tokenizer_encoder_boot_duration_ms gauge"));
+        assert!(body.contains(
+            "spendguard_tokenizer_encoder_boot_duration_ms{encoder=\"llama-sentencepiece\"} 42"
+        ));
     }
 
     fn make_shadow_event() -> spendguard_tokenizer_service::shadow::worker::ShadowEvent {

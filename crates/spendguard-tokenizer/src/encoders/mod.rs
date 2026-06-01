@@ -44,6 +44,7 @@ pub mod cohere;
 pub mod gemini;
 pub mod llama;
 pub mod openai;
+pub(crate) mod tokenizers_common;
 
 /// Stable string discriminant matching `tokenizer_versions.kind`
 /// CHECK constraint values. Used for `TokenizeResponse.kind` and for

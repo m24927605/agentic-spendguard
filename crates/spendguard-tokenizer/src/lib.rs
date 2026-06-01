@@ -82,7 +82,7 @@ use std::sync::Arc;
 // re-export below preserves `spendguard_tokenizer::EncoderKind` as the
 // stable public path (the trait module is the source of truth).
 pub use dispatch::DispatchEntry;
-pub use encoder_cache::EncoderCache;
+pub use encoder_cache::{EncoderBootMetric, EncoderCache};
 pub use encoders::{EncodeResult, Encoder, EncoderKind};
 pub use error::TokenizerError;
 pub use tier3::tier3_fallback;
@@ -263,6 +263,12 @@ impl Tokenizer {
     /// must reconstruct the encoder lookup that the producer used.
     pub fn dispatch(&self) -> &dispatch::DispatchTable {
         &self.dispatch
+    }
+
+    /// Boot-time duration samples captured while eager-loading
+    /// encoder assets. Empty only for dispatch-only test tokenizers.
+    pub fn encoder_boot_durations(&self) -> &[EncoderBootMetric] {
+        self.cache.boot_durations()
     }
 }
 
