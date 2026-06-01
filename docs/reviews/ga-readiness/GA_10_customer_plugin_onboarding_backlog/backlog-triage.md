@@ -38,23 +38,22 @@ requirements are covered by:
 | Slice | Scope | Issues |
 |---|---|---|
 | POST_GA_01_ledger_replay_semantics | Release reservation replay/fencing/status semantics. | #85, #86, #87 |
-| POST_GA_02_contract_spec_cleanup | Documentation/spec title and wording drift. | #91, #93, #97, #99, #101, #113, #121, #123, #131, #136, #147, #154, #158, #159, #167, #177 |
-| POST_GA_03_tokenizer_runtime_hardening | Tokenizer readiness, rate limiting, request IDs, UDS docs, parity, security, partition/retention, and tests. | #92, #94, #96, #98, #100, #103, #105, #110, #111, #112, #114, #115, #117, #118, #119, #126, #127, #129, #133, #135, #146, #148, #149, #151, #152 |
-| POST_GA_04_tokenizer_asset_performance | Tokenizer asset size, dispatch performance, duplication cleanup, encoder bench expansion. | #102, #104, #108, #109, #116, #120, #122, #125, #130, #134, #140 |
+| POST_GA_02_contract_spec_cleanup | Documentation/spec title and wording drift. | #91, #93, #97, #99, #101, #113, #121, #123, #131, #136, #141, #147, #154, #158, #159, #167, #177 |
+| POST_GA_03_tokenizer_runtime_hardening | Tokenizer readiness, rate limiting, request IDs, UDS docs, parity, security, partition/retention, and tests. | #92, #94, #96, #98, #100, #103, #105, #110, #111, #112, #114, #115, #117, #118, #119, #126, #127, #129, #133, #135, #148, #149, #151, #152 |
+| POST_GA_04_tokenizer_asset_performance | Tokenizer asset size, dispatch performance, duplication cleanup, encoder bench expansion. | #95, #102, #104, #108, #116, #120, #122, #125, #130, #134, #140 |
 | POST_GA_05_provider_coverage | Tier 1 provider client expansion and envelope tuning. | #139 |
 | POST_GA_06_stats_drift_hygiene | Prediction drift alert source/dedup/cooldown and NaN guard. | #157, #162 |
 | POST_GA_07_predictor_api_evolution | Output predictor response/policy shape and per-tenant Predict API rate limits. | #161, #165 |
-| POST_GA_08_db_index_and_rls_polish | Output cache index cardinality, nil UUID sentinel, advisory-lock runbook, migration hardening. | #128, #163, #164, #166 |
+| POST_GA_08_db_index_and_rls_polish | Output cache index cardinality, nil UUID sentinel, advisory-lock runbook, migration hardening. | #146, #163, #164, #166 |
 | POST_GA_09_strategy_c_resilience | Strategy C stale-cache, herd control, input caps, reset audit enrichment, and reason caps. | #172, #173, #174, #175, #176 |
-| POST_GA_10_test_quality | Cross-check fixtures and remaining smoke-test improvements. | #107, #124, #126, #129 |
+| POST_GA_10_test_quality | Cross-check fixtures and remaining smoke-test improvements. | #109, #124 |
 
 Notes:
 
-- #107 is listed in `POST_GA_10_test_quality` only as historical
-  lineage. The unused tonic gzip feature was already removed by
-  HARDEN_05 and is closed during GA_10.
-- #128 is kept in `POST_GA_08_db_index_and_rls_polish` only as lineage.
-  The current migration is schema-qualified and is closed during GA_10.
+- The named post-GA table lists only issues whose coverage rows assign a
+  `POST_GA_*` handoff. Closed GA_10 evidence items such as #107 and #128
+  remain only in the closure set below so ownership cannot be double
+  counted.
 
 ## GA_10 Closure Set
 

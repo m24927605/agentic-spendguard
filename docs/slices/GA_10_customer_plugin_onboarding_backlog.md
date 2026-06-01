@@ -101,6 +101,7 @@ Reviewer must inspect triage honesty and reject undocumented customer-critical f
 | SRE/Operations Architect | Plugin failure modes must map to customer and operator actions | Error taxonomy maps Strategy C metric labels to actions |
 | Database Optimizer | DB/index polish issues can be non-GA only when named and visible | Backlog triage assigns them to post-GA implementation slices |
 | Software Architect | Duplicate and historical issues must close with evidence | #155 and #170 closure evidence recorded in backlog triage |
+| Review R1 | codex CLI adversarial reviewer | Fixed live API path and `client_cert_id` registration sample, client SVID evidence path, SVID `PERMISSION_DENIED` to `tls_error` routing, and backlog slice/table consistency |
 
 ## §14. Merge Checklist
 

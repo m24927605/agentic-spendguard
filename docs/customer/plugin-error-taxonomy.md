@@ -20,7 +20,7 @@ deterministic decision path intact.
 | Invalid overflow | `invalid_overflow` | Prediction exceeds model context window or integer bounds. | Reject Strategy C result and fall to B. | Clamp or retrain model. | Confirm audit rows show Strategy B fallback. |
 | Invalid confidence | `invalid_confidence` | `confidence < 0`, `confidence > 1`, or NaN. | Reject Strategy C result and fall to B. | Fix confidence calibration. | Require conformance rerun. |
 | Deserialization error | `deserialization_error` | Invalid wire format or semantic request decode failure. | Fall to Strategy B. | Regenerate proto bindings and redeploy. | Check template/proto version drift. |
-| TLS error | `tls_error` | Chain failure, fingerprint mismatch, expired cert, or SVID mismatch. | Fall to Strategy B; tenant isolation metric may increment. | Rotate certs and validate SVID URI SAN. | Confirm control-plane fingerprint and CA bundle. |
+| TLS error | `tls_error` | Chain failure, fingerprint mismatch, expired cert, missing SVID, or tenant SVID mismatch. | Fall to Strategy B; tenant isolation metric may increment. | Rotate certs and validate SVID URI SAN. | Confirm control-plane fingerprint, client SVID binding, and CA bundle. |
 | Not serving | `not_serving` | Health probe reports `NOT_SERVING`. | Skip Strategy C until health recovers. | Fix model or dependency state. | Keep breaker open and notify customer. |
 | Not configured | `not_configured` | No enabled endpoint for tenant. | Use Strategy B without treating it as an incident. | Complete onboarding. | Verify registration record. |
 | Breaker open | `breaker_open` | Failure threshold reached. | Skip calls until recovery probe succeeds or reset is requested. | Stabilize plugin before reset. | Use force reset only after root cause is corrected. |
@@ -39,6 +39,7 @@ The reference template returns:
 | Tenant ID mismatch | `INVALID_ARGUMENT` |
 | Oversized model/request field | `INVALID_ARGUMENT` |
 | Missing required SVID when `require_client_svid=true` | `PERMISSION_DENIED` |
+| Valid SpendGuard SVID for the wrong tenant | `PERMISSION_DENIED`; caller classifies `SVID tenant mismatch` as `tls_error` |
 | Model exception | `INTERNAL` |
 | Client deadline exceeded | `DEADLINE_EXCEEDED` observed by caller |
 | Plaintext client to TLS server | `UNAVAILABLE` observed by caller |

@@ -108,18 +108,22 @@ Strategy B.
 
 Register one endpoint per tenant. The endpoint URL and SHA-256 server
 certificate fingerprint are stored by the control plane and forwarded to
-the output predictor endpoint cache.
+the output predictor endpoint cache. `client_cert_id` must equal the
+matching `outputPredictor.pluginClientSvid.bindings[].clientCertId`
+value, which selects the SpendGuard-issued client SVID directory mounted
+under `/etc/spendguard/plugin-client-svid/${CLIENT_CERT_ID}`.
 
 ```bash
 curl --fail -X POST \
   --header "Authorization: Bearer ${SPENDGUARD_API_TOKEN}" \
   --header "Content-Type: application/json" \
   --data @- \
-  https://control-plane.spendguard.example/api/v1/predictor-plugins <<EOF
+  https://control-plane.spendguard.example/v1/predictor/plugins <<EOF
 {
   "tenant_id": "${TENANT_ID}",
   "endpoint_url": "https://predictor.example.com:50054",
-  "server_cert_fingerprint": "${SHA256_FINGERPRINT}"
+  "server_cert_fingerprint": "${SHA256_FINGERPRINT}",
+  "client_cert_id": "${CLIENT_CERT_ID}"
 }
 EOF
 ```
@@ -136,8 +140,9 @@ change record:
 - SpendGuard commit SHA and plugin fork commit SHA.
 - `python3 -m pytest conformance_test.py -q` output.
 - `grpc_health_probe` output against the deployed endpoint.
-- `openssl x509 -in tls.crt -noout -ext subjectAltName` output showing
-  the exact predictor-client SVID.
+- `openssl x509 -in /etc/spendguard/plugin-client-svid/${CLIENT_CERT_ID}/tls.crt -noout -ext subjectAltName`
+  output from the SpendGuard-issued client SVID certificate showing the
+  exact predictor-client SVID.
 - Server certificate SHA-256 fingerprint used at registration.
 - Backtest report showing held-out calibration and model version.
 - Screenshot or export of plugin metrics for at least one low-risk

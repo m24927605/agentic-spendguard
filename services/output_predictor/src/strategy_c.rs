@@ -382,6 +382,7 @@ fn classify_status(status: &tonic::Status) -> StrategyCFailure {
         || msg.contains("TLS")
         || msg.contains("certificate")
         || msg.contains("fingerprint")
+        || (code == Code::PermissionDenied && msg.contains("SVID"))
     {
         return StrategyCFailure::TlsError;
     }
@@ -629,6 +630,15 @@ mod tests {
         let s = tonic::Status::internal("certificate verify failed: leaf untrusted");
         assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
         let s = tonic::Status::unknown("fingerprint mismatch (expected aa..., got bb...)");
+        assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
+    }
+
+    #[test]
+    fn classify_status_svid_tenant_mismatch_is_tls_error() {
+        let s = tonic::Status::permission_denied("client SVID tenant mismatch");
+        assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
+
+        let s = tonic::Status::permission_denied("missing required SVID");
         assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
     }
 
