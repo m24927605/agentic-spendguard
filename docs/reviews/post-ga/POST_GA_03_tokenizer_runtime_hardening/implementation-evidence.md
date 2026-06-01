@@ -42,6 +42,31 @@ Mapped issues: #92, #94, #96, #98, #100, #103, #105, #110, #111, #112, #114, #11
 Passed before evidence capture:
 
 - `cargo build --manifest-path services/tokenizer/Cargo.toml && cargo test --manifest-path services/tokenizer/Cargo.toml`
+
+## Adversarial Review Round 3
+
+Required AIT command was run and recorded in `round-3-ait-command.txt`.
+Local AIT again rejected `--review-mode`, so codex CLI fallback review
+was run and recorded in `round-3-codex-review.txt`.
+
+Finding:
+
+- P2: `ENCODE_CONCURRENCY_LIMITED_TOTAL` was incremented when the
+  semaphore budget rejected a request, but the counter was not exported
+  by `/metrics`.
+
+Round 3 fix:
+
+- `render_metrics()` now exports
+  `spendguard_tokenizer_encode_concurrency_limited_total` with
+  Prometheus HELP/TYPE metadata and the current counter value.
+- `render_metrics_contains_shadow_counters` now asserts the metric is
+  present.
+
+Round 3 fix verification:
+
+- `cargo fmt --manifest-path services/tokenizer/Cargo.toml`
+- `cargo test --manifest-path services/tokenizer/Cargo.toml render_metrics_contains_shadow_counters`
 - `cargo build --manifest-path services/sidecar/Cargo.toml && cargo test --manifest-path services/sidecar/Cargo.toml`
 - `cargo build --manifest-path services/webhook_receiver/Cargo.toml && cargo test --manifest-path services/webhook_receiver/Cargo.toml`
 - `cargo test --manifest-path crates/spendguard-tokenizer/Cargo.toml`

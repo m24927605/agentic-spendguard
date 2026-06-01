@@ -634,7 +634,8 @@ fn init_tracing() {
 /// rendering without binding a socket.
 fn render_metrics() -> String {
     use spendguard_tokenizer_service::server::{
-        ENCODE_TIMEOUT_TOTAL, INVALID_REQUEST_ID_TOTAL, REQUEST_ID_V4_ACCEPTED_TOTAL,
+        ENCODE_CONCURRENCY_LIMITED_TOTAL, ENCODE_TIMEOUT_TOTAL, INVALID_REQUEST_ID_TOTAL,
+        REQUEST_ID_V4_ACCEPTED_TOTAL,
     };
     use spendguard_tokenizer_service::shadow::worker::{
         ALERT_ONCALL_ESCALATION_TOTAL, PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT, SHADOW_DROPPED_FULL,
@@ -649,6 +650,7 @@ fn render_metrics() -> String {
     let invalid_request_ids = INVALID_REQUEST_ID_TOTAL.load(Ordering::Relaxed);
     let request_id_v4 = REQUEST_ID_V4_ACCEPTED_TOTAL.load(Ordering::Relaxed);
     let encode_timeouts = ENCODE_TIMEOUT_TOTAL.load(Ordering::Relaxed);
+    let encode_concurrency_limited = ENCODE_CONCURRENCY_LIMITED_TOTAL.load(Ordering::Relaxed);
     let rate_limited = TOKENIZER_RATE_LIMITED_TOTAL.load(Ordering::Relaxed);
     format!(
         "# HELP spendguard_tokenizer_tier3_hit_total \
@@ -690,6 +692,10 @@ fn render_metrics() -> String {
          Tokenize requests that exceeded the service encode timeout.\n\
          # TYPE spendguard_tokenizer_encode_timeout_total counter\n\
          spendguard_tokenizer_encode_timeout_total {encode_timeouts}\n\
+         # HELP spendguard_tokenizer_encode_concurrency_limited_total \
+         Tokenize requests rejected because the encode work budget was exhausted.\n\
+         # TYPE spendguard_tokenizer_encode_concurrency_limited_total counter\n\
+         spendguard_tokenizer_encode_concurrency_limited_total {encode_concurrency_limited}\n\
          # HELP spendguard_tokenizer_rate_limited_total \
          Tier 1 count_tokens shadow samples skipped by per-tenant quota.\n\
          # TYPE spendguard_tokenizer_rate_limited_total counter\n\
@@ -1090,6 +1096,7 @@ mod tests {
         assert!(body.contains("spendguard_tokenizer_invalid_request_id_total"));
         assert!(body.contains("spendguard_tokenizer_request_id_v4_accepted_total"));
         assert!(body.contains("spendguard_tokenizer_encode_timeout_total"));
+        assert!(body.contains("spendguard_tokenizer_encode_concurrency_limited_total"));
         assert!(body.contains("spendguard_tokenizer_rate_limited_total"));
     }
 
