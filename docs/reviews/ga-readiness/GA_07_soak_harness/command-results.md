@@ -4,26 +4,29 @@ Date: 2026-06-01
 
 | Gate | Result | Evidence |
 |---|---|---|
-| `scripts/soak/ga-soak.sh --duration 30m --profile local` | PASS | `ga_soak_summary.json`: result `pass`, duration `1800`, snapshots `27`, started `2026-06-01T00:27:51Z`, finished `2026-06-01T00:58:12Z` |
+| `scripts/soak/ga-soak.sh --duration 30m --profile local` | PASS | Rerun after R1 review fix. `ga_soak_summary.json`: result `pass`, duration `1800`, snapshots `28`, commit `b43e26d8b684e5ec27dc704954aec46d15e24759`, started `2026-06-01T01:17:58Z`, finished `2026-06-01T01:48:43Z`, `git_dirty=false` |
 | `cargo test --manifest-path services/output_predictor/Cargo.toml --test plugin_svid_mtls -- --nocapture` | PASS | Run inside the soak harness before sustained snapshots; 4 tests passed |
 | `python3 -m pytest contrib/output_predictor_template/conformance_test.py -q -k 'client_svid'` | PASS | Run inside the soak harness before sustained snapshots; 5 tests passed, 65 deselected |
 | `python3 tests/e2e/verify_audit_columns.py --tenant 00000000-0000-4000-8000-000000000001` | PASS | Run on every soak snapshot; last snapshot verify status `0`, verify-chain GREEN |
 | `helm template spendguard charts/spendguard --set chart.profile=demo` | PASS | Rendered `/tmp/ga07-helm-demo.yaml`, 1441 lines |
 | `helm template spendguard charts/spendguard --set chart.profile=production -f scripts/helm-validate-test-values.yaml` | PASS | Rendered `/tmp/ga07-helm-prod.yaml`, 1534 lines |
-| `git diff --check` | PASS | Whitespace gate clean before the 30m run; rerun after evidence update before review |
+| `scripts/soak/ga-soak.sh --duration 30s --interval 30s --profile local --no-reset --evidence-dir /tmp/ga07-review-soak-r1` | PASS | R1 smoke after fail-closed + metadata fix. Summary included branch, commit, command line, environment, machine descriptor, and `git_dirty=false` |
+| `bash -n scripts/soak/ga-soak.sh && git diff --check` | PASS | Shell syntax and whitespace gates clean after R1 fix |
+| `ait run --adapter codex --review-mode adversarial --base main --branch ga/GA_07_soak_harness --slice-doc docs/slices/GA_07_soak_harness.md --review-budget deep` | FAIL | Local AIT wrapper rejected `--review-mode` with `unrecognized arguments`; fallback direct codex review used per workflow precedent |
+| `codex review --base main` | R1 FINDINGS | P1 snapshot probe failures could fail open under Bash `errexit` suppression; P2 generated summary lacked GA §7 evidence metadata |
 
 Last soak snapshot:
 
 | Field | Value |
 |---|---:|
-| `elapsed_seconds` | 1814 |
+| `elapsed_seconds` | 1838 |
 | `canonical_events` | 5 |
 | `pending_forward_rows` | 0 |
 | `outbox_lag_metric_seconds` | 0 |
 | `outbox_leader_count` | 1 |
 | `stats_cycles_total` | 31 |
 | `stats_errors_total` | 0 |
-| `last_cycle_age_seconds` | 35 |
+| `last_cycle_age_seconds` | 56 |
 | `svid_probe_status` | 0 |
 | `container_count` | 10 |
 | `failures` | 0 |

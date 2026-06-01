@@ -96,6 +96,8 @@ Reviewer must reject shim-only or final-status-only soak evidence.
 | Implementer | Use real docker-compose demo stack, SVID/mTLS tests, verify-chain, outbox/leader metrics, stats cycles, and container memory snapshots | `scripts/soak/ga-soak.sh` writes JSONL snapshots and JSON summary |
 | Implementer | Corrected no-traffic freshness gate after a 30m run exposed a harness false positive | Canonical count regression + verify-chain are blockers; canonical freshest age remains telemetry |
 | Implementer | Ran exact 30m local gate | PASS: 27 snapshots, final elapsed 1814s, pending 0, lag 0, stats cycles 31 |
+| Codex adversarial reviewer R1 | Snapshot probe failures could fail open under Bash `errexit` suppression; generated summary lacked GA §7 evidence metadata | Fixed explicit probe return guards and added commit, branch, date, command line, environment profile, machine descriptor, cluster descriptor, and git cleanliness metadata |
+| Implementer | Reran exact 30m local gate after R1 fix | PASS: 28 snapshots, final elapsed 1838s, pending 0, lag 0, stats cycles 31, `git_dirty=false` |
 
 ## §14. Merge Checklist
 
