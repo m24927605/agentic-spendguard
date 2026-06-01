@@ -1,7 +1,7 @@
 # GA 09 - Security Signoff and Supply Chain
 
 > **Branch**: `ga/GA_09_security_signoff_supply_chain`
-> **Status**: design
+> **Status**: implemented; adversarial review pending
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; threat model, scan scripts, supply-chain docs
 
@@ -65,6 +65,26 @@ This is the release security gate. It must not waive known high-severity finding
 - Evidence includes scanner versions and results
 - Image workflow either verifies signing/SBOM/vulnerability gates or documents a fail-closed local release gate with exact commands
 
+Local evidence on 2026-06-01:
+
+- `scripts/security/ga-security-scan.sh --require-external-tools` passed.
+- External tools installed and recorded: Syft 1.44.0, Trivy 0.70.0, Cosign 3.0.6, cargo-audit 0.22.1.
+- `cargo-audit.json` reports 0 vulnerabilities and no warnings.
+- `trivy-fs.json` reports 0 high/critical vulnerabilities for `Cargo.lock`.
+- `helm template spendguard charts/spendguard --set chart.profile=demo` passed.
+- `helm template spendguard charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production` passed.
+- `scripts/release/validate-production-helm-values.sh charts/spendguard/values-production.example.yaml --rendered-manifest /tmp/ga09-helm-prod.yaml` passed with negative tests failed closed.
+- `scripts/release/build-release-bundle.sh --output /tmp/spendguard-ga09-release` passed.
+- `scripts/release/check-release-bundle.sh /tmp/spendguard-ga09-release` passed.
+
+Evidence:
+
+- `docs/reviews/ga-readiness/GA_09_security_signoff_supply_chain/README.md`
+- `docs/reviews/ga-readiness/GA_09_security_signoff_supply_chain/scan-summary.json`
+- `docs/reviews/ga-readiness/GA_09_security_signoff_supply_chain/syft-sbom.spdx.json`
+- `docs/reviews/ga-readiness/GA_09_security_signoff_supply_chain/trivy-fs.json`
+- `docs/reviews/ga-readiness/GA_09_security_signoff_supply_chain/cargo-audit.json`
+
 ## §9. Review Checklist
 
 1. Are critical/high findings handled?
@@ -96,11 +116,14 @@ Reviewer must treat unhandled high-severity findings as blockers.
 |---|---|---|
 | Security Engineer | Security signoff is a GA gate, not post-GA work | GA_09 dedicated slice |
 | Release Engineering Architect | Supply-chain evidence ties back to release bundle | GA_01/GA_09 cross-link |
+| Security Engineer | Runtime image `USER 65532:65532` is required even when Helm sets `runAsUser=65532` | Added USER to every `deploy/demo/runtime/Dockerfile.*` |
+| Release Engineering Architect | Mutable `latest` and `latest-main` promotion are incompatible with GA signoff | Publish workflow now emits sha/tag refs only and signs pushed digests |
+| Release Engineering Architect | Release bundle gate must include migrations added after GA_04 | Refreshed migration inventory for canonical `0021` and ledger `0053` |
 
 ## §14. Merge Checklist
 
-- [ ] Security signoff exists
-- [ ] Scan script passes or fails closed with documented missing tool
-- [ ] Helm security baseline still passes
+- [x] Security signoff exists
+- [x] Scan script passes or fails closed with documented missing tool
+- [x] Helm security baseline still passes
 - [ ] AIT review clean or arbitration recorded
 - [ ] Memory updated
