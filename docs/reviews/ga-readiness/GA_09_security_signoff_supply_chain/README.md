@@ -1,9 +1,9 @@
 # GA_09 Security Scan Evidence
 
 - Result: pass
-- Commit: `b7d7f878e44174a24840f3626b22f905a3caf2cd`
+- Commit: `60ae0e20403d1811d35c6c67bb2bd5dacb4feb29`
 - Branch: `ga/GA_09_security_signoff_supply_chain`
-- Started UTC: `2026-06-01T07:18:33Z`
+- Started UTC: `2026-06-01T07:21:53Z`
 - Missing optional external tools: none
 - Release-mode command: `scripts/security/ga-security-scan.sh --require-external-tools`
 

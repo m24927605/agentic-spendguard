@@ -3,8 +3,8 @@
   "Trivy": {
     "Version": "0.70.0"
   },
-  "ReportID": "019e820c-8cb6-7269-8104-1a33ece84c2a",
-  "CreatedAt": "2026-06-01T15:18:41.078166+08:00",
+  "ReportID": "019e820f-a536-767c-a1af-42a3980eb64d",
+  "CreatedAt": "2026-06-01T15:22:03.958428+08:00",
   "ArtifactName": "Cargo.lock",
   "ArtifactType": "filesystem",
   "Results": [

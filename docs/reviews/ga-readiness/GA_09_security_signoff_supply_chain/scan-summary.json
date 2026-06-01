@@ -82,12 +82,12 @@
       "ok": true
     }
   },
-  "commit_sha": "b7d7f878e44174a24840f3626b22f905a3caf2cd",
+  "commit_sha": "60ae0e20403d1811d35c6c67bb2bd5dacb4feb29",
   "errors": [],
   "external_tool_install": "brew install syft trivy cosign cargo-audit",
   "missing_external_tools": [],
   "release_mode": "scripts/security/ga-security-scan.sh --require-external-tools",
   "result": "pass",
-  "scan_started_utc": "2026-06-01T07:18:33Z",
+  "scan_started_utc": "2026-06-01T07:21:53Z",
   "schema": "spendguard.ga09.security_scan.v1alpha1"
 }
