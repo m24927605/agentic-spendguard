@@ -1,9 +1,9 @@
 # GA_09 Security Scan Evidence
 
 - Result: pass
-- Commit: `4f8deda9346af946baf9ca6080b201c2578a8e7d`
+- Commit: `a28a3fab8f6f2f046c8c6d097e9582d5bdace813`
 - Branch: `ga/GA_09_security_signoff_supply_chain`
-- Started UTC: `2026-06-01T08:24:02Z`
+- Started UTC: `2026-06-01T08:41:27Z`
 - Worktree dirty at start: `false`
 - Missing optional external tools: none
 - Optional external scanner failures: none
@@ -40,4 +40,4 @@
 - PASS `svid_template_exact_uri`: Helm Certificate URI uses exact predictor-client tenant prefix
 - PASS `svid_runtime_exact_uri`: runtime validator uses exact predictor-client tenant prefix
 - PASS `cargo_sbom_generated`: 226 Cargo packages recorded
-- PASS `cargo_evidence_no_local_paths`: cargo metadata/SBOM evidence strips developer-local paths
+- PASS `evidence_no_local_paths`: GA_09 evidence strips developer-local paths

@@ -1,4 +1,4 @@
-$ scripts/release/validate-production-helm-values.sh charts/spendguard/values-production.example.yaml --rendered-manifest /Users/michael.chen/products/agentic-spendguard/docs/reviews/ga-readiness/GA_09_security_signoff_supply_chain/helm-production.yaml
+$ scripts/release/validate-production-helm-values.sh charts/spendguard/values-production.example.yaml --rendered-manifest docs/reviews/ga-readiness/GA_09_security_signoff_supply_chain/helm-production.yaml
 
 production Helm values validated
 negative production Helm values tests failed closed

@@ -5,10 +5,6 @@
       "detail": "bundles-init hands writable bundle volume to runtime UID 65532",
       "ok": true
     },
-    "cargo_evidence_no_local_paths": {
-      "detail": "cargo metadata/SBOM evidence strips developer-local paths",
-      "ok": true
-    },
     "cargo_sbom_generated": {
       "detail": "226 Cargo packages recorded",
       "ok": true
@@ -19,6 +15,10 @@
     },
     "count_tokens_quota_present": {
       "detail": "per-tenant count_tokens quota present",
+      "ok": true
+    },
+    "evidence_no_local_paths": {
+      "detail": "GA_09 evidence strips developer-local paths",
       "ok": true
     },
     "pii_shadow_default_denied": {
@@ -122,14 +122,14 @@
       "ok": true
     }
   },
-  "commit_sha": "4f8deda9346af946baf9ca6080b201c2578a8e7d",
+  "commit_sha": "a28a3fab8f6f2f046c8c6d097e9582d5bdace813",
   "errors": [],
   "external_scanner_failures": [],
   "external_tool_install": "brew install syft trivy cosign cargo-audit",
   "missing_external_tools": [],
   "release_mode": "scripts/security/ga-security-scan.sh --require-external-tools",
   "result": "pass",
-  "scan_started_utc": "2026-06-01T08:24:02Z",
+  "scan_started_utc": "2026-06-01T08:41:27Z",
   "schema": "spendguard.ga09.security_scan.v1alpha1",
   "worktree_dirty_at_start": false
 }
