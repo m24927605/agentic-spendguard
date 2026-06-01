@@ -4,7 +4,7 @@ Date: 2026-06-01
 
 | Gate | Result | Evidence |
 |---|---|---|
-| `scripts/soak/ga-soak.sh --duration 30m --profile local` | PASS | Rerun after R1 review fix. `ga_soak_summary.json`: result `pass`, duration `1800`, snapshots `28`, commit `b43e26d8b684e5ec27dc704954aec46d15e24759`, started `2026-06-01T01:17:58Z`, finished `2026-06-01T01:48:43Z`, `git_dirty=false` |
+| `scripts/soak/ga-soak.sh --duration 30m --profile local` | PASS | Rerun after R3 inspect-failure fix on clean source commit `ae318aa3cc1f7cd30902c2447b4f21343abf8b0a`. `ga_soak_summary.json`: result `pass`, duration `1800`, snapshots `27`, started `2026-06-01T02:20:19Z`, finished `2026-06-01T02:50:27Z`, `git_dirty=false` |
 | `cargo test --manifest-path services/output_predictor/Cargo.toml --test plugin_svid_mtls -- --nocapture` | PASS | Run inside the soak harness before sustained snapshots; 4 tests passed |
 | `python3 -m pytest contrib/output_predictor_template/conformance_test.py -q -k 'client_svid'` | PASS | Run inside the soak harness before sustained snapshots; 5 tests passed, 65 deselected |
 | `python3 tests/e2e/verify_audit_columns.py --tenant 00000000-0000-4000-8000-000000000001` | PASS | Run on every soak snapshot; last snapshot verify status `0`, verify-chain GREEN |
@@ -14,23 +14,25 @@ Date: 2026-06-01
 | `scripts/soak/ga-soak.sh --duration 1s --interval 0s --profile local --no-reset --evidence-dir /tmp/ga07-zero-interval-test` | PASS (negative) | R2 fix rejects zero interval before touching docker: exit `2`, `--interval must be > 0` |
 | `scripts/soak/ga-soak.sh --duration 90s --interval 30s --profile local --no-reset --evidence-dir /tmp/ga07-stopped-container-test` + `docker stop spendguard-tokenizer` after snapshot 0 | PASS (negative) | Harness exited `1` and wrote failure summary with tokenizer metrics probe failure, `spendguard-tokenizer status is exited`, and `spendguard-tokenizer health is unhealthy` |
 | `scripts/soak/ga-soak.sh --duration 30s --interval 30s --profile local --no-reset --evidence-dir /tmp/ga07-review-soak-r2` | PASS | R2 happy-path smoke after probe-failure capture; 2 snapshots, pending `0`, lag `0`, failures `[]` |
-| `bash -n scripts/soak/ga-soak.sh && git diff --check` | PASS | Shell syntax and whitespace gates clean after R1 fix |
+| `scripts/soak/ga-soak.sh --duration 30s --interval 30s --profile local --no-reset --evidence-dir /tmp/ga07-inspect-failure-test-r2` + `docker rm -f spendguard-tokenizer` before snapshot 0 | PASS (negative) | R3 inspect-failure fix wrote a fail summary with structured failures: `docker stats failed`, `tokenizer escalation metric failed`, and concise `docker inspect failed ... no such object` |
+| `bash -n scripts/soak/ga-soak.sh && git diff --check` | PASS | Shell syntax and whitespace gates clean after R3 fix |
 | `ait run --adapter codex --review-mode adversarial --base main --branch ga/GA_07_soak_harness --slice-doc docs/slices/GA_07_soak_harness.md --review-budget deep` | FAIL | Local AIT wrapper rejected `--review-mode` with `unrecognized arguments`; fallback direct codex review used per workflow precedent |
 | `codex review --base main` | R1 FINDINGS | P1 snapshot probe failures could fail open under Bash `errexit` suppression; P2 generated summary lacked GA §7 evidence metadata |
 | `codex review --base main` | R2 FINDINGS | P2 stopped containers could abort before recording inspect details; P3 zero interval could busy-loop |
+| `codex review --base main` | R3 FINDINGS | P2 required 30m evidence was stale relative to final script; P2 `docker inspect` failure path still returned before structured evidence |
 
 Last soak snapshot:
 
 | Field | Value |
 |---|---:|
-| `elapsed_seconds` | 1838 |
+| `elapsed_seconds` | 1798 |
 | `canonical_events` | 5 |
 | `pending_forward_rows` | 0 |
 | `outbox_lag_metric_seconds` | 0 |
 | `outbox_leader_count` | 1 |
 | `stats_cycles_total` | 31 |
 | `stats_errors_total` | 0 |
-| `last_cycle_age_seconds` | 56 |
+| `last_cycle_age_seconds` | 13 |
 | `svid_probe_status` | 0 |
 | `container_count` | 10 |
 | `failures` | 0 |

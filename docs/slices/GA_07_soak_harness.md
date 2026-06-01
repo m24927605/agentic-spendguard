@@ -1,7 +1,7 @@
 # GA 07 - Long-Running Soak Harness
 
 > **Branch**: `ga/GA_07_soak_harness`
-> **Status**: implementation complete; adversarial review pending
+> **Status**: implementation complete; adversarial review R4 pending
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; soak scripts and evidence format
 
@@ -100,6 +100,8 @@ Reviewer must reject shim-only or final-status-only soak evidence.
 | Implementer | Reran exact 30m local gate after R1 fix | PASS: 28 snapshots, final elapsed 1838s, pending 0, lag 0, stats cycles 31, `git_dirty=false` |
 | Codex adversarial reviewer R2 | Stopped containers could fail `docker stats` or metrics probes before inspect details were recorded; zero intervals could busy-loop | Snapshot probes now capture DB/metrics failures into failure evidence, still record inspect status, and reject non-positive duration/interval values |
 | Implementer | Ran R2 targeted gates | PASS: zero interval rejected; stopped tokenizer produced a structured fail summary with exited/unhealthy status; 30s happy-path smoke passed |
+| Codex adversarial reviewer R3 | Required 30m evidence was stale relative to final script changes; `docker inspect` failures could still return before structured evidence | Fixed inspect failure handling to record concise failure evidence and reran the exact 30m local gate on clean source commit `ae318aa3cc1f7cd30902c2447b4f21343abf8b0a` |
+| Implementer | Ran R3 targeted gates | PASS: removed tokenizer before snapshot produced structured failures for docker stats, tokenizer metrics, and concise docker inspect missing-object output; 30m local gate passed with 27 snapshots, pending 0, lag 0, stats cycles 31, `git_dirty=false` |
 
 ## §14. Merge Checklist
 

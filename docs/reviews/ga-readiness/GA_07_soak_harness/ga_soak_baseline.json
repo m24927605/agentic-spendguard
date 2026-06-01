@@ -1,16 +1,16 @@
 {
   "canonical_events": 5,
-  "created_at": "2026-06-01T01:17:58+00:00",
+  "created_at": "2026-06-01T02:20:19+00:00",
   "memory_bytes": {
-    "spendguard-canonical-ingest": 4984930,
-    "spendguard-control-plane": 2019557,
-    "spendguard-ledger": 2342518,
-    "spendguard-outbox-forwarder": 5304745,
-    "spendguard-output-predictor": 1847590,
-    "spendguard-postgres": 87996497,
-    "spendguard-run-cost-projector": 8646557,
-    "spendguard-sidecar": 11492392,
-    "spendguard-stats-aggregator": 2424307,
-    "spendguard-tokenizer": 311217356
+    "spendguard-canonical-ingest": 2473590,
+    "spendguard-control-plane": 2011168,
+    "spendguard-ledger": 2207252,
+    "spendguard-outbox-forwarder": 4428136,
+    "spendguard-output-predictor": 2531262,
+    "spendguard-postgres": 85081456,
+    "spendguard-run-cost-projector": 1044480,
+    "spendguard-sidecar": 12352225,
+    "spendguard-stats-aggregator": 1937768,
+    "spendguard-tokenizer": 307652198
   }
 }
