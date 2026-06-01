@@ -246,6 +246,9 @@ append_snapshot() {
   local verify_output
   local verify_status=0
   local inspect_output
+  local inspect_status=0
+  local inspect_error_file
+  local inspect_error
   local stats_output
   local stats_status=0
   local PROBE_FAILURES=""
@@ -333,10 +336,19 @@ append_snapshot() {
     verify_status=$?
   fi
 
-  inspect_output="$(docker inspect --format '{{json .}}' \
+  inspect_error_file="$(mktemp)"
+  if inspect_output="$(docker inspect --format '{{json .}}' \
     spendguard-postgres spendguard-ledger spendguard-canonical-ingest spendguard-sidecar \
     spendguard-outbox-forwarder spendguard-stats-aggregator spendguard-output-predictor \
-    spendguard-run-cost-projector spendguard-tokenizer spendguard-control-plane)" || return $?
+    spendguard-run-cost-projector spendguard-tokenizer spendguard-control-plane 2>"$inspect_error_file")"; then
+    inspect_status=0
+  else
+    inspect_status=$?
+    inspect_error="$(tr '\n' ' ' < "$inspect_error_file")"
+    record_probe_failure "docker inspect" "$inspect_status" "${inspect_error:-$inspect_output}"
+    inspect_output=""
+  fi
+  rm -f "$inspect_error_file"
   if stats_output="$(docker stats --no-stream --format '{{json .}}' \
     spendguard-postgres spendguard-ledger spendguard-canonical-ingest spendguard-sidecar \
     spendguard-outbox-forwarder spendguard-stats-aggregator spendguard-output-predictor \
@@ -365,6 +377,7 @@ append_snapshot() {
   VERIFY_STATUS="$verify_status" \
   VERIFY_OUTPUT="$verify_output" \
   DOCKER_INSPECT="$inspect_output" \
+  DOCKER_INSPECT_STATUS="$inspect_status" \
   DOCKER_STATS="$stats_output" \
   DOCKER_STATS_STATUS="$stats_status" \
   PROBE_FAILURES="$PROBE_FAILURES" \
