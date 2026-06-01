@@ -364,7 +364,16 @@ the structural source of truth, this section is the policy intent.
 
 ### 3.2 Encoder cache
 
-`Tokenizer::new` 在啟動時 eager-load 所有 dispatch table 中的 encoder assets 到 process memory。Encoder objects 是 immutable + thread-safe（per tiktoken-rs API contract；vendored BPE 用 `Arc<EncoderRef>` 包裝）。Hot path tokenize 無 lock contention。
+`Tokenizer::new` 在啟動時 eager-load 所有 dispatch table 中的 encoder assets 到 process memory。Encoder objects 是 immutable + thread-safe（per tiktoken-rs API contract；vendored BPE 用 `tokenizers::Tokenizer` handles 包裝）。Hot path tokenize 無 lock contention。
+
+POST_GA_04 keeps eager-load as the production default instead of
+lazy-loading on first request. The decision is fail-fast over
+first-request latency variance: corrupt or mismatched assets must stop
+the process before readiness, and the hot path must not pay lazy-init
+or locking costs. The implementation records boot duration per encoder
+step and exports `spendguard_tokenizer_encoder_boot_duration_ms` from
+the tokenizer service `/metrics` endpoint so operators can detect
+startup regressions without weakening the eager-load invariant.
 
 Asset 來源 per §7.2。Asset 大小總和 typically < 50 MB（tiktoken cl100k_base ~10 MB；其他類似量級）。
 
@@ -798,6 +807,14 @@ Hot-reload 機制：
 為堵住這個 gap，`Tokenizer::new` 在 sha256 check 之後執行 **runtime cross-check**：tokenize 一個固定的 fixture string (`CROSS_CHECK_FIXTURE = "spendguard-cross-check-fixture-v1alpha1"`)，跟 hard-coded `EXPECTED_*` token vectors 比對。任何 mismatch → `TokenizerError::AssetSignatureMismatch` → boot-fail 跟 sha256 mismatch 同 surface。
 
 **Cross-check fixture maintenance**: bumping tiktoken-rs version 時，`cargo run --example discover_fixture_tokens` 重新印出新版的 token vectors，更新 `encoder_cache.rs` 的 `EXPECTED_*` arrays，跟 `asset_sha256` rotation 同時做（per §6.2）。
+
+POST_GA_04 adds `crates/spendguard-tokenizer/tests/fixtures/cross_check.json`
+as the extensible maintenance manifest for all tokenizer kinds
+(`OPENAI_TIKTOKEN`, `ANTHROPIC_BPE`, `GEMINI_BPE`, `COHERE_BPE`,
+`SENTENCEPIECE_LLAMA`). Runtime fail-fast still uses compiled constants
+so startup does not depend on parsing a test fixture, but the manifest
+is schema-tested to ensure future Anthropic/Gemini/provider rotations
+add explicit fixture cases rather than burying vectors only in code.
 
 ---
 
