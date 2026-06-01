@@ -29,10 +29,7 @@ pub enum TokenizerError {
     /// silently fall back to Tier 3 (panic may indicate input
     /// anomaly that needs escalation).
     #[error("encoder error for kind `{kind}`: {message}")]
-    EncoderInternal {
-        kind: &'static str,
-        message: String,
-    },
+    EncoderInternal { kind: &'static str, message: String },
 
     /// Dispatch table failed to compile its regex patterns. This is
     /// a programmer error (only triggered if a SLICE_04+ contributor

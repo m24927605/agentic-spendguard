@@ -67,13 +67,19 @@
 //! question 3).
 
 use crate::dispatch::{DispatchEntry, EncoderResolver, TiktokenEncoder};
-use crate::encoders::{
-    anthropic::AnthropicEncoder, gemini::GeminiEncoder, llama::LlamaEncoder, Encoder,
-};
 #[cfg(feature = "cohere")]
 use crate::encoders::cohere::CohereEncoder;
+use crate::encoders::{
+    anthropic::AnthropicEncoder,
+    gemini::GeminiEncoder,
+    llama::LlamaEncoder,
+    openai::{OpenAiEncoder, TiktokenFamily},
+    Encoder,
+};
 use crate::error::TokenizerError;
-use crate::{Message, TokenizeRequest, TokenizeResponse, ToolCall};
+#[cfg(test)]
+use crate::Message;
+use crate::{TokenizeRequest, TokenizeResponse};
 use sha2::{Digest, Sha256};
 use tiktoken_rs::CoreBPE;
 
@@ -81,12 +87,9 @@ use tiktoken_rs::CoreBPE;
 /// tiktoken-rs `assets/*.tiktoken` files of the pinned 0.11.x
 /// release; copied into `crates/spendguard-tokenizer/data/` so this
 /// crate owns the integrity check.
-const ASSET_CL100K_BASE: &[u8] =
-    include_bytes!("../data/cl100k_base.tiktoken");
-const ASSET_O200K_BASE: &[u8] =
-    include_bytes!("../data/o200k_base.tiktoken");
-const ASSET_P50K_BASE: &[u8] =
-    include_bytes!("../data/p50k_base.tiktoken");
+const ASSET_CL100K_BASE: &[u8] = include_bytes!("../data/cl100k_base.tiktoken");
+const ASSET_O200K_BASE: &[u8] = include_bytes!("../data/o200k_base.tiktoken");
+const ASSET_P50K_BASE: &[u8] = include_bytes!("../data/p50k_base.tiktoken");
 
 // ============================================================================
 // Round-2 fix B1 — cross-check fixture (Layer B integrity guard).
@@ -141,7 +144,6 @@ const EXPECTED_P50K_FIXTURE: &[u32] = &[
 /// (Arc's reference-counting buys nothing for a 'static borrow).
 struct EncoderRow {
     encoder: &'static CoreBPE,
-    tiktoken: TiktokenEncoder,
 }
 
 /// Eager-loaded encoder bundle.
@@ -182,8 +184,16 @@ impl EncoderCache {
     ///      our verified bytes and what the singletons actually use.
     pub fn with_embedded_assets() -> Result<Self, TokenizerError> {
         // Layer A — sha256 of the embedded asset bytes.
-        verify_asset_sha256("cl100k_base", ASSET_CL100K_BASE, crate::asset_sha256::CL100K_BASE)?;
-        verify_asset_sha256("o200k_base", ASSET_O200K_BASE, crate::asset_sha256::O200K_BASE)?;
+        verify_asset_sha256(
+            "cl100k_base",
+            ASSET_CL100K_BASE,
+            crate::asset_sha256::CL100K_BASE,
+        )?;
+        verify_asset_sha256(
+            "o200k_base",
+            ASSET_O200K_BASE,
+            crate::asset_sha256::O200K_BASE,
+        )?;
         verify_asset_sha256("p50k_base", ASSET_P50K_BASE, crate::asset_sha256::P50K_BASE)?;
 
         // Eager-load via tiktoken-rs singletons. The first call to a
@@ -215,16 +225,9 @@ impl EncoderCache {
         Ok(Self {
             cl100k: Some(EncoderRow {
                 encoder: cl100k_ref,
-                tiktoken: TiktokenEncoder::Cl100kBase,
             }),
-            o200k: Some(EncoderRow {
-                encoder: o200k_ref,
-                tiktoken: TiktokenEncoder::O200kBase,
-            }),
-            p50k: Some(EncoderRow {
-                encoder: p50k_ref,
-                tiktoken: TiktokenEncoder::P50kBase,
-            }),
+            o200k: Some(EncoderRow { encoder: o200k_ref }),
+            p50k: Some(EncoderRow { encoder: p50k_ref }),
             anthropic: Some(anthropic),
             gemini: Some(gemini),
             #[cfg(feature = "cohere")]
@@ -301,7 +304,8 @@ impl EncoderCache {
             EncoderResolver::Cohere => Err(TokenizerError::AssetLoadFailed {
                 encoder: "cohere-v2-bpe",
                 message: "Cohere encoder not built (enable `cohere` Cargo feature \
-                          after legal review per R2 M6)".to_string(),
+                          after legal review per R2 M6)"
+                    .to_string(),
             }),
             EncoderResolver::Llama => self.tokenize_via_trait(
                 self.llama.as_ref().map(|e| e as &dyn Encoder),
@@ -318,7 +322,7 @@ impl EncoderCache {
     fn tokenize_via_tiktoken(
         &self,
         family: TiktokenEncoder,
-        entry: &DispatchEntry,
+        _entry: &DispatchEntry,
         req: &TokenizeRequest,
     ) -> Result<TokenizeResponse, TokenizerError> {
         let row = self
@@ -328,13 +332,14 @@ impl EncoderCache {
                 message: "encoder not loaded (test_empty cache)".to_string(),
             })?;
 
-        let input_tokens = count_tokens(row, req)?;
+        let enc = OpenAiEncoder::new(TiktokenFamily::from_dispatch(family), row.encoder);
+        let result = enc.count_tokens_request(req)?;
 
         Ok(TokenizeResponse {
-            input_tokens: input_tokens as i64,
+            input_tokens: result.input_tokens as i64,
             tier: "T2".to_string(),
-            tokenizer_version_id: family.tokenizer_version_id().to_string(),
-            kind: entry.kind.as_str().to_string(),
+            tokenizer_version_id: result.tokenizer_version_id.to_string(),
+            kind: result.kind.as_str().to_string(),
             fallback_char_count: 0,
             fallback_margin_ratio: 0.0,
             latency_ns: 0,
@@ -375,102 +380,6 @@ impl EncoderCache {
             TiktokenEncoder::P50kBase => self.p50k.as_ref(),
         }
     }
-}
-
-/// Compute total token count for a request.
-///
-/// Per spec §3.4 + §3.5:
-///   * Chat shape (messages.len() > 0): per-message envelope
-///     (3 tokens / message + per-tool overhead) + 3 reply priming.
-///   * Text-completion shape (raw_text.len() > 0): raw encode only.
-///   * Both: results from the two branches sum (rare but defensive).
-///
-/// Round-2 fix m1 (panel finding): per OpenAI cookbook, the legacy
-/// gpt-3.5-turbo-0301 snapshot uses tokens_per_message=4 (one extra
-/// for an implicit "name" position that newer snapshots dropped).
-/// All other cl100k / o200k chat models use 3. We special-case the
-/// 0301 snapshot via the request's model string rather than adding
-/// a third TiktokenEncoder variant since the BPE encoder itself is
-/// still cl100k.
-fn count_tokens(row: &EncoderRow, req: &TokenizeRequest) -> Result<usize, TokenizerError> {
-    let mut total: usize = 0;
-
-    // ── chat-shape path ───────────────────────────────────────
-    if !req.messages.is_empty() {
-        let (per_msg_overhead, reply_priming) = match row.tiktoken {
-            // Per OpenAI cookbook tokens_per_message=3, plus 3 for
-            // reply priming. Holds for cl100k + o200k families
-            // shipping in SLICE_03 EXCEPT the legacy 0301 snapshot
-            // (R2 m1 fix). p50k models don't use chat shape
-            // (text-completion only) — see else branch below.
-            TiktokenEncoder::Cl100kBase | TiktokenEncoder::O200kBase => {
-                if req.model == "gpt-3.5-turbo-0301" {
-                    // Legacy snapshot quirk: tokens_per_message=4.
-                    (4usize, 3usize)
-                } else {
-                    (3usize, 3usize)
-                }
-            }
-            TiktokenEncoder::P50kBase => {
-                // Per spec §3.4 — text-completion shape only; if a
-                // caller passes messages to p50k, count them as raw
-                // (no envelope). This is graceful-degradation rather
-                // than rejection.
-                (0usize, 0usize)
-            }
-        };
-
-        for msg in &req.messages {
-            total += per_msg_overhead;
-            total += encode_count(row, &msg.role)?;
-            total += encode_count(row, &msg.content)?;
-            for tc in &msg.tool_calls {
-                total += tool_call_tokens(row, tc)?;
-            }
-        }
-        total += reply_priming;
-    }
-
-    // ── text-completion path ──────────────────────────────────
-    if !req.raw_text.is_empty() {
-        total += encode_count(row, &req.raw_text)?;
-    }
-
-    Ok(total)
-}
-
-fn tool_call_tokens(row: &EncoderRow, tc: &ToolCall) -> Result<usize, TokenizerError> {
-    // Per tiktoken-rs num_tokens_from_messages: +1 overhead per tool
-    // call + tokens(name) + tokens(arguments_json).
-    const TOOL_CALL_OVERHEAD: usize = 1;
-    Ok(
-        TOOL_CALL_OVERHEAD
-            + encode_count(row, &tc.name)?
-            + encode_count(row, &tc.arguments_json)?,
-    )
-}
-
-fn encode_count(row: &EncoderRow, text: &str) -> Result<usize, TokenizerError> {
-    if text.is_empty() {
-        return Ok(0);
-    }
-    // We capture any panic that might occur inside encode_with_special_tokens
-    // and translate to EncoderInternal per spec §8 ("Tier 2 encoder
-    // panic during tokenize → hot path raises error → sidecar fail-
-    // closed reservation"). The wrapper here is a defense-in-depth
-    // (tiktoken-rs's encode_with_special_tokens returns Vec<Rank>
-    // and is not expected to panic on well-formed UTF-8).
-    //
-    // Round-2 fix m6: row.encoder is now `&'static CoreBPE` directly
-    // (was `Arc<&'static CoreBPE>`); no Arc deref needed.
-    let encoder: &CoreBPE = row.encoder;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        encoder.encode_with_special_tokens(text).len()
-    }));
-    result.map_err(|_| TokenizerError::EncoderInternal {
-        kind: encoder_static_name(row.tiktoken),
-        message: "tiktoken-rs encode panicked on input".to_string(),
-    })
 }
 
 fn encoder_static_name(enc: TiktokenEncoder) -> &'static str {
@@ -579,10 +488,6 @@ fn cross_check_encoder(
     Ok(())
 }
 
-// Suppress unused-import warning when no chat-shape tests run.
-#[allow(unused_imports)]
-use Message as _Message;
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -597,12 +502,8 @@ mod tests {
         if tampered.len() > 1024 {
             tampered[1024] ^= 0x01;
         }
-        let err = verify_asset_sha256(
-            "cl100k_base",
-            &tampered,
-            crate::asset_sha256::CL100K_BASE,
-        )
-        .unwrap_err();
+        let err = verify_asset_sha256("cl100k_base", &tampered, crate::asset_sha256::CL100K_BASE)
+            .unwrap_err();
         match err {
             TokenizerError::AssetSignatureMismatch { encoder, .. } => {
                 assert_eq!(encoder, "cl100k_base");
@@ -676,12 +577,8 @@ mod tests {
             crate::asset_sha256::O200K_BASE,
         )
         .expect("untampered bytes pass");
-        verify_asset_sha256(
-            "p50k_base",
-            ASSET_P50K_BASE,
-            crate::asset_sha256::P50K_BASE,
-        )
-        .expect("untampered bytes pass");
+        verify_asset_sha256("p50k_base", ASSET_P50K_BASE, crate::asset_sha256::P50K_BASE)
+            .expect("untampered bytes pass");
     }
 
     #[test]
@@ -737,6 +634,45 @@ mod tests {
             resp.tokenizer_version_id,
             crate::versions::TIKTOKEN_CL100K_BASE_VERSION_ID
         );
+    }
+
+    fn assert_cache_routes_model(model: &str, expected_kind: &str) {
+        let cache = EncoderCache::with_embedded_assets().expect("cache loads");
+        let dispatch = DispatchTable::compile().expect("dispatch");
+        let entry = dispatch.lookup(model).expect("dispatch hit");
+        let req = TokenizeRequest {
+            model: model.to_string(),
+            raw_text: "SpendGuard tokenizer cache smoke sample.".to_string(),
+            ..Default::default()
+        };
+
+        let resp = cache.tokenize_with_entry(entry, &req).expect("encode");
+
+        assert_eq!(resp.tier, "T2");
+        assert_eq!(resp.kind, expected_kind);
+        assert!(resp.input_tokens > 0);
+        assert!(!resp.tokenizer_version_id.is_empty());
+    }
+
+    #[test]
+    fn tier2_cache_smoke_anthropic_trait_dispatch() {
+        assert_cache_routes_model("claude-3-5-sonnet-20240620", "ANTHROPIC_BPE");
+    }
+
+    #[test]
+    fn tier2_cache_smoke_gemini_trait_dispatch() {
+        assert_cache_routes_model("gemini-1.5-pro", "GEMINI_BPE");
+    }
+
+    #[cfg(feature = "cohere")]
+    #[test]
+    fn tier2_cache_smoke_cohere_trait_dispatch() {
+        assert_cache_routes_model("command-r-plus", "COHERE_BPE");
+    }
+
+    #[test]
+    fn tier2_cache_smoke_llama_trait_dispatch() {
+        assert_cache_routes_model("meta.llama3-1-70b-instruct-v1:0", "SENTENCEPIECE_LLAMA");
     }
 
     #[test]

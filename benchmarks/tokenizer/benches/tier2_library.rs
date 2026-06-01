@@ -15,6 +15,8 @@
 //! 5. 5-message chat — typical agent transcript shape.
 //! 6. cl100k_base at 1000 chars — separate encoder family.
 //! 7. Tier 3 fallback (unknown model) — heuristic path bench.
+//! 8. POST_GA_03 10K-char stress prompts for every vendor encoder
+//!    family, tracked separately from the <=1K-char steady-state SLO.
 //!
 //! ## Local measurements (developer baseline; not CI gate)
 //!
@@ -67,9 +69,8 @@ use spendguard_tokenizer::{Message, TokenizeRequest, Tokenizer};
 use std::sync::Arc;
 
 fn bench_tier2_library(c: &mut Criterion) {
-    let tokenizer = Arc::new(
-        Tokenizer::new_with_embedded_assets().expect("boot tokenizer for bench"),
-    );
+    let tokenizer =
+        Arc::new(Tokenizer::new_with_embedded_assets().expect("boot tokenizer for bench"));
 
     let mut group = c.benchmark_group("tier2_library");
 
@@ -89,17 +90,21 @@ fn bench_tier2_library(c: &mut Criterion) {
     // Scenarios 2-4: progressively larger raw_text payloads.
     for size in &[100usize, 1_000, 10_000] {
         let body = "x".repeat(*size);
-        group.bench_with_input(BenchmarkId::new("raw_text_gpt_4o_chars", size), size, |b, _| {
-            let req = TokenizeRequest {
-                model: "gpt-4o".to_string(),
-                raw_text: body.clone(),
-                ..Default::default()
-            };
-            b.iter(|| {
-                let resp = tokenizer.tokenize(black_box(&req)).unwrap();
-                black_box(resp)
-            });
-        });
+        group.bench_with_input(
+            BenchmarkId::new("raw_text_gpt_4o_chars", size),
+            size,
+            |b, _| {
+                let req = TokenizeRequest {
+                    model: "gpt-4o".to_string(),
+                    raw_text: body.clone(),
+                    ..Default::default()
+                };
+                b.iter(|| {
+                    let resp = tokenizer.tokenize(black_box(&req)).unwrap();
+                    black_box(resp)
+                });
+            },
+        );
     }
 
     // Scenario 5: typical 5-message chat.
@@ -128,9 +133,9 @@ fn bench_tier2_library(c: &mut Criterion) {
             },
             Message {
                 role: "assistant".to_string(),
-                content:
-                    "Paris is the capital and most populous city of France. It is located in \
-                     the north-central part of the country on the Seine River.".to_string(),
+                content: "Paris is the capital and most populous city of France. It is located in \
+                     the north-central part of the country on the Seine River."
+                    .to_string(),
                 tool_calls: vec![],
             },
         ],
@@ -183,6 +188,17 @@ fn bench_tier2_library(c: &mut Criterion) {
             black_box(resp)
         });
     });
+    let anthropic_10k_req = TokenizeRequest {
+        model: "claude-3-5-sonnet-20240620".to_string(),
+        raw_text: "Anthropic long prompt stress: ".repeat(334),
+        ..Default::default()
+    };
+    group.bench_function("raw_text_claude_3_5_sonnet_10000_chars", |b| {
+        b.iter(|| {
+            let resp = tokenizer.tokenize(black_box(&anthropic_10k_req)).unwrap();
+            black_box(resp)
+        });
+    });
 
     let gemini_req = TokenizeRequest {
         model: "gemini-1.5-pro".to_string(),
@@ -195,15 +211,41 @@ fn bench_tier2_library(c: &mut Criterion) {
             black_box(resp)
         });
     });
+    let gemini_10k_req = TokenizeRequest {
+        model: "gemini-1.5-pro".to_string(),
+        raw_text: "Gemini multilingual stress 你好 κόσμε नमस्ते ".repeat(220),
+        ..Default::default()
+    };
+    group.bench_function("raw_text_gemini_1_5_pro_10000_chars", |b| {
+        b.iter(|| {
+            let resp = tokenizer.tokenize(black_box(&gemini_10k_req)).unwrap();
+            black_box(resp)
+        });
+    });
 
+    #[cfg(feature = "cohere")]
     let cohere_req = TokenizeRequest {
         model: "command-r-plus".to_string(),
         raw_text: "x".repeat(1000),
         ..Default::default()
     };
+    #[cfg(feature = "cohere")]
     group.bench_function("raw_text_command_r_plus_1000_chars", |b| {
         b.iter(|| {
             let resp = tokenizer.tokenize(black_box(&cohere_req)).unwrap();
+            black_box(resp)
+        });
+    });
+    #[cfg(feature = "cohere")]
+    let cohere_10k_req = TokenizeRequest {
+        model: "command-r-plus".to_string(),
+        raw_text: "Cohere command-r stress prompt with retrieval citations. ".repeat(185),
+        ..Default::default()
+    };
+    #[cfg(feature = "cohere")]
+    group.bench_function("raw_text_command_r_plus_10000_chars", |b| {
+        b.iter(|| {
+            let resp = tokenizer.tokenize(black_box(&cohere_10k_req)).unwrap();
             black_box(resp)
         });
     });
@@ -216,6 +258,17 @@ fn bench_tier2_library(c: &mut Criterion) {
     group.bench_function("raw_text_llama_3_1_70b_1000_chars", |b| {
         b.iter(|| {
             let resp = tokenizer.tokenize(black_box(&llama_req)).unwrap();
+            black_box(resp)
+        });
+    });
+    let llama_10k_req = TokenizeRequest {
+        model: "meta.llama3-1-70b-instruct-v1:0".to_string(),
+        raw_text: "Llama Bedrock stress 🦙 你好 mundo مرحبا ".repeat(240),
+        ..Default::default()
+    };
+    group.bench_function("raw_text_llama_3_1_70b_10000_chars", |b| {
+        b.iter(|| {
+            let resp = tokenizer.tokenize(black_box(&llama_10k_req)).unwrap();
             black_box(resp)
         });
     });

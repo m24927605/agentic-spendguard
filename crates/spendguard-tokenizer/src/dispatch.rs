@@ -27,8 +27,7 @@
 use crate::encoders::EncoderKind;
 use crate::error::TokenizerError;
 use crate::versions::{
-    TIKTOKEN_CL100K_BASE_VERSION_ID, TIKTOKEN_O200K_BASE_VERSION_ID,
-    TIKTOKEN_P50K_BASE_VERSION_ID,
+    TIKTOKEN_CL100K_BASE_VERSION_ID, TIKTOKEN_O200K_BASE_VERSION_ID, TIKTOKEN_P50K_BASE_VERSION_ID,
 };
 use regex::Regex;
 
@@ -150,12 +149,11 @@ pub struct DispatchEntry {
 
     /// SLICE_03 back-compat: when [`Self::resolver`] is
     /// `EncoderResolver::Tiktoken(family)`, this mirrors `family` so
-    /// the existing `EncoderCache::tokenize_with_entry` SLICE_03 path
-    /// can short-circuit without re-matching on resolver kind. For
-    /// non-OpenAI rows this is a placeholder
-    /// `TiktokenEncoder::Cl100kBase` value the cache MUST NOT read —
-    /// the cache routes via `resolver` for all SLICE_04 kinds.
-    pub tiktoken: TiktokenEncoder,
+    /// existing OpenAI routing tests and callers can read the concrete
+    /// tiktoken family. For non-OpenAI rows this is `None`; POST_GA_03
+    /// removes the previous `Cl100kBase` placeholder because it was a
+    /// footgun for generic dispatch-table consumers.
+    pub tiktoken: Option<TiktokenEncoder>,
 
     /// SLICE_04 multi-encoder router. The
     /// [`crate::encoder_cache::EncoderCache::tokenize_with_entry`]
@@ -281,7 +279,6 @@ const RAW_ENTRIES: &[(&str, EncoderResolver)] = &[
         r"^code-davinci-(001|002)$",
         EncoderResolver::Tiktoken(TiktokenEncoder::P50kBase),
     ),
-
     // ════════════════════════════════════════════════════════════════
     // SLICE_04 — Tier 2 expansion (per spec §3.1)
     // ════════════════════════════════════════════════════════════════
@@ -343,17 +340,12 @@ const RAW_ENTRIES: &[(&str, EncoderResolver)] = &[
         r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-(haiku|sonnet|opus)(-\d{8})?-v\d+:\d+$",
         EncoderResolver::Anthropic,
     ),
-
     // ── Gemini native ──
-    (
-        r"^gemini-2\.0-flash(-exp)?$",
-        EncoderResolver::Gemini,
-    ),
+    (r"^gemini-2\.0-flash(-exp)?$", EncoderResolver::Gemini),
     (
         r"^gemini-1\.5-(flash|pro)(-\d{3})?$",
         EncoderResolver::Gemini,
     ),
-
     // ── Cohere native + Bedrock entries are FEATURE-GATED ──
     //
     // R2 M6 + Security F5: the Cohere encoder ships behind the `cohere`
@@ -409,14 +401,8 @@ const RAW_ENTRIES: &[(&str, EncoderResolver)] = &[
 #[cfg(feature = "cohere")]
 const COHERE_ENTRIES: &[(&str, EncoderResolver)] = &[
     // `command-r-plus` must precede `command-r` for first-match-wins.
-    (
-        r"^command-r-plus(-\d{8})?$",
-        EncoderResolver::Cohere,
-    ),
-    (
-        r"^command-r(-\d{8})?$",
-        EncoderResolver::Cohere,
-    ),
+    (r"^command-r-plus(-\d{8})?$", EncoderResolver::Cohere),
+    (r"^command-r(-\d{8})?$", EncoderResolver::Cohere),
     // Bedrock + cross-region prefix support per R2 B1.
     (
         r"^(?:[a-z][a-z0-9-]*\.)?cohere\.command(-r)?(-plus)?-v\d+:\d+$",
@@ -450,21 +436,18 @@ impl DispatchTable {
         let raw_iter = RAW_ENTRIES.iter();
 
         for (pattern, resolver) in raw_iter {
-            let regex = Regex::new(pattern).map_err(|e| TokenizerError::DispatchPatternInvalid {
-                pattern: (*pattern).to_string(),
-                source: e,
-            })?;
+            let regex =
+                Regex::new(pattern).map_err(|e| TokenizerError::DispatchPatternInvalid {
+                    pattern: (*pattern).to_string(),
+                    source: e,
+                })?;
             // SLICE_03 back-compat: when the resolver is a tiktoken
-            // family the `tiktoken` field carries the variant so the
-            // existing SLICE_03 cache path can short-circuit. For
-            // non-tiktoken kinds we still need a placeholder value
-            // (the field is non-Option for back-compat) — the cache
-            // dispatches via `resolver` for non-tiktoken kinds and
-            // does NOT read the `tiktoken` field, so the placeholder
-            // is unobservable. See `EncoderCache::tokenize_with_entry`.
+            // family the `tiktoken` field carries the variant. For
+            // non-tiktoken kinds it is None so callers cannot mistake
+            // a vendor encoder for cl100k_base.
             let tiktoken = match resolver {
-                EncoderResolver::Tiktoken(t) => *t,
-                _ => TiktokenEncoder::Cl100kBase, // placeholder; not read
+                EncoderResolver::Tiktoken(t) => Some(*t),
+                _ => None,
             };
             entries.push(DispatchEntry {
                 pattern: regex,
@@ -513,7 +496,7 @@ mod tests {
     fn gpt_4o_routes_to_o200k_base() {
         let t = table();
         let e = t.lookup("gpt-4o").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::O200kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::O200kBase));
         assert_eq!(e.kind, EncoderKind::OpenAi);
     }
 
@@ -521,7 +504,7 @@ mod tests {
     fn gpt_4o_mini_routes_to_o200k_base() {
         let t = table();
         let e = t.lookup("gpt-4o-mini").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::O200kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::O200kBase));
     }
 
     #[test]
@@ -529,7 +512,7 @@ mod tests {
         // Per §9 question 1 — explicit fixture for the dated suffix.
         let t = table();
         let e = t.lookup("gpt-4o-2024-08-06").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::O200kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::O200kBase));
     }
 
     #[test]
@@ -537,42 +520,42 @@ mod tests {
         // Per §9 question 1.
         let t = table();
         let e = t.lookup("gpt-4o-mini-2024-07-18").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::O200kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::O200kBase));
     }
 
     #[test]
     fn gpt_4_turbo_routes_to_cl100k() {
         let t = table();
         let e = t.lookup("gpt-4-turbo").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::Cl100kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::Cl100kBase));
     }
 
     #[test]
     fn gpt_4_routes_to_cl100k() {
         let t = table();
         let e = t.lookup("gpt-4").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::Cl100kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::Cl100kBase));
     }
 
     #[test]
     fn gpt_35_turbo_routes_to_cl100k() {
         let t = table();
         let e = t.lookup("gpt-3.5-turbo").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::Cl100kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::Cl100kBase));
     }
 
     #[test]
     fn gpt_35_turbo_16k_routes_to_cl100k() {
         let t = table();
         let e = t.lookup("gpt-3.5-turbo-16k").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::Cl100kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::Cl100kBase));
     }
 
     #[test]
     fn text_davinci_003_routes_to_p50k() {
         let t = table();
         let e = t.lookup("text-davinci-003").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::P50kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::P50kBase));
     }
 
     #[test]
@@ -603,7 +586,7 @@ mod tests {
         let o4o_idx = t
             .entries()
             .iter()
-            .position(|e| e.tiktoken == TiktokenEncoder::O200kBase)
+            .position(|e| e.tiktoken == Some(TiktokenEncoder::O200kBase))
             .expect("has o200k entry");
         let cl100k_4_idx = t
             .entries()
@@ -637,7 +620,7 @@ mod tests {
         // confirmed coverage now.
         let t = table();
         let e = t.lookup("gpt-4-1106-preview").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::Cl100kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::Cl100kBase));
         assert_eq!(e.kind, EncoderKind::OpenAi);
     }
 
@@ -646,7 +629,7 @@ mod tests {
         // R2 M1: dated preview variant.
         let t = table();
         let e = t.lookup("gpt-4-0125-preview").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::Cl100kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::Cl100kBase));
     }
 
     #[test]
@@ -655,7 +638,7 @@ mod tests {
         // route via the new pattern (the (-\d{4})? group is optional).
         let t = table();
         let e = t.lookup("gpt-4-preview").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::Cl100kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::Cl100kBase));
     }
 
     #[test]
@@ -663,7 +646,7 @@ mod tests {
         // R2 M1: alphabetic suffix variant (not date). Was T3 fallback.
         let t = table();
         let e = t.lookup("gpt-3.5-turbo-instruct").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::P50kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::P50kBase));
         assert_eq!(e.kind, EncoderKind::OpenAi);
     }
 
@@ -672,7 +655,7 @@ mod tests {
         // R2 M1: dated instruct variant (per OpenAI deprecation notes).
         let t = table();
         let e = t.lookup("gpt-3.5-turbo-instruct-0914").expect("hit");
-        assert_eq!(e.tiktoken, TiktokenEncoder::P50kBase);
+        assert_eq!(e.tiktoken, Some(TiktokenEncoder::P50kBase));
     }
 
     #[test]
@@ -684,18 +667,18 @@ mod tests {
         let t = table();
         assert_eq!(
             t.lookup("gpt-4").expect("hit").tiktoken,
-            TiktokenEncoder::Cl100kBase
+            Some(TiktokenEncoder::Cl100kBase)
         );
         assert_eq!(
             t.lookup("gpt-3.5-turbo").expect("hit").tiktoken,
-            TiktokenEncoder::Cl100kBase
+            Some(TiktokenEncoder::Cl100kBase)
         );
         // Ensure gpt-3.5-turbo-instruct doesn't get caught by the
         // gpt-3.5-turbo(-N)? pattern (alphabetic suffix wouldn't
         // satisfy \d{4} anyway, but pin the assertion).
         assert_eq!(
             t.lookup("gpt-3.5-turbo-instruct").expect("hit").tiktoken,
-            TiktokenEncoder::P50kBase,
+            Some(TiktokenEncoder::P50kBase),
         );
     }
 
@@ -728,6 +711,7 @@ mod tests {
         let t = table();
         let e = t.lookup("claude-3-haiku").expect("hit");
         assert_eq!(e.kind, EncoderKind::Anthropic);
+        assert_eq!(e.tiktoken, None);
         assert!(matches!(e.resolver, EncoderResolver::Anthropic));
     }
 
@@ -1034,9 +1018,13 @@ mod tests {
         // cross-region branch.
         let t = table();
         // Upper-case prefix not allowed by regex
-        assert!(t.lookup("US.anthropic.claude-3-haiku-20240307-v1:0").is_none());
+        assert!(t
+            .lookup("US.anthropic.claude-3-haiku-20240307-v1:0")
+            .is_none());
         // Digit-leading prefix not allowed
-        assert!(t.lookup("1us.anthropic.claude-3-haiku-20240307-v1:0").is_none());
+        assert!(t
+            .lookup("1us.anthropic.claude-3-haiku-20240307-v1:0")
+            .is_none());
     }
 
     // ── No-fuzzy-match negative tests (per spec §3.3) ───────────────

@@ -19,10 +19,14 @@ use tiktoken_rs::{cl100k_base_singleton, o200k_base_singleton, p50k_base_singlet
 use tokenizers::Tokenizer;
 
 const FIXTURE: &str = "spendguard-cross-check-fixture-v1alpha1";
+const LLAMA_FIXTURE: &str = "spendguard-llama-cross-check-v1alpha1 你好 llama-ñ";
 
 fn print_tiktoken_block() {
     println!("// ── SLICE_03 — OpenAI tiktoken-rs ─────────────────────");
-    println!("// asset_sha256::CL100K_BASE = {}", asset_sha256::CL100K_BASE);
+    println!(
+        "// asset_sha256::CL100K_BASE = {}",
+        asset_sha256::CL100K_BASE
+    );
     println!("// asset_sha256::O200K_BASE = {}", asset_sha256::O200K_BASE);
     println!("// asset_sha256::P50K_BASE = {}", asset_sha256::P50K_BASE);
     println!();
@@ -47,12 +51,13 @@ fn print_tiktoken_block() {
     println!();
 }
 
-fn print_tier2_block(label: &str, asset_path: &str, sha256_const: &str) {
+fn print_tier2_block(label: &str, asset_path: &str, sha256_const: &str, fixture: &str) {
     println!("// ── SLICE_04 — {} ──────────────────────", label);
     println!("// asset_sha256 = {}", sha256_const);
     let bytes = std::fs::read(asset_path).expect("read vendored tokenizer.json");
     let tok = Tokenizer::from_bytes(&bytes).expect("parse tokenizer.json");
-    let enc = tok.encode(FIXTURE, false).expect("encode fixture");
+    let enc = tok.encode(fixture, false).expect("encode fixture");
+    println!("// fixture = {:?}", fixture);
     println!("EXPECTED_{}_FIXTURE = {:?}", label, enc.get_ids());
     println!();
 }
@@ -69,17 +74,20 @@ fn main() {
         "ANTHROPIC",
         &format!("{manifest_dir}/data/anthropic-claude3/tokenizer.json"),
         asset_sha256::ANTHROPIC_CLAUDE3,
+        FIXTURE,
     );
     print_tier2_block(
         "GEMINI",
         &format!("{manifest_dir}/data/gemini-1.5/tokenizer.json"),
         asset_sha256::GEMINI_15,
+        FIXTURE,
     );
     #[cfg(feature = "cohere")]
     print_tier2_block(
         "COHERE",
         &format!("{manifest_dir}/data/cohere-command-r/tokenizer.json"),
         asset_sha256::COHERE_COMMAND_R,
+        FIXTURE,
     );
     #[cfg(not(feature = "cohere"))]
     println!("// ── SLICE_04 — COHERE skipped (feature `cohere` disabled) ──");
@@ -87,5 +95,6 @@ fn main() {
         "LLAMA",
         &format!("{manifest_dir}/data/llama-3.1/tokenizer.json"),
         asset_sha256::LLAMA_31,
+        LLAMA_FIXTURE,
     );
 }

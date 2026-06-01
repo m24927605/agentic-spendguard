@@ -57,7 +57,7 @@ pub fn tier3_fallback(req: &TokenizeRequest) -> TokenizeResponse {
         // Per audit-chain extension §2.1: Tier 3 → tokenizer_version_id NULL
         // (empty string at the proto / library boundary; the mirror crate
         // translates to SQL NULL).
-        tokenizer_version_id: crate::versions::HEURISTIC_FALLBACK_VERSION_ID.to_string(),
+        tokenizer_version_id: crate::versions::TIER3_NULL_SENTINEL_VERSION_ID.to_string(),
         kind: "HEURISTIC".to_string(),
         fallback_char_count: total_chars as i64,
         fallback_margin_ratio: TIER3_MARGIN_RATIO,
@@ -123,20 +123,20 @@ mod tests {
             model: "unknown".to_string(),
             messages: vec![
                 Message {
-                    role: "user".to_string(),       // 4 chars
-                    content: "hello".to_string(),  // 5 chars
+                    role: "user".to_string(),     // 4 chars
+                    content: "hello".to_string(), // 5 chars
                     tool_calls: vec![],
                 },
                 Message {
-                    role: "assistant".to_string(),  // 9 chars
+                    role: "assistant".to_string(), // 9 chars
                     content: String::new(),
                     tool_calls: vec![crate::ToolCall {
-                        name: "get_weather".to_string(),                          // 11 chars
-                        arguments_json: r#"{"city":"sf"}"#.to_string(),          // 13 chars
+                        name: "get_weather".to_string(),                // 11 chars
+                        arguments_json: r#"{"city":"sf"}"#.to_string(), // 13 chars
                     }],
                 },
             ],
-            raw_text: "extra".to_string(),  // 5 chars
+            raw_text: "extra".to_string(), // 5 chars
             ..Default::default()
         };
         let resp = tier3_fallback(&req);

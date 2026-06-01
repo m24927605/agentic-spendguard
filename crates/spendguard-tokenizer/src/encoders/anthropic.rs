@@ -91,8 +91,7 @@ use sha2::{Digest, Sha256};
 use tokenizers::Tokenizer;
 
 /// Embedded `tokenizer.json` bytes for Anthropic Claude 3 BPE.
-const ASSET_BYTES: &[u8] =
-    include_bytes!("../../data/anthropic-claude3/tokenizer.json");
+const ASSET_BYTES: &[u8] = include_bytes!("../../data/anthropic-claude3/tokenizer.json");
 
 /// Cross-check fixture string (shared across SLICE_03 + SLICE_04).
 const CROSS_CHECK_FIXTURE: &str = "spendguard-cross-check-fixture-v1alpha1";
@@ -134,12 +133,11 @@ impl AnthropicEncoder {
         // Load the BPE config from the vendored JSON. The tokenizers
         // crate parses the JSON, builds an internal trie + BPE merges
         // table, and returns a thread-safe `Tokenizer` handle.
-        let tokenizer = Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| {
-            TokenizerError::AssetLoadFailed {
+        let tokenizer =
+            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
                 encoder: "anthropic-claude3",
                 message: format!("Tokenizer::from_bytes failed: {e}"),
-            }
-        })?;
+            })?;
 
         // Layer B — encode the fixture string and compare against
         // the hard-coded expected vector. Catches a future asset
@@ -348,13 +346,13 @@ fn verify_asset_sha256(
 /// Layer B — runtime cross-check of the loaded tokenizer against the
 /// hard-coded fixture vector (per spec §7.4.1).
 fn cross_check(tokenizer: &Tokenizer, expected: &[u32]) -> Result<(), TokenizerError> {
-    let enc = tokenizer
-        .encode(CROSS_CHECK_FIXTURE, false)
-        .map_err(|e| TokenizerError::AssetSignatureMismatch {
+    let enc = tokenizer.encode(CROSS_CHECK_FIXTURE, false).map_err(|e| {
+        TokenizerError::AssetSignatureMismatch {
             encoder: "anthropic-claude3",
             expected: "cross_check_fixture_vector",
             actual: format!("fixture-encode-error: {e}"),
-        })?;
+        }
+    })?;
     let actual = enc.get_ids();
     if actual != expected {
         let expected_summary: String = expected
@@ -427,10 +425,7 @@ mod tests {
             ..Default::default()
         };
         let r = enc.count_tokens_request(&req).unwrap();
-        assert_eq!(
-            r.input_tokens, 3,
-            "Bedrock: expected 2 vocab + 1 BOS = 3"
-        );
+        assert_eq!(r.input_tokens, 3, "Bedrock: expected 2 vocab + 1 BOS = 3");
         assert_eq!(r.kind, EncoderKind::Anthropic);
     }
 
@@ -507,7 +502,10 @@ mod tests {
         };
         let raw_n = enc.count_tokens_request(&raw_req).unwrap().input_tokens;
         let chat_n = enc.count_tokens_request(&chat_req).unwrap().input_tokens;
-        assert!(chat_n > raw_n, "chat ({chat_n}) should exceed raw ({raw_n})");
+        assert!(
+            chat_n > raw_n,
+            "chat ({chat_n}) should exceed raw ({raw_n})"
+        );
         // Native API arithmetic (post R3 N1):
         //   chat = role_tokens + content_tokens + 4 (per_turn_boundary)
         //   raw  = content_tokens                  (no BOS on native)
@@ -547,7 +545,9 @@ mod tests {
         let bad: &[u32] = &[999, 999, 999];
         let err = cross_check(&tokenizer, bad).expect_err("Layer B must reject wrong expected");
         match err {
-            TokenizerError::AssetSignatureMismatch { encoder, expected, .. } => {
+            TokenizerError::AssetSignatureMismatch {
+                encoder, expected, ..
+            } => {
                 assert_eq!(encoder, "anthropic-claude3");
                 assert_eq!(expected, "cross_check_fixture_vector");
             }

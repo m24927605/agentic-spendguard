@@ -34,7 +34,10 @@ pub type TokenizerVersionId = String;
 /// The mirror crate (`spendguard-prediction-mirror`) translates this
 /// empty string to / from SQL NULL and proto3 default per
 /// `audit-chain-prediction-extension-v1alpha1.md` §3.3.
-pub const HEURISTIC_FALLBACK_VERSION_ID: &str = "";
+///
+/// POST_GA_03 / #98: the constant name is explicit that this is a
+/// NULL sentinel, not a real tokenizer_versions row id.
+pub const TIER3_NULL_SENTINEL_VERSION_ID: &str = "";
 
 // ============================================================================
 // Stable UUIDv7 constants for SLICE_03 seed rows.
@@ -230,7 +233,11 @@ mod tests {
         let mut ids: Vec<&str> = rows.iter().map(|r| r.tokenizer_version_id).collect();
         ids.sort();
         ids.dedup();
-        assert_eq!(ids.len(), rows.len(), "tokenizer_version_ids must be unique");
+        assert_eq!(
+            ids.len(),
+            rows.len(),
+            "tokenizer_version_ids must be unique"
+        );
     }
 
     #[test]
@@ -298,7 +305,11 @@ mod tests {
             .collect();
         tuples.sort();
         tuples.dedup();
-        assert_eq!(tuples.len(), rows.len(), "UNIQUE constraint pre-check failed");
+        assert_eq!(
+            tuples.len(),
+            rows.len(),
+            "UNIQUE constraint pre-check failed"
+        );
     }
 
     // ── SLICE_04 — Tier 2 expansion seed-row parity tests ─────────
@@ -361,7 +372,11 @@ mod tests {
             .collect();
         tuples.sort();
         tuples.dedup();
-        assert_eq!(tuples.len(), rows.len(), "UNIQUE constraint pre-check failed");
+        assert_eq!(
+            tuples.len(),
+            rows.len(),
+            "UNIQUE constraint pre-check failed"
+        );
     }
 
     #[test]
@@ -389,8 +404,7 @@ mod tests {
         // Sanity: SLICE_04 ships exactly one row per new encoder
         // kind (Anthropic / Gemini / Cohere / Llama).
         let rows = slice04_seed_rows();
-        let kinds: std::collections::BTreeSet<&str> =
-            rows.iter().map(|r| r.kind).collect();
+        let kinds: std::collections::BTreeSet<&str> = rows.iter().map(|r| r.kind).collect();
         let expected: std::collections::BTreeSet<&str> = [
             "ANTHROPIC_BPE",
             "GEMINI_BPE",
