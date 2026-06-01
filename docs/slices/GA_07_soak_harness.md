@@ -1,7 +1,7 @@
 # GA 07 - Long-Running Soak Harness
 
 > **Branch**: `ga/GA_07_soak_harness`
-> **Status**: implementation complete; adversarial review R4 pending
+> **Status**: implementation complete; adversarial review R5 pending
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; soak scripts and evidence format
 
@@ -102,6 +102,8 @@ Reviewer must reject shim-only or final-status-only soak evidence.
 | Implementer | Ran R2 targeted gates | PASS: zero interval rejected; stopped tokenizer produced a structured fail summary with exited/unhealthy status; 30s happy-path smoke passed |
 | Codex adversarial reviewer R3 | Required 30m evidence was stale relative to final script changes; `docker inspect` failures could still return before structured evidence | Fixed inspect failure handling to record concise failure evidence and reran the exact 30m local gate on clean source commit `ae318aa3cc1f7cd30902c2447b4f21343abf8b0a` |
 | Implementer | Ran R3 targeted gates | PASS: removed tokenizer before snapshot produced structured failures for docker stats, tokenizer metrics, and concise docker inspect missing-object output; 30m local gate passed with 27 snapshots, pending 0, lag 0, stats cycles 31, `git_dirty=false` |
+| Codex adversarial reviewer R4 | Metrics and HTTP probes could hang without bounded timeouts; pre-snapshot SVID test failures could exit before writing summary evidence | Added curl/wget timeouts, hardened missing option values, and routed Rust/Python preflight test failures through `ga_soak_summary.json` |
+| Implementer | Ran R4 targeted gates | PASS: missing `--duration` value exits 2 with usage; fake cargo failure writes `result=fail`, `snapshot_count=0`, and preflight failure detail; exact 30m local gate passed on clean source commit `31631db760531022774c49d38d51ee5a4fb89e2a` with 27 snapshots, pending 0, lag 0, stats cycles 31, `git_dirty=false` |
 
 ## §14. Merge Checklist
 
