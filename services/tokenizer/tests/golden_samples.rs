@@ -3,7 +3,7 @@
 //! Spec ref `tokenizer-service-spec-v1alpha1.md` §8.1 acceptance:
 //!
 //! > Tier 2 OpenAI tokenize matches tiktoken Python reference output
-//! > for 50 golden samples.
+//! > for 51 golden samples (50 reference + 1 boundary-cap sample).
 //!
 //! ## Round-2 fix m17 (panel finding) — honest provenance disclosure
 //!

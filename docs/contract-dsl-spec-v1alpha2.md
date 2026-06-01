@@ -303,7 +303,16 @@ message DecisionResponse {
 
 ### 6.3 Contract bundle wire schema (YAML; per v1alpha1 §3)
 
-YAML schema 新增兩個 top-level fields（contract-rule 範圍）：
+#### 6.3.0 Wedge surface (SLICE_02)
+
+SLICE_02 shipped the additive YAML fields and the declarative
+`when.claim_amount_atomic_gt` / `when.claim_amount_atomic_gte` predicate
+surface only. This is the only condition surface honored by the
+SLICE_02 hot-path evaluator; it preserves the §2 row-18 invariant that
+v1alpha1 quickstart bundles still parse and evaluate correctly under a
+v1alpha2-capable sidecar.
+
+Supported SLICE_02 shape:
 
 ```yaml
 apiVersion: spendguard.ai/v1alpha2  # bump from v1alpha1
@@ -315,31 +324,11 @@ spec:
   # NEW (v1alpha2):
   prediction_policy: STRICT_CEILING  # default; one of STRICT/EMPIRICAL/ADAPTIVE/SHADOW
 
-  rules:
-    - id: stop_when_projection_exceeded
-      priority: 1100  # higher than v1alpha1 §10 stop_when_exhausted (1000)
-      condition: |
-        run_projection.at_decision_micros >
-        budget("daily_usd").remaining.amountMicros
-      effect:
-        decision: stop  # v1alpha1 lattice 仍用 stop
-        reasonCode: RUN_BUDGET_PROJECTION_EXCEEDED
-      # NEW (v1alpha2):
-      run_projection_action: BLOCK_NEXT_CALL  # default
+  # RUN_* rules are not authored as claim-amount threshold rules. SLICE_09+
+  # wires run_cost_projector output directly into the evaluator; see §6.3.1 for
+  # the non-authoritative shape and §8.4 for CEL upgrade guidance.
+  rules: []
 ```
-
-CEL helpers 新增（per v1alpha1 §14 evaluation.helpers）：
-
-```cel
-run_projection.at_decision_micros  // 等於 audit_outbox.run_projection_at_decision_atomic / pricing.scale
-run_projection.predicted_remaining_steps
-run_projection.steps_completed_so_far
-prediction.tier   // "T1" | "T2" | "T3"
-prediction.strategy_chosen  // "A" | "B" | "C"
-prediction.confidence  // 0.0-1.0
-```
-
-**Wiring boundary (SLICE_02 vs SLICE_09)** — round-1 fix M3:
 
 SLICE_02 ships the CEL helper structs (`RunProjection`,
 `PredictionContext`) and `into_cel_context` in
@@ -347,10 +336,7 @@ SLICE_02 ships the CEL helper structs (`RunProjection`,
 The hot-path evaluator does NOT yet invoke `Program::execute` against
 contract YAML — the v1alpha2 declarative form
 (`when.claim_amount_atomic_gt` / `when.claim_amount_atomic_gte`) remains
-the only honored condition surface in SLICE_02. CEL-condition support
-(`condition: "<cel-expr>"` form in rule body) is wired in SLICE_09 when
-`run_cost_projector` populates `RunProjection` / `PredictionContext`
-per-decision.
+the only honored condition surface in SLICE_02.
 
 v1alpha2 contract authors writing `condition: <cel-expr>` in v1alpha2
 bundles BEFORE SLICE_09 lands would silently get no enforcement — every
@@ -369,22 +355,60 @@ forward-compat-hint pattern (parse.rs:247-258).
 
 **On v1alpha2 contracts**, `condition:` fields are REJECTED with
 `bundle_validation_failed` because v1alpha2 explicitly opts into the
-predictor-aware surface; SLICE_09 will wire the CEL accessor surface
-listed above (`run_projection.*`, `prediction.*`). The rejection error
-string:
+predictor-aware surface, and the shipped SLICE_02 evaluator cannot safely
+translate arbitrary CEL into its amount-threshold-only `when:` surface.
+Projection CEL is especially not translatable: `run_projection.*`,
+`prediction.*`, and RUN_* predicates have no equivalent
+`claim_amount_atomic_*` threshold. The rejection error string:
 
 ```
 bundle_validation_failed: rule '<rule-id>' uses CEL `condition:`
-field; CEL conditions wired in SLICE_09 — use claim_amount_atomic_gt /
-claim_amount_atomic_gte under `when:` in SLICE_02. See
-contract-dsl-spec-v1alpha2.md §6.3 SLICE_02-vs-SLICE_09 wiring
-boundary.
+field. SLICE_02 only supports amount thresholds under `when:`; projection
+CEL has no SLICE_02 replacement. Remove or keep projection rules disabled
+until SLICE_09/10 run_cost_projector owns RUN_* activation. See
+contract-dsl-spec-v1alpha2.md §6.3/§8.4.
 ```
 
 Cross-reference: enforcement in
 `services/sidecar/src/contract/parse.rs` (rule-iteration block); test
 coverage in `parse.rs::tests::rejects_v1alpha2_contract_with_cel_condition_field`
 and `v1alpha1_contract_with_cel_condition_field_parses_with_warn`.
+
+#### 6.3.1 Post-SLICE_09 projector accessor capability
+
+SLICE_09/10 wires `run_cost_projector` signals into the internal evaluator
+and egress decision path. It does not make YAML-authored
+`condition: "<cel-expr>"` rules deployable. Contract bundles that carry
+`condition:` still fail closed per §8.4; RUN_* activation is owned by
+projector integration, not by claim-amount threshold rewrites.
+
+CEL helpers新增（per v1alpha1 §14 evaluation.helpers）：
+
+```cel
+run_projection.at_decision_micros  // 等於 audit_outbox.run_projection_at_decision_atomic / pricing.scale
+run_projection.predicted_remaining_steps
+run_projection.steps_completed_so_far
+prediction.tier   // "T1" | "T2" | "T3"
+prediction.strategy_chosen  // "A" | "B" | "C"
+prediction.confidence  // 0.0-1.0
+```
+
+Post-SLICE_09 non-authoritative pseudo-shape. This illustrates the predicate
+that run_cost_projector evaluates internally; do not paste this into a
+contract bundle because v1alpha2 sidecars fail closed on `condition:` per §8.4.
+
+```yaml
+rules:
+  - id: stop_when_projection_exceeded
+    priority: 1100
+    condition: |
+      run_projection.at_decision_micros >
+      budget("daily_usd").remaining.amountMicros
+    effect:
+      decision: stop
+      reasonCode: RUN_BUDGET_PROJECTION_EXCEEDED
+    run_projection_action: BLOCK_NEXT_CALL
+```
 
 ### 6.4 v1alpha1 contracts 在 v1alpha2 evaluator 下的 default 填充
 
@@ -477,11 +501,47 @@ per §6.4，v1alpha2 evaluator 對 v1alpha1 bundle：
 |---|---|---|
 | 1 | Deploy v1alpha2 sidecar binary（仍跑 v1alpha1 contracts） | sidecar 必須先升好，才能處理新 contract |
 | 2 | 驗證 v1alpha1 contracts byte-identical 行為 | 8+ demo modes regression |
-| 3 | Deploy 第一個 v1alpha2 contract bundle（with policy + RUN_* rules） | 客戶 opt-in 才會走新邏輯 |
+| 3 | Deploy 第一個 v1alpha2 contract bundle（with policy; no YAML-authored `condition:` RUN_* rules） | RUN_* activation comes from run_cost_projector wiring, not from claim-amount threshold rewrites |
 | 4 | 觀察 audit chain 新欄位 + RUN_* codes 行為 | 7 日 trial period |
 | 5 | 推廣至更多 tenants | |
 
 不允許「先 deploy v1alpha2 contract，後升 sidecar」順序 —— 由 §8.1 mismatch refuse 機制強制。
+
+### 8.4 SLICE_02 upgrade path: `condition:` validation surface
+
+Operators upgrading from pre-SLICE_02 sidecars MUST scan contract
+bundles before rolling the new sidecar binary:
+
+```sh
+grep -RInE '(^|[[:space:]])condition[[:space:]]*:' /path/to/contract-bundles
+```
+
+If a bundle is `apiVersion: spendguard.ai/v1alpha2`, classify every
+`condition:` rule before deploying:
+
+- Amount-only predicates may be rewritten into the SLICE_02 declarative
+  `when.claim_amount_atomic_gt` / `when.claim_amount_atomic_gte` form.
+- Projection predicates (`run_projection.*`, `prediction.*`, or RUN_*
+  reason-code logic) MUST NOT be rewritten as claim-amount thresholds.
+  They have no SLICE_02 `when:` equivalent and must be removed from the
+  bundle or kept disabled/commented until SLICE_09/10
+  `run_cost_projector` integration owns RUN_* activation.
+
+A v1alpha2 bundle that still carries `condition:` fails to load with:
+
+```text
+bundle_validation_failed: rule '<rule-id>' uses CEL `condition:`
+field. SLICE_02 only supports amount thresholds under `when:`; projection
+CEL has no SLICE_02 replacement. Remove or keep projection rules disabled
+until SLICE_09/10 run_cost_projector owns RUN_* activation. See
+contract-dsl-spec-v1alpha2.md §6.3/§8.4.
+```
+
+If a bundle is `apiVersion: spendguard.ai/v1alpha1`, `condition:` is
+treated as a legacy quickstart field: the bundle loads, the wedge
+evaluator uses the declarative `when:` fallback, and the parser emits a
+warning so operators can clean up before moving the bundle to
+v1alpha2.
 
 ---
 
@@ -504,7 +564,7 @@ per §6.4，v1alpha2 evaluator 對 v1alpha1 bundle：
 1. SLICE_02 implementation（merge `d5c5434`）：proto additive 補丁 + DSL evaluator extension（internal compatibility path）+ 既有 8+ demo modes regression; production emission/blocked-call behavior was activated by SLICE_09/10 (`6407648` / `c649196`)
 2. SLICE 02 acceptance：v1alpha1 contract 在 v1alpha2 evaluator 下 byte-identical audit row
 3. SLICE 09 PR：run_cost_projector 接入 + RUN_* codes 真正觸發
-4. 客戶 v1alpha2 quickstart template（per v1alpha1 §18 風格）—— 加 `prediction_policy: STRICT_CEILING` + 一個 sample RUN_BUDGET_PROJECTION_EXCEEDED rule
+4. 客戶 v1alpha2 quickstart template（per v1alpha1 §18 風格）—— 加 `prediction_policy: STRICT_CEILING` and a commented, non-deployable RUN_BUDGET_PROJECTION_EXCEEDED pseudo-shape that points operators to projector-owned activation
 
 ---
 

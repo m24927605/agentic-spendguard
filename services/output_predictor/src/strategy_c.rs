@@ -42,12 +42,12 @@
 //!   5. `InvalidConfidence`    → `customer_predictor_invalid_confidence`
 //!   6. `DeserializationError` → `customer_predictor_deserialization_error`
 //!   7. `TlsError`             → `customer_predictor_tls_error`
-//!   8. `NotServing`           → tracked via circuit-breaker state
-//!                               (per spec §6.3 NOT_SERVING is treated
-//!                               by the health loop, not the Predict
-//!                               path; we emit `customer_predictor_not_serving`
-//!                               when the cache hands us an explicitly
-//!                               disabled endpoint here)
+//!   8. `NotServing`           → Predict returned Code::Unavailable with
+//!                               a "not_serving" sentinel. Endpoint rows
+//!                               with enabled=false map to NotConfigured,
+//!                               and health-loop NOT_SERVING opens the
+//!                               breaker instead of directly returning
+//!                               this variant.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -100,9 +100,10 @@ pub enum StrategyCFailure {
     /// Spec §5.1 mode 7 — mTLS handshake failure or cert pin mismatch.
     /// Surfaced as `Code::Unauthenticated` from tonic; we tag separately.
     TlsError,
-    /// Spec §5.1 mode 8 — last known HealthCheck was NOT_SERVING. In
-    /// SLICE_07 this fires when the cache hands us an explicitly
-    /// disabled endpoint (operator kill-switch).
+    /// Spec §5.1 mode 8 — plugin refused Predict with a
+    /// Code::Unavailable + "not_serving" sentinel. A disabled endpoint
+    /// (`enabled = FALSE`) is classified as NotConfigured, and the
+    /// health loop records NOT_SERVING by opening the circuit breaker.
     NotServing,
     /// No row in the registry for this tenant — strategy_c.rs returns
     /// `Ok(None)` and the selector falls to B. Reported separately for
@@ -368,7 +369,9 @@ pub async fn compute_c(
 ///     "InvalidProtobuf", NOT `Code::DataLoss`. The router peeks at
 ///     the message for these sentinels.
 ///   - `Code::Unavailable` with a "not_serving" sentinel maps to
-///     `NotServing` (spec §5.1 mode 8) so the kill-switch surfaces.
+///     `NotServing` (spec §5.1 mode 8). This is the Predict refusal
+///     path, distinct from disabled endpoint rows and breaker-open
+///     health-loop state.
 fn classify_status(status: &tonic::Status) -> StrategyCFailure {
     let code = status.code();
     let msg = status.message();
@@ -405,10 +408,9 @@ fn classify_status(status: &tonic::Status) -> StrategyCFailure {
     match code {
         Code::DeadlineExceeded => StrategyCFailure::Timeout,
         // R2 M6: NOT_SERVING signal piggybacks on Code::Unavailable
-        // (the plugin returns a Unavailable status when it sets its
-        // health to NOT_SERVING and refuses Predict). Distinct from
-        // a connect-level Unavailable (which we already routed to
-        // TlsError above based on message sentinels).
+        // when the plugin refuses Predict with a "not_serving" sentinel.
+        // Endpoint enabled=false maps earlier to NotConfigured, and the
+        // health loop records NOT_SERVING by opening the breaker.
         Code::Unavailable if msg.contains("not_serving") => StrategyCFailure::NotServing,
         // Retain the spec §5.1-doc'd legacy mapping for clients that
         // explicitly choose these codes.
