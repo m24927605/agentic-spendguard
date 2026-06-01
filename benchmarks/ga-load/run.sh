@@ -332,6 +332,11 @@ card = load.get("cardinality", {})
 with open(command_path, "w", encoding="utf-8") as fh:
     fh.write("# GA_08 Command Results\n\n")
     fh.write(f"Date: {summary['date']}\n\n")
+    fh.write(
+        "Scope: local real-stack smoke and DB-plan gate. "
+        "Contract §14 latency certification remains the "
+        "`spendguard-predictor-upgrade-benchmarks` gate.\n\n"
+    )
     fh.write("| Gate | Result | Evidence |\n|---|---|---|\n")
     fh.write(
         f"| `benchmarks/ga-load/run.sh --scenario benchmarks/ga-load/scenarios/local-100-tenants.yaml` | {summary['result'].upper()} | "
@@ -342,7 +347,7 @@ with open(command_path, "w", encoding="utf-8") as fh:
     for name in ["tokenizer", "output_predictor", "run_cost_projector", "sidecar_decision", "sidecar_confirm_publish_outcome", "sidecar_emit_trace_events", "end_to_end"]:
         item = lat.get(name, {})
         fh.write(
-            f"| latency `{name}` | {'PASS' if item else 'FAIL'} | "
+            f"| local smoke latency `{name}` | {'PASS' if item else 'FAIL'} | "
             f"count {item.get('count', 0)}, p50 {item.get('p50_ms', 0)}ms, "
             f"p95 {item.get('p95_ms', 0)}ms, p99 {item.get('p99_ms', 0)}ms, max {item.get('max_ms', 0)}ms |\n"
         )
