@@ -195,6 +195,10 @@ sidecar:
   # With the demo/test metadata gate off, budget projection uses
   # Ledger.QueryBudgetState rather than caller-supplied metadata.
   runCostProjectorUrl: ""
+  # Per-RPC timeout for sidecar -> run_cost_projector.Project. The
+  # sidecar still fails open per spec §10 on timeout; GA_08 evidence
+  # requires the intentionally-wired projector path to succeed 100%.
+  runCostProjectorTimeoutMs: 500
   # Demo/test-only. When true, sidecar accepts caller-supplied
   # runtime_metadata.budget_remaining_atomic for RUN_BUDGET_PROJECTION_EXCEEDED.
   # Production renders fail if this is enabled; production must derive budget

@@ -58,6 +58,7 @@ sidecar:
     tag: v0.1.0
   endpointCatalogManifestUrl: https://endpoint-catalog.example.invalid/v1/catalog/manifest
   runCostProjectorUrl: https://spendguard-spendguard-run-cost-projector:50055
+  runCostProjectorTimeoutMs: 500
   contractBundleHashHex: "2222222222222222222222222222222222222222222222222222222222222222"
   trustSecret:
     name: spendguard-prod-trust

@@ -549,6 +549,7 @@ services:
       SPENDGUARD_SIDECAR_LEDGER_URL:               "https://ledger:50051"
       SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL:     "https://canonical-ingest:50052"
       SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL:    "${SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL:-}"
+      SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_TIMEOUT_MS: "${SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_TIMEOUT_MS:-500}"
       # Demo-only gate. Production Helm refuses this setting; the real
       # production budget source must be a signed/fenced ledger snapshot.
       SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA: "${SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA:-false}"

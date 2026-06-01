@@ -47,6 +47,7 @@ impl RunCostProjectorClient {
         endpoint_url: String,
         sni: &str,
         mtls: &MTlsPaths,
+        timeout_ms: u64,
     ) -> Result<Self, DomainError> {
         let mut endpoint = Endpoint::from_shared(endpoint_url.clone())
             .map_err(|e| DomainError::LedgerClient(format!("projector endpoint parse: {e}")))?;
@@ -62,12 +63,12 @@ impl RunCostProjectorClient {
                 "run_cost_projector client using plaintext; only valid for demo/test"
             );
         }
+        let timeout_ms = timeout_ms.max(1);
         let endpoint = endpoint
-            // p99 budget per spec §12.1 is 5ms warm / 10ms cold; we time
-            // out the RPC at 50ms — well above the projector's worst case
-            // but tight enough to keep the sidecar 50ms p99 budget for
-            // the overall decision transaction (sidecar §14).
-            .timeout(std::time::Duration::from_millis(50))
+            // Keep the cap configurable. The sidecar still falls through
+            // conservatively on timeout, but GA_08 treats such fall-through
+            // as evidence failure when the projector is intentionally wired.
+            .timeout(std::time::Duration::from_millis(timeout_ms))
             .connect_timeout(std::time::Duration::from_secs(5))
             .keep_alive_timeout(std::time::Duration::from_secs(20))
             .keep_alive_while_idle(true);

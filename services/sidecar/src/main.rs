@@ -146,12 +146,14 @@ async fn main() -> Result<()> {
             cfg.run_cost_projector_url.clone(),
             default_service_sni(&cfg.run_cost_projector_url),
             &mtls,
+            cfg.run_cost_projector_timeout_ms,
         )
         .await
         .context("connect run_cost_projector")?;
         state = state.with_run_cost_projector(projector);
         info!(
             endpoint = %cfg.run_cost_projector_url,
+            timeout_ms = cfg.run_cost_projector_timeout_ms,
             "run_cost_projector client configured"
         );
     }
