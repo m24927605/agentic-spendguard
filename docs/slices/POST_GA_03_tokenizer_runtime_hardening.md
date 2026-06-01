@@ -1,7 +1,7 @@
 # POST_GA 03 - Tokenizer Runtime Hardening
 
 > **Branch**: `post-ga/POST_GA_03_tokenizer_runtime_hardening`
-> **Status**: implemented; pending adversarial review
+> **Status**: adversarial review clean; pending merge
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `tokenizer-service-spec-v1alpha1.md`
 > **Issues**: #92, #94, #96, #98, #100, #103, #105, #110, #111, #112, #114, #115, #117, #118, #119, #126, #127, #129, #133, #135, #148, #149, #151, #152, #156
 > **Estimated change size**: large; tokenizer runtime, security, tests, Helm
@@ -132,11 +132,12 @@ grep/tests.
 | Adversarial Reviewer R1 | Metrics NetworkPolicy must preserve public ingress; encode timeout must match accepted request size | Both fixed; evidence in `round-1-codex-review.txt` and implementation evidence |
 | Adversarial Reviewer R2 | Timeout alone does not cancel `spawn_blocking` encode work | Added semaphore work budget held inside blocking closure until encode completion |
 | Adversarial Reviewer R3 | Encode work-budget rejections must be visible to operators | Exported `spendguard_tokenizer_encode_concurrency_limited_total` in `/metrics` |
+| Adversarial Reviewer R4 | No findings | Clean review; no Staff+ arbitration required |
 
 ## §14. Merge Checklist
 
 - [x] Runtime tokenizer tests pass
 - [x] Helm/demo gates pass
 - [x] All mapped issues have closure evidence
-- [ ] AIT review clean or Staff+ arbitration recorded
+- [x] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated

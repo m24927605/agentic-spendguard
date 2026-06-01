@@ -67,6 +67,50 @@ Round 3 fix verification:
 
 - `cargo fmt --manifest-path services/tokenizer/Cargo.toml`
 - `cargo test --manifest-path services/tokenizer/Cargo.toml render_metrics_contains_shadow_counters`
+
+## Adversarial Review Round 4
+
+Required AIT command was run and recorded in `round-4-ait-command.txt`.
+Local AIT again rejected `--review-mode`, so codex CLI fallback review
+was run and recorded in `round-4-codex-review.txt`.
+
+Outcome:
+
+- No findings. Reviewer conclusion: changed Rust crates build
+  successfully, tokenizer tests pass, Helm templates render with and
+  without NetworkPolicy enabled, and no discrete introduced bug was
+  found.
+
+## Final Acceptance Gates
+
+Passed after Round 4 clean review:
+
+- `cargo build --manifest-path services/tokenizer/Cargo.toml && cargo test --manifest-path services/tokenizer/Cargo.toml`
+- `cargo build --manifest-path services/sidecar/Cargo.toml && cargo test --manifest-path services/sidecar/Cargo.toml`
+- `cargo build --manifest-path services/webhook_receiver/Cargo.toml && cargo test --manifest-path services/webhook_receiver/Cargo.toml`
+- `cargo test --manifest-path crates/spendguard-tokenizer/Cargo.toml`
+- `cargo check --manifest-path benchmarks/tokenizer/Cargo.toml --benches`
+- `scripts/ga/verify-tokenizer-python-parity.py`
+- `scripts/ga/lint-tokenizer-t1-migrations.sh`
+- `helm template charts/spendguard --set chart.profile=demo`
+- `helm template charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production`
+- `rg "SPENDGUARD_TOKENIZER_ENCODE_MAX_CONCURRENT|SPENDGUARD_TOKENIZER_ENCODE_TIMEOUT_MS|port: 8443|port: 8091|allow-metrics-ingress" /tmp/spendguard-postga03-final-prod.yaml`
+- `make demo-down`
+- `make demo-up DEMO_MODE=default`
+
+The first repeated demo run failed because it was intentionally run
+against already-mutated demo state, doubling Step 8 ledger counts. The
+accepted demo gate is the subsequent clean-volume run:
+
+- handshake ok
+- release smoke ok
+- decision CONTINUE ok
+- provider_report webhook ok
+- Phase 2B Step 8 assertions PASS
+- audit_outbox forwarder closure PASS with 7/7 forwarded rows
+- canonical_events count observed as 5
+
+Clean demo log: `/tmp/spendguard-postga03-final-demo-clean.log`.
 - `cargo build --manifest-path services/sidecar/Cargo.toml && cargo test --manifest-path services/sidecar/Cargo.toml`
 - `cargo build --manifest-path services/webhook_receiver/Cargo.toml && cargo test --manifest-path services/webhook_receiver/Cargo.toml`
 - `cargo test --manifest-path crates/spendguard-tokenizer/Cargo.toml`
