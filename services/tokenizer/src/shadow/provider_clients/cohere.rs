@@ -10,10 +10,11 @@
 //! Response 200: { "tokens": [1, 2, ...], "token_strings": [...] }
 //! ```
 //!
-//! The API returns the token IDs, not a scalar count; Tier 1 count is
-//! `tokens.len()`. As with Anthropic/Gemini, this client is constructed
-//! only inside the tokenizer shadow worker and never from hot-path
-//! sidecar/egress_proxy code.
+//! The API returns the token IDs, not a scalar count. For non-empty raw
+//! text, Tier 1 reports `tokens.len() + 1` so native Cohere calls match
+//! the locked Tier 2 Bedrock BOS accounting. As with Anthropic/Gemini,
+//! this client is constructed only inside the tokenizer shadow worker
+//! and never from hot-path sidecar/egress_proxy code.
 
 use std::borrow::Cow;
 use std::time::{Duration, Instant};
@@ -25,6 +26,7 @@ use super::{ProviderCount, ProviderError};
 
 const DEFAULT_BASE_URL: &str = "https://api.cohere.com";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const COHERE_BEDROCK_BOS_COUNT: u64 = 1;
 
 #[derive(Debug, Clone)]
 pub struct CohereClient {
@@ -104,8 +106,13 @@ impl CohereClient {
                 .get("tokens")
                 .and_then(|v| v.as_array())
                 .ok_or_else(|| ProviderError::Schema("missing array `tokens`".into()))?;
+            let bos = if text.is_empty() {
+                0
+            } else {
+                COHERE_BEDROCK_BOS_COUNT
+            };
             return Ok(ProviderCount {
-                input_tokens: tokens.len() as u64,
+                input_tokens: tokens.len() as u64 + bos,
                 request_id,
                 latency,
             });
@@ -185,7 +192,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn count_tokens_success_returns_tokens_len() {
+    async fn count_tokens_success_returns_tokens_len_plus_bedrock_bos() {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/tokenize"))
@@ -210,8 +217,28 @@ mod tests {
             .count_tokens("command-r-plus-08-2024", "hello world")
             .await
             .expect("ok");
-        assert_eq!(resp.input_tokens, 3);
+        assert_eq!(resp.input_tokens, 4);
         assert_eq!(resp.request_id.as_deref(), Some("coh_req_123"));
+    }
+
+    #[tokio::test]
+    async fn empty_text_does_not_add_bedrock_bos() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/tokenize"))
+            .and(body_json(json!({
+                "text": "",
+                "model": "command-r"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "tokens": []
+            })))
+            .mount(&server)
+            .await;
+
+        let c = client_for_server(&server).await;
+        let resp = c.count_tokens("command-r", "").await.expect("ok");
+        assert_eq!(resp.input_tokens, 0);
     }
 
     #[tokio::test]
@@ -234,7 +261,7 @@ mod tests {
             .count_tokens("cohere.command-r-plus-v1:0", "hello bedrock cohere")
             .await
             .expect("ok");
-        assert_eq!(resp.input_tokens, 3);
+        assert_eq!(resp.input_tokens, 4);
     }
 
     #[tokio::test]
@@ -257,7 +284,7 @@ mod tests {
             .count_tokens("us.cohere.command-r-v1:0", "hello cross region")
             .await
             .expect("ok");
-        assert_eq!(resp.input_tokens, 2);
+        assert_eq!(resp.input_tokens, 3);
     }
 
     #[tokio::test]

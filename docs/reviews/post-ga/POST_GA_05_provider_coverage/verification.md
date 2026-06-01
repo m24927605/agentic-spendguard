@@ -7,10 +7,10 @@ Branch: `post-ga/POST_GA_05_provider_coverage`
 
 | Gate | Command | Result |
 |---|---|---|
-| Format + tests | `cargo fmt --manifest-path services/tokenizer/Cargo.toml && cargo test --manifest-path services/tokenizer/Cargo.toml` | PASS after Round 1 fixes: lib 95, main 13, golden 51, slice04 golden 203, slice05 chaos 3 |
-| Build | `cargo build --manifest-path services/tokenizer/Cargo.toml` | PASS after Round 1 fixes |
+| Format + tests | `cargo fmt --manifest-path services/tokenizer/Cargo.toml && cargo test --manifest-path services/tokenizer/Cargo.toml` | PASS after Round 2 fixes: lib 96, main 13, golden 51, slice04 golden 203, slice05 chaos 3 |
+| Build | `cargo build --manifest-path services/tokenizer/Cargo.toml` | PASS after Round 2 fixes |
 | Helm demo render | `helm template charts/spendguard --set chart.profile=demo` | PASS, 1443 rendered lines |
-| Helm production render | `helm template charts/spendguard --set chart.profile=production ...` | PASS, 1511 rendered lines; Llama Bedrock region path exercised without provider Secret |
+| Helm production render | `helm template charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production` | PASS, 2157 rendered lines |
 | Hot-path invariant | `rg -n "provider_clients\|CohereClient\|LlamaClient\|COHERE\|LLAMA\|count_tokens\\(" services/sidecar services/egress_proxy` | PASS: no tokenizer provider clients in sidecar/egress_proxy; only existing Bedrock provider model classifier regexes match Cohere/Llama names |
 | Demo | `make demo-down && ANTHROPIC_API_KEY= GEMINI_API_KEY= COHERE_API_KEY= LLAMA_BEDROCK_REGION= LLAMA_COUNT_TOKENS_BASE_URL= LLAMA_API_KEY= make demo-up DEMO_MODE=default` | PASS: Step 8 assertions, outbox closure, canonical_events receipt |
 
@@ -24,6 +24,8 @@ Branch: `post-ga/POST_GA_05_provider_coverage`
 - Config Debug masking covers Cohere/Llama API keys and Llama CountTokens base URL presence.
 - Cohere Bedrock and cross-region Bedrock model IDs normalize to Cohere native names before `/v1/tokenize`.
 - Partial Llama HTTP-compatible config fails closed before the worker can enter drop-only mode.
+- Cohere native `/v1/tokenize` results add the locked Bedrock BOS count for non-empty raw text and skip it for empty raw text.
+- Llama Bedrock CountTokens uses the InvokeModel request body shape so Tier 1 and Tier 2 compare the same raw prompt envelope.
 
 ## Review Rounds
 
@@ -32,6 +34,8 @@ Branch: `post-ga/POST_GA_05_provider_coverage`
 | 1 | `ait run --adapter codex --review-mode adversarial ...` | Tool rejected `--review-mode` with exit code 2 | Recorded in `round-1-ait.txt`; used codex CLI fallback |
 | 1 | `codex review --base main` under active AIT wrapper | Nested wrapper warning; process waited on stdin | Recorded in `round-1-codex-review*.txt`; reran direct reviewer with `ait off` |
 | 1 | Direct codex CLI review | P2: Cohere Bedrock IDs sent to Cohere public API unchanged. P2: partial Llama HTTP config could be classified as no provider config. | Fixed in `cohere.rs` and `main.rs`; tests/build/Helm/demo rerun clean |
+| 2 | `ait run --adapter codex --review-mode adversarial ...` | Tool rejected `--review-mode` with exit code 2 | Recorded in `round-2-ait.txt`; used codex CLI fallback |
+| 2 | Direct codex CLI review | P2: Llama used Bedrock Converse CountTokens while Tier 2 used raw InvokeModel+BOS. P2: Cohere native tokenize returned one token below Tier 2 Bedrock BOS accounting for non-empty raw text. | Fixed in `llama.rs`, `cohere.rs`, and worker tests; tests/build/Helm/demo rerun clean |
 
 ## Real Provider Tests
 
@@ -42,7 +46,7 @@ Optional real Cohere/Llama provider tests were not run because sanitized local v
 | Role | Decision |
 |---|---|
 | Software Architect | Keep expansion scoped to tokenizer shadow worker only; no sidecar/egress_proxy hot-path dependency. |
-| Backend Architect | Llama Tier 1 uses Bedrock Runtime CountTokens because the locked tokenizer spec dispatches Llama via Bedrock model IDs. |
+| Backend Architect | Llama Tier 1 uses Bedrock Runtime CountTokens with the InvokeModel body shape because the locked Tier 2 raw-text estimator is Bedrock raw prompt + BOS, not Converse chat framing. |
 | Security Engineer | New provider clients redact provider error bodies and mask base URLs in Debug output. |
 | Database Optimizer | Reuse existing tokenizer_t1_samples, PII opt-in, quota, and sample-rate state; no schema change. |
-| Tokenizer Domain Expert | Cohere count is `tokens.len()` from `/v1/tokenize`; Llama count is Bedrock `inputTokens`. |
+| Tokenizer Domain Expert | Cohere count is `tokens.len() + 1` for non-empty raw text to match Bedrock BOS accounting; Llama count is Bedrock `inputTokens` over the InvokeModel body. |

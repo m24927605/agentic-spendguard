@@ -118,10 +118,10 @@ Reviewer must inspect PII, quota, provider-error, and license paths.
 | Database Optimizer | No schema change unless provider state cannot fit current tables | §5 |
 | Tokenizer Domain Expert | Envelope fixtures are required before real-provider confidence | §8 |
 | Software Architect | Keep Cohere/Llama clients confined to tokenizer shadow worker | `services/tokenizer/src/shadow/provider_clients/`; hot-path grep evidence |
-| Backend Architect | Use Bedrock Runtime CountTokens for Llama instead of Together embeddings because locked tokenizer dispatch uses Bedrock Llama model IDs | `services/tokenizer/src/shadow/provider_clients/llama.rs` |
+| Backend Architect | Use Bedrock Runtime CountTokens with InvokeModel body shape for Llama instead of Together embeddings because locked tokenizer dispatch and Tier 2 raw-text accounting use Bedrock Llama model IDs | `services/tokenizer/src/shadow/provider_clients/llama.rs` |
 | Security Engineer | Redact provider error bodies and mask Llama base URL in Debug output | `cohere.rs`, `llama.rs`, `config.rs` |
 | Database Optimizer | Reuse existing sample/quota/PII tables; no migration | §5 |
-| Tokenizer Domain Expert | Cohere Tier 1 count is `tokens.len()` from `/v1/tokenize` | `services/tokenizer/src/shadow/provider_clients/cohere.rs` |
+| Tokenizer Domain Expert | Cohere Tier 1 count is `tokens.len() + 1` for non-empty raw text so native `/v1/tokenize` matches Tier 2 Bedrock BOS accounting | `services/tokenizer/src/shadow/provider_clients/cohere.rs` |
 
 ## §14. Merge Checklist
 

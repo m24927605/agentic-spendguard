@@ -2,7 +2,9 @@
 //!
 //! Locked tokenizer spec §3.1/§3.4 routes Llama only for Bedrock
 //! `meta.llama3-*-instruct-v1:0` model IDs. Use the official Bedrock
-//! Runtime CountTokens API instead of hand-rolled SigV4:
+//! Runtime CountTokens API instead of hand-rolled SigV4. The CountTokens
+//! request uses the InvokeModel shape so Tier 1 sees the same raw prompt
+//! envelope as Tier 2's Llama estimator:
 //! <https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html>
 //!
 //! Test fixtures use the HTTP-compatible backend so normal unit tests do
@@ -16,9 +18,11 @@ use aws_sdk_bedrockruntime::{
     config::{timeout::TimeoutConfig, Region},
     error::SdkError,
     operation::count_tokens::CountTokensError,
-    types::{ContentBlock, ConversationRole, ConverseTokensRequest, CountTokensInput, Message},
+    primitives::Blob,
+    types::{CountTokensInput, InvokeModelTokensRequest},
     Client as BedrockClient,
 };
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use reqwest::{Client, StatusCode};
 use serde_json::json;
 
@@ -141,13 +145,13 @@ async fn count_tokens_bedrock(
     model: &str,
     text: &str,
 ) -> Result<ProviderCount, ProviderError> {
-    let message = Message::builder()
-        .role(ConversationRole::User)
-        .content(ContentBlock::Text(text.to_owned()))
-        .build()
-        .map_err(|e| ProviderError::Schema(format!("build bedrock converse message: {e}")))?;
-    let input =
-        CountTokensInput::Converse(ConverseTokensRequest::builder().messages(message).build());
+    let body = llama_invoke_model_body(text)?;
+    let input = CountTokensInput::InvokeModel(
+        InvokeModelTokensRequest::builder()
+            .body(Blob::new(body))
+            .build()
+            .map_err(|e| ProviderError::Schema(format!("build bedrock invokeModel body: {e}")))?,
+    );
 
     let start = Instant::now();
     let resp = client
@@ -171,6 +175,16 @@ async fn count_tokens_bedrock(
     })
 }
 
+fn llama_invoke_model_body(text: &str) -> Result<Vec<u8>, ProviderError> {
+    serde_json::to_vec(&json!({
+        "prompt": text,
+        "max_gen_len": 1,
+        "temperature": 0.0,
+        "top_p": 1.0
+    }))
+    .map_err(|e| ProviderError::Schema(format!("build llama invokeModel JSON: {e}")))
+}
+
 async fn count_tokens_http_compat(
     http: &Client,
     base_url: &str,
@@ -183,13 +197,11 @@ async fn count_tokens_http_compat(
         base_url.trim_end_matches('/'),
         model
     );
+    let invoke_body = llama_invoke_model_body(text)?;
     let body = json!({
         "input": {
-            "converse": {
-                "messages": [{
-                    "role": "user",
-                    "content": [{ "text": text }]
-                }]
+            "invokeModel": {
+                "body": BASE64_STANDARD.encode(&invoke_body)
             }
         }
     });
@@ -319,11 +331,8 @@ mod tests {
             .and(header("authorization", "Bearer test-key"))
             .and(body_json(json!({
                 "input": {
-                    "converse": {
-                        "messages": [{
-                            "role": "user",
-                            "content": [{ "text": "hello llama" }]
-                        }]
+                    "invokeModel": {
+                        "body": BASE64_STANDARD.encode(llama_invoke_model_body("hello llama").expect("body"))
                     }
                 }
             })))

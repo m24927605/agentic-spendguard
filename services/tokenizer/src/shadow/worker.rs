@@ -1343,7 +1343,7 @@ mod tests {
         let rows = persister.rows.lock();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model, "command-r-plus-08-2024");
-        assert_eq!(rows[0].t1_input_tokens, 100);
+        assert_eq!(rows[0].t1_input_tokens, 101);
     }
 
     #[tokio::test]
