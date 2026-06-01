@@ -16,6 +16,8 @@
 //! CommitEstimated lane (Phase 2B Step 7); Release + ProviderReport are
 //! deferred to a future slice.
 
+use std::collections::HashMap;
+
 use chrono::Utc;
 use prost::Message as _;
 use sha2::{Digest, Sha256};
@@ -26,7 +28,7 @@ use crate::{
     contract,
     domain::{
         error::DomainError,
-        state::{ReservationCtx, SidecarState},
+        state::{CachedReleaseSignature, ReservationCtx, SidecarState},
     },
     proto::{
         common::v1::{
@@ -106,6 +108,9 @@ const SPENDGUARD_ENRICHMENT_ALLOWLIST: &[&str] = &[
     "mode",
     "team_id",
 ];
+
+const RELEASE_SIGNATURE_CACHE_MIN_TTL_SECONDS: i64 = 600;
+const RELEASE_SIGNATURE_CACHE_MAX_TTL_SECONDS: i64 = 3600;
 
 /// Extract the four enrichment fields from a `DecisionRequest`. Any
 /// missing field becomes empty string (degraded path).
@@ -1923,6 +1928,92 @@ impl ReleaseReason {
     }
 }
 
+fn release_signature_cache_ttl_seconds(state: &SidecarState) -> i64 {
+    state.inner.reservation_ttl_seconds.clamp(
+        RELEASE_SIGNATURE_CACHE_MIN_TTL_SECONDS,
+        RELEASE_SIGNATURE_CACHE_MAX_TTL_SECONDS,
+    )
+}
+
+fn release_signature_cache_key(tenant_id: &str, ledger_idempotency_key: &str) -> String {
+    format!("{tenant_id}:{ledger_idempotency_key}")
+}
+
+fn store_release_signature(
+    cache: &mut HashMap<String, CachedReleaseSignature>,
+    key: String,
+    signature: &[u8],
+    now: chrono::DateTime<Utc>,
+    ttl_seconds: i64,
+) {
+    if signature.is_empty() {
+        return;
+    }
+    cache.retain(|_, cached| cached.expires_at > now);
+    cache.insert(
+        key,
+        CachedReleaseSignature {
+            signature: signature.to_vec(),
+            expires_at: now + chrono::Duration::seconds(ttl_seconds.max(1)),
+        },
+    );
+}
+
+fn lookup_release_signature(
+    cache: &mut HashMap<String, CachedReleaseSignature>,
+    key: &str,
+    now: chrono::DateTime<Utc>,
+) -> Option<Vec<u8>> {
+    match cache.get(key) {
+        Some(cached) if cached.expires_at > now => Some(cached.signature.clone()),
+        Some(_) => {
+            cache.remove(key);
+            None
+        }
+        None => None,
+    }
+}
+
+#[cfg(test)]
+mod release_signature_cache_tests {
+    use super::*;
+
+    #[test]
+    fn release_replay_cache_returns_original_signature() {
+        let mut cache = HashMap::new();
+        let key = release_signature_cache_key("tenant-a", "release:reservation-1:key-1");
+        let now = Utc::now();
+
+        store_release_signature(&mut cache, key.clone(), b"original-signature", now, 600);
+        let replay_signature =
+            lookup_release_signature(&mut cache, &key, now + chrono::Duration::seconds(1));
+
+        assert_eq!(replay_signature, Some(b"original-signature".to_vec()));
+    }
+
+    #[test]
+    fn release_replay_cache_expires_without_fabricating_signature() {
+        let mut cache = HashMap::new();
+        let key = release_signature_cache_key("tenant-a", "release:reservation-1:key-1");
+        let now = Utc::now();
+
+        store_release_signature(&mut cache, key.clone(), b"original-signature", now, 1);
+        let replay_signature =
+            lookup_release_signature(&mut cache, &key, now + chrono::Duration::seconds(2));
+
+        assert_eq!(replay_signature, None);
+        assert!(!cache.contains_key(&key));
+    }
+
+    #[test]
+    fn release_replay_cache_is_tenant_scoped() {
+        let key_a = release_signature_cache_key("tenant-a", "release:reservation-1:key-1");
+        let key_b = release_signature_cache_key("tenant-b", "release:reservation-1:key-1");
+
+        assert_ne!(key_a, key_b);
+    }
+}
+
 pub async fn run_release(
     cfg: &crate::config::Config,
     state: &SidecarState,
@@ -1987,11 +2078,14 @@ pub async fn run_release(
         .clone()
         .ok_or_else(|| DomainError::FencingAcquire("no active fencing scope".into()))?;
     let is_replay_attempt = resv.current_state == "released";
-    if !is_replay_attempt && fencing_state.epoch != resv.fencing_epoch_at_post {
-        return Err(DomainError::FencingEpochStale(format!(
-            "current epoch {} differs from reserve-time epoch {}; reservation will TTL-release",
-            fencing_state.epoch, resv.fencing_epoch_at_post
-        )));
+    if !is_replay_attempt {
+        crate::fencing::check_active(state)?;
+        if fencing_state.epoch != resv.fencing_epoch_at_post {
+            return Err(DomainError::FencingEpochStale(format!(
+                "current epoch {} differs from reserve-time epoch {}; reservation will TTL-release",
+                fencing_state.epoch, resv.fencing_epoch_at_post
+            )));
+        }
     }
 
     // 4) Single producer_sequence allocation.
@@ -2058,6 +2152,7 @@ pub async fn run_release(
     let ledger_idempotency_key = idempotency_key_override
         .map(|k| format!("release:{}:{}", reservation_uuid, k))
         .unwrap_or_else(|| format!("release:{}:1", reservation_uuid));
+    let signature_cache_key = release_signature_cache_key(&ctx.tenant_id, &ledger_idempotency_key);
 
     let request_hash_vec: Vec<u8> = request_body_hash.map(|h| h.to_vec()).unwrap_or_default();
 
@@ -2065,7 +2160,7 @@ pub async fn run_release(
         tenant_id: ctx.tenant_id.clone(),
         reservation_set_id: reservation_set_id.to_string(),
         idempotency: Some(Idempotency {
-            key: ledger_idempotency_key,
+            key: ledger_idempotency_key.clone(),
             request_hash: request_hash_vec.into(),
         }),
         fencing: Some(Fencing {
@@ -2099,6 +2194,15 @@ pub async fn run_release(
             // Normalize Success to match so callers see the same
             // identifier shape across first-success and retry-replay
             // for the same operation.
+            let ttl_seconds = release_signature_cache_ttl_seconds(state);
+            let mut signature_cache = state.inner.release_signature_cache.lock();
+            store_release_signature(
+                &mut signature_cache,
+                signature_cache_key,
+                &audit_event_signature,
+                Utc::now(),
+                ttl_seconds,
+            );
             Ok(ReleaseOutput {
                 ledger_transaction_id: s.ledger_transaction_id,
                 released_reservation_ids: vec![reservation_uuid.to_string()],
@@ -2116,20 +2220,19 @@ pub async fn run_release(
                 .decision_id_to_reservation
                 .lock()
                 .remove(&resv.decision_id);
+            let mut signature_cache = state.inner.release_signature_cache.lock();
+            let replay_signature =
+                lookup_release_signature(&mut signature_cache, &signature_cache_key, Utc::now())
+                    .unwrap_or_default();
             Ok(ReleaseOutput {
                 ledger_transaction_id: r.ledger_transaction_id,
                 released_reservation_ids: vec![reservation_uuid.to_string()],
-                // The freshly-generated signature above is for THIS
-                // retry's CloudEvent — but on the Replay branch the
-                // ledger returns the original transaction and does not
-                // persist the new event. Returning the fresh signature
-                // would let the adapter pin to a CloudEvent that does
-                // not exist in the audit chain. Return empty bytes
-                // instead; adapter uses ledger_transaction_id as the
-                // canonical replay identifier and can re-fetch the
-                // original audit row by that id if it needs the
-                // original signature.
-                audit_event_signature: Vec::new(),
+                // Never return the freshly-generated retry signature:
+                // the ledger replay branch did not persist that event.
+                // Use only the original signature captured after the
+                // first success. Cache miss (expiry/restart) degrades to
+                // empty bytes rather than fabricating audit evidence.
+                audit_event_signature: replay_signature,
             })
         }
         Some(ReleaseOutcome::Error(e)) => map_proto_error_to_domain(e.code, e.message),
