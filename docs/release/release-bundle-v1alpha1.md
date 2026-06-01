@@ -24,12 +24,12 @@ The release bundle is the minimal reproducible artifact set for a SpendGuard GA 
 | `charts/*.tgz` | Helm package from `charts/spendguard` |
 | `migrations/inventory.txt` | Sorted list of service migration SQL files with checksums |
 | `migrations/inventory.sha256` | SHA-256 of `inventory.txt` |
-| `sbom/README.md` | SBOM status placeholder until GA_09 supply-chain gate |
+| `sbom/README.md` | Pointer to GA_09 local security scan evidence plus image SBOM/provenance workflow |
 | `SHA256SUMS` | Checksums for all bundle files except `SHA256SUMS` |
 
 ## Non-Goals
 
-The v1alpha1 bundle does not sign artifacts, generate SBOMs, publish images, or create immutable tags. GA_09 owns signing, SBOM, vulnerability scanning, and provenance.
+The v1alpha1 bundle does not push images or sign artifacts itself. GA_09 wires image signing, SBOM, vulnerability scanning, and provenance into `.github/workflows/publish-images.yml`, and local release signoff is produced by `scripts/security/ga-security-scan.sh --require-external-tools`.
 
 ## Validation
 

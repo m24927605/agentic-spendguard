@@ -1,0 +1,135 @@
+{
+  "branch": "ga/GA_09_security_signoff_supply_chain",
+  "checks": {
+    "bundles_volume_chowned_for_runtime_uid": {
+      "detail": "bundles-init hands writable bundle volume to runtime UID 65532",
+      "ok": true
+    },
+    "cargo_sbom_generated": {
+      "detail": "226 Cargo packages recorded",
+      "ok": true
+    },
+    "compose_sidecar_uds_volume_handoff": {
+      "detail": "compose hands existing sidecar UDS named volume to runtime UID before sidecar starts",
+      "ok": true
+    },
+    "count_tokens_quota_present": {
+      "detail": "per-tenant count_tokens quota present",
+      "ok": true
+    },
+    "evidence_no_local_paths": {
+      "detail": "GA_09 evidence strips developer-local paths",
+      "ok": true
+    },
+    "pii_shadow_default_denied": {
+      "detail": "PII shadow default denies raw text",
+      "ok": true
+    },
+    "pii_shadow_worker_guard": {
+      "detail": "shadow worker checks tenant opt-in",
+      "ok": true
+    },
+    "pki_ca_key_remains_root_only": {
+      "detail": "pki-init keeps demo CA private key out of runtime UID",
+      "ok": true
+    },
+    "pki_volume_chowned_for_runtime_uid": {
+      "detail": "pki-init hands cert/key volume to runtime UID 65532",
+      "ok": true
+    },
+    "production_render_has_networkpolicy": {
+      "detail": "NetworkPolicy rendered",
+      "ok": true
+    },
+    "production_render_has_svid_certificate": {
+      "detail": "per-tenant SVID Certificate rendered",
+      "ok": true
+    },
+    "production_render_no_plaintext_db": {
+      "detail": "no plaintext DB URL in production render",
+      "ok": true
+    },
+    "production_values_no_plaintext_db": {
+      "detail": "no plaintext DB URL in production values",
+      "ok": true
+    },
+    "publish_workflow_cosign": {
+      "detail": "cosign signing step present",
+      "ok": true
+    },
+    "publish_workflow_covers_production_chart_images": {
+      "detail": "publish workflow covers 12 production chart images under spendguard/<component>",
+      "ok": true
+    },
+    "publish_workflow_dispatch_has_sha_tag": {
+      "detail": "manual dispatch publishes immutable sha tag",
+      "ok": true
+    },
+    "publish_workflow_no_latest_promotion": {
+      "detail": "no latest/latest-main promotion",
+      "ok": true
+    },
+    "publish_workflow_oidc": {
+      "detail": "OIDC permission present for keyless signing",
+      "ok": true
+    },
+    "publish_workflow_provenance": {
+      "detail": "Buildx provenance enabled",
+      "ok": true
+    },
+    "publish_workflow_repo_scan_single_job": {
+      "detail": "repository Trivy scan runs once before the image matrix",
+      "ok": true
+    },
+    "publish_workflow_sbom": {
+      "detail": "Buildx SBOM enabled",
+      "ok": true
+    },
+    "publish_workflow_trivy": {
+      "detail": "Trivy scan step present",
+      "ok": true
+    },
+    "replay_dedup_key": {
+      "detail": "producer/event and global event replay keys enforced",
+      "ok": true
+    },
+    "replay_dedup_table": {
+      "detail": "replay dedup table exists",
+      "ok": true
+    },
+    "rls_no_bypassrls_grants": {
+      "detail": "no executable BYPASSRLS grants",
+      "ok": true
+    },
+    "runtime_dockerfiles_user_65532": {
+      "detail": "all runtime Dockerfiles set USER 65532:65532",
+      "ok": true
+    },
+    "sidecar_entrypoint_nonroot_safe": {
+      "detail": "sidecar entrypoint only verifies mounted paths after USER switch",
+      "ok": true
+    },
+    "sidecar_image_precreates_secret_links": {
+      "detail": "sidecar image prepares root-owned paths before USER switch",
+      "ok": true
+    },
+    "svid_runtime_exact_uri": {
+      "detail": "runtime validator uses exact predictor-client tenant prefix",
+      "ok": true
+    },
+    "svid_template_exact_uri": {
+      "detail": "Helm Certificate URI uses exact predictor-client tenant prefix",
+      "ok": true
+    }
+  },
+  "commit_sha": "a28a3fab8f6f2f046c8c6d097e9582d5bdace813",
+  "errors": [],
+  "external_scanner_failures": [],
+  "external_tool_install": "brew install syft trivy cosign cargo-audit",
+  "missing_external_tools": [],
+  "release_mode": "scripts/security/ga-security-scan.sh --require-external-tools",
+  "result": "pass",
+  "scan_started_utc": "2026-06-01T08:41:27Z",
+  "schema": "spendguard.ga09.security_scan.v1alpha1",
+  "worktree_dirty_at_start": false
+}

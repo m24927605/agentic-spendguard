@@ -1,12 +1,12 @@
 name: Publish chart images
 
-# Builds + pushes the six chart service images to GitHub Container
-# Registry (ghcr.io/m24927605/spendguard-*).
+# Builds + pushes the production chart service images to GitHub Container
+# Registry (ghcr.io/<owner>/spendguard/<component>).
 #
 # Triggers:
-#   push tag v*       → publishes :{<tag>,latest}
-#   push main         → publishes :sha-<short>,latest-main
-#   workflow_dispatch → manual; same as main push (sha-<commit>,latest-main)
+#   push tag v*       → publishes :<tag>, signs digest, emits SBOM/provenance
+#   push main         → publishes :sha-<short>, signs digest, emits SBOM/provenance
+#   workflow_dispatch → manual; same as main push (sha-<commit>)
 #   pull_request      → build-only (no push); validates Dockerfile + cargo build
 #
 # Spec: docs/specs/issue-61-chart-image-publishing.md.
@@ -28,31 +28,65 @@ on:
 permissions:
   contents: read
   packages: write
+  id-token: write
+  security-events: write
 
 env:
   REGISTRY: ghcr.io
   IMAGE_OWNER: ${{ github.repository_owner }}
 
 jobs:
+  repository-scan:
+    name: Repository vulnerability scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Trivy repository scan
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
   build-and-push:
     name: ${{ matrix.service }}
+    needs: repository-scan
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - service: ledger
-            dockerfile: deploy/demo/runtime/Dockerfile.ledger
           - service: canonical-ingest
             dockerfile: deploy/demo/runtime/Dockerfile.canonical_ingest
-          - service: sidecar
-            dockerfile: deploy/demo/runtime/Dockerfile.sidecar
-          - service: webhook-receiver
-            dockerfile: deploy/demo/runtime/Dockerfile.webhook_receiver
+          - service: control-plane
+            dockerfile: deploy/demo/runtime/Dockerfile.control_plane
+          - service: egress-proxy
+            dockerfile: deploy/demo/runtime/Dockerfile.egress_proxy
+          - service: ledger
+            dockerfile: deploy/demo/runtime/Dockerfile.ledger
           - service: outbox-forwarder
             dockerfile: deploy/demo/runtime/Dockerfile.outbox_forwarder
+          - service: output-predictor
+            dockerfile: deploy/demo/runtime/Dockerfile.output_predictor
+          - service: run-cost-projector
+            dockerfile: deploy/demo/runtime/Dockerfile.run_cost_projector
+          - service: sidecar
+            dockerfile: deploy/demo/runtime/Dockerfile.sidecar
+          - service: stats-aggregator
+            dockerfile: deploy/demo/runtime/Dockerfile.stats_aggregator
+          - service: tokenizer
+            dockerfile: deploy/demo/runtime/Dockerfile.tokenizer
           - service: ttl-sweeper
             dockerfile: deploy/demo/runtime/Dockerfile.ttl_sweeper
+          - service: webhook-receiver
+            dockerfile: deploy/demo/runtime/Dockerfile.webhook_receiver
 
     steps:
       - name: Checkout
@@ -75,19 +109,18 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard-${{ matrix.service }}
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard/${{ matrix.service }}
           tags: |
-            type=sha,prefix=sha-,format=short,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
-            type=raw,value=latest-main,enable=${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+            type=sha,prefix=sha-,format=short,enable=${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch' }}
             type=ref,event=tag
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
           labels: |
-            org.opencontainers.image.title=spendguard-${{ matrix.service }}
+            org.opencontainers.image.title=spendguard/${{ matrix.service }}
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.licenses=Apache-2.0
 
       - name: Build${{ github.event_name != 'pull_request' && ' + push' || '' }}
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -95,5 +128,29 @@ jobs:
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          sbom: ${{ github.event_name != 'pull_request' }}
+          provenance: ${{ github.event_name != 'pull_request' }}
           cache-from: type=gha,scope=spendguard-${{ matrix.service }}
           cache-to: type=gha,mode=max,scope=spendguard-${{ matrix.service }}
+
+      - name: Trivy pushed image scan
+        if: github.event_name != 'pull_request'
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard/${{ matrix.service }}@${{ steps.build.outputs.digest }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: "1"
+          format: table
+
+      - name: Install cosign
+        if: github.event_name != 'pull_request'
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: v2.4.1
+
+      - name: Sign image digest
+        if: github.event_name != 'pull_request'
+        env:
+          IMAGE_REF: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard/${{ matrix.service }}@${{ steps.build.outputs.digest }}
+        run: cosign sign --yes "${IMAGE_REF}"

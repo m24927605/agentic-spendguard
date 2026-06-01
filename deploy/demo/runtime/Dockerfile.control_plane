@@ -30,4 +30,6 @@ COPY --from=builder /spendguard-control-plane /usr/local/bin/spendguard-control-
 COPY deploy/demo/runtime/control-plane-entrypoint.sh /usr/local/bin/control-plane-entrypoint.sh
 RUN chmod +x /usr/local/bin/control-plane-entrypoint.sh
 
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/control-plane-entrypoint.sh"]

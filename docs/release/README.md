@@ -14,7 +14,7 @@ The canonical verifier is:
 scripts/release/check-release-bundle.sh /tmp/spendguard-ga-release
 ```
 
-The scripts are intentionally local and fail closed. They do not publish a GitHub Release, create a tag, push images, or sign artifacts. Those actions are owned by later GA readiness slices.
+The scripts are intentionally local and fail closed. They do not publish a GitHub Release, create a tag, push images, or sign artifacts. Image signing, SBOM, vulnerability scanning, and provenance are owned by GA_09 through `.github/workflows/publish-images.yml` and `scripts/security/ga-security-scan.sh`.
 
 ## Bundle Layout
 
@@ -37,4 +37,4 @@ spendguard-ga-release/
 
 ## Secret Policy
 
-Release bundles must not contain credentials, private keys, database URLs, API keys, or rendered Kubernetes Secrets. The checker scans for common secret patterns as a guardrail, but this does not replace GA_09 security signoff.
+Release bundles must not contain credentials, private keys, database URLs, API keys, or rendered Kubernetes Secrets. The checker scans for common secret patterns as a guardrail, and GA_09 security signoff is required before a bundle is promoted.

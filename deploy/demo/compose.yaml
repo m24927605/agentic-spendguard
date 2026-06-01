@@ -508,6 +508,22 @@ services:
       spendguard-net:
         aliases: [stats-aggregator]
 
+  sidecar-uds-init:
+    image: alpine:3.20
+    container_name: spendguard-sidecar-uds-init
+    command:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /var/run/spendguard
+        chown -R 65532:65532 /var/run/spendguard
+        chmod 0775 /var/run/spendguard
+        ls -ld /var/run/spendguard
+    volumes:
+      - sidecar-uds:/var/run/spendguard
+    networks: [spendguard-net]
+
   sidecar:
     build:
       context: ../..
@@ -580,6 +596,8 @@ services:
       run-cost-projector:
         condition: service_healthy
         required: false
+      sidecar-uds-init:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/readyz | grep -q ready"]
       interval: 3s

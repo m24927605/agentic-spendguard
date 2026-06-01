@@ -23,6 +23,13 @@ CONTRACT_DIR="$OUT/contract_bundle"
 SCHEMA_DIR="$OUT/schema_bundle"
 mkdir -p "$CONTRACT_DIR" "$SCHEMA_DIR"
 
+ensure_nonroot_ownership() {
+    # Runtime consumers and bundle_registry run as USER 65532:65532. The init
+    # container owns this named volume and must hand it off on every idempotent
+    # run so hot-reload writers can create temp files and atomic renames.
+    chown -R 65532:65532 "$OUT"
+}
+
 # Phase 4 O3: pricing-seed-init writes /bundles/pricing.env with the
 # real pricing_version + snapshot hash from the canonical DB. If
 # present, source it so the freeze tuple matches what's actually in
@@ -49,6 +56,7 @@ if [ -f "$OUT/runtime.env" ] && [ -f "$CONTRACT_DIR/$CONTRACT_BUNDLE_ID.tgz" ]; 
     if tar -tzf "$CONTRACT_DIR/$CONTRACT_BUNDLE_ID.tgz" 2>/dev/null \
             | grep -q '^\./contract\.yaml$\|^contract\.yaml$'; then
         echo "[bundles] existing bundles detected (contract.yaml present), skipping regeneration"
+        ensure_nonroot_ownership
         cat "$OUT/runtime.env"
         exit 0
     else
@@ -203,6 +211,8 @@ SPENDGUARD_PRICING_VERSION=$PRICING_VERSION
 SPENDGUARD_FX_RATE_VERSION=$FX_RATE_VERSION
 SPENDGUARD_UNIT_CONVERSION_VERSION=$UNIT_CONVERSION_VERSION
 EOF
+
+ensure_nonroot_ownership
 
 echo "[bundles] generated:"
 find "$OUT" -type f -exec ls -la {} \;

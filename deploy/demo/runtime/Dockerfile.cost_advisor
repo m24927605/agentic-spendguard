@@ -33,4 +33,6 @@ COPY --from=builder /spendguard-advise /usr/local/bin/spendguard-advise
 # The default entrypoint is the CLI itself (matches the ttl_sweeper /
 # ledger Dockerfile pattern). DEMO_MODE=cost_advisor overrides this
 # with the driver script via compose `entrypoint:`.
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/spendguard-advise"]
