@@ -105,8 +105,8 @@ pub struct ShadowEvent {
     pub encoder_kind: EncoderKind,
     pub t2_input_tokens: i64,
     pub t2_tokenizer_version_id: String,
-    /// Raw text the caller tokenized. Bounded upstream by spec §10.1
-    /// 1 MiB cap so channel memory pressure is bounded.
+    /// Raw text the caller tokenized. Bounded upstream by the shared
+    /// 4 MiB tokenizer request cap so channel memory pressure is bounded.
     pub raw_text: String,
 }
 
@@ -393,6 +393,7 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
     {
         Ok(true) => {}
         Ok(false) => {
+            TOKENIZER_RATE_LIMITED_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             debug!(
                 tenant = %event.tenant_id,
                 provider,
@@ -563,6 +564,13 @@ pub static SHADOW_SKIPPED_CHAT_SHAPE: std::sync::atomic::AtomicU64 =
 /// as the documented count_tokens schema (vendor API drift). Distinct
 /// from network errors so operators can alert on it independently.
 pub static PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// POST_GA_03 / #110 — Tier 1 provider count_tokens calls skipped by the
+/// shared per-tenant quota. Kept aggregate to avoid high-cardinality tenant
+/// labels on the built-in endpoint; logs carry tenant/model for forensic
+/// correlation.
+pub static TOKENIZER_RATE_LIMITED_TOTAL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 async fn on_provider_error(

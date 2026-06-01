@@ -18,27 +18,31 @@
 //! input size for the BPE encode buffer).
 //!
 //! Layered caps:
-//!   1. Protocol layer (main.rs `max_decoding_message_size`) — 1 MiB
+//!   1. Protocol layer (main.rs `max_decoding_message_size`) — 4 MiB
 //!      hard cap. Anything bigger is rejected by tonic with
 //!      `Status::resource_exhausted` BEFORE proto deserialisation.
-//!   2. Field layer (this module, `TokenizerSvc::tokenize`) — 1 MiB
+//!   2. Field layer (this module, `TokenizerSvc::tokenize`) — 4 MiB
 //!      `raw_text` / per-message content; 256 B model; 1000 message
 //!      array bound. Rejected with `Status::invalid_argument`.
 //!
-//! Round-3 N3: the field caps and the protocol cap MUST agree.
-//! Previously the protocol layer rejected at 1 MiB while the docs +
-//! field caps advertised 2 MiB → callers catching `InvalidArgument`
-//! never saw the field-layer error, only `ResourceExhausted`. We
-//! tightened the field caps to 1 MiB to match. This is intentionally
-//! redundant: the field validation runs against a value that already
-//! passed the protocol cap, but it provides a stable + named error
-//! distinct from `ResourceExhausted` and makes the in-process library
-//! form (no tonic protocol layer) defend itself with the same bound.
+//! Round-3 N3 / POST_GA_03 #114: the field caps and the protocol cap
+//! MUST agree. The shared cap is now 4 MiB so realistic multi-turn
+//! prompts can traverse the sidecar/tokenizer path while oversized
+//! frames remain rejected before encoder work begins. This is
+//! intentionally redundant: the field validation runs against a value
+//! that already passed the protocol cap, but it provides a stable +
+//! named error distinct from `ResourceExhausted` and makes the
+//! in-process library form (no tonic protocol layer) defend itself
+//! with the same bound.
 //!
 //! Violations return `Status::invalid_argument` with a stable code so
 //! callers can distinguish from `internal` (encoder panic).
 
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+use std::time::Duration;
 
 use tonic::{Request, Response, Status};
 use tracing::warn;
@@ -54,7 +58,7 @@ use spendguard_tokenizer::{Tokenizer, TokenizerError};
 // ============================================================================
 // Round-2 fix M6 + Round-3 fix N3 — request-shape caps.
 //
-// Field cap == protocol cap == 1 MiB by design. The redundancy is
+// Field cap == protocol cap == 4 MiB by design. The redundancy is
 // defense-in-depth:
 //   * Protocol cap (main.rs `max_decoding_message_size`) rejects
 //     oversized frames with `ResourceExhausted` before deserialisation.
@@ -62,7 +66,7 @@ use spendguard_tokenizer::{Tokenizer, TokenizerError};
 //     more specific `InvalidArgument` so callers can metric on the
 //     offending field (model vs raw_text vs messages).
 //
-// `MAX_RAW_TEXT_LEN == MAX_MESSAGE_CONTENT_LEN == 1 MiB == 1 << 20`.
+// `MAX_RAW_TEXT_LEN == MAX_MESSAGE_CONTENT_LEN == 4 MiB == 4 << 20`.
 // Tighten the protocol cap in lock-step if the field caps grow.
 //
 // Kept as `pub(crate) const` so the test mod (and future calibration
@@ -73,19 +77,33 @@ use spendguard_tokenizer::{Tokenizer, TokenizerError};
 /// are < 64 chars; 256 leaves runway for vendor prefixes.
 pub(crate) const MAX_MODEL_LEN: usize = 256;
 
+/// POST_GA_03 / #114: shared decoded-message cap for the gRPC protocol
+/// layer and this field-validation layer. Raised from 1 MiB to 4 MiB so
+/// SLICE_10 sidecar integrations can carry realistic multi-turn prompts
+/// without weakening the layered cap invariant.
+pub const TOKENIZER_REQUEST_CAP_BYTES: usize = 4 << 20;
+
+/// POST_GA_03 / #127: bound synchronous BPE work from the gRPC service
+/// form. The in-process library form keeps its direct synchronous API;
+/// callers that need a timeout should wrap it at their trust boundary.
+const ENCODE_TIMEOUT: Duration = Duration::from_millis(100);
+
+pub static INVALID_REQUEST_ID_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static REQUEST_ID_V4_ACCEPTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static ENCODE_TIMEOUT_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 /// Max bytes accepted in `raw_text` (the text-completion shape).
-/// Round-3 N3: matches the 1 MiB protocol-layer
+/// POST_GA_03 / #114: matches the 4 MiB protocol-layer
 /// `max_decoding_message_size` configured in main.rs so the field
-/// validation error surface is reachable (was previously 2 MiB and
-/// therefore unreachable — the protocol cap fired first).
-pub(crate) const MAX_RAW_TEXT_LEN: usize = 1 << 20;
+/// validation error surface is reachable.
+pub(crate) const MAX_RAW_TEXT_LEN: usize = TOKENIZER_REQUEST_CAP_BYTES;
 
 /// Max number of `Message` elements in the chat-shape array.
 pub(crate) const MAX_MESSAGES: usize = 1_000;
 
 /// Max bytes per individual `message.content`. See `MAX_RAW_TEXT_LEN`
 /// for the protocol-cap alignment rationale.
-pub(crate) const MAX_MESSAGE_CONTENT_LEN: usize = 1 << 20;
+pub(crate) const MAX_MESSAGE_CONTENT_LEN: usize = TOKENIZER_REQUEST_CAP_BYTES;
 
 /// Service struct holding a shared library handle. Constructed once
 /// in main(); cloned cheaply on every RPC dispatch because
@@ -202,20 +220,23 @@ impl TokenizerSvcTrait for TokenizerSvc {
 
         let lib_req: spendguard_tokenizer::TokenizeRequest = proto_req.into();
 
-        // Per spec §3.5 — the request_id mints UUIDv7 if empty so
-        // downstream telemetry has a stable id.
-        let lib_req = if lib_req.request_id.is_empty() {
-            spendguard_tokenizer::TokenizeRequest {
-                request_id: uuid::Uuid::now_v7().to_string(),
-                ..lib_req
-            }
-        } else {
-            lib_req
-        };
+        let lib_req = validate_or_mint_request_id(lib_req)?;
 
-        let lib_resp = match self.tokenizer.tokenize(&lib_req) {
-            Ok(resp) => resp,
-            Err(err) => return Err(map_tokenizer_error(err)),
+        let encode_req = lib_req.clone();
+        let tokenizer = Arc::clone(&self.tokenizer);
+        let encode_task = tokio::task::spawn_blocking(move || tokenizer.tokenize(&encode_req));
+        let lib_resp = match tokio::time::timeout(ENCODE_TIMEOUT, encode_task).await {
+            Ok(Ok(Ok(resp))) => resp,
+            Ok(Ok(Err(err))) => return Err(map_tokenizer_error(err)),
+            Ok(Err(join_err)) => {
+                return Err(Status::internal(format!(
+                    "tokenizer encode task failed: {join_err}"
+                )));
+            }
+            Err(_) => {
+                ENCODE_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+                return Err(Status::deadline_exceeded("encode timeout exceeded"));
+            }
         };
 
         // SLICE_05: fire-and-forget shadow event AFTER computing the
@@ -302,6 +323,40 @@ fn encoder_kind_from_str(kind: &str) -> Option<EncoderKind> {
         "COHERE_BPE" => Some(EncoderKind::Cohere),
         "SENTENCEPIECE_LLAMA" => Some(EncoderKind::Llama),
         _ => None,
+    }
+}
+
+fn validate_or_mint_request_id(
+    req: spendguard_tokenizer::TokenizeRequest,
+) -> Result<spendguard_tokenizer::TokenizeRequest, Status> {
+    if req.request_id.is_empty() {
+        return Ok(spendguard_tokenizer::TokenizeRequest {
+            request_id: uuid::Uuid::now_v7().to_string(),
+            ..req
+        });
+    }
+
+    let parsed = uuid::Uuid::parse_str(&req.request_id).map_err(|e| {
+        INVALID_REQUEST_ID_TOTAL.fetch_add(1, Ordering::Relaxed);
+        Status::invalid_argument(format!("request_id must be a UUIDv7 or UUIDv4: {e}"))
+    })?;
+
+    match parsed.get_version_num() {
+        7 => Ok(req),
+        4 => {
+            REQUEST_ID_V4_ACCEPTED_TOTAL.fetch_add(1, Ordering::Relaxed);
+            warn!(
+                request_id = %parsed,
+                "tokenizer request_id UUIDv4 accepted for backward compatibility; prefer UUIDv7"
+            );
+            Ok(req)
+        }
+        other => {
+            INVALID_REQUEST_ID_TOTAL.fetch_add(1, Ordering::Relaxed);
+            Err(Status::invalid_argument(format!(
+                "request_id must be UUIDv7 or UUIDv4, got UUIDv{other}"
+            )))
+        }
     }
 }
 
@@ -397,10 +452,10 @@ mod tests {
         assert!(err.message().contains("SLICE_05"));
     }
 
-    // ── Round-2 fix M6 + Round-3 fix N3 — DoS protection tests ────
-    // (R3 N3: caps tightened to 1 MiB to match protocol-layer
-    //  `max_decoding_message_size`; tests reference constants so they
-    //  auto-track the boundary.)
+    // ── Round-2 fix M6 + Round-3 fix N3 / POST_GA_03 #114 — DoS tests ────
+    // The field cap and protocol-layer `max_decoding_message_size`
+    // both reference TOKENIZER_REQUEST_CAP_BYTES, so tests auto-track
+    // the 4 MiB boundary.
 
     #[tokio::test]
     async fn tokenize_rejects_oversize_model() {
@@ -502,5 +557,47 @@ mod tests {
         });
         let resp = s.tokenize(req).await.expect("ok").into_inner();
         assert!(resp.latency_ns >= 0);
+    }
+
+    #[tokio::test]
+    async fn tokenize_accepts_caller_supplied_uuidv7_request_id() {
+        let s = svc();
+        let req = Request::new(TokenizeRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![],
+            raw_text: "hi".to_string(),
+            request_id: uuid::Uuid::now_v7().to_string(),
+        });
+        let resp = s.tokenize(req).await.expect("uuidv7 ok").into_inner();
+        assert_eq!(resp.tier, "T2");
+    }
+
+    #[tokio::test]
+    async fn tokenize_accepts_uuidv4_request_id_for_backward_compat() {
+        let s = svc();
+        let req = Request::new(TokenizeRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![],
+            raw_text: "hi".to_string(),
+            request_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+        });
+        let resp = s.tokenize(req).await.expect("uuidv4 ok").into_inner();
+        assert_eq!(resp.tier, "T2");
+    }
+
+    #[tokio::test]
+    async fn tokenize_rejects_invalid_request_id() {
+        let s = svc();
+        let req = Request::new(TokenizeRequest {
+            model: "gpt-4o".to_string(),
+            messages: vec![],
+            raw_text: "hi".to_string(),
+            request_id: "tenant-a:copied-request-id".to_string(),
+        });
+        let err = s.tokenize(req).await.expect_err("invalid request_id");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(err
+            .message()
+            .contains("request_id must be a UUIDv7 or UUIDv4"));
     }
 }
