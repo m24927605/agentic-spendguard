@@ -102,6 +102,7 @@ Reviewer must inspect triage honesty and reject undocumented customer-critical f
 | Database Optimizer | DB/index polish issues can be non-GA only when named and visible | Backlog triage assigns them to post-GA implementation slices |
 | Software Architect | Duplicate and historical issues must close with evidence | #155 and #170 closure evidence recorded in backlog triage |
 | Review R1 | codex CLI adversarial reviewer | Fixed live API path and `client_cert_id` registration sample, client SVID evidence path, SVID `PERMISSION_DENIED` to `tls_error` routing, and backlog slice/table consistency |
+| Review R2 | codex CLI adversarial reviewer | Fixed reference-image `--insecure` override guidance and replaced invalid multi-issue `gh issue close` evidence with a reproducible loop |
 
 ## §14. Merge Checklist
 

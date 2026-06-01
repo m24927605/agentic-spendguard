@@ -35,6 +35,7 @@ require_text "$ONBOARDING" "mTLS|mutual TLS" "mTLS onboarding requirement"
 require_text "$ONBOARDING" "/v1/predictor/plugins" "live predictor plugin API path"
 require_text "$ONBOARDING" "client_cert_id" "client certificate binding field"
 require_text "$ONBOARDING" "plugin-client-svid" "client SVID evidence path"
+require_text "$ONBOARDING" "override.*--insecure|--insecure.*not passed" "reference image insecure command override"
 require_text "$ONBOARDING" "50 ms|timeout" "timeout requirement"
 require_text "$ONBOARDING" "retry" "retry/idempotency guidance"
 require_text "$ONBOARDING" "circuit breaker" "circuit breaker guidance"
@@ -53,6 +54,7 @@ done
 
 require_text "$TRIAGE" "#155.*GA_10 closure" "duplicate/process closure evidence for #155"
 require_text "$TRIAGE" "#170.*GA_10 closure" "duplicate closure evidence for #170"
+require_text "$ROOT/docs/reviews/ga-readiness/GA_10_customer_plugin_onboarding_backlog/command-results.md" "for n in 106 107 128 138 142 144 153 155 170" "reproducible issue-close loop"
 require_text "$README" "Certification path" "template certification path"
 
 python3 - "$TRIAGE" <<'PY'

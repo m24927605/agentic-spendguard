@@ -49,6 +49,21 @@ to Strategy B and records metrics/audit evidence.
    PREDICTOR_REQUIRE_CLIENT_SVID=true
    ```
 
+   The reference template image defaults to `CMD ["--insecure"]` for
+   local development. Production deployments must override container
+   args so `--insecure` is not passed. For Kubernetes, set explicit
+   args such as:
+
+   ```yaml
+   args:
+     - --port
+     - "50054"
+   ```
+
+   The TLS environment variables above are then loaded by
+   `predictor_server.py`, and startup fails closed if any required TLS
+   path is missing.
+
 8. Register the endpoint and server certificate fingerprint with the
    SpendGuard control plane.
 9. Deploy at least two plugin replicas before enabling production
