@@ -372,16 +372,21 @@ pub async fn compute_c(
 fn classify_status(status: &tonic::Status) -> StrategyCFailure {
     let code = status.code();
     let msg = status.message();
+    let msg_lc = msg.to_ascii_lowercase();
 
     // R2 M6: TLS sentinel — the plugin connect path in plugin_client.rs
     // wraps connect failures as `tonic::Status::unavailable("plugin connect failed: ...")`,
     // so a TLS error comes back as Unavailable + this sentinel rather
     // than as Unauthenticated.
-    if msg.contains("plugin connect failed")
-        || msg.contains("tls handshake")
-        || msg.contains("TLS")
-        || msg.contains("certificate")
-        || msg.contains("fingerprint")
+    if msg_lc.contains("plugin connect failed")
+        || msg_lc.contains("tls handshake")
+        || msg_lc.contains("tls")
+        || msg_lc.contains("certificate")
+        || msg_lc.contains("fingerprint")
+        || (code == Code::PermissionDenied
+            && (msg_lc.contains("svid")
+                || msg_lc.contains("uri san")
+                || msg_lc.contains("client cert")))
     {
         return StrategyCFailure::TlsError;
     }
@@ -630,6 +635,27 @@ mod tests {
         assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
         let s = tonic::Status::unknown("fingerprint mismatch (expected aa..., got bb...)");
         assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
+    }
+
+    #[test]
+    fn classify_status_svid_tenant_mismatch_is_tls_error() {
+        let s = tonic::Status::permission_denied("client SVID tenant mismatch");
+        assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
+
+        let s = tonic::Status::permission_denied("missing required SVID");
+        assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
+
+        let s = tonic::Status::permission_denied("multiple URI SAN identities presented");
+        assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
+
+        let s = tonic::Status::permission_denied("bad client cert san");
+        assert_eq!(classify_status(&s), StrategyCFailure::TlsError);
+
+        let s = tonic::Status::permission_denied("policy denied");
+        assert_eq!(
+            classify_status(&s),
+            StrategyCFailure::GrpcError(Code::PermissionDenied)
+        );
     }
 
     #[test]

@@ -1,7 +1,7 @@
 # GA 10 - Customer Plugin Onboarding and Backlog Triage
 
 > **Branch**: `ga/GA_10_customer_plugin_onboarding_backlog`
-> **Status**: design
+> **Status**: accepted
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; docs, conformance checks, issue triage
 
@@ -62,6 +62,7 @@ Customer plugin onboarding must not weaken SVID validation, mTLS, tenant isolati
 
 - `python3 -m pytest contrib/output_predictor_template/conformance_test.py -q`
 - Plugin onboarding docs include SVID, mTLS, timeout, retry, circuit-breaker, and audit expectations
+- Certification checklist requires explicit `command`/`args` override or runtime proof that the reference image did not start with `--insecure`
 - `gh issue list --repo m24927605/agentic-spendguard --limit 120 --state open` triaged into GA-before/GA-after/roadmap
 - GA-before issues are closed or moved to a named implementation slice before phase completion
 - Duplicate candidates #155 and #170 are closed only with commit/test evidence
@@ -98,11 +99,19 @@ Reviewer must inspect triage honesty and reject undocumented customer-critical f
 |---|---|---|
 | Customer Plugin/Backend Architect | Plugin certification and backlog triage share one customer-readiness slice | GA_10 owns both |
 | Security Engineer | SVID/mTLS requirements remain non-negotiable | Certification checklist enforces them |
+| SRE/Operations Architect | Plugin failure modes must map to customer and operator actions | Error taxonomy maps Strategy C metric labels to actions |
+| Database Optimizer | DB/index polish issues can be non-GA only when named and visible | Backlog triage assigns them to post-GA implementation slices |
+| Software Architect | Duplicate and historical issues must close with evidence | #155 and #170 closure evidence recorded in backlog triage |
+| Review R1 | codex CLI adversarial reviewer | Fixed live API path and `client_cert_id` registration sample, client SVID evidence path, SVID `PERMISSION_DENIED` to `tls_error` routing, and backlog slice/table consistency |
+| Review R2 | codex CLI adversarial reviewer | Fixed reference-image `--insecure` override guidance and replaced invalid multi-issue `gh issue close` evidence with a reproducible loop |
+| Review R3 | codex CLI adversarial reviewer | Expanded TLS classification for SVID/URI-SAN/client-cert permission denials and clarified metadata fields as certification hard-fails rather than runtime fallback triggers |
+| Review R4 | codex CLI adversarial reviewer | Fixed checklist certification gap by requiring explicit reference-image `command`/`args` override or runtime proof that `--insecure` was not used |
+| Review R5 | codex CLI adversarial reviewer | Clean: no blocking correctness issues found; validator and Strategy C tests checked by reviewer |
 
 ## §14. Merge Checklist
 
-- [ ] Plugin onboarding docs exist
-- [ ] Conformance tests pass
-- [ ] Backlog triage report exists
-- [ ] AIT review clean or arbitration recorded
-- [ ] Memory updated
+- [x] Plugin onboarding docs exist
+- [x] Conformance tests pass
+- [x] Backlog triage report exists
+- [x] AIT review clean or arbitration recorded
+- [x] Memory updated
