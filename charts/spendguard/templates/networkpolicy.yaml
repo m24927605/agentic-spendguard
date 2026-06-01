@@ -296,6 +296,66 @@ spec:
               {{- include "spendguard.selector" (merge (dict "component" "run-cost-projector") .) | nindent 14 }}
       ports:
         - { protocol: TCP, port: 50055 }
+{{- if .Values.networkPolicy.metricsIngress.enabled }}
+---
+# ────────────────────────────────────────────────────────────────────────
+# Allow metrics scraping while preserving internal service ingress.
+#
+# POST_GA_03 / #103: once any Ingress NetworkPolicy selects a pod, all
+# unlisted ingress is denied. This policy therefore includes:
+#   * same-release pod-to-pod ingress on all ports, preserving existing
+#     gRPC/service traffic;
+#   * L2-enforced app pods to egress_proxy on :9000;
+#   * Prometheus namespace to first-party metrics ports.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-allow-metrics-ingress
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" "networkpolicy") .) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "spendguard.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Preserve first-party service-to-service calls inside this release.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ include "spendguard.name" . }}
+              app.kubernetes.io/instance: {{ .Release.Name }}
+    # L2-enforced app pods reach only the egress_proxy listener.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $appNamespace | quote }}
+          podSelector:
+            matchLabels:
+              spendguard.io/enforced: "true"
+      ports:
+        - { protocol: TCP, port: 9000 }
+    # Prometheus / metrics collector.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.networkPolicy.metricsIngress.prometheusNamespace | quote }}
+      ports:
+        - { protocol: TCP, port: 9091 }
+        - { protocol: TCP, port: 9092 }
+        - { protocol: TCP, port: 9093 }
+        - { protocol: TCP, port: 9094 }
+        - { protocol: TCP, port: 9096 }
+        - { protocol: TCP, port: 9097 }
+        - { protocol: TCP, port: 9098 }
+        - { protocol: TCP, port: 9099 }
+        - { protocol: TCP, port: 9100 }
+        - { protocol: TCP, port: 9101 }
+        - { protocol: TCP, port: 9102 }
+{{- end }}
 {{- end -}}
 {{- /* SLICE_11 Phase D — production-profile gate.
 

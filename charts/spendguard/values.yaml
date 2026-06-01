@@ -601,6 +601,13 @@ networkPolicy:
   # internal Postgres add it via internal podSelector + extraEgressRules).
   # Most managed-Postgres deployments use a known CIDR — set it here.
   postgresCidrs: []
+  # POST_GA_03 / #103: when NetworkPolicy is enabled, explicitly allow
+  # Prometheus-style scrapers to reach SpendGuard metrics ports. Same-
+  # release pod ingress remains allowed by the rendered policy so this
+  # does not break gRPC service traffic.
+  metricsIngress:
+    enabled: true
+    prometheusNamespace: monitoring
 
 # ── stats_aggregator service (SLICE_06) ─────────────────────────────
 # Spec: docs/stats-aggregator-spec-v1alpha1.md (full).
