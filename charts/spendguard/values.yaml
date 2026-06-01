@@ -278,6 +278,10 @@ tokenizer:
   # in the gRPC service form. Default is sized for the 4 MiB accepted
   # request cap; lower this only with a correspondingly lower ingress cap.
   encodeTimeoutMs: 30000
+  # POST_GA_03 / Round 2: max concurrent blocking encode jobs. This is
+  # a CPU work budget held until encode completion, even if the caller's
+  # RPC has already timed out.
+  encodeMaxConcurrent: 32
   # Round-2 fix B3.3 + Round-3 Backend N2: secure-transport gates for
   # production profile. Set EXACTLY ONE of these under
   # chart.profile=production. Demo profile leaves both empty and falls

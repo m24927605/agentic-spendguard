@@ -61,6 +61,13 @@ pub struct Config {
     #[serde(default = "default_encode_timeout_ms")]
     pub encode_timeout_ms: u64,
 
+    /// Maximum number of synchronous encode jobs allowed to run in the
+    /// gRPC service form at once. The permit is held until the blocking
+    /// encode closure actually returns, so request timeouts cannot create
+    /// unbounded background CPU work.
+    #[serde(default = "default_encode_max_concurrent")]
+    pub encode_max_concurrent: usize,
+
     /// Threshold for emitting `tokenizer_tier3_hit_alert` events.
     /// Default 0.001 (0.1%) per spec §5.3 health invariant.
     /// SLICE_03: the value is plumbed but the alert wire-up itself
@@ -189,6 +196,7 @@ impl std::fmt::Debug for Config {
             .field("tls_ca_pem", &self.tls_ca_pem)
             .field("metrics_addr", &self.metrics_addr)
             .field("encode_timeout_ms", &self.encode_timeout_ms)
+            .field("encode_max_concurrent", &self.encode_max_concurrent)
             .field("tier3_alert_threshold", &self.tier3_alert_threshold)
             .field("region", &self.region)
             .field("shadow_enabled", &self.shadow_enabled)
@@ -246,6 +254,10 @@ fn default_encode_timeout_ms() -> u64 {
     30_000
 }
 
+fn default_encode_max_concurrent() -> usize {
+    32
+}
+
 fn default_shadow_enabled() -> bool {
     // SLICE_05: enabled by default — operators disable via env var per
     // §11 rollback plan. Helm production profile honours the value
@@ -290,6 +302,7 @@ mod tests {
         assert!(cfg.uds_path.is_none());
         assert_eq!(cfg.metrics_addr, "0.0.0.0:9099");
         assert_eq!(cfg.encode_timeout_ms, 30_000);
+        assert_eq!(cfg.encode_max_concurrent, 32);
         assert!((cfg.tier3_alert_threshold - 0.001).abs() < 1e-6);
     }
 
@@ -322,6 +335,23 @@ mod tests {
             ])
             .expect("config loads");
         assert_eq!(cfg.encode_timeout_ms, 7500);
+    }
+
+    #[test]
+    fn encode_max_concurrent_overridable() {
+        let cfg = envy::prefixed("TEST_CFG_")
+            .from_iter::<_, Config>(vec![
+                (
+                    "TEST_CFG_LISTEN_ADDR".to_string(),
+                    "127.0.0.1:50053".to_string(),
+                ),
+                (
+                    "TEST_CFG_ENCODE_MAX_CONCURRENT".to_string(),
+                    "8".to_string(),
+                ),
+            ])
+            .expect("config loads");
+        assert_eq!(cfg.encode_max_concurrent, 8);
     }
 
     /// R2 M13: Debug must not spill the raw API keys.

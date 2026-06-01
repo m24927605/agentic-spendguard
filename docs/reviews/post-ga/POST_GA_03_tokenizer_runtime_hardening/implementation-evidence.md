@@ -123,3 +123,37 @@ Round 1 fix verification:
 - `helm template charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production`
 - `rg "public service ingress|port: 8443|SPENDGUARD_TOKENIZER_ENCODE_TIMEOUT_MS|port: 8091" /tmp/spendguard-postga03-r1fix-prod.yaml`
 - `cargo build --manifest-path services/tokenizer/Cargo.toml && cargo test --manifest-path services/tokenizer/Cargo.toml`
+
+## Adversarial Review Round 2
+
+Required AIT command was run and recorded in `round-2-ait-command.txt`.
+Local AIT again rejected `--review-mode`, so codex CLI fallback review
+was run and recorded in `round-2-codex-review.txt`.
+
+Finding:
+
+- P2: `tokio::time::timeout` bounds caller wait time, but dropping a
+  `spawn_blocking` join handle does not cancel the encode work. Timed
+  out requests could continue consuming Tokio blocking workers.
+
+Round 2 fix:
+
+- `TokenizerSvc` now enforces `DEFAULT_ENCODE_MAX_CONCURRENT` through a
+  per-service `Semaphore`.
+- The semaphore permit is moved into the blocking encode closure, so it
+  is held until actual encode completion even if the RPC returns
+  `DeadlineExceeded`.
+- Exhausted encode budget returns `ResourceExhausted` and increments
+  `ENCODE_CONCURRENCY_LIMITED_TOTAL`.
+- `SPENDGUARD_TOKENIZER_ENCODE_MAX_CONCURRENT` is wired through config
+  and Helm as `tokenizer.encodeMaxConcurrent`, defaulting to 32.
+- The tokenizer service spec now documents timeout as a caller wait
+  bound and max-concurrent as the CPU work budget.
+
+Round 2 fix verification:
+
+- `cargo test --manifest-path services/tokenizer/Cargo.toml encode`
+- `helm template charts/spendguard --set chart.profile=demo`
+- `helm template charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production`
+- `rg "SPENDGUARD_TOKENIZER_ENCODE_MAX_CONCURRENT|SPENDGUARD_TOKENIZER_ENCODE_TIMEOUT_MS|port: 8443|port: 8091" /tmp/spendguard-postga03-r2fix-prod.yaml`
+- `cargo build --manifest-path services/tokenizer/Cargo.toml && cargo test --manifest-path services/tokenizer/Cargo.toml`

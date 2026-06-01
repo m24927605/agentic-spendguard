@@ -142,6 +142,7 @@ async fn main() -> Result<()> {
 
     let svc = TokenizerSvc::new(Arc::clone(&tokenizer))
         .with_encode_timeout(std::time::Duration::from_millis(cfg.encode_timeout_ms))
+        .with_encode_max_concurrent(cfg.encode_max_concurrent)
         .with_shadow_worker(shadow_handle);
     let tonic_svc = TokenizerServer::new(svc)
         // Round-2 fix M6 + Round-3 fix N3 + POST_GA_03 / #114:

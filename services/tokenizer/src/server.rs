@@ -44,6 +44,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
+use tokio::sync::Semaphore;
 use tonic::{Request, Response, Status};
 use tracing::warn;
 
@@ -89,9 +90,16 @@ pub const TOKENIZER_REQUEST_CAP_BYTES: usize = 4 << 20;
 /// `SPENDGUARD_TOKENIZER_ENCODE_TIMEOUT_MS`.
 pub const DEFAULT_ENCODE_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// POST_GA_03 / Round 2: maximum concurrent blocking encode jobs for
+/// the gRPC service form. This is a work budget, not merely a client
+/// wait budget: permits are moved into the blocking closure and are not
+/// released when the RPC timeout fires.
+pub const DEFAULT_ENCODE_MAX_CONCURRENT: usize = 32;
+
 pub static INVALID_REQUEST_ID_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static REQUEST_ID_V4_ACCEPTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static ENCODE_TIMEOUT_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static ENCODE_CONCURRENCY_LIMITED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Max bytes accepted in `raw_text` (the text-completion shape).
 /// POST_GA_03 / #114: matches the 4 MiB protocol-layer
@@ -123,6 +131,7 @@ pub struct TokenizerSvc {
     tokenizer: Arc<Tokenizer>,
     shadow_worker: Option<ShadowWorkerHandle>,
     encode_timeout: Duration,
+    encode_budget: Arc<Semaphore>,
     /// Per-request tenant id pulled from a gRPC metadata header.
     /// Empty when the caller is anonymous (test / library form).
     /// Phase F's control plane API references this for the per-(tenant,
@@ -136,6 +145,7 @@ impl TokenizerSvc {
             tokenizer,
             shadow_worker: None,
             encode_timeout: DEFAULT_ENCODE_TIMEOUT,
+            encode_budget: Arc::new(Semaphore::new(DEFAULT_ENCODE_MAX_CONCURRENT)),
             tenant_header_name: DEFAULT_TENANT_METADATA_HEADER.to_string(),
         }
     }
@@ -156,6 +166,19 @@ impl TokenizerSvc {
         } else {
             timeout
         };
+        self
+    }
+
+    /// Override the encode work budget. A zero limit is coerced back to
+    /// the safe default; callers that want to disable the service should
+    /// do so at deployment/traffic-routing level instead.
+    pub fn with_encode_max_concurrent(mut self, max_concurrent: usize) -> Self {
+        let max_concurrent = if max_concurrent == 0 {
+            DEFAULT_ENCODE_MAX_CONCURRENT
+        } else {
+            max_concurrent
+        };
+        self.encode_budget = Arc::new(Semaphore::new(max_concurrent));
         self
     }
 
@@ -237,9 +260,21 @@ impl TokenizerSvcTrait for TokenizerSvc {
 
         let lib_req = validate_or_mint_request_id(lib_req)?;
 
+        let encode_permit = self
+            .encode_budget
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| {
+                ENCODE_CONCURRENCY_LIMITED_TOTAL.fetch_add(1, Ordering::Relaxed);
+                Status::resource_exhausted("encode concurrency limit exceeded")
+            })?;
+
         let encode_req = lib_req.clone();
         let tokenizer = Arc::clone(&self.tokenizer);
-        let encode_task = tokio::task::spawn_blocking(move || tokenizer.tokenize(&encode_req));
+        let encode_task = tokio::task::spawn_blocking(move || {
+            let _permit = encode_permit;
+            tokenizer.tokenize(&encode_req)
+        });
         let lib_resp = match tokio::time::timeout(self.encode_timeout, encode_task).await {
             Ok(Ok(Ok(resp))) => resp,
             Ok(Ok(Err(err))) => return Err(map_tokenizer_error(err)),
@@ -419,6 +454,37 @@ mod tests {
         let tokenizer = Tokenizer::new_with_embedded_assets().expect("load");
         let svc = TokenizerSvc::new(Arc::new(tokenizer)).with_encode_timeout(Duration::ZERO);
         assert_eq!(svc.encode_timeout, DEFAULT_ENCODE_TIMEOUT);
+    }
+
+    #[test]
+    fn zero_encode_max_concurrent_uses_default() {
+        let tokenizer = Tokenizer::new_with_embedded_assets().expect("load");
+        let svc = TokenizerSvc::new(Arc::new(tokenizer)).with_encode_max_concurrent(0);
+        assert_eq!(
+            svc.encode_budget.available_permits(),
+            DEFAULT_ENCODE_MAX_CONCURRENT
+        );
+    }
+
+    #[tokio::test]
+    async fn encode_budget_exhaustion_returns_resource_exhausted() {
+        let tokenizer = Tokenizer::new_with_embedded_assets().expect("load");
+        let svc = TokenizerSvc::new(Arc::new(tokenizer)).with_encode_max_concurrent(1);
+        let _held = svc
+            .encode_budget
+            .clone()
+            .try_acquire_owned()
+            .expect("hold only permit");
+
+        let req = Request::new(TokenizeRequest {
+            model: "gpt-4o-mini".to_string(),
+            messages: vec![],
+            raw_text: "hello world".to_string(),
+            request_id: String::new(),
+        });
+        let err = svc.tokenize(req).await.expect_err("budget exhausted");
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+        assert!(err.message().contains("encode concurrency limit"));
     }
 
     #[tokio::test]

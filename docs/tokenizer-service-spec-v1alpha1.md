@@ -852,6 +852,12 @@ with `SPENDGUARD_TOKENIZER_ENCODE_TIMEOUT_MS` (Helm:
 than the 10K stress SLO and compatible with the 4 MiB accepted request
 cap; operators lowering this timeout must also lower upstream request
 caps or prove long-prompt benchmarks stay below the configured value.
+Because `spawn_blocking` work is not cancellable by dropping the client
+wait handle, the service also enforces
+`SPENDGUARD_TOKENIZER_ENCODE_MAX_CONCURRENT` (Helm:
+`tokenizer.encodeMaxConcurrent`, default 32). The concurrency permit is
+held inside the blocking encode closure until the actual encode returns,
+so timed-out RPCs cannot create unbounded background CPU work.
 
 ### 10.2 Shadow availability
 
