@@ -78,6 +78,12 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 serde_json = "1"
 hex = "0.4"
 
+# POST_GA_05 / #139: Llama Tier 1 verification uses Amazon Bedrock
+# Runtime CountTokens so we do not hand-roll SigV4. Defaults keep rustls
+# and tokio, matching the service-wide TLS/runtime posture.
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = "1.132.0"
+
 # SLICE_05: random float for sample rate gating. Default features
 # omitted to drop `getrandom`'s wasm-only paths; the `std` + `std_rng`
 # defaults we keep are enough for ThreadRng.
