@@ -175,7 +175,8 @@ sidecar:
     # sidecars ignored. Before changing this tag across a SLICE_02+
     # boundary, run the grep in docs/contract-dsl-spec-v1alpha2.md §8.4;
     # v1alpha2 bundles with `condition:` fail with bundle_validation_failed
-    # until the SLICE_09 CEL accessor surface is active.
+    # and projection predicates must be removed or kept disabled because
+    # RUN_* activation is owned by run_cost_projector.
     tag: "0.1.0-alpha.1"
   fencingScopeId: "33333333-3333-4333-8333-333333333333"
   workloadInstanceId: "sidecar-0"

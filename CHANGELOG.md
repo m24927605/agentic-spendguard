@@ -10,9 +10,10 @@ Version tags follow `vYYYY.MM.DD-ga.N` for GA release candidates and GA releases
 - Release bundle tooling added in GA_01.
 - Operator upgrade warning: before rolling a SLICE_02+ sidecar, grep
   contract bundles for `condition:`. v1alpha2 bundles with CEL
-  `condition:` fail to load with `bundle_validation_failed` until the
-  SLICE_09 CEL accessor surface is active; use the declarative `when:`
-  form documented in `docs/contract-dsl-spec-v1alpha2.md` §8.4.
+  `condition:` fail to load with `bundle_validation_failed`; amount-only
+  predicates may be rewritten to declarative `when:`, while projection
+  predicates must be removed or kept disabled because RUN_* activation is
+  owned by `run_cost_projector`.
 
 ## v2026.05.31-ga.0 - 2026-05-31
 
