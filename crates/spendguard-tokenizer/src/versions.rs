@@ -43,10 +43,12 @@ pub const HEURISTIC_FALLBACK_VERSION_ID: &str = "";
 // 0049 SQL migration, the library mapping, and any verify-chain
 // reproduction read the same values byte-for-byte.
 //
-// Convention: the timestamp half is 2026-05-30 00:00:00 UTC (the day
-// SLICE_03 ships) and the random tail is a kind-specific hex
-// signature so the IDs sort by ship-date and are visually
-// distinguishable in audit dumps.
+// Convention: these IDs are stable application-minted UUIDv7-shaped
+// constants. The timestamp half is decorative: the current prefix
+// decodes to 2024-10-18, not the SLICE_03 ship date. Do not infer
+// registration time from these UUIDs; use tokenizer_versions.registered_at
+// for operator-visible chronology. The random tail is a kind-specific
+// hex signature so the IDs are visually distinguishable in audit dumps.
 //
 // ## UUIDv7 layout (RFC 9562 §5.7)
 //
@@ -83,8 +85,9 @@ pub const HEURISTIC_MARKER_VERSION_ID: &str = "01918000-0000-7c10-8c10-000000000
 // ============================================================================
 // SLICE_04 — Tier 2 expansion (Anthropic + Cohere + Gemini + Llama).
 //
-// Same UUIDv7 minting convention as SLICE_03:
-//   * Timestamp half: 2026-05-30 00:00:00 UTC (ship-day grouping).
+// Same UUIDv7-shaped minting convention as SLICE_03:
+//   * Timestamp half: decorative stable prefix; currently decodes to
+//     2024-10-18 and is not a registration timestamp.
 //   * Version nibble: 7 (RFC 9562 §5.7).
 //   * Variant nibble: 8 (the simplest deterministic 10xx2 choice;
 //     also what SLICE_03 R2 B2 standardised on after the original

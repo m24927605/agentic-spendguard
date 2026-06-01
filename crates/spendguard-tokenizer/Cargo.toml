@@ -61,9 +61,11 @@ tiktoken-rs = "0.11"
 #     features added build deps + binary size without any runtime
 #     benefit for our use case.
 #   * `features = ["onig"]` keeps the Oniguruma regex backend (the
-#     `transformers` default). All four vendored tokenizer.json files
-#     reference PCRE-style patterns in their pretokenizer config;
-#     disabling `onig` risks a silent encode drift on edge-case inputs.
+#     `transformers` default). Anthropic / Cohere / Llama tokenizer.json
+#     files use PCRE-style regex pretokenizers that require onig. Gemini's
+#     Gemma tokenizer uses Replace(String) normalizers and would work
+#     without onig, but disabling onig crate-wide would break the other
+#     vendored encoders.
 #   * Net effect: ~1-2 MB smaller binary + ~30 fewer transitive crate
 #     deps. Boot time + hot path performance unchanged (we never
 #     touched the trimmed code paths).

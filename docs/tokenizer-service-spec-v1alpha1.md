@@ -565,10 +565,14 @@ CREATE TABLE tokenizer_t1_samples (
     provider_request_id TEXT
 );
 
-CREATE INDEX tokenizer_t1_samples_drift_idx
+CREATE INDEX tokenizer_t1_samples_alert_idx
   ON tokenizer_t1_samples (tenant_id, model, sampled_at DESC)
   WHERE drift_alert_emitted = TRUE;
 ```
+
+Migration source of truth: `services/ledger/migrations/0051_tokenizer_t1_samples.sql`
+uses `tokenizer_t1_samples_alert_idx`; any older `drift_idx` spelling is
+stale draft text.
 
 Retention：90 日（per tenant policy override allowed）。Drift 分析 / vendor update 偵測用。Calibration-report CLI 不讀此表 —— 它的數據在 `audit_outbox` prediction columns。
 
@@ -594,6 +598,14 @@ tier3_input_tokens = ceil(total_chars / 4 × 1.05)
 ```
 
 `1.05` 是 5% conservative margin —— 故意比 v1alpha1 之前的 17 行 heuristic（`chars / 4 × 2`）窄；因為 Tier 3 只在 unknown model 時觸發，operator 應該主動 PR 補 dispatch entry，不該長期靠 Tier 3 撐。寬 margin 會讓 operator 缺乏動機修。
+
+The implementation counts `total_chars` with Rust's Unicode-aware
+`text.chars().count()`. For CJK input this intentionally over-reserves:
+many CJK characters are close to one token each, while the fallback
+still divides by four and applies the 5% margin. This is acceptable only
+because Tier 3 is a last-resort path with the §5.3 health invariant
+(`tokenizer_tier3_hit_total / total_tokenize_calls < 0.001`). The bias
+fails closed by reserving more than tokenizer truth, not less.
 
 對於可能輸出 reasoning tokens 的 unknown model：不額外加倍。Tier 3 是 input-side fallback only；output projection 由 output_predictor 的 Strategy A 用 `max_tokens` 處理。
 
@@ -662,6 +674,12 @@ CREATE INDEX tokenizer_versions_active_idx
 
 per `audit-chain-prediction-extension-v1alpha1.md` §2.1：每筆 decision audit row 寫 `tokenizer_version_id` FK 至本 table。FK constraint 強制 referential integrity。Tier 3 fallback → `tokenizer_version_id` NULL（per audit-chain extension §2.1 nullable rules）。
 
+The `kind='HEURISTIC'` seed row is deliberately not reachable through
+the `audit_outbox.tokenizer_version_id` FK for Tier 3 rows. It exists for
+diagnostic and calibration-report joins that need a stable registry row
+for the fallback kind; audit rows still encode the fallback with NULL /
+empty-string sentinel semantics.
+
 ---
 
 ## §7. Vendored encoder maintenance
@@ -678,30 +696,27 @@ per `audit-chain-prediction-extension-v1alpha1.md` §2.1：每筆 decision audit
 
 #### 7.1 R2 M5 — Gemini approximation honest disclosure
 
-The v1alpha1 draft claimed `GEMINI_BPE` came "From Google AI published
-tokenizer files". This was inaccurate: Google publishes a `countTokens`
-REST endpoint, not a vendorable BPE merges file. The actual asset
-SpendGuard vendors is the open-source **Gemma tokenizer** released by
-Google AI under Apache 2.0, which shares the underlying BPE config that
-Google reports as a parity proxy for Gemini's `countTokens` semantics
-within ~1% on typical inputs.
+**Source URL** (pinned in `LICENSE_NOTICES.md`):
+`https://huggingface.co/Xenova/gemma-tokenizer`
 
-Implications:
+**License**: MIT (Xenova mirror) / Apache 2.0 (Gemma upstream).
 
-* The published `<1% delta per Google's parity table` claim in
-  R1's `encoders/gemini.rs` doc-comment is not citable — there is no
-  Google-published parity table for Gemma-vs-Gemini. The R2 comment
-  rewrites this as "approximation; drift threshold §4.2 accounts for
-  unknown gap" so future readers don't repeat the unsupported claim.
-* The `tokenizer_versions` `kind=GEMINI_BPE` row's `version_string`
-  remains `gemini-1.5-bpe-2026-05` (the SpendGuard-internal asset id);
-  the underlying asset URL pinned in
-  `crates/spendguard-tokenizer/LICENSE_NOTICES.md` correctly references
-  `huggingface.co/Xenova/gemma-tokenizer`.
-* If SLICE_05 production data shows >1% drift, the §4.2 threshold
-  widens to absorb measured drift OR we switch Gemini to a Tier 1-only
-  strategy (no Tier 2 hot path). Either path documented for operator
-  visibility.
+**R2 M5 honest disclosure**:
+
+* Google's official Gemini tokenizer is API-only (`countTokens` REST
+  endpoint); Google does not publish a vendorable Gemini BPE merges file.
+* SpendGuard vendors the Xenova community Gemma tokenizer as the closest
+  publicly available approximation.
+* There is no citable Google-published Gemma-vs-Gemini parity table; the
+  actual gap must be measured by the SLICE_05 shadow worker against the
+  official `countTokens` API.
+* Spec §4.2 carries a 1% drift threshold to absorb the approximation gap.
+* If production shadow data shows >1% drift, the threshold widens to the
+  measured value or Gemini switches to Tier 1-only. Either path requires
+  an operator-visible spec update.
+
+The `tokenizer_versions` `kind=GEMINI_BPE` row's `version_string`
+remains `gemini-1.5-bpe-2026-05` as a SpendGuard-internal asset id.
 
 #### 7.1 R2 M6 — Cohere encoder opt-in feature flag
 

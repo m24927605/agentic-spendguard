@@ -111,7 +111,7 @@ The audit-chain extension §2.1 columns `tokenizer_tier` + `tokenizer_version_id
 ### 8.1 Unit tests
 
 - Each dispatch table entry maps to correct encoder + version_id
-- Tier 2 OpenAI tokenize matches tiktoken Python reference output for 50 golden samples
+- Tier 2 OpenAI tokenize matches tiktoken Python reference output for 51 golden samples (50 reference + 1 boundary-cap sample)
 - Tier 3 fallback formula correct for unknown model
 - Asset signature check fails on tampered bytes
 
@@ -163,7 +163,7 @@ The audit-chain extension §2.1 columns `tokenizer_tier` + `tokenizer_version_id
 ## §11. Risk / rollback plan
 
 - Risk: incorrect encoder dispatch → systematic under/over estimate
-- Mitigation: 50 golden sample tests; tiktoken parity
+- Mitigation: 51 golden sample tests (50 reference + 1 boundary-cap sample); tiktoken parity
 - Rollback: disable tokenizer service in Helm; sidecar falls back to legacy `estimate_tokens` heuristic (deferred SLICE_10 integration means heuristic still in proxy)
 
 ---

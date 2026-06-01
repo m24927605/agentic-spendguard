@@ -16,6 +16,12 @@
 // verify-chain can reproduce historical decisions even after an
 // encoder refresh (per §7.3).
 //
+// Protocol-layer cap: max_decoding_message_size = 1 MiB is configured
+// server-side in services/tokenizer/src/main.rs. The per-field caps
+// below are redundant defense-in-depth and produce field-specific
+// InvalidArgument errors after a request has already passed the tonic
+// frame cap.
+//
 // SLICE_03 scope:
 //   - Tokenize RPC: Tier 2 OpenAI dispatch + Tier 3 fallback
 //   - ShadowVerify RPC: declared but returns UNIMPLEMENTED;
@@ -78,6 +84,7 @@ message TokenizeRequest {
   repeated Message messages = 2;
 
   // Mutually exclusive with messages; for text-completion shape.
+  // PROTOCOL CAP: 1 MiB.
   // Server rejects with InvalidArgument if len > 1 MiB (M6 / R3 N3).
   string raw_text = 3;
 
@@ -91,6 +98,7 @@ message TokenizeRequest {
 
     // Text content; vision/multimodal v2 will add binary
     // content_parts as a separate additive field.
+    // PROTOCOL CAP: 1 MiB.
     // Server rejects with InvalidArgument if len > 1 MiB (M6 / R3 N3).
     string content = 2;
 

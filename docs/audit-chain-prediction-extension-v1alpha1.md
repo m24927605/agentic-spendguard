@@ -224,6 +224,12 @@ proto3 沒有「field absent」的原生語意（fields with default values are 
 
 審計層讀 audit_outbox column（非 CloudEvent proto）時看到的是 SQL NULL；wire 層 mirror 不到 NULL，只能 0/-1/""。Producer 需做 NULL ↔ sentinel 雙向轉譯（per §6.3 column-vs-proto consistency table）。
 
+Tokenizer registry note: the `tokenizer_versions` table contains a
+`kind='HEURISTIC'` seed row for diagnostic/calibration joins, but Tier 3
+audit rows do not FK to it. The authoritative Tier 3 sentinel is still
+`audit_outbox.tokenizer_version_id IS NULL` and proto tag 307 empty
+string.
+
 ### 3.4 為什麼選 mirror approach 而非「擴展 canonical_bytes derivation 從 column 讀」
 
 | 方案 | 優勢 | 風險 |
