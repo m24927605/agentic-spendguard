@@ -14,11 +14,11 @@ Branch: `post-ga/POST_GA_02_contract_spec_cleanup`
 | #93 | `docs/contract-dsl-spec-v1alpha2.md` §8.4, `CHANGELOG.md`, and `charts/spendguard/values.yaml` document upgrade grep and `bundle_validation_failed`. |
 | #97 | `docs/audit-chain-prediction-extension-v1alpha1.md` and `docs/tokenizer-service-spec-v1alpha1.md` clarify HEURISTIC marker row vs Tier 3 NULL sentinel. |
 | #99 | `services/tokenizer/tests/golden_samples.rs` and `docs/slices/SLICE_03_tokenizer_service_skeleton_openai.md` say 51 samples. |
-| #101 | `docs/tokenizer-service-spec-v1alpha1.md` §5.1 documents CJK over-reservation as conservative Tier 3 behavior. |
+| #101 | `docs/tokenizer-service-spec-v1alpha1.md` §5.1 documents CJK Tier 3 as an under-reservation risk for unknown-model traffic, not fail-closed behavior. |
 | #113 | `proto/spendguard/tokenizer/v1/tokenizer.proto` documents 1 MiB protocol cap and field-level defense-in-depth. |
 | #121 | Anthropic and Cohere encoder comments now reference `discover_fixture_tokens`. |
 | #123 | `crates/spendguard-tokenizer/Cargo.toml` onig justification now distinguishes Gemini from Anthropic/Cohere/Llama. |
-| #131 | `crates/spendguard-tokenizer/src/versions.rs` states UUID timestamp half is decorative and decodes to 2024-10-18. |
+| #131 | `crates/spendguard-tokenizer/src/versions.rs` states UUID timestamp half is decorative and decodes to `2024-08-23T16:09:29.344Z`. |
 | #136 | Gemini §7.1 disclosure is split into source/license/honest-disclosure bullets. |
 | #141 | Added `docs/operations/runbooks/tokenizer-key-rotation.md`. |
 | #147 | `docs/tokenizer-service-spec-v1alpha1.md` uses `tokenizer_t1_samples_alert_idx`. |
@@ -45,6 +45,7 @@ Results:
 - `bash -n scripts/verify-migrations-postgres16.sh`: pass
 - Targeted output_predictor test: pass, 1 test
 - `scripts/verify-migrations-postgres16.sh`: pass against `postgres:16-alpine`
+- Round 1 reviewer-fix reruns: `scripts/ga/validate-post-ga-docs.sh`, `git diff --check main..HEAD`, targeted output_predictor test, stale-text grep, and `scripts/verify-migrations-postgres16.sh` all pass
 
 Postgres evidence:
 

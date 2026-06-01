@@ -600,12 +600,13 @@ tier3_input_tokens = ceil(total_chars / 4 × 1.05)
 `1.05` 是 5% conservative margin —— 故意比 v1alpha1 之前的 17 行 heuristic（`chars / 4 × 2`）窄；因為 Tier 3 只在 unknown model 時觸發，operator 應該主動 PR 補 dispatch entry，不該長期靠 Tier 3 撐。寬 margin 會讓 operator 缺乏動機修。
 
 The implementation counts `total_chars` with Rust's Unicode-aware
-`text.chars().count()`. For CJK input this intentionally over-reserves:
-many CJK characters are close to one token each, while the fallback
-still divides by four and applies the 5% margin. This is acceptable only
-because Tier 3 is a last-resort path with the §5.3 health invariant
-(`tokenizer_tier3_hit_total / total_tokenize_calls < 0.001`). The bias
-fails closed by reserving more than tokenizer truth, not less.
+`text.chars().count()`. CJK-heavy unknown-model traffic is not fail-closed:
+many CJK characters are close to one token each, while this fallback still
+divides by four and applies only the 5% margin. Operators must treat CJK Tier
+3 hits as an accuracy-risk signal and add a real dispatch entry instead of
+letting this path persist. The risk is acceptable only because Tier 3 is a
+last-resort path with the §5.3 health invariant
+(`tokenizer_tier3_hit_total / total_tokenize_calls < 0.001`).
 
 對於可能輸出 reasoning tokens 的 unknown model：不額外加倍。Tier 3 是 input-side fallback only；output projection 由 output_predictor 的 Strategy A 用 `max_tokens` 處理。
 

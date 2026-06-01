@@ -368,10 +368,10 @@ pub async fn compute_c(
 ///     mentioning "decode" / "DecodeError" / "invalid wire format" /
 ///     "InvalidProtobuf", NOT `Code::DataLoss`. The router peeks at
 ///     the message for these sentinels.
-    ///   - `Code::Unavailable` with a "not_serving" sentinel maps to
-    ///     `NotServing` (spec §5.1 mode 8). This is the Predict refusal
-    ///     path, distinct from disabled endpoint rows and breaker-open
-    ///     health-loop state.
+///   - `Code::Unavailable` with a "not_serving" sentinel maps to
+///     `NotServing` (spec §5.1 mode 8). This is the Predict refusal
+///     path, distinct from disabled endpoint rows and breaker-open
+///     health-loop state.
 fn classify_status(status: &tonic::Status) -> StrategyCFailure {
     let code = status.code();
     let msg = status.message();

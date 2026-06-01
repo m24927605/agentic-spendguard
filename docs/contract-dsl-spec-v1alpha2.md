@@ -324,16 +324,10 @@ spec:
   # NEW (v1alpha2):
   prediction_policy: STRICT_CEILING  # default; one of STRICT/EMPIRICAL/ADAPTIVE/SHADOW
 
-  rules:
-    - id: stop_when_projection_exceeded
-      priority: 1100  # higher than v1alpha1 §10 stop_when_exhausted (1000)
-      when:
-        claim_amount_atomic_gt: 0
-      effect:
-        decision: stop  # v1alpha1 lattice 仍用 stop
-        reasonCode: RUN_BUDGET_PROJECTION_EXCEEDED
-      # NEW (v1alpha2):
-      run_projection_action: BLOCK_NEXT_CALL  # default
+  # RUN_* rules are not authored as claim-amount threshold rules. SLICE_09+
+  # wires run_cost_projector output directly into the evaluator; see §6.3 for
+  # the non-authoritative shape and §8.4 for CEL upgrade guidance.
+  rules: []
 ```
 
 SLICE_02 ships the CEL helper structs (`RunProjection`,
@@ -395,7 +389,9 @@ prediction.strategy_chosen  // "A" | "B" | "C"
 prediction.confidence  // 0.0-1.0
 ```
 
-Post-SLICE_09 example:
+Post-SLICE_09 non-authoritative pseudo-shape. This illustrates the predicate
+that run_cost_projector evaluates internally; do not paste this into a
+contract bundle because v1alpha2 sidecars fail closed on `condition:` per §8.4.
 
 ```yaml
 rules:

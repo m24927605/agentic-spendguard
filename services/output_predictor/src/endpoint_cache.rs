@@ -214,9 +214,9 @@ impl EndpointCache {
     /// Returns only tenants whose cached entry is still within
     /// `refresh_ttl`. Stale entries are excluded: the health loop will
     /// pick them up after the next lookup() reload via the slow path.
-    /// Includes both enabled + disabled tenants — `enabled = FALSE`
-    /// is reported as `not_serving` so the kill-switch surfaces in
-    /// the breaker metrics.
+    /// Includes both enabled + disabled tenants. The health loop sees
+    /// `enabled = FALSE` through `EndpointCacheError::NotConfigured`,
+    /// matching the Strategy C kill-switch semantics.
     pub fn cached_tenants(&self) -> Vec<Uuid> {
         let now = Instant::now();
         self.entries
