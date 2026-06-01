@@ -146,8 +146,12 @@ chmod 0644 "$OUT"/*.crt "$OUT/ca.spki.sha256.hex"
 chmod 0640 "$OUT"/*.key
 
 # Runtime images run as USER 65532:65532. Preserve tight key permissions while
-# making mounted cert/key volumes readable to the service UID.
+# making mounted cert/key volumes readable to the service UID. The demo CA key
+# stays root-only even though the volume is shared read-only with runtime
+# containers; services only need ca.crt and their workload/signing keys.
 chown -R 65532:65532 "$OUT"
+chown 0:0 "$OUT/ca.key"
+chmod 0600 "$OUT/ca.key"
 
 echo "[pki] generated artifacts:"
 ls -la "$OUT"

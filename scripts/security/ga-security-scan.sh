@@ -112,31 +112,76 @@ run_and_capture helm-demo helm template spendguard charts/spendguard --set chart
 helm template spendguard charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production >"$output_dir/helm-production.yaml"
 run_and_capture production-helm-validator scripts/release/validate-production-helm-values.sh charts/spendguard/values-production.example.yaml --rendered-manifest "$output_dir/helm-production.yaml"
 
-run_and_capture cargo-metadata cargo metadata --format-version 1 --locked
-python3 - "$output_dir/cargo-metadata.txt" "$output_dir/cargo-sbom.json" <<'PY'
+metadata_raw="$(mktemp)"
+cargo metadata --format-version 1 --locked >"$metadata_raw"
+python3 - "$metadata_raw" "$output_dir/cargo-metadata.txt" "$output_dir/cargo-sbom.json" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-metadata_log = Path(sys.argv[1]).read_text(encoding="utf-8")
-metadata_json = metadata_log.split("\n\n", 1)[1]
-metadata = json.loads(metadata_json)
+raw_path = Path(sys.argv[1])
+metadata_out = Path(sys.argv[2])
+sbom_out = Path(sys.argv[3])
+root = Path.cwd().resolve()
+home = Path.home().resolve()
+cargo_registry_src = home / ".cargo" / "registry" / "src"
+
+
+def sanitize_string(value: str) -> str:
+    value = value.replace(str(root), "$REPO")
+    value = value.replace(str(cargo_registry_src), "$CARGO_REGISTRY_SRC")
+    value = value.replace(str(home), "$HOME")
+    return value
+
+
+def sanitize(value):
+    if isinstance(value, dict):
+        return {key: sanitize(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [sanitize(item) for item in value]
+    if isinstance(value, str):
+        return sanitize_string(value)
+    return value
+
+
+def stable_manifest_path(value):
+    if not value:
+        return None
+    path = Path(value)
+    try:
+        return path.resolve().relative_to(root).as_posix()
+    except Exception:
+        if str(cargo_registry_src) in value or "/.cargo/registry/" in value:
+            return None
+        return sanitize_string(value)
+
+
+metadata = json.loads(raw_path.read_text(encoding="utf-8"))
+sanitized_metadata = sanitize(metadata)
+metadata_out.write_text(
+    "$ cargo metadata --format-version 1 --locked\n\n"
+    + json.dumps(sanitized_metadata, indent=2, sort_keys=True)
+    + "\n",
+    encoding="utf-8",
+)
+
 packages = []
 for package in sorted(metadata["packages"], key=lambda item: (item["name"], item["version"])):
     packages.append(
         {
             "name": package["name"],
             "version": package["version"],
-            "id": package["id"],
-            "source": package.get("source"),
+            "id": sanitize_string(package["id"]),
+            "source": sanitize_string(package["source"]) if package.get("source") else None,
             "license": package.get("license"),
-            "manifest_path": package.get("manifest_path"),
+            "manifest_path": stable_manifest_path(package.get("manifest_path")),
         }
     )
-Path(sys.argv[2]).write_text(
+sbom_out.write_text(
     json.dumps(
         {
             "schema": "spendguard.local-cargo-sbom.v1alpha1",
+            "path_policy": "repository paths are relative; registry cache paths are stripped",
             "package_count": len(packages),
             "packages": packages,
         },
@@ -147,6 +192,7 @@ Path(sys.argv[2]).write_text(
     encoding="utf-8",
 )
 PY
+rm -f "$metadata_raw"
 
 if command -v syft >/dev/null 2>&1; then
   syft file:Cargo.lock \
@@ -242,6 +288,7 @@ sidecar_dockerfile = text("deploy/demo/runtime/Dockerfile.sidecar")
 sidecar_entrypoint = text("deploy/demo/runtime/sidecar-entrypoint.sh")
 pki_init = text("deploy/demo/init/pki/generate.sh")
 bundles_init = text("deploy/demo/init/bundles/generate.sh")
+compose = text("deploy/demo/compose.yaml")
 record(
     "sidecar_image_precreates_secret_links",
     "/var/run/secrets/spendguard/tls.crt" in sidecar_dockerfile
@@ -268,9 +315,21 @@ record(
     "pki-init hands cert/key volume to runtime UID 65532",
 )
 record(
+    "pki_ca_key_remains_root_only",
+    'chown 0:0 "$OUT/ca.key"' in pki_init and 'chmod 0600 "$OUT/ca.key"' in pki_init,
+    "pki-init keeps demo CA private key out of runtime UID",
+)
+record(
     "bundles_volume_chowned_for_runtime_uid",
     'chown -R 65532:65532 "$OUT"' in bundles_init and "ensure_nonroot_ownership" in bundles_init,
     "bundles-init hands writable bundle volume to runtime UID 65532",
+)
+record(
+    "compose_sidecar_uds_volume_handoff",
+    "sidecar-uds-init:" in compose
+    and "chown -R 65532:65532 /var/run/spendguard" in compose
+    and "sidecar-uds-init:" in compose.split("sidecar:", 1)[0],
+    "compose hands existing sidecar UDS named volume to runtime UID before sidecar starts",
 )
 
 production_values = text("charts/spendguard/values-production.example.yaml")
@@ -323,6 +382,24 @@ record("svid_runtime_exact_uri", svid_runtime_ok, "runtime validator uses exact 
 
 sbom = json.loads((output_dir / "cargo-sbom.json").read_text(encoding="utf-8"))
 record("cargo_sbom_generated", sbom.get("package_count", 0) > 0, f"{sbom.get('package_count', 0)} Cargo packages recorded")
+local_path_tokens = [str(Path.home()), str(root)]
+evidence_paths = [
+    output_dir / "cargo-metadata.txt",
+    output_dir / "cargo-sbom.json",
+]
+local_path_hits = []
+for evidence_path in evidence_paths:
+    contents = evidence_path.read_text(encoding="utf-8")
+    for token in local_path_tokens:
+        if token and token in contents:
+            local_path_hits.append(f"{evidence_path.name}:{token}")
+record(
+    "cargo_evidence_no_local_paths",
+    not local_path_hits,
+    "cargo metadata/SBOM evidence strips developer-local paths"
+    if not local_path_hits
+    else ", ".join(local_path_hits),
+)
 
 summary = {
     "schema": "spendguard.ga09.security_scan.v1alpha1",

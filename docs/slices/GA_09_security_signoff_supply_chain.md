@@ -1,7 +1,7 @@
 # GA 09 - Security Signoff and Supply Chain
 
 > **Branch**: `ga/GA_09_security_signoff_supply_chain`
-> **Status**: implemented; adversarial review in progress
+> **Status**: implemented; adversarial review R3 pending
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; threat model, scan scripts, supply-chain docs
 
@@ -67,7 +67,7 @@ This is the release security gate. It must not waive known high-severity finding
 
 Local evidence on 2026-06-01:
 
-- `scripts/security/ga-security-scan.sh --require-external-tools` passed after R1 non-root runtime fixes.
+- `scripts/security/ga-security-scan.sh --require-external-tools` passed after R2 security evidence hardening fixes.
 - External tools installed and recorded: Syft 1.44.0, Trivy 0.70.0, Cosign 3.0.6, cargo-audit 0.22.1.
 - `cargo-audit.json` reports 0 vulnerabilities and no warnings.
 - `trivy-fs.json` reports 0 high/critical vulnerabilities for `Cargo.lock`.
@@ -76,7 +76,8 @@ Local evidence on 2026-06-01:
 - `scripts/release/validate-production-helm-values.sh charts/spendguard/values-production.example.yaml --rendered-manifest /tmp/ga09-helm-prod.yaml` passed with negative tests failed closed.
 - `scripts/release/build-release-bundle.sh --output /tmp/spendguard-ga09-release` passed.
 - `scripts/release/check-release-bundle.sh /tmp/spendguard-ga09-release` passed.
-- `make demo-up DEMO_MODE=default` passed after R1 non-root volume ownership fixes; demo completed handshake, decision, provider_report, Step 8 SQL assertions, outbox closure, and canonical_events forwarding checks.
+- `make demo-up DEMO_MODE=default` passed after R2 volume handoff fixes; demo completed handshake, decision, provider_report, Step 8 SQL assertions, outbox closure, and canonical_events forwarding checks.
+- Upgrade simulation manually root-owned the existing `spendguard-demo_sidecar-uds` named volume, then reran `make demo-up DEMO_MODE=default`; `sidecar-uds-init` handed the volume to `65532:65532`, sidecar bound the UDS, and runtime RPCs succeeded. A non-clean SQL assertion failed only because previous demo rows remained; clean rerun passed.
 
 R1 regression coverage added after adversarial review:
 
@@ -85,6 +86,13 @@ R1 regression coverage added after adversarial review:
 - `Dockerfile.sidecar` pre-creates `/var/run/secrets/spendguard` symlinks and `/var/run/spendguard` before `USER 65532:65532`.
 - `sidecar-entrypoint.sh` no longer creates root-owned paths, mutates the OS trust store, or chmods the UDS directory after the USER switch.
 - `scripts/security/ga-security-scan.sh` now fails if the above non-root runtime invariants regress.
+
+R2 regression coverage added after adversarial review:
+
+- `pki-init` keeps the demo CA private key `root:root 0600` after handing runtime-readable workload cert/key material to UID/GID `65532:65532`.
+- `compose.yaml` adds `sidecar-uds-init`, a one-shot volume handoff service that chowns existing sidecar UDS named volumes before the non-root sidecar starts.
+- `scripts/security/ga-security-scan.sh` sanitizes `cargo metadata` and local Cargo SBOM evidence so committed evidence strips developer-local absolute paths.
+- `scripts/security/ga-security-scan.sh` now fails if the CA-key isolation, sidecar UDS volume handoff, or cargo evidence path-sanitization invariants regress.
 
 Evidence:
 
@@ -130,6 +138,9 @@ Reviewer must treat unhandled high-severity findings as blockers.
 | Release Engineering Architect | Release bundle gate must include migrations added after GA_04 | Refreshed migration inventory for canonical `0021` and ledger `0053` |
 | Security Engineer | R1 P1/P2 findings showed image `USER 65532` must be paired with compose volume ownership handoff | Fixed PKI, bundle, and sidecar runtime ownership and added scan guards |
 | Release Engineering Architect | Manual publish dispatch must still produce an immutable image tag | Restored workflow_dispatch `sha-<short>` tag without reintroducing mutable `latest` |
+| Security Engineer | R2 found the demo CA private key must not become readable by runtime UID 65532 | Re-rooted `ca.key` to `root:root 0600` after PKI runtime handoff and added a scan guard |
+| Platform Runtime Architect | R2 found named Docker volumes from pre-GA runs can mask image-level sidecar UDS ownership | Added `sidecar-uds-init` to repair the named volume before sidecar startup |
+| Release Engineering Architect | R2 found committed evidence must not leak developer-local absolute paths | Sanitized cargo metadata/SBOM evidence and added a path-leak scan guard |
 
 ## §14. Merge Checklist
 
