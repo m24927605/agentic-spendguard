@@ -770,6 +770,7 @@ message ReleaseReservationRequest {
 //   ReservationStateConflict → Status::failed_precondition
 //   ReservationTtlExpired    → Status::failed_precondition
 //   FencingEpochStale        → Status::failed_precondition
+//   IdempotencyConflict      → Status::failed_precondition
 //   (unknown reservation)    → Status::not_found
 //   (tenant mismatch)        → Status::permission_denied
 //   (invalid UUID)           → Status::invalid_argument
@@ -778,7 +779,10 @@ message ReleaseReservationResponse {
 
   // Detached Ed25519 signature of the emitted audit.release CloudEvent.
   // The full event lands in the audit chain via canonical_ingest; this
-  // signature lets the adapter pin the response to the receipt.
+  // signature lets the adapter pin the response to the receipt. Same-
+  // process idempotent replay returns the original signature while the
+  // sidecar replay cache is warm; cache miss returns empty bytes rather
+  // than a signature over a retry event that was not persisted.
   bytes audit_event_signature = 1;
 
   // ── SpendGuard extensions (additive) ────────────────────────────────

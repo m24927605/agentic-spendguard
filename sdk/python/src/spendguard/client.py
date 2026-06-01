@@ -734,20 +734,12 @@ class SpendGuardClient:
                   metadata regardless)
 
         Idempotent: same (reservation_id, idempotency_key) returns the
-        original outcome on retry. Different idempotency_key against an
-        already-released reservation surfaces as a gRPC
-        FailedPrecondition (SpendGuardError with detail mentioning
-        RESERVATION_SETTLED).
-
-        Known v1 limitations (tracked at github.com/m24927605/agentic-
-        spendguard/issues/85, /86, /87):
-          - Replay-branch responses carry empty audit_event_signature
-            (re-fetch via ledger_transaction_id if you need the
-            original receipt)
-          - Retries fail if the sidecar's fencing lease changed since
-            the original call
-          - Ledger IdempotencyConflict surfaces as INTERNAL not
-            FailedPrecondition
+        original outcome on retry. Same-process retry returns the
+        original audit_event_signature while the sidecar replay cache is
+        warm; cache miss returns empty bytes rather than a fabricated
+        signature. Different idempotency_key against an already-released
+        reservation, stale first-time mutation, and same-key different
+        ledger request body surface as gRPC FailedPrecondition.
         """
         stub = self._require_stub()
         session_id = self.session_id
