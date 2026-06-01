@@ -1,0 +1,17 @@
+benchmark	samples	p50_ns	p95_ns	p99_ns	p50_human	p95_human	p99_human
+tier2_cold_start/new_with_embedded_assets	10	1584978500.000	1846632333.000	1846632333.000	1.585s	1.847s	1.847s
+tier2_library/chat_5_messages_gpt_4o_mini	10	13948.288	14215.143	14215.143	13.948us	14.215us	14.215us
+tier2_library/raw_text_claude_3_5_sonnet_10000_chars	10	2141402.644	2162235.577	2162235.577	2.141ms	2.162ms	2.162ms
+tier2_library/raw_text_claude_3_5_sonnet_1000_chars	10	254573.014	365301.526	365301.526	254.573us	365.302us	365.302us
+tier2_library/raw_text_command_r_plus_10000_chars	10	2419609.147	2458640.391	2458640.391	2.420ms	2.459ms	2.459ms
+tier2_library/raw_text_command_r_plus_1000_chars	10	255493.187	256271.352	256271.352	255.493us	256.271us	256.271us
+tier2_library/raw_text_gemini_1_5_pro_10000_chars	10	2472074.019	2491028.626	2491028.626	2.472ms	2.491ms	2.491ms
+tier2_library/raw_text_gemini_1_5_pro_1000_chars	10	208336.106	208645.437	208645.437	208.336us	208.645us	208.645us
+tier2_library/raw_text_gpt_4_1000_chars	10	365892.058	391597.176	391597.176	365.892us	391.597us	391.597us
+tier2_library/raw_text_llama_3_1_70b_10000_chars	10	2269021.922	2281942.708	2281942.708	2.269ms	2.282ms	2.282ms
+tier2_library/raw_text_llama_3_1_70b_1000_chars	10	226161.458	228249.343	228249.343	226.161us	228.249us	228.249us
+tier2_library/tier3_fallback_1000_chars	10	239.805	240.167	240.167	239.805ns	240.167ns	240.167ns
+tier2_library/tiny_gpt_4o_hello_world	10	868.181	950.494	950.494	868.181ns	950.494ns	950.494ns
+tier2_library/raw_text_gpt_4o_chars/100	10	6731.450	7292.635	7292.635	6.731us	7.293us	7.293us
+tier2_library/raw_text_gpt_4o_chars/1000	10	365751.940	385435.555	385435.555	365.752us	385.436us	385.436us
+tier2_library/raw_text_gpt_4o_chars/10000	10	34724130.929	37793908.350	37793908.350	34.724ms	37.794ms	37.794ms
