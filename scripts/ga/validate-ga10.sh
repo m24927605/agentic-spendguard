@@ -43,6 +43,8 @@ require_text "$ONBOARDING" "audit" "audit expectation"
 require_text "$ONBOARDING" "empty values fail certification" "metadata certification-only wording"
 require_text "$CHECKLIST" "python3 -m pytest conformance_test.py -q" "conformance command"
 require_text "$CHECKLIST" "spiffe://spendguard.platform/predictor-client" "exact SVID subject"
+require_text "$CHECKLIST" "explicit.*(command|args).*override" "explicit reference-image insecure command override"
+require_text "$CHECKLIST" 'CMD \["--insecure"\]' "reference image insecure default warning"
 require_text "$CHECKLIST" "Hard Fail Conditions" "hard fail section"
 
 for mode in timeout grpc_error invalid_zero_or_negative invalid_overflow invalid_confidence deserialization_error tls_error not_serving not_configured breaker_open; do

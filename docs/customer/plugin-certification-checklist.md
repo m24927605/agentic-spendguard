@@ -21,7 +21,7 @@ has evidence.
 | Proto compatibility | Generated bindings match `proto/spendguard/output_predictor_plugin/v1/plugin.proto`. | `bash gen_proto.sh` output or committed generated files. |
 | Conformance | Full corpus passes. | `python3 -m pytest conformance_test.py -q`. |
 | Tenant binding | Different tenant IDs are rejected. | `test_tenant_mismatch_rejected` and SVID mismatch tests pass. |
-| mTLS | Plaintext production traffic is impossible. | Deployment manifest has server cert/key, client CA, and no `--insecure`. |
+| mTLS | Plaintext production traffic is impossible. | Deployment manifest has server cert/key, client CA, and an explicit `command` or `args` override that prevents the reference image default `CMD ["--insecure"]`; alternatively, runtime evidence proves the process did not start with `--insecure`. |
 | SVID subject | Client cert URI SAN exactly equals `spiffe://spendguard.platform/predictor-client/<tenant_id>`. | `openssl x509 -ext subjectAltName` output. |
 | Server fingerprint | Control plane registration pins the plugin server certificate fingerprint. | Registration request and response. |
 | Timeout | Predict completes inside the 50 ms budget under expected load. | Load or soak result with p99. |
@@ -38,6 +38,9 @@ Certification fails if any of these are true:
   tenant SVID URI SAN.
 - A single endpoint serves more than one tenant.
 - Production deployment uses plaintext or `--insecure`.
+- A reference-image deployment omits an explicit `command` or `args`
+  override that disables the image default `CMD ["--insecure"]`, unless
+  runtime proof shows the process started in mTLS mode.
 - `Predict` returns zero, negative, overflowing, or unbounded token
   predictions.
 - `confidence` is outside `[0.0, 1.0]`.

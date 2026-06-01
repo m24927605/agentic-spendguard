@@ -62,6 +62,7 @@ Customer plugin onboarding must not weaken SVID validation, mTLS, tenant isolati
 
 - `python3 -m pytest contrib/output_predictor_template/conformance_test.py -q`
 - Plugin onboarding docs include SVID, mTLS, timeout, retry, circuit-breaker, and audit expectations
+- Certification checklist requires explicit `command`/`args` override or runtime proof that the reference image did not start with `--insecure`
 - `gh issue list --repo m24927605/agentic-spendguard --limit 120 --state open` triaged into GA-before/GA-after/roadmap
 - GA-before issues are closed or moved to a named implementation slice before phase completion
 - Duplicate candidates #155 and #170 are closed only with commit/test evidence
@@ -104,6 +105,7 @@ Reviewer must inspect triage honesty and reject undocumented customer-critical f
 | Review R1 | codex CLI adversarial reviewer | Fixed live API path and `client_cert_id` registration sample, client SVID evidence path, SVID `PERMISSION_DENIED` to `tls_error` routing, and backlog slice/table consistency |
 | Review R2 | codex CLI adversarial reviewer | Fixed reference-image `--insecure` override guidance and replaced invalid multi-issue `gh issue close` evidence with a reproducible loop |
 | Review R3 | codex CLI adversarial reviewer | Expanded TLS classification for SVID/URI-SAN/client-cert permission denials and clarified metadata fields as certification hard-fails rather than runtime fallback triggers |
+| Review R4 | codex CLI adversarial reviewer | Fixed checklist certification gap by requiring explicit reference-image `command`/`args` override or runtime proof that `--insecure` was not used |
 
 ## §14. Merge Checklist
 
