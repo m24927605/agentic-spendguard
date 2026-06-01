@@ -57,6 +57,10 @@
       "detail": "cosign signing step present",
       "ok": true
     },
+    "publish_workflow_covers_production_chart_images": {
+      "detail": "publish workflow covers 12 production chart images under spendguard/<component>",
+      "ok": true
+    },
     "publish_workflow_dispatch_has_sha_tag": {
       "detail": "manual dispatch publishes immutable sha tag",
       "ok": true
@@ -114,12 +118,13 @@
       "ok": true
     }
   },
-  "commit_sha": "a3d2424b1a2be1cb8bbf6d31d68c2f0ff6d0e53c",
+  "commit_sha": "7015fa4f95699fe77d502d2554f12694dd83ba77",
   "errors": [],
   "external_tool_install": "brew install syft trivy cosign cargo-audit",
   "missing_external_tools": [],
   "release_mode": "scripts/security/ga-security-scan.sh --require-external-tools",
   "result": "pass",
-  "scan_started_utc": "2026-06-01T07:56:33Z",
-  "schema": "spendguard.ga09.security_scan.v1alpha1"
+  "scan_started_utc": "2026-06-01T08:10:27Z",
+  "schema": "spendguard.ga09.security_scan.v1alpha1",
+  "worktree_dirty_at_start": false
 }

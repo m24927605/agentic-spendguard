@@ -1,9 +1,10 @@
 # GA_09 Security Scan Evidence
 
 - Result: pass
-- Commit: `a3d2424b1a2be1cb8bbf6d31d68c2f0ff6d0e53c`
+- Commit: `7015fa4f95699fe77d502d2554f12694dd83ba77`
 - Branch: `ga/GA_09_security_signoff_supply_chain`
-- Started UTC: `2026-06-01T07:56:33Z`
+- Started UTC: `2026-06-01T08:10:27Z`
+- Worktree dirty at start: `false`
 - Missing optional external tools: none
 - Release-mode command: `scripts/security/ga-security-scan.sh --require-external-tools`
 
@@ -23,6 +24,7 @@
 - PASS `pki_ca_key_remains_root_only`: pki-init keeps demo CA private key out of runtime UID
 - PASS `bundles_volume_chowned_for_runtime_uid`: bundles-init hands writable bundle volume to runtime UID 65532
 - PASS `compose_sidecar_uds_volume_handoff`: compose hands existing sidecar UDS named volume to runtime UID before sidecar starts
+- PASS `publish_workflow_covers_production_chart_images`: publish workflow covers 12 production chart images under spendguard/<component>
 - PASS `production_values_no_plaintext_db`: no plaintext DB URL in production values
 - PASS `production_render_no_plaintext_db`: no plaintext DB URL in production render
 - PASS `production_render_has_networkpolicy`: NetworkPolicy rendered
