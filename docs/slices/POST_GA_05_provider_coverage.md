@@ -1,7 +1,7 @@
 # POST_GA 05 - Provider Coverage
 
 > **Branch**: `post-ga/POST_GA_05_provider_coverage`
-> **Status**: draft
+> **Status**: implemented; adversarial review pending
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `tokenizer-service-spec-v1alpha1.md`
 > **Issues**: #139
 > **Estimated change size**: medium; Tier 1 provider clients and tests
@@ -11,7 +11,9 @@
 ## §0. TL;DR
 
 Add Cohere and Llama Tier 1 provider count_tokens support, including
-envelope tuning, opt-in safety, quota behavior, and drift evidence.
+envelope tuning, opt-in safety, quota behavior, and drift evidence. Llama
+uses Bedrock Runtime CountTokens to match the locked tokenizer spec's
+Bedrock model IDs.
 
 ## §1. Architectural Context
 
@@ -24,6 +26,8 @@ behavior and legal/operational constraints needed narrower treatment.
 
 - #139: Cohere and Llama Tier 1 provider clients
 - Provider-specific request envelope builders
+- Llama Bedrock Runtime CountTokens production backend
+- Llama HTTP-compatible backend for local/private gateway tests
 - Quota and PII opt-in integration with HARDEN_05 controls
 - Circuit breaker behavior per provider
 - Drift alert integration and evidence
@@ -65,6 +69,7 @@ No new audit columns are expected.
 | Provider API rate limit | Shadow skipped or breaker opens without hot-path impact |
 | Envelope mismatch | Drift sample records provider-specific evidence |
 | Provider license not accepted | Llama path remains disabled |
+| Provider error body echoes prompt | Error body redacted before it reaches logs |
 
 ## §8. Acceptance Gates
 
@@ -74,6 +79,7 @@ No new audit columns are expected.
 - Optional real-provider tests run only when required env vars are set
 - Helm demo/production templates render with secure defaults
 - Evidence under `docs/reviews/post-ga/POST_GA_05_provider_coverage/`
+- `make demo-up DEMO_MODE=default` actually runs from a clean demo volume
 
 ## §9. Review Checklist
 
@@ -111,11 +117,16 @@ Reviewer must inspect PII, quota, provider-error, and license paths.
 | Security Engineer | Raw prompt egress remains tenant opt-in only | §7 and §9 |
 | Database Optimizer | No schema change unless provider state cannot fit current tables | §5 |
 | Tokenizer Domain Expert | Envelope fixtures are required before real-provider confidence | §8 |
+| Software Architect | Keep Cohere/Llama clients confined to tokenizer shadow worker | `services/tokenizer/src/shadow/provider_clients/`; hot-path grep evidence |
+| Backend Architect | Use Bedrock Runtime CountTokens for Llama instead of Together embeddings because locked tokenizer dispatch uses Bedrock Llama model IDs | `services/tokenizer/src/shadow/provider_clients/llama.rs` |
+| Security Engineer | Redact provider error bodies and mask Llama base URL in Debug output | `cohere.rs`, `llama.rs`, `config.rs` |
+| Database Optimizer | Reuse existing sample/quota/PII tables; no migration | §5 |
+| Tokenizer Domain Expert | Cohere Tier 1 count is `tokens.len()` from `/v1/tokenize` | `services/tokenizer/src/shadow/provider_clients/cohere.rs` |
 
 ## §14. Merge Checklist
 
-- [ ] #139 fixed and tested
-- [ ] Secure defaults verified
-- [ ] Provider evidence recorded
+- [x] #139 fixed and tested
+- [x] Secure defaults verified
+- [x] Provider evidence recorded
 - [ ] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated
