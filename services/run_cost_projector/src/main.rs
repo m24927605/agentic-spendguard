@@ -7,7 +7,7 @@
 //!   1. Install rustls aws_lc_rs crypto provider.
 //!   2. Load env config via [`spendguard_run_cost_projector::config::Config`].
 //!   3. Phase B: open canonical_ingest DB pool (when DATABASE_URL set) for
-//!      run_length_distribution_cache + audit_outbox replay.
+//!      run_length_distribution_cache + canonical_events replay.
 //!   4. Phase B: construct RunStateCache (bounded LRU + TTL).
 //!   5. Spawn the /metrics + /livez + /healthz + /readyz hyper server.
 //!   6. Bind the tonic gRPC server (UDS or TCP+mTLS or TCP-plaintext-demo).

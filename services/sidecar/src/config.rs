@@ -81,9 +81,9 @@ pub struct Config {
     pub run_cost_projector_url: String,
 
     /// Per-RPC timeout for sidecar -> run_cost_projector.Project.
-    /// GA_08 proof requires this hop to complete under local cold-start
-    /// contention; keep this below the sidecar decision SLO while avoiding
-    /// false projector_unreachable fall-through from a too-tight client cap.
+    /// Keep the production default inside the sidecar 50ms decision budget.
+    /// Local GA smoke runs may override this to absorb Docker Desktop tail
+    /// latency, but those overrides are not production SLO evidence.
     #[serde(default = "default_run_cost_projector_timeout_ms")]
     pub run_cost_projector_timeout_ms: u64,
 
@@ -190,7 +190,7 @@ fn default_decision_p99_ms() -> u64 {
     50
 }
 fn default_run_cost_projector_timeout_ms() -> u64 {
-    500
+    25
 }
 fn default_metrics_addr() -> String {
     // Round-2 #11 port table assigns sidecar 9093.

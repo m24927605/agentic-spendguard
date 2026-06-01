@@ -65,9 +65,8 @@ impl RunCostProjectorClient {
         }
         let timeout_ms = timeout_ms.max(1);
         let endpoint = endpoint
-            // Keep the cap configurable. The sidecar still falls through
-            // conservatively on timeout, but GA_08 treats such fall-through
-            // as evidence failure when the projector is intentionally wired.
+            // Keep the cap configurable. Production defaults stay inside
+            // the sidecar decision budget; local smoke gates may override.
             .timeout(std::time::Duration::from_millis(timeout_ms))
             .connect_timeout(std::time::Duration::from_secs(5))
             .keep_alive_timeout(std::time::Duration::from_secs(20))

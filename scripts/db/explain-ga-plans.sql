@@ -155,6 +155,29 @@ SELECT pg_temp.ga_assert_no_seq_scan(
 );
 
 SELECT pg_temp.ga_require_index(
+    'canonical_events_run_recovery_index',
+    'canonical_events',
+    'canonical_events_run_recovery_idx'
+);
+
+SELECT pg_temp.ga_assert_no_seq_scan(
+    'canonical_events_run_recovery_lookup',
+    $SQL$
+    SELECT run_steps_completed_so_far,
+           run_projection_at_decision_atomic::text AS run_projection_at_decision_atomic
+      FROM canonical_events
+     WHERE tenant_id = '00000000-0000-4000-8000-000000000001'::uuid
+       AND event_type = 'spendguard.audit.decision'
+       AND ingest_at >= clock_timestamp() - interval '30 minutes'
+       AND recorded_month >= date_trunc('month', clock_timestamp() - interval '30 minutes')::date
+       AND run_id_mirror = '11111111-1111-4111-8111-111111111111'::uuid
+       AND agent_id = 'agent-00'
+     ORDER BY producer_sequence DESC
+     LIMIT 1
+    $SQL$
+);
+
+SELECT pg_temp.ga_require_index(
     'canonical_events_decision_join_index',
     'canonical_events',
     'canonical_events_decision_idx'

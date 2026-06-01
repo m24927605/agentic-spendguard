@@ -61,7 +61,7 @@ lru = "0.12"
 
 # SQL — read-only pools to:
 #   1. canonical_ingest DB → run_length_distribution_cache (Signal 1)
-#      and audit_outbox replay (state recovery on cold miss)
+#      and canonical_events replay (state recovery on cold miss)
 sqlx = { version = "0.8", default-features = false, features = [
     "postgres",
     "runtime-tokio",

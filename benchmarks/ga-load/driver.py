@@ -219,7 +219,7 @@ async def main() -> int:
     models = list(scenario["models"])
     providers = list(scenario["providers"])
     prompt_classes = list(scenario["prompt_classes"])
-    slos = dict(scenario["slos"])
+    local_smoke_limits = dict(scenario["local_smoke_limits"])
 
     latencies: dict[str, list[float]] = {}
     errors: list[dict[str, Any]] = []
@@ -539,11 +539,14 @@ async def main() -> int:
         ("sidecar_emit_trace_events", "sidecar_emit_p99_ms"),
         ("end_to_end", "end_to_end_p99_ms"),
     ]:
-        if limit_key not in slos:
+        if limit_key not in local_smoke_limits:
             continue
         p99 = float(latency_summary.get(key, {}).get("p99_ms", 0.0))
-        if p99 > float(slos[limit_key]):
-            failures.append(f"{key} p99 {p99}ms exceeds {limit_key}={slos[limit_key]}ms")
+        if p99 > float(local_smoke_limits[limit_key]):
+            failures.append(
+                f"{key} p99 {p99}ms exceeds local smoke limit "
+                f"{limit_key}={local_smoke_limits[limit_key]}ms"
+            )
 
     if metric_deltas["output_predictor_predict_count"] < expected_ops:
         failures.append("output_predictor metrics count below expected operation count")

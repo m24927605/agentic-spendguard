@@ -33,7 +33,7 @@
 //! the configurable `replay_window_minutes` (default 30 min) so a long-
 //! dead run's stale audit rows don't pollute a recreated run state.
 //! Bounded LIMIT 1 ORDER BY producer_sequence DESC keeps the query
-//! fast (sub-millisecond on well-indexed audit_outbox).
+//! fast via `canonical_events_run_recovery_idx`.
 //!
 //! ## RLS
 //!
@@ -65,6 +65,7 @@ const RECOVERY_SQL: &str = r#"
                 clock_timestamp() - make_interval(mins => $2::int)
               )::date
           AND run_id_mirror = $3
+          AND agent_id = $4
         ORDER BY producer_sequence DESC
         LIMIT 1
         "#;
@@ -82,7 +83,7 @@ pub enum RecoveryError {
 }
 
 /// Attempt to rebuild a RunState by replaying the most recent
-/// audit_outbox row for `(tenant_id, run_id)` within
+/// canonical decision row for `(tenant_id, run_id, agent_id)` within
 /// `replay_window_minutes`. Returns `Ok(None)` when the window contains
 /// no rows for this run (treated as a true cold-start by the caller).
 ///
@@ -121,11 +122,12 @@ pub async fn recover_from_audit_chain(
     // before Phase E lands in production we fall back to recording
     // steps_completed only and zeroing cumulative_cost_atomic.
     let row = sqlx::query(RECOVERY_SQL)
-    .bind(tenant_id)
-    .bind(replay_window_minutes as i32)
-    .bind(run_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+        .bind(tenant_id)
+        .bind(replay_window_minutes as i32)
+        .bind(run_id)
+        .bind(agent_id)
+        .fetch_optional(&mut *tx)
+        .await?;
 
     tx.commit().await?;
 
@@ -194,6 +196,7 @@ mod tests {
     fn recovery_sql_targets_canonical_events() {
         assert!(RECOVERY_SQL.contains("FROM canonical_events"));
         assert!(RECOVERY_SQL.contains("run_id_mirror = $3"));
+        assert!(RECOVERY_SQL.contains("agent_id = $4"));
         assert!(!RECOVERY_SQL.contains("audit_outbox"));
         assert!(SET_TENANT_SQL.contains("set_config('app.current_tenant_id'"));
     }

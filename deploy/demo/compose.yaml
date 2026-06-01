@@ -389,11 +389,11 @@ services:
   # drift detection) + Signal 3 (SDK with_run_plan hint pass-through;
   # SLICE_12 lands the SDK decorator) + 3 RUN_* code emission (BUDGET >
   # STEPS > DRIFT precedence) + in-memory RunState cache (10K cap,
-  # 30-min TTL) + audit-chain replay recovery on cold miss.
+  # 30-min TTL) + canonical audit-chain replay recovery on cold miss.
   #
   # Demo connects to the canonical_ingest DB for run_length_distribution
   # _cache (Signal 1 P95 lookups; stats_aggregator populates it after
-  # one cycle) + audit_outbox replay (cold cache recovery).
+  # one cycle) + canonical_events replay (cold cache recovery).
   #
   # The sidecar (Phase E) dials this service via TCP. SLICE_10 wires
   # the egress_proxy hot path; this slice keeps egress_proxy unchanged.
@@ -416,7 +416,7 @@ services:
       SPENDGUARD_RUN_COST_PROJECTOR_REGION:                       "demo"
       SPENDGUARD_RUN_COST_PROJECTOR_PROFILE:                      "demo"
       # canonical_ingest DB for run_length_distribution_cache lookup
-      # (Signal 1) AND audit_outbox replay (cold cache recovery per
+      # (Signal 1) AND canonical_events replay (cold cache recovery per
       # spec §7.4). Empty → skeleton mode (Signal 1 always cold-starts;
       # recovery returns Ok(None); demo only — production Helm profile
       # rejects this fallback).
@@ -549,7 +549,7 @@ services:
       SPENDGUARD_SIDECAR_LEDGER_URL:               "https://ledger:50051"
       SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL:     "https://canonical-ingest:50052"
       SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL:    "${SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL:-}"
-      SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_TIMEOUT_MS: "${SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_TIMEOUT_MS:-500}"
+      SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_TIMEOUT_MS: "${SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_TIMEOUT_MS:-25}"
       # Demo-only gate. Production Helm refuses this setting; the real
       # production budget source must be a signed/fenced ledger snapshot.
       SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA: "${SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA:-false}"

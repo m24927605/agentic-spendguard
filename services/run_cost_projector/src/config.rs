@@ -50,7 +50,7 @@ pub struct Config {
     pub profile: String,
 
     /// Postgres URL for the read-only `run_length_distribution_cache` lookup
-    /// (Signal 1) AND audit_outbox replay (cold cache rebuild per spec §7.4).
+    /// (Signal 1) AND canonical_events replay (cold cache rebuild per spec §7.4).
     /// Empty = skeleton mode (Signal 1 always falls to cold-start default;
     /// no audit chain recovery). Production Helm profile requires this set.
     #[serde(default)]
@@ -105,7 +105,10 @@ impl std::fmt::Debug for Config {
             .field("state_cache_capacity", &self.state_cache_capacity)
             .field("replay_window_minutes", &self.replay_window_minutes)
             .field("cold_start_run_length", &self.cold_start_run_length)
-            .field("drift_consecutive_threshold", &self.drift_consecutive_threshold)
+            .field(
+                "drift_consecutive_threshold",
+                &self.drift_consecutive_threshold,
+            )
             .field("drift_ratio_threshold", &self.drift_ratio_threshold)
             .finish()
     }

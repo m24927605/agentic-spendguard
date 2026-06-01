@@ -1,6 +1,6 @@
 # GA Load Harness
 
-`benchmarks/ga-load/run.sh` drives the GA_08 scale/performance gate against the real demo compose stack.
+`benchmarks/ga-load/run.sh` drives the GA_08 real-stack scale smoke gate against the demo compose stack. It is not the Contract §14 latency certification gate; `spendguard-predictor-upgrade-benchmarks` owns that SLO.
 
 The local scenario uses the single demo tenant that has a signed bundle and SVID identity in compose, then fans out 100 logical tenant workloads through distinct run, agent, model, provider, and prompt-class buckets. That keeps the path real-stack without fabricating tenant identities the sidecar would correctly reject.
 

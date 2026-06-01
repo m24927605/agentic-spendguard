@@ -134,6 +134,7 @@ fi
 
 echo "[ga-load] starting real compose stack"
 SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL=http://run-cost-projector:50055 \
+SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_TIMEOUT_MS=500 \
 SPENDGUARD_SIDECAR_ALLOW_UNTRUSTED_BUDGET_METADATA=true \
   "${COMPOSE[@]}" up -d --build \
     postgres pki-init pricing-seed-init bundles-init canonical-seed-init \
@@ -189,7 +190,7 @@ PY
 fi
 
 EXPECTED_OPS="$(parse_json_field "$LOAD_RESULTS" expected_operations)"
-MAX_DRAIN_WAIT="$(parse_json_field "$LOAD_RESULTS" scenario.slos.max_outbox_drain_wait_seconds)"
+MAX_DRAIN_WAIT="$(parse_json_field "$SCENARIO" local_smoke_limits.max_outbox_drain_wait_seconds)"
 
 echo "[ga-load] waiting for outbox drain"
 set +e
@@ -210,6 +211,8 @@ set +e
   < "$ROOT/scripts/db/explain-ga-plans.sql" >"$EXPLAIN_OUTPUT" 2>&1
 PLAN_STATUS=$?
 set -e
+awk '{ sub(/[ \t]+$/, ""); print }' "$EXPLAIN_OUTPUT" >"$EXPLAIN_OUTPUT.tmp"
+mv "$EXPLAIN_OUTPUT.tmp" "$EXPLAIN_OUTPUT"
 
 CANONICAL_AFTER="$(psql_db spendguard_canonical "SELECT count(*)::int FROM canonical_events WHERE tenant_id = '$TENANT_ID';" | tail -n1)"
 CANONICAL_DECISION_AFTER="$(psql_db spendguard_canonical "SELECT count(*)::int FROM canonical_events WHERE tenant_id = '$TENANT_ID' AND event_type = 'spendguard.audit.decision';" | tail -n1)"

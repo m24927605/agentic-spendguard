@@ -1,5 +1,6 @@
 {
   "name": "local-100-tenants",
+  "gate_kind": "local_real_stack_smoke",
   "description": "GA_08 local real-stack load: one certified demo tenant plus 100 logical tenant workloads expressed as distinct run/agent/provider/prompt buckets.",
   "environment_profile": "local-compose",
   "actual_tenant_id": "00000000-0000-4000-8000-000000000001",
@@ -30,7 +31,7 @@
     "rag",
     "tool_calling"
   ],
-  "slos": {
+  "local_smoke_limits": {
     "tokenizer_p99_ms": 500,
     "output_predictor_p99_ms": 500,
     "run_cost_projector_p99_ms": 500,
