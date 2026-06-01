@@ -1,7 +1,7 @@
 # POST_GA 02 - Contract and Spec Cleanup
 
 > **Branch**: `post-ga/POST_GA_02_contract_spec_cleanup`
-> **Status**: draft
+> **Status**: implementation complete; awaiting adversarial review
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `contract-dsl-spec-v1alpha2.md`, `tokenizer-service-spec-v1alpha1.md`, `stats-aggregator-spec-v1alpha1.md`
 > **Issues**: #91, #93, #97, #99, #101, #113, #121, #123, #131, #136, #141, #147, #154, #158, #159, #167, #177
 > **Estimated change size**: medium; docs/spec cleanup with grep validation
@@ -115,11 +115,12 @@ findings.
 | Security Engineer | Provider key rotation runbook must not include plaintext secrets | §7 |
 | Database Optimizer | sample_size constraint docs must match real migrations | #167 in scope |
 | Technical Writer | Titles must describe shipped boundaries, not planned behavior | #91 and #136 |
+| Implementer | Reconciled all mapped doc/comment drift and added sample-size CHECK smoke coverage | Commits `d972a6e`, `38829a0`, `c63b871` |
 
 ## §14. Merge Checklist
 
-- [ ] All 17 issues have doc evidence
-- [ ] Grep checks pass
-- [ ] No runtime drift introduced
+- [x] All 17 issues have doc evidence
+- [x] Grep checks pass
+- [x] No runtime drift introduced
 - [ ] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated
