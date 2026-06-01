@@ -1,7 +1,7 @@
 # GA 07 - Long-Running Soak Harness
 
 > **Branch**: `ga/GA_07_soak_harness`
-> **Status**: implementation complete; adversarial review R5 pending
+> **Status**: implementation complete; adversarial review R5 arbitrated and fixed
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; soak scripts and evidence format
 
@@ -104,11 +104,15 @@ Reviewer must reject shim-only or final-status-only soak evidence.
 | Implementer | Ran R3 targeted gates | PASS: removed tokenizer before snapshot produced structured failures for docker stats, tokenizer metrics, and concise docker inspect missing-object output; 30m local gate passed with 27 snapshots, pending 0, lag 0, stats cycles 31, `git_dirty=false` |
 | Codex adversarial reviewer R4 | Metrics and HTTP probes could hang without bounded timeouts; pre-snapshot SVID test failures could exit before writing summary evidence | Added curl/wget timeouts, hardened missing option values, and routed Rust/Python preflight test failures through `ga_soak_summary.json` |
 | Implementer | Ran R4 targeted gates | PASS: missing `--duration` value exits 2 with usage; fake cargo failure writes `result=fail`, `snapshot_count=0`, and preflight failure detail; exact 30m local gate passed on clean source commit `31631db760531022774c49d38d51ee5a4fb89e2a` with 27 snapshots, pending 0, lag 0, stats cycles 31, `git_dirty=false` |
+| Codex adversarial reviewer R5 | Stats cache checks could pass with `output_distribution_cache_rows=0`; soak timer started before Rust/Python preflight and stats warmup | Max review rounds reached; Staff+ panel arbitration required by §12 |
+| Staff+ arbitration panel | Software Architect, Backend Architect, Security Engineer, Database Optimizer, and domain expert all voted fix-in-slice | Implemented final fixes instead of deferring: stats aggregation now joins sparse outcome rows to decision mirrors, soak preflight waits for required stats cache rows/freshness, and sustained-window timing starts after all preflight gates |
+| Implementer | Ran R5 targeted gates | PASS: full stats_aggregator test suite; helm demo/production template; output-cache negative; run-cache negative; slow-preflight timing; 30s happy-path smoke |
+| Implementer | Ran exact 30m local gate after R5 arbitration fix | PASS: clean source commit `89a233153e68d7863dc2ab28dfea2a6dee466ff7`, 28 snapshots, snapshot window 1800s, pending 0, lag 0, stats cycles 31, output cache rows 1 freshness 8s, run cache rows 2 freshness 9s, `git_dirty=false` |
 
 ## §14. Merge Checklist
 
 - [x] Soak harness exists
 - [x] 30m local soak passes
 - [x] Evidence recorded
-- [ ] AIT review clean or arbitration recorded
+- [x] AIT review clean or arbitration recorded
 - [ ] Memory updated

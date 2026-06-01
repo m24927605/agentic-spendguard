@@ -1,19 +1,19 @@
 {
-  "boot_started_at": "2026-06-01T03:09:09Z",
+  "boot_started_at": "2026-06-01T04:17:51Z",
   "branch": "ga/GA_07_soak_harness",
   "cluster_descriptor": "docker-compose:deploy/demo/compose.yaml;profile=local;demo_mode=default",
   "command_line": "scripts/soak/ga-soak.sh --duration 30m --profile local",
-  "commit_sha": "31631db760531022774c49d38d51ee5a4fb89e2a",
+  "commit_sha": "89a233153e68d7863dc2ab28dfea2a6dee466ff7",
   "date": "2026-06-01",
   "demo_mode": "default",
   "duration_seconds": 1800,
   "environment_profile": "local",
   "failures": [],
-  "finished_at": "2026-06-01T03:42:04Z",
+  "finished_at": "2026-06-01T04:52:08Z",
   "first_snapshot": {
     "audit": {
       "canonical_events": 5,
-      "canonical_freshest_age_seconds": 92,
+      "canonical_freshest_age_seconds": 218,
       "dedup_total": 0,
       "outbox_lag_metric_seconds": 0,
       "outbox_leader_count": 1,
@@ -25,85 +25,85 @@
       "spendguard-canonical-ingest": {
         "growth_bytes": 0,
         "health": "none",
-        "memory_bytes": 5988417,
-        "memory_raw": "5.711MiB / 7.807GiB",
+        "memory_bytes": 14103347,
+        "memory_raw": "13.45MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-control-plane": {
         "growth_bytes": 0,
         "health": "none",
-        "memory_bytes": 22743613,
-        "memory_raw": "21.69MiB / 7.807GiB",
+        "memory_bytes": 22345154,
+        "memory_raw": "21.31MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-ledger": {
         "growth_bytes": 0,
         "health": "none",
-        "memory_bytes": 4787798,
-        "memory_raw": "4.566MiB / 7.807GiB",
+        "memory_bytes": 3330277,
+        "memory_raw": "3.176MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-outbox-forwarder": {
         "growth_bytes": 0,
         "health": "none",
-        "memory_bytes": 9011462,
-        "memory_raw": "8.594MiB / 7.807GiB",
+        "memory_bytes": 5328863,
+        "memory_raw": "5.082MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-output-predictor": {
         "growth_bytes": 0,
         "health": "healthy",
-        "memory_bytes": 2642411,
-        "memory_raw": "2.52MiB / 7.807GiB",
+        "memory_bytes": 16305356,
+        "memory_raw": "15.55MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-postgres": {
         "growth_bytes": 0,
         "health": "healthy",
-        "memory_bytes": 89705676,
-        "memory_raw": "85.55MiB / 7.807GiB",
+        "memory_bytes": 93711237,
+        "memory_raw": "89.37MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-run-cost-projector": {
         "growth_bytes": 0,
         "health": "healthy",
-        "memory_bytes": 2473590,
-        "memory_raw": "2.359MiB / 7.807GiB",
+        "memory_bytes": 6414139,
+        "memory_raw": "6.117MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-sidecar": {
         "growth_bytes": 0,
         "health": "healthy",
-        "memory_bytes": 8900313,
-        "memory_raw": "8.488MiB / 7.807GiB",
+        "memory_bytes": 8629780,
+        "memory_raw": "8.23MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-stats-aggregator": {
         "growth_bytes": 0,
         "health": "healthy",
-        "memory_bytes": 2133852,
-        "memory_raw": "2.035MiB / 7.807GiB",
+        "memory_bytes": 21275607,
+        "memory_raw": "20.29MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-tokenizer": {
         "growth_bytes": 0,
         "health": "healthy",
-        "memory_bytes": 314992230,
-        "memory_raw": "300.4MiB / 7.807GiB",
+        "memory_bytes": 387239116,
+        "memory_raw": "369.3MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       }
     },
-    "elapsed_seconds": 20,
+    "elapsed_seconds": 0,
     "failures": [],
     "index": 0,
     "plugin_cert": {
@@ -114,13 +114,13 @@
     "stats": {
       "cycle_errors_total": 0,
       "cycles_total": 1,
-      "last_cycle_age_seconds": 29,
-      "output_distribution_cache_freshness_seconds": 999999,
-      "output_distribution_cache_rows": 0,
-      "run_length_distribution_cache_freshness_seconds": 30,
+      "last_cycle_age_seconds": 7,
+      "output_distribution_cache_freshness_seconds": 8,
+      "output_distribution_cache_rows": 1,
+      "run_length_distribution_cache_freshness_seconds": 8,
       "run_length_distribution_cache_rows": 2
     },
-    "timestamp": "2026-06-01T03:12:02+00:00"
+    "timestamp": "2026-06-01T04:22:01+00:00"
   },
   "git_dirty": false,
   "git_status": [],
@@ -128,7 +128,7 @@
   "last_snapshot": {
     "audit": {
       "canonical_events": 5,
-      "canonical_freshest_age_seconds": 1887,
+      "canonical_freshest_age_seconds": 2019,
       "dedup_total": 0,
       "outbox_lag_metric_seconds": 0,
       "outbox_leader_count": 1,
@@ -138,89 +138,89 @@
     },
     "containers": {
       "spendguard-canonical-ingest": {
-        "growth_bytes": -3465544,
+        "growth_bytes": -4715447,
         "health": "none",
-        "memory_bytes": 2522873,
-        "memory_raw": "2.406MiB / 7.807GiB",
+        "memory_bytes": 9387900,
+        "memory_raw": "8.953MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-control-plane": {
-        "growth_bytes": -8870953,
+        "growth_bytes": -6585057,
         "health": "none",
-        "memory_bytes": 13872660,
-        "memory_raw": "13.23MiB / 7.807GiB",
+        "memory_bytes": 15760097,
+        "memory_raw": "15.03MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-ledger": {
-        "growth_bytes": 2240806,
+        "growth_bytes": -418382,
         "health": "none",
-        "memory_bytes": 7028604,
-        "memory_raw": "6.703MiB / 7.807GiB",
+        "memory_bytes": 2911895,
+        "memory_raw": "2.777MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-outbox-forwarder": {
-        "growth_bytes": -1778385,
+        "growth_bytes": -679478,
         "health": "none",
-        "memory_bytes": 7233077,
-        "memory_raw": "6.898MiB / 7.807GiB",
+        "memory_bytes": 4649385,
+        "memory_raw": "4.434MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-output-predictor": {
-        "growth_bytes": -20971,
+        "growth_bytes": -2894069,
         "health": "healthy",
-        "memory_bytes": 2621440,
-        "memory_raw": "2.5MiB / 7.807GiB",
+        "memory_bytes": 13411287,
+        "memory_raw": "12.79MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-postgres": {
-        "growth_bytes": -33963376,
+        "growth_bytes": -31016878,
         "health": "healthy",
-        "memory_bytes": 55742300,
-        "memory_raw": "53.16MiB / 7.807GiB",
+        "memory_bytes": 62694359,
+        "memory_raw": "59.79MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-run-cost-projector": {
-        "growth_bytes": -879755,
+        "growth_bytes": 3605004,
         "health": "healthy",
-        "memory_bytes": 1593835,
-        "memory_raw": "1.52MiB / 7.807GiB",
+        "memory_bytes": 10019143,
+        "memory_raw": "9.555MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-sidecar": {
-        "growth_bytes": 2445279,
+        "growth_bytes": -3505390,
         "health": "healthy",
-        "memory_bytes": 11345592,
-        "memory_raw": "10.82MiB / 7.807GiB",
+        "memory_bytes": 5124390,
+        "memory_raw": "4.887MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-stats-aggregator": {
-        "growth_bytes": 560988,
+        "growth_bytes": -6962545,
         "health": "healthy",
-        "memory_bytes": 2694840,
-        "memory_raw": "2.57MiB / 7.807GiB",
+        "memory_bytes": 14313062,
+        "memory_raw": "13.65MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       },
       "spendguard-tokenizer": {
-        "growth_bytes": -7549747,
+        "growth_bytes": -63124275,
         "health": "healthy",
-        "memory_bytes": 307442483,
-        "memory_raw": "293.2MiB / 7.807GiB",
+        "memory_bytes": 324114841,
+        "memory_raw": "309.1MiB / 7.807GiB",
         "restart_count": 0,
         "status": "running"
       }
     },
-    "elapsed_seconds": 1814,
+    "elapsed_seconds": 1800,
     "failures": [],
-    "index": 26,
+    "index": 27,
     "plugin_cert": {
       "svid_probe_status": 0,
       "svid_subject": "spiffe://spendguard.platform/predictor-client/00000000-0000-4000-8000-000000000001",
@@ -229,17 +229,21 @@
     "stats": {
       "cycle_errors_total": 0,
       "cycles_total": 31,
-      "last_cycle_age_seconds": 23,
-      "output_distribution_cache_freshness_seconds": 999999,
-      "output_distribution_cache_rows": 0,
-      "run_length_distribution_cache_freshness_seconds": 25,
+      "last_cycle_age_seconds": 7,
+      "output_distribution_cache_freshness_seconds": 8,
+      "output_distribution_cache_rows": 1,
+      "run_length_distribution_cache_freshness_seconds": 9,
       "run_length_distribution_cache_rows": 2
     },
-    "timestamp": "2026-06-01T03:41:56+00:00"
+    "timestamp": "2026-06-01T04:52:01+00:00"
   },
   "machine_descriptor": "Darwin TW168020225M.local 25.3.0 Darwin Kernel Version 25.3.0: Wed Jan 28 20:56:34 PST 2026; root:xnu-12377.91.3~2/RELEASE_ARM64_T8122 arm64",
+  "preflight_finished_at": "2026-06-01T04:22:01Z",
+  "preflight_started_at": "2026-06-01T04:21:56Z",
   "profile": "local",
+  "requested_duration_seconds": 1800,
   "result": "pass",
-  "snapshot_count": 27,
-  "started_at": "2026-06-01T03:11:42Z"
+  "snapshot_count": 28,
+  "snapshot_window_seconds": 1800,
+  "started_at": "2026-06-01T04:22:01Z"
 }
