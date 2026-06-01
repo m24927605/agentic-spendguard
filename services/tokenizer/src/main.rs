@@ -788,8 +788,18 @@ mod tests {
     //!
     //! Cases 3+4 are the actual attack defense; case 5 is paranoia.
     use super::*;
+    use spendguard_tokenizer_service::proto::canonical_ingest::v1::{
+        canonical_ingest_server::{CanonicalIngest, CanonicalIngestServer},
+        AuditChainEvent, EventResult, QueryAuditChainRequest, VerifySchemaBundleRequest,
+        VerifySchemaBundleResponse,
+    };
+    use std::pin::Pin;
     use tempfile::TempDir;
+    use testcontainers::runners::AsyncRunner;
+    use testcontainers::ImageExt;
+    use testcontainers_modules::postgres::Postgres;
     use tokio::net::UnixListener;
+    use tonic::{Request, Response, Status};
 
     #[tokio::test]
     async fn cleanup_uds_notfound_is_noop() {
@@ -930,6 +940,121 @@ mod tests {
         let h = boot_shadow_worker(&cfg).await.expect("drop-only boots");
         let ev = make_shadow_event();
         h.try_send(ev).expect("drop handle accepts");
+    }
+
+    #[derive(Clone, Default)]
+    struct BootCanonicalIngest;
+
+    #[tonic::async_trait]
+    impl CanonicalIngest for BootCanonicalIngest {
+        async fn verify_schema_bundle(
+            &self,
+            _request: Request<VerifySchemaBundleRequest>,
+        ) -> Result<Response<VerifySchemaBundleResponse>, Status> {
+            Err(Status::unimplemented("not used by boot_shadow_worker test"))
+        }
+
+        type QueryAuditChainStream =
+            Pin<Box<dyn tokio_stream::Stream<Item = Result<AuditChainEvent, Status>> + Send>>;
+
+        async fn query_audit_chain(
+            &self,
+            _request: Request<QueryAuditChainRequest>,
+        ) -> Result<Response<Self::QueryAuditChainStream>, Status> {
+            Ok(Response::new(Box::pin(tokio_stream::empty())))
+        }
+
+        async fn append_events(
+            &self,
+            request: Request<
+                spendguard_tokenizer_service::proto::canonical_ingest::v1::AppendEventsRequest,
+            >,
+        ) -> Result<
+            Response<
+                spendguard_tokenizer_service::proto::canonical_ingest::v1::AppendEventsResponse,
+            >,
+            Status,
+        > {
+            let event_id = request
+                .into_inner()
+                .events
+                .first()
+                .map(|event| event.id.clone())
+                .unwrap_or_default();
+            Ok(Response::new(spendguard_tokenizer_service::proto::canonical_ingest::v1::AppendEventsResponse {
+                results: vec![EventResult {
+                    event_id,
+                    status: spendguard_tokenizer_service::proto::canonical_ingest::v1::event_result::Status::Appended as i32,
+                    ingest_position: None,
+                    error: None,
+                }],
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn boot_shadow_worker_real_wiring_connects_postgres_and_canonical_ingest() {
+        let container = match Postgres::default().with_tag("16-alpine").start().await {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[tokenizer boot] Postgres not available: {e}");
+                return;
+            }
+        };
+        let host_port = container
+            .get_host_port_ipv4(5432)
+            .await
+            .expect("postgres host port");
+        let database_url =
+            format!("postgres://postgres:postgres@127.0.0.1:{host_port}/postgres?sslmode=disable");
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test canonical_ingest");
+        let addr = listener.local_addr().expect("local addr");
+        let incoming = async_stream::stream! {
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => yield Ok::<_, std::io::Error>(stream),
+                    Err(e) => yield Err(e),
+                }
+            }
+        };
+        tokio::spawn(async move {
+            tonic::transport::Server::builder()
+                .add_service(CanonicalIngestServer::new(BootCanonicalIngest))
+                .serve_with_incoming(incoming)
+                .await
+                .expect("test canonical_ingest server");
+        });
+
+        std::env::set_var("SPENDGUARD_PROFILE", "demo");
+        std::env::set_var("SPENDGUARD_TOKENIZER_SIGNING_MODE", "disabled");
+        std::env::set_var(
+            "SPENDGUARD_TOKENIZER_SIGNING_PRODUCER_IDENTITY",
+            "tokenizer-service:boot-test",
+        );
+
+        let mut cfg = minimal_cfg();
+        cfg.shadow_enabled = true;
+        cfg.anthropic_api_key = "test-anthropic-key".into();
+        cfg.canonical_ingest_url = format!("http://{addr}");
+        cfg.database_url = database_url;
+        cfg.sampling_override_database_url = String::new();
+        cfg.schema_bundle_id = "22222222-2222-7222-8222-222222222222".into();
+        cfg.schema_bundle_hash_hex = "ab".repeat(32);
+        cfg.canonical_schema_version = "spendguard.v1alpha1".into();
+
+        let handle = boot_shadow_worker(&cfg)
+            .await
+            .expect("real shadow worker boots with DB + canonical_ingest");
+        handle
+            .try_send(make_shadow_event())
+            .expect("real worker handle accepts");
+
+        std::env::remove_var("SPENDGUARD_TOKENIZER_SIGNING_PRODUCER_IDENTITY");
+        std::env::remove_var("SPENDGUARD_TOKENIZER_SIGNING_MODE");
+        std::env::remove_var("SPENDGUARD_PROFILE");
     }
 
     #[test]
