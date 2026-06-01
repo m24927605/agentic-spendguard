@@ -18,6 +18,7 @@ use aws_sdk_bedrockruntime::{
     config::{timeout::TimeoutConfig, Region},
     error::SdkError,
     operation::count_tokens::CountTokensError,
+    operation::RequestId,
     primitives::Blob,
     types::{CountTokensInput, InvokeModelTokensRequest},
     Client as BedrockClient,
@@ -168,9 +169,10 @@ async fn count_tokens_bedrock(
             "bedrock returned negative inputTokens: {input_tokens}"
         )));
     }
+    let request_id = resp.request_id().map(str::to_owned);
     Ok(ProviderCount {
         input_tokens: input_tokens as u64,
-        request_id: None,
+        request_id,
         latency,
     })
 }
@@ -319,6 +321,7 @@ fn body_summary(body: String) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use aws_sdk_bedrockruntime::config::{BehaviorVersion as BedrockBehaviorVersion, Credentials};
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -326,6 +329,32 @@ mod tests {
 
     async fn client_for_server(server: &MockServer) -> LlamaClient {
         LlamaClient::with_base_url("test-key", server.uri()).expect("client builds")
+    }
+
+    fn bedrock_client_for_server(server: &MockServer) -> LlamaClient {
+        let conf = aws_sdk_bedrockruntime::config::Builder::new()
+            .behavior_version(BedrockBehaviorVersion::latest())
+            .region(Region::new("us-east-1"))
+            .credentials_provider(Credentials::new(
+                "test-access-key",
+                "test-secret-key",
+                None,
+                None,
+                "post-ga-05-test",
+            ))
+            .endpoint_url(server.uri())
+            .timeout_config(
+                TimeoutConfig::builder()
+                    .operation_timeout(REQUEST_TIMEOUT)
+                    .operation_attempt_timeout(REQUEST_TIMEOUT)
+                    .build(),
+            )
+            .build();
+        LlamaClient {
+            backend: LlamaBackend::Bedrock {
+                client: BedrockClient::from_conf(conf),
+            },
+        }
     }
 
     #[tokio::test]
@@ -353,6 +382,40 @@ mod tests {
         let resp = c.count_tokens(MODEL, "hello llama").await.expect("ok");
         assert_eq!(resp.input_tokens, 11);
         assert_eq!(resp.request_id.as_deref(), Some("bedrock_req_123"));
+    }
+
+    #[tokio::test]
+    async fn bedrock_success_preserves_request_id() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/model/meta.llama3-1-8b-instruct-v1%3A0/count-tokens"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("x-amzn-requestid", "bedrock_req_456")
+                    .set_body_json(json!({ "inputTokens": 17 })),
+            )
+            .mount(&server)
+            .await;
+
+        let c = bedrock_client_for_server(&server);
+        let resp = c.count_tokens(MODEL, "hello bedrock").await.expect("ok");
+        assert_eq!(resp.input_tokens, 17);
+        assert_eq!(resp.request_id.as_deref(), Some("bedrock_req_456"));
+    }
+
+    #[tokio::test]
+    async fn bedrock_success_without_request_id_remains_none() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/model/meta.llama3-1-8b-instruct-v1%3A0/count-tokens"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "inputTokens": 17 })))
+            .mount(&server)
+            .await;
+
+        let c = bedrock_client_for_server(&server);
+        let resp = c.count_tokens(MODEL, "hello bedrock").await.expect("ok");
+        assert_eq!(resp.input_tokens, 17);
+        assert_eq!(resp.request_id, None);
     }
 
     #[tokio::test]

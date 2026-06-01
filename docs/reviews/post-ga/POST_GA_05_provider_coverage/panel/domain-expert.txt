@@ -1,0 +1,993 @@
+ait warning: spawning a nested wrapped codex session from inside attempt 'd22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KSX3H3F2MX6QXEKAXYGQG2WH'. The inner agent may lose its parent OAuth context and fail with auth errors. To bypass: prefix with `AIT_BYPASS=1`, or run `ait off` in the outer shell first.
+Reading additional input from stdin...
+OpenAI Codex v0.135.0
+--------
+workdir: /Users/michael.chen/products/agentic-spendguard
+model: gpt-5.5
+provider: openai
+approval: never
+sandbox: danger-full-access
+reasoning effort: xhigh
+reasoning summaries: none
+session id: 019e8594-393e-74d0-901e-e5bebcfc5ea6
+--------
+user
+You are a Staff+ arbitration reviewer for Agent SpendGuard POST_GA_05 provider coverage.
+Role: Tokenizer Domain Expert.
+
+Context:
+- Branch: post-ga/POST_GA_05_provider_coverage, base main.
+- Round 5 adversarial codex review reached the max configured review round and reported one remaining P2:
+  [P2] Preserve Bedrock request IDs — services/tokenizer/src/shadow/provider_clients/llama.rs:173
+  For production Llama samples using the Bedrock SDK backend, CountTokensOutput carries the AWS x-amzn-requestid via the SDK request-id trait, but this path always stores None. As a result, Llama drift sample rows and alert CloudEvents cannot be correlated with AWS Bedrock logs, unlike the HTTP-compatible backend; please populate this from the SDK response instead of discarding it.
+
+Current code facts:
+- HTTP-compatible Llama path already extracts provider-request-id header.
+- Bedrock path uses aws_sdk_bedrockruntime::Client.count_tokens().send().await and currently sets request_id: None.
+- Local SDK source shows CountTokensOutput implements aws_types::request_id::RequestId with request_id(&self) -> Option<&str>.
+- ProviderCount.request_id is Option<String> and is persisted into tokenizer_t1_samples/provider evidence.
+
+Arbitration requirement:
+- This is NOT a new review round. Decide final handling after max round 5: fix anyway / accept as out-of-scope / arbitrate Option A vs B.
+- Prefer a concrete production-readiness decision. If fixing, specify exact acceptance checks required.
+- Keep output concise, with sections: Decision, Rationale, Required implementation/tests, Residual risk.
+codex
+I’ll quickly verify the local Llama client shape so the arbitration points to the right implementation surface and test seam.
+exec
+/bin/zsh -lc 'rg -n "CountTokens|request_id|ProviderCount|Bedrock" services/tokenizer/src/shadow/provider_clients/llama.rs services/tokenizer -S' in /Users/michael.chen/products/agentic-spendguard
+ succeeded in 0ms:
+services/tokenizer/src/shadow/provider_clients/llama.rs:1://! Meta Llama Tier 1 count client via Amazon Bedrock Runtime CountTokens.
+services/tokenizer/src/shadow/provider_clients/llama.rs:3://! Locked tokenizer spec §3.1/§3.4 routes Llama only for Bedrock
+services/tokenizer/src/shadow/provider_clients/llama.rs:4://! `meta.llama3-*-instruct-v1:0` model IDs. Use the official Bedrock
+services/tokenizer/src/shadow/provider_clients/llama.rs:5://! Runtime CountTokens API instead of hand-rolled SigV4. The CountTokens
+services/tokenizer/src/shadow/provider_clients/llama.rs:8://! <https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html>
+services/tokenizer/src/shadow/provider_clients/llama.rs:20:    operation::count_tokens::CountTokensError,
+services/tokenizer/src/shadow/provider_clients/llama.rs:22:    types::{CountTokensInput, InvokeModelTokensRequest},
+services/tokenizer/src/shadow/provider_clients/llama.rs:23:    Client as BedrockClient,
+services/tokenizer/src/shadow/provider_clients/llama.rs:29:use super::{ProviderCount, ProviderError};
+services/tokenizer/src/shadow/provider_clients/llama.rs:40:    Bedrock {
+services/tokenizer/src/shadow/provider_clients/llama.rs:41:        client: BedrockClient,
+services/tokenizer/src/shadow/provider_clients/llama.rs:53:            LlamaBackend::Bedrock { .. } => "bedrock-sdk",
+services/tokenizer/src/shadow/provider_clients/llama.rs:90:            backend: LlamaBackend::Bedrock {
+services/tokenizer/src/shadow/provider_clients/llama.rs:91:                client: BedrockClient::from_conf(builder.build()),
+services/tokenizer/src/shadow/provider_clients/llama.rs:96:    /// Test / private gateway backend. It speaks the Bedrock CountTokens
+services/tokenizer/src/shadow/provider_clients/llama.rs:131:    ) -> Result<ProviderCount, ProviderError> {
+services/tokenizer/src/shadow/provider_clients/llama.rs:133:            LlamaBackend::Bedrock { client } => count_tokens_bedrock(client, model, text).await,
+services/tokenizer/src/shadow/provider_clients/llama.rs:144:    client: &BedrockClient,
+services/tokenizer/src/shadow/provider_clients/llama.rs:147:) -> Result<ProviderCount, ProviderError> {
+services/tokenizer/src/shadow/provider_clients/llama.rs:149:    let input = CountTokensInput::InvokeModel(
+services/tokenizer/src/shadow/provider_clients/llama.rs:171:    Ok(ProviderCount {
+services/tokenizer/src/shadow/provider_clients/llama.rs:173:        request_id: None,
+services/tokenizer/src/shadow/provider_clients/llama.rs:194:) -> Result<ProviderCount, ProviderError> {
+services/tokenizer/src/shadow/provider_clients/llama.rs:220:    let request_id = resp
+services/tokenizer/src/shadow/provider_clients/llama.rs:236:        return Ok(ProviderCount {
+services/tokenizer/src/shadow/provider_clients/llama.rs:238:            request_id,
+services/tokenizer/src/shadow/provider_clients/llama.rs:274:fn map_bedrock_error(err: SdkError<CountTokensError>) -> ProviderError {
+services/tokenizer/src/shadow/provider_clients/llama.rs:278:            CountTokensError::AccessDeniedException(_) => {
+services/tokenizer/src/shadow/provider_clients/llama.rs:281:            CountTokensError::ResourceNotFoundException(_) => {
+services/tokenizer/src/shadow/provider_clients/llama.rs:284:            CountTokensError::ThrottlingException(_) => ProviderError::RateLimit {
+services/tokenizer/src/shadow/provider_clients/llama.rs:287:            CountTokensError::ValidationException(_) => {
+services/tokenizer/src/shadow/provider_clients/llama.rs:290:            CountTokensError::InternalServerException(_) => {
+services/tokenizer/src/shadow/provider_clients/llama.rs:293:            CountTokensError::ServiceUnavailableException(_) => {
+services/tokenizer/src/shadow/provider_clients/llama.rs:355:        assert_eq!(resp.request_id.as_deref(), Some("bedrock_req_123"));
+services/tokenizer/tests/slice05_chaos.rs:24:    security::{LocalCountTokensQuota, StaticShadowSecurityStore},
+services/tokenizer/tests/slice05_chaos.rs:48:        count_tokens_quota: Arc::new(LocalCountTokensQuota::default()),
+services/tokenizer/src/main.rs:56:            LocalCountTokensQuota, PgCountTokensQuota, PgShadowSecurityStore,
+services/tokenizer/src/main.rs:335:            .map_err(|e| anyhow::anyhow!("build Llama Bedrock client: {e}"))?,
+services/tokenizer/src/main.rs:386:) -> Result<Arc<dyn spendguard_tokenizer_service::shadow::security::CountTokensQuota>> {
+services/tokenizer/src/main.rs:388:        return Ok(Arc::new(LocalCountTokensQuota::default()));
+services/tokenizer/src/main.rs:396:    Ok(Arc::new(PgCountTokensQuota::new(pool)))
+services/tokenizer/src/main.rs:723:    let invalid_request_ids = INVALID_REQUEST_ID_TOTAL.load(Ordering::Relaxed);
+services/tokenizer/src/main.rs:724:    let request_id_v4 = REQUEST_ID_V4_ACCEPTED_TOTAL.load(Ordering::Relaxed);
+services/tokenizer/src/main.rs:756:         # HELP spendguard_tokenizer_invalid_request_id_total \
+services/tokenizer/src/main.rs:757:         Caller supplied an invalid or unsupported request_id UUID version.\n\
+services/tokenizer/src/main.rs:758:         # TYPE spendguard_tokenizer_invalid_request_id_total counter\n\
+services/tokenizer/src/main.rs:759:         spendguard_tokenizer_invalid_request_id_total {invalid_request_ids}\n\
+services/tokenizer/src/main.rs:760:         # HELP spendguard_tokenizer_request_id_v4_accepted_total \
+services/tokenizer/src/main.rs:761:         Caller supplied a valid UUIDv4 request_id accepted for backward compatibility.\n\
+services/tokenizer/src/main.rs:762:         # TYPE spendguard_tokenizer_request_id_v4_accepted_total counter\n\
+services/tokenizer/src/main.rs:763:         spendguard_tokenizer_request_id_v4_accepted_total {request_id_v4}\n\
+services/tokenizer/src/main.rs:1214:        assert!(body.contains("spendguard_tokenizer_invalid_request_id_total"));
+services/tokenizer/src/main.rs:1215:        assert!(body.contains("spendguard_tokenizer_request_id_v4_accepted_total"));
+services/tokenizer/tests/slice04_golden_samples.rs:25://!     model IDs + Bedrock routing IDs + chat envelope.
+services/tokenizer/tests/slice04_golden_samples.rs:27://!   * Cohere (command-r + Bedrock): 50.
+services/tokenizer/tests/slice04_golden_samples.rs:28://!   * Llama (Bedrock meta.llama3): 50.
+services/tokenizer/tests/slice04_golden_samples.rs:34://!     Bedrock IDs.
+services/tokenizer/tests/slice04_golden_samples.rs:114:    // R3 N1: Bedrock invokeModel path prepends `<|begin_of_text|>`;
+services/tokenizer/tests/slice04_golden_samples.rs:124:    // R3 N1: cross-region inference profile prefix is still Bedrock
+services/tokenizer/tests/slice04_golden_samples.rs:143:    // BOS NOT added when raw_text is empty (both native + Bedrock paths
+services/tokenizer/tests/slice04_golden_samples.rs:343:    // Per §9 review question 3 — full Bedrock model id with dated
+services/tokenizer/tests/slice04_golden_samples.rs:476:    // R3 N1: Bedrock path adds BOS; "a" = 1 vocab + 1 BOS = 2.
+services/tokenizer/src/shadow/provider_clients/llama.rs:1://! Meta Llama Tier 1 count client via Amazon Bedrock Runtime CountTokens.
+services/tokenizer/src/shadow/provider_clients/llama.rs:3://! Locked tokenizer spec §3.1/§3.4 routes Llama only for Bedrock
+services/tokenizer/src/shadow/provider_clients/llama.rs:4://! `meta.llama3-*-instruct-v1:0` model IDs. Use the official Bedrock
+services/tokenizer/src/shadow/provider_clients/llama.rs:5://! Runtime CountTokens API instead of hand-rolled SigV4. The CountTokens
+services/tokenizer/src/shadow/provider_clients/llama.rs:8://! <https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_CountTokens.html>
+services/tokenizer/src/shadow/provider_clients/llama.rs:20:    operation::count_tokens::CountTokensError,
+services/tokenizer/src/shadow/provider_clients/llama.rs:22:    types::{CountTokensInput, InvokeModelTokensRequest},
+services/tokenizer/src/shadow/provider_clients/llama.rs:23:    Client as BedrockClient,
+services/tokenizer/src/shadow/provider_clients/llama.rs:29:use super::{ProviderCount, ProviderError};
+services/tokenizer/src/shadow/provider_clients/llama.rs:40:    Bedrock {
+services/tokenizer/src/shadow/provider_clients/llama.rs:41:        client: BedrockClient,
+services/tokenizer/src/shadow/provider_clients/llama.rs:53:            LlamaBackend::Bedrock { .. } => "bedrock-sdk",
+services/tokenizer/src/shadow/provider_clients/llama.rs:90:            backend: LlamaBackend::Bedrock {
+services/tokenizer/src/shadow/provider_clients/llama.rs:91:                client: BedrockClient::from_conf(builder.build()),
+services/tokenizer/src/shadow/provider_clients/llama.rs:96:    /// Test / private gateway backend. It speaks the Bedrock CountTokens
+services/tokenizer/src/shadow/provider_clients/llama.rs:131:    ) -> Result<ProviderCount, ProviderError> {
+services/tokenizer/src/shadow/provider_clients/llama.rs:133:            LlamaBackend::Bedrock { client } => count_tokens_bedrock(client, model, text).await,
+services/tokenizer/src/shadow/provider_clients/llama.rs:144:    client: &BedrockClient,
+services/tokenizer/src/shadow/provider_clients/llama.rs:147:) -> Result<ProviderCount, ProviderError> {
+services/tokenizer/src/shadow/provider_clients/llama.rs:149:    let input = CountTokensInput::InvokeModel(
+services/tokenizer/src/shadow/provider_clients/llama.rs:171:    Ok(ProviderCount {
+services/tokenizer/src/shadow/provider_clients/llama.rs:173:        request_id: None,
+services/tokenizer/src/shadow/provider_clients/llama.rs:194:) -> Result<ProviderCount, ProviderError> {
+services/tokenizer/src/shadow/provider_clients/llama.rs:220:    let request_id = resp
+services/tokenizer/src/shadow/provider_clients/llama.rs:236:        return Ok(ProviderCount {
+services/tokenizer/src/shadow/provider_clients/llama.rs:238:            request_id,
+services/tokenizer/src/shadow/provider_clients/llama.rs:274:fn map_bedrock_error(err: SdkError<CountTokensError>) -> ProviderError {
+services/tokenizer/src/shadow/provider_clients/llama.rs:278:            CountTokensError::AccessDeniedException(_) => {
+services/tokenizer/src/shadow/provider_clients/llama.rs:281:            CountTokensError::ResourceNotFoundException(_) => {
+services/tokenizer/src/shadow/provider_clients/llama.rs:284:            CountTokensError::ThrottlingException(_) => ProviderError::RateLimit {
+services/tokenizer/src/shadow/provider_clients/llama.rs:287:            CountTokensError::ValidationException(_) => {
+services/tokenizer/src/shadow/provider_clients/llama.rs:290:            CountTokensError::InternalServerException(_) => {
+services/tokenizer/src/shadow/provider_clients/llama.rs:293:            CountTokensError::ServiceUnavailableException(_) => {
+services/tokenizer/src/shadow/provider_clients/llama.rs:355:        assert_eq!(resp.request_id.as_deref(), Some("bedrock_req_123"));
+services/tokenizer/src/shadow/provider_clients/anthropic.rs:43:use super::{ProviderCount, ProviderError};
+services/tokenizer/src/shadow/provider_clients/anthropic.rs:114:    ) -> Result<ProviderCount, ProviderError> {
+services/tokenizer/src/shadow/provider_clients/anthropic.rs:134:        let request_id = resp
+services/tokenizer/src/shadow/provider_clients/anthropic.rs:151:            return Ok(ProviderCount {
+services/tokenizer/src/shadow/provider_clients/anthropic.rs:153:                request_id,
+services/tokenizer/src/shadow/provider_clients/anthropic.rs:252:        assert_eq!(resp.request_id.as_deref(), Some("req_abc123"));
+services/tokenizer/src/shadow/worker.rs:69:use super::security::{DynCountTokensQuota, DynShadowSecurityStore};
+services/tokenizer/src/shadow/worker.rs:203:    pub provider_request_id: Option<String>,
+services/tokenizer/src/shadow/worker.rs:271:    pub count_tokens_quota: DynCountTokensQuota,
+services/tokenizer/src/shadow/worker.rs:484:        provider_request_id: provider_count.request_id.clone(),
+services/tokenizer/src/shadow/worker.rs:643:    provider_count: &super::provider_clients::ProviderCount,
+services/tokenizer/src/shadow/worker.rs:659:        "provider_request_id": provider_count.request_id,
+services/tokenizer/src/shadow/worker.rs:768:    use super::super::security::{LocalCountTokensQuota, StaticShadowSecurityStore};
+services/tokenizer/src/shadow/worker.rs:803:            count_tokens_quota: Arc::new(LocalCountTokensQuota::default()),
+services/tokenizer/src/config.rs:112:    /// AWS region enabling Bedrock Runtime CountTokens for Llama model
+services/tokenizer/src/config.rs:113:    /// IDs. Empty = Bedrock Llama shadow path disabled. AWS credentials
+services/tokenizer/src/config.rs:118:    /// Optional endpoint override for Llama CountTokens. With
+services/tokenizer/src/config.rs:120:    /// or private Bedrock-compatible endpoint. Without a Bedrock region,
+services/tokenizer/src/config.rs:127:    /// Not used for the AWS SDK Bedrock path.
+services/tokenizer/src/config.rs:438:            "Llama CountTokens base URL leaked into Debug output: {dbg}"
+services/tokenizer/Cargo.toml:69:# UUIDs (request_id mint)
+services/tokenizer/Cargo.toml:82:# POST_GA_05 / #139: Llama Tier 1 verification uses Amazon Bedrock
+services/tokenizer/Cargo.toml:83:# Runtime CountTokens so we do not hand-roll SigV4. Defaults keep rustls
+services/tokenizer/src/shadow/security.rs:108:pub trait CountTokensQuota: Send + Sync {
+services/tokenizer/src/shadow/security.rs:118:pub struct LocalCountTokensQuota {
+services/tokenizer/src/shadow/security.rs:123:impl CountTokensQuota for LocalCountTokensQuota {
+services/tokenizer/src/shadow/security.rs:159:pub struct PgCountTokensQuota {
+services/tokenizer/src/shadow/security.rs:163:impl PgCountTokensQuota {
+services/tokenizer/src/shadow/security.rs:170:impl CountTokensQuota for PgCountTokensQuota {
+services/tokenizer/src/shadow/security.rs:247:pub type DynCountTokensQuota = Arc<dyn CountTokensQuota>;
+services/tokenizer/src/shadow/security.rs:392:        let first_worker = PgCountTokensQuota::new(fx.runtime_pool.clone());
+services/tokenizer/src/shadow/security.rs:393:        let second_worker = PgCountTokensQuota::new(fx.runtime_pool.clone());
+services/tokenizer/src/shadow/persistence.rs:65:                provider_request_id
+services/tokenizer/src/shadow/persistence.rs:79:        .bind(sample.provider_request_id)
+services/tokenizer/src/shadow/provider_clients/cohere.rs:15://! the locked Tier 2 Bedrock BOS accounting. As with Anthropic/Gemini,
+services/tokenizer/src/shadow/provider_clients/cohere.rs:25:use super::{ProviderCount, ProviderError};
+services/tokenizer/src/shadow/provider_clients/cohere.rs:82:    ) -> Result<ProviderCount, ProviderError> {
+services/tokenizer/src/shadow/provider_clients/cohere.rs:102:        let request_id = resp
+services/tokenizer/src/shadow/provider_clients/cohere.rs:123:            return Ok(ProviderCount {
+services/tokenizer/src/shadow/provider_clients/cohere.rs:125:                request_id,
+services/tokenizer/src/shadow/provider_clients/cohere.rs:245:        assert_eq!(resp.request_id.as_deref(), Some("coh_req_123"));
+services/tokenizer/src/server.rs:261:        let lib_req = validate_or_mint_request_id(lib_req)?;
+services/tokenizer/src/server.rs:379:fn validate_or_mint_request_id(
+services/tokenizer/src/server.rs:382:    if req.request_id.is_empty() {
+services/tokenizer/src/server.rs:384:            request_id: uuid::Uuid::now_v7().to_string(),
+services/tokenizer/src/server.rs:389:    let parsed = uuid::Uuid::parse_str(&req.request_id).map_err(|e| {
+services/tokenizer/src/server.rs:391:        Status::invalid_argument(format!("request_id must be a UUIDv7 or UUIDv4: {e}"))
+services/tokenizer/src/server.rs:399:                request_id = %parsed,
+services/tokenizer/src/server.rs:400:                "tokenizer request_id UUIDv4 accepted for backward compatibility; prefer UUIDv7"
+services/tokenizer/src/server.rs:407:                "request_id must be UUIDv7 or UUIDv4, got UUIDv{other}"
+services/tokenizer/src/server.rs:483:            request_id: String::new(),
+services/tokenizer/src/server.rs:501:            request_id: String::new(),
+services/tokenizer/src/server.rs:518:            request_id: String::new(),
+services/tokenizer/src/server.rs:555:            request_id: String::new(),
+services/tokenizer/src/server.rs:569:            request_id: String::new(),
+services/tokenizer/src/server.rs:588:            request_id: String::new(),
+services/tokenizer/src/server.rs:607:            request_id: String::new(),
+services/tokenizer/src/server.rs:627:            request_id: String::new(),
+services/tokenizer/src/server.rs:635:    async fn tokenize_mints_request_id_when_empty() {
+services/tokenizer/src/server.rs:636:        // The library doesn't return request_id but we verify the
+services/tokenizer/src/server.rs:644:            request_id: String::new(),
+services/tokenizer/src/server.rs:651:    async fn tokenize_accepts_caller_supplied_uuidv7_request_id() {
+services/tokenizer/src/server.rs:657:            request_id: uuid::Uuid::now_v7().to_string(),
+services/tokenizer/src/server.rs:664:    async fn tokenize_accepts_uuidv4_request_id_for_backward_compat() {
+services/tokenizer/src/server.rs:670:            request_id: "550e8400-e29b-41d4-a716-446655440000".to_string(),
+services/tokenizer/src/server.rs:677:    async fn tokenize_rejects_invalid_request_id() {
+services/tokenizer/src/server.rs:683:            request_id: "tenant-a:copied-request-id".to_string(),
+services/tokenizer/src/server.rs:685:        let err = s.tokenize(req).await.expect_err("invalid request_id");
+services/tokenizer/src/server.rs:689:            .contains("request_id must be a UUIDv7 or UUIDv4"));
+services/tokenizer/src/dispatch.rs:16:            request_id: p.request_id,
+services/tokenizer/src/dispatch.rs:71:            request_id: "abc".to_string(),
+services/tokenizer/src/dispatch.rs:78:        assert_eq!(lib.request_id, "abc");
+services/tokenizer/src/shadow/provider_clients/gemini.rs:35:use super::{ProviderCount, ProviderError};
+services/tokenizer/src/shadow/provider_clients/gemini.rs:83:    ) -> Result<ProviderCount, ProviderError> {
+services/tokenizer/src/shadow/provider_clients/gemini.rs:121:            return Ok(ProviderCount {
+services/tokenizer/src/shadow/provider_clients/gemini.rs:125:                request_id: None,
+services/tokenizer/src/shadow/provider_clients/gemini.rs:216:        assert!(resp.request_id.is_none());
+services/tokenizer/src/shadow/provider_clients/mod.rs:82:pub struct ProviderCount {
+services/tokenizer/src/shadow/provider_clients/mod.rs:88:    pub request_id: Option<String>,
+
+exec
+/bin/zsh -lc 'git diff -- services/tokenizer/src/shadow/provider_clients/llama.rs && git status --short' in /Users/michael.chen/products/agentic-spendguard
+ succeeded in 0ms:
+?? docs/reviews/post-ga/POST_GA_05_provider_coverage/panel/
+?? docs/reviews/post-ga/POST_GA_05_provider_coverage/round-5-ait.txt
+?? docs/reviews/post-ga/POST_GA_05_provider_coverage/round-5-codex-review-direct.txt
+
+codex
+The code matches the reported issue: the SDK Bedrock path drops `request_id`, while the HTTP-compatible path already preserves it and tests that behavior.
+exec
+/bin/zsh -lc "nl -ba services/tokenizer/src/shadow/provider_clients/llama.rs | sed -n '320,375p'" in /Users/michael.chen/products/agentic-spendguard
+ succeeded in 0ms:
+   320	mod tests {
+   321	    use super::*;
+   322	    use wiremock::matchers::{body_json, header, method, path};
+   323	    use wiremock::{Mock, MockServer, ResponseTemplate};
+   324	
+   325	    const MODEL: &str = "meta.llama3-1-8b-instruct-v1:0";
+   326	
+   327	    async fn client_for_server(server: &MockServer) -> LlamaClient {
+   328	        LlamaClient::with_base_url("test-key", server.uri()).expect("client builds")
+   329	    }
+   330	
+   331	    #[tokio::test]
+   332	    async fn count_tokens_success_returns_input_tokens() {
+   333	        let server = MockServer::start().await;
+   334	        Mock::given(method("POST"))
+   335	            .and(path("/model/meta.llama3-1-8b-instruct-v1:0/count-tokens"))
+   336	            .and(header("authorization", "Bearer test-key"))
+   337	            .and(body_json(json!({
+   338	                "input": {
+   339	                    "invokeModel": {
+   340	                        "body": BASE64_STANDARD.encode(llama_invoke_model_body("hello llama").expect("body"))
+   341	                    }
+   342	                }
+   343	            })))
+   344	            .respond_with(
+   345	                ResponseTemplate::new(200)
+   346	                    .insert_header("x-amzn-requestid", "bedrock_req_123")
+   347	                    .set_body_json(json!({ "inputTokens": 11 })),
+   348	            )
+   349	            .mount(&server)
+   350	            .await;
+   351	
+   352	        let c = client_for_server(&server).await;
+   353	        let resp = c.count_tokens(MODEL, "hello llama").await.expect("ok");
+   354	        assert_eq!(resp.input_tokens, 11);
+   355	        assert_eq!(resp.request_id.as_deref(), Some("bedrock_req_123"));
+   356	    }
+   357	
+   358	    #[tokio::test]
+   359	    async fn schema_drift_missing_input_tokens_is_schema_error() {
+   360	        let server = MockServer::start().await;
+   361	        Mock::given(method("POST"))
+   362	            .and(path("/model/meta.llama3-1-8b-instruct-v1:0/count-tokens"))
+   363	            .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "tokens": 11 })))
+   364	            .mount(&server)
+   365	            .await;
+   366	        let c = client_for_server(&server).await;
+   367	        let err = c.count_tokens(MODEL, "hello").await.expect_err("schema");
+   368	        assert!(matches!(err, ProviderError::Schema(_)));
+   369	        assert!(!err.counts_as_breaker_failure());
+   370	    }
+   371	
+   372	    #[tokio::test]
+   373	    async fn access_denied_maps_to_auth_variant() {
+   374	        let server = MockServer::start().await;
+   375	        Mock::given(method("POST"))
+
+exec
+/bin/zsh -lc "nl -ba services/tokenizer/src/shadow/provider_clients/llama.rs | sed -n '140,245p'" in /Users/michael.chen/products/agentic-spendguard
+exec
+/bin/zsh -lc 'rg -n "aws-types|aws_types|bedrockruntime" services/tokenizer/Cargo.toml Cargo.lock -S' in /Users/michael.chen/products/agentic-spendguard
+ succeeded in 0ms:
+services/tokenizer/Cargo.toml:86:aws-sdk-bedrockruntime = "1.132.0"
+
+ succeeded in 0ms:
+   140	    }
+   141	}
+   142	
+   143	async fn count_tokens_bedrock(
+   144	    client: &BedrockClient,
+   145	    model: &str,
+   146	    text: &str,
+   147	) -> Result<ProviderCount, ProviderError> {
+   148	    let body = llama_invoke_model_body(text)?;
+   149	    let input = CountTokensInput::InvokeModel(
+   150	        InvokeModelTokensRequest::builder()
+   151	            .body(Blob::new(body))
+   152	            .build()
+   153	            .map_err(|e| ProviderError::Schema(format!("build bedrock invokeModel body: {e}")))?,
+   154	    );
+   155	
+   156	    let start = Instant::now();
+   157	    let resp = client
+   158	        .count_tokens()
+   159	        .model_id(model)
+   160	        .input(input)
+   161	        .send()
+   162	        .await
+   163	        .map_err(map_bedrock_error)?;
+   164	    let latency = start.elapsed();
+   165	    let input_tokens = resp.input_tokens();
+   166	    if input_tokens < 0 {
+   167	        return Err(ProviderError::Schema(format!(
+   168	            "bedrock returned negative inputTokens: {input_tokens}"
+   169	        )));
+   170	    }
+   171	    Ok(ProviderCount {
+   172	        input_tokens: input_tokens as u64,
+   173	        request_id: None,
+   174	        latency,
+   175	    })
+   176	}
+   177	
+   178	fn llama_invoke_model_body(text: &str) -> Result<Vec<u8>, ProviderError> {
+   179	    serde_json::to_vec(&json!({
+   180	        "prompt": text,
+   181	        "max_gen_len": 1,
+   182	        "temperature": 0.0,
+   183	        "top_p": 1.0
+   184	    }))
+   185	    .map_err(|e| ProviderError::Schema(format!("build llama invokeModel JSON: {e}")))
+   186	}
+   187	
+   188	async fn count_tokens_http_compat(
+   189	    http: &Client,
+   190	    base_url: &str,
+   191	    api_key: &str,
+   192	    model: &str,
+   193	    text: &str,
+   194	) -> Result<ProviderCount, ProviderError> {
+   195	    let url = format!(
+   196	        "{}/model/{}/count-tokens",
+   197	        base_url.trim_end_matches('/'),
+   198	        model
+   199	    );
+   200	    let invoke_body = llama_invoke_model_body(text)?;
+   201	    let body = json!({
+   202	        "input": {
+   203	            "invokeModel": {
+   204	                "body": BASE64_STANDARD.encode(&invoke_body)
+   205	            }
+   206	        }
+   207	    });
+   208	
+   209	    let start = Instant::now();
+   210	    let resp = http
+   211	        .post(&url)
+   212	        .bearer_auth(api_key)
+   213	        .json(&body)
+   214	        .send()
+   215	        .await
+   216	        .map_err(map_send_error)?;
+   217	    let latency = start.elapsed();
+   218	
+   219	    let status = resp.status();
+   220	    let request_id = resp
+   221	        .headers()
+   222	        .get("x-amzn-requestid")
+   223	        .or_else(|| resp.headers().get("x-request-id"))
+   224	        .and_then(|h| h.to_str().ok())
+   225	        .map(|s| s.to_owned());
+   226	
+   227	    if status.is_success() {
+   228	        let parsed: serde_json::Value = resp
+   229	            .json()
+   230	            .await
+   231	            .map_err(|e| ProviderError::Schema(format!("read body: {e}")))?;
+   232	        let count = parsed
+   233	            .get("inputTokens")
+   234	            .and_then(|v| v.as_u64())
+   235	            .ok_or_else(|| ProviderError::Schema("missing or non-u64 `inputTokens`".into()))?;
+   236	        return Ok(ProviderCount {
+   237	            input_tokens: count,
+   238	            request_id,
+   239	            latency,
+   240	        });
+   241	    }
+   242	
+   243	    if status == StatusCode::TOO_MANY_REQUESTS {
+   244	        let retry_after = resp
+   245	            .headers()
+
+codex
+I’m checking the SDK trait import path before naming the acceptance check, because relying on a transitive crate path in Rust can make an otherwise tiny fix brittle.
+exec
+/bin/zsh -lc "rg -n \"pub trait RequestId|mod request_id|request_id::RequestId|RequestId\" ~/.cargo/registry/src -g '*.rs' | head -80" in /Users/michael.chen/products/agentic-spendguard
+exec
+/bin/zsh -lc "rg -n \"impl .*RequestId.*CountTokensOutput|struct CountTokensOutput|request_id\\(&self\\)\" ~/.cargo/registry/src -g '*.rs' | head -120" in /Users/michael.chen/products/agentic-spendguard
+ succeeded in 842ms:
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/protocol_serde/shape_decode_authorization_message.rs:62:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/protocol_serde/shape_assume_root.rs:65:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/protocol_serde/shape_get_session_token.rs:50:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/protocol_serde/shape_get_access_key_info.rs:29:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/protocol_serde/shape_get_delegated_access_token.rs:96:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/protocol_serde/shape_get_caller_identity.rs:29:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/protocol_serde/shape_assume_role_with_web_identity.rs:160:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/protocol_serde/shape_assume_role_with_saml.rs:140:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/protocol_serde/shape_get_web_identity_token.rs:95:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/protocol_serde/shape_get_federation_token.rs:92:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/protocol_serde/shape_assume_role.rs:101:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/rest_xml_wrapped_errors.rs:74:    <RequestId>foo-id</RequestId>
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/rest_xml_wrapped_errors.rs:85:    <RequestId>foo-id</RequestId>
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/rest_xml_wrapped_errors.rs:86:    <MorePreamble>foo-id</RequestId>
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/rest_xml_wrapped_errors.rs:95:    <RequestId>foo-id</RequestId>
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_invalid_authorization_message_exception.rs:29:impl ::aws_types::request_id::RequestId for crate::types::error::InvalidAuthorizationMessageException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_jwt_payload_size_exceeded_exception.rs:29:impl ::aws_types::request_id::RequestId for crate::types::error::JwtPayloadSizeExceededException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_expired_token_exception.rs:29:impl ::aws_types::request_id::RequestId for crate::types::error::ExpiredTokenException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_outbound_web_identity_federation_disabled_exception.rs:29:impl ::aws_types::request_id::RequestId for crate::types::error::OutboundWebIdentityFederationDisabledException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_idp_rejected_claim_exception.rs:30:impl ::aws_types::request_id::RequestId for crate::types::error::IdpRejectedClaimException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_invalid_identity_token_exception.rs:29:impl ::aws_types::request_id::RequestId for crate::types::error::InvalidIdentityTokenException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_idp_communication_error_exception.rs:33:impl ::aws_types::request_id::RequestId for crate::types::error::IdpCommunicationErrorException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_expired_trade_in_token_exception.rs:29:impl ::aws_types::request_id::RequestId for crate::types::error::ExpiredTradeInTokenException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_session_duration_escalation_exception.rs:29:impl ::aws_types::request_id::RequestId for crate::types::error::SessionDurationEscalationException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_malformed_policy_document_exception.rs:29:impl ::aws_types::request_id::RequestId for crate::types::error::MalformedPolicyDocumentException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_packed_policy_too_large_exception.rs:30:impl ::aws_types::request_id::RequestId for crate::types::error::PackedPolicyTooLargeException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_region_disabled_exception.rs:29:impl ::aws_types::request_id::RequestId for crate::types::error::RegionDisabledException {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/error_meta.rs:422:impl ::aws_types::request_id::RequestId for Error {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation.rs:2:pub use ::aws_types::request_id::RequestId;
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_access_key_info/_get_access_key_info_output.rs:16:impl ::aws_types::request_id::RequestId for GetAccessKeyInfoOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_federation_token.rs:160:        ::tracing::debug!(request_id = ?::aws_types::request_id::RequestId::request_id(response));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_federation_token.rs:379:impl ::aws_types::request_id::RequestId for crate::operation::get_federation_token::GetFederationTokenError {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_root.rs:160:        ::tracing::debug!(request_id = ?::aws_types::request_id::RequestId::request_id(response));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_root.rs:365:impl ::aws_types::request_id::RequestId for crate::operation::assume_root::AssumeRootError {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/decode_authorization_message.rs:162:        ::tracing::debug!(request_id = ?::aws_types::request_id::RequestId::request_id(response));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/decode_authorization_message.rs:360:impl ::aws_types::request_id::RequestId for crate::operation::decode_authorization_message::DecodeAuthorizationMessageError {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_delegated_access_token.rs:163:        ::tracing::debug!(request_id = ?::aws_types::request_id::RequestId::request_id(response));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_delegated_access_token.rs:382:impl ::aws_types::request_id::RequestId for crate::operation::get_delegated_access_token::GetDelegatedAccessTokenError {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_web_identity_token.rs:163:        ::tracing::debug!(request_id = ?::aws_types::request_id::RequestId::request_id(response));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_web_identity_token.rs:381:impl ::aws_types::request_id::RequestId for crate::operation::get_web_identity_token::GetWebIdentityTokenError {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role_with_saml/_assume_role_with_saml_output.rs:113:impl ::aws_types::request_id::RequestId for AssumeRoleWithSamlOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_caller_identity/_get_caller_identity_output.rs:29:impl ::aws_types::request_id::RequestId for GetCallerIdentityOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:17:pub trait RequestId {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:22:impl<E> RequestId for SdkError<E, Response> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:32:impl RequestId for ErrorMetadata {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:38:impl<B> RequestId for Response<B> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:44:impl RequestId for Headers {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:51:impl<O, E> RequestId for Result<O, E>
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:53:    O: RequestId,
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:54:    E: RequestId,
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:75:    use crate::request_id::{apply_request_id, RequestId, AWS_REQUEST_ID};
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/lib.rs:26:pub mod request_id;
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role/_assume_role_output.rs:54:impl ::aws_types::request_id::RequestId for AssumeRoleOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_session_token.rs:160:        ::tracing::debug!(request_id = ?::aws_types::request_id::RequestId::request_id(response));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_session_token.rs:358:impl ::aws_types::request_id::RequestId for crate::operation::get_session_token::GetSessionTokenError {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_access_key_info.rs:159:        ::tracing::debug!(request_id = ?::aws_types::request_id::RequestId::request_id(response));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_access_key_info.rs:347:impl ::aws_types::request_id::RequestId for crate::operation::get_access_key_info::GetAccessKeyInfoError {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role.rs:160:        ::tracing::debug!(request_id = ?::aws_types::request_id::RequestId::request_id(response));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role.rs:386:impl ::aws_types::request_id::RequestId for crate::operation::assume_role::AssumeRoleError {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_federation_token/_get_federation_token_output.rs:43:impl ::aws_types::request_id::RequestId for GetFederationTokenOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_caller_identity.rs:159:        ::tracing::debug!(request_id = ?::aws_types::request_id::RequestId::request_id(response));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_caller_identity.rs:344:impl ::aws_types::request_id::RequestId for crate::operation::get_caller_identity::GetCallerIdentityError {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_session_token/_get_session_token_output.rs:29:impl ::aws_types::request_id::RequestId for GetSessionTokenOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role_with_saml.rs:150:        ::tracing::debug!(request_id = ?::aws_types::request_id::RequestId::request_id(response));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role_with_saml.rs:400:impl ::aws_types::request_id::RequestId for crate::operation::assume_role_with_saml::AssumeRoleWithSAMLError {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role_with_web_identity/_assume_role_with_web_identity_output.rs:75:impl ::aws_types::request_id::RequestId for AssumeRoleWithWebIdentityOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/decode_authorization_message/_decode_authorization_message_output.rs:17:impl ::aws_types::request_id::RequestId for DecodeAuthorizationMessageOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role_with_web_identity.rs:153:        ::tracing::debug!(request_id = ?::aws_types::request_id::RequestId::request_id(response));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role_with_web_identity.rs:416:impl ::aws_types::request_id::RequestId for crate::operation::assume_role_with_web_identity::AssumeRoleWithWebIdentityError {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_delegated_access_token/_get_delegated_access_token_output.rs:38:impl ::aws_types::request_id::RequestId for GetDelegatedAccessTokenOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_web_identity_token/_get_web_identity_token_output.rs:31:impl ::aws_types::request_id::RequestId for GetWebIdentityTokenOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_root/_assume_root_output.rs:39:impl ::aws_types::request_id::RequestId for AssumeRootOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/protocol_serde/shape_disable_key_rotation.rs:145:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/protocol_serde/shape_generate_data_key_pair.rs:193:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/protocol_serde/shape_list_aliases.rs:110:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/protocol_serde/shape_import_key_material.rs:193:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/protocol_serde/shape_list_retirable_grants.rs:116:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/protocol_serde/shape_generate_data_key_pair_without_plaintext.rs:233:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/protocol_serde/shape_rotate_key_on_demand.rs:177:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/protocol_serde/shape_verify_mac.rs:171:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+
+ succeeded in 1430ms:
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-types-1.4.8/src/error/metadata.rs:80:    ///     fn extended_request_id(&self) -> Option<&str>;
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-smithy-types-1.4.8/src/error/metadata.rs:84:    ///     fn extended_request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:19:    fn request_id(&self) -> Option<&str>;
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:23:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:33:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:39:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:45:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-types-1.3.16/src/request_id.rs:56:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_invalid_authorization_message_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_jwt_payload_size_exceeded_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_expired_token_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_outbound_web_identity_federation_disabled_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_idp_rejected_claim_exception.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_invalid_identity_token_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_idp_communication_error_exception.rs:34:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_expired_trade_in_token_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_session_duration_escalation_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_malformed_policy_document_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_packed_policy_too_large_exception.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/types/error/_region_disabled_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/error_meta.rs:423:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_access_key_info/_get_access_key_info_output.rs:17:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_federation_token.rs:380:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_root.rs:366:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/decode_authorization_message.rs:361:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_delegated_access_token.rs:383:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_web_identity_token.rs:382:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role_with_saml/_assume_role_with_saml_output.rs:114:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_caller_identity/_get_caller_identity_output.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role/_assume_role_output.rs:55:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_session_token.rs:359:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_access_key_info.rs:348:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role.rs:387:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_federation_token/_get_federation_token_output.rs:44:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_caller_identity.rs:345:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_session_token/_get_session_token_output.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role_with_saml.rs:401:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role_with_web_identity/_assume_role_with_web_identity_output.rs:76:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_role_with_web_identity.rs:417:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_delegated_access_token/_get_delegated_access_token_output.rs:39:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/decode_authorization_message/_decode_authorization_message_output.rs:18:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/get_web_identity_token/_get_web_identity_token_output.rs:32:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-sts-1.105.0/src/operation/assume_root/_assume_root_output.rs:40:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/_key_last_usage_data.rs:30:    pub fn kms_request_id(&self) -> ::std::option::Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/_key_last_usage_data.rs:104:    pub fn get_kms_request_id(&self) -> &::std::option::Option<::std::string::String> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_limit_exceeded_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_cloud_hsm_cluster_in_use_exception.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_cloud_hsm_cluster_invalid_configuration_exception.rs:40:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_tag_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_expired_import_token_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_invalid_marker_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_kms_internal_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_key_unavailable_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_invalid_arn_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_invalid_alias_name_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_custom_key_store_name_in_use_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_key_invalid_configuration_exception.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_invalid_import_token_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_proxy_invalid_response_exception.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_conflict_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_custom_key_store_has_cmks_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_key_not_found_exception.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_kms_invalid_state_exception.rs:38:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_proxy_vpc_endpoint_service_invalid_configuration_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_already_exists_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_unsupported_operation_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_key_already_in_use_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_custom_key_store_not_found_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_cloud_hsm_cluster_not_related_exception.rs:32:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_proxy_vpc_endpoint_service_in_use_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_dry_run_operation_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_invalid_key_usage_exception.rs:38:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_proxy_invalid_configuration_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_not_found_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_cloud_hsm_cluster_not_active_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_incorrect_key_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_invalid_ciphertext_exception.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_custom_key_store_invalid_state_exception.rs:43:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_proxy_uri_unreachable_exception.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_disabled_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_invalid_grant_id_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_incorrect_key_material_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_kms_invalid_mac_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_cloud_hsm_cluster_not_found_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_invalid_grant_token_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_proxy_vpc_endpoint_service_not_found_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/error_meta.rs:2148:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_proxy_incorrect_authentication_credential_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_malformed_policy_document_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_incorrect_trust_anchor_exception.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/delete_custom_key_store.rs:408:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_kms_invalid_signature_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/retire_grant.rs:438:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_dependency_timeout_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_proxy_uri_endpoint_in_use_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/types/error/_xks_proxy_uri_in_use_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/describe_custom_key_stores/_describe_custom_key_stores_output.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/cancel_key_deletion.rs:408:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/decrypt/_decrypt_output.rs:57:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/enable_key/_enable_key_output.rs:9:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/re_encrypt.rs:475:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/disconnect_custom_key_store.rs:398:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/get_key_policy/_get_key_policy_output.rs:23:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/verify_mac/_verify_mac_output.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/sign/_sign_output.rs:43:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/create_alias/_create_alias_output.rs:9:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/encrypt/_encrypt_output.rs:29:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/get_parameters_for_import/_get_parameters_for_import_output.rs:46:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/import_key_material/_import_key_material_output.rs:23:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/update_key_description/_update_key_description_output.rs:9:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/put_key_policy.rs:438:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/re_encrypt/_re_encrypt_output.rs:53:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/revoke_grant/_revoke_grant_output.rs:9:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/create_custom_key_store.rs:543:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/list_key_policies.rs:408:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/schedule_key_deletion.rs:413:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/list_retirable_grants/_list_retirable_grants_output.rs:31:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/get_public_key.rs:466:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/list_aliases.rs:400:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-kms-1.108.0/src/operation/describe_custom_key_stores.rs:386:    fn request_id(&self) -> Option<&str> {
+
+codex
+The AWS SDK crate re-exports `RequestId` from its `operation` module, so the implementation can avoid adding a new direct dependency just to call the trait.
+exec
+/bin/zsh -lc "rg -n \"pub use ::aws_types::request_id::RequestId|impl ::aws_types::request_id::RequestId for CountTokensOutput|struct CountTokensOutput|_set_request_id|fn request_id\\(&self\\)\" ~/.cargo/registry/src/index.crates.io-*/aws-sdk-bedrockruntime-1.132.0/src -S" in /Users/michael.chen/products/agentic-spendguard
+ succeeded in 0ms:
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/error_meta.rs:582:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation.rs:2:pub use ::aws_types::request_id::RequestId;
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/apply_guardrail.rs:447:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/get_async_invoke/_get_async_invoke_output.rs:83:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/get_async_invoke/_get_async_invoke_output.rs:246:    pub(crate) fn _set_request_id(&mut self, request_id: Option<String>) -> &mut Self {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/protocol_serde/shape_get_async_invoke.rs:95:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/get_async_invoke.rs:396:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/invoke_model_with_bidirectional_stream.rs:502:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/converse/_converse_output.rs:59:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/converse/_converse_output.rs:206:    pub(crate) fn _set_request_id(&mut self, request_id: Option<String>) -> &mut Self {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/protocol_serde/shape_start_async_invoke.rs:159:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/converse_stream/_converse_stream_output.rs:19:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/converse_stream/_converse_stream_output.rs:71:    pub(crate) fn _set_request_id(&mut self, request_id: Option<String>) -> &mut Self {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/protocol_serde/shape_list_async_invokes.rs:95:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/list_async_invokes/_list_async_invokes_output.rs:25:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/list_async_invokes/_list_async_invokes_output.rs:84:    pub(crate) fn _set_request_id(&mut self, request_id: Option<String>) -> &mut Self {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/protocol_serde/shape_converse.rs:171:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/converse_stream.rs:472:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/protocol_serde/shape_converse_stream.rs:18:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/converse.rs:447:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/invoke_model.rs:464:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/protocol_serde/shape_invoke_model_with_response_stream.rs:44:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_model_error_exception.rs:44:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/protocol_serde/shape_invoke_model.rs:204:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/invoke_model/_invoke_model_output.rs:47:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/invoke_model/_invoke_model_output.rs:132:    pub(crate) fn _set_request_id(&mut self, request_id: Option<String>) -> &mut Self {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_model_timeout_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/protocol_serde/shape_count_tokens.rs:126:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_conflict_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/protocol_serde/shape_invoke_model_with_bidirectional_stream.rs:22:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_model_not_ready_exception.rs:34:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_internal_server_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_throttling_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/protocol_serde/shape_apply_guardrail.rs:144:        output._set_request_id(::aws_types::request_id::RequestId::request_id(_response_headers).map(str::to_string));
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/invoke_model_with_bidirectional_stream/_invoke_model_with_bidirectional_stream_output.rs:25:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/invoke_model_with_bidirectional_stream/_invoke_model_with_bidirectional_stream_output.rs:90:    pub(crate) fn _set_request_id(&mut self, request_id: Option<String>) -> &mut Self {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_service_unavailable_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_model_stream_error_exception.rs:44:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_validation_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_service_quota_exceeded_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/count_tokens/_count_tokens_output.rs:5:pub struct CountTokensOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/count_tokens/_count_tokens_output.rs:16:impl ::aws_types::request_id::RequestId for CountTokensOutput {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/count_tokens/_count_tokens_output.rs:17:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/count_tokens/_count_tokens_output.rs:31:pub struct CountTokensOutputBuilder {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/count_tokens/_count_tokens_output.rs:56:    pub(crate) fn _set_request_id(&mut self, request_id: Option<String>) -> &mut Self {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/invoke_model_with_response_stream.rs:494:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_access_denied_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error/_resource_not_found_exception.rs:30:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/count_tokens.rs:419:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/invoke_model_with_response_stream/_invoke_model_with_response_stream_output.rs:36:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/invoke_model_with_response_stream/_invoke_model_with_response_stream_output.rs:130:    pub(crate) fn _set_request_id(&mut self, request_id: Option<String>) -> &mut Self {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/start_async_invoke/_start_async_invoke_output.rs:18:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/start_async_invoke/_start_async_invoke_output.rs:57:    pub(crate) fn _set_request_id(&mut self, request_id: Option<String>) -> &mut Self {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/apply_guardrail/_apply_guardrail_output.rs:49:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/apply_guardrail/_apply_guardrail_output.rs:176:    pub(crate) fn _set_request_id(&mut self, request_id: Option<String>) -> &mut Self {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/start_async_invoke.rs:435:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/operation/list_async_invokes.rs:434:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error.rs:164:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error.rs:257:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error.rs:410:    fn request_id(&self) -> Option<&str> {
+/Users/michael.chen/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-bedrockruntime-1.132.0/src/types/error.rs:563:    fn request_id(&self) -> Option<&str> {
+
+exec
+/bin/zsh -lc "sed -n '1,40p' ~/.cargo/registry/src/index.crates.io-*/aws-sdk-bedrockruntime-1.132.0/src/operation.rs" in /Users/michael.chen/products/agentic-spendguard
+exec
+/bin/zsh -lc "sed -n '1,70p' ~/.cargo/registry/src/index.crates.io-*/aws-sdk-bedrockruntime-1.132.0/src/operation/count_tokens/_count_tokens_output.rs" in /Users/michael.chen/products/agentic-spendguard
+ succeeded in 0ms:
+// Code generated by software.amazon.smithy.rust.codegen.smithy-rs. DO NOT EDIT.
+pub use ::aws_types::request_id::RequestId;
+
+/// Types for the `ApplyGuardrail` operation.
+pub mod apply_guardrail;
+
+/// Types for the `Converse` operation.
+pub mod converse;
+
+/// Types for the `ConverseStream` operation.
+pub mod converse_stream;
+
+/// Types for the `CountTokens` operation.
+pub mod count_tokens;
+
+/// Types for the `GetAsyncInvoke` operation.
+pub mod get_async_invoke;
+
+/// Types for the `InvokeModel` operation.
+pub mod invoke_model;
+
+/// Types for the `InvokeModelWithBidirectionalStream` operation.
+pub mod invoke_model_with_bidirectional_stream;
+
+/// Types for the `InvokeModelWithResponseStream` operation.
+pub mod invoke_model_with_response_stream;
+
+/// Types for the `ListAsyncInvokes` operation.
+pub mod list_async_invokes;
+
+/// Types for the `StartAsyncInvoke` operation.
+pub mod start_async_invoke;
+
+ succeeded in 0ms:
+// Code generated by software.amazon.smithy.rust.codegen.smithy-rs. DO NOT EDIT.
+#[allow(missing_docs)] // documentation missing in model
+#[non_exhaustive]
+#[derive(::std::clone::Clone, ::std::cmp::PartialEq, ::std::fmt::Debug)]
+pub struct CountTokensOutput {
+    /// <p>The number of tokens in the provided input according to the specified model's tokenization rules. This count represents the number of input tokens that would be processed if the same input were sent to the model in an inference request. Use this value to estimate costs and ensure your inputs stay within model token limits.</p>
+    pub input_tokens: i32,
+    _request_id: Option<String>,
+}
+impl CountTokensOutput {
+    /// <p>The number of tokens in the provided input according to the specified model's tokenization rules. This count represents the number of input tokens that would be processed if the same input were sent to the model in an inference request. Use this value to estimate costs and ensure your inputs stay within model token limits.</p>
+    pub fn input_tokens(&self) -> i32 {
+        self.input_tokens
+    }
+}
+impl ::aws_types::request_id::RequestId for CountTokensOutput {
+    fn request_id(&self) -> Option<&str> {
+        self._request_id.as_deref()
+    }
+}
+impl CountTokensOutput {
+    /// Creates a new builder-style object to manufacture [`CountTokensOutput`](crate::operation::count_tokens::CountTokensOutput).
+    pub fn builder() -> crate::operation::count_tokens::builders::CountTokensOutputBuilder {
+        crate::operation::count_tokens::builders::CountTokensOutputBuilder::default()
+    }
+}
+
+/// A builder for [`CountTokensOutput`](crate::operation::count_tokens::CountTokensOutput).
+#[derive(::std::clone::Clone, ::std::cmp::PartialEq, ::std::default::Default, ::std::fmt::Debug)]
+#[non_exhaustive]
+pub struct CountTokensOutputBuilder {
+    pub(crate) input_tokens: ::std::option::Option<i32>,
+    _request_id: Option<String>,
+}
+impl CountTokensOutputBuilder {
+    /// <p>The number of tokens in the provided input according to the specified model's tokenization rules. This count represents the number of input tokens that would be processed if the same input were sent to the model in an inference request. Use this value to estimate costs and ensure your inputs stay within model token limits.</p>
+    /// This field is required.
+    pub fn input_tokens(mut self, input: i32) -> Self {
+        self.input_tokens = ::std::option::Option::Some(input);
+        self
+    }
+    /// <p>The number of tokens in the provided input according to the specified model's tokenization rules. This count represents the number of input tokens that would be processed if the same input were sent to the model in an inference request. Use this value to estimate costs and ensure your inputs stay within model token limits.</p>
+    pub fn set_input_tokens(mut self, input: ::std::option::Option<i32>) -> Self {
+        self.input_tokens = input;
+        self
+    }
+    /// <p>The number of tokens in the provided input according to the specified model's tokenization rules. This count represents the number of input tokens that would be processed if the same input were sent to the model in an inference request. Use this value to estimate costs and ensure your inputs stay within model token limits.</p>
+    pub fn get_input_tokens(&self) -> &::std::option::Option<i32> {
+        &self.input_tokens
+    }
+    pub(crate) fn _request_id(mut self, request_id: impl Into<String>) -> Self {
+        self._request_id = Some(request_id.into());
+        self
+    }
+
+    pub(crate) fn _set_request_id(&mut self, request_id: Option<String>) -> &mut Self {
+        self._request_id = request_id;
+        self
+    }
+    /// Consumes the builder and constructs a [`CountTokensOutput`](crate::operation::count_tokens::CountTokensOutput).
+    /// This method will fail if any of the following fields are not set:
+    /// - [`input_tokens`](crate::operation::count_tokens::builders::CountTokensOutputBuilder::input_tokens)
+    pub fn build(self) -> ::std::result::Result<crate::operation::count_tokens::CountTokensOutput, ::aws_smithy_types::error::operation::BuildError> {
+        ::std::result::Result::Ok(crate::operation::count_tokens::CountTokensOutput {
+            input_tokens: self.input_tokens.ok_or_else(|| {
+                ::aws_smithy_types::error::operation::BuildError::missing_field(
+                    "input_tokens",
+                    "input_tokens was not specified but it is required when building CountTokensOutput",
+                )
+            })?,
+
+codex
+For tests, the existing wiremock coverage only exercises the HTTP-compatible backend. The required check should specifically drive the SDK Bedrock client against a mocked endpoint response that includes `x-amzn-requestid`.
+exec
+/bin/zsh -lc "sed -n '1,130p' services/tokenizer/Cargo.toml" in /Users/michael.chen/products/agentic-spendguard
+ succeeded in 0ms:
+[package]
+name = "spendguard-tokenizer-service"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard tokenizer service: gRPC over mTLS centralized form per tokenizer-service-spec-v1alpha1.md §2.1(a). Wraps the spendguard-tokenizer library crate (in-process Tier 2 BPE) plus a ShadowVerify stub (Tier 1; SLICE_05 wires the real shadow worker). SLICE_03 scope: tonic server skeleton + UDS bind + metrics endpoint."
+
+[[bin]]
+name = "spendguard-tokenizer"
+path = "src/main.rs"
+
+[lib]
+name = "spendguard_tokenizer_service"
+path = "src/lib.rs"
+
+[dependencies]
+# Library form — the service is a thin tonic wrapper around the
+# in-process tokenizer; both forms share the same dispatch table +
+# encoder cache (per spec §2.1).
+#
+# R2 M6: enable the opt-in `cohere` feature for the tokenizer service
+# binary + integration tests. The service is the centralized form per
+# spec §2.1(a); deployments still gate the Cohere encoder behind their
+# own legal review when linking the library form (sidecar /
+# egress_proxy default to feature OFF). The slice04 golden samples
+# integration tests live here and require the Cohere dispatch entries
+# to be present.
+spendguard-tokenizer = { path = "../../crates/spendguard-tokenizer", features = ["cohere"] }
+
+# Direct rustls dep so main() can call CryptoProvider::install_default()
+rustls = "0.23"
+
+# gRPC + protobuf (server side only — tokenizer is a leaf service
+# with no outbound RPCs in SLICE_03).
+tonic = { version = "0.12", features = ["tls", "transport"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-stream = "0.3"
+
+# HTTP / Prometheus /metrics endpoint (raw hyper, matching the ledger
+# / canonical_ingest convention so there's no `prometheus` crate
+# dependency to track).
+hyper = { version = "1", features = ["http1", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+http-body-util = "0.1"
+
+# UDS support: round-2 fix B3.1 (panel finding): tokio-vsock was the
+# wrong crate (VM-socket protocol, not Unix socket). UDS binding now
+# uses tokio::net::UnixListener (already a dep of `tokio = "1"`) +
+# tonic's Server::serve_with_incoming() pattern (precedent:
+# services/sidecar/src/main.rs:262-296). No additional crate dep is
+# needed; tonic-build's transport feature already enables UDS.
+#
+# Errors / logging
+thiserror = "1"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Config (env-driven for POC, mirrors sidecar / ledger)
+envy = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+# UUIDs (request_id mint)
+uuid = { version = "1", features = ["v7"] }
+
+# SLICE_05: HTTP client for Anthropic / Gemini provider count_tokens
+# APIs (Tier 1 shadow). `rustls-tls` keeps the TLS surface
+# single-provider (matches the aws_lc_rs default_provider main.rs
+# installs); `json` feature serialises request bodies; default-features
+# off drops the native-tls fallback we don't want.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1"
+hex = "0.4"
+base64 = "0.22"
+
+# POST_GA_05 / #139: Llama Tier 1 verification uses Amazon Bedrock
+# Runtime CountTokens so we do not hand-roll SigV4. Defaults keep rustls
+# and tokio, matching the service-wide TLS/runtime posture.
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-bedrockruntime = "1.132.0"
+
+# SLICE_05: random float for sample rate gating. Default features
+# omitted to drop `getrandom`'s wasm-only paths; the `std` + `std_rng`
+# defaults we keep are enough for ThreadRng.
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+
+# SLICE_05: parking_lot RwLock for SampleRateState per-(tenant, model)
+# map + CircuitBreaker per-(tenant, model) state. Faster than std for
+# read-mostly workloads and provides poison-free guards (so a panicked
+# shadow worker can't deadlock the gRPC handler that shares the lock).
+parking_lot = "0.12"
+
+# SLICE_05: Ed25519 producer signing for `tokenizer_drift_alert`
+# CloudEvent emitted by the shadow worker. Reuses the canonical
+# Signer trait + LocalEd25519Signer + DisabledSigner triad already
+# wired in sidecar / canonical_ingest / ttl_sweeper.
+spendguard-signing = { path = "../signing" }
+chrono = { version = "0.4", features = ["serde"] }
+async-trait = "0.1"
+
+# SLICE_05: SQL persistence for tokenizer_t1_samples. sqlx-postgres
+# behind tls-rustls (matching the sidecar / ledger convention) and
+# without the macros feature (we use query() / query_as() / fetch_one
+# patterns to keep compile-time DB checks off).
+sqlx = { version = "0.8", default-features = false, features = [
+    "postgres",
+    "runtime-tokio",
+    "tls-rustls",
+    "uuid",
+    "chrono",
+] }
+
+# SLICE_05: prost CloudEvent uses bytes::Bytes for the signature +
+# data fields; the worker constructs both via Bytes::new() / Bytes::from.
+bytes = "1"
+
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"
+
+[dev-dependencies]
+pretty_assertions = "1"
+tempfile = "3"
+tokio = { version = "1", features = ["test-util", "macros", "rt-multi-thread"] }
+
+exec
+/bin/zsh -lc 'rg -n "BedrockClient::from_conf|endpoint_url|BehaviorVersion|test_credentials|Credentials|Region" services/tokenizer/src services/tokenizer/tests -S' in /Users/michael.chen/products/agentic-spendguard
+ succeeded in 0ms:
+services/tokenizer/src/shadow/provider_clients/llama.rs:16:use aws_config::BehaviorVersion;
+services/tokenizer/src/shadow/provider_clients/llama.rs:18:    config::{timeout::TimeoutConfig, Region},
+services/tokenizer/src/shadow/provider_clients/llama.rs:72:        let sdk_config = aws_config::defaults(BehaviorVersion::latest())
+services/tokenizer/src/shadow/provider_clients/llama.rs:73:            .region(Region::new(region))
+services/tokenizer/src/shadow/provider_clients/llama.rs:85:                builder = builder.endpoint_url(endpoint);
+services/tokenizer/src/shadow/provider_clients/llama.rs:91:                client: BedrockClient::from_conf(builder.build()),
+
+codex
+I have enough to make the arbitration call. The finding is narrow, reproducible from code, and has a low-risk SDK-native fix.
+codex
+**Decision**
+Fix anyway before closing POST_GA_05. Treat the P2 as accepted and in scope, despite max review round.
+
+**Rationale**
+This is provider coverage production-readiness, not a cosmetic observability issue. The SDK Bedrock path is the production Llama path, and it currently drops a correlation identifier that the SDK already exposes. The HTTP-compatible path preserves the same Bedrock request ID, so leaving the SDK path at `None` creates inconsistent evidence rows and weaker incident/debug correlation for Llama drift alerts.
+
+**Required Implementation/Tests**
+Implement in `services/tokenizer/src/shadow/provider_clients/llama.rs`:
+
+- Import the SDK re-exported trait, e.g. `aws_sdk_bedrockruntime::operation::RequestId`.
+- After `send().await?`, capture `let request_id = resp.request_id().map(str::to_owned);`.
+- Populate `ProviderCount { request_id, ... }`.
+- Keep `None` allowed if AWS omits the metadata. Do not fail the sample.
+- Do not manually parse headers in the SDK path.
+
+Acceptance checks:
+
+- Add/adjust a unit test for the Bedrock SDK backend, not only the HTTP-compatible backend.
+- The test must mock a successful `CountTokens` response with `x-amzn-requestid: bedrock_req_123`.
+- Assert `ProviderCount.request_id.as_deref() == Some("bedrock_req_123")`.
+- Run the tokenizer provider-client test target, at minimum the Llama module tests, and ensure existing HTTP-compatible request-id coverage still passes.
+
+**Residual Risk**
+Low. The change is a one-field propagation from SDK response metadata into an existing optional evidence field. Main remaining risk is SDK mocking fidelity; if unit setup is awkward, a focused integration-style mock endpoint is acceptable as long as it exercises `aws_sdk_bedrockruntime::Client.count_tokens().send().await`.
+tokens used
+34,069
+AIT recorded the run
+Status: succeeded
+Exit code: 0
+Changed: 0 files
+Outcome: succeeded_noop
+Attempt: a320
+Description: Attempt 01KT2S79FK7Y has no indexed changed files yet; status succeeded.
+Result: ready to apply
+Next: ait apply a320
+**Decision**
+Fix anyway before closing POST_GA_05. Treat the P2 as accepted and in scope, despite max review round.
+
+**Rationale**
+This is provider coverage production-readiness, not a cosmetic observability issue. The SDK Bedrock path is the production Llama path, and it currently drops a correlation identifier that the SDK already exposes. The HTTP-compatible path preserves the same Bedrock request ID, so leaving the SDK path at `None` creates inconsistent evidence rows and weaker incident/debug correlation for Llama drift alerts.
+
+**Required Implementation/Tests**
+Implement in `services/tokenizer/src/shadow/provider_clients/llama.rs`:
+
+- Import the SDK re-exported trait, e.g. `aws_sdk_bedrockruntime::operation::RequestId`.
+- After `send().await?`, capture `let request_id = resp.request_id().map(str::to_owned);`.
+- Populate `ProviderCount { request_id, ... }`.
+- Keep `None` allowed if AWS omits the metadata. Do not fail the sample.
+- Do not manually parse headers in the SDK path.
+
+Acceptance checks:
+
+- Add/adjust a unit test for the Bedrock SDK backend, not only the HTTP-compatible backend.
+- The test must mock a successful `CountTokens` response with `x-amzn-requestid: bedrock_req_123`.
+- Assert `ProviderCount.request_id.as_deref() == Some("bedrock_req_123")`.
+- Run the tokenizer provider-client test target, at minimum the Llama module tests, and ensure existing HTTP-compatible request-id coverage still passes.
+
+**Residual Risk**
+Low. The change is a one-field propagation from SDK response metadata into an existing optional evidence field. Main remaining risk is SDK mocking fidelity; if unit setup is awkward, a focused integration-style mock endpoint is acceptable as long as it exercises `aws_sdk_bedrockruntime::Client.count_tokens().send().await`.

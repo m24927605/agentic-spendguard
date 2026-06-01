@@ -1,7 +1,7 @@
 # POST_GA 05 - Provider Coverage
 
 > **Branch**: `post-ga/POST_GA_05_provider_coverage`
-> **Status**: implemented; adversarial review pending
+> **Status**: implemented; Staff+ arbitration accepted; ready to merge
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `tokenizer-service-spec-v1alpha1.md`
 > **Issues**: #139
 > **Estimated change size**: medium; Tier 1 provider clients and tests
@@ -122,11 +122,13 @@ Reviewer must inspect PII, quota, provider-error, and license paths.
 | Security Engineer | Redact provider error bodies, SDK service error details, and provider client Debug output so API keys, URL userinfo, and raw prompt echoes cannot reach logs | `cohere.rs`, `llama.rs`, `config.rs` |
 | Database Optimizer | Reuse existing sample/quota/PII tables; no migration | §5 |
 | Tokenizer Domain Expert | Cohere Tier 1 count is `tokens.len() + 1` for non-empty raw text; native dispatch covers both `YYYYMMDD` and documented `MM-YYYY` dated IDs; Bedrock Cohere model normalization strips any numeric revision accepted by dispatch | `services/tokenizer/src/shadow/provider_clients/cohere.rs`, `crates/spendguard-tokenizer/src/dispatch.rs` |
+| Staff+ Panel | Round 5 P2 on Bedrock Llama request-id propagation is valid and must be fixed before merge; no Round 6 review after arbitration | `docs/reviews/post-ga/POST_GA_05_provider_coverage/round-5-codex-review-summary.md`, `services/tokenizer/src/shadow/provider_clients/llama.rs` |
+| Backend Architect | Bedrock SDK `CountTokensOutput.request_id()` must populate `ProviderCount.request_id`; absence remains `None` | `services/tokenizer/src/shadow/provider_clients/llama.rs` |
 
 ## §14. Merge Checklist
 
 - [x] #139 fixed and tested
 - [x] Secure defaults verified
 - [x] Provider evidence recorded
-- [ ] AIT review clean or Staff+ arbitration recorded
+- [x] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated

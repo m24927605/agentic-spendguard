@@ -1,0 +1,18 @@
+ait warning: spawning a nested wrapped codex session from inside attempt 'd22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KSX3H3F2MX6QXEKAXYGQG2WH'. The inner agent may lose its parent OAuth context and fail with auth errors. To bypass: prefix with `AIT_BYPASS=1`, or run `ait off` in the outer shell first.
+error: unexpected argument '-a' found
+
+  tip: to pass '-a' as a value, use '-- -a'
+
+Usage: codex exec [OPTIONS] [PROMPT]
+       codex exec [OPTIONS] <COMMAND> [ARGS]
+
+For more information, try '--help'.
+AIT recorded the run
+Status: failed
+Exit code: 2
+Changed: 0 files
+Outcome: failed_with_evidence
+Attempt: a316
+Description: Attempt 01KT2S2GRA1Y has no indexed changed files yet; status failed; exit code 2.
+Result: kept for recovery
+Next: ait recover a316

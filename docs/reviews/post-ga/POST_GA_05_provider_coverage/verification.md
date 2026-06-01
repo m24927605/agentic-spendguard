@@ -7,9 +7,10 @@ Branch: `post-ga/POST_GA_05_provider_coverage`
 
 | Gate | Command | Result |
 |---|---|---|
-| Library tests | `cargo test --manifest-path crates/spendguard-tokenizer/Cargo.toml --features cohere` | PASS after Round 4 fixes: lib 135, cross-check schema 2, seed parity 15 |
-| Format + service tests | `cargo fmt --manifest-path services/tokenizer/Cargo.toml && cargo test --manifest-path services/tokenizer/Cargo.toml` | PASS after Round 4 fixes: lib 99, main 13, golden 51, slice04 golden 205, slice05 chaos 3 |
-| Build | `cargo build --manifest-path services/tokenizer/Cargo.toml` | PASS after Round 4 fixes |
+| Library tests | `cargo test --manifest-path crates/spendguard-tokenizer/Cargo.toml --features cohere` | PASS after Staff+ arbitration fix: lib 135, cross-check schema 2, seed parity 15 |
+| Format + service tests | `cargo fmt --manifest-path services/tokenizer/Cargo.toml && cargo test --manifest-path services/tokenizer/Cargo.toml` | PASS after Staff+ arbitration fix: lib 101, main 13, golden 51, slice04 golden 205, slice05 chaos 3 |
+| Targeted Llama provider tests | `cargo test --manifest-path services/tokenizer/Cargo.toml shadow::provider_clients::llama -- --nocapture` | PASS: 7 tests, including Bedrock SDK request-id present/missing cases |
+| Build | `cargo build --manifest-path services/tokenizer/Cargo.toml` | PASS after Staff+ arbitration fix |
 | Helm demo render | `helm template charts/spendguard --set chart.profile=demo` | PASS, 1443 rendered lines |
 | Helm production render | `helm template charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production` | PASS, 2157 rendered lines |
 | Hot-path invariant | `rg -n "provider_clients\|CohereClient\|LlamaClient\|COHERE\|LLAMA\|count_tokens\\(" services/sidecar services/egress_proxy` | PASS: no tokenizer provider clients in sidecar/egress_proxy; only existing Bedrock provider model classifier regexes match Cohere/Llama names |
@@ -31,6 +32,7 @@ Branch: `post-ga/POST_GA_05_provider_coverage`
 - Cohere `Debug` redacts API keys and URL userinfo.
 - Cohere dispatch routes documented `command-r(-plus)-MM-YYYY` dated model IDs as well as legacy `YYYYMMDD` test IDs.
 - Bedrock Llama SDK service errors are mapped to redacted categories before logs can observe provider-controlled detail.
+- Bedrock Llama SDK success path preserves AWS `x-amzn-requestid` into `ProviderCount.request_id`; missing request IDs remain `None`.
 
 ## Review Rounds
 
@@ -45,6 +47,9 @@ Branch: `post-ga/POST_GA_05_provider_coverage`
 | 3 | Direct codex CLI review | P2: Cohere Bedrock model IDs with non-zero numeric revisions were not normalized. P2: Cohere derived `Debug` exposed `api_key` and base URL userinfo. | Fixed in `cohere.rs`; tests/build/Helm/demo rerun clean |
 | 4 | `ait run --adapter codex --review-mode adversarial ...` | Tool rejected `--review-mode` with exit code 2 | Recorded in `round-4-ait.txt`; used codex CLI fallback |
 | 4 | Direct codex CLI review | P2: documented Cohere `command-r-plus-08-2024` IDs did not route to Cohere Tier 2/1. P2: Bedrock Llama service errors could log provider-controlled detail. | Fixed in `dispatch.rs`, `slice04_golden_samples.rs`, and `llama.rs`; library/service tests, build, Helm, and demo rerun clean |
+| 5 | `ait run --adapter codex --review-mode adversarial ...` | Tool rejected `--review-mode` with exit code 2 | Recorded in `round-5-ait.txt`; used codex CLI fallback |
+| 5 | Direct codex CLI review | P2: Bedrock Llama SDK success path dropped `CountTokensOutput.request_id()`. | Max review round reached; Staff+ arbitration required |
+| Staff+ arbitration | Five `ait run --adapter codex` panel runs | Unanimous decision: fix anyway; no waiver, no Round 6 | Fixed in `llama.rs`; targeted/full tests, build, Helm, hot-path grep, and demo rerun clean |
 
 ## Real Provider Tests
 
@@ -59,3 +64,13 @@ Optional real Cohere/Llama provider tests were not run because sanitized local v
 | Security Engineer | New provider clients redact provider error bodies, SDK service error detail, and custom Debug implementations mask API keys and URL userinfo. |
 | Database Optimizer | Reuse existing tokenizer_t1_samples, PII opt-in, quota, and sample-rate state; no schema change. |
 | Tokenizer Domain Expert | Cohere count is `tokens.len() + 1` for non-empty raw text to match Bedrock BOS accounting; native dispatch covers documented `MM-YYYY` dated IDs and Bedrock Cohere IDs strip any numeric revision. Llama count is Bedrock `inputTokens` over the InvokeModel body. |
+
+## Staff+ Arbitration Locked After Round 5
+
+| Role | Round-5 Decision |
+|---|---|
+| Software Architect | Fix Bedrock request-id propagation before closing POST_GA_05; no schema or contract change. |
+| Backend Architect | Use SDK `RequestId` trait and add a mocked Bedrock CountTokens test with `x-amzn-requestid`. |
+| Security Engineer | Do not waive the finding; preserving a correlation ID improves incident investigation without exposing prompts. |
+| Database Optimizer | No migration needed; existing optional provider request-id evidence field is sufficient. |
+| Tokenizer Domain Expert | Capture `resp.request_id().map(str::to_owned)` from the SDK path; missing request ID remains acceptable `None`. |
