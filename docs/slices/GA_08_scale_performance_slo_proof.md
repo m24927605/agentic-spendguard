@@ -1,7 +1,7 @@
 # GA 08 - Scale and Performance SLO Proof
 
 > **Branch**: `ga/GA_08_scale_performance_slo_proof`
-> **Status**: R2 findings under fix
+> **Status**: Implemented; R4 adversarial review clean
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium-large; load harness, DB plan checks, performance evidence
 
@@ -49,6 +49,8 @@ Implementation adds one index-only migration. The load gate exposed invalid para
 
 R2 review added `0021_canonical_events_run_recovery_index.sql` so `recover_from_audit_chain()` can seek the latest decision row by `(tenant_id, run_id_mirror, agent_id)` instead of scanning tenant-month decision volume.
 
+R3 review made the DB plan gate partition-aware: `scripts/db/explain-ga-plans.sql` now treats every relation in `pg_partition_tree('public.canonical_events')` as a GA production table, so Seq Scans on `canonical_events_2026_06` or `canonical_events_default` fail the gate instead of slipping past a parent-table name check.
+
 ## §6. Audit / Security / Operational Impact
 
 Load tests must verify zero audit loss and must not disable security or replay protection for speed.
@@ -71,15 +73,27 @@ Load tests must verify zero audit loss and must not disable security or replay p
 - Performance evidence includes p50, p95, p99, max, errors, and environment
 - Audit row integrity probe passes after load
 
-R1/R2 local evidence on 2026-06-01:
+Final local evidence on 2026-06-01:
 
-- Source commit under test: refreshed after R2 fixes
+- Source commit under test: `e660678953adfa1aa56c9d6203518bd382d29308`
 - `git_dirty=false`
 - 100/100 operations completed; 100 logical workloads, 4 providers, 20 agents
 - canonical delta 200; ledger outbox delta 200; pending outbox rows 0
 - `verify_audit_columns.py` exit 0; DB plan gate exit 0
+- local smoke p99: tokenizer 10.071ms; output_predictor 14.435ms; direct run_cost_projector 51.073ms; sidecar decision 101.917ms; sidecar emit 83.512ms; end-to-end 256.852ms
 - Local compose smoke p99 is recorded as evidence, not as Contract §14 certification.
 - Contract §14 benchmark ancestor: `docs/reviews/hardening/HARDEN_02/predictor-benchmark/RESULTS.md` reports SpendGuard p99 15,407us at burst 100, under the 50,000us gate enforced by the benchmark binary.
+
+Additional validation:
+
+- `cargo test --manifest-path services/run_cost_projector/Cargo.toml`
+- `cargo test --manifest-path services/sidecar/Cargo.toml`
+- `cargo check --manifest-path services/run_cost_projector/Cargo.toml`
+- `cargo check --manifest-path services/sidecar/Cargo.toml`
+- `helm template spendguard charts/spendguard`
+- `helm template spendguard charts/spendguard -f charts/spendguard/values-production.example.yaml --set chart.profile=production`
+- `bash -n benchmarks/ga-load/run.sh`
+- Python syntax check through `ast.parse(Path('benchmarks/ga-load/driver.py').read_text())`
 
 ## §9. Review Checklist
 
@@ -105,6 +119,14 @@ Reviewer: codex CLI via `ait run --adapter codex --review-mode adversarial`. Max
 
 Reviewer must reject averaged-only latency, tiny cardinality, and disabled-security benchmark shortcuts.
 
+Execution record:
+
+- AIT wrapper limitation: local `ait run --adapter codex --review-mode adversarial ...` exits with `ait: error: unrecognized arguments: --review-mode`; every review round therefore used codex CLI fallback: `codex review --base main`.
+- R1: 3 P2 findings fixed. Sidecar ClaimEstimate now uses tokenizer/RCP output; metric gate proves sidecar projector calls; audit row gate counts decision/outcome separately.
+- R2: 3 P2 findings fixed. Local compose evidence relabelled as smoke gate, production/default projector timeout set to 25ms, and canonical recovery lookup gained `(tenant_id, run_id_mirror, agent_id)` index coverage.
+- R3: 1 P2 finding fixed. DB plan gate now detects Seq Scans on `canonical_events` partition children via `pg_partition_tree`.
+- R4: clean. No discrete correctness findings.
+
 ## §13. Adoption History
 
 | Role | Decision | Outcome |
@@ -117,11 +139,13 @@ Reviewer must reject averaged-only latency, tiny cardinality, and disabled-secur
 | Performance Architect | Local Docker p99 limits are smoke thresholds, not production Contract §14 certification | Scenario renamed `local_smoke_limits`; benchmark SLO evidence remains separate |
 | Backend Architect | Projector fail-open timeout must stay inside the 50ms decision budget by default | Production/default timeout is 25ms; local smoke run overrides to 500ms explicitly |
 | Database Optimizer | canonical recovery requires a seek path by tenant/run/agent | Added `canonical_events_run_recovery_idx` and GA plan gate coverage |
+| Database Optimizer | Plan gate must reject Seq Scans on canonical partition children, not just the parent relation | `ga_assert_no_seq_scan` matches every `canonical_events` partition through `pg_partition_tree` |
+| Reviewer codex CLI | R4 adversarial review found no further correctness issues | GA_08 accepted without Staff+ arbitration |
 
 ## §14. Merge Checklist
 
 - [x] Load harness passes local scenario
 - [x] DB explain checks pass
 - [x] Evidence recorded
-- [ ] AIT review clean or arbitration recorded
+- [x] AIT review clean or arbitration recorded
 - [ ] Memory updated
