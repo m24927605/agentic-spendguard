@@ -1,7 +1,7 @@
 # GA 10 - Customer Plugin Onboarding and Backlog Triage
 
 > **Branch**: `ga/GA_10_customer_plugin_onboarding_backlog`
-> **Status**: design
+> **Status**: implementation
 > **Spec ancestor(s)**: `ga-readiness-spec-v1alpha1.md`
 > **Estimated change size**: medium; docs, conformance checks, issue triage
 
@@ -98,11 +98,14 @@ Reviewer must inspect triage honesty and reject undocumented customer-critical f
 |---|---|---|
 | Customer Plugin/Backend Architect | Plugin certification and backlog triage share one customer-readiness slice | GA_10 owns both |
 | Security Engineer | SVID/mTLS requirements remain non-negotiable | Certification checklist enforces them |
+| SRE/Operations Architect | Plugin failure modes must map to customer and operator actions | Error taxonomy maps Strategy C metric labels to actions |
+| Database Optimizer | DB/index polish issues can be non-GA only when named and visible | Backlog triage assigns them to post-GA implementation slices |
+| Software Architect | Duplicate and historical issues must close with evidence | #155 and #170 closure evidence recorded in backlog triage |
 
 ## §14. Merge Checklist
 
-- [ ] Plugin onboarding docs exist
-- [ ] Conformance tests pass
-- [ ] Backlog triage report exists
+- [x] Plugin onboarding docs exist
+- [x] Conformance tests pass
+- [x] Backlog triage report exists
 - [ ] AIT review clean or arbitration recorded
 - [ ] Memory updated

@@ -149,6 +149,34 @@ Run it with `python -m pytest conformance_test.py -v`. The suite
 should be 100% green on the stub before you replace the model; it
 also serves as a regression harness for your replacement model.
 
+## Certification path
+
+Customer production onboarding is documented in:
+
+- `../../docs/customer/plugin-onboarding.md`
+- `../../docs/customer/plugin-certification-checklist.md`
+- `../../docs/customer/plugin-error-taxonomy.md`
+
+Before SpendGuard Strategy C traffic is enabled for a tenant, produce
+the certification evidence in that checklist. At minimum:
+
+```bash
+python3 -m pytest conformance_test.py -q
+```
+
+The production deployment must use mTLS, must reject plaintext traffic,
+and must validate the exact SpendGuard predictor-client SVID URI SAN:
+
+```text
+spiffe://spendguard.platform/predictor-client/<tenant_id>
+```
+
+The plugin should be idempotent by `spendguard_call_id`, should not
+perform unbounded retries inside the 50 ms `Predict` budget, and should
+expect SpendGuard's circuit breaker to fall back to Strategy B on
+timeouts, gRPC errors, invalid predictions, TLS errors, or
+`NOT_SERVING` health.
+
 ## Troubleshooting
 
 | Symptom | Likely cause |
