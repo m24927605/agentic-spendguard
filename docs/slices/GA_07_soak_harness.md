@@ -98,6 +98,8 @@ Reviewer must reject shim-only or final-status-only soak evidence.
 | Implementer | Ran exact 30m local gate | PASS: 27 snapshots, final elapsed 1814s, pending 0, lag 0, stats cycles 31 |
 | Codex adversarial reviewer R1 | Snapshot probe failures could fail open under Bash `errexit` suppression; generated summary lacked GA §7 evidence metadata | Fixed explicit probe return guards and added commit, branch, date, command line, environment profile, machine descriptor, cluster descriptor, and git cleanliness metadata |
 | Implementer | Reran exact 30m local gate after R1 fix | PASS: 28 snapshots, final elapsed 1838s, pending 0, lag 0, stats cycles 31, `git_dirty=false` |
+| Codex adversarial reviewer R2 | Stopped containers could fail `docker stats` or metrics probes before inspect details were recorded; zero intervals could busy-loop | Snapshot probes now capture DB/metrics failures into failure evidence, still record inspect status, and reject non-positive duration/interval values |
+| Implementer | Ran R2 targeted gates | PASS: zero interval rejected; stopped tokenizer produced a structured fail summary with exited/unhealthy status; 30s happy-path smoke passed |
 
 ## §14. Merge Checklist
 

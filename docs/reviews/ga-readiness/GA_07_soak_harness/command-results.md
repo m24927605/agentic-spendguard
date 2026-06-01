@@ -11,9 +11,13 @@ Date: 2026-06-01
 | `helm template spendguard charts/spendguard --set chart.profile=demo` | PASS | Rendered `/tmp/ga07-helm-demo.yaml`, 1441 lines |
 | `helm template spendguard charts/spendguard --set chart.profile=production -f scripts/helm-validate-test-values.yaml` | PASS | Rendered `/tmp/ga07-helm-prod.yaml`, 1534 lines |
 | `scripts/soak/ga-soak.sh --duration 30s --interval 30s --profile local --no-reset --evidence-dir /tmp/ga07-review-soak-r1` | PASS | R1 smoke after fail-closed + metadata fix. Summary included branch, commit, command line, environment, machine descriptor, and `git_dirty=false` |
+| `scripts/soak/ga-soak.sh --duration 1s --interval 0s --profile local --no-reset --evidence-dir /tmp/ga07-zero-interval-test` | PASS (negative) | R2 fix rejects zero interval before touching docker: exit `2`, `--interval must be > 0` |
+| `scripts/soak/ga-soak.sh --duration 90s --interval 30s --profile local --no-reset --evidence-dir /tmp/ga07-stopped-container-test` + `docker stop spendguard-tokenizer` after snapshot 0 | PASS (negative) | Harness exited `1` and wrote failure summary with tokenizer metrics probe failure, `spendguard-tokenizer status is exited`, and `spendguard-tokenizer health is unhealthy` |
+| `scripts/soak/ga-soak.sh --duration 30s --interval 30s --profile local --no-reset --evidence-dir /tmp/ga07-review-soak-r2` | PASS | R2 happy-path smoke after probe-failure capture; 2 snapshots, pending `0`, lag `0`, failures `[]` |
 | `bash -n scripts/soak/ga-soak.sh && git diff --check` | PASS | Shell syntax and whitespace gates clean after R1 fix |
 | `ait run --adapter codex --review-mode adversarial --base main --branch ga/GA_07_soak_harness --slice-doc docs/slices/GA_07_soak_harness.md --review-budget deep` | FAIL | Local AIT wrapper rejected `--review-mode` with `unrecognized arguments`; fallback direct codex review used per workflow precedent |
 | `codex review --base main` | R1 FINDINGS | P1 snapshot probe failures could fail open under Bash `errexit` suppression; P2 generated summary lacked GA §7 evidence metadata |
+| `codex review --base main` | R2 FINDINGS | P2 stopped containers could abort before recording inspect details; P3 zero interval could busy-loop |
 
 Last soak snapshot:
 

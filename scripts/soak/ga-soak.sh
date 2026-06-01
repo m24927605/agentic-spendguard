@@ -89,6 +89,14 @@ fi
 
 DURATION_SECONDS="$(parse_duration "$DURATION")"
 INTERVAL_SECONDS="$(parse_duration "$INTERVAL")"
+if [[ "$DURATION_SECONDS" -le 0 ]]; then
+  echo "--duration must be > 0" >&2
+  exit 2
+fi
+if [[ "$INTERVAL_SECONDS" -le 0 ]]; then
+  echo "--interval must be > 0" >&2
+  exit 2
+fi
 if [[ "$DURATION_SECONDS" -lt "$INTERVAL_SECONDS" ]]; then
   echo "--duration must be >= --interval" >&2
   exit 2
@@ -208,6 +216,14 @@ run_verify_audit_columns() {
   python3 "$ROOT/tests/e2e/verify_audit_columns.py" --tenant "$TENANT_ID"
 }
 
+record_probe_failure() {
+  local label="$1"
+  local status="$2"
+  local output="$3"
+  local cleaned="${output//$'\n'/ }"
+  PROBE_FAILURES+="${label} failed with status ${status}: ${cleaned}"$'\n'
+}
+
 append_snapshot() {
   local index="$1"
   local started_unix="$2"
@@ -231,22 +247,79 @@ append_snapshot() {
   local verify_status=0
   local inspect_output
   local stats_output
+  local stats_status=0
+  local PROBE_FAILURES=""
 
   now_unix="$(date -u +%s)" || return $?
   elapsed=$((now_unix - started_unix))
 
-  ledger_out="$(psql_db spendguard_ledger "SELECT count(*) FILTER (WHERE pending_forward = TRUE)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - min(recorded_at)))::bigint, 0) FROM audit_outbox WHERE pending_forward = TRUE;")" || return $?
-  canonical_out="$(psql_db spendguard_canonical "SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(ingest_at)))::bigint, 999999) FROM canonical_events WHERE tenant_id = '$TENANT_ID';")" || return $?
-  cache_out="$(psql_db spendguard_canonical "SELECT set_config('app.current_tenant_id', '$TENANT_ID', true); SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(computed_at)))::bigint, 999999) FROM output_distribution_cache WHERE tenant_id = '$TENANT_ID';" | tail -n1)" || return $?
-  run_cache_out="$(psql_db spendguard_canonical "SELECT set_config('app.current_tenant_id', '$TENANT_ID', true); SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(computed_at)))::bigint, 999999) FROM run_length_distribution_cache WHERE tenant_id = '$TENANT_ID';" | tail -n1)" || return $?
+  if ledger_out="$(psql_db spendguard_ledger "SELECT count(*) FILTER (WHERE pending_forward = TRUE)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - min(recorded_at)))::bigint, 0) FROM audit_outbox WHERE pending_forward = TRUE;" 2>&1)"; then
+    :
+  else
+    record_probe_failure "ledger audit_outbox query" "$?" "$ledger_out"
+    ledger_out="0|0"
+  fi
+  if canonical_out="$(psql_db spendguard_canonical "SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(ingest_at)))::bigint, 999999) FROM canonical_events WHERE tenant_id = '$TENANT_ID';" 2>&1)"; then
+    :
+  else
+    record_probe_failure "canonical_events query" "$?" "$canonical_out"
+    canonical_out="0|999999"
+  fi
+  if cache_out="$({ psql_db spendguard_canonical "SELECT set_config('app.current_tenant_id', '$TENANT_ID', true); SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(computed_at)))::bigint, 999999) FROM output_distribution_cache WHERE tenant_id = '$TENANT_ID';" | tail -n1; } 2>&1)"; then
+    :
+  else
+    record_probe_failure "output_distribution_cache query" "$?" "$cache_out"
+    cache_out="0|999999"
+  fi
+  if run_cache_out="$({ psql_db spendguard_canonical "SELECT set_config('app.current_tenant_id', '$TENANT_ID', true); SELECT count(*)::int, COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(computed_at)))::bigint, 999999) FROM run_length_distribution_cache WHERE tenant_id = '$TENANT_ID';" | tail -n1; } 2>&1)"; then
+    :
+  else
+    record_probe_failure "run_length_distribution_cache query" "$?" "$run_cache_out"
+    run_cache_out="0|999999"
+  fi
 
-  outbox_lag="$(metric_gauge "http://127.0.0.1:9096/metrics" "spendguard_outbox_pending_oldest_age_seconds")" || return $?
-  leader_count="$(metric_sum "http://127.0.0.1:9096/metrics" "spendguard_outbox_forwarder_is_leader")" || return $?
-  dedup_total="$(canonical_metric_sum "spendguard_ingest_events_deduped_total")" || return $?
-  stats_cycles="$(metric_sum "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_cycles_total")" || return $?
-  stats_errors="$(metric_sum "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_cycle_error_total")" || return $?
-  stats_last_cycle="$(metric_gauge "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_last_cycle_start_unix_secs")" || return $?
-  tokenizer_escalations="$(metric_sum "http://127.0.0.1:9099/metrics" "spendguard_tokenizer_drift_alert_oncall_escalation_total")" || return $?
+  if outbox_lag="$(metric_gauge "http://127.0.0.1:9096/metrics" "spendguard_outbox_pending_oldest_age_seconds" 2>&1)"; then
+    :
+  else
+    record_probe_failure "outbox lag metric" "$?" "$outbox_lag"
+    outbox_lag=0
+  fi
+  if leader_count="$(metric_sum "http://127.0.0.1:9096/metrics" "spendguard_outbox_forwarder_is_leader" 2>&1)"; then
+    :
+  else
+    record_probe_failure "outbox leader metric" "$?" "$leader_count"
+    leader_count=0
+  fi
+  if dedup_total="$(canonical_metric_sum "spendguard_ingest_events_deduped_total" 2>&1)"; then
+    :
+  else
+    record_probe_failure "canonical dedup metric" "$?" "$dedup_total"
+    dedup_total=0
+  fi
+  if stats_cycles="$(metric_sum "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_cycles_total" 2>&1)"; then
+    :
+  else
+    record_probe_failure "stats cycles metric" "$?" "$stats_cycles"
+    stats_cycles=0
+  fi
+  if stats_errors="$(metric_sum "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_cycle_error_total" 2>&1)"; then
+    :
+  else
+    record_probe_failure "stats errors metric" "$?" "$stats_errors"
+    stats_errors=0
+  fi
+  if stats_last_cycle="$(metric_gauge "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_last_cycle_start_unix_secs" 2>&1)"; then
+    :
+  else
+    record_probe_failure "stats last-cycle metric" "$?" "$stats_last_cycle"
+    stats_last_cycle=0
+  fi
+  if tokenizer_escalations="$(metric_sum "http://127.0.0.1:9099/metrics" "spendguard_tokenizer_drift_alert_oncall_escalation_total" 2>&1)"; then
+    :
+  else
+    record_probe_failure "tokenizer escalation metric" "$?" "$tokenizer_escalations"
+    tokenizer_escalations=0
+  fi
 
   if svid_output="$(run_svid_probe 2>&1)"; then
     svid_status=0
@@ -264,10 +337,14 @@ append_snapshot() {
     spendguard-postgres spendguard-ledger spendguard-canonical-ingest spendguard-sidecar \
     spendguard-outbox-forwarder spendguard-stats-aggregator spendguard-output-predictor \
     spendguard-run-cost-projector spendguard-tokenizer spendguard-control-plane)" || return $?
-  stats_output="$(docker stats --no-stream --format '{{json .}}' \
+  if stats_output="$(docker stats --no-stream --format '{{json .}}' \
     spendguard-postgres spendguard-ledger spendguard-canonical-ingest spendguard-sidecar \
     spendguard-outbox-forwarder spendguard-stats-aggregator spendguard-output-predictor \
-    spendguard-run-cost-projector spendguard-tokenizer spendguard-control-plane)" || return $?
+    spendguard-run-cost-projector spendguard-tokenizer spendguard-control-plane 2>&1)"; then
+    stats_status=0
+  else
+    stats_status=$?
+  fi
 
   SNAPSHOT_INDEX="$index" \
   SNAPSHOT_UNIX="$now_unix" \
@@ -289,6 +366,8 @@ append_snapshot() {
   VERIFY_OUTPUT="$verify_output" \
   DOCKER_INSPECT="$inspect_output" \
   DOCKER_STATS="$stats_output" \
+  DOCKER_STATS_STATUS="$stats_status" \
+  PROBE_FAILURES="$PROBE_FAILURES" \
   BASELINE_FILE="$baseline_file" \
   SNAPSHOTS_FILE="$SNAPSHOTS_FILE" \
   MAX_OUTBOX_LAG_SECONDS="$MAX_OUTBOX_LAG_SECONDS" \
@@ -352,8 +431,11 @@ pending, pending_age = split_pair(os.environ["LEDGER_OUT"])
 canonical_count, canonical_freshness = split_pair(os.environ["CANONICAL_OUT"])
 output_cache_count, output_cache_age = split_pair(os.environ["CACHE_OUT"])
 run_cache_count, run_cache_age = split_pair(os.environ["RUN_CACHE_OUT"])
-docker_stats = parse_stats(os.environ["DOCKER_STATS"])
 docker_inspect = parse_inspect(os.environ["DOCKER_INSPECT"])
+docker_stats = {}
+docker_stats_status = int(os.environ["DOCKER_STATS_STATUS"])
+if docker_stats_status == 0:
+    docker_stats = parse_stats(os.environ["DOCKER_STATS"])
 
 baseline_path = Path(os.environ["BASELINE_FILE"])
 if baseline_path.exists():
@@ -370,6 +452,9 @@ failures = []
 max_outbox_lag = int(os.environ["MAX_OUTBOX_LAG_SECONDS"])
 max_memory_growth = int(os.environ["MAX_MEMORY_GROWTH_BYTES"])
 
+if docker_stats_status != 0:
+    failures.append(f"docker stats failed with status {docker_stats_status}: {os.environ['DOCKER_STATS'].strip()}")
+failures.extend(line for line in os.environ["PROBE_FAILURES"].splitlines() if line.strip())
 if pending != 0:
     failures.append(f"audit_outbox pending rows not drained: {pending}")
 if int(os.environ["OUTBOX_LAG"]) > max_outbox_lag:
