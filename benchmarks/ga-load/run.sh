@@ -151,7 +151,11 @@ wait_for_http "http://127.0.0.1:9102/healthz" "run cost projector health"
 wait_for_container_http canonical-ingest "http://127.0.0.1:9091/metrics" "canonical metrics"
 
 CANONICAL_BEFORE="$(psql_db spendguard_canonical "SELECT count(*)::int FROM canonical_events WHERE tenant_id = '$TENANT_ID';" | tail -n1)"
+CANONICAL_DECISION_BEFORE="$(psql_db spendguard_canonical "SELECT count(*)::int FROM canonical_events WHERE tenant_id = '$TENANT_ID' AND event_type = 'spendguard.audit.decision';" | tail -n1)"
+CANONICAL_OUTCOME_BEFORE="$(psql_db spendguard_canonical "SELECT count(*)::int FROM canonical_events WHERE tenant_id = '$TENANT_ID' AND event_type = 'spendguard.audit.outcome';" | tail -n1)"
 LEDGER_OUTBOX_BEFORE="$(psql_db spendguard_ledger "SELECT count(*)::int FROM audit_outbox WHERE tenant_id = '$TENANT_ID';" | tail -n1)"
+LEDGER_OUTBOX_DECISION_BEFORE="$(psql_db spendguard_ledger "SELECT count(*)::int FROM audit_outbox WHERE tenant_id = '$TENANT_ID' AND event_type = 'spendguard.audit.decision';" | tail -n1)"
+LEDGER_OUTBOX_OUTCOME_BEFORE="$(psql_db spendguard_ledger "SELECT count(*)::int FROM audit_outbox WHERE tenant_id = '$TENANT_ID' AND event_type = 'spendguard.audit.outcome';" | tail -n1)"
 
 echo "[ga-load] running load driver in demo container"
 set +e
@@ -208,15 +212,27 @@ PLAN_STATUS=$?
 set -e
 
 CANONICAL_AFTER="$(psql_db spendguard_canonical "SELECT count(*)::int FROM canonical_events WHERE tenant_id = '$TENANT_ID';" | tail -n1)"
+CANONICAL_DECISION_AFTER="$(psql_db spendguard_canonical "SELECT count(*)::int FROM canonical_events WHERE tenant_id = '$TENANT_ID' AND event_type = 'spendguard.audit.decision';" | tail -n1)"
+CANONICAL_OUTCOME_AFTER="$(psql_db spendguard_canonical "SELECT count(*)::int FROM canonical_events WHERE tenant_id = '$TENANT_ID' AND event_type = 'spendguard.audit.outcome';" | tail -n1)"
 LEDGER_OUTBOX_AFTER="$(psql_db spendguard_ledger "SELECT count(*)::int FROM audit_outbox WHERE tenant_id = '$TENANT_ID';" | tail -n1)"
+LEDGER_OUTBOX_DECISION_AFTER="$(psql_db spendguard_ledger "SELECT count(*)::int FROM audit_outbox WHERE tenant_id = '$TENANT_ID' AND event_type = 'spendguard.audit.decision';" | tail -n1)"
+LEDGER_OUTBOX_OUTCOME_AFTER="$(psql_db spendguard_ledger "SELECT count(*)::int FROM audit_outbox WHERE tenant_id = '$TENANT_ID' AND event_type = 'spendguard.audit.outcome';" | tail -n1)"
 PENDING_AFTER="$(psql_db spendguard_ledger "SELECT count(*)::int FROM audit_outbox WHERE pending_forward = TRUE;" | tail -n1)"
 OLDEST_LAG_AFTER="$(psql_db spendguard_ledger "SELECT COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - min(recorded_at)))::bigint, 0) FROM audit_outbox WHERE pending_forward = TRUE;" | tail -n1)"
 CANONICAL_DELTA=$((CANONICAL_AFTER - CANONICAL_BEFORE))
+CANONICAL_DECISION_DELTA=$((CANONICAL_DECISION_AFTER - CANONICAL_DECISION_BEFORE))
+CANONICAL_OUTCOME_DELTA=$((CANONICAL_OUTCOME_AFTER - CANONICAL_OUTCOME_BEFORE))
 LEDGER_OUTBOX_DELTA=$((LEDGER_OUTBOX_AFTER - LEDGER_OUTBOX_BEFORE))
-export EXPECTED_OPS CANONICAL_DELTA LEDGER_OUTBOX_DELTA PENDING_AFTER OLDEST_LAG_AFTER
+LEDGER_OUTBOX_DECISION_DELTA=$((LEDGER_OUTBOX_DECISION_AFTER - LEDGER_OUTBOX_DECISION_BEFORE))
+LEDGER_OUTBOX_OUTCOME_DELTA=$((LEDGER_OUTBOX_OUTCOME_AFTER - LEDGER_OUTBOX_OUTCOME_BEFORE))
+export EXPECTED_OPS CANONICAL_DELTA CANONICAL_DECISION_DELTA CANONICAL_OUTCOME_DELTA
+export LEDGER_OUTBOX_DELTA LEDGER_OUTBOX_DECISION_DELTA LEDGER_OUTBOX_OUTCOME_DELTA
+export PENDING_AFTER OLDEST_LAG_AFTER
 export DRIVER_STATUS OUTBOX_STATUS VERIFY_STATUS PLAN_STATUS
 export GIT_BRANCH GIT_COMMIT_SHA GIT_SOURCE_STATUS COMMAND_LINE MACHINE_DESCRIPTOR
-export SCENARIO TENANT_ID CANONICAL_BEFORE CANONICAL_AFTER LEDGER_OUTBOX_BEFORE LEDGER_OUTBOX_AFTER
+export SCENARIO TENANT_ID
+export CANONICAL_BEFORE CANONICAL_AFTER CANONICAL_DECISION_BEFORE CANONICAL_DECISION_AFTER CANONICAL_OUTCOME_BEFORE CANONICAL_OUTCOME_AFTER
+export LEDGER_OUTBOX_BEFORE LEDGER_OUTBOX_AFTER LEDGER_OUTBOX_DECISION_BEFORE LEDGER_OUTBOX_DECISION_AFTER LEDGER_OUTBOX_OUTCOME_BEFORE LEDGER_OUTBOX_OUTCOME_AFTER
 
 python3 - "$LOAD_RESULTS" "$SUMMARY" "$COMMAND_RESULTS" <<'PY'
 import json
@@ -228,7 +244,11 @@ load_path, summary_path, command_path = sys.argv[1:4]
 load = json.load(open(load_path))
 expected = int(os.environ["EXPECTED_OPS"])
 canonical_delta = int(os.environ["CANONICAL_DELTA"])
+canonical_decision_delta = int(os.environ["CANONICAL_DECISION_DELTA"])
+canonical_outcome_delta = int(os.environ["CANONICAL_OUTCOME_DELTA"])
 ledger_delta = int(os.environ["LEDGER_OUTBOX_DELTA"])
+ledger_decision_delta = int(os.environ["LEDGER_OUTBOX_DECISION_DELTA"])
+ledger_outcome_delta = int(os.environ["LEDGER_OUTBOX_OUTCOME_DELTA"])
 pending_after = int(os.environ["PENDING_AFTER"])
 oldest_lag_after = int(os.environ["OLDEST_LAG_AFTER"])
 driver_status = int(os.environ["DRIVER_STATUS"])
@@ -245,10 +265,18 @@ if verify_status != 0:
     failures.append(f"verify_audit_columns exited {verify_status}")
 if plan_status != 0:
     failures.append(f"explain-ga-plans exited {plan_status}")
-if canonical_delta < expected:
-    failures.append(f"canonical_events delta {canonical_delta} below expected operations {expected}")
-if ledger_delta < expected:
-    failures.append(f"audit_outbox delta {ledger_delta} below expected operations {expected}")
+if canonical_delta < expected * 2:
+    failures.append(f"canonical_events delta {canonical_delta} below expected decision+outcome rows {expected * 2}")
+if canonical_decision_delta < expected:
+    failures.append(f"canonical_events decision delta {canonical_decision_delta} below expected operations {expected}")
+if canonical_outcome_delta < expected:
+    failures.append(f"canonical_events outcome delta {canonical_outcome_delta} below expected operations {expected}")
+if ledger_delta < expected * 2:
+    failures.append(f"audit_outbox delta {ledger_delta} below expected decision+outcome rows {expected * 2}")
+if ledger_decision_delta < expected:
+    failures.append(f"audit_outbox decision delta {ledger_decision_delta} below expected operations {expected}")
+if ledger_outcome_delta < expected:
+    failures.append(f"audit_outbox outcome delta {ledger_outcome_delta} below expected operations {expected}")
 if pending_after != 0:
     failures.append(f"pending audit_outbox rows after load: {pending_after}")
 
@@ -269,9 +297,21 @@ summary = {
         "canonical_before": int(os.environ["CANONICAL_BEFORE"]),
         "canonical_after": int(os.environ["CANONICAL_AFTER"]),
         "canonical_delta": canonical_delta,
+        "canonical_decision_before": int(os.environ["CANONICAL_DECISION_BEFORE"]),
+        "canonical_decision_after": int(os.environ["CANONICAL_DECISION_AFTER"]),
+        "canonical_decision_delta": canonical_decision_delta,
+        "canonical_outcome_before": int(os.environ["CANONICAL_OUTCOME_BEFORE"]),
+        "canonical_outcome_after": int(os.environ["CANONICAL_OUTCOME_AFTER"]),
+        "canonical_outcome_delta": canonical_outcome_delta,
         "ledger_outbox_before": int(os.environ["LEDGER_OUTBOX_BEFORE"]),
         "ledger_outbox_after": int(os.environ["LEDGER_OUTBOX_AFTER"]),
         "ledger_outbox_delta": ledger_delta,
+        "ledger_outbox_decision_before": int(os.environ["LEDGER_OUTBOX_DECISION_BEFORE"]),
+        "ledger_outbox_decision_after": int(os.environ["LEDGER_OUTBOX_DECISION_AFTER"]),
+        "ledger_outbox_decision_delta": ledger_decision_delta,
+        "ledger_outbox_outcome_before": int(os.environ["LEDGER_OUTBOX_OUTCOME_BEFORE"]),
+        "ledger_outbox_outcome_after": int(os.environ["LEDGER_OUTBOX_OUTCOME_AFTER"]),
+        "ledger_outbox_outcome_delta": ledger_outcome_delta,
         "pending_after": pending_after,
         "oldest_pending_lag_after_seconds": oldest_lag_after,
         "verify_audit_columns_status": verify_status,
@@ -293,7 +333,8 @@ with open(command_path, "w", encoding="utf-8") as fh:
     fh.write(
         f"| `benchmarks/ga-load/run.sh --scenario benchmarks/ga-load/scenarios/local-100-tenants.yaml` | {summary['result'].upper()} | "
         f"ops {load.get('completed_operations')}/{expected}; logical tenants {card.get('logical_tenants')}; "
-        f"providers {card.get('providers')}; canonical delta {canonical_delta}; pending {pending_after}; failures {len(failures)} |\n"
+        f"providers {card.get('providers')}; canonical decision/outcome {canonical_decision_delta}/{canonical_outcome_delta}; "
+        f"ledger decision/outcome {ledger_decision_delta}/{ledger_outcome_delta}; pending {pending_after}; failures {len(failures)} |\n"
     )
     for name in ["tokenizer", "output_predictor", "run_cost_projector", "sidecar_decision", "sidecar_confirm_publish_outcome", "sidecar_emit_trace_events", "end_to_end"]:
         item = lat.get(name, {})

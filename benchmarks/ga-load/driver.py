@@ -266,6 +266,7 @@ async def main() -> int:
         provider: str,
         model: str,
         prompt_class: str,
+        tokenized,
         prediction,
     ) -> None:
         projected_claims = [
@@ -303,9 +304,9 @@ async def main() -> int:
             else ""
         )
         claim_estimate = adapter_pb2.ClaimEstimate(
-            tokenizer_tier="T2",
-            tokenizer_version_id="01918000-0000-7c10-8c10-000000000001",
-            input_tokens=actual_input_tokens,
+            tokenizer_tier=tokenized.tier,
+            tokenizer_version_id=tokenized.tokenizer_version_id,
+            input_tokens=tokenized.input_tokens,
             predicted_a_tokens=prediction.predicted_a_tokens,
             predicted_b_tokens=predicted_b,
             predicted_c_tokens=predicted_c,
@@ -468,6 +469,7 @@ async def main() -> int:
                 provider=provider,
                 model=model,
                 prompt_class=prompt_class,
+                tokenized=tokenized,
                 prediction=prediction,
             )
             latencies.setdefault("end_to_end", []).append((time.perf_counter() - start) * 1000.0)
@@ -493,6 +495,7 @@ async def main() -> int:
             )
 
     sem = asyncio.Semaphore(concurrency)
+    metrics_before = scrape_metrics()
 
     async def guarded(index: int) -> None:
         async with sem:
@@ -508,6 +511,10 @@ async def main() -> int:
 
     latency_summary = {name: summarize(values) for name, values in sorted(latencies.items())}
     metrics = scrape_metrics()
+    metric_deltas = {
+        name: round(float(metrics.get(name, 0.0)) - float(metrics_before.get(name, 0.0)), 6)
+        for name in sorted(metrics)
+    }
     cardinality = {
         "actual_tenants": 1,
         "logical_tenants": len({r["logical_tenant"] for r in completed}),
@@ -538,13 +545,22 @@ async def main() -> int:
         if p99 > float(slos[limit_key]):
             failures.append(f"{key} p99 {p99}ms exceeds {limit_key}={slos[limit_key]}ms")
 
-    if metrics["output_predictor_predict_count"] < expected_ops:
+    if metric_deltas["output_predictor_predict_count"] < expected_ops:
         failures.append("output_predictor metrics count below expected operation count")
-    if metrics["run_cost_projector_project_count"] < expected_ops:
-        failures.append("run_cost_projector metrics count below expected operation count")
-    if metrics["sidecar_request_decision_ok"] < expected_ops:
+    expected_projector_calls = expected_ops * 2
+    if metric_deltas["run_cost_projector_project_count"] < expected_projector_calls:
+        failures.append(
+            "run_cost_projector project count below expected direct+sidecar call count "
+            f"({metric_deltas['run_cost_projector_project_count']} < {expected_projector_calls})"
+        )
+    if metric_deltas["run_cost_projector_project_ok_total"] < expected_projector_calls:
+        failures.append(
+            "run_cost_projector ok total below expected direct+sidecar call count "
+            f"({metric_deltas['run_cost_projector_project_ok_total']} < {expected_projector_calls})"
+        )
+    if metric_deltas["sidecar_request_decision_ok"] < expected_ops:
         failures.append("sidecar request_decision ok count below expected operation count")
-    if metrics["sidecar_emit_trace_events_ok"] < expected_ops:
+    if metric_deltas["sidecar_emit_trace_events_ok"] < expected_ops:
         failures.append("sidecar emit_trace_events ok count below expected operation count")
 
     result = {
@@ -560,6 +576,7 @@ async def main() -> int:
         "latency": latency_summary,
         "cardinality": cardinality,
         "service_metrics": metrics,
+        "service_metric_deltas": metric_deltas,
         "failures": failures,
     }
     output_path.parent.mkdir(parents=True, exist_ok=True)
