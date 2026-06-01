@@ -58,8 +58,8 @@
        Operators who want to ship the tokenizer without shadow set
        tokenizer.shadowEnabled=false explicitly. */ -}}
 {{- if .Values.tokenizer.shadowEnabled -}}
-{{- if not .Values.tokenizer.providerSecretName -}}
-{{- fail "tokenizer.providerSecretName is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B1 + M12: silent drop-only mode is forbidden — set shadowEnabled=false to ship without drift detection)" -}}
+{{- if and (not .Values.tokenizer.providerSecretName) (not .Values.tokenizer.llamaBedrockRegion) -}}
+{{- fail "tokenizer.providerSecretName or tokenizer.llamaBedrockRegion is required under chart.profile=production when tokenizer.shadowEnabled=true (silent drop-only mode is forbidden — set shadowEnabled=false to ship without drift detection)" -}}
 {{- end -}}
 {{- if not .Values.tokenizer.canonicalIngestUrl -}}
 {{- fail "tokenizer.canonicalIngestUrl is required under chart.profile=production when tokenizer.shadowEnabled=true (R2 B1 + M12: drift alerts must reach canonical_ingest's ImmutableAuditLog route)" -}}
@@ -189,30 +189,42 @@ spec:
               {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.tokenizerShadowUrlKey) | nindent 14 }}
             {{- end }}
             {{- if .Values.tokenizer.providerSecretName }}
-            # Provider API keys for Anthropic / Gemini Tier 1
-            # count_tokens calls. Mounted from a pre-created Secret
-            # so the keys never appear in the Helm release secrets
-            # or Deployment manifest. Demo: both optional (worker falls
-            # back to drop-only when neither key is present). Production
-            # (chart.profile=production + shadowEnabled=true): the
-            # template-level fail-fast above requires this Secret to
-            # exist; at least ONE of the two keys MUST be populated for
-            # the shadow worker to make any provider call.
-            # R2 M12: optional flag flipped to false in production so a
-            # rotated/missing key surfaces as a CrashLoopBackoff instead
-            # of silent shadow-disablement.
+            # Provider API keys for Tier 1 count_tokens calls. Mounted
+            # from a pre-created Secret so keys never appear in the Helm
+            # release secrets or Deployment manifest. In production,
+            # providerSecretRequiredKeys controls which key refs are
+            # optional:false; defaults preserve the Anthropic/Gemini
+            # R2 M12 behavior while allowing Cohere/Llama opt-in.
             - name: SPENDGUARD_TOKENIZER_ANTHROPIC_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.tokenizer.providerSecretName | quote }}
                   key: anthropic-api-key
-                  optional: {{ if eq .Values.chart.profile "production" }}false{{ else }}true{{ end }}
+                  optional: {{ if and (eq .Values.chart.profile "production") .Values.tokenizer.providerSecretRequiredKeys.anthropic }}false{{ else }}true{{ end }}
             - name: SPENDGUARD_TOKENIZER_GEMINI_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: {{ .Values.tokenizer.providerSecretName | quote }}
                   key: gemini-api-key
-                  optional: {{ if eq .Values.chart.profile "production" }}false{{ else }}true{{ end }}
+                  optional: {{ if and (eq .Values.chart.profile "production") .Values.tokenizer.providerSecretRequiredKeys.gemini }}false{{ else }}true{{ end }}
+            - name: SPENDGUARD_TOKENIZER_COHERE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tokenizer.providerSecretName | quote }}
+                  key: cohere-api-key
+                  optional: {{ if and (eq .Values.chart.profile "production") .Values.tokenizer.providerSecretRequiredKeys.cohere }}false{{ else }}true{{ end }}
+            - name: SPENDGUARD_TOKENIZER_LLAMA_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.tokenizer.providerSecretName | quote }}
+                  key: llama-api-key
+                  optional: {{ if and (eq .Values.chart.profile "production") .Values.tokenizer.providerSecretRequiredKeys.llama }}false{{ else }}true{{ end }}
+            {{- end }}
+            {{- if .Values.tokenizer.llamaBedrockRegion }}
+            - { name: SPENDGUARD_TOKENIZER_LLAMA_BEDROCK_REGION, value: {{ .Values.tokenizer.llamaBedrockRegion | quote }} }
+            {{- end }}
+            {{- if .Values.tokenizer.llamaCountTokensBaseUrl }}
+            - { name: SPENDGUARD_TOKENIZER_LLAMA_COUNT_TOKENS_BASE_URL, value: {{ .Values.tokenizer.llamaCountTokensBaseUrl | quote }} }
             {{- end }}
             {{- if .Values.tokenizer.sinkMtlsSecretName }}
             # R2 B4: outbound mTLS to canonical_ingest for the

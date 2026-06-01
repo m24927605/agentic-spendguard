@@ -344,21 +344,36 @@ tokenizer:
   # persisted operator overrides, PII opt-in, and count_tokens quotas actually
   # affect sampling across replicas without control-plane writer credentials.
   samplingOverrideDatabaseSecretEnabled: false
-  # Optional Secret holding Anthropic + Gemini Tier 1 count_tokens
-  # API keys. Expected keys inside the Secret:
+  # Optional Secret holding provider Tier 1 count_tokens API keys.
+  # Expected keys inside the Secret:
   #   anthropic-api-key: <api key string>
   #   gemini-api-key:    <api key string>
-  # Both keys are independent — if only Anthropic is set, Gemini
-  # shadow samples are silently skipped and the Tier 1 path is
-  # disabled for that vendor. Empty in demo profile = shadow worker
-  # boots in drop-only mode (events accepted from the gRPC handler
-  # but discarded; Tier 2 hot path unaffected). See
-  # services/tokenizer/src/main.rs boot log for visibility.
-  # R2 M12: required under chart.profile=production + shadowEnabled=true.
-  # R2 M12: `optional` flag on the env reference flips to false in
-  # production so a missing/rotated key surfaces as CrashLoopBackoff
-  # instead of silent shadow-disablement.
+  #   cohere-api-key:    <api key string>
+  #   llama-api-key:     <bearer token for private HTTP-compatible gateway>
+  # Llama's production-preferred Bedrock path does not use llama-api-key;
+  # set llamaBedrockRegion and grant the pod AWS credentials via IRSA or
+  # the platform's AWS credential provider chain.
+  #
+  # Keys are independent. providerSecretRequiredKeys controls which
+  # Secret keys become optional:false in the rendered Deployment.
+  # Defaults preserve the existing Anthropic/Gemini production posture;
+  # operators enabling Cohere-only or Llama-only can flip these booleans
+  # deliberately.
   providerSecretName: ""
+  providerSecretRequiredKeys:
+    anthropic: true
+    gemini: true
+    cohere: false
+    llama: false
+  # POST_GA_05 / #139: Bedrock Runtime CountTokens for Llama Tier 1.
+  # Empty = disabled. When set, the binary uses the AWS SDK default
+  # credential chain and calls CountTokens with the event's Bedrock
+  # model_id.
+  llamaBedrockRegion: ""
+  # Optional endpoint override for localstack/private Bedrock-compatible
+  # testing. Without llamaBedrockRegion this enables the bearer-token
+  # HTTP-compatible backend together with providerSecretName/llama-api-key.
+  llamaCountTokensBaseUrl: ""
   # R2 B4: outbound mTLS Secret for the canonical_ingest sink.
   # Expected keys: tls.crt / tls.key / ca.crt. SNI sent to
   # canonical_ingest defaults to the in-cluster ClusterIP DNS name
