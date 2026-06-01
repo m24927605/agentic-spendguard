@@ -771,6 +771,7 @@ pub async fn run_through_reserve(
         scope_id: fencing_state.scope_id.to_string(),
         workload_instance_id: ctx.workload_instance_id.clone(),
     };
+    let schema_bundle_id = active_schema_bundle_id(state);
 
     // Cost Advisor P0.5 enrichment: extracted ONCE above for projector
     // call. Same value flows into both CONTINUE + DENY audit.decision
@@ -799,6 +800,7 @@ pub async fn run_through_reserve(
             &pricing,
             &fencing,
             &bundle,
+            &schema_bundle_id,
             &adapter_idempotency_key,
             &request_fingerprint_hex,
             effect_hash,
@@ -840,6 +842,7 @@ pub async fn run_through_reserve(
         &reason_codes,
         &enrichment,
         prediction_policy_str,
+        &schema_bundle_id,
         &request_fingerprint_hex,
         projector_response_ref,
         claim_estimate_ref,
@@ -1027,6 +1030,16 @@ fn extract_claim_estimate(
     req.inputs.as_ref().and_then(|i| i.claim_estimate.as_ref())
 }
 
+fn active_schema_bundle_id(state: &SidecarState) -> String {
+    state
+        .inner
+        .schema_bundle
+        .read()
+        .as_ref()
+        .map(|s| s.bundle_id.to_string())
+        .unwrap_or_default()
+}
+
 fn insert_claim_estimate_payload_mirrors(payload: &mut serde_json::Value, est: &ClaimEstimate) {
     let Some(obj) = payload.as_object_mut() else {
         return;
@@ -1058,6 +1071,7 @@ fn build_audit_decision_cloudevent(
     reason_codes: &[String],
     enrichment: &AuditEnrichment,
     prediction_policy: &str,
+    schema_bundle_id: &str,
     request_fingerprint_hex: &str,
     projector_response: Option<&crate::proto::run_cost_projector::v1::ProjectResponse>,
     claim_estimate: Option<&crate::proto::sidecar_adapter::v1::ClaimEstimate>,
@@ -1130,7 +1144,7 @@ fn build_audit_decision_cloudevent(
         // field, unblocking run-scoped rule grouping.
         run_id: enrichment.run_id.clone(),
         decision_id: decision_id.to_string(),
-        schema_bundle_id: String::new(),
+        schema_bundle_id: schema_bundle_id.to_string(),
         producer_id: format!("sidecar:{}", ctx.workload_instance_id),
         producer_sequence,
         producer_signature: vec![].into(), // POC: signing TBD
@@ -1249,6 +1263,7 @@ async fn run_record_denied_decision(
     pricing: &PricingFreeze,
     fencing: &Fencing,
     bundle: &crate::domain::state::CachedContractBundle,
+    schema_bundle_id: &str,
     adapter_idempotency_key: &str,
     request_fingerprint_hex: &str,
     effect_hash: [u8; 32],
@@ -1334,7 +1349,7 @@ async fn run_record_denied_decision(
         // is populated downstream.
         run_id: enrichment.run_id.clone(),
         decision_id: decision_id.to_string(),
-        schema_bundle_id: String::new(),
+        schema_bundle_id: schema_bundle_id.to_string(),
         producer_id: format!("sidecar:{}", ctx.workload_instance_id),
         producer_sequence,
         producer_signature: vec![].into(),
@@ -2961,6 +2976,7 @@ mod slice_02_decision_match_tests {
             &[],
             &enrichment,
             "STRICT_CEILING",
+            "schema-bundle-test",
             "test-fingerprint",
             Some(&projector),
             Some(&claim),
@@ -3002,6 +3018,7 @@ mod slice_02_decision_match_tests {
             &[],
             &enrichment,
             "ADAPTIVE_CEILING",
+            "schema-bundle-test",
             "test-fingerprint",
             None,
             Some(&claim),
@@ -3038,6 +3055,7 @@ mod slice_02_decision_match_tests {
             &reason_codes,
             &enrichment,
             "STRICT_CEILING",
+            "schema-bundle-test",
             "test-fingerprint",
             None,
             None,
@@ -3049,5 +3067,6 @@ mod slice_02_decision_match_tests {
             payload.get("reason_codes"),
             Some(&serde_json::json!(["RUN_DRIFT_DETECTED"]))
         );
+        assert_eq!(ce.schema_bundle_id, "schema-bundle-test");
     }
 }
