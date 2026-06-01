@@ -15,6 +15,7 @@
 //! only inside the tokenizer shadow worker and never from hot-path
 //! sidecar/egress_proxy code.
 
+use std::borrow::Cow;
 use std::time::{Duration, Instant};
 
 use reqwest::{Client, StatusCode};
@@ -68,6 +69,7 @@ impl CohereClient {
         model: &str,
         text: &str,
     ) -> Result<ProviderCount, ProviderError> {
+        let model = normalize_model_for_cohere_api(model);
         let body = json!({
             "text": text,
             "model": model,
@@ -137,6 +139,28 @@ impl CohereClient {
     }
 }
 
+fn normalize_model_for_cohere_api(model: &str) -> Cow<'_, str> {
+    let Some(suffix) = model
+        .strip_prefix("cohere.")
+        .or_else(|| model.split_once(".cohere.").map(|(_, suffix)| suffix))
+    else {
+        return Cow::Borrowed(model);
+    };
+    let Some(no_revision) = suffix.strip_suffix(":0") else {
+        return Cow::Borrowed(model);
+    };
+    let Some((native, version)) = no_revision.rsplit_once("-v") else {
+        return Cow::Borrowed(model);
+    };
+    if version.is_empty() || !version.bytes().all(|b| b.is_ascii_digit()) {
+        return Cow::Borrowed(model);
+    }
+    match native {
+        "command" | "command-r" | "command-r-plus" => Cow::Owned(native.to_owned()),
+        _ => Cow::Borrowed(model),
+    }
+}
+
 fn map_send_error(e: reqwest::Error) -> ProviderError {
     if e.is_timeout() {
         ProviderError::Timeout
@@ -188,6 +212,52 @@ mod tests {
             .expect("ok");
         assert_eq!(resp.input_tokens, 3);
         assert_eq!(resp.request_id.as_deref(), Some("coh_req_123"));
+    }
+
+    #[tokio::test]
+    async fn bedrock_command_r_plus_model_id_normalizes_to_native_model() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/tokenize"))
+            .and(body_json(json!({
+                "text": "hello bedrock cohere",
+                "model": "command-r-plus"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "tokens": [1, 2, 3]
+            })))
+            .mount(&server)
+            .await;
+
+        let c = client_for_server(&server).await;
+        let resp = c
+            .count_tokens("cohere.command-r-plus-v1:0", "hello bedrock cohere")
+            .await
+            .expect("ok");
+        assert_eq!(resp.input_tokens, 3);
+    }
+
+    #[tokio::test]
+    async fn cross_region_bedrock_command_r_model_id_normalizes_to_native_model() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/tokenize"))
+            .and(body_json(json!({
+                "text": "hello cross region",
+                "model": "command-r"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "tokens": [1, 2]
+            })))
+            .mount(&server)
+            .await;
+
+        let c = client_for_server(&server).await;
+        let resp = c
+            .count_tokens("us.cohere.command-r-v1:0", "hello cross region")
+            .await
+            .expect("ok");
+        assert_eq!(resp.input_tokens, 2);
     }
 
     #[tokio::test]

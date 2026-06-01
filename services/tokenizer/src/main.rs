@@ -182,11 +182,23 @@ async fn boot_shadow_worker(cfg: &Config) -> Result<ShadowWorkerHandle> {
         return Ok(spawn_drop_handle(0));
     }
 
+    if cfg.llama_bedrock_region.is_empty()
+        && (cfg.llama_api_key.is_empty() ^ cfg.llama_count_tokens_base_url.is_empty())
+    {
+        anyhow::bail!(
+            "partial Llama HTTP-compatible config: set both \
+             SPENDGUARD_TOKENIZER_LLAMA_API_KEY and \
+             SPENDGUARD_TOKENIZER_LLAMA_COUNT_TOKENS_BASE_URL, or set \
+             SPENDGUARD_TOKENIZER_LLAMA_BEDROCK_REGION for AWS SDK mode"
+        );
+    }
+
     let no_provider_config = cfg.anthropic_api_key.is_empty()
         && cfg.gemini_api_key.is_empty()
         && cfg.cohere_api_key.is_empty()
         && cfg.llama_bedrock_region.is_empty()
-        && (cfg.llama_api_key.is_empty() || cfg.llama_count_tokens_base_url.is_empty());
+        && cfg.llama_api_key.is_empty()
+        && cfg.llama_count_tokens_base_url.is_empty();
     if no_provider_config {
         info!("no provider API keys/config configured — shadow worker in drop-only mode (demo)");
         return Ok(spawn_drop_handle(0));
@@ -1010,6 +1022,25 @@ mod tests {
         let h = boot_shadow_worker(&cfg).await.expect("drop-only boots");
         let ev = make_shadow_event();
         h.try_send(ev).expect("drop handle accepts");
+    }
+
+    #[tokio::test]
+    async fn boot_rejects_partial_llama_http_config_before_drop_only() {
+        let mut cfg = minimal_cfg();
+        cfg.shadow_enabled = true;
+        cfg.llama_api_key = "llama-token".into();
+        cfg.llama_count_tokens_base_url = "".into();
+        cfg.canonical_ingest_url = "".into();
+        cfg.database_url = "".into();
+
+        let err = boot_shadow_worker(&cfg)
+            .await
+            .expect_err("partial Llama HTTP config must fail closed");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("partial Llama HTTP-compatible config"),
+            "unexpected error: {msg}"
+        );
     }
 
     #[tokio::test]

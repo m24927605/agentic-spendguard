@@ -7,8 +7,8 @@ Branch: `post-ga/POST_GA_05_provider_coverage`
 
 | Gate | Command | Result |
 |---|---|---|
-| Format + tests | `cargo fmt --manifest-path services/tokenizer/Cargo.toml && cargo test --manifest-path services/tokenizer/Cargo.toml` | PASS: lib 93, main 12, golden 51, slice04 golden 203, slice05 chaos 3 |
-| Build | `cargo build --manifest-path services/tokenizer/Cargo.toml` | PASS |
+| Format + tests | `cargo fmt --manifest-path services/tokenizer/Cargo.toml && cargo test --manifest-path services/tokenizer/Cargo.toml` | PASS after Round 1 fixes: lib 95, main 13, golden 51, slice04 golden 203, slice05 chaos 3 |
+| Build | `cargo build --manifest-path services/tokenizer/Cargo.toml` | PASS after Round 1 fixes |
 | Helm demo render | `helm template charts/spendguard --set chart.profile=demo` | PASS, 1443 rendered lines |
 | Helm production render | `helm template charts/spendguard --set chart.profile=production ...` | PASS, 1511 rendered lines; Llama Bedrock region path exercised without provider Secret |
 | Hot-path invariant | `rg -n "provider_clients\|CohereClient\|LlamaClient\|COHERE\|LLAMA\|count_tokens\\(" services/sidecar services/egress_proxy` | PASS: no tokenizer provider clients in sidecar/egress_proxy; only existing Bedrock provider model classifier regexes match Cohere/Llama names |
@@ -22,6 +22,16 @@ Branch: `post-ga/POST_GA_05_provider_coverage`
 - PII opt-in denial proves raw text is not sent to Cohere/Llama.
 - CountTokens quota test proves per-tenant/per-provider isolation across Cohere and Llama.
 - Config Debug masking covers Cohere/Llama API keys and Llama CountTokens base URL presence.
+- Cohere Bedrock and cross-region Bedrock model IDs normalize to Cohere native names before `/v1/tokenize`.
+- Partial Llama HTTP-compatible config fails closed before the worker can enter drop-only mode.
+
+## Review Rounds
+
+| Round | Tool | Findings | Resolution |
+|---|---|---|---|
+| 1 | `ait run --adapter codex --review-mode adversarial ...` | Tool rejected `--review-mode` with exit code 2 | Recorded in `round-1-ait.txt`; used codex CLI fallback |
+| 1 | `codex review --base main` under active AIT wrapper | Nested wrapper warning; process waited on stdin | Recorded in `round-1-codex-review*.txt`; reran direct reviewer with `ait off` |
+| 1 | Direct codex CLI review | P2: Cohere Bedrock IDs sent to Cohere public API unchanged. P2: partial Llama HTTP config could be classified as no provider config. | Fixed in `cohere.rs` and `main.rs`; tests/build/Helm/demo rerun clean |
 
 ## Real Provider Tests
 
