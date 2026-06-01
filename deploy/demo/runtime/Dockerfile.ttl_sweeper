@@ -30,4 +30,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /spendguard-ttl-sweeper /usr/local/bin/spendguard-ttl-sweeper
 
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/spendguard-ttl-sweeper"]

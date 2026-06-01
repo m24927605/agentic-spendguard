@@ -33,4 +33,6 @@ COPY --from=builder /spendguard-outbox-forwarder /usr/local/bin/spendguard-outbo
 RUN printf '#!/bin/sh\nset -eu\nif [ -f /var/lib/spendguard/bundles/runtime.env ]; then\n    set -a\n    . /var/lib/spendguard/bundles/runtime.env\n    set +a\nfi\nif [ -z "${SPENDGUARD_OUTBOX_FORWARDER_SCHEMA_BUNDLE_HASH_HEX:-}" ]; then\n    export SPENDGUARD_OUTBOX_FORWARDER_SCHEMA_BUNDLE_HASH_HEX="${SPENDGUARD_SCHEMA_BUNDLE_HASH_HEX:-}"\nfi\nexec /usr/local/bin/spendguard-outbox-forwarder\n' > /usr/local/bin/entrypoint.sh \
     && chmod +x /usr/local/bin/entrypoint.sh
 
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

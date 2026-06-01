@@ -37,4 +37,6 @@ COPY --from=builder /spendguard-sidecar /usr/local/bin/spendguard-sidecar
 COPY deploy/demo/runtime/sidecar-entrypoint.sh /usr/local/bin/sidecar-entrypoint.sh
 RUN chmod +x /usr/local/bin/sidecar-entrypoint.sh
 
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/sidecar-entrypoint.sh"]

@@ -56,4 +56,6 @@ RUN chmod +x /usr/local/bin/run_demo.py /usr/local/bin/demo-entrypoint.sh
 RUN pip install --no-cache-dir "aiohttp>=3.9"
 COPY deploy/demo/litellm_proxy /opt/spendguard/litellm_proxy
 
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/demo-entrypoint.sh"]

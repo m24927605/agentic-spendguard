@@ -26,4 +26,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /spendguard-bundle-registry /usr/local/bin/spendguard-bundle-registry
 
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/spendguard-bundle-registry"]

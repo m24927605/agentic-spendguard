@@ -31,4 +31,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=builder /spendguard-egress-proxy /usr/local/bin/spendguard-egress-proxy
 
+USER 65532:65532
+
 ENTRYPOINT ["/usr/local/bin/spendguard-egress-proxy"]
