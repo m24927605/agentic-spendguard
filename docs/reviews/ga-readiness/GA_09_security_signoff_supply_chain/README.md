@@ -1,11 +1,12 @@
 # GA_09 Security Scan Evidence
 
 - Result: pass
-- Commit: `7015fa4f95699fe77d502d2554f12694dd83ba77`
+- Commit: `4f8deda9346af946baf9ca6080b201c2578a8e7d`
 - Branch: `ga/GA_09_security_signoff_supply_chain`
-- Started UTC: `2026-06-01T08:10:27Z`
+- Started UTC: `2026-06-01T08:24:02Z`
 - Worktree dirty at start: `false`
 - Missing optional external tools: none
+- Optional external scanner failures: none
 - Release-mode command: `scripts/security/ga-security-scan.sh --require-external-tools`
 
 ## Checks
@@ -17,6 +18,7 @@
 - PASS `publish_workflow_cosign`: cosign signing step present
 - PASS `publish_workflow_no_latest_promotion`: no latest/latest-main promotion
 - PASS `publish_workflow_oidc`: OIDC permission present for keyless signing
+- PASS `publish_workflow_repo_scan_single_job`: repository Trivy scan runs once before the image matrix
 - PASS `publish_workflow_dispatch_has_sha_tag`: manual dispatch publishes immutable sha tag
 - PASS `sidecar_image_precreates_secret_links`: sidecar image prepares root-owned paths before USER switch
 - PASS `sidecar_entrypoint_nonroot_safe`: sidecar entrypoint only verifies mounted paths after USER switch

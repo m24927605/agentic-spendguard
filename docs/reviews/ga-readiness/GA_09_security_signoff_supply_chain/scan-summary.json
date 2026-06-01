@@ -77,6 +77,10 @@
       "detail": "Buildx provenance enabled",
       "ok": true
     },
+    "publish_workflow_repo_scan_single_job": {
+      "detail": "repository Trivy scan runs once before the image matrix",
+      "ok": true
+    },
     "publish_workflow_sbom": {
       "detail": "Buildx SBOM enabled",
       "ok": true
@@ -118,13 +122,14 @@
       "ok": true
     }
   },
-  "commit_sha": "7015fa4f95699fe77d502d2554f12694dd83ba77",
+  "commit_sha": "4f8deda9346af946baf9ca6080b201c2578a8e7d",
   "errors": [],
+  "external_scanner_failures": [],
   "external_tool_install": "brew install syft trivy cosign cargo-audit",
   "missing_external_tools": [],
   "release_mode": "scripts/security/ga-security-scan.sh --require-external-tools",
   "result": "pass",
-  "scan_started_utc": "2026-06-01T08:10:27Z",
+  "scan_started_utc": "2026-06-01T08:24:02Z",
   "schema": "spendguard.ga09.security_scan.v1alpha1",
   "worktree_dirty_at_start": false
 }
