@@ -1,0 +1,16 @@
+{
+  "canonical_events": 5,
+  "created_at": "2026-06-01T04:22:01+00:00",
+  "memory_bytes": {
+    "spendguard-canonical-ingest": 14103347,
+    "spendguard-control-plane": 22345154,
+    "spendguard-ledger": 3330277,
+    "spendguard-outbox-forwarder": 5328863,
+    "spendguard-output-predictor": 16305356,
+    "spendguard-postgres": 93711237,
+    "spendguard-run-cost-projector": 6414139,
+    "spendguard-sidecar": 8629780,
+    "spendguard-stats-aggregator": 21275607,
+    "spendguard-tokenizer": 387239116
+  }
+}
