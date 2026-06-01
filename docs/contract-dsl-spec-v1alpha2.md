@@ -303,7 +303,16 @@ message DecisionResponse {
 
 ### 6.3 Contract bundle wire schema (YAML; per v1alpha1 §3)
 
-YAML schema 新增兩個 top-level fields（contract-rule 範圍）：
+#### 6.3.0 Wedge surface (SLICE_02)
+
+SLICE_02 shipped the additive YAML fields and the declarative
+`when.claim_amount_atomic_gt` / `when.claim_amount_atomic_gte` predicate
+surface only. This is the only condition surface honored by the
+SLICE_02 hot-path evaluator; it preserves the §2 row-18 invariant that
+v1alpha1 quickstart bundles still parse and evaluate correctly under a
+v1alpha2-capable sidecar.
+
+Supported SLICE_02 shape:
 
 ```yaml
 apiVersion: spendguard.ai/v1alpha2  # bump from v1alpha1
@@ -318,9 +327,8 @@ spec:
   rules:
     - id: stop_when_projection_exceeded
       priority: 1100  # higher than v1alpha1 §10 stop_when_exhausted (1000)
-      condition: |
-        run_projection.at_decision_micros >
-        budget("daily_usd").remaining.amountMicros
+      when:
+        claim_amount_atomic_gt: 0
       effect:
         decision: stop  # v1alpha1 lattice 仍用 stop
         reasonCode: RUN_BUDGET_PROJECTION_EXCEEDED
@@ -328,29 +336,13 @@ spec:
       run_projection_action: BLOCK_NEXT_CALL  # default
 ```
 
-CEL helpers 新增（per v1alpha1 §14 evaluation.helpers）：
-
-```cel
-run_projection.at_decision_micros  // 等於 audit_outbox.run_projection_at_decision_atomic / pricing.scale
-run_projection.predicted_remaining_steps
-run_projection.steps_completed_so_far
-prediction.tier   // "T1" | "T2" | "T3"
-prediction.strategy_chosen  // "A" | "B" | "C"
-prediction.confidence  // 0.0-1.0
-```
-
-**Wiring boundary (SLICE_02 vs SLICE_09)** — round-1 fix M3:
-
 SLICE_02 ships the CEL helper structs (`RunProjection`,
 `PredictionContext`) and `into_cel_context` in
 `services/sidecar/src/contract/cel_helpers.rs` with unit-test coverage.
 The hot-path evaluator does NOT yet invoke `Program::execute` against
 contract YAML — the v1alpha2 declarative form
 (`when.claim_amount_atomic_gt` / `when.claim_amount_atomic_gte`) remains
-the only honored condition surface in SLICE_02. CEL-condition support
-(`condition: "<cel-expr>"` form in rule body) is wired in SLICE_09 when
-`run_cost_projector` populates `RunProjection` / `PredictionContext`
-per-decision.
+the only honored condition surface in SLICE_02.
 
 v1alpha2 contract authors writing `condition: <cel-expr>` in v1alpha2
 bundles BEFORE SLICE_09 lands would silently get no enforcement — every
@@ -385,6 +377,38 @@ Cross-reference: enforcement in
 `services/sidecar/src/contract/parse.rs` (rule-iteration block); test
 coverage in `parse.rs::tests::rejects_v1alpha2_contract_with_cel_condition_field`
 and `v1alpha1_contract_with_cel_condition_field_parses_with_warn`.
+
+#### 6.3.1 Post-SLICE_09 CEL accessor capability
+
+SLICE_09 wires CEL-condition support (`condition: "<cel-expr>"` form in
+rule body) after `run_cost_projector` populates `RunProjection` /
+`PredictionContext` per decision.
+
+CEL helpers新增（per v1alpha1 §14 evaluation.helpers）：
+
+```cel
+run_projection.at_decision_micros  // 等於 audit_outbox.run_projection_at_decision_atomic / pricing.scale
+run_projection.predicted_remaining_steps
+run_projection.steps_completed_so_far
+prediction.tier   // "T1" | "T2" | "T3"
+prediction.strategy_chosen  // "A" | "B" | "C"
+prediction.confidence  // 0.0-1.0
+```
+
+Post-SLICE_09 example:
+
+```yaml
+rules:
+  - id: stop_when_projection_exceeded
+    priority: 1100
+    condition: |
+      run_projection.at_decision_micros >
+      budget("daily_usd").remaining.amountMicros
+    effect:
+      decision: stop
+      reasonCode: RUN_BUDGET_PROJECTION_EXCEEDED
+    run_projection_action: BLOCK_NEXT_CALL
+```
 
 ### 6.4 v1alpha1 contracts 在 v1alpha2 evaluator 下的 default 填充
 
@@ -482,6 +506,32 @@ per §6.4，v1alpha2 evaluator 對 v1alpha1 bundle：
 | 5 | 推廣至更多 tenants | |
 
 不允許「先 deploy v1alpha2 contract，後升 sidecar」順序 —— 由 §8.1 mismatch refuse 機制強制。
+
+### 8.4 SLICE_02 upgrade path: `condition:` validation surface
+
+Operators upgrading from pre-SLICE_02 sidecars MUST scan contract
+bundles before rolling the new sidecar binary:
+
+```sh
+grep -RInE '(^|[[:space:]])condition[[:space:]]*:' /path/to/contract-bundles
+```
+
+If a bundle is `apiVersion: spendguard.ai/v1alpha2`, replace
+`condition:` rules with the SLICE_02 declarative `when:` form before
+deploying. A v1alpha2 bundle that still carries `condition:` fails to
+load with:
+
+```text
+bundle_validation_failed: rule '<rule-id>' uses CEL `condition:`
+field; CEL conditions wired in SLICE_09 — use claim_amount_atomic_gt /
+claim_amount_atomic_gte under `when:` in SLICE_02.
+```
+
+If a bundle is `apiVersion: spendguard.ai/v1alpha1`, `condition:` is
+treated as a legacy quickstart field: the bundle loads, the wedge
+evaluator uses the declarative `when:` fallback, and the parser emits a
+warning so operators can clean up before moving the bundle to
+v1alpha2.
 
 ---
 

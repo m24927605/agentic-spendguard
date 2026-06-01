@@ -171,6 +171,11 @@ sidecar:
   acknowledgeMultiPod: false
   image:
     repository: spendguard/sidecar
+    # Pre-SLICE_02 bundles may contain CEL `condition:` fields that older
+    # sidecars ignored. Before changing this tag across a SLICE_02+
+    # boundary, run the grep in docs/contract-dsl-spec-v1alpha2.md §8.4;
+    # v1alpha2 bundles with `condition:` fail with bundle_validation_failed
+    # until the SLICE_09 CEL accessor surface is active.
     tag: "0.1.0-alpha.1"
   fencingScopeId: "33333333-3333-4333-8333-333333333333"
   workloadInstanceId: "sidecar-0"
