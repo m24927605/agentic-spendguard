@@ -1,0 +1,12 @@
+[verify_audit_columns] psql not on PATH; will use `docker exec spendguard-postgres psql`
+[verify_audit_columns] mode: live
+[verify_audit_columns] tenant: 00000000-0000-4000-8000-000000000001
+[verify_audit_columns] checking 21 columns across canonical_events...
+[verify_audit_columns] invoking verify-chain --check-prediction-mirror...
+
+=== verify_audit_columns.py SUMMARY (live) ===
+  tenant: 00000000-0000-4000-8000-000000000001
+  columns existing: 21/21
+  columns populated: 21/21
+  verify-chain: GREEN
+[verify_audit_columns] All 21 columns populated + verify-chain green.
