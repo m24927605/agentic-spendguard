@@ -30,7 +30,7 @@ exec
          }
          total += env.reply_priming;
      }
- 
+
      if !req.raw_text.is_empty() {
 -        total += encode_count(tokenizer, &req.raw_text)?;
 +        total += tokenizers_common::encode_count("anthropic-v3-bpe", tokenizer, &req.raw_text)?;
@@ -40,7 +40,7 @@ exec
 @@ -277,107 +278,6 @@ fn count_tokens_anthropic(
      Ok(total)
  }
- 
+
 -fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 -    const TOOL_CALL_OVERHEAD: usize = 1;
 -    Ok(TOOL_CALL_OVERHEAD
@@ -176,7 +176,7 @@ index 39fd2db..d893ad9 100644
 @@ -44,11 +44,11 @@
  //! Bedrock invokeModel for Cohere prepends `<|START_OF_TURN|>` to the
  //! prompt. `bos_token_count() = 1` accounts for it on raw_text encode.
- 
+
 +use crate::encoders::tokenizers_common;
  use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
  use crate::error::TokenizerError;
@@ -185,10 +185,10 @@ index 39fd2db..d893ad9 100644
 -use sha2::{Digest, Sha256};
 +use crate::TokenizeRequest;
  use tokenizers::Tokenizer;
- 
+
  const ASSET_BYTES: &[u8] = include_bytes!("../../data/cohere-command-r/tokenizer.json");
 @@ -71,19 +71,20 @@ pub struct CohereEncoder {
- 
+
  impl CohereEncoder {
      pub fn new() -> Result<Self, TokenizerError> {
 -        verify_asset_sha256(
@@ -197,14 +197,14 @@ index 39fd2db..d893ad9 100644
              ASSET_BYTES,
              crate::asset_sha256::COHERE_COMMAND_R,
          )?;
- 
+
 -        let tokenizer =
 -            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
 -                encoder: "cohere-command-r",
 -                message: format!("Tokenizer::from_bytes failed: {e}"),
 -            })?;
 +        let tokenizer = tokenizers_common::load_tokenizer("cohere-command-r", ASSET_BYTES)?;
- 
+
 -        cross_check(&tokenizer, EXPECTED_COHERE_FIXTURE)?;
 +        tokenizers_common::cross_check(
 +            "cohere-command-r",
@@ -212,7 +212,7 @@ index 39fd2db..d893ad9 100644
 +            CROSS_CHECK_FIXTURE,
 +            EXPECTED_COHERE_FIXTURE,
 +        )?;
- 
+
          Ok(Self { tokenizer })
      }
 @@ -145,17 +146,17 @@ fn count_tokens_cohere(
@@ -230,7 +230,7 @@ index 39fd2db..d893ad9 100644
          }
          total += env.reply_priming;
      }
- 
+
      if !req.raw_text.is_empty() {
 -        total += encode_count(tokenizer, &req.raw_text)?;
 +        total += tokenizers_common::encode_count("cohere-v2-bpe", tokenizer, &req.raw_text)?;
@@ -240,7 +240,7 @@ index 39fd2db..d893ad9 100644
 @@ -163,100 +164,6 @@ fn count_tokens_cohere(
      Ok(total)
  }
- 
+
 -fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 -    const TOOL_CALL_OVERHEAD: usize = 1;
 -    Ok(TOOL_CALL_OVERHEAD
@@ -354,7 +354,7 @@ index 66e9955..e54f2cb 100644
 @@ -64,11 +64,11 @@
  //!
  //! License: MIT (mirror) / Apache 2.0 (Google upstream).
- 
+
 +use crate::encoders::tokenizers_common;
  use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
  use crate::error::TokenizerError;
@@ -363,10 +363,10 @@ index 66e9955..e54f2cb 100644
 -use sha2::{Digest, Sha256};
 +use crate::TokenizeRequest;
  use tokenizers::Tokenizer;
- 
+
  const ASSET_BYTES: &[u8] = include_bytes!("../../data/gemini-1.5/tokenizer.json");
 @@ -87,15 +87,20 @@ pub struct GeminiEncoder {
- 
+
  impl GeminiEncoder {
      pub fn new() -> Result<Self, TokenizerError> {
 -        verify_asset_sha256("gemini-1.5", ASSET_BYTES, crate::asset_sha256::GEMINI_15)?;
@@ -375,14 +375,14 @@ index 66e9955..e54f2cb 100644
 +            ASSET_BYTES,
 +            crate::asset_sha256::GEMINI_15,
 +        )?;
- 
+
 -        let tokenizer =
 -            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
 -                encoder: "gemini-1.5",
 -                message: format!("Tokenizer::from_bytes failed: {e}"),
 -            })?;
 +        let tokenizer = tokenizers_common::load_tokenizer("gemini-1.5", ASSET_BYTES)?;
- 
+
 -        cross_check(&tokenizer, EXPECTED_GEMINI_FIXTURE)?;
 +        tokenizers_common::cross_check(
 +            "gemini-1.5",
@@ -390,7 +390,7 @@ index 66e9955..e54f2cb 100644
 +            CROSS_CHECK_FIXTURE,
 +            EXPECTED_GEMINI_FIXTURE,
 +        )?;
- 
+
          Ok(Self { tokenizer })
      }
 @@ -155,17 +160,17 @@ fn count_tokens_gemini(
@@ -408,7 +408,7 @@ index 66e9955..e54f2cb 100644
          }
          total += env.reply_priming;
      }
- 
+
      if !req.raw_text.is_empty() {
 -        total += encode_count(tokenizer, &req.raw_text)?;
 +        total += tokenizers_common::encode_count("gemini-1.5-bpe", tokenizer, &req.raw_text)?;
@@ -418,7 +418,7 @@ index 66e9955..e54f2cb 100644
 @@ -173,100 +178,6 @@ fn count_tokens_gemini(
      Ok(total)
  }
- 
+
 -fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 -    const TOOL_CALL_OVERHEAD: usize = 1;
 -    Ok(TOOL_CALL_OVERHEAD
@@ -519,7 +519,7 @@ index 66e9955..e54f2cb 100644
 @@ -282,8 +193,12 @@ mod tests {
          let mut tampered = ASSET_BYTES.to_vec();
          tampered[2048] ^= 0x01;
- 
+
 -        let err = verify_asset_sha256("gemini-1.5", &tampered, crate::asset_sha256::GEMINI_15)
 -            .expect_err("tamper must fail");
 +        let err = tokenizers_common::verify_asset_sha256(
@@ -528,7 +528,7 @@ index 66e9955..e54f2cb 100644
 +            crate::asset_sha256::GEMINI_15,
 +        )
 +        .expect_err("tamper must fail");
- 
+
          assert!(matches!(
              err,
 diff --git a/crates/spendguard-tokenizer/src/encoders/llama.rs b/crates/spendguard-tokenizer/src/encoders/llama.rs
@@ -538,7 +538,7 @@ index 3389735..ceb0275 100644
 @@ -50,11 +50,11 @@
  //! Bedrock invokeModel prepends `<|begin_of_text|>` (1 token).
  //! `bos_token_count() = 1`.
- 
+
 +use crate::encoders::tokenizers_common;
  use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
  use crate::error::TokenizerError;
@@ -547,10 +547,10 @@ index 3389735..ceb0275 100644
 -use sha2::{Digest, Sha256};
 +use crate::TokenizeRequest;
  use tokenizers::Tokenizer;
- 
+
  const ASSET_BYTES: &[u8] = include_bytes!("../../data/llama-3.1/tokenizer.json");
 @@ -78,15 +78,20 @@ pub struct LlamaEncoder {
- 
+
  impl LlamaEncoder {
      pub fn new() -> Result<Self, TokenizerError> {
 -        verify_asset_sha256("llama-3.1", ASSET_BYTES, crate::asset_sha256::LLAMA_31)?;
@@ -559,14 +559,14 @@ index 3389735..ceb0275 100644
 +            ASSET_BYTES,
 +            crate::asset_sha256::LLAMA_31,
 +        )?;
- 
+
 -        let tokenizer =
 -            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
 -                encoder: "llama-3.1",
 -                message: format!("Tokenizer::from_bytes failed: {e}"),
 -            })?;
 +        let tokenizer = tokenizers_common::load_tokenizer("llama-3.1", ASSET_BYTES)?;
- 
+
 -        cross_check(&tokenizer, EXPECTED_LLAMA_FIXTURE)?;
 +        tokenizers_common::cross_check(
 +            "llama-3.1",
@@ -574,7 +574,7 @@ index 3389735..ceb0275 100644
 +            CROSS_CHECK_FIXTURE,
 +            EXPECTED_LLAMA_FIXTURE,
 +        )?;
- 
+
          Ok(Self { tokenizer })
      }
 @@ -148,17 +153,18 @@ fn count_tokens_llama(
@@ -593,7 +593,7 @@ index 3389735..ceb0275 100644
          }
          total += env.reply_priming;
      }
- 
+
      if !req.raw_text.is_empty() {
 -        total += encode_count(tokenizer, &req.raw_text)?;
 +        total += tokenizers_common::encode_count("llama-sentencepiece", tokenizer, &req.raw_text)?;
@@ -603,7 +603,7 @@ index 3389735..ceb0275 100644
 @@ -166,100 +172,6 @@ fn count_tokens_llama(
      Ok(total)
  }
- 
+
 -fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 -    const TOOL_CALL_OVERHEAD: usize = 1;
 -    Ok(TOOL_CALL_OVERHEAD
@@ -704,7 +704,7 @@ index 3389735..ceb0275 100644
 @@ -275,8 +187,12 @@ mod tests {
          let mut tampered = ASSET_BYTES.to_vec();
          tampered[2048] ^= 0x01;
- 
+
 -        let err = verify_asset_sha256("llama-3.1", &tampered, crate::asset_sha256::LLAMA_31)
 -            .expect_err("tamper must fail");
 +        let err = tokenizers_common::verify_asset_sha256(
@@ -713,7 +713,7 @@ index 3389735..ceb0275 100644
 +            crate::asset_sha256::LLAMA_31,
 +        )
 +        .expect_err("tamper must fail");
- 
+
          assert!(matches!(
              err,
 diff --git a/crates/spendguard-tokenizer/src/encoders/mod.rs b/crates/spendguard-tokenizer/src/encoders/mod.rs
@@ -725,7 +725,7 @@ index fc80cf4..7575c8f 100644
  pub mod llama;
  pub mod openai;
 +pub(crate) mod tokenizers_common;
- 
+
  /// Stable string discriminant matching `tokenizer_versions.kind`
  /// CHECK constraint values. Used for `TokenizeResponse.kind` and for
 @@ -223,3 +224,71 @@ pub trait Encoder: Send + Sync {
@@ -968,7 +968,7 @@ index da191a6..1e35c69 100644
 +        self.cache.boot_durations()
 +    }
  }
- 
+
  #[cfg(test)]
 diff --git a/crates/spendguard-tokenizer/tests/cross_check_fixture_schema.rs b/crates/spendguard-tokenizer/tests/cross_check_fixture_schema.rs
 new file mode 100644
@@ -1123,14 +1123,14 @@ index 2b29d47..bf02f86 100644
 +++ b/crates/spendguard-tokenizer/tests/seed_parity.rs
 @@ -26,9 +26,8 @@ const SEED_SQL: &str =
      include_str!("../../../services/ledger/migrations/0049_tokenizer_versions_initial_seed.sql");
- 
+
  /// SLICE_04 seed migration (additive — separate file from 0049).
 -const SLICE04_SEED_SQL: &str = include_str!(
 -    "../../../services/ledger/migrations/0050_tokenizer_versions_slice04_seed.sql"
 -);
 +const SLICE04_SEED_SQL: &str =
 +    include_str!("../../../services/ledger/migrations/0050_tokenizer_versions_slice04_seed.sql");
- 
+
  #[test]
  fn each_rust_seed_row_id_appears_in_sql() {
 diff --git a/docs/reviews/post-ga/POST_GA_04_tokenizer_asset_performance/after-benchmark-cohere.txt b/docs/reviews/post-ga/POST_GA_04_tokenizer_asset_performance/after-benchmark-cohere.txt
@@ -1940,7 +1940,7 @@ index 0000000..18afb88
 ++        self.cache.boot_durations()
 ++    }
 + }
-+ 
++
 + #[cfg(test)]
 +diff --git a/crates/spendguard-tokenizer/tests/cross_check_fixture_schema.rs b/crates/spendguard-tokenizer/tests/cross_check_fixture_schema.rs
 +new file mode 100644
@@ -2095,14 +2095,14 @@ index 0000000..18afb88
 ++++ b/crates/spendguard-tokenizer/tests/seed_parity.rs
 +@@ -26,9 +26,8 @@ const SEED_SQL: &str =
 +     include_str!("../../../services/ledger/migrations/0049_tokenizer_versions_initial_seed.sql");
-+ 
++
 + /// SLICE_04 seed migration (additive — separate file from 0049).
 +-const SLICE04_SEED_SQL: &str = include_str!(
 +-    "../../../services/ledger/migrations/0050_tokenizer_versions_slice04_seed.sql"
 +-);
 ++const SLICE04_SEED_SQL: &str =
 ++    include_str!("../../../services/ledger/migrations/0050_tokenizer_versions_slice04_seed.sql");
-+ 
++
 + #[test]
 + fn each_rust_seed_row_id_appears_in_sql() {
 +diff --git a/docs/reviews/post-ga/POST_GA_04_tokenizer_asset_performance/after-benchmark-cohere.txt b/docs/reviews/post-ga/POST_GA_04_tokenizer_asset_performance/after-benchmark-cohere.txt
@@ -2766,9 +2766,9 @@ index 0000000..18afb88
 +--- a/docs/tokenizer-service-spec-v1alpha1.md
 ++++ b/docs/tokenizer-service-spec-v1alpha1.md
 +@@ -364,7 +364,16 @@ the structural source of truth, this section is the policy intent.
-+ 
++
 + ### 3.2 Encoder cache
-+ 
++
 +-`Tokenizer::new` 在啟動時 eager-load 所有 dispatch table 中的 encoder assets 到 process memory。Encoder objects 是 immutable + thread-safe（per tiktoken-rs API contract；vendored BPE 用 `Arc<EncoderRef>` 包裝）。Hot path tokenize 無 lock contention。
 ++`Tokenizer::new` 在啟動時 eager-load 所有 dispatch table 中的 encoder assets 到 process memory。Encoder objects 是 immutable + thread-safe（per tiktoken-rs API contract；vendored BPE 用 `tokenizers::Tokenizer` handles 包裝）。Hot path tokenize 無 lock contention。
 ++
@@ -2780,13 +2780,13 @@ index 0000000..18afb88
 ++step and exports `spendguard_tokenizer_encoder_boot_duration_ms` from
 ++the tokenizer service `/metrics` endpoint so operators can detect
 ++startup regressions without weakening the eager-load invariant.
-+ 
++
 + Asset 來源 per §7.2。Asset 大小總和 typically < 50 MB（tiktoken cl100k_base ~10 MB；其他類似量級）。
-+ 
++
 +@@ -799,6 +808,14 @@ Hot-reload 機制：
-+ 
++
 + **Cross-check fixture maintenance**: bumping tiktoken-rs version 時，`cargo run --example discover_fixture_tokens` 重新印出新版的 token vectors，更新 `encoder_cache.rs` 的 `EXPECTED_*` arrays，跟 `asset_sha256` rotation 同時做（per §6.2）。
-+ 
++
 ++POST_GA_04 adds `crates/spendguard-tokenizer/tests/fixtures/cross_check.json`
 ++as the extensible maintenance manifest for all tokenizer kinds
 ++(`OPENAI_TIKTOKEN`, `ANTHROPIC_BPE`, `GEMINI_BPE`, `COHERE_BPE`,
@@ -2796,7 +2796,7 @@ index 0000000..18afb88
 ++add explicit fixture cases rather than burying vectors only in code.
 ++
 + ---
-+ 
++
 + ## §8. Failure modes
 +diff --git a/services/sidecar/Cargo.toml b/services/sidecar/Cargo.toml
 +index 2892f4f..43ed495 100644
@@ -2805,7 +2805,7 @@ index 0000000..18afb88
 +@@ -86,15 +86,6 @@ spendguard-signing = { path = "../signing" }
 + # Phase 5 GA hardening S22: fail-open / fail-closed policy matrix.
 + spendguard-policy = { path = "../policy" }
-+ 
++
 +-# SLICE_03 — Tokenizer library (in-process Tier 2 BPE + Tier 3 fallback)
 +-# per tokenizer-service-spec-v1alpha1.md §2.1(b). Wired as a placeholder
 +-# dependency here; SLICE_10 replaces the legacy token-estimation path
@@ -2824,7 +2824,7 @@ index 0000000..18afb88
 ++++ b/services/tokenizer/src/main.rs
 +@@ -39,7 +39,7 @@ use tracing_subscriber::EnvFilter;
 + use uuid::Uuid;
-+ 
++
 + use spendguard_signing::Signer;
 +-use spendguard_tokenizer::Tokenizer;
 ++use spendguard_tokenizer::{EncoderBootMetric, Tokenizer};
@@ -2836,7 +2836,7 @@ index 0000000..18afb88
 +         "tokenizer dispatch table compiled + encoder cache eager-loaded"
 +     );
 ++    let encoder_boot_metrics = Arc::new(tokenizer.encoder_boot_durations().to_vec());
-+ 
++
 +     // ── Spawn the metrics hyper server (best-effort). ─────────────
 +     //
 +@@ -109,8 +110,9 @@ async fn main() -> Result<()> {
@@ -2895,7 +2895,7 @@ index 0000000..18afb88
 ++        .replace('"', "\\\"")
 ++        .replace('\n', "\\n")
 + }
-+ 
++
 + async fn shutdown_signal() {
 +@@ -712,7 +734,11 @@ async fn shutdown_signal() {
 + /// raw-hyper pattern used by services/canonical_ingest and
@@ -2931,7 +2931,7 @@ index 0000000..18afb88
 +                             (&Method::GET, "/healthz") => (
 +                                 StatusCode::OK,
 +@@ -1086,7 +1114,7 @@ mod tests {
-+ 
++
 +     #[test]
 +     fn render_metrics_contains_shadow_counters() {
 +-        let body = render_metrics();
@@ -2958,7 +2958,7 @@ index 0000000..18afb88
 ++            "spendguard_tokenizer_encoder_boot_duration_ms{encoder=\"llama-sentencepiece\"} 42"
 ++        ));
 +     }
-+ 
++
 +     fn make_shadow_event() -> spendguard_tokenizer_service::shadow::worker::ShadowEvent {
 +diff --git a/services/tokenizer/tests/golden_samples.rs b/services/tokenizer/tests/golden_samples.rs
 +index fad8a21..9ae6aa9 100644
@@ -2966,7 +2966,7 @@ index 0000000..18afb88
 ++++ b/services/tokenizer/tests/golden_samples.rs
 +@@ -43,9 +43,15 @@
 + //! exact equality so the bump is loud.
-+ 
++
 + use spendguard_tokenizer::{Message, TokenizeRequest, Tokenizer};
 ++use std::sync::OnceLock;
 ++
@@ -2974,7 +2974,7 @@ index 0000000..18afb88
 ++    static TOKENIZER: OnceLock<Tokenizer> = OnceLock::new();
 ++    TOKENIZER.get_or_init(|| Tokenizer::new_with_embedded_assets().expect("boot tokenizer"))
 ++}
-+ 
++
 + fn tokenize_raw(model: &str, text: &str) -> i64 {
 +-    let tokenizer = Tokenizer::new_with_embedded_assets().expect("boot");
 ++    let tokenizer = shared_tokenizer();
@@ -2983,7 +2983,7 @@ index 0000000..18afb88
 +         raw_text: text.to_string(),
 +@@ -57,7 +63,7 @@ fn tokenize_raw(model: &str, text: &str) -> i64 {
 + }
-+ 
++
 + fn tokenize_chat(model: &str, role: &str, content: &str) -> i64 {
 +-    let tokenizer = Tokenizer::new_with_embedded_assets().expect("boot");
 ++    let tokenizer = shared_tokenizer();
@@ -3032,7 +3032,7 @@ index 0000000..18afb88
 +@@ -83,11 +83,11 @@
 + //! SLICE_05 shadow worker measures the residual gap and the spec
 + //! tightens if needed.
-+ 
++
 ++use crate::encoders::tokenizers_common;
 + use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
 + use crate::error::TokenizerError;
@@ -3041,7 +3041,7 @@ index 0000000..18afb88
 +-use sha2::{Digest, Sha256};
 ++use crate::TokenizeRequest;
 + use tokenizers::Tokenizer;
-+ 
++
 + /// Embedded `tokenizer.json` bytes for Anthropic Claude 3 BPE.
 +@@ -124,7 +124,7 @@ impl AnthropicEncoder {
 +     /// `Tokenizer::new()` refuses to start.
@@ -3062,7 +3062,7 @@ index 0000000..18afb88
 +-                message: format!("Tokenizer::from_bytes failed: {e}"),
 +-            })?;
 ++        let tokenizer = tokenizers_common::load_tokenizer("anthropic-claude3", ASSET_BYTES)?;
-+ 
++
 +         // Layer B — encode the fixture string and compare against
 +         // the hard-coded expected vector. Catches a future asset
 +         // swap that passes sha256 (e.g., somebody substituted a
@@ -3074,7 +3074,7 @@ index 0000000..18afb88
 ++            CROSS_CHECK_FIXTURE,
 ++            EXPECTED_ANTHROPIC_FIXTURE,
 ++        )?;
-+ 
++
 +         Ok(Self { tokenizer })
 +     }
 +@@ -257,17 +258,17 @@ fn count_tokens_anthropic(
@@ -3092,7 +3092,7 @@ index 0000000..18afb88
 +         }
 +         total += env.reply_priming;
 +     }
-+ 
++
 +     if !req.raw_text.is_empty() {
 +-        total += encode_count(tokenizer, &req.raw_text)?;
 ++        total += tokenizers_common::encode_count("anthropic-v3-bpe", tokenizer, &req.raw_text)?;
@@ -3102,7 +3102,7 @@ index 0000000..18afb88
 +@@ -277,107 +278,6 @@ fn count_tokens_anthropic(
 +     Ok(total)
 + }
-+ 
++
 +-fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 +-    const TOOL_CALL_OVERHEAD: usize = 1;
 +-    Ok(TOOL_CALL_OVERHEAD
@@ -3238,7 +3238,7 @@ index 0000000..18afb88
 +@@ -44,11 +44,11 @@
 + //! Bedrock invokeModel for Cohere prepends `<|START_OF_TURN|>` to the
 + //! prompt. `bos_token_count() = 1` accounts for it on raw_text encode.
-+ 
++
 ++use crate::encoders::tokenizers_common;
 + use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
 + use crate::error::TokenizerError;
@@ -3247,10 +3247,10 @@ index 0000000..18afb88
 +-use sha2::{Digest, Sha256};
 ++use crate::TokenizeRequest;
 + use tokenizers::Tokenizer;
-+ 
++
 + const ASSET_BYTES: &[u8] = include_bytes!("../../data/cohere-command-r/tokenizer.json");
 +@@ -71,19 +71,20 @@ pub struct CohereEncoder {
-+ 
++
 + impl CohereEncoder {
 +     pub fn new() -> Result<Self, TokenizerError> {
 +-        verify_asset_sha256(
@@ -3259,14 +3259,14 @@ index 0000000..18afb88
 +             ASSET_BYTES,
 +             crate::asset_sha256::COHERE_COMMAND_R,
 +         )?;
-+ 
++
 +-        let tokenizer =
 +-            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
 +-                encoder: "cohere-command-r",
 +-                message: format!("Tokenizer::from_bytes failed: {e}"),
 +-            })?;
 ++        let tokenizer = tokenizers_common::load_tokenizer("cohere-command-r", ASSET_BYTES)?;
-+ 
++
 +-        cross_check(&tokenizer, EXPECTED_COHERE_FIXTURE)?;
 ++        tokenizers_common::cross_check(
 ++            "cohere-command-r",
@@ -3274,7 +3274,7 @@ index 0000000..18afb88
 ++            CROSS_CHECK_FIXTURE,
 ++            EXPECTED_COHERE_FIXTURE,
 ++        )?;
-+ 
++
 +         Ok(Self { tokenizer })
 +     }
 +@@ -145,17 +146,17 @@ fn count_tokens_cohere(
@@ -3292,7 +3292,7 @@ index 0000000..18afb88
 +         }
 +         total += env.reply_priming;
 +     }
-+ 
++
 +     if !req.raw_text.is_empty() {
 +-        total += encode_count(tokenizer, &req.raw_text)?;
 ++        total += tokenizers_common::encode_count("cohere-v2-bpe", tokenizer, &req.raw_text)?;
@@ -3302,7 +3302,7 @@ index 0000000..18afb88
 +@@ -163,100 +164,6 @@ fn count_tokens_cohere(
 +     Ok(total)
 + }
-+ 
++
 +-fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 +-    const TOOL_CALL_OVERHEAD: usize = 1;
 +-    Ok(TOOL_CALL_OVERHEAD
@@ -3416,7 +3416,7 @@ index 0000000..18afb88
 +@@ -64,11 +64,11 @@
 + //!
 + //! License: MIT (mirror) / Apache 2.0 (Google upstream).
-+ 
++
 ++use crate::encoders::tokenizers_common;
 + use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
 + use crate::error::TokenizerError;
@@ -3425,10 +3425,10 @@ index 0000000..18afb88
 +-use sha2::{Digest, Sha256};
 ++use crate::TokenizeRequest;
 + use tokenizers::Tokenizer;
-+ 
++
 + const ASSET_BYTES: &[u8] = include_bytes!("../../data/gemini-1.5/tokenizer.json");
 +@@ -87,15 +87,20 @@ pub struct GeminiEncoder {
-+ 
++
 + impl GeminiEncoder {
 +     pub fn new() -> Result<Self, TokenizerError> {
 +-        verify_asset_sha256("gemini-1.5", ASSET_BYTES, crate::asset_sha256::GEMINI_15)?;
@@ -3437,14 +3437,14 @@ index 0000000..18afb88
 ++            ASSET_BYTES,
 ++            crate::asset_sha256::GEMINI_15,
 ++        )?;
-+ 
++
 +-        let tokenizer =
 +-            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
 +-                encoder: "gemini-1.5",
 +-                message: format!("Tokenizer::from_bytes failed: {e}"),
 +-            })?;
 ++        let tokenizer = tokenizers_common::load_tokenizer("gemini-1.5", ASSET_BYTES)?;
-+ 
++
 +-        cross_check(&tokenizer, EXPECTED_GEMINI_FIXTURE)?;
 ++        tokenizers_common::cross_check(
 ++            "gemini-1.5",
@@ -3452,7 +3452,7 @@ index 0000000..18afb88
 ++            CROSS_CHECK_FIXTURE,
 ++            EXPECTED_GEMINI_FIXTURE,
 ++        )?;
-+ 
++
 +         Ok(Self { tokenizer })
 +     }
 +@@ -155,17 +160,17 @@ fn count_tokens_gemini(
@@ -3470,7 +3470,7 @@ index 0000000..18afb88
 +         }
 +         total += env.reply_priming;
 +     }
-+ 
++
 +     if !req.raw_text.is_empty() {
 +-        total += encode_count(tokenizer, &req.raw_text)?;
 ++        total += tokenizers_common::encode_count("gemini-1.5-bpe", tokenizer, &req.raw_text)?;
@@ -3480,7 +3480,7 @@ index 0000000..18afb88
 +@@ -173,100 +178,6 @@ fn count_tokens_gemini(
 +     Ok(total)
 + }
-+ 
++
 +-fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 +-    const TOOL_CALL_OVERHEAD: usize = 1;
 +-    Ok(TOOL_CALL_OVERHEAD
@@ -3581,7 +3581,7 @@ index 0000000..18afb88
 +@@ -282,8 +193,12 @@ mod tests {
 +         let mut tampered = ASSET_BYTES.to_vec();
 +         tampered[2048] ^= 0x01;
-+ 
++
 +-        let err = verify_asset_sha256("gemini-1.5", &tampered, crate::asset_sha256::GEMINI_15)
 +-            .expect_err("tamper must fail");
 ++        let err = tokenizers_common::verify_asset_sha256(
@@ -3590,7 +3590,7 @@ index 0000000..18afb88
 ++            crate::asset_sha256::GEMINI_15,
 ++        )
 ++        .expect_err("tamper must fail");
-+ 
++
 +         assert!(matches!(
 +             err,
 +diff --git a/crates/spendguard-tokenizer/src/encoders/llama.rs b/crates/spendguard-tokenizer/src/encoders/llama.rs
@@ -3600,7 +3600,7 @@ index 0000000..18afb88
 +@@ -50,11 +50,11 @@
 + //! Bedrock invokeModel prepends `<|begin_of_text|>` (1 token).
 + //! `bos_token_count() = 1`.
-+ 
++
 ++use crate::encoders::tokenizers_common;
 + use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
 + use crate::error::TokenizerError;
@@ -3609,10 +3609,10 @@ index 0000000..18afb88
 +-use sha2::{Digest, Sha256};
 ++use crate::TokenizeRequest;
 + use tokenizers::Tokenizer;
-+ 
++
 + const ASSET_BYTES: &[u8] = include_bytes!("../../data/llama-3.1/tokenizer.json");
 +@@ -78,15 +78,20 @@ pub struct LlamaEncoder {
-+ 
++
 + impl LlamaEncoder {
 +     pub fn new() -> Result<Self, TokenizerError> {
 +-        verify_asset_sha256("llama-3.1", ASSET_BYTES, crate::asset_sha256::LLAMA_31)?;
@@ -3621,14 +3621,14 @@ index 0000000..18afb88
 ++            ASSET_BYTES,
 ++            crate::asset_sha256::LLAMA_31,
 ++        )?;
-+ 
++
 +-        let tokenizer =
 +-            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
 +-                encoder: "llama-3.1",
 +-                message: format!("Tokenizer::from_bytes failed: {e}"),
 +-            })?;
 ++        let tokenizer = tokenizers_common::load_tokenizer("llama-3.1", ASSET_BYTES)?;
-+ 
++
 +-        cross_check(&tokenizer, EXPECTED_LLAMA_FIXTURE)?;
 ++        tokenizers_common::cross_check(
 ++            "llama-3.1",
@@ -3636,7 +3636,7 @@ index 0000000..18afb88
 ++            CROSS_CHECK_FIXTURE,
 ++            EXPECTED_LLAMA_FIXTURE,
 ++        )?;
-+ 
++
 +         Ok(Self { tokenizer })
 +     }
 +@@ -148,17 +153,18 @@ fn count_tokens_llama(
@@ -3655,7 +3655,7 @@ index 0000000..18afb88
 +         }
 +         total += env.reply_priming;
 +     }
-+ 
++
 +     if !req.raw_text.is_empty() {
 +-        total += encode_count(tokenizer, &req.raw_text)?;
 ++        total += tokenizers_common::encode_count("llama-sentencepiece", tokenizer, &req.raw_text)?;
@@ -3665,7 +3665,7 @@ index 0000000..18afb88
 +@@ -166,100 +172,6 @@ fn count_tokens_llama(
 +     Ok(total)
 + }
-+ 
++
 +-fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 +-    const TOOL_CALL_OVERHEAD: usize = 1;
 +-    Ok(TOOL_CALL_OVERHEAD
@@ -3766,7 +3766,7 @@ index 0000000..18afb88
 +@@ -275,8 +187,12 @@ mod tests {
 +         let mut tampered = ASSET_BYTES.to_vec();
 +         tampered[2048] ^= 0x01;
-+ 
++
 +-        let err = verify_asset_sha256("llama-3.1", &tampered, crate::asset_sha256::LLAMA_31)
 +-            .expect_err("tamper must fail");
 ++        let err = tokenizers_common::verify_asset_sha256(
@@ -3775,7 +3775,7 @@ index 0000000..18afb88
 ++            crate::asset_sha256::LLAMA_31,
 ++        )
 ++        .expect_err("tamper must fail");
-+ 
++
 +         assert!(matches!(
 +             err,
 +diff --git a/crates/spendguard-tokenizer/src/encoders/mod.rs b/crates/spendguard-tokenizer/src/encoders/mod.rs
@@ -3787,7 +3787,7 @@ index 0000000..18afb88
 + pub mod llama;
 + pub mod openai;
 ++pub(crate) mod tokenizers_common;
-+ 
++
 + /// Stable string discriminant matching `tokenizer_versions.kind`
 + /// CHECK constraint values. Used for `TokenizeResponse.kind` and for
 +@@ -223,3 +224,71 @@ pub trait Encoder: Send + Sync {
@@ -4030,7 +4030,7 @@ index 0000000..18afb88
 ++        self.cache.boot_durations()
 ++    }
 + }
-+ 
++
 + #[cfg(test)]
 +diff --git a/crates/spendguard-tokenizer/tests/cross_check_fixture_schema.rs b/crates/spendguard-tokenizer/tests/cross_check_fixture_schema.rs
 +new file mode 100644
@@ -4118,14 +4118,14 @@ index 0000000..18afb88
 ++++ b/crates/spendguard-tokenizer/tests/seed_parity.rs
 +@@ -26,9 +26,8 @@ const SEED_SQL: &str =
 +     include_str!("../../../services/ledger/migrations/0049_tokenizer_versions_initial_seed.sql");
-+ 
++
 + /// SLICE_04 seed migration (additive — separate file from 0049).
 +-const SLICE04_SEED_SQL: &str = include_str!(
 +-    "../../../services/ledger/migrations/0050_tokenizer_versions_slice04_seed.sql"
 +-);
 ++const SLICE04_SEED_SQL: &str =
 ++    include_str!("../../../services/ledger/migrations/0050_tokenizer_versions_slice04_seed.sql");
-+ 
++
 + #[test]
 + fn each_rust_seed_row_id_appears_in_sql() {
 +
@@ -4148,7 +4148,7 @@ index 0000000..18afb88
 +@@ -276,5 +278,17 @@ fn bench_tier2_library(c: &mut Criterion) {
 +     group.finish();
 + }
-+ 
++
 +-criterion_group!(benches, bench_tier2_library);
 ++fn bench_tokenizer_cold_start(c: &mut Criterion) {
 ++    let mut group = c.benchmark_group("tier2_cold_start");
@@ -4174,7 +4174,7 @@ index 0000000..18afb88
 + };
 +-use regex::Regex;
 ++use regex::{Regex, RegexSet};
-+ 
++
 + // `EncoderKind` moved to `crate::encoders` in SLICE_04 so all five
 + // kinds (OpenAi, Anthropic, Gemini, Cohere, Llama) live alongside the
 +@@ -413,6 +413,7 @@ const COHERE_ENTRIES: &[(&str, EncoderResolver)] = &[
@@ -4184,18 +4184,18 @@ index 0000000..18afb88
 ++    patterns: RegexSet,
 +     entries: Vec<DispatchEntry>,
 + }
-+ 
++
 +@@ -429,6 +430,7 @@ impl DispatchTable {
 +         #[cfg(not(feature = "cohere"))]
 +         let total = RAW_ENTRIES.len();
 +         let mut entries = Vec::with_capacity(total);
 ++        let mut pattern_sources = Vec::with_capacity(total);
-+ 
++
 +         #[cfg(feature = "cohere")]
 +         let raw_iter = RAW_ENTRIES.iter().chain(COHERE_ENTRIES.iter());
 +@@ -436,6 +438,7 @@ impl DispatchTable {
 +         let raw_iter = RAW_ENTRIES.iter();
-+ 
++
 +         for (pattern, resolver) in raw_iter {
 ++            pattern_sources.push(*pattern);
 +             let regex =
@@ -4214,7 +4214,7 @@ index 0000000..18afb88
 ++        })?;
 ++        Ok(Self { patterns, entries })
 +     }
-+ 
++
 +     /// First-match lookup. Returns `None` for unknown models so the
 +-    /// caller can route to Tier 3.
 ++    /// caller can route to Tier 3. POST_GA_04 uses a `RegexSet` to
@@ -4227,12 +4227,12 @@ index 0000000..18afb88
 ++        let matches = self.patterns.matches(model);
 ++        matches.iter().next().and_then(|idx| self.entries.get(idx))
 +     }
-+ 
++
 +     /// Number of compiled entries. Used by acceptance test §8.1.
 +@@ -492,6 +502,13 @@ mod tests {
 +         DispatchTable::compile().expect("dispatch compiles")
 +     }
-+ 
++
 ++    #[test]
 ++    fn regex_set_and_entry_table_stay_aligned() {
 ++        let t = table();
@@ -4253,12 +4253,12 @@ index 0000000..18afb88
 + use sha2::{Digest, Sha256};
 ++use std::time::Instant;
 + use tiktoken_rs::CoreBPE;
-+ 
++
 + /// Embedded asset bytes. The bytes here are byte-equal to the
 +@@ -146,6 +147,18 @@ struct EncoderRow {
 +     encoder: &'static CoreBPE,
 + }
-+ 
++
 ++/// One boot-time duration sample for an eager-loaded encoder step.
 ++///
 ++/// POST_GA_04 / #122: eager-loading remains the production default,
@@ -4280,7 +4280,7 @@ index 0000000..18afb88
 +     llama: Option<LlamaEncoder>,
 ++    boot_metrics: Vec<EncoderBootMetric>,
 + }
-+ 
++
 + impl EncoderCache {
 +@@ -183,44 +197,62 @@ impl EncoderCache {
 +     ///      EXPECTED_* hard-coded vectors. Catches divergence between
@@ -4314,7 +4314,7 @@ index 0000000..18afb88
 ++            verify_asset_sha256("p50k_base", ASSET_P50K_BASE, crate::asset_sha256::P50K_BASE)?;
 ++            Ok(())
 ++        })?;
-+ 
++
 +         // Eager-load via tiktoken-rs singletons. The first call to a
 +         // singleton triggers `cl100k_base()` / `o200k_base()` etc which
 +         // parse the embedded base64 → CoreBPE struct. Spec §3.2:
@@ -4331,7 +4331,7 @@ index 0000000..18afb88
 ++        let p50k_ref = timed_boot_step(&mut boot_metrics, "p50k_base", || {
 ++            Ok(tiktoken_rs::p50k_base_singleton())
 ++        })?;
-+ 
++
 +         // Layer B — runtime cross-check against the fixture vector to
 +         // catch divergence between data/*.tiktoken (we sha256ed) and
 +         // the bytes the singletons actually use (vendored upstream).
@@ -4344,7 +4344,7 @@ index 0000000..18afb88
 ++            cross_check_encoder("p50k_base", p50k_ref, EXPECTED_P50K_FIXTURE)?;
 ++            Ok(())
 ++        })?;
-+ 
++
 +         // SLICE_04 — eager-load Tier 2 vendor encoders. Each
 +         // constructor runs its own two-layer (sha256 + cross-check
 +         // fixture) integrity check per spec §7.4.1; failure → boot-
@@ -4363,7 +4363,7 @@ index 0000000..18afb88
 ++        let llama = timed_boot_step(&mut boot_metrics, "llama-sentencepiece", || {
 ++            LlamaEncoder::new()
 ++        })?;
-+ 
++
 +         Ok(Self {
 +             cl100k: Some(EncoderRow {
 +@@ -233,6 +265,7 @@ impl EncoderCache {
@@ -4373,7 +4373,7 @@ index 0000000..18afb88
 ++            boot_metrics,
 +         })
 +     }
-+ 
++
 +@@ -252,9 +285,16 @@ impl EncoderCache {
 +             #[cfg(feature = "cohere")]
 +             cohere: None,
@@ -4381,7 +4381,7 @@ index 0000000..18afb88
 ++            boot_metrics: Vec::new(),
 +         }
 +     }
-+ 
++
 ++    /// Boot-time duration samples captured while eager-loading encoder
 ++    /// assets. Empty for [`test_empty`].
 ++    pub fn boot_durations(&self) -> &[EncoderBootMetric] {
@@ -4394,7 +4394,7 @@ index 0000000..18afb88
 +@@ -382,6 +422,34 @@ impl EncoderCache {
 +     }
 + }
-+ 
++
 ++fn timed_boot_step<T>(
 ++    metrics: &mut Vec<EncoderBootMetric>,
 ++    encoder_name: &'static str,
@@ -4429,7 +4429,7 @@ index 0000000..18afb88
 +@@ -590,6 +658,24 @@ mod tests {
 +         assert!(cache.p50k.is_some());
 +     }
-+ 
++
 ++    #[test]
 ++    fn encoder_cache_records_boot_durations() {
 ++        let cache = EncoderCache::with_embedded_assets().expect("cache loads");
@@ -4458,7 +4458,7 @@ index 0000000..18afb88
 +@@ -86,15 +86,6 @@ spendguard-signing = { path = "../signing" }
 + # Phase 5 GA hardening S22: fail-open / fail-closed policy matrix.
 + spendguard-policy = { path = "../policy" }
-+ 
++
 +-# SLICE_03 — Tokenizer library (in-process Tier 2 BPE + Tier 3 fallback)
 +-# per tokenizer-service-spec-v1alpha1.md §2.1(b). Wired as a placeholder
 +-# dependency here; SLICE_10 replaces the legacy token-estimation path
@@ -4477,7 +4477,7 @@ index 0000000..18afb88
 ++++ b/services/tokenizer/src/main.rs
 +@@ -39,7 +39,7 @@ use tracing_subscriber::EnvFilter;
 + use uuid::Uuid;
-+ 
++
 + use spendguard_signing::Signer;
 +-use spendguard_tokenizer::Tokenizer;
 ++use spendguard_tokenizer::{EncoderBootMetric, Tokenizer};
@@ -4489,7 +4489,7 @@ index 0000000..18afb88
 +         "tokenizer dispatch table compiled + encoder cache eager-loaded"
 +     );
 ++    let encoder_boot_metrics = Arc::new(tokenizer.encoder_boot_durations().to_vec());
-+ 
++
 +     // ── Spawn the metrics hyper server (best-effort). ─────────────
 +     //
 +@@ -109,8 +110,9 @@ async fn main() -> Result<()> {
@@ -4548,7 +4548,7 @@ index 0000000..18afb88
 ++        .replace('"', "\\\"")
 ++        .replace('\n', "\\n")
 + }
-+ 
++
 + async fn shutdown_signal() {
 +@@ -712,7 +734,11 @@ async fn shutdown_signal() {
 + /// raw-hyper pattern used by services/canonical_ingest and
@@ -4584,7 +4584,7 @@ index 0000000..18afb88
 +                             (&Method::GET, "/healthz") => (
 +                                 StatusCode::OK,
 +@@ -1086,7 +1114,7 @@ mod tests {
-+ 
++
 +     #[test]
 +     fn render_metrics_contains_shadow_counters() {
 +-        let body = render_metrics();
@@ -4611,7 +4611,7 @@ index 0000000..18afb88
 ++            "spendguard_tokenizer_encoder_boot_duration_ms{encoder=\"llama-sentencepiece\"} 42"
 ++        ));
 +     }
-+ 
++
 +     fn make_shadow_event() -> spendguard_tokenizer_service::shadow::worker::ShadowEvent {
 +
 +exec
@@ -7490,7 +7490,7 @@ index 0000000..18afb88
 + succeeded in 105ms:
 +   278	    group.finish();
 +   279	}
-+   280	
++   280
 +   281	fn bench_tokenizer_cold_start(c: &mut Criterion) {
 +   282	    let mut group = c.benchmark_group("tier2_cold_start");
 +   283	    group.sample_size(10);
@@ -7502,7 +7502,7 @@ index 0000000..18afb88
 +   289	    });
 +   290	    group.finish();
 +   291	}
-+   292	
++   292
 +
 +codex
 +The production code compiles, but the newly added cold-start benchmark does not measure a true process cold start and therefore produces misleading performance evidence for the change.
@@ -7529,9 +7529,9 @@ index 35754ec..c8353f2 100644
 --- a/docs/tokenizer-service-spec-v1alpha1.md
 +++ b/docs/tokenizer-service-spec-v1alpha1.md
 @@ -364,7 +364,16 @@ the structural source of truth, this section is the policy intent.
- 
+
  ### 3.2 Encoder cache
- 
+
 -`Tokenizer::new` 在啟動時 eager-load 所有 dispatch table 中的 encoder assets 到 process memory。Encoder objects 是 immutable + thread-safe（per tiktoken-rs API contract；vendored BPE 用 `Arc<EncoderRef>` 包裝）。Hot path tokenize 無 lock contention。
 +`Tokenizer::new` 在啟動時 eager-load 所有 dispatch table 中的 encoder assets 到 process memory。Encoder objects 是 immutable + thread-safe（per tiktoken-rs API contract；vendored BPE 用 `tokenizers::Tokenizer` handles 包裝）。Hot path tokenize 無 lock contention。
 +
@@ -7543,13 +7543,13 @@ index 35754ec..c8353f2 100644
 +step and exports `spendguard_tokenizer_encoder_boot_duration_ms` from
 +the tokenizer service `/metrics` endpoint so operators can detect
 +startup regressions without weakening the eager-load invariant.
- 
+
  Asset 來源 per §7.2。Asset 大小總和 typically < 50 MB（tiktoken cl100k_base ~10 MB；其他類似量級）。
- 
+
 @@ -799,6 +808,14 @@ Hot-reload 機制：
- 
+
  **Cross-check fixture maintenance**: bumping tiktoken-rs version 時，`cargo run --example discover_fixture_tokens` 重新印出新版的 token vectors，更新 `encoder_cache.rs` 的 `EXPECTED_*` arrays，跟 `asset_sha256` rotation 同時做（per §6.2）。
- 
+
 +POST_GA_04 adds `crates/spendguard-tokenizer/tests/fixtures/cross_check.json`
 +as the extensible maintenance manifest for all tokenizer kinds
 +(`OPENAI_TIKTOKEN`, `ANTHROPIC_BPE`, `GEMINI_BPE`, `COHERE_BPE`,
@@ -7559,7 +7559,7 @@ index 35754ec..c8353f2 100644
 +add explicit fixture cases rather than burying vectors only in code.
 +
  ---
- 
+
  ## §8. Failure modes
 diff --git a/services/sidecar/Cargo.toml b/services/sidecar/Cargo.toml
 index 2892f4f..43ed495 100644
@@ -7568,7 +7568,7 @@ index 2892f4f..43ed495 100644
 @@ -86,15 +86,6 @@ spendguard-signing = { path = "../signing" }
  # Phase 5 GA hardening S22: fail-open / fail-closed policy matrix.
  spendguard-policy = { path = "../policy" }
- 
+
 -# SLICE_03 — Tokenizer library (in-process Tier 2 BPE + Tier 3 fallback)
 -# per tokenizer-service-spec-v1alpha1.md §2.1(b). Wired as a placeholder
 -# dependency here; SLICE_10 replaces the legacy token-estimation path
@@ -7587,7 +7587,7 @@ index 4d3f9c1..2e777c1 100644
 +++ b/services/tokenizer/src/main.rs
 @@ -39,7 +39,7 @@ use tracing_subscriber::EnvFilter;
  use uuid::Uuid;
- 
+
  use spendguard_signing::Signer;
 -use spendguard_tokenizer::Tokenizer;
 +use spendguard_tokenizer::{EncoderBootMetric, Tokenizer};
@@ -7599,7 +7599,7 @@ index 4d3f9c1..2e777c1 100644
          "tokenizer dispatch table compiled + encoder cache eager-loaded"
      );
 +    let encoder_boot_metrics = Arc::new(tokenizer.encoder_boot_durations().to_vec());
- 
+
      // ── Spawn the metrics hyper server (best-effort). ─────────────
      //
 @@ -109,8 +110,9 @@ async fn main() -> Result<()> {
@@ -7658,7 +7658,7 @@ index 4d3f9c1..2e777c1 100644
 +        .replace('"', "\\\"")
 +        .replace('\n', "\\n")
  }
- 
+
  async fn shutdown_signal() {
 @@ -712,7 +734,11 @@ async fn shutdown_signal() {
  /// raw-hyper pattern used by services/canonical_ingest and
@@ -7694,7 +7694,7 @@ index 4d3f9c1..2e777c1 100644
                              (&Method::GET, "/healthz") => (
                                  StatusCode::OK,
 @@ -1086,7 +1114,7 @@ mod tests {
- 
+
      #[test]
      fn render_metrics_contains_shadow_counters() {
 -        let body = render_metrics();
@@ -7721,7 +7721,7 @@ index 4d3f9c1..2e777c1 100644
 +            "spendguard_tokenizer_encoder_boot_duration_ms{encoder=\"llama-sentencepiece\"} 42"
 +        ));
      }
- 
+
      fn make_shadow_event() -> spendguard_tokenizer_service::shadow::worker::ShadowEvent {
 diff --git a/services/tokenizer/tests/golden_samples.rs b/services/tokenizer/tests/golden_samples.rs
 index fad8a21..9ae6aa9 100644
@@ -7729,7 +7729,7 @@ index fad8a21..9ae6aa9 100644
 +++ b/services/tokenizer/tests/golden_samples.rs
 @@ -43,9 +43,15 @@
  //! exact equality so the bump is loud.
- 
+
  use spendguard_tokenizer::{Message, TokenizeRequest, Tokenizer};
 +use std::sync::OnceLock;
 +
@@ -7737,7 +7737,7 @@ index fad8a21..9ae6aa9 100644
 +    static TOKENIZER: OnceLock<Tokenizer> = OnceLock::new();
 +    TOKENIZER.get_or_init(|| Tokenizer::new_with_embedded_assets().expect("boot tokenizer"))
 +}
- 
+
  fn tokenize_raw(model: &str, text: &str) -> i64 {
 -    let tokenizer = Tokenizer::new_with_embedded_assets().expect("boot");
 +    let tokenizer = shared_tokenizer();
@@ -7746,7 +7746,7 @@ index fad8a21..9ae6aa9 100644
          raw_text: text.to_string(),
 @@ -57,7 +63,7 @@ fn tokenize_raw(model: &str, text: &str) -> i64 {
  }
- 
+
  fn tokenize_chat(model: &str, role: &str, content: &str) -> i64 {
 -    let tokenizer = Tokenizer::new_with_embedded_assets().expect("boot");
 +    let tokenizer = shared_tokenizer();
@@ -7800,7 +7800,7 @@ index 8c5dc83..2bf3996 100644
 @@ -83,11 +83,11 @@
  //! SLICE_05 shadow worker measures the residual gap and the spec
  //! tightens if needed.
- 
+
 +use crate::encoders::tokenizers_common;
  use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
  use crate::error::TokenizerError;
@@ -7809,7 +7809,7 @@ index 8c5dc83..2bf3996 100644
 -use sha2::{Digest, Sha256};
 +use crate::TokenizeRequest;
  use tokenizers::Tokenizer;
- 
+
  /// Embedded `tokenizer.json` bytes for Anthropic Claude 3 BPE.
 @@ -124,7 +124,7 @@ impl AnthropicEncoder {
      /// `Tokenizer::new()` refuses to start.
@@ -7830,7 +7830,7 @@ index 8c5dc83..2bf3996 100644
 -                message: format!("Tokenizer::from_bytes failed: {e}"),
 -            })?;
 +        let tokenizer = tokenizers_common::load_tokenizer("anthropic-claude3", ASSET_BYTES)?;
- 
+
          // Layer B — encode the fixture string and compare against
          // the hard-coded expected vector. Catches a future asset
          // swap that passes sha256 (e.g., somebody substituted a
@@ -7842,7 +7842,7 @@ index 8c5dc83..2bf3996 100644
 +            CROSS_CHECK_FIXTURE,
 +            EXPECTED_ANTHROPIC_FIXTURE,
 +        )?;
- 
+
          Ok(Self { tokenizer })
      }
 @@ -257,17 +258,17 @@ fn count_tokens_anthropic(
@@ -7860,7 +7860,7 @@ index 8c5dc83..2bf3996 100644
          }
          total += env.reply_priming;
      }
- 
+
      if !req.raw_text.is_empty() {
 -        total += encode_count(tokenizer, &req.raw_text)?;
 +        total += tokenizers_common::encode_count("anthropic-v3-bpe", tokenizer, &req.raw_text)?;
@@ -7870,7 +7870,7 @@ index 8c5dc83..2bf3996 100644
 @@ -277,107 +278,6 @@ fn count_tokens_anthropic(
      Ok(total)
  }
- 
+
 -fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 -    const TOOL_CALL_OVERHEAD: usize = 1;
 -    Ok(TOOL_CALL_OVERHEAD
@@ -8006,7 +8006,7 @@ index 39fd2db..d893ad9 100644
 @@ -44,11 +44,11 @@
  //! Bedrock invokeModel for Cohere prepends `<|START_OF_TURN|>` to the
  //! prompt. `bos_token_count() = 1` accounts for it on raw_text encode.
- 
+
 +use crate::encoders::tokenizers_common;
  use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
  use crate::error::TokenizerError;
@@ -8015,10 +8015,10 @@ index 39fd2db..d893ad9 100644
 -use sha2::{Digest, Sha256};
 +use crate::TokenizeRequest;
  use tokenizers::Tokenizer;
- 
+
  const ASSET_BYTES: &[u8] = include_bytes!("../../data/cohere-command-r/tokenizer.json");
 @@ -71,19 +71,20 @@ pub struct CohereEncoder {
- 
+
  impl CohereEncoder {
      pub fn new() -> Result<Self, TokenizerError> {
 -        verify_asset_sha256(
@@ -8027,14 +8027,14 @@ index 39fd2db..d893ad9 100644
              ASSET_BYTES,
              crate::asset_sha256::COHERE_COMMAND_R,
          )?;
- 
+
 -        let tokenizer =
 -            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
 -                encoder: "cohere-command-r",
 -                message: format!("Tokenizer::from_bytes failed: {e}"),
 -            })?;
 +        let tokenizer = tokenizers_common::load_tokenizer("cohere-command-r", ASSET_BYTES)?;
- 
+
 -        cross_check(&tokenizer, EXPECTED_COHERE_FIXTURE)?;
 +        tokenizers_common::cross_check(
 +            "cohere-command-r",
@@ -8042,7 +8042,7 @@ index 39fd2db..d893ad9 100644
 +            CROSS_CHECK_FIXTURE,
 +            EXPECTED_COHERE_FIXTURE,
 +        )?;
- 
+
          Ok(Self { tokenizer })
      }
 @@ -145,17 +146,17 @@ fn count_tokens_cohere(
@@ -8060,7 +8060,7 @@ index 39fd2db..d893ad9 100644
          }
          total += env.reply_priming;
      }
- 
+
      if !req.raw_text.is_empty() {
 -        total += encode_count(tokenizer, &req.raw_text)?;
 +        total += tokenizers_common::encode_count("cohere-v2-bpe", tokenizer, &req.raw_text)?;
@@ -8070,7 +8070,7 @@ index 39fd2db..d893ad9 100644
 @@ -163,100 +164,6 @@ fn count_tokens_cohere(
      Ok(total)
  }
- 
+
 -fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 -    const TOOL_CALL_OVERHEAD: usize = 1;
 -    Ok(TOOL_CALL_OVERHEAD
@@ -8184,7 +8184,7 @@ index 66e9955..e54f2cb 100644
 @@ -64,11 +64,11 @@
  //!
  //! License: MIT (mirror) / Apache 2.0 (Google upstream).
- 
+
 +use crate::encoders::tokenizers_common;
  use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
  use crate::error::TokenizerError;
@@ -8193,10 +8193,10 @@ index 66e9955..e54f2cb 100644
 -use sha2::{Digest, Sha256};
 +use crate::TokenizeRequest;
  use tokenizers::Tokenizer;
- 
+
  const ASSET_BYTES: &[u8] = include_bytes!("../../data/gemini-1.5/tokenizer.json");
 @@ -87,15 +87,20 @@ pub struct GeminiEncoder {
- 
+
  impl GeminiEncoder {
      pub fn new() -> Result<Self, TokenizerError> {
 -        verify_asset_sha256("gemini-1.5", ASSET_BYTES, crate::asset_sha256::GEMINI_15)?;
@@ -8205,14 +8205,14 @@ index 66e9955..e54f2cb 100644
 +            ASSET_BYTES,
 +            crate::asset_sha256::GEMINI_15,
 +        )?;
- 
+
 -        let tokenizer =
 -            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
 -                encoder: "gemini-1.5",
 -                message: format!("Tokenizer::from_bytes failed: {e}"),
 -            })?;
 +        let tokenizer = tokenizers_common::load_tokenizer("gemini-1.5", ASSET_BYTES)?;
- 
+
 -        cross_check(&tokenizer, EXPECTED_GEMINI_FIXTURE)?;
 +        tokenizers_common::cross_check(
 +            "gemini-1.5",
@@ -8220,7 +8220,7 @@ index 66e9955..e54f2cb 100644
 +            CROSS_CHECK_FIXTURE,
 +            EXPECTED_GEMINI_FIXTURE,
 +        )?;
- 
+
          Ok(Self { tokenizer })
      }
 @@ -155,17 +160,17 @@ fn count_tokens_gemini(
@@ -8238,7 +8238,7 @@ index 66e9955..e54f2cb 100644
          }
          total += env.reply_priming;
      }
- 
+
      if !req.raw_text.is_empty() {
 -        total += encode_count(tokenizer, &req.raw_text)?;
 +        total += tokenizers_common::encode_count("gemini-1.5-bpe", tokenizer, &req.raw_text)?;
@@ -8248,7 +8248,7 @@ index 66e9955..e54f2cb 100644
 @@ -173,100 +178,6 @@ fn count_tokens_gemini(
      Ok(total)
  }
- 
+
 -fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 -    const TOOL_CALL_OVERHEAD: usize = 1;
 -    Ok(TOOL_CALL_OVERHEAD
@@ -8349,7 +8349,7 @@ index 66e9955..e54f2cb 100644
 @@ -282,8 +193,12 @@ mod tests {
          let mut tampered = ASSET_BYTES.to_vec();
          tampered[2048] ^= 0x01;
- 
+
 -        let err = verify_asset_sha256("gemini-1.5", &tampered, crate::asset_sha256::GEMINI_15)
 -            .expect_err("tamper must fail");
 +        let err = tokenizers_common::verify_asset_sha256(
@@ -8358,7 +8358,7 @@ index 66e9955..e54f2cb 100644
 +            crate::asset_sha256::GEMINI_15,
 +        )
 +        .expect_err("tamper must fail");
- 
+
          assert!(matches!(
              err,
 diff --git a/crates/spendguard-tokenizer/src/encoders/llama.rs b/crates/spendguard-tokenizer/src/encoders/llama.rs
@@ -8368,7 +8368,7 @@ index 3389735..ceb0275 100644
 @@ -50,11 +50,11 @@
  //! Bedrock invokeModel prepends `<|begin_of_text|>` (1 token).
  //! `bos_token_count() = 1`.
- 
+
 +use crate::encoders::tokenizers_common;
  use crate::encoders::{ChatEnvelope, EncodeResult, Encoder, EncoderKind};
  use crate::error::TokenizerError;
@@ -8377,10 +8377,10 @@ index 3389735..ceb0275 100644
 -use sha2::{Digest, Sha256};
 +use crate::TokenizeRequest;
  use tokenizers::Tokenizer;
- 
+
  const ASSET_BYTES: &[u8] = include_bytes!("../../data/llama-3.1/tokenizer.json");
 @@ -78,15 +78,20 @@ pub struct LlamaEncoder {
- 
+
  impl LlamaEncoder {
      pub fn new() -> Result<Self, TokenizerError> {
 -        verify_asset_sha256("llama-3.1", ASSET_BYTES, crate::asset_sha256::LLAMA_31)?;
@@ -8389,14 +8389,14 @@ index 3389735..ceb0275 100644
 +            ASSET_BYTES,
 +            crate::asset_sha256::LLAMA_31,
 +        )?;
- 
+
 -        let tokenizer =
 -            Tokenizer::from_bytes(ASSET_BYTES).map_err(|e| TokenizerError::AssetLoadFailed {
 -                encoder: "llama-3.1",
 -                message: format!("Tokenizer::from_bytes failed: {e}"),
 -            })?;
 +        let tokenizer = tokenizers_common::load_tokenizer("llama-3.1", ASSET_BYTES)?;
- 
+
 -        cross_check(&tokenizer, EXPECTED_LLAMA_FIXTURE)?;
 +        tokenizers_common::cross_check(
 +            "llama-3.1",
@@ -8404,7 +8404,7 @@ index 3389735..ceb0275 100644
 +            CROSS_CHECK_FIXTURE,
 +            EXPECTED_LLAMA_FIXTURE,
 +        )?;
- 
+
          Ok(Self { tokenizer })
      }
 @@ -148,17 +153,18 @@ fn count_tokens_llama(
@@ -8423,7 +8423,7 @@ index 3389735..ceb0275 100644
          }
          total += env.reply_priming;
      }
- 
+
      if !req.raw_text.is_empty() {
 -        total += encode_count(tokenizer, &req.raw_text)?;
 +        total += tokenizers_common::encode_count("llama-sentencepiece", tokenizer, &req.raw_text)?;
@@ -8433,7 +8433,7 @@ index 3389735..ceb0275 100644
 @@ -166,100 +172,6 @@ fn count_tokens_llama(
      Ok(total)
  }
- 
+
 -fn tool_call_tokens(tokenizer: &Tokenizer, tc: &ToolCall) -> Result<usize, TokenizerError> {
 -    const TOOL_CALL_OVERHEAD: usize = 1;
 -    Ok(TOOL_CALL_OVERHEAD
@@ -8534,7 +8534,7 @@ index 3389735..ceb0275 100644
 @@ -275,8 +187,12 @@ mod tests {
          let mut tampered = ASSET_BYTES.to_vec();
          tampered[2048] ^= 0x01;
- 
+
 -        let err = verify_asset_sha256("llama-3.1", &tampered, crate::asset_sha256::LLAMA_31)
 -            .expect_err("tamper must fail");
 +        let err = tokenizers_common::verify_asset_sha256(
@@ -8543,7 +8543,7 @@ index 3389735..ceb0275 100644
 +            crate::asset_sha256::LLAMA_31,
 +        )
 +        .expect_err("tamper must fail");
- 
+
          assert!(matches!(
              err,
 diff --git a/crates/spendguard-tokenizer/src/encoders/mod.rs b/crates/spendguard-tokenizer/src/encoders/mod.rs
@@ -8555,7 +8555,7 @@ index fc80cf4..7575c8f 100644
  pub mod llama;
  pub mod openai;
 +pub(crate) mod tokenizers_common;
- 
+
  /// Stable string discriminant matching `tokenizer_versions.kind`
  /// CHECK constraint values. Used for `TokenizeResponse.kind` and for
 @@ -223,3 +224,71 @@ pub trait Encoder: Send + Sync {
@@ -8798,7 +8798,7 @@ index da191a6..1e35c69 100644
 +        self.cache.boot_durations()
 +    }
  }
- 
+
  #[cfg(test)]
 
 exec
@@ -10286,14 +10286,14 @@ index 2b29d47..bf02f86 100644
 +++ b/crates/spendguard-tokenizer/tests/seed_parity.rs
 @@ -26,9 +26,8 @@ const SEED_SQL: &str =
      include_str!("../../../services/ledger/migrations/0049_tokenizer_versions_initial_seed.sql");
- 
+
  /// SLICE_04 seed migration (additive — separate file from 0049).
 -const SLICE04_SEED_SQL: &str = include_str!(
 -    "../../../services/ledger/migrations/0050_tokenizer_versions_slice04_seed.sql"
 -);
 +const SLICE04_SEED_SQL: &str =
 +    include_str!("../../../services/ledger/migrations/0050_tokenizer_versions_slice04_seed.sql");
- 
+
  #[test]
  fn each_rust_seed_row_id_appears_in_sql() {
 
