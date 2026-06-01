@@ -1,0 +1,4422 @@
+{
+  "SchemaVersion": 2,
+  "Trivy": {
+    "Version": "0.70.0"
+  },
+  "ReportID": "019e820c-8cb6-7269-8104-1a33ece84c2a",
+  "CreatedAt": "2026-06-01T15:18:41.078166+08:00",
+  "ArtifactName": "Cargo.lock",
+  "ArtifactType": "filesystem",
+  "Results": [
+    {
+      "Target": "Cargo.lock",
+      "Class": "lang-pkgs",
+      "Type": "cargo",
+      "Packages": [
+        {
+          "ID": "adler2@2.0.1",
+          "Name": "adler2",
+          "Identifier": {
+            "PURL": "pkg:cargo/adler2@2.0.1",
+            "UID": "dedc75ddf699ed6e"
+          },
+          "Version": "2.0.1",
+          "Locations": [
+            {
+              "StartLine": 5,
+              "EndLine": 9
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "android_system_properties@0.1.5",
+          "Name": "android_system_properties",
+          "Identifier": {
+            "PURL": "pkg:cargo/android_system_properties@0.1.5",
+            "UID": "5fcbec224174a757"
+          },
+          "Version": "0.1.5",
+          "DependsOn": [
+            "libc@0.2.186"
+          ],
+          "Locations": [
+            {
+              "StartLine": 11,
+              "EndLine": 18
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "anstream@1.0.0",
+          "Name": "anstream",
+          "Identifier": {
+            "PURL": "pkg:cargo/anstream@1.0.0",
+            "UID": "77657618f7fdf3e7"
+          },
+          "Version": "1.0.0",
+          "DependsOn": [
+            "anstyle-parse@1.0.0",
+            "anstyle-query@1.1.5",
+            "anstyle-wincon@3.0.11",
+            "anstyle@1.0.14",
+            "colorchoice@1.0.5",
+            "is_terminal_polyfill@1.70.2",
+            "utf8parse@0.2.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 20,
+              "EndLine": 33
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "anstyle@1.0.14",
+          "Name": "anstyle",
+          "Identifier": {
+            "PURL": "pkg:cargo/anstyle@1.0.14",
+            "UID": "3e92be8615ced433"
+          },
+          "Version": "1.0.14",
+          "Locations": [
+            {
+              "StartLine": 35,
+              "EndLine": 39
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "anstyle-parse@1.0.0",
+          "Name": "anstyle-parse",
+          "Identifier": {
+            "PURL": "pkg:cargo/anstyle-parse@1.0.0",
+            "UID": "b2cec5291937d0a4"
+          },
+          "Version": "1.0.0",
+          "DependsOn": [
+            "utf8parse@0.2.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 41,
+              "EndLine": 48
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "anstyle-query@1.1.5",
+          "Name": "anstyle-query",
+          "Identifier": {
+            "PURL": "pkg:cargo/anstyle-query@1.1.5",
+            "UID": "906828a6560ca5db"
+          },
+          "Version": "1.1.5",
+          "DependsOn": [
+            "windows-sys@0.61.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 50,
+              "EndLine": 57
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "anstyle-wincon@3.0.11",
+          "Name": "anstyle-wincon",
+          "Identifier": {
+            "PURL": "pkg:cargo/anstyle-wincon@3.0.11",
+            "UID": "397b10aff4e18c85"
+          },
+          "Version": "3.0.11",
+          "DependsOn": [
+            "anstyle@1.0.14",
+            "once_cell_polyfill@1.70.2",
+            "windows-sys@0.61.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 59,
+              "EndLine": 68
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "anyhow@1.0.102",
+          "Name": "anyhow",
+          "Identifier": {
+            "PURL": "pkg:cargo/anyhow@1.0.102",
+            "UID": "ff44719690e594c0"
+          },
+          "Version": "1.0.102",
+          "Locations": [
+            {
+              "StartLine": 70,
+              "EndLine": 74
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "atomic-waker@1.1.2",
+          "Name": "atomic-waker",
+          "Identifier": {
+            "PURL": "pkg:cargo/atomic-waker@1.1.2",
+            "UID": "417dd4f1a2bcf675"
+          },
+          "Version": "1.1.2",
+          "Locations": [
+            {
+              "StartLine": 76,
+              "EndLine": 80
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "autocfg@1.5.1",
+          "Name": "autocfg",
+          "Identifier": {
+            "PURL": "pkg:cargo/autocfg@1.5.1",
+            "UID": "f414c567b2bbe78c"
+          },
+          "Version": "1.5.1",
+          "Locations": [
+            {
+              "StartLine": 82,
+              "EndLine": 86
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "base64@0.21.7",
+          "Name": "base64",
+          "Identifier": {
+            "PURL": "pkg:cargo/base64@0.21.7",
+            "UID": "5b78660c96205827"
+          },
+          "Version": "0.21.7",
+          "Locations": [
+            {
+              "StartLine": 88,
+              "EndLine": 92
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "base64@0.22.1",
+          "Name": "base64",
+          "Identifier": {
+            "PURL": "pkg:cargo/base64@0.22.1",
+            "UID": "8350f20e46ee11c5"
+          },
+          "Version": "0.22.1",
+          "Locations": [
+            {
+              "StartLine": 94,
+              "EndLine": 98
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "bitflags@2.11.1",
+          "Name": "bitflags",
+          "Identifier": {
+            "PURL": "pkg:cargo/bitflags@2.11.1",
+            "UID": "80e2f30b78ef9d6a"
+          },
+          "Version": "2.11.1",
+          "Locations": [
+            {
+              "StartLine": 100,
+              "EndLine": 104
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "bumpalo@3.20.3",
+          "Name": "bumpalo",
+          "Identifier": {
+            "PURL": "pkg:cargo/bumpalo@3.20.3",
+            "UID": "e60fcbd2d6380562"
+          },
+          "Version": "3.20.3",
+          "Locations": [
+            {
+              "StartLine": 106,
+              "EndLine": 110
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "byteorder@1.5.0",
+          "Name": "byteorder",
+          "Identifier": {
+            "PURL": "pkg:cargo/byteorder@1.5.0",
+            "UID": "90f789ad5ec9212d"
+          },
+          "Version": "1.5.0",
+          "Locations": [
+            {
+              "StartLine": 112,
+              "EndLine": 116
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "bytes@1.11.1",
+          "Name": "bytes",
+          "Identifier": {
+            "PURL": "pkg:cargo/bytes@1.11.1",
+            "UID": "830395d3157f1e26"
+          },
+          "Version": "1.11.1",
+          "Locations": [
+            {
+              "StartLine": 118,
+              "EndLine": 122
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "cc@1.2.63",
+          "Name": "cc",
+          "Identifier": {
+            "PURL": "pkg:cargo/cc@1.2.63",
+            "UID": "db044d53cda6c089"
+          },
+          "Version": "1.2.63",
+          "DependsOn": [
+            "find-msvc-tools@0.1.9",
+            "shlex@2.0.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 124,
+              "EndLine": 132
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "cfg-if@1.0.4",
+          "Name": "cfg-if",
+          "Identifier": {
+            "PURL": "pkg:cargo/cfg-if@1.0.4",
+            "UID": "ba9b5fe46575345e"
+          },
+          "Version": "1.0.4",
+          "Locations": [
+            {
+              "StartLine": 134,
+              "EndLine": 138
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "cfg_aliases@0.2.1",
+          "Name": "cfg_aliases",
+          "Identifier": {
+            "PURL": "pkg:cargo/cfg_aliases@0.2.1",
+            "UID": "1513520e6dd9e51b"
+          },
+          "Version": "0.2.1",
+          "Locations": [
+            {
+              "StartLine": 140,
+              "EndLine": 144
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "chrono@0.4.44",
+          "Name": "chrono",
+          "Identifier": {
+            "PURL": "pkg:cargo/chrono@0.4.44",
+            "UID": "c4f2fe5c3cb670a1"
+          },
+          "Version": "0.4.44",
+          "DependsOn": [
+            "iana-time-zone@0.1.65",
+            "num-traits@0.2.19",
+            "windows-link@0.2.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 146,
+              "EndLine": 155
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "clap@4.6.1",
+          "Name": "clap",
+          "Identifier": {
+            "PURL": "pkg:cargo/clap@4.6.1",
+            "UID": "2a7126f3c9f910b6"
+          },
+          "Version": "4.6.1",
+          "DependsOn": [
+            "clap_builder@4.6.0",
+            "clap_derive@4.6.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 157,
+              "EndLine": 165
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "clap_builder@4.6.0",
+          "Name": "clap_builder",
+          "Identifier": {
+            "PURL": "pkg:cargo/clap_builder@4.6.0",
+            "UID": "35250baf19d1c352"
+          },
+          "Version": "4.6.0",
+          "DependsOn": [
+            "anstream@1.0.0",
+            "anstyle@1.0.14",
+            "clap_lex@1.1.0",
+            "strsim@0.11.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 167,
+              "EndLine": 177
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "clap_derive@4.6.1",
+          "Name": "clap_derive",
+          "Identifier": {
+            "PURL": "pkg:cargo/clap_derive@4.6.1",
+            "UID": "5a350ed582d51aa1"
+          },
+          "Version": "4.6.1",
+          "DependsOn": [
+            "heck@0.5.0",
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 179,
+              "EndLine": 189
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "clap_lex@1.1.0",
+          "Name": "clap_lex",
+          "Identifier": {
+            "PURL": "pkg:cargo/clap_lex@1.1.0",
+            "UID": "3e6ed82210486716"
+          },
+          "Version": "1.1.0",
+          "Locations": [
+            {
+              "StartLine": 191,
+              "EndLine": 195
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "colorchoice@1.0.5",
+          "Name": "colorchoice",
+          "Identifier": {
+            "PURL": "pkg:cargo/colorchoice@1.0.5",
+            "UID": "f694c748bbe71ee8"
+          },
+          "Version": "1.0.5",
+          "Locations": [
+            {
+              "StartLine": 197,
+              "EndLine": 201
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "core-foundation-sys@0.8.7",
+          "Name": "core-foundation-sys",
+          "Identifier": {
+            "PURL": "pkg:cargo/core-foundation-sys@0.8.7",
+            "UID": "5ad3daa96c3aae76"
+          },
+          "Version": "0.8.7",
+          "Locations": [
+            {
+              "StartLine": 203,
+              "EndLine": 207
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "crc32fast@1.5.0",
+          "Name": "crc32fast",
+          "Identifier": {
+            "PURL": "pkg:cargo/crc32fast@1.5.0",
+            "UID": "b21f3307e9d75ff4"
+          },
+          "Version": "1.5.0",
+          "DependsOn": [
+            "cfg-if@1.0.4"
+          ],
+          "Locations": [
+            {
+              "StartLine": 209,
+              "EndLine": 216
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "crossbeam-channel@0.5.15",
+          "Name": "crossbeam-channel",
+          "Identifier": {
+            "PURL": "pkg:cargo/crossbeam-channel@0.5.15",
+            "UID": "4e0e5612b7d81286"
+          },
+          "Version": "0.5.15",
+          "DependsOn": [
+            "crossbeam-utils@0.8.21"
+          ],
+          "Locations": [
+            {
+              "StartLine": 218,
+              "EndLine": 225
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "crossbeam-utils@0.8.21",
+          "Name": "crossbeam-utils",
+          "Identifier": {
+            "PURL": "pkg:cargo/crossbeam-utils@0.8.21",
+            "UID": "53ffac37bea91fed"
+          },
+          "Version": "0.8.21",
+          "Locations": [
+            {
+              "StartLine": 227,
+              "EndLine": 231
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "displaydoc@0.2.6",
+          "Name": "displaydoc",
+          "Identifier": {
+            "PURL": "pkg:cargo/displaydoc@0.2.6",
+            "UID": "517e1c614f4fcc29"
+          },
+          "Version": "0.2.6",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 233,
+              "EndLine": 242
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "equivalent@1.0.2",
+          "Name": "equivalent",
+          "Identifier": {
+            "PURL": "pkg:cargo/equivalent@1.0.2",
+            "UID": "78277b566ec18a19"
+          },
+          "Version": "1.0.2",
+          "Locations": [
+            {
+              "StartLine": 244,
+              "EndLine": 248
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "errno@0.3.14",
+          "Name": "errno",
+          "Identifier": {
+            "PURL": "pkg:cargo/errno@0.3.14",
+            "UID": "e082321895786712"
+          },
+          "Version": "0.3.14",
+          "DependsOn": [
+            "libc@0.2.186",
+            "windows-sys@0.61.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 250,
+              "EndLine": 258
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "find-msvc-tools@0.1.9",
+          "Name": "find-msvc-tools",
+          "Identifier": {
+            "PURL": "pkg:cargo/find-msvc-tools@0.1.9",
+            "UID": "a1a4baded7e9bbb"
+          },
+          "Version": "0.1.9",
+          "Locations": [
+            {
+              "StartLine": 260,
+              "EndLine": 264
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "flate2@1.1.9",
+          "Name": "flate2",
+          "Identifier": {
+            "PURL": "pkg:cargo/flate2@1.1.9",
+            "UID": "1945dc4b4d24d0c4"
+          },
+          "Version": "1.1.9",
+          "DependsOn": [
+            "crc32fast@1.5.0",
+            "miniz_oxide@0.8.9"
+          ],
+          "Locations": [
+            {
+              "StartLine": 266,
+              "EndLine": 274
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "foldhash@0.1.5",
+          "Name": "foldhash",
+          "Identifier": {
+            "PURL": "pkg:cargo/foldhash@0.1.5",
+            "UID": "5f4765ee16e149ce"
+          },
+          "Version": "0.1.5",
+          "Locations": [
+            {
+              "StartLine": 276,
+              "EndLine": 280
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "form_urlencoded@1.2.2",
+          "Name": "form_urlencoded",
+          "Identifier": {
+            "PURL": "pkg:cargo/form_urlencoded@1.2.2",
+            "UID": "ba2b8424e43bc7cc"
+          },
+          "Version": "1.2.2",
+          "DependsOn": [
+            "percent-encoding@2.3.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 282,
+              "EndLine": 289
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "futures@0.3.32",
+          "Name": "futures",
+          "Identifier": {
+            "PURL": "pkg:cargo/futures@0.3.32",
+            "UID": "d38fc6dc1000dce0"
+          },
+          "Version": "0.3.32",
+          "DependsOn": [
+            "futures-channel@0.3.32",
+            "futures-core@0.3.32",
+            "futures-executor@0.3.32",
+            "futures-io@0.3.32",
+            "futures-sink@0.3.32",
+            "futures-task@0.3.32",
+            "futures-util@0.3.32"
+          ],
+          "Locations": [
+            {
+              "StartLine": 291,
+              "EndLine": 304
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "futures-channel@0.3.32",
+          "Name": "futures-channel",
+          "Identifier": {
+            "PURL": "pkg:cargo/futures-channel@0.3.32",
+            "UID": "e8d138dc7b5957b9"
+          },
+          "Version": "0.3.32",
+          "DependsOn": [
+            "futures-core@0.3.32",
+            "futures-sink@0.3.32"
+          ],
+          "Locations": [
+            {
+              "StartLine": 306,
+              "EndLine": 314
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "futures-core@0.3.32",
+          "Name": "futures-core",
+          "Identifier": {
+            "PURL": "pkg:cargo/futures-core@0.3.32",
+            "UID": "f7c6919d20e7affb"
+          },
+          "Version": "0.3.32",
+          "Locations": [
+            {
+              "StartLine": 316,
+              "EndLine": 320
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "futures-executor@0.3.32",
+          "Name": "futures-executor",
+          "Identifier": {
+            "PURL": "pkg:cargo/futures-executor@0.3.32",
+            "UID": "32830dfd04326f9a"
+          },
+          "Version": "0.3.32",
+          "DependsOn": [
+            "futures-core@0.3.32",
+            "futures-task@0.3.32",
+            "futures-util@0.3.32"
+          ],
+          "Locations": [
+            {
+              "StartLine": 322,
+              "EndLine": 331
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "futures-io@0.3.32",
+          "Name": "futures-io",
+          "Identifier": {
+            "PURL": "pkg:cargo/futures-io@0.3.32",
+            "UID": "efe14b1709f0be20"
+          },
+          "Version": "0.3.32",
+          "Locations": [
+            {
+              "StartLine": 333,
+              "EndLine": 337
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "futures-macro@0.3.32",
+          "Name": "futures-macro",
+          "Identifier": {
+            "PURL": "pkg:cargo/futures-macro@0.3.32",
+            "UID": "503a25bf02ab2d1"
+          },
+          "Version": "0.3.32",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 339,
+              "EndLine": 348
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "futures-sink@0.3.32",
+          "Name": "futures-sink",
+          "Identifier": {
+            "PURL": "pkg:cargo/futures-sink@0.3.32",
+            "UID": "8d3156cea7638a7a"
+          },
+          "Version": "0.3.32",
+          "Locations": [
+            {
+              "StartLine": 350,
+              "EndLine": 354
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "futures-task@0.3.32",
+          "Name": "futures-task",
+          "Identifier": {
+            "PURL": "pkg:cargo/futures-task@0.3.32",
+            "UID": "7362b433f96d6660"
+          },
+          "Version": "0.3.32",
+          "Locations": [
+            {
+              "StartLine": 356,
+              "EndLine": 360
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "futures-util@0.3.32",
+          "Name": "futures-util",
+          "Identifier": {
+            "PURL": "pkg:cargo/futures-util@0.3.32",
+            "UID": "24debdd57b79ee6e"
+          },
+          "Version": "0.3.32",
+          "DependsOn": [
+            "futures-channel@0.3.32",
+            "futures-core@0.3.32",
+            "futures-io@0.3.32",
+            "futures-macro@0.3.32",
+            "futures-sink@0.3.32",
+            "futures-task@0.3.32",
+            "memchr@2.8.1",
+            "pin-project-lite@0.2.17",
+            "slab@0.4.12"
+          ],
+          "Locations": [
+            {
+              "StartLine": 362,
+              "EndLine": 377
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "getrandom@0.2.17",
+          "Name": "getrandom",
+          "Identifier": {
+            "PURL": "pkg:cargo/getrandom@0.2.17",
+            "UID": "5b39853f31689cfe"
+          },
+          "Version": "0.2.17",
+          "DependsOn": [
+            "cfg-if@1.0.4",
+            "js-sys@0.3.99",
+            "libc@0.2.186",
+            "wasi@0.11.1+wasi-snapshot-preview1",
+            "wasm-bindgen@0.2.122"
+          ],
+          "Locations": [
+            {
+              "StartLine": 379,
+              "EndLine": 390
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "getrandom@0.3.4",
+          "Name": "getrandom",
+          "Identifier": {
+            "PURL": "pkg:cargo/getrandom@0.3.4",
+            "UID": "a18456757880710c"
+          },
+          "Version": "0.3.4",
+          "DependsOn": [
+            "cfg-if@1.0.4",
+            "js-sys@0.3.99",
+            "libc@0.2.186",
+            "r-efi@5.3.0",
+            "wasip2@1.0.3+wasi-0.2.9",
+            "wasm-bindgen@0.2.122"
+          ],
+          "Locations": [
+            {
+              "StartLine": 392,
+              "EndLine": 404
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "getrandom@0.4.2",
+          "Name": "getrandom",
+          "Identifier": {
+            "PURL": "pkg:cargo/getrandom@0.4.2",
+            "UID": "a7626e6f072fcf1c"
+          },
+          "Version": "0.4.2",
+          "DependsOn": [
+            "cfg-if@1.0.4",
+            "libc@0.2.186",
+            "r-efi@6.0.0",
+            "wasip2@1.0.3+wasi-0.2.9",
+            "wasip3@0.4.0+wasi-0.3.0-rc-2026-01-06"
+          ],
+          "Locations": [
+            {
+              "StartLine": 406,
+              "EndLine": 417
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "hashbrown@0.15.5",
+          "Name": "hashbrown",
+          "Identifier": {
+            "PURL": "pkg:cargo/hashbrown@0.15.5",
+            "UID": "41a584758a4bf135"
+          },
+          "Version": "0.15.5",
+          "DependsOn": [
+            "foldhash@0.1.5"
+          ],
+          "Locations": [
+            {
+              "StartLine": 419,
+              "EndLine": 426
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "hashbrown@0.17.1",
+          "Name": "hashbrown",
+          "Identifier": {
+            "PURL": "pkg:cargo/hashbrown@0.17.1",
+            "UID": "e90ee9612ac5735e"
+          },
+          "Version": "0.17.1",
+          "Locations": [
+            {
+              "StartLine": 428,
+              "EndLine": 432
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "hdrhistogram@7.5.4",
+          "Name": "hdrhistogram",
+          "Identifier": {
+            "PURL": "pkg:cargo/hdrhistogram@7.5.4",
+            "UID": "75e7fd2627b1c207"
+          },
+          "Version": "7.5.4",
+          "DependsOn": [
+            "base64@0.21.7",
+            "byteorder@1.5.0",
+            "crossbeam-channel@0.5.15",
+            "flate2@1.1.9",
+            "nom@7.1.3",
+            "num-traits@0.2.19"
+          ],
+          "Locations": [
+            {
+              "StartLine": 434,
+              "EndLine": 446
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "heck@0.5.0",
+          "Name": "heck",
+          "Identifier": {
+            "PURL": "pkg:cargo/heck@0.5.0",
+            "UID": "444e4788460caba1"
+          },
+          "Version": "0.5.0",
+          "Locations": [
+            {
+              "StartLine": 448,
+              "EndLine": 452
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "http@1.4.1",
+          "Name": "http",
+          "Identifier": {
+            "PURL": "pkg:cargo/http@1.4.1",
+            "UID": "65090e142d5ae9f0"
+          },
+          "Version": "1.4.1",
+          "DependsOn": [
+            "bytes@1.11.1",
+            "itoa@1.0.18"
+          ],
+          "Locations": [
+            {
+              "StartLine": 454,
+              "EndLine": 462
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "http-body@1.0.1",
+          "Name": "http-body",
+          "Identifier": {
+            "PURL": "pkg:cargo/http-body@1.0.1",
+            "UID": "48a79feccd3def8d"
+          },
+          "Version": "1.0.1",
+          "DependsOn": [
+            "bytes@1.11.1",
+            "http@1.4.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 464,
+              "EndLine": 472
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "http-body-util@0.1.3",
+          "Name": "http-body-util",
+          "Identifier": {
+            "PURL": "pkg:cargo/http-body-util@0.1.3",
+            "UID": "6a6b37bd19641442"
+          },
+          "Version": "0.1.3",
+          "DependsOn": [
+            "bytes@1.11.1",
+            "futures-core@0.3.32",
+            "http-body@1.0.1",
+            "http@1.4.1",
+            "pin-project-lite@0.2.17"
+          ],
+          "Locations": [
+            {
+              "StartLine": 474,
+              "EndLine": 485
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "httparse@1.10.1",
+          "Name": "httparse",
+          "Identifier": {
+            "PURL": "pkg:cargo/httparse@1.10.1",
+            "UID": "f41fdc604a8bbe"
+          },
+          "Version": "1.10.1",
+          "Locations": [
+            {
+              "StartLine": 487,
+              "EndLine": 491
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "hyper@1.10.1",
+          "Name": "hyper",
+          "Identifier": {
+            "PURL": "pkg:cargo/hyper@1.10.1",
+            "UID": "2ccf7ffab8d03c97"
+          },
+          "Version": "1.10.1",
+          "DependsOn": [
+            "atomic-waker@1.1.2",
+            "bytes@1.11.1",
+            "futures-channel@0.3.32",
+            "futures-core@0.3.32",
+            "http-body@1.0.1",
+            "http@1.4.1",
+            "httparse@1.10.1",
+            "itoa@1.0.18",
+            "pin-project-lite@0.2.17",
+            "smallvec@1.15.1",
+            "tokio@1.52.3",
+            "want@0.3.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 493,
+              "EndLine": 511
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "hyper-rustls@0.27.9",
+          "Name": "hyper-rustls",
+          "Identifier": {
+            "PURL": "pkg:cargo/hyper-rustls@0.27.9",
+            "UID": "c69b3477ea87d0e3"
+          },
+          "Version": "0.27.9",
+          "DependsOn": [
+            "http@1.4.1",
+            "hyper-util@0.1.20",
+            "hyper@1.10.1",
+            "rustls@0.23.40",
+            "tokio-rustls@0.26.4",
+            "tokio@1.52.3",
+            "tower-service@0.3.3",
+            "webpki-roots@1.0.7"
+          ],
+          "Locations": [
+            {
+              "StartLine": 513,
+              "EndLine": 527
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "hyper-util@0.1.20",
+          "Name": "hyper-util",
+          "Identifier": {
+            "PURL": "pkg:cargo/hyper-util@0.1.20",
+            "UID": "89eb04888ff44cf7"
+          },
+          "Version": "0.1.20",
+          "DependsOn": [
+            "base64@0.22.1",
+            "bytes@1.11.1",
+            "futures-channel@0.3.32",
+            "futures-util@0.3.32",
+            "http-body@1.0.1",
+            "http@1.4.1",
+            "hyper@1.10.1",
+            "ipnet@2.12.0",
+            "libc@0.2.186",
+            "percent-encoding@2.3.2",
+            "pin-project-lite@0.2.17",
+            "socket2@0.6.4",
+            "tokio@1.52.3",
+            "tower-service@0.3.3",
+            "tracing@0.1.44"
+          ],
+          "Locations": [
+            {
+              "StartLine": 529,
+              "EndLine": 550
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "iana-time-zone@0.1.65",
+          "Name": "iana-time-zone",
+          "Identifier": {
+            "PURL": "pkg:cargo/iana-time-zone@0.1.65",
+            "UID": "ae0bf7cce8eaf553"
+          },
+          "Version": "0.1.65",
+          "DependsOn": [
+            "android_system_properties@0.1.5",
+            "core-foundation-sys@0.8.7",
+            "iana-time-zone-haiku@0.1.2",
+            "js-sys@0.3.99",
+            "log@0.4.30",
+            "wasm-bindgen@0.2.122",
+            "windows-core@0.62.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 552,
+              "EndLine": 565
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "iana-time-zone-haiku@0.1.2",
+          "Name": "iana-time-zone-haiku",
+          "Identifier": {
+            "PURL": "pkg:cargo/iana-time-zone-haiku@0.1.2",
+            "UID": "e7d568623f2052a7"
+          },
+          "Version": "0.1.2",
+          "DependsOn": [
+            "cc@1.2.63"
+          ],
+          "Locations": [
+            {
+              "StartLine": 567,
+              "EndLine": 574
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "icu_collections@2.2.0",
+          "Name": "icu_collections",
+          "Identifier": {
+            "PURL": "pkg:cargo/icu_collections@2.2.0",
+            "UID": "a411f46bf77c5bfd"
+          },
+          "Version": "2.2.0",
+          "DependsOn": [
+            "displaydoc@0.2.6",
+            "potential_utf@0.1.5",
+            "utf8_iter@1.0.4",
+            "yoke@0.8.2",
+            "zerofrom@0.1.8",
+            "zerovec@0.11.6"
+          ],
+          "Locations": [
+            {
+              "StartLine": 576,
+              "EndLine": 588
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "icu_locale_core@2.2.0",
+          "Name": "icu_locale_core",
+          "Identifier": {
+            "PURL": "pkg:cargo/icu_locale_core@2.2.0",
+            "UID": "19996f8051b7d8e7"
+          },
+          "Version": "2.2.0",
+          "DependsOn": [
+            "displaydoc@0.2.6",
+            "litemap@0.8.2",
+            "tinystr@0.8.3",
+            "writeable@0.6.3",
+            "zerovec@0.11.6"
+          ],
+          "Locations": [
+            {
+              "StartLine": 590,
+              "EndLine": 601
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "icu_normalizer@2.2.0",
+          "Name": "icu_normalizer",
+          "Identifier": {
+            "PURL": "pkg:cargo/icu_normalizer@2.2.0",
+            "UID": "7158d5ad68cd475a"
+          },
+          "Version": "2.2.0",
+          "DependsOn": [
+            "icu_collections@2.2.0",
+            "icu_normalizer_data@2.2.0",
+            "icu_properties@2.2.0",
+            "icu_provider@2.2.0",
+            "smallvec@1.15.1",
+            "zerovec@0.11.6"
+          ],
+          "Locations": [
+            {
+              "StartLine": 603,
+              "EndLine": 615
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "icu_normalizer_data@2.2.0",
+          "Name": "icu_normalizer_data",
+          "Identifier": {
+            "PURL": "pkg:cargo/icu_normalizer_data@2.2.0",
+            "UID": "bdaa738787dc31aa"
+          },
+          "Version": "2.2.0",
+          "Locations": [
+            {
+              "StartLine": 617,
+              "EndLine": 621
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "icu_properties@2.2.0",
+          "Name": "icu_properties",
+          "Identifier": {
+            "PURL": "pkg:cargo/icu_properties@2.2.0",
+            "UID": "78595d4cfcc6717d"
+          },
+          "Version": "2.2.0",
+          "DependsOn": [
+            "icu_collections@2.2.0",
+            "icu_locale_core@2.2.0",
+            "icu_properties_data@2.2.0",
+            "icu_provider@2.2.0",
+            "zerotrie@0.2.4",
+            "zerovec@0.11.6"
+          ],
+          "Locations": [
+            {
+              "StartLine": 623,
+              "EndLine": 635
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "icu_properties_data@2.2.0",
+          "Name": "icu_properties_data",
+          "Identifier": {
+            "PURL": "pkg:cargo/icu_properties_data@2.2.0",
+            "UID": "a7c6ebb9081de476"
+          },
+          "Version": "2.2.0",
+          "Locations": [
+            {
+              "StartLine": 637,
+              "EndLine": 641
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "icu_provider@2.2.0",
+          "Name": "icu_provider",
+          "Identifier": {
+            "PURL": "pkg:cargo/icu_provider@2.2.0",
+            "UID": "cf33ee2898f25469"
+          },
+          "Version": "2.2.0",
+          "DependsOn": [
+            "displaydoc@0.2.6",
+            "icu_locale_core@2.2.0",
+            "writeable@0.6.3",
+            "yoke@0.8.2",
+            "zerofrom@0.1.8",
+            "zerotrie@0.2.4",
+            "zerovec@0.11.6"
+          ],
+          "Locations": [
+            {
+              "StartLine": 643,
+              "EndLine": 656
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "id-arena@2.3.0",
+          "Name": "id-arena",
+          "Identifier": {
+            "PURL": "pkg:cargo/id-arena@2.3.0",
+            "UID": "d8ccd2bda4fdc7d6"
+          },
+          "Version": "2.3.0",
+          "Locations": [
+            {
+              "StartLine": 658,
+              "EndLine": 662
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "idna@1.1.0",
+          "Name": "idna",
+          "Identifier": {
+            "PURL": "pkg:cargo/idna@1.1.0",
+            "UID": "e0b9fb53596f30f"
+          },
+          "Version": "1.1.0",
+          "DependsOn": [
+            "idna_adapter@1.2.2",
+            "smallvec@1.15.1",
+            "utf8_iter@1.0.4"
+          ],
+          "Locations": [
+            {
+              "StartLine": 664,
+              "EndLine": 673
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "idna_adapter@1.2.2",
+          "Name": "idna_adapter",
+          "Identifier": {
+            "PURL": "pkg:cargo/idna_adapter@1.2.2",
+            "UID": "4c683a9bcd97f399"
+          },
+          "Version": "1.2.2",
+          "DependsOn": [
+            "icu_normalizer@2.2.0",
+            "icu_properties@2.2.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 675,
+              "EndLine": 683
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "indexmap@2.14.0",
+          "Name": "indexmap",
+          "Identifier": {
+            "PURL": "pkg:cargo/indexmap@2.14.0",
+            "UID": "598b5f111cd6f817"
+          },
+          "Version": "2.14.0",
+          "DependsOn": [
+            "equivalent@1.0.2",
+            "hashbrown@0.17.1",
+            "serde@1.0.228",
+            "serde_core@1.0.228"
+          ],
+          "Locations": [
+            {
+              "StartLine": 685,
+              "EndLine": 695
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "ipnet@2.12.0",
+          "Name": "ipnet",
+          "Identifier": {
+            "PURL": "pkg:cargo/ipnet@2.12.0",
+            "UID": "9689de84b863f8d8"
+          },
+          "Version": "2.12.0",
+          "Locations": [
+            {
+              "StartLine": 697,
+              "EndLine": 701
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "is_terminal_polyfill@1.70.2",
+          "Name": "is_terminal_polyfill",
+          "Identifier": {
+            "PURL": "pkg:cargo/is_terminal_polyfill@1.70.2",
+            "UID": "2cb0b060e09abd03"
+          },
+          "Version": "1.70.2",
+          "Locations": [
+            {
+              "StartLine": 703,
+              "EndLine": 707
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "itoa@1.0.18",
+          "Name": "itoa",
+          "Identifier": {
+            "PURL": "pkg:cargo/itoa@1.0.18",
+            "UID": "f39ff282f40c2770"
+          },
+          "Version": "1.0.18",
+          "Locations": [
+            {
+              "StartLine": 709,
+              "EndLine": 713
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "js-sys@0.3.99",
+          "Name": "js-sys",
+          "Identifier": {
+            "PURL": "pkg:cargo/js-sys@0.3.99",
+            "UID": "44a180f07983d324"
+          },
+          "Version": "0.3.99",
+          "DependsOn": [
+            "cfg-if@1.0.4",
+            "futures-util@0.3.32",
+            "once_cell@1.21.4",
+            "wasm-bindgen@0.2.122"
+          ],
+          "Locations": [
+            {
+              "StartLine": 715,
+              "EndLine": 725
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "lazy_static@1.5.0",
+          "Name": "lazy_static",
+          "Identifier": {
+            "PURL": "pkg:cargo/lazy_static@1.5.0",
+            "UID": "77c53668f3168568"
+          },
+          "Version": "1.5.0",
+          "Locations": [
+            {
+              "StartLine": 727,
+              "EndLine": 731
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "leb128fmt@0.1.0",
+          "Name": "leb128fmt",
+          "Identifier": {
+            "PURL": "pkg:cargo/leb128fmt@0.1.0",
+            "UID": "879d9acf53757366"
+          },
+          "Version": "0.1.0",
+          "Locations": [
+            {
+              "StartLine": 733,
+              "EndLine": 737
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "libc@0.2.186",
+          "Name": "libc",
+          "Identifier": {
+            "PURL": "pkg:cargo/libc@0.2.186",
+            "UID": "b4f346e0aa815b33"
+          },
+          "Version": "0.2.186",
+          "Locations": [
+            {
+              "StartLine": 739,
+              "EndLine": 743
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "litemap@0.8.2",
+          "Name": "litemap",
+          "Identifier": {
+            "PURL": "pkg:cargo/litemap@0.8.2",
+            "UID": "3b14341e7700884d"
+          },
+          "Version": "0.8.2",
+          "Locations": [
+            {
+              "StartLine": 745,
+              "EndLine": 749
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "lock_api@0.4.14",
+          "Name": "lock_api",
+          "Identifier": {
+            "PURL": "pkg:cargo/lock_api@0.4.14",
+            "UID": "6d48dccbc2b9d186"
+          },
+          "Version": "0.4.14",
+          "DependsOn": [
+            "scopeguard@1.2.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 751,
+              "EndLine": 758
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "log@0.4.30",
+          "Name": "log",
+          "Identifier": {
+            "PURL": "pkg:cargo/log@0.4.30",
+            "UID": "a5f5e203938fa744"
+          },
+          "Version": "0.4.30",
+          "Locations": [
+            {
+              "StartLine": 760,
+              "EndLine": 764
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "lru-slab@0.1.2",
+          "Name": "lru-slab",
+          "Identifier": {
+            "PURL": "pkg:cargo/lru-slab@0.1.2",
+            "UID": "cad4e3839cab8ec7"
+          },
+          "Version": "0.1.2",
+          "Locations": [
+            {
+              "StartLine": 766,
+              "EndLine": 770
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "memchr@2.8.1",
+          "Name": "memchr",
+          "Identifier": {
+            "PURL": "pkg:cargo/memchr@2.8.1",
+            "UID": "78579d8ad9dc1b8"
+          },
+          "Version": "2.8.1",
+          "Locations": [
+            {
+              "StartLine": 772,
+              "EndLine": 776
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "minimal-lexical@0.2.1",
+          "Name": "minimal-lexical",
+          "Identifier": {
+            "PURL": "pkg:cargo/minimal-lexical@0.2.1",
+            "UID": "809c756d953acbe9"
+          },
+          "Version": "0.2.1",
+          "Locations": [
+            {
+              "StartLine": 778,
+              "EndLine": 782
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "miniz_oxide@0.8.9",
+          "Name": "miniz_oxide",
+          "Identifier": {
+            "PURL": "pkg:cargo/miniz_oxide@0.8.9",
+            "UID": "411d98486323fe62"
+          },
+          "Version": "0.8.9",
+          "DependsOn": [
+            "adler2@2.0.1",
+            "simd-adler32@0.3.9"
+          ],
+          "Locations": [
+            {
+              "StartLine": 784,
+              "EndLine": 792
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "mio@1.2.1",
+          "Name": "mio",
+          "Identifier": {
+            "PURL": "pkg:cargo/mio@1.2.1",
+            "UID": "f66dc31a82a1d69"
+          },
+          "Version": "1.2.1",
+          "DependsOn": [
+            "libc@0.2.186",
+            "wasi@0.11.1+wasi-snapshot-preview1",
+            "windows-sys@0.61.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 794,
+              "EndLine": 803
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "nom@7.1.3",
+          "Name": "nom",
+          "Identifier": {
+            "PURL": "pkg:cargo/nom@7.1.3",
+            "UID": "385cc017e37d4498"
+          },
+          "Version": "7.1.3",
+          "DependsOn": [
+            "memchr@2.8.1",
+            "minimal-lexical@0.2.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 805,
+              "EndLine": 813
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "num-traits@0.2.19",
+          "Name": "num-traits",
+          "Identifier": {
+            "PURL": "pkg:cargo/num-traits@0.2.19",
+            "UID": "1f27de9effafe919"
+          },
+          "Version": "0.2.19",
+          "DependsOn": [
+            "autocfg@1.5.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 815,
+              "EndLine": 822
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "once_cell@1.21.4",
+          "Name": "once_cell",
+          "Identifier": {
+            "PURL": "pkg:cargo/once_cell@1.21.4",
+            "UID": "65f3011241be7fa7"
+          },
+          "Version": "1.21.4",
+          "Locations": [
+            {
+              "StartLine": 824,
+              "EndLine": 828
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "once_cell_polyfill@1.70.2",
+          "Name": "once_cell_polyfill",
+          "Identifier": {
+            "PURL": "pkg:cargo/once_cell_polyfill@1.70.2",
+            "UID": "a97186b8836546d4"
+          },
+          "Version": "1.70.2",
+          "Locations": [
+            {
+              "StartLine": 830,
+              "EndLine": 834
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "parking_lot@0.12.5",
+          "Name": "parking_lot",
+          "Identifier": {
+            "PURL": "pkg:cargo/parking_lot@0.12.5",
+            "UID": "a5d01896567d33d2"
+          },
+          "Version": "0.12.5",
+          "DependsOn": [
+            "lock_api@0.4.14",
+            "parking_lot_core@0.9.12"
+          ],
+          "Locations": [
+            {
+              "StartLine": 836,
+              "EndLine": 844
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "parking_lot_core@0.9.12",
+          "Name": "parking_lot_core",
+          "Identifier": {
+            "PURL": "pkg:cargo/parking_lot_core@0.9.12",
+            "UID": "1a661eab1f34a1c1"
+          },
+          "Version": "0.9.12",
+          "DependsOn": [
+            "cfg-if@1.0.4",
+            "libc@0.2.186",
+            "redox_syscall@0.5.18",
+            "smallvec@1.15.1",
+            "windows-link@0.2.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 846,
+              "EndLine": 857
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "percent-encoding@2.3.2",
+          "Name": "percent-encoding",
+          "Identifier": {
+            "PURL": "pkg:cargo/percent-encoding@2.3.2",
+            "UID": "4dbd48c8daf66064"
+          },
+          "Version": "2.3.2",
+          "Locations": [
+            {
+              "StartLine": 859,
+              "EndLine": 863
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "pin-project-lite@0.2.17",
+          "Name": "pin-project-lite",
+          "Identifier": {
+            "PURL": "pkg:cargo/pin-project-lite@0.2.17",
+            "UID": "97e3dfce9fcbb153"
+          },
+          "Version": "0.2.17",
+          "Locations": [
+            {
+              "StartLine": 865,
+              "EndLine": 869
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "potential_utf@0.1.5",
+          "Name": "potential_utf",
+          "Identifier": {
+            "PURL": "pkg:cargo/potential_utf@0.1.5",
+            "UID": "f1b4fe58c6a9c4b8"
+          },
+          "Version": "0.1.5",
+          "DependsOn": [
+            "zerovec@0.11.6"
+          ],
+          "Locations": [
+            {
+              "StartLine": 871,
+              "EndLine": 878
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "ppv-lite86@0.2.21",
+          "Name": "ppv-lite86",
+          "Identifier": {
+            "PURL": "pkg:cargo/ppv-lite86@0.2.21",
+            "UID": "64cbecdac462b3e1"
+          },
+          "Version": "0.2.21",
+          "DependsOn": [
+            "zerocopy@0.8.50"
+          ],
+          "Locations": [
+            {
+              "StartLine": 880,
+              "EndLine": 887
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "prettyplease@0.2.37",
+          "Name": "prettyplease",
+          "Identifier": {
+            "PURL": "pkg:cargo/prettyplease@0.2.37",
+            "UID": "5b21b9edcb002636"
+          },
+          "Version": "0.2.37",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 889,
+              "EndLine": 897
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "proc-macro2@1.0.106",
+          "Name": "proc-macro2",
+          "Identifier": {
+            "PURL": "pkg:cargo/proc-macro2@1.0.106",
+            "UID": "52bcee8a50b3cecf"
+          },
+          "Version": "1.0.106",
+          "DependsOn": [
+            "unicode-ident@1.0.24"
+          ],
+          "Locations": [
+            {
+              "StartLine": 899,
+              "EndLine": 906
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "quinn@0.11.9",
+          "Name": "quinn",
+          "Identifier": {
+            "PURL": "pkg:cargo/quinn@0.11.9",
+            "UID": "83a19816baa3011f"
+          },
+          "Version": "0.11.9",
+          "DependsOn": [
+            "bytes@1.11.1",
+            "cfg_aliases@0.2.1",
+            "pin-project-lite@0.2.17",
+            "quinn-proto@0.11.14",
+            "quinn-udp@0.5.14",
+            "rustc-hash@2.1.2",
+            "rustls@0.23.40",
+            "socket2@0.6.4",
+            "thiserror@2.0.18",
+            "tokio@1.52.3",
+            "tracing@0.1.44",
+            "web-time@1.1.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 908,
+              "EndLine": 926
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "quinn-proto@0.11.14",
+          "Name": "quinn-proto",
+          "Identifier": {
+            "PURL": "pkg:cargo/quinn-proto@0.11.14",
+            "UID": "5bd4a11966a01cf4"
+          },
+          "Version": "0.11.14",
+          "DependsOn": [
+            "bytes@1.11.1",
+            "getrandom@0.3.4",
+            "lru-slab@0.1.2",
+            "rand@0.9.4",
+            "ring@0.17.14",
+            "rustc-hash@2.1.2",
+            "rustls-pki-types@1.14.1",
+            "rustls@0.23.40",
+            "slab@0.4.12",
+            "thiserror@2.0.18",
+            "tinyvec@1.11.0",
+            "tracing@0.1.44",
+            "web-time@1.1.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 928,
+              "EndLine": 947
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "quinn-udp@0.5.14",
+          "Name": "quinn-udp",
+          "Identifier": {
+            "PURL": "pkg:cargo/quinn-udp@0.5.14",
+            "UID": "6e492500762989e7"
+          },
+          "Version": "0.5.14",
+          "DependsOn": [
+            "cfg_aliases@0.2.1",
+            "libc@0.2.186",
+            "once_cell@1.21.4",
+            "socket2@0.6.4",
+            "tracing@0.1.44",
+            "windows-sys@0.60.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 949,
+              "EndLine": 961
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "quote@1.0.45",
+          "Name": "quote",
+          "Identifier": {
+            "PURL": "pkg:cargo/quote@1.0.45",
+            "UID": "96cb73bbec484635"
+          },
+          "Version": "1.0.45",
+          "DependsOn": [
+            "proc-macro2@1.0.106"
+          ],
+          "Locations": [
+            {
+              "StartLine": 963,
+              "EndLine": 970
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "r-efi@5.3.0",
+          "Name": "r-efi",
+          "Identifier": {
+            "PURL": "pkg:cargo/r-efi@5.3.0",
+            "UID": "434c7dac4c39c1f0"
+          },
+          "Version": "5.3.0",
+          "Locations": [
+            {
+              "StartLine": 972,
+              "EndLine": 976
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "r-efi@6.0.0",
+          "Name": "r-efi",
+          "Identifier": {
+            "PURL": "pkg:cargo/r-efi@6.0.0",
+            "UID": "ff980f13cb9b744b"
+          },
+          "Version": "6.0.0",
+          "Locations": [
+            {
+              "StartLine": 978,
+              "EndLine": 982
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "rand@0.8.6",
+          "Name": "rand",
+          "Identifier": {
+            "PURL": "pkg:cargo/rand@0.8.6",
+            "UID": "ec7efcc8f7e62c41"
+          },
+          "Version": "0.8.6",
+          "DependsOn": [
+            "libc@0.2.186",
+            "rand_chacha@0.3.1",
+            "rand_core@0.6.4"
+          ],
+          "Locations": [
+            {
+              "StartLine": 984,
+              "EndLine": 993
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "rand@0.9.4",
+          "Name": "rand",
+          "Identifier": {
+            "PURL": "pkg:cargo/rand@0.9.4",
+            "UID": "4bf1274d83a0047c"
+          },
+          "Version": "0.9.4",
+          "DependsOn": [
+            "rand_chacha@0.9.0",
+            "rand_core@0.9.5"
+          ],
+          "Locations": [
+            {
+              "StartLine": 995,
+              "EndLine": 1003
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "rand_chacha@0.3.1",
+          "Name": "rand_chacha",
+          "Identifier": {
+            "PURL": "pkg:cargo/rand_chacha@0.3.1",
+            "UID": "14aeab53914a374e"
+          },
+          "Version": "0.3.1",
+          "DependsOn": [
+            "ppv-lite86@0.2.21",
+            "rand_core@0.6.4"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1005,
+              "EndLine": 1013
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "rand_chacha@0.9.0",
+          "Name": "rand_chacha",
+          "Identifier": {
+            "PURL": "pkg:cargo/rand_chacha@0.9.0",
+            "UID": "ea30205e3eb5f9f0"
+          },
+          "Version": "0.9.0",
+          "DependsOn": [
+            "ppv-lite86@0.2.21",
+            "rand_core@0.9.5"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1015,
+              "EndLine": 1023
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "rand_core@0.6.4",
+          "Name": "rand_core",
+          "Identifier": {
+            "PURL": "pkg:cargo/rand_core@0.6.4",
+            "UID": "e1eaa6f3352f5ade"
+          },
+          "Version": "0.6.4",
+          "DependsOn": [
+            "getrandom@0.2.17"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1025,
+              "EndLine": 1032
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "rand_core@0.9.5",
+          "Name": "rand_core",
+          "Identifier": {
+            "PURL": "pkg:cargo/rand_core@0.9.5",
+            "UID": "f00d341f582d9de1"
+          },
+          "Version": "0.9.5",
+          "DependsOn": [
+            "getrandom@0.3.4"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1034,
+              "EndLine": 1041
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "redox_syscall@0.5.18",
+          "Name": "redox_syscall",
+          "Identifier": {
+            "PURL": "pkg:cargo/redox_syscall@0.5.18",
+            "UID": "c77959b1c8d1ecd6"
+          },
+          "Version": "0.5.18",
+          "DependsOn": [
+            "bitflags@2.11.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1043,
+              "EndLine": 1050
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "reqwest@0.12.28",
+          "Name": "reqwest",
+          "Identifier": {
+            "PURL": "pkg:cargo/reqwest@0.12.28",
+            "UID": "e4414ec7f35d493b"
+          },
+          "Version": "0.12.28",
+          "DependsOn": [
+            "base64@0.22.1",
+            "bytes@1.11.1",
+            "futures-core@0.3.32",
+            "http-body-util@0.1.3",
+            "http-body@1.0.1",
+            "http@1.4.1",
+            "hyper-rustls@0.27.9",
+            "hyper-util@0.1.20",
+            "hyper@1.10.1",
+            "js-sys@0.3.99",
+            "log@0.4.30",
+            "percent-encoding@2.3.2",
+            "pin-project-lite@0.2.17",
+            "quinn@0.11.9",
+            "rustls-pki-types@1.14.1",
+            "rustls@0.23.40",
+            "serde@1.0.228",
+            "serde_json@1.0.150",
+            "serde_urlencoded@0.7.1",
+            "sync_wrapper@1.0.2",
+            "tokio-rustls@0.26.4",
+            "tokio@1.52.3",
+            "tower-http@0.6.11",
+            "tower-service@0.3.3",
+            "tower@0.5.3",
+            "url@2.5.8",
+            "wasm-bindgen-futures@0.4.72",
+            "wasm-bindgen@0.2.122",
+            "web-sys@0.3.99",
+            "webpki-roots@1.0.7"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1052,
+              "EndLine": 1088
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "ring@0.17.14",
+          "Name": "ring",
+          "Identifier": {
+            "PURL": "pkg:cargo/ring@0.17.14",
+            "UID": "76d7dc609176b83f"
+          },
+          "Version": "0.17.14",
+          "DependsOn": [
+            "cc@1.2.63",
+            "cfg-if@1.0.4",
+            "getrandom@0.2.17",
+            "libc@0.2.186",
+            "untrusted@0.9.0",
+            "windows-sys@0.52.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1090,
+              "EndLine": 1102
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "rustc-hash@2.1.2",
+          "Name": "rustc-hash",
+          "Identifier": {
+            "PURL": "pkg:cargo/rustc-hash@2.1.2",
+            "UID": "7a80ad5734f64313"
+          },
+          "Version": "2.1.2",
+          "Locations": [
+            {
+              "StartLine": 1104,
+              "EndLine": 1108
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "rustls@0.23.40",
+          "Name": "rustls",
+          "Identifier": {
+            "PURL": "pkg:cargo/rustls@0.23.40",
+            "UID": "2a2d866fce36680"
+          },
+          "Version": "0.23.40",
+          "DependsOn": [
+            "once_cell@1.21.4",
+            "ring@0.17.14",
+            "rustls-pki-types@1.14.1",
+            "rustls-webpki@0.103.13",
+            "subtle@2.6.1",
+            "zeroize@1.8.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1110,
+              "EndLine": 1122
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "rustls-pki-types@1.14.1",
+          "Name": "rustls-pki-types",
+          "Identifier": {
+            "PURL": "pkg:cargo/rustls-pki-types@1.14.1",
+            "UID": "c19e15278e2fed55"
+          },
+          "Version": "1.14.1",
+          "DependsOn": [
+            "web-time@1.1.0",
+            "zeroize@1.8.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1124,
+              "EndLine": 1132
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "rustls-webpki@0.103.13",
+          "Name": "rustls-webpki",
+          "Identifier": {
+            "PURL": "pkg:cargo/rustls-webpki@0.103.13",
+            "UID": "b49c5f763796110a"
+          },
+          "Version": "0.103.13",
+          "DependsOn": [
+            "ring@0.17.14",
+            "rustls-pki-types@1.14.1",
+            "untrusted@0.9.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1134,
+              "EndLine": 1143
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "rustversion@1.0.22",
+          "Name": "rustversion",
+          "Identifier": {
+            "PURL": "pkg:cargo/rustversion@1.0.22",
+            "UID": "abff840f8beeb3b8"
+          },
+          "Version": "1.0.22",
+          "Locations": [
+            {
+              "StartLine": 1145,
+              "EndLine": 1149
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "ryu@1.0.23",
+          "Name": "ryu",
+          "Identifier": {
+            "PURL": "pkg:cargo/ryu@1.0.23",
+            "UID": "bf0eda56dee6e76"
+          },
+          "Version": "1.0.23",
+          "Locations": [
+            {
+              "StartLine": 1151,
+              "EndLine": 1155
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "scopeguard@1.2.0",
+          "Name": "scopeguard",
+          "Identifier": {
+            "PURL": "pkg:cargo/scopeguard@1.2.0",
+            "UID": "881a290d8a58dcad"
+          },
+          "Version": "1.2.0",
+          "Locations": [
+            {
+              "StartLine": 1157,
+              "EndLine": 1161
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "semver@1.0.28",
+          "Name": "semver",
+          "Identifier": {
+            "PURL": "pkg:cargo/semver@1.0.28",
+            "UID": "4c3e416c8c88d940"
+          },
+          "Version": "1.0.28",
+          "Locations": [
+            {
+              "StartLine": 1163,
+              "EndLine": 1167
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "serde@1.0.228",
+          "Name": "serde",
+          "Identifier": {
+            "PURL": "pkg:cargo/serde@1.0.228",
+            "UID": "b27fc2bb7a612f1a"
+          },
+          "Version": "1.0.228",
+          "DependsOn": [
+            "serde_core@1.0.228",
+            "serde_derive@1.0.228"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1169,
+              "EndLine": 1177
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "serde_core@1.0.228",
+          "Name": "serde_core",
+          "Identifier": {
+            "PURL": "pkg:cargo/serde_core@1.0.228",
+            "UID": "396d34eb6c10c1a4"
+          },
+          "Version": "1.0.228",
+          "DependsOn": [
+            "serde_derive@1.0.228"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1179,
+              "EndLine": 1186
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "serde_derive@1.0.228",
+          "Name": "serde_derive",
+          "Identifier": {
+            "PURL": "pkg:cargo/serde_derive@1.0.228",
+            "UID": "90e6f29ae13b9b0c"
+          },
+          "Version": "1.0.228",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1188,
+              "EndLine": 1197
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "serde_json@1.0.150",
+          "Name": "serde_json",
+          "Identifier": {
+            "PURL": "pkg:cargo/serde_json@1.0.150",
+            "UID": "cd365fa7549fea22"
+          },
+          "Version": "1.0.150",
+          "DependsOn": [
+            "itoa@1.0.18",
+            "memchr@2.8.1",
+            "serde@1.0.228",
+            "serde_core@1.0.228",
+            "zmij@1.0.21"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1199,
+              "EndLine": 1210
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "serde_urlencoded@0.7.1",
+          "Name": "serde_urlencoded",
+          "Identifier": {
+            "PURL": "pkg:cargo/serde_urlencoded@0.7.1",
+            "UID": "8a101fffb11ca011"
+          },
+          "Version": "0.7.1",
+          "DependsOn": [
+            "form_urlencoded@1.2.2",
+            "itoa@1.0.18",
+            "ryu@1.0.23",
+            "serde@1.0.228"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1212,
+              "EndLine": 1222
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "sharded-slab@0.1.7",
+          "Name": "sharded-slab",
+          "Identifier": {
+            "PURL": "pkg:cargo/sharded-slab@0.1.7",
+            "UID": "3f85931d5002c856"
+          },
+          "Version": "0.1.7",
+          "DependsOn": [
+            "lazy_static@1.5.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1224,
+              "EndLine": 1231
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "shlex@2.0.1",
+          "Name": "shlex",
+          "Identifier": {
+            "PURL": "pkg:cargo/shlex@2.0.1",
+            "UID": "577b83674a6d1dea"
+          },
+          "Version": "2.0.1",
+          "Locations": [
+            {
+              "StartLine": 1233,
+              "EndLine": 1237
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "signal-hook-registry@1.4.8",
+          "Name": "signal-hook-registry",
+          "Identifier": {
+            "PURL": "pkg:cargo/signal-hook-registry@1.4.8",
+            "UID": "86bf36260e45e9b2"
+          },
+          "Version": "1.4.8",
+          "DependsOn": [
+            "errno@0.3.14",
+            "libc@0.2.186"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1239,
+              "EndLine": 1247
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "simd-adler32@0.3.9",
+          "Name": "simd-adler32",
+          "Identifier": {
+            "PURL": "pkg:cargo/simd-adler32@0.3.9",
+            "UID": "7cce1c1a3fecec5a"
+          },
+          "Version": "0.3.9",
+          "Locations": [
+            {
+              "StartLine": 1249,
+              "EndLine": 1253
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "slab@0.4.12",
+          "Name": "slab",
+          "Identifier": {
+            "PURL": "pkg:cargo/slab@0.4.12",
+            "UID": "abd71fc2e1327d7f"
+          },
+          "Version": "0.4.12",
+          "Locations": [
+            {
+              "StartLine": 1255,
+              "EndLine": 1259
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "smallvec@1.15.1",
+          "Name": "smallvec",
+          "Identifier": {
+            "PURL": "pkg:cargo/smallvec@1.15.1",
+            "UID": "15c1c529f7fbd786"
+          },
+          "Version": "1.15.1",
+          "Locations": [
+            {
+              "StartLine": 1261,
+              "EndLine": 1265
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "socket2@0.6.4",
+          "Name": "socket2",
+          "Identifier": {
+            "PURL": "pkg:cargo/socket2@0.6.4",
+            "UID": "5bcd444cd8c6ef74"
+          },
+          "Version": "0.6.4",
+          "DependsOn": [
+            "libc@0.2.186",
+            "windows-sys@0.61.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1267,
+              "EndLine": 1275
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "spendguard-predictor-upgrade-benchmarks@0.1.0-alpha",
+          "Name": "spendguard-predictor-upgrade-benchmarks",
+          "Identifier": {
+            "PURL": "pkg:cargo/spendguard-predictor-upgrade-benchmarks@0.1.0-alpha",
+            "UID": "3a89148ecf5cdad"
+          },
+          "Version": "0.1.0-alpha",
+          "DependsOn": [
+            "anyhow@1.0.102",
+            "chrono@0.4.44",
+            "clap@4.6.1",
+            "futures@0.3.32",
+            "hdrhistogram@7.5.4",
+            "rand@0.8.6",
+            "reqwest@0.12.28",
+            "serde@1.0.228",
+            "serde_json@1.0.150",
+            "tokio@1.52.3",
+            "tracing-subscriber@0.3.23",
+            "tracing@0.1.44",
+            "uuid@1.23.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1277,
+              "EndLine": 1294
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "stable_deref_trait@1.2.1",
+          "Name": "stable_deref_trait",
+          "Identifier": {
+            "PURL": "pkg:cargo/stable_deref_trait@1.2.1",
+            "UID": "f416717e02968d10"
+          },
+          "Version": "1.2.1",
+          "Locations": [
+            {
+              "StartLine": 1296,
+              "EndLine": 1300
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "strsim@0.11.1",
+          "Name": "strsim",
+          "Identifier": {
+            "PURL": "pkg:cargo/strsim@0.11.1",
+            "UID": "bd9d4be804ef5e0c"
+          },
+          "Version": "0.11.1",
+          "Locations": [
+            {
+              "StartLine": 1302,
+              "EndLine": 1306
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "subtle@2.6.1",
+          "Name": "subtle",
+          "Identifier": {
+            "PURL": "pkg:cargo/subtle@2.6.1",
+            "UID": "f34bb5de45bf49d4"
+          },
+          "Version": "2.6.1",
+          "Locations": [
+            {
+              "StartLine": 1308,
+              "EndLine": 1312
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "syn@2.0.117",
+          "Name": "syn",
+          "Identifier": {
+            "PURL": "pkg:cargo/syn@2.0.117",
+            "UID": "63538f0b83144c90"
+          },
+          "Version": "2.0.117",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "unicode-ident@1.0.24"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1314,
+              "EndLine": 1323
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "sync_wrapper@1.0.2",
+          "Name": "sync_wrapper",
+          "Identifier": {
+            "PURL": "pkg:cargo/sync_wrapper@1.0.2",
+            "UID": "45f5058d2e87eb4c"
+          },
+          "Version": "1.0.2",
+          "DependsOn": [
+            "futures-core@0.3.32"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1325,
+              "EndLine": 1332
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "synstructure@0.13.2",
+          "Name": "synstructure",
+          "Identifier": {
+            "PURL": "pkg:cargo/synstructure@0.13.2",
+            "UID": "89f75e1099debb63"
+          },
+          "Version": "0.13.2",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1334,
+              "EndLine": 1343
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "thiserror@2.0.18",
+          "Name": "thiserror",
+          "Identifier": {
+            "PURL": "pkg:cargo/thiserror@2.0.18",
+            "UID": "e2250c89b943b777"
+          },
+          "Version": "2.0.18",
+          "DependsOn": [
+            "thiserror-impl@2.0.18"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1345,
+              "EndLine": 1352
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "thiserror-impl@2.0.18",
+          "Name": "thiserror-impl",
+          "Identifier": {
+            "PURL": "pkg:cargo/thiserror-impl@2.0.18",
+            "UID": "b117a3d82d99dc70"
+          },
+          "Version": "2.0.18",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1354,
+              "EndLine": 1363
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "thread_local@1.1.9",
+          "Name": "thread_local",
+          "Identifier": {
+            "PURL": "pkg:cargo/thread_local@1.1.9",
+            "UID": "3ca74649fe3bc93c"
+          },
+          "Version": "1.1.9",
+          "DependsOn": [
+            "cfg-if@1.0.4"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1365,
+              "EndLine": 1372
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tinystr@0.8.3",
+          "Name": "tinystr",
+          "Identifier": {
+            "PURL": "pkg:cargo/tinystr@0.8.3",
+            "UID": "1d300c68172dca86"
+          },
+          "Version": "0.8.3",
+          "DependsOn": [
+            "displaydoc@0.2.6",
+            "zerovec@0.11.6"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1374,
+              "EndLine": 1382
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tinyvec@1.11.0",
+          "Name": "tinyvec",
+          "Identifier": {
+            "PURL": "pkg:cargo/tinyvec@1.11.0",
+            "UID": "f90995f8e3d9affb"
+          },
+          "Version": "1.11.0",
+          "DependsOn": [
+            "tinyvec_macros@0.1.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1384,
+              "EndLine": 1391
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tinyvec_macros@0.1.1",
+          "Name": "tinyvec_macros",
+          "Identifier": {
+            "PURL": "pkg:cargo/tinyvec_macros@0.1.1",
+            "UID": "22747a6955e159f6"
+          },
+          "Version": "0.1.1",
+          "Locations": [
+            {
+              "StartLine": 1393,
+              "EndLine": 1397
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tokio@1.52.3",
+          "Name": "tokio",
+          "Identifier": {
+            "PURL": "pkg:cargo/tokio@1.52.3",
+            "UID": "64b2513c4d92eadb"
+          },
+          "Version": "1.52.3",
+          "DependsOn": [
+            "bytes@1.11.1",
+            "libc@0.2.186",
+            "mio@1.2.1",
+            "parking_lot@0.12.5",
+            "pin-project-lite@0.2.17",
+            "signal-hook-registry@1.4.8",
+            "socket2@0.6.4",
+            "tokio-macros@2.7.0",
+            "windows-sys@0.61.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1399,
+              "EndLine": 1414
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tokio-macros@2.7.0",
+          "Name": "tokio-macros",
+          "Identifier": {
+            "PURL": "pkg:cargo/tokio-macros@2.7.0",
+            "UID": "c77bd4a67a6ada2a"
+          },
+          "Version": "2.7.0",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1416,
+              "EndLine": 1425
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tokio-rustls@0.26.4",
+          "Name": "tokio-rustls",
+          "Identifier": {
+            "PURL": "pkg:cargo/tokio-rustls@0.26.4",
+            "UID": "52009501d501ac4f"
+          },
+          "Version": "0.26.4",
+          "DependsOn": [
+            "rustls@0.23.40",
+            "tokio@1.52.3"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1427,
+              "EndLine": 1435
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tower@0.5.3",
+          "Name": "tower",
+          "Identifier": {
+            "PURL": "pkg:cargo/tower@0.5.3",
+            "UID": "d0ffc0869dac19e7"
+          },
+          "Version": "0.5.3",
+          "DependsOn": [
+            "futures-core@0.3.32",
+            "futures-util@0.3.32",
+            "pin-project-lite@0.2.17",
+            "sync_wrapper@1.0.2",
+            "tokio@1.52.3",
+            "tower-layer@0.3.3",
+            "tower-service@0.3.3"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1437,
+              "EndLine": 1450
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tower-http@0.6.11",
+          "Name": "tower-http",
+          "Identifier": {
+            "PURL": "pkg:cargo/tower-http@0.6.11",
+            "UID": "2c3bd6ce48f68eef"
+          },
+          "Version": "0.6.11",
+          "DependsOn": [
+            "bitflags@2.11.1",
+            "bytes@1.11.1",
+            "futures-util@0.3.32",
+            "http-body@1.0.1",
+            "http@1.4.1",
+            "pin-project-lite@0.2.17",
+            "tower-layer@0.3.3",
+            "tower-service@0.3.3",
+            "tower@0.5.3",
+            "url@2.5.8"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1452,
+              "EndLine": 1468
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tower-layer@0.3.3",
+          "Name": "tower-layer",
+          "Identifier": {
+            "PURL": "pkg:cargo/tower-layer@0.3.3",
+            "UID": "56aab18610569f5c"
+          },
+          "Version": "0.3.3",
+          "Locations": [
+            {
+              "StartLine": 1470,
+              "EndLine": 1474
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tower-service@0.3.3",
+          "Name": "tower-service",
+          "Identifier": {
+            "PURL": "pkg:cargo/tower-service@0.3.3",
+            "UID": "2636d945f801c370"
+          },
+          "Version": "0.3.3",
+          "Locations": [
+            {
+              "StartLine": 1476,
+              "EndLine": 1480
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tracing@0.1.44",
+          "Name": "tracing",
+          "Identifier": {
+            "PURL": "pkg:cargo/tracing@0.1.44",
+            "UID": "6c219e9640d597f7"
+          },
+          "Version": "0.1.44",
+          "DependsOn": [
+            "pin-project-lite@0.2.17",
+            "tracing-core@0.1.36"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1482,
+              "EndLine": 1490
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tracing-core@0.1.36",
+          "Name": "tracing-core",
+          "Identifier": {
+            "PURL": "pkg:cargo/tracing-core@0.1.36",
+            "UID": "8b2910755256b66b"
+          },
+          "Version": "0.1.36",
+          "DependsOn": [
+            "once_cell@1.21.4"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1492,
+              "EndLine": 1499
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "tracing-subscriber@0.3.23",
+          "Name": "tracing-subscriber",
+          "Identifier": {
+            "PURL": "pkg:cargo/tracing-subscriber@0.3.23",
+            "UID": "b59cdf615f1bb493"
+          },
+          "Version": "0.3.23",
+          "DependsOn": [
+            "sharded-slab@0.1.7",
+            "thread_local@1.1.9",
+            "tracing-core@0.1.36"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1501,
+              "EndLine": 1510
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "try-lock@0.2.5",
+          "Name": "try-lock",
+          "Identifier": {
+            "PURL": "pkg:cargo/try-lock@0.2.5",
+            "UID": "d67682d45c86c827"
+          },
+          "Version": "0.2.5",
+          "Locations": [
+            {
+              "StartLine": 1512,
+              "EndLine": 1516
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "unicode-ident@1.0.24",
+          "Name": "unicode-ident",
+          "Identifier": {
+            "PURL": "pkg:cargo/unicode-ident@1.0.24",
+            "UID": "4740674b703c86b6"
+          },
+          "Version": "1.0.24",
+          "Locations": [
+            {
+              "StartLine": 1518,
+              "EndLine": 1522
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "unicode-xid@0.2.6",
+          "Name": "unicode-xid",
+          "Identifier": {
+            "PURL": "pkg:cargo/unicode-xid@0.2.6",
+            "UID": "18e529e4e46e7cf0"
+          },
+          "Version": "0.2.6",
+          "Locations": [
+            {
+              "StartLine": 1524,
+              "EndLine": 1528
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "untrusted@0.9.0",
+          "Name": "untrusted",
+          "Identifier": {
+            "PURL": "pkg:cargo/untrusted@0.9.0",
+            "UID": "9af308e417e5159"
+          },
+          "Version": "0.9.0",
+          "Locations": [
+            {
+              "StartLine": 1530,
+              "EndLine": 1534
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "url@2.5.8",
+          "Name": "url",
+          "Identifier": {
+            "PURL": "pkg:cargo/url@2.5.8",
+            "UID": "2bcc991ae6a8390d"
+          },
+          "Version": "2.5.8",
+          "DependsOn": [
+            "form_urlencoded@1.2.2",
+            "idna@1.1.0",
+            "percent-encoding@2.3.2",
+            "serde@1.0.228"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1536,
+              "EndLine": 1546
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "utf8_iter@1.0.4",
+          "Name": "utf8_iter",
+          "Identifier": {
+            "PURL": "pkg:cargo/utf8_iter@1.0.4",
+            "UID": "cf01e3027e87e63f"
+          },
+          "Version": "1.0.4",
+          "Locations": [
+            {
+              "StartLine": 1548,
+              "EndLine": 1552
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "utf8parse@0.2.2",
+          "Name": "utf8parse",
+          "Identifier": {
+            "PURL": "pkg:cargo/utf8parse@0.2.2",
+            "UID": "d6c6dd75162770e4"
+          },
+          "Version": "0.2.2",
+          "Locations": [
+            {
+              "StartLine": 1554,
+              "EndLine": 1558
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "uuid@1.23.2",
+          "Name": "uuid",
+          "Identifier": {
+            "PURL": "pkg:cargo/uuid@1.23.2",
+            "UID": "337f1d837a43a3c7"
+          },
+          "Version": "1.23.2",
+          "DependsOn": [
+            "getrandom@0.4.2",
+            "js-sys@0.3.99",
+            "wasm-bindgen@0.2.122"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1560,
+              "EndLine": 1569
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "want@0.3.1",
+          "Name": "want",
+          "Identifier": {
+            "PURL": "pkg:cargo/want@0.3.1",
+            "UID": "5dd9e64ad7a428a"
+          },
+          "Version": "0.3.1",
+          "DependsOn": [
+            "try-lock@0.2.5"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1571,
+              "EndLine": 1578
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wasi@0.11.1+wasi-snapshot-preview1",
+          "Name": "wasi",
+          "Identifier": {
+            "PURL": "pkg:cargo/wasi@0.11.1%2Bwasi-snapshot-preview1",
+            "UID": "fb070adbf548d6eb"
+          },
+          "Version": "0.11.1+wasi-snapshot-preview1",
+          "Locations": [
+            {
+              "StartLine": 1580,
+              "EndLine": 1584
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wasip2@1.0.3+wasi-0.2.9",
+          "Name": "wasip2",
+          "Identifier": {
+            "PURL": "pkg:cargo/wasip2@1.0.3%2Bwasi-0.2.9",
+            "UID": "1f5523a363be9132"
+          },
+          "Version": "1.0.3+wasi-0.2.9",
+          "DependsOn": [
+            "wit-bindgen@0.57.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1586,
+              "EndLine": 1593
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wasip3@0.4.0+wasi-0.3.0-rc-2026-01-06",
+          "Name": "wasip3",
+          "Identifier": {
+            "PURL": "pkg:cargo/wasip3@0.4.0%2Bwasi-0.3.0-rc-2026-01-06",
+            "UID": "cfb71d96f3c7115b"
+          },
+          "Version": "0.4.0+wasi-0.3.0-rc-2026-01-06",
+          "DependsOn": [
+            "wit-bindgen@0.51.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1595,
+              "EndLine": 1602
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wasm-bindgen@0.2.122",
+          "Name": "wasm-bindgen",
+          "Identifier": {
+            "PURL": "pkg:cargo/wasm-bindgen@0.2.122",
+            "UID": "b7265b70b260db65"
+          },
+          "Version": "0.2.122",
+          "DependsOn": [
+            "cfg-if@1.0.4",
+            "once_cell@1.21.4",
+            "rustversion@1.0.22",
+            "wasm-bindgen-macro@0.2.122",
+            "wasm-bindgen-shared@0.2.122"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1604,
+              "EndLine": 1615
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wasm-bindgen-futures@0.4.72",
+          "Name": "wasm-bindgen-futures",
+          "Identifier": {
+            "PURL": "pkg:cargo/wasm-bindgen-futures@0.4.72",
+            "UID": "d7fa3bf70b32e37e"
+          },
+          "Version": "0.4.72",
+          "DependsOn": [
+            "js-sys@0.3.99",
+            "wasm-bindgen@0.2.122"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1617,
+              "EndLine": 1625
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wasm-bindgen-macro@0.2.122",
+          "Name": "wasm-bindgen-macro",
+          "Identifier": {
+            "PURL": "pkg:cargo/wasm-bindgen-macro@0.2.122",
+            "UID": "e8df88979d67f4d9"
+          },
+          "Version": "0.2.122",
+          "DependsOn": [
+            "quote@1.0.45",
+            "wasm-bindgen-macro-support@0.2.122"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1627,
+              "EndLine": 1635
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wasm-bindgen-macro-support@0.2.122",
+          "Name": "wasm-bindgen-macro-support",
+          "Identifier": {
+            "PURL": "pkg:cargo/wasm-bindgen-macro-support@0.2.122",
+            "UID": "ef33c0364f768e01"
+          },
+          "Version": "0.2.122",
+          "DependsOn": [
+            "bumpalo@3.20.3",
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117",
+            "wasm-bindgen-shared@0.2.122"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1637,
+              "EndLine": 1648
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wasm-bindgen-shared@0.2.122",
+          "Name": "wasm-bindgen-shared",
+          "Identifier": {
+            "PURL": "pkg:cargo/wasm-bindgen-shared@0.2.122",
+            "UID": "23bfb347676049f7"
+          },
+          "Version": "0.2.122",
+          "DependsOn": [
+            "unicode-ident@1.0.24"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1650,
+              "EndLine": 1657
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wasm-encoder@0.244.0",
+          "Name": "wasm-encoder",
+          "Identifier": {
+            "PURL": "pkg:cargo/wasm-encoder@0.244.0",
+            "UID": "ec632ed5789a2524"
+          },
+          "Version": "0.244.0",
+          "DependsOn": [
+            "leb128fmt@0.1.0",
+            "wasmparser@0.244.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1659,
+              "EndLine": 1667
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wasm-metadata@0.244.0",
+          "Name": "wasm-metadata",
+          "Identifier": {
+            "PURL": "pkg:cargo/wasm-metadata@0.244.0",
+            "UID": "9d7d959d29ce6760"
+          },
+          "Version": "0.244.0",
+          "DependsOn": [
+            "anyhow@1.0.102",
+            "indexmap@2.14.0",
+            "wasm-encoder@0.244.0",
+            "wasmparser@0.244.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1669,
+              "EndLine": 1679
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wasmparser@0.244.0",
+          "Name": "wasmparser",
+          "Identifier": {
+            "PURL": "pkg:cargo/wasmparser@0.244.0",
+            "UID": "f7d7f440ba59226b"
+          },
+          "Version": "0.244.0",
+          "DependsOn": [
+            "bitflags@2.11.1",
+            "hashbrown@0.15.5",
+            "indexmap@2.14.0",
+            "semver@1.0.28"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1681,
+              "EndLine": 1691
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "web-sys@0.3.99",
+          "Name": "web-sys",
+          "Identifier": {
+            "PURL": "pkg:cargo/web-sys@0.3.99",
+            "UID": "9b1bfa4cac87b590"
+          },
+          "Version": "0.3.99",
+          "DependsOn": [
+            "js-sys@0.3.99",
+            "wasm-bindgen@0.2.122"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1693,
+              "EndLine": 1701
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "web-time@1.1.0",
+          "Name": "web-time",
+          "Identifier": {
+            "PURL": "pkg:cargo/web-time@1.1.0",
+            "UID": "14d267de5ccc3d54"
+          },
+          "Version": "1.1.0",
+          "DependsOn": [
+            "js-sys@0.3.99",
+            "wasm-bindgen@0.2.122"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1703,
+              "EndLine": 1711
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "webpki-roots@1.0.7",
+          "Name": "webpki-roots",
+          "Identifier": {
+            "PURL": "pkg:cargo/webpki-roots@1.0.7",
+            "UID": "41f8e1b5e659d16a"
+          },
+          "Version": "1.0.7",
+          "DependsOn": [
+            "rustls-pki-types@1.14.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1713,
+              "EndLine": 1720
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows-core@0.62.2",
+          "Name": "windows-core",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows-core@0.62.2",
+            "UID": "bf7f62fda935679d"
+          },
+          "Version": "0.62.2",
+          "DependsOn": [
+            "windows-implement@0.60.2",
+            "windows-interface@0.59.3",
+            "windows-link@0.2.1",
+            "windows-result@0.4.1",
+            "windows-strings@0.5.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1722,
+              "EndLine": 1733
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows-implement@0.60.2",
+          "Name": "windows-implement",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows-implement@0.60.2",
+            "UID": "3e8b2c30c33e1568"
+          },
+          "Version": "0.60.2",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1735,
+              "EndLine": 1744
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows-interface@0.59.3",
+          "Name": "windows-interface",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows-interface@0.59.3",
+            "UID": "62b1169b58b85cdc"
+          },
+          "Version": "0.59.3",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1746,
+              "EndLine": 1755
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows-link@0.2.1",
+          "Name": "windows-link",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows-link@0.2.1",
+            "UID": "7d0c5adf5073233c"
+          },
+          "Version": "0.2.1",
+          "Locations": [
+            {
+              "StartLine": 1757,
+              "EndLine": 1761
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows-result@0.4.1",
+          "Name": "windows-result",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows-result@0.4.1",
+            "UID": "d592a2bf86e22148"
+          },
+          "Version": "0.4.1",
+          "DependsOn": [
+            "windows-link@0.2.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1763,
+              "EndLine": 1770
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows-strings@0.5.1",
+          "Name": "windows-strings",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows-strings@0.5.1",
+            "UID": "f352422a20f78fdd"
+          },
+          "Version": "0.5.1",
+          "DependsOn": [
+            "windows-link@0.2.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1772,
+              "EndLine": 1779
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows-sys@0.52.0",
+          "Name": "windows-sys",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows-sys@0.52.0",
+            "UID": "18a229771b1bea3c"
+          },
+          "Version": "0.52.0",
+          "DependsOn": [
+            "windows-targets@0.52.6"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1781,
+              "EndLine": 1788
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows-sys@0.60.2",
+          "Name": "windows-sys",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows-sys@0.60.2",
+            "UID": "cbe3379a94db8d42"
+          },
+          "Version": "0.60.2",
+          "DependsOn": [
+            "windows-targets@0.53.5"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1790,
+              "EndLine": 1797
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows-sys@0.61.2",
+          "Name": "windows-sys",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows-sys@0.61.2",
+            "UID": "7af6256f95716fda"
+          },
+          "Version": "0.61.2",
+          "DependsOn": [
+            "windows-link@0.2.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1799,
+              "EndLine": 1806
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows-targets@0.52.6",
+          "Name": "windows-targets",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows-targets@0.52.6",
+            "UID": "8b795e042f55c84f"
+          },
+          "Version": "0.52.6",
+          "DependsOn": [
+            "windows_aarch64_gnullvm@0.52.6",
+            "windows_aarch64_msvc@0.52.6",
+            "windows_i686_gnu@0.52.6",
+            "windows_i686_gnullvm@0.52.6",
+            "windows_i686_msvc@0.52.6",
+            "windows_x86_64_gnu@0.52.6",
+            "windows_x86_64_gnullvm@0.52.6",
+            "windows_x86_64_msvc@0.52.6"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1808,
+              "EndLine": 1822
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows-targets@0.53.5",
+          "Name": "windows-targets",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows-targets@0.53.5",
+            "UID": "bf55ea76aff5e9dc"
+          },
+          "Version": "0.53.5",
+          "DependsOn": [
+            "windows-link@0.2.1",
+            "windows_aarch64_gnullvm@0.53.1",
+            "windows_aarch64_msvc@0.53.1",
+            "windows_i686_gnu@0.53.1",
+            "windows_i686_gnullvm@0.53.1",
+            "windows_i686_msvc@0.53.1",
+            "windows_x86_64_gnu@0.53.1",
+            "windows_x86_64_gnullvm@0.53.1",
+            "windows_x86_64_msvc@0.53.1"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1824,
+              "EndLine": 1839
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_aarch64_gnullvm@0.52.6",
+          "Name": "windows_aarch64_gnullvm",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_aarch64_gnullvm@0.52.6",
+            "UID": "8901ba7b25e2a020"
+          },
+          "Version": "0.52.6",
+          "Locations": [
+            {
+              "StartLine": 1841,
+              "EndLine": 1845
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_aarch64_gnullvm@0.53.1",
+          "Name": "windows_aarch64_gnullvm",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_aarch64_gnullvm@0.53.1",
+            "UID": "2394ee827d567b19"
+          },
+          "Version": "0.53.1",
+          "Locations": [
+            {
+              "StartLine": 1847,
+              "EndLine": 1851
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_aarch64_msvc@0.52.6",
+          "Name": "windows_aarch64_msvc",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_aarch64_msvc@0.52.6",
+            "UID": "c8dc97891f830a07"
+          },
+          "Version": "0.52.6",
+          "Locations": [
+            {
+              "StartLine": 1853,
+              "EndLine": 1857
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_aarch64_msvc@0.53.1",
+          "Name": "windows_aarch64_msvc",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_aarch64_msvc@0.53.1",
+            "UID": "dbb3885542cf71df"
+          },
+          "Version": "0.53.1",
+          "Locations": [
+            {
+              "StartLine": 1859,
+              "EndLine": 1863
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_i686_gnu@0.52.6",
+          "Name": "windows_i686_gnu",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_i686_gnu@0.52.6",
+            "UID": "ad22975dc5060633"
+          },
+          "Version": "0.52.6",
+          "Locations": [
+            {
+              "StartLine": 1865,
+              "EndLine": 1869
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_i686_gnu@0.53.1",
+          "Name": "windows_i686_gnu",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_i686_gnu@0.53.1",
+            "UID": "e1b36a114e21c9c4"
+          },
+          "Version": "0.53.1",
+          "Locations": [
+            {
+              "StartLine": 1871,
+              "EndLine": 1875
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_i686_gnullvm@0.52.6",
+          "Name": "windows_i686_gnullvm",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_i686_gnullvm@0.52.6",
+            "UID": "1dced374bf49b8c2"
+          },
+          "Version": "0.52.6",
+          "Locations": [
+            {
+              "StartLine": 1877,
+              "EndLine": 1881
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_i686_gnullvm@0.53.1",
+          "Name": "windows_i686_gnullvm",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_i686_gnullvm@0.53.1",
+            "UID": "de9abe03c846df1d"
+          },
+          "Version": "0.53.1",
+          "Locations": [
+            {
+              "StartLine": 1883,
+              "EndLine": 1887
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_i686_msvc@0.52.6",
+          "Name": "windows_i686_msvc",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_i686_msvc@0.52.6",
+            "UID": "8866dee4f5b9ec0f"
+          },
+          "Version": "0.52.6",
+          "Locations": [
+            {
+              "StartLine": 1889,
+              "EndLine": 1893
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_i686_msvc@0.53.1",
+          "Name": "windows_i686_msvc",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_i686_msvc@0.53.1",
+            "UID": "ac3a5e0e26d2d3f6"
+          },
+          "Version": "0.53.1",
+          "Locations": [
+            {
+              "StartLine": 1895,
+              "EndLine": 1899
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_x86_64_gnu@0.52.6",
+          "Name": "windows_x86_64_gnu",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_x86_64_gnu@0.52.6",
+            "UID": "81e952fe836b2680"
+          },
+          "Version": "0.52.6",
+          "Locations": [
+            {
+              "StartLine": 1901,
+              "EndLine": 1905
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_x86_64_gnu@0.53.1",
+          "Name": "windows_x86_64_gnu",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_x86_64_gnu@0.53.1",
+            "UID": "22c328387e2dc250"
+          },
+          "Version": "0.53.1",
+          "Locations": [
+            {
+              "StartLine": 1907,
+              "EndLine": 1911
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_x86_64_gnullvm@0.52.6",
+          "Name": "windows_x86_64_gnullvm",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_x86_64_gnullvm@0.52.6",
+            "UID": "2d501d38750b8e3b"
+          },
+          "Version": "0.52.6",
+          "Locations": [
+            {
+              "StartLine": 1913,
+              "EndLine": 1917
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_x86_64_gnullvm@0.53.1",
+          "Name": "windows_x86_64_gnullvm",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_x86_64_gnullvm@0.53.1",
+            "UID": "f8b5600018407e9"
+          },
+          "Version": "0.53.1",
+          "Locations": [
+            {
+              "StartLine": 1919,
+              "EndLine": 1923
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_x86_64_msvc@0.52.6",
+          "Name": "windows_x86_64_msvc",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_x86_64_msvc@0.52.6",
+            "UID": "dc2b2ec82de39d49"
+          },
+          "Version": "0.52.6",
+          "Locations": [
+            {
+              "StartLine": 1925,
+              "EndLine": 1929
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "windows_x86_64_msvc@0.53.1",
+          "Name": "windows_x86_64_msvc",
+          "Identifier": {
+            "PURL": "pkg:cargo/windows_x86_64_msvc@0.53.1",
+            "UID": "89aac05fcde6f304"
+          },
+          "Version": "0.53.1",
+          "Locations": [
+            {
+              "StartLine": 1931,
+              "EndLine": 1935
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wit-bindgen@0.51.0",
+          "Name": "wit-bindgen",
+          "Identifier": {
+            "PURL": "pkg:cargo/wit-bindgen@0.51.0",
+            "UID": "1a7b1effb12bcbd8"
+          },
+          "Version": "0.51.0",
+          "DependsOn": [
+            "wit-bindgen-rust-macro@0.51.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1937,
+              "EndLine": 1944
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wit-bindgen@0.57.1",
+          "Name": "wit-bindgen",
+          "Identifier": {
+            "PURL": "pkg:cargo/wit-bindgen@0.57.1",
+            "UID": "4dfb2bcbdd1207ac"
+          },
+          "Version": "0.57.1",
+          "Locations": [
+            {
+              "StartLine": 1946,
+              "EndLine": 1950
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wit-bindgen-core@0.51.0",
+          "Name": "wit-bindgen-core",
+          "Identifier": {
+            "PURL": "pkg:cargo/wit-bindgen-core@0.51.0",
+            "UID": "799c4027381adc62"
+          },
+          "Version": "0.51.0",
+          "DependsOn": [
+            "anyhow@1.0.102",
+            "heck@0.5.0",
+            "wit-parser@0.244.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1952,
+              "EndLine": 1961
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wit-bindgen-rust@0.51.0",
+          "Name": "wit-bindgen-rust",
+          "Identifier": {
+            "PURL": "pkg:cargo/wit-bindgen-rust@0.51.0",
+            "UID": "613ec01fd3e44ecd"
+          },
+          "Version": "0.51.0",
+          "DependsOn": [
+            "anyhow@1.0.102",
+            "heck@0.5.0",
+            "indexmap@2.14.0",
+            "prettyplease@0.2.37",
+            "syn@2.0.117",
+            "wasm-metadata@0.244.0",
+            "wit-bindgen-core@0.51.0",
+            "wit-component@0.244.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1963,
+              "EndLine": 1977
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wit-bindgen-rust-macro@0.51.0",
+          "Name": "wit-bindgen-rust-macro",
+          "Identifier": {
+            "PURL": "pkg:cargo/wit-bindgen-rust-macro@0.51.0",
+            "UID": "29194ba7f4149a95"
+          },
+          "Version": "0.51.0",
+          "DependsOn": [
+            "anyhow@1.0.102",
+            "prettyplease@0.2.37",
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117",
+            "wit-bindgen-core@0.51.0",
+            "wit-bindgen-rust@0.51.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1979,
+              "EndLine": 1992
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wit-component@0.244.0",
+          "Name": "wit-component",
+          "Identifier": {
+            "PURL": "pkg:cargo/wit-component@0.244.0",
+            "UID": "3729f63060b9d7b1"
+          },
+          "Version": "0.244.0",
+          "DependsOn": [
+            "anyhow@1.0.102",
+            "bitflags@2.11.1",
+            "indexmap@2.14.0",
+            "log@0.4.30",
+            "serde@1.0.228",
+            "serde_derive@1.0.228",
+            "serde_json@1.0.150",
+            "wasm-encoder@0.244.0",
+            "wasm-metadata@0.244.0",
+            "wasmparser@0.244.0",
+            "wit-parser@0.244.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 1994,
+              "EndLine": 2011
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "wit-parser@0.244.0",
+          "Name": "wit-parser",
+          "Identifier": {
+            "PURL": "pkg:cargo/wit-parser@0.244.0",
+            "UID": "d2555db1b7e5be7f"
+          },
+          "Version": "0.244.0",
+          "DependsOn": [
+            "anyhow@1.0.102",
+            "id-arena@2.3.0",
+            "indexmap@2.14.0",
+            "log@0.4.30",
+            "semver@1.0.28",
+            "serde@1.0.228",
+            "serde_derive@1.0.228",
+            "serde_json@1.0.150",
+            "unicode-xid@0.2.6",
+            "wasmparser@0.244.0"
+          ],
+          "Locations": [
+            {
+              "StartLine": 2013,
+              "EndLine": 2029
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "writeable@0.6.3",
+          "Name": "writeable",
+          "Identifier": {
+            "PURL": "pkg:cargo/writeable@0.6.3",
+            "UID": "cd6b7d0c3a27b8ac"
+          },
+          "Version": "0.6.3",
+          "Locations": [
+            {
+              "StartLine": 2031,
+              "EndLine": 2035
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "yoke@0.8.2",
+          "Name": "yoke",
+          "Identifier": {
+            "PURL": "pkg:cargo/yoke@0.8.2",
+            "UID": "57b49f48ed502569"
+          },
+          "Version": "0.8.2",
+          "DependsOn": [
+            "stable_deref_trait@1.2.1",
+            "yoke-derive@0.8.2",
+            "zerofrom@0.1.8"
+          ],
+          "Locations": [
+            {
+              "StartLine": 2037,
+              "EndLine": 2046
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "yoke-derive@0.8.2",
+          "Name": "yoke-derive",
+          "Identifier": {
+            "PURL": "pkg:cargo/yoke-derive@0.8.2",
+            "UID": "9a59d4515fef1ca7"
+          },
+          "Version": "0.8.2",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117",
+            "synstructure@0.13.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 2048,
+              "EndLine": 2058
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "zerocopy@0.8.50",
+          "Name": "zerocopy",
+          "Identifier": {
+            "PURL": "pkg:cargo/zerocopy@0.8.50",
+            "UID": "7e4b50a92357a3f0"
+          },
+          "Version": "0.8.50",
+          "DependsOn": [
+            "zerocopy-derive@0.8.50"
+          ],
+          "Locations": [
+            {
+              "StartLine": 2060,
+              "EndLine": 2067
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "zerocopy-derive@0.8.50",
+          "Name": "zerocopy-derive",
+          "Identifier": {
+            "PURL": "pkg:cargo/zerocopy-derive@0.8.50",
+            "UID": "77c622828bcbfa1"
+          },
+          "Version": "0.8.50",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 2069,
+              "EndLine": 2078
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "zerofrom@0.1.8",
+          "Name": "zerofrom",
+          "Identifier": {
+            "PURL": "pkg:cargo/zerofrom@0.1.8",
+            "UID": "279953ca9e49befe"
+          },
+          "Version": "0.1.8",
+          "DependsOn": [
+            "zerofrom-derive@0.1.7"
+          ],
+          "Locations": [
+            {
+              "StartLine": 2080,
+              "EndLine": 2087
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "zerofrom-derive@0.1.7",
+          "Name": "zerofrom-derive",
+          "Identifier": {
+            "PURL": "pkg:cargo/zerofrom-derive@0.1.7",
+            "UID": "fa6130294a6172b7"
+          },
+          "Version": "0.1.7",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117",
+            "synstructure@0.13.2"
+          ],
+          "Locations": [
+            {
+              "StartLine": 2089,
+              "EndLine": 2099
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "zeroize@1.8.2",
+          "Name": "zeroize",
+          "Identifier": {
+            "PURL": "pkg:cargo/zeroize@1.8.2",
+            "UID": "5f693854acb8f64"
+          },
+          "Version": "1.8.2",
+          "Locations": [
+            {
+              "StartLine": 2101,
+              "EndLine": 2105
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "zerotrie@0.2.4",
+          "Name": "zerotrie",
+          "Identifier": {
+            "PURL": "pkg:cargo/zerotrie@0.2.4",
+            "UID": "98057750438801f7"
+          },
+          "Version": "0.2.4",
+          "DependsOn": [
+            "displaydoc@0.2.6",
+            "yoke@0.8.2",
+            "zerofrom@0.1.8"
+          ],
+          "Locations": [
+            {
+              "StartLine": 2107,
+              "EndLine": 2116
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "zerovec@0.11.6",
+          "Name": "zerovec",
+          "Identifier": {
+            "PURL": "pkg:cargo/zerovec@0.11.6",
+            "UID": "80eacbd3dcb93128"
+          },
+          "Version": "0.11.6",
+          "DependsOn": [
+            "yoke@0.8.2",
+            "zerofrom@0.1.8",
+            "zerovec-derive@0.11.3"
+          ],
+          "Locations": [
+            {
+              "StartLine": 2118,
+              "EndLine": 2127
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "zerovec-derive@0.11.3",
+          "Name": "zerovec-derive",
+          "Identifier": {
+            "PURL": "pkg:cargo/zerovec-derive@0.11.3",
+            "UID": "921bd3e39673bc20"
+          },
+          "Version": "0.11.3",
+          "DependsOn": [
+            "proc-macro2@1.0.106",
+            "quote@1.0.45",
+            "syn@2.0.117"
+          ],
+          "Locations": [
+            {
+              "StartLine": 2129,
+              "EndLine": 2138
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        },
+        {
+          "ID": "zmij@1.0.21",
+          "Name": "zmij",
+          "Identifier": {
+            "PURL": "pkg:cargo/zmij@1.0.21",
+            "UID": "8adc6ae8875455a0"
+          },
+          "Version": "1.0.21",
+          "Locations": [
+            {
+              "StartLine": 2140,
+              "EndLine": 2144
+            }
+          ],
+          "AnalyzedBy": "cargo"
+        }
+      ]
+    }
+  ]
+}

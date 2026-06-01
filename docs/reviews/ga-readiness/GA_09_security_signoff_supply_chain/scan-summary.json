@@ -1,0 +1,93 @@
+{
+  "branch": "ga/GA_09_security_signoff_supply_chain",
+  "checks": {
+    "cargo_sbom_generated": {
+      "detail": "226 Cargo packages recorded",
+      "ok": true
+    },
+    "count_tokens_quota_present": {
+      "detail": "per-tenant count_tokens quota present",
+      "ok": true
+    },
+    "pii_shadow_default_denied": {
+      "detail": "PII shadow default denies raw text",
+      "ok": true
+    },
+    "pii_shadow_worker_guard": {
+      "detail": "shadow worker checks tenant opt-in",
+      "ok": true
+    },
+    "production_render_has_networkpolicy": {
+      "detail": "NetworkPolicy rendered",
+      "ok": true
+    },
+    "production_render_has_svid_certificate": {
+      "detail": "per-tenant SVID Certificate rendered",
+      "ok": true
+    },
+    "production_render_no_plaintext_db": {
+      "detail": "no plaintext DB URL in production render",
+      "ok": true
+    },
+    "production_values_no_plaintext_db": {
+      "detail": "no plaintext DB URL in production values",
+      "ok": true
+    },
+    "publish_workflow_cosign": {
+      "detail": "cosign signing step present",
+      "ok": true
+    },
+    "publish_workflow_no_latest_promotion": {
+      "detail": "no latest/latest-main promotion",
+      "ok": true
+    },
+    "publish_workflow_oidc": {
+      "detail": "OIDC permission present for keyless signing",
+      "ok": true
+    },
+    "publish_workflow_provenance": {
+      "detail": "Buildx provenance enabled",
+      "ok": true
+    },
+    "publish_workflow_sbom": {
+      "detail": "Buildx SBOM enabled",
+      "ok": true
+    },
+    "publish_workflow_trivy": {
+      "detail": "Trivy scan step present",
+      "ok": true
+    },
+    "replay_dedup_key": {
+      "detail": "producer/event and global event replay keys enforced",
+      "ok": true
+    },
+    "replay_dedup_table": {
+      "detail": "replay dedup table exists",
+      "ok": true
+    },
+    "rls_no_bypassrls_grants": {
+      "detail": "no executable BYPASSRLS grants",
+      "ok": true
+    },
+    "runtime_dockerfiles_user_65532": {
+      "detail": "all runtime Dockerfiles set USER 65532:65532",
+      "ok": true
+    },
+    "svid_runtime_exact_uri": {
+      "detail": "runtime validator uses exact predictor-client tenant prefix",
+      "ok": true
+    },
+    "svid_template_exact_uri": {
+      "detail": "Helm Certificate URI uses exact predictor-client tenant prefix",
+      "ok": true
+    }
+  },
+  "commit_sha": "b7d7f878e44174a24840f3626b22f905a3caf2cd",
+  "errors": [],
+  "external_tool_install": "brew install syft trivy cosign cargo-audit",
+  "missing_external_tools": [],
+  "release_mode": "scripts/security/ga-security-scan.sh --require-external-tools",
+  "result": "pass",
+  "scan_started_utc": "2026-06-01T07:18:33Z",
+  "schema": "spendguard.ga09.security_scan.v1alpha1"
+}

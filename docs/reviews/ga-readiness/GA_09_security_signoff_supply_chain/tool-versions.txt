@@ -1,0 +1,10 @@
+commit=b7d7f878e44174a24840f3626b22f905a3caf2cd
+branch=ga/GA_09_security_signoff_supply_chain
+scan_started_utc=2026-06-01T07:18:33Z
+helm: v4.1.4+g05fa379
+python3: Python 3.9.6
+cargo: cargo 1.96.0 (30a34c682 2026-05-25)
+syft: Application:   syft
+trivy: Version: 0.70.0
+cosign: v3.0.6
+cargo-audit: cargo-audit-audit 0.22.1

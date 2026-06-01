@@ -1,0 +1,2074 @@
+---
+# Source: spendguard/templates/networkpolicy.yaml
+# ────────────────────────────────────────────────────────────────────────
+# Default-deny egress: every pod with this label denies ALL egress unless
+# a sibling NetworkPolicy below explicitly allows it. Pods in this
+# namespace MUST opt-in to the SpendGuard L2 enforcement model by
+# carrying the `spendguard.io/enforced=true` label.
+#
+# This is the per-tenant kill switch: a pod not carrying the label is
+# untouched by L2 enforcement (gradual migration path). Pods carrying
+# the label can ONLY egress via the sidecar-pod-allow + provider-allow
+# policies below.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spendguard-spendguard-default-deny-egress
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      spendguard.io/enforced: "true"
+  policyTypes:
+    - Egress
+  # Empty egress list = deny-all-egress for pods matching the selector.
+---
+# Source: spendguard/templates/networkpolicy.yaml
+# ────────────────────────────────────────────────────────────────────────
+# Allow enforced app pods to reach the egress_proxy. This is the only
+# permitted upstream egress for L2-enforced pods: app code MUST use the
+# proxy as the OpenAI/Anthropic/Bedrock/Vertex/Azure SDK base_url.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spendguard-spendguard-allow-app-to-egress-proxy
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      spendguard.io/enforced: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spendguard
+              app.kubernetes.io/instance: spendguard
+              app.kubernetes.io/component: egress-proxy
+      ports:
+        - { protocol: TCP, port: 9000 }
+---
+# Source: spendguard/templates/networkpolicy.yaml
+# ────────────────────────────────────────────────────────────────────────
+# Allow DNS lookup (UDP + TCP 53). Without this, ALL DNS resolution
+# fails inside enforced pods → connections to the egress_proxy
+# ClusterIP service can't be resolved by name.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spendguard-spendguard-allow-app-dns
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      spendguard.io/enforced: "true"
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# Source: spendguard/templates/networkpolicy.yaml
+# ────────────────────────────────────────────────────────────────────────
+# Allow egress_proxy → external LLM provider hosts (port 443/HTTPS).
+#
+# The set of providers is the SLICE_11 routing-table coverage:
+#   api.openai.com
+#   api.anthropic.com
+#   bedrock-runtime.{region}.amazonaws.com   (operator pins region)
+#   generativelanguage.googleapis.com        (Vertex)
+#   {azure_resource}.openai.azure.com        (Azure OpenAI; per-tenant)
+#
+# K8s NetworkPolicy egress.to.ipBlock only supports CIDR (no DNS), so
+# we ALLOW any external destination on port 443 from the egress_proxy
+# pod (loose). For tight pinning (operator-specific provider IPs),
+# operators replace this template with a CIDR allowlist via Helm
+# extraEgressRules. v1 ships the broad allow because:
+#   - External LLM provider IPs rotate frequently (CDN-fronted).
+#   - The L2 contract is "app pods CANNOT reach external LLM APIs
+#     directly"; the proxy can — operator's choice whether to
+#     additionally CIDR-restrict the proxy's egress.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spendguard-spendguard-allow-egress-proxy-to-providers
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: egress-proxy
+  policyTypes:
+    - Egress
+  egress:
+    # External LLM providers — port 443 HTTPS.
+    - to:
+        - ipBlock:
+            cidr: "203.0.113.0/24"
+      ports:
+        - { protocol: TCP, port: 443 }
+    # DNS (resolve provider hostnames).
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Postgres (audit_outbox writes).
+    - to:
+        - ipBlock:
+            cidr: "198.51.100.10/32"
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# Source: spendguard/templates/networkpolicy.yaml
+# ────────────────────────────────────────────────────────────────────────
+# Allow sidecar → egress_proxy / tokenizer / output_predictor /
+# run_cost_projector / canonical_ingest / Postgres / DNS.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spendguard-spendguard-allow-sidecar-internal
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: sidecar
+  policyTypes:
+    - Egress
+  egress:
+    # egress_proxy (sidecar's UDS path is unaffected — same pod / hostPath;
+    # this allow is for the L4 fallback path when UDS hostPath disabled).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spendguard
+              app.kubernetes.io/instance: spendguard
+              app.kubernetes.io/component: egress-proxy
+      ports:
+        - { protocol: TCP, port: 9000 }
+    # tokenizer gRPC.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spendguard
+              app.kubernetes.io/instance: spendguard
+              app.kubernetes.io/component: tokenizer
+      ports:
+        - { protocol: TCP, port: 50053 }
+    # output_predictor gRPC.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spendguard
+              app.kubernetes.io/instance: spendguard
+              app.kubernetes.io/component: output-predictor
+      ports:
+        - { protocol: TCP, port: 50054 }
+    # run_cost_projector gRPC.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spendguard
+              app.kubernetes.io/instance: spendguard
+              app.kubernetes.io/component: run-cost-projector
+      ports:
+        - { protocol: TCP, port: 50055 }
+    # canonical_ingest gRPC (audit append).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spendguard
+              app.kubernetes.io/instance: spendguard
+              app.kubernetes.io/component: canonical-ingest
+      ports:
+        - { protocol: TCP, port: 50052 }
+    # ledger gRPC.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spendguard
+              app.kubernetes.io/instance: spendguard
+              app.kubernetes.io/component: ledger
+      ports:
+        - { protocol: TCP, port: 50051 }
+    # DNS.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    # Postgres.
+    - to:
+        - ipBlock:
+            cidr: "198.51.100.10/32"
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# Source: spendguard/templates/networkpolicy.yaml
+# ────────────────────────────────────────────────────────────────────────
+# Allow egress_proxy → sidecar UDS (when UDS hostPath disabled, falls
+# back to gRPC over the cluster network). Also allows reaching the
+# tokenizer / predictor / projector that the proxy dials directly per
+# SLICE_10.
+# ────────────────────────────────────────────────────────────────────────
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: spendguard-spendguard-allow-egress-proxy-internal
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: networkpolicy
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: egress-proxy
+  policyTypes:
+    - Egress
+  egress:
+    # output_predictor gRPC (SLICE_10).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spendguard
+              app.kubernetes.io/instance: spendguard
+              app.kubernetes.io/component: output-predictor
+      ports:
+        - { protocol: TCP, port: 50054 }
+    # run_cost_projector gRPC (SLICE_10).
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: spendguard
+              app.kubernetes.io/instance: spendguard
+              app.kubernetes.io/component: run-cost-projector
+      ports:
+        - { protocol: TCP, port: 50055 }
+---
+# Source: spendguard/templates/canonical-ingest.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: spendguard-spendguard-canonical-ingest
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: canonical-ingest
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc, port: 50052, targetPort: grpc }
+  selector:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/component: canonical-ingest
+---
+# Source: spendguard/templates/control-plane.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: spendguard-spendguard-control-plane
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: control-plane
+spec:
+  type: ClusterIP
+  ports:
+    - { name: http, port: 8091, targetPort: http }
+    - { name: metrics, port: 9094, targetPort: metrics }
+  selector:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/component: control-plane
+---
+# Source: spendguard/templates/egress_proxy.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: spendguard-spendguard-egress-proxy
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: egress-proxy
+spec:
+  type: ClusterIP
+  ports:
+    - { name: http, port: 9000, targetPort: http }
+  selector:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/component: egress-proxy
+---
+# Source: spendguard/templates/ledger.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: spendguard-spendguard-ledger
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: ledger
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc, port: 50051, targetPort: grpc }
+  selector:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/component: ledger
+---
+# Source: spendguard/templates/output_predictor.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: spendguard-spendguard-output-predictor
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: output-predictor
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc,    port: 50054, targetPort: grpc    }
+    - { name: metrics, port: 9100,  targetPort: metrics }
+  selector:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/component: output-predictor
+---
+# Source: spendguard/templates/run_cost_projector.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: spendguard-spendguard-run-cost-projector
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: run-cost-projector
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc,    port: 50055, targetPort: grpc    }
+    - { name: metrics, port: 9102,  targetPort: metrics }
+  selector:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/component: run-cost-projector
+---
+# Source: spendguard/templates/tokenizer.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: spendguard-spendguard-tokenizer
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: tokenizer
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc,    port: 50053, targetPort: grpc    }
+    - { name: metrics, port: 9099,  targetPort: metrics }
+  selector:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/component: tokenizer
+---
+# Source: spendguard/templates/webhook-receiver.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: spendguard-spendguard-webhook-receiver
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: webhook-receiver
+spec:
+  type: ClusterIP
+  ports:
+    - { name: https,  port: 8443, targetPort: https }
+    - { name: health, port: 8080,  targetPort: health }
+  selector:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/component: webhook-receiver
+---
+# Source: spendguard/templates/sidecar.yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: spendguard-spendguard-sidecar
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: sidecar
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: sidecar
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: sidecar
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: sidecar
+          image: ghcr.io/m24927605/spendguard/sidecar:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: metrics, containerPort: 9093 }
+          env:
+            - { name: SPENDGUARD_SIDECAR_METRICS_ADDR,         value: "0.0.0.0:9093" }
+            - { name: SPENDGUARD_SIDECAR_TENANT_ID,            value: "00000000-0000-4000-8000-000000000001" }
+            - { name: SPENDGUARD_SIDECAR_REGION,               value: "us-west-2" }
+            - { name: SPENDGUARD_SIDECAR_FENCING_SCOPE_ID,     value: "33333333-3333-4333-8333-333333333333" }
+            # Phase 5 S2: producer_instance_id (==workload_instance_id) MUST
+            # be per-pod unique. Use the k8s downward API to inject the
+            # pod name + a service prefix so two replicas can never collide.
+            # Operator can override with sidecar.workloadInstanceIdOverride
+            # for non-k8s deployments where pod identity comes from
+            # elsewhere (must still be per-instance unique).
+            - name: _POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID, value: "sidecar-$(_POD_NAME)" }
+            - { name: SPENDGUARD_SIDECAR_RESERVATION_TTL_SECONDS, value: "600" }
+            - name: SPENDGUARD_SIDECAR_LEDGER_URL
+              value: "https://spendguard-spendguard-ledger:50051"
+            - name: SPENDGUARD_SIDECAR_CANONICAL_INGEST_URL
+              value: "https://spendguard-spendguard-canonical-ingest:50052"
+            - { name: SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_URL, value: "https://spendguard-spendguard-run-cost-projector:50055" }
+            - { name: SPENDGUARD_SIDECAR_RUN_COST_PROJECTOR_TIMEOUT_MS, value: "25" }
+            # NOTE: sidecar/src/clients/mtls.rs uses MTlsPaths::default()
+            # which hardcodes the workload-cert paths. Files come from the
+            # `tls` volume mounted at /var/run/secrets/spendguard/ below,
+            # with the per-service Secret keys projected to tls.crt / tls.key.
+            # Do NOT wire SPENDGUARD_SIDECAR_TLS_* env vars here — they
+            # are not read by the sidecar boot path.
+            - { name: SPENDGUARD_SIDECAR_UDS_PATH,     value: "/var/run/spendguard/adapter.sock" }
+            # Endpoint catalog manifest verify key. Required by
+            # sidecar/src/main.rs at startup (load_manifest_signing_key);
+            # without it the sidecar refuses to boot. File comes from
+            # the operator-supplied `manifestVerifyKey.existingSecret`.
+            - { name: SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM, value: "/etc/spendguard/manifest-verify-key/manifest_verify_key.pub.pem" }
+            # Round-2 #3: Required by services/sidecar Config::from_env().
+            # Without these, Config::from_env() panics with
+            # "missing field <name>" and the pod CrashLoopBackOff's.
+            - { name: SPENDGUARD_SIDECAR_ENDPOINT_CATALOG_MANIFEST_URL, value: "https://endpoint-catalog.example.invalid/v1/catalog/manifest" }
+            - { name: SPENDGUARD_SIDECAR_FENCING_INITIAL_EPOCH,         value: "1" }
+            # Contract + schema bundle bootstrap. The hashes MUST be
+            # byte-exact matches for the pre-pulled .tgz files in
+            # bundles-data; otherwise the sidecar refuses to install
+            # them at startup.
+            - { name: SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_ID,        value: "11111111-1111-4111-8111-111111111111" }
+            - { name: SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_HASH_HEX,  value: "2222222222222222222222222222222222222222222222222222222222222222" }
+            - { name: SPENDGUARD_SIDECAR_SCHEMA_BUNDLE_ID,          value: "22222222-2222-4222-8222-222222222222" }
+            # Trust-root pins. Sourced from the operator-supplied
+            # `spendguard-trust` Secret. trust_root_ca_pem holds the
+            # PEM CONTENTS (not a path); trust_root_spki_sha256_hex
+            # is the sha256 of the root CA SubjectPublicKeyInfo.
+            - name: SPENDGUARD_SIDECAR_TRUST_ROOT_CA_PEM
+              valueFrom:
+                secretKeyRef:
+                  name: spendguard-prod-trust
+                  key: "ca.pem"
+            - { name: SPENDGUARD_SIDECAR_TRUST_ROOT_SPKI_SHA256_HEX, value: "3333333333333333333333333333333333333333333333333333333333333333" }
+            # mTLS bootstrap token (one-shot, used by cert-manager
+            # external issuer to provision the workload cert at
+            # first boot).
+            - name: SPENDGUARD_SIDECAR_MTLS_BOOTSTRAP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: spendguard-prod-mtls-bootstrap
+                  key: "token"
+            # Phase 5 GA hardening S6: producer signing config.
+            - { name: SPENDGUARD_PROFILE,                            value: "production" }
+            - { name: SPENDGUARD_SIDECAR_SIGNING_MODE,               value: "local" }
+            - { name: SPENDGUARD_SIDECAR_SIGNING_PRODUCER_IDENTITY,  value: "sidecar:$(SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID)" }
+            - { name: SPENDGUARD_SIDECAR_SIGNING_KEY_PATH,           value: "/etc/spendguard/signing/sidecar.pem" }
+            # Phase 5 GA hardening S22: fail-policy matrix (defaults
+            # to fail-closed everywhere when overrides string is empty).
+          volumeMounts:
+            # sidecar boot path waits for /var/run/secrets/spendguard/{tls.crt,tls.key,ca.crt}
+            # (MTlsPaths::default in services/sidecar/src/clients/mtls.rs).
+            - { name: tls,                 mountPath: /var/run/secrets/spendguard, readOnly: true }
+            - { name: bundles,             mountPath: /var/lib/spendguard/bundles, readOnly: true }
+            - { name: manifest-verify-key, mountPath: /etc/spendguard/manifest-verify-key, readOnly: true }
+            - { name: signing,             mountPath: /etc/spendguard/signing, readOnly: true }
+            - { name: uds,                 mountPath: /var/run/spendguard }
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        # Project the shared TLS Secret's per-service keys (sidecar.crt /
+        # sidecar.key) to the conventional tls.crt / tls.key filenames the
+        # sidecar binary expects at /var/run/secrets/spendguard/. Operator's
+        # Secret structure stays the same; chart adapts.
+        - name: tls
+          secret:
+            secretName: spendguard-prod-tls
+            items:
+              - { key: sidecar.crt, path: tls.crt }
+              - { key: sidecar.key, path: tls.key }
+              - { key: ca.crt,      path: ca.crt }
+        # bootstrap/bundles.rs reads four files at fixed sub-paths:
+        #   contract_bundle/<contractBundleId>.tgz
+        #   contract_bundle/<contractBundleId>.tgz.sig
+        #   contract_bundle/<contractBundleId>.metadata.json
+        #   schema_bundle/<schemaBundleId>.tgz
+        # K8s Secret keys cannot contain "/", so we project flat operator-
+        # supplied keys to those paths via items.path.
+        - name: bundles
+          secret:
+            secretName: spendguard-prod-bundles
+            items:
+              - key: contract_bundle_tgz
+                path: contract_bundle/11111111-1111-4111-8111-111111111111.tgz
+              - key: contract_bundle_sig
+                path: contract_bundle/11111111-1111-4111-8111-111111111111.tgz.sig
+              - key: contract_bundle_metadata_json
+                path: contract_bundle/11111111-1111-4111-8111-111111111111.metadata.json
+              - key: schema_bundle_tgz
+                path: schema_bundle/22222222-2222-4222-8222-222222222222.tgz
+        - name: manifest-verify-key
+          secret:
+            secretName: spendguard-prod-manifest-verify-key
+            items:
+              - key: "manifest_verify_key.pub.pem"
+                path: manifest_verify_key.pub.pem
+        - name: signing
+          secret:
+            secretName: spendguard-prod-signing-keys
+            items:
+              - { key: sidecar.pem, path: sidecar.pem }
+        - name: uds
+          hostPath:
+            path: /var/run/spendguard
+            type: "Directory"
+---
+# Source: spendguard/templates/canonical-ingest.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spendguard-spendguard-canonical-ingest
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: canonical-ingest
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: canonical-ingest
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: canonical-ingest
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: canonical-ingest
+          image: ghcr.io/m24927605/spendguard/canonical-ingest:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: grpc, containerPort: 50052 }
+            - { name: metrics, containerPort: 9091 }
+          env:
+            - { name: SPENDGUARD_CANONICAL_INGEST_BIND_ADDR,    value: "0.0.0.0:50052" }
+            - name: SPENDGUARD_CANONICAL_INGEST_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "canonical-url"
+            # Round-2 #3: canonical_ingest Config::from_env() requires
+            # REGION + INGEST_SHARD_ID (no defaults). The (region,
+            # ingest_shard_id) tuple is the canonical ordering scope
+            # per Trace §10.5; missing either → CrashLoopBackOff.
+            # The chart's earlier TENANT_ID env was extraneous —
+            # canonical_ingest is multi-tenant at the row level, not
+            # per-instance, so the binary's Config doesn't read it.
+            - { name: SPENDGUARD_CANONICAL_INGEST_REGION,          value: "us-west-2" }
+            - { name: SPENDGUARD_CANONICAL_INGEST_INGEST_SHARD_ID, value: "primary-us-west-2" }
+            - { name: SPENDGUARD_CANONICAL_INGEST_TLS_CERT_PEM, value: "/etc/ssl/spendguard/canonical-ingest.crt" }
+            - { name: SPENDGUARD_CANONICAL_INGEST_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/canonical-ingest.key" }
+            - { name: SPENDGUARD_CANONICAL_INGEST_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # Phase 5 GA hardening S8: strict signature verification.
+            - { name: SPENDGUARD_CANONICAL_INGEST_STRICT_SIGNATURES, value: "true" }
+            - { name: SPENDGUARD_CANONICAL_INGEST_TRUST_STORE_DIR,   value: "/etc/spendguard/trust-store" }
+            - { name: SPENDGUARD_CANONICAL_INGEST_METRICS_ADDR,      value: "0.0.0.0:9091" }
+          volumeMounts:
+            - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+            - { name: trust-store, mountPath: /etc/spendguard/trust-store, readOnly: true }
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: tls
+          secret:
+            secretName: spendguard-prod-tls
+        - name: trust-store
+          secret:
+            secretName: spendguard-prod-signing-keys
+---
+# Source: spendguard/templates/control-plane.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spendguard-spendguard-control-plane
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: control-plane
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: control-plane
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: control-plane
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: control-plane
+          image: ghcr.io/m24927605/spendguard/control-plane:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: http, containerPort: 8091 }
+            - { name: metrics, containerPort: 9094 }
+          env:
+            - { name: SPENDGUARD_PROFILE, value: "production" }
+            - { name: SPENDGUARD_CONTROL_PLANE_BIND_ADDR, value: "0.0.0.0:8091" }
+            - { name: SPENDGUARD_CONTROL_PLANE_METRICS_ADDR, value: "0.0.0.0:9094" }
+            - name: SPENDGUARD_CONTROL_PLANE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "control-plane-url"
+            - name: SPENDGUARD_CONTROL_PLANE_AUDIT_FORWARDER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "control-plane-audit-forwarder-url"
+            - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_URL, value: "https://spendguard-spendguard-canonical-ingest:50052" }
+            - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_CERT, value: "/etc/ssl/spendguard/control-plane.crt" }
+            - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CLIENT_KEY, value: "/etc/ssl/spendguard/control-plane.key" }
+            - { name: SPENDGUARD_CONTROL_PLANE_CANONICAL_INGEST_TLS_CA_PEM, value: "/etc/ssl/spendguard/ca.crt" }
+            - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_SCHEMA_BUNDLE_ID, value: "22222222-2222-4222-8222-222222222222" }
+            - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_SCHEMA_BUNDLE_HASH_HEX, value: "1111111111111111111111111111111111111111111111111111111111111111" }
+            - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_CANONICAL_SCHEMA_VERSION, value: "spendguard.v1alpha1" }
+            - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_FORWARDER_POLL_INTERVAL_SECONDS, value: "5" }
+            - { name: SPENDGUARD_CONTROL_PLANE_AUDIT_FORWARDER_BATCH_SIZE, value: "32" }
+            - { name: SPENDGUARD_CONTROL_PLANE_AUTH_MODE, value: "jwt" }
+            - { name: SPENDGUARD_CONTROL_PLANE_OIDC_ISSUER, value: "https://issuer.example.invalid/" }
+            - { name: SPENDGUARD_CONTROL_PLANE_OIDC_AUDIENCE, value: "spendguard-control-plane" }
+            - { name: SPENDGUARD_CONTROL_PLANE_OIDC_JWKS_URL, value: "https://issuer.example.invalid/.well-known/jwks.json" }
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - { name: SPENDGUARD_CONTROL_PLANE_SIGNING_MODE, value: "local" }
+            - { name: SPENDGUARD_CONTROL_PLANE_SIGNING_PRODUCER_IDENTITY, value: "control-plane:$(POD_NAME)" }
+            - { name: SPENDGUARD_CONTROL_PLANE_SIGNING_KEY_PATH, value: "/etc/spendguard/signing/control-plane.pem" }
+          volumeMounts:
+            - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: tls
+          secret:
+            secretName: spendguard-prod-tls
+        - name: signing
+          secret:
+            secretName: spendguard-prod-signing-keys
+            items:
+              - { key: control-plane.pem, path: control-plane.pem }
+---
+# Source: spendguard/templates/egress_proxy.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spendguard-spendguard-egress-proxy
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: egress-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: egress-proxy
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: egress-proxy
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: egress-proxy
+          image: ghcr.io/m24927605/spendguard/egress-proxy:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: http, containerPort: 9000 }
+          env:
+            - { name: SPENDGUARD_EGRESS_PROXY_BIND_ADDR, value: "0.0.0.0:9000" }
+            - { name: SPENDGUARD_PROXY_DEFAULT_TENANT_ID, value: "00000000-0000-4000-8000-000000000001" }
+            - { name: SPENDGUARD_PROXY_SIDECAR_UDS_PATH, value: "/var/run/spendguard/adapter.sock" }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: sidecar-uds
+              mountPath: /var/run/spendguard
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: sidecar-uds
+          hostPath:
+            path: /var/run/spendguard
+            type: "Directory"
+---
+# Source: spendguard/templates/ledger.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spendguard-spendguard-ledger
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: ledger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: ledger
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: ledger
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ledger
+          image: ghcr.io/m24927605/spendguard/ledger:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: grpc, containerPort: 50051 }
+            - { name: metrics, containerPort: 9092 }
+          env:
+            - { name: SPENDGUARD_LEDGER_BIND_ADDR,           value: "0.0.0.0:50051" }
+            - { name: SPENDGUARD_LEDGER_METRICS_ADDR,        value: "0.0.0.0:9092" }
+            - name: SPENDGUARD_LEDGER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "ledger-url"
+            - { name: SPENDGUARD_LEDGER_TENANT_ID,           value: "00000000-0000-4000-8000-000000000001" }
+            - { name: SPENDGUARD_LEDGER_REGION,              value: "us-west-2" }
+            - { name: SPENDGUARD_LEDGER_WORKLOAD_INSTANCE_ID, value: "ledger-helm-1" }
+            - { name: SPENDGUARD_LEDGER_PRODUCER_SIGNING_KEY_ID, value: "demo-key-1" }
+            - { name: SPENDGUARD_LEDGER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/ledger.crt" }
+            - { name: SPENDGUARD_LEDGER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/ledger.key" }
+            - { name: SPENDGUARD_LEDGER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            # Phase 5 GA hardening S6: producer signing config.
+            - { name: SPENDGUARD_PROFILE,                           value: "production" }
+            - { name: SPENDGUARD_LEDGER_SIGNING_MODE,               value: "local" }
+            - { name: SPENDGUARD_LEDGER_SIGNING_PRODUCER_IDENTITY,  value: "ledger:server-mint" }
+            - { name: SPENDGUARD_LEDGER_SIGNING_KEY_PATH,           value: "/etc/spendguard/signing/ledger.pem" }
+          volumeMounts:
+            - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
+            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+          resources:
+            limits:
+              cpu: "1"
+              memory: 1Gi
+            requests:
+              cpu: 200m
+              memory: 256Mi
+      volumes:
+        - name: tls
+          secret:
+            secretName: spendguard-prod-tls
+        - name: signing
+          secret:
+            secretName: spendguard-prod-signing-keys
+            items:
+              - { key: ledger.pem, path: ledger.pem }
+---
+# Source: spendguard/templates/outbox-forwarder.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spendguard-spendguard-outbox-forwarder
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: outbox-forwarder
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: outbox-forwarder
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: outbox-forwarder
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: outbox-forwarder
+          image: ghcr.io/m24927605/spendguard/outbox-forwarder:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: metrics, containerPort: 9096 }
+          env:
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_METRICS_ADDR,      value: "0.0.0.0:9096" }
+            # Round-2 #3: outbox_forwarder Config::from_env() does NOT
+            # read TENANT_ID (the binary works against the audit_outbox
+            # table directly, not per-tenant). Removed the unused env
+            # var so the chart matches the binary's actual surface.
+            # Phase 5 S2: per-pod-unique workload_instance_id via downward API.
+            - name: _POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_WORKLOAD_INSTANCE_ID, value: "outbox-forwarder-$(_POD_NAME)" }
+            - name: SPENDGUARD_OUTBOX_FORWARDER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "ledger-url"
+            - name: SPENDGUARD_OUTBOX_FORWARDER_CANONICAL_INGEST_URL
+              value: "https://spendguard-spendguard-canonical-ingest:50052"
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_POLL_INTERVAL_SECONDS, value: "2" }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_BATCH_SIZE,            value: "50" }
+            # Round-2 #3: Config::from_env() reads TLS_CLIENT_{CERT,KEY}
+            # (not TLS_CERT_PEM / TLS_KEY_PEM). Rename for production
+            # readiness; the file paths are unchanged.
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CLIENT_CERT, value: "/etc/ssl/spendguard/outbox-forwarder.crt" }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CLIENT_KEY,  value: "/etc/ssl/spendguard/outbox-forwarder.key" }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_TLS_CA_PEM,      value: "/etc/ssl/spendguard/ca.crt" }
+            # Round-2 #3: required by Config::from_env(); previously
+            # unwired (production install would CrashLoopBackOff). The
+            # bundle ID + hash MUST be byte-exact match for the schema
+            # bundle the operator pre-pulled into bundles-data.
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_SCHEMA_BUNDLE_ID,       value: "22222222-2222-4222-8222-222222222222" }
+            - { name: SPENDGUARD_OUTBOX_FORWARDER_SCHEMA_BUNDLE_HASH_HEX, value: "6666666666666666666666666666666666666666666666666666666666666666" }
+            # Phase 5 S1 — leader election config.
+            - { name: SPENDGUARD_LEADER_ELECTION_MODE,    value: "postgres" }
+            - { name: SPENDGUARD_LEADER_LEASE_NAME,        value: "outbox-forwarder" }
+            - { name: SPENDGUARD_LEADER_REGION,            value: "demo" }
+            - { name: SPENDGUARD_LEADER_LEASE_TTL_MS,      value: "15000" }
+            - { name: SPENDGUARD_LEADER_RENEW_INTERVAL_MS, value: "5000" }
+            - { name: SPENDGUARD_LEADER_RETRY_INTERVAL_MS, value: "1000" }
+            # K8s Lease backend is namespaced. Bind to the release
+            # namespace so multi-namespace installs don't collide on
+            # the "default" namespace fallback.
+            - name: SPENDGUARD_LEADER_K8S_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+          volumeMounts:
+            - { name: tls,     mountPath: /etc/ssl/spendguard, readOnly: true }
+            - { name: bundles, mountPath: /var/lib/spendguard/bundles, readOnly: true }
+      volumes:
+        - name: tls
+          secret:
+            secretName: spendguard-prod-tls
+        - name: bundles
+          secret:
+            secretName: spendguard-prod-bundles
+---
+# Source: spendguard/templates/output_predictor.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spendguard-spendguard-output-predictor
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: output-predictor
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: output-predictor
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: output-predictor
+    spec:
+      # Container security baseline per SLICE_03 R2 M7.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: output-predictor
+          image: ghcr.io/m24927605/spendguard/output-predictor:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: grpc,    containerPort: 50054 }
+            - { name: metrics, containerPort: 9100  }
+          env:
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_LISTEN_ADDR,                value: "0.0.0.0:50054" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_METRICS_ADDR,               value: "0.0.0.0:9100"  }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_REGION,                     value: "us-west-2" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PROFILE,                    value: "production" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_CACHE_TTL_SECONDS,          value: "300" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_UNKNOWN_MODEL_CONTEXT_WINDOW, value: "8000" }
+            - name: SPENDGUARD_OUTPUT_PREDICTOR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "output-predictor-url"
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_TLS_CERT_PEM,               value: "/etc/spendguard/tls/tls.crt" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_TLS_KEY_PEM,                value: "/etc/spendguard/tls/tls.key" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_TLS_CA_PEM,                 value: "/etc/spendguard/tls/ca.crt"  }
+            - name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_ENDPOINT_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "output-predictor-plugin-endpoint-url"
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_ENDPOINT_CACHE_TTL_SECONDS, value: "5" }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PLUGIN_CLIENT_SVID_DIR, value: "/etc/spendguard/plugin-client-svid" }
+          volumeMounts:
+            # read-only rootfs requires /tmp writable
+            - name: tmp
+              mountPath: /tmp
+            - name: tls
+              mountPath: /etc/spendguard/tls
+              readOnly: true
+            - name: plugin-client-svid-tenant-0001
+              mountPath: "/etc/spendguard/plugin-client-svid/tenant-0001"
+              readOnly: true
+            - name: plugin-client-svid-tenant-0002
+              mountPath: "/etc/spendguard/plugin-client-svid/tenant-0002"
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: tls
+          secret:
+            secretName: "spendguard-prod-output-predictor-mtls"
+        - name: plugin-client-svid-tenant-0001
+          secret:
+            secretName: "spendguard-spendguard-plugin-client-tenant-0001"
+        - name: plugin-client-svid-tenant-0002
+          secret:
+            secretName: "spendguard-spendguard-plugin-client-tenant-0002"
+---
+# Source: spendguard/templates/run_cost_projector.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spendguard-spendguard-run-cost-projector
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: run-cost-projector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: run-cost-projector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: run-cost-projector
+    spec:
+      # Container security baseline per SLICE_03 R2 M7.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: run-cost-projector
+          image: ghcr.io/m24927605/spendguard/run-cost-projector:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: grpc,    containerPort: 50055 }
+            - { name: metrics, containerPort: 9102  }
+          env:
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_LISTEN_ADDR,                value: "0.0.0.0:50055" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_METRICS_ADDR,               value: "0.0.0.0:9102"  }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_REGION,                     value: "us-west-2" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_PROFILE,                    value: "production" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_STATE_CACHE_TTL_SECONDS,    value: "1800" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_STATE_CACHE_CAPACITY,       value: "10000" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_REPLAY_WINDOW_MINUTES,      value: "30" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_COLD_START_RUN_LENGTH,      value: "10" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_DRIFT_CONSECUTIVE_THRESHOLD, value: "3" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_DRIFT_RATIO_THRESHOLD,      value: "0.5" }
+            - name: SPENDGUARD_RUN_COST_PROJECTOR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "run-cost-projector-url"
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_TLS_CERT_PEM,               value: "/etc/spendguard/tls/tls.crt" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_TLS_KEY_PEM,                value: "/etc/spendguard/tls/tls.key" }
+            - { name: SPENDGUARD_RUN_COST_PROJECTOR_TLS_CA_PEM,                 value: "/etc/spendguard/tls/ca.crt"  }
+          volumeMounts:
+            # read-only rootfs requires /tmp writable
+            - name: tmp
+              mountPath: /tmp
+            - name: tls
+              mountPath: /etc/spendguard/tls
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 64Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: tls
+          secret:
+            secretName: "spendguard-prod-run-cost-projector-mtls"
+---
+# Source: spendguard/templates/stats_aggregator.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spendguard-spendguard-stats-aggregator
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: stats-aggregator
+spec:
+  # Spec §2.2: singleton. Advisory lock prevents data corruption when
+  # two pods overlap (e.g. rolling update). Recreate strategy gives a
+  # clean handoff — no rolling update = no overlap with the advisory
+  # lock guard.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: stats-aggregator
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: stats-aggregator
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: stats-aggregator
+          image: ghcr.io/m24927605/spendguard/stats-aggregator:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: metrics, containerPort: 9101 }
+          env:
+            - { name: SPENDGUARD_STATS_AGGREGATOR_METRICS_ADDR,           value: "0.0.0.0:9101" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_REGION,                 value: "us-west-2" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_PROFILE,                value: "production" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_CYCLE_SECONDS,          value: "3600" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_MIN_SAMPLES_FOR_ALERT,  value: "100" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_DRIFT_Z_THRESHOLD,      value: "2" }
+            - name: SPENDGUARD_STATS_AGGREGATOR_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "stats-aggregator-url"
+            - { name: SPENDGUARD_STATS_AGGREGATOR_CANONICAL_INGEST_URL,   value: "https://spendguard-spendguard-canonical-ingest:50052" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SINK_TLS_CERT_PEM,      value: "/etc/spendguard/sink-tls/tls.crt" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SINK_TLS_KEY_PEM,       value: "/etc/spendguard/sink-tls/tls.key" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SINK_TLS_CA_PEM,        value: "/etc/spendguard/sink-tls/ca.crt"  }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SINK_TLS_SNI,           value: "canonical-ingest.spendguard.internal" }
+            # SLICE_06: producer identity + signing mode for the audit-routed
+            # prediction_drift_alert CloudEvent. Mirrors tokenizer SLICE_05
+            # R2 B1 env contract for signer_from_env.
+            - { name: SPENDGUARD_PROFILE,                                 value: "production" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SIGNING_PRODUCER_IDENTITY, value: "stats-aggregator:us-west-2" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SIGNING_MODE,           value: "local" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SIGNING_KEY_PATH,       value: "/etc/spendguard/signing/signing-key.pem" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_ID,       value: "22222222-2222-4222-8222-222222222222" }
+            - { name: SPENDGUARD_STATS_AGGREGATOR_SCHEMA_BUNDLE_HASH_HEX, value: "5555555555555555555555555555555555555555555555555555555555555555" }
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: sink-tls
+              mountPath: /etc/spendguard/sink-tls
+              readOnly: true
+            - name: signing-key
+              mountPath: /etc/spendguard/signing
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              # R2 M8: /livez is pure process liveness — won't restart
+              # the pod just because DB connectivity is flaky (that's
+              # readiness's job, which only marks the pod as not-serving).
+              path: /livez
+              port: metrics
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          readinessProbe:
+            httpGet:
+              # R2 M8: /readyz probes the DB pool + cycle freshness.
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 50m
+              memory: 128Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: sink-tls
+          secret:
+            secretName: "spendguard-prod-stats-aggregator-sink-mtls"
+        - name: signing-key
+          secret:
+            secretName: "spendguard-prod-stats-aggregator-signing-key"
+---
+# Source: spendguard/templates/tokenizer.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spendguard-spendguard-tokenizer
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: tokenizer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: tokenizer
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: tokenizer
+    spec:
+      # Round-2 fix M7: pod-level securityContext — runAsNonRoot +
+      # seccomp baseline matching CIS Kubernetes Benchmark §5.7. Container
+      # securityContext below adds read-only rootfs + drop ALL caps.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: tokenizer
+          image: ghcr.io/m24927605/spendguard/tokenizer:v0.1.0
+          imagePullPolicy: IfNotPresent
+          # Round-2 fix M7: container-level securityContext.
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - { name: grpc,    containerPort: 50053 }
+            - { name: metrics, containerPort: 9099  }
+          env:
+            - { name: SPENDGUARD_TOKENIZER_LISTEN_ADDR,           value: "0.0.0.0:50053" }
+            - { name: SPENDGUARD_TOKENIZER_METRICS_ADDR,          value: "0.0.0.0:9099"  }
+            - { name: SPENDGUARD_TOKENIZER_REGION,                value: "us-west-2" }
+            # Per spec §5.3 health invariant — Tier 3 hit-rate
+            # alerting threshold. SLICE_03 plumbs the value through
+            # Config; the alert wire-up itself lands in SLICE-extra.
+            - { name: SPENDGUARD_TOKENIZER_TIER3_ALERT_THRESHOLD, value: "0.001" }
+            # ── SLICE_05: Tier 1 shadow drift detection ────────────
+            # Per spec §4 + §11 rollback plan, shadowEnabled is a
+            # master kill-switch. Default true; operators set to
+            # false to disable the shadow worker entirely (Tier 2
+            # hot path is unaffected).
+            - { name: SPENDGUARD_TOKENIZER_SHADOW_ENABLED,        value: "true" }
+            # Default sample rate per spec §4.1 (1% = 0.01).
+            # Per-(tenant, model) override via the control plane API.
+            - { name: SPENDGUARD_TOKENIZER_SHADOW_DEFAULT_SAMPLE_RATE, value: "0.01" }
+            # canonical_ingest gRPC endpoint for signed
+            # tokenizer_drift_alert CloudEvent emission.
+            - { name: SPENDGUARD_TOKENIZER_CANONICAL_INGEST_URL,  value: "https://spendguard-spendguard-canonical-ingest:50052" }
+            # HARDEN_03 / #168: AppendEventsRequest schema bundle
+            # envelope. Production profile gates this above; demo may
+            # leave the hash empty because canonical_ingest is unset and
+            # the sink is not constructed.
+            - { name: SPENDGUARD_TOKENIZER_SCHEMA_BUNDLE_ID,       value: "22222222-2222-4222-8222-222222222222" }
+            - { name: SPENDGUARD_TOKENIZER_SCHEMA_BUNDLE_HASH_HEX, value: "4444444444444444444444444444444444444444444444444444444444444444" }
+            - { name: SPENDGUARD_TOKENIZER_CANONICAL_SCHEMA_VERSION, value: "spendguard.v1alpha1" }
+            # Postgres URL for tokenizer_t1_samples persistence.
+            # Migration 0051 owns the schema.
+            - name: SPENDGUARD_TOKENIZER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "tokenizer-url"
+            # Least-privilege control-plane DB path for durable per-(tenant, model)
+            # sample-rate overrides plus HARDEN_05 per-tenant PII opt-in
+            # and shared count_tokens quota claims. The worker sets
+            # app.current_tenant_id per event, so RLS remains the isolation
+            # boundary across tokenizer replicas. This Secret key must map
+            # to tokenizer_shadow_runtime_role, not the control-plane writer.
+            - name: SPENDGUARD_TOKENIZER_SAMPLING_OVERRIDE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "tokenizer-shadow-url"
+            # Provider API keys for Anthropic / Gemini Tier 1
+            # count_tokens calls. Mounted from a pre-created Secret
+            # so the keys never appear in the Helm release secrets
+            # or Deployment manifest. Demo: both optional (worker falls
+            # back to drop-only when neither key is present). Production
+            # (chart.profile=production + shadowEnabled=true): the
+            # template-level fail-fast above requires this Secret to
+            # exist; at least ONE of the two keys MUST be populated for
+            # the shadow worker to make any provider call.
+            # R2 M12: optional flag flipped to false in production so a
+            # rotated/missing key surfaces as a CrashLoopBackoff instead
+            # of silent shadow-disablement.
+            - name: SPENDGUARD_TOKENIZER_ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-tokenizer-provider-keys"
+                  key: anthropic-api-key
+                  optional: false
+            - name: SPENDGUARD_TOKENIZER_GEMINI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-tokenizer-provider-keys"
+                  key: gemini-api-key
+                  optional: false
+            # R2 B4: outbound mTLS to canonical_ingest for the
+            # tokenizer_drift_alert CloudEvent sink. Required under
+            # chart.profile=production + shadowEnabled=true. Paths
+            # match the cert-manager mount convention the sidecar uses.
+            - { name: SPENDGUARD_TOKENIZER_SINK_TLS_CERT_PEM, value: "/etc/spendguard/sink-tls/tls.crt" }
+            - { name: SPENDGUARD_TOKENIZER_SINK_TLS_KEY_PEM,  value: "/etc/spendguard/sink-tls/tls.key" }
+            - { name: SPENDGUARD_TOKENIZER_SINK_TLS_CA_PEM,   value: "/etc/spendguard/sink-tls/ca.crt"  }
+            - { name: SPENDGUARD_TOKENIZER_SINK_TLS_SNI,      value: "canonical-ingest.spendguard.internal" }
+            # R2 B1: producer identity + signing mode for the audit-routed
+            # drift_alert CloudEvent. Mirrors the env contract used by
+            # sidecar / canonical_ingest / ledger via signer_from_env.
+            - { name: SPENDGUARD_PROFILE,                     value: "production" }
+            - { name: SPENDGUARD_TOKENIZER_SIGNING_PRODUCER_IDENTITY, value: "tokenizer-service:us-west-2" }
+            - { name: SPENDGUARD_TOKENIZER_SIGNING_MODE,      value: "local" }
+            - { name: SPENDGUARD_TOKENIZER_SIGNING_KEY_PATH,  value: "/etc/spendguard/signing/signing-key.pem" }
+            # Round-2 fix B3.2: mTLS — paths into the mounted Secret.
+            - { name: SPENDGUARD_TOKENIZER_TLS_CERT_PEM,          value: "/etc/spendguard/tls/tls.crt" }
+            - { name: SPENDGUARD_TOKENIZER_TLS_KEY_PEM,           value: "/etc/spendguard/tls/tls.key" }
+            - { name: SPENDGUARD_TOKENIZER_TLS_CA_PEM,            value: "/etc/spendguard/tls/ca.crt" }
+          volumeMounts:
+            # Round-2 fix M7: read-only rootfs requires /tmp writable for
+            # any scratch + spilled state from tonic/h2.
+            - name: tmp
+              mountPath: /tmp
+            - name: tls
+              mountPath: /etc/spendguard/tls
+              readOnly: true
+            # R2 B4: outbound mTLS material for canonical_ingest sink.
+            - name: sink-tls
+              mountPath: /etc/spendguard/sink-tls
+              readOnly: true
+            # R2 B1: PKCS8 PEM key for Ed25519 drift_alert CloudEvent
+            # signing. Mounted from a Secret named `signingKeySecretName`
+            # at the path the SPENDGUARD_TOKENIZER_SIGNING_KEY_PATH env
+            # points at.
+            - name: signing-key
+              mountPath: /etc/spendguard/signing
+              readOnly: true
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: metrics
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: metrics
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 192Mi
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: tls
+          secret:
+            secretName: "spendguard-prod-tokenizer-mtls"
+        - name: sink-tls
+          secret:
+            secretName: "spendguard-prod-tokenizer-sink-mtls"
+        - name: signing-key
+          secret:
+            secretName: "spendguard-prod-tokenizer-signing-key"
+---
+# Source: spendguard/templates/ttl-sweeper.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spendguard-spendguard-ttl-sweeper
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: ttl-sweeper
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: ttl-sweeper
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: ttl-sweeper
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ttl-sweeper
+          image: ghcr.io/m24927605/spendguard/ttl-sweeper:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: metrics, containerPort: 9097 }
+          env:
+            - { name: SPENDGUARD_TTL_SWEEPER_METRICS_ADDR,         value: "0.0.0.0:9097" }
+            - { name: SPENDGUARD_TTL_SWEEPER_TENANT_ID,            value: "00000000-0000-4000-8000-000000000001" }
+            - { name: SPENDGUARD_TTL_SWEEPER_FENCING_SCOPE_ID,     value: "00000000-0000-7000-a000-000000000060" }
+            # Phase 5 S2: per-pod-unique workload_instance_id via downward API.
+            - name: _POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID, value: "ttl-sweeper-$(_POD_NAME)" }
+            - name: SPENDGUARD_TTL_SWEEPER_LEDGER_URL
+              value: "https://spendguard-spendguard-ledger:50051"
+            - name: SPENDGUARD_TTL_SWEEPER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "ledger-url"
+            - { name: SPENDGUARD_TTL_SWEEPER_POLL_INTERVAL_SECONDS, value: "2" }
+            - { name: SPENDGUARD_TTL_SWEEPER_BATCH_SIZE,            value: "10" }
+            # Round-2 #3: Config::from_env() reads TLS_CLIENT_{CERT,KEY}
+            # (not TLS_CERT_PEM / TLS_KEY_PEM). Rename for production
+            # readiness; the file paths are unchanged.
+            - { name: SPENDGUARD_TTL_SWEEPER_TLS_CLIENT_CERT, value: "/etc/ssl/spendguard/ttl-sweeper.crt" }
+            - { name: SPENDGUARD_TTL_SWEEPER_TLS_CLIENT_KEY,  value: "/etc/ssl/spendguard/ttl-sweeper.key" }
+            - { name: SPENDGUARD_TTL_SWEEPER_TLS_CA_PEM,      value: "/etc/ssl/spendguard/ca.crt" }
+            # Round-2 #3: required by Config::from_env(); was missing
+            # from chart (production install would CrashLoopBackOff).
+            - { name: SPENDGUARD_TTL_SWEEPER_FENCING_INITIAL_EPOCH, value: "1" }
+            # Phase 5 S1 — leader election config.
+            - { name: SPENDGUARD_LEADER_ELECTION_MODE,    value: "postgres" }
+            - { name: SPENDGUARD_LEADER_LEASE_NAME,        value: "ttl-sweeper" }
+            - { name: SPENDGUARD_LEADER_REGION,            value: "demo" }
+            - { name: SPENDGUARD_LEADER_LEASE_TTL_MS,      value: "15000" }
+            - { name: SPENDGUARD_LEADER_RENEW_INTERVAL_MS, value: "5000" }
+            - { name: SPENDGUARD_LEADER_RETRY_INTERVAL_MS, value: "1000" }
+            # K8s Lease backend is namespaced. Bind to the release
+            # namespace so multi-namespace installs don't collide on
+            # the "default" namespace fallback.
+            - name: SPENDGUARD_LEADER_K8S_NAMESPACE
+              valueFrom: { fieldRef: { fieldPath: metadata.namespace } }
+            # Phase 5 GA hardening S6: producer signing config.
+            - { name: SPENDGUARD_PROFILE,                                value: "production" }
+            - { name: SPENDGUARD_TTL_SWEEPER_SIGNING_MODE,               value: "local" }
+            - { name: SPENDGUARD_TTL_SWEEPER_SIGNING_PRODUCER_IDENTITY,  value: "ttl-sweeper:$(SPENDGUARD_TTL_SWEEPER_WORKLOAD_INSTANCE_ID)" }
+            - { name: SPENDGUARD_TTL_SWEEPER_SIGNING_KEY_PATH,           value: "/etc/spendguard/signing/ttl-sweeper.pem" }
+          volumeMounts:
+            - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+      volumes:
+        - name: tls
+          secret:
+            secretName: spendguard-prod-tls
+        - name: signing
+          secret:
+            secretName: spendguard-prod-signing-keys
+            items:
+              - { key: ttl-sweeper.pem, path: ttl-sweeper.pem }
+---
+# Source: spendguard/templates/webhook-receiver.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: spendguard-spendguard-webhook-receiver
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: webhook-receiver
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: spendguard
+      app.kubernetes.io/instance: spendguard
+      app.kubernetes.io/component: webhook-receiver
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: webhook-receiver
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: webhook-receiver
+          image: ghcr.io/m24927605/spendguard/webhook-receiver:v0.1.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - { name: https, containerPort: 8443 }
+            - { name: health, containerPort: 8080 }
+            - { name: metrics, containerPort: 9098 }
+          env:
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_METRICS_ADDR,         value: "0.0.0.0:9098" }
+            # Round-2 #3: BIND_ADDR + HEALTH_ADDR are required by
+            # Config::from_env() (no defaults). Bind values match
+            # the containerPort declarations above.
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_BIND_ADDR,            value: "0.0.0.0:8443" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_HEALTH_ADDR,          value: "0.0.0.0:8080" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TENANT_ID,            value: "00000000-0000-4000-8000-000000000001" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_FENCING_SCOPE_ID,     value: "00000000-0000-7000-a000-000000000050" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_WORKLOAD_INSTANCE_ID, value: "webhook-receiver-0" }
+            # Round-2 #3: required by Config::from_env(); previously
+            # unwired (production install would CrashLoopBackOff).
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_FENCING_INITIAL_EPOCH, value: "1" }
+            - name: SPENDGUARD_WEBHOOK_RECEIVER_LEDGER_URL
+              value: "https://spendguard-spendguard-ledger:50051"
+            - name: SPENDGUARD_WEBHOOK_RECEIVER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "ledger-url"
+            # Round-2 #3: per-tenant HMAC secret for the mock-llm
+            # provider. Config field is `mock_llm_secret`, and
+            # envy::from_env() (NOT prefixed) reads the env var as
+            # SPENDGUARD_WEBHOOK_SECRET_MOCK_LLM. The previous chart
+            # set SPENDGUARD_WEBHOOK_RECEIVER_HMAC_SECRET, which the
+            # binary ignored, leaving Config::from_env() to bail with
+            # "missing field mock_llm_secret".
+            - name: SPENDGUARD_WEBHOOK_SECRET_MOCK_LLM
+              valueFrom:
+                secretKeyRef:
+                  name: spendguard-prod-webhook-hmac
+                  key: hmac
+            # Round-2 #3: Config::from_env() distinguishes server
+            # vs client TLS material (HTTPS server identity vs gRPC
+            # client identity to ledger). Wire both — same files in
+            # the chart, but the binary expects all four env names.
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_SERVER_CERT, value: "/etc/ssl/spendguard/webhook-receiver.crt" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_SERVER_KEY,  value: "/etc/ssl/spendguard/webhook-receiver.key" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CLIENT_CERT, value: "/etc/ssl/spendguard/webhook-receiver.crt" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CLIENT_KEY,  value: "/etc/ssl/spendguard/webhook-receiver.key" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_TLS_CA_PEM,      value: "/etc/ssl/spendguard/ca.crt" }
+            # Phase 5 GA hardening S6: producer signing config.
+            - { name: SPENDGUARD_PROFILE,                                    value: "production" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_MODE,              value: "local" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_PRODUCER_IDENTITY, value: "webhook-receiver:webhook-receiver-0" }
+            - { name: SPENDGUARD_WEBHOOK_RECEIVER_SIGNING_KEY_PATH,          value: "/etc/spendguard/signing/webhook-receiver.pem" }
+          volumeMounts:
+            - { name: tls, mountPath: /etc/ssl/spendguard, readOnly: true }
+            - { name: signing, mountPath: /etc/spendguard/signing, readOnly: true }
+          readinessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: tls
+          secret:
+            secretName: spendguard-prod-tls
+        - name: signing
+          secret:
+            secretName: spendguard-prod-signing-keys
+            items:
+              - { key: webhook-receiver.pem, path: webhook-receiver.pem }
+---
+# Source: spendguard/templates/output_predictor_plugin_svid.yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: "plugin-client-svid-tenant-0001"
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: output-predictor
+    spendguard.com/client-cert-id: "tenant-0001"
+    spendguard.com/tenant-id: "00000000-0000-4000-8000-000000000001"
+spec:
+  secretName: "spendguard-spendguard-plugin-client-tenant-0001"
+  duration: "720h"
+  renewBefore: "240h"
+  commonName: "spendguard-predictor-client-tenant-0001"
+  uris:
+    - "spiffe://spendguard.platform/predictor-client/00000000-0000-4000-8000-000000000001"
+  usages:
+    - client auth
+    - digital signature
+    - key encipherment
+  issuerRef:
+    name: "spendguard-predictor-client-issuer"
+    kind: "Issuer"
+    group: "cert-manager.io"
+---
+# Source: spendguard/templates/output_predictor_plugin_svid.yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: "plugin-client-svid-tenant-0002"
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: output-predictor
+    spendguard.com/client-cert-id: "tenant-0002"
+    spendguard.com/tenant-id: "00000000-0000-4000-8000-000000000002"
+spec:
+  secretName: "spendguard-spendguard-plugin-client-tenant-0002"
+  duration: "720h"
+  renewBefore: "240h"
+  commonName: "spendguard-predictor-client-tenant-0002"
+  uris:
+    - "spiffe://spendguard.platform/predictor-client/00000000-0000-4000-8000-000000000002"
+  usages:
+    - client auth
+    - digital signature
+    - key encipherment
+  issuerRef:
+    name: "spendguard-predictor-client-issuer"
+    kind: "Issuer"
+    group: "cert-manager.io"
+---
+# Source: spendguard/templates/migrations.yaml
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: spendguard-spendguard-migrate
+  labels:
+    app.kubernetes.io/name: spendguard
+    app.kubernetes.io/instance: spendguard
+    app.kubernetes.io/version: "0.1.0-alpha.3"
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: spendguard-0.1.0-alpha.3
+    app.kubernetes.io/component: migrations
+  annotations:
+    "helm.sh/hook": post-install,post-upgrade
+    "helm.sh/hook-weight": "-5"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: spendguard
+        app.kubernetes.io/instance: spendguard
+        app.kubernetes.io/version: "0.1.0-alpha.3"
+        app.kubernetes.io/managed-by: Helm
+        helm.sh/chart: spendguard-0.1.0-alpha.3
+        app.kubernetes.io/component: migrations
+    spec:
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migrate
+          image: docker.io/library/postgres:16-alpine
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              applied=0
+              skipped=0
+              # Round-3 fix m6 + round-4 fix B2: detect SLICE_01-incomplete
+              # ConfigMap and warn loudly. With the production fail-gate
+              # removed (round-4 B2), this is the ONLY signal the operator
+              # gets from the chart that the ConfigMap mount is missing
+              # the SLICE_01 files. Warning is visible in:
+              #   * helm install --wait | --debug
+              #   * kubectl logs -l app.kubernetes.io/component=migrations
+              #   * The kind-cluster job at .github/workflows/helm-validate.yml
+              missing_slice01=""
+              for f in 0046_audit_outbox_prediction_columns.sql 0048_tokenizer_versions.sql; do
+                  if [ -d /etc/migrations/ledger ] && [ ! -f "/etc/migrations/ledger/$f" ]; then
+                      missing_slice01="$missing_slice01 ledger/$f"
+                  fi
+              done
+              for f in 0013_canonical_events_prediction_columns.sql 0015_audit_outcome_quarantine_prediction_columns.sql; do
+                  if [ -d /etc/migrations/canonical ] && [ ! -f "/etc/migrations/canonical/$f" ]; then
+                      missing_slice01="$missing_slice01 canonical/$f"
+                  fi
+              done
+              if [ -n "$missing_slice01" ]; then
+                  echo "[migrate] WARNING: SLICE_01 migration file(s) MISSING from mounted ConfigMaps:$missing_slice01"
+                  echo "[migrate] WARNING: this will cause a 'column does not exist'"
+                  echo "[migrate] WARNING: runtime error once SLICE_06 producers attempt to write tag-300+ fields."
+                  echo "[migrate] WARNING: regenerate ConfigMaps via scripts/helm-validate-kind.sh."
+              fi
+              for f in $(ls /etc/migrations/ledger/*.sql 2>/dev/null | sort); do
+                  echo "[migrate] applying $f to spendguard_ledger..."
+                  psql "$PG_LEDGER_URL" -v ON_ERROR_STOP=1 -f "$f"
+                  applied=$((applied + 1))
+              done
+              for f in $(ls /etc/migrations/canonical/*.sql 2>/dev/null | sort); do
+                  echo "[migrate] applying $f to spendguard_canonical..."
+                  psql "$PG_CANONICAL_URL" -v ON_ERROR_STOP=1 -f "$f"
+                  applied=$((applied + 1))
+              done
+              # R2 M3 (Security F5): control_plane migrations apply against
+              # the separate spendguard_control_plane DB. The ConfigMap is
+              # OPTIONAL — if absent, no-op. Production helm-validate-kind.sh
+              # regenerates all three ConfigMaps in lockstep.
+              for f in $(ls /etc/migrations/control-plane/*.sql 2>/dev/null | sort); do
+                  echo "[migrate] applying $f to spendguard_control_plane..."
+                  psql "$PG_CONTROL_PLANE_URL" -v ON_ERROR_STOP=1 -f "$f"
+                  applied=$((applied + 1))
+              done
+              if [ "$applied" -eq 0 ]; then
+                  echo "[migrate] no SQL files found in /etc/migrations/{ledger,canonical,control-plane}/."
+                  echo "[migrate] Operator must mount the spendguard-migrations-ledger +"
+                  echo "[migrate] spendguard-migrations-canonical +"
+                  echo "[migrate] spendguard-migrations-control-plane ConfigMaps OR"
+                  echo "[migrate] override migrations.applyMigrationsOnInstall=false + run migrations out-of-band."
+                  echo "[migrate] Job exits 0 so helm install can complete."
+              else
+                  echo "[migrate] PASS — applied ${applied} migration file(s)."
+              fi
+          env:
+            - name: PG_LEDGER_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "ledger-url"
+            - name: PG_CANONICAL_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "canonical-url"
+            - name: PG_CONTROL_PLANE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: "spendguard-prod-postgres-urls"
+                  key: "control-plane-url"
+          volumeMounts:
+            - name: migrations-ledger
+              mountPath: /etc/migrations/ledger
+              readOnly: true
+            - name: migrations-canonical
+              mountPath: /etc/migrations/canonical
+              readOnly: true
+            - name: migrations-control-plane
+              mountPath: /etc/migrations/control-plane
+              readOnly: true
+          resources:
+            limits:
+              cpu: 500m
+              memory: 256Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: migrations-ledger
+          configMap:
+            name: spendguard-migrations-ledger
+            optional: true
+        - name: migrations-canonical
+          configMap:
+            name: spendguard-migrations-canonical
+            optional: true
+        - name: migrations-control-plane
+          configMap:
+            name: spendguard-migrations-control-plane
+            optional: true
