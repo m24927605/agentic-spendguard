@@ -103,6 +103,7 @@ Reviewer must inspect triage honesty and reject undocumented customer-critical f
 | Software Architect | Duplicate and historical issues must close with evidence | #155 and #170 closure evidence recorded in backlog triage |
 | Review R1 | codex CLI adversarial reviewer | Fixed live API path and `client_cert_id` registration sample, client SVID evidence path, SVID `PERMISSION_DENIED` to `tls_error` routing, and backlog slice/table consistency |
 | Review R2 | codex CLI adversarial reviewer | Fixed reference-image `--insecure` override guidance and replaced invalid multi-issue `gh issue close` evidence with a reproducible loop |
+| Review R3 | codex CLI adversarial reviewer | Expanded TLS classification for SVID/URI-SAN/client-cert permission denials and clarified metadata fields as certification hard-fails rather than runtime fallback triggers |
 
 ## §14. Merge Checklist
 

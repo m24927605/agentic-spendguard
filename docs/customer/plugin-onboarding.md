@@ -108,16 +108,20 @@ following budgets:
 | Retry discipline | The plugin must be idempotent by `spendguard_call_id`; SpendGuard does not rely on retries to make a hot-path prediction succeed. |
 | Circuit breaker | Repeated failures open the SpendGuard-side breaker and skip Strategy C until recovery probes pass. |
 
-The plugin must return bounded values:
+SpendGuard validates these runtime values and falls back to Strategy B
+when they are invalid:
 
 - `predicted_output_tokens > 0`
 - `predicted_output_tokens <= model context window`
 - `0.0 <= confidence <= 1.0`
-- non-empty `plugin_version`
-- non-empty `feature_hash`
 
 Invalid responses are treated as plugin failures and fall back to
 Strategy B.
+
+Certification also requires non-empty `plugin_version` and
+`feature_hash`. Those fields are release and feature-schema metadata in
+v1alpha1; empty values fail certification but do not by themselves
+trigger hot-path fallback.
 
 ## Registration Flow
 
