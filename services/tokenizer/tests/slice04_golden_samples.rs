@@ -1034,6 +1034,16 @@ fn cohere_command_r_plus_dated_dispatches() {
 }
 
 #[test]
+fn cohere_command_r_month_year_dated_dispatches() {
+    assert_eq!(dispatch_kind("command-r-08-2024"), "COHERE_BPE");
+}
+
+#[test]
+fn cohere_command_r_plus_month_year_dated_dispatches() {
+    assert_eq!(dispatch_kind("command-r-plus-08-2024"), "COHERE_BPE");
+}
+
+#[test]
 fn cohere_bedrock_command_dispatches() {
     assert_eq!(dispatch_kind("cohere.command-v1:0"), "COHERE_BPE");
 }

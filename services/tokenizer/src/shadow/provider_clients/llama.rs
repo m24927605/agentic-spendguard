@@ -274,28 +274,33 @@ async fn count_tokens_http_compat(
 fn map_bedrock_error(err: SdkError<CountTokensError>) -> ProviderError {
     match err {
         SdkError::TimeoutError(_) => ProviderError::Timeout,
-        SdkError::ServiceError(service) => {
-            let detail = format!("{:?}", service.err());
-            match service.err() {
-                CountTokensError::AccessDeniedException(_)
-                | CountTokensError::ResourceNotFoundException(_) => {
-                    ProviderError::Auth(format!("bedrock llama {detail}"))
-                }
-                CountTokensError::ThrottlingException(_) => ProviderError::RateLimit {
-                    retry_after: Duration::from_secs(30),
-                },
-                CountTokensError::ValidationException(_) => {
-                    ProviderError::Schema(format!("bedrock llama {detail}"))
-                }
-                CountTokensError::InternalServerException(_)
-                | CountTokensError::ServiceUnavailableException(_) => {
-                    ProviderError::Other(format!("bedrock llama {detail}"))
-                }
-                _ => ProviderError::Other(format!("bedrock llama {detail}")),
+        SdkError::ServiceError(service) => match service.err() {
+            CountTokensError::AccessDeniedException(_) => {
+                ProviderError::Auth(bedrock_redacted_error("AccessDeniedException"))
             }
-        }
-        other => ProviderError::Other(format!("bedrock llama {other}")),
+            CountTokensError::ResourceNotFoundException(_) => {
+                ProviderError::Auth(bedrock_redacted_error("ResourceNotFoundException"))
+            }
+            CountTokensError::ThrottlingException(_) => ProviderError::RateLimit {
+                retry_after: Duration::from_secs(30),
+            },
+            CountTokensError::ValidationException(_) => {
+                ProviderError::Schema(bedrock_redacted_error("ValidationException"))
+            }
+            CountTokensError::InternalServerException(_) => {
+                ProviderError::Other(bedrock_redacted_error("InternalServerException"))
+            }
+            CountTokensError::ServiceUnavailableException(_) => {
+                ProviderError::Other(bedrock_redacted_error("ServiceUnavailableException"))
+            }
+            _ => ProviderError::Other(bedrock_redacted_error("ServiceError")),
+        },
+        _ => ProviderError::Other("bedrock llama sdk error: <details redacted>".into()),
     }
+}
+
+fn bedrock_redacted_error(kind: &str) -> String {
+    format!("bedrock llama {kind}: <provider error redacted>")
 }
 
 fn map_send_error(e: reqwest::Error) -> ProviderError {
@@ -394,5 +399,16 @@ mod tests {
             }
             other => panic!("expected rate limit, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn bedrock_redacted_error_omits_provider_detail() {
+        let msg = bedrock_redacted_error("ValidationException");
+        assert_eq!(
+            msg,
+            "bedrock llama ValidationException: <provider error redacted>"
+        );
+        assert!(!msg.contains("prompt"));
+        assert!(!msg.contains("raw"));
     }
 }

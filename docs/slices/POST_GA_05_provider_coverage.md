@@ -119,9 +119,9 @@ Reviewer must inspect PII, quota, provider-error, and license paths.
 | Tokenizer Domain Expert | Envelope fixtures are required before real-provider confidence | §8 |
 | Software Architect | Keep Cohere/Llama clients confined to tokenizer shadow worker | `services/tokenizer/src/shadow/provider_clients/`; hot-path grep evidence |
 | Backend Architect | Use Bedrock Runtime CountTokens with InvokeModel body shape for Llama instead of Together embeddings because locked tokenizer dispatch and Tier 2 raw-text accounting use Bedrock Llama model IDs | `services/tokenizer/src/shadow/provider_clients/llama.rs` |
-| Security Engineer | Redact provider error bodies and ensure provider client Debug output cannot expose API keys or URL userinfo | `cohere.rs`, `llama.rs`, `config.rs` |
+| Security Engineer | Redact provider error bodies, SDK service error details, and provider client Debug output so API keys, URL userinfo, and raw prompt echoes cannot reach logs | `cohere.rs`, `llama.rs`, `config.rs` |
 | Database Optimizer | Reuse existing sample/quota/PII tables; no migration | §5 |
-| Tokenizer Domain Expert | Cohere Tier 1 count is `tokens.len() + 1` for non-empty raw text and Bedrock Cohere model normalization strips any numeric revision accepted by dispatch | `services/tokenizer/src/shadow/provider_clients/cohere.rs` |
+| Tokenizer Domain Expert | Cohere Tier 1 count is `tokens.len() + 1` for non-empty raw text; native dispatch covers both `YYYYMMDD` and documented `MM-YYYY` dated IDs; Bedrock Cohere model normalization strips any numeric revision accepted by dispatch | `services/tokenizer/src/shadow/provider_clients/cohere.rs`, `crates/spendguard-tokenizer/src/dispatch.rs` |
 
 ## §14. Merge Checklist
 

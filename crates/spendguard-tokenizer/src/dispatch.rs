@@ -189,7 +189,7 @@ pub struct DispatchEntry {
 ///     * `gemini-2.0-flash` (+ optional `-exp`)
 ///
 ///   Cohere native (SLICE_04):
-///     * `command-r(-plus)?` (+ optional dated suffix)
+///     * `command-r(-plus)?` (+ optional dated suffix as `YYYYMMDD` or `MM-YYYY`)
 ///     * (`command-light` INTENTIONALLY omitted per R2 Backend F4 —
 ///        uses different vocab; falls to Tier 3 until vendored.)
 ///
@@ -401,8 +401,14 @@ const RAW_ENTRIES: &[(&str, EncoderResolver)] = &[
 #[cfg(feature = "cohere")]
 const COHERE_ENTRIES: &[(&str, EncoderResolver)] = &[
     // `command-r-plus` must precede `command-r` for first-match-wins.
-    (r"^command-r-plus(-\d{8})?$", EncoderResolver::Cohere),
-    (r"^command-r(-\d{8})?$", EncoderResolver::Cohere),
+    (
+        r"^command-r-plus(?:-\d{8}|-\d{2}-\d{4})?$",
+        EncoderResolver::Cohere,
+    ),
+    (
+        r"^command-r(?:-\d{8}|-\d{2}-\d{4})?$",
+        EncoderResolver::Cohere,
+    ),
     // Bedrock + cross-region prefix support per R2 B1.
     (
         r"^(?:[a-z][a-z0-9-]*\.)?cohere\.command(-r)?(-plus)?-v\d+:\d+$",
@@ -840,6 +846,22 @@ mod tests {
         // match the broader pattern.
         let t = table();
         let e = t.lookup("command-r-plus").expect("hit");
+        assert_eq!(e.kind, EncoderKind::Cohere);
+    }
+
+    #[cfg(feature = "cohere")]
+    #[test]
+    fn command_r_month_year_dated_routes_to_cohere() {
+        let t = table();
+        let e = t.lookup("command-r-08-2024").expect("hit");
+        assert_eq!(e.kind, EncoderKind::Cohere);
+    }
+
+    #[cfg(feature = "cohere")]
+    #[test]
+    fn command_r_plus_month_year_dated_routes_to_cohere() {
+        let t = table();
+        let e = t.lookup("command-r-plus-08-2024").expect("hit");
         assert_eq!(e.kind, EncoderKind::Cohere);
     }
 
