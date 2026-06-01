@@ -197,6 +197,71 @@ async fn seed_outcome_pair(
     .await;
 }
 
+async fn seed_sparse_outcome_pair(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    seq: i64,
+    age_days: i32,
+    actual_output_tokens: i64,
+) {
+    let decision_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let decision_event_id = Uuid::new_v4();
+    let outcome_event_id = Uuid::new_v4();
+
+    insert_global_key(
+        pool,
+        decision_event_id,
+        tenant_id,
+        Some(decision_id),
+        "spendguard.audit.decision",
+        age_days,
+    )
+    .await;
+    insert_canonical_event(CanonicalSeed {
+        pool,
+        event_id: decision_event_id,
+        tenant_id,
+        decision_id: Some(decision_id),
+        run_id: Some(run_id),
+        event_type: "spendguard.audit.decision",
+        seq: seq * 2,
+        age_days,
+        actual_input_tokens: None,
+        actual_output_tokens: None,
+        model: Some("gpt-4o-mini"),
+        agent_id: Some("agent-alpha"),
+        prompt_class: Some("chat_short"),
+    })
+    .await;
+
+    insert_global_key(
+        pool,
+        outcome_event_id,
+        tenant_id,
+        Some(decision_id),
+        "spendguard.audit.outcome",
+        age_days,
+    )
+    .await;
+    insert_canonical_event(CanonicalSeed {
+        pool,
+        event_id: outcome_event_id,
+        tenant_id,
+        decision_id: Some(decision_id),
+        run_id: Some(run_id),
+        event_type: "spendguard.audit.outcome",
+        seq: seq * 2 + 1,
+        age_days,
+        actual_input_tokens: Some(42),
+        actual_output_tokens: Some(actual_output_tokens),
+        model: None,
+        agent_id: None,
+        prompt_class: None,
+    })
+    .await;
+}
+
 async fn insert_global_key(
     pool: &PgPool,
     event_id: Uuid,
@@ -339,6 +404,55 @@ async fn cycle_e2e_postgres_populates_output_distribution_cache() {
     .expect("read cache row through RLS");
     assert_eq!(row.get::<i32, _>("sample_size_7d"), 8);
     assert_eq!(row.get::<i32, _>("sample_size_30d"), 16);
+    tx.commit().await.expect("commit RLS read tx");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cycle_e2e_postgres_joins_sparse_outcomes_to_decision_mirrors() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let tenant_id = Uuid::new_v4();
+
+    for idx in 0..4 {
+        seed_sparse_outcome_pair(&fx.owner_pool, tenant_id, idx, 1, 100 + idx).await;
+    }
+    for idx in 4..8 {
+        seed_sparse_outcome_pair(&fx.owner_pool, tenant_id, idx, 10, 180 + idx).await;
+    }
+
+    let aggregates = aggregate_output_distribution(&fx.app_pool, tenant_id)
+        .await
+        .expect("aggregate sparse outcome distribution");
+    assert_eq!(aggregates.len(), 1);
+    assert_eq!(aggregates[0].model, "gpt-4o-mini");
+    assert_eq!(aggregates[0].agent_id, "agent-alpha");
+    assert_eq!(aggregates[0].prompt_class, "chat_short");
+    assert_eq!(aggregates[0].sample_size_7d, Some(4));
+    assert_eq!(aggregates[0].sample_size_30d, Some(8));
+    assert_eq!(aggregates[0].baseline_sample_size, Some(4));
+
+    let mut tx = fx.app_pool.begin().await.expect("begin RLS read tx");
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+        .bind(tenant_id.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("set RLS tenant");
+    let rows: i64 = sqlx::query_scalar(
+        r#"
+        SELECT count(*)
+        FROM output_distribution_cache
+        WHERE tenant_id = $1
+          AND model = 'gpt-4o-mini'
+          AND agent_id = 'agent-alpha'
+          AND prompt_class = 'chat_short'
+        "#,
+    )
+    .bind(tenant_id)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("read joined cache row through RLS");
+    assert_eq!(rows, 1);
     tx.commit().await.expect("commit RLS read tx");
 }
 

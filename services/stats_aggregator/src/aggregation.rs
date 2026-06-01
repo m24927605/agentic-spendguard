@@ -232,28 +232,40 @@ pub async fn aggregate_output_distribution(
     // base64-decoded JSON path. ingest_at not recorded_at (matches the
     // real canonical_events.ingest_at). recorded_month partition-prune
     // predicate (R2 M7) pins the planner to active partitions.
+    //
+    // GA_07 R5 arbitration: sidecar commit/outcome rows are intentionally
+    // sparse; the paired decision row is the authoritative source for
+    // predictor bucket mirrors. Aggregate actual output tokens from
+    // outcome rows, then join by decision_id to recover the decision's
+    // (model, agent_id, prompt_class) when the outcome did not duplicate
+    // those fields.
     let agg_30d = sqlx::query(
         r#"
         SELECT
-          model,
-          agent_id,
-          prompt_class,
-          percentile_cont(0.50) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p50_30d,
-          percentile_cont(0.95) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p95_30d,
-          percentile_cont(0.99) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p99_30d,
-          avg(actual_output_tokens)::REAL AS mean_30d,
-          stddev_samp(actual_output_tokens)::REAL AS stddev_30d,
+          COALESCE(outcome.model, decision.model) AS model,
+          COALESCE(outcome.agent_id, decision.agent_id) AS agent_id,
+          COALESCE(outcome.prompt_class, decision.prompt_class) AS prompt_class,
+          percentile_cont(0.50) WITHIN GROUP (ORDER BY outcome.actual_output_tokens)::REAL AS p50_30d,
+          percentile_cont(0.95) WITHIN GROUP (ORDER BY outcome.actual_output_tokens)::REAL AS p95_30d,
+          percentile_cont(0.99) WITHIN GROUP (ORDER BY outcome.actual_output_tokens)::REAL AS p99_30d,
+          avg(outcome.actual_output_tokens)::REAL AS mean_30d,
+          stddev_samp(outcome.actual_output_tokens)::REAL AS stddev_30d,
           count(*)::INT AS sample_size_30d
-        FROM canonical_events
-        WHERE event_type = 'spendguard.audit.outcome'
-          AND actual_output_tokens IS NOT NULL
-          AND ingest_at >= now() - interval '30 days'
-          AND recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
-          AND tenant_id = $1
-          AND model IS NOT NULL
-          AND agent_id IS NOT NULL
-          AND prompt_class IS NOT NULL
-        GROUP BY model, agent_id, prompt_class
+        FROM canonical_events outcome
+        LEFT JOIN canonical_events decision
+          ON decision.tenant_id = outcome.tenant_id
+         AND decision.decision_id = outcome.decision_id
+         AND decision.event_type = 'spendguard.audit.decision'
+         AND decision.recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
+        WHERE outcome.event_type = 'spendguard.audit.outcome'
+          AND outcome.actual_output_tokens IS NOT NULL
+          AND outcome.ingest_at >= now() - interval '30 days'
+          AND outcome.recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
+          AND outcome.tenant_id = $1
+          AND COALESCE(outcome.model, decision.model) IS NOT NULL
+          AND COALESCE(outcome.agent_id, decision.agent_id) IS NOT NULL
+          AND COALESCE(outcome.prompt_class, decision.prompt_class) IS NOT NULL
+        GROUP BY 1, 2, 3
         "#,
     )
     .bind(tenant_id)
@@ -264,25 +276,30 @@ pub async fn aggregate_output_distribution(
     let agg_7d = sqlx::query(
         r#"
         SELECT
-          model,
-          agent_id,
-          prompt_class,
-          percentile_cont(0.50) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p50_7d,
-          percentile_cont(0.95) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p95_7d,
-          percentile_cont(0.99) WITHIN GROUP (ORDER BY actual_output_tokens)::REAL AS p99_7d,
-          avg(actual_output_tokens)::REAL AS mean_7d,
-          stddev_samp(actual_output_tokens)::REAL AS stddev_7d,
+          COALESCE(outcome.model, decision.model) AS model,
+          COALESCE(outcome.agent_id, decision.agent_id) AS agent_id,
+          COALESCE(outcome.prompt_class, decision.prompt_class) AS prompt_class,
+          percentile_cont(0.50) WITHIN GROUP (ORDER BY outcome.actual_output_tokens)::REAL AS p50_7d,
+          percentile_cont(0.95) WITHIN GROUP (ORDER BY outcome.actual_output_tokens)::REAL AS p95_7d,
+          percentile_cont(0.99) WITHIN GROUP (ORDER BY outcome.actual_output_tokens)::REAL AS p99_7d,
+          avg(outcome.actual_output_tokens)::REAL AS mean_7d,
+          stddev_samp(outcome.actual_output_tokens)::REAL AS stddev_7d,
           count(*)::INT AS sample_size_7d
-        FROM canonical_events
-        WHERE event_type = 'spendguard.audit.outcome'
-          AND actual_output_tokens IS NOT NULL
-          AND ingest_at >= now() - interval '7 days'
-          AND recorded_month >= DATE_TRUNC('month', now() - interval '7 days')::DATE
-          AND tenant_id = $1
-          AND model IS NOT NULL
-          AND agent_id IS NOT NULL
-          AND prompt_class IS NOT NULL
-        GROUP BY model, agent_id, prompt_class
+        FROM canonical_events outcome
+        LEFT JOIN canonical_events decision
+          ON decision.tenant_id = outcome.tenant_id
+         AND decision.decision_id = outcome.decision_id
+         AND decision.event_type = 'spendguard.audit.decision'
+         AND decision.recorded_month >= DATE_TRUNC('month', now() - interval '7 days')::DATE
+        WHERE outcome.event_type = 'spendguard.audit.outcome'
+          AND outcome.actual_output_tokens IS NOT NULL
+          AND outcome.ingest_at >= now() - interval '7 days'
+          AND outcome.recorded_month >= DATE_TRUNC('month', now() - interval '7 days')::DATE
+          AND outcome.tenant_id = $1
+          AND COALESCE(outcome.model, decision.model) IS NOT NULL
+          AND COALESCE(outcome.agent_id, decision.agent_id) IS NOT NULL
+          AND COALESCE(outcome.prompt_class, decision.prompt_class) IS NOT NULL
+        GROUP BY 1, 2, 3
         "#,
     )
     .bind(tenant_id)
@@ -296,23 +313,28 @@ pub async fn aggregate_output_distribution(
     let agg_baseline = sqlx::query(
         r#"
         SELECT
-          model,
-          agent_id,
-          prompt_class,
-          avg(actual_output_tokens)::REAL AS baseline_mean,
-          stddev_samp(actual_output_tokens)::REAL AS baseline_stddev,
+          COALESCE(outcome.model, decision.model) AS model,
+          COALESCE(outcome.agent_id, decision.agent_id) AS agent_id,
+          COALESCE(outcome.prompt_class, decision.prompt_class) AS prompt_class,
+          avg(outcome.actual_output_tokens)::REAL AS baseline_mean,
+          stddev_samp(outcome.actual_output_tokens)::REAL AS baseline_stddev,
           count(*)::INT AS baseline_sample_size
-        FROM canonical_events
-        WHERE event_type = 'spendguard.audit.outcome'
-          AND actual_output_tokens IS NOT NULL
-          AND ingest_at < now() - interval '7 days'
-          AND ingest_at >= now() - interval '30 days'
-          AND recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
-          AND tenant_id = $1
-          AND model IS NOT NULL
-          AND agent_id IS NOT NULL
-          AND prompt_class IS NOT NULL
-        GROUP BY model, agent_id, prompt_class
+        FROM canonical_events outcome
+        LEFT JOIN canonical_events decision
+          ON decision.tenant_id = outcome.tenant_id
+         AND decision.decision_id = outcome.decision_id
+         AND decision.event_type = 'spendguard.audit.decision'
+         AND decision.recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
+        WHERE outcome.event_type = 'spendguard.audit.outcome'
+          AND outcome.actual_output_tokens IS NOT NULL
+          AND outcome.ingest_at < now() - interval '7 days'
+          AND outcome.ingest_at >= now() - interval '30 days'
+          AND outcome.recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
+          AND outcome.tenant_id = $1
+          AND COALESCE(outcome.model, decision.model) IS NOT NULL
+          AND COALESCE(outcome.agent_id, decision.agent_id) IS NOT NULL
+          AND COALESCE(outcome.prompt_class, decision.prompt_class) IS NOT NULL
+        GROUP BY 1, 2, 3
         "#,
     )
     .bind(tenant_id)

@@ -12,6 +12,7 @@ DEMO_MODE="default"
 EVIDENCE_DIR="$ROOT/docs/reviews/ga-readiness/GA_07_soak_harness"
 MAX_OUTBOX_LAG_SECONDS="${MAX_OUTBOX_LAG_SECONDS:-30}"
 MAX_MEMORY_GROWTH_BYTES="${MAX_MEMORY_GROWTH_BYTES:-268435456}"
+MAX_STATS_CACHE_AGE_SECONDS="${MAX_STATS_CACHE_AGE_SECONDS:-180}"
 HTTP_CONNECT_TIMEOUT_SECONDS="${HTTP_CONNECT_TIMEOUT_SECONDS:-2}"
 HTTP_MAX_TIME_SECONDS="${HTTP_MAX_TIME_SECONDS:-5}"
 RESET_STACK=1
@@ -194,6 +195,55 @@ wait_for_metric_positive() {
     sleep 2
   done
   echo "timed out waiting for $label metric $metric to become positive" >&2
+  return 1
+}
+
+stats_cache_status() {
+  { psql_db spendguard_canonical "
+      SELECT set_config('app.current_tenant_id', '$TENANT_ID', true);
+      WITH output_cache AS (
+        SELECT
+          count(*)::int AS rows,
+          COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(computed_at)))::bigint, 999999) AS age
+        FROM output_distribution_cache
+        WHERE tenant_id = '$TENANT_ID'
+      ),
+      run_cache AS (
+        SELECT
+          count(*)::int AS rows,
+          COALESCE(EXTRACT(EPOCH FROM (clock_timestamp() - max(computed_at)))::bigint, 999999) AS age
+        FROM run_length_distribution_cache
+        WHERE tenant_id = '$TENANT_ID'
+      )
+      SELECT output_cache.rows, output_cache.age, run_cache.rows, run_cache.age
+      FROM output_cache CROSS JOIN run_cache;
+    " | tail -n1; } 2>&1
+}
+
+wait_for_required_stats_cache() {
+  local status
+  local output_rows
+  local output_age
+  local run_rows
+  local run_age
+  local last_status=""
+  for _ in $(seq 1 120); do
+    if status="$(stats_cache_status)"; then
+      last_status="$status"
+      IFS='|' read -r output_rows output_age run_rows run_age <<<"$status"
+      if [[ "$output_rows" =~ ^[0-9]+$ && "$output_age" =~ ^[0-9]+$ \
+        && "$run_rows" =~ ^[0-9]+$ && "$run_age" =~ ^[0-9]+$ \
+        && "$output_rows" -gt 0 && "$run_rows" -gt 0 \
+        && "$output_age" -le "$MAX_STATS_CACHE_AGE_SECONDS" \
+        && "$run_age" -le "$MAX_STATS_CACHE_AGE_SECONDS" ]]; then
+        return 0
+      fi
+    else
+      last_status="$status"
+    fi
+    sleep 2
+  done
+  echo "required stats caches not ready for tenant $TENANT_ID: ${last_status:-no status} (max_age=${MAX_STATS_CACHE_AGE_SECONDS}s)" >&2
   return 1
 }
 
@@ -426,6 +476,7 @@ append_snapshot() {
   SNAPSHOTS_FILE="$SNAPSHOTS_FILE" \
   MAX_OUTBOX_LAG_SECONDS="$MAX_OUTBOX_LAG_SECONDS" \
   MAX_MEMORY_GROWTH_BYTES="$MAX_MEMORY_GROWTH_BYTES" \
+  MAX_STATS_CACHE_AGE_SECONDS="$MAX_STATS_CACHE_AGE_SECONDS" \
   python3 - <<'PY'
 import json
 import os
@@ -528,6 +579,19 @@ if int(os.environ["STATS_ERRORS"]) != 0:
 last_cycle = int(os.environ["STATS_LAST_CYCLE"])
 if last_cycle <= 0 or snapshot_unix - last_cycle > 180:
     failures.append(f"stats_aggregator last cycle is stale: {snapshot_unix - last_cycle if last_cycle else 'never'}s")
+max_stats_cache_age = int(os.environ["MAX_STATS_CACHE_AGE_SECONDS"])
+if output_cache_count <= 0:
+    failures.append("output_distribution_cache has no rows for the soak tenant")
+if output_cache_age > max_stats_cache_age:
+    failures.append(
+        f"output_distribution_cache freshness {output_cache_age}s exceeds {max_stats_cache_age}s"
+    )
+if run_cache_count <= 0:
+    failures.append("run_length_distribution_cache has no rows for the soak tenant")
+if run_cache_age > max_stats_cache_age:
+    failures.append(
+        f"run_length_distribution_cache freshness {run_cache_age}s exceeds {max_stats_cache_age}s"
+    )
 if int(os.environ["SVID_STATUS"]) != 0:
     failures.append("SVID subject probe failed")
 if int(os.environ["VERIFY_STATUS"]) != 0:
@@ -610,6 +674,8 @@ write_summary() {
   STARTED_AT="$started_at" \
   FINISHED_AT="$finished_at" \
   BOOT_STARTED_AT="$BOOT_STARTED_AT" \
+  PREFLIGHT_STARTED_AT="$PREFLIGHT_STARTED_AT" \
+  PREFLIGHT_FINISHED_AT="$PREFLIGHT_FINISHED_AT" \
   RESULT="$result" \
   DURATION_SECONDS="$DURATION_SECONDS" \
   INTERVAL_SECONDS="$INTERVAL_SECONDS" \
@@ -644,6 +710,9 @@ extra_failures = [
 failures = extra_failures + [
     f for snapshot in snapshots for f in snapshot.get("failures", [])
 ]
+snapshot_window_seconds = 0
+if snapshots:
+    snapshot_window_seconds = int(snapshots[-1]["elapsed_seconds"])
 summary = {
     "result": os.environ["RESULT"],
     "commit_sha": os.environ["GIT_COMMIT_SHA"],
@@ -656,10 +725,14 @@ summary = {
     "git_dirty": bool(os.environ["GIT_SOURCE_STATUS"].strip()),
     "git_status": [line for line in os.environ["GIT_SOURCE_STATUS"].splitlines() if line.strip()],
     "boot_started_at": os.environ["BOOT_STARTED_AT"],
+    "preflight_started_at": os.environ["PREFLIGHT_STARTED_AT"],
+    "preflight_finished_at": os.environ["PREFLIGHT_FINISHED_AT"],
     "started_at": os.environ["STARTED_AT"],
     "finished_at": os.environ["FINISHED_AT"],
+    "requested_duration_seconds": int(os.environ["DURATION_SECONDS"]),
     "duration_seconds": int(os.environ["DURATION_SECONDS"]),
     "interval_seconds": int(os.environ["INTERVAL_SECONDS"]),
+    "snapshot_window_seconds": snapshot_window_seconds,
     "profile": os.environ["PROFILE"],
     "demo_mode": os.environ["DEMO_MODE"],
     "snapshot_count": len(snapshots),
@@ -688,6 +761,8 @@ BASELINE_FILE="$EVIDENCE_DIR/ga_soak_baseline.json"
 rm -f "$SNAPSHOTS_FILE" "$SUMMARY_FILE" "$BASELINE_FILE"
 
 BOOT_STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+PREFLIGHT_STARTED_AT=""
+PREFLIGHT_FINISHED_AT=""
 
 echo "[soak] profile=$PROFILE duration=${DURATION_SECONDS}s interval=${INTERVAL_SECONDS}s demo_mode=$DEMO_MODE"
 if [[ "$RESET_STACK" -eq 1 ]]; then
@@ -714,28 +789,33 @@ wait_for_http "http://127.0.0.1:9099/healthz" "tokenizer healthz"
 wait_for_http "http://127.0.0.1:9094/metrics" "control-plane metrics"
 wait_for_metric_positive "http://127.0.0.1:9101/metrics" "spendguard_stats_aggregator_cycles_total" "stats-aggregator cycle"
 
-STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-STARTED_UNIX="$(date -u +%s)"
 PREFLIGHT_FAILURES=""
 RESULT="pass"
 
+PREFLIGHT_STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 echo "[soak] validating real SVID/mTLS test once before sustained snapshots"
 run_preflight_gate "Rust SVID/mTLS test" \
   cargo test --manifest-path services/output_predictor/Cargo.toml --test plugin_svid_mtls -- --nocapture || RESULT="fail"
 run_preflight_gate "Python SVID conformance test" \
   python3 -m pytest contrib/output_predictor_template/conformance_test.py -q -k 'client_svid' || RESULT="fail"
+run_preflight_gate "stats cache warmup" wait_for_required_stats_cache || RESULT="fail"
+PREFLIGHT_FINISHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 if [[ "$RESULT" != "pass" ]]; then
   FINISHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
-  write_summary "$STARTED_AT" "$FINISHED_AT" "$RESULT" "$PREFLIGHT_FAILURES"
+  write_summary "" "$FINISHED_AT" "$RESULT" "$PREFLIGHT_FAILURES"
   echo "[soak] FAIL: see $SUMMARY_FILE" >&2
   exit 1
 fi
 
+STARTED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+STARTED_UNIX="$(date -u +%s)"
 INDEX=0
 while true; do
   # append_snapshot has explicit return guards on each probe so the loop can
   # still write a structured failure summary without making probes fail-open.
+  SNAPSHOT_STARTED_UNIX="$(date -u +%s)"
+  SNAPSHOT_ELAPSED=$((SNAPSHOT_STARTED_UNIX - STARTED_UNIX))
   append_snapshot "$INDEX" "$STARTED_UNIX" "$BASELINE_FILE" || RESULT="fail"
   if [[ "$RESULT" != "pass" ]]; then
     break
@@ -743,10 +823,21 @@ while true; do
   NOW_UNIX="$(date -u +%s)"
   ELAPSED=$((NOW_UNIX - STARTED_UNIX))
   if [[ "$ELAPSED" -ge "$DURATION_SECONDS" ]]; then
+    if [[ "$SNAPSHOT_ELAPSED" -lt "$DURATION_SECONDS" ]]; then
+      INDEX=$((INDEX + 1))
+      append_snapshot "$INDEX" "$STARTED_UNIX" "$BASELINE_FILE" || RESULT="fail"
+    fi
     break
   fi
   INDEX=$((INDEX + 1))
-  sleep "$INTERVAL_SECONDS"
+  REMAINING=$((DURATION_SECONDS - ELAPSED))
+  SLEEP_SECONDS="$INTERVAL_SECONDS"
+  if [[ "$REMAINING" -lt "$SLEEP_SECONDS" ]]; then
+    SLEEP_SECONDS="$REMAINING"
+  fi
+  if [[ "$SLEEP_SECONDS" -gt 0 ]]; then
+    sleep "$SLEEP_SECONDS"
+  fi
 done
 
 FINISHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
