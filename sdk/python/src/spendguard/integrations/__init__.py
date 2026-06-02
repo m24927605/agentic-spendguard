@@ -2,7 +2,9 @@
 
 Each integration is gated behind an optional dependency:
 
-  pip install spendguard-sdk[pydantic-ai]    # spendguard.integrations.pydantic_ai
+  # pydantic-ai auto-install is temporarily fail-closed due to
+  # CVE-2026-25580; install a vetted non-vulnerable upstream release
+  # when available.
   pip install spendguard-sdk[langchain]      # spendguard.integrations.langchain
   pip install spendguard-sdk[langgraph]      # spendguard.integrations.langgraph
   pip install spendguard-sdk[openai-agents]  # spendguard.integrations.openai_agents

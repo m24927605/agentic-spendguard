@@ -13,7 +13,11 @@ immutable audit chain.
 pip install spendguard-sdk
 
 # With the integration you need
-pip install 'spendguard-sdk[pydantic-ai]'
+# Pydantic-AI auto-install is temporarily fail-closed because
+# CVE-2026-25580 affects pydantic-ai/pydantic-ai-slim before 1.56.0,
+# and PyPI does not currently expose a fixed 1.56.0+ release.
+# Install spendguard-sdk plus a vetted non-vulnerable pydantic-ai
+# release when upstream publishes one.
 pip install 'spendguard-sdk[langchain]'
 pip install 'spendguard-sdk[langgraph]'
 pip install 'spendguard-sdk[openai-agents]'

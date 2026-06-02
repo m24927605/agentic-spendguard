@@ -6,7 +6,9 @@ Core surface (always available):
 
 Framework integrations are optional (install via extras):
 
-    pip install spendguard-sdk[pydantic-ai]
+    # pydantic-ai auto-install is temporarily fail-closed due to
+    # CVE-2026-25580; install a vetted non-vulnerable upstream release
+    # when available.
     pip install spendguard-sdk[langchain]
     pip install spendguard-sdk[langgraph]
     pip install spendguard-sdk[openai-agents]

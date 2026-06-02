@@ -49,8 +49,8 @@ jobs:
             echo "$out" | head -20
             exit 1
           fi
-          # Expect at least one fail() call to have triggered.
-          echo "$out" | grep -q -E "(fail|CHANGE_ME|required under chart.profile=production)" || {
+          # Expect at least one production safety validation to have triggered.
+          echo "$out" | grep -q -E "(CHANGE_ME|required under chart.profile=production|must be .* under chart.profile=production)" || {
             echo "::error::Expected a fail() message from validations.yaml / sidecar.yaml / outbox-forwarder.yaml / canonical-ingest.yaml gates; got:"
             echo "$out" | head -20
             exit 1
@@ -108,14 +108,20 @@ jobs:
 
       - name: Install kind
         run: |
-          curl -sL https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64 -o /usr/local/bin/kind
-          chmod +x /usr/local/bin/kind
+          install -d "$RUNNER_TEMP/bin"
+          curl -fsSL https://kind.sigs.k8s.io/dl/v0.31.0/kind-linux-amd64 -o "$RUNNER_TEMP/bin/kind"
+          chmod +x "$RUNNER_TEMP/bin/kind"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
           kind version
 
       - name: Install kubectl
         run: |
-          curl -sL https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl -o /usr/local/bin/kubectl
-          chmod +x /usr/local/bin/kubectl
+          install -d "$RUNNER_TEMP/bin"
+          curl -fsSL https://dl.k8s.io/release/v1.31.0/bin/linux/amd64/kubectl -o "$RUNNER_TEMP/bin/kubectl"
+          chmod +x "$RUNNER_TEMP/bin/kubectl"
+          echo "$RUNNER_TEMP/bin" >> "$GITHUB_PATH"
+          export PATH="$RUNNER_TEMP/bin:$PATH"
           kubectl version --client
 
       - name: Run kind validation script (BUILD_IMAGES=1, STRICT_READY=1)
@@ -131,6 +137,14 @@ jobs:
       - name: Dump pod state on failure
         if: failure()
         run: |
+          if ! command -v kubectl >/dev/null 2>&1; then
+            echo "kubectl is not installed; skipping pod dump."
+            exit 0
+          fi
+          if ! kubectl config get-contexts -o name | grep -qx 'kind-spendguard-validate'; then
+            echo "kind-spendguard-validate context is not available; skipping pod dump."
+            exit 0
+          fi
           kubectl --context kind-spendguard-validate get pods -A
           for pod in $(kubectl --context kind-spendguard-validate get pods -n spendguard -o name); do
             echo "=== $pod ==="
@@ -139,4 +153,9 @@ jobs:
 
       - name: Tear down kind cluster
         if: always()
-        run: kind delete cluster --name spendguard-validate
+        run: |
+          if command -v kind >/dev/null 2>&1; then
+            kind delete cluster --name spendguard-validate
+          else
+            echo "kind is not installed; skipping cluster teardown."
+          fi

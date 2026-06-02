@@ -83,8 +83,10 @@ try:
     from pydantic_ai.models import Model as _PydanticAIModel
 except ImportError as exc:  # pragma: no cover
     raise ImportError(
-        "spendguard.integrations.pydantic_ai requires the [pydantic-ai] "
-        "extra. Install with: pip install 'spendguard-sdk[pydantic-ai]'"
+        "spendguard.integrations.pydantic_ai requires pydantic-ai. "
+        "SpendGuard no longer installs vulnerable pydantic-ai 0.x releases "
+        "via its optional extra; install a vetted non-vulnerable pydantic-ai "
+        "release when available."
     ) from exc
 
 if TYPE_CHECKING:

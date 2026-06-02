@@ -32,8 +32,14 @@ description: >-
 ## Setup (60 seconds)
 
 ```bash
-pip install 'spendguard-sdk[pydantic-ai]'
+pip install spendguard-sdk
 ```
+
+Pydantic-AI auto-install is temporarily fail-closed because
+CVE-2026-25580 affects `pydantic-ai` / `pydantic-ai-slim` before
+1.56.0, and PyPI does not currently expose a fixed 1.56.0+ release.
+Install a vetted non-vulnerable `pydantic-ai` release in the same
+environment when upstream publishes one.
 
 You also need a running SpendGuard sidecar reachable on a Unix Domain
 Socket. The fastest path is the demo stack:

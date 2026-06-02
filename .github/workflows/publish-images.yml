@@ -46,7 +46,7 @@ jobs:
           persist-credentials: false
 
       - name: Trivy repository scan
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           scan-type: fs
           scan-ref: .
@@ -135,7 +135,7 @@ jobs:
 
       - name: Trivy pushed image scan
         if: github.event_name != 'pull_request'
-        uses: aquasecurity/trivy-action@0.28.0
+        uses: aquasecurity/trivy-action@v0.36.0
         with:
           image-ref: ${{ env.REGISTRY }}/${{ env.IMAGE_OWNER }}/spendguard/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           severity: CRITICAL,HIGH
