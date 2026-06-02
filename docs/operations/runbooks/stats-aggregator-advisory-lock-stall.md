@@ -22,11 +22,11 @@ FROM pg_locks l
 JOIN pg_stat_activity a ON a.pid = l.pid
 WHERE l.locktype = 'advisory'
   AND l.granted
-  AND l.classid = ((5994358719602389587::bigint >> 32) & 4294967295)::oid
-  AND l.objid = (5994358719602389587::bigint & 4294967295)::oid;
+  AND l.classid = ((6003373350444290643::bigint >> 32) & 4294967295)::oid
+  AND l.objid = (6003373350444290643::bigint & 4294967295)::oid;
 ```
 
-The lock id is `5994358719602389587` (`0x5350444147475253`, `SPDAGGRS`) from `services/stats_aggregator/src/aggregation.rs`.
+The lock id is `6003373350444290643` (`0x5350444147475253`, `SPDAGGRS`) from `services/stats_aggregator/src/aggregation.rs`.
 
 ## Diagnosis
 
