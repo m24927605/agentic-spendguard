@@ -33,7 +33,7 @@ use spendguard_output_predictor::{
     endpoint_cache::EndpointCache,
     plugin_client::{PluginClient, PluginClientTls},
     proto::output_predictor::v1::output_predictor_server::OutputPredictorServer,
-    server::OutputPredictorSvc,
+    server::{OutputPredictorSvc, PredictRateLimiter},
 };
 
 #[tokio::main]
@@ -54,6 +54,8 @@ async fn main() -> Result<()> {
         profile = %cfg.profile,
         database_present = !cfg.database_url.is_empty(),
         cache_ttl_seconds = %cfg.cache_ttl_seconds,
+        predict_rate_limit_per_tenant_per_second = cfg.predict_rate_limit_per_tenant_per_second,
+        predict_rate_limit_tenant_capacity = cfg.predict_rate_limit_tenant_capacity,
         "starting spendguard-output-predictor"
     );
 
@@ -195,7 +197,11 @@ async fn main() -> Result<()> {
     }
 
     // ── Build service ─────────────────────────────────────────────
-    let svc = OutputPredictorSvc::new(
+    let rate_limiter = Arc::new(PredictRateLimiter::new(
+        cfg.predict_rate_limit_per_tenant_per_second,
+        cfg.predict_rate_limit_tenant_capacity,
+    ));
+    let svc = OutputPredictorSvc::new_with_rate_limiter(
         cache,
         context_window,
         cfg.unknown_model_context_window,
@@ -203,6 +209,7 @@ async fn main() -> Result<()> {
         plugin_client,
         plugin_breaker,
         Some(cold_start),
+        rate_limiter,
     );
     let tonic_svc = OutputPredictorServer::new(svc)
         // Match the tokenizer's DoS posture: 1 MiB decoded message
@@ -625,14 +632,15 @@ fn render_metrics() -> String {
         OUTPUT_DISTRIBUTION_CACHE_HIT_TOTAL, OUTPUT_DISTRIBUTION_CACHE_LOOKUP_TOTAL,
     };
     use spendguard_output_predictor::server::{
+        predict_latency_bucket_samples, predict_latency_count, predict_latency_sum_seconds,
+        predict_outcome_samples, predict_rate_limited_samples,
         CUSTOMER_PREDICTOR_CALL_FALL_TO_B_TOTAL, CUSTOMER_PREDICTOR_CALL_SUCCESS_TOTAL,
         CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL, FAILURE_BY_MODE_BREAKER_OPEN,
         FAILURE_BY_MODE_DESERIALIZATION_ERROR, FAILURE_BY_MODE_GRPC_ERROR,
         FAILURE_BY_MODE_INVALID_CONFIDENCE, FAILURE_BY_MODE_INVALID_OVERFLOW,
         FAILURE_BY_MODE_INVALID_ZERO_OR_NEGATIVE, FAILURE_BY_MODE_NOT_CONFIGURED,
         FAILURE_BY_MODE_NOT_SERVING, FAILURE_BY_MODE_TIMEOUT, FAILURE_BY_MODE_TLS_ERROR,
-        UNKNOWN_CONTEXT_WINDOW_TOTAL, predict_latency_bucket_samples, predict_latency_count,
-        predict_latency_sum_seconds, predict_outcome_samples,
+        UNKNOWN_CONTEXT_WINDOW_TOTAL,
     };
     use std::sync::atomic::Ordering;
     // SLICE_07 Phase E: surface the spec §9.1 customer_predictor_* counters.
@@ -646,6 +654,15 @@ fn render_metrics() -> String {
     for (outcome, value) in predict_outcome_samples() {
         body.push_str(&format!(
             "spendguard_output_predictor_predict_total{{outcome=\"{outcome}\"}} {value}\n"
+        ));
+    }
+    body.push_str(
+        "# HELP spendguard_output_predictor_rate_limited_total Predict RPCs rejected by the per-tenant rate limiter.\n\
+         # TYPE spendguard_output_predictor_rate_limited_total counter\n",
+    );
+    for (tenant_id, value) in predict_rate_limited_samples() {
+        body.push_str(&format!(
+            "spendguard_output_predictor_rate_limited_total{{tenant_id=\"{tenant_id}\"}} {value}\n"
         ));
     }
     body.push_str(
@@ -944,6 +961,8 @@ mod tests {
             database_url: "".into(),
             cache_ttl_seconds: 300,
             unknown_model_context_window: 8000,
+            predict_rate_limit_per_tenant_per_second: 1000,
+            predict_rate_limit_tenant_capacity: 4096,
             context_window_toml_path: "data/model_context_window.toml".into(),
             plugin_endpoint_database_url: "".into(),
             plugin_endpoint_cache_ttl_seconds: 60,
@@ -1014,6 +1033,8 @@ mod tests {
             database_url: "".into(),
             cache_ttl_seconds: 300,
             unknown_model_context_window: 8000,
+            predict_rate_limit_per_tenant_per_second: 1000,
+            predict_rate_limit_tenant_capacity: 4096,
             context_window_toml_path: "data/model_context_window.toml".into(),
             plugin_endpoint_database_url: "".into(),
             plugin_endpoint_cache_ttl_seconds: 60,
@@ -1035,6 +1056,7 @@ mod tests {
     fn render_metrics_contains_known_names() {
         let body = render_metrics();
         assert!(body.contains("spendguard_output_predictor_predict_total"));
+        assert!(body.contains("spendguard_output_predictor_rate_limited_total"));
         assert!(body.contains("spendguard_output_predictor_predict_latency_seconds_bucket"));
         assert!(body.contains("spendguard_output_predictor_cache_lookup_total"));
         assert!(body.contains("spendguard_output_predictor_cache_hit_total"));

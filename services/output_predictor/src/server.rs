@@ -26,10 +26,14 @@
 //! returns a 100% Strategy-A response with `predicted_b_tokens` unset,
 //! mirroring the spec §3.4 "A is always callable" invariant.
 
-use std::sync::Arc;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use lru::LruCache;
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, warn};
 
@@ -42,8 +46,8 @@ use crate::endpoint_cache::EndpointCache;
 use crate::fingerprint::FINGERPRINT_VERSION;
 use crate::plugin_client::PluginClient;
 use crate::proto::output_predictor::v1::{
-    PredictRequest, PredictResponse,
-    output_predictor_server::OutputPredictor as OutputPredictorTrait,
+    output_predictor_server::OutputPredictor as OutputPredictorTrait, PredictRequest,
+    PredictResponse,
 };
 use crate::selector::{self, Strategy};
 use crate::strategy_a;
@@ -81,6 +85,17 @@ pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_LE_1000_TOTAL: AtomicU64 = AtomicU64
 pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_INF_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_SUM_NS: AtomicU64 = AtomicU64::new(0);
 pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub const DEFAULT_PREDICT_RATE_LIMIT_PER_TENANT_PER_SECOND: u32 = 1000;
+pub const DEFAULT_PREDICT_RATE_LIMIT_TENANT_CAPACITY: usize = 4096;
+
+static OUTPUT_PREDICTOR_RATE_LIMITED_BY_TENANT: Lazy<Mutex<LruCache<uuid::Uuid, u64>>> =
+    Lazy::new(|| {
+        Mutex::new(LruCache::new(
+            NonZeroUsize::new(DEFAULT_PREDICT_RATE_LIMIT_TENANT_CAPACITY)
+                .expect("default tenant metric capacity is non-zero"),
+        ))
+    });
 
 pub fn predict_outcome_samples() -> [(&'static str, u64); 2] {
     [
@@ -146,6 +161,28 @@ pub fn predict_latency_sum_seconds() -> f64 {
 
 pub fn predict_latency_count() -> u64 {
     OUTPUT_PREDICTOR_PREDICT_LATENCY_COUNT.load(Ordering::Relaxed)
+}
+
+pub fn record_predict_rate_limited(tenant_id: uuid::Uuid) {
+    let mut counters = OUTPUT_PREDICTOR_RATE_LIMITED_BY_TENANT.lock();
+    match counters.get_mut(&tenant_id) {
+        Some(value) => {
+            *value = value.saturating_add(1);
+        }
+        None => {
+            counters.put(tenant_id, 1);
+        }
+    }
+}
+
+pub fn predict_rate_limited_samples() -> Vec<(String, u64)> {
+    let counters = OUTPUT_PREDICTOR_RATE_LIMITED_BY_TENANT.lock();
+    let mut samples = counters
+        .iter()
+        .map(|(tenant_id, value)| (tenant_id.to_string(), *value))
+        .collect::<Vec<_>>();
+    samples.sort_by(|a, b| a.0.cmp(&b.0));
+    samples
 }
 
 fn record_predict_metrics(ok: bool, elapsed: Duration) {
@@ -271,6 +308,74 @@ fn record_failure_metric(failure: &StrategyCFailure) {
     counter.fetch_add(1, Ordering::Relaxed);
 }
 
+#[derive(Debug)]
+struct TenantRateState {
+    tokens: f64,
+    last_refill: Instant,
+}
+
+#[derive(Debug)]
+pub struct PredictRateLimiter {
+    limit_per_second: u32,
+    tenants: Mutex<LruCache<uuid::Uuid, TenantRateState>>,
+}
+
+impl PredictRateLimiter {
+    pub fn new(limit_per_second: u32, tenant_capacity: usize) -> Self {
+        let capacity = NonZeroUsize::new(tenant_capacity.max(1))
+            .expect("tenant capacity is clamped to at least one");
+        Self {
+            limit_per_second,
+            tenants: Mutex::new(LruCache::new(capacity)),
+        }
+    }
+
+    pub fn disabled() -> Self {
+        Self::new(0, DEFAULT_PREDICT_RATE_LIMIT_TENANT_CAPACITY)
+    }
+
+    pub fn check(&self, tenant_id: uuid::Uuid) -> bool {
+        self.check_at(tenant_id, Instant::now())
+    }
+
+    fn check_at(&self, tenant_id: uuid::Uuid, now: Instant) -> bool {
+        if self.limit_per_second == 0 {
+            return true;
+        }
+
+        let burst = f64::from(self.limit_per_second);
+        let mut tenants = self.tenants.lock();
+        let state = match tenants.get_mut(&tenant_id) {
+            Some(state) => state,
+            None => {
+                tenants.put(
+                    tenant_id,
+                    TenantRateState {
+                        tokens: burst,
+                        last_refill: now,
+                    },
+                );
+                tenants
+                    .get_mut(&tenant_id)
+                    .expect("tenant state inserted into LRU cache")
+            }
+        };
+
+        let elapsed = now.saturating_duration_since(state.last_refill);
+        if !elapsed.is_zero() {
+            state.tokens = (state.tokens + elapsed.as_secs_f64() * burst).min(burst);
+            state.last_refill = now;
+        }
+
+        if state.tokens >= 1.0 {
+            state.tokens -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+}
+
 /// Service struct. Shares the in-memory cache layer + context-window
 /// table + Strategy C dependencies across all RPC handlers.
 ///
@@ -289,6 +394,7 @@ pub struct OutputPredictorSvc {
     endpoint_cache: Arc<EndpointCache>,
     plugin_client: Arc<PluginClient>,
     plugin_breaker: Arc<PluginCircuitBreaker>,
+    rate_limiter: Arc<PredictRateLimiter>,
     /// SLICE_08 cold-start L2 baseline table. None in skeleton tests
     /// that don't need the embedded TOML loaded (loader failure during
     /// test setup would mask the real test bug). Production always
@@ -306,6 +412,28 @@ impl OutputPredictorSvc {
         plugin_breaker: Arc<PluginCircuitBreaker>,
         cold_start: Option<Arc<ModelDefaultDistribution>>,
     ) -> Self {
+        Self::new_with_rate_limiter(
+            cache,
+            context_window,
+            unknown_model_context_window,
+            endpoint_cache,
+            plugin_client,
+            plugin_breaker,
+            cold_start,
+            Arc::new(PredictRateLimiter::disabled()),
+        )
+    }
+
+    pub fn new_with_rate_limiter(
+        cache: Arc<OutputDistributionCache>,
+        context_window: Arc<ContextWindowTable>,
+        unknown_model_context_window: i64,
+        endpoint_cache: Arc<EndpointCache>,
+        plugin_client: Arc<PluginClient>,
+        plugin_breaker: Arc<PluginCircuitBreaker>,
+        cold_start: Option<Arc<ModelDefaultDistribution>>,
+        rate_limiter: Arc<PredictRateLimiter>,
+    ) -> Self {
         Self {
             cache,
             context_window,
@@ -313,6 +441,7 @@ impl OutputPredictorSvc {
             endpoint_cache,
             plugin_client,
             plugin_breaker,
+            rate_limiter,
             cold_start,
         }
     }
@@ -340,6 +469,17 @@ impl OutputPredictorTrait for OutputPredictorSvc {
                 )));
             }
         };
+
+        if !self.rate_limiter.check(tenant_uuid) {
+            record_predict_rate_limited(tenant_uuid);
+            warn!(
+                tenant_id = %req.tenant_id,
+                "Predict RPC rate limit exceeded for tenant"
+            );
+            return Err(Status::resource_exhausted(
+                "Predict RPC rate limit exceeded for tenant",
+            ));
+        }
 
         // R2 M5: input validation. Length-bounded bucket-key fields +
         // class enum allow-list. Without these a caller can mint
@@ -600,6 +740,7 @@ impl OutputPredictorTrait for OutputPredictorSvc {
             classifier_version: CLASSIFIER_VERSION.to_string(),
             fingerprint_version: FINGERPRINT_VERSION.to_string(),
             prompt_class_fingerprint_used: fingerprint_used,
+            prediction_policy_used: req.prediction_policy.clone(),
             a_latency_ns,
             b_latency_ns,
             c_latency_ns,
@@ -612,7 +753,7 @@ impl OutputPredictorTrait for OutputPredictorSvc {
 mod tests {
     use super::*;
     use crate::context_window::ContextWindowTable;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     fn svc_skeleton() -> OutputPredictorSvc {
         // No DB pool → Strategy B always None; pure A path for input
@@ -659,6 +800,25 @@ mod tests {
             plugin_client,
             plugin_breaker,
             cold_start,
+        )
+    }
+
+    fn svc_with_rate_limiter(limit_per_second: u32) -> OutputPredictorSvc {
+        use crate::circuit_breaker::CircuitBreakerConfig;
+        let cache = OutputDistributionCache::new(None, Duration::from_secs(300));
+        let context_window = Arc::new(ContextWindowTable::empty());
+        let endpoint_cache = EndpointCache::with_default_ttl(None);
+        let plugin_client = PluginClient::new(None).expect("skeleton-mode constructor");
+        let plugin_breaker = PluginCircuitBreaker::new(CircuitBreakerConfig::default());
+        OutputPredictorSvc::new_with_rate_limiter(
+            cache,
+            context_window,
+            8000,
+            endpoint_cache,
+            plugin_client,
+            plugin_breaker,
+            None,
+            Arc::new(PredictRateLimiter::new(limit_per_second, 16)),
         )
     }
 
@@ -733,6 +893,72 @@ mod tests {
         // resolve the stub None future; that's microseconds. Verify
         // c is None per spec.
         assert!(resp.predicted_c_tokens.is_none());
+    }
+
+    #[tokio::test]
+    async fn predict_response_echoes_prediction_policy_used() {
+        let svc = svc_skeleton();
+        let mut req = valid_req();
+        req.prediction_policy = "ADAPTIVE_CEILING".into();
+        let resp = svc
+            .predict(Request::new(req))
+            .await
+            .expect("ok")
+            .into_inner();
+        assert_eq!(
+            resp.prediction_policy_used, "ADAPTIVE_CEILING",
+            "POST_GA_07 #161: response must echo the policy audited for the decision"
+        );
+    }
+
+    #[tokio::test]
+    async fn predict_rate_limit_is_per_tenant_and_records_metric() {
+        let svc = svc_with_rate_limiter(1);
+        let tenant_a = uuid::Uuid::new_v4();
+        let tenant_b = uuid::Uuid::new_v4();
+
+        let mut req_a = valid_req();
+        req_a.tenant_id = tenant_a.to_string();
+        svc.predict(Request::new(req_a.clone()))
+            .await
+            .expect("first request for tenant A fits bucket");
+
+        let err = svc
+            .predict(Request::new(req_a))
+            .await
+            .expect_err("second request for tenant A exceeds one-token bucket");
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+
+        let mut req_b = valid_req();
+        req_b.tenant_id = tenant_b.to_string();
+        svc.predict(Request::new(req_b))
+            .await
+            .expect("tenant B has an independent bucket");
+
+        let tenant_a_label = tenant_a.to_string();
+        assert!(
+            predict_rate_limited_samples()
+                .iter()
+                .any(|(tenant_id, count)| tenant_id == &tenant_a_label && *count >= 1),
+            "rate-limit metric must carry the throttled tenant_id label"
+        );
+    }
+
+    #[test]
+    fn predict_rate_limiter_refills_tokens_after_one_second() {
+        let limiter = PredictRateLimiter::new(1, 16);
+        let tenant = uuid::Uuid::new_v4();
+        let now = Instant::now();
+
+        assert!(limiter.check_at(tenant, now));
+        assert!(
+            !limiter.check_at(tenant, now),
+            "second same-window request should be throttled"
+        );
+        assert!(
+            limiter.check_at(tenant, now + Duration::from_secs(1)),
+            "bucket should refill at limit_per_second"
+        );
     }
 
     #[tokio::test]
