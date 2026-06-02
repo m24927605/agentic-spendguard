@@ -442,8 +442,9 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create configmap spendguard
     $(for f in "${REPO_ROOT}/services/control_plane/migrations"/*.sql; do echo --from-file="$(basename "$f")=$f"; done) \
     --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" create -f -
 
-# Write Helm values before optional image loading so BUILD_IMAGES=1 can
-# tag/load the exact fully-qualified image refs the chart renders.
+# Write Helm values before optional image loading so BUILD_IMAGES=1 or
+# LOAD_PUBLISHED_IMAGES=1 can tag/load the exact fully-qualified image
+# refs the chart renders.
 cat > "${WORK_DIR}/values.yaml" <<EOF
 chart:
   profile: demo
@@ -461,6 +462,43 @@ signing:
   profile: demo
   strictVerification: false
 EOF
+if [ -n "${KIND_IMAGE_TAG:-}" ]; then
+    cat >> "${WORK_DIR}/values.yaml" <<EOF
+ledger:
+  image:
+    tag: "${KIND_IMAGE_TAG}"
+canonicalIngest:
+  image:
+    tag: "${KIND_IMAGE_TAG}"
+controlPlane:
+  image:
+    tag: "${KIND_IMAGE_TAG}"
+sidecar:
+  image:
+    tag: "${KIND_IMAGE_TAG}"
+tokenizer:
+  image:
+    tag: "${KIND_IMAGE_TAG}"
+outputPredictor:
+  image:
+    tag: "${KIND_IMAGE_TAG}"
+runCostProjector:
+  image:
+    tag: "${KIND_IMAGE_TAG}"
+statsAggregator:
+  image:
+    tag: "${KIND_IMAGE_TAG}"
+webhookReceiver:
+  image:
+    tag: "${KIND_IMAGE_TAG}"
+outboxForwarder:
+  image:
+    tag: "${KIND_IMAGE_TAG}"
+ttlSweeper:
+  image:
+    tag: "${KIND_IMAGE_TAG}"
+EOF
+fi
 
 rendered_image_for_workload() {
     local workload="$1"
@@ -501,12 +539,28 @@ for svc in "${CHART_WORKLOADS[@]}"; do
 done
 
 # ---------------------------------------------------------------------
-# 5.5. (optional) Build chart service images locally + load into kind.
+# 5.5. (optional) Load chart service images into kind.
 #
 # Issue #61: without this step pods stay in ImagePullBackOff unless the
-# exact chart-rendered image refs are present on the kind node. Set
-# BUILD_IMAGES=1 to build via docker compose + kind load locally.
+# exact chart-rendered image refs are present on the kind node.
+# Set LOAD_PUBLISHED_IMAGES=1 to pull the rendered refs from the registry
+# and load them into kind. Set BUILD_IMAGES=1 to build via docker compose
+# + kind load locally.
 # ---------------------------------------------------------------------
+if [ "${LOAD_PUBLISHED_IMAGES:-0}" = "1" ] && [ "${BUILD_IMAGES:-0}" = "1" ]; then
+    log "FAIL: choose only one of LOAD_PUBLISHED_IMAGES=1 or BUILD_IMAGES=1"
+    exit 1
+fi
+
+if [ "${LOAD_PUBLISHED_IMAGES:-0}" = "1" ]; then
+    log "LOAD_PUBLISHED_IMAGES=1: pulling rendered images + loading into kind..."
+    for image_ref in "${RENDERED_IMAGE_REFS[@]}"; do
+        docker pull "${image_ref}"
+        kind load docker-image "${image_ref}" --name "${CLUSTER_NAME}"
+        log "  loaded ${image_ref} into kind"
+    done
+fi
+
 if [ "${BUILD_IMAGES:-0}" = "1" ]; then
     log "BUILD_IMAGES=1: building chart service images via docker compose..."
     (
@@ -537,10 +591,14 @@ fi
 # ---------------------------------------------------------------------
 log "helm install (chart.profile=demo)..."
 
-# Default Helm timeout is 5 minutes; bump to 10 if BUILD_IMAGES=1
+# Default Helm timeout is 5 minutes; bump to 10 if images are loaded
 # so the chart pods have time to actually reach Ready (cold pg
 # migrations + rust binary startup ~30-60s each in a single-node kind).
-HELM_TIMEOUT="${HELM_TIMEOUT:-$([ "${BUILD_IMAGES:-0}" = "1" ] && echo "600s" || echo "180s")}"
+if [ "${BUILD_IMAGES:-0}" = "1" ] || [ "${LOAD_PUBLISHED_IMAGES:-0}" = "1" ]; then
+    HELM_TIMEOUT="${HELM_TIMEOUT:-600s}"
+else
+    HELM_TIMEOUT="${HELM_TIMEOUT:-180s}"
+fi
 log "  helm --wait timeout=${HELM_TIMEOUT}"
 
 log "validating rendered workload inventory..."
@@ -657,13 +715,17 @@ for prefix in "${EXPECTED_PODS[@]}"; do
     esac
 done
 
-# Issue #61 slice 5: when BUILD_IMAGES=1 (images available), enforce
-# Ready strictly. Without BUILD_IMAGES, ImagePullBackOff is OK
+# Issue #61 slice 5: when images are loaded, enforce Ready strictly.
+# Without loaded images, ImagePullBackOff is OK
 # (structural validation only). CI's kind job uses ghcr.io images +
 # overrides values.yaml's image refs, so it should also reach Ready.
-STRICT_READY="${STRICT_READY:-$([ "${BUILD_IMAGES:-0}" = "1" ] && echo "1" || echo "0")}"
+if [ "${BUILD_IMAGES:-0}" = "1" ] || [ "${LOAD_PUBLISHED_IMAGES:-0}" = "1" ]; then
+    STRICT_READY="${STRICT_READY:-1}"
+else
+    STRICT_READY="${STRICT_READY:-0}"
+fi
 if [ "$STRICT_READY" = "1" ]; then
-    log "STRICT_READY=1: requiring Ready=${EXPECTED_COUNT}/${EXPECTED_COUNT} (BUILD_IMAGES=1 or CI with published images)"
+    log "STRICT_READY=1: requiring Ready=${EXPECTED_COUNT}/${EXPECTED_COUNT} (images loaded into kind)"
     if [ "$READY" -ne "$EXPECTED_COUNT" ]; then
         log "FAIL: STRICT_READY=1 expected Ready=${EXPECTED_COUNT}/${EXPECTED_COUNT} chart pods, got Ready=${READY}/${EXPECTED_COUNT}"
         exit 1

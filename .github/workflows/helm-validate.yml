@@ -17,6 +17,28 @@ on:
       - "scripts/helm-validate-kind.sh"
       - "scripts/helm-validate-test-values.yaml"
   workflow_dispatch:
+    inputs:
+      run_kind_e2e:
+        description: "Run full kind e2e install validation"
+        required: true
+        default: true
+        type: boolean
+      image_source:
+        description: "Image source for full kind e2e"
+        required: true
+        default: "published"
+        type: choice
+        options:
+          - published
+          - build
+  schedule:
+    # Nightly full kind e2e validation. Push/PR paths stay fast and rely
+    # on the template gate; manual dispatch can run this gate on demand.
+    - cron: "0 18 * * *"
+
+permissions:
+  contents: read
+  packages: read
 
 jobs:
   template:
@@ -93,13 +115,12 @@ jobs:
   kind:
     name: kind cluster install (demo profile)
     runs-on: ubuntu-latest
-    # Slow job: spins up kind + cert-manager + postgres + helm install +
-    # waits for pods Ready. Gated to main pushes + manual dispatch so PR
-    # iteration stays fast on the template job alone. Cold Rust image
-    # builds on GitHub hosted runners have exceeded 25 minutes; keep the
-    # job timeout high enough to distinguish a real readiness failure
-    # from compilation time.
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    # Slow job: spins up kind + postgres + helm install + waits for pods
+    # Ready. It is intentionally kept out of push/PR runs; cold building
+    # 11 Rust service images on GitHub hosted runners routinely dominates
+    # CI latency. Run it manually or nightly, using already-published
+    # sha-<commit> images by default.
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.run_kind_e2e)
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -127,14 +148,35 @@ jobs:
           export PATH="$RUNNER_TEMP/bin:$PATH"
           kubectl version --client
 
-      - name: Run kind validation script (BUILD_IMAGES=1, STRICT_READY=1)
-        # Issue #61: build chart service images in the runner's Docker
-        # daemon + kind load them. Sidesteps the registry-auth concern
-        # for PRs from forks (ghcr.io anonymous pulls would need the
-        # repo to be public). Sets STRICT_READY=1 so the kind job
-        # enforces all rendered workloads Ready (PR #60's lenient ImagePullBackOff=OK
-        # criterion is for the no-images-available local dev path).
-        run: BUILD_IMAGES=1 STRICT_READY=1 bash scripts/helm-validate-kind.sh
+      - name: Log in to GHCR
+        if: github.event_name == 'schedule' || inputs.image_source == 'published'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Run kind validation script (STRICT_READY=1)
+        run: |
+          image_source="${IMAGE_SOURCE:-published}"
+          case "$image_source" in
+            published)
+              short_sha="${GITHUB_SHA::7}"
+              KIND_IMAGE_TAG="sha-${short_sha}" \
+              LOAD_PUBLISHED_IMAGES=1 \
+              STRICT_READY=1 \
+              bash scripts/helm-validate-kind.sh
+              ;;
+            build)
+              BUILD_IMAGES=1 STRICT_READY=1 bash scripts/helm-validate-kind.sh
+              ;;
+            *)
+              echo "::error::unsupported image_source=${image_source}"
+              exit 1
+              ;;
+          esac
+        env:
+          IMAGE_SOURCE: ${{ inputs.image_source || 'published' }}
         timeout-minutes: 60
 
       - name: Dump pod state on failure
