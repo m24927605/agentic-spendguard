@@ -33,6 +33,7 @@ from typing import Any
 #   "decision"   → just call client.request_decision once and exit
 DEMO_MODE = os.environ.get("SPENDGUARD_DEMO_MODE", "agent")
 HANDSHAKE_TIMEOUT_S = float(os.environ.get("DEMO_HANDSHAKE_TIMEOUT_S", "30"))
+DEMO_DECISION_TIMEOUT_S = float(os.environ.get("SPENDGUARD_DEMO_DECISION_TIMEOUT_S", "5.0"))
 
 
 def _env(name: str) -> str:
@@ -41,6 +42,16 @@ def _env(name: str) -> str:
         print(f"FATAL: env var {name} required", file=sys.stderr)
         sys.exit(2)
     return val
+
+
+def _demo_client(*, socket_path: str, tenant_id: str) -> Any:
+    from spendguard import SpendGuardClient as _SpendGuardClient
+
+    return _SpendGuardClient(
+        socket_path=socket_path,
+        tenant_id=tenant_id,
+        decision_timeout_s=DEMO_DECISION_TIMEOUT_S,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +187,7 @@ async def run_decision_mode(also_invoice: bool = False) -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(
+            c = _demo_client(
                 socket_path=socket_path,
                 tenant_id=tenant_id,
             )
@@ -584,7 +595,7 @@ async def run_agent_mode(
         ]
 
     print(f"[demo] connecting to sidecar at {socket_path}")
-    async with SpendGuardClient(
+    async with _demo_client(
         socket_path=socket_path,
         tenant_id=tenant_id,
     ) as client:
@@ -686,7 +697,7 @@ async def run_m1_benchmark_runaway_loop_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -855,7 +866,7 @@ async def run_agt_composite_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -983,7 +994,7 @@ async def run_openai_agents_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -1156,7 +1167,7 @@ async def run_openai_agents_multistep_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -1295,7 +1306,7 @@ async def run_multi_provider_usd_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -1477,7 +1488,7 @@ async def run_langchain_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -1576,7 +1587,7 @@ async def run_langgraph_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -1673,7 +1684,7 @@ async def run_deny_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -1802,7 +1813,7 @@ async def run_release_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -1918,7 +1929,7 @@ async def run_ttl_sweep_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -2026,7 +2037,7 @@ async def run_approval_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -2304,7 +2315,7 @@ async def run_approval_hot_reload_mode() -> int:
     last_err: BaseException | None = None
     while time.monotonic() < deadline:
         try:
-            c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
             await c.connect()
             await c.handshake()
             client = c
@@ -2979,7 +2990,7 @@ async def run_litellm_direct_mode() -> int:
         last_err: BaseException | None = None
         while time.monotonic() < deadline:
             try:
-                c = SpendGuardClient(socket_path=socket_path, tenant_id=tenant_id)
+                c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
                 await c.connect()
                 await c.handshake()
                 client = c
