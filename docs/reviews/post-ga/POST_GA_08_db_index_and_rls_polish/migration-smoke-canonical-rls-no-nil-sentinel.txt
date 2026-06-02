@@ -1,0 +1,6 @@
+DO
+           check_name           | passed 
+--------------------------------+--------
+ cache_rls_no_nil_uuid_sentinel | t
+(1 row)
+

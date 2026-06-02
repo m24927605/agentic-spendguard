@@ -1,7 +1,7 @@
 # POST_GA 08 - DB Index and RLS Polish
 
 > **Branch**: `post-ga/POST_GA_08_db_index_and_rls_polish`
-> **Status**: draft
+> **Status**: implementation-complete; pending adversarial review
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `ledger-storage-spec-v1alpha1.md`, `output-predictor-service-spec-v1alpha1.md`
 > **Issues**: #146, #163, #164, #166
 > **Estimated change size**: medium; SQL, RLS, runbooks, planner evidence
@@ -112,11 +112,12 @@ planner evidence.
 | Security Engineer | Public revoke is defense-in-depth but still testable | #146 |
 | Database Optimizer | Index decision requires EXPLAIN, not intuition | #166 |
 | SRE/Operations Architect | Advisory-lock keepalive belongs in runbook | #164 |
+| Implementer | Added forward-only ledger/canonical migrations, RLS regression, planner evidence, runbook, and migration smoke evidence | `73524d3`, `94b7825`, `067bce4` |
 
 ## §14. Merge Checklist
 
-- [ ] SQL smoke passes
-- [ ] RLS/grant tests pass
-- [ ] EXPLAIN evidence recorded
+- [x] SQL smoke passes
+- [x] RLS/grant tests pass
+- [x] EXPLAIN evidence recorded
 - [ ] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated

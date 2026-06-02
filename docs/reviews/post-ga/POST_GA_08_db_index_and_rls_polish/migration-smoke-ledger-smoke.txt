@@ -1,0 +1,5 @@
+ audit_outbox | tokenizer_t1_samples | has_prediction_columns 
+--------------+----------------------+------------------------
+ audit_outbox | tokenizer_t1_samples | t
+(1 row)
+

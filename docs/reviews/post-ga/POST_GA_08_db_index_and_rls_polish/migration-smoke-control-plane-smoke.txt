@@ -1,0 +1,5 @@
+ predictor_plugin_endpoints | control_plane_audit_outbox | has_forwarder_update_policy 
+----------------------------+----------------------------+-----------------------------
+ predictor_plugin_endpoints | control_plane_audit_outbox | t
+(1 row)
+

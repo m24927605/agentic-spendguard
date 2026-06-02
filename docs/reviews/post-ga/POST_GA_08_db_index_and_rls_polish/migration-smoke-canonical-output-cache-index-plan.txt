@@ -1,0 +1,22 @@
+BEGIN
+SET
+SET
+CREATE TABLE
+CREATE FUNCTION
+ post_ga_08_assert_uses_index 
+------------------------------
+ 
+(1 row)
+
+ post_ga_08_assert_uses_index 
+------------------------------
+ 
+(1 row)
+
+                     check_name                      | status |                                                 details                                                 
+-----------------------------------------------------+--------+---------------------------------------------------------------------------------------------------------
+ output_distribution_cache_max_computed_at_slo_probe | PASS   | uses output_distribution_cache_freshness_idx; all indexes seen: output_distribution_cache_freshness_idx
+ output_distribution_cache_stale_range_scan          | PASS   | uses output_distribution_cache_freshness_idx; all indexes seen: output_distribution_cache_freshness_idx
+(2 rows)
+
+ROLLBACK
