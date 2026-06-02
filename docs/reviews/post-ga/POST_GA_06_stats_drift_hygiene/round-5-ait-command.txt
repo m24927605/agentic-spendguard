@@ -1,0 +1,1 @@
+AIT_BYPASS=1 ait run --adapter codex --review adversarial --review-budget deep --apply never --no-auto-commit --stdin none -- /bin/sh -lc 'git diff --stat main..HEAD -- services/stats_aggregator services/canonical_ingest/migrations docs/slices/POST_GA_06_stats_drift_hygiene.md docs/stats-aggregator-spec-v1alpha1.md'

@@ -49,12 +49,15 @@ Prefer an existing table or deterministic idempotency key if available.
 Durable cooldown state lands in
 `services/canonical_ingest/migrations/0022_prediction_drift_alert_cooldowns.sql`.
 The primary key is exactly `(tenant_id, model, agent_id, prompt_class)`;
-`suppress_until` is indexed for expiry inspection. Key constraints mirror
-the `canonical_events` aggregator mirror columns, including
-character-count limits for multibyte-safe `agent_id` values and the same
-7-class `prompt_class` enum. RLS is enabled and forced with a `FOR ALL`
-policy using `app.current_tenant_id`; missing or invalid tenant context
-fails closed. `last_z_score` rejects `NaN` and `+/-Infinity` at both
+`suppress_until` is indexed for expiry inspection. The same table also
+stores a nullable pending signed CloudEvent proto reservation so
+commit-then-timeout retries reuse the exact same event id and bytes until
+canonical_ingest returns `APPENDED` or `DEDUPED`. Key constraints mirror the
+`canonical_events` aggregator mirror columns, including character-count
+limits for multibyte-safe `agent_id` values and the same 7-class
+`prompt_class` enum. RLS is enabled and forced with a `FOR ALL` policy using
+`app.current_tenant_id`; missing or invalid tenant context fails closed.
+`last_z_score` and `pending_z_score` reject `NaN` and `+/-Infinity` at both
 runtime and SQL CHECK layers. No proto changes.
 
 ## §6. Audit-Chain Impact
@@ -73,7 +76,8 @@ operators can distinguish quiet cooldown from no drift.
 | Different tenant/model/agent/prompt | Independent cooldown key |
 | Drift math produces NaN/Infinity | Fail closed; no audit payload or cooldown row is written |
 | Dedup store unavailable before emit | Fail safe; do not spam immutable audit |
-| Immutable append fails | No cooldown row is recorded; retry next cycle |
+| Immutable append times out after possible commit | Keep pending event reservation; retry same CloudEvent id/bytes |
+| Immutable append fails before commit | No active cooldown is recorded; retry pending event next cycle |
 | Cooldown record fails after append | Alert remains durable; log duplicate-suppression risk |
 
 ## §8. Acceptance Gates
@@ -126,11 +130,12 @@ Reviewer should inspect dedup persistence and numeric edge tests.
 | Stats Domain Expert | NaN/Infinity are invalid alert payload values | §7 |
 | Implementer self-review | PostgreSQL treats `NaN = NaN` as true, so the SQL CHECK must explicitly compare against `'NaN'::REAL` | Migration 0022 + `drift_alert_cooldown_postgres_rejects_non_finite_z_scores` |
 | Staff+ panel | Store-unavailable behavior favors suppressing duplicates over immutable audit spam | §6/§7 |
+| Staff+ arbitration | Round 5 Major is in-scope; pending signed CloudEvent reservation is required so append timeout retries reuse the same event id and canonical bytes | Migration 0022 + `reserve_emission` |
 
 ## §14. Merge Checklist
 
 - [x] #157 fixed and tested
 - [x] #162 fixed and tested
 - [x] Stats gates pass
-- [ ] AIT review clean or Staff+ arbitration recorded
+- [x] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated

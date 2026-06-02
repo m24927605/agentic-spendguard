@@ -20,17 +20,58 @@ CREATE TABLE prediction_drift_alert_cooldowns (
         'chat_short', 'chat_long', 'code_gen', 'summarization',
         'rag', 'tool_calling', 'vision'
     )),
-    last_emitted_at TIMESTAMPTZ NOT NULL,
-    suppress_until  TIMESTAMPTZ NOT NULL,
-    last_z_score    REAL        NOT NULL CHECK (
+    last_emitted_at TIMESTAMPTZ,
+    suppress_until  TIMESTAMPTZ,
+    last_z_score    REAL CHECK (
+        last_z_score IS NULL OR (
         last_z_score <> 'NaN'::REAL
         AND last_z_score <> 'Infinity'::REAL
         AND last_z_score <> '-Infinity'::REAL
+        )
     ),
+    pending_event_id    UUID,
+    pending_event_time  TIMESTAMPTZ,
+    pending_event_proto BYTEA,
+    pending_z_score     REAL CHECK (
+        pending_z_score IS NULL OR (
+        pending_z_score <> 'NaN'::REAL
+        AND pending_z_score <> 'Infinity'::REAL
+        AND pending_z_score <> '-Infinity'::REAL
+        )
+    ),
+    pending_created_at  TIMESTAMPTZ,
+    pending_expires_at  TIMESTAMPTZ,
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
 
     PRIMARY KEY (tenant_id, model, agent_id, prompt_class),
-    CHECK (suppress_until > last_emitted_at)
+    CHECK (
+        (
+            last_emitted_at IS NULL
+            AND suppress_until IS NULL
+            AND last_z_score IS NULL
+        )
+        OR (
+            last_emitted_at IS NOT NULL
+            AND suppress_until IS NOT NULL
+            AND last_z_score IS NOT NULL
+            AND suppress_until > last_emitted_at
+        )
+    ),
+    CHECK (
+        num_nonnulls(
+            pending_event_id,
+            pending_event_time,
+            pending_event_proto,
+            pending_z_score,
+            pending_created_at,
+            pending_expires_at
+        ) IN (0, 6)
+    ),
+    CHECK (pending_event_proto IS NULL OR octet_length(pending_event_proto) > 0),
+    CHECK (
+        pending_expires_at IS NULL
+        OR pending_expires_at > pending_created_at
+    )
 );
 
 CREATE INDEX prediction_drift_alert_cooldowns_suppress_until_idx
@@ -65,6 +106,8 @@ COMMENT ON COLUMN prediction_drift_alert_cooldowns.suppress_until IS
     'Rolling cooldown expiry. stats_aggregator may emit the next alert for the same bucket only when suppress_until <= now().';
 COMMENT ON COLUMN prediction_drift_alert_cooldowns.last_z_score IS
     'Finite z-score that triggered the latest emitted alert. CHECK explicitly rejects NaN and +/-Infinity.';
+COMMENT ON COLUMN prediction_drift_alert_cooldowns.pending_event_proto IS
+    'Signed CloudEvent proto bytes reserved before append. Retries reuse these exact bytes/id so canonical_ingest can dedupe commit-then-timeout retries.';
 
 DO $$
 BEGIN

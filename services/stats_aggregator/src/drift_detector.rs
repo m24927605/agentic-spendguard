@@ -83,6 +83,18 @@ pub enum DriftAlertCooldownDecision {
     Suppressed { suppress_until: DateTime<Utc> },
 }
 
+#[derive(Debug, Clone)]
+pub struct DriftAlertEmissionAttempt {
+    pub event: CloudEvent,
+    pub z_score: f32,
+}
+
+#[derive(Debug, Clone)]
+pub enum DriftAlertEmissionDecision {
+    Allowed { attempt: DriftAlertEmissionAttempt },
+    Suppressed { suppress_until: DateTime<Utc> },
+}
+
 #[async_trait::async_trait]
 pub trait DriftAlertCooldown: Send + Sync {
     async fn check(
@@ -90,6 +102,22 @@ pub trait DriftAlertCooldown: Send + Sync {
         key: &DriftAlertKey,
         now: DateTime<Utc>,
     ) -> Result<DriftAlertCooldownDecision, anyhow::Error>;
+
+    async fn reserve_emission(
+        &self,
+        key: &DriftAlertKey,
+        now: DateTime<Utc>,
+        candidate: DriftAlertEmissionAttempt,
+    ) -> Result<DriftAlertEmissionDecision, anyhow::Error> {
+        match self.check(key, now).await? {
+            DriftAlertCooldownDecision::Allowed { .. } => {
+                Ok(DriftAlertEmissionDecision::Allowed { attempt: candidate })
+            }
+            DriftAlertCooldownDecision::Suppressed { suppress_until } => {
+                Ok(DriftAlertEmissionDecision::Suppressed { suppress_until })
+            }
+        }
+    }
 
     async fn record_emitted(
         &self,
@@ -107,6 +135,19 @@ impl PostgresDriftAlertCooldownStore {
     pub fn new(pool: PgPool) -> Self {
         Self { pool }
     }
+}
+
+fn event_time_utc(event: &CloudEvent) -> Result<DateTime<Utc>, anyhow::Error> {
+    let ts = event
+        .time
+        .as_ref()
+        .context("prediction_drift_alert pending event_time required")?;
+    DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos as u32)
+        .context("prediction_drift_alert pending event_time out of range")
+}
+
+fn decode_pending_event(bytes: &[u8]) -> Result<CloudEvent, anyhow::Error> {
+    CloudEvent::decode(bytes).context("decode pending prediction_drift_alert CloudEvent")
 }
 
 #[async_trait::async_trait]
@@ -131,18 +172,20 @@ impl DriftAlertCooldown for PostgresDriftAlertCooldownStore {
               AND model = $2
               AND agent_id = $3
               AND prompt_class = $4
+              AND suppress_until > $5
             "#,
         )
         .bind(key.tenant_id)
         .bind(&key.model)
         .bind(&key.agent_id)
         .bind(&key.prompt_class)
+        .bind(now)
         .fetch_optional(&mut *tx)
         .await
         .context("read prediction_drift_alert cooldown")?;
 
         let decision = match active_until {
-            Some(until) if until > now => DriftAlertCooldownDecision::Suppressed {
+            Some(until) => DriftAlertCooldownDecision::Suppressed {
                 suppress_until: until,
             },
             _ => DriftAlertCooldownDecision::Allowed {
@@ -154,6 +197,133 @@ impl DriftAlertCooldown for PostgresDriftAlertCooldownStore {
             .await
             .context("commit drift cooldown check tx")?;
         Ok(decision)
+    }
+
+    async fn reserve_emission(
+        &self,
+        key: &DriftAlertKey,
+        now: DateTime<Utc>,
+        candidate: DriftAlertEmissionAttempt,
+    ) -> Result<DriftAlertEmissionDecision, anyhow::Error> {
+        if !candidate.z_score.is_finite() {
+            anyhow::bail!("non-finite z_score cannot enter drift alert pending emission");
+        }
+        let candidate_event_id = uuid::Uuid::parse_str(&candidate.event.id)
+            .context("prediction_drift_alert pending event_id must be a UUID")?;
+        let candidate_event_time = event_time_utc(&candidate.event)?;
+        let candidate_proto = candidate.event.encode_to_vec();
+        let pending_expires_at = now + ChronoDuration::hours(DRIFT_ALERT_COOLDOWN_HOURS);
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("begin drift emission reservation tx")?;
+        sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+            .bind(key.tenant_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .context("set RLS tenant_id for prediction_drift_alert emission reservation")?;
+
+        let existing = sqlx::query_as::<
+            _,
+            (
+                Option<DateTime<Utc>>,
+                Option<Vec<u8>>,
+                Option<f32>,
+                Option<DateTime<Utc>>,
+            ),
+        >(
+            r#"
+            SELECT suppress_until, pending_event_proto, pending_z_score, pending_expires_at
+            FROM prediction_drift_alert_cooldowns
+            WHERE tenant_id = $1
+              AND model = $2
+              AND agent_id = $3
+              AND prompt_class = $4
+            FOR UPDATE
+            "#,
+        )
+        .bind(key.tenant_id)
+        .bind(&key.model)
+        .bind(&key.agent_id)
+        .bind(&key.prompt_class)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("read prediction_drift_alert emission reservation")?;
+
+        if let Some((Some(suppress_until), _, _, _)) = existing.as_ref() {
+            if *suppress_until > now {
+                tx.commit()
+                    .await
+                    .context("commit suppressed drift emission reservation tx")?;
+                return Ok(DriftAlertEmissionDecision::Suppressed {
+                    suppress_until: *suppress_until,
+                });
+            }
+        }
+
+        if let Some((_, Some(pending_proto), Some(pending_z_score), Some(expires_at))) =
+            existing.as_ref()
+        {
+            if *expires_at > now {
+                let event = decode_pending_event(pending_proto)?;
+                tx.commit()
+                    .await
+                    .context("commit reused drift emission reservation tx")?;
+                return Ok(DriftAlertEmissionDecision::Allowed {
+                    attempt: DriftAlertEmissionAttempt {
+                        event,
+                        z_score: *pending_z_score,
+                    },
+                });
+            }
+        }
+
+        let (pending_proto, pending_z_score): (Vec<u8>, f32) = sqlx::query_as(
+            r#"
+            INSERT INTO prediction_drift_alert_cooldowns (
+              tenant_id, model, agent_id, prompt_class,
+              pending_event_id, pending_event_time, pending_event_proto,
+              pending_z_score, pending_created_at, pending_expires_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, clock_timestamp())
+            ON CONFLICT (tenant_id, model, agent_id, prompt_class)
+              DO UPDATE SET
+                pending_event_id = EXCLUDED.pending_event_id,
+                pending_event_time = EXCLUDED.pending_event_time,
+                pending_event_proto = EXCLUDED.pending_event_proto,
+                pending_z_score = EXCLUDED.pending_z_score,
+                pending_created_at = EXCLUDED.pending_created_at,
+                pending_expires_at = EXCLUDED.pending_expires_at,
+                updated_at = clock_timestamp()
+            RETURNING pending_event_proto, pending_z_score
+            "#,
+        )
+        .bind(key.tenant_id)
+        .bind(&key.model)
+        .bind(&key.agent_id)
+        .bind(&key.prompt_class)
+        .bind(candidate_event_id)
+        .bind(candidate_event_time)
+        .bind(&candidate_proto)
+        .bind(candidate.z_score)
+        .bind(now)
+        .bind(pending_expires_at)
+        .fetch_one(&mut *tx)
+        .await
+        .context("reserve prediction_drift_alert pending emission")?;
+
+        tx.commit()
+            .await
+            .context("commit drift emission reservation tx")?;
+
+        Ok(DriftAlertEmissionDecision::Allowed {
+            attempt: DriftAlertEmissionAttempt {
+                event: decode_pending_event(&pending_proto)?,
+                z_score: pending_z_score,
+            },
+        })
     }
 
     async fn record_emitted(
@@ -186,6 +356,12 @@ impl DriftAlertCooldown for PostgresDriftAlertCooldownStore {
                 last_emitted_at = EXCLUDED.last_emitted_at,
                 suppress_until = EXCLUDED.suppress_until,
                 last_z_score = EXCLUDED.last_z_score,
+                pending_event_id = NULL,
+                pending_event_time = NULL,
+                pending_event_proto = NULL,
+                pending_z_score = NULL,
+                pending_created_at = NULL,
+                pending_expires_at = NULL,
                 updated_at = clock_timestamp()
             RETURNING suppress_until
             "#,
@@ -533,33 +709,6 @@ pub async fn detect_and_emit(
             continue;
         }
         let key = DriftAlertKey::from(agg);
-        match cooldown.check(&key, Utc::now()).await {
-            Ok(DriftAlertCooldownDecision::Allowed { .. }) => {}
-            Ok(DriftAlertCooldownDecision::Suppressed { suppress_until }) => {
-                outcome.suppressed += 1;
-                info!(
-                    tenant_id = %agg.tenant_id,
-                    model = %agg.model,
-                    agent_id = %agg.agent_id,
-                    prompt_class = %agg.prompt_class,
-                    suppress_until = %suppress_until,
-                    "drift alert suppressed by cooldown"
-                );
-                continue;
-            }
-            Err(e) => {
-                outcome.suppressed += 1;
-                warn!(
-                    tenant_id = %agg.tenant_id,
-                    model = %agg.model,
-                    agent_id = %agg.agent_id,
-                    prompt_class = %agg.prompt_class,
-                    error = %e,
-                    "drift alert cooldown unavailable; suppressing alert to avoid immutable audit spam"
-                );
-                continue;
-            }
-        }
         let Some(mut ce) = build_drift_alert(agg, z, cfg) else {
             outcome.suppressed += 1;
             warn!(
@@ -584,10 +733,51 @@ pub async fn detect_and_emit(
             .map_err(|e| anyhow::anyhow!("sign drift_alert CloudEvent: {e}"))?;
         ce.producer_signature = sig.bytes.into();
 
-        match sink.emit(ce).await {
+        let attempt = match cooldown
+            .reserve_emission(
+                &key,
+                Utc::now(),
+                DriftAlertEmissionAttempt {
+                    event: ce,
+                    z_score: z,
+                },
+            )
+            .await
+        {
+            Ok(DriftAlertEmissionDecision::Allowed { attempt }) => attempt,
+            Ok(DriftAlertEmissionDecision::Suppressed { suppress_until }) => {
+                outcome.suppressed += 1;
+                info!(
+                    tenant_id = %agg.tenant_id,
+                    model = %agg.model,
+                    agent_id = %agg.agent_id,
+                    prompt_class = %agg.prompt_class,
+                    suppress_until = %suppress_until,
+                    "drift alert suppressed by cooldown"
+                );
+                continue;
+            }
+            Err(e) => {
+                outcome.suppressed += 1;
+                warn!(
+                    tenant_id = %agg.tenant_id,
+                    model = %agg.model,
+                    agent_id = %agg.agent_id,
+                    prompt_class = %agg.prompt_class,
+                    error = %e,
+                    "drift alert cooldown unavailable; suppressing alert to avoid immutable audit spam"
+                );
+                continue;
+            }
+        };
+
+        match sink.emit(attempt.event).await {
             Ok(()) => {
                 outcome.emitted += 1;
-                if let Err(e) = cooldown.record_emitted(&key, Utc::now(), z).await {
+                if let Err(e) = cooldown
+                    .record_emitted(&key, Utc::now(), attempt.z_score)
+                    .await
+                {
                     warn!(
                         tenant_id = %agg.tenant_id,
                         model = %agg.model,
@@ -602,7 +792,7 @@ pub async fn detect_and_emit(
                     model = %agg.model,
                     agent_id = %agg.agent_id,
                     prompt_class = %agg.prompt_class,
-                    z_score = z,
+                    z_score = attempt.z_score,
                     "drift alert emitted"
                 );
             }
@@ -847,9 +1037,32 @@ mod tests {
         }
     }
 
+    struct CommitThenTimeoutSink {
+        events: parking_lot::Mutex<Vec<CloudEvent>>,
+        fail_first: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl DriftAlertSink for CommitThenTimeoutSink {
+        async fn emit(&self, event: CloudEvent) -> Result<(), anyhow::Error> {
+            self.events.lock().push(event);
+            if self
+                .fail_first
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                Err(anyhow::anyhow!(
+                    "canonical_ingest committed but transport timed out"
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
     #[derive(Default)]
     struct MemoryCooldown {
         entries: parking_lot::Mutex<HashMap<DriftAlertKey, DateTime<Utc>>>,
+        pending: parking_lot::Mutex<HashMap<DriftAlertKey, DriftAlertEmissionAttempt>>,
     }
 
     #[async_trait::async_trait]
@@ -871,6 +1084,28 @@ mod tests {
             Ok(DriftAlertCooldownDecision::Allowed { suppress_until })
         }
 
+        async fn reserve_emission(
+            &self,
+            key: &DriftAlertKey,
+            now: DateTime<Utc>,
+            candidate: DriftAlertEmissionAttempt,
+        ) -> Result<DriftAlertEmissionDecision, anyhow::Error> {
+            if let DriftAlertCooldownDecision::Suppressed { suppress_until } =
+                self.check(key, now).await?
+            {
+                return Ok(DriftAlertEmissionDecision::Suppressed { suppress_until });
+            }
+
+            let mut pending = self.pending.lock();
+            if let Some(existing) = pending.get(key) {
+                return Ok(DriftAlertEmissionDecision::Allowed {
+                    attempt: existing.clone(),
+                });
+            }
+            pending.insert(key.clone(), candidate.clone());
+            Ok(DriftAlertEmissionDecision::Allowed { attempt: candidate })
+        }
+
         async fn record_emitted(
             &self,
             key: &DriftAlertKey,
@@ -880,6 +1115,7 @@ mod tests {
             let suppress_until = emitted_at + ChronoDuration::hours(DRIFT_ALERT_COOLDOWN_HOURS);
             let mut entries = self.entries.lock();
             entries.insert(key.clone(), suppress_until);
+            self.pending.lock().remove(key);
             Ok(suppress_until)
         }
     }
@@ -1215,6 +1451,61 @@ mod tests {
                 .expect("cooldown remains open after failed append"),
             DriftAlertCooldownDecision::Allowed { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn detect_and_emit_reuses_pending_event_after_commit_timeout() {
+        use spendguard_signing::DisabledSigner;
+        let signer = DisabledSigner::for_test("test-stats-aggregator".into());
+        let cooldown = MemoryCooldown::default();
+        let sink = CommitThenTimeoutSink {
+            events: parking_lot::Mutex::new(Vec::new()),
+            fail_first: std::sync::atomic::AtomicBool::new(true),
+        };
+        let mut breaching = fixture_agg();
+        breaching.mean_7d = Some(200.0);
+
+        let first = detect_and_emit(
+            &[breaching.clone()],
+            &fixture_cfg(),
+            &signer,
+            &sink,
+            &cooldown,
+        )
+        .await
+        .expect("ambiguous timeout should not fail cycle");
+        assert_eq!(first.emitted, 0);
+        assert_eq!(first.suppressed, 0);
+        let first_id = {
+            let events = sink.events.lock();
+            assert_eq!(events.len(), 1);
+            events[0].id.clone()
+        };
+
+        let second = detect_and_emit(
+            &[breaching.clone()],
+            &fixture_cfg(),
+            &signer,
+            &sink,
+            &cooldown,
+        )
+        .await
+        .expect("retry should reuse pending event and succeed");
+        assert_eq!(second.emitted, 1);
+        assert_eq!(second.suppressed, 0);
+        {
+            let events = sink.events.lock();
+            assert_eq!(events.len(), 2);
+            assert_eq!(events[0].id, events[1].id);
+            assert_eq!(events[1].id, first_id);
+        }
+
+        let third = detect_and_emit(&[breaching], &fixture_cfg(), &signer, &sink, &cooldown)
+            .await
+            .expect("successful retry records cooldown");
+        assert_eq!(third.emitted, 0);
+        assert_eq!(third.suppressed, 1);
+        assert_eq!(sink.events.lock().len(), 2);
     }
 
     #[tokio::test]

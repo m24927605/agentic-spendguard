@@ -15,8 +15,10 @@ use chrono::{Duration as ChronoDuration, Utc};
 use pretty_assertions::assert_eq;
 use spendguard_stats_aggregator::aggregation::aggregate_output_distribution;
 use spendguard_stats_aggregator::drift_detector::{
-    DriftAlertCooldown, DriftAlertCooldownDecision, DriftAlertKey, PostgresDriftAlertCooldownStore,
+    DriftAlertCooldown, DriftAlertCooldownDecision, DriftAlertEmissionAttempt,
+    DriftAlertEmissionDecision, DriftAlertKey, PostgresDriftAlertCooldownStore,
 };
+use spendguard_stats_aggregator::proto::common::v1::CloudEvent;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use testcontainers::runners::AsyncRunner;
@@ -134,6 +136,30 @@ async fn seed_schema_bundle(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("seed schema bundle");
+}
+
+fn pending_attempt(key: &DriftAlertKey, event_id: Uuid, z_score: f32) -> DriftAlertEmissionAttempt {
+    let now = Utc::now();
+    DriftAlertEmissionAttempt {
+        event: CloudEvent {
+            specversion: "1.0".to_string(),
+            r#type: "spendguard.audit.prediction_drift_alert.v1alpha1".to_string(),
+            source: format!("spendguard://stats-aggregator/{}", key.tenant_id),
+            id: event_id.to_string(),
+            time: Some(prost_types::Timestamp {
+                seconds: now.timestamp(),
+                nanos: now.timestamp_subsec_nanos() as i32,
+            }),
+            datacontenttype: "application/json".to_string(),
+            data: bytes::Bytes::from_static(br#"{"z_score":2.5}"#),
+            tenant_id: key.tenant_id.to_string(),
+            producer_id: "stats-aggregator:test".to_string(),
+            signing_key_id: "test-key".to_string(),
+            producer_signature: bytes::Bytes::from_static(b"test-signature"),
+            ..Default::default()
+        },
+        z_score,
+    }
 }
 
 async fn seed_outcome_pair(
@@ -674,6 +700,64 @@ async fn drift_alert_cooldown_postgres_is_key_and_tenant_scoped() {
     assert!(matches!(
         after_expiry,
         DriftAlertCooldownDecision::Allowed { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drift_alert_cooldown_postgres_reuses_pending_event_until_recorded() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let store = PostgresDriftAlertCooldownStore::new(fx.app_pool.clone());
+    let key = DriftAlertKey {
+        tenant_id: Uuid::new_v4(),
+        model: "gpt-4o-mini".into(),
+        agent_id: "agent-alpha".into(),
+        prompt_class: "chat_short".into(),
+    };
+    let now = Utc::now();
+    let first_event_id = Uuid::new_v4();
+    let second_event_id = Uuid::new_v4();
+
+    let first = store
+        .reserve_emission(&key, now, pending_attempt(&key, first_event_id, 2.5))
+        .await
+        .expect("first reserve");
+    let DriftAlertEmissionDecision::Allowed { attempt: first } = first else {
+        panic!("first reserve must be allowed");
+    };
+    assert_eq!(first.event.id, first_event_id.to_string());
+
+    let second = store
+        .reserve_emission(
+            &key,
+            now + ChronoDuration::minutes(1),
+            pending_attempt(&key, second_event_id, 3.5),
+        )
+        .await
+        .expect("second reserve reuses pending");
+    let DriftAlertEmissionDecision::Allowed { attempt: second } = second else {
+        panic!("second reserve must reuse pending");
+    };
+    assert_eq!(second.event.id, first_event_id.to_string());
+    assert_eq!(second.z_score, 2.5);
+
+    store
+        .record_emitted(&key, now + ChronoDuration::minutes(2), second.z_score)
+        .await
+        .expect("record emitted clears pending");
+
+    let duplicate = store
+        .reserve_emission(
+            &key,
+            now + ChronoDuration::minutes(3),
+            pending_attempt(&key, Uuid::new_v4(), 4.5),
+        )
+        .await
+        .expect("active cooldown suppresses");
+    assert!(matches!(
+        duplicate,
+        DriftAlertEmissionDecision::Suppressed { .. }
     ));
 }
 
