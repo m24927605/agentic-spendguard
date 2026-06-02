@@ -1056,7 +1056,24 @@ mod tests {
         let body = render_metrics();
         assert!(body.contains("spendguard_output_predictor_predict_total"));
         assert!(body.contains("spendguard_output_predictor_rate_limited_total"));
-        assert!(!body.contains("spendguard_output_predictor_rate_limited_total{tenant_id"));
+        let rate_limit_samples: Vec<&str> = body
+            .lines()
+            .filter(|line| line.starts_with("spendguard_output_predictor_rate_limited_total"))
+            .collect();
+        assert_eq!(rate_limit_samples.len(), 1);
+        let mut fields = rate_limit_samples[0].split_whitespace();
+        assert_eq!(
+            fields.next(),
+            Some("spendguard_output_predictor_rate_limited_total")
+        );
+        assert!(
+            fields.next().is_some(),
+            "rate-limit sample must have a value"
+        );
+        assert!(
+            fields.next().is_none(),
+            "rate-limit sample must be no-label"
+        );
         assert!(body.contains("spendguard_output_predictor_predict_latency_seconds_bucket"));
         assert!(body.contains("spendguard_output_predictor_cache_lookup_total"));
         assert!(body.contains("spendguard_output_predictor_cache_hit_total"));

@@ -27,7 +27,7 @@ Base: `main` at `04f1fa3 Merge POST_GA_06 stats drift hygiene`
 | `docker compose -f deploy/demo/compose.yaml up -d --build output-predictor` | PASS | output predictor container reached `healthy` |
 | `curl -fsS http://localhost:9100/healthz` | PASS | returned `ok` |
 | `curl -fsS http://localhost:9100/metrics \| rg "spendguard_output_predictor_(rate_limited_total\|predict_total)"` | PASS | `predict_total` and no-label `rate_limited_total` HELP/TYPE/sample emitted |
-| tenant-label grep on output predictor metrics | PASS | `spendguard_output_predictor_rate_limited_total{tenant_id=...}` absent |
+| rate-limit sample shape check on output predictor metrics | PASS | live `rate_limited_total` sample name was followed directly by a value; no label block was present |
 
 ## API Compatibility
 
