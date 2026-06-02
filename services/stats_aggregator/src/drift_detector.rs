@@ -85,12 +85,18 @@ pub enum DriftAlertCooldownDecision {
 
 #[async_trait::async_trait]
 pub trait DriftAlertCooldown: Send + Sync {
-    async fn reserve(
+    async fn check(
         &self,
         key: &DriftAlertKey,
         now: DateTime<Utc>,
-        z_score: f32,
     ) -> Result<DriftAlertCooldownDecision, anyhow::Error>;
+
+    async fn record_emitted(
+        &self,
+        key: &DriftAlertKey,
+        emitted_at: DateTime<Utc>,
+        z_score: f32,
+    ) -> Result<DateTime<Utc>, anyhow::Error>;
 }
 
 pub struct PostgresDriftAlertCooldownStore {
@@ -105,17 +111,11 @@ impl PostgresDriftAlertCooldownStore {
 
 #[async_trait::async_trait]
 impl DriftAlertCooldown for PostgresDriftAlertCooldownStore {
-    async fn reserve(
+    async fn check(
         &self,
         key: &DriftAlertKey,
         now: DateTime<Utc>,
-        z_score: f32,
     ) -> Result<DriftAlertCooldownDecision, anyhow::Error> {
-        if !z_score.is_finite() {
-            anyhow::bail!("non-finite z_score cannot enter drift alert cooldown store");
-        }
-
-        let suppress_until = now + ChronoDuration::hours(DRIFT_ALERT_COOLDOWN_HOURS);
         let mut tx = self.pool.begin().await.context("begin drift cooldown tx")?;
         sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
             .bind(key.tenant_id.to_string())
@@ -123,7 +123,58 @@ impl DriftAlertCooldown for PostgresDriftAlertCooldownStore {
             .await
             .context("set RLS tenant_id for prediction_drift_alert_cooldowns")?;
 
-        let reserved = sqlx::query_scalar::<_, DateTime<Utc>>(
+        let active_until = sqlx::query_scalar::<_, DateTime<Utc>>(
+            r#"
+            SELECT suppress_until
+            FROM prediction_drift_alert_cooldowns
+            WHERE tenant_id = $1
+              AND model = $2
+              AND agent_id = $3
+              AND prompt_class = $4
+            "#,
+        )
+        .bind(key.tenant_id)
+        .bind(&key.model)
+        .bind(&key.agent_id)
+        .bind(&key.prompt_class)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("read prediction_drift_alert cooldown")?;
+
+        let decision = match active_until {
+            Some(until) if until > now => DriftAlertCooldownDecision::Suppressed {
+                suppress_until: until,
+            },
+            _ => DriftAlertCooldownDecision::Allowed {
+                suppress_until: now + ChronoDuration::hours(DRIFT_ALERT_COOLDOWN_HOURS),
+            },
+        };
+
+        tx.commit()
+            .await
+            .context("commit drift cooldown check tx")?;
+        Ok(decision)
+    }
+
+    async fn record_emitted(
+        &self,
+        key: &DriftAlertKey,
+        emitted_at: DateTime<Utc>,
+        z_score: f32,
+    ) -> Result<DateTime<Utc>, anyhow::Error> {
+        if !z_score.is_finite() {
+            anyhow::bail!("non-finite z_score cannot enter drift alert cooldown store");
+        }
+
+        let suppress_until = emitted_at + ChronoDuration::hours(DRIFT_ALERT_COOLDOWN_HOURS);
+        let mut tx = self.pool.begin().await.context("begin drift cooldown tx")?;
+        sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+            .bind(key.tenant_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .context("set RLS tenant_id for prediction_drift_alert_cooldowns")?;
+
+        let recorded_until = sqlx::query_scalar::<_, DateTime<Utc>>(
             r#"
             INSERT INTO prediction_drift_alert_cooldowns (
               tenant_id, model, agent_id, prompt_class,
@@ -136,7 +187,6 @@ impl DriftAlertCooldown for PostgresDriftAlertCooldownStore {
                 suppress_until = EXCLUDED.suppress_until,
                 last_z_score = EXCLUDED.last_z_score,
                 updated_at = clock_timestamp()
-              WHERE prediction_drift_alert_cooldowns.suppress_until <= $5
             RETURNING suppress_until
             "#,
         )
@@ -144,42 +194,15 @@ impl DriftAlertCooldown for PostgresDriftAlertCooldownStore {
         .bind(&key.model)
         .bind(&key.agent_id)
         .bind(&key.prompt_class)
-        .bind(now)
+        .bind(emitted_at)
         .bind(suppress_until)
         .bind(z_score)
-        .fetch_optional(&mut *tx)
+        .fetch_one(&mut *tx)
         .await
-        .context("reserve prediction_drift_alert cooldown")?;
-
-        let decision = if let Some(until) = reserved {
-            DriftAlertCooldownDecision::Allowed {
-                suppress_until: until,
-            }
-        } else {
-            let active_until = sqlx::query_scalar::<_, DateTime<Utc>>(
-                r#"
-                SELECT suppress_until
-                FROM prediction_drift_alert_cooldowns
-                WHERE tenant_id = $1
-                  AND model = $2
-                  AND agent_id = $3
-                  AND prompt_class = $4
-                "#,
-            )
-            .bind(key.tenant_id)
-            .bind(&key.model)
-            .bind(&key.agent_id)
-            .bind(&key.prompt_class)
-            .fetch_one(&mut *tx)
-            .await
-            .context("read active prediction_drift_alert cooldown")?;
-            DriftAlertCooldownDecision::Suppressed {
-                suppress_until: active_until,
-            }
-        };
+        .context("record prediction_drift_alert cooldown")?;
 
         tx.commit().await.context("commit drift cooldown tx")?;
-        Ok(decision)
+        Ok(recorded_until)
     }
 }
 
@@ -456,7 +479,7 @@ pub async fn detect_and_emit(
             None => continue,
         };
         let key = DriftAlertKey::from(agg);
-        match cooldown.reserve(&key, Utc::now(), z).await {
+        match cooldown.check(&key, Utc::now()).await {
             Ok(DriftAlertCooldownDecision::Allowed { .. }) => {}
             Ok(DriftAlertCooldownDecision::Suppressed { suppress_until }) => {
                 outcome.suppressed += 1;
@@ -510,6 +533,16 @@ pub async fn detect_and_emit(
         match sink.emit(ce).await {
             Ok(()) => {
                 outcome.emitted += 1;
+                if let Err(e) = cooldown.record_emitted(&key, Utc::now(), z).await {
+                    warn!(
+                        tenant_id = %agg.tenant_id,
+                        model = %agg.model,
+                        agent_id = %agg.agent_id,
+                        prompt_class = %agg.prompt_class,
+                        error = %e,
+                        "drift alert emitted but cooldown record failed; future duplicate suppression may be unavailable"
+                    );
+                }
                 debug!(
                     tenant_id = %agg.tenant_id,
                     model = %agg.model,
@@ -523,7 +556,7 @@ pub async fn detect_and_emit(
                 warn!(
                     tenant_id = %agg.tenant_id,
                     error = %e,
-                    "drift alert emit failed after cooldown reservation; not counted as emitted"
+                    "drift alert emit failed before cooldown record; will retry next cycle"
                 );
             }
         }
@@ -767,13 +800,12 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DriftAlertCooldown for MemoryCooldown {
-        async fn reserve(
+        async fn check(
             &self,
             key: &DriftAlertKey,
             now: DateTime<Utc>,
-            _z_score: f32,
         ) -> Result<DriftAlertCooldownDecision, anyhow::Error> {
-            let mut entries = self.entries.lock();
+            let entries = self.entries.lock();
             if let Some(existing) = entries.get(key) {
                 if *existing > now {
                     return Ok(DriftAlertCooldownDecision::Suppressed {
@@ -782,8 +814,19 @@ mod tests {
                 }
             }
             let suppress_until = now + ChronoDuration::hours(DRIFT_ALERT_COOLDOWN_HOURS);
-            entries.insert(key.clone(), suppress_until);
             Ok(DriftAlertCooldownDecision::Allowed { suppress_until })
+        }
+
+        async fn record_emitted(
+            &self,
+            key: &DriftAlertKey,
+            emitted_at: DateTime<Utc>,
+            _z_score: f32,
+        ) -> Result<DateTime<Utc>, anyhow::Error> {
+            let suppress_until = emitted_at + ChronoDuration::hours(DRIFT_ALERT_COOLDOWN_HOURS);
+            let mut entries = self.entries.lock();
+            entries.insert(key.clone(), suppress_until);
+            Ok(suppress_until)
         }
     }
 
@@ -791,12 +834,20 @@ mod tests {
 
     #[async_trait::async_trait]
     impl DriftAlertCooldown for FailingCooldown {
-        async fn reserve(
+        async fn check(
             &self,
             _key: &DriftAlertKey,
             _now: DateTime<Utc>,
-            _z_score: f32,
         ) -> Result<DriftAlertCooldownDecision, anyhow::Error> {
+            Err(anyhow::anyhow!("cooldown store unavailable"))
+        }
+
+        async fn record_emitted(
+            &self,
+            _key: &DriftAlertKey,
+            _emitted_at: DateTime<Utc>,
+            _z_score: f32,
+        ) -> Result<DateTime<Utc>, anyhow::Error> {
             Err(anyhow::anyhow!("cooldown store unavailable"))
         }
     }
@@ -806,11 +857,15 @@ mod tests {
         let store = MemoryCooldown::default();
         let key = DriftAlertKey::from(&fixture_agg());
         let now = Utc::now();
-        let first = store.reserve(&key, now, 2.5).await.expect("first");
+        let first = store.check(&key, now).await.expect("first");
         assert!(matches!(first, DriftAlertCooldownDecision::Allowed { .. }));
+        store
+            .record_emitted(&key, now, 2.5)
+            .await
+            .expect("record first");
 
         let second = store
-            .reserve(&key, now + ChronoDuration::hours(1), 2.5)
+            .check(&key, now + ChronoDuration::hours(1))
             .await
             .expect("second");
         assert!(matches!(
@@ -819,7 +874,7 @@ mod tests {
         ));
 
         let after_expiry = store
-            .reserve(&key, now + ChronoDuration::hours(25), 2.5)
+            .check(&key, now + ChronoDuration::hours(25))
             .await
             .expect("after expiry");
         assert!(matches!(
@@ -834,13 +889,13 @@ mod tests {
         let agg = fixture_agg();
         let key = DriftAlertKey::from(&agg);
         let now = Utc::now();
-        store.reserve(&key, now, 2.5).await.expect("seed");
+        store.record_emitted(&key, now, 2.5).await.expect("seed");
 
         let mut different_prompt = key.clone();
         different_prompt.prompt_class = "rag".into();
         assert!(matches!(
             store
-                .reserve(&different_prompt, now + ChronoDuration::hours(1), 2.5)
+                .check(&different_prompt, now + ChronoDuration::hours(1))
                 .await
                 .expect("different prompt"),
             DriftAlertCooldownDecision::Allowed { .. }
@@ -850,7 +905,7 @@ mod tests {
         different_tenant.tenant_id = Uuid::new_v4();
         assert!(matches!(
             store
-                .reserve(&different_tenant, now + ChronoDuration::hours(1), 2.5)
+                .check(&different_tenant, now + ChronoDuration::hours(1))
                 .await
                 .expect("different tenant"),
             DriftAlertCooldownDecision::Allowed { .. }
@@ -1018,6 +1073,7 @@ mod tests {
         let cooldown = MemoryCooldown::default();
         let mut breaching = fixture_agg();
         breaching.mean_7d = Some(200.0);
+        let key = DriftAlertKey::from(&breaching);
 
         let outcome = detect_and_emit(
             &[breaching],
@@ -1034,5 +1090,12 @@ mod tests {
             "failed canonical append must not count as emitted"
         );
         assert_eq!(outcome.suppressed, 0);
+        assert!(matches!(
+            cooldown
+                .check(&key, Utc::now() + ChronoDuration::hours(1))
+                .await
+                .expect("cooldown remains open after failed append"),
+            DriftAlertCooldownDecision::Allowed { .. }
+        ));
     }
 }

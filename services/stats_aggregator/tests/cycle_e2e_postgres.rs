@@ -607,11 +607,15 @@ async fn drift_alert_cooldown_postgres_is_key_and_tenant_scoped() {
         prompt_class: "chat_short".into(),
     };
 
-    let first = store.reserve(&key, now, 2.5).await.expect("first");
+    let first = store.check(&key, now).await.expect("first");
     assert!(matches!(first, DriftAlertCooldownDecision::Allowed { .. }));
+    store
+        .record_emitted(&key, now, 2.5)
+        .await
+        .expect("record first");
 
     let duplicate = store
-        .reserve(&key, now + ChronoDuration::hours(1), 3.0)
+        .check(&key, now + ChronoDuration::hours(1))
         .await
         .expect("duplicate");
     assert!(matches!(
@@ -622,7 +626,7 @@ async fn drift_alert_cooldown_postgres_is_key_and_tenant_scoped() {
     let mut different_prompt = key.clone();
     different_prompt.prompt_class = "rag".into();
     let prompt_decision = store
-        .reserve(&different_prompt, now + ChronoDuration::hours(1), 3.0)
+        .check(&different_prompt, now + ChronoDuration::hours(1))
         .await
         .expect("different prompt");
     assert!(matches!(
@@ -633,7 +637,7 @@ async fn drift_alert_cooldown_postgres_is_key_and_tenant_scoped() {
     let mut different_tenant = key.clone();
     different_tenant.tenant_id = Uuid::new_v4();
     let tenant_decision = store
-        .reserve(&different_tenant, now + ChronoDuration::hours(1), 3.0)
+        .check(&different_tenant, now + ChronoDuration::hours(1))
         .await
         .expect("different tenant");
     assert!(matches!(
@@ -642,7 +646,7 @@ async fn drift_alert_cooldown_postgres_is_key_and_tenant_scoped() {
     ));
 
     let after_expiry = store
-        .reserve(&key, now + ChronoDuration::hours(25), 3.5)
+        .check(&key, now + ChronoDuration::hours(25))
         .await
         .expect("after expiry");
     assert!(matches!(
@@ -665,13 +669,17 @@ async fn drift_alert_cooldown_postgres_accepts_canonical_multibyte_agent_id() {
     };
 
     let decision = store
-        .reserve(&key, Utc::now(), 2.5)
+        .check(&key, Utc::now())
         .await
         .expect("128-character multibyte agent_id is valid per canonical_events");
     assert!(matches!(
         decision,
         DriftAlertCooldownDecision::Allowed { .. }
     ));
+    store
+        .record_emitted(&key, Utc::now(), 2.5)
+        .await
+        .expect("record multibyte agent_id");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -702,7 +710,7 @@ async fn drift_alert_cooldown_postgres_rejects_non_finite_z_scores() {
         );
         let err = sqlx::query(&query)
             .bind(tenant_id)
-            .bind(format!("prompt-{value}"))
+            .bind("chat_short")
             .execute(&mut *tx)
             .await
             .expect_err("non-finite z-score must violate CHECK");

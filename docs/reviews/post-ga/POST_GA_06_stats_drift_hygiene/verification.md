@@ -28,5 +28,5 @@
 ## Self-Review Notes
 
 - PostgreSQL 16 returns true for `'NaN'::REAL = 'NaN'::REAL`; migration 0022 explicitly rejects `'NaN'::REAL` instead of relying on `x = x`.
-- Cooldown reservation occurs before immutable alert append. If append fails, the alert is not counted as emitted and the cooldown prevents immediate duplicate audit spam. This is documented as a fail-safe tradeoff in `docs/stats-aggregator-spec-v1alpha1.md`.
+- Round 2 reviewer found that pre-append cooldown reservation could turn append failures into 24h alert loss. Runtime now checks cooldown first and records cooldown only after durable append succeeds; failed append leaves the cooldown open for retry.
 - Round 1 reviewer found that byte-length constraints could reject canonical multibyte `agent_id` values. Migration 0022 now mirrors canonical `char_length` constraints and enum constraints instead.

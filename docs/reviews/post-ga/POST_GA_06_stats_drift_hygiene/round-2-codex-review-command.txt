@@ -1,0 +1,1 @@
+ait off && codex exec --dangerously-bypass-approvals-and-sandbox '<POST_GA_06 adversarial review prompt>'

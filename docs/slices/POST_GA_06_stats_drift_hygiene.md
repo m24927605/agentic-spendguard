@@ -72,7 +72,9 @@ operators can distinguish quiet cooldown from no drift.
 | Same drift after cooldown | Emit once |
 | Different tenant/model/agent/prompt | Independent cooldown key |
 | Drift math produces NaN/Infinity | Fail closed; no audit payload or cooldown row is written |
-| Dedup store unavailable | Fail safe; do not spam immutable audit |
+| Dedup store unavailable before emit | Fail safe; do not spam immutable audit |
+| Immutable append fails | No cooldown row is recorded; retry next cycle |
+| Cooldown record fails after append | Alert remains durable; log duplicate-suppression risk |
 
 ## §8. Acceptance Gates
 

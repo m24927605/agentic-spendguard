@@ -418,8 +418,9 @@ cooldown keyed exactly on:
 
 The durable state table is
 `prediction_drift_alert_cooldowns` in the canonical_ingest DB. It is
-mutable derived state, not audit history. The stats_aggregator reserves a
-cooldown before emitting an immutable alert; if the same key breaches
+mutable derived state, not audit history. The stats_aggregator checks the
+cooldown before attempting alert emission and records the new cooldown
+only after the immutable alert append succeeds; if the same key breaches
 again while `suppress_until > now()`, the alert is suppressed and the
 suppression is observable through logs and
 `spendguard_stats_aggregator_drift_alerts_suppressed_total`.
@@ -427,8 +428,11 @@ suppression is observable through logs and
 Failure mode: if the cooldown store is unavailable, stats_aggregator
 suppresses the alert rather than emitting duplicate immutable audit rows.
 This favors avoiding alert spam over retrying a possibly repeated alert.
-Different tenants, models, agents, and prompt classes have independent
-cooldowns.
+If the immutable append fails, no cooldown row is recorded and the next
+cycle can retry the alert. If append succeeds but cooldown recording
+fails, the alert remains durable and the daemon logs that future duplicate
+suppression may be unavailable. Different tenants, models, agents, and
+prompt classes have independent cooldowns.
 
 ### 7.2 Alert event schema
 
