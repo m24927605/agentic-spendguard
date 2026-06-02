@@ -91,3 +91,33 @@ Result:
 ```text
 passed
 ```
+
+```bash
+helm template spendguard charts/spendguard --set chart.profile=demo \
+  >/tmp/postga10-helm-demo.yaml
+wc -l /tmp/postga10-helm-demo.yaml
+helm template spendguard charts/spendguard \
+  -f charts/spendguard/values-production.example.yaml \
+  --set chart.profile=production >/tmp/postga10-helm-production.yaml
+wc -l /tmp/postga10-helm-production.yaml
+```
+
+Result:
+
+```text
+1445 /tmp/postga10-helm-demo.yaml
+2159 /tmp/postga10-helm-production.yaml
+```
+
+```bash
+make demo-down
+make demo-up DEMO_MODE=default
+```
+
+Result:
+
+```text
+PASS: Phase 2B Step 8 assertions
+PASS: audit_outbox forwarder closure
+PASS: canonical_events count=5
+```
