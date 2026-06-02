@@ -433,7 +433,7 @@ if [ "${BUILD_IMAGES:-0}" = "1" ]; then
     (
         cd "${REPO_ROOT}/deploy/demo"
         docker compose -f compose.yaml build \
-            ledger canonical-ingest sidecar webhook-receiver \
+            ledger canonical-ingest control-plane sidecar webhook-receiver \
             outbox-forwarder ttl-sweeper tokenizer output-predictor \
             run-cost-projector stats-aggregator
     )
