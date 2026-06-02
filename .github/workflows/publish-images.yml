@@ -5,7 +5,8 @@ name: Publish chart images
 #
 # Triggers:
 #   push tag v*       → publishes :<tag>, signs digest, emits SBOM/provenance
-#   push main         → publishes :sha-<short>, signs digest, emits SBOM/provenance
+#   push main         → publishes :sha-<short> for image-affecting changes,
+#                       signs digest, emits SBOM/provenance
 #   workflow_dispatch → manual; same as main push (sha-<commit>)
 #   pull_request      → build-only (no push); validates Dockerfile + cargo build
 #
@@ -15,10 +16,21 @@ on:
   push:
     branches: [main]
     tags: ["v*"]
+    paths:
+      - "deploy/demo/compose.yaml"
+      - "deploy/demo/runtime/**"
+      - "services/**"
+      - "crates/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "proto/**"
+      - ".github/workflows/publish-images.yml"
   pull_request:
     paths:
+      - "deploy/demo/compose.yaml"
       - "deploy/demo/runtime/Dockerfile.*"
       - "services/**"
+      - "crates/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - "proto/**"
