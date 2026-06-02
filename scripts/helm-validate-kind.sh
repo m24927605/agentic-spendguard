@@ -158,7 +158,7 @@ for svc in "${MTLS_SERVICES[@]}"; do
 basicConstraints=critical,CA:FALSE
 keyUsage=critical,digitalSignature,keyEncipherment
 extendedKeyUsage=serverAuth,clientAuth
-subjectAltName=DNS:${svc}.spendguard.local,DNS:spendguard-spendguard-${svc},DNS:spendguard-spendguard-${svc}.${NAMESPACE}.svc,DNS:spendguard-spendguard-${svc}.${NAMESPACE}.svc.cluster.local
+subjectAltName=DNS:${svc}.spendguard.local,DNS:${svc}.spendguard.internal,DNS:spendguard-spendguard-${svc},DNS:spendguard-spendguard-${svc}.${NAMESPACE}.svc,DNS:spendguard-spendguard-${svc}.${NAMESPACE}.svc.cluster.local
 EOF
     "${OPENSSL}" x509 -req -in "${PKI}/${svc}.csr" \
         -CA "${PKI}/ca.crt" -CAkey "${PKI}/ca.key" \

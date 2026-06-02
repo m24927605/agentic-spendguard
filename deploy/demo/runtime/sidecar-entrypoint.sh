@@ -48,14 +48,25 @@ else
     exit 1
 fi
 
-# 3. Inject the trust root + SPKI pin from the PKI volume.
-if [ -f /etc/ssl/spendguard/ca.crt ] && [ -f /etc/ssl/spendguard/ca.spki.sha256.hex ]; then
+# 3. Inject the trust root + SPKI pin.
+#    Helm supplies these as env vars from Secret/values, while compose
+#    mounts them under /etc/ssl/spendguard. Accept both boot paths.
+if [ -n "${SPENDGUARD_SIDECAR_TRUST_ROOT_CA_PEM:-}" ] && \
+   [ -n "${SPENDGUARD_SIDECAR_TRUST_ROOT_SPKI_SHA256_HEX:-}" ]; then
+    export SPENDGUARD_SIDECAR_TRUST_ROOT_CA_PEM
+    export SPENDGUARD_SIDECAR_TRUST_ROOT_SPKI_SHA256_HEX
+elif [ -r /etc/ssl/spendguard/ca.crt ] && [ -r /etc/ssl/spendguard/ca.spki.sha256.hex ]; then
     SPENDGUARD_SIDECAR_TRUST_ROOT_CA_PEM=$(cat /etc/ssl/spendguard/ca.crt)
     SPENDGUARD_SIDECAR_TRUST_ROOT_SPKI_SHA256_HEX=$(cat /etc/ssl/spendguard/ca.spki.sha256.hex)
     export SPENDGUARD_SIDECAR_TRUST_ROOT_CA_PEM
     export SPENDGUARD_SIDECAR_TRUST_ROOT_SPKI_SHA256_HEX
+elif [ -r /var/run/secrets/spendguard/ca.crt ] && \
+     [ -n "${SPENDGUARD_SIDECAR_TRUST_ROOT_SPKI_SHA256_HEX:-}" ]; then
+    SPENDGUARD_SIDECAR_TRUST_ROOT_CA_PEM=$(cat /var/run/secrets/spendguard/ca.crt)
+    export SPENDGUARD_SIDECAR_TRUST_ROOT_CA_PEM
+    export SPENDGUARD_SIDECAR_TRUST_ROOT_SPKI_SHA256_HEX
 else
-    echo "[sidecar-entrypoint] FATAL: PKI ca.crt or SPKI hash missing" >&2
+    echo "[sidecar-entrypoint] FATAL: trust root CA or SPKI hash missing" >&2
     exit 1
 fi
 
