@@ -26,13 +26,11 @@
 //! returns a 100% Strategy-A response with `predicted_b_tokens` unset,
 //! mirroring the spec §3.4 "A is always callable" invariant.
 
-use std::num::NonZeroUsize;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use lru::LruCache;
-use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use tonic::{Request, Response, Status};
 use tracing::{debug, error, warn};
@@ -88,14 +86,7 @@ pub static OUTPUT_PREDICTOR_PREDICT_LATENCY_COUNT: AtomicU64 = AtomicU64::new(0)
 
 pub const DEFAULT_PREDICT_RATE_LIMIT_PER_TENANT_PER_SECOND: u32 = 1000;
 pub const DEFAULT_PREDICT_RATE_LIMIT_TENANT_CAPACITY: usize = 4096;
-
-static OUTPUT_PREDICTOR_RATE_LIMITED_BY_TENANT: Lazy<Mutex<LruCache<uuid::Uuid, u64>>> =
-    Lazy::new(|| {
-        Mutex::new(LruCache::new(
-            NonZeroUsize::new(DEFAULT_PREDICT_RATE_LIMIT_TENANT_CAPACITY)
-                .expect("default tenant metric capacity is non-zero"),
-        ))
-    });
+pub static OUTPUT_PREDICTOR_RATE_LIMITED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 pub fn predict_outcome_samples() -> [(&'static str, u64); 2] {
     [
@@ -163,26 +154,12 @@ pub fn predict_latency_count() -> u64 {
     OUTPUT_PREDICTOR_PREDICT_LATENCY_COUNT.load(Ordering::Relaxed)
 }
 
-pub fn record_predict_rate_limited(tenant_id: uuid::Uuid) {
-    let mut counters = OUTPUT_PREDICTOR_RATE_LIMITED_BY_TENANT.lock();
-    match counters.get_mut(&tenant_id) {
-        Some(value) => {
-            *value = value.saturating_add(1);
-        }
-        None => {
-            counters.put(tenant_id, 1);
-        }
-    }
+pub fn record_predict_rate_limited() {
+    OUTPUT_PREDICTOR_RATE_LIMITED_TOTAL.fetch_add(1, Ordering::Relaxed);
 }
 
-pub fn predict_rate_limited_samples() -> Vec<(String, u64)> {
-    let counters = OUTPUT_PREDICTOR_RATE_LIMITED_BY_TENANT.lock();
-    let mut samples = counters
-        .iter()
-        .map(|(tenant_id, value)| (tenant_id.to_string(), *value))
-        .collect::<Vec<_>>();
-    samples.sort_by(|a, b| a.0.cmp(&b.0));
-    samples
+pub fn predict_rate_limited_total() -> u64 {
+    OUTPUT_PREDICTOR_RATE_LIMITED_TOTAL.load(Ordering::Relaxed)
 }
 
 fn record_predict_metrics(ok: bool, elapsed: Duration) {
@@ -317,16 +294,16 @@ struct TenantRateState {
 #[derive(Debug)]
 pub struct PredictRateLimiter {
     limit_per_second: u32,
-    tenants: Mutex<LruCache<uuid::Uuid, TenantRateState>>,
+    tenant_capacity: usize,
+    tenants: Mutex<HashMap<uuid::Uuid, TenantRateState>>,
 }
 
 impl PredictRateLimiter {
     pub fn new(limit_per_second: u32, tenant_capacity: usize) -> Self {
-        let capacity = NonZeroUsize::new(tenant_capacity.max(1))
-            .expect("tenant capacity is clamped to at least one");
         Self {
             limit_per_second,
-            tenants: Mutex::new(LruCache::new(capacity)),
+            tenant_capacity: tenant_capacity.max(1),
+            tenants: Mutex::new(HashMap::with_capacity(tenant_capacity.max(1))),
         }
     }
 
@@ -345,21 +322,21 @@ impl PredictRateLimiter {
 
         let burst = f64::from(self.limit_per_second);
         let mut tenants = self.tenants.lock();
-        let state = match tenants.get_mut(&tenant_id) {
-            Some(state) => state,
-            None => {
-                tenants.put(
-                    tenant_id,
-                    TenantRateState {
-                        tokens: burst,
-                        last_refill: now,
-                    },
-                );
-                tenants
-                    .get_mut(&tenant_id)
-                    .expect("tenant state inserted into LRU cache")
+        if !tenants.contains_key(&tenant_id) {
+            if tenants.len() >= self.tenant_capacity {
+                return false;
             }
-        };
+            tenants.insert(
+                tenant_id,
+                TenantRateState {
+                    tokens: burst,
+                    last_refill: now,
+                },
+            );
+        }
+        let state = tenants
+            .get_mut(&tenant_id)
+            .expect("tenant state inserted into rate-limit map");
 
         let elapsed = now.saturating_duration_since(state.last_refill);
         if !elapsed.is_zero() {
@@ -471,7 +448,7 @@ impl OutputPredictorTrait for OutputPredictorSvc {
         };
 
         if !self.rate_limiter.check(tenant_uuid) {
-            record_predict_rate_limited(tenant_uuid);
+            record_predict_rate_limited();
             warn!(
                 tenant_id = %req.tenant_id,
                 "Predict RPC rate limit exceeded for tenant"
@@ -916,6 +893,7 @@ mod tests {
         let svc = svc_with_rate_limiter(1);
         let tenant_a = uuid::Uuid::new_v4();
         let tenant_b = uuid::Uuid::new_v4();
+        let before = predict_rate_limited_total();
 
         let mut req_a = valid_req();
         req_a.tenant_id = tenant_a.to_string();
@@ -935,12 +913,9 @@ mod tests {
             .await
             .expect("tenant B has an independent bucket");
 
-        let tenant_a_label = tenant_a.to_string();
         assert!(
-            predict_rate_limited_samples()
-                .iter()
-                .any(|(tenant_id, count)| tenant_id == &tenant_a_label && *count >= 1),
-            "rate-limit metric must carry the throttled tenant_id label"
+            predict_rate_limited_total() > before,
+            "rate-limit metric must be a monotonic bounded-label counter"
         );
     }
 
@@ -958,6 +933,24 @@ mod tests {
         assert!(
             limiter.check_at(tenant, now + Duration::from_secs(1)),
             "bucket should refill at limit_per_second"
+        );
+    }
+
+    #[test]
+    fn predict_rate_limiter_capacity_rejects_new_tenant_without_evicting_existing() {
+        let limiter = PredictRateLimiter::new(1, 1);
+        let tenant_a = uuid::Uuid::new_v4();
+        let tenant_b = uuid::Uuid::new_v4();
+        let now = Instant::now();
+
+        assert!(limiter.check_at(tenant_a, now));
+        assert!(
+            !limiter.check_at(tenant_b, now),
+            "capacity exhaustion must fail closed instead of evicting an existing tenant bucket"
+        );
+        assert!(
+            limiter.check_at(tenant_a, now + Duration::from_secs(1)),
+            "existing tenant state must survive capacity pressure and refill"
         );
     }
 

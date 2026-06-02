@@ -633,7 +633,7 @@ fn render_metrics() -> String {
     };
     use spendguard_output_predictor::server::{
         predict_latency_bucket_samples, predict_latency_count, predict_latency_sum_seconds,
-        predict_outcome_samples, predict_rate_limited_samples,
+        predict_outcome_samples, predict_rate_limited_total,
         CUSTOMER_PREDICTOR_CALL_FALL_TO_B_TOTAL, CUSTOMER_PREDICTOR_CALL_SUCCESS_TOTAL,
         CUSTOMER_PREDICTOR_TENANT_ISOLATION_VIOLATION_TOTAL, FAILURE_BY_MODE_BREAKER_OPEN,
         FAILURE_BY_MODE_DESERIALIZATION_ERROR, FAILURE_BY_MODE_GRPC_ERROR,
@@ -660,11 +660,10 @@ fn render_metrics() -> String {
         "# HELP spendguard_output_predictor_rate_limited_total Predict RPCs rejected by the per-tenant rate limiter.\n\
          # TYPE spendguard_output_predictor_rate_limited_total counter\n",
     );
-    for (tenant_id, value) in predict_rate_limited_samples() {
-        body.push_str(&format!(
-            "spendguard_output_predictor_rate_limited_total{{tenant_id=\"{tenant_id}\"}} {value}\n"
-        ));
-    }
+    body.push_str(&format!(
+        "spendguard_output_predictor_rate_limited_total {}\n",
+        predict_rate_limited_total()
+    ));
     body.push_str(
         "# HELP spendguard_output_predictor_predict_latency_seconds Predict RPC latency histogram in seconds.\n\
          # TYPE spendguard_output_predictor_predict_latency_seconds histogram\n",
@@ -1057,6 +1056,7 @@ mod tests {
         let body = render_metrics();
         assert!(body.contains("spendguard_output_predictor_predict_total"));
         assert!(body.contains("spendguard_output_predictor_rate_limited_total"));
+        assert!(!body.contains("spendguard_output_predictor_rate_limited_total{tenant_id"));
         assert!(body.contains("spendguard_output_predictor_predict_latency_seconds_bucket"));
         assert!(body.contains("spendguard_output_predictor_cache_lookup_total"));
         assert!(body.contains("spendguard_output_predictor_cache_hit_total"));

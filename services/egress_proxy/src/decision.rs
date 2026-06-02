@@ -612,6 +612,11 @@ fn build_estimate_from_predictor(
     project: Option<&ProjectResponse>,
 ) -> ClaimEstimate {
     let cold_start_layer_used = predict.cold_start_layer_used.clone().unwrap_or_default();
+    let prediction_policy_used = if predict.prediction_policy_used.is_empty() {
+        prediction_policy.to_string()
+    } else {
+        predict.prediction_policy_used.clone()
+    };
     let mut estimate = ClaimEstimate {
         tokenizer_tier: tok_resp.tier.clone(),
         tokenizer_version_id: tok_resp.tokenizer_version_id.clone(),
@@ -622,7 +627,7 @@ fn build_estimate_from_predictor(
         predicted_c_tokens: predict.predicted_c_tokens.unwrap_or(0),
         reserved_strategy: predict.reserved_strategy.clone(),
         prediction_strategy_used: predict.prediction_strategy_used.clone(),
-        prediction_policy_used: prediction_policy.to_string(),
+        prediction_policy_used,
         prediction_confidence: predict.confidence.unwrap_or(0.0),
         prediction_sample_size: predict.sample_size.unwrap_or(0) as i64,
         cold_start_layer_used,
@@ -947,6 +952,67 @@ mod tests {
         // Projector sentinels (no projector wired).
         assert_eq!(est.run_predicted_remaining_steps, -1);
         assert_eq!(est.run_code_triggered, "");
+    }
+
+    #[test]
+    fn build_estimate_from_predictor_uses_response_prediction_policy_used() {
+        let tok_resp = spendguard_tokenizer::TokenizeResponse {
+            tier: "T2".into(),
+            tokenizer_version_id: "00000000-0000-7000-8000-000000000001".into(),
+            ..Default::default()
+        };
+        let predict = PredictResponse {
+            predicted_a_tokens: 128,
+            reserved_strategy: "A".into(),
+            prediction_strategy_used: "B".into(),
+            prediction_policy_used: "ADAPTIVE_CEILING".into(),
+            classifier_version: "classifier-v1".into(),
+            fingerprint_version: "fingerprint-v1".into(),
+            prompt_class_fingerprint_used: "fingerprint".into(),
+            ..Default::default()
+        };
+
+        let est = build_estimate_from_predictor(
+            &tok_resp,
+            12,
+            "gpt-4o",
+            "chat_short",
+            "STRICT_CEILING",
+            &predict,
+            None,
+        );
+
+        assert_eq!(
+            est.prediction_policy_used, "ADAPTIVE_CEILING",
+            "egress proxy must write audit estimate policy from predictor response on successful Predict"
+        );
+    }
+
+    #[test]
+    fn build_estimate_from_predictor_falls_back_to_request_policy_for_legacy_response() {
+        let tok_resp = spendguard_tokenizer::TokenizeResponse {
+            tier: "T2".into(),
+            tokenizer_version_id: "00000000-0000-7000-8000-000000000001".into(),
+            ..Default::default()
+        };
+        let predict = PredictResponse {
+            predicted_a_tokens: 128,
+            reserved_strategy: "A".into(),
+            prediction_strategy_used: "A".into(),
+            ..Default::default()
+        };
+
+        let est = build_estimate_from_predictor(
+            &tok_resp,
+            12,
+            "gpt-4o",
+            "chat_short",
+            "STRICT_CEILING",
+            &predict,
+            None,
+        );
+
+        assert_eq!(est.prediction_policy_used, "STRICT_CEILING");
     }
 
     /// SLICE_10 Phase E — measure aggregate latency of estimate_call_cost

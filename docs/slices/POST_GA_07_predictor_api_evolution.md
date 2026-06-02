@@ -62,10 +62,11 @@ with existing audit columns for the same request.
 | Scenario | Expected behavior |
 |---|---|
 | Old client ignores new response field | Compatible |
-| Tenant exceeds rate limit | Resource exhausted or documented fail-closed status |
+| Tenant exceeds per-pod rate limit | Resource exhausted or documented fail-closed status |
 | One tenant floods Predict | Other tenants unaffected |
 | API field disagrees with audit | Test fails |
 | Limit config missing | Documented default behavior |
+| Tenant bucket capacity exhausted | New tenant bucket fails closed without evicting existing tenant state |
 
 ## §8. Acceptance Gates
 
@@ -95,8 +96,11 @@ with existing audit columns for the same request.
 
 Proto/API changes carry compatibility risk. Prefer additive fields and
 compatibility tests. Rate limiting can cause unexpected throttling; keep
-config explicit and observable. Roll back by disabling limit config
-while preserving additive proto compatibility.
+config explicit and observable. POST_GA_07 limiter state is process-local
+per pod; multi-replica service-wide capacity is the per-pod rate times
+ready replicas unless sticky tenant routing or a shared limiter is added.
+Roll back by disabling limit config while preserving additive proto
+compatibility.
 
 ## §12. AIT Execution Notes
 

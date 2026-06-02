@@ -184,12 +184,17 @@ message PredictResponse {
 
 `output_predictor` 自己對 cache lookup 用 connection pool；對 plugin call 用 per-(tenant) circuit breaker（per `output-predictor-plugin-contract-v1alpha1.md` §6）。
 
-POST_GA_07 adds a per-tenant Predict RPC token bucket before cache,
-database, or plugin work. Defaults are `predict_rate_limit_per_tenant_per_second = 1000`
-and `predict_rate_limit_tenant_capacity = 4096`; setting the rate to
-`0` disables throttling for emergency rollback. A tenant overrun returns
-gRPC `RESOURCE_EXHAUSTED` and increments
-`spendguard_output_predictor_rate_limited_total{tenant_id}`.
+POST_GA_07 adds a process-local per-tenant Predict RPC token bucket
+before cache, database, or plugin work. Defaults are
+`predict_rate_limit_per_tenant_per_second = 1000` per pod and
+`predict_rate_limit_tenant_capacity = 4096` retained tenant buckets per
+pod; setting the rate to `0` disables throttling for emergency rollback.
+A tenant overrun returns gRPC `RESOURCE_EXHAUSTED`, logs the tenant id in
+structured logs, and increments the bounded-label monotonic counter
+`spendguard_output_predictor_rate_limited_total`. In multi-replica
+deployments, effective service-wide tenant capacity is approximately
+`per_pod_limit * ready_replicas` unless the deployment adds sticky
+tenant routing or an external shared limiter.
 
 ### 2.3 Hot path 並行模式
 
