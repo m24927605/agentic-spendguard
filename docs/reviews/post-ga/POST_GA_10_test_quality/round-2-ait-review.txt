@@ -1,0 +1,11 @@
+AIT adversarial review command, round 2:
+
+ait run --adapter codex --review adversarial --review-adapter codex --review-budget deep --apply never --no-auto-commit --stdin none --description "POST_GA_10 adversarial review round 2 after fixes. Verify round-1 findings are fixed: pinned Python tiktoken reference, per-case Unicode coverage validation, and date-qualified Llama 700M MAU wording. Base main, branch post-ga/POST_GA_10_test_quality." -- /bin/sh -lc 'git diff --stat main..HEAD && git diff --name-only main..HEAD'
+
+Result:
+
+attempt handle: a342
+review_error: attempt is not reviewable: d22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KT3CBWJACWY9ATYJCJ2GC689
+
+AIT produced no adversarial findings. Per POST_GA workflow, round 2
+continues with the direct codex CLI adversarial-review fallback.

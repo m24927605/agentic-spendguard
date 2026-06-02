@@ -1,0 +1,26 @@
+Direct codex CLI adversarial review fallback for AIT round 2.
+
+Reviewer command:
+
+/Users/michael.chen/.nvm/versions/node/v24.14.1/bin/node /Users/michael.chen/.nvm/versions/node/v24.14.1/lib/node_modules/@openai/codex/bin/codex.js exec --dangerously-bypass-approvals-and-sandbox "You are the adversarial code reviewer for SpendGuard POST_GA_10_test_quality round 2. Review branch post-ga/POST_GA_10_test_quality against main in /Users/michael.chen/products/agentic-spendguard. Scope: issues #109 and #124 only. Confirm round-1 findings are genuinely fixed: Python tiktoken reference pinned/asserted, Unicode coverage test validates each tag against the same case input and mixed_noise includes all classes, and README/spec/tests include the date-qualified 700M MAU clause. Also look for new regressions. Return findings first with severity/file:line/fix. If no findings, say 'No findings.'"
+
+Findings:
+
+No findings.
+
+Round-1 fixes confirmed:
+
+- Python `tiktoken` reference is pinned/asserted:
+  `crates/spendguard-tokenizer/tests/fixtures/requirements-openai-cross-check.txt`
+  and `regenerate_openai_cross_check.py`.
+- Unicode tags are validated against the same case input, and
+  `mixed_noise` requires all classes in
+  `cross_check_fixture_schema.rs`.
+- Date-qualified 700M MAU clause is in README/spec/tests.
+
+Reviewer verification run:
+
+- `python3 crates/spendguard-tokenizer/tests/fixtures/regenerate_openai_cross_check.py` passed.
+- `cargo test --manifest-path crates/spendguard-tokenizer/Cargo.toml --test cross_check_fixture_schema --test license_notices` passed.
+- `cargo test --manifest-path crates/spendguard-tokenizer/Cargo.toml` passed.
+- `git diff --check main...post-ga/POST_GA_10_test_quality` passed.
