@@ -100,7 +100,7 @@ while preserving additive proto compatibility.
 
 ## §12. AIT Execution Notes
 
-Reviewer: codex CLI via `ait run --adapter codex --review-mode adversarial`. Max 5 rounds. Staff+ panel arbitration if 5 rounds fail.
+Reviewer: codex CLI via `ait run --adapter codex --review adversarial`. Max 5 rounds. Staff+ panel arbitration if 5 rounds fail.
 
 Reviewer should inspect proto compatibility and tenant isolation.
 
