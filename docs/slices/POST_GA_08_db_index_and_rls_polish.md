@@ -1,7 +1,7 @@
 # POST_GA 08 - DB Index and RLS Polish
 
 > **Branch**: `post-ga/POST_GA_08_db_index_and_rls_polish`
-> **Status**: implementation-complete; pending adversarial review
+> **Status**: ready-to-merge; round 3 adversarial review clean
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `ledger-storage-spec-v1alpha1.md`, `output-predictor-service-spec-v1alpha1.md`
 > **Issues**: #146, #163, #164, #166
 > **Estimated change size**: medium; SQL, RLS, runbooks, planner evidence
@@ -113,11 +113,14 @@ planner evidence.
 | Database Optimizer | Index decision requires EXPLAIN, not intuition | #166 |
 | SRE/Operations Architect | Advisory-lock keepalive belongs in runbook | #164 |
 | Implementer | Added forward-only ledger/canonical migrations, RLS regression, planner evidence, runbook, and migration smoke evidence | `73524d3`, `94b7825`, `067bce4` |
+| Codex adversarial reviewer R1 | Found whitespace-gate drift and forced/empty planner evidence | Fixed in `5e74894` + `951bbe3` |
+| Codex adversarial reviewer R2 | Found incorrect advisory-lock decimal in #164 runbook | Fixed in `0df86a4` |
+| Codex adversarial reviewer R3 | Rechecked #146/#163/#164/#166 and round-1/2 closure | No findings |
 
 ## §14. Merge Checklist
 
 - [x] SQL smoke passes
 - [x] RLS/grant tests pass
 - [x] EXPLAIN evidence recorded
-- [ ] AIT review clean or Staff+ arbitration recorded
+- [x] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated
