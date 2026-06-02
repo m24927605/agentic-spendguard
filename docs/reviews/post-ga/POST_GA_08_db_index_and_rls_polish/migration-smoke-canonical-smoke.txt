@@ -2,4 +2,3 @@
 ------------------+------------------------------+--------------------
  canonical_events | canonical_event_replay_dedup | t
 (1 row)
-

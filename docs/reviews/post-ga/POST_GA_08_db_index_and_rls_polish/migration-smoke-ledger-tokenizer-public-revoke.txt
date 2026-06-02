@@ -3,4 +3,3 @@ DO
 --------------------------------------------+--------
  tokenizer_t1_samples_public_select_revoked | t
 (1 row)
-

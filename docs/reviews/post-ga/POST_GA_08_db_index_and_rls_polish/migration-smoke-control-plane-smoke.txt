@@ -2,4 +2,3 @@
 ----------------------------+----------------------------+-----------------------------
  predictor_plugin_endpoints | control_plane_audit_outbox | t
 (1 row)
-

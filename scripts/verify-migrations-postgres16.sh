@@ -14,7 +14,20 @@ EVIDENCE_PREFIX="${EVIDENCE_PREFIX:-/tmp/spendguard-migrations}"
 log() { echo "[verify-migrations] $*" >&2; }
 
 clean_evidence() {
-    sed -E 's/[[:blank:]]+$//'
+    sed -E 's/[[:blank:]]+$//' |
+        awk '
+            NF {
+                while (blank_lines > 0) {
+                    print "";
+                    blank_lines--;
+                }
+                print;
+                next;
+            }
+            {
+                blank_lines++;
+            }
+        '
 }
 
 cleanup() {

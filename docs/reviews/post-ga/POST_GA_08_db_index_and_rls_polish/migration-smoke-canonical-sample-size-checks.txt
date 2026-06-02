@@ -3,4 +3,3 @@ DO
 -----------------------------------------------+--------
  sample_size_check_constraints_reject_negative | t
 (1 row)
-
