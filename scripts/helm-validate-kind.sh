@@ -119,14 +119,28 @@ PKI="${WORK_DIR}/pki"
 mkdir -p "${PKI}"
 
 # CA
-openssl genrsa -out "${PKI}/ca.key" 4096 2>/dev/null
-openssl req -x509 -new -nodes -key "${PKI}/ca.key" -sha256 -days 3650 \
+"${OPENSSL}" genrsa -out "${PKI}/ca.key" 4096 2>/dev/null
+cat > "${PKI}/ca.cnf" <<EOF
+[req]
+distinguished_name=dn
+x509_extensions=v3_ca
+prompt=no
+
+[dn]
+CN=spendguard-validate-CA
+
+[v3_ca]
+basicConstraints=critical,CA:TRUE,pathlen:0
+keyUsage=critical,keyCertSign,cRLSign
+subjectKeyIdentifier=hash
+EOF
+"${OPENSSL}" req -x509 -new -nodes -key "${PKI}/ca.key" -sha256 -days 3650 \
     -out "${PKI}/ca.crt" \
-    -subj "/CN=spendguard-validate-CA" 2>/dev/null
+    -config "${PKI}/ca.cnf" 2>/dev/null
 
 # Trust SPKI hash (sha256 of CA SubjectPublicKeyInfo, hex).
-TRUST_SPKI_SHA256=$(openssl x509 -in "${PKI}/ca.crt" -outform DER \
-    | openssl dgst -sha256 -binary \
+TRUST_SPKI_SHA256=$("${OPENSSL}" x509 -in "${PKI}/ca.crt" -outform DER \
+    | "${OPENSSL}" dgst -sha256 -binary \
     | xxd -p -c 256)
 
 # Per-service workload certs (chart's shared TLS Secret expects these
@@ -135,14 +149,22 @@ TRUST_SPKI_SHA256=$(openssl x509 -in "${PKI}/ca.crt" -outform DER \
 # this shared TLS Secret unless mTLS is explicitly enabled.
 MTLS_SERVICES=(ledger canonical-ingest control-plane sidecar webhook-receiver outbox-forwarder ttl-sweeper)
 for svc in "${MTLS_SERVICES[@]}"; do
-    openssl genrsa -out "${PKI}/${svc}.key" 2048 2>/dev/null
-    openssl req -new -key "${PKI}/${svc}.key" \
+    "${OPENSSL}" genrsa -out "${PKI}/${svc}.key" 2048 2>/dev/null
+    "${OPENSSL}" req -new -key "${PKI}/${svc}.key" \
         -out "${PKI}/${svc}.csr" \
         -subj "/CN=${svc}.spendguard.local" 2>/dev/null
-    openssl x509 -req -in "${PKI}/${svc}.csr" \
+    cat > "${PKI}/${svc}.ext" <<EOF
+[v3_req]
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth,clientAuth
+subjectAltName=DNS:${svc}.spendguard.local,DNS:spendguard-spendguard-${svc},DNS:spendguard-spendguard-${svc}.${NAMESPACE}.svc,DNS:spendguard-spendguard-${svc}.${NAMESPACE}.svc.cluster.local
+EOF
+    "${OPENSSL}" x509 -req -in "${PKI}/${svc}.csr" \
         -CA "${PKI}/ca.crt" -CAkey "${PKI}/ca.key" \
         -CAcreateserial \
         -out "${PKI}/${svc}.crt" \
+        -extensions v3_req -extfile "${PKI}/${svc}.ext" \
         -days 365 -sha256 2>/dev/null
 done
 
@@ -279,7 +301,7 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create secret generic spend
 
 # 4.3 — webhook HMAC
 kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create secret generic spendguard-webhook-hmac \
-    --from-literal=hmac="$(openssl rand -hex 32)" \
+    --from-literal=hmac="$("${OPENSSL}" rand -hex 32)" \
     --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" apply -f -
 
 # 4.4 — manifest verify key (ed25519 PUBLIC PEM)
@@ -303,7 +325,7 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create secret generic spend
 
 # 4.7 — mTLS bootstrap token (one-shot)
 kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create secret generic spendguard-mtls-bootstrap \
-    --from-literal=token="$(openssl rand -hex 32)" \
+    --from-literal=token="$("${OPENSSL}" rand -hex 32)" \
     --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" apply -f -
 
 # ---------------------------------------------------------------------

@@ -45,6 +45,11 @@ spec:
             - { name: SPENDGUARD_LEDGER_TLS_CERT_PEM, value: "/etc/ssl/spendguard/ledger.crt" }
             - { name: SPENDGUARD_LEDGER_TLS_KEY_PEM,  value: "/etc/ssl/spendguard/ledger.key" }
             - { name: SPENDGUARD_LEDGER_TLS_CA_PEM,   value: "/etc/ssl/spendguard/ca.crt" }
+            {{- if eq .Values.chart.profile "demo" }}
+            # Demo kind validation runs a single Postgres pod, not a
+            # synchronous replica set. Production must leave this unset.
+            - { name: SPENDGUARD_LEDGER_ALLOW_UNSAFE_DURABILITY, value: "true" }
+            {{- end }}
             # Phase 5 GA hardening S6: producer signing config.
             - { name: SPENDGUARD_PROFILE,                           value: {{ .Values.signing.profile | quote }} }
             - { name: SPENDGUARD_LEDGER_SIGNING_MODE,               value: {{ .Values.signing.mode | quote }} }

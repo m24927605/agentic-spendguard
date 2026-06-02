@@ -190,6 +190,8 @@ spec:
         #   contract_bundle/<contractBundleId>.tgz.sig
         #   contract_bundle/<contractBundleId>.metadata.json
         #   schema_bundle/<schemaBundleId>.tgz
+        #   runtime.env
+        #   pricing.env
         # K8s Secret keys cannot contain "/", so we project flat operator-
         # supplied keys to those paths via items.path.
         - name: bundles
@@ -204,6 +206,10 @@ spec:
                 path: contract_bundle/{{ .Values.sidecar.contractBundleId }}.metadata.json
               - key: schema_bundle_tgz
                 path: schema_bundle/{{ .Values.sidecar.schemaBundleId }}.tgz
+              - key: runtime.env
+                path: runtime.env
+              - key: pricing.env
+                path: pricing.env
         - name: manifest-verify-key
           secret:
             secretName: {{ .Values.sidecar.manifestVerifyKey.existingSecret }}
