@@ -61,6 +61,10 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
+      # Each matrix job boots a docker-container BuildKit instance. Keep
+      # Docker Hub pulls bounded so one transient registry timeout does
+      # not fail the whole publish run.
+      max-parallel: 4
       matrix:
         include:
           - service: canonical-ingest
@@ -93,6 +97,16 @@ jobs:
         uses: actions/checkout@v6
         with:
           persist-credentials: false
+
+      - name: Pre-pull BuildKit image
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if docker pull moby/buildkit:buildx-stable-1; then
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          docker pull moby/buildkit:buildx-stable-1
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
