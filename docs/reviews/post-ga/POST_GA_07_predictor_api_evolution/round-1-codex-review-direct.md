@@ -10,7 +10,7 @@ Reviewer: codex CLI direct fallback after AIT review orchestration returned `att
 
 ## Fixes Applied
 
-- Replaced tenant-labeled rate-limit metric samples with a single bounded-label monotonic counter and kept tenant detail in structured logs.
+- Replaced raw per-tenant Prometheus samples with a single no-label monotonic counter and kept tenant detail in structured logs.
 - Replaced limiter LRU tenant state with a bounded `HashMap`; capacity exhaustion now fails closed for new tenants instead of evicting/resetting existing tenant buckets.
 - Documented per-pod limiter semantics in the output predictor spec and Helm values.
 - Added metrics inventory coverage for `spendguard_output_predictor_rate_limited_total` with no labels.
@@ -28,6 +28,6 @@ Reviewer: codex CLI direct fallback after AIT review orchestration returned `att
 - `helm template spendguard charts/spendguard --set chart.profile=production -f charts/spendguard/values-production.example.yaml`: PASS, 2159 lines.
 - `docker compose -f deploy/demo/compose.yaml up -d --build output-predictor`: PASS.
 - `curl -fsS http://localhost:9100/healthz`: PASS, `ok`.
-- `curl -fsS http://localhost:9100/metrics | rg "spendguard_output_predictor_(rate_limited_total|predict_total)"`: PASS; rate-limit metric has no labels.
+- `curl -fsS http://localhost:9100/metrics | rg "spendguard_output_predictor_(rate_limited_total|predict_total)"`: PASS; `rate_limited_total` counter has no labels.
 - `make demo-down && make demo-up DEMO_MODE=default`: PASS.
 - `git diff --check`: PASS.

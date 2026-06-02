@@ -81,7 +81,7 @@ pub struct Config {
     pub predict_rate_limit_per_tenant_per_second: u32,
 
     /// Maximum number of tenant limiter buckets retained in memory.
-    /// Bounded to keep tenant_id metric labels and hot-path state finite.
+    /// Bounded to keep hot-path state finite; metrics stay no-label.
     #[serde(default = "default_predict_rate_limit_tenant_capacity")]
     pub predict_rate_limit_tenant_capacity: usize,
 

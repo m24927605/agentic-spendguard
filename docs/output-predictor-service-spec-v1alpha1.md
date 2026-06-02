@@ -190,7 +190,7 @@ before cache, database, or plugin work. Defaults are
 `predict_rate_limit_tenant_capacity = 4096` retained tenant buckets per
 pod; setting the rate to `0` disables throttling for emergency rollback.
 A tenant overrun returns gRPC `RESOURCE_EXHAUSTED`, logs the tenant id in
-structured logs, and increments the bounded-label monotonic counter
+structured logs, and increments the no-label monotonic counter
 `spendguard_output_predictor_rate_limited_total`. In multi-replica
 deployments, effective service-wide tenant capacity is approximately
 `per_pod_limit * ready_replicas` unless the deployment adds sticky
@@ -569,7 +569,7 @@ v1alpha1 是 rule-based；v2 可能引入 ML classifier。Upgrade 走 v1beta1 co
 | Plugin returns illegal value | C = null + circuit breaker count failure |
 | `model_default_distribution.toml` lookup miss | L2 → L1（B null） |
 | `model_context_window` lookup miss | A 用 8000 default + emit metric |
-| Tenant exceeds Predict RPC rate limit | Return gRPC `RESOURCE_EXHAUSTED` + emit tenant-labeled rate-limit metric |
+| Tenant exceeds Predict RPC rate limit | Return gRPC `RESOURCE_EXHAUSTED`, log tenant id in structured logs, and increment no-label `spendguard_output_predictor_rate_limited_total` |
 | Classifier mis-classify | 仍走流程；calibration-report 後驗 |
 | All B and C fail | A 仍永遠算成 → selector 落到 A |
 | Predict RPC timeout from sidecar | sidecar 走 conservative fallback（per `sidecar-architecture-spec-v1alpha1.md` §7 fail-safe path）—— typically A only |

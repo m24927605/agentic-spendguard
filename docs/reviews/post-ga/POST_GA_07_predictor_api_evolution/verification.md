@@ -41,7 +41,7 @@ Base: `main` at `04f1fa3 Merge POST_GA_06 stats drift hygiene`
 - Default per-tenant refill rate: `1000` Predict RPCs/second.
 - Default retained tenant buckets: `4096`.
 - `0` disables the limiter for emergency rollback.
-- Over-limit requests return gRPC `RESOURCE_EXHAUSTED`, log `tenant_id`, and increment bounded-label `spendguard_output_predictor_rate_limited_total`.
+- Over-limit requests return gRPC `RESOURCE_EXHAUSTED`, log `tenant_id`, and increment no-label `spendguard_output_predictor_rate_limited_total`.
 - Unit coverage verifies one tenant exhausting its bucket does not affect another tenant.
 - Unit coverage verifies tenant-capacity exhaustion fails closed for new tenants rather than evicting and resetting existing tenant buckets.
 - The limiter is process-local per pod; multi-replica service-wide tenant capacity is approximately the configured per-pod rate multiplied by ready replicas unless sticky tenant routing or a shared external limiter is added.
