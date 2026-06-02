@@ -1,7 +1,7 @@
 # POST_GA 10 - Test Quality
 
 > **Branch**: `post-ga/POST_GA_10_test_quality`
-> **Status**: draft
+> **Status**: clean adversarial review and final gates passed; merge pending
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `tokenizer-service-spec-v1alpha1.md`
 > **Issues**: #109, #124
 > **Estimated change size**: small-medium; test fixtures and compliance docs
@@ -107,8 +107,8 @@ claims.
 
 ## §14. Merge Checklist
 
-- [ ] #109 fixed and tested
-- [ ] #124 fixed and reviewed
-- [ ] Test evidence recorded
-- [ ] AIT review clean or Staff+ arbitration recorded
+- [x] #109 fixed and tested
+- [x] #124 fixed and reviewed
+- [x] Test evidence recorded
+- [x] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated

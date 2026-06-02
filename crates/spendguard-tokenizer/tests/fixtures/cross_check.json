@@ -1,31 +1,237 @@
 {
   "schema_version": 1,
   "description": "Tokenizer Layer B cross-check fixture manifest. Runtime fail-fast vectors remain compiled into the library; this file is the extensible maintenance surface for asset rotations.",
+  "reference_generator": "regenerate_openai_cross_check.py verifies OPENAI_TIKTOKEN vectors with Python tiktoken 0.12.0; install via requirements-openai-cross-check.txt.",
   "kinds": {
     "OPENAI_TIKTOKEN": {
       "cases": [
         {
+          "case_id": "canonical_ascii_cl100k",
           "encoder": "cl100k_base",
           "input": "spendguard-cross-check-fixture-v1alpha1",
+          "coverage": ["canonical_ascii"],
+          "rationale": "Runtime Layer B smoke fixture used by encoder_cache.rs for the cl100k singleton.",
+          "expected_token_count": 11,
           "expected_token_ids": [2203, 408, 27190, 77529, 16313, 2269, 13025, 8437, 16, 7288, 16]
         },
         {
+          "case_id": "canonical_ascii_o200k",
           "encoder": "o200k_base",
           "input": "spendguard-cross-check-fixture-v1alpha1",
+          "coverage": ["canonical_ascii"],
+          "rationale": "Runtime Layer B smoke fixture used by encoder_cache.rs for the o200k singleton.",
+          "expected_token_count": 11,
           "expected_token_ids": [1148, 419, 29190, 154059, 30411, 52253, 10978, 9827, 16, 15453, 16]
         },
         {
+          "case_id": "canonical_ascii_p50k",
           "encoder": "p50k_base",
           "input": "spendguard-cross-check-fixture-v1alpha1",
+          "coverage": ["canonical_ascii"],
+          "rationale": "Runtime Layer B smoke fixture used by encoder_cache.rs for the p50k singleton.",
+          "expected_token_count": 15,
           "expected_token_ids": [2777, 437, 14864, 12, 19692, 12, 9122, 12, 69, 9602, 12, 85, 16, 26591, 16]
+        },
+        {
+          "case_id": "unicode_four_byte_cl100k",
+          "encoder": "cl100k_base",
+          "input": "unicode-4byte: \ud83e\uddea\ud83d\ude80\ud83d\ude42",
+          "coverage": ["unicode_adversarial", "four_byte_utf8"],
+          "rationale": "Pins non-BMP UTF-8 handling for emoji code points that encode as four-byte Unicode scalars.",
+          "expected_token_count": 13,
+          "expected_token_ids": [25535, 12, 19, 3867, 25, 11410, 100, 103, 9468, 248, 222, 9468, 19044]
+        },
+        {
+          "case_id": "unicode_four_byte_o200k",
+          "encoder": "o200k_base",
+          "input": "unicode-4byte: \ud83e\uddea\ud83d\ude80\ud83d\ude42",
+          "coverage": ["unicode_adversarial", "four_byte_utf8"],
+          "rationale": "Pins non-BMP UTF-8 handling for emoji code points that encode as four-byte Unicode scalars.",
+          "expected_token_count": 11,
+          "expected_token_ids": [107456, 12, 19, 7216, 25, 9552, 100, 103, 112927, 222, 37459]
+        },
+        {
+          "case_id": "unicode_four_byte_p50k",
+          "encoder": "p50k_base",
+          "input": "unicode-4byte: \ud83e\uddea\ud83d\ude80\ud83d\ude42",
+          "coverage": ["unicode_adversarial", "four_byte_utf8"],
+          "rationale": "Pins non-BMP UTF-8 handling for emoji code points that encode as four-byte Unicode scalars.",
+          "expected_token_count": 14,
+          "expected_token_ids": [46903, 1098, 12, 19, 26327, 25, 12520, 100, 103, 8582, 248, 222, 8582, 25081]
+        },
+        {
+          "case_id": "unicode_zwj_family_cl100k",
+          "encoder": "cl100k_base",
+          "input": "zwj-family: \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66",
+          "coverage": ["unicode_adversarial", "zwj_sequence"],
+          "rationale": "Pins zero-width-joiner behavior for a multi-code-point emoji family sequence.",
+          "expected_token_count": 21,
+          "expected_token_ids": [31881, 73, 17633, 25, 62904, 101, 378, 235, 9468, 239, 102, 378, 235, 9468, 239, 100, 378, 235, 9468, 239, 99]
+        },
+        {
+          "case_id": "unicode_zwj_family_o200k",
+          "encoder": "o200k_base",
+          "input": "zwj-family: \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66",
+          "coverage": ["unicode_adversarial", "zwj_sequence"],
+          "rationale": "Pins zero-width-joiner behavior for a multi-code-point emoji family sequence.",
+          "expected_token_count": 15,
+          "expected_token_ids": [16120, 73, 34972, 25, 61138, 101, 2524, 28823, 102, 2524, 28823, 100, 2524, 28823, 99]
+        },
+        {
+          "case_id": "unicode_zwj_family_p50k",
+          "encoder": "p50k_base",
+          "input": "zwj-family: \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66",
+          "coverage": ["unicode_adversarial", "zwj_sequence"],
+          "rationale": "Pins zero-width-joiner behavior for a multi-code-point emoji family sequence.",
+          "expected_token_count": 20,
+          "expected_token_ids": [89, 86, 73, 12, 17989, 25, 50169, 101, 447, 235, 41840, 102, 447, 235, 41840, 100, 447, 235, 41840, 99]
+        },
+        {
+          "case_id": "unicode_rtl_scripts_cl100k",
+          "encoder": "cl100k_base",
+          "input": "rtl-script: \u0645\u0631\u062d\u0628\u0627 \u05e9\u05dc\u05d5\u05dd",
+          "coverage": ["unicode_adversarial", "rtl_script"],
+          "rationale": "Pins bidirectional Arabic and Hebrew script handling without relying on UI display order.",
+          "expected_token_count": 12,
+          "expected_token_ids": [49568, 67060, 25, 24252, 11318, 30925, 22071, 5821, 88898, 50391, 37769, 251]
+        },
+        {
+          "case_id": "unicode_rtl_scripts_o200k",
+          "encoder": "o200k_base",
+          "input": "rtl-script: \u0645\u0631\u062d\u0628\u0627 \u05e9\u05dc\u05d5\u05dd",
+          "coverage": ["unicode_adversarial", "rtl_script"],
+          "rationale": "Pins bidirectional Arabic and Hebrew script handling without relying on UI display order.",
+          "expected_token_count": 6,
+          "expected_token_ids": [110297, 164434, 25, 60397, 26537, 173283]
+        },
+        {
+          "case_id": "unicode_rtl_scripts_p50k",
+          "encoder": "p50k_base",
+          "input": "rtl-script: \u0645\u0631\u062d\u0628\u0627 \u05e9\u05dc\u05d5\u05dd",
+          "coverage": ["unicode_adversarial", "rtl_script"],
+          "rationale": "Pins bidirectional Arabic and Hebrew script handling without relying on UI display order.",
+          "expected_token_count": 17,
+          "expected_token_ids": [17034, 75, 12, 12048, 25, 47048, 26897, 148, 255, 39848, 12919, 14360, 102, 40010, 27072, 147, 251]
+        },
+        {
+          "case_id": "unicode_cjk_bidi_mix_cl100k",
+          "encoder": "cl100k_base",
+          "input": "cjk-bidi: \u4f60\u597d \u0645\u0631\u062d\u0628\u0627 \u6771\u4eac \u05e9\u05dc\u05d5\u05dd",
+          "coverage": ["unicode_adversarial", "cjk_bidi_mix", "rtl_script"],
+          "rationale": "Pins mixed CJK plus bidi scripts in the same pasted prompt.",
+          "expected_token_count": 20,
+          "expected_token_ids": [66, 42908, 1481, 12558, 25, 220, 57668, 53901, 24252, 11318, 30925, 22071, 5821, 61696, 109, 47653, 88898, 50391, 37769, 251]
+        },
+        {
+          "case_id": "unicode_cjk_bidi_mix_o200k",
+          "encoder": "o200k_base",
+          "input": "cjk-bidi: \u4f60\u597d \u0645\u0631\u062d\u0628\u0627 \u6771\u4eac \u05e9\u05dc\u05d5\u05dd",
+          "coverage": ["unicode_adversarial", "cjk_bidi_mix", "rtl_script"],
+          "rationale": "Pins mixed CJK plus bidi scripts in the same pasted prompt.",
+          "expected_token_count": 11,
+          "expected_token_ids": [66, 88082, 2118, 9175, 25, 220, 177519, 60397, 26537, 185244, 173283]
+        },
+        {
+          "case_id": "unicode_cjk_bidi_mix_p50k",
+          "encoder": "p50k_base",
+          "input": "cjk-bidi: \u4f60\u597d \u0645\u0631\u062d\u0628\u0627 \u6771\u4eac \u05e9\u05dc\u05d5\u05dd",
+          "coverage": ["unicode_adversarial", "cjk_bidi_mix", "rtl_script"],
+          "rationale": "Pins mixed CJK plus bidi scripts in the same pasted prompt.",
+          "expected_token_count": 29,
+          "expected_token_ids": [66, 73, 74, 12, 14065, 72, 25, 220, 19526, 254, 25001, 121, 47048, 26897, 148, 255, 39848, 12919, 10545, 251, 109, 12859, 105, 14360, 102, 40010, 27072, 147, 251]
+        },
+        {
+          "case_id": "unicode_combining_marks_cl100k",
+          "encoder": "cl100k_base",
+          "input": "combining: cafe\u0301 na\u0308ive e\u0301",
+          "coverage": ["unicode_adversarial", "combining_marks"],
+          "rationale": "Pins decomposed combining marks so NFC/NFD normalization drift is visible.",
+          "expected_token_count": 11,
+          "expected_token_ids": [22631, 5859, 25, 42030, 54939, 4415, 136, 230, 535, 384, 54939]
+        },
+        {
+          "case_id": "unicode_combining_marks_o200k",
+          "encoder": "o200k_base",
+          "input": "combining: cafe\u0301 na\u0308ive e\u0301",
+          "coverage": ["unicode_adversarial", "combining_marks"],
+          "rationale": "Pins decomposed combining marks so NFC/NFD normalization drift is visible.",
+          "expected_token_count": 10,
+          "expected_token_ids": [43606, 7276, 25, 50672, 13430, 898, 47565, 585, 319, 13430]
+        },
+        {
+          "case_id": "unicode_combining_marks_p50k",
+          "encoder": "p50k_base",
+          "input": "combining: cafe\u0301 na\u0308ive e\u0301",
+          "coverage": ["unicode_adversarial", "combining_marks"],
+          "rationale": "Pins decomposed combining marks so NFC/NFD normalization drift is visible.",
+          "expected_token_count": 13,
+          "expected_token_ids": [24011, 3191, 25, 26725, 136, 223, 12385, 136, 230, 425, 304, 136, 223]
+        },
+        {
+          "case_id": "unicode_bom_prefix_cl100k",
+          "encoder": "cl100k_base",
+          "input": "\ufeffbom-prefix spendguard pasted text",
+          "coverage": ["unicode_adversarial", "bom_prefix"],
+          "rationale": "Pins pasted-text inputs that preserve an initial byte-order mark.",
+          "expected_token_count": 9,
+          "expected_token_ids": [3305, 65, 316, 68281, 8493, 27190, 3347, 291, 1495]
+        },
+        {
+          "case_id": "unicode_bom_prefix_o200k",
+          "encoder": "o200k_base",
+          "input": "\ufeffbom-prefix spendguard pasted text",
+          "coverage": ["unicode_adversarial", "bom_prefix"],
+          "rationale": "Pins pasted-text inputs that preserve an initial byte-order mark.",
+          "expected_token_count": 7,
+          "expected_token_ids": [5574, 146878, 189584, 10075, 29190, 192393, 2201]
+        },
+        {
+          "case_id": "unicode_bom_prefix_p50k",
+          "encoder": "p50k_base",
+          "input": "\ufeffbom-prefix spendguard pasted text",
+          "coverage": ["unicode_adversarial", "bom_prefix"],
+          "rationale": "Pins pasted-text inputs that preserve an initial byte-order mark.",
+          "expected_token_count": 12,
+          "expected_token_ids": [171, 119, 123, 65, 296, 12, 40290, 4341, 14864, 1613, 276, 2420]
+        },
+        {
+          "case_id": "unicode_noise_mix_cl100k",
+          "encoder": "cl100k_base",
+          "input": "noise: \u4f60\u597d \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 \u0645\u0631\u062d\u0628\u0627 \ud83d\ude80 cafe\u0301 \ufeff",
+          "coverage": ["unicode_adversarial", "mixed_noise", "four_byte_utf8", "zwj_sequence", "rtl_script", "cjk_bidi_mix", "combining_marks", "bom_prefix"],
+          "rationale": "Pins a single noisy pasted prompt containing CJK, emoji, ZWJ, RTL, combining mark, and BOM classes.",
+          "expected_token_count": 33,
+          "expected_token_ids": [53318, 25, 220, 57668, 53901, 62904, 101, 378, 235, 9468, 239, 102, 378, 235, 9468, 239, 100, 378, 235, 9468, 239, 99, 24252, 11318, 30925, 22071, 5821, 11410, 248, 222, 42030, 54939, 76880]
+        },
+        {
+          "case_id": "unicode_noise_mix_o200k",
+          "encoder": "o200k_base",
+          "input": "noise: \u4f60\u597d \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 \u0645\u0631\u062d\u0628\u0627 \ud83d\ude80 cafe\u0301 \ufeff",
+          "coverage": ["unicode_adversarial", "mixed_noise", "four_byte_utf8", "zwj_sequence", "rtl_script", "cjk_bidi_mix", "combining_marks", "bom_prefix"],
+          "rationale": "Pins a single noisy pasted prompt containing CJK, emoji, ZWJ, RTL, combining mark, and BOM classes.",
+          "expected_token_count": 22,
+          "expected_token_ids": [106706, 25, 220, 177519, 61138, 101, 2524, 28823, 102, 2524, 28823, 100, 2524, 28823, 99, 60397, 26537, 169883, 222, 50672, 13430, 71280]
+        },
+        {
+          "case_id": "unicode_noise_mix_p50k",
+          "encoder": "p50k_base",
+          "input": "noise: \u4f60\u597d \ud83d\udc68\u200d\ud83d\udc69\u200d\ud83d\udc67\u200d\ud83d\udc66 \u0645\u0631\u062d\u0628\u0627 \ud83d\ude80 cafe\u0301 \ufeff",
+          "coverage": ["unicode_adversarial", "mixed_noise", "four_byte_utf8", "zwj_sequence", "rtl_script", "cjk_bidi_mix", "combining_marks", "bom_prefix"],
+          "rationale": "Pins a single noisy pasted prompt containing CJK, emoji, ZWJ, RTL, combining mark, and BOM classes.",
+          "expected_token_count": 37,
+          "expected_token_ids": [3919, 786, 25, 220, 19526, 254, 25001, 121, 50169, 101, 447, 235, 41840, 102, 447, 235, 41840, 100, 447, 235, 41840, 99, 47048, 26897, 148, 255, 39848, 12919, 12520, 248, 222, 26725, 136, 223, 27332, 119, 123]
         }
       ]
     },
     "ANTHROPIC_BPE": {
       "cases": [
         {
+          "case_id": "canonical_ascii_anthropic",
           "encoder": "anthropic-claude3",
           "input": "spendguard-cross-check-fixture-v1alpha1",
+          "coverage": ["canonical_ascii"],
+          "rationale": "Runtime Layer B smoke fixture used by the Anthropic vendored tokenizer.",
+          "expected_token_count": 13,
           "expected_token_ids": [39995, 17973, 17, 9258, 17, 1584, 17, 12488, 17, 90, 21, 2741, 21]
         }
       ]
@@ -33,8 +239,12 @@
     "GEMINI_BPE": {
       "cases": [
         {
+          "case_id": "canonical_ascii_gemini",
           "encoder": "gemini-1.5",
           "input": "spendguard-cross-check-fixture-v1alpha1",
+          "coverage": ["canonical_ascii"],
+          "rationale": "Runtime Layer B smoke fixture used by the Gemini/Gemma approximation tokenizer.",
+          "expected_token_count": 13,
           "expected_token_ids": [120479, 14413, 235290, 16100, 235290, 3534, 235290, 35693, 235290, 235272, 235274, 4705, 235274]
         }
       ]
@@ -42,8 +252,12 @@
     "COHERE_BPE": {
       "cases": [
         {
+          "case_id": "canonical_ascii_cohere",
           "encoder": "cohere-command-r",
           "input": "spendguard-cross-check-fixture-v1alpha1",
+          "coverage": ["canonical_ascii"],
+          "rationale": "Runtime Layer B smoke fixture used by the opt-in Cohere vendored tokenizer.",
+          "expected_token_count": 13,
           "expected_token_ids": [221325, 37315, 20, 32374, 20, 7399, 20, 61774, 20, 93, 24, 21159, 24]
         }
       ]
@@ -51,8 +265,12 @@
     "SENTENCEPIECE_LLAMA": {
       "cases": [
         {
+          "case_id": "canonical_llama_multilingual",
           "encoder": "llama-3.1",
-          "input": "spendguard-llama-cross-check-v1alpha1 你好 llama-\u00f1",
+          "input": "spendguard-llama-cross-check-v1alpha1 \u4f60\u597d llama-\u00f1",
+          "coverage": ["canonical_ascii", "cjk", "latin1"],
+          "rationale": "Runtime Layer B smoke fixture used by the Llama vendored tokenizer, including CJK and Latin-1 bytes.",
+          "expected_token_count": 17,
           "expected_token_ids": [2203, 408, 27190, 12, 657, 3105, 77529, 16313, 8437, 16, 7288, 16, 118195, 53901, 94776, 12, 5771]
         }
       ]
