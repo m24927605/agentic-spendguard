@@ -419,6 +419,12 @@ outputPredictor:
   cacheTtlSeconds: 300
   # Unknown-model context window fallback per spec §3.3.
   unknownModelContextWindow: 8000
+  # POST_GA_07: per-tenant Predict RPC limiter. 0 disables for
+  # emergency rollback; default protects shared hot-path capacity.
+  predictRateLimitPerTenantPerSecond: 1000
+  # Maximum tenant buckets retained for limiter state and tenant-labeled
+  # throttling metrics.
+  predictRateLimitTenantCapacity: 4096
   # ── SLICE_07: Strategy C plugin wiring ──────────────────────────
   # per output-predictor-plugin-contract-v1alpha1.md.
   # Strategy C reads the plugin endpoint registry from
