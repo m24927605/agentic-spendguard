@@ -34,7 +34,9 @@ use crate::aggregation::{
     aggregate_output_distribution, discover_active_tenants, release_lock_conn,
     try_acquire_lock_conn,
 };
-use crate::drift_detector::{detect_and_emit, DriftAlertSink, DriftDetectorConfig};
+use crate::drift_detector::{
+    detect_and_emit, DriftAlertCooldown, DriftAlertSink, DriftDetectorConfig,
+};
 use crate::run_length::aggregate_run_length;
 use spendguard_signing::Signer;
 
@@ -45,6 +47,7 @@ use spendguard_signing::Signer;
 pub static CYCLES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static SKIPPED_LOCK_HELD_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static DRIFT_ALERTS_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static DRIFT_ALERTS_SUPPRESSED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static CYCLE_ERROR_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_CYCLE_START_UNIX_SECS: AtomicU64 = AtomicU64::new(0);
 
@@ -54,6 +57,7 @@ pub struct CycleOutcome {
     pub lock_acquired: bool,
     pub tenants_processed: usize,
     pub alerts_emitted: usize,
+    pub alerts_suppressed: usize,
     pub error_count: usize,
 }
 
@@ -64,11 +68,13 @@ pub async fn run_one_cycle(
     cfg: &DriftDetectorConfig,
     signer: Arc<dyn Signer>,
     sink: Arc<dyn DriftAlertSink>,
+    cooldown: Arc<dyn DriftAlertCooldown>,
 ) -> Result<CycleOutcome, anyhow::Error> {
     let mut outcome = CycleOutcome {
         lock_acquired: false,
         tenants_processed: 0,
         alerts_emitted: 0,
+        alerts_suppressed: 0,
         error_count: 0,
     };
 
@@ -97,7 +103,7 @@ pub async fn run_one_cycle(
     // lock before returning. Per spec §8.3 the lock must release even
     // if any tenant aggregation panics (Postgres auto-releases on
     // session disconnect, but we want a clean release in normal flow).
-    let cycle_result = run_cycle_body(pool, cfg, signer, sink, &mut outcome).await;
+    let cycle_result = run_cycle_body(pool, cfg, signer, sink, cooldown, &mut outcome).await;
 
     if let Err(e) = release_lock_conn(lock_conn).await {
         warn!(error = %e, "release_lock failed (Postgres will auto-release on session disconnect)");
@@ -114,6 +120,7 @@ async fn run_cycle_body(
     cfg: &DriftDetectorConfig,
     signer: Arc<dyn Signer>,
     sink: Arc<dyn DriftAlertSink>,
+    cooldown: Arc<dyn DriftAlertCooldown>,
     outcome: &mut CycleOutcome,
 ) -> Result<(), anyhow::Error> {
     let tenants = match discover_active_tenants(pool).await {
@@ -144,12 +151,26 @@ async fn run_cycle_body(
         }
     }
 
-    match detect_and_emit(&all_aggregates, cfg, signer.as_ref(), sink.as_ref()).await {
-        Ok(n) => {
-            outcome.alerts_emitted = n;
+    match detect_and_emit(
+        &all_aggregates,
+        cfg,
+        signer.as_ref(),
+        sink.as_ref(),
+        cooldown.as_ref(),
+    )
+    .await
+    {
+        Ok(drift) => {
+            outcome.alerts_emitted = drift.emitted;
+            outcome.alerts_suppressed = drift.suppressed;
             // R2 M13: live counter for alert emission rate.
-            DRIFT_ALERTS_TOTAL.fetch_add(n as u64, Ordering::Relaxed);
-            info!(alerts = n, "drift detection complete");
+            DRIFT_ALERTS_TOTAL.fetch_add(drift.emitted as u64, Ordering::Relaxed);
+            DRIFT_ALERTS_SUPPRESSED_TOTAL.fetch_add(drift.suppressed as u64, Ordering::Relaxed);
+            info!(
+                alerts = drift.emitted,
+                suppressed = drift.suppressed,
+                "drift detection complete"
+            );
         }
         Err(e) => {
             error!(error = %e, "detect_and_emit failed; alerts may be lost");
@@ -174,6 +195,7 @@ pub async fn run_loop(
     cfg: DriftDetectorConfig,
     signer: Arc<dyn Signer>,
     sink: Arc<dyn DriftAlertSink>,
+    cooldown: Arc<dyn DriftAlertCooldown>,
 ) {
     let mut ticker = interval(Duration::from_secs(cycle_seconds));
     // Tick once immediately so the first cycle runs at startup, then
@@ -182,12 +204,21 @@ pub async fn run_loop(
 
     loop {
         ticker.tick().await;
-        match run_one_cycle(&pool, &cfg, Arc::clone(&signer), Arc::clone(&sink)).await {
+        match run_one_cycle(
+            &pool,
+            &cfg,
+            Arc::clone(&signer),
+            Arc::clone(&sink),
+            Arc::clone(&cooldown),
+        )
+        .await
+        {
             Ok(outcome) => {
                 info!(
                     lock_acquired = outcome.lock_acquired,
                     tenants_processed = outcome.tenants_processed,
                     alerts_emitted = outcome.alerts_emitted,
+                    alerts_suppressed = outcome.alerts_suppressed,
                     error_count = outcome.error_count,
                     "cycle complete"
                 );
