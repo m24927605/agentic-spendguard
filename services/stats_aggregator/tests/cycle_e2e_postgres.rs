@@ -11,8 +11,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use chrono::{Duration as ChronoDuration, Utc};
 use pretty_assertions::assert_eq;
 use spendguard_stats_aggregator::aggregation::aggregate_output_distribution;
+use spendguard_stats_aggregator::drift_detector::{
+    DriftAlertCooldown, DriftAlertCooldownDecision, DriftAlertKey, PostgresDriftAlertCooldownStore,
+};
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use testcontainers::runners::AsyncRunner;
@@ -586,4 +590,104 @@ async fn drift_alert_audit_row_can_land_without_prediction_mirror_columns() {
         .try_get::<Option<String>, _>("prompt_class")
         .unwrap()
         .is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drift_alert_cooldown_postgres_is_key_and_tenant_scoped() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let store = PostgresDriftAlertCooldownStore::new(fx.app_pool.clone());
+    let tenant_id = Uuid::new_v4();
+    let now = Utc::now();
+    let key = DriftAlertKey {
+        tenant_id,
+        model: "gpt-4o-mini".into(),
+        agent_id: "agent-alpha".into(),
+        prompt_class: "chat_short".into(),
+    };
+
+    let first = store.reserve(&key, now, 2.5).await.expect("first");
+    assert!(matches!(first, DriftAlertCooldownDecision::Allowed { .. }));
+
+    let duplicate = store
+        .reserve(&key, now + ChronoDuration::hours(1), 3.0)
+        .await
+        .expect("duplicate");
+    assert!(matches!(
+        duplicate,
+        DriftAlertCooldownDecision::Suppressed { .. }
+    ));
+
+    let mut different_prompt = key.clone();
+    different_prompt.prompt_class = "rag_short".into();
+    let prompt_decision = store
+        .reserve(&different_prompt, now + ChronoDuration::hours(1), 3.0)
+        .await
+        .expect("different prompt");
+    assert!(matches!(
+        prompt_decision,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+
+    let mut different_tenant = key.clone();
+    different_tenant.tenant_id = Uuid::new_v4();
+    let tenant_decision = store
+        .reserve(&different_tenant, now + ChronoDuration::hours(1), 3.0)
+        .await
+        .expect("different tenant");
+    assert!(matches!(
+        tenant_decision,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+
+    let after_expiry = store
+        .reserve(&key, now + ChronoDuration::hours(25), 3.5)
+        .await
+        .expect("after expiry");
+    assert!(matches!(
+        after_expiry,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drift_alert_cooldown_postgres_rejects_non_finite_z_scores() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let tenant_id = Uuid::new_v4();
+
+    for value in ["'NaN'::REAL", "'Infinity'::REAL", "'-Infinity'::REAL"] {
+        let mut tx = fx.app_pool.begin().await.expect("begin tx");
+        sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+            .bind(tenant_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .expect("set tenant");
+        let query = format!(
+            r#"
+            INSERT INTO prediction_drift_alert_cooldowns (
+              tenant_id, model, agent_id, prompt_class,
+              last_emitted_at, suppress_until, last_z_score
+            )
+            VALUES (
+              $1, 'gpt-4o-mini', 'agent-alpha', $2,
+              clock_timestamp(), clock_timestamp() + interval '24 hours', {value}
+            )
+            "#
+        );
+        let err = sqlx::query(&query)
+            .bind(tenant_id)
+            .bind(format!("prompt-{value}"))
+            .execute(&mut *tx)
+            .await
+            .expect_err("non-finite z-score must violate CHECK");
+        assert!(
+            err.to_string()
+                .contains("prediction_drift_alert_cooldowns_last_z_score_check"),
+            "unexpected error for {value}: {err}"
+        );
+        let _ = tx.rollback().await;
+    }
 }
