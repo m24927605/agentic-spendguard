@@ -7,7 +7,7 @@
 # (cert-manager rotation, KMS-backed signing) and is the next layer up.
 #
 # What this script proves:
-#   * helm install --set chart.profile=demo brings up postgres + the 10
+#   * helm install --set chart.profile=demo brings up postgres + the 11
 #     default-enabled chart workloads + 1 migration Job
 #   * Required Secrets (TLS, bundles, webhook HMAC, signing keys,
 #     manifest verify key, trust root, mTLS bootstrap) have the right
@@ -420,43 +420,8 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create configmap spendguard
     $(for f in "${REPO_ROOT}/services/control_plane/migrations"/*.sql; do echo --from-file="$(basename "$f")=$f"; done) \
     --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" create -f -
 
-# ---------------------------------------------------------------------
-# 5.5. (optional) Build chart service images locally + load into kind.
-#
-# Issue #61: without this step pods stay in ImagePullBackOff because
-# spendguard/*:0.1.0-alpha.1 isn't published to docker.io. Set
-# BUILD_IMAGES=1 to build via docker compose + kind load locally.
-# CI uses ghcr.io images instead (see .github/workflows/helm-validate.yml).
-# ---------------------------------------------------------------------
-if [ "${BUILD_IMAGES:-0}" = "1" ]; then
-    log "BUILD_IMAGES=1: building chart service images via docker compose..."
-    (
-        cd "${REPO_ROOT}/deploy/demo"
-        docker compose -f compose.yaml build \
-            ledger canonical-ingest control-plane sidecar webhook-receiver \
-            outbox-forwarder ttl-sweeper tokenizer output-predictor \
-            run-cost-projector stats-aggregator
-    )
-    for svc in "${CHART_WORKLOADS[@]}"; do
-        # docker compose tags images as spendguard-demo-<svc>:latest.
-        # The chart's values.yaml expects spendguard/<svc>:0.1.0-alpha.1.
-        docker tag "spendguard-demo-${svc}:latest" "spendguard/${svc}:0.1.0-alpha.1"
-        kind load docker-image "spendguard/${svc}:0.1.0-alpha.1" --name "${CLUSTER_NAME}"
-        log "  loaded spendguard/${svc}:0.1.0-alpha.1 into kind"
-    done
-fi
-
-# ---------------------------------------------------------------------
-# 6. helm install (chart.profile=demo).
-# ---------------------------------------------------------------------
-log "helm install (chart.profile=demo)..."
-
-# Default Helm timeout is 5 minutes; bump to 10 if BUILD_IMAGES=1
-# so the chart pods have time to actually reach Ready (cold pg
-# migrations + rust binary startup ~30-60s each in a single-node kind).
-HELM_TIMEOUT="${HELM_TIMEOUT:-$([ "${BUILD_IMAGES:-0}" = "1" ] && echo "600s" || echo "180s")}"
-log "  helm --wait timeout=${HELM_TIMEOUT}"
-
+# Write Helm values before optional image loading so BUILD_IMAGES=1 can
+# tag/load the exact fully-qualified image refs the chart renders.
 cat > "${WORK_DIR}/values.yaml" <<EOF
 chart:
   profile: demo
@@ -474,6 +439,87 @@ signing:
   profile: demo
   strictVerification: false
 EOF
+
+rendered_image_for_workload() {
+    local workload="$1"
+    helm template spendguard "${REPO_ROOT}/charts/spendguard" \
+        --namespace "${NAMESPACE}" \
+        -f "${WORK_DIR}/values.yaml" \
+    | awk -v workload="${workload}" '
+        /^kind: (Deployment|DaemonSet)$/ {want=1; in_metadata=0; name=""; next}
+        want && /^metadata:/ {in_metadata=1; next}
+        want && in_metadata && /^  name:/ {name=$2; in_metadata=0; next}
+        want && name == workload && /^[[:space:]]*image:/ {
+            image=$2
+            gsub(/"/, "", image)
+            found=1
+            want=0
+            next
+        }
+        /^---$/ {want=0; in_metadata=0; name=""}
+        END {
+            if (!found) exit 1
+            print image
+        }
+    '
+}
+
+RENDERED_IMAGE_REFS=()
+for svc in "${CHART_WORKLOADS[@]}"; do
+    workload="spendguard-spendguard-${svc}"
+    image_ref="$(rendered_image_for_workload "${workload}")" || {
+        log "FAIL: unable to resolve rendered image for ${workload}"
+        exit 1
+    }
+    if [ -z "${image_ref}" ]; then
+        log "FAIL: empty rendered image for ${workload}"
+        exit 1
+    fi
+    RENDERED_IMAGE_REFS+=("${image_ref}")
+done
+
+# ---------------------------------------------------------------------
+# 5.5. (optional) Build chart service images locally + load into kind.
+#
+# Issue #61: without this step pods stay in ImagePullBackOff unless the
+# exact chart-rendered image refs are present on the kind node. Set
+# BUILD_IMAGES=1 to build via docker compose + kind load locally.
+# ---------------------------------------------------------------------
+if [ "${BUILD_IMAGES:-0}" = "1" ]; then
+    log "BUILD_IMAGES=1: building chart service images via docker compose..."
+    (
+        cd "${REPO_ROOT}/deploy/demo"
+        docker compose -f compose.yaml build \
+            ledger canonical-ingest control-plane sidecar webhook-receiver \
+            outbox-forwarder ttl-sweeper tokenizer output-predictor \
+            run-cost-projector stats-aggregator
+    )
+    image_idx=0
+    for svc in "${CHART_WORKLOADS[@]}"; do
+        # docker compose tags images as spendguard-demo-<svc>:latest.
+        # The chart may prepend a registry, so load the rendered ref.
+        image_ref="${RENDERED_IMAGE_REFS[$image_idx]}"
+        image_idx=$((image_idx + 1))
+        if [ "${image_ref#*@sha256:}" != "${image_ref}" ]; then
+            log "FAIL: BUILD_IMAGES=1 cannot locally tag digest image ref ${image_ref}"
+            exit 1
+        fi
+        docker tag "spendguard-demo-${svc}:latest" "${image_ref}"
+        kind load docker-image "${image_ref}" --name "${CLUSTER_NAME}"
+        log "  loaded ${image_ref} into kind"
+    done
+fi
+
+# ---------------------------------------------------------------------
+# 6. helm install (chart.profile=demo).
+# ---------------------------------------------------------------------
+log "helm install (chart.profile=demo)..."
+
+# Default Helm timeout is 5 minutes; bump to 10 if BUILD_IMAGES=1
+# so the chart pods have time to actually reach Ready (cold pg
+# migrations + rust binary startup ~30-60s each in a single-node kind).
+HELM_TIMEOUT="${HELM_TIMEOUT:-$([ "${BUILD_IMAGES:-0}" = "1" ] && echo "600s" || echo "180s")}"
+log "  helm --wait timeout=${HELM_TIMEOUT}"
 
 log "validating rendered workload inventory..."
 RENDERED_WORKLOADS=()
