@@ -643,6 +643,39 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn db_error_does_not_resurrect_disabled_stale_endpoint() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://spendguard:spendguard@127.0.0.1:1/spendguard")
+            .expect("lazy pool");
+        let cache = EndpointCache::new_with_stale_ttl(
+            Some(pool),
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+        );
+        let tenant = Uuid::new_v4();
+        let mut row = ep(false);
+        row.tenant_id = tenant;
+        cache.entries.write().insert(
+            tenant,
+            Cached {
+                endpoint: Arc::new(row),
+                loaded_at: Instant::now()
+                    .checked_sub(Duration::from_secs(10))
+                    .unwrap_or_else(Instant::now),
+            },
+        );
+
+        let err = cache
+            .lookup(&tenant)
+            .await
+            .expect_err("disabled stale endpoint must remain a kill switch");
+        match err {
+            EndpointCacheError::NotConfigured(t) => assert_eq!(t, tenant),
+            other => panic!("expected NotConfigured for disabled stale endpoint, got {other:?}"),
+        }
+    }
+
     #[test]
     fn enabled_false_falls_through_to_not_configured() {
         // Spec §11 — kill-switch: enabled=FALSE is observable to

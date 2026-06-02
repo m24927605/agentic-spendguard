@@ -341,6 +341,16 @@ B 是 nullable —— cache miss + cold-start L1 → B null。`output_predictor`
 
 `output_predictor` lookup `(tenant_id → plugin_endpoint, mTLS cert_id)` from control plane cache. Hit → call plugin per `output-predictor-plugin-contract-v1alpha1.md` proto. Miss → C = null（tenant 沒配 plugin）。
 
+POST_GA_09 endpoint-cache resilience:
+
+- Cache miss/stale reload uses tenant-scoped singleflight, so many
+  concurrent requests for the same tenant collapse into one control
+  plane DB lookup. Different tenants use different locks.
+- If the control plane DB lookup fails, an enabled cached endpoint may
+  be served stale for at most 300s. Older stale entries fall back to B.
+- `enabled = FALSE` remains a kill switch even during DB errors; stale
+  disabled entries return C null rather than calling the plugin.
+
 ### 5.2 Call mechanics
 
 ```rust
