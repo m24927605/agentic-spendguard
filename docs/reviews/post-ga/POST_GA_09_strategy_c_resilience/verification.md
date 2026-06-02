@@ -10,7 +10,7 @@ Base: `main` at `d524793 Merge POST_GA_08 DB index and RLS polish`
 |---|---|---|
 | `cargo fmt --manifest-path services/output_predictor/Cargo.toml --check` | PASS | exited 0 after formatting |
 | `cargo build --manifest-path services/output_predictor/Cargo.toml` | PASS | dev profile finished |
-| `cargo test --manifest-path services/output_predictor/Cargo.toml` | PASS | 161 lib tests, 7 main tests, 20 integration tests, 0 doctests |
+| `cargo test --manifest-path services/output_predictor/Cargo.toml` | PASS | 163 lib tests, 7 main tests, 20 integration tests, 0 doctests |
 | `cargo fmt --manifest-path services/control_plane/Cargo.toml --check` | PASS | exited 0 after formatting |
 | `cargo build --manifest-path services/control_plane/Cargo.toml` | PASS | dev profile finished; existing auth dead-code warnings only |
 | `cargo test --manifest-path services/control_plane/Cargo.toml` | PASS | 55 tests passed; existing auth dead-code warnings only |
@@ -27,8 +27,8 @@ Base: `main` at `d524793 Merge POST_GA_08 DB index and RLS polish`
 
 | Issue | Evidence |
 |---|---|
-| #172 | `force_reset` audit data now includes `operation`, `tenant_id`, `plugin_endpoint_id`, `previous_health_status`, `new_health_status`, `reset_at`, bounded `reason`, and `reason_length`. |
+| #172 | `force_reset` audit data now includes `operation`, `tenant_id`, `plugin_endpoint_id`, `previous_health_status`, `new_health_status`, `reset_at`, bounded `reason`, `reason_length`, and an explicit status-only `effect` that does not claim direct output_predictor breaker mutation. |
 | #173 | `validate_force_reset_reason` trims, requires non-empty, and rejects reason strings over `MAX_FORCE_RESET_REASON_LEN=1024` before audit/logging. |
-| #174 | `EndpointCache` now uses tenant-scoped reload locks so stale/missing cache reloads singleflight per tenant without serializing unrelated tenants. |
+| #174 | `EndpointCache` now uses tenant-scoped reload locks plus 1s miss/DB-error reload-result backoff so stale/missing cache reloads singleflight per tenant without serializing unrelated tenants or queueing one DB hit per waiter. |
 | #175 | `EndpointCache` serves enabled stale endpoint snapshots for at most 300s on control-plane DB errors, falls back after the bound, and does not resurrect `enabled=false` stale endpoints. |
 | #176 | `OutputPredictorSvc::predict` rejects `decision_id` and `prompt_class_fingerprint` over 128 bytes before cache, DB, or plugin work. |

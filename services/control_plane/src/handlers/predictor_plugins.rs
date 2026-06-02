@@ -823,7 +823,7 @@ pub async fn force_reset_plugin<S: PluginAppState>(
         tenant = %tenant_uuid,
         plugin_endpoint_id = %row.0,
         reason = %reason,
-        "force_reset_plugin success — output_predictor breaker will pick up via cache reload"
+        "force_reset_plugin success — control-plane health status set to serving"
     );
 
     Ok(Json(ForceResetResp {
@@ -832,7 +832,7 @@ pub async fn force_reset_plugin<S: PluginAppState>(
         reset_at: row.4,
         previous_health_status: row.2,
         new_health_status: row.3,
-        note: "Plugin endpoint marked SERVING. output_predictor's per-tenant circuit breaker will reset on next cache reload (≤ plugin_endpoint_cache_ttl_seconds).".to_string(),
+        note: "Plugin endpoint health status marked SERVING in control_plane. This does not directly mutate output_predictor pods' in-memory circuit breakers; predictor breakers recover only through their health loop or runtime observations.".to_string(),
     })
     .into_response())
 }
@@ -872,7 +872,7 @@ fn force_reset_audit_payload(
     reason: &str,
 ) -> serde_json::Value {
     serde_json::json!({
-        "operation": "force_reset_plugin_circuit_breaker",
+        "operation": "force_reset_plugin_health_status",
         "tenant_id": row.1.to_string(),
         "plugin_endpoint_id": row.0.to_string(),
         "reset_at": row.4.to_rfc3339(),
@@ -880,7 +880,7 @@ fn force_reset_audit_payload(
         "new_health_status": row.3.as_str(),
         "reason": reason,
         "reason_length": reason.len(),
-        "effect": "control_plane_current_health_status_set_serving; output_predictor observes on next endpoint cache reload",
+        "effect": "control_plane_current_health_status_set_serving_only; does_not_mutate_output_predictor_in_memory_breakers; predictor_breakers_recover_via_health_loop_or_runtime_observation",
     })
 }
 
@@ -1040,8 +1040,8 @@ mod tests {
         let payload = force_reset_audit_payload(&row, "operator reset");
 
         assert_eq!(
-            payload["operation"], "force_reset_plugin_circuit_breaker",
-            "payload must distinguish force-reset from generic plugin update"
+            payload["operation"], "force_reset_plugin_health_status",
+            "payload must distinguish health-status force-reset from generic plugin update"
         );
         assert_eq!(payload["tenant_id"], tenant_id.to_string());
         assert_eq!(
@@ -1053,6 +1053,10 @@ mod tests {
         assert_eq!(payload["reason"], "operator reset");
         assert_eq!(payload["reason_length"], "operator reset".len());
         assert_eq!(payload["reset_at"], reset_at.to_rfc3339());
+        assert_eq!(
+            payload["effect"],
+            "control_plane_current_health_status_set_serving_only; does_not_mutate_output_predictor_in_memory_breakers; predictor_breakers_recover_via_health_loop_or_runtime_observation"
+        );
     }
 
     // ─── R2 M4 — https://-under-production gate ──────────────────────

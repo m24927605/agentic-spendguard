@@ -366,8 +366,12 @@ truncated because the string enters signed audit payloads and operator
 logs. The `force_reset` audit `data` identifies the exact
 `plugin_endpoint_id`, `tenant_id`, `previous_health_status`,
 `new_health_status`, `reset_at`, bounded `reason`, `reason_length`, and
-an `operation = force_reset_plugin_circuit_breaker` discriminator so the
-event cannot be confused with a generic plugin update.
+an `operation = force_reset_plugin_health_status` discriminator so the
+event cannot be confused with a generic plugin update. The payload
+explicitly states that this only sets the control-plane
+`current_health_status` value to `serving`; it does not directly mutate
+any output_predictor pod's in-memory circuit breaker. Predictor breaker
+state changes still come from the health loop or runtime observations.
 
 ---
 

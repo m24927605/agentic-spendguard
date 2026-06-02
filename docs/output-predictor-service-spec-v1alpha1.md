@@ -345,7 +345,9 @@ POST_GA_09 endpoint-cache resilience:
 
 - Cache miss/stale reload uses tenant-scoped singleflight, so many
   concurrent requests for the same tenant collapse into one control
-  plane DB lookup. Different tenants use different locks.
+  plane DB lookup. True misses and DB-error stale serves are shared for
+  a 1s reload-result backoff so queued callers do not take turns
+  re-hitting the DB. Different tenants use different locks.
 - If the control plane DB lookup fails, an enabled cached endpoint may
   be served stale for at most 300s. Older stale entries fall back to B.
 - `enabled = FALSE` remains a kill switch even during DB errors; stale

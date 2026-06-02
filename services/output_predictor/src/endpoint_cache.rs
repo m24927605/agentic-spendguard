@@ -20,9 +20,12 @@
 //! older than `refresh_ttl`) a tenant-scoped singleflight lock collapses
 //! concurrent reloads before issuing a SELECT with `SET LOCAL
 //! app.current_tenant_id` so the RLS policy enforces tenant isolation
-//! at the read. If that SELECT fails because the DB is temporarily
-//! unavailable, lookup may serve a bounded stale enabled endpoint
-//! snapshot rather than amplifying an outage into immediate C fallback.
+//! at the read. The slow-path result is shared for a short backoff
+//! window for true misses and DB-error stale serves, so queued callers
+//! do not serialize into one DB lookup each during an outage or cold miss.
+//! If that SELECT fails because the DB is temporarily unavailable,
+//! lookup may serve a bounded stale enabled endpoint snapshot rather
+//! than amplifying an outage into immediate C fallback.
 //!
 //! ## Critical invariant — tenant_id binding (spec §7.3)
 //!
@@ -82,6 +85,12 @@ pub const DEFAULT_REFRESH_TTL: Duration = Duration::from_secs(5);
 /// error falls back to Strategy B instead.
 pub const DEFAULT_STALE_ON_DB_ERROR_TTL: Duration = Duration::from_secs(300);
 
+/// POST_GA_09 / #174: after one reload observes a miss or serves stale
+/// through a DB error, queued same-tenant callers reuse that result for
+/// a short window instead of taking turns hitting the DB. This is not the
+/// endpoint freshness TTL; it only collapses immediate herds.
+pub const DEFAULT_RELOAD_RESULT_BACKOFF_TTL: Duration = Duration::from_secs(1);
+
 /// Endpoint snapshot returned by the cache. Cheap to clone (Arc'd in
 /// the cache to avoid copying the full struct on every Predict call).
 #[derive(Debug, Clone)]
@@ -135,6 +144,7 @@ pub enum EndpointCacheError {
 struct Cached {
     endpoint: Arc<PluginEndpoint>,
     loaded_at: Instant,
+    stale_reload_backoff_until: Option<Instant>,
 }
 
 /// Per-tenant endpoint cache. Shared across all output_predictor
@@ -144,7 +154,9 @@ pub struct EndpointCache {
     pool: Option<PgPool>,
     refresh_ttl: Duration,
     stale_on_db_error_ttl: Duration,
+    reload_result_backoff_ttl: Duration,
     entries: RwLock<HashMap<Uuid, Cached>>,
+    not_configured_backoffs: RwLock<HashMap<Uuid, Instant>>,
     reload_locks: AsyncMutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>,
 }
 
@@ -170,7 +182,9 @@ impl EndpointCache {
             pool,
             refresh_ttl,
             stale_on_db_error_ttl,
+            reload_result_backoff_ttl: DEFAULT_RELOAD_RESULT_BACKOFF_TTL,
             entries: RwLock::new(HashMap::new()),
+            not_configured_backoffs: RwLock::new(HashMap::new()),
             reload_locks: AsyncMutex::new(HashMap::new()),
         })
     }
@@ -185,6 +199,12 @@ impl EndpointCache {
     /// treats both as "fall to B silently" per spec §11).
     pub async fn lookup(&self, tenant: &Uuid) -> Result<Arc<PluginEndpoint>, EndpointCacheError> {
         if let Some(result) = self.cached_if_fresh(tenant) {
+            return result;
+        }
+        if let Some(result) = self.cached_if_stale_reload_backoff(tenant) {
+            return result;
+        }
+        if let Some(result) = self.cached_if_not_configured_backoff(tenant) {
             return result;
         }
 
@@ -208,6 +228,12 @@ impl EndpointCache {
         if let Some(result) = self.cached_if_fresh(tenant) {
             return result;
         }
+        if let Some(result) = self.cached_if_stale_reload_backoff(tenant) {
+            return result;
+        }
+        if let Some(result) = self.cached_if_not_configured_backoff(tenant) {
+            return result;
+        }
         // Slow path — DB lookup (RLS-bound). Skeleton mode returns
         // NotConfigured immediately so strategy_c.rs falls to B.
         let pool = match &self.pool {
@@ -217,13 +243,14 @@ impl EndpointCache {
         let endpoint = match load_one(&pool, tenant).await {
             Ok(endpoint) => endpoint,
             Err(EndpointCacheError::Sql(e)) => {
-                if let Some(result) = self.cached_if_stale_on_db_error(tenant) {
+                if let Some(result) = self.mark_stale_reload_backoff_on_db_error(tenant) {
                     return result;
                 }
                 return Err(EndpointCacheError::Sql(e));
             }
             Err(EndpointCacheError::NotConfigured(t)) => {
                 self.entries.write().remove(tenant);
+                self.record_not_configured_backoff(tenant);
                 return Err(EndpointCacheError::NotConfigured(t));
             }
             Err(e @ EndpointCacheError::TenantBindingViolation { .. }) => {
@@ -238,8 +265,10 @@ impl EndpointCache {
             Cached {
                 endpoint: endpoint.clone(),
                 loaded_at: Instant::now(),
+                stale_reload_backoff_until: None,
             },
         );
+        self.not_configured_backoffs.write().remove(tenant);
         if !endpoint.enabled {
             return Err(EndpointCacheError::NotConfigured(*tenant));
         }
@@ -258,16 +287,61 @@ impl EndpointCache {
         Some(endpoint_result_from_cached(tenant, cached.endpoint.clone()))
     }
 
-    fn cached_if_stale_on_db_error(
+    fn cached_if_stale_reload_backoff(
         &self,
         tenant: &Uuid,
     ) -> Option<Result<Arc<PluginEndpoint>, EndpointCacheError>> {
+        let now = Instant::now();
         let entries = self.entries.read();
         let cached = entries.get(tenant)?;
-        if cached.loaded_at.elapsed() > self.stale_on_db_error_ttl {
+        let backoff_until = cached.stale_reload_backoff_until?;
+        if backoff_until <= now {
+            return None;
+        }
+        self.result_if_stale_within_db_error_ttl(tenant, cached, now)
+    }
+
+    fn mark_stale_reload_backoff_on_db_error(
+        &self,
+        tenant: &Uuid,
+    ) -> Option<Result<Arc<PluginEndpoint>, EndpointCacheError>> {
+        let now = Instant::now();
+        let mut entries = self.entries.write();
+        let cached = entries.get_mut(tenant)?;
+        let result = self.result_if_stale_within_db_error_ttl(tenant, cached, now)?;
+        cached.stale_reload_backoff_until = Some(now + self.reload_result_backoff_ttl);
+        Some(result)
+    }
+
+    fn result_if_stale_within_db_error_ttl(
+        &self,
+        tenant: &Uuid,
+        cached: &Cached,
+        now: Instant,
+    ) -> Option<Result<Arc<PluginEndpoint>, EndpointCacheError>> {
+        if now.duration_since(cached.loaded_at) > self.stale_on_db_error_ttl {
             return None;
         }
         Some(endpoint_result_from_cached(tenant, cached.endpoint.clone()))
+    }
+
+    fn cached_if_not_configured_backoff(
+        &self,
+        tenant: &Uuid,
+    ) -> Option<Result<Arc<PluginEndpoint>, EndpointCacheError>> {
+        let now = Instant::now();
+        let until = self.not_configured_backoffs.read().get(tenant).copied()?;
+        if until > now {
+            return Some(Err(EndpointCacheError::NotConfigured(*tenant)));
+        }
+        self.not_configured_backoffs.write().remove(tenant);
+        None
+    }
+
+    fn record_not_configured_backoff(&self, tenant: &Uuid) {
+        self.not_configured_backoffs
+            .write()
+            .insert(*tenant, Instant::now() + self.reload_result_backoff_ttl);
     }
 
     async fn reload_lock_for(&self, tenant: &Uuid) -> Arc<AsyncMutex<()>> {
@@ -291,6 +365,7 @@ impl EndpointCache {
     /// control plane handlers after PUT / DELETE / force-reset.
     pub fn evict(&self, tenant: &Uuid) {
         self.entries.write().remove(tenant);
+        self.not_configured_backoffs.write().remove(tenant);
     }
 
     /// R2 B2 — snapshot of currently-cached tenant ids. The 30s
@@ -409,6 +484,14 @@ mod tests {
         }
     }
 
+    fn cached(endpoint: PluginEndpoint, loaded_at: Instant) -> Cached {
+        Cached {
+            endpoint: Arc::new(endpoint),
+            loaded_at,
+            stale_reload_backoff_until: None,
+        }
+    }
+
     #[test]
     fn same_wire_shape_compares_url_fingerprint_and_client_cert_id() {
         let a = ep(true);
@@ -462,13 +545,10 @@ mod tests {
         let cache = EndpointCache::with_default_ttl(None);
         let tenant = Uuid::new_v4();
         // Manually seed (skip DB) so evict has something to remove.
-        cache.entries.write().insert(
-            tenant,
-            Cached {
-                endpoint: Arc::new(ep(true)),
-                loaded_at: Instant::now(),
-            },
-        );
+        cache
+            .entries
+            .write()
+            .insert(tenant, cached(ep(true), Instant::now()));
         assert_eq!(cache.cached_count(), 1);
         cache.evict(&tenant);
         assert_eq!(cache.cached_count(), 0);
@@ -528,25 +608,22 @@ mod tests {
         let fresh = Uuid::new_v4();
         let mut row_fresh = ep(true);
         row_fresh.tenant_id = fresh;
-        cache.entries.write().insert(
-            fresh,
-            Cached {
-                endpoint: Arc::new(row_fresh),
-                loaded_at: Instant::now(),
-            },
-        );
+        cache
+            .entries
+            .write()
+            .insert(fresh, cached(row_fresh, Instant::now()));
         let stale = Uuid::new_v4();
         let mut row_stale = ep(true);
         row_stale.tenant_id = stale;
         cache.entries.write().insert(
             stale,
-            Cached {
-                endpoint: Arc::new(row_stale),
+            cached(
+                row_stale,
                 // Far past the 100ms refresh window.
-                loaded_at: Instant::now()
+                Instant::now()
                     .checked_sub(Duration::from_secs(60))
                     .unwrap_or_else(Instant::now),
-            },
+            ),
         );
         let cached = cache.cached_tenants();
         assert!(cached.contains(&fresh), "fresh tenant must be reported");
@@ -594,12 +671,12 @@ mod tests {
         row.tenant_id = tenant;
         cache.entries.write().insert(
             tenant,
-            Cached {
-                endpoint: Arc::new(row.clone()),
-                loaded_at: Instant::now()
+            cached(
+                row.clone(),
+                Instant::now()
                     .checked_sub(Duration::from_secs(10))
                     .unwrap_or_else(Instant::now),
-            },
+            ),
         );
 
         let got = cache
@@ -608,6 +685,12 @@ mod tests {
             .expect("stale enabled endpoint should serve through DB error");
         assert_eq!(got.tenant_id, tenant);
         assert_eq!(got.endpoint_url, row.endpoint_url);
+        let entries = cache.entries.read();
+        let cached = entries.get(&tenant).expect("stale entry retained");
+        assert!(
+            cached.stale_reload_backoff_until.is_some(),
+            "DB-error stale serve must set a short reload backoff for queued callers"
+        );
     }
 
     #[tokio::test]
@@ -625,12 +708,12 @@ mod tests {
         row.tenant_id = tenant;
         cache.entries.write().insert(
             tenant,
-            Cached {
-                endpoint: Arc::new(row),
-                loaded_at: Instant::now()
+            cached(
+                row,
+                Instant::now()
                     .checked_sub(Duration::from_secs(120))
                     .unwrap_or_else(Instant::now),
-            },
+            ),
         );
 
         let err = cache
@@ -658,12 +741,12 @@ mod tests {
         row.tenant_id = tenant;
         cache.entries.write().insert(
             tenant,
-            Cached {
-                endpoint: Arc::new(row),
-                loaded_at: Instant::now()
+            cached(
+                row,
+                Instant::now()
                     .checked_sub(Duration::from_secs(10))
                     .unwrap_or_else(Instant::now),
-            },
+            ),
         );
 
         let err = cache
@@ -684,13 +767,10 @@ mod tests {
         let tenant = Uuid::new_v4();
         let mut row = ep(false);
         row.tenant_id = tenant;
-        cache.entries.write().insert(
-            tenant,
-            Cached {
-                endpoint: Arc::new(row),
-                loaded_at: Instant::now(),
-            },
-        );
+        cache
+            .entries
+            .write()
+            .insert(tenant, cached(row, Instant::now()));
         // The cache is now fresh but disabled → lookup returns
         // NotConfigured per the enabled flag check.
         // (Can't call async lookup in a sync test; we exercise the
@@ -701,5 +781,57 @@ mod tests {
         // The lookup() async fn checks `!enabled` and returns
         // NotConfigured; this test asserts the precondition that
         // makes that path fire.
+    }
+
+    #[test]
+    fn stale_reload_backoff_reuses_stale_result_without_marking_fresh() {
+        let cache = EndpointCache::new_with_stale_ttl(
+            None,
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+        );
+        let tenant = Uuid::new_v4();
+        let loaded_at = Instant::now()
+            .checked_sub(Duration::from_secs(10))
+            .unwrap_or_else(Instant::now);
+        let mut row = ep(true);
+        row.tenant_id = tenant;
+        let mut entry = cached(row, loaded_at);
+        entry.stale_reload_backoff_until = Some(Instant::now() + Duration::from_secs(1));
+        cache.entries.write().insert(tenant, entry);
+
+        let got = cache
+            .cached_if_stale_reload_backoff(&tenant)
+            .expect("active backoff should return cached result")
+            .expect("enabled endpoint should serve stale during backoff");
+        assert_eq!(got.tenant_id, tenant);
+        let entries = cache.entries.read();
+        let cached = entries.get(&tenant).expect("entry retained");
+        assert_eq!(
+            cached.loaded_at, loaded_at,
+            "reload-error backoff must not make stale data fresh for health-loop visibility"
+        );
+    }
+
+    #[test]
+    fn not_configured_backoff_reuses_true_miss_result() {
+        let cache = EndpointCache::with_default_ttl(None);
+        let tenant = Uuid::new_v4();
+
+        cache.record_not_configured_backoff(&tenant);
+        let err = cache
+            .cached_if_not_configured_backoff(&tenant)
+            .expect("active miss backoff should be visible")
+            .expect_err("true miss backoff should return NotConfigured");
+        match err {
+            EndpointCacheError::NotConfigured(t) => assert_eq!(t, tenant),
+            other => panic!("expected NotConfigured, got {other:?}"),
+        }
+
+        cache.evict(&tenant);
+        assert!(
+            cache.cached_if_not_configured_backoff(&tenant).is_none(),
+            "explicit evict must clear miss backoff so control-plane registration is observed immediately"
+        );
     }
 }
