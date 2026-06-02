@@ -14,9 +14,12 @@
 
 CREATE TABLE prediction_drift_alert_cooldowns (
     tenant_id       UUID        NOT NULL,
-    model           TEXT        NOT NULL CHECK (octet_length(model) BETWEEN 1 AND 512),
-    agent_id        TEXT        NOT NULL CHECK (octet_length(agent_id) BETWEEN 1 AND 256),
-    prompt_class    TEXT        NOT NULL CHECK (octet_length(prompt_class) BETWEEN 1 AND 128),
+    model           TEXT        NOT NULL CHECK (char_length(model) BETWEEN 1 AND 64),
+    agent_id        TEXT        NOT NULL CHECK (char_length(agent_id) BETWEEN 1 AND 128),
+    prompt_class    TEXT        NOT NULL CHECK (prompt_class IN (
+        'chat_short', 'chat_long', 'code_gen', 'summarization',
+        'rag', 'tool_calling', 'vision'
+    )),
     last_emitted_at TIMESTAMPTZ NOT NULL,
     suppress_until  TIMESTAMPTZ NOT NULL,
     last_z_score    REAL        NOT NULL CHECK (
@@ -57,7 +60,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE
 GRANT SELECT ON prediction_drift_alert_cooldowns TO canonical_ingest_reader_role;
 
 COMMENT ON TABLE prediction_drift_alert_cooldowns IS
-    'POST_GA_06 mutable dedup state for stats_aggregator prediction_drift_alert CloudEvents. PRIMARY KEY is exactly (tenant_id, model, agent_id, prompt_class); rows suppress repeat immutable audit alerts for 24h.';
+    'POST_GA_06 mutable dedup state for stats_aggregator prediction_drift_alert CloudEvents. PRIMARY KEY is exactly (tenant_id, model, agent_id, prompt_class); key constraints mirror canonical_events aggregator columns; rows suppress repeat immutable audit alerts for 24h.';
 COMMENT ON COLUMN prediction_drift_alert_cooldowns.suppress_until IS
     'Rolling cooldown expiry. stats_aggregator may emit the next alert for the same bucket only when suppress_until <= now().';
 COMMENT ON COLUMN prediction_drift_alert_cooldowns.last_z_score IS

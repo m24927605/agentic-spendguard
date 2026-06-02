@@ -837,7 +837,7 @@ mod tests {
         store.reserve(&key, now, 2.5).await.expect("seed");
 
         let mut different_prompt = key.clone();
-        different_prompt.prompt_class = "rag_short".into();
+        different_prompt.prompt_class = "rag".into();
         assert!(matches!(
             store
                 .reserve(&different_prompt, now + ChronoDuration::hours(1), 2.5)

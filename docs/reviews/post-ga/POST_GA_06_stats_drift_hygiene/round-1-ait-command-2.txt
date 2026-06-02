@@ -1,0 +1,1 @@
+AIT_BYPASS=1 ait run --adapter codex --review adversarial --review-adapter codex --review-budget deep --apply never --no-auto-commit --description POST_GA_06_stats_drift_hygiene --stdin none -- codex exec --dangerously-bypass-approvals-and-sandbox 'Review POST_GA_06 branch ... Do not edit files.'

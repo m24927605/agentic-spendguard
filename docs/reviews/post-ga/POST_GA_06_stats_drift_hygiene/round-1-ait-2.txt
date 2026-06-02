@@ -1,0 +1,1 @@
+ait warning: spawning a nested wrapped codex session from inside attempt 'd22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KSX3H3F2MX6QXEKAXYGQG2WH'. The inner agent may lose its parent OAuth context and fail with auth errors. To bypass: prefix with `AIT_BYPASS=1`, or run `ait off` in the outer shell first.

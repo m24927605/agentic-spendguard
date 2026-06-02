@@ -620,7 +620,7 @@ async fn drift_alert_cooldown_postgres_is_key_and_tenant_scoped() {
     ));
 
     let mut different_prompt = key.clone();
-    different_prompt.prompt_class = "rag_short".into();
+    different_prompt.prompt_class = "rag".into();
     let prompt_decision = store
         .reserve(&different_prompt, now + ChronoDuration::hours(1), 3.0)
         .await
@@ -647,6 +647,29 @@ async fn drift_alert_cooldown_postgres_is_key_and_tenant_scoped() {
         .expect("after expiry");
     assert!(matches!(
         after_expiry,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drift_alert_cooldown_postgres_accepts_canonical_multibyte_agent_id() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let store = PostgresDriftAlertCooldownStore::new(fx.app_pool.clone());
+    let key = DriftAlertKey {
+        tenant_id: Uuid::new_v4(),
+        model: "gpt-4o-mini".into(),
+        agent_id: "客".repeat(128),
+        prompt_class: "chat_short".into(),
+    };
+
+    let decision = store
+        .reserve(&key, Utc::now(), 2.5)
+        .await
+        .expect("128-character multibyte agent_id is valid per canonical_events");
+    assert!(matches!(
+        decision,
         DriftAlertCooldownDecision::Allowed { .. }
     ));
 }

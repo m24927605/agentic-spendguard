@@ -49,10 +49,13 @@ Prefer an existing table or deterministic idempotency key if available.
 Durable cooldown state lands in
 `services/canonical_ingest/migrations/0022_prediction_drift_alert_cooldowns.sql`.
 The primary key is exactly `(tenant_id, model, agent_id, prompt_class)`;
-`suppress_until` is indexed for expiry inspection. RLS is enabled and
-forced with a `FOR ALL` policy using `app.current_tenant_id`; missing or
-invalid tenant context fails closed. `last_z_score` rejects `NaN` and
-`+/-Infinity` at both runtime and SQL CHECK layers. No proto changes.
+`suppress_until` is indexed for expiry inspection. Key constraints mirror
+the `canonical_events` aggregator mirror columns, including
+character-count limits for multibyte-safe `agent_id` values and the same
+7-class `prompt_class` enum. RLS is enabled and forced with a `FOR ALL`
+policy using `app.current_tenant_id`; missing or invalid tenant context
+fails closed. `last_z_score` rejects `NaN` and `+/-Infinity` at both
+runtime and SQL CHECK layers. No proto changes.
 
 ## §6. Audit-Chain Impact
 
