@@ -17,9 +17,12 @@
 //! control_plane DB's `predictor_plugin_endpoints` table (per Phase A
 //! migration). Each per-tenant lookup hits the in-memory cache first
 //! (RwLock<HashMap<Uuid, Cached>>); on miss or staleness (computed_at
-//! older than `refresh_ttl`) we issue a SELECT with `SET LOCAL
+//! older than `refresh_ttl`) a tenant-scoped singleflight lock collapses
+//! concurrent reloads before issuing a SELECT with `SET LOCAL
 //! app.current_tenant_id` so the RLS policy enforces tenant isolation
-//! at the read.
+//! at the read. If that SELECT fails because the DB is temporarily
+//! unavailable, lookup may serve a bounded stale enabled endpoint
+//! snapshot rather than amplifying an outage into immediate C fallback.
 //!
 //! ## Critical invariant — tenant_id binding (spec §7.3)
 //!
@@ -56,6 +59,7 @@ use std::time::{Duration, Instant};
 use parking_lot::RwLock;
 use sqlx::PgPool;
 use thiserror::Error;
+use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -72,6 +76,11 @@ use uuid::Uuid;
 /// contract; a tighter consistency guarantee requires the cache-
 /// revision column approach tracked as a GH issue in R2 outputs.
 pub const DEFAULT_REFRESH_TTL: Duration = Duration::from_secs(5);
+
+/// POST_GA_09 / #175: bounded stale serve window for DB errors.
+/// Stale entries older than this are treated as unsafe and the DB
+/// error falls back to Strategy B instead.
+pub const DEFAULT_STALE_ON_DB_ERROR_TTL: Duration = Duration::from_secs(300);
 
 /// Endpoint snapshot returned by the cache. Cheap to clone (Arc'd in
 /// the cache to avoid copying the full struct on every Predict call).
@@ -134,11 +143,21 @@ struct Cached {
 pub struct EndpointCache {
     pool: Option<PgPool>,
     refresh_ttl: Duration,
+    stale_on_db_error_ttl: Duration,
     entries: RwLock<HashMap<Uuid, Cached>>,
+    reload_locks: AsyncMutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>,
 }
 
 impl EndpointCache {
     pub fn new(pool: Option<PgPool>, refresh_ttl: Duration) -> Arc<Self> {
+        Self::new_with_stale_ttl(pool, refresh_ttl, DEFAULT_STALE_ON_DB_ERROR_TTL)
+    }
+
+    pub fn new_with_stale_ttl(
+        pool: Option<PgPool>,
+        refresh_ttl: Duration,
+        stale_on_db_error_ttl: Duration,
+    ) -> Arc<Self> {
         if pool.is_none() {
             warn!(
                 "EndpointCache initialised WITHOUT a control_plane DB pool — \
@@ -150,7 +169,9 @@ impl EndpointCache {
         Arc::new(Self {
             pool,
             refresh_ttl,
+            stale_on_db_error_ttl,
             entries: RwLock::new(HashMap::new()),
+            reload_locks: AsyncMutex::new(HashMap::new()),
         })
     }
 
@@ -163,26 +184,52 @@ impl EndpointCache {
     /// row exists or the row has `enabled = FALSE` (strategy_c.rs
     /// treats both as "fall to B silently" per spec §11).
     pub async fn lookup(&self, tenant: &Uuid) -> Result<Arc<PluginEndpoint>, EndpointCacheError> {
-        // Fast path — cached + fresh.
-        {
-            let entries = self.entries.read();
-            if let Some(cached) = entries.get(tenant) {
-                if cached.loaded_at.elapsed() < self.refresh_ttl {
-                    if !cached.endpoint.enabled {
-                        return Err(EndpointCacheError::NotConfigured(*tenant));
-                    }
-                    return Ok(cached.endpoint.clone());
-                }
-            }
+        if let Some(result) = self.cached_if_fresh(tenant) {
+            return result;
         }
 
+        // POST_GA_09 / #174: tenant-scoped singleflight. Only one task
+        // reloads a stale/missing endpoint for a given tenant; unrelated
+        // tenants use different locks and do not serialize each other.
+        let reload_lock = self.reload_lock_for(tenant).await;
+        let guard = reload_lock.lock().await;
+        let result = self.lookup_after_reload_lock(tenant).await;
+        drop(guard);
+        self.cleanup_reload_lock(tenant, &reload_lock).await;
+        result
+    }
+
+    async fn lookup_after_reload_lock(
+        &self,
+        tenant: &Uuid,
+    ) -> Result<Arc<PluginEndpoint>, EndpointCacheError> {
+        // Another concurrent caller may have reloaded the cache while
+        // this task waited for the tenant-scoped lock.
+        if let Some(result) = self.cached_if_fresh(tenant) {
+            return result;
+        }
         // Slow path — DB lookup (RLS-bound). Skeleton mode returns
         // NotConfigured immediately so strategy_c.rs falls to B.
         let pool = match &self.pool {
             Some(p) => p.clone(),
             None => return Err(EndpointCacheError::NotConfigured(*tenant)),
         };
-        let endpoint = load_one(&pool, tenant).await?;
+        let endpoint = match load_one(&pool, tenant).await {
+            Ok(endpoint) => endpoint,
+            Err(EndpointCacheError::Sql(e)) => {
+                if let Some(result) = self.cached_if_stale_on_db_error(tenant) {
+                    return result;
+                }
+                return Err(EndpointCacheError::Sql(e));
+            }
+            Err(EndpointCacheError::NotConfigured(t)) => {
+                self.entries.write().remove(tenant);
+                return Err(EndpointCacheError::NotConfigured(t));
+            }
+            Err(e @ EndpointCacheError::TenantBindingViolation { .. }) => {
+                return Err(e);
+            }
+        };
         // Cache the row regardless of enabled flag — strategy_c.rs needs
         // to see the enabled state to decide whether to call.
         let endpoint = Arc::new(endpoint);
@@ -197,6 +244,47 @@ impl EndpointCache {
             return Err(EndpointCacheError::NotConfigured(*tenant));
         }
         Ok(endpoint)
+    }
+
+    fn cached_if_fresh(
+        &self,
+        tenant: &Uuid,
+    ) -> Option<Result<Arc<PluginEndpoint>, EndpointCacheError>> {
+        let entries = self.entries.read();
+        let cached = entries.get(tenant)?;
+        if cached.loaded_at.elapsed() >= self.refresh_ttl {
+            return None;
+        }
+        Some(endpoint_result_from_cached(tenant, cached.endpoint.clone()))
+    }
+
+    fn cached_if_stale_on_db_error(
+        &self,
+        tenant: &Uuid,
+    ) -> Option<Result<Arc<PluginEndpoint>, EndpointCacheError>> {
+        let entries = self.entries.read();
+        let cached = entries.get(tenant)?;
+        if cached.loaded_at.elapsed() > self.stale_on_db_error_ttl {
+            return None;
+        }
+        Some(endpoint_result_from_cached(tenant, cached.endpoint.clone()))
+    }
+
+    async fn reload_lock_for(&self, tenant: &Uuid) -> Arc<AsyncMutex<()>> {
+        let mut locks = self.reload_locks.lock().await;
+        locks
+            .entry(*tenant)
+            .or_insert_with(|| Arc::new(AsyncMutex::new(())))
+            .clone()
+    }
+
+    async fn cleanup_reload_lock(&self, tenant: &Uuid, lock: &Arc<AsyncMutex<()>>) {
+        let mut locks = self.reload_locks.lock().await;
+        if let Some(current) = locks.get(tenant) {
+            if Arc::ptr_eq(current, lock) && Arc::strong_count(current) == 2 {
+                locks.remove(tenant);
+            }
+        }
     }
 
     /// Operator-triggered cache evict for the tenant. Called by the
@@ -232,6 +320,16 @@ impl EndpointCache {
     pub fn cached_count(&self) -> usize {
         self.entries.read().len()
     }
+}
+
+fn endpoint_result_from_cached(
+    tenant: &Uuid,
+    endpoint: Arc<PluginEndpoint>,
+) -> Result<Arc<PluginEndpoint>, EndpointCacheError> {
+    if !endpoint.enabled {
+        return Err(EndpointCacheError::NotConfigured(*tenant));
+    }
+    Ok(endpoint)
 }
 
 /// SQL read for one tenant. Per SLICE_06 R2 B1 + R2 B5: open a tx,
@@ -459,6 +557,90 @@ mod tests {
     fn cached_tenants_returns_empty_when_cold() {
         let cache = EndpointCache::with_default_ttl(None);
         assert!(cache.cached_tenants().is_empty());
+    }
+
+    #[tokio::test]
+    async fn reload_locks_are_tenant_scoped_singleflight_keys() {
+        let cache = EndpointCache::with_default_ttl(None);
+        let tenant_a = Uuid::new_v4();
+        let tenant_b = Uuid::new_v4();
+
+        let a1 = cache.reload_lock_for(&tenant_a).await;
+        let a2 = cache.reload_lock_for(&tenant_a).await;
+        let b = cache.reload_lock_for(&tenant_b).await;
+
+        assert!(
+            Arc::ptr_eq(&a1, &a2),
+            "same tenant must share one reload lock"
+        );
+        assert!(
+            !Arc::ptr_eq(&a1, &b),
+            "different tenants must not serialize behind one lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn db_error_serves_bounded_stale_enabled_endpoint() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://spendguard:spendguard@127.0.0.1:1/spendguard")
+            .expect("lazy pool");
+        let cache = EndpointCache::new_with_stale_ttl(
+            Some(pool),
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+        );
+        let tenant = Uuid::new_v4();
+        let mut row = ep(true);
+        row.tenant_id = tenant;
+        cache.entries.write().insert(
+            tenant,
+            Cached {
+                endpoint: Arc::new(row.clone()),
+                loaded_at: Instant::now()
+                    .checked_sub(Duration::from_secs(10))
+                    .unwrap_or_else(Instant::now),
+            },
+        );
+
+        let got = cache
+            .lookup(&tenant)
+            .await
+            .expect("stale enabled endpoint should serve through DB error");
+        assert_eq!(got.tenant_id, tenant);
+        assert_eq!(got.endpoint_url, row.endpoint_url);
+    }
+
+    #[tokio::test]
+    async fn db_error_does_not_serve_stale_beyond_bound() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://spendguard:spendguard@127.0.0.1:1/spendguard")
+            .expect("lazy pool");
+        let cache = EndpointCache::new_with_stale_ttl(
+            Some(pool),
+            Duration::from_millis(1),
+            Duration::from_secs(60),
+        );
+        let tenant = Uuid::new_v4();
+        let mut row = ep(true);
+        row.tenant_id = tenant;
+        cache.entries.write().insert(
+            tenant,
+            Cached {
+                endpoint: Arc::new(row),
+                loaded_at: Instant::now()
+                    .checked_sub(Duration::from_secs(120))
+                    .unwrap_or_else(Instant::now),
+            },
+        );
+
+        let err = cache
+            .lookup(&tenant)
+            .await
+            .expect_err("stale endpoint beyond bound must not serve");
+        match err {
+            EndpointCacheError::Sql(_) => {}
+            other => panic!("expected SQL error after stale bound, got {other:?}"),
+        }
     }
 
     #[test]
