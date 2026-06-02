@@ -8,6 +8,7 @@ Every dashboard metric below is emitted by a service `/metrics` endpoint and use
 |---|---|---|---|---|---|---|
 | `spendguard_output_predictor_predict_latency_seconds_bucket` | output_predictor | `:9100/metrics` | `services/output_predictor/src/main.rs` | `le` | Output Predictor p99 | Bounded histogram bucket |
 | `spendguard_output_predictor_predict_total` | output_predictor | `:9100/metrics` | `services/output_predictor/src/main.rs` | `outcome=ok,err` | Output Predictor RPC Rate | Bounded enum |
+| `spendguard_output_predictor_rate_limited_total` | output_predictor | `:9100/metrics` | `services/output_predictor/src/main.rs` | none | Output Predictor RPC Rate | No labels |
 | `spendguard_output_predictor_cache_hit_total` | output_predictor | `:9100/metrics` | `services/output_predictor/src/main.rs` | none | Strategy B Cache Hit Ratio | No labels |
 | `spendguard_output_predictor_cache_lookup_total` | output_predictor | `:9100/metrics` | `services/output_predictor/src/main.rs` | none | Strategy B Cache Hit Ratio | No labels |
 | `spendguard_run_cost_projector_project_latency_seconds_bucket` | run_cost_projector | `:9102/metrics` | `services/run_cost_projector/src/main.rs` | `le` | Run Cost Projector p99 | Bounded histogram bucket |

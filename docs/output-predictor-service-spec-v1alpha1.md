@@ -130,6 +130,7 @@ message PredictRequest {
   // Identity for tracing/audit.
   string decision_id = 10;
   string run_id = 11;
+  string prompt_class_fingerprint = 12;
 }
 
 message PluginContextFeatures {
@@ -166,6 +167,14 @@ message PredictResponse {
   int64 b_latency_ns = 11;
   int64 c_latency_ns = 12;
   int64 total_latency_ns = 13;
+
+  string classifier_version = 14;
+  string fingerprint_version = 15;
+  string prompt_class_fingerprint_used = 16;
+
+  // POST_GA_07: echoed request prediction policy so API consumers can
+  // reconstruct policy behavior without joining audit rows.
+  string prediction_policy_used = 17;
 }
 ```
 
@@ -174,6 +183,18 @@ message PredictResponse {
 集中 service（gRPC over mTLS internal transport per Sidecar §5）。Sidecar 每 decision 一次 call。
 
 `output_predictor` 自己對 cache lookup 用 connection pool；對 plugin call 用 per-(tenant) circuit breaker（per `output-predictor-plugin-contract-v1alpha1.md` §6）。
+
+POST_GA_07 adds a process-local per-tenant Predict RPC token bucket
+before cache, database, or plugin work. Defaults are
+`predict_rate_limit_per_tenant_per_second = 1000` per pod and
+`predict_rate_limit_tenant_capacity = 4096` retained tenant buckets per
+pod; setting the rate to `0` disables throttling for emergency rollback.
+A tenant overrun returns gRPC `RESOURCE_EXHAUSTED`, logs the tenant id in
+structured logs, and increments the no-label monotonic counter
+`spendguard_output_predictor_rate_limited_total`. In multi-replica
+deployments, effective service-wide tenant capacity is approximately
+`per_pod_limit * ready_replicas` unless the deployment adds sticky
+tenant routing or an external shared limiter.
 
 ### 2.3 Hot path 並行模式
 
@@ -196,6 +217,7 @@ async fn predict(req: PredictRequest) -> PredictResponse {
         predicted_c_tokens: c.map(|x| x.value),
         reserved_strategy: reserved_strategy.to_string(),
         prediction_strategy_used: prediction_strategy_used.to_string(),
+        prediction_policy_used: req.prediction_policy.clone(),
         confidence: c.as_ref().or(b.as_ref()).map(|x| x.confidence),
         sample_size: c.as_ref().or(b.as_ref()).and_then(|x| x.sample_size),
         cold_start_layer_used: b.as_ref().and_then(|x| x.layer.clone()),
@@ -547,6 +569,7 @@ v1alpha1 是 rule-based；v2 可能引入 ML classifier。Upgrade 走 v1beta1 co
 | Plugin returns illegal value | C = null + circuit breaker count failure |
 | `model_default_distribution.toml` lookup miss | L2 → L1（B null） |
 | `model_context_window` lookup miss | A 用 8000 default + emit metric |
+| Tenant exceeds Predict RPC rate limit | Return gRPC `RESOURCE_EXHAUSTED`, log tenant id in structured logs, and increment no-label `spendguard_output_predictor_rate_limited_total` |
 | Classifier mis-classify | 仍走流程；calibration-report 後驗 |
 | All B and C fail | A 仍永遠算成 → selector 落到 A |
 | Predict RPC timeout from sidecar | sidecar 走 conservative fallback（per `sidecar-architecture-spec-v1alpha1.md` §7 fail-safe path）—— typically A only |
@@ -562,6 +585,7 @@ per `audit-chain-prediction-extension-v1alpha1.md` §2.1，每 Predict response 
 - `predicted_c_tokens` ← `response.predicted_c_tokens`（nullable）
 - `reserved_strategy` ← `response.reserved_strategy`
 - `prediction_strategy_used` ← `response.prediction_strategy_used`
+- `prediction_policy_used` ← `response.prediction_policy_used`（must equal the active contract policy for the decision）
 - `prediction_confidence` ← `response.confidence`
 - `prediction_sample_size` ← `response.sample_size`
 - `cold_start_layer_used` ← `response.cold_start_layer_used`

@@ -96,6 +96,8 @@ spec:
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_PROFILE,                    value: {{ .Values.chart.profile | quote }} }
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_CACHE_TTL_SECONDS,          value: {{ .Values.outputPredictor.cacheTtlSeconds | quote }} }
             - { name: SPENDGUARD_OUTPUT_PREDICTOR_UNKNOWN_MODEL_CONTEXT_WINDOW, value: {{ .Values.outputPredictor.unknownModelContextWindow | quote }} }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PREDICT_RATE_LIMIT_PER_TENANT_PER_SECOND, value: {{ .Values.outputPredictor.predictRateLimitPerTenantPerSecond | quote }} }
+            - { name: SPENDGUARD_OUTPUT_PREDICTOR_PREDICT_RATE_LIMIT_TENANT_CAPACITY, value: {{ .Values.outputPredictor.predictRateLimitTenantCapacity | quote }} }
             {{- if or (eq .Values.chart.profile "production") .Values.outputPredictor.databaseSecretEnabled }}
             - name: SPENDGUARD_OUTPUT_PREDICTOR_DATABASE_URL
               {{- include "spendguard.postgresSecretRef" (dict "root" . "key" .Values.postgres.outputPredictorUrlKey) | nindent 14 }}

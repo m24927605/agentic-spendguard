@@ -1,7 +1,7 @@
 # POST_GA 07 - Predictor API Evolution
 
 > **Branch**: `post-ga/POST_GA_07_predictor_api_evolution`
-> **Status**: draft
+> **Status**: ready-to-merge
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `output-predictor-service-spec-v1alpha1.md`, `predictor-architecture-spec-v1alpha1.md`
 > **Issues**: #161, #165
 > **Estimated change size**: medium; output predictor API and rate limiting
@@ -62,10 +62,11 @@ with existing audit columns for the same request.
 | Scenario | Expected behavior |
 |---|---|
 | Old client ignores new response field | Compatible |
-| Tenant exceeds rate limit | Resource exhausted or documented fail-closed status |
+| Tenant exceeds per-pod rate limit | Resource exhausted or documented fail-closed status |
 | One tenant floods Predict | Other tenants unaffected |
 | API field disagrees with audit | Test fails |
 | Limit config missing | Documented default behavior |
+| Tenant bucket capacity exhausted | New tenant bucket fails closed without evicting existing tenant state |
 
 ## §8. Acceptance Gates
 
@@ -95,12 +96,15 @@ with existing audit columns for the same request.
 
 Proto/API changes carry compatibility risk. Prefer additive fields and
 compatibility tests. Rate limiting can cause unexpected throttling; keep
-config explicit and observable. Roll back by disabling limit config
-while preserving additive proto compatibility.
+config explicit and observable. POST_GA_07 limiter state is process-local
+per pod; multi-replica service-wide capacity is the per-pod rate times
+ready replicas unless sticky tenant routing or a shared limiter is added.
+Roll back by disabling limit config while preserving additive proto
+compatibility.
 
 ## §12. AIT Execution Notes
 
-Reviewer: codex CLI via `ait run --adapter codex --review-mode adversarial`. Max 5 rounds. Staff+ panel arbitration if 5 rounds fail.
+Reviewer: codex CLI via `ait run --adapter codex --review adversarial`. Max 5 rounds. Staff+ panel arbitration if 5 rounds fail.
 
 Reviewer should inspect proto compatibility and tenant isolation.
 
@@ -113,11 +117,12 @@ Reviewer should inspect proto compatibility and tenant isolation.
 | Security Engineer | Rate limits are tenant isolation controls | §7 |
 | Database Optimizer | No DB change unless audit/API consistency requires query support | §6 |
 | Output Predictor Domain Expert | API truth must match audit truth | §8 |
+| Codex Implementer/Reviewer | Five adversarial rounds completed; AIT did not produce review artifacts, so direct codex CLI fallback supplied review findings and final no-finding result | Rounds 1-5 evidence under `docs/reviews/post-ga/POST_GA_07_predictor_api_evolution/` |
 
 ## §14. Merge Checklist
 
-- [ ] #161 fixed and tested
-- [ ] #165 fixed and tested
-- [ ] Compatibility evidence recorded
-- [ ] AIT review clean or Staff+ arbitration recorded
-- [ ] Memory updated
+- [x] #161 fixed and tested
+- [x] #165 fixed and tested
+- [x] Compatibility evidence recorded
+- [x] AIT/direct fallback review clean or Staff+ arbitration recorded
+- [x] Memory updated

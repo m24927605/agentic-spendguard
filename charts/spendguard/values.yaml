@@ -419,6 +419,15 @@ outputPredictor:
   cacheTtlSeconds: 300
   # Unknown-model context window fallback per spec §3.3.
   unknownModelContextWindow: 8000
+  # POST_GA_07: process-local per-tenant Predict RPC limiter. 0 disables
+  # for emergency rollback. In multi-replica deployments, effective
+  # service-wide tenant capacity is this per-pod rate times ready pods
+  # unless sticky tenant routing or an external shared limiter is added.
+  predictRateLimitPerTenantPerSecond: 1000
+  # Maximum tenant buckets retained per pod for limiter state. Capacity
+  # exhaustion fails closed for new tenants instead of evicting existing
+  # tenant buckets.
+  predictRateLimitTenantCapacity: 4096
   # ── SLICE_07: Strategy C plugin wiring ──────────────────────────
   # per output-predictor-plugin-contract-v1alpha1.md.
   # Strategy C reads the plugin endpoint registry from

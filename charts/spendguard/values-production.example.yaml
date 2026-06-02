@@ -99,6 +99,8 @@ outputPredictor:
     tag: v0.1.0
   mtlsSecretName: spendguard-prod-output-predictor-mtls
   databaseSecretEnabled: true
+  predictRateLimitPerTenantPerSecond: 1000
+  predictRateLimitTenantCapacity: 4096
   pluginEndpointDatabaseEnabled: true
   pluginClientSvid:
     enabled: true

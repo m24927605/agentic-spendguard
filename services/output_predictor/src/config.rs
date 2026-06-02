@@ -74,6 +74,17 @@ pub struct Config {
     #[serde(default = "default_unknown_model_context_window")]
     pub unknown_model_context_window: i64,
 
+    /// Per-tenant Predict RPC token-bucket refill rate. 0 disables the
+    /// limiter for emergency rollback; production default protects the
+    /// shared predictor hot path without requiring control-plane wiring.
+    #[serde(default = "default_predict_rate_limit_per_tenant_per_second")]
+    pub predict_rate_limit_per_tenant_per_second: u32,
+
+    /// Maximum number of tenant limiter buckets retained in memory.
+    /// Bounded to keep hot-path state finite; metrics stay no-label.
+    #[serde(default = "default_predict_rate_limit_tenant_capacity")]
+    pub predict_rate_limit_tenant_capacity: usize,
+
     /// Path to the model_context_window.toml file. Defaults to the
     /// crate-relative `data/model_context_window.toml` packed with the
     /// binary. Production deployments may override to point at a Helm-
@@ -145,6 +156,14 @@ impl std::fmt::Debug for Config {
                 "unknown_model_context_window",
                 &self.unknown_model_context_window,
             )
+            .field(
+                "predict_rate_limit_per_tenant_per_second",
+                &self.predict_rate_limit_per_tenant_per_second,
+            )
+            .field(
+                "predict_rate_limit_tenant_capacity",
+                &self.predict_rate_limit_tenant_capacity,
+            )
             .field("context_window_toml_path", &self.context_window_toml_path)
             .field(
                 "plugin_endpoint_database_url_present",
@@ -179,6 +198,14 @@ fn default_cache_ttl_seconds() -> u64 {
 fn default_unknown_model_context_window() -> i64 {
     // Spec §3.3 — conservative 8000 tokens for unknown models.
     8000
+}
+
+fn default_predict_rate_limit_per_tenant_per_second() -> u32 {
+    crate::server::DEFAULT_PREDICT_RATE_LIMIT_PER_TENANT_PER_SECOND
+}
+
+fn default_predict_rate_limit_tenant_capacity() -> usize {
+    crate::server::DEFAULT_PREDICT_RATE_LIMIT_TENANT_CAPACITY
 }
 
 fn default_context_window_toml_path() -> String {
@@ -223,6 +250,8 @@ mod tests {
         assert_eq!(cfg.metrics_addr, "0.0.0.0:9100");
         assert_eq!(cfg.cache_ttl_seconds, 300);
         assert_eq!(cfg.unknown_model_context_window, 8000);
+        assert_eq!(cfg.predict_rate_limit_per_tenant_per_second, 1000);
+        assert_eq!(cfg.predict_rate_limit_tenant_capacity, 4096);
     }
 
     #[test]

@@ -152,4 +152,10 @@ message PredictResponse {
   // Echoed fingerprint per spec §8.2 — the predictor's view of the
   // bucket identity. Audit row records this; verify-chain validates.
   string prompt_class_fingerprint_used = 16;
+
+  // Echoed active prediction_policy from the request. This lets API
+  // consumers reconstruct predictor behavior without joining audit rows;
+  // the value must match audit_outbox.prediction_policy_used for the
+  // same decision.
+  string prediction_policy_used = 17;
 }
