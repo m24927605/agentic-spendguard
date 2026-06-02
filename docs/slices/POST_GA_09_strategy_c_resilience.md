@@ -1,7 +1,7 @@
 # POST_GA 09 - Strategy C Resilience
 
 > **Branch**: `post-ga/POST_GA_09_strategy_c_resilience`
-> **Status**: draft
+> **Status**: implementation-complete; pending adversarial review
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `output-predictor-plugin-contract-v1alpha1.md`, `output-predictor-service-spec-v1alpha1.md`
 > **Issues**: #172, #173, #174, #175, #176
 > **Estimated change size**: medium-large; Strategy C resilience and audit clarity
@@ -115,11 +115,12 @@ hot-path failure isolation.
 | Security Engineer | Reason/input caps are security controls | #173 and #176 |
 | Database Optimizer | Stale cache must reduce DB outage blast radius | #175 |
 | Customer Plugin Domain Expert | Plugin failure still falls to Strategy B | §7 |
+| Implementer | Added tenant-scoped endpoint-cache singleflight, bounded stale-on-DB-error serving, force-reset audit target/transition payload, reason cap, and plugin-bound identifier caps | `76da6d2`, `e633ce0`, `62096cf`, `b61797e` |
 
 ## §14. Merge Checklist
 
-- [ ] #172-#176 fixed and tested
-- [ ] plugin_c_synthetic demo passes
-- [ ] Audit evidence recorded
+- [x] #172-#176 fixed and tested
+- [x] plugin_c_synthetic demo passes
+- [x] Audit evidence recorded
 - [ ] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated
