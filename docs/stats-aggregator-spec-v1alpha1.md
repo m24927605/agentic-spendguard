@@ -391,11 +391,54 @@ For each (tenant, model, agent_id, prompt_class) bucket:
 
   z_score = (current_mean - baseline_mean) / baseline_stddev
 
-  IF |z_score| > 2.0 AND sample_size_7d >= MIN_SAMPLES_FOR_ALERT:
+  IF z_score is finite
+     AND |z_score| > 2.0
+     AND sample_size_7d >= MIN_SAMPLES_FOR_ALERT
+     AND cooldown key is not active:
     emit prediction_drift_alert
 ```
 
 `MIN_SAMPLES_FOR_ALERT` default 100。理由：小樣本 7-day window 容易 false-positive。
+
+POST_GA_06 runtime hardening: `mean_7d`, `baseline_mean`,
+`baseline_stddev`, `drift_z_threshold`, and the computed `z_score` must
+all be finite. `NaN`, `+Infinity`, `-Infinity`, zero/negative baseline
+stddev, and non-positive/non-finite thresholds fail closed by suppressing
+alert emission; these values must never appear in an immutable
+`prediction_drift_alert` payload.
+
+### 7.1.1 Alert cooldown / dedup
+
+`prediction_drift_alert` emission is rate-limited by a rolling 24-hour
+cooldown keyed exactly on:
+
+```text
+(tenant_id, model, agent_id, prompt_class)
+```
+
+The durable state table is
+`prediction_drift_alert_cooldowns` in the canonical_ingest DB. It is
+mutable derived state, not audit history. Before sending to
+canonical_ingest, stats_aggregator reserves or reuses a pending signed
+CloudEvent proto for the cooldown key. Pending reservations are not active
+cooldowns: they preserve one stable event id, event timestamp, payload, and
+signature across ambiguous append retries. The new 24-hour cooldown is
+recorded only after canonical_ingest returns `APPENDED` or `DEDUPED`; if
+the same key breaches again while `suppress_until > now()`, the alert is
+suppressed and the suppression is observable through logs and
+`spendguard_stats_aggregator_drift_alerts_suppressed_total`.
+
+Failure mode: if the cooldown store is unavailable, stats_aggregator
+suppresses the alert rather than emitting duplicate immutable audit rows.
+This favors avoiding alert spam over retrying a possibly repeated alert.
+If the append result is ambiguous because the transport fails after a
+possible durable commit, no active cooldown is recorded, but the pending
+CloudEvent remains retryable. The next cycle resends the same event id and
+bytes so canonical_ingest can return `DEDUPED` if the first attempt already
+committed. If append succeeds but cooldown recording fails, the alert
+remains durable and the daemon logs that future duplicate suppression may
+be unavailable. Different tenants, models, agents, and prompt classes have
+independent cooldowns.
 
 ### 7.2 Alert event schema
 
@@ -416,7 +459,12 @@ data:
   suggested_action: "review_predictor_baseline" | "retrain_strategy_c_plugin" | "investigate_agent_change"
 ```
 
-Implementation reference: `services/stats_aggregator/src/drift_detector.rs` commit `f8dc34c` defines `PREDICTION_DRIFT_ALERT_EVENT_TYPE = "spendguard.audit.prediction_drift_alert.v1alpha1"`; calibration-report commit `8ee35ca` reads the same event type from `canonical_events.payload_json`.
+Implementation reference: `services/stats_aggregator/src/drift_detector.rs`
+commit `f8dc34c` defines `PREDICTION_DRIFT_ALERT_EVENT_TYPE =
+"spendguard.audit.prediction_drift_alert.v1alpha1"`; POST_GA_06 merge
+updates the same module with 24h cooldown and non-finite guard behavior.
+Calibration-report commit `8ee35ca` reads the same event type from
+`canonical_events.payload_json`.
 
 Audit routing discipline: the `spendguard.audit.*` prefix is required so
 canonical_ingest routes this event to ImmutableAuditLog. The source URI

@@ -1,0 +1,80 @@
+ait warning: spawning a nested wrapped codex session from inside attempt 'd22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KSX3H3F2MX6QXEKAXYGQG2WH'. The inner agent may lose its parent OAuth context and fail with auth errors. To bypass: prefix with `AIT_BYPASS=1`, or run `ait off` in the outer shell first.
+{
+  "intent_id": "d22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KT2V6GKFPWX4D70CEY7V6NNE",
+  "attempt_id": "d22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KT2V6GYNHMZ3FXR4Y5DW8NAD",
+  "workspace_ref": "/Users/michael.chen/products/agentic-spendguard/.ait/workspaces/attempt-0001-01kt2v6gynhmz3fxr4y5dw8nad",
+  "exit_code": 127,
+  "command_stdout": "",
+  "command_stderr": "ait run failed: command not executable: Review POST_GA_06 branch post-ga/POST_GA_06_stats_drift_hygiene against main and docs/slices/POST_GA_06_stats_drift_hygiene.md. Do not edit files. Return only adversarial findings by severity, or state no findings. ([Errno 2] No such file or directory: 'Review POST_GA_06 branch post-ga/POST_GA_06_stats_drift_hygiene against main and docs/slices/POST_GA_06_stats_drift_hygiene.md. Do not edit files. Return only adversarial findings by severity, or state no findings.')\nhint: positional looks like a prose prompt; did you mean `ait run [opts] -- codex -p \"Review POST_GA_06 branch post-ga/POST_GA_06_stats_drift_hygiene against main and\u2026\"`?\n",
+  "attempt": {
+    "attempt": {
+      "id": "d22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KT2V6GYNHMZ3FXR4Y5DW8NAD",
+      "schema_version": 10,
+      "intent_id": "d22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KT2V6GKFPWX4D70CEY7V6NNE",
+      "ordinal": 1,
+      "agent_id": "codex:main",
+      "agent_model": null,
+      "agent_harness": "codex",
+      "agent_harness_version": "ait-run",
+      "workspace_kind": "worktree",
+      "workspace_ref": "/Users/michael.chen/products/agentic-spendguard/.ait/workspaces/attempt-0001-01kt2v6gynhmz3fxr4y5dw8nad",
+      "base_ref_oid": "20634240cd1dade951c61291147dc77da4c85984",
+      "base_ref_name": "post-ga/POST_GA_06_stats_drift_hygiene",
+      "started_at": "2026-06-02T00:19:39Z",
+      "ended_at": "2026-06-02T00:20:12Z",
+      "heartbeat_at": "2026-06-02T00:20:12Z",
+      "reported_status": "finished",
+      "verified_status": "failed",
+      "ownership_token": "oI74cvjBFAm3hfmZ235ic4hpExGH3vAN",
+      "raw_trace_ref": ".ait/traces/d22348dcf2e01a233b401aa1a1ab97bb611642f9_14adbc8e9d65bbb6ea809c3c0beeb260_01KT2V6GYNHMZ3FXR4Y5DW8NAD.txt",
+      "logs_ref": null,
+      "result_promotion_ref": null,
+      "result_exit_code": 127,
+      "attempt_handle": "a324",
+      "attempt_display_title": "manual codex run",
+      "attempt_description": "Attempt 01KT2V6GYNHM has no indexed changed files yet; status failed; exit code 127."
+    },
+    "evidence_summary": {
+      "id": "d22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KT2V6GYNHMZ3FXR4Y5DW8NAD:evidence:26dd4f3cbf43403891306a03acf6ea34",
+      "schema_version": 10,
+      "attempt_id": "d22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KT2V6GYNHMZ3FXR4Y5DW8NAD",
+      "observed_tool_calls": 1,
+      "observed_file_reads": 0,
+      "observed_file_writes": 0,
+      "observed_commands_run": 1,
+      "observed_duration_ms": 90,
+      "observed_tests_run": 0,
+      "observed_tests_passed": 0,
+      "observed_tests_failed": 0,
+      "observed_lint_passed": null,
+      "observed_build_passed": null,
+      "raw_prompt_ref": ".ait/prompts/d22348dcf2e01a233b401aa1a1ab97bb611642f9_14adbc8e9d65bbb6ea809c3c0beeb260_01KT2V6GYNHMZ3FXR4Y5DW8NAD.txt",
+      "raw_trace_ref": ".ait/traces/d22348dcf2e01a233b401aa1a1ab97bb611642f9_14adbc8e9d65bbb6ea809c3c0beeb260_01KT2V6GYNHMZ3FXR4Y5DW8NAD.txt",
+      "logs_ref": null
+    },
+    "outcome": {
+      "attempt_id": "d22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KT2V6GYNHMZ3FXR4Y5DW8NAD",
+      "schema_version": 10,
+      "outcome_class": "failed_infra",
+      "confidence": "high",
+      "reasons": [
+        "trace indicates harness or environment failure"
+      ],
+      "classified_at": "2026-06-02T00:20:13Z"
+    },
+    "files": {},
+    "commits": [],
+    "local_artifacts": null
+  },
+  "run_apply_policy": "never",
+  "run_review_policy": "adversarial",
+  "review": null,
+  "review_error": null,
+  "apply": null,
+  "intent_inferred": true,
+  "attempt_handle": "a324",
+  "next_steps": [
+    "ait recover a324"
+  ],
+  "inferred_intent_title": "manual codex run"
+}

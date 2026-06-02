@@ -11,8 +11,14 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use chrono::{Duration as ChronoDuration, Utc};
 use pretty_assertions::assert_eq;
 use spendguard_stats_aggregator::aggregation::aggregate_output_distribution;
+use spendguard_stats_aggregator::drift_detector::{
+    DriftAlertCooldown, DriftAlertCooldownDecision, DriftAlertEmissionAttempt,
+    DriftAlertEmissionDecision, DriftAlertKey, PostgresDriftAlertCooldownStore,
+};
+use spendguard_stats_aggregator::proto::common::v1::CloudEvent;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::{PgPool, Row};
 use testcontainers::runners::AsyncRunner;
@@ -130,6 +136,30 @@ async fn seed_schema_bundle(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("seed schema bundle");
+}
+
+fn pending_attempt(key: &DriftAlertKey, event_id: Uuid, z_score: f32) -> DriftAlertEmissionAttempt {
+    let now = Utc::now();
+    DriftAlertEmissionAttempt {
+        event: CloudEvent {
+            specversion: "1.0".to_string(),
+            r#type: "spendguard.audit.prediction_drift_alert.v1alpha1".to_string(),
+            source: format!("spendguard://stats-aggregator/{}", key.tenant_id),
+            id: event_id.to_string(),
+            time: Some(prost_types::Timestamp {
+                seconds: now.timestamp(),
+                nanos: now.timestamp_subsec_nanos() as i32,
+            }),
+            datacontenttype: "application/json".to_string(),
+            data: bytes::Bytes::from_static(br#"{"z_score":2.5}"#),
+            tenant_id: key.tenant_id.to_string(),
+            producer_id: "stats-aggregator:test".to_string(),
+            signing_key_id: "test-key".to_string(),
+            producer_signature: bytes::Bytes::from_static(b"test-signature"),
+            ..Default::default()
+        },
+        z_score,
+    }
 }
 
 async fn seed_outcome_pair(
@@ -586,4 +616,329 @@ async fn drift_alert_audit_row_can_land_without_prediction_mirror_columns() {
         .try_get::<Option<String>, _>("prompt_class")
         .unwrap()
         .is_none());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drift_alert_cooldown_postgres_is_key_and_tenant_scoped() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let store = PostgresDriftAlertCooldownStore::new(fx.app_pool.clone());
+    let tenant_id = Uuid::new_v4();
+    let now = Utc::now();
+    let key = DriftAlertKey {
+        tenant_id,
+        model: "gpt-4o-mini".into(),
+        agent_id: "agent-alpha".into(),
+        prompt_class: "chat_short".into(),
+    };
+
+    let first = store.check(&key, now).await.expect("first");
+    assert!(matches!(first, DriftAlertCooldownDecision::Allowed { .. }));
+    store
+        .record_emitted(&key, now, 2.5)
+        .await
+        .expect("record first");
+
+    let duplicate = store
+        .check(&key, now + ChronoDuration::hours(1))
+        .await
+        .expect("duplicate");
+    assert!(matches!(
+        duplicate,
+        DriftAlertCooldownDecision::Suppressed { .. }
+    ));
+
+    let mut different_prompt = key.clone();
+    different_prompt.prompt_class = "rag".into();
+    let prompt_decision = store
+        .check(&different_prompt, now + ChronoDuration::hours(1))
+        .await
+        .expect("different prompt");
+    assert!(matches!(
+        prompt_decision,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+
+    let mut different_model = key.clone();
+    different_model.model = "claude-3-5-sonnet".into();
+    let model_decision = store
+        .check(&different_model, now + ChronoDuration::hours(1))
+        .await
+        .expect("different model");
+    assert!(matches!(
+        model_decision,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+
+    let mut different_agent = key.clone();
+    different_agent.agent_id = "agent-beta".into();
+    let agent_decision = store
+        .check(&different_agent, now + ChronoDuration::hours(1))
+        .await
+        .expect("different agent");
+    assert!(matches!(
+        agent_decision,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+
+    let mut different_tenant = key.clone();
+    different_tenant.tenant_id = Uuid::new_v4();
+    let tenant_decision = store
+        .check(&different_tenant, now + ChronoDuration::hours(1))
+        .await
+        .expect("different tenant");
+    assert!(matches!(
+        tenant_decision,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+
+    let after_expiry = store
+        .check(&key, now + ChronoDuration::hours(25))
+        .await
+        .expect("after expiry");
+    assert!(matches!(
+        after_expiry,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drift_alert_cooldown_postgres_reuses_pending_event_until_recorded() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let store = PostgresDriftAlertCooldownStore::new(fx.app_pool.clone());
+    let key = DriftAlertKey {
+        tenant_id: Uuid::new_v4(),
+        model: "gpt-4o-mini".into(),
+        agent_id: "agent-alpha".into(),
+        prompt_class: "chat_short".into(),
+    };
+    let now = Utc::now();
+    let first_event_id = Uuid::new_v4();
+    let second_event_id = Uuid::new_v4();
+
+    let first = store
+        .reserve_emission(&key, now, pending_attempt(&key, first_event_id, 2.5))
+        .await
+        .expect("first reserve");
+    let DriftAlertEmissionDecision::Allowed { attempt: first } = first else {
+        panic!("first reserve must be allowed");
+    };
+    assert_eq!(first.event.id, first_event_id.to_string());
+
+    let second = store
+        .reserve_emission(
+            &key,
+            now + ChronoDuration::minutes(1),
+            pending_attempt(&key, second_event_id, 3.5),
+        )
+        .await
+        .expect("second reserve reuses pending");
+    let DriftAlertEmissionDecision::Allowed { attempt: second } = second else {
+        panic!("second reserve must reuse pending");
+    };
+    assert_eq!(second.event.id, first_event_id.to_string());
+    assert_eq!(second.z_score, 2.5);
+
+    store
+        .record_emitted(&key, now + ChronoDuration::minutes(2), second.z_score)
+        .await
+        .expect("record emitted clears pending");
+
+    let duplicate = store
+        .reserve_emission(
+            &key,
+            now + ChronoDuration::minutes(3),
+            pending_attempt(&key, Uuid::new_v4(), 4.5),
+        )
+        .await
+        .expect("active cooldown suppresses");
+    assert!(matches!(
+        duplicate,
+        DriftAlertEmissionDecision::Suppressed { .. }
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drift_alert_cooldown_postgres_rls_blocks_missing_or_mismatched_tenant() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let store = PostgresDriftAlertCooldownStore::new(fx.app_pool.clone());
+    let tenant_a = Uuid::new_v4();
+    let tenant_b = Uuid::new_v4();
+    let key = DriftAlertKey {
+        tenant_id: tenant_a,
+        model: "gpt-4o-mini".into(),
+        agent_id: "agent-alpha".into(),
+        prompt_class: "chat_short".into(),
+    };
+
+    store
+        .record_emitted(&key, Utc::now(), 2.5)
+        .await
+        .expect("seed tenant A cooldown");
+
+    let mut missing_tenant_tx = fx.app_pool.begin().await.expect("begin missing tenant tx");
+    let visible_without_tenant = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM prediction_drift_alert_cooldowns
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_a)
+    .fetch_one(&mut *missing_tenant_tx)
+    .await
+    .expect("select without tenant context");
+    assert_eq!(visible_without_tenant, 0);
+
+    let missing_write_err = sqlx::query(
+        r#"
+        INSERT INTO prediction_drift_alert_cooldowns (
+          tenant_id, model, agent_id, prompt_class,
+          last_emitted_at, suppress_until, last_z_score
+        )
+        VALUES (
+          $1, 'gpt-4o-mini', 'agent-beta', 'chat_short',
+          clock_timestamp(), clock_timestamp() + interval '24 hours', 2.5
+        )
+        "#,
+    )
+    .bind(tenant_a)
+    .execute(&mut *missing_tenant_tx)
+    .await
+    .expect_err("missing tenant context must fail WITH CHECK");
+    assert!(
+        missing_write_err.to_string().contains("row-level security"),
+        "unexpected missing-tenant write error: {missing_write_err}"
+    );
+    let _ = missing_tenant_tx.rollback().await;
+
+    let mut mismatched_tx = fx.app_pool.begin().await.expect("begin mismatched tx");
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+        .bind(tenant_b.to_string())
+        .execute(&mut *mismatched_tx)
+        .await
+        .expect("set mismatched tenant");
+
+    let visible_with_mismatch = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM prediction_drift_alert_cooldowns
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_a)
+    .fetch_one(&mut *mismatched_tx)
+    .await
+    .expect("select with mismatched tenant context");
+    assert_eq!(visible_with_mismatch, 0);
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE prediction_drift_alert_cooldowns
+        SET suppress_until = clock_timestamp() + interval '48 hours'
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_a)
+    .execute(&mut *mismatched_tx)
+    .await
+    .expect("mismatched tenant update is filtered by RLS");
+    assert_eq!(updated.rows_affected(), 0);
+
+    let mismatched_write_err = sqlx::query(
+        r#"
+        INSERT INTO prediction_drift_alert_cooldowns (
+          tenant_id, model, agent_id, prompt_class,
+          last_emitted_at, suppress_until, last_z_score
+        )
+        VALUES (
+          $1, 'gpt-4o-mini', 'agent-gamma', 'chat_short',
+          clock_timestamp(), clock_timestamp() + interval '24 hours', 2.5
+        )
+        "#,
+    )
+    .bind(tenant_a)
+    .execute(&mut *mismatched_tx)
+    .await
+    .expect_err("mismatched tenant context must fail WITH CHECK");
+    assert!(
+        mismatched_write_err
+            .to_string()
+            .contains("row-level security"),
+        "unexpected mismatched-tenant write error: {mismatched_write_err}"
+    );
+    let _ = mismatched_tx.rollback().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drift_alert_cooldown_postgres_accepts_canonical_multibyte_agent_id() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let store = PostgresDriftAlertCooldownStore::new(fx.app_pool.clone());
+    let key = DriftAlertKey {
+        tenant_id: Uuid::new_v4(),
+        model: "gpt-4o-mini".into(),
+        agent_id: "客".repeat(128),
+        prompt_class: "chat_short".into(),
+    };
+
+    let decision = store
+        .check(&key, Utc::now())
+        .await
+        .expect("128-character multibyte agent_id is valid per canonical_events");
+    assert!(matches!(
+        decision,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+    store
+        .record_emitted(&key, Utc::now(), 2.5)
+        .await
+        .expect("record multibyte agent_id");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drift_alert_cooldown_postgres_rejects_non_finite_z_scores() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let tenant_id = Uuid::new_v4();
+
+    for value in ["'NaN'::REAL", "'Infinity'::REAL", "'-Infinity'::REAL"] {
+        let mut tx = fx.app_pool.begin().await.expect("begin tx");
+        sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+            .bind(tenant_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .expect("set tenant");
+        let query = format!(
+            r#"
+            INSERT INTO prediction_drift_alert_cooldowns (
+              tenant_id, model, agent_id, prompt_class,
+              last_emitted_at, suppress_until, last_z_score
+            )
+            VALUES (
+              $1, 'gpt-4o-mini', 'agent-alpha', $2,
+              clock_timestamp(), clock_timestamp() + interval '24 hours', {value}
+            )
+            "#
+        );
+        let err = sqlx::query(&query)
+            .bind(tenant_id)
+            .bind("chat_short")
+            .execute(&mut *tx)
+            .await
+            .expect_err("non-finite z-score must violate CHECK");
+        assert!(
+            err.to_string()
+                .contains("prediction_drift_alert_cooldowns_last_z_score_check"),
+            "unexpected error for {value}: {err}"
+        );
+        let _ = tx.rollback().await;
+    }
 }

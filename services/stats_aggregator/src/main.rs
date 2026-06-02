@@ -31,7 +31,8 @@ use spendguard_stats_aggregator::{
     aggregation::STATS_AGGREGATOR_ADVISORY_LOCK_ID,
     config::Config,
     drift_detector::{
-        CanonicalIngestDriftAlertSink, DriftAlertSink, DriftDetectorConfig, LoggingDriftAlertSink,
+        CanonicalIngestDriftAlertSink, DriftAlertCooldown, DriftAlertSink, DriftDetectorConfig,
+        LoggingDriftAlertSink, PostgresDriftAlertCooldownStore,
     },
     scheduler::run_loop,
 };
@@ -157,6 +158,8 @@ async fn main() -> Result<()> {
         drift_z_threshold: cfg.drift_z_threshold,
         min_samples_for_alert: cfg.min_samples_for_alert,
     };
+    let cooldown: Arc<dyn DriftAlertCooldown> =
+        Arc::new(PostgresDriftAlertCooldownStore::new(pool.clone()));
 
     // ── Spawn metrics server ──────────────────────────────────────
     //
@@ -186,7 +189,15 @@ async fn main() -> Result<()> {
     // ── Run scheduler loop (forever, until ctrl-c) ────────────────
     let pool_for_loop = pool.clone();
     let scheduler_handle = tokio::spawn(async move {
-        run_loop(pool_for_loop, cycle_seconds, detector_cfg, signer, sink).await;
+        run_loop(
+            pool_for_loop,
+            cycle_seconds,
+            detector_cfg,
+            signer,
+            sink,
+            cooldown,
+        )
+        .await;
     });
 
     shutdown_signal().await;
@@ -254,8 +265,8 @@ async fn shutdown_signal() {
 
 fn render_metrics() -> String {
     use spendguard_stats_aggregator::scheduler::{
-        CYCLES_TOTAL, CYCLE_ERROR_TOTAL, DRIFT_ALERTS_TOTAL, LAST_CYCLE_START_UNIX_SECS,
-        SKIPPED_LOCK_HELD_TOTAL,
+        CYCLES_TOTAL, CYCLE_ERROR_TOTAL, DRIFT_ALERTS_SUPPRESSED_TOTAL, DRIFT_ALERTS_TOTAL,
+        LAST_CYCLE_START_UNIX_SECS, SKIPPED_LOCK_HELD_TOTAL,
     };
     use std::sync::atomic::Ordering;
     // R2 M13: render the live AtomicU64 counters.
@@ -272,6 +283,10 @@ fn render_metrics() -> String {
          Total prediction_drift_alert CloudEvents emitted.\n\
          # TYPE spendguard_stats_aggregator_drift_alerts_total counter\n\
          spendguard_stats_aggregator_drift_alerts_total {}\n\
+         # HELP spendguard_stats_aggregator_drift_alerts_suppressed_total \
+         Total prediction_drift_alert CloudEvents suppressed by cooldown or numeric safety guards.\n\
+         # TYPE spendguard_stats_aggregator_drift_alerts_suppressed_total counter\n\
+         spendguard_stats_aggregator_drift_alerts_suppressed_total {}\n\
          # HELP spendguard_stats_aggregator_cycle_error_total \
          Total per-cycle errors (tenant aggregation failures + sink failures).\n\
          # TYPE spendguard_stats_aggregator_cycle_error_total counter\n\
@@ -283,6 +298,7 @@ fn render_metrics() -> String {
         CYCLES_TOTAL.load(Ordering::Relaxed),
         SKIPPED_LOCK_HELD_TOTAL.load(Ordering::Relaxed),
         DRIFT_ALERTS_TOTAL.load(Ordering::Relaxed),
+        DRIFT_ALERTS_SUPPRESSED_TOTAL.load(Ordering::Relaxed),
         CYCLE_ERROR_TOTAL.load(Ordering::Relaxed),
         LAST_CYCLE_START_UNIX_SECS.load(Ordering::Relaxed),
     )
@@ -408,5 +424,6 @@ mod tests {
         assert!(body.contains("spendguard_stats_aggregator_cycles_total"));
         assert!(body.contains("spendguard_stats_aggregator_skipped_lock_held_total"));
         assert!(body.contains("spendguard_stats_aggregator_drift_alerts_total"));
+        assert!(body.contains("spendguard_stats_aggregator_drift_alerts_suppressed_total"));
     }
 }

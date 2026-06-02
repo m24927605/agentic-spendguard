@@ -1,0 +1,1 @@
+/Users/michael.chen/.nvm/versions/node/v24.14.1/bin/node /Users/michael.chen/.nvm/versions/node/v24.14.1/lib/node_modules/@openai/codex/bin/codex.js exec --dangerously-bypass-approvals-and-sandbox '<POST_GA_06 Round 3 adversarial review prompt>'
