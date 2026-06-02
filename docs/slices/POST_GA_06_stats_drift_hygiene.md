@@ -1,7 +1,7 @@
 # POST_GA 06 - Stats Drift Hygiene
 
 > **Branch**: `post-ga/POST_GA_06_stats_drift_hygiene`
-> **Status**: draft
+> **Status**: implemented; adversarial review pending
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `stats-aggregator-spec-v1alpha1.md`, `audit-chain-prediction-extension-v1alpha1.md`
 > **Issues**: #157, #162
 > **Estimated change size**: medium; stats aggregation, alert dedup, numeric guards
@@ -10,8 +10,9 @@
 
 ## §0. TL;DR
 
-Add prediction drift alert dedup/cooldown and harden drift math against
-NaN/Infinity so the stats aggregator emits stable, bounded alerts.
+Add durable prediction drift alert dedup/cooldown and harden drift math
+against NaN/Infinity so the stats aggregator emits stable, bounded
+alerts.
 
 ## §1. Architectural Context
 
@@ -45,16 +46,20 @@ The current GA path works, but post-GA issues call out alert dedup over
 ## §5. Schema / Proto
 
 Prefer an existing table or deterministic idempotency key if available.
-If durable cooldown state is required, add a forward migration with a
-unique key on the dedup dimensions and indexed expiry/last_emitted time.
-No proto changes expected.
+Durable cooldown state lands in
+`services/canonical_ingest/migrations/0022_prediction_drift_alert_cooldowns.sql`.
+The primary key is exactly `(tenant_id, model, agent_id, prompt_class)`;
+`suppress_until` is indexed for expiry inspection. RLS is enabled and
+forced with a `FOR ALL` policy using `app.current_tenant_id`; missing or
+invalid tenant context fails closed. `last_z_score` rejects `NaN` and
+`+/-Infinity` at both runtime and SQL CHECK layers. No proto changes.
 
 ## §6. Audit-Chain Impact
 
-Dedup suppresses duplicate alert emission; it must not delete or mutate
-prior audit rows. Suppressed decisions should be observable through
-metrics or logs so operators can distinguish quiet cooldown from no
-drift.
+Dedup suppresses duplicate alert emission; it does not delete or mutate
+prior audit rows. Suppressed decisions are observable through structured
+logs and `spendguard_stats_aggregator_drift_alerts_suppressed_total`, so
+operators can distinguish quiet cooldown from no drift.
 
 ## §7. Failure Modes
 
@@ -63,7 +68,7 @@ drift.
 | Same drift repeats within 24h | Suppress duplicate alert |
 | Same drift after cooldown | Emit once |
 | Different tenant/model/agent/prompt | Independent cooldown key |
-| Drift math produces NaN/Infinity | Skip or clamp according to documented fail-closed rule |
+| Drift math produces NaN/Infinity | Fail closed; no audit payload or cooldown row is written |
 | Dedup store unavailable | Fail safe; do not spam immutable audit |
 
 ## §8. Acceptance Gates
@@ -74,6 +79,9 @@ drift.
 - Migration smoke if SQL added
 - `make demo-up DEMO_MODE=default` if aggregator runtime path changes
 - Evidence under `docs/reviews/post-ga/POST_GA_06_stats_drift_hygiene/`
+
+Executed evidence is recorded in
+`docs/reviews/post-ga/POST_GA_06_stats_drift_hygiene/verification.md`.
 
 ## §9. Review Checklist
 
@@ -98,7 +106,7 @@ dedup only if alert spam risk is controlled by another gate.
 
 ## §12. AIT Execution Notes
 
-Reviewer: codex CLI via `ait run --adapter codex --review-mode adversarial`. Max 5 rounds. Staff+ panel arbitration if 5 rounds fail.
+Reviewer: codex CLI via `ait run --adapter codex --review adversarial`. Max 5 rounds. Staff+ panel arbitration if 5 rounds fail.
 
 Reviewer should inspect dedup persistence and numeric edge tests.
 
@@ -111,11 +119,13 @@ Reviewer should inspect dedup persistence and numeric edge tests.
 | Security Engineer | Alert suppression must not hide tenant isolation issues | §9 |
 | Database Optimizer | Durable dedup needs a bounded indexed key | §5 |
 | Stats Domain Expert | NaN/Infinity are invalid alert payload values | §7 |
+| Implementer self-review | PostgreSQL treats `NaN = NaN` as true, so the SQL CHECK must explicitly compare against `'NaN'::REAL` | Migration 0022 + `drift_alert_cooldown_postgres_rejects_non_finite_z_scores` |
+| Staff+ panel | Store-unavailable behavior favors suppressing duplicates over immutable audit spam | §6/§7 |
 
 ## §14. Merge Checklist
 
-- [ ] #157 fixed and tested
-- [ ] #162 fixed and tested
-- [ ] Stats gates pass
+- [x] #157 fixed and tested
+- [x] #162 fixed and tested
+- [x] Stats gates pass
 - [ ] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated
