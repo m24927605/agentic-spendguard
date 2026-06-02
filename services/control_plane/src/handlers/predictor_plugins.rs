@@ -62,6 +62,8 @@ use uuid::Uuid;
 
 use spendguard_auth::{Permission, Principal};
 
+pub const MAX_FORCE_RESET_REASON_LEN: usize = 1024;
+
 /// R2 M1 — write a `spendguard.audit.plugin_*.v1alpha1` CloudEvent
 /// into `control_plane_audit_outbox` inside the caller's transaction.
 /// The audit row + the registry-row mutation commit together so an
@@ -724,7 +726,10 @@ pub struct ForceResetReq {
 #[derive(Debug, Serialize)]
 pub struct ForceResetResp {
     pub tenant_id: Uuid,
+    pub plugin_endpoint_id: Uuid,
     pub reset_at: DateTime<Utc>,
+    pub previous_health_status: Option<String>,
+    pub new_health_status: String,
     pub note: String,
 }
 
@@ -743,9 +748,7 @@ pub async fn force_reset_plugin<S: PluginAppState>(
     if principal.assert_tenant(&tenant_uuid.to_string()).is_err() {
         return Err((StatusCode::FORBIDDEN, "cross-tenant").into_response());
     }
-    if req.reason.trim().is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "reason is required").into_response());
-    }
+    let reason = validate_force_reset_reason(&req.reason).map_err(|err| err.into_response())?;
 
     let mut tx = state
         .pg()
@@ -758,13 +761,29 @@ pub async fn force_reset_plugin<S: PluginAppState>(
         .await
         .map_err(|e| internal_err(e).into_response())?;
 
-    let row: Option<(Uuid, DateTime<Utc>)> = sqlx::query_as(
+    let row: Option<(Uuid, Uuid, Option<String>, String, DateTime<Utc>)> = sqlx::query_as(
         r#"
-        UPDATE predictor_plugin_endpoints
-           SET current_health_status = 'serving',
-               last_health_check_at  = clock_timestamp()
-         WHERE tenant_id = $1
-        RETURNING tenant_id, last_health_check_at
+        WITH target AS (
+            SELECT plugin_endpoint_id, tenant_id, current_health_status
+              FROM predictor_plugin_endpoints
+             WHERE tenant_id = $1
+             FOR UPDATE
+        ),
+        updated AS (
+            UPDATE predictor_plugin_endpoints p
+               SET current_health_status = 'serving',
+                   last_health_check_at  = clock_timestamp()
+              FROM target
+             WHERE p.plugin_endpoint_id = target.plugin_endpoint_id
+            RETURNING p.plugin_endpoint_id,
+                      p.tenant_id,
+                      target.current_health_status AS previous_health_status,
+                      p.current_health_status AS new_health_status,
+                      p.last_health_check_at
+        )
+        SELECT plugin_endpoint_id, tenant_id, previous_health_status,
+               new_health_status, last_health_check_at
+          FROM updated
         "#,
     )
     .bind(tenant_uuid)
@@ -780,20 +799,15 @@ pub async fn force_reset_plugin<S: PluginAppState>(
             .into_response(),
     )?;
 
-    // R2 M1: signed CloudEvent emission inside the same tx. The reason
-    // is operator-supplied free text; we already enforce non-empty +
-    // could grow length caps in a follow-up (tracked as GH issue per
-    // R2 outputs).
+    // R2 M1 + POST_GA_09 #172/#173: signed CloudEvent emission inside
+    // the same tx. Payload identifies the exact endpoint and state
+    // transition; reason is trimmed and length-bounded before audit/log.
     if let Err(e) = emit_plugin_audit_event(
         &mut tx,
         tenant_uuid,
         "force_reset",
         &principal.subject,
-        serde_json::json!({
-            "tenant_id": row.0.to_string(),
-            "reset_at": row.1.to_rfc3339(),
-            "reason": &req.reason,
-        }),
+        force_reset_audit_payload(&row, &reason),
     )
     .await
     {
@@ -807,14 +821,18 @@ pub async fn force_reset_plugin<S: PluginAppState>(
     info!(
         subject = %principal.subject,
         tenant = %tenant_uuid,
-        reason = %req.reason,
-        "force_reset_plugin success — output_predictor breaker will pick up via cache reload"
+        plugin_endpoint_id = %row.0,
+        reason = %reason,
+        "force_reset_plugin success — control-plane health status set to serving"
     );
 
     Ok(Json(ForceResetResp {
-        tenant_id: row.0,
-        reset_at: row.1,
-        note: "Plugin endpoint marked SERVING. output_predictor's per-tenant circuit breaker will reset on next cache reload (≤ plugin_endpoint_cache_ttl_seconds).".to_string(),
+        tenant_id: row.1,
+        plugin_endpoint_id: row.0,
+        reset_at: row.4,
+        previous_health_status: row.2,
+        new_health_status: row.3,
+        note: "Plugin endpoint health status marked SERVING in control_plane. This does not directly mutate output_predictor pods' in-memory circuit breakers; predictor breakers recover only through their health loop or runtime observations.".to_string(),
     })
     .into_response())
 }
@@ -829,6 +847,41 @@ fn internal_err(e: sqlx::Error) -> (StatusCode, String) {
         StatusCode::INTERNAL_SERVER_ERROR,
         "internal error".to_string(),
     )
+}
+
+fn validate_force_reset_reason(reason: &str) -> Result<String, (StatusCode, String)> {
+    let trimmed = reason.trim();
+    if trimmed.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, "reason is required".to_string()));
+    }
+    if trimmed.len() > MAX_FORCE_RESET_REASON_LEN {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "reason length {} exceeds MAX_FORCE_RESET_REASON_LEN={}",
+                trimmed.len(),
+                MAX_FORCE_RESET_REASON_LEN
+            ),
+        ));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn force_reset_audit_payload(
+    row: &(Uuid, Uuid, Option<String>, String, DateTime<Utc>),
+    reason: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "operation": "force_reset_plugin_health_status",
+        "tenant_id": row.1.to_string(),
+        "plugin_endpoint_id": row.0.to_string(),
+        "reset_at": row.4.to_rfc3339(),
+        "previous_health_status": row.2.as_deref(),
+        "new_health_status": row.3.as_str(),
+        "reason": reason,
+        "reason_length": reason.len(),
+        "effect": "control_plane_current_health_status_set_serving_only; does_not_mutate_output_predictor_in_memory_breakers; predictor_breakers_recover_via_health_loop_or_runtime_observation",
+    })
 }
 
 #[cfg(test)]
@@ -954,6 +1007,56 @@ mod tests {
             assert_eq!(code, StatusCode::BAD_REQUEST);
             assert!(msg.contains("[A-Za-z0-9_-]"), "got: {msg}");
         }
+    }
+
+    #[test]
+    fn force_reset_reason_is_trimmed_and_length_bounded() {
+        let reason = validate_force_reset_reason("  operator reset after plugin deploy  ")
+            .expect("valid reason");
+        assert_eq!(reason, "operator reset after plugin deploy");
+
+        let (code, msg) = validate_force_reset_reason(" \t\n ").expect_err("empty rejected");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(msg.contains("reason is required"));
+
+        let (code, msg) = validate_force_reset_reason(&"r".repeat(MAX_FORCE_RESET_REASON_LEN + 1))
+            .expect_err("oversize rejected");
+        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert!(msg.contains("MAX_FORCE_RESET_REASON_LEN"));
+    }
+
+    #[test]
+    fn force_reset_audit_payload_identifies_target_and_transition() {
+        let plugin_endpoint_id = Uuid::new_v4();
+        let tenant_id = Uuid::new_v4();
+        let reset_at = Utc::now();
+        let row = (
+            plugin_endpoint_id,
+            tenant_id,
+            Some("not_serving".to_string()),
+            "serving".to_string(),
+            reset_at,
+        );
+        let payload = force_reset_audit_payload(&row, "operator reset");
+
+        assert_eq!(
+            payload["operation"], "force_reset_plugin_health_status",
+            "payload must distinguish health-status force-reset from generic plugin update"
+        );
+        assert_eq!(payload["tenant_id"], tenant_id.to_string());
+        assert_eq!(
+            payload["plugin_endpoint_id"],
+            plugin_endpoint_id.to_string()
+        );
+        assert_eq!(payload["previous_health_status"], "not_serving");
+        assert_eq!(payload["new_health_status"], "serving");
+        assert_eq!(payload["reason"], "operator reset");
+        assert_eq!(payload["reason_length"], "operator reset".len());
+        assert_eq!(payload["reset_at"], reset_at.to_rfc3339());
+        assert_eq!(
+            payload["effect"],
+            "control_plane_current_health_status_set_serving_only; does_not_mutate_output_predictor_in_memory_breakers; predictor_breakers_recover_via_health_loop_or_runtime_observation"
+        );
     }
 
     // ─── R2 M4 — https://-under-production gate ──────────────────────

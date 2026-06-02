@@ -196,6 +196,12 @@ deployments, effective service-wide tenant capacity is approximately
 `per_pod_limit * ready_replicas` unless the deployment adds sticky
 tenant routing or an external shared limiter.
 
+POST_GA_09 bounds Strategy C plugin-bound identifiers before cache,
+database, or plugin work: `decision_id <= 128` bytes and
+`prompt_class_fingerprint <= 128` bytes. Over-limit requests fail with
+gRPC `INVALID_ARGUMENT`; SpendGuard does not truncate these fields
+because they are audit/join identifiers.
+
 ### 2.3 Hot path 並行模式
 
 ```rust
@@ -334,6 +340,20 @@ B 是 nullable —— cache miss + cold-start L1 → B null。`output_predictor`
 ### 5.1 Entry condition
 
 `output_predictor` lookup `(tenant_id → plugin_endpoint, mTLS cert_id)` from control plane cache. Hit → call plugin per `output-predictor-plugin-contract-v1alpha1.md` proto. Miss → C = null（tenant 沒配 plugin）。
+
+POST_GA_09 endpoint-cache resilience:
+
+- Cache miss/stale reload uses tenant-scoped singleflight, so many
+  concurrent requests for the same tenant collapse into one control
+  plane DB lookup. True misses and DB-error stale serves are shared for
+  a 1s reload-result backoff so queued callers do not take turns
+  re-hitting the DB. The true-miss backoff table is capped at 4096
+  tenants and sweeps expired entries on insert. Different tenants use
+  different locks.
+- If the control plane DB lookup fails, an enabled cached endpoint may
+  be served stale for at most 300s. Older stale entries fall back to B.
+- `enabled = FALSE` remains a kill switch even during DB errors; stale
+  disabled entries return C null rather than calling the plugin.
 
 ### 5.2 Call mechanics
 
