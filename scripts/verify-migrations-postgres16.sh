@@ -144,6 +144,30 @@ SELECT
   ) AS has_prediction_columns;
 " | tee "${EVIDENCE_PREFIX}-ledger-smoke.txt"
 
+log "ledger tokenizer_t1_samples PUBLIC SELECT revoke smoke"
+psql_exec spendguard_ledger -c "
+DO \$\$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+      FROM information_schema.role_table_grants
+     WHERE table_schema='public'
+       AND table_name IN (
+         'tokenizer_t1_samples',
+         'tokenizer_t1_samples_2026_05',
+         'tokenizer_t1_samples_2026_06',
+         'tokenizer_t1_samples_2026_07'
+       )
+       AND grantee='PUBLIC'
+       AND privilege_type='SELECT'
+  ) THEN
+    RAISE EXCEPTION 'PUBLIC SELECT remains on tokenizer_t1_samples or a current partition';
+  END IF;
+END
+\$\$;
+SELECT 'tokenizer_t1_samples_public_select_revoked' AS check_name, TRUE AS passed;
+" | tee "${EVIDENCE_PREFIX}-ledger-tokenizer-public-revoke.txt"
+
 log "canonical smoke checks"
 psql_exec spendguard_canonical -c "
 DO \$\$
@@ -228,6 +252,36 @@ END
 \$\$;
 SELECT 'sample_size_check_constraints_reject_negative' AS check_name, TRUE AS passed;
 " | tee "${EVIDENCE_PREFIX}-canonical-sample-size-checks.txt"
+
+log "canonical RLS no-nil-sentinel smoke"
+psql_exec spendguard_canonical -c "
+DO \$\$
+DECLARE
+  policy_sql text;
+BEGIN
+  SELECT pg_get_expr(polqual, polrelid) || ' ' || pg_get_expr(polwithcheck, polrelid)
+    INTO policy_sql
+    FROM pg_policy
+   WHERE polname='output_distribution_cache_tenant_isolation';
+  IF policy_sql IS NULL OR policy_sql LIKE '%00000000-0000-0000-0000-000000000000%' THEN
+    RAISE EXCEPTION 'output_distribution_cache RLS policy missing or still uses nil sentinel: %', policy_sql;
+  END IF;
+
+  SELECT pg_get_expr(polqual, polrelid) || ' ' || pg_get_expr(polwithcheck, polrelid)
+    INTO policy_sql
+    FROM pg_policy
+   WHERE polname='run_length_distribution_cache_tenant_isolation';
+  IF policy_sql IS NULL OR policy_sql LIKE '%00000000-0000-0000-0000-000000000000%' THEN
+    RAISE EXCEPTION 'run_length_distribution_cache RLS policy missing or still uses nil sentinel: %', policy_sql;
+  END IF;
+END
+\$\$;
+SELECT 'cache_rls_no_nil_uuid_sentinel' AS check_name, TRUE AS passed;
+" | tee "${EVIDENCE_PREFIX}-canonical-rls-no-nil-sentinel.txt"
+
+log "canonical output_distribution_cache freshness index planner smoke"
+psql_exec spendguard_canonical < scripts/db/explain-post-ga-08-cache-index.sql \
+  | tee "${EVIDENCE_PREFIX}-canonical-output-cache-index-plan.txt"
 
 log "control-plane smoke checks"
 psql_exec spendguard_control_plane -c "
