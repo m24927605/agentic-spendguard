@@ -139,17 +139,36 @@ encoder asset is vendored.
 | Asset path           | `crates/spendguard-tokenizer/data/llama-3.1/tokenizer.json`                                         |
 | Size                 | ~8.7 MB                                                                                             |
 | Vocabulary           | ~128K tokens                                                                                        |
-| License              | Llama 3.1 Community License (Meta) + MIT (Xenova port)                                              |
+| License              | Llama 3.1 Community License (Meta) + MIT (Xenova port); see operational checklist below              |
+| Meta license URL     | `https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/LICENSE`                       |
+| Acceptable-use URL   | `https://llama.meta.com/llama3_1/use-policy`                                                        |
+| Required product notice | `Built with Llama`                                                                                |
 | Asset sha256         | `79e3e522635f3171300913bb421464a87de6222182a0570b9b2ccba2a964b2b4`                                |
 | Snapshot date        | 2026-05-30                                                                                          |
 | Spec drift threshold | 0.005 (0.5%; per spec §4.2 — SentencePiece is configuration-precise)                                |
 
-The Llama 3.1 Community License permits non-commercial AND commercial
-use of the tokenizer configuration (the restrictions kick in for model
-weight redistribution which we do not ship). The Xenova HF port
-re-packages the Llama tokenizer config as a HuggingFace
-`tokenizer.json` without touching any weights, which is within
-the Community License terms.
+This section is an engineering compliance checklist, not legal advice.
+SpendGuard vendors only the tokenizer JSON and does not ship Llama model
+weights, but the tokenizer is still derived from Llama Materials. Before
+redistributing the crate, enabling the Llama tokenizer path, or selling a
+product/service that contains it, operators must review the official Meta
+license and acceptable-use policy:
+
+* **Attribution**: distribution packages must preserve the Llama 3.1
+  Community License and Meta attribution notice, and product surfaces or
+  docs that use the Llama-derived tokenizer path must prominently display
+  `Built with Llama`.
+* **700 million monthly active users threshold**: if the licensee or its
+  affiliates exceeded 700 million monthly active users in the calendar
+  month before the Llama 3.1 release date (2024-07-23), the operator must
+  request a separate Meta license before relying on the community license.
+* **Acceptable Use Policy**: Llama Materials use must follow Meta's
+  Llama 3.1 AUP, including prohibitions for unlawful activity, child
+  exploitation, weapons, malware, unauthorized professional advice,
+  sensitive personal-data misuse, and deceptive or misleading uses.
+* **Scope statement**: shipping tokenizer-only assets reduces the artifact
+  scope relative to model weights, but it does not remove the attribution,
+  700M MAU, or AUP review obligations for Llama-derived materials.
 
 ## Reproducibility & refresh
 

@@ -704,7 +704,7 @@ empty-string sentinel semantics.
 | `ANTHROPIC_BPE` | 從 `@anthropic-ai/tokenizer` JS package port，或 reconstruct from Anthropic published BPE merges | MIT (Anthropic public) |
 | `GEMINI_BPE` | **Community Gemma approximation** (per R2 M5) — Google's official Gemini tokenizer is API-only; no vendored BPE merges file is available. We ship the Xenova/gemma-tokenizer mirror which exposes the open-source Gemma vocabulary. Spec §4.2 0.01 drift threshold accommodates the approximation gap; SLICE_05 shadow worker measures the residual against the official `countTokens` API. | Apache 2.0 (Gemma upstream) / MIT (Xenova mirror) |
 | `COHERE_BPE` | **OPT-IN per R2 M6** — Xenova/c4ai-command-r-v01-tokenizer mirror. Underlying Cohere model is CC-BY-NC-4.0 (research-only) and the tokenizer-only redistribution terms are uncited; safe default ships the encoder behind a `cohere` Cargo feature flag (default OFF). Deployments enable `--features cohere` after their own legal review. See LICENSE_NOTICES.md and `7.1 R2 M6` subsection below. | MIT (Xenova mirror); model CC-BY-NC-4.0 |
-| `SENTENCEPIECE_LLAMA` | Meta-released SentencePiece model files | Llama 2 Community License |
+| `SENTENCEPIECE_LLAMA` | Meta Llama 3.1 tokenizer file via Xenova community mirror | Llama 3.1 Community License (Meta) + MIT (Xenova mirror); see §7.1 POST_GA_10 disclosure |
 
 #### 7.1 R2 M5 — Gemini approximation honest disclosure
 
@@ -765,6 +765,22 @@ form per §2.1(b)) default to OFF.
 legal disclosure; any future revision of the Cohere model license OR
 a separately-licensed encoder asset will be tracked in that file with
 the §7.1 row updated to match.
+
+#### 7.1 POST_GA_10 — Llama 3.1 operational license disclosure
+
+The Llama tokenizer path is tokenizer-only and does not vendor Meta model
+weights, but it is still a Llama-derived asset. The current engineering
+notice lives in `crates/spendguard-tokenizer/LICENSE_NOTICES.md` and must
+be reviewed before redistributing or enabling the Llama tokenizer path in
+a product:
+
+* Product/docs attribution must include `Built with Llama`.
+* Operators above the Llama 3.1 Community License's 700 million monthly
+  active users threshold must request a separate Meta license.
+* Use must comply with Meta's Llama 3.1 Acceptable Use Policy.
+
+This is an operator checklist, not legal advice. The official license
+and AUP URLs are pinned in `LICENSE_NOTICES.md`.
 
 ### 7.2 Asset bundling
 
