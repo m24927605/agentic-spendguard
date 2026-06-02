@@ -915,7 +915,7 @@ mod tests {
 
         assert!(
             predict_rate_limited_total() > before,
-            "rate-limit metric must be a monotonic bounded-label counter"
+            "rate-limit counter must be monotonic and no-label"
         );
     }
 
