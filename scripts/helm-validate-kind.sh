@@ -402,17 +402,23 @@ kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create secret generic spend
 # always create them so the Job actually applies SQL.
 # ---------------------------------------------------------------------
 log "creating migration ConfigMaps..."
+kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" delete configmap spendguard-migrations-ledger \
+    --ignore-not-found
 kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create configmap spendguard-migrations-ledger \
     $(for f in "${REPO_ROOT}/services/ledger/migrations"/*.sql; do echo --from-file="$(basename "$f")=$f"; done) \
-    --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" apply -f -
+    --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" create -f -
 
+kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" delete configmap spendguard-migrations-canonical \
+    --ignore-not-found
 kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create configmap spendguard-migrations-canonical \
     $(for f in "${REPO_ROOT}/services/canonical_ingest/migrations"/*.sql; do echo --from-file="$(basename "$f")=$f"; done) \
-    --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" apply -f -
+    --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" create -f -
 
+kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" delete configmap spendguard-migrations-control-plane \
+    --ignore-not-found
 kubectl --context "${KUBECTL_CTX}" -n "${NAMESPACE}" create configmap spendguard-migrations-control-plane \
     $(for f in "${REPO_ROOT}/services/control_plane/migrations"/*.sql; do echo --from-file="$(basename "$f")=$f"; done) \
-    --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" apply -f -
+    --dry-run=client -o yaml | kubectl --context "${KUBECTL_CTX}" create -f -
 
 # ---------------------------------------------------------------------
 # 5.5. (optional) Build chart service images locally + load into kind.
