@@ -302,16 +302,27 @@ CREATE TABLE output_distribution_cache (
 CREATE INDEX output_distribution_cache_freshness_idx
   ON output_distribution_cache (computed_at);
 
-CREATE INDEX output_distribution_cache_tenant_lookup_idx
-  ON output_distribution_cache (tenant_id, model, agent_id, prompt_class);
+-- Hot lookup uses output_distribution_cache_pkey. No separate
+-- tenant_lookup index is created.
 
 -- Row-Level Security
 ALTER TABLE output_distribution_cache ENABLE ROW LEVEL SECURITY;
+ALTER TABLE output_distribution_cache FORCE ROW LEVEL SECURITY;
 
 CREATE POLICY output_distribution_cache_tenant_isolation
   ON output_distribution_cache
-  USING (tenant_id = current_setting('app.current_tenant_id')::uuid);
+  FOR ALL
+  USING (tenant_id = NULLIF(current_setting('app.current_tenant_id', TRUE), '')::uuid)
+  WITH CHECK (tenant_id = NULLIF(current_setting('app.current_tenant_id', TRUE), '')::uuid);
 ```
+
+POST_GA_08 keeps `output_distribution_cache_freshness_idx` despite low
+per-cycle `computed_at` cardinality because it is not a Strategy B
+hot-lookup index. Hot lookup uses the primary key. The freshness index
+supports range probes such as "which buckets are older than the
+staleness threshold" and SLO probes such as `max(computed_at)`; planner
+evidence lives in
+`docs/reviews/post-ga/POST_GA_08_db_index_and_rls_polish/`.
 
 `sample_size_7d` and `sample_size_30d` are COUNT-derived values and must
 never be negative. Migrations pin this with CHECK constraints; the
@@ -534,8 +545,14 @@ Per-tenant commit 確保部分 tenant 失敗不影響其他。
 
 1. **Row-Level Security** on cache tables（per §5）
 2. **Connection-level `app.current_tenant_id` setting** before any cache query
-3. **No cross-tenant SQL**：每個 query 必含 explicit `tenant_id = $tenant_var`
-4. **Aggregation cycle isolation**：每 tenant 自己 transaction；不 batch cross-tenant aggregation
+3. **No sentinel UUID fallback**：POST_GA_08 removed the nil UUID
+   `COALESCE` fallback from `output_distribution_cache` and
+   `run_length_distribution_cache` RLS policies. A missing or empty
+   setting becomes SQL `NULL` via
+   `NULLIF(current_setting('app.current_tenant_id', TRUE), '')::uuid`,
+   so it matches no tenant, including a hypothetical nil UUID row.
+4. **No cross-tenant SQL**：每個 query 必含 explicit `tenant_id = $tenant_var`
+5. **Aggregation cycle isolation**：每 tenant 自己 transaction；不 batch cross-tenant aggregation
 
 ### 9.2 Adversarial test
 

@@ -38,6 +38,8 @@ The migration index as of HARDEN_03 R2:
 | 0019 | HARDEN_03 R2  | audit_outcome_quarantine aggregator mirror columns                     |
 | 0020 | HARDEN_05     | CloudEvent replay dedup ledger                                         |
 | 0021 | GA_08         | canonical_events run recovery index for run_cost_projector             |
+| 0022 | POST_GA_06    | prediction_drift_alert cooldown table                                  |
+| 0023 | POST_GA_08    | cache RLS nil-sentinel removal + freshness index evidence comment      |
 
 ## The 0014 gap
 
@@ -83,6 +85,17 @@ DROP INDEX IF EXISTS canonical_events_aggregator_run_length_idx;
 
 -- 0021
 DROP INDEX IF EXISTS canonical_events_run_recovery_idx;
+
+-- 0022
+DROP TABLE prediction_drift_alert_cooldowns CASCADE;
+
+-- 0023
+DROP POLICY IF EXISTS output_distribution_cache_tenant_isolation
+    ON output_distribution_cache;
+DROP POLICY IF EXISTS run_length_distribution_cache_tenant_isolation
+    ON run_length_distribution_cache;
+-- Recreate the pre-POST_GA_08 policies only if rolling back the
+-- nil-sentinel removal is explicitly accepted as a security regression.
 ```
 
 ## RLS contract (SLICE_06 R2)
@@ -93,9 +106,11 @@ Tables 0016 + 0017 enforce per-tenant Row-Level Security via:
 2. `FOR ALL` policy with both `USING` (SELECT/UPDATE/DELETE) and
    `WITH CHECK` (INSERT/UPDATE) keyed on
    `current_setting('app.current_tenant_id', TRUE)::uuid`
-3. NULL session variable → `'00000000-0000-0000-0000-000000000000'`
-   (nil UUID) so a missing SET LOCAL fails closed (0 rows visible,
-   inserts fail the WITH CHECK clause).
+3. NULL or empty session variable stays SQL NULL via
+   `NULLIF(current_setting('app.current_tenant_id', TRUE), '')::uuid`;
+   the comparison matches no row and inserts fail `WITH CHECK`. No UUID
+   value is reserved as a sentinel, so a legitimate nil UUID row cannot
+   become visible just because the caller forgot SET LOCAL.
 4. `REVOKE SELECT FROM PUBLIC` (R2 M16 belt-and-suspenders).
 5. Writer (`services/stats_aggregator/src/aggregation.rs` +
    `run_length.rs`) calls

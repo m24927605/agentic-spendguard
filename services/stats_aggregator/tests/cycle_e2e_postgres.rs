@@ -537,6 +537,74 @@ async fn rls_injection_blocks_cross_tenant_cache_reads_and_writes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn rls_missing_tenant_setting_does_not_match_nil_uuid_rows() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let nil_tenant = Uuid::nil();
+
+    sqlx::query(
+        r#"
+        INSERT INTO output_distribution_cache (
+          tenant_id, model, agent_id, prompt_class,
+          sample_size_30d, computed_at, aggregation_version
+        )
+        VALUES ($1, 'gpt-4o-mini', 'agent-alpha', 'rag', 1, now(), 'v1alpha1')
+        "#,
+    )
+    .bind(nil_tenant)
+    .execute(&fx.owner_pool)
+    .await
+    .expect("owner seeds nil tenant output cache row");
+
+    sqlx::query(
+        r#"
+        INSERT INTO run_length_distribution_cache (
+          tenant_id, agent_id, sample_size_30d, computed_at, aggregation_version
+        )
+        VALUES ($1, 'agent-alpha', 1, now(), 'v1alpha1')
+        "#,
+    )
+    .bind(nil_tenant)
+    .execute(&fx.owner_pool)
+    .await
+    .expect("owner seeds nil tenant run-length cache row");
+
+    let mut tx = fx
+        .app_pool
+        .begin()
+        .await
+        .expect("begin app tx without tenant setting");
+
+    let output_visible: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM output_distribution_cache WHERE tenant_id = $1")
+            .bind(nil_tenant)
+            .fetch_one(&mut *tx)
+            .await
+            .expect("nil output cache read without RLS setting");
+    assert_eq!(
+        output_visible, 0,
+        "missing app.current_tenant_id must not fall back to nil UUID"
+    );
+
+    let run_visible: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM run_length_distribution_cache WHERE tenant_id = $1",
+    )
+    .bind(nil_tenant)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("nil run-length cache read without RLS setting");
+    assert_eq!(
+        run_visible, 0,
+        "missing app.current_tenant_id must not fall back to nil UUID"
+    );
+
+    tx.commit()
+        .await
+        .expect("commit nil sentinel regression tx");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drift_alert_audit_row_can_land_without_prediction_mirror_columns() {
     let Some(fx) = setup_postgres().await else {
         return;
