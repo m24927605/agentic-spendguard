@@ -1,7 +1,7 @@
 # POST_GA 09 - Strategy C Resilience
 
 > **Branch**: `post-ga/POST_GA_09_strategy_c_resilience`
-> **Status**: implementation-complete; pending adversarial review
+> **Status**: review-clean; ready to merge
 > **Spec ancestor(s)**: `post-ga-backlog-spec-v1alpha1.md`, `output-predictor-plugin-contract-v1alpha1.md`, `output-predictor-service-spec-v1alpha1.md`
 > **Issues**: #172, #173, #174, #175, #176
 > **Estimated change size**: medium-large; Strategy C resilience and audit clarity
@@ -117,14 +117,15 @@ hot-path failure isolation.
 | Customer Plugin Domain Expert | Plugin failure still falls to Strategy B | §7 |
 | Implementer | Added tenant-scoped endpoint-cache singleflight, bounded stale-on-DB-error serving, force-reset audit target/transition payload, reason cap, and plugin-bound identifier caps | `76da6d2`, `e633ce0`, `62096cf`, `b61797e` |
 | Reviewer R1 | Found endpoint-cache singleflight did not share true-miss or DB-error stale results; found force-reset audit effect overclaimed predictor breaker reset semantics | Codex direct adversarial fallback after AIT attempt `a338` was not reviewable |
-| Implementer R1 | Added 1s reload-result backoff for true misses and DB-error stale serves; clarified force-reset audit/response as control-plane health-status-only | Pending commit |
+| Implementer R1 | Added 1s reload-result backoff for true misses and DB-error stale serves; clarified force-reset audit/response as control-plane health-status-only | `a09eb3d` |
 | Reviewer R2 | Found true-miss backoff table was unbounded and expired one-off tenants were not swept unless looked up again | Codex direct adversarial fallback after AIT attempt `a339` was not reviewable |
-| Implementer R2 | Capped true-miss backoff table at 4096 tenants and sweep expired entries on insert | Pending commit |
+| Implementer R2 | Capped true-miss backoff table at 4096 tenants and sweep expired entries on insert | `8b5dc46` |
+| Reviewer R3 | No findings after rechecking R1/R2 fixes, tests, docs, and diff hygiene | Codex direct adversarial fallback after AIT attempt `a340` was not reviewable |
 
 ## §14. Merge Checklist
 
 - [x] #172-#176 fixed and tested
 - [x] plugin_c_synthetic demo passes
 - [x] Audit evidence recorded
-- [ ] AIT review clean or Staff+ arbitration recorded
+- [x] AIT review clean or Staff+ arbitration recorded
 - [ ] Memory updated
