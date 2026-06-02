@@ -60,6 +60,8 @@ use crate::strategy_c::{self, StrategyCError, StrategyCFailure, StrategyCInput, 
 pub const MAX_AGENT_ID_LEN: usize = 128;
 pub const MAX_MODEL_LEN: usize = 64;
 pub const MAX_PROMPT_CLASS_LEN: usize = 32;
+pub const MAX_DECISION_ID_LEN: usize = 128;
+pub const MAX_PROMPT_CLASS_FINGERPRINT_LEN: usize = 128;
 
 /// R2 M12 (Software F17): when the context-window lookup falls back to
 /// the unknown default, increment this counter so operators see
@@ -458,10 +460,11 @@ impl OutputPredictorTrait for OutputPredictorSvc {
             ));
         }
 
-        // R2 M5: input validation. Length-bounded bucket-key fields +
-        // class enum allow-list. Without these a caller can mint
-        // arbitrarily long agent_id / model strings that bloat the LRU
-        // entries + structured log lines.
+        // R2 M5 + POST_GA_09 #176: input validation. Length-bounded
+        // bucket-key and plugin-bound fields + class enum allow-list.
+        // Without these a caller can mint arbitrarily long strings that
+        // bloat LRU entries, structured log lines, audit rows, or the
+        // Strategy C plugin request.
         if req.agent_id.len() > MAX_AGENT_ID_LEN {
             return Err(Status::invalid_argument(format!(
                 "agent_id length {} exceeds MAX_AGENT_ID_LEN={}",
@@ -481,6 +484,20 @@ impl OutputPredictorTrait for OutputPredictorSvc {
                 "prompt_class length {} exceeds MAX_PROMPT_CLASS_LEN={}",
                 req.prompt_class.len(),
                 MAX_PROMPT_CLASS_LEN
+            )));
+        }
+        if req.decision_id.len() > MAX_DECISION_ID_LEN {
+            return Err(Status::invalid_argument(format!(
+                "decision_id length {} exceeds MAX_DECISION_ID_LEN={}",
+                req.decision_id.len(),
+                MAX_DECISION_ID_LEN
+            )));
+        }
+        if req.prompt_class_fingerprint.len() > MAX_PROMPT_CLASS_FINGERPRINT_LEN {
+            return Err(Status::invalid_argument(format!(
+                "prompt_class_fingerprint length {} exceeds MAX_PROMPT_CLASS_FINGERPRINT_LEN={}",
+                req.prompt_class_fingerprint.len(),
+                MAX_PROMPT_CLASS_FINGERPRINT_LEN
             )));
         }
         if !req.prompt_class.is_empty() && !classifier::is_known_class(&req.prompt_class) {
@@ -847,6 +864,30 @@ mod tests {
             .await
             .expect_err("must reject unknown class");
         assert!(err.message().contains("unknown prompt_class"));
+    }
+
+    #[tokio::test]
+    async fn input_validation_rejects_overlong_decision_id() {
+        let svc = svc_skeleton();
+        let mut req = valid_req();
+        req.decision_id = "d".repeat(MAX_DECISION_ID_LEN + 1);
+        let err = svc
+            .predict(Request::new(req))
+            .await
+            .expect_err("must reject overlong decision_id");
+        assert!(err.message().contains("MAX_DECISION_ID_LEN"));
+    }
+
+    #[tokio::test]
+    async fn input_validation_rejects_overlong_prompt_class_fingerprint() {
+        let svc = svc_skeleton();
+        let mut req = valid_req();
+        req.prompt_class_fingerprint = "f".repeat(MAX_PROMPT_CLASS_FINGERPRINT_LEN + 1);
+        let err = svc
+            .predict(Request::new(req))
+            .await
+            .expect_err("must reject overlong prompt_class_fingerprint");
+        assert!(err.message().contains("MAX_PROMPT_CLASS_FINGERPRINT_LEN"));
     }
 
     #[tokio::test]

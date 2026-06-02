@@ -196,6 +196,12 @@ deployments, effective service-wide tenant capacity is approximately
 `per_pod_limit * ready_replicas` unless the deployment adds sticky
 tenant routing or an external shared limiter.
 
+POST_GA_09 bounds Strategy C plugin-bound identifiers before cache,
+database, or plugin work: `decision_id <= 128` bytes and
+`prompt_class_fingerprint <= 128` bytes. Over-limit requests fail with
+gRPC `INVALID_ARGUMENT`; SpendGuard does not truncate these fields
+because they are audit/join identifiers.
+
 ### 2.3 Hot path 並行模式
 
 ```rust
