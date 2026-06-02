@@ -257,6 +257,45 @@ pub fn should_emit_drift_alert(agg: &BucketAggregate, cfg: &DriftDetectorConfig)
     z.abs() > cfg.drift_z_threshold && n7d >= cfg.min_samples_for_alert
 }
 
+fn numeric_guard_suppression_reason(
+    agg: &BucketAggregate,
+    cfg: &DriftDetectorConfig,
+) -> Option<&'static str> {
+    if !cfg.drift_z_threshold.is_finite() {
+        return Some("non-finite drift_z_threshold");
+    }
+    if cfg.drift_z_threshold <= 0.0 {
+        return Some("non-positive drift_z_threshold");
+    }
+
+    let Some(mean_7d) = agg.mean_7d else {
+        return None;
+    };
+    if !mean_7d.is_finite() {
+        return Some("non-finite mean_7d");
+    }
+
+    let Some(baseline_mean) = agg.baseline_mean else {
+        return None;
+    };
+    if !baseline_mean.is_finite() {
+        return Some("non-finite baseline_mean");
+    }
+
+    let Some(baseline_stddev) = agg.baseline_stddev else {
+        return None;
+    };
+    if !baseline_stddev.is_finite() {
+        return Some("non-finite baseline_stddev");
+    }
+    if baseline_stddev <= 0.0 {
+        return Some("non-positive baseline_stddev");
+    }
+
+    let z = (mean_7d - baseline_mean) / baseline_stddev;
+    (!z.is_finite()).then_some("non-finite z_score")
+}
+
 /// Build (but do not sign or emit) the prediction_drift_alert
 /// CloudEvent for a bucket. Separated from the emission step so unit
 /// tests can verify the envelope shape without a tonic Channel.
@@ -471,13 +510,28 @@ pub async fn detect_and_emit(
 ) -> Result<DriftDetectionOutcome, anyhow::Error> {
     let mut outcome = DriftDetectionOutcome::default();
     for agg in aggregates {
-        if !should_emit_drift_alert(agg, cfg) {
+        if let Some(reason) = numeric_guard_suppression_reason(agg, cfg) {
+            outcome.suppressed += 1;
+            warn!(
+                tenant_id = %agg.tenant_id,
+                model = %agg.model,
+                agent_id = %agg.agent_id,
+                prompt_class = %agg.prompt_class,
+                reason,
+                "drift alert suppressed by numeric safety guard"
+            );
             continue;
         }
         let z = match compute_z_score(agg) {
             Some(z) => z,
             None => continue,
         };
+        let Some(n7d) = agg.sample_size_7d else {
+            continue;
+        };
+        if z.abs() <= cfg.drift_z_threshold || n7d < cfg.min_samples_for_alert {
+            continue;
+        }
         let key = DriftAlertKey::from(agg);
         match cooldown.check(&key, Utc::now()).await {
             Ok(DriftAlertCooldownDecision::Allowed { .. }) => {}
@@ -1060,6 +1114,46 @@ mod tests {
         )
         .await
         .expect("cooldown failure is fail-safe suppression, not cycle failure");
+
+        assert_eq!(outcome.emitted, 0);
+        assert_eq!(outcome.suppressed, 1);
+        assert!(sink.events.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn detect_and_emit_counts_numeric_guard_suppression() {
+        use spendguard_signing::DisabledSigner;
+        let sink = RecordingSink {
+            events: parking_lot::Mutex::new(Vec::new()),
+        };
+        let cooldown = MemoryCooldown::default();
+        let signer = DisabledSigner::for_test("test-stats-aggregator".into());
+        let mut non_finite = fixture_agg();
+        non_finite.mean_7d = Some(f32::INFINITY);
+
+        let outcome = detect_and_emit(&[non_finite], &fixture_cfg(), &signer, &sink, &cooldown)
+            .await
+            .expect("non-finite aggregate suppression should not fail the cycle");
+
+        assert_eq!(outcome.emitted, 0);
+        assert_eq!(outcome.suppressed, 1);
+        assert!(sink.events.lock().is_empty());
+
+        let sink = RecordingSink {
+            events: parking_lot::Mutex::new(Vec::new()),
+        };
+        let mut invalid_threshold_cfg = fixture_cfg();
+        invalid_threshold_cfg.drift_z_threshold = f32::NAN;
+
+        let outcome = detect_and_emit(
+            &[fixture_agg()],
+            &invalid_threshold_cfg,
+            &signer,
+            &sink,
+            &cooldown,
+        )
+        .await
+        .expect("invalid threshold suppression should not fail the cycle");
 
         assert_eq!(outcome.emitted, 0);
         assert_eq!(outcome.suppressed, 1);

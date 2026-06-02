@@ -634,6 +634,28 @@ async fn drift_alert_cooldown_postgres_is_key_and_tenant_scoped() {
         DriftAlertCooldownDecision::Allowed { .. }
     ));
 
+    let mut different_model = key.clone();
+    different_model.model = "claude-3-5-sonnet".into();
+    let model_decision = store
+        .check(&different_model, now + ChronoDuration::hours(1))
+        .await
+        .expect("different model");
+    assert!(matches!(
+        model_decision,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+
+    let mut different_agent = key.clone();
+    different_agent.agent_id = "agent-beta".into();
+    let agent_decision = store
+        .check(&different_agent, now + ChronoDuration::hours(1))
+        .await
+        .expect("different agent");
+    assert!(matches!(
+        agent_decision,
+        DriftAlertCooldownDecision::Allowed { .. }
+    ));
+
     let mut different_tenant = key.clone();
     different_tenant.tenant_id = Uuid::new_v4();
     let tenant_decision = store
