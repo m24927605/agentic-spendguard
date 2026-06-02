@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "spendguard-sdk"
-version = "0.5.0"
+version = "0.5.1"
 description = "SpendGuard SDK — runtime safety layer client for AI agent frameworks (Pydantic-AI, LangChain, LangGraph, OpenAI Agents SDK). SLICE_12: default token estimators + with_run_plan decorator (Signal 3)."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -78,7 +78,7 @@ litellm = [
   "granian>=2.7.4",
 ]
 dev = [
-  "grpcio-tools>=1.62",
+  "grpcio-tools>=1.62,<1.72",
   "pytest>=8",
   "pytest-asyncio>=0.23",
   "ruff>=0.5",

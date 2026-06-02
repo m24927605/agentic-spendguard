@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.5.1 — 2026-06-02
+
+### Changed
+
+- Patch release for the hardened predictor-upgrade mainline after CI
+  efficiency fixes. The SDK package content remains the 0.5.x API
+  surface: default token estimators, `with_run_plan`, and regenerated
+  proto stubs for the current SpendGuard wire contracts.
+- Pins the SDK proto generator path to `grpcio-tools<1.72` while the
+  runtime dependency remains `protobuf<6`, preventing protobuf 6.x
+  gencode from entering release wheels.
+
 ## 0.5.0 — 2026-05-30
 
 SLICE_12 — Python SDK gains **default token estimators** for OpenAI /

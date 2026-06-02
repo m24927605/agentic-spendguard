@@ -3514,7 +3514,7 @@ wheels = [
 
 [[package]]
 name = "spendguard-sdk"
-version = "0.5.0"
+version = "0.5.1"
 source = { editable = "." }
 dependencies = [
     { name = "grpcio" },
@@ -3561,7 +3561,7 @@ requires-dist = [
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
     { name = "granian", marker = "extra == 'litellm'", specifier = ">=2.7.4" },
     { name = "grpcio", specifier = ">=1.62" },
-    { name = "grpcio-tools", marker = "extra == 'dev'", specifier = ">=1.62" },
+    { name = "grpcio-tools", marker = "extra == 'dev'", specifier = ">=1.62,<1.72" },
     { name = "langchain", marker = "extra == 'langchain'", specifier = ">=0.3" },
     { name = "langchain-core", marker = "extra == 'langchain'", specifier = ">=0.3" },
     { name = "langchain-core", marker = "extra == 'langgraph'", specifier = ">=0.3" },
