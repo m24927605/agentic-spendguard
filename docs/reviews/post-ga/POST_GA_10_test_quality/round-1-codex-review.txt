@@ -1,0 +1,40 @@
+Direct codex CLI adversarial review fallback for AIT round 1.
+
+Reviewer command:
+
+/Users/michael.chen/.nvm/versions/node/v24.14.1/bin/node /Users/michael.chen/.nvm/versions/node/v24.14.1/lib/node_modules/@openai/codex/bin/codex.js exec --dangerously-bypass-approvals-and-sandbox "You are the adversarial code reviewer for SpendGuard POST_GA_10_test_quality. Review branch post-ga/POST_GA_10_test_quality against main in /Users/michael.chen/products/agentic-spendguard. Scope: issues #109 and #124 only. Prioritize bugs, misleading compliance claims, fixture tautology, Unicode coverage gaps, reference script correctness, missing tests, and runtime behavior regressions. Use repo evidence; do not ask questions. Return findings first, each with severity Blocker/Major/Minor, file:line, and concrete fix. If no findings, say 'No findings.'"
+
+Findings:
+
+Major - crates/spendguard-tokenizer/tests/fixtures/regenerate_openai_cross_check.py:15
+The "canonical Python tiktoken" reference is not reproducible from the
+repo. The helper imports whatever `tiktoken` is installed locally, and
+there is no colocated requirements/lock file or version assertion. It
+passed here with `tiktoken 0.12.0`, but the Rust crate is pinned to
+`tiktoken-rs 0.11.x`.
+Fix: commit a pinned Python dependency file, assert the exact version in
+the script, and name that version in the manifest/evidence.
+
+Major - crates/spendguard-tokenizer/tests/cross_check_fixture_schema.rs:141
+The Unicode coverage test is partly tag-tautological. It counts
+self-reported coverage tags, then separately checks global character
+presence across all cases, so a mislabeled `mixed_noise` or
+`zwj_sequence` case can still pass.
+Fix: validate each tag against the same case input, and require the
+`mixed_noise` case to contain CJK, RTL, non-BMP emoji, ZWJ, combining
+mark, and BOM in one string.
+
+Minor - docs/tokenizer-service-spec-v1alpha1.md:778
+The operator-facing spec shortens the 700M clause to "operators above ...
+threshold," dropping the release-date / preceding-calendar-month
+qualifier that `LICENSE_NOTICES.md` gets right. That can mislead
+operators about when a separate Meta license is required.
+Fix: copy the precise qualifier into the spec and README, and make
+`license_notices.rs` assert the date-qualified wording.
+
+Reviewer verification run:
+
+- `python3 crates/spendguard-tokenizer/tests/fixtures/regenerate_openai_cross_check.py` passed with `tiktoken 0.12.0`.
+- `cargo test --manifest-path crates/spendguard-tokenizer/Cargo.toml --test cross_check_fixture_schema` passed.
+- `cargo test --manifest-path crates/spendguard-tokenizer/Cargo.toml --test license_notices` passed.
+- `git diff --check main...HEAD` passed.

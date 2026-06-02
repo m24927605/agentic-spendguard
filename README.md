@@ -383,6 +383,7 @@ SpendGuard vendors tokenizer assets for predictor validation. The Llama
 tokenizer path uses Meta Llama 3.1-derived tokenizer files and is
 `Built with Llama`; review
 [`crates/spendguard-tokenizer/LICENSE_NOTICES.md`](crates/spendguard-tokenizer/LICENSE_NOTICES.md)
-for attribution, the 700 million monthly active users threshold, and
-Meta Llama 3.1 Acceptable Use Policy obligations before redistributing
-or enabling that path in a product.
+for attribution, the 700 million monthly active users threshold measured
+in the calendar month before the Llama 3.1 release date (2024-07-23),
+and Meta Llama 3.1 Acceptable Use Policy obligations before
+redistributing or enabling that path in a product.

@@ -4,6 +4,9 @@
 This is the reference regeneration helper for issue #109. It intentionally
 checks the committed JSON rather than printing a detached table, so reviewers
 can rerun it after tiktoken upgrades and see the exact case that drifted.
+
+Install the pinned reference dependency with:
+    python3 -m pip install -r requirements-openai-cross-check.txt
 """
 
 from __future__ import annotations
@@ -16,9 +19,20 @@ import tiktoken
 
 
 FIXTURE_PATH = Path(__file__).with_name("cross_check.json")
+EXPECTED_TIKTOKEN_VERSION = "0.12.0"
 
 
 def main() -> int:
+    actual_version = getattr(tiktoken, "__version__", None)
+    if actual_version != EXPECTED_TIKTOKEN_VERSION:
+        print(
+            "Python tiktoken reference version mismatch: "
+            f"expected {EXPECTED_TIKTOKEN_VERSION}, got {actual_version!r}. "
+            "Install tests/fixtures/requirements-openai-cross-check.txt.",
+            file=sys.stderr,
+        )
+        return 2
+
     manifest = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
     cases = manifest["kinds"]["OPENAI_TIKTOKEN"]["cases"]
     failures: list[str] = []
@@ -47,7 +61,7 @@ def main() -> int:
 
     print(
         f"verified {len(cases)} OPENAI_TIKTOKEN fixture cases "
-        f"with Python tiktoken {getattr(tiktoken, '__version__', 'unknown')}"
+        f"with Python tiktoken {actual_version}"
     )
     return 0
 

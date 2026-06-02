@@ -1,6 +1,7 @@
 const LICENSE_NOTICES: &str = include_str!("../LICENSE_NOTICES.md");
 const README: &str = include_str!("../../../README.md");
 const TOKENIZER_SPEC: &str = include_str!("../../../docs/tokenizer-service-spec-v1alpha1.md");
+const LLAMA_MAU_QUALIFIER: &str = "calendar month before the Llama 3.1 release date (2024-07-23)";
 
 fn llama_notice_section() -> &'static str {
     let start = LICENSE_NOTICES
@@ -24,6 +25,7 @@ fn llama_license_notice_lists_post_ga_10_operational_clauses() {
         "https://llama.meta.com/llama3_1/use-policy",
         "not legal advice",
         "Meta attribution notice",
+        LLAMA_MAU_QUALIFIER,
     ] {
         assert!(section.contains(needle), "missing Llama notice `{needle}`");
     }
@@ -39,6 +41,7 @@ fn readme_carries_llama_product_notice_and_operator_pointer() {
     for needle in [
         "Built with Llama",
         "700 million monthly active users",
+        LLAMA_MAU_QUALIFIER,
         "Acceptable Use Policy",
         "crates/spendguard-tokenizer/LICENSE_NOTICES.md",
     ] {
@@ -52,6 +55,7 @@ fn tokenizer_spec_carries_current_llama_license_disclosure() {
         "Llama 3.1 Community License",
         "Built with Llama",
         "700 million monthly",
+        LLAMA_MAU_QUALIFIER,
         "Acceptable Use Policy",
         "not legal advice",
     ] {

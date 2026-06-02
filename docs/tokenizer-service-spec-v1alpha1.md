@@ -775,8 +775,9 @@ be reviewed before redistributing or enabling the Llama tokenizer path in
 a product:
 
 * Product/docs attribution must include `Built with Llama`.
-* Operators above the Llama 3.1 Community License's 700 million monthly
-  active users threshold must request a separate Meta license.
+* Operators whose licensee or affiliates exceeded 700 million monthly
+  active users in the calendar month before the Llama 3.1 release date (2024-07-23)
+  must request a separate Meta license.
 * Use must comply with Meta's Llama 3.1 Acceptable Use Policy.
 
 This is an operator checklist, not legal advice. The official license

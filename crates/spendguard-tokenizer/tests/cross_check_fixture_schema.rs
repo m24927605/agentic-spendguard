@@ -129,6 +129,81 @@ fn openai_cross_check_manifest_vectors_match_tiktoken_rs() {
     }
 }
 
+fn has_non_bmp(input: &str) -> bool {
+    input.chars().any(|ch| ch as u32 > 0xffff)
+}
+
+fn has_zwj(input: &str) -> bool {
+    input.contains('\u{200d}')
+}
+
+fn has_rtl(input: &str) -> bool {
+    input.chars().any(|ch| matches!(ch as u32, 0x0590..=0x08ff))
+}
+
+fn has_cjk(input: &str) -> bool {
+    input.chars().any(|ch| matches!(ch as u32, 0x4e00..=0x9fff))
+}
+
+fn has_combining_mark(input: &str) -> bool {
+    input.chars().any(|ch| matches!(ch as u32, 0x0300..=0x036f))
+}
+
+fn has_bom(input: &str) -> bool {
+    input.contains('\u{feff}')
+}
+
+fn has_all_mixed_noise_classes(input: &str) -> bool {
+    has_non_bmp(input)
+        && has_zwj(input)
+        && has_rtl(input)
+        && has_cjk(input)
+        && has_combining_mark(input)
+        && has_bom(input)
+}
+
+fn assert_coverage_tag_matches_input(case: &FixtureCase, tag: &str) {
+    match tag {
+        "unicode_adversarial" => {}
+        "four_byte_utf8" => assert!(
+            has_non_bmp(&case.input),
+            "{} is tagged four_byte_utf8 but has no non-BMP scalar",
+            case.case_id
+        ),
+        "zwj_sequence" => assert!(
+            has_zwj(&case.input),
+            "{} is tagged zwj_sequence but has no ZWJ",
+            case.case_id
+        ),
+        "rtl_script" => assert!(
+            has_rtl(&case.input),
+            "{} is tagged rtl_script but has no RTL code point",
+            case.case_id
+        ),
+        "cjk_bidi_mix" => assert!(
+            has_cjk(&case.input) && has_rtl(&case.input),
+            "{} is tagged cjk_bidi_mix but does not contain both CJK and RTL",
+            case.case_id
+        ),
+        "combining_marks" => assert!(
+            has_combining_mark(&case.input),
+            "{} is tagged combining_marks but has no combining mark",
+            case.case_id
+        ),
+        "bom_prefix" => assert!(
+            has_bom(&case.input),
+            "{} is tagged bom_prefix but has no BOM",
+            case.case_id
+        ),
+        "mixed_noise" => assert!(
+            has_all_mixed_noise_classes(&case.input),
+            "{} is tagged mixed_noise but does not contain all required Unicode classes",
+            case.case_id
+        ),
+        other => panic!("unsupported unicode adversarial coverage tag `{other}`"),
+    }
+}
+
 #[test]
 fn openai_unicode_adversarial_cases_cover_issue_109() {
     let manifest: Manifest = serde_json::from_str(include_str!("fixtures/cross_check.json"))
@@ -138,25 +213,33 @@ fn openai_unicode_adversarial_cases_cover_issue_109() {
         .get("OPENAI_TIKTOKEN")
         .expect("OpenAI fixture kind exists");
 
-    let adversarial_case_ids: BTreeSet<&str> = openai
+    let adversarial_cases: Vec<&FixtureCase> = openai
         .cases
         .iter()
         .filter(|case| case.coverage.iter().any(|tag| tag == "unicode_adversarial"))
-        .map(|case| case.case_id.as_str())
+        .collect();
+    let adversarial_inputs: BTreeSet<&str> = adversarial_cases
+        .iter()
+        .map(|case| case.input.as_str())
         .collect();
     assert!(
-        adversarial_case_ids.len() >= 6,
+        adversarial_inputs.len() >= 6,
         "issue #109 requires at least 6 adversarial UTF-8 fixture cases"
     );
 
     let mut coverage_tags = BTreeSet::new();
-    for case in openai
-        .cases
-        .iter()
-        .filter(|case| case.coverage.iter().any(|tag| tag == "unicode_adversarial"))
-    {
+    let mut mixed_noise_cases = 0usize;
+    for case in &adversarial_cases {
         for tag in &case.coverage {
+            if tag == "unicode_adversarial" {
+                coverage_tags.insert(tag.as_str());
+                continue;
+            }
+            assert_coverage_tag_matches_input(case, tag);
             coverage_tags.insert(tag.as_str());
+            if tag == "mixed_noise" {
+                mixed_noise_cases += 1;
+            }
         }
     }
 
@@ -176,48 +259,7 @@ fn openai_unicode_adversarial_cases_cover_issue_109() {
     }
 
     assert!(
-        openai
-            .cases
-            .iter()
-            .any(|case| case.input.contains('\u{200d}')),
-        "ZWJ fixture input missing"
-    );
-    assert!(
-        openai
-            .cases
-            .iter()
-            .any(|case| case.input.chars().any(|ch| ch as u32 > 0xffff)),
-        "4-byte UTF-8 fixture input missing"
-    );
-    assert!(
-        openai.cases.iter().any(|case| {
-            case.input
-                .chars()
-                .any(|ch| matches!(ch as u32, 0x0590..=0x08ff))
-        }),
-        "RTL fixture input missing"
-    );
-    assert!(
-        openai.cases.iter().any(|case| {
-            case.input
-                .chars()
-                .any(|ch| matches!(ch as u32, 0x4e00..=0x9fff))
-        }),
-        "CJK fixture input missing"
-    );
-    assert!(
-        openai.cases.iter().any(|case| {
-            case.input
-                .chars()
-                .any(|ch| matches!(ch as u32, 0x0300..=0x036f))
-        }),
-        "combining-mark fixture input missing"
-    );
-    assert!(
-        openai
-            .cases
-            .iter()
-            .any(|case| case.input.contains('\u{feff}')),
-        "BOM fixture input missing"
+        mixed_noise_cases > 0,
+        "issue #109 requires a mixed-noise case containing all Unicode classes"
     );
 }

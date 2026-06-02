@@ -159,8 +159,7 @@ license and acceptable-use policy:
   docs that use the Llama-derived tokenizer path must prominently display
   `Built with Llama`.
 * **700 million monthly active users threshold**: if the licensee or its
-  affiliates exceeded 700 million monthly active users in the calendar
-  month before the Llama 3.1 release date (2024-07-23), the operator must
+  affiliates exceeded 700 million monthly active users in the calendar month before the Llama 3.1 release date (2024-07-23), the operator must
   request a separate Meta license before relying on the community license.
 * **Acceptable Use Policy**: Llama Materials use must follow Meta's
   Llama 3.1 AUP, including prohibitions for unlawful activity, child

@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "description": "Tokenizer Layer B cross-check fixture manifest. Runtime fail-fast vectors remain compiled into the library; this file is the extensible maintenance surface for asset rotations.",
-  "reference_generator": "regenerate_openai_cross_check.py verifies OPENAI_TIKTOKEN vectors with canonical Python tiktoken.",
+  "reference_generator": "regenerate_openai_cross_check.py verifies OPENAI_TIKTOKEN vectors with Python tiktoken 0.12.0; install via requirements-openai-cross-check.txt.",
   "kinds": {
     "OPENAI_TIKTOKEN": {
       "cases": [

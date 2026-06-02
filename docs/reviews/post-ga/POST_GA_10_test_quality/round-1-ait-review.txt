@@ -1,0 +1,11 @@
+AIT adversarial review command:
+
+ait run --adapter codex --review adversarial --review-adapter codex --review-budget deep --apply never --no-auto-commit --stdin none --description "POST_GA_10 adversarial review: test quality (#109) and Llama license disclosure (#124). Review changed files for fixture tautology, Unicode coverage, reference regeneration script, license over/under-claims, and missing tests. Base main, branch post-ga/POST_GA_10_test_quality." -- /bin/sh -lc 'git diff --stat main..HEAD && git diff --name-only main..HEAD'
+
+Result:
+
+attempt handle: a341
+review_error: attempt is not reviewable: d22348dcf2e01a233b401aa1a1ab97bb611642f9:14adbc8e9d65bbb6ea809c3c0beeb260:01KT3BTH60R1KD6ZNPXQGW7AW1
+
+AIT produced no adversarial findings. Per POST_GA workflow, round 1
+continues with the direct codex CLI adversarial-review fallback.

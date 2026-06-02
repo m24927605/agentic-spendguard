@@ -19,7 +19,9 @@ Issues: #109, #124
 - #109: added
   `crates/spendguard-tokenizer/tests/fixtures/regenerate_openai_cross_check.py`
   so reviewers can re-derive OpenAI expected token ids/counts with
-  canonical Python `tiktoken`.
+  Python `tiktoken 0.12.0`; the colocated
+  `requirements-openai-cross-check.txt` pins the reference version and
+  the script fails fast on version mismatch.
 - #109: strengthened `cross_check_fixture_schema.rs` so fixture metadata,
   token counts, Unicode coverage, and OpenAI vectors are deterministic
   tests instead of manual assertions.
