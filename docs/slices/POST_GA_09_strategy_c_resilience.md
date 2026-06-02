@@ -118,6 +118,8 @@ hot-path failure isolation.
 | Implementer | Added tenant-scoped endpoint-cache singleflight, bounded stale-on-DB-error serving, force-reset audit target/transition payload, reason cap, and plugin-bound identifier caps | `76da6d2`, `e633ce0`, `62096cf`, `b61797e` |
 | Reviewer R1 | Found endpoint-cache singleflight did not share true-miss or DB-error stale results; found force-reset audit effect overclaimed predictor breaker reset semantics | Codex direct adversarial fallback after AIT attempt `a338` was not reviewable |
 | Implementer R1 | Added 1s reload-result backoff for true misses and DB-error stale serves; clarified force-reset audit/response as control-plane health-status-only | Pending commit |
+| Reviewer R2 | Found true-miss backoff table was unbounded and expired one-off tenants were not swept unless looked up again | Codex direct adversarial fallback after AIT attempt `a339` was not reviewable |
+| Implementer R2 | Capped true-miss backoff table at 4096 tenants and sweep expired entries on insert | Pending commit |
 
 ## §14. Merge Checklist
 

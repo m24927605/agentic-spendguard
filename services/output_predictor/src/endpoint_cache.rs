@@ -91,6 +91,11 @@ pub const DEFAULT_STALE_ON_DB_ERROR_TTL: Duration = Duration::from_secs(300);
 /// endpoint freshness TTL; it only collapses immediate herds.
 pub const DEFAULT_RELOAD_RESULT_BACKOFF_TTL: Duration = Duration::from_secs(1);
 
+/// Bound the true-miss backoff table. The table only needs to absorb
+/// immediate herds; a larger value would retain cold-miss state that is
+/// not useful after the 1s backoff TTL.
+pub const DEFAULT_NOT_CONFIGURED_BACKOFF_CAPACITY: usize = 4096;
+
 /// Endpoint snapshot returned by the cache. Cheap to clone (Arc'd in
 /// the cache to avoid copying the full struct on every Predict call).
 #[derive(Debug, Clone)]
@@ -155,6 +160,7 @@ pub struct EndpointCache {
     refresh_ttl: Duration,
     stale_on_db_error_ttl: Duration,
     reload_result_backoff_ttl: Duration,
+    not_configured_backoff_capacity: usize,
     entries: RwLock<HashMap<Uuid, Cached>>,
     not_configured_backoffs: RwLock<HashMap<Uuid, Instant>>,
     reload_locks: AsyncMutex<HashMap<Uuid, Arc<AsyncMutex<()>>>>,
@@ -183,6 +189,7 @@ impl EndpointCache {
             refresh_ttl,
             stale_on_db_error_ttl,
             reload_result_backoff_ttl: DEFAULT_RELOAD_RESULT_BACKOFF_TTL,
+            not_configured_backoff_capacity: DEFAULT_NOT_CONFIGURED_BACKOFF_CAPACITY,
             entries: RwLock::new(HashMap::new()),
             not_configured_backoffs: RwLock::new(HashMap::new()),
             reload_locks: AsyncMutex::new(HashMap::new()),
@@ -339,9 +346,16 @@ impl EndpointCache {
     }
 
     fn record_not_configured_backoff(&self, tenant: &Uuid) {
-        self.not_configured_backoffs
-            .write()
-            .insert(*tenant, Instant::now() + self.reload_result_backoff_ttl);
+        let now = Instant::now();
+        let mut backoffs = self.not_configured_backoffs.write();
+        backoffs.retain(|_, until| *until > now);
+        if !backoffs.contains_key(tenant) && backoffs.len() >= self.not_configured_backoff_capacity
+        {
+            if let Some(victim) = backoffs.keys().next().copied() {
+                backoffs.remove(&victim);
+            }
+        }
+        backoffs.insert(*tenant, now + self.reload_result_backoff_ttl);
     }
 
     async fn reload_lock_for(&self, tenant: &Uuid) -> Arc<AsyncMutex<()>> {
@@ -832,6 +846,32 @@ mod tests {
         assert!(
             cache.cached_if_not_configured_backoff(&tenant).is_none(),
             "explicit evict must clear miss backoff so control-plane registration is observed immediately"
+        );
+    }
+
+    #[test]
+    fn not_configured_backoff_table_is_bounded_and_sweeps_expired() {
+        let cache = EndpointCache::with_default_ttl(None);
+        let expired = Uuid::new_v4();
+        cache.not_configured_backoffs.write().insert(
+            expired,
+            Instant::now()
+                .checked_sub(Duration::from_secs(1))
+                .unwrap_or_else(Instant::now),
+        );
+
+        for _ in 0..=DEFAULT_NOT_CONFIGURED_BACKOFF_CAPACITY {
+            cache.record_not_configured_backoff(&Uuid::new_v4());
+        }
+
+        let backoffs = cache.not_configured_backoffs.read();
+        assert!(
+            backoffs.len() <= DEFAULT_NOT_CONFIGURED_BACKOFF_CAPACITY,
+            "miss-backoff table must remain bounded under one-off tenant UUID misses"
+        );
+        assert!(
+            !backoffs.contains_key(&expired),
+            "recording a new miss must sweep expired entries"
         );
     }
 }

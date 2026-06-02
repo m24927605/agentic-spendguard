@@ -347,7 +347,9 @@ POST_GA_09 endpoint-cache resilience:
   concurrent requests for the same tenant collapse into one control
   plane DB lookup. True misses and DB-error stale serves are shared for
   a 1s reload-result backoff so queued callers do not take turns
-  re-hitting the DB. Different tenants use different locks.
+  re-hitting the DB. The true-miss backoff table is capped at 4096
+  tenants and sweeps expired entries on insert. Different tenants use
+  different locks.
 - If the control plane DB lookup fails, an enabled cached endpoint may
   be served stale for at most 300s. Older stale entries fall back to B.
 - `enabled = FALSE` remains a kill switch even during DB errors; stale
