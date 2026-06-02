@@ -678,6 +678,120 @@ async fn drift_alert_cooldown_postgres_is_key_and_tenant_scoped() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn drift_alert_cooldown_postgres_rls_blocks_missing_or_mismatched_tenant() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let store = PostgresDriftAlertCooldownStore::new(fx.app_pool.clone());
+    let tenant_a = Uuid::new_v4();
+    let tenant_b = Uuid::new_v4();
+    let key = DriftAlertKey {
+        tenant_id: tenant_a,
+        model: "gpt-4o-mini".into(),
+        agent_id: "agent-alpha".into(),
+        prompt_class: "chat_short".into(),
+    };
+
+    store
+        .record_emitted(&key, Utc::now(), 2.5)
+        .await
+        .expect("seed tenant A cooldown");
+
+    let mut missing_tenant_tx = fx.app_pool.begin().await.expect("begin missing tenant tx");
+    let visible_without_tenant = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM prediction_drift_alert_cooldowns
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_a)
+    .fetch_one(&mut *missing_tenant_tx)
+    .await
+    .expect("select without tenant context");
+    assert_eq!(visible_without_tenant, 0);
+
+    let missing_write_err = sqlx::query(
+        r#"
+        INSERT INTO prediction_drift_alert_cooldowns (
+          tenant_id, model, agent_id, prompt_class,
+          last_emitted_at, suppress_until, last_z_score
+        )
+        VALUES (
+          $1, 'gpt-4o-mini', 'agent-beta', 'chat_short',
+          clock_timestamp(), clock_timestamp() + interval '24 hours', 2.5
+        )
+        "#,
+    )
+    .bind(tenant_a)
+    .execute(&mut *missing_tenant_tx)
+    .await
+    .expect_err("missing tenant context must fail WITH CHECK");
+    assert!(
+        missing_write_err.to_string().contains("row-level security"),
+        "unexpected missing-tenant write error: {missing_write_err}"
+    );
+    let _ = missing_tenant_tx.rollback().await;
+
+    let mut mismatched_tx = fx.app_pool.begin().await.expect("begin mismatched tx");
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+        .bind(tenant_b.to_string())
+        .execute(&mut *mismatched_tx)
+        .await
+        .expect("set mismatched tenant");
+
+    let visible_with_mismatch = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT count(*)
+        FROM prediction_drift_alert_cooldowns
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_a)
+    .fetch_one(&mut *mismatched_tx)
+    .await
+    .expect("select with mismatched tenant context");
+    assert_eq!(visible_with_mismatch, 0);
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE prediction_drift_alert_cooldowns
+        SET suppress_until = clock_timestamp() + interval '48 hours'
+        WHERE tenant_id = $1
+        "#,
+    )
+    .bind(tenant_a)
+    .execute(&mut *mismatched_tx)
+    .await
+    .expect("mismatched tenant update is filtered by RLS");
+    assert_eq!(updated.rows_affected(), 0);
+
+    let mismatched_write_err = sqlx::query(
+        r#"
+        INSERT INTO prediction_drift_alert_cooldowns (
+          tenant_id, model, agent_id, prompt_class,
+          last_emitted_at, suppress_until, last_z_score
+        )
+        VALUES (
+          $1, 'gpt-4o-mini', 'agent-gamma', 'chat_short',
+          clock_timestamp(), clock_timestamp() + interval '24 hours', 2.5
+        )
+        "#,
+    )
+    .bind(tenant_a)
+    .execute(&mut *mismatched_tx)
+    .await
+    .expect_err("mismatched tenant context must fail WITH CHECK");
+    assert!(
+        mismatched_write_err
+            .to_string()
+            .contains("row-level security"),
+        "unexpected mismatched-tenant write error: {mismatched_write_err}"
+    );
+    let _ = mismatched_tx.rollback().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn drift_alert_cooldown_postgres_accepts_canonical_multibyte_agent_id() {
     let Some(fx) = setup_postgres().await else {
         return;

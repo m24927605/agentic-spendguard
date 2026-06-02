@@ -906,6 +906,30 @@ mod tests {
         }
     }
 
+    struct RecordFailingCooldown;
+
+    #[async_trait::async_trait]
+    impl DriftAlertCooldown for RecordFailingCooldown {
+        async fn check(
+            &self,
+            _key: &DriftAlertKey,
+            now: DateTime<Utc>,
+        ) -> Result<DriftAlertCooldownDecision, anyhow::Error> {
+            Ok(DriftAlertCooldownDecision::Allowed {
+                suppress_until: now + ChronoDuration::hours(DRIFT_ALERT_COOLDOWN_HOURS),
+            })
+        }
+
+        async fn record_emitted(
+            &self,
+            _key: &DriftAlertKey,
+            _emitted_at: DateTime<Utc>,
+            _z_score: f32,
+        ) -> Result<DateTime<Utc>, anyhow::Error> {
+            Err(anyhow::anyhow!("cooldown record failed"))
+        }
+    }
+
     #[tokio::test]
     async fn memory_cooldown_suppresses_same_key_until_expiry() {
         let store = MemoryCooldown::default();
@@ -1191,5 +1215,30 @@ mod tests {
                 .expect("cooldown remains open after failed append"),
             DriftAlertCooldownDecision::Allowed { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn detect_and_emit_counts_durable_append_when_cooldown_record_fails() {
+        use spendguard_signing::DisabledSigner;
+        let signer = DisabledSigner::for_test("test-stats-aggregator".into());
+        let sink = RecordingSink {
+            events: parking_lot::Mutex::new(Vec::new()),
+        };
+        let mut breaching = fixture_agg();
+        breaching.mean_7d = Some(200.0);
+
+        let outcome = detect_and_emit(
+            &[breaching],
+            &fixture_cfg(),
+            &signer,
+            &sink,
+            &RecordFailingCooldown,
+        )
+        .await
+        .expect("cooldown record failure after durable append is logged, not fatal");
+
+        assert_eq!(outcome.emitted, 1);
+        assert_eq!(outcome.suppressed, 0);
+        assert_eq!(sink.events.lock().len(), 1);
     }
 }

@@ -1,0 +1,1 @@
+AIT_BYPASS=1 ait run --adapter codex --review adversarial --review-budget deep --apply never --no-auto-commit --stdin none -- /bin/sh -lc 'git diff --check main..HEAD && git diff --stat main..HEAD'
