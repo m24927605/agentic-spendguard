@@ -28,9 +28,10 @@
 //! RTBF-deletable and violates the spec §0.1 immutability claim.
 
 use anyhow::Context;
-use chrono::Utc;
+use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use prost::Message;
 use spendguard_signing::Signer;
+use sqlx::postgres::PgPool;
 use tonic::transport::Channel;
 use tracing::{debug, info, warn};
 
@@ -53,6 +54,133 @@ pub const PREDICTION_DRIFT_ALERT_EVENT_TYPE: &str =
 pub struct DriftDetectorConfig {
     pub drift_z_threshold: f32,
     pub min_samples_for_alert: i32,
+}
+
+pub const DRIFT_ALERT_COOLDOWN_HOURS: i64 = 24;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct DriftAlertKey {
+    pub tenant_id: uuid::Uuid,
+    pub model: String,
+    pub agent_id: String,
+    pub prompt_class: String,
+}
+
+impl From<&BucketAggregate> for DriftAlertKey {
+    fn from(agg: &BucketAggregate) -> Self {
+        Self {
+            tenant_id: agg.tenant_id,
+            model: agg.model.clone(),
+            agent_id: agg.agent_id.clone(),
+            prompt_class: agg.prompt_class.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DriftAlertCooldownDecision {
+    Allowed { suppress_until: DateTime<Utc> },
+    Suppressed { suppress_until: DateTime<Utc> },
+}
+
+#[async_trait::async_trait]
+pub trait DriftAlertCooldown: Send + Sync {
+    async fn reserve(
+        &self,
+        key: &DriftAlertKey,
+        now: DateTime<Utc>,
+        z_score: f32,
+    ) -> Result<DriftAlertCooldownDecision, anyhow::Error>;
+}
+
+pub struct PostgresDriftAlertCooldownStore {
+    pool: PgPool,
+}
+
+impl PostgresDriftAlertCooldownStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+}
+
+#[async_trait::async_trait]
+impl DriftAlertCooldown for PostgresDriftAlertCooldownStore {
+    async fn reserve(
+        &self,
+        key: &DriftAlertKey,
+        now: DateTime<Utc>,
+        z_score: f32,
+    ) -> Result<DriftAlertCooldownDecision, anyhow::Error> {
+        if !z_score.is_finite() {
+            anyhow::bail!("non-finite z_score cannot enter drift alert cooldown store");
+        }
+
+        let suppress_until = now + ChronoDuration::hours(DRIFT_ALERT_COOLDOWN_HOURS);
+        let mut tx = self.pool.begin().await.context("begin drift cooldown tx")?;
+        sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+            .bind(key.tenant_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .context("set RLS tenant_id for prediction_drift_alert_cooldowns")?;
+
+        let reserved = sqlx::query_scalar::<_, DateTime<Utc>>(
+            r#"
+            INSERT INTO prediction_drift_alert_cooldowns (
+              tenant_id, model, agent_id, prompt_class,
+              last_emitted_at, suppress_until, last_z_score, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, clock_timestamp())
+            ON CONFLICT (tenant_id, model, agent_id, prompt_class)
+              DO UPDATE SET
+                last_emitted_at = EXCLUDED.last_emitted_at,
+                suppress_until = EXCLUDED.suppress_until,
+                last_z_score = EXCLUDED.last_z_score,
+                updated_at = clock_timestamp()
+              WHERE prediction_drift_alert_cooldowns.suppress_until <= $5
+            RETURNING suppress_until
+            "#,
+        )
+        .bind(key.tenant_id)
+        .bind(&key.model)
+        .bind(&key.agent_id)
+        .bind(&key.prompt_class)
+        .bind(now)
+        .bind(suppress_until)
+        .bind(z_score)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("reserve prediction_drift_alert cooldown")?;
+
+        let decision = if let Some(until) = reserved {
+            DriftAlertCooldownDecision::Allowed {
+                suppress_until: until,
+            }
+        } else {
+            let active_until = sqlx::query_scalar::<_, DateTime<Utc>>(
+                r#"
+                SELECT suppress_until
+                FROM prediction_drift_alert_cooldowns
+                WHERE tenant_id = $1
+                  AND model = $2
+                  AND agent_id = $3
+                  AND prompt_class = $4
+                "#,
+            )
+            .bind(key.tenant_id)
+            .bind(&key.model)
+            .bind(&key.agent_id)
+            .bind(&key.prompt_class)
+            .fetch_one(&mut *tx)
+            .await
+            .context("read active prediction_drift_alert cooldown")?;
+            DriftAlertCooldownDecision::Suppressed {
+                suppress_until: active_until,
+            }
+        };
+
+        tx.commit().await.context("commit drift cooldown tx")?;
+        Ok(decision)
+    }
 }
 
 /// Per spec §7.3 suggested action heuristic.
@@ -80,16 +208,23 @@ pub fn compute_z_score(agg: &BucketAggregate) -> Option<f32> {
     let mean_7d = agg.mean_7d?;
     let baseline_mean = agg.baseline_mean?;
     let baseline_stddev = agg.baseline_stddev?;
+    if !mean_7d.is_finite() || !baseline_mean.is_finite() || !baseline_stddev.is_finite() {
+        return None;
+    }
     if baseline_stddev <= 0.0 {
         // baseline_stddev == 0 → all baseline samples identical.
         // Strict spec interpretation: z-score is undefined → no alert.
         return None;
     }
-    Some((mean_7d - baseline_mean) / baseline_stddev)
+    let z = (mean_7d - baseline_mean) / baseline_stddev;
+    z.is_finite().then_some(z)
 }
 
 /// Decision predicate: should this bucket emit a drift alert?
 pub fn should_emit_drift_alert(agg: &BucketAggregate, cfg: &DriftDetectorConfig) -> bool {
+    if !cfg.drift_z_threshold.is_finite() || cfg.drift_z_threshold <= 0.0 {
+        return false;
+    }
     let Some(z) = compute_z_score(agg) else {
         return false;
     };
@@ -106,8 +241,11 @@ pub fn build_drift_alert(
     agg: &BucketAggregate,
     z_score: f32,
     cfg: &DriftDetectorConfig,
-) -> CloudEvent {
+) -> Option<CloudEvent> {
     use bytes::Bytes;
+    if !drift_alert_payload_is_finite(agg, z_score, cfg) {
+        return None;
+    }
     let now = Utc::now();
     // R2 M2: payload reports baseline_* fields (window [now-30d, now-7d]
     // — distinct from mean_30d which is the strategy-B cache baseline).
@@ -130,7 +268,7 @@ pub fn build_drift_alert(
     });
     let data_bytes = serde_json::to_vec(&data).unwrap_or_default();
 
-    CloudEvent {
+    Some(CloudEvent {
         specversion: "1.0".to_string(),
         r#type: PREDICTION_DRIFT_ALERT_EVENT_TYPE.to_string(),
         source: format!("spendguard://stats-aggregator/{}", agg.tenant_id),
@@ -144,7 +282,22 @@ pub fn build_drift_alert(
         tenant_id: agg.tenant_id.to_string(),
         producer_signature: Bytes::new(),
         ..Default::default()
-    }
+    })
+}
+
+fn drift_alert_payload_is_finite(
+    agg: &BucketAggregate,
+    z_score: f32,
+    cfg: &DriftDetectorConfig,
+) -> bool {
+    z_score.is_finite()
+        && cfg.drift_z_threshold.is_finite()
+        && cfg.drift_z_threshold > 0.0
+        && agg.baseline_mean.is_some_and(f32::is_finite)
+        && agg
+            .baseline_stddev
+            .is_some_and(|stddev| stddev.is_finite() && stddev > 0.0)
+        && agg.mean_7d.is_some_and(f32::is_finite)
 }
 
 /// Sink trait — abstracts the actual canonical_ingest gRPC call so
@@ -280,13 +433,20 @@ pub(crate) fn ensure_append_accepted(resp: AppendEventsResponse) -> Result<(), a
 /// Detect drift across a batch of bucket aggregates and emit signed
 /// CloudEvents for those exceeding the threshold. Returns the count of
 /// alerts emitted for metrics.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DriftDetectionOutcome {
+    pub emitted: usize,
+    pub suppressed: usize,
+}
+
 pub async fn detect_and_emit(
     aggregates: &[BucketAggregate],
     cfg: &DriftDetectorConfig,
     signer: &dyn Signer,
     sink: &dyn DriftAlertSink,
-) -> Result<usize, anyhow::Error> {
-    let mut emitted = 0;
+    cooldown: &dyn DriftAlertCooldown,
+) -> Result<DriftDetectionOutcome, anyhow::Error> {
+    let mut outcome = DriftDetectionOutcome::default();
     for agg in aggregates {
         if !should_emit_drift_alert(agg, cfg) {
             continue;
@@ -295,7 +455,46 @@ pub async fn detect_and_emit(
             Some(z) => z,
             None => continue,
         };
-        let mut ce = build_drift_alert(agg, z, cfg);
+        let key = DriftAlertKey::from(agg);
+        match cooldown.reserve(&key, Utc::now(), z).await {
+            Ok(DriftAlertCooldownDecision::Allowed { .. }) => {}
+            Ok(DriftAlertCooldownDecision::Suppressed { suppress_until }) => {
+                outcome.suppressed += 1;
+                info!(
+                    tenant_id = %agg.tenant_id,
+                    model = %agg.model,
+                    agent_id = %agg.agent_id,
+                    prompt_class = %agg.prompt_class,
+                    suppress_until = %suppress_until,
+                    "drift alert suppressed by cooldown"
+                );
+                continue;
+            }
+            Err(e) => {
+                outcome.suppressed += 1;
+                warn!(
+                    tenant_id = %agg.tenant_id,
+                    model = %agg.model,
+                    agent_id = %agg.agent_id,
+                    prompt_class = %agg.prompt_class,
+                    error = %e,
+                    "drift alert cooldown unavailable; suppressing alert to avoid immutable audit spam"
+                );
+                continue;
+            }
+        }
+        let Some(mut ce) = build_drift_alert(agg, z, cfg) else {
+            outcome.suppressed += 1;
+            warn!(
+                tenant_id = %agg.tenant_id,
+                model = %agg.model,
+                agent_id = %agg.agent_id,
+                prompt_class = %agg.prompt_class,
+                z_score = z,
+                "drift alert payload had non-finite numeric field; suppressing alert"
+            );
+            continue;
+        };
         // Sign the canonical bytes (matches tokenizer worker.rs
         // sign_in_place pattern).
         ce.signing_key_id = signer.key_id().to_string();
@@ -310,7 +509,7 @@ pub async fn detect_and_emit(
 
         match sink.emit(ce).await {
             Ok(()) => {
-                emitted += 1;
+                outcome.emitted += 1;
                 debug!(
                     tenant_id = %agg.tenant_id,
                     model = %agg.model,
@@ -324,12 +523,12 @@ pub async fn detect_and_emit(
                 warn!(
                     tenant_id = %agg.tenant_id,
                     error = %e,
-                    "drift alert emit failed; will retry next cycle"
+                    "drift alert emit failed after cooldown reservation; not counted as emitted"
                 );
             }
         }
     }
-    Ok(emitted)
+    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -337,6 +536,7 @@ mod tests {
     use super::*;
     use crate::proto::canonical_ingest::v1::EventResult;
     use crate::proto::common::v1::Error as ProtoError;
+    use std::collections::HashMap;
     use uuid::Uuid;
 
     fn fixture_cfg() -> DriftDetectorConfig {
@@ -393,6 +593,21 @@ mod tests {
     }
 
     #[test]
+    fn z_score_none_when_inputs_are_non_finite() {
+        let mut agg = fixture_agg();
+        agg.mean_7d = Some(f32::NAN);
+        assert!(compute_z_score(&agg).is_none());
+
+        let mut agg = fixture_agg();
+        agg.baseline_mean = Some(f32::INFINITY);
+        assert!(compute_z_score(&agg).is_none());
+
+        let mut agg = fixture_agg();
+        agg.baseline_stddev = Some(f32::NEG_INFINITY);
+        assert!(compute_z_score(&agg).is_none());
+    }
+
+    #[test]
     fn z_score_uses_baseline_excluding_current_window() {
         // R2 M2 regression: mean_30d INCLUDES the current 7d, baseline
         // EXCLUDES it. Verify drift_detector reads from baseline_*
@@ -431,6 +646,17 @@ mod tests {
     }
 
     #[test]
+    fn should_emit_false_when_threshold_is_non_finite() {
+        let agg = fixture_agg();
+        let mut cfg = fixture_cfg();
+        cfg.drift_z_threshold = f32::NAN;
+        assert!(!should_emit_drift_alert(&agg, &cfg));
+
+        cfg.drift_z_threshold = f32::INFINITY;
+        assert!(!should_emit_drift_alert(&agg, &cfg));
+    }
+
+    #[test]
     fn should_emit_true_with_negative_z_above_threshold() {
         let mut agg = fixture_agg();
         // mean_7d collapsing below baseline (vendor tokenizer drift case).
@@ -454,7 +680,7 @@ mod tests {
         // `spendguard.audit.*` prefix to route into ImmutableAuditLog.
         let agg = fixture_agg();
         let z = compute_z_score(&agg).unwrap();
-        let ce = build_drift_alert(&agg, z, &fixture_cfg());
+        let ce = build_drift_alert(&agg, z, &fixture_cfg()).expect("finite alert");
         assert!(
             ce.r#type.starts_with("spendguard.audit."),
             "drift alert event must use audit-routed prefix; got: {}",
@@ -466,7 +692,7 @@ mod tests {
     fn build_drift_alert_contains_canonical_data_keys() {
         let agg = fixture_agg();
         let z = compute_z_score(&agg).unwrap();
-        let ce = build_drift_alert(&agg, z, &fixture_cfg());
+        let ce = build_drift_alert(&agg, z, &fixture_cfg()).expect("finite alert");
         let parsed: serde_json::Value = serde_json::from_slice(&ce.data).expect("data is json");
         for k in [
             "tenant_id",
@@ -490,6 +716,27 @@ mod tests {
         }
     }
 
+    #[test]
+    fn build_drift_alert_rejects_non_finite_payload_values() {
+        let agg = fixture_agg();
+        assert!(build_drift_alert(&agg, f32::NAN, &fixture_cfg()).is_none());
+
+        let mut cfg = fixture_cfg();
+        cfg.drift_z_threshold = f32::INFINITY;
+        assert!(build_drift_alert(&agg, 2.5, &cfg).is_none());
+
+        cfg.drift_z_threshold = 0.0;
+        assert!(build_drift_alert(&agg, 2.5, &cfg).is_none());
+
+        let mut agg = fixture_agg();
+        agg.mean_7d = Some(f32::INFINITY);
+        assert!(build_drift_alert(&agg, 2.5, &fixture_cfg()).is_none());
+
+        let mut agg = fixture_agg();
+        agg.baseline_stddev = Some(0.0);
+        assert!(build_drift_alert(&agg, 2.5, &fixture_cfg()).is_none());
+    }
+
     /// In-memory recording sink for the integration-style detect_and_emit
     /// test (no real signer required — uses DisabledSigner).
     struct RecordingSink {
@@ -511,6 +758,103 @@ mod tests {
         async fn emit(&self, _event: CloudEvent) -> Result<(), anyhow::Error> {
             Err(anyhow::anyhow!("canonical_ingest rejected append"))
         }
+    }
+
+    #[derive(Default)]
+    struct MemoryCooldown {
+        entries: parking_lot::Mutex<HashMap<DriftAlertKey, DateTime<Utc>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DriftAlertCooldown for MemoryCooldown {
+        async fn reserve(
+            &self,
+            key: &DriftAlertKey,
+            now: DateTime<Utc>,
+            _z_score: f32,
+        ) -> Result<DriftAlertCooldownDecision, anyhow::Error> {
+            let mut entries = self.entries.lock();
+            if let Some(existing) = entries.get(key) {
+                if *existing > now {
+                    return Ok(DriftAlertCooldownDecision::Suppressed {
+                        suppress_until: *existing,
+                    });
+                }
+            }
+            let suppress_until = now + ChronoDuration::hours(DRIFT_ALERT_COOLDOWN_HOURS);
+            entries.insert(key.clone(), suppress_until);
+            Ok(DriftAlertCooldownDecision::Allowed { suppress_until })
+        }
+    }
+
+    struct FailingCooldown;
+
+    #[async_trait::async_trait]
+    impl DriftAlertCooldown for FailingCooldown {
+        async fn reserve(
+            &self,
+            _key: &DriftAlertKey,
+            _now: DateTime<Utc>,
+            _z_score: f32,
+        ) -> Result<DriftAlertCooldownDecision, anyhow::Error> {
+            Err(anyhow::anyhow!("cooldown store unavailable"))
+        }
+    }
+
+    #[tokio::test]
+    async fn memory_cooldown_suppresses_same_key_until_expiry() {
+        let store = MemoryCooldown::default();
+        let key = DriftAlertKey::from(&fixture_agg());
+        let now = Utc::now();
+        let first = store.reserve(&key, now, 2.5).await.expect("first");
+        assert!(matches!(first, DriftAlertCooldownDecision::Allowed { .. }));
+
+        let second = store
+            .reserve(&key, now + ChronoDuration::hours(1), 2.5)
+            .await
+            .expect("second");
+        assert!(matches!(
+            second,
+            DriftAlertCooldownDecision::Suppressed { .. }
+        ));
+
+        let after_expiry = store
+            .reserve(&key, now + ChronoDuration::hours(25), 2.5)
+            .await
+            .expect("after expiry");
+        assert!(matches!(
+            after_expiry,
+            DriftAlertCooldownDecision::Allowed { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_cooldown_key_is_tenant_model_agent_prompt_scoped() {
+        let store = MemoryCooldown::default();
+        let agg = fixture_agg();
+        let key = DriftAlertKey::from(&agg);
+        let now = Utc::now();
+        store.reserve(&key, now, 2.5).await.expect("seed");
+
+        let mut different_prompt = key.clone();
+        different_prompt.prompt_class = "rag_short".into();
+        assert!(matches!(
+            store
+                .reserve(&different_prompt, now + ChronoDuration::hours(1), 2.5)
+                .await
+                .expect("different prompt"),
+            DriftAlertCooldownDecision::Allowed { .. }
+        ));
+
+        let mut different_tenant = key.clone();
+        different_tenant.tenant_id = Uuid::new_v4();
+        assert!(matches!(
+            store
+                .reserve(&different_tenant, now + ChronoDuration::hours(1), 2.5)
+                .await
+                .expect("different tenant"),
+            DriftAlertCooldownDecision::Allowed { .. }
+        ));
     }
 
     fn append_response(status: EventStatus) -> AppendEventsResponse {
@@ -576,32 +920,119 @@ mod tests {
         let sink = RecordingSink {
             events: parking_lot::Mutex::new(Vec::new()),
         };
+        let cooldown = MemoryCooldown::default();
         let signer = DisabledSigner::for_test("test-stats-aggregator".into());
         let mut breaching = fixture_agg();
         breaching.mean_7d = Some(200.0); // z = 5.0; far above 2.0
         let mut normal = fixture_agg();
         normal.mean_7d = Some(105.0); // z = 0.25; below 2.0
         let aggregates = vec![breaching, normal];
-        let n = detect_and_emit(&aggregates, &fixture_cfg(), &signer, &sink)
+        let outcome = detect_and_emit(&aggregates, &fixture_cfg(), &signer, &sink, &cooldown)
             .await
             .expect("ok");
-        assert_eq!(n, 1, "exactly one breach must fire");
+        assert_eq!(outcome.emitted, 1, "exactly one breach must fire");
+        assert_eq!(outcome.suppressed, 0);
         let events = sink.events.lock();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].r#type, PREDICTION_DRIFT_ALERT_EVENT_TYPE);
     }
 
     #[tokio::test]
-    async fn detect_and_emit_does_not_count_failed_append() {
+    async fn detect_and_emit_suppresses_duplicate_same_key() {
         use spendguard_signing::DisabledSigner;
+        let sink = RecordingSink {
+            events: parking_lot::Mutex::new(Vec::new()),
+        };
+        let cooldown = MemoryCooldown::default();
+        let signer = DisabledSigner::for_test("test-stats-aggregator".into());
+        let mut first = fixture_agg();
+        first.mean_7d = Some(200.0);
+        let second = first.clone();
+
+        let outcome = detect_and_emit(&[first, second], &fixture_cfg(), &signer, &sink, &cooldown)
+            .await
+            .expect("ok");
+
+        assert_eq!(outcome.emitted, 1);
+        assert_eq!(outcome.suppressed, 1);
+        assert_eq!(sink.events.lock().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn detect_and_emit_tenant_isolation_keeps_cooldowns_independent() {
+        use spendguard_signing::DisabledSigner;
+        let sink = RecordingSink {
+            events: parking_lot::Mutex::new(Vec::new()),
+        };
+        let cooldown = MemoryCooldown::default();
+        let signer = DisabledSigner::for_test("test-stats-aggregator".into());
+        let mut tenant_a = fixture_agg();
+        tenant_a.mean_7d = Some(200.0);
+        let mut tenant_b = tenant_a.clone();
+        tenant_b.tenant_id = Uuid::new_v4();
+
+        let outcome = detect_and_emit(
+            &[tenant_a, tenant_b],
+            &fixture_cfg(),
+            &signer,
+            &sink,
+            &cooldown,
+        )
+        .await
+        .expect("ok");
+
+        assert_eq!(outcome.emitted, 2);
+        assert_eq!(outcome.suppressed, 0);
+        assert_eq!(sink.events.lock().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn detect_and_emit_suppresses_when_cooldown_store_unavailable() {
+        use spendguard_signing::DisabledSigner;
+        let sink = RecordingSink {
+            events: parking_lot::Mutex::new(Vec::new()),
+        };
         let signer = DisabledSigner::for_test("test-stats-aggregator".into());
         let mut breaching = fixture_agg();
         breaching.mean_7d = Some(200.0);
 
-        let n = detect_and_emit(&[breaching], &fixture_cfg(), &signer, &FailingSink)
-            .await
-            .expect("emit failures are logged for retry, not fatal to cycle");
+        let outcome = detect_and_emit(
+            &[breaching],
+            &fixture_cfg(),
+            &signer,
+            &sink,
+            &FailingCooldown,
+        )
+        .await
+        .expect("cooldown failure is fail-safe suppression, not cycle failure");
 
-        assert_eq!(n, 0, "failed canonical append must not count as emitted");
+        assert_eq!(outcome.emitted, 0);
+        assert_eq!(outcome.suppressed, 1);
+        assert!(sink.events.lock().is_empty());
+    }
+
+    #[tokio::test]
+    async fn detect_and_emit_does_not_count_failed_append() {
+        use spendguard_signing::DisabledSigner;
+        let signer = DisabledSigner::for_test("test-stats-aggregator".into());
+        let cooldown = MemoryCooldown::default();
+        let mut breaching = fixture_agg();
+        breaching.mean_7d = Some(200.0);
+
+        let outcome = detect_and_emit(
+            &[breaching],
+            &fixture_cfg(),
+            &signer,
+            &FailingSink,
+            &cooldown,
+        )
+        .await
+        .expect("emit failures are logged for retry, not fatal to cycle");
+
+        assert_eq!(
+            outcome.emitted, 0,
+            "failed canonical append must not count as emitted"
+        );
+        assert_eq!(outcome.suppressed, 0);
     }
 }
