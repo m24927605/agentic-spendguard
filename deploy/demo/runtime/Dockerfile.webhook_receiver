@@ -25,7 +25,7 @@ RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharin
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates wget libssl3 \
+    ca-certificates wget libssl3 libgnutls30 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /spendguard-webhook-receiver /usr/local/bin/spendguard-webhook-receiver
