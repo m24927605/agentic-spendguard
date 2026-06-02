@@ -1,4 +1,4 @@
- canonical_events |         replay_dedup         | has_mirror_columns 
+ canonical_events |         replay_dedup         | has_mirror_columns
 ------------------+------------------------------+--------------------
  canonical_events | canonical_event_replay_dedup | t
 (1 row)

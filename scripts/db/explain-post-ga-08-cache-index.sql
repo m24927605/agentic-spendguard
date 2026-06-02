@@ -8,7 +8,6 @@
 BEGIN;
 
 SET LOCAL search_path = public, pg_catalog;
-SET LOCAL enable_seqscan = off;
 
 CREATE TEMP TABLE post_ga_08_plan_checks (
     check_name TEXT PRIMARY KEY,
@@ -54,12 +53,34 @@ BEGIN
     );
 END $$;
 
+-- Representative enough for the normal-cost planner to prefer the
+-- freshness index without disabling sequential scans: a small stale
+-- subset among many fresh rows. This transaction is rolled back.
+INSERT INTO output_distribution_cache (
+    tenant_id, model, agent_id, prompt_class,
+    sample_size_30d, computed_at, aggregation_version
+)
+SELECT
+    format('00000000-0000-4000-8000-%012s', lpad(to_hex(g), 12, '0'))::uuid,
+    'post-ga-08-model',
+    'agent-' || g::text,
+    'chat_short',
+    30,
+    CASE
+        WHEN g <= 25 THEN clock_timestamp() - interval '3 hours' - make_interval(secs => g)
+        ELSE clock_timestamp() - interval '5 minutes'
+    END,
+    'v1alpha1'
+FROM generate_series(1, 50000) AS g;
+
+ANALYZE output_distribution_cache;
+
 SELECT pg_temp.post_ga_08_assert_uses_index(
     'output_distribution_cache_stale_range_scan',
     $SQL$
     SELECT count(*)
       FROM output_distribution_cache
-     WHERE computed_at < clock_timestamp() - interval '2 hours'
+     WHERE computed_at < now() - interval '2 hours'
     $SQL$,
     'output_distribution_cache_freshness_idx'
 );

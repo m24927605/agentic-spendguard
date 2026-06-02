@@ -13,6 +13,10 @@ EVIDENCE_PREFIX="${EVIDENCE_PREFIX:-/tmp/spendguard-migrations}"
 
 log() { echo "[verify-migrations] $*" >&2; }
 
+clean_evidence() {
+    sed -E 's/[[:blank:]]+$//'
+}
+
 cleanup() {
     docker rm -f "${CONTAINER}" >/dev/null 2>&1 || true
 }
@@ -142,7 +146,7 @@ SELECT
     WHERE table_name='audit_outbox'
       AND column_name IN ('predicted_a_tokens', 'run_projection_at_decision_atomic', 'prediction_strategy_used')
   ) AS has_prediction_columns;
-" | tee "${EVIDENCE_PREFIX}-ledger-smoke.txt"
+" | clean_evidence | tee "${EVIDENCE_PREFIX}-ledger-smoke.txt"
 
 log "ledger tokenizer_t1_samples PUBLIC SELECT revoke smoke"
 psql_exec spendguard_ledger -c "
@@ -166,7 +170,7 @@ BEGIN
 END
 \$\$;
 SELECT 'tokenizer_t1_samples_public_select_revoked' AS check_name, TRUE AS passed;
-" | tee "${EVIDENCE_PREFIX}-ledger-tokenizer-public-revoke.txt"
+" | clean_evidence | tee "${EVIDENCE_PREFIX}-ledger-tokenizer-public-revoke.txt"
 
 log "canonical smoke checks"
 psql_exec spendguard_canonical -c "
@@ -208,7 +212,7 @@ SELECT
     WHERE table_name='canonical_events'
       AND column_name IN ('payload_json', 'prediction_strategy_used', 'run_id_mirror')
   ) AS has_mirror_columns;
-" | tee "${EVIDENCE_PREFIX}-canonical-smoke.txt"
+" | clean_evidence | tee "${EVIDENCE_PREFIX}-canonical-smoke.txt"
 
 log "canonical sample-size CHECK smoke"
 psql_exec spendguard_canonical -c "
@@ -251,7 +255,7 @@ BEGIN
 END
 \$\$;
 SELECT 'sample_size_check_constraints_reject_negative' AS check_name, TRUE AS passed;
-" | tee "${EVIDENCE_PREFIX}-canonical-sample-size-checks.txt"
+" | clean_evidence | tee "${EVIDENCE_PREFIX}-canonical-sample-size-checks.txt"
 
 log "canonical RLS no-nil-sentinel smoke"
 psql_exec spendguard_canonical -c "
@@ -277,11 +281,11 @@ BEGIN
 END
 \$\$;
 SELECT 'cache_rls_no_nil_uuid_sentinel' AS check_name, TRUE AS passed;
-" | tee "${EVIDENCE_PREFIX}-canonical-rls-no-nil-sentinel.txt"
+" | clean_evidence | tee "${EVIDENCE_PREFIX}-canonical-rls-no-nil-sentinel.txt"
 
 log "canonical output_distribution_cache freshness index planner smoke"
 psql_exec spendguard_canonical < scripts/db/explain-post-ga-08-cache-index.sql \
-  | tee "${EVIDENCE_PREFIX}-canonical-output-cache-index-plan.txt"
+  | clean_evidence | tee "${EVIDENCE_PREFIX}-canonical-output-cache-index-plan.txt"
 
 log "control-plane smoke checks"
 psql_exec spendguard_control_plane -c "
@@ -313,6 +317,6 @@ SELECT
     WHERE tablename='control_plane_audit_outbox'
       AND policyname='control_plane_audit_outbox_forwarder_update'
   ) AS has_forwarder_update_policy;
-" | tee "${EVIDENCE_PREFIX}-control-plane-smoke.txt"
+" | clean_evidence | tee "${EVIDENCE_PREFIX}-control-plane-smoke.txt"
 
 log "PASS"

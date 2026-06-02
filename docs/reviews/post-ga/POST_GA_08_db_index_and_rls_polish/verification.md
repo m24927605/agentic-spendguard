@@ -30,7 +30,7 @@ Base: `main` at `3c2a240 Merge POST_GA_07 predictor API evolution`
 | #146 | `0054_tokenizer_t1_samples_public_select_revoke.sql` revokes parent/current-partition SELECT from PUBLIC; migration smoke `migration-smoke-ledger-tokenizer-public-revoke.txt` proves no PUBLIC SELECT grant remains. |
 | #163 | `0023_cache_rls_no_nil_sentinel.sql` replaces nil UUID sentinel fallback with NULL comparison for `output_distribution_cache` and `run_length_distribution_cache`; integration test `rls_missing_tenant_setting_does_not_match_nil_uuid_rows` proves missing tenant setting cannot read nil-tenant rows. |
 | #164 | `docs/operations/runbooks/stats-aggregator-advisory-lock-stall.md` documents detection, TCP keepalive checks, safe `pg_terminate_backend`, rollback, and evidence capture for stale advisory-lock sessions. |
-| #166 | `scripts/db/explain-post-ga-08-cache-index.sql` and `migration-smoke-canonical-output-cache-index-plan.txt` prove `output_distribution_cache_freshness_idx` is used for stale range scans and `max(computed_at)` SLO probes; hot lookup remains primary-key backed. |
+| #166 | `scripts/db/explain-post-ga-08-cache-index.sql` seeds representative fresh/stale cache rows inside a rollback-only transaction and proves the normal-cost planner uses `output_distribution_cache_freshness_idx` for stale range scans and `max(computed_at)` SLO probes; hot lookup remains primary-key backed. |
 
 ## Evidence Files
 
