@@ -1,0 +1,21 @@
+---
+title: "Aider with SpendGuard"
+description: >-
+  Drop SpendGuard into Aider by pointing OPENAI_API_BASE at a running
+  SpendGuard egress proxy. Recipe in progress; the exact env var string
+  is on the drop-in landing.
+pagefind: false
+---
+
+## Coming soon
+
+The full walkthrough — prerequisites, the exact env var, the verification
+step, and gotchas — lands in a follow-up slice. In the meantime, the env
+var to set is row 2 of the
+[drop-in landing matrix](../#find-your-tool):
+
+```bash
+export OPENAI_API_BASE=http://localhost:9000/v1
+```
+
+Source: [Aider OpenAI-compatible APIs guide](https://aider.chat/docs/llms/openai-compat.html).

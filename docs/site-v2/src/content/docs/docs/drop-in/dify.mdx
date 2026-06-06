@@ -1,0 +1,19 @@
+---
+title: "Dify with SpendGuard"
+description: >-
+  Drop SpendGuard into Dify by registering a custom Model Provider
+  plugin whose manifest points the base URL at a running SpendGuard
+  egress proxy. Recipe in progress; the exact plugin manifest is on
+  the drop-in landing.
+pagefind: false
+---
+
+## Coming soon
+
+The full walkthrough — prerequisites, the exact plugin manifest, the
+verification step, and gotchas — lands in a follow-up slice. In the
+meantime, the setting to use is row 14 of the
+[drop-in landing matrix](../#find-your-tool): register a custom Model
+Provider plugin and set its base URL to `http://localhost:9000/v1`.
+
+Source: [Dify Model Provider plugin](https://docs.dify.ai/plugins/model-provider).

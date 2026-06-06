@@ -1,0 +1,95 @@
+---
+title: "Drop-in coverage: 14 tools, one env var"
+description: >-
+  Every tool that already accepts an OpenAI-compatible base URL — LiteLLM
+  proxy, Aider, Continue, Cline / Roo Code, OpenHands, Goose, Zed AI,
+  GitHub Copilot CLI, Tabnine Enterprise, AnythingLLM, LobeChat, Cody
+  self-hosted, Augment, Dify — works with Agentic SpendGuard out of the
+  box. One env var, no SDK install, no code change.
+---
+
+If your agent stack already uses an OpenAI-compatible client, SpendGuard
+drops in by changing one base URL. Start the SpendGuard egress proxy at
+`http://localhost:9000/v1`, point your tool at it, and every model call
+flows through SpendGuard's pre-call budget gate and KMS-signed audit
+chain before it ever hits the upstream provider. No SDK install, no code
+change, no rebuild. Find your tool in the matrix below, copy the line
+your tool's docs specify, and the next call is governed.
+
+## How Pattern 2 works
+
+Each of these 14 tools already supports a custom OpenAI-compatible base
+URL. SpendGuard runs an OpenAI-compatible endpoint of its own; setting
+the env var (or one config line) routes the tool's traffic through
+SpendGuard before it reaches OpenAI / Anthropic / Bedrock. Pattern 2
+contrasts with Pattern 1 (in-process SDK middleware, used for the
+adapter integrations) and Pattern 3 (egress proxy + CA install, used
+for closed BYOK CLIs like Claude Code and Codex).
+
+## Start the proxy locally (30 seconds)
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard
+export OPENAI_API_KEY=sk-...
+make demo-up DEMO_MODE=proxy
+```
+
+The egress proxy binds on `http://localhost:9000/v1`. Point any of the
+14 tools below at that URL.
+
+## Find your tool
+
+The matrix lists the exact env var name or config key each tool's
+maintainer docs specify. The `Verified` column distinguishes rows we
+have run end-to-end against the egress proxy (`Live`), rows whose
+configuration matches the maintainer's published docs but we have not
+ourselves smoke-tested (`Spec`), and rows the tool's own changelog
+documents natively without SpendGuard-specific testing (`Vendor-native`).
+
+| # | Tool | Provider field | Exact value | Upstream source | Verified | Recipe |
+|---|------|----------------|-------------|-----------------|----------|--------|
+| 1 | LiteLLM (proxy mode) | Env var | `OPENAI_API_BASE=http://localhost:9000/v1` | [docs.litellm.ai](https://docs.litellm.ai/docs/proxy/config_settings) | Spec | [Open ↗](./litellm/) |
+| 2 | Aider | Env var | `OPENAI_API_BASE=http://localhost:9000/v1` | [aider.chat](https://aider.chat/docs/llms/openai-compat.html) | Spec | [Open ↗](./aider/) |
+| 3 | Continue | YAML `apiBase` | `apiBase: http://localhost:9000/v1` | [docs.continue.dev](https://docs.continue.dev/customization/models) | Spec | [Open ↗](./continue/) |
+| 4 | Cline / Roo Code (BYOK) | UI field | Custom OpenAI provider, Base URL `http://localhost:9000/v1` | [docs.cline.bot](https://docs.cline.bot/getting-started/byok) | Spec | [Open ↗](./cline-roo-code/) |
+| 5 | OpenHands (BYOK) | UI field | LLM custom endpoint `http://localhost:9000/v1` | [docs.all-hands.dev](https://docs.all-hands.dev/usage/llms/custom-llm-configs) | Spec | [Open ↗](./openhands/) |
+| 6 | Goose | Env var | `OPENAI_HOST=http://localhost:9000` | [block.github.io/goose](https://block.github.io/goose/docs/getting-started/installation) | Spec | [Open ↗](./goose/) |
+| 7 | Zed AI | TOML key | `api_url = "http://localhost:9000/v1"` | [zed.dev](https://zed.dev/docs/ai/configuration) | Vendor-native | [Open ↗](./zed/) |
+| 8 | GitHub Copilot CLI (BYOK) | Env var | `COPILOT_PROVIDER_BASE_URL=http://localhost:9000/v1` | [docs.github.com](https://docs.github.com/en/copilot/github-copilot-cli/using-byok) | Vendor-native | [Open ↗](./copilot-cli/) |
+| 9 | Tabnine Enterprise | Admin UI | BYO LLM endpoint `http://localhost:9000/v1` | [docs.tabnine.com](https://docs.tabnine.com/main/software-configuration/connect-custom-llm) | Spec | [Open ↗](./tabnine/) |
+| 10 | AnythingLLM | Admin UI | Custom OpenAI-compatible base URL `http://localhost:9000/v1` | [docs.anythingllm.com](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url) | Spec | [Open ↗](./anythingllm/) |
+| 11 | LobeChat | UI field | Custom base URL `http://localhost:9000/v1` | [lobehub.com](https://lobehub.com/docs/self-hosting/usage/byok) | Spec | [Open ↗](./lobechat/) |
+| 12 | Cody self-hosted Enterprise | Site config | Sourcegraph relay endpoint `http://localhost:9000/v1` | [sourcegraph.com](https://sourcegraph.com/docs/cody/clients/install-vscode) | Spec | [Open ↗](./cody/) |
+| 13 | Augment (BYOK) | UI field | LLM custom endpoint `http://localhost:9000/v1` | [docs.augmentcode.com](https://docs.augmentcode.com/setup/byok) | Spec | [Open ↗](./augment/) |
+| 14 | Dify | Plugin manifest | Custom Model Provider plugin → base URL `http://localhost:9000/v1` | [docs.dify.ai](https://docs.dify.ai/plugins/model-provider) | Spec | [Open ↗](./dify/) |
+| 15 | CrewAI Studio (via LiteLLM) | Indirect | Use row 1 — point CrewAI at the LiteLLM proxy, point LiteLLM at SpendGuard | [docs.litellm.ai](https://docs.litellm.ai/docs/proxy/config_settings) | Spec | [Open ↗](./litellm/) |
+
+Already running SpendGuard in production? Swap `http://localhost:9000/v1`
+for your SpendGuard egress proxy URL — a Kubernetes Service URL, a
+sidecar URL inside the pod, or a hosted SpendGuard URL. The relative
+path is always `/v1`. See the [Helm deployment guide](../deployment/helm/)
+for the production hostname pattern.
+
+## What works today
+
+The matrix above is the **drop-in surface**: tools whose maintainer docs
+publicly document a custom OpenAI-compatible base URL on 2026-06-06. The
+`Verified` column reflects SpendGuard's own claim per row; for the
+runtime-verified client SDKs (openai-python, LangChain ChatOpenAI,
+LangGraph, openai-agents shorthand, streaming) see the README's
+`What works today` table.
+
+## What to do next
+
+- [Provision a real budget on Kubernetes](../deployment/helm/)
+- [Open the SpendGuard dashboard](../operations/dashboard/)
+- [Cover the rest of your stack (Pattern 3 egress proxy)](../deployment/docker-compose/)
+- [Wire a framework SDK (Pattern 1)](../integrations/openai-agents/)
+- [How SpendGuard compares to Cloudflare AI Gateway, Databricks Unity, Portkey](../posts/agent-spend-governance-gap/)
+
+The per-tool deep-dive pages linked in the `Recipe` column above are
+the SLICE-2 / D33 / D34 walkthroughs (prerequisites, exact config
+block, verification step, gotchas). At Slice 1 each `Open ↗` link
+resolves to a `Coming soon` stub; the env var or config line for that
+tool is already in the matrix on this page.

@@ -1,0 +1,18 @@
+---
+title: "OpenHands (BYOK) with SpendGuard"
+description: >-
+  Drop SpendGuard into OpenHands by configuring an LLM custom endpoint
+  pointing at a running SpendGuard egress proxy. Recipe in progress; the
+  exact UI step is on the drop-in landing.
+pagefind: false
+---
+
+## Coming soon
+
+The full walkthrough — prerequisites, the exact UI step, the verification
+step, and gotchas — lands in a follow-up slice. In the meantime, the
+setting to use is row 5 of the
+[drop-in landing matrix](../#find-your-tool): in Settings → LLM, add a
+custom provider and set the endpoint to `http://localhost:9000/v1`.
+
+Source: [OpenHands custom LLM configs](https://docs.all-hands.dev/usage/llms/custom-llm-configs).

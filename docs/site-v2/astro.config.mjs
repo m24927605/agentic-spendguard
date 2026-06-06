@@ -66,6 +66,26 @@ export default defineConfig({
           ],
         },
         {
+          label: 'Drop-in (Pattern 2)',
+          items: [
+            { label: 'Drop in 14 tools (overview)', slug: 'docs/drop-in' },
+            { label: 'LiteLLM (proxy mode)', slug: 'docs/drop-in/litellm' },
+            { label: 'Aider', slug: 'docs/drop-in/aider' },
+            { label: 'Continue', slug: 'docs/drop-in/continue' },
+            { label: 'Cline / Roo Code (BYOK)', slug: 'docs/drop-in/cline-roo-code' },
+            { label: 'OpenHands (BYOK)', slug: 'docs/drop-in/openhands' },
+            { label: 'Goose', slug: 'docs/drop-in/goose' },
+            { label: 'Zed AI', slug: 'docs/drop-in/zed' },
+            { label: 'GitHub Copilot CLI (BYOK)', slug: 'docs/drop-in/copilot-cli' },
+            { label: 'Tabnine Enterprise', slug: 'docs/drop-in/tabnine' },
+            { label: 'AnythingLLM', slug: 'docs/drop-in/anythingllm' },
+            { label: 'LobeChat', slug: 'docs/drop-in/lobechat' },
+            { label: 'Cody self-hosted Enterprise', slug: 'docs/drop-in/cody' },
+            { label: 'Augment (BYOK)', slug: 'docs/drop-in/augment' },
+            { label: 'Dify', slug: 'docs/drop-in/dify' },
+          ],
+        },
+        {
           label: 'Operations',
           items: [
             { label: 'Dashboard', slug: 'docs/operations/dashboard' },

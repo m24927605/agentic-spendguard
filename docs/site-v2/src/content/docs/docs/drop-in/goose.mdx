@@ -1,0 +1,21 @@
+---
+title: "Goose with SpendGuard"
+description: >-
+  Drop SpendGuard into Goose by pointing OPENAI_HOST at a running
+  SpendGuard egress proxy. Recipe in progress; the exact env var string
+  is on the drop-in landing.
+pagefind: false
+---
+
+## Coming soon
+
+The full walkthrough — prerequisites, the exact env var, the verification
+step, and gotchas — lands in a follow-up slice. In the meantime, the env
+var to set is row 6 of the
+[drop-in landing matrix](../#find-your-tool):
+
+```bash
+export OPENAI_HOST=http://localhost:9000
+```
+
+Source: [Goose installation guide](https://block.github.io/goose/docs/getting-started/installation).

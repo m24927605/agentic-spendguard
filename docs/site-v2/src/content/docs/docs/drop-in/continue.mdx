@@ -1,0 +1,21 @@
+---
+title: "Continue with SpendGuard"
+description: >-
+  Drop SpendGuard into Continue by setting apiBase in config.yaml to a
+  running SpendGuard egress proxy. Recipe in progress; the exact config
+  block is on the drop-in landing.
+pagefind: false
+---
+
+## Coming soon
+
+The full walkthrough — prerequisites, the exact YAML key path, the
+verification step, and gotchas — lands in a follow-up slice. In the
+meantime, the config to set is row 3 of the
+[drop-in landing matrix](../#find-your-tool):
+
+```yaml
+apiBase: http://localhost:9000/v1
+```
+
+Source: [Continue customization → models](https://docs.continue.dev/customization/models).

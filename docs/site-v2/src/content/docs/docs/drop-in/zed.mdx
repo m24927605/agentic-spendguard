@@ -1,0 +1,21 @@
+---
+title: "Zed AI with SpendGuard"
+description: >-
+  Drop SpendGuard into Zed AI by setting api_url in your Zed settings to
+  a running SpendGuard egress proxy. Recipe in progress; the exact config
+  line is on the drop-in landing.
+pagefind: false
+---
+
+## Coming soon
+
+The full walkthrough — prerequisites, the exact config line, the
+verification step, and gotchas — lands in a follow-up slice. In the
+meantime, the setting to use is row 7 of the
+[drop-in landing matrix](../#find-your-tool):
+
+```toml
+api_url = "http://localhost:9000/v1"
+```
+
+Source: [Zed AI configuration](https://zed.dev/docs/ai/configuration).

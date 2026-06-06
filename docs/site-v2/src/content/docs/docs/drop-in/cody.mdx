@@ -1,0 +1,19 @@
+---
+title: "Cody self-hosted Enterprise with SpendGuard"
+description: >-
+  Drop SpendGuard into Cody self-hosted Enterprise by configuring the
+  Sourcegraph site-config relay endpoint to a running SpendGuard egress
+  proxy. Recipe in progress; the exact config block is on the drop-in
+  landing.
+pagefind: false
+---
+
+## Coming soon
+
+The full walkthrough — prerequisites, the exact site-config block, the
+verification step, and gotchas — lands in a follow-up slice. In the
+meantime, the setting to use is row 12 of the
+[drop-in landing matrix](../#find-your-tool): point the Sourcegraph
+relay endpoint at `http://localhost:9000/v1`.
+
+Source: [Cody self-hosted Enterprise install](https://sourcegraph.com/docs/cody/clients/install-vscode).

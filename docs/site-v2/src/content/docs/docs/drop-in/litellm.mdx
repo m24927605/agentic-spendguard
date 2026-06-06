@@ -1,0 +1,21 @@
+---
+title: "LiteLLM proxy mode with SpendGuard"
+description: >-
+  Drop SpendGuard into LiteLLM proxy mode by setting OPENAI_API_BASE to a
+  running SpendGuard egress proxy. Recipe in progress; the exact env var
+  string is on the drop-in landing.
+pagefind: false
+---
+
+## Coming soon
+
+The full walkthrough — prerequisites, the exact env var, the verification
+step, and gotchas — lands in a follow-up slice. In the meantime, the env
+var to set is row 1 of the
+[drop-in landing matrix](../#find-your-tool):
+
+```bash
+export OPENAI_API_BASE=http://localhost:9000/v1
+```
+
+Source: [LiteLLM proxy config settings](https://docs.litellm.ai/docs/proxy/config_settings).

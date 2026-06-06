@@ -1,0 +1,22 @@
+---
+title: "GitHub Copilot CLI (BYOK) with SpendGuard"
+description: >-
+  Drop SpendGuard into the GitHub Copilot CLI BYOK mode by setting
+  COPILOT_PROVIDER_BASE_URL to a running SpendGuard egress proxy. Recipe
+  in progress; the exact env var string is on the drop-in landing.
+pagefind: false
+---
+
+## Coming soon
+
+The full walkthrough — prerequisites, the exact env var, the verification
+step, and gotchas — lands in a follow-up slice. In the meantime, the env
+var to set is row 8 of the
+[drop-in landing matrix](../#find-your-tool):
+
+```bash
+export COPILOT_PROVIDER_BASE_URL=http://localhost:9000/v1
+```
+
+Source: [GitHub Copilot CLI BYOK](https://docs.github.com/en/copilot/github-copilot-cli/using-byok)
+(GA 2026-04-07).
