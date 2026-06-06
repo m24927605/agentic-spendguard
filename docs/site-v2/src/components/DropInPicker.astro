@@ -1,0 +1,377 @@
+---
+/**
+ * D03 SLICE 3 — DropInPicker.
+ *
+ * SSR-rendered filterable table for the 14 Pattern 2 BASE_URL tools on
+ * `/docs/drop-in/`. Lives at the top of the landing's `## Find your tool`
+ * section. Progressive enhancement: the full table is in the SSR'd HTML
+ * with every row visible. Client-side JS only adds pattern + name filters,
+ * URL-hash sync, and smooth-scroll to the per-tool H3 section below.
+ *
+ * Hard gates satisfied per `review-standards.md` §2.3:
+ * - H13 — page renders identically with JS disabled (table fully visible).
+ * - H14 — URL hash updates on click, back / forward navigation works.
+ * - H15 — `.mdx` rename preserves slug (handled at page level).
+ *
+ * Filter taxonomy per `design.md` §1.3 + slice prompt anti-scope:
+ *   - `env_var`    — one env var export (LiteLLM, Aider, Goose, Copilot CLI)
+ *   - `config_file`— YAML/TOML/JSON config block (Continue, Zed, Cody, Dify)
+ *   - `admin_ui`   — admin UI / settings panel (Cline, OpenHands, Tabnine,
+ *                    AnythingLLM, LobeChat, Augment)
+ *
+ * The filter is over **how** the tool reads its OpenAI-compatible base
+ * URL, not over Pattern 2 vs Pattern 3 (Pattern 3 is anti-scope per
+ * design.md §1.3 — `spendguard install` is D02 territory).
+ *
+ * Data source: `src/data/dropin_tools.json` (single source of truth;
+ * mirrors the matrix rows in `index.mdx` and the maintainer-cited
+ * env var / config key per `design.md` §3.4).
+ */
+import tools from '../data/dropin_tools.json';
+
+interface Props {
+  /** Initial pattern filter; defaults to "all". */
+  initialFilter?: 'all' | 'env_var' | 'config_file' | 'admin_ui';
+}
+
+const { initialFilter = 'all' } = Astro.props;
+
+const patternLabel: Record<string, string> = {
+  env_var: 'Env var',
+  config_file: 'Config file',
+  admin_ui: 'Admin UI',
+};
+---
+
+<div class="dropin-picker" data-tool-count={tools.length}>
+  <fieldset class="dropin-picker__filters" aria-label="Filter tools by setting type">
+    <legend class="dropin-picker__legend">Filter by setting type</legend>
+    <label class="dropin-picker__radio">
+      <input
+        type="radio"
+        name="dropin-pattern"
+        value="all"
+        checked={initialFilter === 'all'}
+      />
+      <span>All ({tools.length})</span>
+    </label>
+    <label class="dropin-picker__radio">
+      <input
+        type="radio"
+        name="dropin-pattern"
+        value="env_var"
+        checked={initialFilter === 'env_var'}
+      />
+      <span>Env var</span>
+    </label>
+    <label class="dropin-picker__radio">
+      <input
+        type="radio"
+        name="dropin-pattern"
+        value="config_file"
+        checked={initialFilter === 'config_file'}
+      />
+      <span>Config file</span>
+    </label>
+    <label class="dropin-picker__radio">
+      <input
+        type="radio"
+        name="dropin-pattern"
+        value="admin_ui"
+        checked={initialFilter === 'admin_ui'}
+      />
+      <span>Admin UI</span>
+    </label>
+    <label class="dropin-picker__search-label">
+      <span class="dropin-picker__search-text">Search by tool name</span>
+      <input
+        type="search"
+        class="dropin-picker__search"
+        placeholder="Type a tool name..."
+        aria-label="Search by tool name"
+      />
+    </label>
+  </fieldset>
+
+  <p class="dropin-picker__status" aria-live="polite" data-status>
+    Showing all {tools.length} tools.
+  </p>
+
+  <div class="dropin-picker__table-wrap">
+    <table class="dropin-picker__table">
+      <thead>
+        <tr>
+          <th scope="col">Tool</th>
+          <th scope="col">Vendor</th>
+          <th scope="col">Setting type</th>
+          <th scope="col">What to set</th>
+          <th scope="col">Verified</th>
+          <th scope="col">Jump</th>
+        </tr>
+      </thead>
+      <tbody>
+        {tools.map((tool) => (
+          <tr
+            data-pattern={tool.pattern}
+            data-name={tool.name.toLowerCase()}
+            data-vendor={tool.vendor.toLowerCase()}
+          >
+            <td><strong>{tool.name}</strong></td>
+            <td>{tool.vendor}</td>
+            <td>
+              <code class="dropin-picker__pattern">{patternLabel[tool.pattern] ?? tool.pattern}</code>
+            </td>
+            <td><code class="dropin-picker__cmd">{tool.install_cmd}</code></td>
+            <td>{tool.verified}</td>
+            <td>
+              {tool.anchor ? (
+                <a href={tool.anchor} class="dropin-picker__jump" data-anchor={tool.anchor}>
+                  Jump &darr;
+                </a>
+              ) : (
+                <em>(none)</em>
+              )}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  </div>
+
+  <p class="dropin-picker__empty" data-empty hidden>
+    No tools match your filter. Try clearing the search or selecting <em>All</em>.
+  </p>
+</div>
+
+<script>
+  /**
+   * Progressive enhancement: filter rows by pattern radio + name search,
+   * sync URL hash with anchor clicks, and smooth-scroll. With JS
+   * disabled, the table is fully visible and the `Jump ↓` links still
+   * resolve as normal anchor navigation.
+   */
+  (function initDropInPicker() {
+    const picker = document.querySelector<HTMLElement>('.dropin-picker');
+    if (!picker) return;
+
+    const rows = Array.from(
+      picker.querySelectorAll<HTMLTableRowElement>('.dropin-picker__table tbody tr'),
+    );
+    const radios = Array.from(
+      picker.querySelectorAll<HTMLInputElement>('input[name="dropin-pattern"]'),
+    );
+    const search = picker.querySelector<HTMLInputElement>('.dropin-picker__search');
+    const status = picker.querySelector<HTMLElement>('[data-status]');
+    const empty = picker.querySelector<HTMLElement>('[data-empty]');
+    const totalCount = rows.length;
+
+    function applyFilter() {
+      const checked = radios.find((r) => r.checked);
+      const pattern = checked ? checked.value : 'all';
+      const searchTerm = (search?.value ?? '').toLowerCase().trim();
+
+      let visibleCount = 0;
+      for (const row of rows) {
+        const matchesPattern = pattern === 'all' || row.dataset.pattern === pattern;
+        const matchesSearch =
+          !searchTerm ||
+          (row.dataset.name ?? '').includes(searchTerm) ||
+          (row.dataset.vendor ?? '').includes(searchTerm);
+        const show = matchesPattern && matchesSearch;
+        row.hidden = !show;
+        if (show) visibleCount++;
+      }
+
+      if (status) {
+        if (visibleCount === totalCount) {
+          status.textContent = `Showing all ${totalCount} tools.`;
+        } else {
+          status.textContent = `Showing ${visibleCount} of ${totalCount} tools.`;
+        }
+      }
+      if (empty) empty.hidden = visibleCount !== 0;
+    }
+
+    radios.forEach((r) => r.addEventListener('change', applyFilter));
+    search?.addEventListener('input', applyFilter);
+
+    // H14: clicking a Jump link updates window.location.hash via the
+    // browser's default anchor behaviour, which History API records
+    // automatically. We intercept to add smooth-scroll behaviour and
+    // to keep the URL-hash semantics clean for back / forward.
+    const jumpLinks = Array.from(
+      picker.querySelectorAll<HTMLAnchorElement>('.dropin-picker__jump'),
+    );
+    for (const link of jumpLinks) {
+      link.addEventListener('click', (event) => {
+        const anchor = link.dataset.anchor;
+        if (!anchor || anchor[0] !== '#') return;
+        const target = document.querySelector<HTMLElement>(anchor);
+        if (!target) return;
+        event.preventDefault();
+        history.pushState(null, '', anchor);
+        target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        // Move focus for screen readers + keyboard users.
+        const prevTabIndex = target.getAttribute('tabindex');
+        if (prevTabIndex === null) target.setAttribute('tabindex', '-1');
+        target.focus({ preventScroll: true });
+      });
+    }
+
+    // Initial state — if the URL already has a hash matching one of our
+    // anchors, leave the page scrolled there (browser handles it). The
+    // filter starts in the SSR'd state ("all" unless initialFilter prop
+    // overrode), so no work to do on first paint.
+    applyFilter();
+  })();
+</script>
+
+<style>
+  .dropin-picker {
+    margin: 1.5rem 0;
+    font-size: 0.95rem;
+  }
+
+  .dropin-picker__filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1rem;
+    align-items: center;
+    padding: 0.75rem 1rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.5rem;
+    margin: 0 0 1rem 0;
+  }
+
+  .dropin-picker__legend {
+    font-weight: 600;
+    padding: 0 0.5rem;
+    color: var(--sl-color-white);
+  }
+
+  .dropin-picker__radio {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    cursor: pointer;
+    user-select: none;
+  }
+
+  .dropin-picker__radio input {
+    margin: 0;
+    cursor: pointer;
+  }
+
+  .dropin-picker__search-label {
+    display: inline-flex;
+    flex-direction: column;
+    gap: 0.25rem;
+    margin-left: auto;
+    min-width: 200px;
+  }
+
+  .dropin-picker__search-text {
+    font-size: 0.8rem;
+    color: var(--sl-color-gray-2);
+  }
+
+  .dropin-picker__search {
+    padding: 0.4rem 0.6rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.35rem;
+    background: var(--sl-color-bg);
+    color: var(--sl-color-white);
+    font-size: 0.9rem;
+  }
+
+  .dropin-picker__status {
+    font-size: 0.85rem;
+    color: var(--sl-color-gray-2);
+    margin: 0 0 0.5rem 0;
+  }
+
+  .dropin-picker__table-wrap {
+    overflow-x: auto;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 0.5rem;
+  }
+
+  .dropin-picker__table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 0;
+  }
+
+  .dropin-picker__table th,
+  .dropin-picker__table td {
+    padding: 0.6rem 0.75rem;
+    text-align: left;
+    border-bottom: 1px solid var(--sl-color-gray-6);
+    vertical-align: top;
+  }
+
+  .dropin-picker__table thead th {
+    background: var(--sl-color-gray-7, transparent);
+    font-weight: 600;
+    border-bottom: 2px solid var(--sl-color-gray-5);
+    white-space: nowrap;
+  }
+
+  .dropin-picker__table tbody tr:last-child td {
+    border-bottom: none;
+  }
+
+  .dropin-picker__pattern,
+  .dropin-picker__cmd {
+    font-size: 0.82rem;
+    background: var(--sl-color-gray-7, rgba(0, 0, 0, 0.04));
+    padding: 0.1rem 0.35rem;
+    border-radius: 0.25rem;
+    white-space: nowrap;
+    overflow-wrap: anywhere;
+  }
+
+  .dropin-picker__cmd {
+    white-space: normal;
+    word-break: break-word;
+    display: inline-block;
+    max-width: 100%;
+  }
+
+  .dropin-picker__jump {
+    text-decoration: none;
+    color: var(--sl-color-accent);
+    font-weight: 500;
+  }
+
+  .dropin-picker__jump:hover,
+  .dropin-picker__jump:focus {
+    text-decoration: underline;
+  }
+
+  .dropin-picker__empty {
+    padding: 1rem;
+    text-align: center;
+    color: var(--sl-color-gray-2);
+    font-style: italic;
+  }
+
+  /* Mobile: stack the filter controls + scroll the table */
+  @media (max-width: 640px) {
+    .dropin-picker__filters {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .dropin-picker__search-label {
+      margin-left: 0;
+      min-width: 0;
+    }
+
+    .dropin-picker__table th,
+    .dropin-picker__table td {
+      padding: 0.5rem 0.6rem;
+      font-size: 0.85rem;
+    }
+  }
+</style>

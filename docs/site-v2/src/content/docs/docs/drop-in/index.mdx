@@ -8,6 +8,8 @@ description: >-
   box. One env var, no SDK install, no code change.
 ---
 
+import DropInPicker from '../../../../components/DropInPicker.astro';
+
 If your agent stack already uses an OpenAI-compatible client, SpendGuard
 drops in by changing one base URL. Start the SpendGuard egress proxy at
 `http://localhost:9000/v1`, point your tool at it, and every model call
@@ -46,6 +48,16 @@ have run end-to-end against the egress proxy (`Live`), rows whose
 configuration matches the maintainer's published docs but we have not
 ourselves smoke-tested (`Spec`), and rows the tool's own changelog
 documents natively without SpendGuard-specific testing (`Vendor-native`).
+
+Use the quick filter below to narrow by setting type (env var, config
+file, or admin UI), search by tool name, and jump straight to the
+per-tool section.
+
+<DropInPicker />
+
+The static matrix below carries the upstream-source links and the row
+numbering the rest of this page references; the picker above is a
+quick-filter layer over the same data.
 
 | # | Tool | Provider field | Exact value | Upstream source | Verified | Recipe |
 |---|------|----------------|-------------|-----------------|----------|--------|

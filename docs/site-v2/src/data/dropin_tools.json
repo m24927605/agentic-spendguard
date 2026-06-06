@@ -1,0 +1,128 @@
+[
+  {
+    "name": "LiteLLM (proxy mode)",
+    "pattern": "env_var",
+    "vendor": "LiteLLM",
+    "install_cmd": "export OPENAI_API_BASE=http://localhost:9000/v1",
+    "env_var": "OPENAI_API_BASE",
+    "anchor": "#litellm",
+    "verified": "Spec"
+  },
+  {
+    "name": "Aider",
+    "pattern": "env_var",
+    "vendor": "Aider",
+    "install_cmd": "export OPENAI_API_BASE=http://localhost:9000/v1",
+    "env_var": "OPENAI_API_BASE",
+    "anchor": "#aider",
+    "verified": "Spec"
+  },
+  {
+    "name": "Continue",
+    "pattern": "config_file",
+    "vendor": "Continue",
+    "install_cmd": "apiBase: http://localhost:9000/v1",
+    "env_var": null,
+    "anchor": "#continue",
+    "verified": "Spec"
+  },
+  {
+    "name": "Cline / Roo Code (BYOK)",
+    "pattern": "admin_ui",
+    "vendor": "Cline",
+    "install_cmd": "OpenAI Compatible provider, Base URL http://localhost:9000/v1",
+    "env_var": null,
+    "anchor": "#cline-roo-code",
+    "verified": "Spec"
+  },
+  {
+    "name": "OpenHands (BYOK)",
+    "pattern": "admin_ui",
+    "vendor": "All Hands AI",
+    "install_cmd": "Settings → LLM → Custom Provider → Endpoint",
+    "env_var": null,
+    "anchor": "#openhands",
+    "verified": "Spec"
+  },
+  {
+    "name": "Goose",
+    "pattern": "env_var",
+    "vendor": "Block",
+    "install_cmd": "export OPENAI_HOST=http://localhost:9000",
+    "env_var": "OPENAI_HOST",
+    "anchor": "#goose",
+    "verified": "Spec"
+  },
+  {
+    "name": "Zed AI",
+    "pattern": "config_file",
+    "vendor": "Zed",
+    "install_cmd": "api_url = \"http://localhost:9000/v1\"",
+    "env_var": null,
+    "anchor": "#zed",
+    "verified": "Vendor-native"
+  },
+  {
+    "name": "GitHub Copilot CLI (BYOK)",
+    "pattern": "env_var",
+    "vendor": "GitHub",
+    "install_cmd": "export COPILOT_PROVIDER_BASE_URL=http://localhost:9000/v1",
+    "env_var": "COPILOT_PROVIDER_BASE_URL",
+    "anchor": "#copilot-cli",
+    "verified": "Vendor-native"
+  },
+  {
+    "name": "Tabnine Enterprise",
+    "pattern": "admin_ui",
+    "vendor": "Tabnine",
+    "install_cmd": "Admin → AI Models → Connect Custom LLM → Endpoint URL",
+    "env_var": null,
+    "anchor": "#tabnine",
+    "verified": "Spec"
+  },
+  {
+    "name": "AnythingLLM",
+    "pattern": "admin_ui",
+    "vendor": "Mintplex Labs",
+    "install_cmd": "Admin → LLM Configuration → Custom OpenAI-compatible base URL",
+    "env_var": null,
+    "anchor": "#anythingllm",
+    "verified": "Spec"
+  },
+  {
+    "name": "LobeChat",
+    "pattern": "admin_ui",
+    "vendor": "LobeHub",
+    "install_cmd": "Settings → Language Model → Custom Base URL",
+    "env_var": null,
+    "anchor": "#lobechat",
+    "verified": "Spec"
+  },
+  {
+    "name": "Cody self-hosted",
+    "pattern": "config_file",
+    "vendor": "Sourcegraph",
+    "install_cmd": "cody.completions.endpoint in site-config.json",
+    "env_var": null,
+    "anchor": "#cody",
+    "verified": "Spec"
+  },
+  {
+    "name": "Augment (BYOK)",
+    "pattern": "admin_ui",
+    "vendor": "Augment",
+    "install_cmd": "Settings → BYOK → LLM Custom Endpoint",
+    "env_var": null,
+    "anchor": "#augment",
+    "verified": "Spec"
+  },
+  {
+    "name": "Dify",
+    "pattern": "config_file",
+    "vendor": "Dify",
+    "install_cmd": "Custom Model Provider plugin manifest: base_url",
+    "env_var": null,
+    "anchor": "#dify",
+    "verified": "Spec"
+  }
+]
