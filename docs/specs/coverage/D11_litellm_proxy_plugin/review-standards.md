@@ -48,15 +48,17 @@ For each slice, the reviewer MUST verify each row that applies. Rows marked `Blo
 
 ### Slice 4 — Env-driven default factory
 
-| # | Check | Severity |
-|---|-------|----------|
-| 4.1 | Missing required env var raises `SpendGuardConfigError` at construction time, message names the var. | Blocker |
-| 4.2 | `SPENDGUARD_RESOLVER_MODULE=pkg.mod:fn` path: bad module / missing attr both raise `SpendGuardConfigError`. | Blocker |
-| 4.3 | When `SPENDGUARD_RESOLVER_MODULE` is set, single-tenant env vars are NOT consulted (verified by U08 leaving them unset). | Blocker |
-| 4.4 | `_default_estimator` is reused — no duplicate estimator logic. | Major |
-| 4.5 | `BudgetBinding` validation: empty `budget_id` / `window_instance_id` / `unit_id` rejected at factory time (mirror `litellm.py` lines 306-315). | Blocker |
-| 4.6 | Pricing version env vars parsed into a `PricingFreeze` consistent with `examples/litellm-proxy-composite/spendguard_litellm_proxy_callback.py` field-by-field. | Major |
-| 4.7 | Tests U04-U11 present. | Major |
+> **SLICE-PHASING (added 2026-06-07 in SLICE 4 R2)**: SLICE 4 ships the `from_env` / `from_kwargs` / `from_config` factory layer for the 5-var subset (`SPENDGUARD_TENANT_ID`, `SPENDGUARD_SIDECAR_ADDRESS`, `SPENDGUARD_API_KEY`, `SPENDGUARD_DISABLED`, `SPENDGUARD_PROXY_TIMEOUT_MS`) which exercises the factory machinery without requiring resolver wiring. SLICE 4 R1 reviewer carved off the resolver-module wiring (`SPENDGUARD_RESOLVER_MODULE`, `SPENDGUARD_BUDGET_ID`, `SPENDGUARD_WINDOW_INSTANCE_ID`, `SPENDGUARD_UNIT_ID` + pricing-version vars + `_load_resolver_from_env`/`_load_reconciler_from_env` + `BudgetBinding` validation) into a SLICE 4b that lands before SLICE 5's `proxy_config.yaml`, since the SLICE 5 yaml loader dispatches through the same loader functions. Gates 4.2 / 4.3 / 4.5 / 4.6 apply only after SLICE 4b lands; SLICE 4b R1 will re-apply them. SLICE 4 gates that remain in-scope: 4.1 (missing env var raises with var name), 4.4 (`_default_estimator` reuse), and the 5-var subset of 4.7 (tests covering the SLICE 4 vars).
+
+| # | Check | Severity | Phase |
+|---|-------|----------|-------|
+| 4.1 | Missing required env var raises `SpendGuardConfigError` at construction time, message names the var. | Blocker | SLICE 4 |
+| 4.2 | `SPENDGUARD_RESOLVER_MODULE=pkg.mod:fn` path: bad module / missing attr both raise `SpendGuardConfigError`. **SLICE-PHASING (added 2026-06-07 in SLICE 4 R2)**: this gate applies only after SLICE 4b lands. SLICE 4 R1 reviewer carved off the resolver-module wiring (`SPENDGUARD_RESOLVER_MODULE`, `SPENDGUARD_BUDGET_ID`, `SPENDGUARD_WINDOW_INSTANCE_ID`, `SPENDGUARD_UNIT_ID` + pricing-version vars + `_load_resolver_from_env`/`_load_reconciler_from_env` + `BudgetBinding` validation) into SLICE 4b. SLICE 4b R1 will re-apply this gate. | Blocker | SLICE 4b |
+| 4.3 | When `SPENDGUARD_RESOLVER_MODULE` is set, single-tenant env vars are NOT consulted (verified by U08 leaving them unset). **SLICE-PHASING (added 2026-06-07 in SLICE 4 R2)**: this gate applies only after SLICE 4b lands. The single-tenant env vars (`SPENDGUARD_BUDGET_ID` / `SPENDGUARD_WINDOW_INSTANCE_ID` / `SPENDGUARD_UNIT_ID`) and the resolver-module dispatch both live in the SLICE 4b carve-off; SLICE 4 itself does not consult them. SLICE 4b R1 will re-apply this gate. | Blocker | SLICE 4b |
+| 4.4 | `_default_estimator` is reused — no duplicate estimator logic. | Major | SLICE 4 |
+| 4.5 | `BudgetBinding` validation: empty `budget_id` / `window_instance_id` / `unit_id` rejected at factory time (mirror `litellm.py` lines 306-315). **SLICE-PHASING (added 2026-06-07 in SLICE 4 R2)**: this gate applies only after SLICE 4b lands. `BudgetBinding` field validation depends on the budget-binding env vars (`SPENDGUARD_BUDGET_ID` / `SPENDGUARD_WINDOW_INSTANCE_ID` / `SPENDGUARD_UNIT_ID`) that SLICE 4b owns; SLICE 4 ships only the factory plumbing scaffolding. SLICE 4b R1 will re-apply this gate. | Blocker | SLICE 4b |
+| 4.6 | Pricing version env vars parsed into a `PricingFreeze` consistent with `examples/litellm-proxy-composite/spendguard_litellm_proxy_callback.py` field-by-field. **SLICE-PHASING (added 2026-06-07 in SLICE 4 R2)**: this gate applies only after SLICE 4b lands. The 4 pricing-version env vars are part of the SLICE 4b carve-off (alongside the resolver-module wiring) since `PricingFreeze` construction is part of the same `_load_resolver_from_env` helper. SLICE 4b R1 will re-apply this gate. | Major | SLICE 4b |
+| 4.7 | Tests U04-U11 present. (U04-U05 + the 5-var-subset of U11 land in SLICE 4; U06-U10 + the remaining U11 paths land in SLICE 4b — see `tests.md` §2.2 SLICE-PHASING notes.) | Major | Split |
 
 ### Slice 5 — `proxy_config.yaml` registry entry + PyPI extra
 

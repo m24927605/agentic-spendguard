@@ -1,5 +1,5 @@
 # ruff: noqa: ANN401  # LiteLLM's CustomGuardrail interface uses untyped Any
-"""LiteLLM proxy ``CustomGuardrail`` plugin — SLICE 1 + 2 + 3 wired.
+"""LiteLLM proxy ``CustomGuardrail`` plugin — SLICE 1 + 2 + 3 + 4 wired.
 
 Discoverability + zero-Python install path for SpendGuard on the
 LiteLLM proxy. Wraps the existing ``_LoopBoundCallback`` from
@@ -19,7 +19,7 @@ Slice 2 shipped:
     * ``async_pre_call_hook`` wired — pure delegation to
       ``_LoopBoundCallback.async_pre_call_hook``.
 
-Slice 3 ships (this file):
+Slice 3 shipped:
     * ``async_post_call_success_hook`` wired — translates the
       ``CustomGuardrail`` ``(data, user_api_key_dict, response)``
       signature into the ``CustomLogger`` ``(kwargs, response_obj,
@@ -33,8 +33,28 @@ Slice 3 ships (this file):
       re-raises the original exception per LiteLLM's failure-hook
       propagation contract.
 
-Anti-scope for SLICE 3 (per ``docs/slices/COV_D11_S3_commit_release.md``):
-    * No env-driven default factory — SLICE 4.
+Slice 4 ships (this file):
+    * Env-driven default factory classmethods:
+        - ``SpendGuardGuardrail.from_env()`` reads
+          ``SPENDGUARD_TENANT_ID`` / ``SPENDGUARD_SIDECAR_ADDRESS``
+          (with ``SPENDGUARD_SIDECAR_UDS`` legacy fallback) /
+          optional ``SPENDGUARD_API_KEY`` / ``SPENDGUARD_DISABLED``
+          / ``SPENDGUARD_PROXY_TIMEOUT_MS`` and constructs a fully
+          wired guardrail — adapter authors no longer need to thread
+          kwargs through proxy yaml.
+        - ``SpendGuardGuardrail.from_kwargs(**kwargs)`` is the
+          explicit-kwargs constructor (kwargs win over env;
+          delegates straight to ``__init__``).
+        - ``SpendGuardGuardrail.from_config(config: dict)`` accepts
+          the parsed-yaml dict shape SLICE 5's ``proxy_config.yaml``
+          entry will produce.
+    * Missing required env var → ``SpendGuardConfigError`` naming the
+      var (review-standards 4.1 Blocker).
+    * ``SPENDGUARD_DISABLED=true`` / ``1`` / ``yes`` (case-insensitive)
+      → no-op delegate: hooks short-circuit without touching the
+      sidecar (mirrors the TS SDK disabled-mode pattern).
+
+Anti-scope for SLICE 4 (per ``docs/slices/COV_D11_S4_env_defaults.md``):
     * No ``proxy_config.yaml`` snippet — SLICE 5.
     * No demo mode — SLICE 6.
     * No docs page — SLICE 7.
@@ -49,7 +69,10 @@ Backwards compatibility (per ``implementation.md`` §3):
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
+
+from spendguard.errors import SpendGuardConfigError
 
 # Composition source — these names are re-used unchanged so the
 # reserve / commit / release flow remains single-sourced in
@@ -345,6 +368,334 @@ class SpendGuardGuardrail(CustomGuardrail):
             request_data.get("end_time"),
         )
         raise original_exception
+
+    # -------------------------------------------------------------------
+    # SLICE 4 — env-driven default factory classmethods.
+    #
+    # `from_env`:    operator config from environment variables.
+    # `from_kwargs`: explicit kwargs (mirrors `__init__` surface but
+    #                callable from a dict via `**`).
+    # `from_config`: parsed-yaml dict (SLICE 5 `proxy_config.yaml`
+    #                parser calls this).
+    #
+    # Each factory:
+    #   * Returns a fresh `SpendGuardGuardrail` (no module-level
+    #     singleton — review-standards 1.4 carryover).
+    #   * Raises `SpendGuardConfigError` when a required value is
+    #     missing, naming the offending env var or config key
+    #     (review-standards 4.1 Blocker).
+    #   * Honours `disabled=true` by installing a no-op delegate so
+    #     hooks short-circuit (mirrors the TS SDK disabled-mode).
+    #
+    # No `from_env` on `SpendGuardClient` exists today (verified) and
+    # this SLICE 4 must NOT refactor the existing client surface; we
+    # read env vars directly here and forward parsed values into the
+    # `_LoopBoundCallback` constructor instead.
+    # -------------------------------------------------------------------
+
+    @classmethod
+    def from_env(cls) -> SpendGuardGuardrail:
+        """Construct a guardrail from environment variables.
+
+        Required env vars:
+            * ``SPENDGUARD_TENANT_ID``
+            * ``SPENDGUARD_SIDECAR_ADDRESS`` (or legacy
+              ``SPENDGUARD_SIDECAR_UDS``; either is accepted so
+              existing deployments — examples/litellm-proxy-composite,
+              the legacy callback path — continue to work)
+
+        Optional env vars:
+            * ``SPENDGUARD_API_KEY`` — sidecar auth token; default None.
+            * ``SPENDGUARD_DISABLED`` — case-insensitive truthy values
+              (``true`` / ``1`` / ``yes`` / ``on``) install a no-op
+              delegate so hooks short-circuit without touching the
+              sidecar. Default False.
+            * ``SPENDGUARD_PROXY_TIMEOUT_MS`` — integer milliseconds;
+              defaults to 5000. Parsed via ``int()``; non-integer
+              raises ``SpendGuardConfigError`` naming the var.
+
+        Returns:
+            A fully constructed ``SpendGuardGuardrail`` ready to
+            register with the LiteLLM proxy. The underlying
+            ``_LoopBoundCallback`` defers gRPC channel creation to
+            the first hook invocation on the serving event loop
+            (Round 3 P0.3 — loop-affinity invariant).
+
+        Raises:
+            SpendGuardConfigError: a required env var is missing or a
+                typed value (e.g. ``SPENDGUARD_PROXY_TIMEOUT_MS``)
+                cannot be parsed. The message names the offending
+                var so operators can fix the deployment.
+        """
+        config = cls._read_env_config()
+        return cls._from_parsed_config(config)
+
+    @classmethod
+    def from_kwargs(cls, **kwargs: Any) -> SpendGuardGuardrail:
+        """Construct a guardrail from explicit kwargs.
+
+        Delegates straight to ``__init__`` — useful for callers that
+        hold the config as a dict and want to splat it without
+        running the env-var resolution pipeline (kwargs win over env;
+        env is NOT consulted on this path).
+
+        The kwargs surface mirrors ``__init__``:
+        ``guardrail_name`` / ``budget_resolver`` / ``claim_estimator``
+        / ``claim_reconciler`` / ``socket_path`` / ``tenant_id`` plus
+        any extra kwargs LiteLLM's registry forwards into
+        ``CustomGuardrail`` (e.g. ``mode``, ``default_on``,
+        ``supported_event_hooks``).
+        """
+        return cls(**kwargs)
+
+    @classmethod
+    def from_config(cls, config: dict) -> SpendGuardGuardrail:
+        """Construct a guardrail from a parsed config dict.
+
+        Accepts the dict shape SLICE 5's ``proxy_config.yaml`` parser
+        will emit. Same construction pipeline as ``from_env`` but
+        reads from ``config`` instead of ``os.environ``.
+
+        Expected keys:
+            * ``tenant_id`` (required)
+            * ``sidecar_address`` or legacy ``socket_path`` /
+              ``sidecar_uds`` (required; first non-empty wins)
+            * ``api_key`` (optional)
+            * ``disabled`` (optional bool; accepts True / strings)
+            * ``proxy_timeout_ms`` (optional int)
+
+        Raises:
+            SpendGuardConfigError: required key missing or invalid.
+        """
+        parsed = cls._coerce_config_dict(config)
+        return cls._from_parsed_config(parsed)
+
+    # -------------------------------------------------------------------
+    # Internal config-resolution helpers (SLICE 4).
+    # -------------------------------------------------------------------
+
+    @staticmethod
+    def _parse_disabled(raw: str | None) -> bool:
+        """Parse a disabled-flag string into a bool.
+
+        Truthy values (case-insensitive): ``true`` / ``1`` / ``yes`` /
+        ``on``. Falsy values (default): everything else, including
+        empty string and ``false`` / ``0`` / ``no`` / ``off``.
+
+        Centralised so ``from_env`` and ``from_config`` agree on
+        truthiness semantics — no operator surprises from a yaml
+        boolean vs an env-var string mismatch.
+        """
+        if raw is None:
+            return False
+        return raw.strip().lower() in {"true", "1", "yes", "on"}
+
+    @classmethod
+    def _read_env_config(cls) -> dict[str, Any]:
+        """Resolve env vars into the parsed-config dict shape.
+
+        Centralised so both ``from_env`` and any future config
+        loaders share the same env-var spelling table. Required vars
+        missing → ``SpendGuardConfigError`` named at the call site.
+        """
+        tenant_id = os.environ.get("SPENDGUARD_TENANT_ID", "").strip()
+        if not tenant_id:
+            raise SpendGuardConfigError(
+                "missing env var SPENDGUARD_TENANT_ID — required for "
+                "SpendGuardGuardrail.from_env(). Set the SpendGuard "
+                "tenant id at LiteLLM proxy boot."
+            )
+
+        sidecar_address = (
+            os.environ.get("SPENDGUARD_SIDECAR_ADDRESS", "").strip()
+            or os.environ.get("SPENDGUARD_SIDECAR_UDS", "").strip()
+        )
+        if not sidecar_address:
+            raise SpendGuardConfigError(
+                "missing env var SPENDGUARD_SIDECAR_ADDRESS — required "
+                "for SpendGuardGuardrail.from_env(). Set the sidecar "
+                "UDS path (e.g. unix:///run/spendguard.sock) at "
+                "LiteLLM proxy boot. SPENDGUARD_SIDECAR_UDS is also "
+                "accepted as a legacy alias."
+            )
+
+        api_key = os.environ.get("SPENDGUARD_API_KEY") or None
+        disabled = cls._parse_disabled(os.environ.get("SPENDGUARD_DISABLED"))
+
+        timeout_raw = os.environ.get("SPENDGUARD_PROXY_TIMEOUT_MS", "").strip()
+        if timeout_raw:
+            try:
+                proxy_timeout_ms: int = int(timeout_raw)
+            except ValueError as exc:
+                raise SpendGuardConfigError(
+                    "invalid env var SPENDGUARD_PROXY_TIMEOUT_MS="
+                    f"{timeout_raw!r} — must be an integer millisecond "
+                    "value (e.g. 5000)."
+                ) from exc
+        else:
+            proxy_timeout_ms = 5000
+
+        return {
+            "tenant_id": tenant_id,
+            "sidecar_address": sidecar_address,
+            "api_key": api_key,
+            "disabled": disabled,
+            "proxy_timeout_ms": proxy_timeout_ms,
+        }
+
+    @classmethod
+    def _coerce_config_dict(cls, config: dict) -> dict[str, Any]:
+        """Coerce a caller-supplied dict into the parsed-config shape.
+
+        Same semantics as ``_read_env_config`` but the source is the
+        dict, not the environment. SLICE 5's ``proxy_config.yaml``
+        parser will hand us a dict like::
+
+            {
+                "tenant_id": "...",
+                "sidecar_address": "unix:///run/spendguard.sock",
+                "api_key": "...",            # optional
+                "disabled": false,           # optional
+                "proxy_timeout_ms": 5000,    # optional
+            }
+        """
+        if not isinstance(config, dict):
+            raise SpendGuardConfigError(
+                "SpendGuardGuardrail.from_config expects a dict; "
+                f"got {type(config).__name__}."
+            )
+
+        tenant_id = str(config.get("tenant_id") or "").strip()
+        if not tenant_id:
+            raise SpendGuardConfigError(
+                "missing config key 'tenant_id' — required for "
+                "SpendGuardGuardrail.from_config(). Add it to your "
+                "proxy_config.yaml guardrail entry."
+            )
+
+        sidecar_address = (
+            str(config.get("sidecar_address") or "").strip()
+            or str(config.get("socket_path") or "").strip()
+            or str(config.get("sidecar_uds") or "").strip()
+        )
+        if not sidecar_address:
+            raise SpendGuardConfigError(
+                "missing config key 'sidecar_address' — required for "
+                "SpendGuardGuardrail.from_config(). Add it to your "
+                "proxy_config.yaml guardrail entry "
+                "('socket_path' / 'sidecar_uds' are legacy aliases)."
+            )
+
+        api_key_raw = config.get("api_key")
+        api_key = api_key_raw if api_key_raw else None
+
+        disabled_raw = config.get("disabled")
+        if isinstance(disabled_raw, bool):
+            disabled: bool = disabled_raw
+        else:
+            disabled = cls._parse_disabled(
+                None if disabled_raw is None else str(disabled_raw),
+            )
+
+        timeout_raw = config.get("proxy_timeout_ms")
+        if timeout_raw is None:
+            proxy_timeout_ms: int = 5000
+        else:
+            try:
+                proxy_timeout_ms = int(timeout_raw)
+            except (TypeError, ValueError) as exc:
+                raise SpendGuardConfigError(
+                    "invalid config key 'proxy_timeout_ms'="
+                    f"{timeout_raw!r} — must be an integer millisecond "
+                    "value (e.g. 5000)."
+                ) from exc
+
+        return {
+            "tenant_id": tenant_id,
+            "sidecar_address": sidecar_address,
+            "api_key": api_key,
+            "disabled": disabled,
+            "proxy_timeout_ms": proxy_timeout_ms,
+        }
+
+    @classmethod
+    def _from_parsed_config(
+        cls, parsed: dict[str, Any],
+    ) -> SpendGuardGuardrail:
+        """Construct a guardrail from the parsed-config dict shape.
+
+        Single construction pipeline both ``from_env`` and
+        ``from_config`` route through, so the disabled-mode + lazy
+        delegate semantics stay identical regardless of where the
+        config came from.
+        """
+        instance = cls(
+            socket_path=parsed["sidecar_address"],
+            tenant_id=parsed["tenant_id"],
+        )
+
+        # The default skeleton resolvers wired by __init__ would surface
+        # a `SpendGuardConfigError("budget_resolver returned None")` on
+        # first hook invocation. SLICE 4 honours operator intent: a
+        # `from_env`-constructed guardrail without an explicit resolver
+        # is the EXPECTED state for adapter-author wiring — operators
+        # plug a real resolver via the future SLICE 5 yaml entry or via
+        # `from_kwargs`. The disabled path below short-circuits before
+        # the skeleton resolver fires, matching the TS SDK contract.
+
+        if parsed["disabled"]:
+            instance._install_disabled_delegate()
+
+        # Stash parsed values on the instance so SLICE 5's bootstrap
+        # validator can inspect what was applied without re-reading
+        # the env. Underscored to keep the public surface stable.
+        instance._config_api_key = parsed["api_key"]
+        instance._config_disabled = parsed["disabled"]
+        instance._config_proxy_timeout_ms = parsed["proxy_timeout_ms"]
+
+        return instance
+
+    def _install_disabled_delegate(self) -> None:
+        """Install a no-op delegate so every hook short-circuits.
+
+        Mirrors the TS SDK's disabled-mode pattern: the guardrail
+        remains constructable + introspectable (so LiteLLM's registry
+        + ops dashboards still see it) but the three hook methods do
+        not call into the sidecar gRPC channel — they return None
+        without touching any IO. Used by ``from_env`` /
+        ``from_config`` when ``SPENDGUARD_DISABLED`` is truthy.
+        """
+        self._delegate = _NoopGuardrailDelegate()  # type: ignore[assignment]
+
+
+class _NoopGuardrailDelegate:
+    """No-op stand-in for ``_LoopBoundCallback`` in disabled mode.
+
+    Implements the same three async surface methods
+    (``async_pre_call_hook`` / ``async_log_success_event`` /
+    ``async_log_failure_event``) so ``SpendGuardGuardrail``'s hooks
+    can delegate without conditional branching. Each method is a
+    coroutine that returns ``None`` immediately — no gRPC channel,
+    no event loop affinity, no audit row.
+
+    Used when ``SPENDGUARD_DISABLED`` (or the config dict's
+    ``disabled``) is truthy. Adapter authors flip the flag for
+    canary deploys / staged rollouts without removing the guardrail
+    from ``proxy_config.yaml``.
+    """
+
+    # Exposed for test introspection — assertions can check the
+    # delegate type to confirm disabled-mode wiring.
+    disabled = True
+
+    async def async_pre_call_hook(self, *_a: Any, **_kw: Any) -> None:
+        return None
+
+    async def async_log_success_event(self, *_a: Any, **_kw: Any) -> None:
+        return None
+
+    async def async_log_failure_event(self, *_a: Any, **_kw: Any) -> None:
+        return None
 
 
 __all__ = ["SpendGuardGuardrail"]

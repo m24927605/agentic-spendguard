@@ -167,14 +167,19 @@ async def async_post_call_failure_hook(
 
 ### Slice 4 — Env-driven default resolver / estimator / reconciler factory (M)
 
+> **Two-slice landing (added 2026-06-07 in SLICE 4 R2)**: SLICE 4 lands the 5-var factory subset (`SPENDGUARD_TENANT_ID`, `SPENDGUARD_SIDECAR_ADDRESS`, `SPENDGUARD_API_KEY`, `SPENDGUARD_DISABLED`, `SPENDGUARD_PROXY_TIMEOUT_MS`) that exercises the `from_env` / `from_kwargs` / `from_config` factories. SLICE 4b (precursor to SLICE 5's `proxy_config.yaml`) lands the 4 budget-binding vars (`SPENDGUARD_RESOLVER_MODULE`, `SPENDGUARD_BUDGET_ID`, `SPENDGUARD_WINDOW_INSTANCE_ID`, `SPENDGUARD_UNIT_ID`) and 4 pricing-version vars, plus `_load_resolver_from_env` and `_load_reconciler_from_env` helpers, plus `BudgetBinding` validation. This split is deliberate: the SLICE 4 factory plumbing is the prerequisite skeleton; SLICE 4b adds the resolver-module wiring that `proxy_config.yaml` (SLICE 5) will inherit verbatim. See [`docs/slices/COV_D11_S4B_resolver_module.md`](../../../slices/COV_D11_S4B_resolver_module.md).
+
 `_build_delegate` reads operator config from env:
 
-| Env | Purpose | Required when |
-|-----|---------|---------------|
-| `SPENDGUARD_SIDECAR_UDS` | UDS path | always |
-| `SPENDGUARD_TENANT_ID` | tenant scope | always |
-| `SPENDGUARD_RESOLVER_MODULE` | `pkg.mod:fn_name` triple of `(resolver, estimator, reconciler)` factories | optional |
-| `SPENDGUARD_BUDGET_ID` + `SPENDGUARD_WINDOW_INSTANCE_ID` + `SPENDGUARD_UNIT_ID` + 4 pricing-version vars | single-tenant default resolver | when `SPENDGUARD_RESOLVER_MODULE` unset |
+| Env | Purpose | Required when | Lands in |
+|-----|---------|---------------|----------|
+| `SPENDGUARD_SIDECAR_UDS` / `SPENDGUARD_SIDECAR_ADDRESS` | UDS path / sidecar address | always | SLICE 4 |
+| `SPENDGUARD_TENANT_ID` | tenant scope | always | SLICE 4 |
+| `SPENDGUARD_API_KEY` | sidecar auth token | always | SLICE 4 |
+| `SPENDGUARD_DISABLED` | no-op guardrail short-circuit | optional | SLICE 4 |
+| `SPENDGUARD_PROXY_TIMEOUT_MS` | per-call timeout | optional | SLICE 4 |
+| `SPENDGUARD_RESOLVER_MODULE` | `pkg.mod:fn_name` triple of `(resolver, estimator, reconciler)` factories | optional | SLICE 4b |
+| `SPENDGUARD_BUDGET_ID` + `SPENDGUARD_WINDOW_INSTANCE_ID` + `SPENDGUARD_UNIT_ID` + 4 pricing-version vars | single-tenant default resolver | when `SPENDGUARD_RESOLVER_MODULE` unset | SLICE 4b |
 
 Algorithm:
 
