@@ -54,6 +54,18 @@
       "types": "./dist/runPlan.d.ts",
       "import": "./dist/runPlan.js"
     },
+    "./otel": {
+      "types": "./dist/otel.d.ts",
+      "import": "./dist/otel.js"
+    },
+    "./retry": {
+      "types": "./dist/retry.d.ts",
+      "import": "./dist/retry.js"
+    },
+    "./cache": {
+      "types": "./dist/cache.d.ts",
+      "import": "./dist/cache.js"
+    },
     "./proto": {
       "types": "./dist/proto.d.ts",
       "import": "./dist/proto.js"

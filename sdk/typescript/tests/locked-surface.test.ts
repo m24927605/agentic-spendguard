@@ -418,3 +418,92 @@ describe("LOCKED §4.7 / §3 — SLICE 7 R2 barrel + subpath reachability", () =
     expect(invoked).toBe(false);
   });
 });
+
+// ── SLICE 8 (COV_S05_08) — OTel + retry + cache barrel reachability ───────
+//
+// design.md §3 module layout pins `otel.ts`, `retry.ts`, `cache.ts` as
+// dedicated modules. The slice doc requires each to be reachable through
+// the main `@spendguard/sdk` barrel; tests below assert symbol presence
+// and (for cache) the §1.5 alias-identity invariant survives the wrapping.
+
+import {
+  classifyRpcError as MainBarrelClassifyRpcError,
+  DEFAULT_CACHE_MAX_ENTRIES as MainBarrelDefaultCacheMaxEntries,
+  DEFAULT_CACHE_TTL_MS as MainBarrelDefaultCacheTtlMs,
+  InMemoryIdempotencyCache as MainBarrelInMemoryIdempotencyCache,
+  NoopIdempotencyCache as MainBarrelNoopIdempotencyCache,
+  SPENDGUARD_OTEL_ATTR as MainBarrelOtelAttr,
+  runWithRetry as MainBarrelRunWithRetry,
+  setOtelSpanAttributes as MainBarrelSetOtelSpanAttributes,
+  TRANSIENT_STATUS_CODES as MainBarrelTransientStatusCodes,
+  withOtelSpan as MainBarrelWithOtelSpan,
+} from "../src/index.js";
+
+describe("LOCKED §6.4 / §6.5 / §3 — SLICE 8 barrel reachability", () => {
+  it("re-exports withOtelSpan as a callable function", () => {
+    expect(typeof MainBarrelWithOtelSpan).toBe("function");
+  });
+
+  it("re-exports setOtelSpanAttributes as a callable function", () => {
+    expect(typeof MainBarrelSetOtelSpanAttributes).toBe("function");
+  });
+
+  it("re-exports SPENDGUARD_OTEL_ATTR with design §6.4 key names verbatim", () => {
+    // §1.2 P0 verbatim signature gate
+    expect(MainBarrelOtelAttr.TENANT_ID).toBe("spendguard.tenant_id");
+    expect(MainBarrelOtelAttr.DECISION_ID).toBe("spendguard.decision_id");
+    expect(MainBarrelOtelAttr.TRIGGER).toBe("spendguard.trigger");
+    expect(MainBarrelOtelAttr.OUTCOME_DECISION).toBe("spendguard.outcome.decision");
+    expect(MainBarrelOtelAttr.OUTCOME_REASON_CODES).toBe("spendguard.outcome.reason_codes");
+    expect(MainBarrelOtelAttr.SDK_VERSION).toBe("spendguard.sdk.version");
+  });
+
+  it("re-exports classifyRpcError as a callable function", () => {
+    expect(typeof MainBarrelClassifyRpcError).toBe("function");
+    expect(MainBarrelClassifyRpcError({ code: "UNAVAILABLE" })).toBe("transient");
+    expect(MainBarrelClassifyRpcError({ code: "INVALID_ARGUMENT" })).toBe("permanent");
+  });
+
+  it("re-exports runWithRetry as a callable function", () => {
+    expect(typeof MainBarrelRunWithRetry).toBe("function");
+  });
+
+  it("re-exports TRANSIENT_STATUS_CODES with the Python parity three", () => {
+    expect([...MainBarrelTransientStatusCodes].sort()).toEqual([
+      "CANCELLED",
+      "DEADLINE_EXCEEDED",
+      "UNAVAILABLE",
+    ]);
+  });
+
+  it("re-exports InMemoryIdempotencyCache as a constructable class", () => {
+    expect(typeof MainBarrelInMemoryIdempotencyCache).toBe("function");
+    const c = new MainBarrelInMemoryIdempotencyCache();
+    expect(c.size).toBe(0);
+  });
+
+  it("re-exports NoopIdempotencyCache as a constructable class", () => {
+    expect(typeof MainBarrelNoopIdempotencyCache).toBe("function");
+    const c = new MainBarrelNoopIdempotencyCache();
+    expect(c.size).toBe(0);
+  });
+
+  it("re-exports DEFAULT_CACHE_MAX_ENTRIES = 1024 and DEFAULT_CACHE_TTL_MS = 300_000", () => {
+    expect(MainBarrelDefaultCacheMaxEntries).toBe(1024);
+    expect(MainBarrelDefaultCacheTtlMs).toBe(5 * 60 * 1000);
+  });
+});
+
+describe("LOCKED §1.5 P0 — alias identity survives SLICE 8 wrapping", () => {
+  it("reserve === requestDecision after cache/retry/otel integration", () => {
+    const client = new SpendGuardClient({
+      socketPath: "/tmp/x.sock",
+      tenantId: "t",
+    });
+    // §1.5 P0 BLOCKER gate — adapter authors depend on this referential
+    // equality. SLICE 8 wraps `reserve()` body with cache + retry + otel;
+    // the alias is set ABOVE the body via instance-field initializer so
+    // the identity invariant must survive.
+    expect(client.reserve).toBe(client.requestDecision);
+  });
+});

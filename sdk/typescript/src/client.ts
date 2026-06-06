@@ -100,7 +100,9 @@ import {
   SpendGuardConnectionError,
   SpendGuardError,
 } from "./errors.js";
+import { SPENDGUARD_OTEL_ATTR, withOtelSpan } from "./otel.js";
 import { computePromptHash } from "./promptHash.js";
+import { runWithRetry } from "./retry.js";
 import { currentRunPlan } from "./runPlan.js";
 import { VERSION } from "./version.js";
 
@@ -452,6 +454,9 @@ export class SpendGuardClient implements AsyncDisposable {
     if (rawOpts.otelTracer !== undefined) {
       cfg.otelTracer = rawOpts.otelTracer;
     }
+    if (rawOpts.idempotencyCache !== undefined) {
+      cfg.idempotencyCache = rawOpts.idempotencyCache;
+    }
 
     validateConfig(cfg);
     this.cfg = Object.freeze(cfg);
@@ -701,14 +706,29 @@ export class SpendGuardClient implements AsyncDisposable {
       workloadInstanceId,
       protocolVersion: this.cfg.protocolVersion,
     };
-    let resp: ProtoHandshakeResponse;
-    try {
-      resp = await adapter.handshake(req, {
-        timeout: this.cfg.handshakeTimeoutMs,
-      }).response;
-    } catch (err) {
-      throw mapGrpcStatusToError(err, { rpc: "handshake" });
-    }
+    // ── SLICE 8 — wrap handshake RPC in OTel span (design.md §6.4) ─────────
+    //
+    // No retry helper here: handshake is one-shot per client lifetime; a
+    // failure should surface to the caller, not silently retry (retrying a
+    // handshake against a broken sidecar would mask the broken-sidecar signal
+    // the caller needs to see).
+    const resp: ProtoHandshakeResponse = await withOtelSpan(
+      this.cfg.otelTracer,
+      "handshake",
+      {
+        [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
+        [SPENDGUARD_OTEL_ATTR.SDK_VERSION]: this.cfg.sdkVersion,
+      },
+      async () => {
+        try {
+          return await adapter.handshake(req, {
+            timeout: this.cfg.handshakeTimeoutMs,
+          }).response;
+        } catch (err) {
+          throw mapGrpcStatusToError(err, { rpc: "handshake" });
+        }
+      },
+    );
     if (resp.protocolVersion !== this.cfg.protocolVersion) {
       throw new HandshakeError(
         `protocol version mismatch: adapter=${this.cfg.protocolVersion} sidecar=${resp.protocolVersion}`,
@@ -769,6 +789,18 @@ export class SpendGuardClient implements AsyncDisposable {
         "reserve() requires handshake(); call await client.handshake() before reserve()",
       );
     }
+    // ── SLICE 8 — in-process idempotency cache (design.md §6.5) ────────────
+    //
+    // Before issuing the sidecar RPC, consult `cfg.idempotencyCache?` for a
+    // hit on `req.idempotencyKey`. A hit short-circuits the UDS round trip;
+    // a miss falls through to the wire path normally. The sidecar maintains
+    // its OWN idempotency cache (it MUST — it is the correctness gate); the
+    // local cache lives ABOVE it for latency.
+    const cache = this.cfg.idempotencyCache;
+    if (cache !== undefined && req.idempotencyKey.length > 0) {
+      const cached = cache.get(req.idempotencyKey);
+      if (cached !== undefined) return cached;
+    }
     if (this.adapterClient === null) {
       await this.connect();
     }
@@ -777,20 +809,50 @@ export class SpendGuardClient implements AsyncDisposable {
       throw new SidecarUnavailable("transport not established for reserve");
     }
     const grpcReq = this.buildDecisionRequest(req);
-    let resp: ProtoDecisionResponse;
-    try {
-      resp = await adapter.requestDecision(grpcReq, {
-        timeout: this.cfg.decisionTimeoutMs,
-      }).response;
-    } catch (err) {
-      throw mapGrpcStatusToError(err, { rpc: "reserve" });
-    }
-    if (resp.error && resp.error.code !== 0) {
-      throw new SpendGuardError(
-        `sidecar error code=${resp.error.code} message=${resp.error.message}`,
-      );
-    }
-    return mapDecisionResponse(resp, this.cfg.tenantId);
+    // ── SLICE 8 — wrap RPC in OTel span (design.md §6.4) + retry helper ────
+    return await withOtelSpan(
+      this.cfg.otelTracer,
+      "reserve",
+      {
+        [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
+        [SPENDGUARD_OTEL_ATTR.DECISION_ID]: req.decisionId,
+        [SPENDGUARD_OTEL_ATTR.TRIGGER]: req.trigger,
+        [SPENDGUARD_OTEL_ATTR.SDK_VERSION]: this.cfg.sdkVersion,
+      },
+      async () => {
+        let resp: ProtoDecisionResponse;
+        try {
+          resp = await runWithRetry(
+            async () => {
+              try {
+                return await adapter.requestDecision(grpcReq, {
+                  timeout: this.cfg.decisionTimeoutMs,
+                }).response;
+              } catch (err) {
+                throw mapGrpcStatusToError(err, { rpc: "reserve" });
+              }
+            },
+            { idempotencyKey: req.idempotencyKey },
+          );
+        } catch (err) {
+          if (err instanceof SpendGuardError) throw err;
+          throw mapGrpcStatusToError(err, { rpc: "reserve" });
+        }
+        if (resp.error && resp.error.code !== 0) {
+          throw new SpendGuardError(
+            `sidecar error code=${resp.error.code} message=${resp.error.message}`,
+          );
+        }
+        const outcome = mapDecisionResponse(resp, this.cfg.tenantId);
+        // Cache the successful outcome — design.md §6.5 + cache.ts JSDoc:
+        // the cache key is the SAME idempotencyKey the sidecar would dedupe
+        // on, so a same-process retry observes the cached outcome.
+        if (cache !== undefined && req.idempotencyKey.length > 0) {
+          cache.set(req.idempotencyKey, outcome);
+        }
+        return outcome;
+      },
+    );
   }
 
   /**
@@ -876,44 +938,62 @@ export class SpendGuardClient implements AsyncDisposable {
     if (req.outcomeKind !== undefined) {
       events.push(this.buildLlmCallOutcomeEvent(req));
     }
-    let call: ReturnType<SidecarAdapterClient["emitTraceEvents"]>;
-    try {
-      call = adapter.emitTraceEvents({
-        timeout: this.cfg.traceTimeoutMs,
-      });
-      for (const event of events) {
-        await call.requests.send(event);
-      }
-      await call.requests.complete();
-    } catch (err) {
-      throw mapGrpcStatusToError(err, { rpc: "commitEstimated" });
-    }
-
-    // Drain the ack stream — sidecar emits exactly one ack per inbound event.
-    try {
-      let acked = 0;
-      for await (const ack of call.responses) {
-        acked += 1;
-        if (ack.status !== TraceEventAck_Status.ACCEPTED) {
-          throw new SpendGuardError(buildAckRejectMessage(ack));
+    // ── SLICE 8 — wrap commit RPC in OTel span (design.md §6.4) ────────────
+    //
+    // No retry helper: the bidi-stream + ack drain is not safe to retry from
+    // the outside (a partial-ack state on the sidecar side would observe a
+    // duplicate event). The sidecar's own idempotency dedup on
+    // `providerEventId` handles same-tenant repeat events; transient failures
+    // here surface to the adapter for routing.
+    await withOtelSpan(
+      this.cfg.otelTracer,
+      "commitEstimated",
+      {
+        [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
+        [SPENDGUARD_OTEL_ATTR.DECISION_ID]: req.decisionId,
+        [SPENDGUARD_OTEL_ATTR.SDK_VERSION]: this.cfg.sdkVersion,
+      },
+      async () => {
+        let call: ReturnType<SidecarAdapterClient["emitTraceEvents"]>;
+        try {
+          call = adapter.emitTraceEvents({
+            timeout: this.cfg.traceTimeoutMs,
+          });
+          for (const event of events) {
+            await call.requests.send(event);
+          }
+          await call.requests.complete();
+        } catch (err) {
+          throw mapGrpcStatusToError(err, { rpc: "commitEstimated" });
         }
-      }
-      // Surface the final RPC status so a server-side error after the ack
-      // (e.g. trailers-only cancellation) doesn't silently disappear.
-      await call.status;
-      await call.trailers;
-      if (acked === 0) {
-        throw new SpendGuardError("EmitTraceEvents closed without an ack from sidecar");
-      }
-      if (acked < events.length) {
-        throw new SpendGuardError(
-          `EmitTraceEvents acked ${acked} of ${events.length} events before closing`,
-        );
-      }
-    } catch (err) {
-      if (err instanceof SpendGuardError) throw err;
-      throw mapGrpcStatusToError(err, { rpc: "commitEstimated" });
-    }
+
+        // Drain the ack stream — sidecar emits exactly one ack per inbound event.
+        try {
+          let acked = 0;
+          for await (const ack of call.responses) {
+            acked += 1;
+            if (ack.status !== TraceEventAck_Status.ACCEPTED) {
+              throw new SpendGuardError(buildAckRejectMessage(ack));
+            }
+          }
+          // Surface the final RPC status so a server-side error after the ack
+          // (e.g. trailers-only cancellation) doesn't silently disappear.
+          await call.status;
+          await call.trailers;
+          if (acked === 0) {
+            throw new SpendGuardError("EmitTraceEvents closed without an ack from sidecar");
+          }
+          if (acked < events.length) {
+            throw new SpendGuardError(
+              `EmitTraceEvents acked ${acked} of ${events.length} events before closing`,
+            );
+          }
+        } catch (err) {
+          if (err instanceof SpendGuardError) throw err;
+          throw mapGrpcStatusToError(err, { rpc: "commitEstimated" });
+        }
+      },
+    );
   }
 
   /**
@@ -960,15 +1040,33 @@ export class SpendGuardClient implements AsyncDisposable {
       throw new SidecarUnavailable("transport not established for release");
     }
     const grpcReq = buildReleaseRequest(req, this.handshakeResult.sessionId);
-    let resp: ProtoReleaseReservationResponse;
-    try {
-      resp = await adapter.releaseReservation(grpcReq, {
-        timeout: this.cfg.publishTimeoutMs,
-      }).response;
-    } catch (err) {
-      throw mapGrpcStatusToError(err, { rpc: "release", releaseNotFoundAsPlain: true });
-    }
-    return mapReleaseResponse(resp);
+    // ── SLICE 8 — wrap release RPC in OTel span (design.md §6.4) ───────────
+    //
+    // No retry helper: release is idempotent on `idempotencyKey` on the
+    // sidecar side, but the adapter typically calls release at most once
+    // per reservation lifetime — a retry inside the SDK would mask the
+    // unavailable signal the adapter needs to escalate to its own retry
+    // budget (e.g. queued release-on-restart).
+    return await withOtelSpan(
+      this.cfg.otelTracer,
+      "release",
+      {
+        [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
+        [SPENDGUARD_OTEL_ATTR.RESERVATION_ID]: req.reservationId,
+        [SPENDGUARD_OTEL_ATTR.SDK_VERSION]: this.cfg.sdkVersion,
+      },
+      async () => {
+        let resp: ProtoReleaseReservationResponse;
+        try {
+          resp = await adapter.releaseReservation(grpcReq, {
+            timeout: this.cfg.publishTimeoutMs,
+          }).response;
+        } catch (err) {
+          throw mapGrpcStatusToError(err, { rpc: "release", releaseNotFoundAsPlain: true });
+        }
+        return mapReleaseResponse(resp);
+      },
+    );
   }
 
   /**
@@ -993,7 +1091,23 @@ export class SpendGuardClient implements AsyncDisposable {
         "queryBudget() requires handshake(); call await client.handshake() before queryBudget()",
       );
     }
-    throw new SpendGuardError(QUERY_BUDGET_NOT_YET_WIRED);
+    // ── SLICE 8 — wrap (still placeholder) RPC in OTel span ────────────────
+    //
+    // The not-yet-wired throw inside the callback records as a span exception
+    // via `withOtelSpan` — observability dashboards can see the call attempt
+    // even before the §9.4 wire lands.
+    return await withOtelSpan(
+      this.cfg.otelTracer,
+      "queryBudget",
+      {
+        [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
+        [SPENDGUARD_OTEL_ATTR.SCOPE_ID]: req.scopeId,
+        [SPENDGUARD_OTEL_ATTR.SDK_VERSION]: this.cfg.sdkVersion,
+      },
+      async () => {
+        throw new SpendGuardError(QUERY_BUDGET_NOT_YET_WIRED);
+      },
+    );
   }
 
   // ── Lower-level surface (deferred to SLICE 7+) ──────────────────────────

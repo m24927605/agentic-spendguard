@@ -19,6 +19,7 @@
 
 import type { Tracer } from "@opentelemetry/api";
 
+import type { IdempotencyCache } from "./cache.js";
 import { SpendGuardConfigError } from "./errors.js";
 
 // ── Default deadlines (design.md §4.2) ─────────────────────────────────────
@@ -137,6 +138,16 @@ export interface SpendGuardClientConfig {
    * default per design.md §4.2 R2 amendment.
    */
   runProjectionDefault?: RunProjectionPolicy;
+  /**
+   * In-process idempotency cache. When set, `reserve()` consults this cache
+   * before issuing the sidecar RPC: a hit short-circuits to the cached
+   * `DecisionOutcome`. SLICE 8 wires the consumption; see
+   * `InMemoryIdempotencyCache` / `NoopIdempotencyCache` from
+   * `@spendguard/sdk/cache` for ready-made impls. When `undefined`,
+   * `reserve()` issues every RPC unconditionally (the sidecar is still the
+   * correctness gate via its own idempotency-key dedup).
+   */
+  idempotencyCache?: IdempotencyCache;
 }
 
 /**
@@ -189,6 +200,7 @@ export interface ResolvedConfig {
   traceTimeoutMs: number;
   onSpan?: (span: SpanRecord) => void;
   otelTracer?: Tracer;
+  idempotencyCache?: IdempotencyCache;
   runtime: "uds-grpc";
   disabled: boolean;
   runProjectionDefault: RunProjectionPolicy;

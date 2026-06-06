@@ -40,8 +40,15 @@
 // `tracestate` / `budgetGrantJti`) stay on `ReserveRequest` and are
 // caller-threaded per the SLICE 4-5 wire path.
 //
+// SLICE 8 (COV_S05_08) adds the three cross-cutting modules:
+//   - `withOtelSpan` + `SPENDGUARD_OTEL_ATTR` from `./otel.js` (design §6.4).
+//     `@opentelemetry/api` stays a `peerDependenciesMeta.optional` dep.
+//   - `classifyRpcError` + `runWithRetry` + `TRANSIENT_STATUS_CODES` from
+//     `./retry.js` (design §6.5; mirrors Python `_classify_rpc_error`).
+//   - `InMemoryIdempotencyCache` + `NoopIdempotencyCache` + `IdempotencyCache`
+//     interface from `./cache.js` (design §3 layout + impl §10).
+//
 // What's INTENTIONALLY NOT exported yet (anti-scope per future slice docs):
-//   - OTel / retry / idempotency-cache surface — SLICE 8.
 //   - `@withRunPlan(...)` decorator syntax — v0.2 minor (design §4.7 line 303).
 
 // ── Client ────────────────────────────────────────────────────────────────
@@ -145,3 +152,29 @@ export type { PriceKey, PriceTable } from "./pricing.js";
 export { currentRunPlan, withRunPlan } from "./runPlan.js";
 
 export type { RunPlan } from "./runPlan.js";
+
+// ── SLICE 8: OTel hook + retry helper + idempotency cache ─────────────────
+
+export { SPENDGUARD_OTEL_ATTR, setOtelSpanAttributes, withOtelSpan } from "./otel.js";
+
+export type { OtelAttributes, OtelAttributeValue } from "./otel.js";
+
+export {
+  classifyRpcError,
+  runWithRetry,
+  TRANSIENT_STATUS_CODES,
+} from "./retry.js";
+
+export type { RpcErrorClassification, RunWithRetryOptions } from "./retry.js";
+
+export {
+  DEFAULT_CACHE_MAX_ENTRIES,
+  DEFAULT_CACHE_TTL_MS,
+  InMemoryIdempotencyCache,
+  NoopIdempotencyCache,
+} from "./cache.js";
+
+export type {
+  IdempotencyCache,
+  InMemoryIdempotencyCacheOptions,
+} from "./cache.js";

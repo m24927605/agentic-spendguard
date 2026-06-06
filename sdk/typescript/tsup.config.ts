@@ -42,6 +42,10 @@ export default defineConfig({
     promptHash: "src/promptHash.ts",
     // SLICE 7 (COV_S05_07) entry — `withRunPlan` + `currentRunPlan` substrate.
     runPlan: "src/runPlan.ts",
+    // SLICE 8 (COV_S05_08) entries — OTel + retry + idempotency cache.
+    otel: "src/otel.ts",
+    retry: "src/retry.ts",
+    cache: "src/cache.ts",
   },
   format: ["esm"],
   // `resolve: true` inlines cross-entry type re-exports rather than spilling
