@@ -1,0 +1,259 @@
+# Copyright Envoy AI Gateway Authors
+# SPDX-License-Identifier: Apache-2.0
+# The full text of the Apache license is available in the LICENSE file at
+# the root of the repo.
+
+apiVersion: gateway.networking.k8s.io/v1
+kind: GatewayClass
+metadata:
+  name: envoy-ai-gateway-token-ratelimit
+spec:
+  controllerName: gateway.envoyproxy.io/gatewayclass-controller
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: envoy-ai-gateway-token-ratelimit
+  namespace: default
+spec:
+  gatewayClassName: envoy-ai-gateway-token-ratelimit
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+  infrastructure:
+    parametersRef:
+      group: gateway.envoyproxy.io
+      kind: EnvoyProxy
+      name: envoy-ai-gateway-token-ratelimit
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIGatewayRoute
+metadata:
+  name: envoy-ai-gateway-token-ratelimit
+  namespace: default
+spec:
+  parentRefs:
+    - name: envoy-ai-gateway-token-ratelimit
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rules:
+    - matches:
+        - headers:
+            - type: Exact
+              name: x-ai-eg-model
+              value: rate-limit-funky-model
+      backendRefs:
+        - name: envoy-ai-gateway-token-ratelimit-testupstream
+  # The following metadata keys are used to store the costs from the LLM request.
+  llmRequestCosts:
+    - metadataKey: llm_input_token
+      type: InputToken
+    - metadataKey: llm_cached_input_token
+      type: CachedInputToken
+    - metadataKey: llm_cache_creation_input_token
+      type: CacheCreationInputToken
+    - metadataKey: llm_output_token
+      type: OutputToken
+    - metadataKey: llm_total_token
+      type: TotalToken
+    # This configures the token limit based on the CEL expression.
+    # For a demonstration purpose, the CEL expression returns 100000000 only when the input token is 3.
+    # Otherwise, it returns 0 (no token usage).
+    - metadataKey: llm_cel_calculated_token
+      type: CEL
+      cel: "input_tokens == uint(3) ? 100000000 : 0"
+---
+apiVersion: aigateway.envoyproxy.io/v1beta1
+kind: AIServiceBackend
+metadata:
+  name: envoy-ai-gateway-token-ratelimit-testupstream
+  namespace: default
+spec:
+  schema:
+    name: OpenAI
+  backendRef:
+    name: envoy-ai-gateway-token-ratelimit-testupstream
+    kind: Backend
+    group: gateway.envoyproxy.io
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: Backend
+metadata:
+  name: envoy-ai-gateway-token-ratelimit-testupstream
+  namespace: default
+spec:
+  endpoints:
+    - fqdn:
+        hostname: envoy-ai-gateway-token-ratelimit-tesetupstream.default.svc.cluster.local
+        port: 80
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: BackendTrafficPolicy
+metadata:
+  name: envoy-ai-gateway-token-ratelimit-policy
+  namespace: default
+spec:
+  # Applies the rate limit policy to the gateway.
+  targetRefs:
+    - name: envoy-ai-gateway-token-ratelimit
+      kind: Gateway
+      group: gateway.networking.k8s.io
+  rateLimit:
+    type: Global
+    global:
+      rules:
+        # This configures the input token limit, and it has a different budget than others,
+        # so it will be rate limited separately.
+        - clientSelectors:
+            - headers:
+                # Have the rate limit budget be per unique "x-tenant-id" header value.
+                - name: x-tenant-id
+                  type: Distinct
+          limit:
+            # Configures the number of "tokens" allowed per hour, per user.
+            requests: 10
+            unit: Hour
+          cost:
+            request:
+              from: Number
+              # Setting the request cost to zero allows to only check the rate limit budget,
+              # and not consume the budget on the request path.
+              number: 0
+            response:
+              from: Metadata
+              metadata:
+                # This is the fixed namespace for the metadata used by AI Gateway.
+                namespace: io.envoy.ai_gateway
+                # Limit on the input token.
+                key: llm_input_token
+
+        # Repeat the same configuration for a different token type.
+        # This configures the output token limit, and it has a different budget than others,
+        # so it will be rate limited separately.
+        - clientSelectors:
+            - headers:
+                - name: x-tenant-id
+                  type: Distinct
+          limit:
+            requests: 100
+            unit: Hour
+          cost:
+            request:
+              from: Number
+              number: 0
+            response:
+              from: Metadata
+              metadata:
+                namespace: io.envoy.ai_gateway
+                key: llm_output_token
+
+        # Repeat the same configuration for a different token type.
+        # This configures the total token limit, and it has a different budget than others,
+        # so it will be rate limited separately.
+        - clientSelectors:
+            - headers:
+                - name: x-tenant-id
+                  type: Distinct
+          limit:
+            requests: 1000
+            unit: Hour
+          cost:
+            request:
+              from: Number
+              number: 0
+            response:
+              from: Metadata
+              metadata:
+                namespace: io.envoy.ai_gateway
+                key: llm_total_token
+
+        # Repeat the same configuration for a different token type.
+        # This configures the cached input token limit, and it has a different budget than others,
+        # so it will be rate limited separately.
+        - clientSelectors:
+            - headers:
+                - name: x-tenant-id
+                  type: Distinct
+          limit:
+            requests: 100
+            unit: Hour
+          cost:
+            request:
+              from: Number
+              number: 0
+            response:
+              from: Metadata
+              metadata:
+                namespace: io.envoy.ai_gateway
+                key: llm_cached_input_token
+
+        # Repeat the same configuration for a different token type.
+        # This configures the token limit based on the CEL expression.
+        - clientSelectors:
+            - headers:
+                - name: x-tenant-id
+                  type: Distinct
+          limit:
+            requests: 1000
+            unit: Hour
+          cost:
+            request:
+              from: Number
+              number: 0
+            response:
+              from: Metadata
+              metadata:
+                namespace: io.envoy.ai_gateway
+                key: llm_cel_calculated_token
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: envoy-ai-gateway-token-ratelimit-tesetupstream
+  namespace: default
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: envoy-ai-gateway-token-ratelimit-tesetupstream
+  template:
+    metadata:
+      labels:
+        app: envoy-ai-gateway-token-ratelimit-tesetupstream
+    spec:
+      containers:
+        - name: testupstream
+          image: docker.io/envoyproxy/ai-gateway-testupstream:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: envoy-ai-gateway-token-ratelimit-tesetupstream
+  namespace: default
+spec:
+  selector:
+    app: envoy-ai-gateway-token-ratelimit-tesetupstream
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 8080
+  type: ClusterIP
+---
+apiVersion: gateway.envoyproxy.io/v1alpha1
+kind: EnvoyProxy
+metadata:
+  name: envoy-ai-gateway-token-ratelimit
+  namespace: default
+spec:
+  provider:
+    type: Kubernetes
+    kubernetes:
+      envoyDeployment:
+        container:
+          # Note: this is to clear the large default memory/cpu requirements for local tests.
+          # In production, you should set these to values that make sense for your environment.
+          resources: {}

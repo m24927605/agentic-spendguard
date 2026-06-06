@@ -61,3 +61,8 @@ prost-build = "0.13"
 # Smoke-test deps. tonic transport + tokio's TcpListener::bind("127.0.0.1:0")
 # pattern is enough for SLICE 1.
 pretty_assertions = "1"
+# SLICE 5 — YAML parse for the Envoy AI Gateway v0.6 vendored reference
+# manifests under tests/fixtures/v0_6/. Parsed in tests only (no runtime
+# dep) so the conformance harness can pin against the upstream contract
+# without dragging serde_yaml into the production binary.
+serde_yaml = "0.9"
