@@ -244,6 +244,7 @@ async with SpendGuardClient(
 | **OpenAI Agents SDK** | `spendguard.integrations.openai_agents` | Every model call inside an `Agent` run | [`examples/openai-agents-composite/`](examples/openai-agents-composite/) |
 | **Microsoft AGT** | `spendguard.integrations.agt` | AGT's PolicyEngine + SpendGuard as a policy plugin | [`microsoft/agent-governance-toolkit#2398`](https://github.com/microsoft/agent-governance-toolkit/pull/2398) |
 | **LiteLLM proxy** | `spendguard.integrations.litellm` | Every `/v1/chat/completions` through the LiteLLM proxy | [`docs/specs/litellm-integration/PROXY_RECIPE.md`](docs/specs/litellm-integration/PROXY_RECIPE.md) |
+| **Drop-in (14 tools)** | _no SDK; Pattern 2 env-var redirect_ | Every OpenAI-compatible base URL tool — drop in SpendGuard in 30 seconds, one env var | [Drop-in landing](https://agenticspendguard.dev/docs/drop-in/) |
 
 ---
 

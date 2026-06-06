@@ -19,3 +19,7 @@ pnpm-debug.log*
 
 # macOS-specific files
 .DS_Store
+
+# Playwright artifacts (keep __screenshots__ baselines tracked under tests/)
+playwright-report/
+test-results/

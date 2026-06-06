@@ -1,5 +1,5 @@
 ---
-title: "Drop-in coverage: 14 tools, one env var"
+title: "Drop in SpendGuard in 30 seconds (14 tools, one env var)"
 description: >-
   Every tool that already accepts an OpenAI-compatible base URL — LiteLLM
   proxy, Aider, Continue, Cline / Roo Code, OpenHands, Goose, Zed AI,
@@ -49,27 +49,226 @@ documents natively without SpendGuard-specific testing (`Vendor-native`).
 
 | # | Tool | Provider field | Exact value | Upstream source | Verified | Recipe |
 |---|------|----------------|-------------|-----------------|----------|--------|
-| 1 | LiteLLM (proxy mode) | Env var | `OPENAI_API_BASE=http://localhost:9000/v1` | [docs.litellm.ai](https://docs.litellm.ai/docs/proxy/config_settings) | Spec | [Open ↗](./litellm/) |
-| 2 | Aider | Env var | `OPENAI_API_BASE=http://localhost:9000/v1` | [aider.chat](https://aider.chat/docs/llms/openai-compat.html) | Spec | [Open ↗](./aider/) |
-| 3 | Continue | YAML `apiBase` | `apiBase: http://localhost:9000/v1` | [docs.continue.dev](https://docs.continue.dev/customization/models) | Spec | [Open ↗](./continue/) |
-| 4 | Cline / Roo Code (BYOK) | UI field | Custom OpenAI provider, Base URL `http://localhost:9000/v1` | [docs.cline.bot](https://docs.cline.bot/getting-started/byok) | Spec | [Open ↗](./cline-roo-code/) |
-| 5 | OpenHands (BYOK) | UI field | LLM custom endpoint `http://localhost:9000/v1` | [docs.all-hands.dev](https://docs.all-hands.dev/usage/llms/custom-llm-configs) | Spec | [Open ↗](./openhands/) |
-| 6 | Goose | Env var | `OPENAI_HOST=http://localhost:9000` | [block.github.io/goose](https://block.github.io/goose/docs/getting-started/installation) | Spec | [Open ↗](./goose/) |
-| 7 | Zed AI | TOML key | `api_url = "http://localhost:9000/v1"` | [zed.dev](https://zed.dev/docs/ai/configuration) | Vendor-native | [Open ↗](./zed/) |
-| 8 | GitHub Copilot CLI (BYOK) | Env var | `COPILOT_PROVIDER_BASE_URL=http://localhost:9000/v1` | [docs.github.com](https://docs.github.com/en/copilot/github-copilot-cli/using-byok) | Vendor-native | [Open ↗](./copilot-cli/) |
-| 9 | Tabnine Enterprise | Admin UI | BYO LLM endpoint `http://localhost:9000/v1` | [docs.tabnine.com](https://docs.tabnine.com/main/software-configuration/connect-custom-llm) | Spec | [Open ↗](./tabnine/) |
-| 10 | AnythingLLM | Admin UI | Custom OpenAI-compatible base URL `http://localhost:9000/v1` | [docs.anythingllm.com](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url) | Spec | [Open ↗](./anythingllm/) |
-| 11 | LobeChat | UI field | Custom base URL `http://localhost:9000/v1` | [lobehub.com](https://lobehub.com/docs/self-hosting/usage/byok) | Spec | [Open ↗](./lobechat/) |
-| 12 | Cody self-hosted Enterprise | Site config | Sourcegraph relay endpoint `http://localhost:9000/v1` | [sourcegraph.com](https://sourcegraph.com/docs/cody/clients/install-vscode) | Spec | [Open ↗](./cody/) |
-| 13 | Augment (BYOK) | UI field | LLM custom endpoint `http://localhost:9000/v1` | [docs.augmentcode.com](https://docs.augmentcode.com/setup/byok) | Spec | [Open ↗](./augment/) |
-| 14 | Dify | Plugin manifest | Custom Model Provider plugin → base URL `http://localhost:9000/v1` | [docs.dify.ai](https://docs.dify.ai/plugins/model-provider) | Spec | [Open ↗](./dify/) |
-| 15 | CrewAI Studio (via LiteLLM) | Indirect | Use row 1 — point CrewAI at the LiteLLM proxy, point LiteLLM at SpendGuard | [docs.litellm.ai](https://docs.litellm.ai/docs/proxy/config_settings) | Spec | [Open ↗](./litellm/) |
+| 1 | [LiteLLM (proxy mode)](#litellm) | Env var | `OPENAI_API_BASE=http://localhost:9000/v1` | [docs.litellm.ai](https://docs.litellm.ai/docs/proxy/config_settings) | Spec | [Open ↗](./litellm/) |
+| 2 | [Aider](#aider) | Env var | `OPENAI_API_BASE=http://localhost:9000/v1` | [aider.chat](https://aider.chat/docs/llms/openai-compat.html) | Spec | [Open ↗](./aider/) |
+| 3 | [Continue](#continue) | YAML `apiBase` | `apiBase: http://localhost:9000/v1` | [docs.continue.dev](https://docs.continue.dev/customization/models) | Spec | [Open ↗](./continue/) |
+| 4 | [Cline / Roo Code (BYOK)](#cline-roo-code) | UI field | Custom OpenAI provider, Base URL `http://localhost:9000/v1` | [docs.cline.bot](https://docs.cline.bot/getting-started/byok) | Spec | [Open ↗](./cline-roo-code/) |
+| 5 | [OpenHands (BYOK)](#openhands) | UI field | LLM custom endpoint `http://localhost:9000/v1` | [docs.all-hands.dev](https://docs.all-hands.dev/usage/llms/custom-llm-configs) | Spec | [Open ↗](./openhands/) |
+| 6 | [Goose](#goose) | Env var | `OPENAI_HOST=http://localhost:9000` | [block.github.io/goose](https://block.github.io/goose/docs/getting-started/installation) | Spec | [Open ↗](./goose/) |
+| 7 | [Zed AI](#zed) | TOML key | `api_url = "http://localhost:9000/v1"` | [zed.dev](https://zed.dev/docs/ai/configuration) | Vendor-native | [Open ↗](./zed/) |
+| 8 | [GitHub Copilot CLI (BYOK)](#copilot-cli) | Env var | `COPILOT_PROVIDER_BASE_URL=http://localhost:9000/v1` | [docs.github.com](https://docs.github.com/en/copilot/github-copilot-cli/using-byok) | Vendor-native | [Open ↗](./copilot-cli/) |
+| 9 | [Tabnine Enterprise](#tabnine) | Admin UI | BYO LLM endpoint `http://localhost:9000/v1` | [docs.tabnine.com](https://docs.tabnine.com/main/software-configuration/connect-custom-llm) | Spec | [Open ↗](./tabnine/) |
+| 10 | [AnythingLLM](#anythingllm) | Admin UI | Custom OpenAI-compatible base URL `http://localhost:9000/v1` | [docs.anythingllm.com](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url) | Spec | [Open ↗](./anythingllm/) |
+| 11 | [LobeChat](#lobechat) | UI field | Custom base URL `http://localhost:9000/v1` | [lobehub.com](https://lobehub.com/docs/self-hosting/usage/byok) | Spec | [Open ↗](./lobechat/) |
+| 12 | [Cody self-hosted Enterprise](#cody) | Site config | Sourcegraph relay endpoint `http://localhost:9000/v1` | [sourcegraph.com](https://sourcegraph.com/docs/cody/clients/install-vscode) | Spec | [Open ↗](./cody/) |
+| 13 | [Augment (BYOK)](#augment) | UI field | LLM custom endpoint `http://localhost:9000/v1` | [docs.augmentcode.com](https://docs.augmentcode.com/setup/byok) | Spec | [Open ↗](./augment/) |
+| 14 | [Dify](#dify) | Plugin manifest | Custom Model Provider plugin → base URL `http://localhost:9000/v1` | [docs.dify.ai](https://docs.dify.ai/plugins/model-provider) | Spec | [Open ↗](./dify/) |
+| 15 | [CrewAI Studio (via LiteLLM)](#litellm) | Indirect | Use row 1 — point CrewAI at the LiteLLM proxy, point LiteLLM at SpendGuard | [docs.litellm.ai](https://docs.litellm.ai/docs/proxy/config_settings) | Spec | [Open ↗](./litellm/) |
 
 Already running SpendGuard in production? Swap `http://localhost:9000/v1`
 for your SpendGuard egress proxy URL — a Kubernetes Service URL, a
 sidecar URL inside the pod, or a hosted SpendGuard URL. The relative
 path is always `/v1`. See the [Helm deployment guide](../deployment/helm/)
 for the production hostname pattern.
+
+## Per-tool setup
+
+Each section below is the H3 anchor the matrix above links to. Copy the
+code block, set it in your shell or config, and the next call from that
+tool routes through SpendGuard. The full walkthrough — verification
+steps and known gotchas — lives in each tool's recipe page in the
+sidebar.
+
+<h3 id="litellm">LiteLLM</h3>
+
+LiteLLM proxy mode reads `OPENAI_API_BASE` for the upstream endpoint
+when you set the OpenAI provider with no explicit base URL on a route.
+Export the var before `litellm --config config.yaml` (or set it in your
+`config.yaml` environment block).
+
+```bash
+export OPENAI_API_BASE=http://localhost:9000/v1
+```
+
+Source: [LiteLLM proxy config settings](https://docs.litellm.ai/docs/proxy/config_settings).
+
+<h3 id="aider">Aider</h3>
+
+Aider picks up `OPENAI_API_BASE` from the environment and routes every
+chat completion through it. Set the env var in the shell you launch
+`aider` from.
+
+```bash
+export OPENAI_API_BASE=http://localhost:9000/v1
+```
+
+Source: [Aider OpenAI-compatible APIs guide](https://aider.chat/docs/llms/openai-compat.html).
+
+<h3 id="continue">Continue</h3>
+
+Continue reads `apiBase` from each model entry in `config.yaml` (under
+the model's `config` block for the OpenAI provider). Edit the YAML and
+reload the IDE extension.
+
+```yaml
+models:
+  - name: SpendGuard-gated GPT-4o
+    provider: openai
+    model: gpt-4o
+    config:
+      apiBase: http://localhost:9000/v1
+```
+
+Source: [Continue model customization](https://docs.continue.dev/customization/models).
+
+<h3 id="cline-roo-code">Cline / Roo Code (BYOK)</h3>
+
+In the Cline or Roo Code extension settings, pick the **OpenAI
+Compatible** provider and fill the **Base URL** field. No env var
+required — this is a UI-only setting that persists in the workspace
+config.
+
+```text
+Provider:  OpenAI Compatible
+Base URL:  http://localhost:9000/v1
+API Key:   <any value the proxy will forward upstream>
+```
+
+Source: [Cline BYOK guide](https://docs.cline.bot/getting-started/byok).
+
+<h3 id="openhands">OpenHands (BYOK)</h3>
+
+OpenHands' UI exposes a **Custom LLM endpoint** field under Settings →
+LLM → Custom Provider. Enter the SpendGuard egress URL there; OpenHands
+will use it for every model call in the workspace.
+
+```text
+Settings → LLM → Custom Provider → Endpoint
+http://localhost:9000/v1
+```
+
+Source: [OpenHands custom LLM configs](https://docs.all-hands.dev/usage/llms/custom-llm-configs).
+
+<h3 id="goose">Goose</h3>
+
+Goose reads `OPENAI_HOST` (host, not full base URL — Goose appends
+`/v1` itself for the OpenAI provider). Export the variable in the shell
+you launch `goose` from.
+
+```bash
+export OPENAI_HOST=http://localhost:9000
+```
+
+Source: [Goose installation guide](https://block.github.io/goose/docs/getting-started/installation).
+
+<h3 id="zed">Zed AI</h3>
+
+Zed AI configuration is TOML inside `settings.json` (Zed reads JSON or
+TOML depending on file extension). Add an `api_url` to the OpenAI
+provider block.
+
+```toml
+[ai.openai]
+api_url = "http://localhost:9000/v1"
+```
+
+Source: [Zed AI configuration](https://zed.dev/docs/ai/configuration).
+
+<h3 id="copilot-cli">GitHub Copilot CLI (BYOK)</h3>
+
+The GA-2026-04-07 BYOK release of `gh copilot` honours
+`COPILOT_PROVIDER_BASE_URL` for the OpenAI-compatible provider. Export
+the var; `gh copilot` picks it up on the next invocation.
+
+```bash
+export COPILOT_PROVIDER_BASE_URL=http://localhost:9000/v1
+```
+
+Source: [GitHub Copilot CLI BYOK reference](https://docs.github.com/en/copilot/github-copilot-cli/using-byok).
+
+<h3 id="tabnine">Tabnine Enterprise</h3>
+
+Tabnine Enterprise's admin UI has a **Connect Custom LLM** form for
+self-hosted endpoints. Paste the SpendGuard egress URL into the
+endpoint field and save; the change rolls out to every Tabnine seat
+on the tenant.
+
+```text
+Admin → AI Models → Connect Custom LLM → Endpoint URL
+http://localhost:9000/v1
+```
+
+Source: [Tabnine connect custom LLM](https://docs.tabnine.com/main/software-configuration/connect-custom-llm).
+
+<h3 id="anythingllm">AnythingLLM</h3>
+
+AnythingLLM's admin UI exposes a **Custom OpenAI-compatible base URL**
+under LLM Configuration. Set the SpendGuard URL and click `Save`. The
+full per-tool walkthrough lives in the [AnythingLLM recipe](./anythingllm/)
+(D33).
+
+```text
+Admin → LLM Configuration → Custom OpenAI-compatible base URL
+http://localhost:9000/v1
+```
+
+Source: [AnythingLLM custom OpenAI base URL](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url).
+
+<h3 id="lobechat">LobeChat</h3>
+
+LobeChat self-hosted ships a **Custom base URL** field on the
+language-model settings panel. Drop the SpendGuard URL in and every
+chat completion routes through it. Full walkthrough in the
+[LobeChat recipe](./lobechat/) (D34).
+
+```text
+Settings → Language Model → Custom Base URL
+http://localhost:9000/v1
+```
+
+Source: [LobeChat BYOK self-hosting guide](https://lobehub.com/docs/self-hosting/usage/byok).
+
+<h3 id="cody">Cody self-hosted Enterprise</h3>
+
+Sourcegraph Cody self-hosted uses a site-config block for the
+completions relay endpoint. Edit `site-config.json` to point the
+relay at SpendGuard.
+
+```json
+{
+  "cody.completions.endpoint": "http://localhost:9000/v1"
+}
+```
+
+Source: [Cody self-hosted install guide](https://sourcegraph.com/docs/cody/clients/install-vscode).
+
+<h3 id="augment">Augment (BYOK)</h3>
+
+Augment's BYOK flow has an **LLM custom endpoint** field on the
+workspace settings page. Paste the SpendGuard URL and save; Augment
+uses it for every model call.
+
+```text
+Settings → BYOK → LLM Custom Endpoint
+http://localhost:9000/v1
+```
+
+Source: [Augment BYOK setup](https://docs.augmentcode.com/setup/byok).
+
+<h3 id="dify">Dify</h3>
+
+Dify wires custom OpenAI-compatible endpoints through its **Model
+Provider Plugin** mechanism. The plugin manifest declares the base
+URL; load it into your Dify workspace and pick it as the default
+provider.
+
+```yaml
+type: model-provider
+provider: openai-compatible
+base_url: http://localhost:9000/v1
+```
+
+Source: [Dify model provider plugin](https://docs.dify.ai/plugins/model-provider).
 
 ## What works today
 
@@ -92,4 +291,5 @@ The per-tool deep-dive pages linked in the `Recipe` column above are
 the SLICE-2 / D33 / D34 walkthroughs (prerequisites, exact config
 block, verification step, gotchas). At Slice 1 each `Open ↗` link
 resolves to a `Coming soon` stub; the env var or config line for that
-tool is already in the matrix on this page.
+tool is in the matrix above and repeated in the per-tool H3 sections
+on this page.
