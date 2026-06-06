@@ -100,6 +100,7 @@ import {
   SpendGuardConnectionError,
   SpendGuardError,
 } from "./errors.js";
+import { computePromptHash } from "./promptHash.js";
 import { VERSION } from "./version.js";
 
 // Suppress the unused-import warning by referencing in JSDoc — these are
@@ -1149,11 +1150,14 @@ export class SpendGuardClient implements AsyncDisposable {
    *     non-empty). The caller's value wins; the default only fills in when
    *     the caller did not provide one — matches design.md §4.2 R2 semantics.
    *
-   * Note: `prompt_hash` enrichment is INTENTIONALLY deferred to SLICE 6 when
-   * `computePromptHash` ships. The Python parity is loose here — Python
-   * already has the helper available; the TS SDK adds it in SLICE 6 along
-   * with the cross-language fixture gate (review-standards §2). Until then,
-   * `promptText` on the request is silently discarded with a JSDoc note.
+   * SLICE 6 R1 closure of SLICE 4 M-3: when `req.promptText` is set,
+   * `computePromptHash(req.promptText, this.cfg.tenantId)` populates
+   * `runtime_metadata.prompt_hash` as a stringValue. Mirrors Python parity
+   * at `sdk/python/.../client.py` (the `prompt_hash` field is the rules
+   * dedup key per Cost Advisor P0.5 §5.1). The caller may pre-set
+   * `decisionContextJson.prompt_hash` to override (e.g. when the prompt is
+   * tokenised upstream and the hash is computed there); the caller-supplied
+   * value wins.
    */
   private buildRuntimeMetadataStruct(
     req: ReserveRequest,
@@ -1170,6 +1174,14 @@ export class SpendGuardClient implements AsyncDisposable {
     // already set it. Empty string is treated as "unset" per design §5.1.
     if (this.cfg.runProjectionDefault !== "" && fields.run_projection_policy === undefined) {
       fields.run_projection_policy = jsonValueToStructValue(this.cfg.runProjectionDefault);
+      hasField = true;
+    }
+    // M-3 closure: prompt_hash from promptText. Caller-supplied value via
+    // decisionContextJson wins so adapters that tokenise upstream can pass
+    // the pre-computed hash and avoid re-hashing on the SDK hot path.
+    if (req.promptText !== undefined && fields.prompt_hash === undefined) {
+      const hash = computePromptHash(req.promptText, this.cfg.tenantId);
+      fields.prompt_hash = jsonValueToStructValue(hash);
       hasField = true;
     }
     return hasField ? { fields } : undefined;

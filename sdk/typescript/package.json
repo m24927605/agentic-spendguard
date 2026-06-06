@@ -34,6 +34,22 @@
       "types": "./dist/errors.d.ts",
       "import": "./dist/errors.js"
     },
+    "./ids": {
+      "types": "./dist/ids.d.ts",
+      "import": "./dist/ids.js"
+    },
+    "./pricing": {
+      "types": "./dist/pricing.d.ts",
+      "import": "./dist/pricing.js"
+    },
+    "./pricing/demo": {
+      "types": "./dist/pricing/demo.d.ts",
+      "import": "./dist/pricing/demo.js"
+    },
+    "./promptHash": {
+      "types": "./dist/promptHash.d.ts",
+      "import": "./dist/promptHash.js"
+    },
     "./proto": {
       "types": "./dist/proto.d.ts",
       "import": "./dist/proto.js"
@@ -53,6 +69,7 @@
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.14.0",
+    "@noble/hashes": "^1.4.0",
     "@protobuf-ts/runtime": "^2.9.4",
     "@protobuf-ts/runtime-rpc": "^2.9.4",
     "@protobuf-ts/grpc-transport": "^2.9.4"

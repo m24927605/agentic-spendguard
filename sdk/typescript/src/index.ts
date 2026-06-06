@@ -14,10 +14,20 @@
 //   - Default deadlines + `VERSION` constant (design §3.2 / §4.2).
 //   - Env-var helpers (`fromEnv` is a static method on the client).
 //
-// What's INTENTIONALLY NOT exported yet (anti-scope per SLICE 3 doc):
-//   - `newUuid7`, `deriveIdempotencyKey`, … — SLICE 6 ships them.
-//   - `computePromptHash` — SLICE 6.
-//   - `PricingLookup` / `DEMO_PRICING` — SLICE 6.
+// SLICE 6 (COV_S05_06) adds the three adapter-facing helper modules:
+//   - `newUuid7` + `deriveIdempotencyKey` + `deriveUuidFromSignature` +
+//     `workloadInstanceId` from `./ids.js`.
+//   - `computePromptHash` from `./promptHash.js`.
+//   - `PricingLookup` + `USD_MICROS_PER_USD` + `PriceKey` + `PriceTable`
+//     from `./pricing.js`.
+//
+// **NOT re-exported here**:
+//   - `DEMO_PRICING` lives on the `@spendguard/sdk/pricing/demo` subpath
+//     only. The full snapshot is ~3 KB minified and re-exporting it from
+//     the main barrel would unconditionally pull the embedded entries into
+//     the main bundle even for adapters that never call demo helpers.
+//
+// What's INTENTIONALLY NOT exported yet (anti-scope per future slice docs):
 //   - `withRunPlan` / `currentRunPlan` — SLICE 7.
 // The placeholder re-exports for those land in their respective slices to
 // avoid forward-shipping a half-implemented symbol that a downstream adapter
@@ -103,3 +113,18 @@ export type {
 // ── Version constant ──────────────────────────────────────────────────────
 
 export { VERSION } from "./version.js";
+
+// ── SLICE 6: ids / promptHash / pricing helpers ──────────────────────────
+
+export {
+  deriveIdempotencyKey,
+  deriveUuidFromSignature,
+  newUuid7,
+  workloadInstanceId,
+} from "./ids.js";
+
+export { computePromptHash } from "./promptHash.js";
+
+export { PricingLookup, USD_MICROS_PER_USD } from "./pricing.js";
+
+export type { PriceKey, PriceTable } from "./pricing.js";

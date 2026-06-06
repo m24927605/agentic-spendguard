@@ -626,6 +626,111 @@ describe("reserve() — design.md §4.7", () => {
       await mock.close();
     }
   });
+
+  // SLICE 4 R1 M-3 closure: req.promptText is no longer silently discarded —
+  // buildRuntimeMetadataStruct now calls computePromptHash and writes
+  // runtime_metadata.prompt_hash. Mirrors Python parity.
+  it("M-3 closure: req.promptText drives runtime_metadata.prompt_hash via HMAC-SHA256(promptText, tenantId)", async () => {
+    let captured: ProtoDecisionRequest | null = null;
+    const mock = await MockSidecar.start({
+      onRequestDecision: (req) => {
+        captured = req;
+        return {
+          decisionId: req.ids?.decisionId ?? "",
+          auditDecisionEventId: "",
+          decision: DecisionResponse_Decision.CONTINUE,
+          reasonCodes: [],
+          matchedRuleIds: [],
+          mutationPatchJson: "",
+          effectHash: new Uint8Array(),
+          ledgerTransactionId: "",
+          reservationIds: [],
+          ttlExpiresAt: { seconds: "0", nanos: 0 },
+          approvalRequestId: "",
+          approverRole: "",
+          terminal: false,
+          runCodeTriggered: "",
+        };
+      },
+    });
+    try {
+      const client = new SpendGuardClient({
+        socketPath: mock.socketPath,
+        tenantId: "00000000-0000-0000-0000-000000000001",
+      });
+      await client.connect();
+      await client.handshake();
+      await client.reserve(
+        reserveReq({
+          promptText: "hello world",
+        }),
+      );
+      const req = captured as unknown as ProtoDecisionRequest;
+      const meta = req.inputs?.runtimeMetadata;
+      expect(meta).toBeDefined();
+      const hashField = meta?.fields?.prompt_hash;
+      expect(hashField?.kind?.oneofKind).toBe("stringValue");
+      if (hashField?.kind?.oneofKind === "stringValue") {
+        // Same fixture as tests/promptHash.test.ts FX1 — byte-identical to
+        // Python `spendguard.prompt_hash.compute("hello world",
+        // "00000000-0000-0000-0000-000000000001")`.
+        expect(hashField.kind.stringValue).toBe(
+          "5d55a1ebc9782455de0979780fd6cf686127dadcba580f230ddc3fea31516d0d",
+        );
+      }
+      await client.close();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it("caller-supplied decisionContextJson.prompt_hash wins over computed value", async () => {
+    let captured: ProtoDecisionRequest | null = null;
+    const mock = await MockSidecar.start({
+      onRequestDecision: (req) => {
+        captured = req;
+        return {
+          decisionId: req.ids?.decisionId ?? "",
+          auditDecisionEventId: "",
+          decision: DecisionResponse_Decision.CONTINUE,
+          reasonCodes: [],
+          matchedRuleIds: [],
+          mutationPatchJson: "",
+          effectHash: new Uint8Array(),
+          ledgerTransactionId: "",
+          reservationIds: [],
+          ttlExpiresAt: { seconds: "0", nanos: 0 },
+          approvalRequestId: "",
+          approverRole: "",
+          terminal: false,
+          runCodeTriggered: "",
+        };
+      },
+    });
+    try {
+      const client = new SpendGuardClient({
+        socketPath: mock.socketPath,
+        tenantId: "00000000-0000-0000-0000-000000000001",
+      });
+      await client.connect();
+      await client.handshake();
+      await client.reserve(
+        reserveReq({
+          promptText: "hello world",
+          decisionContextJson: { prompt_hash: "pre-computed-by-upstream-tokenizer" },
+        }),
+      );
+      const req = captured as unknown as ProtoDecisionRequest;
+      const hashField = req.inputs?.runtimeMetadata?.fields?.prompt_hash;
+      expect(hashField?.kind?.oneofKind).toBe("stringValue");
+      if (hashField?.kind?.oneofKind === "stringValue") {
+        expect(hashField.kind.stringValue).toBe("pre-computed-by-upstream-tokenizer");
+      }
+      await client.close();
+    } finally {
+      await mock.close();
+    }
+  });
 });
 
 // ── §1.5 P0 — requestDecision === reserve identity ────────────────────────

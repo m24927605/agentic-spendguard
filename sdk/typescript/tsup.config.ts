@@ -35,11 +35,12 @@ export default defineConfig({
     client: "src/client.ts",
     errors: "src/errors.ts",
     proto: "src/proto.ts",
-    // SLICE 6+ entries (populated when the source files land):
-    // ids: "src/ids.ts",
-    // pricing: "src/pricing.ts",
-    // "pricing/demo": "src/pricing/demo.ts",
-    // promptHash: "src/promptHash.ts",
+    // SLICE 6 entries (COV_S05_06):
+    ids: "src/ids.ts",
+    pricing: "src/pricing.ts",
+    "pricing/demo": "src/pricing/demo.ts",
+    promptHash: "src/promptHash.ts",
+    // SLICE 7+ entries (populated when the source files land):
     // runPlan: "src/runPlan.ts",
   },
   format: ["esm"],

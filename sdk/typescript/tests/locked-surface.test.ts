@@ -250,3 +250,79 @@ const _commitWithOutcome: CommitEstimatedRequestWithOutcomeShape = {
 const _assignToPublic: MainBarrelCommitEstimatedRequest = _commitWithOutcome;
 void _assignToPublic;
 void _commitWithOutcome;
+
+// ── SLICE 6 (COV_S05_06) — ids / promptHash / pricing barrel reachability ──
+
+import {
+  computePromptHash as MainBarrelComputePromptHash,
+  deriveIdempotencyKey as MainBarrelDeriveIdempotencyKey,
+  deriveUuidFromSignature as MainBarrelDeriveUuidFromSignature,
+  newUuid7 as MainBarrelNewUuid7,
+  PricingLookup as MainBarrelPricingLookup,
+  USD_MICROS_PER_USD as MainBarrelUsdMicrosPerUsd,
+  workloadInstanceId as MainBarrelWorkloadInstanceId,
+} from "../src/index.js";
+
+describe("LOCKED §4.6 / §4.8 / §4.9 — SLICE 6 barrel reachability", () => {
+  it("re-exports newUuid7 as a callable function", () => {
+    expect(typeof MainBarrelNewUuid7).toBe("function");
+    const u = MainBarrelNewUuid7();
+    expect(u).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+
+  it("re-exports deriveIdempotencyKey as a callable function returning 'sg-<32 hex>'", () => {
+    expect(typeof MainBarrelDeriveIdempotencyKey).toBe("function");
+    const k = MainBarrelDeriveIdempotencyKey({
+      tenantId: "t",
+      sessionId: "s",
+      runId: "r",
+      stepId: "st",
+      llmCallId: "l",
+      trigger: "LLM_CALL_PRE",
+    });
+    expect(k).toMatch(/^sg-[0-9a-f]{32}$/);
+  });
+
+  it("re-exports deriveUuidFromSignature returning a v4-shaped UUID", () => {
+    expect(typeof MainBarrelDeriveUuidFromSignature).toBe("function");
+    const u = MainBarrelDeriveUuidFromSignature("sig", { scope: "decision_id" });
+    expect(u).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  });
+
+  it("re-exports workloadInstanceId returning a string", () => {
+    expect(typeof MainBarrelWorkloadInstanceId).toBe("function");
+    expect(typeof MainBarrelWorkloadInstanceId()).toBe("string");
+  });
+
+  it("re-exports computePromptHash returning lowercase hex (cross-language gate)", () => {
+    expect(typeof MainBarrelComputePromptHash).toBe("function");
+    const h = MainBarrelComputePromptHash("hello world", "00000000-0000-0000-0000-000000000001");
+    expect(h).toBe("5d55a1ebc9782455de0979780fd6cf686127dadcba580f230ddc3fea31516d0d");
+  });
+
+  it("re-exports PricingLookup as a constructable class", () => {
+    expect(typeof MainBarrelPricingLookup).toBe("function");
+    const p = new MainBarrelPricingLookup(new Map([["openai|gpt-4o-mini|input", 0.15]]));
+    expect(p.pricePerMillion("openai", "gpt-4o-mini", "input")).toBe(0.15);
+  });
+
+  it("re-exports USD_MICROS_PER_USD constant = 1_000_000", () => {
+    expect(MainBarrelUsdMicrosPerUsd).toBe(1_000_000);
+  });
+});
+
+describe("LOCKED §4.9 — DEMO_PRICING is subpath-only (NOT on main barrel)", () => {
+  it("DEMO_PRICING is not in the main `@spendguard/sdk` barrel surface", async () => {
+    // Importing from the main barrel must NOT expose DEMO_PRICING — keeps the
+    // main-bundle size budget intact. Adapters that need it go to the subpath.
+    const barrel = (await import("../src/index.js")) as Record<string, unknown>;
+    expect(barrel.DEMO_PRICING).toBeUndefined();
+    expect(barrel.DEMO_PRICING_VERSION).toBeUndefined();
+  });
+
+  it("DEMO_PRICING is reachable via the subpath `src/pricing/demo.js`", async () => {
+    const { DEMO_PRICING, DEMO_PRICING_VERSION } = await import("../src/pricing/demo.js");
+    expect(DEMO_PRICING).toBeDefined();
+    expect(typeof DEMO_PRICING_VERSION).toBe("string");
+  });
+});

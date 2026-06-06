@@ -39,6 +39,9 @@ importers:
       '@grpc/grpc-js':
         specifier: ^1.14.0
         version: 1.14.4
+      '@noble/hashes':
+        specifier: ^1.4.0
+        version: 1.8.0
       '@protobuf-ts/grpc-transport':
         specifier: ^2.9.4
         version: 2.11.1(@grpc/grpc-js@1.14.4)
@@ -902,6 +905,10 @@ packages:
 
   '@mdx-js/mdx@3.1.1':
     resolution: {integrity: sha512-f6ZO2ifpwAQIpzGWaBQT2TXxPv6z3RBzQKpVftEWN78Vl/YweF1uwussDx8ECAXVtr3Rs89fKyG9YlzUs9DyGQ==}
+
+  '@noble/hashes@1.8.0':
+    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
+    engines: {node: ^14.21.3 || >=16}
 
   '@opentelemetry/api@1.9.1':
     resolution: {integrity: sha512-gLyJlPHPZYdAk1JENA9LeHejZe1Ti77/pTeFm/nMXmQH/HFZlcS/O2XJB+L8fkbrNSqhdtlvjBVjxwUYanNH5Q==}
@@ -3818,6 +3825,8 @@ snapshots:
       vfile: 6.0.3
     transitivePeerDependencies:
       - supports-color
+
+  '@noble/hashes@1.8.0': {}
 
   '@opentelemetry/api@1.9.1': {}
 
