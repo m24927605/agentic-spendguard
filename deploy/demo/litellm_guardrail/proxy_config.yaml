@@ -1,0 +1,64 @@
+# LiteLLM proxy config for `DEMO_MODE=litellm_guardrail` (COV_D11 SLICE 6).
+#
+# This is the NEW guardrail-registry path: the `guardrails:` stanza
+# below registers `SpendGuardGuardrail` via the SLICE 5 factory
+# (`spendguard.integrations.litellm_guardrail.spendguard_guardrail_factory`).
+# It is distinct from `deploy/demo/litellm_proxy/proxy_config.yaml`
+# which exercises the LEGACY `litellm_settings.callbacks` callback
+# surface — both paths must keep working (review-standards §6.8).
+#
+# Routing:
+#   * Every model maps to a local counting HTTP listener
+#     (`api_base = http://127.0.0.1:8765/v1`) that run_demo.py boots
+#     in-process before spawning the proxy subprocess. Same counting
+#     listener as `litellm_real` so we never rely on `mock_response`
+#     (DESIGN.md §1 line 16, spec line 893 — BANNED for the demo
+#     gate; F7 acceptance requires reconciled usage).
+#
+# Guardrail wiring:
+#   * `guardrail:` value is the dotted module path → factory.
+#   * `mode: pre_call` (D11 design §5 — LOCKED).
+#   * `default_on: true` (D11 design §5 — LOCKED).
+#   * `resolver_module:` points at the demo-side triple factory
+#     (`spendguard_guardrail_resolver:make_triple`) that mirrors the
+#     `litellm_real` callback's behavior: single-tenant binding +
+#     `spendguard_estimate_override` per-call hook for the DENY step.
+#     The module lives next to this config and is added to PYTHONPATH
+#     by run_demo.py before spawning the proxy subprocess.
+#   * Required identity / pricing env vars (SPENDGUARD_TENANT_ID,
+#     SPENDGUARD_SIDECAR_ADDRESS, SPENDGUARD_BUDGET_ID, ...) are
+#     sourced from compose env on the demo container.
+
+model_list:
+  - model_name: gpt-4o-mini  # callers POST {"model": "gpt-4o-mini", ...}
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_base: http://127.0.0.1:8765/v1  # counting listener
+      api_key: dummy-key-not-used-by-counter
+
+# ---------------------------------------------------------------------------
+# SpendGuard guardrail entry (SLICE 5 factory → SLICE 6 demo proof).
+# ---------------------------------------------------------------------------
+guardrails:
+  - guardrail_name: spendguard
+    litellm_params:
+      guardrail: spendguard.integrations.litellm_guardrail.spendguard_guardrail_factory
+      mode: pre_call
+      default_on: true
+      # Resolver-module dispatch — the demo triple-factory inspects
+      # request data for `spendguard_estimate_override` so step 2
+      # (DENY) can drive the hard-cap STOP path without forging a
+      # claim. Single-tenant binding + reconciler come from the same
+      # module; identity / pricing vars are sourced from env.
+      resolver_module: spendguard_guardrail_resolver:make_triple
+
+litellm_settings:
+  # Drop request bodies from logs to avoid PII leakage; SpendGuard
+  # itself records only the hashed prompt + token counts.
+  drop_params: true
+
+general_settings:
+  # Master key for proxy auth — demo-only; real operators MUST override.
+  # Matches the litellm_real demo key shape so the driver can reuse
+  # the same Authorization header pattern.
+  master_key: sk-demo-litellm-proxy-key

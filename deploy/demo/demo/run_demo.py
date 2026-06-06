@@ -827,6 +827,8 @@ async def main() -> int:
         return await run_litellm_deny_mode()
     if DEMO_MODE == "litellm_direct":
         return await run_litellm_direct_mode()
+    if DEMO_MODE == "litellm_guardrail":
+        return await run_litellm_guardrail_mode()
     return await run_agent_mode()
 
 
@@ -2486,6 +2488,19 @@ def _spendguard_proxy_dir() -> Path:
     return Path(__file__).resolve().parent.parent / "litellm_proxy"
 
 
+def _spendguard_guardrail_proxy_dir() -> Path:
+    """Sibling of `_spendguard_proxy_dir()` for SLICE 6 of D11
+    (`DEMO_MODE=litellm_guardrail`). Resolves to the NEW
+    guardrail-registry demo directory; review-standards §6.1 +
+    §6.8 require this be physically separate from `litellm_proxy/`
+    so the legacy callback demo (`litellm_real`) keeps shipping
+    unchanged."""
+    container_path = Path("/opt/spendguard/litellm_guardrail")
+    if container_path.exists():
+        return container_path
+    return Path(__file__).resolve().parent.parent / "litellm_guardrail"
+
+
 async def _start_counting_provider(host: str = "127.0.0.1", port: int = 8765) -> Any:
     """Start an in-process aiohttp server that mimics OpenAI's
     /v1/chat/completions with non-zero token counts so the reconciler
@@ -3085,6 +3100,177 @@ async def run_litellm_direct_mode() -> int:
         await client.close()
         return 0
     finally:
+        if counting_runner is not None:
+            await counting_runner.cleanup()
+            print("[demo] counting provider stopped")
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE=litellm_guardrail (COV_D11 SLICE 6) — 3-step driver for the NEW
+# guardrail-registry path:
+#   step 1 ALLOW : HTTP 200 + counter +1 + reservation row + commit row
+#   step 2 DENY  : HTTP 4xx + counter UNCHANGED + denied_decision row
+#   step 3 STREAM: HTTP 200 + counter +1 + end-of-stream commit row
+#
+# Reuses the SLICE 6 of D9 (`litellm_real`) harness — same counting
+# provider, same proxy subprocess launcher, same health gate. The
+# difference is the proxy_config.yaml (new `guardrails:` registry
+# entry pointing at the SLICE 5 factory) and the resolver_module
+# (deploy/demo/litellm_guardrail/spendguard_guardrail_resolver.py).
+# See review-standards.md §6 for the per-line gate-check matrix.
+# ---------------------------------------------------------------------------
+
+
+async def run_litellm_guardrail_mode() -> int:
+    """3 steps (ALLOW + DENY + STREAM) per ACCEPTANCE / tests.md §5."""
+    if not os.environ.get("SPENDGUARD_BUDGET_ID"):
+        print("[demo] FATAL: budget env vars required", file=sys.stderr)
+        return 8
+
+    proxy_dir = _spendguard_guardrail_proxy_dir()
+    config_path = proxy_dir / "proxy_config.yaml"
+    if not config_path.exists():
+        print(f"[demo] FATAL: proxy config missing at {config_path}",
+              file=sys.stderr)
+        return 8
+
+    counting_runner = None
+    proxy_proc = None
+    drain_task: asyncio.Task[None] | None = None
+    try:
+        counting_runner = await _start_counting_provider()
+        # _start_litellm_proxy_subprocess adds `callback_dir` to
+        # PYTHONPATH; for the guardrail demo this is the directory
+        # containing `spendguard_guardrail_resolver.py` so the
+        # SLICE 4b `_load_resolver_triple` can `importlib.import_module`
+        # it at proxy boot.
+        proxy_proc, drain_task = await _start_litellm_proxy_subprocess(
+            config_path, proxy_dir,
+        )
+        await _wait_for_litellm_health(port=4000)
+
+        import httpx
+        async with httpx.AsyncClient(
+            base_url="http://127.0.0.1:4000",
+            headers={"Authorization": "Bearer sk-demo-litellm-proxy-key"},
+            timeout=15.0,
+        ) as http:
+            # ---- Step 1: ALLOW ----
+            pre_calls = _COUNTING_PROVIDER_HITS["calls"]
+            r = await http.post("/v1/chat/completions", json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "hello guardrail"}],
+            }, headers={"x-litellm-call-id": "demo-guardrail-allow-1"})
+            print(f"[demo] (1) ALLOW step: HTTP {r.status_code} "
+                  f"body={r.text[:200]!r}")
+            if r.status_code != 200:
+                print(f"[demo] FATAL: ALLOW step expected 200, "
+                      f"got {r.status_code}", file=sys.stderr)
+                return 7
+            if _COUNTING_PROVIDER_HITS["calls"] != pre_calls + 1:
+                print(
+                    f"[demo] FATAL: counting provider should have been "
+                    f"hit once on ALLOW; pre={pre_calls} "
+                    f"post={_COUNTING_PROVIDER_HITS['calls']}",
+                    file=sys.stderr,
+                )
+                return 7
+            usage = r.json().get("usage", {})
+            if int(usage.get("completion_tokens", 0)) <= 0:
+                print(
+                    f"[demo] FATAL: ALLOW step requires "
+                    f"completion_tokens > 0; got usage={usage}",
+                    file=sys.stderr,
+                )
+                return 7
+            print(f"[demo] (1) ALLOW positive control: "
+                  f"counting_calls={_COUNTING_PROVIDER_HITS['calls']} "
+                  f"completion_tokens={usage.get('completion_tokens')}")
+
+            # ---- Step 2: DENY ----
+            # `spendguard_estimate_override=2000000000` drives the
+            # 2B atomic-unit claim above the seeded 1B hard-cap; the
+            # sidecar contract evaluator emits SPENDGUARD_DENY pre-call,
+            # the SLICE 2 `async_pre_call_hook` raises, LiteLLM proxy
+            # short-circuits to 4xx, and the counting provider MUST NOT
+            # be hit (INV-1 strict-order proof).
+            counting_pre_deny = _COUNTING_PROVIDER_HITS["calls"]
+            try:
+                r_deny = await http.post("/v1/chat/completions", json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {"role": "user", "content": "trigger guardrail deny"},
+                    ],
+                    "spendguard_estimate_override": "2000000000",
+                }, headers={"x-litellm-call-id": "demo-guardrail-deny-1"})
+            except httpx.RequestError as e:
+                print(
+                    f"[demo] FATAL: DENY step transport failure — "
+                    f"proxy unreachable: {e!r}",
+                    file=sys.stderr,
+                )
+                return 7
+            counting_post_deny = _COUNTING_PROVIDER_HITS["calls"]
+            print(f"[demo] (2) DENY step: HTTP {r_deny.status_code} "
+                  f"body={str(r_deny.text)[:200]!r}")
+            print(f"[demo] (2) DENY negative control: counting hits "
+                  f"pre={counting_pre_deny} post={counting_post_deny}")
+            if counting_post_deny != counting_pre_deny:
+                print(
+                    "[demo] FATAL: DENY step did NOT block upstream — "
+                    f"counting hit pre={counting_pre_deny} "
+                    f"post={counting_post_deny}. Guardrail pre_call hook "
+                    "did not gate the call.",
+                    file=sys.stderr,
+                )
+                return 7
+            if r_deny.status_code < 400:
+                print(
+                    f"[demo] FATAL: DENY step expected HTTP non-2xx, "
+                    f"got {r_deny.status_code} — proxy admitted the "
+                    "call even though SpendGuard should have denied.",
+                    file=sys.stderr,
+                )
+                return 7
+
+            # ---- Step 3: STREAM ----
+            # `stream=True` → end-of-stream commit reconciles real
+            # `usage.completion_tokens` (INV-5 end-of-stream commit).
+            pre_stream = _COUNTING_PROVIDER_HITS["calls"]
+            r_stream = await http.post("/v1/chat/completions", json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "stream guardrail"}],
+                "stream": True,
+            }, headers={"x-litellm-call-id": "demo-guardrail-stream-1"})
+            print(f"[demo] (3) STREAM step: HTTP {r_stream.status_code}")
+            if r_stream.status_code != 200:
+                print(f"[demo] FATAL STREAM: expected 200, got "
+                      f"{r_stream.status_code}", file=sys.stderr)
+                return 7
+            if _COUNTING_PROVIDER_HITS["calls"] != pre_stream + 1:
+                print("[demo] FATAL STREAM: counting provider not hit",
+                      file=sys.stderr)
+                return 7
+
+        # review-standards §6.7: success-line literal LOCKED.
+        print("[demo] litellm_guardrail ALL 3 steps PASS "
+              "(ALLOW + DENY + STREAM)")
+        return 0
+    finally:
+        if proxy_proc is not None:
+            proxy_proc.terminate()
+            try:
+                await asyncio.wait_for(proxy_proc.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                proxy_proc.kill()
+                await proxy_proc.wait()
+            print("[demo] LiteLLM proxy subprocess terminated")
+        if drain_task is not None:
+            drain_task.cancel()
+            try:
+                await drain_task
+            except (asyncio.CancelledError, Exception):  # noqa: BLE001
+                pass
         if counting_runner is not None:
             await counting_runner.cleanup()
             print("[demo] counting provider stopped")

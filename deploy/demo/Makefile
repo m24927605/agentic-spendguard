@@ -190,6 +190,9 @@ else ifeq ($(DEMO_MODE),litellm_deny)
 else ifeq ($(DEMO_MODE),litellm_direct)
 	@echo "[demo] verifying Slice A3 (litellm_direct ALLOW + DENY)..."
 	@$(MAKE) demo-verify-litellm-direct
+else ifeq ($(DEMO_MODE),litellm_guardrail)
+	@echo "[demo] verifying COV_D11 SLICE 6 (litellm_guardrail ALLOW + DENY + STREAM)..."
+	@$(MAKE) demo-verify-litellm-guardrail
 else ifneq (,$(findstring agent_real,$(DEMO_MODE)))
 	@echo "[demo] DEMO_MODE=$(DEMO_MODE) — skipping demo-verify-step7."
 	@echo "[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)"
@@ -321,6 +324,48 @@ demo-verify-litellm-direct:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_direct.sql
 	@echo "[demo] Slice A3 litellm_direct verification done"
 
+# COV_D11 SLICE 6 (litellm_guardrail) verification. Mirrors the
+# litellm_real layout: ledger-DB assertions in verify_step_litellm_guardrail.sql,
+# then a 5s outbox drain wait, then a cross-DB canonical_events check
+# under spendguard_canonical that asserts the spendguard sub-object's
+# integration='litellm' enrichment landed for both ALLOW + DENY rows.
+demo-verify-litellm-guardrail:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_guardrail.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; v_with_spendguard INT; v_integration TEXT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 2 THEN \
+		     RAISE EXCEPTION 'D11_GUARDRAIL_GATE: canonical_events.decision >= 2 expected (ALLOW + DENY), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'D11_GUARDRAIL_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   SELECT COUNT(*) INTO v_with_spendguard FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND cost_advisor_safe_decode_payload(payload_json)->'spendguard' IS NOT NULL; \
+		   IF v_with_spendguard < 2 THEN \
+		     RAISE EXCEPTION 'D11_GUARDRAIL_GATE: canonical_events with spendguard sub-object >= 2 expected (ALLOW + DENY, both carry integration=litellm), got %', v_with_spendguard; \
+		   END IF; \
+		   SELECT (cost_advisor_safe_decode_payload(payload_json)->'spendguard'->>'integration') INTO v_integration FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND cost_advisor_safe_decode_payload(payload_json)->'spendguard' IS NOT NULL \
+		    LIMIT 1; \
+		   IF v_integration <> 'litellm' THEN \
+		     RAISE EXCEPTION 'D11_GUARDRAIL_GATE: spendguard.integration expected litellm, got %', v_integration; \
+		   END IF; \
+		   RAISE NOTICE 'D11_GUARDRAIL CANONICAL OK: decision=% outcome=% with_spendguard=% integration=%', v_decision, v_outcome, v_with_spendguard, v_integration; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D11 SLICE 6 litellm_guardrail verification done"
+
 demo-verify-litellm-real:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_real.sql
 	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
@@ -398,7 +443,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans
