@@ -44,7 +44,9 @@ Trust-store backends:
 | Linux Arch / fallback | `p11-kit trust anchor` |
 | Windows | `certutil -addstore {-user,} -f Root` |
 
-Installer prefers per-user trust where the OS supports it; escalates to system trust only with explicit `--scope system`.
+Installer prefers per-user trust where the OS supports it; escalates to system trust only with explicit `--scope system`. **R2 Linux clarification (SLICE 3 / COV_07):** Linux's `update-ca-certificates`, `update-ca-trust`, and `trust anchor` all read from system paths only — there is no per-user analogue. `--scope user` on Linux therefore fails closed at the `TrustStore` boundary; the SLICE 7 doctor surfaces the `CURL_CA_BUNDLE` / `SSL_CERT_FILE` env-var redirect instead. macOS and Windows keep their per-user keychain / cert store paths.
+
+**Module-declaration pattern (LOCKED at SLICE 3 R2):** `pub mod macos;` is `#[cfg(target_os = "macos")]`-gated because its primary code path uses `/usr/bin/security` shellouts whose argv shape is macOS-only; the cross-platform compile is not needed. `pub mod linux;` is NOT cfg-gated because its FakeRunner-driven unit tests run on every workspace member's `cargo test` invocation (including macOS dev hosts), and the production paths only touch the live filesystem through test-injectable overrides, so the macOS-host compile is hermetic. SLICE 4 `pub mod windows;` SHOULD follow the linux pattern (ungated) for the same FakeRunner-on-macOS-dev reason, but MUST avoid `windows` / `windows-sys` crate types in trait-bound public signatures (inject via a `WinCertStore` trait inside the module instead, mirroring how `linux.rs` keeps `CommandRunner` as the boundary).
 
 ## 5. Per-tool override matrix
 

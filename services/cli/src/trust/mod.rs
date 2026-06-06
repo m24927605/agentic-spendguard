@@ -1,9 +1,12 @@
 //! OS trust-store backend dispatch.
 //!
-//! This slice (SLICE 2 / COV_06) ships the macOS keychain backend; Linux
-//! (SLICE 3) and Windows (SLICE 4) plug into the same [`TrustStore`] trait so
-//! the [`install`](crate::install) / [`uninstall`](crate::uninstall) /
-//! [`doctor`](crate::doctor) entry points are OS-agnostic.
+//! SLICE 2 (COV_06) shipped the macOS keychain backend; **SLICE 3 (COV_07,
+//! this slice)** plugs the Linux multi-distro backend (Debian/RHEL/Arch/
+//! Alpine) into the same [`TrustStore`] trait. SLICE 4 (COV_08) adds the
+//! Windows backend. The [`install`](crate::install) /
+//! [`uninstall`](crate::uninstall) / [`doctor`](crate::doctor) entry points
+//! stay OS-agnostic — the per-OS branching lives exclusively in the
+//! `#[cfg]`-gated [`dispatch`] below (review-standards `X1`).
 //!
 //! ## Why a `CommandRunner` indirection
 //!
@@ -28,6 +31,17 @@ use std::path::{Path, PathBuf};
 
 #[cfg(target_os = "macos")]
 pub mod macos;
+
+// SLICE 3 (COV_07) note: `linux` is compiled on every host (not just
+// `target_os = "linux"`) so its FakeRunner-driven unit tests run on the
+// macOS dev laptop and any other CI runner that builds the workspace.
+// The module's production paths only shell out via `CommandRunner` and
+// never look at the live filesystem outside test-injected overrides, so
+// compiling it on macOS is hermetic. `dispatch()` below is still
+// cfg-gated so production install on macOS keeps routing to
+// `macos::MacosTrustStore`, not `linux::LinuxTrustStore::new()`
+// (review-standards `X1`).
+pub mod linux;
 
 /// Capture of a shell-out invocation. `Output::status` is the OS exit code;
 /// `Output::stdout` / `Output::stderr` are captured as `Vec<u8>` so the
@@ -101,18 +115,30 @@ pub trait TrustStore {
     fn verify_installed(&self, fingerprint_sha256_hex: &str, scope: TrustScope) -> Result<bool>;
 }
 
-/// Dispatch to the platform-specific backend. Linux / Windows will plug in
-/// here in SLICE 3 / SLICE 4 — for now, those platforms produce a clear
-/// `unsupported on this slice` error from the constructor.
+/// Dispatch to the platform-specific backend.
+///
+/// - macOS (SLICE 2 / COV_06) → [`macos::MacosTrustStore`].
+/// - Linux (**SLICE 3 / COV_07**) → [`linux::LinuxTrustStore`]. Detects
+///   distro family from `/etc/os-release` at construction time; an
+///   unrecognised family fails closed on the first `add_root` call
+///   rather than at dispatch — keeps `doctor` and other read-only flows
+///   informative on hosts we don't know how to mutate.
+/// - Windows (SLICE 4 / COV_08) → still unimplemented; the catch-all arm
+///   below produces a clear "this slice doesn't cover Windows" error.
 #[cfg(target_os = "macos")]
 pub fn dispatch() -> Result<Box<dyn TrustStore>> {
     Ok(Box::new(macos::MacosTrustStore::new()))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "linux")]
+pub fn dispatch() -> Result<Box<dyn TrustStore>> {
+    Ok(Box::new(linux::LinuxTrustStore::new()))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 pub fn dispatch() -> Result<Box<dyn TrustStore>> {
     anyhow::bail!(
-        "trust-store install is implemented for macOS in this slice (COV_06); \
-         Linux lands in COV_07 (SLICE 3) and Windows in COV_08 (SLICE 4)"
+        "trust-store install is implemented for macOS (COV_06) and Linux \
+         (COV_07) at this slice; Windows lands in COV_08 (SLICE 4)"
     )
 }
