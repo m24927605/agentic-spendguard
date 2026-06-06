@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# build output (populated in COV_S05_02+)
+dist/
+
+# tsup / vitest caches
+.tsup/
+.vitest/
+coverage/
+
+# logs
+npm-debug.log*
+pnpm-debug.log*
+
+# macOS
+.DS_Store

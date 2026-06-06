@@ -39,5 +39,12 @@ proto/google
 *.swo
 .DS_Store
 
+# D05 TS SDK substrate + pnpm workspace: ignore node_modules anywhere
+# in the tree so per-package .gitignore files don't have to duplicate
+# this rule (sdk/typescript/, docs/site-v2/, future packages).
+# pnpm-lock.yaml is intentionally NOT ignored — workspace lockfiles
+# are committed for reproducible CI per pnpm convention.
+node_modules/
+
 # M2 — local outreach list with personal contacts (template lives in outreach-list.template.md)
 docs/launches/outreach-list.md

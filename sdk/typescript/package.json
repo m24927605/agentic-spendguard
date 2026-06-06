@@ -1,0 +1,40 @@
+{
+  "name": "@spendguard/sdk",
+  "version": "0.0.0",
+  "private": true,
+  "description": "SpendGuard SDK — runtime safety layer client for AI agent frameworks (TypeScript half; mirror of spendguard-sdk on PyPI). PRE-RELEASE substrate; first published release ships in slice COV_S05_10 as 0.1.0.",
+  "license": "Apache-2.0",
+  "author": "Michael Chen <m24927605@gmail.com>",
+  "homepage": "https://github.com/m24927605/agentic-spendguard",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/m24927605/agentic-spendguard.git",
+    "directory": "sdk/typescript"
+  },
+  "bugs": "https://github.com/m24927605/agentic-spendguard/issues",
+  "keywords": ["llm", "agent", "spend", "budget", "spendguard", "asp", "guardrails"],
+  "type": "module",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "sideEffects": false,
+  "files": ["dist/", "README.md"],
+  "exports": {},
+  "scripts": {
+    "build": "echo 'sdk/typescript: build placeholder (wired in COV_S05_02/COV_S05_10)' && exit 0",
+    "test": "echo 'sdk/typescript: test placeholder (wired in COV_S05_09)' && exit 0",
+    "lint": "echo 'sdk/typescript: lint placeholder (wired in COV_S05_02+)' && exit 0",
+    "typecheck": "echo 'sdk/typescript: typecheck placeholder (wired in COV_S05_03+)' && exit 0",
+    "size": "echo 'sdk/typescript: size placeholder (wired in COV_S05_10)' && exit 0"
+  },
+  "peerDependencies": {
+    "@grpc/grpc-js": ">=1.10",
+    "@grpc/proto-loader": ">=0.7",
+    "@opentelemetry/api": "^1.9.0"
+  },
+  "peerDependenciesMeta": {
+    "@opentelemetry/api": {
+      "optional": true
+    }
+  }
+}

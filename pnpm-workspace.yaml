@@ -1,0 +1,14 @@
+# pnpm workspace root for agentic-spendguard.
+#
+# Workspace members are TypeScript-only directories. The Rust workspace
+# (Cargo.toml at repo root) is independent — it lists its own members under
+# `[workspace] members = [...]` and explicitly excludes the `services/*`,
+# `crates/*`, and `benchmarks/*` paths it does not own. `sdk/typescript/` and
+# `docs/site-v2/` are TS-only and do not conflict with Cargo.
+#
+# Created in slice COV_S05_01 (D05 TS SDK substrate). `docs/site-v2/` was
+# previously installed standalone; promoting it to a workspace member keeps
+# `pnpm install` from the repo root working end-to-end.
+packages:
+  - "sdk/typescript"
+  - "docs/site-v2"
