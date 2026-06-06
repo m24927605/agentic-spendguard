@@ -18,23 +18,35 @@
     "node": ">=20.10.0"
   },
   "sideEffects": false,
-  "files": ["dist/", "README.md"],
+  "files": ["dist/", "src/_proto/", "README.md"],
   "exports": {},
   "scripts": {
     "build": "echo 'sdk/typescript: build placeholder (wired in COV_S05_02/COV_S05_10)' && exit 0",
     "test": "echo 'sdk/typescript: test placeholder (wired in COV_S05_09)' && exit 0",
     "lint": "echo 'sdk/typescript: lint placeholder (wired in COV_S05_02+)' && exit 0",
-    "typecheck": "echo 'sdk/typescript: typecheck placeholder (wired in COV_S05_03+)' && exit 0",
-    "size": "echo 'sdk/typescript: size placeholder (wired in COV_S05_10)' && exit 0"
+    "typecheck": "tsc --noEmit",
+    "size": "echo 'sdk/typescript: size placeholder (wired in COV_S05_10)' && exit 0",
+    "proto:gen": "tsx scripts/proto.ts",
+    "proto:check": "tsx scripts/proto.ts --check"
+  },
+  "dependencies": {
+    "@protobuf-ts/runtime": "^2.9.4",
+    "@protobuf-ts/runtime-rpc": "^2.9.4",
+    "@protobuf-ts/grpc-transport": "^2.9.4"
   },
   "peerDependencies": {
     "@grpc/grpc-js": ">=1.10",
-    "@grpc/proto-loader": ">=0.7",
     "@opentelemetry/api": "^1.9.0"
   },
   "peerDependenciesMeta": {
     "@opentelemetry/api": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "@protobuf-ts/plugin": "^2.9.4",
+    "@types/node": "^20.14.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0"
   }
 }

@@ -1,0 +1,91 @@
+# @spendguard/sdk — pull-request gates.
+#
+# Runs on every push touching the TS SDK and is the substrate's pre-merge
+# safety net. The publish workflow (sdk-ts-publish.yml, wired in COV_S05_10)
+# inherits these same gates.
+#
+# Slice reference: docs/slices/COV_S05_02_d05_proto_codegen.md
+#                  docs/specs/coverage/D05_ts_sdk_substrate/design.md §7, §10
+#
+# Determinism gate (the load-bearing one):
+#   `pnpm run proto:check` regenerates the proto tree into a tempdir and
+#   diffs against the committed copy. A red here means the contributor
+#   forgot to run `pnpm run proto:gen` and commit the result — that would
+#   ship a divergence between the canonical `proto/spendguard/` source and
+#   the customer-facing `_proto/` tree, breaking adapters at install time.
+
+name: SDK TS CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "sdk/typescript/**"
+      - "proto/spendguard/**"
+      - ".github/workflows/sdk-ts-ci.yml"
+  pull_request:
+    paths:
+      - "sdk/typescript/**"
+      - "proto/spendguard/**"
+      - ".github/workflows/sdk-ts-ci.yml"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  # cancel-in-progress=true: a newer push to the same branch supersedes the
+  # in-flight job. Saves CI minutes on rapid iteration.
+  group: sdk-ts-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  proto-and-typecheck:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        # protoc is required by sdk/typescript/scripts/proto.ts. The
+        # @protobuf-ts/plugin ships only the language-emitter plugin and
+        # shells out to the system protoc for parsing.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends protobuf-compiler
+          protoc --version
+
+      - uses: pnpm/action-setup@v4
+        with:
+          # R2 fix per R1 review M1: design.md §12.3 locks pnpm 9.x. CI
+          # follows the spec; pnpm 9 reads 10-written lockfiles fine but
+          # the spec contract is "pnpm 9.x" until a deliberate bump ADR.
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install deps (workspace-aware, lockfile-frozen)
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify proto codegen is deterministic + committed
+        # The gate. If a contributor edited a .proto without rerunning
+        # proto:gen, this step exits non-zero and prints the drifted paths.
+        # The script also asserts the 250 KB budget (design §10) — a fat
+        # well-known-types regeneration is caught here too.
+        run: pnpm --filter @spendguard/sdk run proto:check
+
+      - name: Typecheck (resolves generated imports)
+        # tsc --noEmit; the generated tree is @ts-nocheck-annotated so this
+        # only verifies that every import in src/_proto/ resolves against
+        # the installed @protobuf-ts/runtime + @protobuf-ts/runtime-rpc.
+        run: pnpm --filter @spendguard/sdk run typecheck
+
+      - name: Build (placeholder until COV_S05_10)
+        # The build script is still a placeholder in this slice; we run it
+        # to make sure the slice's package.json scripts wiring doesn't
+        # regress (gate #6 of the slice's verification plan).
+        run: pnpm --filter @spendguard/sdk run build
