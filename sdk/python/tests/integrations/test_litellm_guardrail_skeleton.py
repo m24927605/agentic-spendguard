@@ -151,22 +151,25 @@ def test_hook_methods_are_coroutines(method_name: str):
 @pytest.mark.parametrize(
     ("method_name", "args"),
     [
-        ("async_pre_call_hook", (None, None, {}, "acompletion")),
+        # COV_D11_S2 (2026-06-06) wired async_pre_call_hook → delegate.
+        # Pre-call assertion moved to test_litellm_guardrail_pre_call.py
+        # (delegate-mock based). The two post-call hooks remain SLICE 3
+        # stubs per the guardrail module's docstring.
         ("async_post_call_success_hook", ({}, None, None)),
         ("async_post_call_failure_hook", ({}, RuntimeError("x"), None)),
     ],
 )
 async def test_hook_methods_raise_not_implemented(method_name, args):
-    """Slice 1 hook bodies raise ``NotImplementedError`` pointing at
-    the slice that wires them. Wired bodies in SLICE 2 / 3 will
-    replace this assertion with real reserve / commit / release
-    behaviour."""
+    """Remaining SLICE 1 hook bodies still raise ``NotImplementedError``
+    pointing at the SLICE 3 wiring. ``async_pre_call_hook`` was wired
+    in COV_D11_S2 — its delegation contract is pinned by
+    ``test_litellm_guardrail_pre_call.py``."""
     g = SpendGuardGuardrail(guardrail_name="test")
     method = getattr(g, method_name)
     with pytest.raises(NotImplementedError) as exc_info:
         await method(*args)
     msg = str(exc_info.value)
-    assert "COV_D11_S2" in msg or "COV_D11_S3" in msg, (
+    assert "COV_D11_S3" in msg, (
         f"NotImplementedError must reference wiring slice; got: {msg!r}"
     )
 

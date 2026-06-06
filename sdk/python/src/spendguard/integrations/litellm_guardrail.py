@@ -153,15 +153,41 @@ class SpendGuardGuardrail(CustomGuardrail):
         data: dict[str, Any],
         call_type: str,
     ) -> dict[str, Any] | None:
-        """Pre-call gate — wired in SLICE 2.
+        """Pre-call gate — pure delegation to ``_LoopBoundCallback``.
 
-        SLICE 2 will pure-delegate to
-        ``self._delegate.async_pre_call_hook(...)`` so reserve /
-        DEGRADE / DENY semantics stay single-sourced in ``litellm.py``.
+        Per ``review-standards.md`` §Slice 2:
+            * 2.1 (Blocker): pure delegation, fewer than 5 LOC of body
+              excluding signature, no new error handling.
+            * 2.2 (Blocker): ``DecisionDenied`` /
+              ``SidecarUnavailable`` / ``SpendGuardConfigError`` raises
+              propagate; no ``except`` swallowing.
+            * 2.3 (Blocker): return value forwarded verbatim from
+              delegate; no ``data`` mutation.
+
+        The delegate (``_LoopBoundCallback``) is single-sourced in
+        ``litellm.py`` and already implements:
+            * reserve via ``request_decision`` (litellm.py L388-399)
+            * DENY → ``DecisionDenied`` propagates (L400-401)
+              → LiteLLM proxy maps ``status_code=403`` to HTTP 403
+              automatically via ``getattr(exc, "status_code", 500)``
+              (per ``errors.py`` L53; see DESIGN §3.4 Path B).
+            * DEGRADE → ``SidecarUnavailable`` raised (L418-429)
+              → ``status_code=503`` (``errors.py`` L35) → HTTP 503.
+            * ALLOW → returns ``data`` unchanged (L476).
+            * Lazy event-loop binding via
+              ``_LoopBoundCallback._ensure_client`` (L804-863) — the
+              guardrail wrapper never touches the loop.
+
+        SLICE 1 sentinel resolvers (``_skeleton_budget_resolver`` etc)
+        surface as a loud ``SpendGuardConfigError("budget_resolver
+        returned None")`` from ``litellm.py`` L298-302 when this hook
+        runs without an operator-supplied resolver. That's by design:
+        SLICE 4 replaces the sentinels with the env-driven factory
+        per ``implementation.md`` §2.4. Until then, the hook fails
+        loudly (not silently) when wired against the default skeleton.
         """
-        raise NotImplementedError(
-            "SpendGuardGuardrail.async_pre_call_hook is wired in "
-            "COV_D11_S2 (reserve via _LoopBoundCallback delegate)."
+        return await self._delegate.async_pre_call_hook(
+            user_api_key_dict, cache, data, call_type,
         )
 
     async def async_post_call_success_hook(
