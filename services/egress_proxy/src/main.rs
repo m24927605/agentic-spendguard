@@ -79,6 +79,14 @@ async fn main() -> Result<()> {
 
     info!(bind_addr = %cfg.bind_addr, "spendguard-egress-proxy starting (slice 2 skeleton)");
 
+    // COV_01: routing table extraction. The shared
+    // spendguard-provider-routing crate owns ProviderConfig + ROUTING_TABLE
+    // but holds the per-provider response extractors behind a OnceLock that
+    // this binary populates with its providers::*::extract_usage fn
+    // pointers. Done before any request handler can call route().
+    routing::install_extractors()
+        .map_err(|e| anyhow::anyhow!("provider routing extractor registration: {e}"))?;
+
     // Slice 4a: connect to sidecar UDS + handshake with retry-with-backoff.
     // Spec §9: fail-fast if 30s elapses without successful handshake.
     let sidecar_cfg =

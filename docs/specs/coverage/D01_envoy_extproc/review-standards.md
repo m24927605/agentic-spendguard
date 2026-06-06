@@ -27,19 +27,21 @@ Reviewer MUST apply the universal §1 checklist from [`docs/review-standards/pre
 
 ## §2. SLICE 1 — Skeleton + provider-routing extraction
 
-### §2.1 Blocker-class checks
+### §2.1 Blocker-class checks (SLICE 1-5 transport carve-out)
+
+Per design §3.3 carve-out: SLICES 1-5 use **UDS** at `/var/run/spendguard/adapter.sock` for local-dev / docker-compose ergonomic; mTLS-over-TCP is a SLICE 6 hard-switch alongside Helm. The mTLS-TCP and SPIFFE checks below are **deferred to §7.1 (SLICE 6)**.
 
 - [ ] `crates/spendguard-provider-routing` extracted cleanly: no dead code left in `services/egress_proxy/src/routing.rs`; only re-exports remain.
 - [ ] `services/egress_proxy` regression: `cargo test -p spendguard-egress-proxy` passes byte-identically.
 - [ ] All `routes_*` tests in [`tests.md`](tests.md) §1.1 moved with the code; nothing left orphaned in egress_proxy.
 - [ ] `Cargo.toml` workspace exclude list updated for both new crates; `cargo build --workspace` still compiles.
-- [ ] mTLS-over-TCP transport configured; NO `tokio::net::UnixListener` or `SocketAddr::Unix` in the new service. Re-read design §3.3.
-- [ ] SVID cert pinning enforced on the sidecar-client side; SPIFFE URI SAN matches `spiffe://<tenant>/sidecar` regex.
+- [ ] Transport: UDS at `/var/run/spendguard/adapter.sock` is acceptable here. The SLICE 1-5 deployment shape is same-pod / same-node; cross-pod mTLS is SLICE 6's responsibility.
+- [ ] `tonic::net::UnixListener` / `UnixStream` is permitted in SLICE 1-5 code paths; the production `mTLS-TCP` hard-switch is gated to SLICE 6 (see §7.1 below).
 
-### §2.2 Major-class checks
+### §2.2 Major-class checks (SLICE 1-5 transport carve-out)
 
 - [ ] `Config::from_env` returns typed error (not `unwrap`) for missing required vars.
-- [ ] Handshake failure on startup exits process with non-zero status; readiness probe returns 503 until handshake succeeds.
+- [ ] Handshake failure on startup exits process with non-zero status. (Note: `/readyz` HTTP probe wiring is deferred to **§7.1 SLICE 6** alongside the mTLS-TCP hard-switch — co-deferred per design §3.3 carve-out, because the readiness signal is only consumed by Kubernetes, which is also where SLICE 6 lands.)
 - [ ] No `unwrap()` / `expect()` on Result types in `main.rs` or `server.rs` request paths.
 
 ### §2.3 Adversarial questions
@@ -143,7 +145,9 @@ Reviewer MUST apply the universal §1 checklist from [`docs/review-standards/pre
 
 ## §7. SLICE 6 — Helm sub-chart
 
-### §7.1 Blocker-class checks
+### §7.1 Blocker-class checks (SLICE 6 production transport hard-switch)
+
+Per design §3.3 carve-out, SLICE 6 is the transport hard-switch from UDS (SLICE 1-5) to mTLS-over-TCP. The SLICE 1-5 UDS code paths MUST be removed or guarded off here; the readiness probe lands alongside.
 
 - [ ] `envoyExtproc.enabled` defaults to `false`; opt-in only (acceptance gate 21).
 - [ ] No fail-open: `tenant_id` required at render time (matches GA_03 fail-closed posture).
@@ -152,6 +156,9 @@ Reviewer MUST apply the universal §1 checklist from [`docs/review-standards/pre
 - [ ] Container runs `runAsNonRoot: true`, `readOnlyRootFilesystem: true`, `capabilities.drop: ["ALL"]`.
 - [ ] Image is non-root verified at the OCI layer (Trivy gate 29).
 - [ ] Helm kind-cluster install passes (acceptance gate 24).
+- [ ] **Transport hard-switch: mTLS-over-TCP configured. NO `tokio::net::UnixListener` or `SocketAddr::Unix` in production execution paths of `services/envoy_extproc/src/`. Re-read design §3.3.** (UDS-using test fixtures or `#[cfg(test)]`-gated helpers do NOT count.)
+- [ ] **SVID cert pinning enforced on the sidecar-client side; SPIFFE URI SAN matches `spiffe://<tenant>/sidecar` regex.**
+- [ ] **`/readyz` HTTP probe returns 503 until the mTLS sidecar handshake succeeds, then 200. Kubernetes readinessProbe in the Helm sub-chart points at `/readyz`.**
 
 ### §7.2 Major-class checks
 
@@ -200,7 +207,9 @@ Every R1+ review must spot-check these end-to-end invariants:
 3. **No audit chain schema changes** — `git diff main...HEAD -- services/canonical_ingest/` is empty.
 4. **`spendguard-provider-routing` is the only new shared crate** — no other extractions.
 5. **Sidecar adapter is the only audit write path** — `grep -rn "INSERT INTO audit_outbox\|INSERT INTO canonical_events" services/envoy_extproc/ crates/spendguard-provider-routing/` returns 0.
-6. **mTLS over TCP, never UDS** — `grep -rn "UnixListener\|UnixStream\|/run/spendguard/sidecar.sock" services/envoy_extproc/src/` returns 0.
+6. **Transport carve-out (design §3.3):**
+   - **SLICE 1-5**: UDS at `/var/run/spendguard/adapter.sock` is permitted. The grep gate is NOT applied here.
+   - **SLICE 6+**: production execution paths in `services/envoy_extproc/src/` MUST be UDS-free. `grep -rn "UnixListener\|UnixStream\|/var/run/spendguard/adapter.sock" services/envoy_extproc/src/ --exclude-dir=tests` returns 0 (or hits only `#[cfg(test)]`-gated code, which reviewers spot-check by hand).
 
 ---
 

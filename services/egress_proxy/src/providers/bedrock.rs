@@ -40,79 +40,20 @@
 //!
 //! v1 handles both shapes via shape sniffing.
 
-use once_cell::sync::Lazy;
-use regex::Regex;
 use serde_json::Value;
-use spendguard_tokenizer::EncoderKind;
-use tracing::warn;
 
 use crate::routing::UsageMetrics;
 
-/// SLICE_04 R2 B1 — Anthropic Claude 3 / 3.5 Bedrock dispatch
-/// (cross-region prefix permitted).
-static BEDROCK_ANTHROPIC_3_5: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(
-        r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-5-(sonnet|haiku|opus)(-\d{8})?-v\d+:\d+$",
-    )
-    .expect("bedrock anthropic-3-5 regex")
-});
-static BEDROCK_ANTHROPIC_3: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-(sonnet|haiku|opus)(-\d{8})?-v\d+:\d+$")
-        .expect("bedrock anthropic-3 regex")
-});
-/// SLICE_04 R2 B1 — Cohere Command R Bedrock dispatch
-/// (cross-region prefix permitted). Note that the upstream Cohere
-/// encoder is feature-gated in the tokenizer crate (`cohere` Cargo
-/// feature); when off, model IDs fall to Tier 3.
-static BEDROCK_COHERE_COMMAND_R: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(?:[a-z][a-z0-9-]*\.)?cohere\.command(-r)?(-plus)?-v\d+:\d+$")
-        .expect("bedrock cohere regex")
-});
-/// SLICE_04 R2 B1 — Meta Llama 3.x Bedrock dispatch
-/// (cross-region prefix permitted). Pre-Llama-3 (`meta.llama2-*`)
-/// intentionally falls to Tier 3 per SLICE_04 R2 B2 narrow Option A.
-static BEDROCK_META_LLAMA3: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(?:[a-z][a-z0-9-]*\.)?meta\.llama3(-\d+)?-\d+b-instruct-v\d+:\d+$")
-        .expect("bedrock llama3 regex")
-});
+// COV_01: dispatch moved to crates/spendguard-provider-routing so that
+// services/envoy_extproc can share it. We re-export the shared symbol so
+// the existing `providers::bedrock::dispatch_tokenizer_kind` call sites
+// in this crate (and the egress_proxy unit tests below) keep compiling
+// byte-identical.
+#[allow(unused_imports)]
+pub use spendguard_provider_routing::bedrock::dispatch_tokenizer_kind;
 
-/// Bedrock-specific model dispatch — picks the correct tokenizer
-/// kind for a Bedrock model id.
-///
-/// Returns:
-///
-///   * `Some(EncoderKind::Anthropic)` for anthropic.claude-3 / 3.5 models
-///     (with or without cross-region prefix).
-///   * `Some(EncoderKind::Cohere)` for cohere.command-r / -r-plus models
-///     (with or without cross-region prefix). Note: the tokenizer
-///     library's `cohere` feature must be enabled for this to load a
-///     real encoder; otherwise it falls to Tier 3 inside the tokenizer.
-///   * `Some(EncoderKind::Llama)` for meta.llama3-* models.
-///   * `None` for unknown vendors / pre-Claude-3 / pre-Llama-3 /
-///     Cohere embed models. Caller emits the
-///     `tokenizer_unknown_model` metric per spec §3.3.
-///
-/// Per SLICE_04 R2 B2 — narrow Option A: silent under-count vs the
-/// conservative 5% Tier 3 margin makes Tier 3 the safer default for
-/// any unknown variant.
-pub fn dispatch_tokenizer_kind(model_id: &str) -> Option<EncoderKind> {
-    // 3.5 BEFORE 3 (first-match-wins; SLICE_04 ordering rule).
-    if BEDROCK_ANTHROPIC_3_5.is_match(model_id) {
-        return Some(EncoderKind::Anthropic);
-    }
-    if BEDROCK_ANTHROPIC_3.is_match(model_id) {
-        return Some(EncoderKind::Anthropic);
-    }
-    if BEDROCK_COHERE_COMMAND_R.is_match(model_id) {
-        return Some(EncoderKind::Cohere);
-    }
-    if BEDROCK_META_LLAMA3.is_match(model_id) {
-        return Some(EncoderKind::Llama);
-    }
-    // Unknown — caller emits tokenizer_unknown_model metric per spec §3.3.
-    warn!(model_id = %model_id, "bedrock unknown model; falling to Tier 3");
-    None
-}
+#[cfg(test)]
+use spendguard_tokenizer::EncoderKind;
 
 /// Pull usage metrics from a Bedrock InvokeModel JSON response.
 ///

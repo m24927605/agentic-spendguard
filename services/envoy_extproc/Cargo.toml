@@ -1,0 +1,63 @@
+[package]
+name = "spendguard-envoy-extproc"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard Envoy AI Gateway ExtProc sidecar (D01). Translates Envoy ExternalProcessor gRPC calls into SpendGuard sidecar UDS adapter calls. SLICE 1 skeleton: Handshake-only — bin + lib, vendored ext_proc.v3 proto, sidecar UDS handshake mirroring services/egress_proxy. See docs/specs/coverage/D01_envoy_extproc/."
+
+[[bin]]
+name = "spendguard-envoy-extproc"
+path = "src/main.rs"
+
+[lib]
+name = "spendguard_envoy_extproc"
+path = "src/lib.rs"
+
+[dependencies]
+# gRPC + protobuf. tonic 0.12 / prost 0.13 — workspace-aligned with
+# services/egress_proxy and services/sidecar so the shared
+# spendguard-provider-routing crate (and any future direct sidecar adapter
+# proto re-exports) Just Works.
+tonic = { version = "0.12", features = ["transport"] }
+prost = "0.13"
+prost-types = "0.13"
+
+# Async runtime.
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+
+# Sidecar UDS client transport.
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = "0.5"
+
+# COV_01 — provider routing table shared with services/egress_proxy.
+# SLICE 1 doesn't call route() yet (handshake-only), but main() still
+# registers a default no-op extractor set so a future slice can flip on
+# request-body parsing without re-init.
+spendguard-provider-routing = { path = "../../crates/spendguard-provider-routing" }
+spendguard-tokenizer = { path = "../../crates/spendguard-tokenizer" }
+
+# Observability.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Errors.
+thiserror = "1"
+anyhow = "1"
+
+# JSON for body parsing (chat/completions, messages) — wired in SLICE 2.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes = "1"
+
+# UUIDs for session_id derivation + request id correlation.
+uuid = { version = "1", features = ["v7", "v4"] }
+
+[build-dependencies]
+tonic-build = "0.12"
+prost-build = "0.13"
+
+[dev-dependencies]
+# Smoke-test deps. tonic transport + tokio's TcpListener::bind("127.0.0.1:0")
+# pattern is enough for SLICE 1.
+pretty_assertions = "1"

@@ -13,6 +13,10 @@ RUN ln -sf /usr/include/google ./proto/google
 COPY services/ids ./services/ids
 # SLICE_10 links tokenizer as an in-process path dependency.
 COPY crates/spendguard-tokenizer ./crates/spendguard-tokenizer
+# COV_01 (D01 Envoy ExtProc skeleton) — shared routing crate extracted
+# from services/egress_proxy/src/routing.rs so services/envoy_extproc can
+# share the same routing table. egress_proxy now consumes it via path dep.
+COPY crates/spendguard-provider-routing ./crates/spendguard-provider-routing
 COPY services/egress_proxy ./services/egress_proxy
 WORKDIR /build/services/egress_proxy
 RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \

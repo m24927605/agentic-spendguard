@@ -28,9 +28,15 @@ A new service `services/envoy_extproc`: a single binary plus a Helm sub-chart. I
 
 The service depends on `spendguard-tokenizer` (existing workspace member) plus `resolve_model_id` / `resolve_tokenizer_kind` from `services/egress_proxy/src/routing.rs`. Slice 1 extracts those into a shared crate `crates/spendguard-provider-routing` so both consumers share one source of truth.
 
-### 3.3 mTLS over TCP (not UDS)
+### 3.3 Transport: UDS in SLICES 1-5, mTLS-over-TCP from SLICE 6
 
-ExtProc runs in a different pod from the sidecar (the sidecar is per-app-pod; Envoy AI Gateway is its own deployment). SO_PEERCRED is unavailable. We use mTLS over TCP, mirroring [`charts/spendguard/templates/output_predictor_plugin_svid.yaml`](../../../../charts/spendguard/templates/output_predictor_plugin_svid.yaml); HARDEN_08's per-tenant SVID minting carries over.
+**Transport: SLICE 1-5 UDS at /var/run/spendguard/adapter.sock; SLICE 6 hard-switch to mTLS over TCP at https://<sidecar>:8443 with SPIFFE URI SAN pinning. The UDS path matches existing sidecar local-dev ergonomic; the mTLS-TCP path is required for production Helm.**
+
+**Carve-out rationale (LOCKED).** SLICES 1-5 use UDS at `/var/run/spendguard/adapter.sock` for local-dev / docker-compose ergonomic convenience — the path matches the existing `services/egress_proxy/src/sidecar_client.rs` default and lets the SLICE 1 skeleton dial the live sidecar from the same machine without standing up a cert authority. This restricts the SLICE 1-5 deployment shape to a *same-pod or same-node* sidecar layout, which is exactly what the demo + docker-compose smoke harness uses.
+
+**Production deployment shape (LOCKED at SLICE 6).** Once Helm wiring lands in SLICE 6, ExtProc runs in a different pod from the sidecar (the sidecar is per-app-pod; Envoy AI Gateway is its own deployment). SO_PEERCRED is unavailable across pod boundaries; we hard-switch to mTLS over TCP at `https://<sidecar>:8443` with SPIFFE URI SAN pinning, mirroring [`charts/spendguard/templates/output_predictor_plugin_svid.yaml`](../../../../charts/spendguard/templates/output_predictor_plugin_svid.yaml). HARDEN_08's per-tenant SVID minting carries over. The SLICE 6 wiring also lands the `/readyz` HTTP probe (deferred from SLICE 1 per the same carve-out).
+
+**Why a phased carve-out instead of mTLS-TCP from day one.** Standing up cert-manager + per-tenant SVIDs + readiness wiring in SLICE 1 would gate the routing-extraction work on Helm changes, which is the opposite of the slice-by-slice deliverable cadence. The carve-out keeps SLICE 1-5 implementable against the existing demo sidecar at zero infrastructure cost, then SLICE 6 makes the production transport switch atomically alongside Helm + cert wiring. Reviewers checking SLICE 6+ must reject any residual UDS code paths in the production execution flow.
 
 ### 3.4 Deny-on-fail-closed default
 
@@ -67,4 +73,4 @@ None. The ExtProc contract is stable in Envoy AI Gateway v0.6; we ship against t
 
 ---
 
-*Locked decisions: §3.1, §3.2, §3.3, §3.4, §3.5. Slice plan: §4 (7 slices). Anti-scope: §5.*
+*Locked decisions: §3.1, §3.2, §3.3 (phased: UDS in SLICES 1-5, mTLS-over-TCP from SLICE 6), §3.4, §3.5. Slice plan: §4 (7 slices). Anti-scope: §5.*

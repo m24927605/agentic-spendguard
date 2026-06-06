@@ -1,0 +1,180 @@
+// Envoy ExternalProcessor service — vendored subset.
+//
+// Source-of-truth: envoyproxy/envoy
+//   api/envoy/service/ext_proc/v3/external_processor.proto
+//   (fetched 2026-06-06; sha256 evidence in proto/VENDOR.md when generated)
+//
+// Why vendored:
+//   * The upstream tree pulls in xds.annotations.v3, udpa.annotations,
+//     validate, envoy.annotations, and a deep xDS dependency graph; for
+//     a wire-compatible client/server stub we only need the message
+//     shapes + the ExternalProcessor service definition.
+//   * Validation rules (`(validate.rules).*`) are server-side only; they
+//     are options on fields and have no effect on wire encoding so they
+//     are safe to omit.
+//   * versioning + deprecated_at_minor_version + work_in_progress
+//     annotations are likewise pure metadata; stripped here.
+//
+// Wire-compatible with Envoy 1.30+ / Envoy AI Gateway v0.6 (CNCF GA
+// 2026-05). This matches the proto3 field numbers + types of the
+// upstream file exactly so a stub built here interoperates with the
+// upstream Envoy ExtProc filter.
+//
+// Anti-scope (per docs/specs/coverage/D01_envoy_extproc/design.md §3.5
+// + §5):
+//   * TRAILERS phase types are vendored (HttpTrailers / TrailersResponse)
+//     so reviewers can see the full shape, but SLICE 1-4 do not handle
+//     them — the implementation responds with continue_response().
+//   * StreamedImmediateResponse / StreamedBodyResponse vendored for
+//     wire-compat but SLICE 1-4 only emit the simple ImmediateResponse
+//     shape.
+
+syntax = "proto3";
+
+package envoy.service.ext_proc.v3;
+
+import "envoy/config/core/v3/base.proto";
+import "envoy/extensions/filters/http/ext_proc/v3/processing_mode.proto";
+import "envoy/type/v3/http_status.proto";
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+
+option go_package = "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3;ext_procv3";
+
+// A service that can access and modify HTTP requests and responses as part of
+// a filter chain. See upstream `external_processor.proto` for the full
+// protocol description.
+service ExternalProcessor {
+  // Bidirectional stream: the data plane sends ProcessingRequest messages,
+  // the server replies with ProcessingResponse messages.
+  rpc Process(stream ProcessingRequest) returns (stream ProcessingResponse) {
+  }
+}
+
+message ProtocolConfiguration {
+  envoy.extensions.filters.http.ext_proc.v3.ProcessingMode.BodySendMode
+      request_body_mode = 1;
+  envoy.extensions.filters.http.ext_proc.v3.ProcessingMode.BodySendMode
+      response_body_mode = 2;
+  bool send_body_without_waiting_for_header_response = 3;
+}
+
+message ProcessingRequest {
+  reserved 1;
+  reserved "async_mode";
+
+  oneof request {
+    HttpHeaders request_headers = 2;
+    HttpHeaders response_headers = 3;
+    HttpBody request_body = 4;
+    HttpBody response_body = 5;
+    HttpTrailers request_trailers = 6;
+    HttpTrailers response_trailers = 7;
+  }
+
+  envoy.config.core.v3.Metadata metadata_context = 8;
+  map<string, google.protobuf.Struct> attributes = 9;
+  bool observability_mode = 10;
+  ProtocolConfiguration protocol_config = 11;
+}
+
+message ProcessingResponse {
+  oneof response {
+    HeadersResponse request_headers = 1;
+    HeadersResponse response_headers = 2;
+    BodyResponse request_body = 3;
+    BodyResponse response_body = 4;
+    TrailersResponse request_trailers = 5;
+    TrailersResponse response_trailers = 6;
+    ImmediateResponse immediate_response = 7;
+    StreamedImmediateResponse streamed_immediate_response = 11;
+  }
+
+  google.protobuf.Struct dynamic_metadata = 8;
+  envoy.extensions.filters.http.ext_proc.v3.ProcessingMode mode_override = 9;
+  bool request_drain = 12;
+  google.protobuf.Duration override_message_timeout = 10;
+}
+
+message HttpHeaders {
+  envoy.config.core.v3.HeaderMap headers = 1;
+  map<string, google.protobuf.Struct> attributes = 2;
+  bool end_of_stream = 3;
+}
+
+message HttpBody {
+  bytes body = 1;
+  bool end_of_stream = 2;
+  bool end_of_stream_without_message = 3;
+  bool grpc_message_compressed = 4;
+}
+
+message HttpTrailers {
+  envoy.config.core.v3.HeaderMap trailers = 1;
+}
+
+message HeadersResponse {
+  CommonResponse response = 1;
+}
+
+message BodyResponse {
+  CommonResponse response = 1;
+}
+
+message TrailersResponse {
+  HeaderMutation header_mutation = 1;
+}
+
+message StreamedImmediateResponse {
+  oneof response {
+    HttpHeaders headers_response = 1;
+    StreamedBodyResponse body_response = 2;
+    envoy.config.core.v3.HeaderMap trailers_response = 3;
+  }
+}
+
+message CommonResponse {
+  enum ResponseStatus {
+    CONTINUE = 0;
+    CONTINUE_AND_REPLACE = 1;
+  }
+
+  ResponseStatus status = 1;
+  HeaderMutation header_mutation = 2;
+  BodyMutation body_mutation = 3;
+  envoy.config.core.v3.HeaderMap trailers = 4;
+  bool clear_route_cache = 5;
+}
+
+message ImmediateResponse {
+  envoy.type.v3.HttpStatus status = 1;
+  HeaderMutation headers = 2;
+  bytes body = 3;
+  GrpcStatus grpc_status = 4;
+  string details = 5;
+}
+
+message GrpcStatus {
+  uint32 status = 1;
+}
+
+message HeaderMutation {
+  repeated envoy.config.core.v3.HeaderValueOption set_headers = 1;
+  repeated string remove_headers = 2;
+}
+
+message StreamedBodyResponse {
+  bytes body = 1;
+  bool end_of_stream = 2;
+  bool end_of_stream_without_message = 3;
+  bool grpc_message_compressed = 4;
+}
+
+message BodyMutation {
+  oneof mutation {
+    bytes body = 1;
+    bool clear_body = 2;
+    StreamedBodyResponse streamed_response = 3;
+  }
+}

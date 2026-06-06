@@ -1,0 +1,21 @@
+[package]
+name = "spendguard-provider-routing"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard provider routing table — shared between services/egress_proxy and services/envoy_extproc. Extracted from services/egress_proxy/src/routing.rs at COV_01. Defines ProviderKind / RequestShape / UsageMetrics / ProviderConfig + the per-path routing table; the per-provider response usage_extractor functions are registered at startup by each binary so the providers/ submodules stay where they are (per docs/specs/coverage/D01_envoy_extproc/implementation.md §4)."
+
+[lib]
+name = "spendguard_provider_routing"
+path = "src/lib.rs"
+
+[dependencies]
+once_cell = "1"
+regex = "1"
+serde_json = "1"
+tracing = "0.1"
+
+# Tokenizer EncoderKind discriminator (Bedrock per-model dispatch returns
+# EncoderKind so the consuming binary can pass it straight into
+# spendguard_tokenizer::count_tokens).
+spendguard-tokenizer = { path = "../spendguard-tokenizer" }
