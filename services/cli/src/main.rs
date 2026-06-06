@@ -11,7 +11,7 @@
 //! with a "see SLICE 7" message so the surface area is stable from day one.
 
 use clap::{Parser, Subcommand};
-use spendguard_cli::{install, InstallOpts, UninstallOpts};
+use spendguard_cli::{install, DoctorOpts, InstallOpts, UninstallOpts};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -28,16 +28,17 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Cmd {
     /// Issue a root CA, issue a localhost leaf, write four PEM files, and
-    /// (in later slices) install the CA into the OS trust store + emit
-    /// per-tool shell rc snippets.
+    /// install the CA into the OS trust store. macOS-only in SLICE 2;
+    /// Linux/Windows in SLICE 3/4.
     Install(InstallOpts),
 
-    /// Symmetric removal of every install artifact. Implementation: SLICE 7.
+    /// Symmetric removal of the trust-store entry. Full on-disk + rc
+    /// cleanup lands in SLICE 7.
     Uninstall(UninstallOpts),
 
-    /// Healthcheck: CA in store + HTTPS_PROXY reachable + TLS handshake.
-    /// Implementation: SLICE 7.
-    Doctor,
+    /// Healthcheck: CA in store (this slice) + HTTPS_PROXY reachable
+    /// + TLS handshake (SLICE 7).
+    Doctor(DoctorOpts),
 }
 
 fn main() -> anyhow::Result<()> {
@@ -61,11 +62,22 @@ fn main() -> anyhow::Result<()> {
             tracing::info!(
                 fingerprint = %report.ca_fingerprint_sha256,
                 ca_pem = %report.ca_pem_path.display(),
-                "spendguard install complete (SLICE 1: CA + leaf only)"
+                trust_store_locations = ?report.trust_store_locations,
+                "spendguard install complete (SLICE 2: CA + leaf + macOS keychain)"
             );
             Ok(())
         }
-        Cmd::Uninstall(opts) => spendguard_cli::uninstall(&opts).map(|_| ()),
-        Cmd::Doctor => spendguard_cli::doctor().map(|_| ()),
+        Cmd::Uninstall(opts) => {
+            let report = spendguard_cli::uninstall(&opts)?;
+            let json = serde_json::to_string_pretty(&report)?;
+            println!("{json}");
+            Ok(())
+        }
+        Cmd::Doctor(opts) => {
+            let report = spendguard_cli::doctor(&opts)?;
+            let json = serde_json::to_string_pretty(&report)?;
+            println!("{json}");
+            Ok(())
+        }
     }
 }

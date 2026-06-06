@@ -3,12 +3,17 @@
 //! Per design §8, the CLI exposes three top-level operations:
 //!
 //! - [`install`] — CA issuance, leaf issuance, trust-store install, per-tool
-//!   env emitter. This slice (COV_05) implements CA + leaf gen + on-disk
-//!   PEM persistence; trust-store install is sniped to SLICE 2/3/4 and
-//!   per-tool env emission to SLICE 5.
-//! - [`uninstall`] — symmetric removal of all install artifacts. Full impl
-//!   in SLICE 7.
-//! - [`doctor`] — CA-in-store + HTTPS_PROXY + TLS handshake. SLICE 7.
+//!   env emitter. SLICE 1 (COV_05) implemented CA + leaf gen + on-disk PEM
+//!   persistence. **SLICE 2 (COV_06, this slice)** wires the macOS trust
+//!   store (`MacosTrustStore`) into `install` / `uninstall` / `doctor` and
+//!   populates `InstallReport.trust_store_locations`. Linux trust install
+//!   lands in SLICE 3 (COV_07), Windows in SLICE 4 (COV_08).
+//! - [`uninstall`] — symmetric removal of trust-store entries +
+//!   on-disk PEMs. This slice implements the trust-store half on macOS;
+//!   the shell-rc / per-tool overrides half lands in SLICE 5 / SLICE 7.
+//! - [`doctor`] — CA-in-store check. This slice implements the trust-store
+//!   query on macOS; HTTPS_PROXY reachability + TLS handshake land in
+//!   SLICE 7.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -16,20 +21,16 @@ use std::path::PathBuf;
 
 pub mod ca;
 pub mod paths;
+pub mod trust;
 
 /// Per-user vs admin trust scope. Parsed in this slice; honoured by SLICE
 /// 2/3/4 trust-store backends.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TrustScope {
+    #[default]
     User,
     System,
-}
-
-impl Default for TrustScope {
-    fn default() -> Self {
-        Self::User
-    }
 }
 
 /// Shell rc backend selector. Parsed here; honoured by SLICE 5.
@@ -62,14 +63,42 @@ pub struct InstallOpts {
     pub shell: Option<ShellKind>,
 }
 
-/// `spendguard uninstall` options. Field set defined here so the CLI
-/// scaffold compiles; behaviour is SLICE 7.
+/// `spendguard uninstall` options.
+///
+/// SLICE 2 (COV_06) honours `--scope` and `--ca-fingerprint` to drive the
+/// macOS trust-store removal. SLICE 7 (COV_11) adds on-disk PEM cleanup
+/// (and resolves the fingerprint from the PEM when `--ca-fingerprint` is
+/// not supplied), shell-rc strip, and per-tool config cleanup.
 #[derive(Debug, Clone, clap::Args)]
 pub struct UninstallOpts {
     /// Match the `--scope` used at install time so the symmetric removal
     /// targets the same trust store.
     #[arg(long, value_enum, default_value_t = TrustScope::User)]
     pub scope: TrustScope,
+
+    /// Lower-case SHA-256 hex of the root CA to remove. Required in
+    /// SLICE 2 (COV_06); SLICE 7 will derive it from the on-disk PEM
+    /// when omitted.
+    #[arg(long, value_name = "HEX")]
+    pub ca_fingerprint: Option<String>,
+}
+
+/// `spendguard doctor` options.
+///
+/// SLICE 2 (COV_06) reads the supplied CA fingerprint and reports whether
+/// it's trusted in the configured keychain scope. SLICE 7 expands this with
+/// HTTPS_PROXY reachability + TLS handshake checks.
+#[derive(Debug, Clone, clap::Args)]
+pub struct DoctorOpts {
+    /// Trust-store scope to probe.
+    #[arg(long, value_enum, default_value_t = TrustScope::User)]
+    pub scope: TrustScope,
+
+    /// CA fingerprint to look for in the trust store. Optional — when
+    /// omitted, the report flags `ca_present_in_store = false` and adds a
+    /// warning. SLICE 7 will derive from the on-disk PEM.
+    #[arg(long, value_name = "HEX")]
+    pub ca_fingerprint: Option<String>,
 }
 
 /// What `install` produced. Public so SLICE 5 can extend it additively
@@ -102,10 +131,36 @@ pub struct DoctorReport {
     pub warnings: Vec<String>,
 }
 
-/// `spendguard install` entry point. In SLICE 1 the only honoured option is
-/// `--ca-out`; trust-store and shell-rc fields are populated as empty Vecs
-/// so the downstream slices can replace them without an API break.
+/// `spendguard install` entry point.
+///
+/// SLICE 2 (COV_06) wires the macOS trust store on top of SLICE 1's CA
+/// material:
+///
+/// 1. Issue a fresh root CA + localhost leaf (SLICE 1).
+/// 2. Write all four PEM files via the atomic temp-file + 0o600 rename
+///    pipeline (SLICE 1, R2 fix B1).
+/// 3. **NEW**: Hand the CA PEM to the OS trust-store backend (macOS only
+///    in this slice). Populates `InstallReport.trust_store_locations` so
+///    the operator + `doctor` know exactly which keychain was touched.
+///
+/// Non-macOS callers fall through with an empty `trust_store_locations`
+/// for now — SLICE 3 / SLICE 4 fill those in without an API break.
+///
+/// Internally this is a thin shim over [`install_with_trust_store`], which
+/// the unit tests use with a no-op trust backend to avoid mutating the
+/// developer's real keychain.
 pub fn install(opts: &InstallOpts) -> Result<InstallReport> {
+    let backend = trust_backend()?;
+    install_with_trust_store(opts, backend.as_ref())
+}
+
+/// `spendguard install` with an injected trust backend. Public so the
+/// integration test (`tests/trust_macos.rs`) and the eventual SLICE 7
+/// driver can compose this without re-implementing the four-PEM emit.
+pub fn install_with_trust_store(
+    opts: &InstallOpts,
+    trust_backend: &dyn trust::TrustStore,
+) -> Result<InstallReport> {
     let out_dir = match &opts.ca_out {
         Some(dir) => {
             std::fs::create_dir_all(dir)
@@ -129,27 +184,117 @@ pub fn install(opts: &InstallOpts) -> Result<InstallReport> {
     write_secret(&leaf_pem_path, leaf.cert_pem.as_bytes(), false)?;
     write_secret(&leaf_key_path, leaf.key_pem.as_bytes(), true)?;
 
+    let ca_fingerprint_sha256 = ca::fingerprint_hex(&root.fingerprint_sha256);
+
+    // SLICE 2: install the CA into the OS trust store. macOS only in this
+    // slice; Linux/Windows fall through with empty trust_store_locations
+    // (review-standards X1: cfg-gated, not runtime branched).
+    let trust_store_locations = trust_backend
+        .add_root(&ca_pem_path, opts.scope)
+        .context("install CA into OS trust store")?;
+
     Ok(InstallReport {
-        ca_fingerprint_sha256: ca::fingerprint_hex(&root.fingerprint_sha256),
+        ca_fingerprint_sha256,
         ca_pem_path,
         ca_key_path,
         leaf_pem_path,
         leaf_key_path,
-        trust_store_locations: Vec::new(),
+        trust_store_locations,
         shell_rc_paths: Vec::new(),
     })
 }
 
-/// `spendguard uninstall` — stub for SLICE 7.
-pub fn uninstall(_opts: &UninstallOpts) -> Result<UninstallReport> {
-    // Full impl is the inverse of install in reverse order (design §9).
-    // SLICE 1 wires the scaffold so the CLI surface is stable.
-    anyhow::bail!("spendguard uninstall is implemented in SLICE 7 (COV_11)")
+/// `spendguard uninstall` — SLICE 2 lands the trust-store half (macOS only).
+///
+/// Per design §9 (Uninstall guarantees) the full inverse is:
+///   1. Remove rc markers (SLICE 5 / SLICE 7).
+///   2. Clear per-tool config-file overrides (SLICE 5 / SLICE 7).
+///   3. **NEW (this slice)**: Remove CA from trust store(s) by fingerprint
+///      — macOS only.
+///   4. Delete on-disk CA / leaf PEM and key blobs (SLICE 7).
+///
+/// In this slice we accept the SHA-256 fingerprint via `opts.ca_fingerprint`
+/// — the caller is the operator with their install-report JSON to hand. The
+/// SLICE 7 implementation will resolve the fingerprint from the on-disk PEM
+/// when the operator doesn't have one handy.
+pub fn uninstall(opts: &UninstallOpts) -> Result<UninstallReport> {
+    let backend = trust_backend()?;
+    uninstall_with_trust_store(opts, backend.as_ref())
 }
 
-/// `spendguard doctor` — stub for SLICE 7.
-pub fn doctor() -> Result<DoctorReport> {
-    anyhow::bail!("spendguard doctor is implemented in SLICE 7 (COV_11)")
+/// `spendguard uninstall` with injected trust backend — see
+/// [`install_with_trust_store`] for the rationale.
+pub fn uninstall_with_trust_store(
+    opts: &UninstallOpts,
+    trust_backend: &dyn trust::TrustStore,
+) -> Result<UninstallReport> {
+    let fingerprint = match &opts.ca_fingerprint {
+        Some(fp) => fp.clone(),
+        None => {
+            // SLICE 7 will read the PEM from `paths::ca_root_dir()` and
+            // re-derive. For now require the operator to supply it explicitly.
+            anyhow::bail!(
+                "uninstall: --ca-fingerprint is required in SLICE 2 (COV_06); \
+                 SLICE 7 (COV_11) will re-derive from the on-disk PEM"
+            );
+        }
+    };
+
+    let trust_store_locations_cleared = trust_backend
+        .remove_root(&fingerprint, opts.scope)
+        .context("remove CA from OS trust store")?;
+
+    Ok(UninstallReport {
+        removed_files: Vec::new(),
+        trust_store_locations_cleared,
+    })
+}
+
+/// `spendguard doctor` — SLICE 2 reports whether the CA is trusted in the
+/// configured keychain.
+///
+/// SLICE 7 expands this to also probe `HTTPS_PROXY` and to drive a TLS
+/// handshake; for now we provide the deterministic, no-network half: was
+/// the CA fingerprint successfully landed in the trust store?
+pub fn doctor(opts: &DoctorOpts) -> Result<DoctorReport> {
+    let backend = trust_backend()?;
+    doctor_with_trust_store(opts, backend.as_ref())
+}
+
+/// `spendguard doctor` with injected trust backend.
+pub fn doctor_with_trust_store(
+    opts: &DoctorOpts,
+    trust_backend: &dyn trust::TrustStore,
+) -> Result<DoctorReport> {
+    let mut warnings = Vec::new();
+    let ca_present_in_store = match &opts.ca_fingerprint {
+        Some(fp) => trust_backend
+            .verify_installed(fp, opts.scope)
+            .unwrap_or_else(|e| {
+                warnings.push(format!("trust-store probe failed: {e:#}"));
+                false
+            }),
+        None => {
+            warnings.push(
+                "doctor: --ca-fingerprint not supplied; trust-store probe skipped".to_string(),
+            );
+            false
+        }
+    };
+
+    Ok(DoctorReport {
+        ca_present_in_store,
+        https_proxy_set: std::env::var("HTTPS_PROXY").ok(),
+        round_trip_ok: false, // SLICE 7
+        warnings,
+    })
+}
+
+/// Resolve the OS trust-store backend for the production entry points.
+/// Pulled out so the `#[cfg]` gate lives in one place — see
+/// [`trust::dispatch`] for the per-OS routing.
+fn trust_backend() -> Result<Box<dyn trust::TrustStore>> {
+    trust::dispatch()
 }
 
 /// Write a PEM blob to disk. On POSIX, `secret=true` clamps mode to `0o600`
@@ -227,8 +372,48 @@ fn tmp_sibling_for(path: &std::path::Path) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+    use std::sync::Mutex;
 
-    /// End-to-end: `install --ca-out <tmp>` writes 4 PEM files, all parseable.
+    /// Inert trust store used by lib-tests that exercise the install path
+    /// without touching the developer's real keychain. SLICE 2 (COV_06) added
+    /// this for the `install_with_trust_store` shim so unit tests can stay
+    /// hermetic on macOS hosts — the real keychain integration test lives in
+    /// `services/cli/tests/trust_macos.rs` and is `#[ignore]`-gated.
+    #[derive(Debug, Default)]
+    struct NoopTrustStore {
+        added: Mutex<Vec<PathBuf>>,
+        removed: Mutex<Vec<String>>,
+    }
+
+    impl trust::TrustStore for NoopTrustStore {
+        fn add_root(&self, ca_pem_path: &Path, _scope: TrustScope) -> Result<Vec<PathBuf>> {
+            self.added.lock().unwrap().push(ca_pem_path.to_path_buf());
+            Ok(vec![PathBuf::from("/tmp/noop-trust-store")])
+        }
+        fn remove_root(
+            &self,
+            fingerprint_sha256_hex: &str,
+            _scope: TrustScope,
+        ) -> Result<Vec<PathBuf>> {
+            self.removed
+                .lock()
+                .unwrap()
+                .push(fingerprint_sha256_hex.to_string());
+            Ok(vec![PathBuf::from("/tmp/noop-trust-store")])
+        }
+        fn verify_installed(
+            &self,
+            _fingerprint_sha256_hex: &str,
+            _scope: TrustScope,
+        ) -> Result<bool> {
+            Ok(true)
+        }
+    }
+
+    /// End-to-end: `install_with_trust_store --ca-out <tmp>` writes 4 PEM
+    /// files, all parseable. Uses NoopTrustStore so the developer's real
+    /// keychain stays untouched.
     #[test]
     fn install_writes_four_pem_files() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -237,7 +422,8 @@ mod tests {
             ca_out: Some(tmp.path().to_path_buf()),
             shell: None,
         };
-        let report = install(&opts).expect("install");
+        let backend = NoopTrustStore::default();
+        let report = install_with_trust_store(&opts, &backend).expect("install");
 
         for p in [
             &report.ca_pem_path,
@@ -256,8 +442,106 @@ mod tests {
             "sha256 hex must be 64 chars, got {}",
             report.ca_fingerprint_sha256
         );
-        assert!(report.trust_store_locations.is_empty());
+        // SLICE 2: trust_store_locations is populated by the (noop here)
+        // backend's add_root return value.
+        assert_eq!(
+            report.trust_store_locations,
+            vec![PathBuf::from("/tmp/noop-trust-store")],
+            "install_with_trust_store should surface the backend's return value"
+        );
         assert!(report.shell_rc_paths.is_empty());
+    }
+
+    /// SLICE 2: `install_with_trust_store` calls `add_root` exactly once with
+    /// the CA PEM path it wrote.
+    #[test]
+    fn install_invokes_trust_backend_add_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let opts = InstallOpts {
+            scope: TrustScope::User,
+            ca_out: Some(tmp.path().to_path_buf()),
+            shell: None,
+        };
+        let backend = NoopTrustStore::default();
+        let report = install_with_trust_store(&opts, &backend).expect("install");
+
+        let added = backend.added.lock().unwrap().clone();
+        assert_eq!(added.len(), 1, "add_root called exactly once");
+        assert_eq!(added[0], report.ca_pem_path);
+    }
+
+    /// SLICE 2: `uninstall_with_trust_store` requires `--ca-fingerprint`.
+    #[test]
+    fn uninstall_requires_ca_fingerprint_in_slice_2() {
+        let backend = NoopTrustStore::default();
+        let opts = UninstallOpts {
+            scope: TrustScope::User,
+            ca_fingerprint: None,
+        };
+        let err = uninstall_with_trust_store(&opts, &backend)
+            .expect_err("must require fingerprint until SLICE 7");
+        assert!(format!("{err:#}").contains("ca-fingerprint"));
+    }
+
+    /// SLICE 2: `uninstall_with_trust_store` forwards the fingerprint to the
+    /// backend and surfaces the cleared locations.
+    #[test]
+    fn uninstall_invokes_backend_remove_root() {
+        let backend = NoopTrustStore::default();
+        let opts = UninstallOpts {
+            scope: TrustScope::User,
+            ca_fingerprint: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            ),
+        };
+        let report = uninstall_with_trust_store(&opts, &backend).expect("uninstall");
+        assert_eq!(
+            report.trust_store_locations_cleared,
+            vec![PathBuf::from("/tmp/noop-trust-store")]
+        );
+        let removed = backend.removed.lock().unwrap().clone();
+        assert_eq!(removed.len(), 1);
+        assert_eq!(
+            removed[0],
+            "0000000000000000000000000000000000000000000000000000000000000000"
+        );
+    }
+
+    /// SLICE 2: `doctor_with_trust_store` reports the trust-store probe
+    /// result and surfaces a warning when no fingerprint is supplied.
+    #[test]
+    fn doctor_without_fingerprint_warns_and_reports_false() {
+        let backend = NoopTrustStore::default();
+        let opts = DoctorOpts {
+            scope: TrustScope::User,
+            ca_fingerprint: None,
+        };
+        let report = doctor_with_trust_store(&opts, &backend).expect("doctor");
+        assert!(!report.ca_present_in_store);
+        assert!(report
+            .warnings
+            .iter()
+            .any(|w| w.contains("ca-fingerprint not supplied")));
+    }
+
+    #[test]
+    fn doctor_with_fingerprint_returns_backend_probe() {
+        let backend = NoopTrustStore::default();
+        let opts = DoctorOpts {
+            scope: TrustScope::User,
+            ca_fingerprint: Some(
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into(),
+            ),
+        };
+        let report = doctor_with_trust_store(&opts, &backend).expect("doctor");
+        assert!(
+            report.ca_present_in_store,
+            "NoopTrustStore.verify_installed returns true"
+        );
+        assert!(report
+            .warnings
+            .iter()
+            .all(|w| !w.contains("ca-fingerprint not supplied")));
     }
 
     /// `T2` — private key files are mode 0o600.
@@ -271,7 +555,8 @@ mod tests {
             ca_out: Some(tmp.path().to_path_buf()),
             shell: None,
         };
-        let report = install(&opts).expect("install");
+        let backend = NoopTrustStore::default();
+        let report = install_with_trust_store(&opts, &backend).expect("install");
 
         for key_path in [&report.ca_key_path, &report.leaf_key_path] {
             let meta = std::fs::metadata(key_path).expect("metadata");
@@ -308,7 +593,9 @@ mod tests {
             ca_out: Some(tmp.path().to_path_buf()),
             shell: None,
         };
-        let report = install(&opts).expect("install over pre-existing key files");
+        let backend = NoopTrustStore::default();
+        let report =
+            install_with_trust_store(&opts, &backend).expect("install over pre-existing key files");
 
         for key_path in [&report.ca_key_path, &report.leaf_key_path] {
             let meta = std::fs::metadata(key_path).expect("metadata");
