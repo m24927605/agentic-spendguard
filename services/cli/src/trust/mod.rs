@@ -1,9 +1,9 @@
 //! OS trust-store backend dispatch.
 //!
-//! SLICE 2 (COV_06) shipped the macOS keychain backend; **SLICE 3 (COV_07,
-//! this slice)** plugs the Linux multi-distro backend (Debian/RHEL/Arch/
-//! Alpine) into the same [`TrustStore`] trait. SLICE 4 (COV_08) adds the
-//! Windows backend. The [`install`](crate::install) /
+//! SLICE 2 (COV_06) shipped the macOS keychain backend; SLICE 3 (COV_07)
+//! added the Linux multi-distro backend (Debian/RHEL/Arch/Alpine);
+//! **SLICE 4 (COV_08, this slice)** plugs the Windows `certutil` backend
+//! into the same [`TrustStore`] trait. The [`install`](crate::install) /
 //! [`uninstall`](crate::uninstall) / [`doctor`](crate::doctor) entry points
 //! stay OS-agnostic — the per-OS branching lives exclusively in the
 //! `#[cfg]`-gated [`dispatch`] below (review-standards `X1`).
@@ -42,6 +42,18 @@ pub mod macos;
 // `macos::MacosTrustStore`, not `linux::LinuxTrustStore::new()`
 // (review-standards `X1`).
 pub mod linux;
+
+// SLICE 4 (COV_08) note: `windows` follows the SAME LOCKED-at-SLICE-3-R2
+// module-decl pattern as `linux` — declared on every host (not just
+// `target_os = "windows"`) so its FakeRunner-driven unit tests run on the
+// macOS dev laptop. To keep the macOS compile hermetic, `windows.rs` MUST
+// NOT import `windows` / `windows-sys` crate types in any public
+// signature: every shell-out routes through the `CommandRunner` trait +
+// `std::path::Path`, exactly mirroring how `linux.rs` keeps
+// `CommandRunner` at the boundary. `dispatch()` below is still cfg-gated
+// so production install on macOS / Linux keeps routing to its native
+// backend, not `windows::WindowsTrustStore::new()` (review-standards `X1`).
+pub mod windows;
 
 /// Capture of a shell-out invocation. `Output::status` is the OS exit code;
 /// `Output::stdout` / `Output::stderr` are captured as `Vec<u8>` so the
@@ -118,13 +130,18 @@ pub trait TrustStore {
 /// Dispatch to the platform-specific backend.
 ///
 /// - macOS (SLICE 2 / COV_06) → [`macos::MacosTrustStore`].
-/// - Linux (**SLICE 3 / COV_07**) → [`linux::LinuxTrustStore`]. Detects
+/// - Linux (SLICE 3 / COV_07) → [`linux::LinuxTrustStore`]. Detects
 ///   distro family from `/etc/os-release` at construction time; an
 ///   unrecognised family fails closed on the first `add_root` call
 ///   rather than at dispatch — keeps `doctor` and other read-only flows
 ///   informative on hosts we don't know how to mutate.
-/// - Windows (SLICE 4 / COV_08) → still unimplemented; the catch-all arm
-///   below produces a clear "this slice doesn't cover Windows" error.
+/// - Windows (**SLICE 4 / COV_08**) → [`windows::WindowsTrustStore`].
+///   Shell-outs to the host `certutil` against the `Root` cert store;
+///   `--scope user` writes to `HKCU`, `--scope system` writes to `HKLM`
+///   and requires an already-elevated shell (we do not prepend `runas`).
+/// - Any other host → catch-all `bail!`. The four supported OSes above
+///   cover the D02 strategy memo's CI matrix; non-listed hosts produce a
+///   clear "no SpendGuard backend on this OS" error.
 #[cfg(target_os = "macos")]
 pub fn dispatch() -> Result<Box<dyn TrustStore>> {
     Ok(Box::new(macos::MacosTrustStore::new()))
@@ -135,10 +152,16 @@ pub fn dispatch() -> Result<Box<dyn TrustStore>> {
     Ok(Box::new(linux::LinuxTrustStore::new()))
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[cfg(target_os = "windows")]
+pub fn dispatch() -> Result<Box<dyn TrustStore>> {
+    Ok(Box::new(windows::WindowsTrustStore::new()))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
 pub fn dispatch() -> Result<Box<dyn TrustStore>> {
     anyhow::bail!(
-        "trust-store install is implemented for macOS (COV_06) and Linux \
-         (COV_07) at this slice; Windows lands in COV_08 (SLICE 4)"
+        "trust-store install is implemented for macOS (COV_06), Linux \
+         (COV_07), and Windows (COV_08); no backend matches this host's \
+         target_os"
     )
 }
