@@ -471,26 +471,11 @@ def test_pre_call_hook_has_no_try_except():
 
 
 # ---------------------------------------------------------------------------
-# Other hooks remain stubbed (SLICE 3 scope-fence)
+# Slice-boundary scope-fence (SLICE 3 wired 2026-06-07)
 # ---------------------------------------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_post_call_success_hook_still_raises_not_implemented():
-    """Scope-fence: SLICE 2 wires ONLY async_pre_call_hook. The two
-    post-call hooks MUST remain ``NotImplementedError`` stubs pointing
-    at SLICE 3. This pins the slice boundary per the slice doc's
-    'Anti-scope' section."""
-    g = SpendGuardGuardrail(guardrail_name="test")
-    with pytest.raises(NotImplementedError, match="COV_D11_S3"):
-        await g.async_post_call_success_hook({}, None, None)
-
-
-@pytest.mark.asyncio
-async def test_post_call_failure_hook_still_raises_not_implemented():
-    """Scope-fence sibling: failure hook MUST also remain a SLICE 3 stub."""
-    g = SpendGuardGuardrail(guardrail_name="test")
-    with pytest.raises(NotImplementedError, match="COV_D11_S3"):
-        await g.async_post_call_failure_hook(
-            {}, RuntimeError("x"), None,
-        )
+#
+# SLICE 3 wired both post-call hooks; their delegation contracts are
+# pinned by ``test_litellm_guardrail_post_call.py``. The two stub-only
+# tests that previously lived here have been removed as part of the
+# SLICE 3 ship. The pre-call body invariants above (< 5 LOC, no
+# try/except, exact return-await delegation form) remain intact.

@@ -1,5 +1,5 @@
 # ruff: noqa: ANN401  # LiteLLM's CustomGuardrail interface uses untyped Any
-"""LiteLLM proxy ``CustomGuardrail`` plugin — SLICE 1 skeleton.
+"""LiteLLM proxy ``CustomGuardrail`` plugin — SLICE 1 + 2 + 3 wired.
 
 Discoverability + zero-Python install path for SpendGuard on the
 LiteLLM proxy. Wraps the existing ``_LoopBoundCallback`` from
@@ -8,21 +8,36 @@ both the legacy ``litellm_settings.callbacks`` path AND the new
 ``guardrails:`` registry path drive the same reserve / commit / release
 flow (DESIGN.md §3.4 v1 Path B).
 
-Slice 1 ships:
+Slice 1 shipped:
     * Module + class ``SpendGuardGuardrail`` registered against the
       LiteLLM 1.50+ ``CustomGuardrail`` ABC.
     * Composition with ``_LoopBoundCallback`` — the delegate instance
       lives on ``self._delegate``. Lazy loop binding stays in the
       delegate; this wrapper never touches an event loop at import.
-    * Stub hook bodies that raise ``NotImplementedError`` pointing at
-      the slice that will wire them. Tests verify they are
-      coroutines + present without invoking the wired flow.
 
-Anti-scope for SLICE 1 (per ``docs/slices/COV_D11_S1_guardrail_class.md``):
-    * No real pre-call wiring — SLICE 2.
-    * No commit / release wiring — SLICE 3.
+Slice 2 shipped:
+    * ``async_pre_call_hook`` wired — pure delegation to
+      ``_LoopBoundCallback.async_pre_call_hook``.
+
+Slice 3 ships (this file):
+    * ``async_post_call_success_hook`` wired — translates the
+      ``CustomGuardrail`` ``(data, user_api_key_dict, response)``
+      signature into the ``CustomLogger`` ``(kwargs, response_obj,
+      start_time, end_time)`` shape that
+      ``_LoopBoundCallback.async_log_success_event`` consumes.
+    * ``async_post_call_failure_hook`` wired — translates the
+      ``CustomGuardrail`` ``(request_data, original_exception,
+      user_api_key_dict, traceback_str)`` signature into the
+      ``CustomLogger`` shape that
+      ``_LoopBoundCallback.async_log_failure_event`` consumes, then
+      re-raises the original exception per LiteLLM's failure-hook
+      propagation contract.
+
+Anti-scope for SLICE 3 (per ``docs/slices/COV_D11_S3_commit_release.md``):
     * No env-driven default factory — SLICE 4.
     * No ``proxy_config.yaml`` snippet — SLICE 5.
+    * No demo mode — SLICE 6.
+    * No docs page — SLICE 7.
 
 Backwards compatibility (per ``implementation.md`` §3):
     * ``spendguard.integrations.litellm.SpendGuardLiteLLMCallback`` is
@@ -196,17 +211,64 @@ class SpendGuardGuardrail(CustomGuardrail):
         user_api_key_dict: Any,
         response: Any,
     ) -> None:
-        """Commit path — wired in SLICE 3.
+        """Commit path — pure delegation to ``_LoopBoundCallback``.
 
-        SLICE 3 will translate the ``CustomGuardrail`` post-call
-        signature into the ``CustomLogger`` ``kwargs / response_obj``
-        shape that ``_LoopBoundCallback.async_log_success_event``
-        expects, including the streaming-fallback branch.
+        Per ``review-standards.md`` §Slice 3:
+            * 3.1 (Blocker): kwargs dict carries ``litellm_call_id``
+              copied from ``data`` so the delegate's ``_get_stash``
+              finds the SLICE 2 reserve stash. Missing
+              ``litellm_call_id`` → ``_get_stash`` returns None →
+              silent no-op (per ``litellm.py`` L482-483 contract).
+            * 3.3 (Major): ``start_time`` / ``end_time`` are
+              propagated from ``data`` when LiteLLM stamps them; the
+              delegate's commit path reads ``response.usage`` (not
+              timestamps) so ``None`` is safe — pinned by U05.
+            * 3.4 (Blocker): when ``response.usage`` is None the
+              delegate's streaming-fallback branch fires
+              (``litellm.py`` L598-608) — commits the estimator
+              snapshot + WARN log. Owned by the delegate; the wrapper
+              forwards the (possibly usage-less) ``response`` verbatim.
+
+        Translation contract (CustomGuardrail → CustomLogger):
+            ``CustomGuardrail.async_post_call_success_hook`` signature::
+
+                (data, user_api_key_dict, response)
+
+            ``_LoopBoundCallback.async_log_success_event`` signature::
+
+                (kwargs: dict, response_obj, start_time, end_time)
+
+            * ``kwargs = dict(data)`` so ``kwargs["litellm_call_id"]``
+              hits the same stash key the pre-call hook populated.
+              ``dict(data)`` is a shallow copy — never mutates the
+              caller's ``data`` dict (review-standards 2.3 sibling
+              invariant carried over to SLICE 3).
+            * ``kwargs["user_api_key_dict"]`` populated so the
+              delegate's resolver context construction
+              (``litellm.py`` L519) has the team/tenant scope.
+            * ``response`` forwarded as ``response_obj`` verbatim;
+              the delegate's reconciler reads ``response.usage``
+              and ``response.id``.
+            * ``start_time`` / ``end_time`` propagated from ``data``
+              when LiteLLM stamps them (forward-compat); fall back to
+              ``None`` (delegate ignores them — commit reads
+              ``response.usage``).
+
+        LiteLLM contract: success hook returns ``None``; the proxy
+        does not expect a return value on this surface (verified
+        against ``CustomGuardrail.async_post_call_success_hook``
+        signature -> ``Any`` but the registry ignores returns).
         """
-        raise NotImplementedError(
-            "SpendGuardGuardrail.async_post_call_success_hook is wired "
-            "in COV_D11_S3 (commit via delegate.async_log_success_event)."
+        kwargs: dict[str, Any] = dict(data)
+        kwargs["litellm_call_id"] = data.get("litellm_call_id")
+        kwargs["user_api_key_dict"] = user_api_key_dict
+        await self._delegate.async_log_success_event(
+            kwargs,
+            response,
+            data.get("start_time"),
+            data.get("end_time"),
         )
+        return None
 
     async def async_post_call_failure_hook(
         self,
@@ -215,19 +277,74 @@ class SpendGuardGuardrail(CustomGuardrail):
         user_api_key_dict: Any,
         traceback_str: str | None = None,
     ) -> None:
-        """Release path — wired in SLICE 3.
+        """Release path — pure delegation to ``_LoopBoundCallback``.
 
-        SLICE 3 will translate the ``CustomGuardrail`` failure-hook
-        signature into the ``CustomLogger`` ``kwargs / exception``
-        shape that ``_LoopBoundCallback.async_log_failure_event``
-        consumes. ``traceback_str`` is the LiteLLM 1.55+ optional
-        argument; signature accepts it for forward-compat without
-        forcing a floor-bump in SLICE 1.
+        Per ``review-standards.md`` §Slice 3:
+            * 3.1 (Blocker): kwargs dict carries ``litellm_call_id``
+              copied from ``request_data`` so the delegate's
+              ``_get_stash`` finds the SLICE 2 reserve stash.
+            * 3.2 (Blocker): ``kwargs["exception"] =
+              original_exception`` is populated BEFORE forwarding so
+              the delegate's ``_classify_failure`` (``litellm.py``
+              L739-760) can map ``asyncio.CancelledError`` → outcome
+              CANCELLED vs every other exception → outcome FAILURE.
+              Missing this populate would silently misclassify every
+              failure as FAILURE.
+            * 3.3 (Major): ``start_time`` / ``end_time`` propagated
+              from ``request_data`` when LiteLLM stamps them; the
+              delegate's release path does not consume them, so
+              ``None`` is safe.
+            * 3.5 (Minor): no new exception types introduced. The
+              original exception is re-raised verbatim per LiteLLM's
+              failure-hook propagation contract (HTTP error path).
+
+        Translation contract (CustomGuardrail → CustomLogger):
+            ``CustomGuardrail.async_post_call_failure_hook`` signature::
+
+                (request_data, original_exception, user_api_key_dict,
+                 traceback_str=None)
+
+            ``_LoopBoundCallback.async_log_failure_event`` signature::
+
+                (kwargs: dict, response_obj, start_time, end_time)
+
+            * ``kwargs = dict(request_data)`` shallow copy (caller
+              dict never mutated).
+            * ``kwargs["exception"] = original_exception`` so
+              ``_classify_failure`` reads the exception object.
+            * ``kwargs["litellm_call_id"]`` copied from
+              ``request_data`` so ``_get_stash`` finds the
+              reservation.
+            * ``response_obj`` passed as None (no successful response
+              on the failure path); the delegate's release branch
+              tolerates this via ``getattr(response_obj, "id", "")``
+              (``litellm.py`` L491-493).
+            * ``traceback_str`` is the LiteLLM 1.55+ optional arg;
+              not forwarded into the delegate's kwargs by design
+              (the delegate already has the exception object;
+              traceback strings can leak PII into audit logs and the
+              release path does not consume them).
+
+        LiteLLM contract: failure hook is expected to propagate the
+        original exception so the proxy returns the underlying HTTP
+        error rather than swallowing it. The delegate's
+        ``async_log_failure_event`` already swallows its own RPC
+        errors (``litellm.py`` L722-729) to avoid masking the
+        original LiteLLM exception — we therefore re-raise the
+        original exception verbatim after the delegate's release
+        call completes (or its own errors are logged).
         """
-        raise NotImplementedError(
-            "SpendGuardGuardrail.async_post_call_failure_hook is wired "
-            "in COV_D11_S3 (release via delegate.async_log_failure_event)."
+        kwargs: dict[str, Any] = dict(request_data)
+        kwargs["litellm_call_id"] = request_data.get("litellm_call_id")
+        kwargs["user_api_key_dict"] = user_api_key_dict
+        kwargs["exception"] = original_exception
+        await self._delegate.async_log_failure_event(
+            kwargs,
+            None,
+            request_data.get("start_time"),
+            request_data.get("end_time"),
         )
+        raise original_exception
 
 
 __all__ = ["SpendGuardGuardrail"]

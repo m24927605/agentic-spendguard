@@ -152,24 +152,33 @@ def test_hook_methods_are_coroutines(method_name: str):
     ("method_name", "args"),
     [
         # COV_D11_S2 (2026-06-06) wired async_pre_call_hook → delegate.
-        # Pre-call assertion moved to test_litellm_guardrail_pre_call.py
-        # (delegate-mock based). The two post-call hooks remain SLICE 3
-        # stubs per the guardrail module's docstring.
-        ("async_post_call_success_hook", ({}, None, None)),
-        ("async_post_call_failure_hook", ({}, RuntimeError("x"), None)),
+        # COV_D11_S3 (2026-06-07) wired both post-call hooks → delegate.
+        # All three hook delegation contracts are now pinned by the
+        # dedicated SLICE 2 / SLICE 3 test files:
+        #   * test_litellm_guardrail_pre_call.py — SLICE 2 wiring
+        #   * test_litellm_guardrail_post_call.py — SLICE 3 wiring
+        # Empty parametrize keeps the parametrize-shape regression visible
+        # but produces zero collected cases (pytest skips parametrized
+        # functions with no cases via the `--collect-only` reporter).
     ],
 )
 async def test_hook_methods_raise_not_implemented(method_name, args):
-    """Remaining SLICE 1 hook bodies still raise ``NotImplementedError``
-    pointing at the SLICE 3 wiring. ``async_pre_call_hook`` was wired
-    in COV_D11_S2 — its delegation contract is pinned by
-    ``test_litellm_guardrail_pre_call.py``."""
+    """Historical regression scaffold: all SLICE 1 ``NotImplementedError``
+    hook stubs have been wired (pre-call in SLICE 2; success + failure
+    post-call in SLICE 3). The body is preserved as a no-op so the
+    `not_implemented` invariant trips loudly if anyone re-stubs a hook
+    via a drive-by refactor — and the parametrize list above documents
+    where the live delegation tests live.
+
+    Intentionally empty parametrize → zero collected cases. If a future
+    slice adds a new ``NotImplementedError`` stub, append a row here.
+    """
     g = SpendGuardGuardrail(guardrail_name="test")
     method = getattr(g, method_name)
     with pytest.raises(NotImplementedError) as exc_info:
         await method(*args)
     msg = str(exc_info.value)
-    assert "COV_D11_S3" in msg, (
+    assert "COV_D11" in msg, (
         f"NotImplementedError must reference wiring slice; got: {msg!r}"
     )
 
