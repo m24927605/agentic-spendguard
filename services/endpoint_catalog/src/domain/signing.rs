@@ -20,10 +20,7 @@ pub fn load_signing_key_pem(path: &str) -> Result<SigningKey> {
 }
 
 /// Sign a manifest body. Returns the base64 signature.
-pub fn sign_manifest_body(
-    key: &SigningKey,
-    body: &ManifestSigningBody<'_>,
-) -> Result<String> {
+pub fn sign_manifest_body(key: &SigningKey, body: &ManifestSigningBody<'_>) -> Result<String> {
     let canonical = canonicalize(serde_json::to_value(body)?)?;
     let sig = key.sign(canonical.as_bytes());
     Ok(base64::engine::general_purpose::STANDARD.encode(sig.to_bytes()))
@@ -92,10 +89,10 @@ pub fn canonical_sha256_hex(value: &Value) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::manifest::{Manifest, ManifestSigningBody};
+    use chrono::Utc;
     use ed25519_dalek::SigningKey;
     use rand::rngs::OsRng;
-    use chrono::Utc;
-    use crate::domain::manifest::{Manifest, ManifestSigningBody};
 
     #[test]
     fn sign_and_verify_roundtrip() {

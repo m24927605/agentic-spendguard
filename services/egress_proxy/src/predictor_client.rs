@@ -35,8 +35,8 @@ use tonic::transport::{Channel, Endpoint};
 use tracing::{debug, warn};
 
 use crate::proto::output_predictor::v1::{
-    output_predictor_client::OutputPredictorClient as OutputPredictorProtoClient,
-    PredictRequest, PredictResponse,
+    output_predictor_client::OutputPredictorClient as OutputPredictorProtoClient, PredictRequest,
+    PredictResponse,
 };
 use crate::proto::run_cost_projector::v1::{
     run_cost_projector_client::RunCostProjectorClient as RunCostProjectorProtoClient,
@@ -232,11 +232,9 @@ impl PredictorClientConfig {
     ///   SPENDGUARD_PROXY_RUN_COST_PROJECTOR_ENDPOINT — e.g. http://projector:50052
     pub fn from_env() -> Self {
         Self {
-            output_predictor_endpoint: std::env::var(
-                "SPENDGUARD_PROXY_OUTPUT_PREDICTOR_ENDPOINT",
-            )
-            .ok()
-            .filter(|s| !s.is_empty()),
+            output_predictor_endpoint: std::env::var("SPENDGUARD_PROXY_OUTPUT_PREDICTOR_ENDPOINT")
+                .ok()
+                .filter(|s| !s.is_empty()),
             run_cost_projector_endpoint: std::env::var(
                 "SPENDGUARD_PROXY_RUN_COST_PROJECTOR_ENDPOINT",
             )

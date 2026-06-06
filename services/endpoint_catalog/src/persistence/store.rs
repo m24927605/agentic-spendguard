@@ -37,10 +37,9 @@ pub trait Store: Send + Sync {
 pub fn make_store(cfg: &StorageConfig) -> Result<std::sync::Arc<dyn Store>> {
     match cfg.storage_backend.as_str() {
         "filesystem" => {
-            let root = cfg
-                .filesystem_root
-                .as_deref()
-                .ok_or_else(|| anyhow!("filesystem_root required when storage_backend=filesystem"))?;
+            let root = cfg.filesystem_root.as_deref().ok_or_else(|| {
+                anyhow!("filesystem_root required when storage_backend=filesystem")
+            })?;
             Ok(std::sync::Arc::new(FilesystemStore::new(root)?))
         }
         "s3" => {
@@ -99,9 +98,7 @@ impl Store for FilesystemStore {
         // Atomic via tmp + rename in same directory.
         let tmp = p.with_extension(format!(
             "{}.tmp.{}",
-            p.extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("dat"),
+            p.extension().and_then(|e| e.to_str()).unwrap_or("dat"),
             uuid::Uuid::now_v7()
         ));
         tokio::fs::write(&tmp, body)
@@ -213,7 +210,10 @@ impl Store for S3Store {
         Ok(resp
             .contents()
             .iter()
-            .filter_map(|o| o.key().map(|k| k.trim_start_matches(&prefix_full).to_string()))
+            .filter_map(|o| {
+                o.key()
+                    .map(|k| k.trim_start_matches(&prefix_full).to_string())
+            })
             .map(|name| format!("{}{}", prefix, name))
             .collect())
     }

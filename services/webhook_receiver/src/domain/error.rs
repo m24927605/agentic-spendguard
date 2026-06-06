@@ -103,7 +103,10 @@ mod tests {
     #[test]
     fn idempotency_conflict_maps_to_http_409() {
         assert_eq!(
-            ledger_code_to_http(ProtoCode::IdempotencyConflict as i32, "same key different body"),
+            ledger_code_to_http(
+                ProtoCode::IdempotencyConflict as i32,
+                "same key different body"
+            ),
             StatusCode::CONFLICT
         );
     }

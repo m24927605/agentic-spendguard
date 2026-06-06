@@ -124,10 +124,7 @@ pub type SharedContract = Arc<Contract>;
 /// JSON/YAML serialisation surface (e.g. calibration-report exports,
 /// audit JSON snapshots) on the same canonical strings the existing
 /// `from_str` / `as_str` round-trip already pins.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum PredictionPolicy {
     /// Default. Reservation = Strategy A (ceiling); regulated workloads.
@@ -180,10 +177,7 @@ impl Default for PredictionPolicy {
 ///
 /// SLICE_02 round-1 M4: serde derives (see `PredictionPolicy` for
 /// rationale).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum RunProjectionAction {
     /// Default. RUN_* triggers → `Decision::Stop` (v1alpha1 lattice).
@@ -230,10 +224,7 @@ impl Default for RunProjectionAction {
 /// §3.1/§3.2/§3.3 `RUN_*` prefix exactly (the default
 /// `SCREAMING_SNAKE_CASE` derivation would drop the `RUN_` prefix
 /// since the Rust variant identifiers do not carry it).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash,
-    serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum RunCode {
     /// Per spec §3.1. Per-run projected cumulative > budget remaining.
     #[serde(rename = "RUN_BUDGET_PROJECTION_EXCEEDED")]
@@ -419,15 +410,17 @@ mod tests {
     fn prediction_policy_serde_round_trip() {
         for (variant, token) in [
             (PredictionPolicy::StrictCeiling, "STRICT_CEILING"),
-            (PredictionPolicy::EmpiricalRunCeiling, "EMPIRICAL_RUN_CEILING"),
+            (
+                PredictionPolicy::EmpiricalRunCeiling,
+                "EMPIRICAL_RUN_CEILING",
+            ),
             (PredictionPolicy::AdaptiveCeiling, "ADAPTIVE_CEILING"),
             (PredictionPolicy::ShadowOnly, "SHADOW_ONLY"),
         ] {
             // YAML round trip.
             let yaml = serde_yaml::to_string(&variant).expect("yaml encode");
             assert_eq!(yaml.trim(), token);
-            let back: PredictionPolicy =
-                serde_yaml::from_str(token).expect("yaml decode");
+            let back: PredictionPolicy = serde_yaml::from_str(token).expect("yaml decode");
             assert_eq!(back, variant);
 
             // JSON round trip.
@@ -453,8 +446,7 @@ mod tests {
         ] {
             let yaml = serde_yaml::to_string(&variant).expect("yaml encode");
             assert_eq!(yaml.trim(), token);
-            let back: RunProjectionAction =
-                serde_yaml::from_str(token).expect("yaml decode");
+            let back: RunProjectionAction = serde_yaml::from_str(token).expect("yaml decode");
             assert_eq!(back, variant);
 
             let json = serde_json::to_string(&variant).expect("json encode");
@@ -473,7 +465,10 @@ mod tests {
         // the spec §3 tokens carry a RUN_ prefix that the Rust variant
         // identifiers do not.
         for (variant, token) in [
-            (RunCode::BudgetProjectionExceeded, "RUN_BUDGET_PROJECTION_EXCEEDED"),
+            (
+                RunCode::BudgetProjectionExceeded,
+                "RUN_BUDGET_PROJECTION_EXCEEDED",
+            ),
             (RunCode::DriftDetected, "RUN_DRIFT_DETECTED"),
             (RunCode::StepsExceeded, "RUN_STEPS_EXCEEDED"),
         ] {

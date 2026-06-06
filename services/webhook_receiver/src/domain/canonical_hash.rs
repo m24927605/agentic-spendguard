@@ -115,18 +115,8 @@ mod s10_tests {
 
     #[test]
     fn provider_usage_record_hash_is_deterministic() {
-        let a = provider_usage_record_hash(
-            "openai",
-            "acct-1",
-            "evt-abc",
-            "completion",
-        );
-        let b = provider_usage_record_hash(
-            "openai",
-            "acct-1",
-            "evt-abc",
-            "completion",
-        );
+        let a = provider_usage_record_hash("openai", "acct-1", "evt-abc", "completion");
+        let b = provider_usage_record_hash("openai", "acct-1", "evt-abc", "completion");
         assert_eq!(a, b);
     }
 

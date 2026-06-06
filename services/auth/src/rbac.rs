@@ -97,7 +97,13 @@ pub fn permissions_for_role(role: Role) -> &'static [Permission] {
         Role::Viewer => &[ReadView],
         Role::Operator => &[ReadView, BudgetWrite],
         Role::Approver => &[ReadView, ApprovalResolve],
-        Role::Admin => &[ReadView, TenantWrite, BudgetWrite, ApprovalResolve, AuditExport],
+        Role::Admin => &[
+            ReadView,
+            TenantWrite,
+            BudgetWrite,
+            ApprovalResolve,
+            AuditExport,
+        ],
         Role::Auditor => &[ReadView, AuditExport],
     }
 }
@@ -131,7 +137,13 @@ impl GroupPolicy {
         // Static-token demo subjects map to admin (full power).
         mapping.insert(
             "demo-admins".to_string(),
-            vec![Role::Admin, Role::Operator, Role::Auditor, Role::Approver, Role::Viewer],
+            vec![
+                Role::Admin,
+                Role::Operator,
+                Role::Auditor,
+                Role::Approver,
+                Role::Viewer,
+            ],
         );
         Self {
             mapping,
@@ -395,8 +407,7 @@ mod tests {
     fn group_policy_resolves_groups_to_role_union() {
         let raw = r#"{"a":["viewer"],"b":["operator"],"c":["admin"]}"#;
         let p = GroupPolicy::parse_json(raw).unwrap();
-        let roles =
-            p.roles_for_groups(&["a".into(), "b".into(), "missing".into()]);
+        let roles = p.roles_for_groups(&["a".into(), "b".into(), "missing".into()]);
         // Order should be sorted by role name.
         assert_eq!(roles, vec!["operator".to_string(), "viewer".to_string()]);
     }

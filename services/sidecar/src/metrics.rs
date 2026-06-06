@@ -148,7 +148,9 @@ mod tests {
     fn counters_default_to_zero_in_render_output() {
         let m = SidecarMetrics::new();
         let txt = m.render();
-        assert!(txt.contains("spendguard_sidecar_handler_calls_total{handler=\"request_decision\",outcome=\"ok\"} 0"));
+        assert!(txt.contains(
+            "spendguard_sidecar_handler_calls_total{handler=\"request_decision\",outcome=\"ok\"} 0"
+        ));
         assert!(txt.contains("spendguard_sidecar_handler_calls_total{handler=\"resume_after_approval\",outcome=\"err\"} 0"));
     }
 

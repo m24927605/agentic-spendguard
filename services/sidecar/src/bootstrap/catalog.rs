@@ -72,10 +72,10 @@ pub async fn refresh_once(
     // /etc/ssl/certs bundle. Without explicit `add_root_certificate`,
     // the manifest fetch fails the moment the catalog server uses any
     // private CA. (Codex Round 1 of demo bring-up caught this hole.)
-    let ca_cert = reqwest::Certificate::from_pem(cfg.trust_root_ca_pem.as_bytes())
-        .map_err(|e| DomainError::Internal(anyhow!(
-            "parse trust_root_ca_pem for catalog client: {e}"
-        )))?;
+    let ca_cert =
+        reqwest::Certificate::from_pem(cfg.trust_root_ca_pem.as_bytes()).map_err(|e| {
+            DomainError::Internal(anyhow!("parse trust_root_ca_pem for catalog client: {e}"))
+        })?;
     let client = reqwest::Client::builder()
         .https_only(true)
         .add_root_certificate(ca_cert)
@@ -154,7 +154,10 @@ fn verify_manifest_signature(
     //   * `tenant_overrides` only included when non-empty (publisher's
     //     `#[serde(skip_serializing_if = "<[T]>::is_empty")]`).
     let mut body = serde_json::Map::new();
-    body.insert("manifest_version".into(), Value::String(manifest.manifest_version.clone()));
+    body.insert(
+        "manifest_version".into(),
+        Value::String(manifest.manifest_version.clone()),
+    );
     body.insert(
         "current_catalog_version_id".into(),
         Value::String(manifest.current_catalog_version_id.clone()),
@@ -177,11 +180,19 @@ fn verify_manifest_signature(
     // demo bring-up caught this risk.)
     body.insert(
         "issued_at".into(),
-        Value::String(manifest.issued_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        Value::String(
+            manifest
+                .issued_at
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
+        ),
     );
     body.insert(
         "valid_until".into(),
-        Value::String(manifest.valid_until.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        Value::String(
+            manifest
+                .valid_until
+                .to_rfc3339_opts(SecondsFormat::Secs, true),
+        ),
     );
     body.insert(
         "signing_key_id".into(),
@@ -200,12 +211,11 @@ fn verify_manifest_signature(
 
     let sig_bytes = base64::engine::general_purpose::STANDARD
         .decode(&manifest.signature)
-        .map_err(|e| {
-            DomainError::ManifestSignatureInvalid(format!("base64 sig decode: {e}"))
-        })?;
-    let sig: ed25519_dalek::Signature = sig_bytes.as_slice().try_into().map_err(|_| {
-        DomainError::ManifestSignatureInvalid("signature length".into())
-    })?;
+        .map_err(|e| DomainError::ManifestSignatureInvalid(format!("base64 sig decode: {e}")))?;
+    let sig: ed25519_dalek::Signature = sig_bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| DomainError::ManifestSignatureInvalid("signature length".into()))?;
     verifying_key
         .verify(canonical.as_bytes(), &sig)
         .map_err(|e| DomainError::ManifestSignatureInvalid(format!("verify: {e}")))?;
@@ -235,9 +245,9 @@ fn sort_keys(value: Value) -> Value {
 /// Per Sidecar §7, enforcement fails closed if
 /// `last_verified_critical_version_age > critical_max_stale_seconds`.
 pub fn enforce_freshness_gate(state: &SidecarState, cfg: &Config) -> Result<(), DomainError> {
-    let age = state.manifest_age_seconds().ok_or_else(|| {
-        DomainError::ManifestStale("no manifest verified yet".into())
-    })?;
+    let age = state
+        .manifest_age_seconds()
+        .ok_or_else(|| DomainError::ManifestStale("no manifest verified yet".into()))?;
     if age > cfg.critical_max_stale_seconds as i64 {
         return Err(DomainError::ManifestStale(format!(
             "manifest age {}s > critical_max_stale {}s",

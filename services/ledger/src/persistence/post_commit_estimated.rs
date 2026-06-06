@@ -22,10 +22,7 @@ pub struct PostCommitEstimatedInput<'a> {
     pub audit_outbox_row: Value,
 }
 
-pub async fn post(
-    pool: &PgPool,
-    input: PostCommitEstimatedInput<'_>,
-) -> Result<Uuid, DomainError> {
+pub async fn post(pool: &PgPool, input: PostCommitEstimatedInput<'_>) -> Result<Uuid, DomainError> {
     let row: (Uuid,) = sqlx::query_as(
         "SELECT post_commit_estimated_transaction(\
             $1::JSONB, $2::UUID, $3::NUMERIC, $4::JSONB, $5::JSONB)",

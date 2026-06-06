@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use spendguard_leases::{
-    DisabledLease, K8sLease, LeaseConfig, LeaseManager, LeaseState, PostgresLease, spawn_lease_loop,
+    spawn_lease_loop, DisabledLease, K8sLease, LeaseConfig, LeaseManager, LeaseState, PostgresLease,
 };
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -11,7 +11,7 @@ use spendguard_outbox_forwarder::{
     config::Config,
     forward::forward_batch,
     metrics::{LoopOutcome, OutboxForwarderMetrics, SkipReason},
-    state::{AppState, build_canonical_client, build_pg_pool},
+    state::{build_canonical_client, build_pg_pool, AppState},
 };
 
 #[tokio::main(flavor = "multi_thread")]

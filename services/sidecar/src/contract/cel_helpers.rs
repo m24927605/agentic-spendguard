@@ -170,7 +170,11 @@ mod tests {
 
     /// Helper to compile + execute a CEL expression against
     /// synthetic context. Returns the CEL Value.
-    fn eval_cel(expr: &str, run: &RunProjection, prediction: &PredictionContext) -> cel_interpreter::Value {
+    fn eval_cel(
+        expr: &str,
+        run: &RunProjection,
+        prediction: &PredictionContext,
+    ) -> cel_interpreter::Value {
         let program = Program::compile(expr).expect("compile");
         let mut ctx = into_cel_context(run, prediction);
         program.execute(&mut ctx).expect("execute")
@@ -233,11 +237,7 @@ mod tests {
 
     #[test]
     fn prediction_tier_accessible() {
-        let v = eval_cel(
-            "prediction.tier",
-            &synth_run(),
-            &synth_prediction(),
-        );
+        let v = eval_cel("prediction.tier", &synth_run(), &synth_prediction());
         match v {
             cel_interpreter::Value::String(s) => assert_eq!(&*s, "T2"),
             other => panic!("expected String, got {:?}", other),
@@ -259,11 +259,7 @@ mod tests {
 
     #[test]
     fn prediction_confidence_accessible() {
-        let v = eval_cel(
-            "prediction.confidence",
-            &synth_run(),
-            &synth_prediction(),
-        );
+        let v = eval_cel("prediction.confidence", &synth_run(), &synth_prediction());
         match v {
             cel_interpreter::Value::Float(f) => assert!((f - 0.85).abs() < 1e-6),
             other => panic!("expected Float, got {:?}", other),

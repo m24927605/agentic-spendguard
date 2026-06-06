@@ -9,9 +9,7 @@ use spendguard_calibration_report::{
     cli::Format,
     formatters::{self, FormatOptions},
     recommendations,
-    report::{
-        CalibrationRatio, DriftAlert, Report, TierDistribution, Window,
-    },
+    report::{CalibrationRatio, DriftAlert, Report, TierDistribution, Window},
 };
 
 fn sample() -> Report {

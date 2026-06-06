@@ -112,12 +112,9 @@ async fn handle_inner(
         .ok_or_else(|| DomainError::InvalidRequest("audit_event required".into()))?;
     let audit_outbox_id = parse_uuid(&audit_event.id, "audit_event.id")?;
 
-    let estimated_amount = req
-        .estimated_amount_atomic
-        .parse::<BigInt>()
-        .map_err(|e| {
-            DomainError::InvalidRequest(format!("estimated_amount_atomic invalid: {e}"))
-        })?;
+    let estimated_amount = req.estimated_amount_atomic.parse::<BigInt>().map_err(|e| {
+        DomainError::InvalidRequest(format!("estimated_amount_atomic invalid: {e}"))
+    })?;
     if estimated_amount.sign() != num_bigint::Sign::Plus {
         return Err(DomainError::InvalidRequest(
             "estimated_amount_atomic must be > 0".into(),
@@ -190,7 +187,13 @@ async fn handle_inner(
 
     // -- 6. Branch new tx vs idempotent replay ----------------------------
     if returned_tx_id == ledger_transaction_id {
-        let success = build_success(pool, ledger_transaction_id, reservation_id, &estimated_amount).await?;
+        let success = build_success(
+            pool,
+            ledger_transaction_id,
+            reservation_id,
+            &estimated_amount,
+        )
+        .await?;
         return Ok(CommitEstimatedResponse {
             outcome: Some(Outcome::Success(success)),
         });
@@ -210,7 +213,9 @@ fn validate(req: &CommitEstimatedRequest) -> Result<(), DomainError> {
         return Err(DomainError::InvalidRequest("tenant_id required".into()));
     }
     if req.reservation_id.is_empty() {
-        return Err(DomainError::InvalidRequest("reservation_id required".into()));
+        return Err(DomainError::InvalidRequest(
+            "reservation_id required".into(),
+        ));
     }
     if req.decision_id.is_empty() {
         return Err(DomainError::InvalidRequest("decision_id required".into()));

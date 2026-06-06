@@ -34,7 +34,10 @@ use axum::{
     Extension, Json, Router,
 };
 use serde::{Deserialize, Serialize};
-use spendguard_auth::{AuthConfig, Authenticator, Permission, Principal};
+use spendguard_auth::{
+    approver_policy_shape, parse_approver_policy, ApproverPolicyParse, AuthConfig, Authenticator,
+    Permission, Principal,
+};
 
 use crate::metrics::DashboardMetrics;
 use sqlx::postgres::PgPoolOptions;
@@ -97,13 +100,11 @@ async fn main() -> anyhow::Result<()> {
     // is unset; the export endpoint then returns 503.
     let canonical_pg = if let Some(url) = &cfg.canonical_database_url {
         if !url.trim().is_empty() {
-            info!(target = "audit_export", "S9: connecting to canonical DB for audit export");
-            Some(
-                PgPoolOptions::new()
-                    .max_connections(5)
-                    .connect(url)
-                    .await?,
-            )
+            info!(
+                target = "audit_export",
+                "S9: connecting to canonical DB for audit export"
+            );
+            Some(PgPoolOptions::new().max_connections(5).connect(url).await?)
         } else {
             None
         }
@@ -111,7 +112,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    let state = Arc::new(AppState { pg, canonical_pg, tenant_id });
+    let state = Arc::new(AppState {
+        pg,
+        canonical_pg,
+        tenant_id,
+    });
 
     // Phase 5 GA hardening S17: build Authenticator (jwt or
     // static_token-with-demo-profile) before binding the listener.
@@ -149,7 +154,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/approvals", get(api_approvals_list))
         .route("/api/approvals/:id", get(api_approval_detail))
         .route("/api/approvals/:id/resolve", post(api_approval_resolve))
-        .layer(from_fn_with_state(auth.clone(), spendguard_auth::require_auth));
+        .layer(from_fn_with_state(
+            auth.clone(),
+            spendguard_auth::require_auth,
+        ));
 
     let app = Router::new()
         .route("/", get(index))
@@ -169,13 +177,13 @@ async fn main() -> anyhow::Result<()> {
 /// DashboardMetrics Prometheus text. Same hyper-based pattern as
 /// canonical_ingest / ledger / sidecar / control_plane.
 async fn serve_metrics(addr: String, metrics: DashboardMetrics) -> anyhow::Result<()> {
-    use std::convert::Infallible;
+    use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
-    use http_body_util::Full;
+    use std::convert::Infallible;
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind(&addr).await?;
@@ -196,10 +204,7 @@ async fn serve_metrics(addr: String, metrics: DashboardMetrics) -> anyhow::Resul
                     };
                     Ok::<_, Infallible>(
                         Response::builder()
-                            .header(
-                                "content-type",
-                                "text/plain; version=0.0.4; charset=utf-8",
-                            )
+                            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
                             .body(Full::new(Bytes::from(body)))
                             .unwrap(),
                     )
@@ -444,7 +449,10 @@ async fn api_budgets(
     // could otherwise read these aggregate views for the env tenant.
     // Mirror the api_audit_export pattern: assert_tenant against the
     // env-pinned tenant_id; reject 403 on mismatch / no scope.
-    if principal.assert_tenant(&state.tenant_id.to_string()).is_err() {
+    if principal
+        .assert_tenant(&state.tenant_id.to_string())
+        .is_err()
+    {
         info!(
             subject = %principal.subject,
             requested = %state.tenant_id,
@@ -519,7 +527,10 @@ async fn api_decisions(
     // could otherwise read these aggregate views for the env tenant.
     // Mirror the api_audit_export pattern: assert_tenant against the
     // env-pinned tenant_id; reject 403 on mismatch / no scope.
-    if principal.assert_tenant(&state.tenant_id.to_string()).is_err() {
+    if principal
+        .assert_tenant(&state.tenant_id.to_string())
+        .is_err()
+    {
         info!(
             subject = %principal.subject,
             requested = %state.tenant_id,
@@ -529,7 +540,16 @@ async fn api_decisions(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let rows = sqlx::query_as::<_, (Uuid, String, String, Option<Uuid>, chrono::DateTime<chrono::Utc>)>(
+    let rows = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            String,
+            String,
+            Option<Uuid>,
+            chrono::DateTime<chrono::Utc>,
+        ),
+    >(
         r#"
         SELECT ledger_transaction_id, operation_kind, posting_state,
                decision_id, recorded_at
@@ -578,7 +598,10 @@ async fn api_deny_stats(
     // could otherwise read these aggregate views for the env tenant.
     // Mirror the api_audit_export pattern: assert_tenant against the
     // env-pinned tenant_id; reject 403 on mismatch / no scope.
-    if principal.assert_tenant(&state.tenant_id.to_string()).is_err() {
+    if principal
+        .assert_tenant(&state.tenant_id.to_string())
+        .is_err()
+    {
         info!(
             subject = %principal.subject,
             requested = %state.tenant_id,
@@ -607,7 +630,10 @@ async fn api_deny_stats(
 
     let out: Vec<DenyStatRow> = rows
         .into_iter()
-        .map(|(b, c)| DenyStatRow { bucket_hour: b, count: c })
+        .map(|(b, c)| DenyStatRow {
+            bucket_hour: b,
+            count: c,
+        })
         .collect();
     Ok(Json(out).into_response())
 }
@@ -633,7 +659,10 @@ async fn api_outbox_health(
     // could otherwise read these aggregate views for the env tenant.
     // Mirror the api_audit_export pattern: assert_tenant against the
     // env-pinned tenant_id; reject 403 on mismatch / no scope.
-    if principal.assert_tenant(&state.tenant_id.to_string()).is_err() {
+    if principal
+        .assert_tenant(&state.tenant_id.to_string())
+        .is_err()
+    {
         info!(
             subject = %principal.subject,
             requested = %state.tenant_id,
@@ -824,17 +853,17 @@ async fn api_audit_export(
     let rows: Vec<ExportRow> = sqlx::query_as::<
         _,
         (
-            Uuid,                           // event_id
-            String,                         // event_type
-            Uuid,                           // tenant_id
-            Option<Uuid>,                   // decision_id
-            chrono::DateTime<chrono::Utc>,  // recorded_at
-            serde_json::Value,              // cloudevent_payload
-            Vec<u8>,                        // producer_signature
-            String,                         // signing_key_id
-            String,                         // signing_algorithm
-            i64,                            // ingest_log_offset
-            chrono::NaiveDate,              // recorded_month
+            Uuid,                          // event_id
+            String,                        // event_type
+            Uuid,                          // tenant_id
+            Option<Uuid>,                  // decision_id
+            chrono::DateTime<chrono::Utc>, // recorded_at
+            serde_json::Value,             // cloudevent_payload
+            Vec<u8>,                       // producer_signature
+            String,                        // signing_key_id
+            String,                        // signing_algorithm
+            i64,                           // ingest_log_offset
+            chrono::NaiveDate,             // recorded_month
         ),
     >(
         r#"
@@ -867,19 +896,21 @@ async fn api_audit_export(
         StatusCode::INTERNAL_SERVER_ERROR
     })?
     .into_iter()
-    .map(|(eid, et, tid, did, rat, payload, sig, kid, algo, off, mon)| ExportRow {
-        event_id: eid.to_string(),
-        event_type: et,
-        tenant_id: tid.to_string(),
-        decision_id: did.map(|d| d.to_string()),
-        recorded_at: rat,
-        cloudevent_payload: payload,
-        producer_signature_hex: hex::encode(&sig),
-        signing_key_id: kid,
-        signing_algorithm: algo,
-        ingest_log_offset: off,
-        recorded_month: mon,
-    })
+    .map(
+        |(eid, et, tid, did, rat, payload, sig, kid, algo, off, mon)| ExportRow {
+            event_id: eid.to_string(),
+            event_type: et,
+            tenant_id: tid.to_string(),
+            decision_id: did.map(|d| d.to_string()),
+            recorded_at: rat,
+            cloudevent_payload: payload,
+            producer_signature_hex: hex::encode(&sig),
+            signing_key_id: kid,
+            signing_algorithm: algo,
+            ingest_log_offset: off,
+            recorded_month: mon,
+        },
+    )
     .collect();
 
     // Build JSONL body + sha256 over the lines.
@@ -887,8 +918,7 @@ async fn api_audit_export(
     let mut body = String::with_capacity(rows.len() * 256);
     let mut hasher = Sha256::new();
     for row in &rows {
-        let line =
-            serde_json::to_string(row).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let line = serde_json::to_string(row).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
         hasher.update(line.as_bytes());
         hasher.update(b"\n");
         body.push_str(&line);
@@ -930,10 +960,13 @@ async fn api_audit_export(
         "S9: audit export served"
     );
 
-    Ok(([
-        ("content-type", "application/x-ndjson"),
-        ("x-spendguard-audit-export", "v1"),
-    ], body)
+    Ok((
+        [
+            ("content-type", "application/x-ndjson"),
+            ("x-spendguard-audit-export", "v1"),
+        ],
+        body,
+    )
         .into_response())
 }
 
@@ -969,7 +1002,10 @@ async fn api_approvals_list(
     if principal.require(Permission::ApprovalResolve).is_err() {
         return Err(StatusCode::FORBIDDEN);
     }
-    if principal.assert_tenant(&state.tenant_id.to_string()).is_err() {
+    if principal
+        .assert_tenant(&state.tenant_id.to_string())
+        .is_err()
+    {
         return Err(StatusCode::FORBIDDEN);
     }
 
@@ -1005,16 +1041,14 @@ async fn api_approvals_list(
 
     let out: Vec<ApprovalSummary> = rows
         .into_iter()
-        .map(
-            |(aid, did, st, finding, ttl, ct)| ApprovalSummary {
-                approval_id: aid,
-                decision_id: did,
-                state: st,
-                proposing_finding_id: finding,
-                ttl_expires_at: ttl,
-                created_at: ct,
-            },
-        )
+        .map(|(aid, did, st, finding, ttl, ct)| ApprovalSummary {
+            approval_id: aid,
+            decision_id: did,
+            state: st,
+            proposing_finding_id: finding,
+            ttl_expires_at: ttl,
+            created_at: ct,
+        })
         .collect();
     Ok(Json(out).into_response())
 }
@@ -1162,14 +1196,23 @@ async fn api_approval_resolve(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    // Pre-check: cost_advisor scope + tenant + state + TTL.
+    // Pre-check: cost_advisor scope + tenant + state + TTL + approver_policy.
+    //
+    // R3: approver_policy is now in the SELECT and goes through the
+    // shared `spendguard_auth::parse_approver_policy` gate so dashboard
+    // enforces the same fail-closed Restrict / Malformed semantics
+    // control_plane already does. Today cost_advisor rows are seeded
+    // by the SP with `approver_policy='{}'` (NoRestriction) so this is
+    // a no-op for current data; the value-add is preventing a future
+    // SP relaxation from creating a silent dashboard bypass.
     let row: Option<(
         Uuid,
         String,
         String,
         chrono::DateTime<chrono::Utc>,
+        serde_json::Value,
     )> = sqlx::query_as(
-        "SELECT tenant_id, state, proposal_source, ttl_expires_at \
+        "SELECT tenant_id, state, proposal_source, ttl_expires_at, approver_policy \
            FROM approval_requests WHERE approval_id = $1",
     )
     .bind(approval_uuid)
@@ -1177,7 +1220,7 @@ async fn api_approval_resolve(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let Some((row_tenant, row_state, row_source, ttl_expires_at)) = row else {
+    let Some((row_tenant, row_state, row_source, ttl_expires_at, approver_policy)) = row else {
         return Err(StatusCode::FORBIDDEN);
     };
     if principal.assert_tenant(&row_tenant.to_string()).is_err() {
@@ -1220,11 +1263,38 @@ async fn api_approval_resolve(
         );
         return Err(StatusCode::CONFLICT);
     }
+    // R3: approver_policy intersection (shared with control_plane).
+    match parse_approver_policy(&approver_policy) {
+        ApproverPolicyParse::NoRestriction => {
+            // Permission + tenant + source gates already passed; admit.
+        }
+        ApproverPolicyParse::Restrict(required) => {
+            let satisfied = required
+                .iter()
+                .any(|r| principal.roles.iter().any(|p| p == r));
+            if !satisfied {
+                info!(
+                    subject = %principal.subject,
+                    approval_id = %approval_uuid,
+                    required_roles = ?required,
+                    principal_roles = ?principal.roles,
+                    "dashboard resolve rejected — approver_policy role mismatch"
+                );
+                return Err(StatusCode::FORBIDDEN);
+            }
+        }
+        ApproverPolicyParse::Malformed => {
+            info!(
+                subject = %principal.subject,
+                approval_id = %approval_uuid,
+                policy_shape = %approver_policy_shape(&approver_policy),
+                "dashboard resolve rejected — approver_policy malformed (fail-closed)"
+            );
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
 
-    let result: Result<
-        (String, bool, Option<Uuid>),
-        sqlx::Error,
-    > = sqlx::query_as(
+    let result: Result<(String, bool, Option<Uuid>), sqlx::Error> = sqlx::query_as(
         r#"
         SELECT final_state, transitioned, event_id
           FROM resolve_approval_request($1::uuid, $2::text, $3::text, $4::text, $5::text)
@@ -1266,4 +1336,3 @@ async fn api_approval_resolve(
     })
     .into_response())
 }
-

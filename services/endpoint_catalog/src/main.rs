@@ -4,9 +4,7 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 use spendguard_endpoint_catalog::{
-    config::ServerConfig,
-    persistence::store::make_store,
-    server::router,
+    config::ServerConfig, persistence::store::make_store, server::router,
 };
 
 #[tokio::main]

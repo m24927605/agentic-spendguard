@@ -147,7 +147,11 @@ pub async fn evaluate_tenant_day(
                     .as_ref()
                     .map(|w| w.micros_usd),
                 evidence: finding.proto_json.clone(),
-                proposed_dsl_patch: if propose_patches { proposed_patch } else { None },
+                proposed_dsl_patch: if propose_patches {
+                    proposed_patch
+                } else {
+                    None
+                },
                 proposal_outcome: proposal_outcome.map(format_proposal_outcome),
             });
         }
@@ -210,12 +214,8 @@ async fn run_rule(
             "idle_reservation_rate_v1" => {
                 decode_idle_reservation_rate(rule, row, tenant_id, bucket_date)?
             }
-            "failed_retry_burn_v1" => {
-                decode_failed_retry_burn(rule, row, tenant_id, bucket_date)?
-            }
-            "runaway_loop_v1" => {
-                decode_runaway_loop(rule, row, tenant_id, bucket_date)?
-            }
+            "failed_retry_burn_v1" => decode_failed_retry_burn(rule, row, tenant_id, bucket_date)?,
+            "runaway_loop_v1" => decode_runaway_loop(rule, row, tenant_id, bucket_date)?,
             other => return Err(anyhow!("no decoder registered for rule {}", other)),
         };
         out.push(decoded);
@@ -260,14 +260,34 @@ fn decode_failed_retry_burn(
         fingerprint::compute(rule.rule_id(), &tenant_id.to_string(), &scope, &time_bucket);
 
     let metrics = vec![
-        metric("affected_run_prompt_groups", affected as f64, MetricUnit::Count, "derived: COUNT(DISTINCT run_id, prompt_hash) in step3"),
-        metric("total_attempts", total_attempts as f64, MetricUnit::Calls, "derived: SUM(attempt_count) across groups"),
-        metric("total_billed_failures", total_billed_failures as f64, MetricUnit::Calls, "derived: SUM(billed_failure_count) across groups"),
+        metric(
+            "affected_run_prompt_groups",
+            affected as f64,
+            MetricUnit::Count,
+            "derived: COUNT(DISTINCT run_id, prompt_hash) in step3",
+        ),
+        metric(
+            "total_attempts",
+            total_attempts as f64,
+            MetricUnit::Calls,
+            "derived: SUM(attempt_count) across groups",
+        ),
+        metric(
+            "total_billed_failures",
+            total_billed_failures as f64,
+            MetricUnit::Calls,
+            "derived: SUM(billed_failure_count) across groups",
+        ),
         // Atomic-units waste exposed so operators see magnitude even
         // before baseline_refresher converts to USD. Unit is the
         // ledger's per-budget atomic (e.g. tokens × scale_factor);
         // pricing snapshot converts to USD during P2.
-        metric("total_failed_atomic_sum", total_atomic_sum_f, MetricUnit::Count, "derived: SUM(estimated_amount_atomic) of wasted attempts; ledger-unit-atomic"),
+        metric(
+            "total_failed_atomic_sum",
+            total_atomic_sum_f,
+            MetricUnit::Count,
+            "derived: SUM(estimated_amount_atomic) of wasted attempts; ledger-unit-atomic",
+        ),
     ];
 
     // P1 contract: estimated_amount_atomic is unit-atomic, not USD
@@ -315,8 +335,7 @@ fn decode_runaway_loop(
     let affected: i64 = row.try_get("affected_run_prompt_groups")?;
     let total_calls: i64 = row.try_get("total_calls")?;
     let max_depth: i64 = row.try_get("max_loop_depth")?;
-    let total_atomic_sum_bd: Option<bigdecimal::BigDecimal> =
-        row.try_get("total_atomic_sum").ok();
+    let total_atomic_sum_bd: Option<bigdecimal::BigDecimal> = row.try_get("total_atomic_sum").ok();
     use bigdecimal::ToPrimitive;
     let total_atomic_sum_f = total_atomic_sum_bd
         .as_ref()
@@ -339,12 +358,32 @@ fn decode_runaway_loop(
         fingerprint::compute(rule.rule_id(), &tenant_id.to_string(), &scope, &time_bucket);
 
     let metrics = vec![
-        metric("affected_run_prompt_groups", affected as f64, MetricUnit::Count, "derived: COUNT(DISTINCT run_id, prompt_hash) in step3"),
-        metric("total_calls", total_calls as f64, MetricUnit::Calls, "derived: SUM(call_count) across groups"),
-        metric("max_loop_depth", max_depth as f64, MetricUnit::Count, "derived: MAX(call_count) across groups"),
+        metric(
+            "affected_run_prompt_groups",
+            affected as f64,
+            MetricUnit::Count,
+            "derived: COUNT(DISTINCT run_id, prompt_hash) in step3",
+        ),
+        metric(
+            "total_calls",
+            total_calls as f64,
+            MetricUnit::Calls,
+            "derived: SUM(call_count) across groups",
+        ),
+        metric(
+            "max_loop_depth",
+            max_depth as f64,
+            MetricUnit::Count,
+            "derived: MAX(call_count) across groups",
+        ),
         // Codex CA-P1.5 r1 P2: surface atomic-units magnitude so
         // operators see the size of the loop's spend.
-        metric("total_atomic_sum", total_atomic_sum_f, MetricUnit::Count, "derived: SUM(estimated_amount_atomic) across looping calls; ledger-unit-atomic"),
+        metric(
+            "total_atomic_sum",
+            total_atomic_sum_f,
+            MetricUnit::Count,
+            "derived: SUM(estimated_amount_atomic) across looping calls; ledger-unit-atomic",
+        ),
     ];
 
     let waste_estimate: Option<WasteEstimate> = None;
@@ -454,8 +493,18 @@ fn decode_idle_reservation_rate(
         fingerprint::compute(rule.rule_id(), &tenant_id.to_string(), &scope, &time_bucket);
 
     let metrics = vec![
-        metric("total_reservations", total as f64, MetricUnit::Count, "reservations_with_ttl_status_v1.reservation_id"),
-        metric("ttl_expired_count", ttl_expired as f64, MetricUnit::Count, "reservations_with_ttl_status_v1.derived_state"),
+        metric(
+            "total_reservations",
+            total as f64,
+            MetricUnit::Count,
+            "reservations_with_ttl_status_v1.reservation_id",
+        ),
+        metric(
+            "ttl_expired_count",
+            ttl_expired as f64,
+            MetricUnit::Count,
+            "reservations_with_ttl_status_v1.derived_state",
+        ),
         Metric {
             name: "idle_ratio".into(),
             value: idle_ratio,
@@ -466,8 +515,18 @@ fn decode_idle_reservation_rate(
             ci95_low: None,
             ci95_high: None,
         },
-        metric("median_ttl_seconds", median_ttl as f64, MetricUnit::Seconds, "derived: PERCENTILE_CONT(0.5) of ttl_seconds"),
-        metric("p95_ttl_seconds", p95_ttl as f64, MetricUnit::Seconds, "derived: PERCENTILE_CONT(0.95) of ttl_seconds"),
+        metric(
+            "median_ttl_seconds",
+            median_ttl as f64,
+            MetricUnit::Seconds,
+            "derived: PERCENTILE_CONT(0.5) of ttl_seconds",
+        ),
+        metric(
+            "p95_ttl_seconds",
+            p95_ttl as f64,
+            MetricUnit::Seconds,
+            "derived: PERCENTILE_CONT(0.95) of ttl_seconds",
+        ),
     ];
 
     // Codex CA-P1 r2 P2: when the rule SQL returns NULL waste (P1
@@ -648,13 +707,7 @@ async fn upsert_finding(
     // §4.1). Earlier .unwrap_or(0) coerced unquantified findings
     // to a stored zero — indistinguishable from a real $0
     // verified-waste row when consumers SUM the column.
-    .bind(
-        finding
-            .proto
-            .waste_estimate
-            .as_ref()
-            .map(|w| w.micros_usd),
-    )
+    .bind(finding.proto.waste_estimate.as_ref().map(|w| w.micros_usd))
     .bind(&finding.sample_decision_ids)
     .fetch_one(canonical)
     .await

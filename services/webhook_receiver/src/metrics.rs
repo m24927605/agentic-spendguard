@@ -131,9 +131,7 @@ pub async fn record_metrics(
         .unwrap_or_else(|| request.uri().path().to_string());
     let route = Route::from_matched(&method, &matched);
     let response = next.run(request).await;
-    let outcome = if response.status().is_server_error()
-        || response.status().is_client_error()
-    {
+    let outcome = if response.status().is_server_error() || response.status().is_client_error() {
         Outcome::Err
     } else {
         Outcome::Ok
@@ -179,7 +177,10 @@ mod tests {
             Route::from_matched(&Method::POST, "/v1/webhook/:provider"),
             Route::Webhook
         );
-        assert_eq!(Route::from_matched(&Method::GET, "/healthz"), Route::Healthz);
+        assert_eq!(
+            Route::from_matched(&Method::GET, "/healthz"),
+            Route::Healthz
+        );
         assert_eq!(Route::from_matched(&Method::DELETE, "/x"), Route::Other);
     }
 

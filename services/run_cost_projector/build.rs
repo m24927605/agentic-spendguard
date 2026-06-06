@@ -6,9 +6,7 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_root = std::path::PathBuf::from("../../proto");
 
-    let protos = &[
-        proto_root.join("spendguard/run_cost_projector/v1/projector.proto"),
-    ];
+    let protos = &[proto_root.join("spendguard/run_cost_projector/v1/projector.proto")];
     let includes = &[proto_root.clone()];
 
     tonic_build::configure()

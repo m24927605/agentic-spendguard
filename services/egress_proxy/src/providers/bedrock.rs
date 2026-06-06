@@ -51,8 +51,10 @@ use crate::routing::UsageMetrics;
 /// SLICE_04 R2 B1 — Anthropic Claude 3 / 3.5 Bedrock dispatch
 /// (cross-region prefix permitted).
 static BEDROCK_ANTHROPIC_3_5: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-5-(sonnet|haiku|opus)(-\d{8})?-v\d+:\d+$")
-        .expect("bedrock anthropic-3-5 regex")
+    Regex::new(
+        r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-5-(sonnet|haiku|opus)(-\d{8})?-v\d+:\d+$",
+    )
+    .expect("bedrock anthropic-3-5 regex")
 });
 static BEDROCK_ANTHROPIC_3: Lazy<Regex> = Lazy::new(|| {
     Regex::new(r"^(?:[a-z][a-z0-9-]*\.)?anthropic\.claude-3-(sonnet|haiku|opus)(-\d{8})?-v\d+:\d+$")
@@ -283,19 +285,13 @@ mod tests {
 
     #[test]
     fn dispatch_pre_llama_3_falls_to_tier3() {
-        assert_eq!(
-            dispatch_tokenizer_kind("meta.llama2-70b-chat-v1"),
-            None
-        );
+        assert_eq!(dispatch_tokenizer_kind("meta.llama2-70b-chat-v1"), None);
     }
 
     #[test]
     fn dispatch_cohere_embed_falls_to_tier3() {
         // Different vocab from command-r.
-        assert_eq!(
-            dispatch_tokenizer_kind("cohere.embed-english-v3"),
-            None
-        );
+        assert_eq!(dispatch_tokenizer_kind("cohere.embed-english-v3"), None);
         assert_eq!(
             dispatch_tokenizer_kind("cohere.embed-multilingual-v3"),
             None
@@ -304,9 +300,15 @@ mod tests {
 
     #[test]
     fn dispatch_unknown_vendor_falls_to_tier3() {
-        assert_eq!(dispatch_tokenizer_kind("amazon.titan-text-express-v1"), None);
+        assert_eq!(
+            dispatch_tokenizer_kind("amazon.titan-text-express-v1"),
+            None
+        );
         assert_eq!(dispatch_tokenizer_kind("ai21.j2-ultra-v1"), None);
-        assert_eq!(dispatch_tokenizer_kind("mistral.mistral-7b-instruct-v0:2"), None);
+        assert_eq!(
+            dispatch_tokenizer_kind("mistral.mistral-7b-instruct-v0:2"),
+            None
+        );
     }
 
     // ─── extract_usage ───────────────────────────────────────────────

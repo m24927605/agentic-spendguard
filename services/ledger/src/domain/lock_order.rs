@@ -49,9 +49,7 @@ pub fn derive(claims: &[BudgetClaim]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proto::common::v1::{
-        budget_claim::Direction, BudgetClaim, UnitRef, unit_ref::Kind,
-    };
+    use crate::proto::common::v1::{budget_claim::Direction, unit_ref::Kind, BudgetClaim, UnitRef};
 
     fn claim(budget_id: &str, unit_id: &str) -> BudgetClaim {
         BudgetClaim {

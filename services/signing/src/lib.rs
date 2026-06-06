@@ -33,7 +33,10 @@
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use ed25519_dalek::{Signer as Ed25519SignerTrait, Signature as Ed25519Signature, SigningKey, Verifier as Ed25519VerifierTrait, VerifyingKey};
+use ed25519_dalek::{
+    Signature as Ed25519Signature, Signer as Ed25519SignerTrait, SigningKey,
+    Verifier as Ed25519VerifierTrait, VerifyingKey,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -139,10 +142,7 @@ impl LocalEd25519Signer {
     /// PKCS8-encoded Ed25519 private key. We read the key once at
     /// startup; rotating the file requires a process restart (S7
     /// adds in-place rotation via the key registry).
-    pub fn from_pkcs8_pem_file(
-        path: &Path,
-        producer_identity: String,
-    ) -> Result<Self, SignError> {
+    pub fn from_pkcs8_pem_file(path: &Path, producer_identity: String) -> Result<Self, SignError> {
         use ed25519_dalek::pkcs8::DecodePrivateKey;
         let pem = std::fs::read_to_string(path)?;
         let signing_key = SigningKey::from_pkcs8_pem(&pem)
@@ -219,19 +219,13 @@ impl KmsSigner {
     /// Construct a KMS-backed signer. Loads AWS config from the
     /// process environment (IRSA / instance profile / static creds).
     /// Async because `aws_config::load_from_env()` is async.
-    pub async fn new(
-        key_arn: String,
-        producer_identity: String,
-    ) -> Result<Self, SignError> {
+    pub async fn new(key_arn: String, producer_identity: String) -> Result<Self, SignError> {
         // `load_defaults` with an explicit BehaviorVersion is the
         // recommended path; `load_from_env` is deprecated in
         // aws-config 1.x. Pinning latest behavior so a future
         // aws-config bump doesn't silently change credential
         // resolution order.
-        let config = aws_config::load_defaults(
-            aws_config::BehaviorVersion::latest(),
-        )
-        .await;
+        let config = aws_config::load_defaults(aws_config::BehaviorVersion::latest()).await;
         let client = aws_sdk_kms::Client::new(&config);
         Ok(Self {
             key_arn,
@@ -281,7 +275,10 @@ impl Signer for KmsSigner {
             .send()
             .await
             .map_err(|e| {
-                SignError::Kms(format!("kms sign call failed (arn={}): {}", self.key_arn, e))
+                SignError::Kms(format!(
+                    "kms sign call failed (arn={}): {}",
+                    self.key_arn, e
+                ))
             })?;
 
         let sig_bytes = resp
@@ -434,9 +431,8 @@ pub async fn signer_from_env(prefix: &str) -> Result<Box<dyn Signer>, SignError>
     let mode = SigningMode::parse(&mode)?;
 
     let identity_var = format!("{prefix}_SIGNING_PRODUCER_IDENTITY");
-    let producer_identity = std::env::var(&identity_var).map_err(|_| {
-        SignError::InvalidKeyFile(format!("{identity_var} env var required"))
-    })?;
+    let producer_identity = std::env::var(&identity_var)
+        .map_err(|_| SignError::InvalidKeyFile(format!("{identity_var} env var required")))?;
 
     match mode {
         SigningMode::Local => {
@@ -446,10 +442,8 @@ pub async fn signer_from_env(prefix: &str) -> Result<Box<dyn Signer>, SignError>
                     "{path_var} env var required when SIGNING_MODE=local"
                 ))
             })?;
-            let signer = LocalEd25519Signer::from_pkcs8_pem_file(
-                Path::new(&key_path),
-                producer_identity,
-            )?;
+            let signer =
+                LocalEd25519Signer::from_pkcs8_pem_file(Path::new(&key_path), producer_identity)?;
             Ok(Box::new(signer))
         }
         SigningMode::Kms => {
@@ -576,7 +570,10 @@ impl KeyValidity {
     /// Caller passes `None` if it doesn't have an event_time and
     /// wants crypto-only validation — the validity check then
     /// reduces to the revoked flag.
-    pub fn check(&self, event_time: Option<chrono::DateTime<chrono::Utc>>) -> Result<(), VerifyFailure> {
+    pub fn check(
+        &self,
+        event_time: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<(), VerifyFailure> {
         if self.revoked {
             return Err(VerifyFailure::KeyRevoked);
         }
@@ -726,8 +723,8 @@ impl LocalEd25519Verifier {
                     ))
                 })?;
                 use p256::pkcs8::DecodePublicKey;
-                let vk = p256::ecdsa::VerifyingKey::from_public_key_pem(pem.trim())
-                    .map_err(|e| {
+                let vk =
+                    p256::ecdsa::VerifyingKey::from_public_key_pem(pem.trim()).map_err(|e| {
                         VerifyError::InvalidTrustStore(format!(
                             "keys.json entry {key_id:?}: P-256 SPKI parse: {e}"
                         ))
@@ -953,11 +950,8 @@ mod tests {
         let path = dir.path().join("ed25519.pem");
         std::fs::write(&path, pem.as_bytes()).unwrap();
 
-        let signer = LocalEd25519Signer::from_pkcs8_pem_file(
-            &path,
-            "test-producer:pem".into(),
-        )
-        .unwrap();
+        let signer =
+            LocalEd25519Signer::from_pkcs8_pem_file(&path, "test-producer:pem".into()).unwrap();
         let sig = signer.sign(b"hello").await.unwrap();
         assert_eq!(sig.bytes.len(), 64);
         assert_eq!(sig.producer_identity, "test-producer:pem");
@@ -1031,7 +1025,10 @@ mod tests {
         assert!(!sig.producer_identity.is_empty());
         // signed_at is recent; allow 5s skew for slow CI.
         let elapsed = (Utc::now() - sig.signed_at).num_seconds();
-        assert!((-1..=5).contains(&elapsed), "signed_at must be ~now: {elapsed}s");
+        assert!(
+            (-1..=5).contains(&elapsed),
+            "signed_at must be ~now: {elapsed}s"
+        );
     }
 
     // ============================================================
@@ -1065,7 +1062,9 @@ mod tests {
         let canonical = b"canonical-cloudevent-bytes-v1";
         let sig = signer.sign(canonical).await.unwrap();
         let mutated = b"canonical-cloudevent-bytes-XX";
-        let err = verifier.verify(&sig.key_id, mutated, &sig.bytes, None).unwrap_err();
+        let err = verifier
+            .verify(&sig.key_id, mutated, &sig.bytes, None)
+            .unwrap_err();
         assert_eq!(err, VerifyFailure::InvalidSignature);
     }
 
@@ -1115,10 +1114,8 @@ mod tests {
         let arn = "arn:aws:kms:us-west-2:000000000000:key/0000-test".to_string();
         let mut ecdsa_keys = HashMap::new();
         ecdsa_keys.insert(arn.clone(), vk);
-        let verifier = LocalEd25519Verifier::from_ecdsa_keys_with_validity(
-            ecdsa_keys,
-            HashMap::new(),
-        );
+        let verifier =
+            LocalEd25519Verifier::from_ecdsa_keys_with_validity(ecdsa_keys, HashMap::new());
 
         verifier
             .verify(&arn, canonical, &sig_der_bytes, None)
@@ -1145,10 +1142,8 @@ mod tests {
 
         let mut ecdsa_keys = HashMap::new();
         ecdsa_keys.insert("kms-key".to_string(), vk);
-        let verifier = LocalEd25519Verifier::from_ecdsa_keys_with_validity(
-            ecdsa_keys,
-            HashMap::new(),
-        );
+        let verifier =
+            LocalEd25519Verifier::from_ecdsa_keys_with_validity(ecdsa_keys, HashMap::new());
 
         // Mutate the bytes; sha256 changes; signature should fail.
         let err = verifier
@@ -1159,10 +1154,8 @@ mod tests {
 
     #[tokio::test]
     async fn ecdsa_verifier_rejects_unknown_kms_arn() {
-        let verifier = LocalEd25519Verifier::from_ecdsa_keys_with_validity(
-            HashMap::new(),
-            HashMap::new(),
-        );
+        let verifier =
+            LocalEd25519Verifier::from_ecdsa_keys_with_validity(HashMap::new(), HashMap::new());
         let err = verifier
             .verify("arn:aws:kms:us-west-2:0:key/missing", b"x", b"sig", None)
             .unwrap_err();
@@ -1235,7 +1228,9 @@ mod tests {
         let canonical = b"hello";
         let sig = signer.sign(canonical).await.unwrap();
         let truncated = &sig.bytes[..32];
-        let err = verifier.verify(&sig.key_id, canonical, truncated, None).unwrap_err();
+        let err = verifier
+            .verify(&sig.key_id, canonical, truncated, None)
+            .unwrap_err();
         assert_eq!(err, VerifyFailure::InvalidSignature);
     }
 
@@ -1538,7 +1533,10 @@ mod tests {
         // Quarantine table stores as_str(); stability is part of the
         // forensics contract.
         assert_eq!(VerifyFailure::UnknownKey.as_str(), "unknown_key");
-        assert_eq!(VerifyFailure::InvalidSignature.as_str(), "invalid_signature");
+        assert_eq!(
+            VerifyFailure::InvalidSignature.as_str(),
+            "invalid_signature"
+        );
         assert_eq!(VerifyFailure::PreS6.as_str(), "pre_s6");
         assert_eq!(VerifyFailure::Disabled.as_str(), "disabled");
     }

@@ -25,9 +25,9 @@ pub mod fingerprint;
 pub mod patch_validator;
 pub mod proposal_writer;
 pub mod rule;
+pub mod rules;
 pub mod runtime;
 pub mod sql_rule;
-pub mod rules;
 
 pub use rule::{Category, CostRule, EvaluationContext};
 pub use sql_rule::SqlCostRule;

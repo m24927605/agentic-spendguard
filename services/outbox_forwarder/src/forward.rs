@@ -15,8 +15,8 @@ use crate::{
     poll::OutboxRow,
     proto::{
         canonical_ingest::v1::{
-            append_events_request::Route, event_result::Status as EventStatus,
-            AppendEventsRequest, EventResult,
+            append_events_request::Route, event_result::Status as EventStatus, AppendEventsRequest,
+            EventResult,
         },
         common::v1::SchemaBundleRef,
     },
@@ -102,7 +102,8 @@ pub async fn forward_batch(state: &mut AppState) -> anyhow::Result<usize> {
                             continue;
                         }
                     };
-                    let status = EventStatus::try_from(r.status).unwrap_or(EventStatus::Unspecified);
+                    let status =
+                        EventStatus::try_from(r.status).unwrap_or(EventStatus::Unspecified);
                     match status {
                         EventStatus::Appended | EventStatus::Deduped => {
                             updates.push(UpdateRow {
@@ -182,6 +183,9 @@ async fn apply_updates(state: &AppState, updates: &[UpdateRow]) -> anyhow::Resul
     );
 
     qb.build().execute(&state.pg).await?;
-    info!(count = updates.len(), "applied batch update to audit_outbox");
+    info!(
+        count = updates.len(),
+        "applied batch update to audit_outbox"
+    );
     Ok(())
 }

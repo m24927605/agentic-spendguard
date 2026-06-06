@@ -83,11 +83,7 @@ async fn main() -> std::process::ExitCode {
 
     // 4. Ledger DB.
     let ledger_pool = match &cli.ledger_url {
-        Some(url) => match PgPoolOptions::new()
-            .max_connections(2)
-            .connect(url)
-            .await
-        {
+        Some(url) => match PgPoolOptions::new().max_connections(2).connect(url).await {
             Ok(p) => Some(p),
             Err(e) => {
                 checks.push(spendguard_doctor::CheckResult::fail(
@@ -107,11 +103,7 @@ async fn main() -> std::process::ExitCode {
 
     // 5. Canonical DB + pricing freshness.
     let canonical_pool = match &cli.canonical_url {
-        Some(url) => match PgPoolOptions::new()
-            .max_connections(2)
-            .connect(url)
-            .await
-        {
+        Some(url) => match PgPoolOptions::new().max_connections(2).connect(url).await {
             Ok(p) => Some(p),
             Err(e) => {
                 checks.push(spendguard_doctor::CheckResult::fail(
@@ -135,9 +127,7 @@ async fn main() -> std::process::ExitCode {
 
     // 6. Tenant provisioned.
     if let Some(tid) = cli.tenant_id {
-        checks.push(
-            spendguard_doctor::check_tenant_provisioned(ledger_pool.as_ref(), tid).await,
-        );
+        checks.push(spendguard_doctor::check_tenant_provisioned(ledger_pool.as_ref(), tid).await);
     } else {
         checks.push(spendguard_doctor::CheckResult::skipped(
             "tenant.provisioned",
@@ -149,8 +139,7 @@ async fn main() -> std::process::ExitCode {
 
     let env_map: std::collections::HashMap<String, String> = std::env::vars().collect();
     if cli.json {
-        let json =
-            serde_json::to_string_pretty(&report).expect("report serializes to JSON");
+        let json = serde_json::to_string_pretty(&report).expect("report serializes to JSON");
         let redacted = spendguard_doctor::redact_secrets(&json, &env_map);
         println!("{redacted}");
     } else {

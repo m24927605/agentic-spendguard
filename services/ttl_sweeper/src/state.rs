@@ -7,9 +7,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::info;
 
 use crate::{
-    config::Config,
-    proto::ledger::v1::ledger_client::LedgerClient,
-    sequence::SequenceAllocator,
+    config::Config, proto::ledger::v1::ledger_client::LedgerClient, sequence::SequenceAllocator,
 };
 
 pub struct AppState {
@@ -79,7 +77,9 @@ pub async fn build_ledger_client(config: &Config) -> anyhow::Result<LedgerClient
                 if tokio::time::Instant::now() >= deadline {
                     return Err(anyhow::anyhow!(
                         "ledger gRPC connect to {} failed after {} attempts; last error: {}",
-                        config.ledger_url, attempt, e
+                        config.ledger_url,
+                        attempt,
+                        e
                     ));
                 }
                 tracing::warn!(

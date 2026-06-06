@@ -119,7 +119,9 @@ async fn handle_inner(
     for row in rows {
         let kind: String = row.get("account_kind");
         let net_str: String = row.get("net_debit");
-        let net = net_str.parse::<BigInt>().unwrap_or_else(|_| BigInt::from(0));
+        let net = net_str
+            .parse::<BigInt>()
+            .unwrap_or_else(|_| BigInt::from(0));
         let balance = match kind.as_str() {
             "available_budget" | "reserved_hold" | "committed_spend" | "refund_credit" => -&net,
             _ => net,

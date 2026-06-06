@@ -68,12 +68,7 @@ pub fn canonical_scope_repr(scope: &FindingScope) -> String {
 /// hour string `2026-05-13T07:00:00Z` for `failed_retry_burn_v1`, or
 /// a day string `2026-05-13` for `idle_reservation_rate_v1`). Bucket
 /// granularity is the rule's choice (spec §11.5 A1).
-pub fn compute(
-    rule_id: &str,
-    tenant_id: &str,
-    scope: &FindingScope,
-    time_bucket: &str,
-) -> String {
+pub fn compute(rule_id: &str, tenant_id: &str, scope: &FindingScope, time_bucket: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(rule_id.as_bytes());
     hasher.update(b"|");
@@ -158,7 +153,10 @@ mod tests {
         let s2 = mk("22222222-2222-4222-8222-222222222222");
         let fp1 = compute("idle_reservation_rate_v1", T1, &s1, "2026-05-14");
         let fp2 = compute("idle_reservation_rate_v1", T1, &s2, "2026-05-14");
-        assert_ne!(fp1, fp2, "different budget_ids must yield distinct fingerprints");
+        assert_ne!(
+            fp1, fp2,
+            "different budget_ids must yield distinct fingerprints"
+        );
     }
 
     #[test]

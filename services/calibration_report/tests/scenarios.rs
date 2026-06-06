@@ -87,8 +87,15 @@ fn scenario_healthy_renders_clean_report_exit_zero() {
         sample_size: 12_000,
     });
     r.recommendations = recommendations::evaluate(&r);
-    assert_eq!(r.exit_code(), ReportExitCode::Success, "healthy scenario must exit 0");
-    assert!(r.recommendations.is_empty(), "healthy scenario must trigger zero recommendations");
+    assert_eq!(
+        r.exit_code(),
+        ReportExitCode::Success,
+        "healthy scenario must exit 0"
+    );
+    assert!(
+        r.recommendations.is_empty(),
+        "healthy scenario must trigger zero recommendations"
+    );
 
     // All three formatters must render without panic.
     for format in [Format::Text, Format::Json, Format::Markdown] {
@@ -137,7 +144,11 @@ fn scenario_drift_triggers_drift_recommendation_exit_one() {
         });
     }
     r.recommendations = recommendations::evaluate(&r);
-    assert_eq!(r.exit_code(), ReportExitCode::CriticalFindings, "drift > 0 → exit 1");
+    assert_eq!(
+        r.exit_code(),
+        ReportExitCode::CriticalFindings,
+        "drift > 0 → exit 1"
+    );
     let codes: Vec<_> = r.recommendations.iter().map(|x| x.code.as_str()).collect();
     assert!(
         codes.contains(&"PREDICTION_DRIFT_ALERTS_PRESENT"),
@@ -400,7 +411,10 @@ fn recommendation_order_is_deterministic_across_runs() {
         .iter()
         .map(|x| x.code.clone())
         .collect();
-    assert_eq!(codes1, codes2, "recommendation ordering must be deterministic");
+    assert_eq!(
+        codes1, codes2,
+        "recommendation ordering must be deterministic"
+    );
 }
 
 // ---- Acceptance criterion §8.4: every rule has spec-compliant fields ------
@@ -448,7 +462,11 @@ fn every_recommendation_has_required_fields() {
     r.run_total_count = 100;
     r.run_budget_projection_exceeded_count = 20;
     let recs: Vec<Recommendation> = recommendations::evaluate(&r);
-    assert!(recs.len() >= 5, "expected 5+ rules to fire; got {}", recs.len());
+    assert!(
+        recs.len() >= 5,
+        "expected 5+ rules to fire; got {}",
+        recs.len()
+    );
     for rec in &recs {
         assert!(!rec.code.is_empty(), "rule code must be non-empty");
         assert!(!rec.headline.is_empty(), "rule {} headline empty", rec.code);

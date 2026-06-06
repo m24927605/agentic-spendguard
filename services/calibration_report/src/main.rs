@@ -18,18 +18,19 @@
 //! 9. Exit per `Report::exit_code()`.
 
 use clap::Parser;
-use sqlx::postgres::PgPoolOptions;
 use spendguard_calibration_report::{
     cli::{Cli, ProofMode, Subcommand},
     formatters::{self, FormatOptions},
-    recommendations, self_audit,
+    recommendations,
     report::{Report, ReportExitCode, Window},
+    self_audit,
     sql_queries::{
-        self, fetch_calibration_ratios, fetch_calibration_ratios_cache_mode,
-        fetch_drift_alerts, fetch_run_level_counts, fetch_tier_distribution, open_tenant_tx,
+        self, fetch_calibration_ratios, fetch_calibration_ratios_cache_mode, fetch_drift_alerts,
+        fetch_run_level_counts, fetch_tier_distribution, open_tenant_tx,
     },
     verify_chain_wrapper,
 };
+use sqlx::postgres::PgPoolOptions;
 use std::process::ExitCode;
 use tracing::{error, info, warn};
 
@@ -111,11 +112,7 @@ async fn run_report(cli: Cli) -> ExitCode {
 
     // ---- Pool ---------------------------------------------------
     let pool = match &cli.canonical_url {
-        Some(url) => match PgPoolOptions::new()
-            .max_connections(4)
-            .connect(url)
-            .await
-        {
+        Some(url) => match PgPoolOptions::new().max_connections(4).connect(url).await {
             Ok(p) => p,
             Err(e) => {
                 error!(error = %e, "cannot connect to canonical DB");
@@ -198,7 +195,10 @@ async fn run_report(cli: Cli) -> ExitCode {
     if let Some(path) = cli.output_path() {
         if let Err(e) = std::fs::write(&path, rendered) {
             error!(error = %e, "write report failed");
-            eprintln!("calibration-report: write to {} failed: {e}", path.display());
+            eprintln!(
+                "calibration-report: write to {} failed: {e}",
+                path.display()
+            );
             return ReportExitCode::QueryError.to_process_exit_code();
         }
     } else {
@@ -259,11 +259,7 @@ async fn run_queries(
 async fn run_verify_chain_subcommand(cli: Cli) -> ExitCode {
     info!("verify-chain subcommand invoked");
     let pool = match &cli.canonical_url {
-        Some(url) => match PgPoolOptions::new()
-            .max_connections(2)
-            .connect(url)
-            .await
-        {
+        Some(url) => match PgPoolOptions::new().max_connections(2).connect(url).await {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("calibration-report verify-chain: DB connect failed: {e}");
@@ -290,8 +286,8 @@ async fn run_verify_chain_subcommand(cli: Cli) -> ExitCode {
     // Use library API directly so the verify-chain subcommand is a
     // thin pass-through.
     let now = chrono::Utc::now();
-    let from = sql_queries::parse_window_anchor(&cli.from, now)
-        .unwrap_or(now - chrono::Duration::days(7));
+    let from =
+        sql_queries::parse_window_anchor(&cli.from, now).unwrap_or(now - chrono::Duration::days(7));
     let to = sql_queries::parse_window_anchor(&cli.to, now).unwrap_or(now);
 
     let args = spendguard_canonical_ingest::verify_chain_lib::VerifyChainArgs {

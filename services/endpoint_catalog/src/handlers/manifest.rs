@@ -19,10 +19,8 @@ pub async fn get_manifest(State(state): State<AppState>) -> Response {
     match state.store.get("manifest.json").await {
         Ok(Some(bytes)) => {
             let mut resp = (StatusCode::OK, bytes).into_response();
-            resp.headers_mut().insert(
-                header::CONTENT_TYPE,
-                "application/json".parse().unwrap(),
-            );
+            resp.headers_mut()
+                .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
             resp.headers_mut().insert(
                 header::CACHE_CONTROL,
                 "no-store, max-age=0".parse().unwrap(),

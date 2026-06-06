@@ -122,9 +122,7 @@ impl LeaseConfig {
         if self.region.is_empty() {
             return Err(LeaseError::Invalid("region empty".into()));
         }
-        if self.ttl.is_zero() || self.renew_interval.is_zero()
-            || self.retry_interval.is_zero()
-        {
+        if self.ttl.is_zero() || self.renew_interval.is_zero() || self.retry_interval.is_zero() {
             return Err(LeaseError::Invalid("intervals must be > 0".into()));
         }
         if self.renew_interval >= self.ttl {
@@ -215,14 +213,12 @@ impl LeaseManager for PostgresLease {
     }
 
     async fn release(&self, token: Uuid) -> Result<(), LeaseError> {
-        let released: (bool,) = sqlx::query_as(
-            "SELECT release_lease($1, $2, $3)",
-        )
-        .bind(&self.cfg.lease_name)
-        .bind(&self.cfg.workload_id)
-        .bind(token)
-        .fetch_one(&self.pool)
-        .await?;
+        let released: (bool,) = sqlx::query_as("SELECT release_lease($1, $2, $3)")
+            .bind(&self.cfg.lease_name)
+            .bind(&self.cfg.workload_id)
+            .bind(token)
+            .fetch_one(&self.pool)
+            .await?;
         if !released.0 {
             // Caller didn't hold — log but don't error (idempotent).
             debug!(
@@ -328,9 +324,10 @@ impl LeaseManager for K8sLease {
         let now = Utc::now();
 
         // 1) GET — does the Lease exist?
-        let existing = self.api.get_opt(&self.lease_name).await.map_err(|e| {
-            LeaseError::Invalid(format!("k8s GET lease {}: {e}", self.lease_name))
-        })?;
+        let existing =
+            self.api.get_opt(&self.lease_name).await.map_err(|e| {
+                LeaseError::Invalid(format!("k8s GET lease {}: {e}", self.lease_name))
+            })?;
 
         match existing {
             None => {
@@ -356,8 +353,7 @@ impl LeaseManager for K8sLease {
                     .await
                     .map_err(|e| LeaseError::Invalid(format!("k8s CREATE lease: {e}")))?;
                 let token = derive_k8s_token(&created);
-                let expires = now
-                    + chrono::Duration::seconds(self.lease_duration_seconds as i64);
+                let expires = now + chrono::Duration::seconds(self.lease_duration_seconds as i64);
                 Ok(LeaseAttempt {
                     state: LeaseState::Leader {
                         token,
@@ -394,12 +390,10 @@ impl LeaseManager for K8sLease {
                             &kube::api::Patch::Merge(&patch),
                         )
                         .await
-                        .map_err(|e| {
-                            LeaseError::Invalid(format!("k8s PATCH renewTime: {e}"))
-                        })?;
+                        .map_err(|e| LeaseError::Invalid(format!("k8s PATCH renewTime: {e}")))?;
                     let token = derive_k8s_token(&lease);
-                    let expires = now
-                        + chrono::Duration::seconds(self.lease_duration_seconds as i64);
+                    let expires =
+                        now + chrono::Duration::seconds(self.lease_duration_seconds as i64);
                     Ok(LeaseAttempt {
                         state: LeaseState::Leader {
                             token,
@@ -427,12 +421,10 @@ impl LeaseManager for K8sLease {
                             &kube::api::Patch::Merge(&patch),
                         )
                         .await
-                        .map_err(|e| {
-                            LeaseError::Invalid(format!("k8s PATCH takeover: {e}"))
-                        })?;
+                        .map_err(|e| LeaseError::Invalid(format!("k8s PATCH takeover: {e}")))?;
                     let token = derive_k8s_token(&patched);
-                    let expires = now
-                        + chrono::Duration::seconds(self.lease_duration_seconds as i64);
+                    let expires =
+                        now + chrono::Duration::seconds(self.lease_duration_seconds as i64);
                     Ok(LeaseAttempt {
                         state: LeaseState::Leader {
                             token,
@@ -578,10 +570,7 @@ impl LeaseManager for DisabledLease {
 /// Workers consume the `watch::Receiver` to decide whether to process
 /// a batch. The LeaseGuard returned from this function holds the join
 /// handle and a channel sender to request shutdown.
-pub fn spawn_lease_loop(
-    manager: std::sync::Arc<dyn LeaseManager>,
-    cfg: LeaseConfig,
-) -> LeaseGuard {
+pub fn spawn_lease_loop(manager: std::sync::Arc<dyn LeaseManager>, cfg: LeaseConfig) -> LeaseGuard {
     let (state_tx, state_rx) = watch::channel(LeaseState::Unknown);
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
@@ -619,8 +608,7 @@ pub fn spawn_lease_loop(
                     cfg.renew_interval
                 }
                 LeaseState::Standby {
-                    holder_workload_id,
-                    ..
+                    holder_workload_id, ..
                 } => {
                     debug!(
                         lease = %lease_name,
@@ -724,7 +712,10 @@ mod tests {
             transition_count: 1,
         };
         assert!(fresh.is_leader_now(), "fresh leader should be leader-now");
-        assert!(!expired.is_leader_now(), "expired leader must NOT be leader-now");
+        assert!(
+            !expired.is_leader_now(),
+            "expired leader must NOT be leader-now"
+        );
         // Plain is_leader is variant-only and does not check expiry —
         // verifies the new method is genuinely stricter.
         assert!(expired.is_leader());
@@ -803,7 +794,10 @@ mod tests {
         };
         let t1 = derive_k8s_token(&lease);
         let t2 = derive_k8s_token(&lease);
-        assert_eq!(t1, t2, "derive_k8s_token must be deterministic per (uid, transition)");
+        assert_eq!(
+            t1, t2,
+            "derive_k8s_token must be deterministic per (uid, transition)"
+        );
     }
 
     #[test]

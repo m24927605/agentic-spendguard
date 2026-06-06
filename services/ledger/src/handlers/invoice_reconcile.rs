@@ -248,14 +248,9 @@ async fn handle_inner(
     let decision_canonical_bytes = serde_json::to_vec(&decision_payload).map_err(|e| {
         DomainError::Internal(anyhow::anyhow!("decision payload canonical serialize: {e}"))
     })?;
-    let decision_signature = signer
-        .sign(&decision_canonical_bytes)
-        .await
-        .map_err(|e| {
-            DomainError::Internal(anyhow::anyhow!(
-                "ledger sign synthesized decision row: {e}"
-            ))
-        })?;
+    let decision_signature = signer.sign(&decision_canonical_bytes).await.map_err(|e| {
+        DomainError::Internal(anyhow::anyhow!("ledger sign synthesized decision row: {e}"))
+    })?;
     // Echo the actual signing_key_id back into the payload so the
     // GENERATED columns added by migration 0024 see the correct value.
     decision_payload["signing_key_id"] = json!(decision_signature.key_id);
@@ -335,7 +330,9 @@ fn validate(req: &InvoiceReconcileRequest) -> Result<(), DomainError> {
         return Err(DomainError::InvalidRequest("tenant_id required".into()));
     }
     if req.reservation_id.is_empty() {
-        return Err(DomainError::InvalidRequest("reservation_id required".into()));
+        return Err(DomainError::InvalidRequest(
+            "reservation_id required".into(),
+        ));
     }
     if req.decision_id.is_empty() {
         return Err(DomainError::InvalidRequest("decision_id required".into()));

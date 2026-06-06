@@ -42,10 +42,15 @@ fn openai_sample_1_basic_chat_completion() {
         "usage": {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11}
     });
     let u = openai::extract_usage(&body);
-    assert_eq!(u, UsageMetrics {
-        input_tokens: 9, output_tokens: 2, total_tokens: 11,
-        ..Default::default()
-    });
+    assert_eq!(
+        u,
+        UsageMetrics {
+            input_tokens: 9,
+            output_tokens: 2,
+            total_tokens: 11,
+            ..Default::default()
+        }
+    );
 }
 
 #[test]

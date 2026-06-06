@@ -43,10 +43,7 @@ use crate::{
     decision_id = %req.decision_id,
     reason = req.reason,
 ))]
-pub async fn handle(
-    pool: &PgPool,
-    req: ReleaseRequest,
-) -> Result<ReleaseResponse, tonic::Status> {
+pub async fn handle(pool: &PgPool, req: ReleaseRequest) -> Result<ReleaseResponse, tonic::Status> {
     match handle_inner(pool, req).await {
         Ok(resp) => Ok(resp),
         Err(DomainError::Internal(e)) => Err(tonic::Status::internal(e.to_string())),
@@ -60,10 +57,7 @@ pub async fn handle(
     }
 }
 
-async fn handle_inner(
-    pool: &PgPool,
-    req: ReleaseRequest,
-) -> Result<ReleaseResponse, DomainError> {
+async fn handle_inner(pool: &PgPool, req: ReleaseRequest) -> Result<ReleaseResponse, DomainError> {
     validate(&req)?;
 
     let tenant_id = parse_uuid(&req.tenant_id, "tenant_id")?;
@@ -237,12 +231,7 @@ fn canonical_request_hash(
     Ok(canonical)
 }
 
-fn minimal_replay_seed(
-    tx: &Uuid,
-    decision: &Uuid,
-    reservation_set: &Uuid,
-    reason: &str,
-) -> Value {
+fn minimal_replay_seed(tx: &Uuid, decision: &Uuid, reservation_set: &Uuid, reason: &str) -> Value {
     json!({
         "ledger_transaction_id": tx.to_string(),
         "decision_id":           decision.to_string(),

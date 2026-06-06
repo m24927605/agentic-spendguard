@@ -39,10 +39,7 @@ pub fn render(report: &Report, opts: &FormatOptions) -> String {
         .tier_distribution
         .iter()
         .map(|t| {
-            let key = t
-                .tier
-                .clone()
-                .unwrap_or_else(|| "unspecified".to_string());
+            let key = t.tier.clone().unwrap_or_else(|| "unspecified".to_string());
             (
                 key,
                 json!({
@@ -81,8 +78,7 @@ pub fn render(report: &Report, opts: &FormatOptions) -> String {
             .expect("JSON payload is an object")
             .insert(
                 "recommendations".to_string(),
-                serde_json::to_value(&report.recommendations)
-                    .expect("Recommendation serializes"),
+                serde_json::to_value(&report.recommendations).expect("Recommendation serializes"),
             );
     }
 
@@ -231,7 +227,10 @@ mod tests {
         let arr = v["drift_alerts"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         // RFC3339 timestamp must be present (chrono serde default).
-        assert!(arr[0]["event_time"].as_str().unwrap().contains("2026-05-15"));
+        assert!(arr[0]["event_time"]
+            .as_str()
+            .unwrap()
+            .contains("2026-05-15"));
         assert_eq!(arr[0]["z_score"], 2.4);
     }
 

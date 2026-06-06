@@ -25,7 +25,9 @@
 //! Out of scope for S17 (S18 covers): per-route role enforcement,
 //! tenant-scoped DB queries, audit log of mutating actions.
 
+pub mod approver_policy;
 pub mod rbac;
+pub use approver_policy::{approver_policy_shape, parse_approver_policy, ApproverPolicyParse};
 pub use rbac::{GroupPolicy, Permission, Role};
 
 use async_trait::async_trait;
@@ -256,9 +258,8 @@ impl AuthConfig {
                         .unwrap_or(3600);
                 let groups_claim = std::env::var(format!("{prefix}_OIDC_GROUPS_CLAIM"))
                     .unwrap_or_else(|_| "groups".into());
-                let tenant_ids_claim =
-                    std::env::var(format!("{prefix}_OIDC_TENANT_IDS_CLAIM"))
-                        .unwrap_or_else(|_| "spendguard:tenant_ids".into());
+                let tenant_ids_claim = std::env::var(format!("{prefix}_OIDC_TENANT_IDS_CLAIM"))
+                    .unwrap_or_else(|_| "spendguard:tenant_ids".into());
                 AuthConfigKind::Jwt(JwtConfig {
                     issuer,
                     audience,
@@ -274,7 +275,9 @@ impl AuthConfig {
                     return Err(AuthError::StaticTokenOutsideDemo);
                 }
                 let token = std::env::var(format!("{prefix}_STATIC_TOKEN")).map_err(|_| {
-                    AuthError::Infra(format!("{prefix}_STATIC_TOKEN required for static_token mode"))
+                    AuthError::Infra(format!(
+                        "{prefix}_STATIC_TOKEN required for static_token mode"
+                    ))
                 })?;
                 let subject = std::env::var(format!("{prefix}_STATIC_TOKEN_SUBJECT"))
                     .unwrap_or_else(|_| "operator".into());
@@ -357,9 +360,7 @@ impl HttpJwksProvider {
             let s = self.inner.read();
             match s.fetched_at {
                 None => true,
-                Some(t) => {
-                    (Utc::now() - t).num_seconds() > self.cfg.jwks_refresh_seconds as i64
-                }
+                Some(t) => (Utc::now() - t).num_seconds() > self.cfg.jwks_refresh_seconds as i64,
             }
         };
         if !needs_refresh {
@@ -682,9 +683,7 @@ fn extract_bearer(req: &Request) -> Result<String, AuthError> {
         .headers()
         .get(AUTHORIZATION)
         .ok_or(AuthError::MissingAuthHeader)?;
-    let s = header
-        .to_str()
-        .map_err(|_| AuthError::MissingAuthHeader)?;
+    let s = header.to_str().map_err(|_| AuthError::MissingAuthHeader)?;
     let bearer = s
         .strip_prefix("Bearer ")
         .ok_or(AuthError::MissingAuthHeader)?;
@@ -807,7 +806,10 @@ mod tests {
         assert!(matches!(result, Err(AuthError::StaticTokenOutsideDemo)));
         // Demo profile allows it.
         let result = AuthConfig::from_env("TEST", "demo");
-        assert!(result.is_ok(), "demo profile must allow static_token: {result:?}");
+        assert!(
+            result.is_ok(),
+            "demo profile must allow static_token: {result:?}"
+        );
         std::env::remove_var("TEST_AUTH_MODE");
         std::env::remove_var("TEST_STATIC_TOKEN");
     }
@@ -979,11 +981,7 @@ mod tests {
         keys.insert(kid.to_string(), DecodingKey::from_secret(secret));
         let jwks = Arc::new(FakeJwks { keys });
         let validator = JwtValidator::with_jwks(cfg, jwks);
-        (
-            validator,
-            EncodingKey::from_secret(secret),
-            kid.to_string(),
-        )
+        (validator, EncodingKey::from_secret(secret), kid.to_string())
     }
 
     fn issue_jwt(
@@ -1011,8 +1009,7 @@ mod tests {
 
     #[tokio::test]
     async fn jwt_validator_accepts_well_formed_token() {
-        let (v, enc, kid) =
-            make_validator("api://spendguard", "https://example.com/issuer");
+        let (v, enc, kid) = make_validator("api://spendguard", "https://example.com/issuer");
         let exp = (Utc::now() + chrono::Duration::seconds(60)).timestamp();
         let token = issue_jwt(
             &enc,
@@ -1075,7 +1072,16 @@ mod tests {
     async fn jwt_validator_rejects_unknown_kid() {
         let (v, enc, _kid) = make_validator("aud", "iss");
         let exp = (Utc::now() + chrono::Duration::seconds(60)).timestamp();
-        let token = issue_jwt(&enc, "kid-not-in-jwks", "iss", "aud", "u", exp, vec![], vec![]);
+        let token = issue_jwt(
+            &enc,
+            "kid-not-in-jwks",
+            "iss",
+            "aud",
+            "u",
+            exp,
+            vec![],
+            vec![],
+        );
         let err = v.validate(&token).await.unwrap_err();
         assert!(matches!(err, AuthError::UnknownKid(_)));
     }
@@ -1084,16 +1090,7 @@ mod tests {
     async fn jwt_validator_default_groups_claim_population() {
         let (v, enc, kid) = make_validator("aud", "iss");
         let exp = (Utc::now() + chrono::Duration::seconds(60)).timestamp();
-        let token = issue_jwt(
-            &enc,
-            &kid,
-            "iss",
-            "aud",
-            "u",
-            exp,
-            vec!["g1", "g2"],
-            vec![],
-        );
+        let token = issue_jwt(&enc, &kid, "iss", "aud", "u", exp, vec!["g1", "g2"], vec![]);
         let p = v.validate(&token).await.unwrap();
         assert_eq!(p.groups, vec!["g1".to_string(), "g2".to_string()]);
         // S17 leaves roles empty (S18 wires them).

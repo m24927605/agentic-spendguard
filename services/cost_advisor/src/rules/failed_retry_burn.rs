@@ -18,9 +18,7 @@ pub const DECLARED_INPUT_FIELDS: &[&str] = &[
     "canonical_events.event_time",
 ];
 
-const RULE_SQL: &str = include_str!(
-    "../../rules/detected_waste/failed_retry_burn_v1.sql"
-);
+const RULE_SQL: &str = include_str!("../../rules/detected_waste/failed_retry_burn_v1.sql");
 
 pub fn descriptor() -> SqlCostRule {
     SqlCostRule::new_with_db(
@@ -55,7 +53,9 @@ mod tests {
         // cost_advisor_safe_decode_payload helper (migration 0012)
         // instead of naive convert_from(decode(...)) which would
         // raise on malformed payloads.
-        assert!(descriptor().sql().contains("cost_advisor_safe_decode_payload"));
+        assert!(descriptor()
+            .sql()
+            .contains("cost_advisor_safe_decode_payload"));
     }
 
     #[test]

@@ -42,8 +42,8 @@ mod apply;
 mod bundle;
 mod listener;
 
-#[derive(Debug, Deserialize)]
-struct Config {
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct Config {
     /// Postgres URL for the ledger DB (where approval_requests lives).
     ledger_db: String,
 
@@ -53,28 +53,45 @@ struct Config {
     ///   - <CONTRACT_BUNDLE_ID>.tgz.sig         (re-stamped placeholder)
     /// And the sibling runtime.env so the sidecar's CONTRACT_BUNDLE_HASH_HEX
     /// pin matches the on-disk bytes.
-    contract_bundle_dir: PathBuf,
+    pub(crate) contract_bundle_dir: PathBuf,
 
     /// UUID of the contract bundle file (filename stem). Pinned at
     /// startup so re-runs of bundle_registry against the same demo
     /// don't accidentally target a different bundle.
-    contract_bundle_id: String,
+    pub(crate) contract_bundle_id: String,
 
     /// Path to runtime.env that the sidecar reads ONCE at startup
     /// (v0.1 has no hot-reload, see module-level doc). bundle_registry
     /// rewrites the SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_HASH_HEX line
     /// atomically (write tempfile, fsync, rename) so a sidecar
     /// restart picks up the new hash + matching .tgz bytes.
-    runtime_env_path: PathBuf,
+    pub(crate) runtime_env_path: PathBuf,
 
     /// Channel to LISTEN on. Pinned for explicitness; defaults to
     /// the channel the trigger in migration 0043 fires on.
     #[serde(default = "default_channel")]
-    notify_channel: String,
+    pub(crate) notify_channel: String,
+
+    /// Interval (seconds) between background recovery sweeps that
+    /// re-scan `state='approved' AND proposal_source='cost_advisor'`
+    /// rows and re-attempt apply. Catches transient apply failures
+    /// (disk hiccup, brief NFS unavailability) that the per-NOTIFY
+    /// path logs and drops — without the sweep, the failed approval
+    /// stays stuck in `approved` until process restart or the next
+    /// PgListener reconnect, whichever comes first.
+    ///
+    /// Defaults to 60s. Set to 0 to disable (recovery only on startup
+    /// + PgListener reconnect — the pre-fix behaviour).
+    #[serde(default = "default_recovery_sweep_interval_secs")]
+    pub(crate) recovery_sweep_interval_secs: u64,
 }
 
 fn default_channel() -> String {
     "approval_requests_state_change".to_string()
+}
+
+fn default_recovery_sweep_interval_secs() -> u64 {
+    60
 }
 
 #[tokio::main]
@@ -111,6 +128,28 @@ async fn main() -> Result<()> {
         .connect(&config.ledger_db)
         .await
         .context("connect ledger DB")?;
+
+    // Spawn the periodic recovery sweep (R1) BEFORE entering the
+    // listener loop. The sweep is fire-and-forget: PgListener's
+    // try_recv() blocks until a NOTIFY arrives, so without an
+    // independent task a transient apply failure (logged + dropped
+    // by the per-NOTIFY handler) wouldn't be re-attempted until the
+    // next legitimate state-change NOTIFY or a PgListener reconnect.
+    // The sweep is a no-op when the queue is clean; apply is idempotent
+    // so racing with the listener's own apply is harmless.
+    if config.recovery_sweep_interval_secs > 0 {
+        let sweep_pool = pool.clone();
+        let sweep_config = config.clone();
+        info!(
+            interval_secs = config.recovery_sweep_interval_secs,
+            "spawning periodic recovery sweep"
+        );
+        tokio::spawn(async move {
+            listener::run_periodic_recovery_sweep(sweep_pool, sweep_config).await;
+        });
+    } else {
+        info!("periodic recovery sweep disabled (interval=0)");
+    }
 
     if let Err(e) = listener::run(pool, &config).await {
         error!(error = %e, "listener loop exited with error");

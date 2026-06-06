@@ -32,7 +32,9 @@
 //! and assert the v1alpha2 evaluator preserves them across a 100-decision
 //! synthetic corpus driven by the existing demo contract YAML.
 
-use spendguard_sidecar::contract::{evaluate, parse_from_tgz, Contract, PredictionPolicy, RunProjectionAction};
+use spendguard_sidecar::contract::{
+    evaluate, parse_from_tgz, Contract, PredictionPolicy, RunProjectionAction,
+};
 
 mod fixtures {
     /// A representative v1alpha1 contract YAML — same shape as the
@@ -201,8 +203,8 @@ fn v1alpha1_canonical_loads_and_defaults_fill() {
 
 #[test]
 fn v1alpha2_loads_with_explicit_policy() {
-    let c: Contract = parse_from_tgz(&build_tgz_bundle(fixtures::V1ALPHA2_YAML))
-        .expect("parse v1alpha2 bundle");
+    let c: Contract =
+        parse_from_tgz(&build_tgz_bundle(fixtures::V1ALPHA2_YAML)).expect("parse v1alpha2 bundle");
     assert_eq!(c.prediction_policy, PredictionPolicy::EmpiricalRunCeiling);
     // require-approval-large rule has explicit REQUIRE_APPROVAL action.
     let r = c
@@ -210,9 +212,16 @@ fn v1alpha2_loads_with_explicit_policy() {
         .iter()
         .find(|r| r.id == "require-approval-large")
         .expect("rule");
-    assert_eq!(r.run_projection_action, RunProjectionAction::RequireApproval);
+    assert_eq!(
+        r.run_projection_action,
+        RunProjectionAction::RequireApproval
+    );
     // hard-cap-deny rule defaults to BLOCK_NEXT_CALL.
-    let r = c.rules.iter().find(|r| r.id == "hard-cap-deny").expect("rule");
+    let r = c
+        .rules
+        .iter()
+        .find(|r| r.id == "hard-cap-deny")
+        .expect("rule");
     assert_eq!(r.run_projection_action, RunProjectionAction::BlockNextCall);
     assert_eq!(c.api_version, "spendguard.ai/v1alpha2");
 }
@@ -235,8 +244,8 @@ fn v1alpha2_evaluator_preserves_decisions_on_v1alpha1_contracts_100_corpus() {
         .expect("parse legacy v1alpha1");
     let c_canonical = parse_from_tgz(&build_tgz_bundle(fixtures::V1ALPHA1_CANONICAL_YAML))
         .expect("parse canonical v1alpha1");
-    let c_v1alpha2 = parse_from_tgz(&build_tgz_bundle(fixtures::V1ALPHA2_YAML))
-        .expect("parse v1alpha2");
+    let c_v1alpha2 =
+        parse_from_tgz(&build_tgz_bundle(fixtures::V1ALPHA2_YAML)).expect("parse v1alpha2");
 
     // 100-decision corpus per §8.2.
     let mut corpus: Vec<String> = Vec::new();
@@ -255,7 +264,11 @@ fn v1alpha2_evaluator_preserves_decisions_on_v1alpha1_contracts_100_corpus() {
         let amount: i64 = 1_500_000_000 + (i as i64) * 1_000_000_000;
         corpus.push(amount.to_string());
     }
-    assert_eq!(corpus.len(), 100, "corpus must hit §8.2 100-decision target");
+    assert_eq!(
+        corpus.len(),
+        100,
+        "corpus must hit §8.2 100-decision target"
+    );
 
     for (i, amount) in corpus.iter().enumerate() {
         let claim = synthetic_claim(amount);

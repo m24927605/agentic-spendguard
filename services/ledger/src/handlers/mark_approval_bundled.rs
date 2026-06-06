@@ -66,9 +66,9 @@ pub async fn handle(
         Err(e) => return Err(Status::unavailable(format!("db: {e}"))),
     };
 
-    let was_first_bundling: bool = row.try_get("was_first_bundling").map_err(|e| {
-        Status::internal(format!("decode was_first_bundling: {e}"))
-    })?;
+    let was_first_bundling: bool = row
+        .try_get("was_first_bundling")
+        .map_err(|e| Status::internal(format!("decode was_first_bundling: {e}")))?;
     let returned_tx: Uuid = row
         .try_get("ledger_transaction_id")
         .map_err(|e| Status::internal(format!("decode ledger_transaction_id: {e}")))?;

@@ -91,7 +91,11 @@ impl TtlSweeperMetrics {
         let mut out = String::with_capacity(1024);
         out.push_str("# HELP spendguard_ttl_sweeper_loop_iterations_total TTL sweeper poll-loop iterations broken out by outcome.\n");
         out.push_str("# TYPE spendguard_ttl_sweeper_loop_iterations_total counter\n");
-        for outcome in [LoopOutcome::Processed, LoopOutcome::Skipped, LoopOutcome::Error] {
+        for outcome in [
+            LoopOutcome::Processed,
+            LoopOutcome::Skipped,
+            LoopOutcome::Error,
+        ] {
             let i = match outcome {
                 LoopOutcome::Processed => 0,
                 LoopOutcome::Skipped => 1,
@@ -106,7 +110,11 @@ impl TtlSweeperMetrics {
         }
         out.push_str("# HELP spendguard_ttl_sweeper_skip_total TTL sweeper skip reasons (non-leader path).\n");
         out.push_str("# TYPE spendguard_ttl_sweeper_skip_total counter\n");
-        for reason in [SkipReason::LeaseExpired, SkipReason::Standby, SkipReason::Unknown] {
+        for reason in [
+            SkipReason::LeaseExpired,
+            SkipReason::Standby,
+            SkipReason::Unknown,
+        ] {
             let i = match reason {
                 SkipReason::LeaseExpired => 0,
                 SkipReason::Standby => 1,

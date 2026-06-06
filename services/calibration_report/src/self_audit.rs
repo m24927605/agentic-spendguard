@@ -75,8 +75,7 @@ pub struct ReportGeneratedData<'a> {
 }
 
 const EVENT_TYPE_REPORT: &str = "spendguard.audit.calibration.report_generated.v1alpha1";
-const EVENT_TYPE_UNAUTHORIZED: &str =
-    "spendguard.audit.calibration.unauthorized_access.v1alpha1";
+const EVENT_TYPE_UNAUTHORIZED: &str = "spendguard.audit.calibration.unauthorized_access.v1alpha1";
 
 /// Emit the report-generated self-audit event (spec §5.3).
 ///
@@ -181,12 +180,7 @@ mod tests {
         // Just call the function; serialisation is the failure mode
         // we care about. The fixture exercises every branch in the
         // `data` body.
-        emit_report_generated(
-            &c,
-            Utc::now() - chrono::Duration::days(7),
-            Utc::now(),
-            0,
-        );
+        emit_report_generated(&c, Utc::now() - chrono::Duration::days(7), Utc::now(), 0);
     }
 
     #[test]
@@ -222,7 +216,10 @@ mod tests {
         assert_eq!(json["data"]["format"], "text");
         assert_eq!(json["data"]["proof_mode"], "cache");
         assert_eq!(json["data"]["exit_code"], 0);
-        assert_eq!(json["data"]["tenant_id"], "00000000-0000-4000-8000-000000000001");
+        assert_eq!(
+            json["data"]["tenant_id"],
+            "00000000-0000-4000-8000-000000000001"
+        );
         assert_eq!(json["data"]["auth_subject"], "test-operator@example.com");
     }
 

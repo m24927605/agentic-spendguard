@@ -28,8 +28,8 @@
 //!   * projector RPC unreachable from sidecar → sidecar handles in Phase E
 //!     via conservative pass-through (no RUN_* emitted; reservation = A).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tonic::{Request, Response, Status};
@@ -37,14 +37,14 @@ use tracing::{debug, error, info, warn};
 use uuid::Uuid;
 
 use crate::config::Config;
-use crate::layering::{LayeringInputs, compute_layering};
+use crate::layering::{compute_layering, LayeringInputs};
 use crate::proto::run_cost_projector::v1::{
-    ProjectRequest, ProjectResponse, StrategyUsed, TerminateRunRequest, TerminateRunResponse,
-    run_cost_projector_server::RunCostProjector,
+    run_cost_projector_server::RunCostProjector, ProjectRequest, ProjectResponse, StrategyUsed,
+    TerminateRunRequest, TerminateRunResponse,
 };
 use crate::recovery::recover_from_audit_chain;
 use crate::signal_1::signal_1_predicted_remaining_steps;
-use crate::signal_2::{DriftVerdict, evaluate_drift};
+use crate::signal_2::{evaluate_drift, DriftVerdict};
 use crate::state_cache::{RunState, RunStateCache, RunStateKey};
 
 /// Bounded request input limits (DoS defense; mirrors output_predictor
@@ -663,10 +663,9 @@ mod tests {
             .expect("project ok")
             .into_inner();
         assert_eq!(resp.emitted_code, "RUN_BUDGET_PROJECTION_EXCEEDED");
-        assert!(
-            resp.considered_codes
-                .contains(&"RUN_BUDGET_PROJECTION_EXCEEDED".to_string())
-        );
+        assert!(resp
+            .considered_codes
+            .contains(&"RUN_BUDGET_PROJECTION_EXCEEDED".to_string()));
     }
 
     #[tokio::test]

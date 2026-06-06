@@ -269,7 +269,9 @@ impl FailPolicyMatrix {
             .unwrap_or(false);
 
         let dep_map: HashMap<String, HashMap<String, String>> = serde_json::from_value(value)
-            .map_err(|e| PolicyError::ParseError(format!("expected map<dep, map<wf, policy>>: {e}")))?;
+            .map_err(|e| {
+                PolicyError::ParseError(format!("expected map<dep, map<wf, policy>>: {e}"))
+            })?;
 
         let mut m = Self::default_fail_closed();
         m.policy_version = policy_version;

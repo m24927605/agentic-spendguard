@@ -16,8 +16,9 @@ use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
 
 fn ledger_url() -> String {
-    std::env::var("SPENDGUARD_TEST_LEDGER_URL")
-        .unwrap_or_else(|_| "postgres://postgres:test@localhost:25440/spendguard_ledger".to_string())
+    std::env::var("SPENDGUARD_TEST_LEDGER_URL").unwrap_or_else(|_| {
+        "postgres://postgres:test@localhost:25440/spendguard_ledger".to_string()
+    })
 }
 
 async fn try_connect() -> Option<sqlx::PgPool> {
@@ -184,10 +185,9 @@ async fn test_op_pinning_round_trip() {
     ]);
     let cfg = ProposalConfig::default();
 
-    let outcome =
-        proposal_writer::write_proposal(&pool, tenant, finding_id, 1, &patch, &cfg)
-            .await
-            .expect("write proposal with test+replace patch");
+    let outcome = proposal_writer::write_proposal(&pool, tenant, finding_id, 1, &patch, &cfg)
+        .await
+        .expect("write proposal with test+replace patch");
     assert!(
         matches!(outcome, ProposalOutcome::Inserted { .. }),
         "expected Inserted, got {:?}",
@@ -195,12 +195,13 @@ async fn test_op_pinning_round_trip() {
     );
 
     // Verify the stored patch round-trips.
-    let stored: (serde_json::Value,) =
-        sqlx::query_as("SELECT proposed_dsl_patch FROM approval_requests WHERE proposing_finding_id = $1")
-            .bind(finding_id)
-            .fetch_one(&pool)
-            .await
-            .expect("fetch stored patch");
+    let stored: (serde_json::Value,) = sqlx::query_as(
+        "SELECT proposed_dsl_patch FROM approval_requests WHERE proposing_finding_id = $1",
+    )
+    .bind(finding_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch stored patch");
     assert_eq!(stored.0, patch);
 }
 
@@ -233,48 +234,97 @@ async fn db_validator_value_schema_edges() {
     }
 
     // TTL value cases (all pinned to isolate the value-schema gate).
-    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!(1.5)), false,
-        "ttl decimal 1.5 rejected").await;
-    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!("60")), false,
-        "ttl string \"60\" rejected (must be JSON number)").await;
-    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!(-1)), false,
-        "ttl -1 rejected (out of range)").await;
-    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!(86401)), false,
-        "ttl 86401 rejected (out of range)").await;
+    check(
+        &pool,
+        pinned_budget_replace("reservation_ttl_seconds", json!(1.5)),
+        false,
+        "ttl decimal 1.5 rejected",
+    )
+    .await;
+    check(
+        &pool,
+        pinned_budget_replace("reservation_ttl_seconds", json!("60")),
+        false,
+        "ttl string \"60\" rejected (must be JSON number)",
+    )
+    .await;
+    check(
+        &pool,
+        pinned_budget_replace("reservation_ttl_seconds", json!(-1)),
+        false,
+        "ttl -1 rejected (out of range)",
+    )
+    .await;
+    check(
+        &pool,
+        pinned_budget_replace("reservation_ttl_seconds", json!(86401)),
+        false,
+        "ttl 86401 rejected (out of range)",
+    )
+    .await;
     // JSON Number with scientific notation: serde_json normalizes
     // `1e2` to `100.0` on the wire; PG's jsonb stores it as a
     // numeric and the `#>> '{}'` text extraction returns `"100.0"`,
     // which fails `::BIGINT` cast. Validator rejects.
-    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!(1e2)), false,
-        "ttl 1e2 rejected (normalized to 100.0 by serde_json)").await;
-    check(&pool, pinned_budget_replace("reservation_ttl_seconds", json!(100)), true,
-        "ttl 100 accepted (plain integer)").await;
+    check(
+        &pool,
+        pinned_budget_replace("reservation_ttl_seconds", json!(1e2)),
+        false,
+        "ttl 1e2 rejected (normalized to 100.0 by serde_json)",
+    )
+    .await;
+    check(
+        &pool,
+        pinned_budget_replace("reservation_ttl_seconds", json!(100)),
+        true,
+        "ttl 100 accepted (plain integer)",
+    )
+    .await;
 
     // Atomic amount: must be string of digits.
-    check(&pool, pinned_budget_replace("limit_amount_atomic", json!(100)), false,
-        "limit_amount_atomic number 100 rejected (must be string)").await;
-    check(&pool, pinned_budget_replace("limit_amount_atomic", json!("1.5")), false,
-        "limit_amount_atomic 1.5 rejected (must be digit-only)").await;
-    check(&pool, pinned_budget_replace("limit_amount_atomic", json!("")), false,
-        "limit_amount_atomic empty string rejected").await;
+    check(
+        &pool,
+        pinned_budget_replace("limit_amount_atomic", json!(100)),
+        false,
+        "limit_amount_atomic number 100 rejected (must be string)",
+    )
+    .await;
+    check(
+        &pool,
+        pinned_budget_replace("limit_amount_atomic", json!("1.5")),
+        false,
+        "limit_amount_atomic 1.5 rejected (must be digit-only)",
+    )
+    .await;
+    check(
+        &pool,
+        pinned_budget_replace("limit_amount_atomic", json!("")),
+        false,
+        "limit_amount_atomic empty string rejected",
+    )
+    .await;
 
     // Same-index pinning invariant: budget replace WITHOUT a
     // preceding test op MUST fail (codex CA-P3.1 r1 P2).
-    check(&pool,
+    check(
+        &pool,
         json!([{"op":"replace","path":"/spec/budgets/0/reservation_ttl_seconds","value":60}]),
         false,
         "budget replace without test pin rejected (same-index invariant)",
-    ).await;
+    )
+    .await;
 
     // CA-P3.1 r1 P1 regression: explicit DB-side rejection of the
     // old (pre-CA-P3.1) path shapes. The Rust validator has these
     // covered; mirror them at the SQL gate so the authoritative
     // layer is regression-protected.
-    check(&pool,
+    check(
+        &pool,
         json!([{"op":"replace","path":"/budgets/0/reservation_ttl_seconds","value":60}]),
         false,
         "old shape /budgets/0/... (no /spec/) rejected",
-    ).await;
+    )
+    .await;
     check(&pool,
         json!([{"op":"test","path":"/spec/budgets/0/budget_id","value":"a1b2c3d4-e5f6-7890-abcd-ef0123456789"}]),
         false,
@@ -354,10 +404,16 @@ async fn notify_fires_on_state_change() {
     insert_finding(&pool, tenant, finding_id, 'c').await;
 
     let patch = json!([{"op":"replace","path":"/spec/rules/0/then/decision","value":"STOP"}]);
-    let outcome =
-        proposal_writer::write_proposal(&pool, tenant, finding_id, 1, &patch, &ProposalConfig::default())
-            .await
-            .expect("write proposal");
+    let outcome = proposal_writer::write_proposal(
+        &pool,
+        tenant,
+        finding_id,
+        1,
+        &patch,
+        &ProposalConfig::default(),
+    )
+    .await
+    .expect("write proposal");
     let approval_id = match outcome {
         ProposalOutcome::Inserted { approval_id, .. } => approval_id,
         other => panic!("expected Inserted, got {:?}", other),
@@ -377,8 +433,7 @@ async fn notify_fires_on_state_change() {
         .await
         .expect("notify timeout")
         .expect("listener channel");
-    let payload: serde_json::Value =
-        serde_json::from_str(notif.payload()).expect("payload json");
+    let payload: serde_json::Value = serde_json::from_str(notif.payload()).expect("payload json");
     assert_eq!(payload["proposal_source"], "cost_advisor");
     assert_eq!(payload["new_state"], "approved");
     assert_eq!(payload["old_state"], "pending");

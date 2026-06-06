@@ -161,8 +161,8 @@ fn classify_api_version(s: &str) -> Option<ApiVersion> {
 
 /// Extract contract.yaml from a gzipped tarball and parse to `Contract`.
 pub fn parse_from_tgz(bundle_bytes: &[u8]) -> Result<Contract> {
-    let yaml_bytes = extract_contract_yaml(bundle_bytes)
-        .context("extract contract.yaml from bundle tarball")?;
+    let yaml_bytes =
+        extract_contract_yaml(bundle_bytes).context("extract contract.yaml from bundle tarball")?;
     parse_yaml(&yaml_bytes).context("parse contract.yaml")
 }
 
@@ -362,13 +362,7 @@ fn parse_yaml(bytes: &[u8]) -> Result<Contract> {
                 "SKIP" => Decision::Skip,
                 "STOP" => Decision::Stop,
                 "REQUIRE_APPROVAL" => Decision::RequireApproval,
-                other => {
-                    return Err(anyhow!(
-                        "rule '{}' has unknown decision '{}'",
-                        r.id,
-                        other
-                    ))
-                }
+                other => return Err(anyhow!("rule '{}' has unknown decision '{}'", r.id, other)),
             };
 
             // SLICE_02 §6.4: rule-level run_projection_action default-fill.
@@ -586,8 +580,10 @@ spec:
 
     #[test]
     fn rejects_unknown_prediction_policy_on_v1alpha2() {
-        let yaml = SAMPLE_YAML_V1ALPHA2
-            .replace("prediction_policy: EMPIRICAL_RUN_CEILING", "prediction_policy: BANANA");
+        let yaml = SAMPLE_YAML_V1ALPHA2.replace(
+            "prediction_policy: EMPIRICAL_RUN_CEILING",
+            "prediction_policy: BANANA",
+        );
         let err = parse_yaml(yaml.as_bytes()).unwrap_err();
         assert!(err.to_string().contains("prediction_policy"));
         assert!(err.to_string().contains("BANANA"));
@@ -595,8 +591,10 @@ spec:
 
     #[test]
     fn rejects_unknown_run_projection_action_on_v1alpha2() {
-        let yaml = SAMPLE_YAML_V1ALPHA2
-            .replace("run_projection_action: REQUIRE_APPROVAL", "run_projection_action: BANANA");
+        let yaml = SAMPLE_YAML_V1ALPHA2.replace(
+            "run_projection_action: REQUIRE_APPROVAL",
+            "run_projection_action: BANANA",
+        );
         let err = parse_yaml(yaml.as_bytes()).unwrap_err();
         assert!(err.to_string().contains("run_projection_action"));
         assert!(err.to_string().contains("BANANA"));
@@ -608,8 +606,14 @@ spec:
         // Test the precise allowed-pairs combination that drives
         // operator confusion most often.
         let yaml = SAMPLE_YAML_V1ALPHA2
-            .replace("prediction_policy: EMPIRICAL_RUN_CEILING", "prediction_policy: STRICT_CEILING")
-            .replace("run_projection_action: REQUIRE_APPROVAL", "run_projection_action: ALERT_ONLY");
+            .replace(
+                "prediction_policy: EMPIRICAL_RUN_CEILING",
+                "prediction_policy: STRICT_CEILING",
+            )
+            .replace(
+                "run_projection_action: REQUIRE_APPROVAL",
+                "run_projection_action: ALERT_ONLY",
+            );
         let err = parse_yaml(yaml.as_bytes()).unwrap_err();
         assert!(err.to_string().contains("§5.3 allowed-pairs"));
         assert!(err.to_string().contains("STRICT_CEILING"));
@@ -619,8 +623,14 @@ spec:
     #[test]
     fn rejects_strict_ceiling_plus_require_approval() {
         let yaml = SAMPLE_YAML_V1ALPHA2
-            .replace("prediction_policy: EMPIRICAL_RUN_CEILING", "prediction_policy: STRICT_CEILING")
-            .replace("run_projection_action: REQUIRE_APPROVAL", "run_projection_action: REQUIRE_APPROVAL");
+            .replace(
+                "prediction_policy: EMPIRICAL_RUN_CEILING",
+                "prediction_policy: STRICT_CEILING",
+            )
+            .replace(
+                "run_projection_action: REQUIRE_APPROVAL",
+                "run_projection_action: REQUIRE_APPROVAL",
+            );
         // STRICT_CEILING + REQUIRE_APPROVAL also invalid per §5.3.
         let err = parse_yaml(yaml.as_bytes()).unwrap_err();
         assert!(err.to_string().contains("§5.3 allowed-pairs"));
@@ -630,8 +640,14 @@ spec:
     fn rejects_shadow_only_plus_block_next_call() {
         // Spec §5.3 — SHADOW_ONLY disallows BLOCK_NEXT_CALL.
         let yaml = SAMPLE_YAML_V1ALPHA2
-            .replace("prediction_policy: EMPIRICAL_RUN_CEILING", "prediction_policy: SHADOW_ONLY")
-            .replace("run_projection_action: REQUIRE_APPROVAL", "run_projection_action: BLOCK_NEXT_CALL");
+            .replace(
+                "prediction_policy: EMPIRICAL_RUN_CEILING",
+                "prediction_policy: SHADOW_ONLY",
+            )
+            .replace(
+                "run_projection_action: REQUIRE_APPROVAL",
+                "run_projection_action: BLOCK_NEXT_CALL",
+            );
         let err = parse_yaml(yaml.as_bytes()).unwrap_err();
         assert!(err.to_string().contains("§5.3 allowed-pairs"));
         assert!(err.to_string().contains("SHADOW_ONLY"));
@@ -641,8 +657,14 @@ spec:
     fn accepts_strict_ceiling_plus_block_next_call() {
         // The ONLY allowed STRICT_CEILING pair.
         let yaml = SAMPLE_YAML_V1ALPHA2
-            .replace("prediction_policy: EMPIRICAL_RUN_CEILING", "prediction_policy: STRICT_CEILING")
-            .replace("run_projection_action: REQUIRE_APPROVAL", "run_projection_action: BLOCK_NEXT_CALL");
+            .replace(
+                "prediction_policy: EMPIRICAL_RUN_CEILING",
+                "prediction_policy: STRICT_CEILING",
+            )
+            .replace(
+                "run_projection_action: REQUIRE_APPROVAL",
+                "run_projection_action: BLOCK_NEXT_CALL",
+            );
         let c = parse_yaml(yaml.as_bytes()).expect("parse");
         assert_eq!(c.prediction_policy, PredictionPolicy::StrictCeiling);
         assert_eq!(
@@ -655,8 +677,14 @@ spec:
     fn accepts_shadow_only_plus_alert_only() {
         // The ONLY allowed SHADOW_ONLY pair.
         let yaml = SAMPLE_YAML_V1ALPHA2
-            .replace("prediction_policy: EMPIRICAL_RUN_CEILING", "prediction_policy: SHADOW_ONLY")
-            .replace("run_projection_action: REQUIRE_APPROVAL", "run_projection_action: ALERT_ONLY");
+            .replace(
+                "prediction_policy: EMPIRICAL_RUN_CEILING",
+                "prediction_policy: SHADOW_ONLY",
+            )
+            .replace(
+                "run_projection_action: REQUIRE_APPROVAL",
+                "run_projection_action: ALERT_ONLY",
+            );
         let c = parse_yaml(yaml.as_bytes()).expect("parse");
         assert_eq!(c.prediction_policy, PredictionPolicy::ShadowOnly);
         assert_eq!(
@@ -770,13 +798,15 @@ spec:
         //   1. The remaining structure still parses cleanly.
         //   2. Only the `stop_when_exhausted` rule is active.
         //   3. The contract-level prediction_policy is preserved.
-        let yaml = include_bytes!(
-            "../../../../examples/contracts/quickstart-v1alpha2.yaml"
-        );
+        let yaml = include_bytes!("../../../../examples/contracts/quickstart-v1alpha2.yaml");
         let c = parse_yaml(yaml).expect("quickstart-v1alpha2.yaml parse");
         assert_eq!(c.api_version, "spendguard.ai/v1alpha2");
         assert_eq!(c.prediction_policy, PredictionPolicy::EmpiricalRunCeiling);
-        assert_eq!(c.rules.len(), 1, "only stop_when_exhausted should be active");
+        assert_eq!(
+            c.rules.len(),
+            1,
+            "only stop_when_exhausted should be active"
+        );
         assert_eq!(c.rules[0].id, "stop_when_exhausted");
         // The active rule has no RUN_* code, so the default
         // BLOCK_NEXT_CALL applies and is allowed under
@@ -819,11 +849,18 @@ spec:
         for (p_str, p_enum) in policies {
             for (a_str, a_enum) in actions {
                 let yaml = SAMPLE_YAML_V1ALPHA2
-                    .replace("prediction_policy: EMPIRICAL_RUN_CEILING", &format!("prediction_policy: {}", p_str))
-                    .replace("run_projection_action: REQUIRE_APPROVAL", &format!("run_projection_action: {}", a_str));
+                    .replace(
+                        "prediction_policy: EMPIRICAL_RUN_CEILING",
+                        &format!("prediction_policy: {}", p_str),
+                    )
+                    .replace(
+                        "run_projection_action: REQUIRE_APPROVAL",
+                        &format!("run_projection_action: {}", a_str),
+                    );
                 let res = parse_yaml(yaml.as_bytes());
                 if is_allowed_pair(p_enum, a_enum) {
-                    let c = res.unwrap_or_else(|e| panic!("allowed pair {p_str}+{a_str} rejected: {e}"));
+                    let c = res
+                        .unwrap_or_else(|e| panic!("allowed pair {p_str}+{a_str} rejected: {e}"));
                     assert_eq!(c.prediction_policy, p_enum);
                     assert_eq!(c.rules[0].run_projection_action, a_enum);
                     accepted += 1;

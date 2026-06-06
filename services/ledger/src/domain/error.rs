@@ -91,18 +91,31 @@ impl DomainError {
             }
             DomainError::BudgetExhausted(d) => (ProtoCode::BudgetExhausted, d.clone()),
             DomainError::DeadlockTimeout => (ProtoCode::DeadlockTimeout, String::new()),
-            DomainError::SerializationFailure => (ProtoCode::DeadlockTimeout, "serialization_failure".to_string()),
-            DomainError::SyncReplicaUnavailable => (ProtoCode::SyncReplicaUnavailable, String::new()),
+            DomainError::SerializationFailure => (
+                ProtoCode::DeadlockTimeout,
+                "serialization_failure".to_string(),
+            ),
+            DomainError::SyncReplicaUnavailable => {
+                (ProtoCode::SyncReplicaUnavailable, String::new())
+            }
             DomainError::TenantDisabled(d) => (ProtoCode::TenantDisabled, d.clone()),
             DomainError::SchemaBundleUnknown(d) => (ProtoCode::SchemaBundleUnknown, d.clone()),
             DomainError::SignatureInvalid(d) => (ProtoCode::SignatureInvalid, d.clone()),
-            DomainError::AuditInvariantViolated(d) => (ProtoCode::AuditInvariantViolated, d.clone()),
-            DomainError::DuplicateDecisionEvent(d) => (ProtoCode::DuplicateDecisionEvent, d.clone()),
-            DomainError::ReservationStateConflict(d) => (ProtoCode::ReservationStateConflict, d.clone()),
+            DomainError::AuditInvariantViolated(d) => {
+                (ProtoCode::AuditInvariantViolated, d.clone())
+            }
+            DomainError::DuplicateDecisionEvent(d) => {
+                (ProtoCode::DuplicateDecisionEvent, d.clone())
+            }
+            DomainError::ReservationStateConflict(d) => {
+                (ProtoCode::ReservationStateConflict, d.clone())
+            }
             DomainError::PricingFreezeMismatch(d) => (ProtoCode::PricingFreezeMismatch, d.clone()),
             DomainError::OverrunReservation(d) => (ProtoCode::OverrunReservation, d.clone()),
             DomainError::ReservationTtlExpired(d) => (ProtoCode::ReservationTtlExpired, d.clone()),
-            DomainError::MultiReservationCommitDeferred(d) => (ProtoCode::MultiReservationCommitDeferred, d.clone()),
+            DomainError::MultiReservationCommitDeferred(d) => {
+                (ProtoCode::MultiReservationCommitDeferred, d.clone())
+            }
             DomainError::ReservationNotFound(d) => (ProtoCode::Unspecified, d.clone()),
             DomainError::IdempotencyConflict => (
                 ProtoCode::IdempotencyConflict,
@@ -116,10 +129,7 @@ impl DomainError {
         ProtoError {
             code: code as i32,
             message: self.to_string(),
-            details: std::collections::HashMap::from([(
-                "summary".to_string(),
-                details,
-            )]),
+            details: std::collections::HashMap::from([("summary".to_string(), details)]),
         }
     }
 
@@ -226,14 +236,13 @@ pub fn map_pg_error(err: sqlx::Error) -> DomainError {
                 "P0001" if msg.contains("AUDIT_INVARIANT_VIOLATED") => {
                     DomainError::AuditInvariantViolated(msg.to_string())
                 }
-                "P0001" if msg.contains("INVALID_PRODUCER_SEQUENCE")
-                    || msg.contains("PRODUCER_SEQUENCE_MISMATCH") =>
+                "P0001"
+                    if msg.contains("INVALID_PRODUCER_SEQUENCE")
+                        || msg.contains("PRODUCER_SEQUENCE_MISMATCH") =>
                 {
                     DomainError::AuditInvariantViolated(msg.to_string())
                 }
-                "P0001" if msg.contains("COMMIT_ROW_DIVERGENT") => {
-                    DomainError::IdempotencyConflict
-                }
+                "P0001" if msg.contains("COMMIT_ROW_DIVERGENT") => DomainError::IdempotencyConflict,
                 // Step 8 SP raises COMMIT_NOT_FOUND when ProviderReport
                 // is called before CommitEstimated; commit_lifecycle_race
                 // when CAS UPDATE affects 0 rows; UNIT_MISMATCH when
@@ -259,10 +268,9 @@ pub fn map_pg_error(err: sqlx::Error) -> DomainError {
                 }
                 "P0001" => DomainError::Internal(anyhow::anyhow!(msg.to_string())),
                 // 23514 = check_violation (per_unit balance trigger).
-                "23514" => DomainError::AuditInvariantViolated(format!(
-                    "balance violation: {}",
-                    msg
-                )),
+                "23514" => {
+                    DomainError::AuditInvariantViolated(format!("balance violation: {}", msg))
+                }
                 // 23505 = unique_violation. Disambiguate by constraint name when present.
                 "23505" => map_unique_violation(db_err),
                 // 22023 = invalid_parameter_value (used for input shape errors).
@@ -283,10 +291,7 @@ pub fn map_pg_error(err: sqlx::Error) -> DomainError {
 
 fn map_unique_violation(db_err: &dyn sqlx::error::DatabaseError) -> DomainError {
     let msg = db_err.message().to_string();
-    let constraint = db_err
-        .constraint()
-        .map(str::to_string)
-        .unwrap_or_default();
+    let constraint = db_err.constraint().map(str::to_string).unwrap_or_default();
 
     if constraint.contains("audit_outbox_global_per_decision")
         || constraint.contains("audit_outbox_decision_per_decision")

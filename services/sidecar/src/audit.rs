@@ -13,10 +13,7 @@ use prost::Message;
 use spendguard_signing::{SignError, Signer};
 use tracing::warn;
 
-use crate::{
-    domain::error::DomainError,
-    proto::common::v1::CloudEvent,
-};
+use crate::{domain::error::DomainError, proto::common::v1::CloudEvent};
 
 /// Sign `event` in place. Sets `signing_key_id` first (so it's covered
 /// by the signature), then computes the canonical encoding with an

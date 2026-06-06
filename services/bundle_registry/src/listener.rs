@@ -16,10 +16,13 @@
 //!     produces bit-identical output, so the apply path skips disk
 //!     writes when sha256 is unchanged.
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use sqlx::postgres::PgListener;
 use sqlx::PgPool;
+use tokio::time::MissedTickBehavior;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
@@ -45,13 +48,20 @@ use crate::Config;
 ///     even when individual applies fail; the operator monitors
 ///     bundle_registry logs for `recovery_apply_failed` events.
 pub async fn recover_pending(pool: &PgPool, config: &crate::Config) -> Result<()> {
+    // Tiebreak on approval_id so two approvals sharing the same
+    // microsecond-resolved_at apply in a deterministic order. Without
+    // it, the module-level claim "FINAL bundle state converges to the
+    // latest-resolved approval" depends on Postgres' non-guaranteed
+    // tuple order for ties — meaning two operators approving the same
+    // budget at the same instant could see different bundle outcomes
+    // across recovery runs on different nodes.
     let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
         r#"
         SELECT approval_id, tenant_id
           FROM approval_requests
          WHERE state = 'approved'
            AND proposal_source = 'cost_advisor'
-         ORDER BY resolved_at ASC
+         ORDER BY resolved_at ASC, approval_id ASC
         "#,
     )
     .fetch_all(pool)
@@ -62,7 +72,10 @@ pub async fn recover_pending(pool: &PgPool, config: &crate::Config) -> Result<()
         info!("startup recovery: no queued approvals");
         return Ok(());
     }
-    info!(count = rows.len(), "startup recovery: applying queued approvals");
+    info!(
+        count = rows.len(),
+        "startup recovery: applying queued approvals"
+    );
 
     let mut applied = 0u32;
     let mut failed = 0u32;
@@ -89,6 +102,38 @@ pub async fn recover_pending(pool: &PgPool, config: &crate::Config) -> Result<()
     }
     info!(applied, failed, "startup recovery: done");
     Ok(())
+}
+
+/// Background task: every `recovery_sweep_interval_secs` re-run
+/// `recover_pending` so a transient apply failure doesn't strand an
+/// approval in `state='approved'` until the next PgListener reconnect
+/// (or process restart). The per-NOTIFY apply path only logs + drops
+/// failures; without this sweep, recovery is gated on something that
+/// might not happen for hours on a quiet system.
+///
+/// Loops forever; intended to be spawned as `tokio::spawn(...)` and
+/// implicitly cancelled when the runtime shuts down.
+pub async fn run_periodic_recovery_sweep(pool: PgPool, config: Config) {
+    let interval_secs = config.recovery_sweep_interval_secs;
+    if interval_secs == 0 {
+        // Caller should not have spawned us, but be defensive.
+        return;
+    }
+    let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    // First tick fires immediately. The synchronous startup recovery in
+    // `run()` already drained the queue, so skip it.
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        match recover_pending(&pool, &config).await {
+            Ok(()) => debug!("periodic recovery sweep complete"),
+            Err(e) => warn!(
+                error = %format!("{:#}", e),
+                "periodic recovery sweep failed; will retry on next interval"
+            ),
+        }
+    }
 }
 
 /// Payload structure emitted by `approval_requests_notify_state_change()`
@@ -193,13 +238,8 @@ pub async fn run(pool: PgPool, config: &Config) -> Result<()> {
             "processing approved cost_advisor proposal"
         );
 
-        match crate::apply::process_approval(
-            &pool,
-            payload.approval_id,
-            payload.tenant_id,
-            config,
-        )
-        .await
+        match crate::apply::process_approval(&pool, payload.approval_id, payload.tenant_id, config)
+            .await
         {
             Ok(result) => info!(
                 approval_id = %payload.approval_id,

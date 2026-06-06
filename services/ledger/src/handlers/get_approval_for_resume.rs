@@ -104,9 +104,7 @@ pub async fn handle(
         .map_err(|e| Status::internal(format!("decode requested_effect: {e}")))?;
     let bundled_tx: Option<Uuid> = row
         .try_get("bundled_ledger_transaction_id")
-        .map_err(|e| {
-            Status::internal(format!("decode bundled_ledger_transaction_id: {e}"))
-        })?;
+        .map_err(|e| Status::internal(format!("decode bundled_ledger_transaction_id: {e}")))?;
 
     Ok(GetApprovalForResumeResponse {
         outcome: Some(Outcome::Context(ApprovalResumeContext {
@@ -120,9 +118,7 @@ pub async fn handle(
             requested_effect_json: serde_json::to_vec(&requested_effect_json)
                 .unwrap_or_default()
                 .into(),
-            bundled_ledger_transaction_id: bundled_tx
-                .map(|u| u.to_string())
-                .unwrap_or_default(),
+            bundled_ledger_transaction_id: bundled_tx.map(|u| u.to_string()).unwrap_or_default(),
         })),
     })
 }

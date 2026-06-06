@@ -28,11 +28,20 @@ pub fn router(store: Arc<dyn Store>, cfg: ServerConfig) -> Router {
     };
 
     Router::new()
-        .route("/v1/catalog/manifest", get(handlers::manifest::get_manifest))
+        .route(
+            "/v1/catalog/manifest",
+            get(handlers::manifest::get_manifest),
+        )
         .route("/v1/catalog/events", get(handlers::sse::sse_events))
         // axum 0.7 path syntax: {param}, not :param.
-        .route("/v1/catalog/{version_id}", get(handlers::catalog::get_catalog))
-        .route("/v1/internal/notify-catalog-change", post(notify_catalog_change))
+        .route(
+            "/v1/catalog/{version_id}",
+            get(handlers::catalog::get_catalog),
+        )
+        .route(
+            "/v1/internal/notify-catalog-change",
+            post(notify_catalog_change),
+        )
         .route("/healthz", get(|| async { "ok" }))
         .with_state(state)
         .layer(TraceLayer::new_for_http())

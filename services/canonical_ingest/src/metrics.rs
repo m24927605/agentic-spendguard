@@ -17,8 +17,8 @@
 //! The metrics HTTP server is started by `serve_metrics` from
 //! `services/canonical_ingest/src/main.rs`.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[derive(Default)]
 pub struct IngestMetricsInner {

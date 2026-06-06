@@ -2,8 +2,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use spendguard_leases::{
-    spawn_lease_loop, DisabledLease, K8sLease, LeaseConfig, LeaseManager,
-    LeaseState, PostgresLease,
+    spawn_lease_loop, DisabledLease, K8sLease, LeaseConfig, LeaseManager, LeaseState, PostgresLease,
 };
 use tokio::time::sleep;
 use tracing::{error, info, warn};
@@ -92,10 +91,7 @@ async fn main() -> anyhow::Result<()> {
             // for the k8s API.
             let namespace = std::env::var("SPENDGUARD_LEADER_K8S_NAMESPACE")
                 .unwrap_or_else(|_| "default".into());
-            let ttl_seconds = std::cmp::max(
-                1,
-                (config.leader_lease_ttl_ms / 1000) as i32,
-            );
+            let ttl_seconds = std::cmp::max(1, (config.leader_lease_ttl_ms / 1000) as i32);
             Arc::new(
                 K8sLease::new(
                     namespace,
@@ -195,13 +191,13 @@ async fn main() -> anyhow::Result<()> {
 
 /// Round-2 #11: minimal HTTP /metrics endpoint.
 async fn serve_metrics(addr: String, metrics: TtlSweeperMetrics) -> anyhow::Result<()> {
-    use std::convert::Infallible;
+    use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
-    use http_body_util::Full;
+    use std::convert::Infallible;
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind(&addr).await?;
@@ -222,10 +218,7 @@ async fn serve_metrics(addr: String, metrics: TtlSweeperMetrics) -> anyhow::Resu
                     };
                     Ok::<_, Infallible>(
                         Response::builder()
-                            .header(
-                                "content-type",
-                                "text/plain; version=0.0.4; charset=utf-8",
-                            )
+                            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
                             .body(Full::new(Bytes::from(body)))
                             .unwrap(),
                     )

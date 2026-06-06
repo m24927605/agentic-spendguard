@@ -36,9 +36,7 @@ use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "spendguard-calibration-report")]
-#[command(
-    about = "SLICE_13: SpendGuard calibration-report CLI (audit-grade calibration evidence)"
-)]
+#[command(about = "SLICE_13: SpendGuard calibration-report CLI (audit-grade calibration evidence)")]
 #[command(version)]
 pub struct Cli {
     /// Subcommand. Default is `report` (the operator-facing report
@@ -187,8 +185,7 @@ impl Cli {
             .ok_or_else(|| "--tenant is required".to_string())?;
         // Validate UUID shape so a malformed value cannot silently
         // accept a typo-as-tenant.
-        uuid::Uuid::parse_str(tenant)
-            .map_err(|e| format!("--tenant is not a valid UUID: {e}"))?;
+        uuid::Uuid::parse_str(tenant).map_err(|e| format!("--tenant is not a valid UUID: {e}"))?;
         match self.auth_tenants.as_deref() {
             None => Ok(true),
             Some(scope) => {
@@ -226,10 +223,7 @@ mod tests {
     #[test]
     fn default_subcommand_is_report() {
         // SLICE_13 §2.1: bare invocation with `--tenant` runs `report`.
-        let cli = parse(&[
-            "--tenant",
-            "00000000-0000-4000-8000-000000000001",
-        ]);
+        let cli = parse(&["--tenant", "00000000-0000-4000-8000-000000000001"]);
         assert!(matches!(cli.subcommand(), Subcommand::Report));
     }
 
@@ -241,29 +235,20 @@ mod tests {
 
     #[test]
     fn default_window_is_7d() {
-        let cli = parse(&[
-            "--tenant",
-            "00000000-0000-4000-8000-000000000001",
-        ]);
+        let cli = parse(&["--tenant", "00000000-0000-4000-8000-000000000001"]);
         assert_eq!(cli.from, "7d");
         assert_eq!(cli.to, "now");
     }
 
     #[test]
     fn default_format_is_text() {
-        let cli = parse(&[
-            "--tenant",
-            "00000000-0000-4000-8000-000000000001",
-        ]);
+        let cli = parse(&["--tenant", "00000000-0000-4000-8000-000000000001"]);
         assert_eq!(cli.format, Format::Text);
     }
 
     #[test]
     fn default_proof_mode_is_cache() {
-        let cli = parse(&[
-            "--tenant",
-            "00000000-0000-4000-8000-000000000001",
-        ]);
+        let cli = parse(&["--tenant", "00000000-0000-4000-8000-000000000001"]);
         assert_eq!(cli.proof_mode, ProofMode::Cache);
     }
 
@@ -294,10 +279,7 @@ mod tests {
     #[test]
     fn include_recommendations_defaults_per_format() {
         // JSON defaults to false; text/markdown to true. Spec §2.2.
-        let text = parse(&[
-            "--tenant",
-            "00000000-0000-4000-8000-000000000001",
-        ]);
+        let text = parse(&["--tenant", "00000000-0000-4000-8000-000000000001"]);
         assert!(text.effective_include_recommendations());
         let json = parse(&[
             "--tenant",
@@ -320,10 +302,7 @@ mod tests {
     #[test]
     fn tenant_scope_check_allows_when_no_auth_tenants_set() {
         // Single-tenant / un-scoped deployment.
-        let cli = parse(&[
-            "--tenant",
-            "00000000-0000-4000-8000-000000000001",
-        ]);
+        let cli = parse(&["--tenant", "00000000-0000-4000-8000-000000000001"]);
         assert_eq!(cli.check_tenant_scope().unwrap(), true);
     }
 
@@ -357,10 +336,7 @@ mod tests {
 
     #[test]
     fn output_path_dash_is_stdout() {
-        let cli = parse(&[
-            "--tenant",
-            "00000000-0000-4000-8000-000000000001",
-        ]);
+        let cli = parse(&["--tenant", "00000000-0000-4000-8000-000000000001"]);
         assert!(cli.output_path().is_none());
     }
 

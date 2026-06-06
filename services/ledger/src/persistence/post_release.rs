@@ -20,10 +20,7 @@ pub struct PostReleaseInput<'a> {
     pub audit_outbox_row: Value,
 }
 
-pub async fn post(
-    pool: &PgPool,
-    input: PostReleaseInput<'_>,
-) -> Result<Uuid, DomainError> {
+pub async fn post(pool: &PgPool, input: PostReleaseInput<'_>) -> Result<Uuid, DomainError> {
     let row: (Uuid,) = sqlx::query_as(
         "SELECT post_release_transaction(\
             $1::JSONB, $2::UUID, $3::TEXT, $4::JSONB)",

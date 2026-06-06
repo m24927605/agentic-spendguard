@@ -161,8 +161,14 @@ mod tests {
         let dashed_lower = "00000000-0000-4000-8000-000000000001";
         let dashed_upper = "00000000-0000-4000-8000-000000000001".to_uppercase();
         let simple_no_dashes = "00000000000040008000000000000001";
-        assert_eq!(compute(prompt, dashed_lower), compute(prompt, &dashed_upper));
-        assert_eq!(compute(prompt, dashed_lower), compute(prompt, simple_no_dashes));
+        assert_eq!(
+            compute(prompt, dashed_lower),
+            compute(prompt, &dashed_upper)
+        );
+        assert_eq!(
+            compute(prompt, dashed_lower),
+            compute(prompt, simple_no_dashes)
+        );
     }
 
     #[test]

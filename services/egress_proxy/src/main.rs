@@ -64,10 +64,12 @@ async fn main() -> Result<()> {
     // call, so we wire the provider here to fail-fast if it can't init.
     rustls::crypto::aws_lc_rs::default_provider()
         .install_default()
-        .map_err(|_| anyhow::anyhow!(
-            "rustls aws_lc_rs default provider already installed by another crate; \
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "rustls aws_lc_rs default provider already installed by another crate; \
              cannot continue startup. Check for duplicate rustls initialization paths."
-        ))?;
+            )
+        })?;
 
     init_tracing();
 
@@ -79,8 +81,8 @@ async fn main() -> Result<()> {
 
     // Slice 4a: connect to sidecar UDS + handshake with retry-with-backoff.
     // Spec §9: fail-fast if 30s elapses without successful handshake.
-    let sidecar_cfg = sidecar_client::SidecarConfig::from_env()
-        .context("loading sidecar client config")?;
+    let sidecar_cfg =
+        sidecar_client::SidecarConfig::from_env().context("loading sidecar client config")?;
     info!(
         uds = %sidecar_cfg.uds_path.display(),
         tenant = %sidecar_cfg.tenant_id,
@@ -92,8 +94,7 @@ async fn main() -> Result<()> {
         .context("sidecar UDS handshake at startup")?;
     info!(session_id = %sidecar.session_id, "sidecar handshake complete");
 
-    let forward_state =
-        Arc::new(forward::ForwardState::new().context("build reqwest client")?);
+    let forward_state = Arc::new(forward::ForwardState::new().context("build reqwest client")?);
 
     // SLICE_10 Phase A: boot Tokenizer (library form; in-process, p99 ≤ 1ms)
     // + optional output_predictor + run_cost_projector gRPC clients. Both
@@ -259,7 +260,9 @@ fn build_app(
 }
 
 async fn healthz() -> impl IntoResponse {
-    Json(serde_json::json!({ "ok": true, "service": "egress-proxy", "version": env!("CARGO_PKG_VERSION") }))
+    Json(
+        serde_json::json!({ "ok": true, "service": "egress-proxy", "version": env!("CARGO_PKG_VERSION") }),
+    )
 }
 
 /// Slice 4a: /readyz reflects sidecar handshake state.
@@ -271,15 +274,21 @@ async fn healthz() -> impl IntoResponse {
 /// false on disconnect" extension.
 async fn readyz(axum::extract::State(state): axum::extract::State<AppState>) -> impl IntoResponse {
     if state.sidecar.is_ready() {
-        (axum::http::StatusCode::OK, Json(serde_json::json!({
-            "ready": true,
-            "sidecar_session_id": state.sidecar.session_id,
-        })))
+        (
+            axum::http::StatusCode::OK,
+            Json(serde_json::json!({
+                "ready": true,
+                "sidecar_session_id": state.sidecar.session_id,
+            })),
+        )
     } else {
-        (axum::http::StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({
-            "ready": false,
-            "reason": "sidecar handshake not complete",
-        })))
+        (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "ready": false,
+                "reason": "sidecar handshake not complete",
+            })),
+        )
     }
 }
 
@@ -303,8 +312,7 @@ mod tests {
         // tests /healthz / /readyz routes don't go near the predictor
         // path, so the None branch is unreached.
         let tokenizer = Arc::new(
-            spendguard_tokenizer::Tokenizer::new_with_embedded_assets()
-                .expect("tokenizer init"),
+            spendguard_tokenizer::Tokenizer::new_with_embedded_assets().expect("tokenizer init"),
         );
         build_app(forward, sidecar, tokenizer, None, None)
     }
@@ -315,9 +323,7 @@ mod tests {
     /// actually call gRPC methods.
     fn make_stub_sidecar_handle() -> sidecar_client::SidecarHandle {
         use tonic::transport::Endpoint;
-        let channel = Endpoint::try_from("http://[::1]:1")
-            .unwrap()
-            .connect_lazy();
+        let channel = Endpoint::try_from("http://[::1]:1").unwrap().connect_lazy();
         let client =
             crate::proto::sidecar_adapter::v1::sidecar_adapter_client::SidecarAdapterClient::new(
                 channel,

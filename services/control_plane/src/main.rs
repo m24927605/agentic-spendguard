@@ -48,7 +48,10 @@ use crate::metrics::ControlPlaneMetrics;
 use audit_forwarder::{
     build_canonical_client, spawn_audit_forwarder, AuditForwarderConfig, CanonicalClientTlsFiles,
 };
-use spendguard_auth::{AuthConfig, Authenticator, Permission, Principal};
+use spendguard_auth::{
+    approver_policy_shape, parse_approver_policy, ApproverPolicyParse, AuthConfig, Authenticator,
+    Permission, Principal,
+};
 use spendguard_signing::Signer;
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
@@ -595,6 +598,28 @@ fn authorize_tokenizer_sampling_tenant(
         .map_err(|_| StatusCode::FORBIDDEN)
 }
 
+/// Allocate a per-tenant `producer_sequence` value via the serialized
+/// allocator SP from migration 0007. Replaces the old
+/// `SELECT COALESCE(MAX(producer_sequence), 0) + 1` pattern that
+/// lost-update-raced under concurrent operator writes for the same
+/// tenant. Concurrent callers serialize on the counter row lock.
+///
+/// Pre-condition: the caller MUST be inside a transaction that will
+/// also INSERT the corresponding `control_plane_audit_outbox` row.
+/// Sequence numbers allocated by this SP and not committed leave a
+/// monotonic gap in the audit log; the canonical_ingest forwarder
+/// tolerates gaps but not duplicates, so this trade is the safe one.
+pub(crate) async fn allocate_audit_sequence(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    tenant_id: Uuid,
+) -> Result<i64, sqlx::Error> {
+    let row: (i64,) = sqlx::query_as("SELECT control_plane_allocate_audit_sequence($1)")
+        .bind(tenant_id)
+        .fetch_one(&mut **tx)
+        .await?;
+    Ok(row.0)
+}
+
 async fn emit_tokenizer_sampling_rate_audit_event(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     tenant_id: Uuid,
@@ -606,17 +631,10 @@ async fn emit_tokenizer_sampling_rate_audit_event(
     let event_id = Uuid::now_v7();
     let event_type = "spendguard.audit.tokenizer_sampling_rate_override.v1alpha1";
 
-    let next_seq: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COALESCE(MAX(producer_sequence), 0) + 1
-          FROM control_plane_audit_outbox
-         WHERE tenant_id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    let producer_sequence = next_seq.0;
+    // R2: serialized allocator SP (migration 0007). Replaces the
+    // SELECT COALESCE(MAX,0)+1 anti-pattern which lost-update-raced
+    // under concurrent operator writes for the same tenant.
+    let producer_sequence: i64 = allocate_audit_sequence(tx, tenant_id).await?;
 
     let now = chrono::Utc::now();
     let cloudevent = serde_json::json!({
@@ -822,17 +840,8 @@ async fn emit_tokenizer_shadow_security_audit_event(
     let event_id = Uuid::now_v7();
     let event_type = "spendguard.audit.tokenizer_shadow_security_settings.v1alpha1";
 
-    let next_seq: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COALESCE(MAX(producer_sequence), 0) + 1
-          FROM control_plane_audit_outbox
-         WHERE tenant_id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    let producer_sequence = next_seq.0;
+    // R2: see emit_tokenizer_sampling_rate_audit_event above.
+    let producer_sequence: i64 = allocate_audit_sequence(tx, tenant_id).await?;
 
     let now = chrono::Utc::now();
     let cloudevent = serde_json::json!({
@@ -886,6 +895,13 @@ fn default_unit_kind() -> String {
     "token".into()
 }
 
+/// Returns true iff `kind` matches the documented `CreateTenantReq.budget_unit_kind`
+/// enum. Kept as a standalone helper so the create_tenant handler's preflight
+/// gate and the unit tests below share a single source of truth.
+fn is_supported_budget_unit_kind(kind: &str) -> bool {
+    matches!(kind, "token" | "usd_micros")
+}
+
 #[derive(Serialize)]
 struct CreateTenantResp {
     tenant_id: Uuid,
@@ -923,6 +939,20 @@ async fn create_tenant(
     if req.name.is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
+    // Reject unknown unit kinds explicitly: the field's documented
+    // enum is {"token", "usd_micros"}. A wildcard-to-token fallback
+    // silently provisioned token budgets for typos like "toekn" or
+    // entirely wrong values like "btc", which then went on to bake
+    // an undetected wrong unit_kind into ledger_units + the audit
+    // chain. Surface the misconfiguration to the caller.
+    if !is_supported_budget_unit_kind(&req.budget_unit_kind) {
+        info!(
+            subject = %principal.subject,
+            budget_unit_kind = %req.budget_unit_kind,
+            "create_tenant rejected — unsupported budget_unit_kind"
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let tenant_id = Uuid::now_v7();
     let budget_id = Uuid::now_v7();
@@ -939,12 +969,25 @@ async fn create_tenant(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // 1) ledger_units row.
-    let (unit_kind_db, currency, scale, rounding_mode, token_kind) =
-        match req.budget_unit_kind.as_str() {
-            "usd_micros" => ("monetary", Some("USD"), 6, "half_up", None::<&str>),
-            "token" | _ => ("token", None, 0, "truncate", Some("output_token")),
-        };
+    // 1) ledger_units row. The match below is exhaustive over the
+    // accepted enum thanks to the preflight check above; the unreachable
+    // arm is just a belt-and-braces guard so a future enum addition
+    // doesn't silently default-to-token without an explicit branch.
+    let (unit_kind_db, currency, scale, rounding_mode, token_kind) = match req
+        .budget_unit_kind
+        .as_str()
+    {
+        "usd_micros" => ("monetary", Some("USD"), 6, "half_up", None::<&str>),
+        "token" => ("token", None, 0, "truncate", Some("output_token")),
+        other => {
+            tracing::error!(
+                subject = %principal.subject,
+                budget_unit_kind = %other,
+                "create_tenant invariant violation: unreachable budget_unit_kind reached SQL layer"
+            );
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
 
     sqlx::query(
         r#"INSERT INTO ledger_units
@@ -1627,131 +1670,10 @@ struct ResolveApprovalResp {
     event_id: Option<Uuid>,
 }
 
-/// Three-way result for `parse_approver_policy`. The third arm is what
-/// makes the gate a real security boundary: a policy that *looks
-/// restrictive* but is malformed (wrong types, empty array, etc.)
-/// is treated as fail-closed — Codex round-2 P1.
-#[derive(Debug, PartialEq, Eq)]
-enum ApproverPolicyParse {
-    /// Empty `{}`, JSON null, or an object that carries only
-    /// non-restrictive metadata (e.g. `{"description": "..."}`).
-    /// Permission gate is the only check.
-    NoRestriction,
-    /// Restrictive policy with at least one valid role name. Caller
-    /// intersects against `principal.roles`.
-    Restrict(Vec<String>),
-    /// One or more restrictive keys are present but the value is
-    /// malformed (non-array where array expected, wrong element type,
-    /// empty list, empty string). Treat as fail-closed: the operator
-    /// *intended* to restrict but the data is unusable, so widening
-    /// access silently is unsafe.
-    Malformed,
-}
-
-/// Parse `approval_requests.approver_policy` JSONB into a typed
-/// outcome. The schema only enforces `JSONB NOT NULL DEFAULT '{}'`,
-/// so the parser is the security boundary.
-///
-/// Accepted restrictive keys:
-///   * `roles` / `required_roles`     — array of role-name strings
-///   * `role` / `approver_role`       — single role-name string OR
-///                                       array of role-name strings
-///
-/// `approver_role` matches the canonical contract.yaml /
-/// `ApprovalDecision.approver_role` field name (Codex round-2 P1).
-fn parse_approver_policy(policy: &serde_json::Value) -> ApproverPolicyParse {
-    if policy.is_null() {
-        return ApproverPolicyParse::NoRestriction;
-    }
-    let Some(obj) = policy.as_object() else {
-        // Non-object, non-null shape (array, scalar) — operator likely
-        // intended *something*; fail closed.
-        return ApproverPolicyParse::Malformed;
-    };
-    if obj.is_empty() {
-        return ApproverPolicyParse::NoRestriction;
-    }
-
-    const ARRAY_KEYS: &[&str] = &["roles", "required_roles"];
-    const STRING_OR_ARRAY_KEYS: &[&str] = &["role", "approver_role"];
-
-    let any_restrictive = ARRAY_KEYS
-        .iter()
-        .chain(STRING_OR_ARRAY_KEYS.iter())
-        .any(|k| obj.contains_key(*k));
-    if !any_restrictive {
-        // Object has only metadata-style keys. No restriction.
-        return ApproverPolicyParse::NoRestriction;
-    }
-
-    let mut roles: Vec<String> = Vec::new();
-
-    for key in ARRAY_KEYS {
-        let Some(v) = obj.get(*key) else { continue };
-        let Some(arr) = v.as_array() else {
-            return ApproverPolicyParse::Malformed;
-        };
-        if arr.is_empty() {
-            return ApproverPolicyParse::Malformed;
-        }
-        for item in arr {
-            match item.as_str() {
-                Some(s) if !s.is_empty() => roles.push(s.to_string()),
-                _ => return ApproverPolicyParse::Malformed,
-            }
-        }
-    }
-
-    for key in STRING_OR_ARRAY_KEYS {
-        let Some(v) = obj.get(*key) else { continue };
-        if let Some(s) = v.as_str() {
-            if s.is_empty() {
-                return ApproverPolicyParse::Malformed;
-            }
-            roles.push(s.to_string());
-        } else if let Some(arr) = v.as_array() {
-            if arr.is_empty() {
-                return ApproverPolicyParse::Malformed;
-            }
-            for item in arr {
-                match item.as_str() {
-                    Some(s) if !s.is_empty() => roles.push(s.to_string()),
-                    _ => return ApproverPolicyParse::Malformed,
-                }
-            }
-        } else {
-            return ApproverPolicyParse::Malformed;
-        }
-    }
-
-    if roles.is_empty() {
-        // Restrictive keys present but we somehow extracted no roles.
-        // Defensive: fail closed.
-        return ApproverPolicyParse::Malformed;
-    }
-    ApproverPolicyParse::Restrict(roles)
-}
-
-/// Render a redacted shape descriptor for an `approver_policy`.
-/// Codex round-3 P2: the malformed-fail-closed log path used to dump
-/// the full JSONB; the policy can carry operator-supplied metadata
-/// (e.g. `description`, contract context) that may include sensitive
-/// strings. Operators only need the top-level type + key list to
-/// debug "why was this rejected."
-fn approver_policy_shape(policy: &serde_json::Value) -> String {
-    match policy {
-        serde_json::Value::Null => "null".to_string(),
-        serde_json::Value::Bool(_) => "bool".to_string(),
-        serde_json::Value::Number(_) => "number".to_string(),
-        serde_json::Value::String(_) => "string".to_string(),
-        serde_json::Value::Array(a) => format!("array(len={})", a.len()),
-        serde_json::Value::Object(m) => {
-            let mut keys: Vec<&str> = m.keys().map(|s| s.as_str()).collect();
-            keys.sort();
-            format!("object(keys=[{}])", keys.join(","))
-        }
-    }
-}
+// R3: `parse_approver_policy` + `approver_policy_shape` + the
+// `ApproverPolicyParse` enum live in `spendguard_auth::approver_policy`
+// so dashboard's resolve handler enforces the same fail-closed
+// semantics. See `services/auth/src/approver_policy.rs`.
 
 async fn resolve_approval(
     Extension(principal): Extension<Principal>,
@@ -1966,6 +1888,44 @@ mod tokenizer_sampling_auth_tests {
             authorize_tokenizer_sampling_tenant(&p, &tenant, Permission::ReadView).unwrap_err(),
             axum::http::StatusCode::FORBIDDEN
         );
+    }
+}
+
+#[cfg(test)]
+mod budget_unit_kind_tests {
+    use super::is_supported_budget_unit_kind;
+
+    #[test]
+    fn token_is_supported() {
+        assert!(is_supported_budget_unit_kind("token"));
+    }
+
+    #[test]
+    fn usd_micros_is_supported() {
+        assert!(is_supported_budget_unit_kind("usd_micros"));
+    }
+
+    #[test]
+    fn typo_is_rejected() {
+        // Pre-fix this used to silently provision a token budget.
+        assert!(!is_supported_budget_unit_kind("toekn"));
+    }
+
+    #[test]
+    fn unknown_currency_is_rejected() {
+        assert!(!is_supported_budget_unit_kind("btc"));
+    }
+
+    #[test]
+    fn empty_string_is_rejected() {
+        assert!(!is_supported_budget_unit_kind(""));
+    }
+
+    #[test]
+    fn case_sensitive_uppercase_rejected() {
+        // Strict match — operator must use the documented lowercase form.
+        assert!(!is_supported_budget_unit_kind("TOKEN"));
+        assert!(!is_supported_budget_unit_kind("USD_MICROS"));
     }
 }
 

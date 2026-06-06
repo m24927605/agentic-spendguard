@@ -46,16 +46,22 @@ pub fn read_bundle(path: &Path) -> Result<LoadedBundle> {
             .to_string();
         let mut buf = String::new();
         if name == CONTRACT_YAML_NAME {
-            entry.read_to_string(&mut buf).context("read contract.yaml")?;
+            entry
+                .read_to_string(&mut buf)
+                .context("read contract.yaml")?;
             contract_yaml = Some(buf);
         } else if name == MANIFEST_JSON_NAME {
-            entry.read_to_string(&mut buf).context("read manifest.json")?;
+            entry
+                .read_to_string(&mut buf)
+                .context("read manifest.json")?;
             manifest_json = Some(buf);
         }
     }
 
-    let contract_yaml = contract_yaml.ok_or_else(|| anyhow!("contract.yaml missing from bundle"))?;
-    let manifest_json = manifest_json.ok_or_else(|| anyhow!("manifest.json missing from bundle"))?;
+    let contract_yaml =
+        contract_yaml.ok_or_else(|| anyhow!("contract.yaml missing from bundle"))?;
+    let manifest_json =
+        manifest_json.ok_or_else(|| anyhow!("manifest.json missing from bundle"))?;
 
     Ok(LoadedBundle {
         contract_yaml,

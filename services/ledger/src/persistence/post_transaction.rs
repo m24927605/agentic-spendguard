@@ -52,14 +52,13 @@ pub struct PostDeniedInput {
 /// Invoke `post_denied_decision_transaction(...)`; returns the resulting
 /// ledger_transaction_id. SP is the sole authority on idempotent replay.
 pub async fn post_denied(pool: &PgPool, input: PostDeniedInput) -> Result<Uuid, DomainError> {
-    let row: (Uuid,) = sqlx::query_as(
-        "SELECT post_denied_decision_transaction($1::JSONB, $2::JSONB)",
-    )
-    .bind(input.transaction)
-    .bind(input.audit_outbox_row)
-    .fetch_one(pool)
-    .await
-    .map_err(map_pg_error)?;
+    let row: (Uuid,) =
+        sqlx::query_as("SELECT post_denied_decision_transaction($1::JSONB, $2::JSONB)")
+            .bind(input.transaction)
+            .bind(input.audit_outbox_row)
+            .fetch_one(pool)
+            .await
+            .map_err(map_pg_error)?;
     Ok(row.0)
 }
 

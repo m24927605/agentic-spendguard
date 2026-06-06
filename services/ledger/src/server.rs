@@ -15,17 +15,15 @@ use crate::{
     metrics::{Handler, LedgerMetrics, Outcome},
     proto::ledger::v1::{
         ledger_server::Ledger, AcquireFencingLeaseRequest, AcquireFencingLeaseResponse,
-        CommitEstimatedRequest, CommitEstimatedResponse,
-        CompensateRequest, CompensateResponse, DisputeAdjustmentRequest,
-        DisputeAdjustmentResponse, GetApprovalForResumeRequest,
+        CommitEstimatedRequest, CommitEstimatedResponse, CompensateRequest, CompensateResponse,
+        DisputeAdjustmentRequest, DisputeAdjustmentResponse, GetApprovalForResumeRequest,
         GetApprovalForResumeResponse, InvoiceReconcileRequest, InvoiceReconcileResponse,
         MarkApprovalBundledRequest, MarkApprovalBundledResponse, ProviderReportRequest,
         ProviderReportResponse, QueryBudgetStateRequest, QueryBudgetStateResponse,
-        QueryDecisionOutcomeRequest, QueryDecisionOutcomeResponse,
-        QueryReservationContextRequest, QueryReservationContextResponse,
-        RecordDeniedDecisionRequest, RecordDeniedDecisionResponse, RefundCreditRequest,
-        RefundCreditResponse, ReleaseRequest, ReleaseResponse, ReplayAuditEvent,
-        ReplayAuditFromCursorRequest, ReserveSetRequest, ReserveSetResponse,
+        QueryDecisionOutcomeRequest, QueryDecisionOutcomeResponse, QueryReservationContextRequest,
+        QueryReservationContextResponse, RecordDeniedDecisionRequest, RecordDeniedDecisionResponse,
+        RefundCreditRequest, RefundCreditResponse, ReleaseRequest, ReleaseResponse,
+        ReplayAuditEvent, ReplayAuditFromCursorRequest, ReserveSetRequest, ReserveSetResponse,
     },
 };
 
@@ -103,8 +101,7 @@ impl Ledger for LedgerService {
         &self,
         req: Request<AcquireFencingLeaseRequest>,
     ) -> Result<Response<AcquireFencingLeaseResponse>, Status> {
-        let result =
-            handlers::acquire_fencing_lease::handle(&self.pool, req.into_inner()).await;
+        let result = handlers::acquire_fencing_lease::handle(&self.pool, req.into_inner()).await;
         record_outcome(&self.metrics, Handler::AcquireFencingLease, &result);
         result.map(Response::new)
     }
@@ -132,8 +129,7 @@ impl Ledger for LedgerService {
         req: Request<InvoiceReconcileRequest>,
     ) -> Result<Response<InvoiceReconcileResponse>, Status> {
         let result =
-            handlers::invoice_reconcile::handle(&self.pool, &*self.signer, req.into_inner())
-                .await;
+            handlers::invoice_reconcile::handle(&self.pool, &*self.signer, req.into_inner()).await;
         record_outcome(&self.metrics, Handler::InvoiceReconcile, &result);
         result.map(Response::new)
     }
@@ -142,16 +138,22 @@ impl Ledger for LedgerService {
         &self,
         _req: Request<RefundCreditRequest>,
     ) -> Result<Response<RefundCreditResponse>, Status> {
-        self.metrics.inc_handler(Handler::RefundCredit, Outcome::Err);
-        Err(Status::unimplemented("RefundCredit: vertical slice expansion in progress"))
+        self.metrics
+            .inc_handler(Handler::RefundCredit, Outcome::Err);
+        Err(Status::unimplemented(
+            "RefundCredit: vertical slice expansion in progress",
+        ))
     }
 
     async fn dispute_adjustment(
         &self,
         _req: Request<DisputeAdjustmentRequest>,
     ) -> Result<Response<DisputeAdjustmentResponse>, Status> {
-        self.metrics.inc_handler(Handler::DisputeAdjustment, Outcome::Err);
-        Err(Status::unimplemented("DisputeAdjustment: vertical slice expansion in progress"))
+        self.metrics
+            .inc_handler(Handler::DisputeAdjustment, Outcome::Err);
+        Err(Status::unimplemented(
+            "DisputeAdjustment: vertical slice expansion in progress",
+        ))
     }
 
     async fn compensate(
@@ -159,7 +161,9 @@ impl Ledger for LedgerService {
         _req: Request<CompensateRequest>,
     ) -> Result<Response<CompensateResponse>, Status> {
         self.metrics.inc_handler(Handler::Compensate, Outcome::Err);
-        Err(Status::unimplemented("Compensate: vertical slice expansion in progress"))
+        Err(Status::unimplemented(
+            "Compensate: vertical slice expansion in progress",
+        ))
     }
 
     async fn query_budget_state(
@@ -175,7 +179,8 @@ impl Ledger for LedgerService {
         &self,
         req: Request<QueryReservationContextRequest>,
     ) -> Result<Response<QueryReservationContextResponse>, Status> {
-        let result = handlers::query_reservation_context::handle(&self.pool, req.into_inner()).await;
+        let result =
+            handlers::query_reservation_context::handle(&self.pool, req.into_inner()).await;
         record_outcome(&self.metrics, Handler::QueryReservationContext, &result);
         result.map(Response::new)
     }
@@ -186,8 +191,7 @@ impl Ledger for LedgerService {
         &self,
         req: Request<ReplayAuditFromCursorRequest>,
     ) -> Result<Response<Self::ReplayAuditFromCursorStream>, Status> {
-        let result =
-            handlers::replay::replay_stream(self.pool.clone(), req.into_inner()).await;
+        let result = handlers::replay::replay_stream(self.pool.clone(), req.into_inner()).await;
         record_outcome(&self.metrics, Handler::ReplayAuditFromCursor, &result);
         result
     }
@@ -205,8 +209,7 @@ impl Ledger for LedgerService {
         &self,
         req: Request<GetApprovalForResumeRequest>,
     ) -> Result<Response<GetApprovalForResumeResponse>, Status> {
-        let result =
-            handlers::get_approval_for_resume::handle(&self.pool, req.into_inner()).await;
+        let result = handlers::get_approval_for_resume::handle(&self.pool, req.into_inner()).await;
         record_outcome(&self.metrics, Handler::GetApprovalForResume, &result);
         result.map(Response::new)
     }
@@ -215,8 +218,7 @@ impl Ledger for LedgerService {
         &self,
         req: Request<MarkApprovalBundledRequest>,
     ) -> Result<Response<MarkApprovalBundledResponse>, Status> {
-        let result =
-            handlers::mark_approval_bundled::handle(&self.pool, req.into_inner()).await;
+        let result = handlers::mark_approval_bundled::handle(&self.pool, req.into_inner()).await;
         record_outcome(&self.metrics, Handler::MarkApprovalBundled, &result);
         result.map(Response::new)
     }

@@ -25,8 +25,8 @@ use crate::{
         state::{ActiveFencing, SidecarState},
     },
     proto::ledger::v1::{
-        acquire_fencing_lease_response::Outcome as LeaseOutcome,
-        AcquireFencingLeaseRequest, AcquireFencingLeaseResponse,
+        acquire_fencing_lease_response::Outcome as LeaseOutcome, AcquireFencingLeaseRequest,
+        AcquireFencingLeaseResponse,
     },
 };
 
@@ -66,7 +66,13 @@ pub async fn rpc_acquire(
         audit_event_id: String::new(),
     };
     let resp = ledger.acquire_fencing_lease(req).await?;
-    apply_lease_response(&state.inner.fencing, scope_id, workload_id, ttl_seconds, resp)
+    apply_lease_response(
+        &state.inner.fencing,
+        scope_id,
+        workload_id,
+        ttl_seconds,
+        resp,
+    )
 }
 
 /// Pure response-handling logic split out of `rpc_acquire` so it can be
@@ -143,7 +149,16 @@ pub fn spawn_renewer(
                 info!("renewer exiting (sidecar draining)");
                 return;
             }
-            match rpc_acquire(&state, &ledger, scope_id, &tenant_id, &workload_id, ttl_seconds).await {
+            match rpc_acquire(
+                &state,
+                &ledger,
+                scope_id,
+                &tenant_id,
+                &workload_id,
+                ttl_seconds,
+            )
+            .await
+            {
                 Ok(()) => {
                     last_success = Utc::now();
                 }
@@ -292,7 +307,10 @@ mod tests {
         let err = apply_lease_response(&lock, scope, "wl-d", 60, resp).unwrap_err();
         match err {
             DomainError::FencingAcquire(msg) => {
-                assert!(msg.contains("tenant disabled"), "msg should carry server message: {msg}");
+                assert!(
+                    msg.contains("tenant disabled"),
+                    "msg should carry server message: {msg}"
+                );
             }
             other => panic!("expected FencingAcquire, got {other:?}"),
         }

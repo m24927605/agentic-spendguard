@@ -82,9 +82,7 @@ fn sort_keys(value: &Value) -> Value {
             }
             Value::Object(sorted.into_iter().collect())
         }
-        Value::Array(items) => {
-            Value::Array(items.iter().map(sort_keys).collect())
-        }
+        Value::Array(items) => Value::Array(items.iter().map(sort_keys).collect()),
         // Scalars are byte-identical regardless of canonicalization.
         other => other.clone(),
     }

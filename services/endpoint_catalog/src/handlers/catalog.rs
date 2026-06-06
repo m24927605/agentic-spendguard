@@ -12,8 +12,7 @@ use axum::{
 
 use crate::server::AppState;
 
-const VERSION_ID_PATTERN_DESC: &str =
-    "ctlg-<rfc3339-utc>-rev<int>";
+const VERSION_ID_PATTERN_DESC: &str = "ctlg-<rfc3339-utc>-rev<int>";
 
 pub async fn get_catalog(
     State(state): State<AppState>,
@@ -24,8 +23,7 @@ pub async fn get_catalog(
             StatusCode::BAD_REQUEST,
             format!(
                 "version_id must match {} ({})",
-                VERSION_ID_PATTERN_DESC,
-                "alphanumeric, ':', '-', 'T', 'Z' only"
+                VERSION_ID_PATTERN_DESC, "alphanumeric, ':', '-', 'T', 'Z' only"
             ),
         )
             .into_response();
@@ -35,10 +33,8 @@ pub async fn get_catalog(
     match state.store.get(&key).await {
         Ok(Some(bytes)) => {
             let mut resp = (StatusCode::OK, bytes).into_response();
-            resp.headers_mut().insert(
-                header::CONTENT_TYPE,
-                "application/json".parse().unwrap(),
-            );
+            resp.headers_mut()
+                .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
             // Catalog versions are immutable; CDN-cacheable for 24h.
             resp.headers_mut().insert(
                 header::CACHE_CONTROL,
@@ -99,6 +95,8 @@ mod tests {
 
     #[test]
     fn accepts_canonical_version() {
-        assert!(is_safe_version_id("ctlg-2026-05-07T10:00:00Z-019e0103a0aabb"));
+        assert!(is_safe_version_id(
+            "ctlg-2026-05-07T10:00:00Z-019e0103a0aabb"
+        ));
     }
 }

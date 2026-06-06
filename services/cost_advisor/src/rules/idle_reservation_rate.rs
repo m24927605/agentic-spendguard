@@ -38,9 +38,7 @@ pub const DECLARED_INPUT_FIELDS: &[&str] = &[
 /// the rule body ships alongside the binary and there's no runtime
 /// filesystem dependency. The .sql file is canonical; this constant
 /// is just the in-binary copy.
-const RULE_SQL: &str = include_str!(
-    "../../rules/detected_waste/idle_reservation_rate_v1.sql"
-);
+const RULE_SQL: &str = include_str!("../../rules/detected_waste/idle_reservation_rate_v1.sql");
 
 /// Static descriptor for the rule. With P1 the SQL is non-placeholder
 /// so [`SqlCostRule::is_ready`] returns `true` and the runtime

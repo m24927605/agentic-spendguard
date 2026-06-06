@@ -14,17 +14,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use spendguard_leases::{
-    LeaseConfig, LeaseManager, LeaseState, PostgresLease,
-};
+use spendguard_leases::{LeaseConfig, LeaseManager, LeaseState, PostgresLease};
 use sqlx::postgres::PgPoolOptions;
 use testcontainers::runners::AsyncRunner;
 use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
-const MIGRATION_SQL: &str = include_str!(
-    "../../ledger/migrations/0021_coordination_leases.sql"
-);
+const MIGRATION_SQL: &str = include_str!("../../ledger/migrations/0021_coordination_leases.sql");
 
 async fn setup_pool() -> Option<sqlx::PgPool> {
     let container = match Postgres::default().start().await {
@@ -34,13 +30,9 @@ async fn setup_pool() -> Option<sqlx::PgPool> {
             return None;
         }
     };
-    let host_port = container
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("host port");
-    let url = format!(
-        "postgres://postgres:postgres@127.0.0.1:{host_port}/postgres?sslmode=disable"
-    );
+    let host_port = container.get_host_port_ipv4(5432).await.expect("host port");
+    let url =
+        format!("postgres://postgres:postgres@127.0.0.1:{host_port}/postgres?sslmode=disable");
     let pool = PgPoolOptions::new()
         .max_connections(5)
         .acquire_timeout(Duration::from_secs(5))
@@ -79,7 +71,9 @@ fn cfg(workload: &str) -> LeaseConfig {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_competitors_one_wins_one_standby() {
-    let Some(pool) = setup_pool().await else { return };
+    let Some(pool) = setup_pool().await else {
+        return;
+    };
 
     let a = PostgresLease::new(pool.clone(), cfg("worker-a")).expect("new a");
     let b = PostgresLease::new(pool.clone(), cfg("worker-b")).expect("new b");
@@ -92,12 +86,17 @@ async fn two_competitors_one_wins_one_standby() {
         .iter()
         .filter(|s| matches!(s, LeaseState::Leader { .. }))
         .count();
-    assert_eq!(leaders, 1, "exactly one leader expected; ra={ra:?} rb={rb:?}");
+    assert_eq!(
+        leaders, 1,
+        "exactly one leader expected; ra={ra:?} rb={rb:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn renewal_does_not_change_token_or_transition() {
-    let Some(pool) = setup_pool().await else { return };
+    let Some(pool) = setup_pool().await else {
+        return;
+    };
 
     let a = PostgresLease::new(pool.clone(), cfg("worker-a")).expect("new a");
     let attempt1 = a.try_acquire().await.expect("acquire 1");
@@ -127,14 +126,20 @@ async fn renewal_does_not_change_token_or_transition() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn takeover_after_expiry_bumps_transition_count() {
-    let Some(pool) = setup_pool().await else { return };
+    let Some(pool) = setup_pool().await else {
+        return;
+    };
 
     let a = PostgresLease::new(pool.clone(), cfg("worker-a")).expect("new a");
     let b = PostgresLease::new(pool.clone(), cfg("worker-b")).expect("new b");
 
     // A acquires
     let attempt1 = a.try_acquire().await.expect("a acquire");
-    let LeaseState::Leader { transition_count: tc1, .. } = attempt1.state else {
+    let LeaseState::Leader {
+        transition_count: tc1,
+        ..
+    } = attempt1.state
+    else {
         panic!("a must be leader");
     };
 
@@ -147,7 +152,12 @@ async fn takeover_after_expiry_bumps_transition_count() {
 
     // B takes over; transition_count bumps
     let attempt_b = b.try_acquire().await.expect("b takeover");
-    let LeaseState::Leader { transition_count: tc2, token: t_b, .. } = attempt_b.state else {
+    let LeaseState::Leader {
+        transition_count: tc2,
+        token: t_b,
+        ..
+    } = attempt_b.state
+    else {
         panic!("b must take over after expiry");
     };
     assert_eq!(tc2, tc1 + 1, "takeover bumps transition_count exactly once");
@@ -159,11 +169,16 @@ async fn takeover_after_expiry_bumps_transition_count() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn release_by_non_holder_is_idempotent_noop() {
-    let Some(pool) = setup_pool().await else { return };
+    let Some(pool) = setup_pool().await else {
+        return;
+    };
 
     let a = PostgresLease::new(pool.clone(), cfg("worker-a")).expect("new a");
     let attempt = a.try_acquire().await.expect("acquire");
-    let LeaseState::Leader { token: real_token, .. } = attempt.state else {
+    let LeaseState::Leader {
+        token: real_token, ..
+    } = attempt.state
+    else {
         panic!("must be leader");
     };
 
@@ -181,7 +196,9 @@ async fn release_by_non_holder_is_idempotent_noop() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_acquires_serialize_no_double_grant() {
-    let Some(pool) = setup_pool().await else { return };
+    let Some(pool) = setup_pool().await else {
+        return;
+    };
 
     let mut handles = Vec::new();
     for i in 0..8 {
@@ -199,5 +216,8 @@ async fn concurrent_acquires_serialize_no_double_grant() {
             leaders += 1;
         }
     }
-    assert_eq!(leaders, 1, "exactly one Leader across 8 concurrent contenders");
+    assert_eq!(
+        leaders, 1,
+        "exactly one Leader across 8 concurrent contenders"
+    );
 }

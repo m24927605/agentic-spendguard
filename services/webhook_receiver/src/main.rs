@@ -9,7 +9,9 @@ use spendguard_webhook_receiver::{
     config::Config,
     metrics::WebhookReceiverMetrics,
     persistence::sequence::{recover_max_seq, SequenceAllocator},
-    server::{build_health_router, build_https_router, build_ledger_client, build_pg_pool, AppState},
+    server::{
+        build_health_router, build_https_router, build_ledger_client, build_pg_pool, AppState,
+    },
 };
 
 #[tokio::main(flavor = "multi_thread")]
@@ -119,13 +121,13 @@ async fn main() -> anyhow::Result<()> {
 
 /// Round-2 #11: minimal HTTP /metrics endpoint.
 async fn serve_metrics(addr: String, metrics: WebhookReceiverMetrics) -> anyhow::Result<()> {
-    use std::convert::Infallible;
+    use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
-    use http_body_util::Full;
+    use std::convert::Infallible;
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind(&addr).await?;
@@ -146,10 +148,7 @@ async fn serve_metrics(addr: String, metrics: WebhookReceiverMetrics) -> anyhow:
                     };
                     Ok::<_, Infallible>(
                         Response::builder()
-                            .header(
-                                "content-type",
-                                "text/plain; version=0.0.4; charset=utf-8",
-                            )
+                            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
                             .body(Full::new(Bytes::from(body)))
                             .unwrap(),
                     )

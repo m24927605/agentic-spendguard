@@ -19,8 +19,8 @@
 
 use anyhow::Context;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::UnixStream;
 use tonic::transport::{Channel, Endpoint, Uri};
@@ -28,8 +28,7 @@ use tower::service_fn;
 use tracing::{info, warn};
 
 use crate::proto::sidecar_adapter::v1::{
-    handshake_request::CapabilityLevel,
-    sidecar_adapter_client::SidecarAdapterClient,
+    handshake_request::CapabilityLevel, sidecar_adapter_client::SidecarAdapterClient,
     HandshakeRequest, HandshakeResponse,
 };
 
@@ -71,11 +70,10 @@ impl SidecarConfig {
         let uds_path: PathBuf = std::env::var("SPENDGUARD_PROXY_SIDECAR_UDS_PATH")
             .unwrap_or_else(|_| "/var/run/spendguard/adapter.sock".to_string())
             .into();
-        let tenant_id = std::env::var("SPENDGUARD_PROXY_DEFAULT_TENANT_ID")
-            .context(
-                "SPENDGUARD_PROXY_DEFAULT_TENANT_ID required (per spec §6.1 Path A); \
+        let tenant_id = std::env::var("SPENDGUARD_PROXY_DEFAULT_TENANT_ID").context(
+            "SPENDGUARD_PROXY_DEFAULT_TENANT_ID required (per spec §6.1 Path A); \
                  may be overridden per-request by X-SpendGuard-Tenant-Id (slice 6)",
-            )?;
+        )?;
         // Validate UUID format at startup (codex r4 NEWr5-3 hint).
         uuid::Uuid::parse_str(&tenant_id).with_context(|| {
             format!("SPENDGUARD_PROXY_DEFAULT_TENANT_ID is not a valid UUID: {tenant_id}")
@@ -225,10 +223,7 @@ mod tests {
         let result = SidecarConfig::from_env();
         assert!(result.is_ok(), "valid UUID must succeed: {:?}", result);
         let cfg = result.unwrap();
-        assert_eq!(
-            cfg.tenant_id,
-            "00000000-0000-4000-8000-000000000001"
-        );
+        assert_eq!(cfg.tenant_id, "00000000-0000-4000-8000-000000000001");
 
         // Restore.
         if let Some(v) = original {

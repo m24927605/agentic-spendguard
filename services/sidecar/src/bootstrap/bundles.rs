@@ -75,12 +75,11 @@ pub fn load_contract_bundle(
     let meta_path = source
         .root
         .join(format!("contract_bundle/{bundle_id}.metadata.json"));
-    let meta_bytes = std::fs::read(&meta_path).with_context(|| {
-        format!("read bundle metadata {}", meta_path.display())
-    }).map_err(|e| DomainError::Internal(anyhow!(e)))?;
-    let meta: BundleMetadata = serde_json::from_slice(&meta_bytes).map_err(|e| {
-        DomainError::BundleSignatureInvalid(format!("bundle metadata json: {e}"))
-    })?;
+    let meta_bytes = std::fs::read(&meta_path)
+        .with_context(|| format!("read bundle metadata {}", meta_path.display()))
+        .map_err(|e| DomainError::Internal(anyhow!(e)))?;
+    let meta: BundleMetadata = serde_json::from_slice(&meta_bytes)
+        .map_err(|e| DomainError::BundleSignatureInvalid(format!("bundle metadata json: {e}")))?;
 
     let snapshot_hash = hex::decode(&meta.price_snapshot_hash).map_err(|e| {
         DomainError::BundleSignatureInvalid(format!("price_snapshot_hash hex: {e}"))
@@ -93,10 +92,7 @@ pub fn load_contract_bundle(
     // worse than refusing to come up — it would leave decisions
     // ungated with no audit trace of what should have gated them.
     let parsed = crate::contract::parse_from_tgz(&raw).map_err(|e| {
-        DomainError::BundleSignatureInvalid(format!(
-            "contract bundle {} parse: {:#}",
-            bundle_id, e
-        ))
+        DomainError::BundleSignatureInvalid(format!("contract bundle {} parse: {:#}", bundle_id, e))
     })?;
 
     Ok(CachedContractBundle {
@@ -143,13 +139,23 @@ struct BundleMetadata {
 /// Atomically swap a freshly-loaded contract bundle into the runtime
 /// state. Returns the previous bundle id (if any) for telemetry.
 pub fn install_contract_bundle(state: &SidecarState, bundle: CachedContractBundle) -> Option<Uuid> {
-    let prev = state.inner.contract_bundle.read().as_ref().map(|b| b.bundle_id);
+    let prev = state
+        .inner
+        .contract_bundle
+        .read()
+        .as_ref()
+        .map(|b| b.bundle_id);
     *state.inner.contract_bundle.write() = Some(bundle);
     prev
 }
 
 pub fn install_schema_bundle(state: &SidecarState, bundle: CachedSchemaBundle) -> Option<Uuid> {
-    let prev = state.inner.schema_bundle.read().as_ref().map(|b| b.bundle_id);
+    let prev = state
+        .inner
+        .schema_bundle
+        .read()
+        .as_ref()
+        .map(|b| b.bundle_id);
     *state.inner.schema_bundle.write() = Some(bundle);
     prev
 }

@@ -30,10 +30,7 @@ impl Default for MTlsPaths {
 /// short-lived (24h default per Stage 2 §12.1) and re-issued by cert-manager
 /// before expiry; tonic re-reads via fresh Channel construction on each
 /// reconnect.
-pub fn build_client_tls(
-    paths: &MTlsPaths,
-    sni_domain: &str,
-) -> Result<ClientTlsConfig> {
+pub fn build_client_tls(paths: &MTlsPaths, sni_domain: &str) -> Result<ClientTlsConfig> {
     let cert_pem = std::fs::read_to_string(&paths.workload_cert_pem)
         .with_context(|| format!("read workload cert {}", paths.workload_cert_pem))?;
     let key_pem = std::fs::read_to_string(&paths.workload_key_pem)

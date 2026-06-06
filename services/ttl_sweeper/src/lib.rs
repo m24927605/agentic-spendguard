@@ -5,8 +5,8 @@
 //! Design source: /tmp/codex-ttl-r2.txt (v2 LOCKED at round 2).
 
 pub mod audit;
-pub mod config;
 pub mod canonical;
+pub mod config;
 pub mod metrics;
 pub mod poll;
 pub mod sequence;

@@ -51,9 +51,15 @@ impl UsagePollerMetrics {
     }
 
     pub fn add_records(&self, fetched: u64, inserted: u64, deduped: u64) {
-        self.inner.records_fetched.fetch_add(fetched, Ordering::Relaxed);
-        self.inner.records_inserted.fetch_add(inserted, Ordering::Relaxed);
-        self.inner.records_deduped.fetch_add(deduped, Ordering::Relaxed);
+        self.inner
+            .records_fetched
+            .fetch_add(fetched, Ordering::Relaxed);
+        self.inner
+            .records_inserted
+            .fetch_add(inserted, Ordering::Relaxed);
+        self.inner
+            .records_deduped
+            .fetch_add(deduped, Ordering::Relaxed);
     }
 
     pub fn render(&self) -> String {
@@ -68,7 +74,9 @@ impl UsagePollerMetrics {
             "spendguard_usage_poller_cycles_total{{outcome=\"err\"}} {}\n",
             self.inner.cycles_err.load(Ordering::Relaxed),
         ));
-        out.push_str("# HELP spendguard_usage_poller_records_total Records counted by lifecycle stage.\n");
+        out.push_str(
+            "# HELP spendguard_usage_poller_records_total Records counted by lifecycle stage.\n",
+        );
         out.push_str("# TYPE spendguard_usage_poller_records_total counter\n");
         out.push_str(&format!(
             "spendguard_usage_poller_records_total{{stage=\"fetched\"}} {}\n",

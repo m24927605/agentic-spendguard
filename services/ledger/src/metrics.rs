@@ -174,7 +174,9 @@ mod tests {
     fn counters_default_to_zero_in_render_output() {
         let m = LedgerMetrics::new();
         let txt = m.render();
-        assert!(txt.contains("spendguard_ledger_handler_calls_total{handler=\"reserve_set\",outcome=\"ok\"} 0"));
+        assert!(txt.contains(
+            "spendguard_ledger_handler_calls_total{handler=\"reserve_set\",outcome=\"ok\"} 0"
+        ));
         assert!(txt.contains("spendguard_ledger_handler_calls_total{handler=\"invoice_reconcile\",outcome=\"err\"} 0"));
     }
 

@@ -78,7 +78,10 @@ async fn main() -> Result<()> {
     //     (Stage 2 §4.3 UNIQUE per (tenant, workload_instance_id, sequence)).
     //     POC: best-effort query; on error fall back to 1 with a warning.
     let producer_sequence_start = bootstrap_producer_sequence(&ledger, &cfg).await;
-    info!(start = producer_sequence_start, "producer_sequence initialized");
+    info!(
+        start = producer_sequence_start,
+        "producer_sequence initialized"
+    );
 
     let idempotency = spendguard_sidecar::decision::idempotency::IdempotencyCache::new(
         cfg.idempotency_cache_size,
@@ -186,10 +189,10 @@ async fn main() -> Result<()> {
     //                that pre-seed fencing_scopes with epoch=1)
     //     Default `rpc`. Static path uses fencing_initial_epoch +
     //     fencing_ttl_seconds env values like before.
-    let fencing_scope_id = uuid::Uuid::parse_str(&cfg.fencing_scope_id)
-        .context("parse fencing_scope_id")?;
-    let lease_mode = std::env::var("SPENDGUARD_SIDECAR_LEASE_MODE")
-        .unwrap_or_else(|_| "rpc".into());
+    let fencing_scope_id =
+        uuid::Uuid::parse_str(&cfg.fencing_scope_id).context("parse fencing_scope_id")?;
+    let lease_mode =
+        std::env::var("SPENDGUARD_SIDECAR_LEASE_MODE").unwrap_or_else(|_| "rpc".into());
     if lease_mode == "static" {
         spendguard_sidecar::fencing::install_active(
             &state,
@@ -203,10 +206,7 @@ async fn main() -> Result<()> {
             "fencing scope installed (lease_mode=static; legacy demo path)"
         );
     } else {
-        let lease_ttl_secs: u32 = cfg
-            .fencing_ttl_seconds
-            .max(1)
-            .min(3600) as u32;
+        let lease_ttl_secs: u32 = cfg.fencing_ttl_seconds.max(1).min(3600) as u32;
         spendguard_sidecar::fencing::rpc_acquire(
             &state,
             &ledger_for_lease,
@@ -240,8 +240,8 @@ async fn main() -> Result<()> {
     }
 
     // 3) Endpoint catalog manifest verify + atomic swap.
-    let manifest_signing_key = load_manifest_signing_key()
-        .context("load manifest signing public key")?;
+    let manifest_signing_key =
+        load_manifest_signing_key().context("load manifest signing public key")?;
     catalog::refresh_once(&cfg, &state, &manifest_signing_key)
         .await
         .context("initial manifest refresh")?;
@@ -280,13 +280,16 @@ async fn main() -> Result<()> {
     // 4) Bind UDS for the in-process adapter.
     let uds_path = PathBuf::from(&cfg.uds_path);
     if let Some(parent) = uds_path.parent() {
-        tokio::fs::create_dir_all(parent).await.context("mkdir uds parent")?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .context("mkdir uds parent")?;
     }
     if uds_path.exists() {
-        tokio::fs::remove_file(&uds_path).await.context("remove stale uds")?;
+        tokio::fs::remove_file(&uds_path)
+            .await
+            .context("remove stale uds")?;
     }
-    let uds_listener =
-        tokio::net::UnixListener::bind(&uds_path).context("bind uds listener")?;
+    let uds_listener = tokio::net::UnixListener::bind(&uds_path).context("bind uds listener")?;
     let incoming = async_stream::stream! {
         loop {
             match uds_listener.accept().await {
@@ -304,15 +307,14 @@ async fn main() -> Result<()> {
     let drain_state = state.clone();
     let drain_secs = cfg.drain_window_seconds;
     let shutdown = async move {
-        let mut sigterm = match tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                error!(?e, "failed to install SIGTERM handler");
-                return;
-            }
-        };
+        let mut sigterm =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    error!(?e, "failed to install SIGTERM handler");
+                    return;
+                }
+            };
         sigterm.recv().await;
         drain::run_drain(drain_state, std::time::Duration::from_secs(drain_secs)).await;
     };
@@ -390,10 +392,7 @@ async fn bootstrap_producer_sequence(ledger: &LedgerClient, cfg: &Config) -> u64
     }
 }
 
-fn install_bundles(
-    cfg: &Config,
-    state: &SidecarState,
-) -> Result<()> {
+fn install_bundles(cfg: &Config, state: &SidecarState) -> Result<()> {
     use spendguard_sidecar::bootstrap::bundles::{
         install_contract_bundle, install_schema_bundle, load_contract_bundle, load_schema_bundle,
         BundleSource,
@@ -401,10 +400,10 @@ fn install_bundles(
     let source = BundleSource {
         root: PathBuf::from(&cfg.bundle_root),
     };
-    let contract_id = uuid::Uuid::parse_str(&cfg.contract_bundle_id)
-        .context("parse contract_bundle_id")?;
-    let schema_id = uuid::Uuid::parse_str(&cfg.schema_bundle_id)
-        .context("parse schema_bundle_id")?;
+    let contract_id =
+        uuid::Uuid::parse_str(&cfg.contract_bundle_id).context("parse contract_bundle_id")?;
+    let schema_id =
+        uuid::Uuid::parse_str(&cfg.schema_bundle_id).context("parse schema_bundle_id")?;
 
     let contract = load_contract_bundle(&source, contract_id, &cfg.contract_bundle_hash_hex)
         .map_err(|e| anyhow!("load contract bundle: {e}"))?;
@@ -422,10 +421,10 @@ fn install_bundles(
 /// ledger pattern — raw hyper, no `prometheus` crate dep. Reuses the
 /// in-process `hyper` already pulled in for the health probe.
 async fn run_metrics_server(addr: String, metrics: SidecarMetrics) {
-    use std::convert::Infallible;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
 
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
@@ -457,10 +456,7 @@ async fn run_metrics_server(addr: String, metrics: SidecarMetrics) {
                     };
                     Ok::<_, Infallible>(
                         hyper::Response::builder()
-                            .header(
-                                "content-type",
-                                "text/plain; version=0.0.4; charset=utf-8",
-                            )
+                            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
                             .body(http_body_util::Full::new(hyper::body::Bytes::from(body)))
                             .unwrap(),
                     )
@@ -474,10 +470,10 @@ async fn run_metrics_server(addr: String, metrics: SidecarMetrics) {
 }
 
 async fn run_health_server(addr: String, state: SidecarState) {
-    use std::convert::Infallible;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper_util::rt::TokioIo;
+    use std::convert::Infallible;
 
     let listener = match tokio::net::TcpListener::bind(&addr).await {
         Ok(l) => l,
@@ -559,8 +555,7 @@ fn load_manifest_signing_key() -> Result<ed25519_dalek::VerifyingKey> {
         .map_err(|_| anyhow!("SPENDGUARD_SIDECAR_MANIFEST_VERIFY_KEY_PEM required"))?;
     let pem = std::fs::read_to_string(&path)
         .with_context(|| format!("read manifest verify key {path}"))?;
-    Ok(ed25519_dalek::VerifyingKey::from_public_key_pem(&pem)
-        .context("parse pkcs8 public key")?)
+    Ok(ed25519_dalek::VerifyingKey::from_public_key_pem(&pem).context("parse pkcs8 public key")?)
 }
 
 // async_stream is needed for UDS incoming adapter.

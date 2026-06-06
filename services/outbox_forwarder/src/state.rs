@@ -5,8 +5,7 @@ use tonic::transport::{Certificate, Channel, ClientTlsConfig, Identity};
 use tracing::info;
 
 use crate::{
-    config::Config,
-    proto::canonical_ingest::v1::canonical_ingest_client::CanonicalIngestClient,
+    config::Config, proto::canonical_ingest::v1::canonical_ingest_client::CanonicalIngestClient,
 };
 
 pub struct AppState {

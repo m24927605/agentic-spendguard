@@ -18,11 +18,12 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use spendguard_leases::{
-    spawn_lease_loop, DisabledLease, K8sLease, LeaseConfig, LeaseManager, LeaseState,
-    PostgresLease,
+    spawn_lease_loop, DisabledLease, K8sLease, LeaseConfig, LeaseManager, LeaseState, PostgresLease,
 };
 
-use spendguard_retention_sweeper::{log_sweep, sweep_audit_outbox_prompts, sweep_provider_usage_raw};
+use spendguard_retention_sweeper::{
+    log_sweep, sweep_audit_outbox_prompts, sweep_provider_usage_raw,
+};
 
 #[derive(Debug, Deserialize)]
 struct Config {

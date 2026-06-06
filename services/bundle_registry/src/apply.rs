@@ -21,19 +21,35 @@ pub async fn process_approval(
     config: &Config,
 ) -> Result<ApplyResult> {
     // 1. Fetch the approval row's patch + state.
-    let row: (String, Option<Value>, Option<Uuid>) = sqlx::query_as(
+    //
+    // Filter on `proposal_source = 'cost_advisor'` so a caller that
+    // somehow reaches this code with a sidecar_decision approval_id
+    // can't trick the apply path into running against a NULL
+    // proposed_dsl_patch (sidecar_decision rows leave the patch NULL
+    // by design). The listener filters by source on the NOTIFY payload
+    // before dispatching; this is the defense-in-depth check at the
+    // chokepoint that actually writes bundle bytes to disk.
+    let row: Option<(String, Option<Value>, Option<Uuid>)> = sqlx::query_as(
         r#"
         SELECT state, proposed_dsl_patch, proposing_finding_id
           FROM approval_requests
-         WHERE approval_id = $1 AND tenant_id = $2
+         WHERE approval_id = $1
+           AND tenant_id = $2
+           AND proposal_source = 'cost_advisor'
         "#,
     )
     .bind(approval_id)
     .bind(tenant_id)
-    .fetch_one(pool)
+    .fetch_optional(pool)
     .await
     .context("SELECT approval_requests row")?;
-    let (state, patch, finding_id) = row;
+    let (state, patch, finding_id) = row.ok_or_else(|| {
+        anyhow!(
+            "approval {} (tenant {}) not found or not a cost_advisor proposal",
+            approval_id,
+            tenant_id
+        )
+    })?;
 
     if state != "approved" {
         // The NOTIFY can race with a subsequent state change; re-check.
@@ -122,10 +138,7 @@ pub async fn process_approval(
     })
 }
 
-fn apply_patch_to_yaml(
-    contract_yaml: &str,
-    patch_json: &serde_json::Value,
-) -> Result<String> {
+fn apply_patch_to_yaml(contract_yaml: &str, patch_json: &serde_json::Value) -> Result<String> {
     // Parse the YAML into a generic JSON value via serde_yaml so
     // RFC-6902 patches can walk the same tree (mapping ↔ object,
     // sequence ↔ array, scalar ↔ scalar).
@@ -165,8 +178,8 @@ fn apply_patch_to_yaml(
     //   * Multiple test ops at the same source index pinning
     //     different UUIDs → rejected before remap. Patch is structurally
     //     invalid and would fail the validator anyway.
-    let remapped_patch = remap_budget_indices(patch_json, &value)
-        .context("CA-P3.8: remap budget indices")?;
+    let remapped_patch =
+        remap_budget_indices(patch_json, &value).context("CA-P3.8: remap budget indices")?;
 
     let patch: json_patch::Patch =
         serde_json::from_value(remapped_patch).context("parse RFC-6902 patch")?;
@@ -294,10 +307,7 @@ fn remap_budget_indices(
                 if let Some(&dst_idx) = remap.get(&src_idx) {
                     let new_path = format!("/spec/budgets/{}{}", dst_idx, rest);
                     if let Some(map) = new_op.as_object_mut() {
-                        map.insert(
-                            "path".to_string(),
-                            serde_json::Value::String(new_path),
-                        );
+                        map.insert("path".to_string(), serde_json::Value::String(new_path));
                     }
                 }
             }
@@ -320,7 +330,8 @@ fn parse_budget_id_path(path: &str) -> Option<u32> {
     // RFC 6901 array indices: 0 or [1-9][0-9]* (no leading zeros).
     // Mirrors patch_validator.rs::parse_budget_index — keep these in
     // sync if either is relaxed.
-    if idx_str != "0" && (idx_str.starts_with('0') || !idx_str.chars().all(|c| c.is_ascii_digit())) {
+    if idx_str != "0" && (idx_str.starts_with('0') || !idx_str.chars().all(|c| c.is_ascii_digit()))
+    {
         return None;
     }
     idx_str.parse::<u32>().ok()
@@ -337,7 +348,8 @@ fn parse_budget_path_prefix(path: &str) -> Option<(u32, &str)> {
     let slash_off = rest.find('/')?;
     let idx_str = &rest[..slash_off];
     let suffix = &rest[slash_off..];
-    if idx_str != "0" && (idx_str.starts_with('0') || !idx_str.chars().all(|c| c.is_ascii_digit())) {
+    if idx_str != "0" && (idx_str.starts_with('0') || !idx_str.chars().all(|c| c.is_ascii_digit()))
+    {
         return None;
     }
     let idx = idx_str.parse::<u32>().ok()?;
@@ -396,7 +408,10 @@ spec:
             {"op":"replace","path":"/spec/budgets/0/reservation_ttl_seconds","value":45},
         ]);
         let r = apply_patch_to_yaml(contract_yaml, &patch);
-        assert!(r.is_err(), "test-op identity mismatch must fail the whole patch");
+        assert!(
+            r.is_err(),
+            "test-op identity mismatch must fail the whole patch"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -435,10 +450,20 @@ spec:
         let out = apply_patch_to_yaml(TWO_BUDGET_CONTRACT, &patch).expect("apply");
         let v: serde_yaml::Value = serde_yaml::from_str(&out).unwrap();
         // budget #1 (index 1) gets the new TTL.
-        assert_eq!(v["spec"]["budgets"][1]["reservation_ttl_seconds"].as_u64().unwrap(), 45);
+        assert_eq!(
+            v["spec"]["budgets"][1]["reservation_ttl_seconds"]
+                .as_u64()
+                .unwrap(),
+            45
+        );
         // budget #0 (index 0) is UNCHANGED — regression detector for
         // the "patch silently mutates wrong budget" bug class.
-        assert_eq!(v["spec"]["budgets"][0]["reservation_ttl_seconds"].as_u64().unwrap(), 600);
+        assert_eq!(
+            v["spec"]["budgets"][0]["reservation_ttl_seconds"]
+                .as_u64()
+                .unwrap(),
+            600
+        );
     }
 
     #[test]
@@ -463,7 +488,12 @@ spec:
         ]);
         let out = apply_patch_to_yaml(single_yaml, &patch).expect("apply");
         let v: serde_yaml::Value = serde_yaml::from_str(&out).unwrap();
-        assert_eq!(v["spec"]["budgets"][0]["reservation_ttl_seconds"].as_u64().unwrap(), 45);
+        assert_eq!(
+            v["spec"]["budgets"][0]["reservation_ttl_seconds"]
+                .as_u64()
+                .unwrap(),
+            45
+        );
     }
 
     #[test]
@@ -477,10 +507,26 @@ spec:
         ]);
         let out = apply_patch_to_yaml(TWO_BUDGET_CONTRACT, &patch).expect("apply");
         let v: serde_yaml::Value = serde_yaml::from_str(&out).unwrap();
-        assert_eq!(v["spec"]["budgets"][0]["id"].as_str().unwrap(), "44444444-4444-4444-8444-444444444444");
-        assert_eq!(v["spec"]["budgets"][0]["limit_amount_atomic"].as_str().unwrap(), "1000000000");
-        assert_eq!(v["spec"]["budgets"][1]["id"].as_str().unwrap(), "55555555-5555-4555-8555-555555555555");
-        assert_eq!(v["spec"]["budgets"][1]["limit_amount_atomic"].as_str().unwrap(), "3000000000");
+        assert_eq!(
+            v["spec"]["budgets"][0]["id"].as_str().unwrap(),
+            "44444444-4444-4444-8444-444444444444"
+        );
+        assert_eq!(
+            v["spec"]["budgets"][0]["limit_amount_atomic"]
+                .as_str()
+                .unwrap(),
+            "1000000000"
+        );
+        assert_eq!(
+            v["spec"]["budgets"][1]["id"].as_str().unwrap(),
+            "55555555-5555-4555-8555-555555555555"
+        );
+        assert_eq!(
+            v["spec"]["budgets"][1]["limit_amount_atomic"]
+                .as_str()
+                .unwrap(),
+            "3000000000"
+        );
     }
 
     #[test]
@@ -513,7 +559,10 @@ spec:
         assert!(r.is_err(), "conflicting same-index pins must be rejected");
         // Surface a clear error mentioning the conflict.
         let msg = format!("{:#}", r.unwrap_err());
-        assert!(msg.contains("conflicting"), "error should mention 'conflicting'; got: {msg}");
+        assert!(
+            msg.contains("conflicting"),
+            "error should mention 'conflicting'; got: {msg}"
+        );
     }
 
     #[test]
@@ -528,7 +577,12 @@ spec:
         ]);
         let out = apply_patch_to_yaml(TWO_BUDGET_CONTRACT, &patch).expect("apply");
         let v: serde_yaml::Value = serde_yaml::from_str(&out).unwrap();
-        assert_eq!(v["spec"]["budgets"][1]["reservation_ttl_seconds"].as_u64().unwrap(), 45);
+        assert_eq!(
+            v["spec"]["budgets"][1]["reservation_ttl_seconds"]
+                .as_u64()
+                .unwrap(),
+            45
+        );
     }
 
     #[test]
@@ -553,7 +607,10 @@ spec:
         let r = apply_patch_to_yaml(yaml, &patch);
         // Without budgets array, no remap; json_patch::test then
         // fails because /spec/budgets/0/id doesn't exist.
-        assert!(r.is_err(), "test op against missing budgets array must fail apply");
+        assert!(
+            r.is_err(),
+            "test op against missing budgets array must fail apply"
+        );
     }
 
     #[test]

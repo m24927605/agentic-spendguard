@@ -5,8 +5,8 @@
 //! (ok / err) so an SLO query can compute "what fraction of pending
 //! rows are getting through?".
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoopOutcome {
@@ -224,15 +224,13 @@ mod tests {
     #[test]
     fn leader_gauge_renders() {
         let m = OutboxForwarderMetrics::new();
-        assert!(
-            m.render()
-                .contains("spendguard_outbox_forwarder_is_leader 0")
-        );
+        assert!(m
+            .render()
+            .contains("spendguard_outbox_forwarder_is_leader 0"));
         m.set_is_leader(true);
-        assert!(
-            m.render()
-                .contains("spendguard_outbox_forwarder_is_leader 1")
-        );
+        assert!(m
+            .render()
+            .contains("spendguard_outbox_forwarder_is_leader 1"));
     }
 
     #[test]

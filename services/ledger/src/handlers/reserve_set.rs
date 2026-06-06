@@ -32,8 +32,8 @@ use crate::{
     proto::{
         common::v1::{BudgetClaim, PricingFreeze},
         ledger::v1::{
-            reserve_set_response::Outcome, ReserveSetRequest, ReserveSetResponse, ReserveSetSuccess,
-            Reservation,
+            reserve_set_response::Outcome, Reservation, ReserveSetRequest, ReserveSetResponse,
+            ReserveSetSuccess,
         },
     },
 };
@@ -149,13 +149,13 @@ async fn handle_inner(
         .collect();
 
     // -- 4. Build payloads for stored procedure ---------------------------
-    let entries_json = build_entries_payload(
+    let entries_json = build_entries_payload(&req.claims, &reservation_ids, pricing)?;
+    let reservations_json = build_reservations_payload(
         &req.claims,
         &reservation_ids,
-        pricing,
+        ttl_expires_at,
+        &idempotency.key,
     )?;
-    let reservations_json =
-        build_reservations_payload(&req.claims, &reservation_ids, ttl_expires_at, &idempotency.key)?;
 
     let transaction_json = json!({
         "ledger_transaction_id": ledger_transaction_id.to_string(),
@@ -233,7 +233,9 @@ fn validate(req: &ReserveSetRequest) -> Result<(), DomainError> {
         ));
     }
     if req.claims.is_empty() {
-        return Err(DomainError::InvalidRequest("claims must not be empty".into()));
+        return Err(DomainError::InvalidRequest(
+            "claims must not be empty".into(),
+        ));
     }
     if req.audit_event.is_none() {
         return Err(DomainError::InvalidRequest(
@@ -264,12 +266,12 @@ fn validate(req: &ReserveSetRequest) -> Result<(), DomainError> {
             )));
         }
         // amount_atomic must parse as non-negative integer.
-        let amount = claim.amount_atomic.parse::<num_bigint::BigInt>().map_err(|e| {
-            DomainError::InvalidRequest(format!(
-                "claim[{}].amount_atomic invalid: {}",
-                i, e
-            ))
-        })?;
+        let amount = claim
+            .amount_atomic
+            .parse::<num_bigint::BigInt>()
+            .map_err(|e| {
+                DomainError::InvalidRequest(format!("claim[{}].amount_atomic invalid: {}", i, e))
+            })?;
         if amount.sign() == num_bigint::Sign::Minus {
             return Err(DomainError::InvalidRequest(format!(
                 "claim[{}].amount_atomic must be non-negative",
@@ -566,8 +568,10 @@ fn success_response(
 
     let success = ReserveSetSuccess {
         ledger_transaction_id: ledger_transaction_id.to_string(),
-        reservation_set_id: derive_reservation_set_id(&parse_uuid(&req.decision_id, "_").unwrap_or(Uuid::nil()))
-            .to_string(),
+        reservation_set_id: derive_reservation_set_id(
+            &parse_uuid(&req.decision_id, "_").unwrap_or(Uuid::nil()),
+        )
+        .to_string(),
         reservations,
         audit_decision_event_id: audit_event_id.to_string(),
         producer_sequence: req.producer_sequence,
@@ -623,17 +627,21 @@ async fn build_replay_response(
     let audit_id: Uuid = row
         .try_get::<Option<Uuid>, _>("audit_decision_event_id")
         .map_err(|e| DomainError::Internal(anyhow::anyhow!("replay lookup audit_id: {}", e)))?
-        .ok_or_else(|| DomainError::Internal(anyhow::anyhow!(
-            "replay row {} has NULL audit_decision_event_id",
-            existing_tx_id
-        )))?;
+        .ok_or_else(|| {
+            DomainError::Internal(anyhow::anyhow!(
+                "replay row {} has NULL audit_decision_event_id",
+                existing_tx_id
+            ))
+        })?;
     let original_decision_id: Uuid = row
         .try_get::<Option<Uuid>, _>("decision_id")
         .map_err(|e| DomainError::Internal(anyhow::anyhow!("replay lookup decision_id: {}", e)))?
-        .ok_or_else(|| DomainError::Internal(anyhow::anyhow!(
-            "replay row {} has NULL decision_id",
-            existing_tx_id
-        )))?;
+        .ok_or_else(|| {
+            DomainError::Internal(anyhow::anyhow!(
+                "replay row {} has NULL decision_id",
+                existing_tx_id
+            ))
+        })?;
 
     // Derive reservation_set_id from the ORIGINAL decision_id so retries
     // see the same operation_id the first call returned.

@@ -78,14 +78,11 @@ pub const MAX_FORCE_RESET_REASON_LEN: usize = 1024;
 /// `SELECT set_config('app.current_tenant_id', ...)` inside the same
 /// transaction so the RLS WITH CHECK clause passes.
 ///
-/// `producer_sequence` is allocated per-tenant by the helper itself —
-/// it issues `SELECT COALESCE(MAX(producer_sequence), 0) + 1 FROM
-/// control_plane_audit_outbox WHERE tenant_id = $1` inside the same
-/// tx so concurrent INSERTs in different transactions hit the
-/// UNIQUE(tenant_id, producer_sequence) constraint and one rolls
-/// back (the handler's HTTP semantics then surface as 409 / 500).
-/// SLICE-extra will replace this with a dedicated sequence allocator
-/// SP per the ledger pattern.
+/// `producer_sequence` is allocated per-tenant by the migration-0007
+/// `control_plane_allocate_audit_sequence` SP, which serializes on a
+/// dedicated counter row so concurrent operator writes against the same
+/// tenant cannot collide on UNIQUE(tenant_id, producer_sequence). See
+/// `crate::allocate_audit_sequence`.
 async fn emit_plugin_audit_event(
     tx: &mut Transaction<'_, Postgres>,
     tenant_id: Uuid,
@@ -97,18 +94,8 @@ async fn emit_plugin_audit_event(
     let event_id = Uuid::now_v7();
     let event_type = format!("spendguard.audit.plugin_{event_kind}.v1alpha1");
 
-    // Allocate the next per-tenant producer_sequence inside the same tx.
-    let next_seq: (i64,) = sqlx::query_as(
-        r#"
-        SELECT COALESCE(MAX(producer_sequence), 0) + 1
-          FROM control_plane_audit_outbox
-         WHERE tenant_id = $1
-        "#,
-    )
-    .bind(tenant_id)
-    .fetch_one(&mut **tx)
-    .await?;
-    let producer_sequence = next_seq.0;
+    // R2: serialized allocator SP (migration 0007).
+    let producer_sequence: i64 = crate::allocate_audit_sequence(tx, tenant_id).await?;
 
     let now = Utc::now();
     let cloudevent = serde_json::json!({

@@ -40,10 +40,10 @@ use crate::{
     },
     proto::{
         canonical_ingest::v1::{
-            AppendEventsRequest, AppendEventsResponse, EventResult, IngestPosition,
-            append_events_request::Route, event_result::Status as EventStatus,
+            append_events_request::Route, event_result::Status as EventStatus, AppendEventsRequest,
+            AppendEventsResponse, EventResult, IngestPosition,
         },
-        common::v1::{CloudEvent, Error as ProtoError, error::Code as ProtoCode},
+        common::v1::{error::Code as ProtoCode, CloudEvent, Error as ProtoError},
     },
     verifier::canonical_bytes,
 };
@@ -684,7 +684,11 @@ fn prediction_columns_from_event(evt: &CloudEvent) -> append::PredictionColumns<
 }
 
 fn nonempty(value: &str) -> Option<&str> {
-    if value.is_empty() { None } else { Some(value) }
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn uuid_nonempty(value: &str) -> Option<Uuid> {
@@ -696,7 +700,11 @@ fn uuid_nonempty(value: &str) -> Option<Uuid> {
 }
 
 fn nonzero_i64(value: i64) -> Option<i64> {
-    if value == 0 { None } else { Some(value) }
+    if value == 0 {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn nonzero_i64_decimal(value: i64) -> Option<BigDecimal> {
@@ -724,7 +732,11 @@ fn json_i64(value: &serde_json::Value) -> Option<i64> {
 }
 
 fn nonzero_f32(value: f32) -> Option<f32> {
-    if value == 0.0 { None } else { Some(value) }
+    if value == 0.0 {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn nonzero_f32_decimal(value: f32) -> Option<BigDecimal> {

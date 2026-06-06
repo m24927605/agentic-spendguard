@@ -46,8 +46,7 @@ async fn main() -> Result<()> {
     init_tracing();
 
     let cfg = PublisherConfig::from_env().context("loading publisher config")?;
-    let key = load_signing_key_pem(&cfg.signing_key_pem_path)
-        .context("load signing key")?;
+    let key = load_signing_key_pem(&cfg.signing_key_pem_path).context("load signing key")?;
 
     let body_path: PathBuf = env::args()
         .nth(1)
@@ -64,11 +63,7 @@ async fn main() -> Result<()> {
     // still readable in the id; the rest is random.
     let now = Utc::now();
     let v7 = uuid::Uuid::now_v7();
-    let version_id = format!(
-        "ctlg-{}-{}",
-        now.format("%Y-%m-%dT%H:%M:%SZ"),
-        v7.simple()
-    );
+    let version_id = format!("ctlg-{}-{}", now.format("%Y-%m-%dT%H:%M:%SZ"), v7.simple());
 
     if let Some(map) = body_value.as_object_mut() {
         map.insert(
@@ -99,8 +94,7 @@ async fn main() -> Result<()> {
 
     // 2) Build + sign manifest with absolute HTTPS URL.
     let issued_at = now;
-    let valid_until =
-        issued_at + chrono::Duration::seconds(cfg.manifest_validity_seconds as i64);
+    let valid_until = issued_at + chrono::Duration::seconds(cfg.manifest_validity_seconds as i64);
 
     let public_base = validate_base_url(&cfg.public_base_url, "PUBLIC_BASE_URL", true)?;
     let catalog_url = format!("{}/v1/catalog/{}", public_base, version_id);
@@ -220,7 +214,8 @@ fn validate_base_url(s: &str, env_var_label: &str, require_https: bool) -> Resul
     if raw.chars().any(char::is_whitespace) {
         anyhow::bail!(
             "SPENDGUARD_ENDPOINT_CATALOG_{} ('{}') must not contain whitespace",
-            env_var_label, raw
+            env_var_label,
+            raw
         );
     }
 
@@ -263,22 +258,31 @@ fn validate_base_url(s: &str, env_var_label: &str, require_https: bool) -> Resul
     if authority.starts_with('@') || authority.ends_with('@') {
         anyhow::bail!(
             "SPENDGUARD_ENDPOINT_CATALOG_{} ('{}') has empty userinfo or host around '@'",
-            env_var_label, raw
+            env_var_label,
+            raw
         );
     }
     if authority.starts_with(':') || authority.ends_with(':') {
         anyhow::bail!(
             "SPENDGUARD_ENDPOINT_CATALOG_{} ('{}') has empty host or port around ':'",
-            env_var_label, raw
+            env_var_label,
+            raw
         );
     }
     // After optional userinfo, the host portion must be non-empty.
-    let host_portion = authority.rsplit_once('@').map(|(_, h)| h).unwrap_or(authority);
-    let host_only = host_portion.split_once(':').map(|(h, _)| h).unwrap_or(host_portion);
+    let host_portion = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    let host_only = host_portion
+        .split_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(host_portion);
     if host_only.is_empty() {
         anyhow::bail!(
             "SPENDGUARD_ENDPOINT_CATALOG_{} ('{}') resolves to empty host",
-            env_var_label, raw
+            env_var_label,
+            raw
         );
     }
 
@@ -290,10 +294,18 @@ mod tests {
     use super::validate_base_url;
 
     fn ok(s: &str) {
-        assert!(validate_base_url(s, "TEST", true).is_ok(), "expected ok: {}", s);
+        assert!(
+            validate_base_url(s, "TEST", true).is_ok(),
+            "expected ok: {}",
+            s
+        );
     }
     fn err(s: &str) {
-        assert!(validate_base_url(s, "TEST", true).is_err(), "expected err: {}", s);
+        assert!(
+            validate_base_url(s, "TEST", true).is_err(),
+            "expected err: {}",
+            s
+        );
     }
 
     #[test]

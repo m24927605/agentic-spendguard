@@ -317,10 +317,7 @@ mod tests {
         }
     }
 
-    fn make_contract_with_policy(
-        rules: Vec<Rule>,
-        policy: PredictionPolicy,
-    ) -> Contract {
+    fn make_contract_with_policy(rules: Vec<Rule>, policy: PredictionPolicy) -> Contract {
         let mut c = make_contract(rules);
         c.prediction_policy = policy;
         c.api_version = "spendguard.ai/v1alpha2".into();
@@ -438,11 +435,7 @@ mod tests {
     /// pass-through assumes the bundle loader validated the
     /// (policy, action) pair; tests bypass the loader to exercise
     /// the projection directly.
-    fn run_rule(
-        id: &str,
-        run_code: RunCode,
-        action: RunProjectionAction,
-    ) -> Rule {
+    fn run_rule(id: &str, run_code: RunCode, action: RunProjectionAction) -> Rule {
         Rule {
             id: id.into(),
             when: Condition {
@@ -602,8 +595,6 @@ mod tests {
         // RUN_DRIFT_DETECTED). Order is rule-iteration order.
         assert_eq!(out.reason_codes.len(), 2);
         assert!(out.reason_codes.contains(&"BUDGET_EXHAUSTED".to_string()));
-        assert!(out
-            .reason_codes
-            .contains(&"RUN_DRIFT_DETECTED".to_string()));
+        assert!(out.reason_codes.contains(&"RUN_DRIFT_DETECTED".to_string()));
     }
 }

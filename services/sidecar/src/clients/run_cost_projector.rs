@@ -82,14 +82,12 @@ impl RunCostProjectorClient {
     /// Project: hot-path RPC. Sidecar calls per decision (LLM_CALL_PRE).
     /// On failure (timeout, network, validation), caller falls through
     /// per spec §10.
-    pub async fn project(
-        &self,
-        req: ProjectRequest,
-    ) -> Result<ProjectResponse, DomainError> {
+    pub async fn project(&self, req: ProjectRequest) -> Result<ProjectResponse, DomainError> {
         let mut client = (*self.inner).clone();
-        let resp = client.project(req).await.map_err(|e| {
-            DomainError::LedgerClient(format!("RunCostProjector.Project: {e}"))
-        })?;
+        let resp = client
+            .project(req)
+            .await
+            .map_err(|e| DomainError::LedgerClient(format!("RunCostProjector.Project: {e}")))?;
         Ok(resp.into_inner())
     }
 

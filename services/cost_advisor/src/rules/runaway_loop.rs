@@ -17,9 +17,7 @@ pub const DECLARED_INPUT_FIELDS: &[&str] = &[
     "canonical_events.event_time",
 ];
 
-const RULE_SQL: &str = include_str!(
-    "../../rules/detected_waste/runaway_loop_v1.sql"
-);
+const RULE_SQL: &str = include_str!("../../rules/detected_waste/runaway_loop_v1.sql");
 
 pub fn descriptor() -> SqlCostRule {
     SqlCostRule::new_with_db(
@@ -49,7 +47,9 @@ mod tests {
 
     #[test]
     fn sql_uses_safe_decode() {
-        assert!(descriptor().sql().contains("cost_advisor_safe_decode_payload"));
+        assert!(descriptor()
+            .sql()
+            .contains("cost_advisor_safe_decode_payload"));
     }
 
     #[test]

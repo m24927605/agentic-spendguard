@@ -530,7 +530,8 @@ mod tests {
 
     #[test]
     fn resolve_tokenizer_kind_vertex_static() {
-        let path = "/v1/projects/p/locations/us/publishers/google/models/gemini-1.5-pro:generateContent";
+        let path =
+            "/v1/projects/p/locations/us/publishers/google/models/gemini-1.5-pro:generateContent";
         let cfg = route(path).unwrap();
         let body = serde_json::json!({});
         assert_eq!(

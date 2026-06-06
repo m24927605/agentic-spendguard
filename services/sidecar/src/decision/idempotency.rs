@@ -5,11 +5,16 @@
 //! `decision_id` per call and the ledger sees a duplicate logical request
 //! as a brand-new transaction (audit chain breaks; reservations duplicate).
 //!
-//! POC: in-memory LRU bounded by `idempotency_cache_size` with per-entry
-//! TTL `idempotency_cache_ttl_secs`. After process restart the cache is
-//! empty; the ledger UNIQUE on `(tenant_id, operation_kind,
-//! idempotency_key)` then catches duplicates server-side and returns a
-//! Replay variant — sidecar maps that back to the cached response.
+//! POC: in-memory FIFO bounded by `idempotency_cache_size` with per-entry
+//! TTL `idempotency_cache_ttl_secs`. (Insertion-order eviction; `get`
+//! does NOT reorder, so this is not LRU — a hot key can still get
+//! evicted by N cold inserts within the window. Acceptable for v0.1
+//! because retries within `ttl_secs` still hit before eviction matters,
+//! and the ledger UNIQUE on `(tenant_id, operation_kind,
+//! idempotency_key)` catches anything the cache misses.) After process
+//! restart the cache is empty; the ledger UNIQUE then catches
+//! duplicates server-side and returns a Replay variant — sidecar maps
+//! that back to the cached response.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -72,8 +77,16 @@ impl IdempotencyCache {
                 };
             }
         }
-        // Expired or missing.
-        g.map.remove(key);
+        // Expired or missing. If we just removed an expired entry from
+        // `map`, also drop it from `order` so the FIFO capacity
+        // accounting stays accurate. Without this, repeated expiries on
+        // distinct keys leave dangling slots that get harmlessly popped
+        // by later capacity-bound puts — wasted work and a confusing
+        // `order.len() > map.len()` invariant violation for anyone
+        // reading the structure.
+        if g.map.remove(key).is_some() {
+            g.order.retain(|k| k != key);
+        }
         Lookup::Miss
     }
 
@@ -153,5 +166,35 @@ mod tests {
         assert!(matches!(c.get("a", "fp-a"), Lookup::Miss));
         assert!(matches!(c.get("b", "fp-b"), Lookup::Hit(_)));
         assert!(matches!(c.get("c", "fp-c"), Lookup::Hit(_)));
+    }
+
+    #[test]
+    fn expired_get_cleans_order_deque() {
+        // Regression: a `get` that finds an expired entry used to leave
+        // a dangling slot in `order`. The next capacity-bound put would
+        // silently waste an eviction slot on the dead key.
+        let c = IdempotencyCache::new(8, 1);
+        c.put("hot".into(), "fp".into(), fake_response("1"));
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        // Touching the expired key drops it from both structures.
+        assert!(matches!(c.get("hot", "fp"), Lookup::Miss));
+        let g = c.inner.lock();
+        assert!(!g.map.contains_key("hot"), "expired entry must leave map");
+        assert!(
+            !g.order.iter().any(|k| k == "hot"),
+            "expired entry must also leave `order` deque (FIFO invariant)"
+        );
+    }
+
+    #[test]
+    fn miss_on_unknown_key_does_not_touch_order() {
+        // `get` for a key that was never inserted must not corrupt the
+        // FIFO state of unrelated live keys.
+        let c = IdempotencyCache::new(8, 600);
+        c.put("alive".into(), "fp".into(), fake_response("1"));
+        let order_before: Vec<String> = c.inner.lock().order.iter().cloned().collect();
+        assert!(matches!(c.get("never-seen", "fp-x"), Lookup::Miss));
+        let order_after: Vec<String> = c.inner.lock().order.iter().cloned().collect();
+        assert_eq!(order_before, order_after);
     }
 }

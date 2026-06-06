@@ -109,7 +109,9 @@ pub enum ForwardError {
     #[error("missing Authorization header")]
     MissingAuth,
 
-    #[error("missing identification — set SPENDGUARD_PROXY_DEFAULT_* env or X-SpendGuard-* headers")]
+    #[error(
+        "missing identification — set SPENDGUARD_PROXY_DEFAULT_* env or X-SpendGuard-* headers"
+    )]
     MissingIdentification,
 
     #[error("upstream HTTP error: {0}")]
@@ -129,7 +131,9 @@ pub enum ForwardError {
         matched_rule_ids: Vec<String>,
     },
 
-    #[error("SpendGuard returned unsupported decision (REQUIRE_APPROVAL/DEGRADE): {reason_codes:?}")]
+    #[error(
+        "SpendGuard returned unsupported decision (REQUIRE_APPROVAL/DEGRADE): {reason_codes:?}"
+    )]
     UnsupportedDecision {
         decision_id: String,
         reason_codes: Vec<String>,
@@ -227,7 +231,8 @@ impl IntoResponse for ForwardError {
             } => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "spendguard_unsupported_decision",
-                "egress-proxy mode does not support REQUIRE_APPROVAL/DEGRADE; use SDK wrapper".to_string(),
+                "egress-proxy mode does not support REQUIRE_APPROVAL/DEGRADE; use SDK wrapper"
+                    .to_string(),
                 None,
                 Some(json!({
                     "decision_id": decision_id,
@@ -273,7 +278,9 @@ impl IntoResponse for ForwardError {
             builder = builder.header("Retry-After", retry);
         }
         builder = builder.header(axum::http::header::CONTENT_TYPE, "application/json");
-        builder.body(axum::body::Body::from(serde_json::to_vec(&body.0).unwrap())).unwrap()
+        builder
+            .body(axum::body::Body::from(serde_json::to_vec(&body.0).unwrap()))
+            .unwrap()
     }
 }
 
@@ -329,34 +336,35 @@ async fn forward_openai_request(
         .get("stream")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let body_for_upstream: bytes::Bytes = if is_streaming && api_kind.needs_include_usage_injection() {
-        let mut mutated = parsed.clone();
-        let opts_obj = mutated
-            .as_object_mut()
-            .ok_or_else(|| ForwardError::MalformedJson("body root not an object".into()))?;
-        let stream_options = opts_obj
-            .entry("stream_options".to_string())
-            .or_insert_with(|| Value::Object(serde_json::Map::new()));
-        let stream_options_obj = stream_options.as_object_mut().ok_or_else(|| {
-            ForwardError::MalformedJson("stream_options is not an object".into())
-        })?;
-        let already_set = stream_options_obj
-            .get("include_usage")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if !already_set {
-            stream_options_obj.insert("include_usage".to_string(), Value::Bool(true));
-            tracing::debug!("v0.2 SSE: injected stream_options.include_usage=true");
-        }
-        serde_json::to_vec(&mutated)
-            .map_err(|e| ForwardError::Internal(format!("re-encode streaming body: {e}")))?
-            .into()
-    } else {
-        // Either non-streaming (body unchanged) or streaming + Responses
-        // API (no include_usage option exists; usage is always included
-        // in the response.completed event).
-        body.clone()
-    };
+    let body_for_upstream: bytes::Bytes =
+        if is_streaming && api_kind.needs_include_usage_injection() {
+            let mut mutated = parsed.clone();
+            let opts_obj = mutated
+                .as_object_mut()
+                .ok_or_else(|| ForwardError::MalformedJson("body root not an object".into()))?;
+            let stream_options = opts_obj
+                .entry("stream_options".to_string())
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            let stream_options_obj = stream_options.as_object_mut().ok_or_else(|| {
+                ForwardError::MalformedJson("stream_options is not an object".into())
+            })?;
+            let already_set = stream_options_obj
+                .get("include_usage")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if !already_set {
+                stream_options_obj.insert("include_usage".to_string(), Value::Bool(true));
+                tracing::debug!("v0.2 SSE: injected stream_options.include_usage=true");
+            }
+            serde_json::to_vec(&mutated)
+                .map_err(|e| ForwardError::Internal(format!("re-encode streaming body: {e}")))?
+                .into()
+        } else {
+            // Either non-streaming (body unchanged) or streaming + Responses
+            // API (no include_usage option exists; usage is always included
+            // in the response.completed event).
+            body.clone()
+        };
 
     // Extract + wrap Authorization. Per spec §3.4: forwarded byte-identical.
     let auth = headers
@@ -536,10 +544,7 @@ async fn forward_openai_request(
     // Stash the IDs we minted so slice 5 commit lane can thread them
     // back through to LLM_CALL_POST. DecisionResponse doesn't carry
     // SpendGuardIds back (verified vs proto).
-    let req_ids = decision_req
-        .ids
-        .clone()
-        .unwrap_or_default();
+    let req_ids = decision_req.ids.clone().unwrap_or_default();
 
     debug!(run_id = %run_id, "calling sidecar request_decision");
     let mut client = app.sidecar.client.clone();
@@ -581,12 +586,18 @@ async fn forward_openai_request(
             });
         }
         Decision::Skip => {
-            return Err(ForwardError::Skipped { decision_id: decision_resp.decision_id });
+            return Err(ForwardError::Skipped {
+                decision_id: decision_resp.decision_id,
+            });
         }
         Decision::Unspecified => {
-            warn!(decision_value = decision_resp.decision, "unknown decision variant");
+            warn!(
+                decision_value = decision_resp.decision,
+                "unknown decision variant"
+            );
             return Err(ForwardError::SidecarUnavailable(format!(
-                "unknown decision variant: {}", decision_resp.decision
+                "unknown decision variant: {}",
+                decision_resp.decision
             )));
         }
     }
@@ -760,7 +771,10 @@ async fn forward_openai_request(
 
     // Upstream 4xx / 5xx: release with PROVIDER_ERROR, forward status verbatim.
     if !upstream_status.is_success() {
-        warn!(status = upstream_status.as_u16(), "upstream non-success; releasing");
+        warn!(
+            status = upstream_status.as_u16(),
+            "upstream non-success; releasing"
+        );
         release_on_upstream_error(
             &app,
             &session_id_for_post,
@@ -774,7 +788,11 @@ async fn forward_openai_request(
             LlmCallOutcome::ProviderError,
         )
         .await;
-        return Ok(build_passthrough(upstream_status, &upstream_headers, upstream_body));
+        return Ok(build_passthrough(
+            upstream_status,
+            &upstream_headers,
+            upstream_body,
+        ));
     }
 
     info!(
@@ -818,7 +836,11 @@ async fn forward_openai_request(
         // in audit_outbox via the APPLY_FAILED row.
     }
 
-    Ok(build_passthrough(upstream_status, &upstream_headers, upstream_body))
+    Ok(build_passthrough(
+        upstream_status,
+        &upstream_headers,
+        upstream_body,
+    ))
 }
 
 /// LLM_CALL_POST outcome enum mirror — typed wrapper used by error path.
@@ -859,8 +881,8 @@ async fn commit_on_success(
     usage_tokens: i64,
 ) -> anyhow::Result<()> {
     use crate::proto::sidecar_adapter::v1::{
-        publish_outcome_request::Outcome as ConfirmOutcome, trace_event,
-        LlmCallPostPayload, PublishOutcomeRequest, TraceEvent,
+        publish_outcome_request::Outcome as ConfirmOutcome, trace_event, LlmCallPostPayload,
+        PublishOutcomeRequest, TraceEvent,
     };
 
     // 12a: EmitTraceEvents/LLM_CALL_POST (verified order per pydantic_ai.py:615-634).
@@ -942,9 +964,7 @@ async fn release_on_upstream_error(
     pricing: &crate::proto::common::v1::PricingFreeze,
     outcome: LlmCallOutcome,
 ) {
-    use crate::proto::sidecar_adapter::v1::{
-        trace_event, LlmCallPostPayload, TraceEvent,
-    };
+    use crate::proto::sidecar_adapter::v1::{trace_event, LlmCallPostPayload, TraceEvent};
     // Same pricing-None fix as commit_on_success above.
     let _ = pricing;
     let payload = LlmCallPostPayload {
@@ -1017,7 +1037,9 @@ fn build_passthrough(
     if let Some(ct) = upstream_headers.get(axum::http::header::CONTENT_TYPE) {
         response = response.header(axum::http::header::CONTENT_TYPE, ct);
     }
-    response.body(axum::body::Body::from(upstream_body)).unwrap()
+    response
+        .body(axum::body::Body::from(upstream_body))
+        .unwrap()
 }
 
 fn parse_usage_tokens(body: &[u8]) -> Option<i64> {
@@ -1089,11 +1111,7 @@ fn should_forward_header(name: &HeaderName) -> bool {
     matches!(
         lower.as_str(),
         // OpenAI-recognized headers (non-exhaustive; expand as needed)
-        "openai-organization"
-            | "openai-project"
-            | "openai-beta"
-            | "user-agent"
-            | "accept"
+        "openai-organization" | "openai-project" | "openai-beta" | "user-agent" | "accept"
     )
 }
 
@@ -1137,16 +1155,17 @@ async fn forward_streaming_response(
     use bytes::Bytes;
     use futures_util::StreamExt;
 
-    info!(upstream_status = upstream_status.as_u16(), "forwarding SSE stream");
+    info!(
+        upstream_status = upstream_status.as_u16(),
+        "forwarding SSE stream"
+    );
 
     // Channel parser ← tee. Bounded: backpressure propagates if parser
     // lags behind the network read so memory doesn't grow unbounded
     // (codex review focus per spec §7 r1 backpressure).
-    let (parser_tx, parser_rx) =
-        tokio::sync::mpsc::channel::<Result<Bytes, String>>(64);
+    let (parser_tx, parser_rx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(64);
     // Channel commit ← parser (last usage observed, or None).
-    let (usage_tx, usage_rx) =
-        tokio::sync::oneshot::channel::<Option<i64>>();
+    let (usage_tx, usage_rx) = tokio::sync::oneshot::channel::<Option<i64>>();
 
     // Spawn parser task. Per-API-kind event parser dispatches the
     // SSE usage-extraction logic (Chat Completions vs Responses).
@@ -1415,14 +1434,13 @@ mod tests {
     fn upstream_error_renders_502() {
         // Build a fake reqwest error by attempting to GET an invalid URL.
         let runtime = tokio::runtime::Runtime::new().unwrap();
-        let err = runtime
-            .block_on(async {
-                reqwest::Client::new()
-                    .get("not-a-url")
-                    .send()
-                    .await
-                    .unwrap_err()
-            });
+        let err = runtime.block_on(async {
+            reqwest::Client::new()
+                .get("not-a-url")
+                .send()
+                .await
+                .unwrap_err()
+        });
         let resp: Response = ForwardError::Upstream(err).into_response();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
     }

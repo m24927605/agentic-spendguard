@@ -185,9 +185,7 @@ pub async fn record_metrics(
         .unwrap_or_else(|| request.uri().path().to_string());
     let route = Route::from_matched(&method, &matched);
     let response = next.run(request).await;
-    let outcome = if response.status().is_server_error()
-        || response.status().is_client_error()
-    {
+    let outcome = if response.status().is_server_error() || response.status().is_client_error() {
         Outcome::Err
     } else {
         Outcome::Ok
@@ -204,8 +202,12 @@ mod tests {
     fn counters_default_to_zero_in_render_output() {
         let m = DashboardMetrics::new();
         let txt = m.render();
-        assert!(txt.contains("spendguard_dashboard_route_calls_total{route=\"api_budgets\",outcome=\"ok\"} 0"));
-        assert!(txt.contains("spendguard_dashboard_route_calls_total{route=\"api_audit_export\",outcome=\"err\"} 0"));
+        assert!(txt.contains(
+            "spendguard_dashboard_route_calls_total{route=\"api_budgets\",outcome=\"ok\"} 0"
+        ));
+        assert!(txt.contains(
+            "spendguard_dashboard_route_calls_total{route=\"api_audit_export\",outcome=\"err\"} 0"
+        ));
     }
 
     #[test]
@@ -240,8 +242,17 @@ mod tests {
     #[test]
     fn route_from_matched_maps_known_pairs() {
         assert_eq!(Route::from_matched(&Method::GET, "/"), Route::Index);
-        assert_eq!(Route::from_matched(&Method::GET, "/api/budgets"), Route::ApiBudgets);
-        assert_eq!(Route::from_matched(&Method::GET, "/api/audit/export"), Route::ApiAuditExport);
-        assert_eq!(Route::from_matched(&Method::POST, "/anywhere"), Route::Other);
+        assert_eq!(
+            Route::from_matched(&Method::GET, "/api/budgets"),
+            Route::ApiBudgets
+        );
+        assert_eq!(
+            Route::from_matched(&Method::GET, "/api/audit/export"),
+            Route::ApiAuditExport
+        );
+        assert_eq!(
+            Route::from_matched(&Method::POST, "/anywhere"),
+            Route::Other
+        );
     }
 }

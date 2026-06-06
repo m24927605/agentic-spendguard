@@ -16,7 +16,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     tonic_build::configure()
         .build_server(true)
         .build_client(false)
-        .bytes(["."])  // use Bytes for `bytes` fields
+        .bytes(["."]) // use Bytes for `bytes` fields
         .compile_protos(protos, includes)?;
 
     for p in protos {

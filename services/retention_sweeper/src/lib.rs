@@ -201,10 +201,7 @@ pub async fn sweep_provider_usage_raw(
 
 /// Insert one row into retention_sweeper_log with the outcome of a
 /// sweep pass. Matches migration 0028's CHECK constraints.
-pub async fn log_sweep(
-    pool: &PgPool,
-    outcome: &SweepOutcome,
-) -> Result<(), SweeperError> {
+pub async fn log_sweep(pool: &PgPool, outcome: &SweepOutcome) -> Result<(), SweeperError> {
     let outcome_text = if outcome.rows_failed == 0 {
         "success"
     } else if outcome.rows_redacted > 0 {
@@ -250,7 +247,10 @@ mod tests {
         // 'provider_raw_redaction', 'tombstone_check')). If we change
         // the enum variants here we must also update the CHECK.
         assert_eq!(SweepKind::PromptRedaction.as_str(), "prompt_redaction");
-        assert_eq!(SweepKind::ProviderRawRedaction.as_str(), "provider_raw_redaction");
+        assert_eq!(
+            SweepKind::ProviderRawRedaction.as_str(),
+            "provider_raw_redaction"
+        );
         assert_eq!(SweepKind::TombstoneCheck.as_str(), "tombstone_check");
     }
 

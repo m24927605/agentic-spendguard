@@ -87,9 +87,18 @@ pub struct Report {
 
 impl Report {
     pub fn from_checks(checks: Vec<CheckResult>) -> Self {
-        let fail = checks.iter().filter(|c| c.status == CheckStatus::Fail).count();
-        let pass = checks.iter().filter(|c| c.status == CheckStatus::Pass).count();
-        let skip = checks.iter().filter(|c| c.status == CheckStatus::Skipped).count();
+        let fail = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Fail)
+            .count();
+        let pass = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Pass)
+            .count();
+        let skip = checks
+            .iter()
+            .filter(|c| c.status == CheckStatus::Skipped)
+            .count();
         let overall = if fail > 0 {
             CheckStatus::Fail
         } else {
@@ -228,10 +237,9 @@ pub fn check_signing_mode(env_prefix: &str, profile: &str) -> CheckResult {
     let var = format!("{env_prefix}_SIGNING_MODE");
     let mode = match std::env::var(&var) {
         Ok(m) => m,
-        Err(_) => return CheckResult::skipped(
-            "signing.mode_configured",
-            format!("env {var} unset"),
-        ),
+        Err(_) => {
+            return CheckResult::skipped("signing.mode_configured", format!("env {var} unset"))
+        }
     };
     if mode == "disabled" && profile != "demo" {
         return CheckResult::fail(
@@ -255,27 +263,23 @@ pub async fn check_pricing_freshness(
 ) -> CheckResult {
     let pool = match canonical_pool {
         Some(p) => p,
-        None => return CheckResult::skipped(
-            "pricing.freshness",
-            "canonical DB pool not provided",
-        ),
+        None => return CheckResult::skipped("pricing.freshness", "canonical DB pool not provided"),
     };
-    let row: Option<(chrono::DateTime<chrono::Utc>,)> = match sqlx::query_as(
-        "SELECT cut_at FROM pricing_versions ORDER BY cut_at DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return CheckResult::fail(
-                "pricing.freshness",
-                "PRICING_QUERY_FAILED",
-                format!("query failed: {e}"),
-                "check canonical DB connectivity + that 0006_pricing_table.sql ran",
-            );
-        }
-    };
+    let row: Option<(chrono::DateTime<chrono::Utc>,)> =
+        match sqlx::query_as("SELECT cut_at FROM pricing_versions ORDER BY cut_at DESC LIMIT 1")
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return CheckResult::fail(
+                    "pricing.freshness",
+                    "PRICING_QUERY_FAILED",
+                    format!("query failed: {e}"),
+                    "check canonical DB connectivity + that 0006_pricing_table.sql ran",
+                );
+            }
+        };
     let cut_at = match row {
         Some((t,)) => t,
         None => {
@@ -312,28 +316,24 @@ pub async fn check_tenant_provisioned(
 ) -> CheckResult {
     let pool = match ledger_pool {
         Some(p) => p,
-        None => return CheckResult::skipped(
-            "tenant.provisioned",
-            "ledger DB pool not provided",
-        ),
+        None => return CheckResult::skipped("tenant.provisioned", "ledger DB pool not provided"),
     };
-    let row: Option<(i64,)> = match sqlx::query_as(
-        "SELECT count(*) FROM ledger_accounts WHERE tenant_id = $1",
-    )
-    .bind(tenant_id)
-    .fetch_optional(pool)
-    .await
-    {
-        Ok(r) => r,
-        Err(e) => {
-            return CheckResult::fail(
-                "tenant.provisioned",
-                "TENANT_QUERY_FAILED",
-                format!("ledger_accounts query failed: {e}"),
-                "verify ledger DB connection + migrations applied",
-            );
-        }
-    };
+    let row: Option<(i64,)> =
+        match sqlx::query_as("SELECT count(*) FROM ledger_accounts WHERE tenant_id = $1")
+            .bind(tenant_id)
+            .fetch_optional(pool)
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                return CheckResult::fail(
+                    "tenant.provisioned",
+                    "TENANT_QUERY_FAILED",
+                    format!("ledger_accounts query failed: {e}"),
+                    "verify ledger DB connection + migrations applied",
+                );
+            }
+        };
     let count = row.map(|(c,)| c).unwrap_or(0);
     if count == 0 {
         return CheckResult::fail(
@@ -353,16 +353,13 @@ pub async fn check_tenant_provisioned(
 pub async fn check_ledger_db(pool: Option<&sqlx::PgPool>) -> CheckResult {
     let pool = match pool {
         Some(p) => p,
-        None => return CheckResult::skipped(
-            "ledger.db_reachable",
-            "ledger DB pool not provided",
-        ),
+        None => return CheckResult::skipped("ledger.db_reachable", "ledger DB pool not provided"),
     };
-    match sqlx::query_scalar::<_, i32>("SELECT 1").fetch_one(pool).await {
-        Ok(_) => CheckResult::pass(
-            "ledger.db_reachable",
-            "SELECT 1 ok",
-        ),
+    match sqlx::query_scalar::<_, i32>("SELECT 1")
+        .fetch_one(pool)
+        .await
+    {
+        Ok(_) => CheckResult::pass("ledger.db_reachable", "SELECT 1 ok"),
         Err(e) => CheckResult::fail(
             "ledger.db_reachable",
             "LEDGER_DB_UNREACHABLE",

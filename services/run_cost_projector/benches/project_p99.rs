@@ -16,9 +16,7 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use spendguard_run_cost_projector::{
     config::Config,
-    proto::run_cost_projector::v1::{
-        run_cost_projector_server::RunCostProjector, ProjectRequest,
-    },
+    proto::run_cost_projector::v1::{run_cost_projector_server::RunCostProjector, ProjectRequest},
     server::RunCostProjectorSvc,
 };
 use tonic::Request;

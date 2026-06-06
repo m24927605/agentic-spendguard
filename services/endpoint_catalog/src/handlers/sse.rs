@@ -27,9 +27,7 @@ pub async fn sse_events(
 ) -> Sse<impl Stream<Item = Result<Event, axum::Error>>> {
     let rx = state.invalidation_tx.subscribe();
     let stream = BroadcastStream::new(rx).map(|res| match res {
-        Ok(payload) => Ok(Event::default()
-            .event("catalog_invalidate")
-            .data(payload)),
+        Ok(payload) => Ok(Event::default().event("catalog_invalidate").data(payload)),
         Err(_) => {
             // Lagged or closed — emit a hint event so client refreshes
             // explicitly.

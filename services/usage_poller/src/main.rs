@@ -85,8 +85,9 @@ async fn main() -> anyhow::Result<()> {
         .json()
         .init();
 
-    let cfg: Config =
-        envy::prefixed("SPENDGUARD_USAGE_POLLER_").from_env().context("loading config")?;
+    let cfg: Config = envy::prefixed("SPENDGUARD_USAGE_POLLER_")
+        .from_env()
+        .context("loading config")?;
 
     info!(
         provider_kind = %cfg.provider_kind,
@@ -109,18 +110,23 @@ async fn main() -> anyhow::Result<()> {
     // accounting then stays blind until someone notices missing data.
     let client: Arc<dyn ProviderClient> = match cfg.provider_kind.as_str() {
         "openai" => {
-            let api_key = cfg
-                .openai_api_key
-                .clone()
-                .context("SPENDGUARD_USAGE_POLLER_OPENAI_API_KEY required when provider_kind=openai")?;
-            Arc::new(OpenAiClient::new(api_key, cfg.openai_org_id.clone(), cfg.openai_project_id.clone()))
+            let api_key = cfg.openai_api_key.clone().context(
+                "SPENDGUARD_USAGE_POLLER_OPENAI_API_KEY required when provider_kind=openai",
+            )?;
+            Arc::new(OpenAiClient::new(
+                api_key,
+                cfg.openai_org_id.clone(),
+                cfg.openai_project_id.clone(),
+            ))
         }
         "anthropic" => {
-            let api_key = cfg
-                .anthropic_api_key
-                .clone()
-                .context("SPENDGUARD_USAGE_POLLER_ANTHROPIC_API_KEY required when provider_kind=anthropic")?;
-            Arc::new(AnthropicClient::new(api_key, cfg.anthropic_workspace_id.clone()))
+            let api_key = cfg.anthropic_api_key.clone().context(
+                "SPENDGUARD_USAGE_POLLER_ANTHROPIC_API_KEY required when provider_kind=anthropic",
+            )?;
+            Arc::new(AnthropicClient::new(
+                api_key,
+                cfg.anthropic_workspace_id.clone(),
+            ))
         }
         "mock" => Arc::new(MockProviderClient::new("mock")),
         other => anyhow::bail!(
@@ -218,13 +224,13 @@ async fn main() -> anyhow::Result<()> {
 
 /// Round-2 #11: minimal HTTP /metrics endpoint.
 async fn serve_metrics(addr: String, metrics: UsagePollerMetrics) -> anyhow::Result<()> {
-    use std::convert::Infallible;
+    use http_body_util::Full;
     use hyper::body::Bytes;
     use hyper::server::conn::http1;
     use hyper::service::service_fn;
     use hyper::{Request, Response};
     use hyper_util::rt::TokioIo;
-    use http_body_util::Full;
+    use std::convert::Infallible;
     use tokio::net::TcpListener;
 
     let listener = TcpListener::bind(&addr).await?;
@@ -245,10 +251,7 @@ async fn serve_metrics(addr: String, metrics: UsagePollerMetrics) -> anyhow::Res
                     };
                     Ok::<_, Infallible>(
                         Response::builder()
-                            .header(
-                                "content-type",
-                                "text/plain; version=0.0.4; charset=utf-8",
-                            )
+                            .header("content-type", "text/plain; version=0.0.4; charset=utf-8")
                             .body(Full::new(Bytes::from(body)))
                             .unwrap(),
                     )

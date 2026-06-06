@@ -13,8 +13,7 @@ use crate::{
     domain::error::{map_pg_error, DomainError},
     proto::ledger::v1::{
         acquire_fencing_lease_response::Outcome, AcquireFencingLeaseDenied,
-        AcquireFencingLeaseRequest, AcquireFencingLeaseResponse,
-        AcquireFencingLeaseSuccess,
+        AcquireFencingLeaseRequest, AcquireFencingLeaseResponse, AcquireFencingLeaseSuccess,
     },
 };
 
@@ -59,7 +58,9 @@ async fn handle_inner(
         ));
     }
     if req.ttl_seconds == 0 {
-        return Err(DomainError::InvalidRequest("ttl_seconds must be > 0".into()));
+        return Err(DomainError::InvalidRequest(
+            "ttl_seconds must be > 0".into(),
+        ));
     }
     // Cap absurdly long TTLs to avoid operator footgun (e.g. 10 years).
     // 1 hour is generous for a sidecar lease; CIRCLE BACK in S5 if a

@@ -39,10 +39,7 @@ fn binary_prints_help() {
 fn missing_canonical_url_exits_two() {
     // Per spec §2.3: cannot query → exit 2.
     let out = Command::new(bin_path())
-        .args([
-            "--tenant",
-            "00000000-0000-4000-8000-000000000001",
-        ])
+        .args(["--tenant", "00000000-0000-4000-8000-000000000001"])
         .env_remove("SPENDGUARD_CALIBRATION_CANONICAL_URL")
         .output()
         .expect("binary executes");

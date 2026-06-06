@@ -340,10 +340,10 @@ impl ProviderClient for OpenAiClient {
                 }
             };
             for bucket in page.data {
-                let bucket_observed = DateTime::<Utc>::from_timestamp(bucket.start_time, 0)
-                    .unwrap_or_else(Utc::now);
-                let bucket_end = DateTime::<Utc>::from_timestamp(bucket.end_time, 0)
-                    .unwrap_or(bucket_observed);
+                let bucket_observed =
+                    DateTime::<Utc>::from_timestamp(bucket.start_time, 0).unwrap_or_else(Utc::now);
+                let bucket_end =
+                    DateTime::<Utc>::from_timestamp(bucket.end_time, 0).unwrap_or(bucket_observed);
                 for r in bucket.results {
                     // Synthesize a stable provider_event_id from the
                     // bucket window + project + model + api_key. OpenAI
@@ -448,18 +448,10 @@ pub struct AnthropicClient {
 
 impl AnthropicClient {
     pub fn new(api_key: String, workspace_id: Option<String>) -> Self {
-        Self::with_base_url(
-            api_key,
-            workspace_id,
-            "https://api.anthropic.com/v1".into(),
-        )
+        Self::with_base_url(api_key, workspace_id, "https://api.anthropic.com/v1".into())
     }
 
-    pub fn with_base_url(
-        api_key: String,
-        workspace_id: Option<String>,
-        base_url: String,
-    ) -> Self {
+    pub fn with_base_url(api_key: String, workspace_id: Option<String>, base_url: String) -> Self {
         Self {
             api_key,
             workspace_id,
@@ -533,10 +525,7 @@ impl ProviderClient for AnthropicClient {
             .workspace_id
             .as_deref()
             .ok_or_else(|| PollerError::Config("anthropic workspace_id not set".into()))?;
-        let endpoint = format!(
-            "{}/organizations/{}/usage_report",
-            self.base_url, workspace
-        );
+        let endpoint = format!("{}/organizations/{}/usage_report", self.base_url, workspace);
         let mut all: Vec<UsageObservation> = Vec::new();
         let mut page_token: Option<String> = None;
         let max_pages = 100;
@@ -945,10 +934,9 @@ mod tests {
         let client = MockProviderClient::new("mock");
         let in_window = make_obs("evt-in");
         let mut out_of_window = make_obs("evt-out");
-        out_of_window.observed_at =
-            chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
-                .unwrap()
-                .with_timezone(&Utc);
+        out_of_window.observed_at = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
         client.enqueue(in_window.clone());
         client.enqueue(out_of_window);
 
@@ -998,12 +986,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let client = OpenAiClient::with_base_url(
-            "sk-test".into(),
-            None,
-            None,
-            server.uri(),
-        );
+        let client = OpenAiClient::with_base_url("sk-test".into(), None, None, server.uri());
         let from = Utc::now() - chrono::Duration::hours(1);
         let to = Utc::now();
         let obs = client.fetch_usage(from, to).await.unwrap();
@@ -1077,9 +1060,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/organization/usage/completions"))
-            .respond_with(
-                ResponseTemplate::new(429).insert_header("retry-after", "30"),
-            )
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "30"))
             .mount(&server)
             .await;
         let client = OpenAiClient::with_base_url("sk".into(), None, None, server.uri());
@@ -1237,16 +1218,11 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/organizations/ws-demo/usage_report"))
-            .respond_with(
-                ResponseTemplate::new(429).insert_header("retry-after", "10"),
-            )
+            .respond_with(ResponseTemplate::new(429).insert_header("retry-after", "10"))
             .mount(&server)
             .await;
-        let client = AnthropicClient::with_base_url(
-            "sk".into(),
-            Some("ws-demo".into()),
-            server.uri(),
-        );
+        let client =
+            AnthropicClient::with_base_url("sk".into(), Some("ws-demo".into()), server.uri());
         let err = client
             .fetch_usage(Utc::now() - chrono::Duration::hours(1), Utc::now())
             .await
@@ -1265,11 +1241,8 @@ mod tests {
             .respond_with(ResponseTemplate::new(401))
             .mount(&server)
             .await;
-        let client = AnthropicClient::with_base_url(
-            "bad".into(),
-            Some("ws-demo".into()),
-            server.uri(),
-        );
+        let client =
+            AnthropicClient::with_base_url("bad".into(), Some("ws-demo".into()), server.uri());
         let err = client
             .fetch_usage(Utc::now() - chrono::Duration::hours(1), Utc::now())
             .await
@@ -1308,7 +1281,10 @@ mod tests {
         for (kind, expected) in [
             ("input_tokens", NormalizedTokenKind::Input),
             ("output_tokens", NormalizedTokenKind::Output),
-            ("cache_creation_input_tokens", NormalizedTokenKind::CachedInput),
+            (
+                "cache_creation_input_tokens",
+                NormalizedTokenKind::CachedInput,
+            ),
             ("cache_read_input_tokens", NormalizedTokenKind::CachedInput),
         ] {
             assert_eq!(map_token_kind("anthropic", kind).unwrap(), expected);
@@ -1391,8 +1367,15 @@ mod tests {
         ] {
             let s = kind.as_str();
             assert!(
-                ["input", "output", "cached_input",
-                 "vision_input", "audio_input", "reasoning"].contains(&s),
+                [
+                    "input",
+                    "output",
+                    "cached_input",
+                    "vision_input",
+                    "audio_input",
+                    "reasoning"
+                ]
+                .contains(&s),
                 "{s} missing from pricing_table CHECK"
             );
         }

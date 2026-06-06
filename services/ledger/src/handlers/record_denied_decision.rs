@@ -20,9 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     domain::error::DomainError,
-    persistence::post_transaction::{
-        self, PostApprovalRequiredInput, PostDeniedInput,
-    },
+    persistence::post_transaction::{self, PostApprovalRequiredInput, PostDeniedInput},
     proto::{
         common::v1::BudgetClaim,
         ledger::v1::{
@@ -136,15 +134,11 @@ async fn handle_inner(
     if want_approval_sp {
         let decision_context_value: Value = serde_json::from_slice(&req.decision_context_json)
             .map_err(|e| {
-                DomainError::InvalidRequest(format!(
-                    "decision_context_json: invalid JSON ({e})"
-                ))
+                DomainError::InvalidRequest(format!("decision_context_json: invalid JSON ({e})"))
             })?;
         let requested_effect_value: Value = serde_json::from_slice(&req.requested_effect_json)
             .map_err(|e| {
-                DomainError::InvalidRequest(format!(
-                    "requested_effect_json: invalid JSON ({e})"
-                ))
+                DomainError::InvalidRequest(format!("requested_effect_json: invalid JSON ({e})"))
             })?;
 
         let approval_ttl_seconds = if req.approval_ttl_seconds == 0 {
@@ -235,7 +229,9 @@ fn validate(req: &RecordDeniedDecisionRequest) -> Result<(), DomainError> {
         ));
     }
     if req.final_decision.is_empty() {
-        return Err(DomainError::InvalidRequest("final_decision required".into()));
+        return Err(DomainError::InvalidRequest(
+            "final_decision required".into(),
+        ));
     }
     // CONTINUE belongs on the reserve path; refuse it here so audit
     // forensics never sees a denied_decision row claiming CONTINUE.
@@ -267,8 +263,11 @@ fn canonical_request_hash(req: &RecordDeniedDecisionRequest) -> Result<[u8; 32],
     sorted.sort_by(|a, b| {
         let au = a.unit.as_ref().map(|u| u.unit_id.as_str()).unwrap_or("");
         let bu = b.unit.as_ref().map(|u| u.unit_id.as_str()).unwrap_or("");
-        (a.budget_id.as_str(), au, a.amount_atomic.as_str())
-            .cmp(&(b.budget_id.as_str(), bu, b.amount_atomic.as_str()))
+        (a.budget_id.as_str(), au, a.amount_atomic.as_str()).cmp(&(
+            b.budget_id.as_str(),
+            bu,
+            b.amount_atomic.as_str(),
+        ))
     });
     for c in sorted {
         h.update(c.budget_id.as_bytes());
@@ -389,9 +388,7 @@ async fn build_replay_response(
     Ok(crate::proto::common::v1::Replay {
         ledger_transaction_id: tx_id.to_string(),
         operation_kind: "denied_decision".to_string(),
-        audit_decision_event_id: audit_event_id
-            .map(|u| u.to_string())
-            .unwrap_or_default(),
+        audit_decision_event_id: audit_event_id.map(|u| u.to_string()).unwrap_or_default(),
         recorded_at: Some(Timestamp {
             seconds: recorded_at.timestamp(),
             nanos: recorded_at.timestamp_subsec_nanos() as i32,

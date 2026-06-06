@@ -52,9 +52,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use tracing::{debug, info, warn};
 
-use crate::bootstrap::bundles::{
-    install_contract_bundle, load_contract_bundle, BundleSource,
-};
+use crate::bootstrap::bundles::{install_contract_bundle, load_contract_bundle, BundleSource};
 use crate::config::Config;
 use crate::domain::state::SidecarState;
 
@@ -87,13 +85,12 @@ pub fn spawn_loop(cfg: &Config, state: SidecarState) -> Result<()> {
     // rather than silently disabling hot-reload at runtime. The
     // sidecar `install_bundles` path parsed the same string at
     // startup with `?`; this is the second eye on the same value.
-    let bundle_id = uuid::Uuid::parse_str(&cfg.contract_bundle_id)
-        .with_context(|| {
-            format!(
-                "CA-P3.7: SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_ID is not a valid UUID: {}",
-                cfg.contract_bundle_id
-            )
-        })?;
+    let bundle_id = uuid::Uuid::parse_str(&cfg.contract_bundle_id).with_context(|| {
+        format!(
+            "CA-P3.7: SPENDGUARD_SIDECAR_CONTRACT_BUNDLE_ID is not a valid UUID: {}",
+            cfg.contract_bundle_id
+        )
+    })?;
     let poll_interval = Duration::from_millis(cfg.hot_reload_poll_ms);
 
     info!(
@@ -233,9 +230,7 @@ fn parse_runtime_env_hash(contents: &str) -> Option<String> {
         }
         // Strip an optional `export ` prefix that some operators leave
         // in to support `source runtime.env` from shells.
-        let body = trimmed
-            .strip_prefix("export ")
-            .unwrap_or(trimmed);
+        let body = trimmed.strip_prefix("export ").unwrap_or(trimmed);
         let Some((k, v)) = body.split_once('=') else {
             continue;
         };

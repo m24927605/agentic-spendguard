@@ -40,4 +40,4 @@ pub mod sql_queries;
 pub mod verify_chain_wrapper;
 
 pub use cli::{Cli, Format, ProofMode, Subcommand};
-pub use report::{Report, ReportExitCode, TierDistribution, CalibrationRatio, DriftAlert};
+pub use report::{CalibrationRatio, DriftAlert, Report, ReportExitCode, TierDistribution};

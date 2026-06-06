@@ -63,7 +63,9 @@ pub async fn signal_1_predicted_remaining_steps(
             // Floor is fine because Signal 2 augments + drift detection
             // catches uplift.
             let p95_int = p95.max(0.0) as i32;
-            let remaining = (p95_int as i64 - steps_completed).max(0).min(i32::MAX as i64) as i32;
+            let remaining = (p95_int as i64 - steps_completed)
+                .max(0)
+                .min(i32::MAX as i64) as i32;
             Ok((remaining, false))
         }
         None => {
@@ -136,7 +138,10 @@ mod tests {
             signal_1_predicted_remaining_steps(None, Uuid::new_v4(), "ag-1", 15, 10)
                 .await
                 .expect("ok");
-        assert_eq!(remaining, 0, "steps_completed=15 > default=10 → 0 remaining");
+        assert_eq!(
+            remaining, 0,
+            "steps_completed=15 > default=10 → 0 remaining"
+        );
         assert!(is_cold);
     }
 

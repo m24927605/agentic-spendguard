@@ -57,7 +57,10 @@ impl Default for ProposalConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProposalOutcome {
     /// New approval_requests row created.
-    Inserted { approval_id: Uuid, decision_id: Uuid },
+    Inserted {
+        approval_id: Uuid,
+        decision_id: Uuid,
+    },
     /// Row with the same (tenant_id, decision_id) already exists.
     /// Spec §11.5 A1 idempotency — re-fire of the same finding.
     AlreadyExists { decision_id: Uuid },

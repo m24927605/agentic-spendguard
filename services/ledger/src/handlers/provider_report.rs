@@ -153,8 +153,7 @@ async fn handle_inner(
     // Canonical request_hash. Excludes producer_sequence, audit ids,
     // timestamps, fencing.epoch, decision_id (caller-derived from same
     // namespaced metadata, may legitimately differ across receiver versions).
-    let request_hash =
-        canonical_request_hash(&req, &provider_amount, &idempotency.request_hash)?;
+    let request_hash = canonical_request_hash(&req, &provider_amount, &idempotency.request_hash)?;
 
     let ledger_transaction_id = Uuid::now_v7();
 
@@ -223,7 +222,9 @@ fn validate(req: &ProviderReportRequest) -> Result<(), DomainError> {
         return Err(DomainError::InvalidRequest("tenant_id required".into()));
     }
     if req.reservation_id.is_empty() {
-        return Err(DomainError::InvalidRequest("reservation_id required".into()));
+        return Err(DomainError::InvalidRequest(
+            "reservation_id required".into(),
+        ));
     }
     if req.decision_id.is_empty() {
         return Err(DomainError::InvalidRequest("decision_id required".into()));

@@ -195,10 +195,10 @@ fn cross_tenant_routing_isolation() {
     // references are read-only.
     let cfg_a = routing::route("/v1/chat/completions").unwrap();
     let cfg_b = routing::route("/v1/chat/completions").unwrap();
-    assert!(std::ptr::eq(
-        cfg_a as *const _,
-        cfg_b as *const _
-    ), "ROUTING_TABLE must be process-scoped (same reference for both lookups)");
+    assert!(
+        std::ptr::eq(cfg_a as *const _, cfg_b as *const _),
+        "ROUTING_TABLE must be process-scoped (same reference for both lookups)"
+    );
 }
 
 #[test]
@@ -312,12 +312,8 @@ fn multi_provider_demo_routing_works_for_all_five() {
         ),
     ];
     for (path, expected_kind) in configs {
-        let cfg = routing::route(path)
-            .unwrap_or_else(|| panic!("path must route: {path}"));
-        assert_eq!(
-            cfg.kind, expected_kind,
-            "wrong provider for path: {path}"
-        );
+        let cfg = routing::route(path).unwrap_or_else(|| panic!("path must route: {path}"));
+        assert_eq!(cfg.kind, expected_kind, "wrong provider for path: {path}");
     }
 }
 
