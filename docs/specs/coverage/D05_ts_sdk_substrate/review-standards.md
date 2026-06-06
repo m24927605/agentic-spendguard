@@ -27,7 +27,7 @@ If any of 1.1–1.7 fail → P0. Substrate is unsuitable for downstream consumpt
 | 2.3 | `defaultCallSignature(messages, settings)` matches Python `default_call_signature(messages, model_settings)` for the canonicalised messages in the fixture. |
 | 2.4 | UUID-shaped tenants are lowercased; non-UUID tenants are used verbatim. |
 | 2.5 | The shared fixture file `sdk/fixtures/cross-language/v1.json` is committed; the Python + Rust suites consume it; the TS suite consumes it. |
-| 2.6 | `pnpm run test tests/crossLanguage.test.ts` runs ≥ 64 vectors and they all pass. |
+| 2.6 | `pnpm run test tests/crossLanguage.test.ts` runs ≥ 20 vectors and they all pass. (Amended 2026-06-07 in SLICE 9 R1 spec-hygiene followup: the original ≥ 64 floor assumed a 3-function corpus including `defaultCallSignature`; per design.md §11 line 502 that signature is "slightly relaxed; uses its own framework's message types" and has no TS impl yet. SLICE 9 ships 20 fixtures across `derive_idempotency_key` (8), `compute_prompt_hash` (8), `derive_uuid_from_signature` (4). v1.json is appendable per the README runbook; the floor will rise organically as new fixtures land.) |
 | 2.7 | When a fixture vector fails, the test prints a clear diff (expected vs actual) — not just `false === true`. |
 
 Drift here breaks audit-chain rule dedup across the Python + Rust + TS estate. This is THE invariant. P0 — blocker.
