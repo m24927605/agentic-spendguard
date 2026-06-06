@@ -1,0 +1,269 @@
+---
+title: "LiteLLM proxy guardrail"
+description: >-
+  Install Agentic SpendGuard as a first-class LiteLLM proxy guardrail with zero
+  callback fork. Pre-call budget reservation against any /v1/chat/completions
+  request the proxy serves, signed audit trail, fail-closed by default.
+---
+
+
+> LiteLLM's `guardrails:` registry is the entry point operators discover first
+> in 2026. SpendGuard ships there as `SpendGuardGuardrail` so a single yaml
+> stanza in your `proxy_config.yaml` gates every `/v1/chat/completions` request
+> the proxy serves — no Python module fork required for single-tenant
+> installs.
+
+## Why guardrail over callback
+
+LiteLLM has two surfaces that can sit in front of a model call:
+
+- **`litellm_settings.callbacks:`** — the legacy `CustomLogger` path
+  (`spendguard.integrations.litellm.SpendGuardLiteLLMCallback`). Still
+  supported, still tested. Requires a forked Python module on
+  `PYTHONPATH` for non-trivial deployments.
+- **`guardrails:`** — the newer `CustomGuardrail` registry, the one LiteLLM
+  Cloud and the 2026 docs steer operators at. SpendGuard ships there as
+  `SpendGuardGuardrail`. For single-tenant installs this is the
+  zero-Python path: config lives entirely in `proxy_config.yaml` + env
+  vars.
+
+Both paths share the same reserve / commit / release flow under the
+hood (composition, not duplication). The guardrail surface is the
+recommended one for new installs.
+
+## Install
+
+```bash
+pip install 'spendguard-sdk[litellm-guardrail]'
+```
+
+The canonical extras name is `litellm-guardrail` (note the hyphen —
+not `litellm-proxy`). It pins `litellm[proxy]>=1.55.0`, which is the
+first release where the `CustomGuardrail` registration surface is
+stable. The legacy `litellm` extra (floor `>=1.50.0`) is unchanged so
+callback-path installs do not get force-upgraded.
+
+## Quick start
+
+Drop this stanza into your `proxy_config.yaml`:
+
+```yaml
+model_list:
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+guardrails:
+  - guardrail_name: spendguard
+    litellm_params:
+      guardrail: spendguard.integrations.litellm_guardrail.spendguard_guardrail_factory
+      mode: pre_call
+      default_on: true
+
+litellm_settings:
+  drop_params: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+```
+
+Then export the two required env vars and boot the proxy:
+
+```bash
+export SPENDGUARD_TENANT_ID="<your-tenant-uuid>"
+export SPENDGUARD_SIDECAR_ADDRESS="unix:///var/run/spendguard/adapter.sock"
+litellm --config proxy_config.yaml
+```
+
+That's the full single-tenant install. The factory reads
+`SPENDGUARD_*` env vars at proxy boot, builds the resolver +
+estimator + reconciler triple, and registers `SpendGuardGuardrail`
+against every model in `model_list`.
+
+### About the dotted module path
+
+The `guardrail:` value MUST use dots all the way through —
+`spendguard.integrations.litellm_guardrail.spendguard_guardrail_factory`
+— **not** a `module:function` colon. LiteLLM's
+`get_instance_fn` only understands the dot-separated shape: it splits
+on the final `.` to get attribute + module path. The colon form (which
+is conventional in Python entry points) silently fails to resolve.
+
+## Configuration
+
+### Environment variables
+
+The factory reads 9 environment variables. The first two are required
+for every install; the rest gate optional behaviour and the
+multi-tenant resolver path.
+
+<table>
+  <thead>
+    <tr><th>Var</th><th>Required</th><th>Default</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>SPENDGUARD_TENANT_ID</code></td><td>YES</td><td>—</td><td>Tenant identifier the sidecar binds reservations to.</td></tr>
+    <tr><td><code>SPENDGUARD_SIDECAR_ADDRESS</code></td><td>YES</td><td>—</td><td>Sidecar endpoint. <code>unix:///path/to.sock</code> for UDS (recommended in-pod) or <code>http(s)://host:port</code> for TCP.</td></tr>
+    <tr><td><code>SPENDGUARD_API_KEY</code></td><td>NO</td><td>—</td><td>API key when the sidecar enforces auth. Omit for UDS-only installs.</td></tr>
+    <tr><td><code>SPENDGUARD_DISABLED</code></td><td>NO</td><td><code>false</code></td><td>Set to <code>true</code>/<code>1</code>/<code>yes</code> to short-circuit the guardrail into a no-op. Useful in CI where the sidecar is not deployed.</td></tr>
+    <tr><td><code>SPENDGUARD_PROXY_TIMEOUT_MS</code></td><td>NO</td><td><code>5000</code></td><td>Per-call sidecar timeout in milliseconds.</td></tr>
+    <tr><td><code>SPENDGUARD_RESOLVER_MODULE</code></td><td>NO</td><td>—</td><td><code>pkg.mod:fn</code> or <code>pkg.mod.fn</code> dotted path returning a <code>(resolver, reconciler_or_None, factory)</code> 3-tuple. Required for any non-single-tenant deployment.</td></tr>
+    <tr><td><code>SPENDGUARD_BUDGET_ID</code></td><td>NO&#42;</td><td>—</td><td>&#42;Required when <code>SPENDGUARD_RESOLVER_MODULE</code> is unset. Single-tenant binding: budget UUID.</td></tr>
+    <tr><td><code>SPENDGUARD_WINDOW_INSTANCE_ID</code></td><td>NO&#42;</td><td>—</td><td>&#42;Required when <code>SPENDGUARD_RESOLVER_MODULE</code> is unset. Single-tenant binding: window instance UUID.</td></tr>
+    <tr><td><code>SPENDGUARD_UNIT_ID</code></td><td>NO&#42;</td><td>—</td><td>&#42;Required when <code>SPENDGUARD_RESOLVER_MODULE</code> is unset. Single-tenant binding: unit UUID.</td></tr>
+  </tbody>
+</table>
+
+### Inline yaml configuration
+
+Every env var has an inline equivalent under `litellm_params:`. Inline
+keys override env. The inline surface is a superset of the env
+surface: it adds 4 pricing-version keys that pin the price snapshot
+to a known release (otherwise the factory falls back to the
+sidecar's current snapshot).
+
+<table>
+  <thead>
+    <tr><th>Inline key</th><th>Env var equivalent</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>tenant_id</code></td><td><code>SPENDGUARD_TENANT_ID</code></td><td>—</td></tr>
+    <tr><td><code>sidecar_address</code></td><td><code>SPENDGUARD_SIDECAR_ADDRESS</code></td><td>—</td></tr>
+    <tr><td><code>api_key</code></td><td><code>SPENDGUARD_API_KEY</code></td><td>—</td></tr>
+    <tr><td><code>disabled</code></td><td><code>SPENDGUARD_DISABLED</code></td><td>Boolean; yaml <code>true</code>/<code>false</code> accepted.</td></tr>
+    <tr><td><code>proxy_timeout_ms</code></td><td><code>SPENDGUARD_PROXY_TIMEOUT_MS</code></td><td>Integer.</td></tr>
+    <tr><td><code>resolver_module</code></td><td><code>SPENDGUARD_RESOLVER_MODULE</code></td><td>—</td></tr>
+    <tr><td><code>budget_id</code></td><td><code>SPENDGUARD_BUDGET_ID</code></td><td>Single-tenant binding only.</td></tr>
+    <tr><td><code>window_instance_id</code></td><td><code>SPENDGUARD_WINDOW_INSTANCE_ID</code></td><td>Single-tenant binding only.</td></tr>
+    <tr><td><code>unit_id</code></td><td><code>SPENDGUARD_UNIT_ID</code></td><td>Single-tenant binding only.</td></tr>
+    <tr><td><code>pricing_version</code></td><td>(none)</td><td>Pins price snapshot release tag.</td></tr>
+    <tr><td><code>fx_rate_version</code></td><td>(none)</td><td>Pins FX-rate snapshot release tag.</td></tr>
+    <tr><td><code>unit_conversion_version</code></td><td>(none)</td><td>Pins unit-conversion snapshot tag.</td></tr>
+    <tr><td><code>price_snapshot_hash_hex</code></td><td>(none)</td><td>64 hex chars (32 bytes) — content-addressed snapshot hash.</td></tr>
+  </tbody>
+</table>
+
+### Precedence
+
+Resolution order, highest priority first:
+
+1. **Inline yaml `litellm_params:`** wins over env when a key is set
+   to a non-empty value.
+2. **`SPENDGUARD_*` env vars** fill any inline gaps.
+3. **`SPENDGUARD_RESOLVER_MODULE`** (env or inline) overrides the
+   single-tenant binding entirely. When set, the
+   `SPENDGUARD_BUDGET_ID` / `WINDOW_INSTANCE_ID` / `UNIT_ID` vars are
+   not consulted — your resolver function returns whatever binding
+   shape it wants per request.
+
+## Limitations
+
+**SpendGuard's LiteLLM guardrail integration is INV-5 end-of-stream commit only.**
+That means the gate runs at pre-call time and the reconciliation runs
+at end-of-stream — there is no token-by-token cap fired mid-flight.
+
+A few important things to know before you ship it in front of long
+streaming responses:
+
+- **No token-by-token cap on streamed responses.** SpendGuard reserves
+  the predicted budget at pre-call time. The commit happens at
+  end-of-stream against the real `response.usage.completion_tokens`
+  (or the equivalent provider-normalised field). The proxy never tears
+  down a mid-flight stream to halt token emission.
+- **Overruns are captured, not prevented.** If a stream exceeds the
+  reserved budget mid-flight, the request is **not** killed mid-stream.
+  The overrun lands in the signed audit chain and reflects in the
+  tenant's running balance at commit time, but the tokens were already
+  emitted to the caller.
+- **No #8842 closure.** Upstream LiteLLM issue #8842 (mid-stream
+  guardrail-driven cancellation) is a separate workstream. The
+  guardrail surface today exposes a `pre_call` gate and
+  `async_post_call_success_hook` / `async_post_call_failure_hook`
+  end-of-stream finalizers — there is no `during_stream` cap point.
+
+**For hard token-by-token caps, use the egress proxy integration**
+(see [Drop-in: LiteLLM proxy mode](../drop-in/litellm/) which routes
+through the Envoy ExtProc gate). The egress path can refuse the
+upstream HTTP request entirely and can cut a stream mid-flight; the
+guardrail path cannot.
+
+## Demo
+
+A bundled docker-compose demo proves the full ALLOW + DENY + STREAM
+matrix end-to-end against a real LiteLLM proxy + sidecar + counting
+provider stub:
+
+```bash
+make demo-up DEMO_MODE=litellm_guardrail
+```
+
+The mode boots `postgres + sidecar + litellm-guardrail-proxy +
+counting-stub`, then issues three calls:
+
+- **ALLOW** — small message within budget → HTTP 200, stub counter
+  +1, sidecar reservation row exists with
+  `decision_context.mode = 'proxy'`.
+- **DENY** — `spendguard_estimate_override=2000000000` blows past the
+  seeded 1B hard-cap → HTTP 4xx, **stub counter unchanged** (proves
+  the gate fires before the upstream call).
+- **STREAM** — `stream=True` within budget → HTTP 200, stub counter
+  +1, end-of-stream commit row reconciling real
+  `completion_tokens`.
+
+Success line on a clean run:
+
+```
+[demo] litellm_guardrail ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+Full details and the verify-SQL gates are in
+[`deploy/demo/litellm_guardrail/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/litellm_guardrail/README.md).
+
+## Troubleshooting
+
+Common boot-time and first-call errors. All `SpendGuardConfigError`
+messages name the offending variable so you can grep the proxy log.
+
+- **`SpendGuardConfigError: missing env var SPENDGUARD_TENANT_ID`** —
+  Set `SPENDGUARD_TENANT_ID` in your proxy environment, or add
+  `tenant_id:` inline under `litellm_params:` for the
+  `spendguard` guardrail entry.
+
+- **`SpendGuardConfigError: missing env var SPENDGUARD_SIDECAR_ADDRESS`** —
+  Set `SPENDGUARD_SIDECAR_ADDRESS` to a `unix:///path/to.sock` (UDS,
+  recommended) or `http(s)://host:port` (TCP) endpoint that resolves
+  the sidecar. Same fix applies inline as `sidecar_address:`.
+
+- **`SpendGuardConfigError: budget_resolver returned None`** — Either
+  set `SPENDGUARD_RESOLVER_MODULE` to a valid Python path that returns
+  a 3-tuple `(resolver, reconciler_or_None, factory)`, **or** set the
+  full single-tenant binding (`SPENDGUARD_BUDGET_ID` +
+  `SPENDGUARD_WINDOW_INSTANCE_ID` + `SPENDGUARD_UNIT_ID`). The
+  factory fails closed at boot when neither dispatch shape is fully
+  configured.
+
+- **`SpendGuardConfigError: could not import resolver module 'pkg.mod:fn'`** —
+  Triple-check the dot-separator: LiteLLM's `get_instance_fn` does not
+  accept the colon. Convert `pkg.mod:fn` to `pkg.mod.fn`. Also verify
+  the module is on the proxy's `PYTHONPATH` — a common gotcha is
+  shipping the resolver module in the operator image but forgetting
+  to `pip install -e .` it.
+
+- **`ModuleNotFoundError: No module named 'spendguard.integrations.litellm_guardrail'`** —
+  You installed the base SDK without the guardrail extras. Run
+  `pip install 'spendguard-sdk[litellm-guardrail]'` (note the
+  canonical extras name; `litellm-proxy` is not a real extra and will
+  install nothing extra).
+
+- **`ImportError: spendguard.integrations.litellm_guardrail requires LiteLLM with guardrail support`** —
+  Your `litellm[proxy]` is older than 1.55. Upgrade with
+  `pip install 'litellm[proxy]>=1.55.0'` or reinstall the
+  guardrail extras which pin the floor.
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in 5 minutes
+- [Contract YAML reference](../../contracts/yaml/) — author allow/stop rules
+- [Drop-in: LiteLLM proxy mode](../../drop-in/litellm/) — egress-path token-by-token cap alternative
+- Other adapter integrations: [Pydantic-AI](../pydantic-ai/) · [LangChain & LangGraph](../langchain/) · [OpenAI Agents SDK](../openai-agents/) · [Microsoft AGT](../agt/)

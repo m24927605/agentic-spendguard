@@ -85,9 +85,11 @@ For each slice, the reviewer MUST verify each row that applies. Rows marked `Blo
 
 ### Slice 7 — Public docs
 
+> **SLICE-PHASING (added 2026-06-07)**: SLICE 7 docs page ✓ shipped 2026-06-07. The site now lives under `docs/site-v2/` (Starlight); the canonical page path is `docs/site-v2/src/content/docs/docs/integrations/litellm-proxy.mdx` rendered at `/docs/integrations/litellm-proxy/`. Gate 7.1 reads against the new path. Gates 7.2-7.5 unchanged.
+
 | # | Check | Severity |
 |---|-------|----------|
-| 7.1 | New page `docs/site/docs/integrations/litellm-guardrail.md` exists and renders via `cd docs/site && npm run build`. | Blocker |
+| 7.1 | New page `docs/site-v2/src/content/docs/docs/integrations/litellm-proxy.mdx` exists and renders via `cd docs/site-v2 && npm run build`. | Blocker |
 | 7.2 | Decision matrix lists 3 paths (forked callback / guardrail / egress proxy) with explicit "when to use" rows. | Major |
 | 7.3 | "Limitations" section explicitly states INV-5 (end-of-stream commit), no token-by-token cap, no #8842 closure. | Blocker |
 | 7.4 | README adapter integrations table gains exactly one row. | Major |

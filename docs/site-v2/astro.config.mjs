@@ -63,6 +63,7 @@ export default defineConfig({
             { label: 'LangChain & LangGraph', slug: 'docs/integrations/langchain' },
             { label: 'OpenAI Agents SDK', slug: 'docs/integrations/openai-agents' },
             { label: 'Microsoft AGT', slug: 'docs/integrations/agt' },
+            { label: 'LiteLLM proxy guardrail', slug: 'docs/integrations/litellm-proxy' },
           ],
         },
         {
