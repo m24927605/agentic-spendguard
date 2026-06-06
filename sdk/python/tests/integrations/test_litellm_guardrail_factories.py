@@ -1,4 +1,4 @@
-# ruff: noqa: ANN001, ANN201, ANN202, ANN401, S106, S108
+# ruff: noqa: ANN001, ANN201, ANN202, ANN401, S105, S106, S108
 # Rationale: test fixtures use ``monkeypatch`` (Any) + non-secret literal
 # tokens; the test never speaks to an actual sidecar / LLM provider.
 # ``/tmp`` paths are unit-test sentinels that never touch disk — the
@@ -583,6 +583,548 @@ def test_from_env_disabled_still_stashes_config(clean_env):
     assert g._config_api_key == "key-dx"
     assert g._config_disabled is True
     assert g._config_proxy_timeout_ms == 3000
+
+
+# ===========================================================================
+# SLICE 4b — resolver-module + single-tenant binding env-var wiring.
+#
+# Covers tests.md U06-U10 (deferred from SLICE 4 per the SLICE-PHASING
+# note + 4 R2 doc-amendment) plus the budget-binding edge cases the
+# slice doc calls out.
+# ===========================================================================
+
+# Importlib uses ``tests`` as the package root; pytest auto-adds it to
+# sys.path when ``tests`` contains a directory with ``__init__.py``.
+# We point ``SPENDGUARD_RESOLVER_MODULE`` at the fixture using the path
+# relative to that root.
+_FIXTURE_RESOLVER_SPEC = "integrations.fixtures.fake_resolver:make_triple"
+
+
+@pytest.fixture
+def fixture_resolver_on_path(monkeypatch):
+    """Insert the SDK ``tests`` directory onto ``sys.path`` so the
+    ``integrations.fixtures.fake_resolver`` module is importable via
+    ``importlib.import_module``. Mirrors how the real LiteLLM proxy
+    boots with ``PYTHONPATH=/path/to/operator/modules``.
+    """
+    import os
+    import sys as _sys
+    tests_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    monkeypatch.syspath_prepend(tests_dir)
+    yield tests_dir
+    # monkeypatch undoes syspath_prepend automatically; the fake_resolver
+    # module may stay cached in sys.modules — purge it so each test sees
+    # a fresh import (relevant for the "import is per-call" test).
+    for mod_name in list(_sys.modules):
+        if mod_name.startswith("integrations.fixtures.fake_resolver"):
+            _sys.modules.pop(mod_name, None)
+
+
+def _set_single_tenant_env(clean_env):
+    """Helper: set the 3 budget-binding + 4 pricing-version env vars
+    to deterministic non-fixture values so tests can distinguish the
+    single-tenant default-resolver path from the operator-factory
+    path (U08 invariant)."""
+    clean_env.setenv("SPENDGUARD_BUDGET_ID", "env-budget")
+    clean_env.setenv("SPENDGUARD_WINDOW_INSTANCE_ID", "env-window")
+    clean_env.setenv("SPENDGUARD_UNIT_ID", "env-unit")
+    clean_env.setenv("SPENDGUARD_PRICING_VERSION", "env-pricing-v1")
+    clean_env.setenv("SPENDGUARD_FX_RATE_VERSION", "env-fx-v1")
+    clean_env.setenv("SPENDGUARD_UNIT_CONVERSION_VERSION", "env-uc-v1")
+    # Even-length hex required by `bytes.fromhex`.
+    clean_env.setenv(
+        "SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX",
+        "deadbeef" * 8,  # 32-byte snapshot hash
+    )
+
+
+# ---------------------------------------------------------------------------
+# U06 / U07 — single-tenant default resolver builds the binding from
+# the 3 + 4 env vars.
+# ---------------------------------------------------------------------------
+
+
+def test_from_env_default_resolver_constructs_binding(clean_env):
+    """U06: with all 8 env vars set, the loaded resolver returns a
+    ``BudgetBinding`` whose ``budget_id`` / ``window_instance_id`` /
+    ``unit.unit_id`` match the env values (review-standards 4.5
+    Blocker: empty fields would fail-closed; non-empty fields land
+    on the binding).
+    """
+    from spendguard.integrations.litellm import ResolverContext
+
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-u06")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/u06.sock")
+    _set_single_tenant_env(clean_env)
+
+    g = SpendGuardGuardrail.from_env()
+
+    # The wired delegate calls its resolver with a ResolverContext;
+    # we invoke it directly with a stub context to exercise the
+    # closure without booting the gRPC channel.
+    ctx = ResolverContext(data={}, user_api_key_dict=None, call_type="completion")
+    binding = g._delegate._budget_resolver(ctx)
+
+    assert binding is not None
+    assert binding.budget_id == "env-budget"
+    assert binding.window_instance_id == "env-window"
+    assert binding.unit.unit_id == "env-unit"
+
+
+def test_from_env_default_resolver_loads_unit_ref_and_pricing(clean_env):
+    """U07: ``BudgetBinding.unit.unit_id`` and
+    ``BudgetBinding.pricing.pricing_version`` (+ fx, unit_conversion,
+    snapshot hash) match env values field-by-field — mirror of the
+    example_callback shape called out in review-standards 4.6
+    Major."""
+    from spendguard.integrations.litellm import ResolverContext
+
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-u07")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/u07.sock")
+    _set_single_tenant_env(clean_env)
+
+    g = SpendGuardGuardrail.from_env()
+    ctx = ResolverContext(data={}, user_api_key_dict=None, call_type="completion")
+    binding = g._delegate._budget_resolver(ctx)
+
+    assert binding.unit.unit_id == "env-unit"
+    assert binding.unit.token_kind == "output_token"
+    assert binding.unit.model_family == "gpt-4"
+    assert binding.pricing.pricing_version == "env-pricing-v1"
+    assert binding.pricing.fx_rate_version == "env-fx-v1"
+    assert binding.pricing.unit_conversion_version == "env-uc-v1"
+    # 32-byte snapshot hash decoded from the hex env var.
+    assert binding.pricing.price_snapshot_hash == bytes.fromhex(
+        "deadbeef" * 8,
+    )
+
+
+# ---------------------------------------------------------------------------
+# U08 — SPENDGUARD_RESOLVER_MODULE dispatches to operator factory and
+# ignores single-tenant env vars.
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_module_env_imports_factory(
+    clean_env, fixture_resolver_on_path,
+):
+    """U08: ``SPENDGUARD_RESOLVER_MODULE=...:make_triple`` imports +
+    dispatches; the single-tenant env vars are NOT consulted
+    (review-standards 4.3 Blocker).
+    """
+    from spendguard.integrations.litellm import ResolverContext
+    from tests.integrations.fixtures.fake_resolver import (  # type: ignore[import-not-found]  # noqa: E501
+        FIXTURE_BUDGET_ID,
+        FIXTURE_UNIT_ID,
+        FIXTURE_WINDOW_ID,
+    )
+
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-u08")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/u08.sock")
+    clean_env.setenv("SPENDGUARD_RESOLVER_MODULE", _FIXTURE_RESOLVER_SPEC)
+    # Deliberately leave single-tenant vars unset to prove they are
+    # NOT required when the resolver-module is set.
+
+    g = SpendGuardGuardrail.from_env()
+    ctx = ResolverContext(data={}, user_api_key_dict=None, call_type="completion")
+    binding = g._delegate._budget_resolver(ctx)
+
+    # The fixture's resolver returns FIXTURE_* sentinels, not env values
+    # — proves the operator factory was dispatched to.
+    assert binding.budget_id == FIXTURE_BUDGET_ID
+    assert binding.window_instance_id == FIXTURE_WINDOW_ID
+    assert binding.unit.unit_id == FIXTURE_UNIT_ID
+
+
+# ---------------------------------------------------------------------------
+# U09 / U10 — resolver-module bad path / missing attr / non-callable.
+# ---------------------------------------------------------------------------
+
+
+def test_resolver_module_bad_path_raises(clean_env):
+    """U09: ``SPENDGUARD_RESOLVER_MODULE=nonexistent.module:bad`` →
+    ``SpendGuardConfigError`` at boot (review-standards 4.2
+    Blocker)."""
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-u09")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/u09.sock")
+    clean_env.setenv(
+        "SPENDGUARD_RESOLVER_MODULE",
+        "definitely_not_a_real_package_xyzzy.module:bad",
+    )
+
+    with pytest.raises(SpendGuardConfigError) as exc_info:
+        SpendGuardGuardrail.from_env()
+
+    msg = str(exc_info.value)
+    assert "SPENDGUARD_RESOLVER_MODULE" in msg
+    assert "definitely_not_a_real_package_xyzzy" in msg
+
+
+def test_resolver_module_missing_attr_raises(
+    clean_env, fixture_resolver_on_path,
+):
+    """U10: module imports but the named attribute is missing →
+    ``SpendGuardConfigError`` (review-standards 4.2 Blocker)."""
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-u10")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/u10.sock")
+    clean_env.setenv(
+        "SPENDGUARD_RESOLVER_MODULE",
+        "integrations.fixtures.fake_resolver:no_such_attr",
+    )
+
+    with pytest.raises(SpendGuardConfigError) as exc_info:
+        SpendGuardGuardrail.from_env()
+
+    msg = str(exc_info.value)
+    assert "SPENDGUARD_RESOLVER_MODULE" in msg
+    assert "no_such_attr" in msg
+
+
+def test_resolver_module_attr_not_callable_raises(
+    clean_env, fixture_resolver_on_path,
+):
+    """Attribute exists but is not callable → typed config error
+    naming the env var. Defensive check; the operator factory
+    contract requires a zero-arg callable."""
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-nc")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/nc.sock")
+    clean_env.setenv(
+        "SPENDGUARD_RESOLVER_MODULE",
+        "integrations.fixtures.fake_resolver:not_a_function",
+    )
+
+    with pytest.raises(SpendGuardConfigError) as exc_info:
+        SpendGuardGuardrail.from_env()
+
+    assert "not callable" in str(exc_info.value)
+
+
+def test_resolver_module_factory_returns_non_triple_raises(
+    clean_env, fixture_resolver_on_path,
+):
+    """Factory exists and is callable but returns a non-triple →
+    typed config error. Pins the contract documented in the docstring
+    so silent shape drift cannot reach the hook layer."""
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-nt")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/nt.sock")
+    clean_env.setenv(
+        "SPENDGUARD_RESOLVER_MODULE",
+        "integrations.fixtures.fake_resolver:not_callable",
+    )
+
+    with pytest.raises(SpendGuardConfigError) as exc_info:
+        SpendGuardGuardrail.from_env()
+
+    assert "3-tuple" in str(exc_info.value)
+
+
+def test_resolver_module_empty_string_raises(clean_env):
+    """An empty / whitespace-only ``SPENDGUARD_RESOLVER_MODULE`` is
+    treated as unset (the env reader strips); a value with no colon
+    and no dot triggers the typed validation error."""
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-empty-rm")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/erm.sock")
+    clean_env.setenv("SPENDGUARD_RESOLVER_MODULE", "no_separator_here")
+
+    with pytest.raises(SpendGuardConfigError) as exc_info:
+        SpendGuardGuardrail.from_env()
+
+    msg = str(exc_info.value)
+    assert "SPENDGUARD_RESOLVER_MODULE" in msg
+
+
+# ---------------------------------------------------------------------------
+# Budget-binding partial-state validation (review-standards 4.5)
+# ---------------------------------------------------------------------------
+
+
+def test_from_env_budget_binding_partial_raises_config_error(clean_env):
+    """Any subset of the 3 + 4 single-tenant vars set (but not all) →
+    ``SpendGuardConfigError`` naming every missing var.
+    Review-standards 4.5 Blocker: empty binding fields are fail-closed
+    at construction time, mirroring ``litellm.py:306-315``.
+    """
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-partial")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/partial.sock")
+    # Only budget_id set — window/unit/pricing all missing.
+    clean_env.setenv("SPENDGUARD_BUDGET_ID", "b1")
+
+    with pytest.raises(SpendGuardConfigError) as exc_info:
+        SpendGuardGuardrail.from_env()
+
+    msg = str(exc_info.value)
+    assert "SPENDGUARD_WINDOW_INSTANCE_ID" in msg
+    assert "SPENDGUARD_UNIT_ID" in msg
+    assert "SPENDGUARD_PRICING_VERSION" in msg
+    assert "SPENDGUARD_FX_RATE_VERSION" in msg
+    assert "SPENDGUARD_UNIT_CONVERSION_VERSION" in msg
+    assert "SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX" in msg
+
+
+def test_from_env_budget_binding_all_unset_is_resolver_only(clean_env):
+    """Legal: all 8 SLICE 4b vars unset → the SLICE 1 skeleton resolver
+    stays put. Adapter authors who supply a resolver via
+    ``from_kwargs`` or by replacing the delegate must not be
+    penalised by SLICE 4b. SLICE 4 baseline tests rely on this.
+    """
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-empty4b")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/e4b.sock")
+    # Deliberately leave all 8 SLICE 4b vars unset.
+
+    g = SpendGuardGuardrail.from_env()
+
+    # Standard _LoopBoundCallback wired with the SLICE 1 sentinel
+    # resolvers. The instance is constructable; first hook call
+    # would surface the well-known "budget_resolver returned None"
+    # error from `litellm.py:298-302` if not overridden — but that
+    # surface is reachable only on hook invocation, not on construction.
+    assert isinstance(g._delegate, _LoopBoundCallback)
+    assert g._config_resolver_module is None
+    assert g._config_budget_id is None
+
+
+def test_from_env_invalid_price_snapshot_hash_raises(clean_env):
+    """Non-hex ``SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX`` → typed config
+    error naming the var. Hex decode failures are silent reads in the
+    legacy path; SLICE 4b makes them loud at boot."""
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-badhex")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/bh.sock")
+    clean_env.setenv("SPENDGUARD_BUDGET_ID", "b1")
+    clean_env.setenv("SPENDGUARD_WINDOW_INSTANCE_ID", "w1")
+    clean_env.setenv("SPENDGUARD_UNIT_ID", "u1")
+    clean_env.setenv("SPENDGUARD_PRICING_VERSION", "v1")
+    clean_env.setenv("SPENDGUARD_FX_RATE_VERSION", "fx1")
+    clean_env.setenv("SPENDGUARD_UNIT_CONVERSION_VERSION", "uc1")
+    clean_env.setenv(
+        "SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX", "not-hex-content!",
+    )
+
+    with pytest.raises(SpendGuardConfigError) as exc_info:
+        SpendGuardGuardrail.from_env()
+
+    assert "SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX" in str(exc_info.value)
+
+
+# ---------------------------------------------------------------------------
+# Pricing-version propagation (review-standards 4.6 Major)
+# ---------------------------------------------------------------------------
+
+
+def test_from_env_pricing_version_vars_propagate_to_binding(clean_env):
+    """Each of the 4 pricing-version env vars lands on the
+    ``BudgetBinding.pricing`` ``PricingFreeze``. Pinned per-field so
+    a future refactor that drops one var fails noisily.
+    """
+    from spendguard.integrations.litellm import ResolverContext
+
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-pv")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/pv.sock")
+    clean_env.setenv("SPENDGUARD_BUDGET_ID", "pv-budget")
+    clean_env.setenv("SPENDGUARD_WINDOW_INSTANCE_ID", "pv-window")
+    clean_env.setenv("SPENDGUARD_UNIT_ID", "pv-unit")
+    clean_env.setenv("SPENDGUARD_PRICING_VERSION", "v2-pricing")
+    clean_env.setenv("SPENDGUARD_FX_RATE_VERSION", "v3-fx")
+    clean_env.setenv("SPENDGUARD_UNIT_CONVERSION_VERSION", "v4-uc")
+    clean_env.setenv(
+        "SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX",
+        "0011223344556677889900aabbccddeeff" + "00" * 15,
+    )
+
+    g = SpendGuardGuardrail.from_env()
+    ctx = ResolverContext(data={}, user_api_key_dict=None, call_type="completion")
+    binding = g._delegate._budget_resolver(ctx)
+    pricing = binding.pricing
+
+    assert pricing.pricing_version == "v2-pricing"
+    assert pricing.fx_rate_version == "v3-fx"
+    assert pricing.unit_conversion_version == "v4-uc"
+    assert pricing.price_snapshot_hash == bytes.fromhex(
+        "0011223344556677889900aabbccddeeff" + "00" * 15,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Smoke: from_env + resolver wiring yields a hook-callable instance.
+# ---------------------------------------------------------------------------
+
+
+def test_from_env_resolver_only_path_hook_invocation_works(clean_env):
+    """Smoke test: ``from_env`` with the single-tenant default
+    resolver path produces a guardrail whose ``_budget_resolver`` is
+    callable and returns a non-None binding — meaning the
+    pre-call hook would NOT raise ``budget_resolver returned None``
+    from ``litellm.py:298-302`` on first invocation.
+
+    Without booting the gRPC channel, we directly verify the
+    resolver-callable invariant; the broader pre-call hook is
+    exercised under U12-U14 in the skeleton suite. SLICE 4b's
+    correctness claim is that ``from_env`` produces an instance
+    that passes the L298-L302 gate, not that the gRPC stack is
+    wired (the existing tests cover that).
+    """
+    from spendguard.integrations.litellm import ResolverContext
+
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-smoke")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/smoke.sock")
+    _set_single_tenant_env(clean_env)
+
+    g = SpendGuardGuardrail.from_env()
+
+    # The delegate is a real `_LoopBoundCallback` (not the no-op).
+    assert isinstance(g._delegate, _LoopBoundCallback)
+
+    # The wired resolver returns a non-None binding for any context.
+    ctx = ResolverContext(data={}, user_api_key_dict=None, call_type="completion")
+    binding = g._delegate._budget_resolver(ctx)
+    assert binding is not None
+    assert binding.budget_id == "env-budget"
+    assert binding.window_instance_id == "env-window"
+
+    # The wired reconciler returns a single-element claim list with a
+    # token-count-derived amount (max(tokens, 1)).
+    class _FakeUsage:
+        completion_tokens = 17
+
+    class _FakeResponse:
+        usage = _FakeUsage()
+
+    claims = g._delegate._claim_reconciler(ctx, _FakeResponse())
+    assert len(claims) == 1
+    assert claims[0].amount_atomic == "17"
+    assert claims[0].budget_id == "env-budget"
+    assert claims[0].window_instance_id == "env-window"
+
+
+def test_default_reconciler_uses_min_one_when_tokens_zero(clean_env):
+    """Reconciler floor: ``max(tokens, 1)`` keeps the commit row
+    non-empty so the stats aggregator never reads a zero-amount
+    commit as a missing commit. Mirrors the example callback's
+    ``_reconcile`` behaviour.
+    """
+    from spendguard.integrations.litellm import ResolverContext
+
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-zero")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/zero.sock")
+    _set_single_tenant_env(clean_env)
+
+    g = SpendGuardGuardrail.from_env()
+
+    class _ZeroResp:
+        usage = type("U", (), {"completion_tokens": 0})()
+
+    ctx = ResolverContext(data={}, user_api_key_dict=None, call_type="completion")
+    claims = g._delegate._claim_reconciler(ctx, _ZeroResp())
+    assert claims[0].amount_atomic == "1"
+
+
+# ---------------------------------------------------------------------------
+# from_kwargs / from_config precedence + dict shape.
+# ---------------------------------------------------------------------------
+
+
+def test_from_kwargs_resolver_kwarg_overrides_env(
+    clean_env, fixture_resolver_on_path,
+):
+    """Explicit ``budget_resolver=`` kwarg wins over any env var
+    settings. Pin the SLICE 4 "kwargs are authoritative" contract
+    extends to the SLICE 4b resolver-wiring surface.
+    """
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "env-tenant")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/env.sock")
+    clean_env.setenv("SPENDGUARD_RESOLVER_MODULE", _FIXTURE_RESOLVER_SPEC)
+    _set_single_tenant_env(clean_env)
+
+    sentinel_binding = object()
+
+    def _kwarg_resolver(_ctx):
+        return sentinel_binding
+
+    g = SpendGuardGuardrail.from_kwargs(
+        socket_path="/kw/wins.sock",
+        tenant_id="kw-wins",
+        budget_resolver=_kwarg_resolver,
+        claim_reconciler=lambda _ctx, _r: [],
+    )
+
+    # `from_kwargs` does NOT consult env; the kwarg resolver flows
+    # directly into the delegate.
+    assert g._delegate._budget_resolver is _kwarg_resolver
+    assert g._delegate._budget_resolver(None) is sentinel_binding
+
+
+def test_from_config_dict_resolver_key(clean_env, fixture_resolver_on_path):
+    """``from_config`` accepts the SLICE 5 yaml shape with a
+    ``resolver_module`` key. Same dispatch path as
+    ``SPENDGUARD_RESOLVER_MODULE`` so the SLICE 5 yaml loader can
+    forward the parsed value verbatim.
+    """
+    from spendguard.integrations.litellm import ResolverContext
+    from tests.integrations.fixtures.fake_resolver import (  # type: ignore[import-not-found]
+        FIXTURE_BUDGET_ID,
+    )
+
+    g = SpendGuardGuardrail.from_config({
+        "tenant_id": "cfg-rm",
+        "sidecar_address": "unix:///tmp/cfg-rm.sock",
+        "resolver_module": _FIXTURE_RESOLVER_SPEC,
+    })
+
+    assert g._config_resolver_module == _FIXTURE_RESOLVER_SPEC
+    ctx = ResolverContext(data={}, user_api_key_dict=None, call_type="completion")
+    binding = g._delegate._budget_resolver(ctx)
+    assert binding.budget_id == FIXTURE_BUDGET_ID
+
+
+def test_from_config_dict_single_tenant_keys(clean_env):
+    """``from_config`` accepts the 3 + 4 single-tenant keys
+    field-by-field (SLICE 5 yaml shape mirror of the env vars).
+    """
+    from spendguard.integrations.litellm import ResolverContext
+
+    g = SpendGuardGuardrail.from_config({
+        "tenant_id": "cfg-st",
+        "sidecar_address": "unix:///tmp/cfg-st.sock",
+        "budget_id": "cfg-budget",
+        "window_instance_id": "cfg-window",
+        "unit_id": "cfg-unit",
+        "pricing_version": "cfg-pricing-v1",
+        "fx_rate_version": "cfg-fx-v1",
+        "unit_conversion_version": "cfg-uc-v1",
+        "price_snapshot_hash_hex": "ab" * 32,
+    })
+
+    ctx = ResolverContext(data={}, user_api_key_dict=None, call_type="completion")
+    binding = g._delegate._budget_resolver(ctx)
+    assert binding.budget_id == "cfg-budget"
+    assert binding.window_instance_id == "cfg-window"
+    assert binding.unit.unit_id == "cfg-unit"
+    assert binding.pricing.pricing_version == "cfg-pricing-v1"
+
+
+def test_load_resolver_triple_supports_legacy_dot_syntax(
+    clean_env, fixture_resolver_on_path,
+):
+    """The task prompt's smoke-test spelling uses dot-only syntax
+    (``pkg.mod.fn``); SLICE 4b honours this as a fallback so
+    operators who type the legacy spelling do not see a confusing
+    'no colon' error. The canonical syntax is still ``pkg.mod:fn``.
+    """
+    from spendguard.integrations.litellm import ResolverContext
+    from tests.integrations.fixtures.fake_resolver import (  # type: ignore[import-not-found]
+        FIXTURE_BUDGET_ID,
+    )
+
+    clean_env.setenv("SPENDGUARD_TENANT_ID", "tenant-dot")
+    clean_env.setenv("SPENDGUARD_SIDECAR_ADDRESS", "unix:///tmp/dot.sock")
+    clean_env.setenv(
+        "SPENDGUARD_RESOLVER_MODULE",
+        "integrations.fixtures.fake_resolver.make_triple",
+    )
+
+    g = SpendGuardGuardrail.from_env()
+    ctx = ResolverContext(data={}, user_api_key_dict=None, call_type="completion")
+    binding = g._delegate._budget_resolver(ctx)
+    assert binding.budget_id == FIXTURE_BUDGET_ID
 
 
 # Type-checking sanity — unused-import guard for the test file's

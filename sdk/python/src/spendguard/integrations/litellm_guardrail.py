@@ -1,5 +1,5 @@
 # ruff: noqa: ANN401  # LiteLLM's CustomGuardrail interface uses untyped Any
-"""LiteLLM proxy ``CustomGuardrail`` plugin — SLICE 1 + 2 + 3 + 4 wired.
+"""LiteLLM proxy ``CustomGuardrail`` plugin — SLICE 1 + 2 + 3 + 4 + 4b wired.
 
 Discoverability + zero-Python install path for SpendGuard on the
 LiteLLM proxy. Wraps the existing ``_LoopBoundCallback`` from
@@ -54,6 +54,37 @@ Slice 4 ships (this file):
       → no-op delegate: hooks short-circuit without touching the
       sidecar (mirrors the TS SDK disabled-mode pattern).
 
+Slice 4b ships (this file):
+    * Resolver-module wiring: ``SPENDGUARD_RESOLVER_MODULE`` —
+      ``pkg.mod:fn_name`` triple-factory escape hatch returning
+      ``(BudgetResolver, ClaimEstimator | None, ClaimReconciler)``.
+      Dispatched via ``importlib.import_module`` + ``getattr``.
+    * Single-tenant default path (when ``SPENDGUARD_RESOLVER_MODULE``
+      is unset): build a closure resolver + reconciler from the 3
+      budget-binding env vars (``SPENDGUARD_BUDGET_ID`` /
+      ``SPENDGUARD_WINDOW_INSTANCE_ID`` / ``SPENDGUARD_UNIT_ID``) +
+      the 4 pricing-version env vars (``SPENDGUARD_PRICING_VERSION`` /
+      ``SPENDGUARD_FX_RATE_VERSION`` /
+      ``SPENDGUARD_UNIT_CONVERSION_VERSION`` /
+      ``SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX``). Mirrors the field-by-
+      field shape used by
+      ``examples/litellm-proxy-composite/spendguard_litellm_proxy_callback.py``.
+    * ``BudgetBinding`` validation: empty
+      ``budget_id`` / ``window_instance_id`` / ``unit_id`` rejected
+      at factory time, naming the offending field — fail-closed
+      before the first hook invocation rather than surfacing
+      ``SpendGuardConfigError("budget_resolver returned None")``
+      from ``litellm.py:298-302`` at the first request.
+    * Same wiring lands in ``from_config`` so SLICE 5's
+      ``proxy_config.yaml`` loader inherits it verbatim.
+
+Anti-scope for SLICE 4b (per ``docs/slices/COV_D11_S4B_resolver_module.md``):
+    * No ``proxy_config.yaml`` snippet — SLICE 5.
+    * No demo mode — SLICE 6.
+    * No docs page — SLICE 7.
+    * No re-touch of the 5-var SLICE 4 subset — SLICE 4 tests stay
+      unchanged.
+
 Anti-scope for SLICE 4 (per ``docs/slices/COV_D11_S4_env_defaults.md``):
     * No ``proxy_config.yaml`` snippet — SLICE 5.
     * No demo mode — SLICE 6.
@@ -68,6 +99,7 @@ Backwards compatibility (per ``implementation.md`` §3):
 
 from __future__ import annotations
 
+import importlib
 import logging
 import os
 from typing import Any
@@ -78,6 +110,7 @@ from spendguard.errors import SpendGuardConfigError
 # reserve / commit / release flow remains single-sourced in
 # ``litellm.py`` (1141 LOC, 5 hardened rounds of review).
 from .litellm import (
+    BudgetBinding,
     BudgetResolver,
     ClaimEstimator,
     ClaimReconciler,
@@ -535,12 +568,47 @@ class SpendGuardGuardrail(CustomGuardrail):
         else:
             proxy_timeout_ms = 5000
 
+        # ---------------------------------------------------------------
+        # SLICE 4b: resolver-module + single-tenant binding env vars.
+        # All optional from the SLICE 4 5-var subset's perspective —
+        # when none are set the SLICE 1 skeleton resolver stays put and
+        # existing SLICE 4 baseline tests pass unchanged.
+        # ---------------------------------------------------------------
+        resolver_module = (
+            os.environ.get("SPENDGUARD_RESOLVER_MODULE", "").strip() or None
+        )
+        budget_id = os.environ.get("SPENDGUARD_BUDGET_ID", "").strip() or None
+        window_instance_id = (
+            os.environ.get("SPENDGUARD_WINDOW_INSTANCE_ID", "").strip() or None
+        )
+        unit_id = os.environ.get("SPENDGUARD_UNIT_ID", "").strip() or None
+        pricing_version = (
+            os.environ.get("SPENDGUARD_PRICING_VERSION", "").strip() or None
+        )
+        fx_rate_version = (
+            os.environ.get("SPENDGUARD_FX_RATE_VERSION", "").strip() or None
+        )
+        unit_conversion_version = (
+            os.environ.get("SPENDGUARD_UNIT_CONVERSION_VERSION", "").strip() or None
+        )
+        price_snapshot_hash_hex = (
+            os.environ.get("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX", "").strip() or None
+        )
+
         return {
             "tenant_id": tenant_id,
             "sidecar_address": sidecar_address,
             "api_key": api_key,
             "disabled": disabled,
             "proxy_timeout_ms": proxy_timeout_ms,
+            "resolver_module": resolver_module,
+            "budget_id": budget_id,
+            "window_instance_id": window_instance_id,
+            "unit_id": unit_id,
+            "pricing_version": pricing_version,
+            "fx_rate_version": fx_rate_version,
+            "unit_conversion_version": unit_conversion_version,
+            "price_snapshot_hash_hex": price_snapshot_hash_hex,
         }
 
     @classmethod
@@ -610,12 +678,36 @@ class SpendGuardGuardrail(CustomGuardrail):
                     "value (e.g. 5000)."
                 ) from exc
 
+        # SLICE 4b: same shape as `_read_env_config`. Dict keys may
+        # omit any of these (None / missing) and the construction
+        # pipeline behaves identically: with `resolver_module` set,
+        # operator factory dispatches; otherwise the 3 + 4 vars build
+        # the single-tenant closure.
+        resolver_module = config.get("resolver_module") or None
+        if isinstance(resolver_module, str):
+            resolver_module = resolver_module.strip() or None
+
+        def _opt_str(key: str) -> str | None:
+            raw = config.get(key)
+            if raw is None:
+                return None
+            stripped = str(raw).strip()
+            return stripped or None
+
         return {
             "tenant_id": tenant_id,
             "sidecar_address": sidecar_address,
             "api_key": api_key,
             "disabled": disabled,
             "proxy_timeout_ms": proxy_timeout_ms,
+            "resolver_module": resolver_module,
+            "budget_id": _opt_str("budget_id"),
+            "window_instance_id": _opt_str("window_instance_id"),
+            "unit_id": _opt_str("unit_id"),
+            "pricing_version": _opt_str("pricing_version"),
+            "fx_rate_version": _opt_str("fx_rate_version"),
+            "unit_conversion_version": _opt_str("unit_conversion_version"),
+            "price_snapshot_hash_hex": _opt_str("price_snapshot_hash_hex"),
         }
 
     @classmethod
@@ -626,8 +718,23 @@ class SpendGuardGuardrail(CustomGuardrail):
 
         Single construction pipeline both ``from_env`` and
         ``from_config`` route through, so the disabled-mode + lazy
-        delegate semantics stay identical regardless of where the
-        config came from.
+        delegate + resolver-wiring semantics stay identical regardless
+        of where the config came from.
+
+        SLICE 4b dispatch:
+            * ``parsed["resolver_module"]`` set → import +
+              triple-factory dispatch via ``_load_resolver_triple``.
+              The 3 budget-binding + 4 pricing-version vars are NOT
+              consulted on this path (operator factory owns binding
+              construction; the U08 invariant).
+            * Otherwise, any of the 3 + 4 single-tenant vars set →
+              build a closure resolver + reconciler from those vars.
+              ``_validate_budget_binding`` runs at factory time so
+              empty fields fail-closed before the first hook fires.
+            * Otherwise (all the SLICE 4b vars unset) → the SLICE 1
+              skeleton resolver stays put. Backward-compat for the
+              SLICE 4 baseline tests + adapter authors who supply
+              resolvers via ``from_kwargs``.
         """
         instance = cls(
             socket_path=parsed["sidecar_address"],
@@ -636,15 +743,15 @@ class SpendGuardGuardrail(CustomGuardrail):
 
         # The default skeleton resolvers wired by __init__ would surface
         # a `SpendGuardConfigError("budget_resolver returned None")` on
-        # first hook invocation. SLICE 4 honours operator intent: a
-        # `from_env`-constructed guardrail without an explicit resolver
-        # is the EXPECTED state for adapter-author wiring — operators
-        # plug a real resolver via the future SLICE 5 yaml entry or via
-        # `from_kwargs`. The disabled path below short-circuits before
-        # the skeleton resolver fires, matching the TS SDK contract.
+        # first hook invocation. SLICE 4 left them in place; SLICE 4b
+        # replaces them when any of the resolver / binding env vars are
+        # supplied. The disabled path below short-circuits before any
+        # resolver fires, matching the TS SDK contract.
 
         if parsed["disabled"]:
             instance._install_disabled_delegate()
+        else:
+            cls._wire_resolver_from_parsed(instance, parsed)
 
         # Stash parsed values on the instance so SLICE 5's bootstrap
         # validator can inspect what was applied without re-reading
@@ -652,8 +759,323 @@ class SpendGuardGuardrail(CustomGuardrail):
         instance._config_api_key = parsed["api_key"]
         instance._config_disabled = parsed["disabled"]
         instance._config_proxy_timeout_ms = parsed["proxy_timeout_ms"]
+        instance._config_resolver_module = parsed.get("resolver_module")
+        instance._config_budget_id = parsed.get("budget_id")
+        instance._config_window_instance_id = parsed.get("window_instance_id")
+        instance._config_unit_id = parsed.get("unit_id")
+        instance._config_pricing_version = parsed.get("pricing_version")
+        instance._config_fx_rate_version = parsed.get("fx_rate_version")
+        instance._config_unit_conversion_version = parsed.get(
+            "unit_conversion_version",
+        )
+        instance._config_price_snapshot_hash_hex = parsed.get(
+            "price_snapshot_hash_hex",
+        )
 
         return instance
+
+    # -------------------------------------------------------------------
+    # SLICE 4b — resolver-module + single-tenant binding wiring.
+    #
+    # Two paths:
+    #   1. `SPENDGUARD_RESOLVER_MODULE=pkg.mod:fn_name` →
+    #      `_load_resolver_triple` imports the module, looks up the
+    #      attribute, invokes it as a zero-arg factory, and expects a
+    #      triple `(BudgetResolver, ClaimEstimator | None,
+    #      ClaimReconciler)`. Empty / missing / non-callable → raise
+    #      `SpendGuardConfigError` naming the env var.
+    #   2. Single-tenant default: build a closure resolver from the
+    #      3 budget-binding + 4 pricing-version env vars (mirrors
+    #      `examples/litellm-proxy-composite/spendguard_litellm_proxy_callback.py`)
+    #      and a closure reconciler that reads
+    #      `response.usage.completion_tokens` (OpenAI shape).
+    # -------------------------------------------------------------------
+
+    @classmethod
+    def _wire_resolver_from_parsed(
+        cls, instance: SpendGuardGuardrail, parsed: dict[str, Any],
+    ) -> None:
+        """Replace the SLICE 1 skeleton delegate with one that has a
+        real resolver / reconciler wired per the parsed config.
+
+        Called by ``_from_parsed_config`` when not in disabled mode.
+        No-op when neither the resolver-module nor any single-tenant
+        var is set (preserves SLICE 4 baseline behaviour).
+        """
+        has_resolver_module = bool(parsed.get("resolver_module"))
+        single_tenant_vars = [
+            "budget_id",
+            "window_instance_id",
+            "unit_id",
+            "pricing_version",
+            "fx_rate_version",
+            "unit_conversion_version",
+            "price_snapshot_hash_hex",
+        ]
+        has_any_single_tenant = any(parsed.get(k) for k in single_tenant_vars)
+
+        if not has_resolver_module and not has_any_single_tenant:
+            # Adapter-author path: leave skeleton resolvers in place;
+            # operator will supply via `from_kwargs` or a yaml entry
+            # that ships an explicit resolver.
+            return
+
+        if has_resolver_module:
+            # U08 invariant: when resolver-module is set, the
+            # single-tenant vars are NOT consulted. The operator factory
+            # is fully responsible for binding construction.
+            resolver, estimator, reconciler = cls._load_resolver_triple(
+                str(parsed["resolver_module"]),
+            )
+        else:
+            cls._validate_budget_binding_fields(parsed)
+            binding = cls._build_binding_from_parsed(parsed)
+            resolver = cls._make_single_tenant_resolver(binding)
+            estimator = None  # delegate falls back to _default_estimator
+            reconciler = cls._make_default_reconciler(binding)
+
+        # Swap the SLICE 1 skeleton delegate for one wired with the
+        # resolved trio. The lazy loop-binding invariant is preserved
+        # — `_LoopBoundCallback.__init__` does NOT create a gRPC
+        # channel; the first hook call binds on the serving loop.
+        instance._delegate = _LoopBoundCallback(
+            socket_path=parsed["sidecar_address"],
+            tenant_id=parsed["tenant_id"],
+            budget_resolver=resolver,
+            claim_estimator=estimator,
+            claim_reconciler=reconciler,
+        )
+
+    @staticmethod
+    def _load_resolver_triple(
+        resolver_module: str,
+    ) -> tuple[BudgetResolver, ClaimEstimator | None, ClaimReconciler]:
+        """Resolve ``pkg.mod:fn_name`` (or legacy ``pkg.mod.fn_name``)
+        into a triple of callables.
+
+        The operator-supplied factory is called with zero args and is
+        expected to return a 3-tuple
+        ``(resolver, estimator | None, reconciler)``. ``estimator`` may
+        be ``None`` so the delegate falls back to ``_default_estimator``.
+
+        Raises:
+            SpendGuardConfigError: module / attribute / shape problems
+                are reported as config errors naming the env var so
+                operators can fix the deployment quickly.
+        """
+        spec = resolver_module.strip()
+        if not spec:
+            raise SpendGuardConfigError(
+                "SPENDGUARD_RESOLVER_MODULE is empty; expected "
+                "'pkg.mod:fn_name' triple-factory spec."
+            )
+
+        if ":" in spec:
+            module_path, _, attr_name = spec.partition(":")
+        elif "." in spec:
+            # Legacy dot-only syntax: `pkg.mod.fn_name`. Split on the
+            # last dot. Documented as a fallback so the task prompt's
+            # smoke-test spelling (`spendguard.budget.resolver.X`)
+            # still works without a colon.
+            module_path, _, attr_name = spec.rpartition(".")
+        else:
+            raise SpendGuardConfigError(
+                f"invalid SPENDGUARD_RESOLVER_MODULE={spec!r} — expected "
+                "'pkg.mod:fn_name' (colon separator). Got a single "
+                "identifier with no module path."
+            )
+
+        module_path = module_path.strip()
+        attr_name = attr_name.strip()
+        if not module_path or not attr_name:
+            raise SpendGuardConfigError(
+                f"invalid SPENDGUARD_RESOLVER_MODULE={spec!r} — both "
+                "module path and attribute name must be non-empty "
+                "(e.g. 'myapp.spendguard:make_triple')."
+            )
+
+        try:
+            module = importlib.import_module(module_path)
+        except ImportError as exc:
+            raise SpendGuardConfigError(
+                f"SPENDGUARD_RESOLVER_MODULE={spec!r}: cannot import "
+                f"module {module_path!r} — {exc}. Check PYTHONPATH and "
+                "the module spelling."
+            ) from exc
+
+        try:
+            factory = getattr(module, attr_name)
+        except AttributeError as exc:
+            raise SpendGuardConfigError(
+                f"SPENDGUARD_RESOLVER_MODULE={spec!r}: module "
+                f"{module_path!r} has no attribute {attr_name!r}. "
+                "The triple-factory must be importable."
+            ) from exc
+
+        if not callable(factory):
+            raise SpendGuardConfigError(
+                f"SPENDGUARD_RESOLVER_MODULE={spec!r}: "
+                f"{module_path}.{attr_name} is not callable. The "
+                "triple-factory must be a zero-arg function returning "
+                "(resolver, estimator | None, reconciler)."
+            )
+
+        try:
+            triple = factory()
+        except Exception as exc:
+            raise SpendGuardConfigError(
+                f"SPENDGUARD_RESOLVER_MODULE={spec!r}: triple-factory "
+                f"raised at proxy boot — {exc!r}. Fix the factory or "
+                "switch to the single-tenant env-var path."
+            ) from exc
+
+        if not (
+            isinstance(triple, tuple)
+            and len(triple) == 3
+            and callable(triple[0])
+            and (triple[1] is None or callable(triple[1]))
+            and callable(triple[2])
+        ):
+            raise SpendGuardConfigError(
+                f"SPENDGUARD_RESOLVER_MODULE={spec!r}: triple-factory "
+                "must return a 3-tuple (resolver, estimator | None, "
+                f"reconciler) of callables; got {triple!r}."
+            )
+
+        resolver, estimator, reconciler = triple
+        return resolver, estimator, reconciler
+
+    @staticmethod
+    def _validate_budget_binding_fields(parsed: dict[str, Any]) -> None:
+        """Reject partial / inconsistent single-tenant config.
+
+        Mirror of ``litellm.py`` lines 306-315 + the unit-id check in
+        ``_validate_claim_against_binding``: each of ``budget_id`` /
+        ``window_instance_id`` / ``unit_id`` MUST be set when the
+        single-tenant default-resolver path is taken. Empty pricing
+        fields fail-closed too so commit-side audit context is never
+        empty.
+        """
+        required = {
+            "budget_id": "SPENDGUARD_BUDGET_ID",
+            "window_instance_id": "SPENDGUARD_WINDOW_INSTANCE_ID",
+            "unit_id": "SPENDGUARD_UNIT_ID",
+            "pricing_version": "SPENDGUARD_PRICING_VERSION",
+            "fx_rate_version": "SPENDGUARD_FX_RATE_VERSION",
+            "unit_conversion_version": "SPENDGUARD_UNIT_CONVERSION_VERSION",
+            "price_snapshot_hash_hex": "SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX",
+        }
+        missing = [env_name for key, env_name in required.items() if not parsed.get(key)]
+        if missing:
+            raise SpendGuardConfigError(
+                "incomplete single-tenant SpendGuard binding: "
+                f"missing {', '.join(missing)}. Set every variable "
+                "in the SLICE 4b binding set, or set "
+                "SPENDGUARD_RESOLVER_MODULE to dispatch through an "
+                "operator-supplied triple-factory."
+            )
+
+    @staticmethod
+    def _build_binding_from_parsed(parsed: dict[str, Any]) -> BudgetBinding:
+        """Build a ``BudgetBinding`` from the 3 + 4 single-tenant vars.
+
+        Mirrors field-by-field the binding shape used by
+        ``examples/litellm-proxy-composite/spendguard_litellm_proxy_callback.py``::
+
+            UnitRef(unit_id, token_kind="output_token", model_family="gpt-4")
+            PricingFreeze(pricing_version, fx_rate_version,
+                          unit_conversion_version, price_snapshot_hash)
+
+        The ``token_kind`` / ``model_family`` defaults match the
+        example callback's hard-coded choice; operators who need
+        different unit semantics must switch to the resolver-module
+        path (SLICE 4b future-compat for SLICE 5's yaml entry).
+        """
+        # Imported here (not at module top) to keep the SLICE 1 import
+        # surface unchanged — the proto module is otherwise unused by
+        # the guardrail wrapper.
+        from spendguard._proto.spendguard.common.v1 import common_pb2
+
+        try:
+            price_snapshot_hash = bytes.fromhex(
+                str(parsed["price_snapshot_hash_hex"]),
+            )
+        except ValueError as exc:
+            raise SpendGuardConfigError(
+                "invalid SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX="
+                f"{parsed['price_snapshot_hash_hex']!r} — must be a "
+                "hex-encoded snapshot digest (e.g. 'a1b2c3...'). "
+                f"Decode error: {exc}."
+            ) from exc
+
+        unit_ref = common_pb2.UnitRef(
+            unit_id=str(parsed["unit_id"]),
+            token_kind="output_token",  # noqa: S106 — proto field, not a credential
+            model_family="gpt-4",
+        )
+        pricing = common_pb2.PricingFreeze(
+            pricing_version=str(parsed["pricing_version"]),
+            price_snapshot_hash=price_snapshot_hash,
+            fx_rate_version=str(parsed["fx_rate_version"]),
+            unit_conversion_version=str(parsed["unit_conversion_version"]),
+        )
+        return BudgetBinding(
+            budget_id=str(parsed["budget_id"]),
+            window_instance_id=str(parsed["window_instance_id"]),
+            unit=unit_ref,
+            pricing=pricing,
+        )
+
+    @staticmethod
+    def _make_single_tenant_resolver(
+        binding: BudgetBinding,
+    ) -> BudgetResolver:
+        """Closure resolver: ignore the per-request ``ResolverContext``
+        and return the env-bound ``BudgetBinding`` every call.
+
+        Matches the shape of ``_resolve`` in
+        ``examples/litellm-proxy-composite/spendguard_litellm_proxy_callback.py``:
+        single-tenant production deployments freeze one binding at
+        proxy boot. Multi-tenant operators must switch to
+        ``SPENDGUARD_RESOLVER_MODULE`` so the resolver can inspect
+        ``ctx.user_api_key_dict.team_id``.
+        """
+
+        def _resolver(_ctx: Any) -> BudgetBinding:
+            return binding
+
+        return _resolver
+
+    @staticmethod
+    def _make_default_reconciler(
+        binding: BudgetBinding,
+    ) -> ClaimReconciler:
+        """Closure reconciler: read ``response.usage.completion_tokens``
+        (OpenAI shape; LiteLLM normalises every provider into the same
+        shape) and emit a single ``BudgetClaim`` under the env-bound
+        binding's unit semantics.
+
+        ``max(tokens, 1)`` keeps the commit row non-empty so the
+        downstream stats aggregator never reads a zero-amount commit
+        as a missing commit. Matches the example callback's
+        ``_reconcile`` behaviour field-by-field.
+        """
+        from spendguard._proto.spendguard.common.v1 import common_pb2
+
+        def _reconciler(_ctx: Any, response_obj: Any) -> list[Any]:
+            usage = getattr(response_obj, "usage", None)
+            tokens = int(getattr(usage, "completion_tokens", 0) or 0)
+            return [
+                common_pb2.BudgetClaim(
+                    budget_id=binding.budget_id,
+                    unit=binding.unit,
+                    amount_atomic=str(max(tokens, 1)),
+                    direction=common_pb2.BudgetClaim.DEBIT,
+                    window_instance_id=binding.window_instance_id,
+                ),
+            ]
+
+        return _reconciler
 
     def _install_disabled_delegate(self) -> None:
         """Install a no-op delegate so every hook short-circuits.
