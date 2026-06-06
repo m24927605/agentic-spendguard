@@ -26,6 +26,12 @@ const DEFAULT_SIDECAR_UDS: &str = "/var/run/spendguard/adapter.sock";
 /// `SPENDGUARD_EXTPROC_DEV_MODE=1` fallback. Production deployments MUST
 /// set `SPENDGUARD_EXTPROC_TENANT_ID` or `Config::from_env` fails closed.
 const DEFAULT_TENANT_ID: &str = "00000000-0000-4000-8000-000000000001";
+/// Default hot-path sidecar RequestDecision RPC timeout in ms. Spec §11
+/// lists 50ms as the upper bound; 75ms is chosen so transient sidecar GC
+/// pauses don't trip the gate (matches Contract §14 p99 budget envelope).
+/// Mirrors [`crate::sidecar_client::DEFAULT_REQUEST_TIMEOUT`] — kept in
+/// sync so non-Config callers (tests / smoke) still get the same default.
+const DEFAULT_SIDECAR_REQUEST_TIMEOUT_MS: u64 = 75;
 
 /// Loaded configuration for one envoy_extproc process.
 #[derive(Debug, Clone)]
@@ -50,6 +56,12 @@ pub struct Config {
     pub sidecar_startup_deadline: Duration,
     pub sidecar_initial_backoff: Duration,
     pub sidecar_max_backoff: Duration,
+    /// Hot-path RequestDecision RPC timeout. Driven by env var
+    /// `SPENDGUARD_EXTPROC_REQUEST_TIMEOUT_MS` (implementation.md §11);
+    /// default 75 ms — see [`DEFAULT_SIDECAR_REQUEST_TIMEOUT_MS`] for the
+    /// rationale on the 50 ms spec envelope vs 75 ms GC-headroom choice
+    /// (review-standards §4.1.2).
+    pub sidecar_request_timeout: Duration,
 }
 
 #[derive(Debug, Error)]
@@ -109,6 +121,12 @@ impl Config {
         let workload_instance_id = std::env::var("SPENDGUARD_EXTPROC_WORKLOAD_INSTANCE_ID")
             .unwrap_or_else(|_| format!("envoy-extproc-{}", uuid::Uuid::new_v4().simple()));
 
+        let sidecar_request_timeout = Duration::from_millis(parse_request_timeout_ms(
+            std::env::var("SPENDGUARD_EXTPROC_REQUEST_TIMEOUT_MS")
+                .ok()
+                .as_deref(),
+        ));
+
         Ok(Self {
             bind_addr,
             sidecar_uds_path,
@@ -117,6 +135,7 @@ impl Config {
             sidecar_startup_deadline: Duration::from_secs(30),
             sidecar_initial_backoff: Duration::from_millis(250),
             sidecar_max_backoff: Duration::from_secs(4),
+            sidecar_request_timeout,
         })
     }
 
@@ -131,8 +150,23 @@ impl Config {
             sidecar_startup_deadline: Duration::from_secs(1),
             sidecar_initial_backoff: Duration::from_millis(50),
             sidecar_max_backoff: Duration::from_millis(200),
+            sidecar_request_timeout: Duration::from_millis(DEFAULT_SIDECAR_REQUEST_TIMEOUT_MS),
         }
     }
+}
+
+/// Pure helper for `SPENDGUARD_EXTPROC_REQUEST_TIMEOUT_MS` parsing.
+/// Unit-tested directly so we don't have to mutate process env.
+///
+/// Invalid / unparseable / unset → default 75 ms. We deliberately do NOT
+/// fail the boot on a parse error here: the field has a safe default that
+/// keeps the gateway fail-closed-on-timeout posture from
+/// review-standards §4.1.2. An ops typo would still produce a working
+/// gateway; the log line in `from_env` makes the parse failure visible.
+fn parse_request_timeout_ms(raw: Option<&str>) -> u64 {
+    raw.and_then(|v| v.parse::<u64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_SIDECAR_REQUEST_TIMEOUT_MS)
 }
 
 #[cfg(test)]
@@ -223,6 +257,43 @@ mod tests {
 
         let err = Config::from_env().expect_err("invalid uuid must error");
         assert!(matches!(err, ConfigError::InvalidTenantId(_)), "got: {err}");
+
+        restore_env(saved);
+    }
+
+    #[test]
+    fn request_timeout_ms_env_overrides_default() {
+        // Pure parser — no env mutation required.
+        // Unset / empty / garbage all fall back to the 75ms default.
+        assert_eq!(parse_request_timeout_ms(None), 75);
+        assert_eq!(parse_request_timeout_ms(Some("")), 75);
+        assert_eq!(parse_request_timeout_ms(Some("not-a-number")), 75);
+        // Zero is also rejected — a zero timeout would defeat the
+        // fail-closed gate, so we fall back to the default.
+        assert_eq!(parse_request_timeout_ms(Some("0")), 75);
+        // Valid override is honoured exactly. Smaller (50ms — spec
+        // envelope) and larger (250ms — ops emergency override) both
+        // round-trip without clamping.
+        assert_eq!(parse_request_timeout_ms(Some("50")), 50);
+        assert_eq!(parse_request_timeout_ms(Some("250")), 250);
+    }
+
+    #[test]
+    fn from_env_picks_up_request_timeout_override() {
+        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let saved = save_env(&[
+            "SPENDGUARD_EXTPROC_BIND_ADDR",
+            "SPENDGUARD_EXTPROC_TENANT_ID",
+            "SPENDGUARD_EXTPROC_DEV_MODE",
+            "SPENDGUARD_EXTPROC_REQUEST_TIMEOUT_MS",
+        ]);
+        std::env::remove_var("SPENDGUARD_EXTPROC_BIND_ADDR");
+        std::env::set_var("SPENDGUARD_EXTPROC_TENANT_ID", DEFAULT_TENANT_ID);
+        std::env::remove_var("SPENDGUARD_EXTPROC_DEV_MODE");
+        std::env::set_var("SPENDGUARD_EXTPROC_REQUEST_TIMEOUT_MS", "120");
+
+        let cfg = Config::from_env().expect("config must load");
+        assert_eq!(cfg.sidecar_request_timeout, Duration::from_millis(120));
 
         restore_env(saved);
     }

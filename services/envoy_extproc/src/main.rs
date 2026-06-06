@@ -22,7 +22,7 @@ use tracing::{info, warn};
 use spendguard_envoy_extproc::{
     config::Config, handshake,
     proto::envoy::service::ext_proc::v3::external_processor_server::ExternalProcessorServer,
-    server::ExtProcService,
+    server::ExtProcService, sidecar_client::SidecarClient,
 };
 
 #[tokio::main]
@@ -58,7 +58,22 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    let svc = ExtProcService::new(cfg.tenant_id.clone());
+    // SLICE 3 — build the lazy sidecar client. The dial above proved
+    // the UDS exists at boot; this constructs the long-lived tonic
+    // channel that the Request-Body hot path uses. Per design §3.3
+    // SLICE 1-5 carve-out, the transport is UDS until SLICE 6 hard-
+    // switches to mTLS-TCP. Timeout is driven by
+    // `SPENDGUARD_EXTPROC_REQUEST_TIMEOUT_MS` per implementation §11.
+    let sidecar = SidecarClient::connect(&cfg.sidecar_uds_path, cfg.sidecar_request_timeout)
+        .await
+        .context("building sidecar UDS client")?;
+    info!(
+        uds = %cfg.sidecar_uds_path.display(),
+        timeout_ms = cfg.sidecar_request_timeout.as_millis() as u64,
+        "SLICE 3 sidecar client wired (UDS)"
+    );
+
+    let svc = ExtProcService::new(cfg.tenant_id.clone()).with_sidecar(sidecar);
 
     info!(addr = %cfg.bind_addr, "binding ExternalProcessor gRPC server");
     Server::builder()

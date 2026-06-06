@@ -5,20 +5,28 @@
 //! * **SLICE 1**: Handshake-only — the first inbound `ProcessingRequest`
 //!   is echoed with a CONTINUE-status response so a mock Envoy client
 //!   gets a 200-equivalent and closes cleanly.
-//! * **SLICE 2 (this slice)**: Wires the Request-Body phase.
+//! * **SLICE 2**: Wires the Request-Body phase.
 //!   `RequestHeaders` captures `:path` + `x-request-id` and stashes a
 //!   fresh [`StreamState`] in the shared [`StreamStateMap`].
 //!   `RequestBody` parses the body, dispatches to the in-process
 //!   tokenizer library, and stashes a [`ClaimEstimate`] on the state.
-//!   All phases still return CONTINUE — SLICE 3 will replace the
-//!   Request-Body CONTINUE with the real budget-decision translation.
+//!   All phases still return CONTINUE.
+//! * **SLICE 3 (this slice)**: Wires the budget-decision RPC.
+//!   `RequestBody` translates `StreamState` → sidecar `RequestDecision`,
+//!   maps `DecisionResponse` → ExtProc `ProcessingResponse`
+//!   (CONTINUE / 429 / 403 / 503), and stashes `reservation_id` +
+//!   `decision_id` + `decision_outcome` on the per-stream state for
+//!   SLICE 4's audit-emit consumer. `RequestHeaders` /
+//!   `ResponseHeaders` / `ResponseBody` still return CONTINUE — SLICE
+//!   4 will wire `EmitTraceEvents` on `ResponseBody`.
 //!
 //! Spec refs:
-//!   - docs/specs/coverage/D01_envoy_extproc/design.md §3.2, §3.4
+//!   - docs/specs/coverage/D01_envoy_extproc/design.md §3.2, §3.4, §3.5
 //!   - docs/specs/coverage/D01_envoy_extproc/implementation.md §5, §6
-//!   - docs/specs/coverage/D01_envoy_extproc/review-standards.md §3
-//!     (SLICE 2 blocker checklist — Tier 2 hot path, unknown model T3,
-//!      no fake B/C, parse-error returns typed error)
+//!   - docs/specs/coverage/D01_envoy_extproc/review-standards.md §4
+//!     (SLICE 3 blocker checklist — non-empty idempotency key, timeout
+//!      enforcement, fail-closed on Unspecified, no info disclosure,
+//!      reservation_id stash for SLICE 4)
 
 use std::sync::Arc;
 
@@ -27,28 +35,39 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, info, warn};
 
+use crate::decision::{build_request_decision, DecisionBuildCtx};
 use crate::proto::envoy::service::ext_proc::v3::{
     common_response::ResponseStatus, external_processor_server::ExternalProcessor,
     processing_request::Request as PReq, processing_response::Response as PResp, BodyResponse,
     CommonResponse, HeadersResponse, ProcessingRequest, ProcessingResponse,
 };
+use crate::response::{
+    build_extproc_response, build_sidecar_error_response, missing_estimate_immediate,
+    MappedResponse,
+};
+use crate::sidecar_client::SidecarClient;
 use crate::state::{
     derive_path_from_headers, derive_stream_id_from_headers, StreamState, StreamStateMap,
 };
 use crate::tokenize::estimate_tokens_or_warn;
 use spendguard_tokenizer::Tokenizer;
 
-/// gRPC service impl. SLICE 2 holds:
-///   * `tenant_id` — structured-logging field (unchanged from SLICE 1).
+/// gRPC service impl. SLICE 3 holds:
+///   * `tenant_id` — structured-logging + sidecar tenant assertion (unchanged from SLICE 1).
 ///   * `tokenizer` — boot-time-loaded Tier 2 tokenizer; cloned via Arc
 ///     into each stream handler.
-///   * `state_map` — process-shared per-stream state. SLICE 3 + SLICE 4
-///     extend the same map.
+///   * `state_map` — process-shared per-stream state. SLICE 4 reads the
+///     same map at Response-Body time for audit emit.
+///   * `sidecar` — optional sidecar adapter client. `None` for SLICE 1
+///     skeleton / SLICE 2 tokenizer tests; `Some` for SLICE 3 budget-
+///     query wired tests + production. When `None`, Request-Body returns
+///     a SLICE 2-compatible CONTINUE so the older test fixtures pass.
 #[derive(Clone)]
 pub struct ExtProcService {
     pub tenant_id: String,
     tokenizer: Arc<Tokenizer>,
     state_map: StreamStateMap,
+    sidecar: Option<SidecarClient>,
 }
 
 impl std::fmt::Debug for ExtProcService {
@@ -59,6 +78,7 @@ impl std::fmt::Debug for ExtProcService {
             // the implementation noise out of trace logs.
             .field("tokenizer", &"<Tokenizer>")
             .field("state_map", &"<StreamStateMap>")
+            .field("sidecar_wired", &self.sidecar.is_some())
             .finish()
     }
 }
@@ -91,20 +111,40 @@ impl ExtProcService {
     /// Inject a pre-constructed tokenizer. Used by:
     ///   - integration tests that share one tokenizer across many
     ///     `ExtProcService` instances (faster than booting per test);
-    ///   - SLICE 3 wiring that may want to dependency-inject an
-    ///     instrumented `Tokenizer` variant.
+    ///   - SLICE 3 wiring that needs an `ExtProcService` with no
+    ///     sidecar (regression coverage for the SLICE 2 path).
     pub fn with_tokenizer(tenant_id: impl Into<String>, tokenizer: Arc<Tokenizer>) -> Self {
         Self {
             tenant_id: tenant_id.into(),
             tokenizer,
             state_map: StreamStateMap::default(),
+            sidecar: None,
         }
     }
 
+    /// SLICE 3 entry point — wires an already-constructed
+    /// [`SidecarClient`] into the service. Once present, the
+    /// Request-Body phase translates each frame into a
+    /// `RequestDecision` RPC and maps the response to the right
+    /// ExtProc reply. `main.rs` calls this once at startup after the
+    /// SLICE 1 fail-fast handshake dial proves the UDS is reachable.
+    pub fn with_sidecar(mut self, sidecar: SidecarClient) -> Self {
+        self.sidecar = Some(sidecar);
+        self
+    }
+
     /// Read-only handle to the per-stream state map. Tests use this to
-    /// assert that a `ClaimEstimate` was stashed after Request-Body.
+    /// assert that a `ClaimEstimate` was stashed after Request-Body and
+    /// that SLICE 3 wired the `reservation_id` / `decision_id` /
+    /// `decision_outcome` after the sidecar RPC.
     pub fn state_map(&self) -> &StreamStateMap {
         &self.state_map
+    }
+
+    /// Returns true if SLICE 3 sidecar wiring is active. Used by tests
+    /// to assert the regression flag is set.
+    pub fn sidecar_wired(&self) -> bool {
+        self.sidecar.is_some()
     }
 }
 
@@ -121,6 +161,7 @@ impl ExternalProcessor for ExtProcService {
         let tenant_id = self.tenant_id.clone();
         let tokenizer = self.tokenizer.clone();
         let state_map = self.state_map.clone();
+        let sidecar = self.sidecar.clone();
 
         tokio::spawn(async move {
             // Per-stream id derived from the first Request-Headers frame.
@@ -128,6 +169,9 @@ impl ExternalProcessor for ExtProcService {
             // very first inbound frame is ACKed with a CONTINUE. SLICE 2
             // adds the side effect of stashing :path + minting a stream
             // id so the subsequent Request-Body phase can look it up.
+            // SLICE 3 (this slice) replaces the Request-Body CONTINUE
+            // with the real budget-decision translation when `sidecar`
+            // is wired.
             let mut stream_id: Option<String> = None;
             let mut frame_index: u64 = 0;
             loop {
@@ -162,14 +206,33 @@ impl ExternalProcessor for ExtProcService {
                     );
                 }
 
-                // Side-effect hook: SLICE 2 stashes path / parsed body
-                // BEFORE building the CONTINUE response so the state map
-                // is populated by the time tests assert on it. Errors
-                // from the side-effect path warn-and-continue per slice
-                // doc § "Scope" — SLICE 3 will fail-closed.
+                // Side-effect hook (SLICE 2): stashes path / parsed body
+                // BEFORE building the response so the state map is
+                // populated by the time we issue the sidecar RPC.
                 handle_side_effects(&msg, &mut stream_id, &tenant_id, &tokenizer, &state_map).await;
 
-                let resp = build_continue_for(&msg);
+                // SLICE 3 hot path: when the inbound frame is a
+                // Request-Body AND the sidecar is wired, build a
+                // RequestDecision, dispatch, and map the response.
+                // Anything else falls back to the SLICE 2 CONTINUE.
+                let resp = match (&msg.request, &sidecar) {
+                    (Some(PReq::RequestBody(_)), Some(client)) => {
+                        let mapped = handle_request_body_budget_query(
+                            stream_id.as_deref(),
+                            &tenant_id,
+                            &state_map,
+                            client,
+                        )
+                        .await;
+                        // Stash SLICE 3 outcome on the per-stream state
+                        // so SLICE 4's audit-emit (Response-Body) can
+                        // reference reservation_id / decision_id.
+                        stash_outcome_on_state(&state_map, stream_id.as_deref(), &mapped).await;
+                        mapped.processing
+                    }
+                    _ => build_continue_for(&msg),
+                };
+
                 if tx.send(Ok(resp)).await.is_err() {
                     debug!(
                         tenant_id = %tenant_id,
@@ -181,6 +244,122 @@ impl ExternalProcessor for ExtProcService {
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
+/// SLICE 3 Request-Body hot path.
+///
+/// Reads SLICE 2's stashed [`StreamState`], builds a `DecisionRequest`,
+/// invokes the sidecar adapter, and maps the response. Three failure
+/// paths fold into a fail-closed 503/distinct-503:
+///   * No stream id (RequestBody before RequestHeaders) → 503 missing-estimate
+///   * State map miss / no ClaimEstimate → 503 missing-estimate
+///   * Sidecar RPC error / timeout → 503 sidecar-unavailable
+///
+/// On success the response is whatever `build_extproc_response` decides
+/// based on the sidecar `Decision` enum (CONTINUE / 429 / 403 / 503).
+async fn handle_request_body_budget_query(
+    stream_id: Option<&str>,
+    tenant_id: &str,
+    state_map: &StreamStateMap,
+    sidecar: &SidecarClient,
+) -> MappedResponse {
+    let Some(stream_id) = stream_id else {
+        warn!(
+            tenant_id = %tenant_id,
+            "RequestBody arrived without stream id; failing closed (503 missing-estimate)"
+        );
+        return missing_estimate_immediate(1);
+    };
+
+    // Pull the SLICE 2 state. Cloning the StreamState is cheap (~few
+    // hundred bytes) and lets us drop the lock before issuing the RPC.
+    let state_snapshot = match state_map.get(stream_id).await {
+        Some(s) => s,
+        None => {
+            warn!(
+                tenant_id = %tenant_id,
+                stream_id = %stream_id,
+                "RequestBody: StreamState missing from map (evicted under pressure?); failing closed"
+            );
+            return missing_estimate_immediate(1);
+        }
+    };
+
+    // Build the decision request.
+    let ctx = DecisionBuildCtx {
+        tenant_id,
+        stream_id,
+        unit_id: None,
+    };
+    let req = match build_request_decision(&state_snapshot, &ctx) {
+        Ok(r) => r,
+        Err(e) => {
+            warn!(
+                tenant_id = %tenant_id,
+                stream_id = %stream_id,
+                err = %e,
+                "RequestBody: SLICE 2 ClaimEstimate missing; failing closed (review-standards §4.1.1)"
+            );
+            return missing_estimate_immediate(1);
+        }
+    };
+
+    // Hot path RPC. `request_decision` enforces the configured
+    // timeout (review-standards §4.1.2); see sidecar_client.rs.
+    match sidecar.request_decision(req).await {
+        Ok(resp) => {
+            info!(
+                tenant_id = %tenant_id,
+                stream_id = %stream_id,
+                decision = resp.decision,
+                decision_id = %resp.decision_id,
+                "RequestBody: sidecar RequestDecision returned"
+            );
+            build_extproc_response(resp)
+        }
+        Err(e) => {
+            warn!(
+                tenant_id = %tenant_id,
+                stream_id = %stream_id,
+                err = %e,
+                "RequestBody: sidecar RPC failed; failing closed (503)"
+            );
+            build_sidecar_error_response(&e)
+        }
+    }
+}
+
+/// Stash SLICE 3 outcome on the per-stream state. SLICE 4 reads
+/// these fields during Response-Body audit emit. When the state row
+/// has been evicted under capacity pressure (mutate returns `false`),
+/// we surface a warn! so the SLICE 4 audit-emit consumer's
+/// `decision_outcome: None` is correlatable to the eviction event —
+/// otherwise a missing outcome silently degrades the audit trail.
+async fn stash_outcome_on_state(
+    state_map: &StreamStateMap,
+    stream_id: Option<&str>,
+    mapped: &MappedResponse,
+) {
+    let Some(id) = stream_id else {
+        return;
+    };
+    let reservation_id = mapped.reservation_id.clone();
+    let decision_id = mapped.decision_id.clone();
+    let outcome = mapped.outcome;
+    let mutated = state_map
+        .mutate(id, move |s| {
+            s.reservation_id = reservation_id;
+            s.decision_id = decision_id;
+            s.decision_outcome = Some(outcome);
+        })
+        .await;
+    if !mutated {
+        warn!(
+            stream_id = %id,
+            ?outcome,
+            "stream state evicted before SLICE 3 outcome could be stashed; SLICE 4 audit emit will see decision_outcome: None"
+        );
     }
 }
 

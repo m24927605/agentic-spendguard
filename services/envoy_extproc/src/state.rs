@@ -58,6 +58,34 @@ use tracing::{debug, warn};
 use crate::parse::ParsedRequest;
 use crate::tokenize::ClaimEstimate;
 
+/// SLICE 3 — coarse-grained record of the sidecar's verdict for this
+/// stream. SLICE 4's audit emit reads this to decide between emitting
+/// `LLM_CALL_POST.SUCCESS` (after Response-Body for ALLOW) vs
+/// `RUN_ABORTED` (when the stream closed without a SUCCESS pair). The
+/// Display impl is used by structured-log fields.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionOutcome {
+    /// Sidecar said `CONTINUE` (and we ACK'd the Request-Body with
+    /// ExtProc CONTINUE). The reservation_id+decision_id pair lives in
+    /// [`StreamState`] for SLICE 4's outcome emit.
+    Allow,
+    /// Sidecar said `STOP` or `STOP_RUN_PROJECTION` — we returned a 429
+    /// ImmediateResponse and closed the stream.
+    Deny,
+    /// Sidecar returned DENY, DEGRADE, or REQUIRE_APPROVAL — request
+    /// rejected at fail-closed boundary. SLICE 4 disambiguates via
+    /// decision_id lookup against sidecar audit. Per the SLICE 3
+    /// fail-closed carve-out the DEGRADE `mutation_patch_json` is NOT
+    /// applied; the BodyMutation arm lands in SLICE 5 conformance.
+    Rejected,
+    /// Sidecar was unreachable / errored — we returned a 503
+    /// ImmediateResponse with Retry-After.
+    SidecarError,
+    /// SLICE 2 carry-over: no ClaimEstimate was available (parse/tokenize
+    /// failed). We returned 503 fail-closed at the Request-Body phase.
+    MissingClaimEstimate,
+}
+
 /// Hard cap on concurrent in-flight streams. Per review-standards §4.1
 /// the SLICE 3 spec requires bounded state to prevent OOM under chaos;
 /// SLICE 2 inherits the same bound so we don't ship an unbounded map
@@ -69,9 +97,10 @@ pub const DEFAULT_STREAM_STATE_CAPACITY: usize = 8_192;
 /// (Envoy can be configured to inject a custom request id format).
 pub type StreamId = String;
 
-/// Per-stream state. SLICE 2 carries only the parsed request + claim
-/// estimate; SLICE 3-4 will append more fields (reservation_id,
-/// decision_id, response usage).
+/// Per-stream state. SLICE 2 carries the parsed request + claim
+/// estimate; SLICE 3 (this slice) appends the sidecar's reservation_id +
+/// decision_id + coarse-grained outcome enum so SLICE 4's audit emit
+/// (Response-Body phase) can reference them.
 ///
 /// `Default` is not derived because [`Instant`] has no `Default`
 /// impl. Use [`StreamState::new`] which seeds `created_at = Instant::now()`.
@@ -85,8 +114,20 @@ pub struct StreamState {
     pub parsed: Option<ParsedRequest>,
     /// SLICE 2 ClaimEstimate (None until Request-Body parse + tokenize
     /// both succeed). On parse / tokenize error the state holds None,
-    /// and SLICE 3 will fail-closed at the budget query.
+    /// and SLICE 3 fails closed at the budget query.
     pub estimate: Option<ClaimEstimate>,
+    /// SLICE 3 — sidecar's reservation handle. None until the
+    /// RequestDecision RPC completes with `Decision::CONTINUE`. SLICE 4
+    /// uses this in `LLM_CALL_POST.reservation_id` (per
+    /// review-standards §5.1: "no UUID generation in ExtProc").
+    pub reservation_id: Option<String>,
+    /// SLICE 3 — sidecar's decision_id. Carried to SLICE 4 so the audit
+    /// emit references the same decision row.
+    pub decision_id: Option<String>,
+    /// SLICE 3 — coarse-grained verdict the budget query produced. SLICE
+    /// 4 reads this on stream close (or response-body end) to choose
+    /// between LLM_CALL_POST.SUCCESS / RUN_ABORTED / no-op.
+    pub decision_outcome: Option<DecisionOutcome>,
     /// Insertion time. SLICE 3's bounded LRU will use this for eviction.
     pub created_at: Instant,
 }
@@ -99,13 +140,18 @@ impl Default for StreamState {
 
 impl StreamState {
     /// Construct a fresh state for a newly observed stream id. `path` is
-    /// updated by [`StreamStateMap::record_request_headers`] once
-    /// Request-Headers arrives.
+    /// updated by [`StreamStateMap::upsert`] once Request-Headers
+    /// arrives. SLICE 3 reservation_id/decision_id/decision_outcome
+    /// start `None` — the Request-Body handler populates them after the
+    /// sidecar `RequestDecision` RPC returns.
     pub fn new() -> Self {
         Self {
             path: String::new(),
             parsed: None,
             estimate: None,
+            reservation_id: None,
+            decision_id: None,
+            decision_outcome: None,
             created_at: Instant::now(),
         }
     }

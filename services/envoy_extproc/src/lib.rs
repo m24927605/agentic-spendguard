@@ -16,9 +16,12 @@
 //! tree.
 
 pub mod config;
+pub mod decision;
 pub mod handshake;
 pub mod parse;
 pub mod proto;
+pub mod response;
 pub mod server;
+pub mod sidecar_client;
 pub mod state;
 pub mod tokenize;
