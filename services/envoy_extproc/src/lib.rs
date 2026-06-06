@@ -15,12 +15,14 @@
 //! without depending on the implementation crate's path-mangled module
 //! tree.
 
+pub mod audit;
 pub mod config;
 pub mod decision;
 pub mod handshake;
 pub mod parse;
 pub mod proto;
 pub mod response;
+pub mod response_parse;
 pub mod server;
 pub mod sidecar_client;
 pub mod state;

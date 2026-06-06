@@ -47,7 +47,8 @@ use tower::service_fn;
 use tracing::{debug, warn};
 
 use crate::proto::spendguard::sidecar_adapter::v1::{
-    sidecar_adapter_client::SidecarAdapterClient, DecisionRequest, DecisionResponse,
+    sidecar_adapter_client::SidecarAdapterClient, DecisionRequest, DecisionResponse, TraceEvent,
+    TraceEventAck,
 };
 
 /// Default hot-path timeout. Spec §11 lists 50ms as the upper bound;
@@ -166,6 +167,117 @@ impl SidecarClient {
                     uds = %self.uds_path.display(),
                     timeout_ms,
                     "sidecar RequestDecision timeout (mapped to 503)"
+                );
+                Err(SidecarError::Timeout { timeout_ms })
+            }
+        }
+    }
+
+    /// SLICE 4 — emit a single `LLM_CALL_POST` `TraceEvent` over the
+    /// sidecar adapter's `EmitTraceEvents` bidi stream and drain the
+    /// resulting `TraceEventAck`. Reuses the SLICE 3 UDS channel; no
+    /// new connect path.
+    ///
+    /// Per implementation.md §7 (Response-Body phase) + the egress_proxy
+    /// pattern at `services/egress_proxy/src/forward.rs:936-940`, the
+    /// caller streams one event and drains one ack — the stream is
+    /// closed after the single round-trip.
+    ///
+    /// Failure modes mirror [`Self::request_decision`]:
+    ///   * `SidecarError::Timeout` when the configured per-call timeout
+    ///     elapses before the ack lands;
+    ///   * `SidecarError::Rpc` when the sidecar returns non-OK status;
+    ///   * `SidecarError::Transport` is only reachable on a fresh
+    ///     connect, which the SLICE 1 handshake already proved.
+    ///
+    /// Audit emit is **best-effort**: review-standards §5.1 requires
+    /// exactly one event per stream, but a transport / timeout failure
+    /// is logged at WARN and the caller MUST NOT block the upstream
+    /// response on it (the sidecar's POST_GA_01 dedup catches retries
+    /// without intervention). The typed error is still returned so the
+    /// caller can update its metrics.
+    pub async fn emit_trace_events(
+        &self,
+        event: TraceEvent,
+    ) -> Result<TraceEventAck, SidecarError> {
+        let mut client = self.inner.clone();
+        // Build a one-shot stream containing the single event. tokio's
+        // `mpsc + ReceiverStream` is enough — no `async_stream` dep
+        // pulled in just to ship one TraceEvent.
+        let (tx, rx) = tokio::sync::mpsc::channel::<TraceEvent>(1);
+        if tx.send(event).await.is_err() {
+            // Receiver dropped before send — should be impossible since
+            // we own both ends in this scope.
+            return Err(SidecarError::Transport {
+                message: "EmitTraceEvents: failed to seed one-shot stream".to_string(),
+            });
+        }
+        drop(tx); // Half-close so the server sees end-of-stream.
+        let request_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+
+        let fut = client.emit_trace_events(tonic::Request::new(request_stream));
+        match tokio::time::timeout(self.timeout, fut).await {
+            Ok(Ok(resp)) => {
+                let mut ack_stream = resp.into_inner();
+                // Drain one ack — the sidecar acknowledges then closes.
+                match tokio::time::timeout(self.timeout, ack_stream.message()).await {
+                    Ok(Ok(Some(ack))) => Ok(ack),
+                    Ok(Ok(None)) => {
+                        // Stream closed without an ack — typed Rpc error.
+                        warn!(
+                            uds = %self.uds_path.display(),
+                            "sidecar EmitTraceEvents closed without TraceEventAck"
+                        );
+                        Err(SidecarError::Rpc {
+                            code: tonic::Code::Internal,
+                            internal_detail: "EmitTraceEvents: no ack frame".to_string(),
+                        })
+                    }
+                    Ok(Err(status)) => {
+                        let internal_detail = status.message().to_string();
+                        let code = status.code();
+                        warn!(
+                            uds = %self.uds_path.display(),
+                            code = ?code,
+                            detail = %internal_detail,
+                            "sidecar EmitTraceEvents ack returned non-OK Status"
+                        );
+                        Err(SidecarError::Rpc {
+                            code,
+                            internal_detail,
+                        })
+                    }
+                    Err(_elapsed) => {
+                        let timeout_ms = self.timeout.as_millis() as u64;
+                        warn!(
+                            uds = %self.uds_path.display(),
+                            timeout_ms,
+                            "sidecar EmitTraceEvents ack timeout"
+                        );
+                        Err(SidecarError::Timeout { timeout_ms })
+                    }
+                }
+            }
+            Ok(Err(status)) => {
+                let internal_detail = status.message().to_string();
+                let code = status.code();
+                warn!(
+                    uds = %self.uds_path.display(),
+                    code = ?code,
+                    detail = %internal_detail,
+                    "sidecar EmitTraceEvents call returned non-OK Status"
+                );
+                Err(SidecarError::Rpc {
+                    code,
+                    internal_detail,
+                })
+            }
+            Err(_elapsed) => {
+                let timeout_ms = self.timeout.as_millis() as u64;
+                warn!(
+                    uds = %self.uds_path.display(),
+                    timeout_ms,
+                    "sidecar EmitTraceEvents call timeout"
                 );
                 Err(SidecarError::Timeout { timeout_ms })
             }

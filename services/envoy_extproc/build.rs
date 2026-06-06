@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .bytes(["."])
-        .compile_protos(envoy_protos, &[envoy_proto_root.clone()])?;
+        .compile_protos(envoy_protos, std::slice::from_ref(&envoy_proto_root))?;
     for p in envoy_protos {
         println!("cargo:rerun-if-changed={}", p.display());
     }
@@ -50,7 +50,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .build_client(true)
         .bytes(["."])
-        .compile_protos(sg_protos, &[spendguard_proto_root.clone()])?;
+        .compile_protos(sg_protos, std::slice::from_ref(&spendguard_proto_root))?;
     for p in sg_protos {
         println!("cargo:rerun-if-changed={}", p.display());
     }

@@ -25,8 +25,8 @@
 //!   - docs/specs/coverage/D01_envoy_extproc/implementation.md §5, §6
 //!   - docs/specs/coverage/D01_envoy_extproc/review-standards.md §4
 //!     (SLICE 3 blocker checklist — non-empty idempotency key, timeout
-//!      enforcement, fail-closed on Unspecified, no info disclosure,
-//!      reservation_id stash for SLICE 4)
+//!     enforcement, fail-closed on Unspecified, no info disclosure,
+//!     reservation_id stash for SLICE 4)
 
 use std::sync::Arc;
 
@@ -35,6 +35,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status, Streaming};
 use tracing::{debug, info, warn};
 
+use crate::audit::{build_llm_call_post, AuditBuild, AuditBuildCtx, ResponseMeta};
 use crate::decision::{build_request_decision, DecisionBuildCtx};
 use crate::proto::envoy::service::ext_proc::v3::{
     common_response::ResponseStatus, external_processor_server::ExternalProcessor,
@@ -45,9 +46,11 @@ use crate::response::{
     build_extproc_response, build_sidecar_error_response, missing_estimate_immediate,
     MappedResponse,
 };
+use crate::response_parse::{extract_provider_usage, ProviderHint};
 use crate::sidecar_client::SidecarClient;
 use crate::state::{
-    derive_path_from_headers, derive_stream_id_from_headers, StreamState, StreamStateMap,
+    derive_path_from_headers, derive_status_from_headers, derive_stream_id_from_headers,
+    StreamState, StreamStateMap,
 };
 use crate::tokenize::estimate_tokens_or_warn;
 use spendguard_tokenizer::Tokenizer;
@@ -214,6 +217,13 @@ impl ExternalProcessor for ExtProcService {
                 // SLICE 3 hot path: when the inbound frame is a
                 // Request-Body AND the sidecar is wired, build a
                 // RequestDecision, dispatch, and map the response.
+                //
+                // SLICE 4 hot path: when the inbound frame is a
+                // Response-Body AND the sidecar is wired, build the
+                // LLM_CALL_POST TraceEvent + dispatch EmitTraceEvents.
+                // The Response-Body ACK is still CONTINUE; the audit
+                // emit is a side effect.
+                //
                 // Anything else falls back to the SLICE 2 CONTINUE.
                 let resp = match (&msg.request, &sidecar) {
                     (Some(PReq::RequestBody(_)), Some(client)) => {
@@ -229,6 +239,20 @@ impl ExternalProcessor for ExtProcService {
                         // reference reservation_id / decision_id.
                         stash_outcome_on_state(&state_map, stream_id.as_deref(), &mapped).await;
                         mapped.processing
+                    }
+                    (Some(PReq::ResponseBody(b)), Some(client)) => {
+                        // SLICE 4 audit emit. Returns the CONTINUE
+                        // BodyResponse regardless of emit success — the
+                        // audit emit is best-effort per implementation
+                        // §7 ("don't block the response on audit").
+                        handle_response_body_audit_emit(
+                            stream_id.as_deref(),
+                            &tenant_id,
+                            &state_map,
+                            client,
+                            &b.body,
+                        )
+                        .await
                     }
                     _ => build_continue_for(&msg),
                 };
@@ -330,6 +354,153 @@ async fn handle_request_body_budget_query(
     }
 }
 
+/// SLICE 4 Response-Body hot path.
+///
+/// Reads SLICE 3's stashed [`StreamState`] (reservation_id, decision_id,
+/// decision_outcome, http_status), parses provider usage from the
+/// response body, builds a `TraceEvent` LLM_CALL_POST, and dispatches
+/// `EmitTraceEvents` to the sidecar adapter. Then removes the state
+/// entry so the map doesn't leak.
+///
+/// Per implementation.md §7 + review-standards §5.1, audit emit is
+/// **best-effort**: a transport / timeout failure is logged at warn!
+/// but the Response-Body ACK is still CONTINUE so the upstream
+/// response flows to the client. The sidecar's POST_GA_01 dedup
+/// catches replays without intervention.
+///
+/// Rejected streams (Deny / Sidecar error / MissingClaimEstimate) skip
+/// the emit entirely — the sidecar already audited at Request-Body
+/// short-circuit. The StreamState is still removed for cleanup;
+/// streams that short-circuit at Request-Body never invoke this phase
+/// (Envoy halts after the ImmediateResponse), so the 60s TTL backstop
+/// is what reaps those entries.
+async fn handle_response_body_audit_emit(
+    stream_id: Option<&str>,
+    tenant_id: &str,
+    state_map: &StreamStateMap,
+    sidecar: &SidecarClient,
+    body: &[u8],
+) -> ProcessingResponse {
+    let response_body_continue = ProcessingResponse {
+        response: Some(PResp::ResponseBody(BodyResponse {
+            response: Some(CommonResponse {
+                status: ResponseStatus::Continue as i32,
+                ..Default::default()
+            }),
+        })),
+        ..Default::default()
+    };
+
+    let Some(stream_id) = stream_id else {
+        debug!(
+            tenant_id = %tenant_id,
+            "ResponseBody arrived without stream id; skipping audit emit"
+        );
+        return response_body_continue;
+    };
+
+    // Pull the stashed state. Cloning is cheap; we drop the lock before
+    // the RPC so the state map stays responsive under load.
+    let state_snapshot = match state_map.get(stream_id).await {
+        Some(s) => s,
+        None => {
+            // Either the TTL expired between Request-Body and
+            // Response-Body (unlikely for a single in-flight call) OR
+            // SLICE 3 stash drift. Log + skip — the sidecar's POST_GA_01
+            // dedup will eventually time-out the reservation.
+            warn!(
+                tenant_id = %tenant_id,
+                stream_id = %stream_id,
+                "ResponseBody: StreamState missing from map (TTL expired or evicted); skipping audit emit"
+            );
+            return response_body_continue;
+        }
+    };
+
+    // Derive ProviderHint from the parsed request (SLICE 2 stashed it).
+    let provider_hint = state_snapshot
+        .parsed
+        .as_ref()
+        .map(|p| ProviderHint::from_provider_str(p.provider_str))
+        .unwrap_or(ProviderHint::Unknown);
+
+    // Parse provider usage. On error we still attempt the emit with
+    // `provider_usage: None` so the audit chain stays complete
+    // (review-standards §5.2 fallback).
+    let provider_usage = match extract_provider_usage(body, provider_hint) {
+        Ok(u) => Some(u),
+        Err(e) => {
+            warn!(
+                tenant_id = %tenant_id,
+                stream_id = %stream_id,
+                err = %e,
+                "ResponseBody: provider usage extraction failed; audit emit will use tokens_unknown fallback"
+            );
+            None
+        }
+    };
+
+    let meta = ResponseMeta {
+        http_status: state_snapshot.http_status,
+        provider_usage,
+    };
+    let ctx = AuditBuildCtx {
+        tenant_id,
+        stream_id,
+    };
+
+    match build_llm_call_post(&state_snapshot, &meta, &ctx) {
+        AuditBuild::Emit(event) => {
+            let reservation_id = state_snapshot.reservation_id.clone().unwrap_or_default();
+            let event_kind_label = "LLM_CALL_POST";
+            match sidecar.emit_trace_events(*event).await {
+                Ok(ack) => {
+                    info!(
+                        tenant_id = %tenant_id,
+                        stream_id = %stream_id,
+                        reservation_id = %reservation_id,
+                        event_kind = event_kind_label,
+                        ack_event_id = %ack.event_id,
+                        ack_status = ack.status,
+                        "ResponseBody: sidecar EmitTraceEvents acked"
+                    );
+                }
+                Err(e) => {
+                    // Best-effort: review-standards §5.1 requires exactly
+                    // one emit per stream, but a transport / timeout
+                    // failure is logged at WARN. POST_GA_01 dedup will
+                    // catch a future replay (e.g. on canary canary
+                    // retry).
+                    warn!(
+                        tenant_id = %tenant_id,
+                        stream_id = %stream_id,
+                        reservation_id = %reservation_id,
+                        err = %e,
+                        "ResponseBody: sidecar EmitTraceEvents failed; audit emit dropped (best-effort)"
+                    );
+                }
+            }
+        }
+        AuditBuild::Skip { reason } => {
+            debug!(
+                tenant_id = %tenant_id,
+                stream_id = %stream_id,
+                skip_reason = reason,
+                "ResponseBody: SLICE 4 audit emit skipped"
+            );
+        }
+    }
+
+    // Eagerly reclaim the state entry — successful emit or not, we're
+    // done with this stream. Rejected streams that short-circuit at
+    // Request-Body never reach this code path; the 60s TTL backstop
+    // (see state::STREAM_STATE_TTL) reaps those entries on the next
+    // map access.
+    state_map.remove(stream_id).await;
+
+    response_body_continue
+}
+
 /// Stash SLICE 3 outcome on the per-stream state. SLICE 4 reads
 /// these fields during Response-Body audit emit. When the state row
 /// has been evicted under capacity pressure (mutate returns `false`),
@@ -405,6 +576,45 @@ async fn handle_side_effects(
                 path = %path,
                 "RequestHeaders side effect: stashed initial StreamState"
             );
+        }
+        Some(PReq::ResponseHeaders(h)) => {
+            // SLICE 4: stash upstream :status on StreamState so the
+            // Response-Body audit emit can classify 2xx vs 5xx.
+            let Some(id) = stream_id_slot.clone() else {
+                debug!(
+                    tenant_id = %tenant_id,
+                    "ResponseHeaders arrived without stream id; skipping status stash"
+                );
+                return;
+            };
+            let Some(headers) = &h.headers else {
+                debug!(
+                    tenant_id = %tenant_id,
+                    stream_id = %id,
+                    "ResponseHeaders missing HeaderMap; skipping status stash"
+                );
+                return;
+            };
+            let status = derive_status_from_headers(headers);
+            if status > 0 {
+                state_map
+                    .mutate(&id, |s| {
+                        s.http_status = status;
+                    })
+                    .await;
+                debug!(
+                    tenant_id = %tenant_id,
+                    stream_id = %id,
+                    http_status = status,
+                    "ResponseHeaders side effect: stashed :status on StreamState"
+                );
+            } else {
+                warn!(
+                    tenant_id = %tenant_id,
+                    stream_id = %id,
+                    "ResponseHeaders missing :status pseudo-header; audit emit will treat as PROVIDER_ERROR"
+                );
+            }
         }
         Some(PReq::RequestBody(b)) => {
             let id = match stream_id_slot.clone() {

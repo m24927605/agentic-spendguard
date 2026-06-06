@@ -50,13 +50,24 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 use tracing::{debug, warn};
 
 use crate::parse::ParsedRequest;
 use crate::tokenize::ClaimEstimate;
+
+/// SLICE 4 — TTL bound on per-stream state. Per review-standards §4.1.7
+/// (carried over from SLICE 3 R1 M2), entries older than 60s are removed
+/// at access time so a stream that errors before Response-Body lands
+/// cannot pin a map entry indefinitely. Bounded by the 8192 capacity
+/// cap + random-pick eviction as a backstop.
+///
+/// Lazy expiry was chosen over a `tokio::spawn` background sweep to
+/// avoid shutdown-coordination complexity: every state lookup runs the
+/// reaper inline, so the worst-case memory footprint is capacity × TTL.
+pub const STREAM_STATE_TTL: Duration = Duration::from_secs(60);
 
 /// SLICE 3 — coarse-grained record of the sidecar's verdict for this
 /// stream. SLICE 4's audit emit reads this to decide between emitting
@@ -128,6 +139,10 @@ pub struct StreamState {
     /// 4 reads this on stream close (or response-body end) to choose
     /// between LLM_CALL_POST.SUCCESS / RUN_ABORTED / no-op.
     pub decision_outcome: Option<DecisionOutcome>,
+    /// SLICE 4 — upstream HTTP status captured at the Response-Headers
+    /// phase. 0 until Response-Headers is received; consumed by
+    /// [`crate::audit::build_llm_call_post`] at Response-Body time.
+    pub http_status: u16,
     /// Insertion time. SLICE 3's bounded LRU will use this for eviction.
     pub created_at: Instant,
 }
@@ -152,9 +167,33 @@ impl StreamState {
             reservation_id: None,
             decision_id: None,
             decision_outcome: None,
+            http_status: 0,
             created_at: Instant::now(),
         }
     }
+}
+
+/// Pull the `:status` pseudo-header from a HeaderMap. Returns 0 when
+/// absent or unparseable — SLICE 4 audit emit handles status 0 as the
+/// "unknown" / 4xx-equivalent path (treated as PROVIDER_ERROR).
+pub fn derive_status_from_headers(
+    headers: &crate::proto::envoy::config::core::v3::HeaderMap,
+) -> u16 {
+    for h in &headers.headers {
+        if h.key == ":status" {
+            let raw = if !h.value.is_empty() {
+                h.value.clone()
+            } else if let Ok(s) = std::str::from_utf8(&h.raw_value) {
+                s.to_string()
+            } else {
+                String::new()
+            };
+            if let Ok(code) = raw.trim().parse::<u16>() {
+                return code;
+            }
+        }
+    }
+    0
 }
 
 /// Process-shared map of stream id → state.
@@ -190,8 +229,13 @@ impl StreamStateMap {
     /// Insert / replace state for `stream_id`. Returns the previous
     /// state if any (mostly useful for tests; production callers ignore
     /// the return value).
+    ///
+    /// SLICE 4: opportunistically reaps TTL-expired entries before the
+    /// capacity check so a long tail of dead streams does not force a
+    /// cold eviction of a still-live one.
     pub async fn upsert(&self, stream_id: StreamId, state: StreamState) -> Option<StreamState> {
         let mut g = self.inner.lock().await;
+        reap_expired_inplace(&mut g);
         if g.len() >= self.capacity && !g.contains_key(&stream_id) {
             // Capacity reached and we're not replacing an existing key —
             // evict an arbitrary entry. SLICE 3 will replace this with a
@@ -211,8 +255,23 @@ impl StreamStateMap {
 
     /// Look up state by stream id, returning a clone for the caller to
     /// inspect without holding the lock.
+    ///
+    /// SLICE 4: if the entry is older than [`STREAM_STATE_TTL`] (60s) it
+    /// is removed in-place and `None` is returned. Closes SLICE 3 R1 M2
+    /// (review-standards §4.1.7) — no background sweep task needed.
     pub async fn get(&self, stream_id: &str) -> Option<StreamState> {
-        let g = self.inner.lock().await;
+        let mut g = self.inner.lock().await;
+        if let Some(s) = g.get(stream_id) {
+            if s.created_at.elapsed() > STREAM_STATE_TTL {
+                debug!(
+                    stream_id = %stream_id,
+                    age_secs = s.created_at.elapsed().as_secs(),
+                    "StreamStateMap: TTL expired on get(); removing entry"
+                );
+                g.remove(stream_id);
+                return None;
+            }
+        }
         g.get(stream_id).cloned()
     }
 
@@ -232,9 +291,11 @@ impl StreamStateMap {
         }
     }
 
-    /// Remove + return state when the stream closes. SLICE 4 will call
-    /// this from the stream end-of-life path; SLICE 2 doesn't yet.
-    #[allow(dead_code)]
+    /// Remove + return state when the stream closes. SLICE 4 calls this
+    /// from the Response-Body audit-emit success path so the entry is
+    /// reclaimed eagerly; the 60s TTL backstop covers Rejected streams
+    /// that short-circuit at Request-Body (Envoy never invokes
+    /// Response-Body for those, so the TTL is the only reaper).
     pub async fn remove(&self, stream_id: &str) -> Option<StreamState> {
         let mut g = self.inner.lock().await;
         g.remove(stream_id)
@@ -250,6 +311,32 @@ impl StreamStateMap {
     #[allow(dead_code)]
     pub async fn is_empty(&self) -> bool {
         self.len().await == 0
+    }
+}
+
+/// SLICE 4 — drop entries whose `created_at` is older than
+/// [`STREAM_STATE_TTL`]. Called inline by `upsert` so a bounded number
+/// of dead streams cannot starve a live insert. Caller MUST hold the
+/// map lock.
+fn reap_expired_inplace(g: &mut HashMap<StreamId, StreamState>) {
+    let expired: Vec<StreamId> = g
+        .iter()
+        .filter_map(|(k, v)| {
+            if v.created_at.elapsed() > STREAM_STATE_TTL {
+                Some(k.clone())
+            } else {
+                None
+            }
+        })
+        .collect();
+    if !expired.is_empty() {
+        debug!(
+            count = expired.len(),
+            "StreamStateMap: reaping TTL-expired entries inline"
+        );
+        for k in expired {
+            g.remove(&k);
+        }
     }
 }
 
@@ -423,5 +510,132 @@ mod tests {
             }],
         };
         assert_eq!(derive_path_from_headers(&headers), "");
+    }
+
+    // ------------------------------------------------------------------
+    // SLICE 4 — 60s TTL sweep (closes SLICE 3 R1 M2).
+    // ------------------------------------------------------------------
+
+    /// Forge a state whose `created_at` is older than the 60s TTL by
+    /// reaching past Instant's safe-arithmetic constructor. We use
+    /// `Instant::now() - (TTL + 10s)` so the entry is comfortably past
+    /// the threshold even on slow CI hosts.
+    fn aged_state(seconds_old: u64) -> StreamState {
+        let mut s = StreamState::new();
+        s.created_at = Instant::now() - Duration::from_secs(seconds_old);
+        s
+    }
+
+    #[tokio::test]
+    async fn sweep_removes_entries_older_than_60s() {
+        let map = StreamStateMap::default();
+        // Seed an expired entry directly (bypassing upsert reaping so we
+        // can assert on get()'s lazy expiry independently).
+        {
+            let mut g = map.inner.lock().await;
+            g.insert("expired".to_string(), aged_state(120));
+            g.insert("fresh".to_string(), StreamState::new());
+        }
+        // get() must drop the expired entry and return None.
+        assert!(map.get("expired").await.is_none(), "expired entry purged");
+        // The fresh entry survives.
+        assert!(map.get("fresh").await.is_some(), "fresh entry preserved");
+    }
+
+    #[tokio::test]
+    async fn sweep_preserves_entries_under_60s() {
+        let map = StreamStateMap::default();
+        {
+            let mut g = map.inner.lock().await;
+            // 30s old — well under the 60s TTL.
+            g.insert("young".to_string(), aged_state(30));
+        }
+        let got = map
+            .get("young")
+            .await
+            .expect("entry under TTL must be preserved");
+        // Sanity: created_at survived the round-trip.
+        assert!(got.created_at.elapsed() >= Duration::from_secs(30));
+    }
+
+    #[tokio::test]
+    async fn upsert_reaps_expired_before_capacity_eviction() {
+        // Construct a cap-2 map; seed one expired entry and one live.
+        // Inserting a third (new) entry should reap the expired entry
+        // FIRST, leaving the live one untouched.
+        let map = StreamStateMap::with_capacity(2);
+        {
+            let mut g = map.inner.lock().await;
+            g.insert("expired".to_string(), aged_state(120));
+            g.insert("live".to_string(), StreamState::new());
+        }
+        // Map is at capacity (2). Inserting "new" must NOT evict "live"
+        // because upsert reaps "expired" first.
+        map.upsert("new".to_string(), StreamState::new()).await;
+        assert!(
+            map.get("live").await.is_some(),
+            "live entry must survive reap-before-evict"
+        );
+        assert!(
+            map.get("new").await.is_some(),
+            "freshly inserted entry must be present"
+        );
+        assert!(
+            map.get("expired").await.is_none(),
+            "expired entry must be reaped"
+        );
+    }
+
+    #[test]
+    fn derive_status_picks_up_2xx() {
+        let headers = HeaderMap {
+            headers: vec![HeaderValue {
+                key: ":status".into(),
+                value: "200".into(),
+                raw_value: Default::default(),
+            }],
+        };
+        assert_eq!(derive_status_from_headers(&headers), 200);
+    }
+
+    #[test]
+    fn derive_status_picks_up_5xx() {
+        let headers = HeaderMap {
+            headers: vec![HeaderValue {
+                key: ":status".into(),
+                value: "503".into(),
+                raw_value: Default::default(),
+            }],
+        };
+        assert_eq!(derive_status_from_headers(&headers), 503);
+    }
+
+    #[test]
+    fn derive_status_zero_when_missing() {
+        let headers = HeaderMap {
+            headers: vec![HeaderValue {
+                key: "content-type".into(),
+                value: "application/json".into(),
+                raw_value: Default::default(),
+            }],
+        };
+        assert_eq!(derive_status_from_headers(&headers), 0);
+    }
+
+    #[tokio::test]
+    async fn remove_returns_stashed_state() {
+        // SLICE 4 audit-emit success path calls remove() after
+        // EmitTraceEvents acks. Pin the API contract so the audit-emit
+        // wiring can rely on it.
+        let map = StreamStateMap::default();
+        let mut s = StreamState::new();
+        s.path = "/v1/messages".to_string();
+        map.upsert("victim".to_string(), s).await;
+        let removed = map.remove("victim").await.expect("must remove");
+        assert_eq!(removed.path, "/v1/messages");
+        assert!(
+            map.get("victim").await.is_none(),
+            "remove must purge the entry"
+        );
     }
 }

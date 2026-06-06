@@ -37,7 +37,8 @@ use spendguard_envoy_extproc::proto::envoy::service::ext_proc::v3::{
     processing_response::Response as PResp, HttpBody, HttpHeaders, ProcessingRequest,
 };
 use spendguard_envoy_extproc::proto::spendguard::sidecar_adapter::v1::{
-    decision_response::Decision, sidecar_adapter_server::SidecarAdapter, ConsumeBudgetGrantRequest,
+    decision_response::Decision, llm_call_post_payload::Outcome as PostOutcome,
+    sidecar_adapter_server::SidecarAdapter, trace_event, ConsumeBudgetGrantRequest,
     ConsumeBudgetGrantResponse, DecisionRequest, DecisionResponse, DrainSignal,
     DrainSubscribeRequest, HandshakeRequest, HandshakeResponse, IssueBudgetGrantRequest,
     IssueBudgetGrantResponse, PublishOutcomeRequest, PublishOutcomeResponse,
@@ -355,6 +356,9 @@ struct MockSidecar {
     /// Captures the last DecisionRequest the server received so tests
     /// can assert on the wire shape (idempotency.key, claim_estimate, etc).
     last_request: Arc<tokio::sync::Mutex<Option<DecisionRequest>>>,
+    /// SLICE 4 — captures every TraceEvent the server received via
+    /// EmitTraceEvents so tests can assert on the audit-emit wire shape.
+    captured_trace_events: Arc<tokio::sync::Mutex<Vec<TraceEvent>>>,
 }
 
 impl MockSidecar {
@@ -365,6 +369,7 @@ impl MockSidecar {
             reason_codes: Vec::new(),
             run_code_triggered: String::new(),
             last_request: Arc::new(tokio::sync::Mutex::new(None)),
+            captured_trace_events: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
     fn deny_with(reason_codes: Vec<String>, run_code: impl Into<String>) -> Self {
@@ -374,11 +379,17 @@ impl MockSidecar {
             reason_codes,
             run_code_triggered: run_code.into(),
             last_request: Arc::new(tokio::sync::Mutex::new(None)),
+            captured_trace_events: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 
     fn last_request_handle(&self) -> Arc<tokio::sync::Mutex<Option<DecisionRequest>>> {
         self.last_request.clone()
+    }
+
+    /// SLICE 4 — handle to the captured TraceEvent log for assertions.
+    fn captured_trace_events_handle(&self) -> Arc<tokio::sync::Mutex<Vec<TraceEvent>>> {
+        self.captured_trace_events.clone()
     }
 }
 
@@ -435,11 +446,46 @@ impl SidecarAdapter for MockSidecar {
     type EmitTraceEventsStream =
         tokio_stream::wrappers::ReceiverStream<Result<TraceEventAck, tonic::Status>>;
 
+    /// SLICE 4 — capture each TraceEvent into `captured_trace_events`,
+    /// emit one TraceEventAck per event so the SidecarClient drain loop
+    /// terminates. Mirrors the sidecar adapter's real bidi stream:
+    /// one-event-in, one-ack-out, then end-of-stream.
     async fn emit_trace_events(
         &self,
-        _req: tonic::Request<tonic::Streaming<TraceEvent>>,
+        req: tonic::Request<tonic::Streaming<TraceEvent>>,
     ) -> Result<tonic::Response<Self::EmitTraceEventsStream>, tonic::Status> {
-        Err(tonic::Status::unimplemented("MockSidecar: SLICE 4"))
+        let mut inbound = req.into_inner();
+        let captured = self.captured_trace_events.clone();
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<TraceEventAck, tonic::Status>>(4);
+        tokio::spawn(async move {
+            while let Some(event_result) = inbound.next().await {
+                match event_result {
+                    Ok(event) => {
+                        // Stash for test assertions.
+                        {
+                            let mut log = captured.lock().await;
+                            log.push(event.clone());
+                        }
+                        // Emit an ACCEPTED ack.
+                        let ack = TraceEventAck {
+                            event_id: format!("evt-mock-{}", uuid::Uuid::new_v4().simple()),
+                            status: 1, // ACCEPTED
+                            error: None,
+                        };
+                        if tx.send(Ok(ack)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(status) => {
+                        let _ = tx.send(Err(status)).await;
+                        break;
+                    }
+                }
+            }
+        });
+        Ok(tonic::Response::new(
+            tokio_stream::wrappers::ReceiverStream::new(rx),
+        ))
     }
 
     async fn issue_budget_grant(
@@ -882,6 +928,435 @@ async fn slice3_request_body_returns_429_on_deny() {
     );
     assert_eq!(state.decision_id.as_deref(), Some("dec-mock-1"));
     assert_eq!(state.decision_outcome, Some(DecisionOutcome::Deny));
+
+    let _ = extproc_shutdown_tx.send(());
+    let _ = mock_shutdown.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(5), extproc_handle).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), mock_handle).await;
+    let _ = std::fs::remove_file(&uds);
+    let _ = std::fs::remove_dir_all(uds.parent().unwrap());
+}
+
+// =============================================================================
+// SLICE 4 — Response-Body audit emit. Full pipeline:
+//   Request-Headers → Request-Body (ALLOW) → Response-Headers (status) →
+//   Response-Body → EmitTraceEvents(LLM_CALL_POST) → StreamState removed.
+// =============================================================================
+
+/// Helper — assemble the four ProcessingRequest frames for a full
+/// Request/Response cycle through ExtProc. `response_status` is the
+/// upstream status code we simulate on Response-Headers; `response_body`
+/// is the JSON body forwarded from the upstream provider.
+fn build_full_cycle_frames(
+    stream_id: &str,
+    request_body_json: &serde_json::Value,
+    response_status: u16,
+    response_body: &[u8],
+) -> [ProcessingRequest; 4] {
+    let req_headers = ProcessingRequest {
+        request: Some(PReq::RequestHeaders(HttpHeaders {
+            headers: Some(HeaderMap {
+                headers: vec![
+                    HeaderValue {
+                        key: ":path".into(),
+                        value: "/v1/chat/completions".into(),
+                        raw_value: Default::default(),
+                    },
+                    HeaderValue {
+                        key: "x-request-id".into(),
+                        value: stream_id.into(),
+                        raw_value: Default::default(),
+                    },
+                ],
+            }),
+            attributes: Default::default(),
+            end_of_stream: false,
+        })),
+        ..Default::default()
+    };
+    let req_body = ProcessingRequest {
+        request: Some(PReq::RequestBody(HttpBody {
+            body: serde_json::to_vec(request_body_json).unwrap().into(),
+            end_of_stream: true,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    let resp_headers = ProcessingRequest {
+        request: Some(PReq::ResponseHeaders(HttpHeaders {
+            headers: Some(HeaderMap {
+                headers: vec![HeaderValue {
+                    key: ":status".into(),
+                    value: response_status.to_string(),
+                    raw_value: Default::default(),
+                }],
+            }),
+            attributes: Default::default(),
+            end_of_stream: false,
+        })),
+        ..Default::default()
+    };
+    let resp_body = ProcessingRequest {
+        request: Some(PReq::ResponseBody(HttpBody {
+            body: response_body.to_vec().into(),
+            end_of_stream: true,
+            ..Default::default()
+        })),
+        ..Default::default()
+    };
+    [req_headers, req_body, resp_headers, resp_body]
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slice4_full_cycle_2xx_emits_llm_call_post_success() {
+    install_test_extractors_once();
+
+    let uds = mint_uds_path();
+    let mock = MockSidecar::allow_with_reservation("res-slice4-allow");
+    let trace_log = mock.captured_trace_events_handle();
+    let (mock_handle, mock_shutdown) = spawn_mock_sidecar(uds.clone(), mock).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let svc = boot_extproc_with_sidecar(&uds).await;
+    let state_map = svc.state_map().clone();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ExtProc port");
+    let addr = listener.local_addr().expect("local_addr");
+    drop(listener);
+
+    let (extproc_shutdown_tx, extproc_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let extproc_handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(ExternalProcessorServer::new(svc))
+            .serve_with_shutdown(addr, async {
+                let _ = extproc_shutdown_rx.await;
+            })
+            .await
+    });
+
+    let endpoint = format!("http://{addr}");
+    let mut client = None;
+    for _ in 0..20 {
+        if let Ok(c) = ExternalProcessorClient::connect(endpoint.clone()).await {
+            client = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let mut client = client.expect("client connects");
+
+    let stream_id = "test-slice4-success-stream";
+    let request_body = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "What is 2+2?"}]
+    });
+    // OpenAI-shaped response body with usage block — SLICE 4 extracts
+    // prompt_tokens=17 / completion_tokens=42.
+    let response_body = serde_json::to_vec(&serde_json::json!({
+        "id": "chatcmpl-mock",
+        "object": "chat.completion",
+        "model": "gpt-4o-mini",
+        "usage": {"prompt_tokens": 17, "completion_tokens": 42, "total_tokens": 59},
+        "choices": [{"index": 0, "message": {"role": "assistant", "content": "4"}}]
+    }))
+    .unwrap();
+    let frames = build_full_cycle_frames(stream_id, &request_body, 200, &response_body);
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    for frame in frames {
+        tx.send(frame).await.unwrap();
+    }
+    drop(tx);
+
+    let response = client
+        .process(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .expect("server accepts stream");
+    let mut response_stream = response.into_inner();
+
+    // Drain all 4 expected CONTINUE-ish replies.
+    for i in 0..4 {
+        let resp = match response_stream.next().await {
+            Some(Ok(r)) => r,
+            Some(Err(status)) => panic!("frame parse error #{i}: {status:?}"),
+            None => panic!("missing reply #{i}"),
+        };
+        match resp.response.expect("response set") {
+            PResp::RequestHeaders(hr) => {
+                assert_eq!(
+                    hr.response.expect("common").status,
+                    ResponseStatus::Continue as i32
+                );
+            }
+            PResp::RequestBody(br) => {
+                assert_eq!(
+                    br.response.expect("common").status,
+                    ResponseStatus::Continue as i32
+                );
+            }
+            PResp::ResponseHeaders(hr) => {
+                assert_eq!(
+                    hr.response.expect("common").status,
+                    ResponseStatus::Continue as i32
+                );
+            }
+            PResp::ResponseBody(br) => {
+                assert_eq!(
+                    br.response.expect("common").status,
+                    ResponseStatus::Continue as i32
+                );
+            }
+            other => panic!("unexpected reply variant: {other:?}"),
+        }
+    }
+
+    // Give the audit-emit spawn a moment to drain (best-effort: the
+    // Response-Body reply is sent before the emit completes in some
+    // tonic versions; poll for at least one captured event).
+    let mut events: Vec<TraceEvent> = Vec::new();
+    for _ in 0..20 {
+        events = trace_log.lock().await.clone();
+        if !events.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        events.len(),
+        1,
+        "exactly one LLM_CALL_POST must be emitted per review-standards §5.1; got {} events",
+        events.len()
+    );
+    let event = &events[0];
+    assert_eq!(event.kind, trace_event::EventKind::LlmCallPost as i32);
+    assert!(event.session_id.contains(stream_id));
+    let payload = match event.payload.as_ref().expect("payload set") {
+        trace_event::Payload::LlmCallPost(p) => p,
+        _ => panic!("expected LlmCallPost payload"),
+    };
+    assert_eq!(payload.reservation_id, "res-slice4-allow");
+    assert_eq!(payload.outcome, PostOutcome::Success as i32);
+    assert_eq!(payload.actual_input_tokens, Some(17));
+    assert_eq!(payload.actual_output_tokens, Some(42));
+    // Strategy A reservation was input × 2; the provider reported 42 —
+    // commit path sends the actual output count.
+    assert_eq!(payload.estimated_amount_atomic, "42");
+    // audit_code stays empty on the happy path.
+    assert!(event.provider_response_metadata.is_empty());
+
+    // StreamState must be reclaimed after the audit emit.
+    assert!(
+        state_map.get(stream_id).await.is_none(),
+        "StreamState must be removed after successful audit emit"
+    );
+
+    let _ = extproc_shutdown_tx.send(());
+    let _ = mock_shutdown.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(5), extproc_handle).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), mock_handle).await;
+    let _ = std::fs::remove_file(&uds);
+    let _ = std::fs::remove_dir_all(uds.parent().unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slice4_full_cycle_5xx_emits_llm_call_post_run_aborted() {
+    install_test_extractors_once();
+
+    let uds = mint_uds_path();
+    let mock = MockSidecar::allow_with_reservation("res-slice4-5xx");
+    let trace_log = mock.captured_trace_events_handle();
+    let (mock_handle, mock_shutdown) = spawn_mock_sidecar(uds.clone(), mock).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let svc = boot_extproc_with_sidecar(&uds).await;
+    let state_map = svc.state_map().clone();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ExtProc port");
+    let addr = listener.local_addr().expect("local_addr");
+    drop(listener);
+
+    let (extproc_shutdown_tx, extproc_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let extproc_handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(ExternalProcessorServer::new(svc))
+            .serve_with_shutdown(addr, async {
+                let _ = extproc_shutdown_rx.await;
+            })
+            .await
+    });
+
+    let endpoint = format!("http://{addr}");
+    let mut client = None;
+    for _ in 0..20 {
+        if let Ok(c) = ExternalProcessorClient::connect(endpoint.clone()).await {
+            client = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let mut client = client.expect("client connects");
+
+    let stream_id = "test-slice4-5xx-stream";
+    let request_body = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "Hello"}]
+    });
+    // 502-ish error body (no usage block). The audit emit treats this
+    // as RUN_ABORTED + UPSTREAM_5XX.
+    let response_body = serde_json::to_vec(&serde_json::json!({
+        "error": {"message": "Upstream provider unavailable", "type": "server_error"}
+    }))
+    .unwrap();
+    let frames = build_full_cycle_frames(stream_id, &request_body, 502, &response_body);
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    for frame in frames {
+        tx.send(frame).await.unwrap();
+    }
+    drop(tx);
+
+    let response = client
+        .process(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .expect("server accepts stream");
+    let mut response_stream = response.into_inner();
+
+    // Drain all 4 replies — all CONTINUE (audit emit is a side effect).
+    for _ in 0..4 {
+        let resp = response_stream
+            .next()
+            .await
+            .expect("reply")
+            .expect("frame parses");
+        let _ = resp.response.expect("response set");
+    }
+
+    // Poll for the captured LLM_CALL_POST event.
+    let mut events: Vec<TraceEvent> = Vec::new();
+    for _ in 0..20 {
+        events = trace_log.lock().await.clone();
+        if !events.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(events.len(), 1, "exactly one LLM_CALL_POST on 5xx path");
+    let payload = match events[0].payload.as_ref().expect("payload set") {
+        trace_event::Payload::LlmCallPost(p) => p,
+        _ => panic!("expected LlmCallPost payload"),
+    };
+    assert_eq!(payload.reservation_id, "res-slice4-5xx");
+    assert_eq!(
+        payload.outcome,
+        PostOutcome::RunAborted as i32,
+        "5xx upstream must map to LLM_CALL_POST.RUN_ABORTED"
+    );
+    assert_eq!(events[0].provider_response_metadata, "UPSTREAM_5XX");
+    // No estimated commit amount on the RUN_ABORTED path — sidecar
+    // takes the release path.
+    assert!(payload.estimated_amount_atomic.is_empty());
+
+    // State still removed after audit emit on the 5xx path too.
+    assert!(state_map.get(stream_id).await.is_none());
+
+    let _ = extproc_shutdown_tx.send(());
+    let _ = mock_shutdown.send(());
+    let _ = tokio::time::timeout(Duration::from_secs(5), extproc_handle).await;
+    let _ = tokio::time::timeout(Duration::from_secs(5), mock_handle).await;
+    let _ = std::fs::remove_file(&uds);
+    let _ = std::fs::remove_dir_all(uds.parent().unwrap());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn slice4_deny_path_does_not_emit_response_body_audit() {
+    // STOP at Request-Body returns ImmediateResponse 429; Envoy never
+    // invokes Response-Body, so SLICE 4 emits NOTHING from this side
+    // (the sidecar audited at decision time). Verify by feeding the
+    // full cycle including Response-Headers + Response-Body frames
+    // (which a buggy client might still send) and asserting the audit
+    // log stays empty.
+    install_test_extractors_once();
+
+    let uds = mint_uds_path();
+    let mock = MockSidecar::deny_with(
+        vec!["BUDGET_EXHAUSTED".to_string()],
+        "RUN_BUDGET_PROJECTION_EXCEEDED",
+    );
+    let trace_log = mock.captured_trace_events_handle();
+    let (mock_handle, mock_shutdown) = spawn_mock_sidecar(uds.clone(), mock).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let svc = boot_extproc_with_sidecar(&uds).await;
+    let _state_map = svc.state_map().clone();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind ExtProc port");
+    let addr = listener.local_addr().expect("local_addr");
+    drop(listener);
+
+    let (extproc_shutdown_tx, extproc_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let extproc_handle = tokio::spawn(async move {
+        Server::builder()
+            .add_service(ExternalProcessorServer::new(svc))
+            .serve_with_shutdown(addr, async {
+                let _ = extproc_shutdown_rx.await;
+            })
+            .await
+    });
+
+    let endpoint = format!("http://{addr}");
+    let mut client = None;
+    for _ in 0..20 {
+        if let Ok(c) = ExternalProcessorClient::connect(endpoint.clone()).await {
+            client = Some(c);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    let mut client = client.expect("client connects");
+
+    let stream_id = "test-slice4-deny-stream";
+    let request_body = serde_json::json!({
+        "model": "gpt-4o-mini",
+        "messages": [{"role": "user", "content": "Hello"}]
+    });
+    let response_body = b"{\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}";
+    let frames = build_full_cycle_frames(stream_id, &request_body, 200, response_body);
+
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    for frame in frames {
+        tx.send(frame).await.unwrap();
+    }
+    drop(tx);
+
+    let response = client
+        .process(tokio_stream::wrappers::ReceiverStream::new(rx))
+        .await
+        .expect("server accepts stream");
+    let mut response_stream = response.into_inner();
+
+    // Drain the replies. Note: production Envoy would stop after the
+    // 429 ImmediateResponse, but our mock client doesn't — it keeps
+    // feeding frames. The server still ACKs each with CONTINUE-ish
+    // (the deny short-circuit only short-circuits the Request-Body
+    // ACK; subsequent Response-* frames return CONTINUE).
+    while let Some(Ok(_resp)) = response_stream.next().await {}
+
+    // Audit log MUST stay empty — Deny outcome skips emit per
+    // review-standards §5.1 ("no double commit"; sidecar already
+    // audited at Request-Body STOP).
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let events = trace_log.lock().await.clone();
+    assert!(
+        events.is_empty(),
+        "Deny path must NOT emit LLM_CALL_POST from ExtProc; got {} events",
+        events.len()
+    );
 
     let _ = extproc_shutdown_tx.send(());
     let _ = mock_shutdown.send(());

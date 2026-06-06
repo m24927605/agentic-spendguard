@@ -11,6 +11,14 @@
 //! The generated Rust modules are mounted here under the same Rust path
 //! as the proto package names so call sites read the same as the source
 //! protos.
+//!
+//! Allowlist below suppresses lints that fire on proto-generated code
+//! we don't own (`large_enum_variant`, `doc_lazy_continuation`,
+//! `doc_overindented_list_items`, etc.) — same posture as
+//! `services/egress_proxy/src/proto.rs` + `services/sidecar/src/`.
+#![allow(clippy::large_enum_variant)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::doc_overindented_list_items)]
 
 pub mod envoy {
     pub mod config {
