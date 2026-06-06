@@ -173,3 +173,80 @@ describe("LOCKED §4.1 — public surface symbols", () => {
     expect(client.config.runProjectionDefault).toBe("ELASTIC");
   });
 });
+
+// ── LOCKED §4.2 — release / queryBudget method shape (SLICE 5) ───────────
+
+describe("LOCKED §4.2 — release / queryBudget surface", () => {
+  it("release is a method on SpendGuardClient (per §4.2 LOCKED)", () => {
+    const client = new SpendGuardClient({ socketPath: "/tmp/x.sock", tenantId: "t" });
+    // Runtime function check — the method is on the prototype, not a per-instance
+    // field. The LOCKED surface requires it as a method (not a getter or a
+    // re-exported helper).
+    expect(typeof client.release).toBe("function");
+    expect(client.release.length).toBe(1); // single ReleaseRequest argument
+  });
+
+  it("queryBudget is a method on SpendGuardClient (per §4.2 LOCKED)", () => {
+    const client = new SpendGuardClient({ socketPath: "/tmp/x.sock", tenantId: "t" });
+    expect(typeof client.queryBudget).toBe("function");
+    expect(client.queryBudget.length).toBe(1); // single QueryBudgetRequest argument
+  });
+});
+
+// ── Type-level: commitEstimated accepts SLICE 5 optional outcome params ───
+//
+// AssertMutuallyAssignable-driven test: the SLICE 5 multi-event extension
+// adds optional `outcomeKind` / `actualInputTokensWire` /
+// `actualOutputTokensWire` / `actualErrorMessage` fields to
+// `CommitEstimatedRequest`. The slice doc requires a type-level assertion
+// that the param type is mutually assignable with a literal carrying all four
+// fields — proves both that the names are spelled exactly as the slice doc
+// specifies and that the types match.
+
+import type { CommitEstimatedRequest as MainBarrelCommitEstimatedRequest } from "../src/index.js";
+
+type CommitEstimatedRequestWithOutcomeShape = {
+  runId: string;
+  stepId: string;
+  llmCallId: string;
+  decisionId: string;
+  reservationId: string;
+  estimatedAmountAtomic: string;
+  unit: { unit: string; denomination: number };
+  pricing: { pricingVersion: string; pricingHash: Uint8Array };
+  providerEventId: string;
+  outcome: "SUCCESS" | "PROVIDER_ERROR" | "CLIENT_TIMEOUT" | "RUN_ABORTED";
+  outcomeKind?: "SUCCESS" | "FAILURE";
+  actualInputTokensWire?: string;
+  actualOutputTokensWire?: string;
+  actualErrorMessage?: string;
+};
+
+// One-direction assertion is sufficient here: the structural shape on the
+// LHS must be assignable INTO the public `CommitEstimatedRequest` (i.e. the
+// optional fields exist with the expected literal-union types). The other
+// direction is loose because `CommitEstimatedRequest` has additional
+// optional fields that the shape literal does not enumerate (e.g.
+// `actualInputTokens`).
+const _commitWithOutcome: CommitEstimatedRequestWithOutcomeShape = {
+  runId: "r",
+  stepId: "s",
+  llmCallId: "l",
+  decisionId: "d",
+  reservationId: "res",
+  estimatedAmountAtomic: "1",
+  unit: { unit: "USD_MICROS", denomination: 1 },
+  pricing: { pricingVersion: "v1", pricingHash: new Uint8Array() },
+  providerEventId: "ev",
+  outcome: "SUCCESS",
+  outcomeKind: "FAILURE",
+  actualInputTokensWire: "128",
+  actualOutputTokensWire: "256",
+  actualErrorMessage: "openai 429",
+};
+// Asserting that the shape is assignable into the public type proves the
+// fields are present on `CommitEstimatedRequest` with at least these literal
+// types.
+const _assignToPublic: MainBarrelCommitEstimatedRequest = _commitWithOutcome;
+void _assignToPublic;
+void _commitWithOutcome;

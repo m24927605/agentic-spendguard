@@ -1,20 +1,28 @@
-// SpendGuard SDK — `SpendGuardClient` skeleton (SLICE 3).
+// SpendGuard SDK — `SpendGuardClient` (SLICE 3 + SLICE 4 + SLICE 5).
 //
-// This slice ships the lifecycle surface and the UDS transport wiring; the
-// business RPCs (`reserve` / `commitEstimated` / `release` / `queryBudget`)
-// land in SLICE 4-5. The class shell here is the contract D04 / D06 / D08 /
-// D29 build against — the LOCKED §4.2 surface — so SLICE 4-5 author only the
-// RPC bodies, not the class shape.
+// SLICE 3 shipped the lifecycle surface and the UDS transport wiring; SLICE 4
+// wired handshake / reserve / commitEstimated (single-event LLM_CALL_POST);
+// SLICE 5 wires release / queryBudget (§9.4 placeholder), the multi-event
+// commitEstimated extension, and the central gRPC Status → typed-error
+// mapper that all four wired RPCs reuse.
+//
+// The class shell here is the contract D04 / D06 / D08 / D29 build against —
+// the LOCKED §4.2 surface — so future slices author only the remaining bodies,
+// not the class shape.
 //
 // Spec refs:
 //   - design.md §4.2 (LOCKED public surface)
+//   - design.md §4.4 (CommitEstimated / Release / QueryBudget shapes)
 //   - design.md §4.5 (error hierarchy)
 //   - design.md §5.1 / §5.2 (env var precedence + validation)
 //   - design.md §6.3 (`grpc.default_authority=localhost` for UDS)
+//   - design.md §9.4 (queryBudget deferral rationale)
 //   - implementation.md §4 (skeleton)
-//   - slices/COV_S05_03_d05_client_skeleton.md (this slice)
+//   - slices/COV_S05_03_d05_client_skeleton.md (SLICE 3)
+//   - slices/COV_S05_04_d05_handshake_reserve_commit.md (SLICE 4)
+//   - slices/COV_S05_05_d05_release_query.md (SLICE 5)
 //
-// What this slice DOES wire:
+// What this file DOES wire (SLICE 3 + SLICE 4 + SLICE 5):
 //   - Constructor that merges explicit options with env fallback + defaults.
 //   - `connect()` → opens a `GrpcTransport` against `unix:<socketPath>` with
 //     the `grpc.default_authority=localhost` channel option (the Python SDK's
@@ -22,18 +30,26 @@
 //   - `close()` graceful + idempotent.
 //   - `[Symbol.asyncDispose]` for `await using client = new ...`.
 //   - `tenantId` / `sessionId` / `handshakeOutcome` getters.
-//   - `SpendGuardClient.fromEnv()` factory that defaults `socketPath` to
-//     `/var/run/spendguard/adapter.sock` per the slice doc.
+//   - `SpendGuardClient.fromEnv()` factory.
+//   - `handshake()` + `reserve()` + `commitEstimated()` real RPC bodies.
+//   - `release()` real RPC body (ASP Draft-01 §4 one-to-one).
+//   - `queryBudget()` §9.4 placeholder (throws with tracking-issue URL).
+//   - Multi-event `commitEstimated()` extension: optional `outcomeKind` +
+//     actuals fields drive a second outcome-flavored event on the same bidi
+//     stream. Single-event SLICE 4 path stays the unchanged default.
+//   - Central `mapGrpcStatusToError()` consumed by all wired RPCs; preserves
+//     the original `RpcError` in `cause`. Dispatches the FAILED_PRECONDITION
+//     cluster on the `x-spendguard-reason-code` trailer metadata field
+//     (IDEMPOTENCY_CONFLICT / BUDGET_EXCEEDED / BUNDLE_HOT_RELOADED).
 //
-// What this slice does NOT wire (anti-scope from the slice doc):
-//   - `handshake()` body — SLICE 4.
-//   - `reserve()` / `commitEstimated()` / `release()` / `queryBudget()` /
-//     `confirmPublishOutcome()` / `resumeAfterApproval()` /
-//     `safeConfirmApplyFailed()` / `emitLlmCallPost()` business bodies.
-//     They are defined but throw `SpendGuardError("...wired in SLICE 4-5")`.
-//   - `ids.ts` / `promptHash.ts` / `pricing.ts` (SLICE 6).
-//   - `withRunPlan` (SLICE 7).
-//   - OTel / retry / idempotency cache (SLICE 8).
+// What this file does NOT wire (anti-scope, deferred to future slices):
+//   - `confirmPublishOutcome()` / `resumeAfterApproval()` /
+//     `safeConfirmApplyFailed()` / `emitLlmCallPost()` business bodies —
+//     deferred to SLICE 7+. They are defined but throw with the
+//     `SLICE_7_NOT_WIRED` marker.
+//   - `ids.ts` / `promptHash.ts` / `pricing.ts` — SLICE 6.
+//   - `withRunPlan` — SLICE 7.
+//   - OTel / retry / idempotency cache — SLICE 8.
 
 import { type ChannelCredentials, credentials as grpcCredentials } from "@grpc/grpc-js";
 import type { status as GrpcStatus, ServiceError } from "@grpc/grpc-js";
@@ -46,6 +62,8 @@ import type {
   DecisionResponse as ProtoDecisionResponse,
   HandshakeRequest as ProtoHandshakeRequest,
   HandshakeResponse as ProtoHandshakeResponse,
+  ReleaseReservationRequest as ProtoReleaseReservationRequest,
+  ReleaseReservationResponse as ProtoReleaseReservationResponse,
   TraceEvent as ProtoTraceEvent,
   TraceEventAck as ProtoTraceEventAck,
 } from "./_proto/spendguard/sidecar_adapter/v1/adapter.js";
@@ -70,11 +88,13 @@ import {
 } from "./config.js";
 import { DEFAULT_SOCKET_PATH, EnvParseError, resolveEnvConfig } from "./env.js";
 import {
+  ApprovalBundleHotReloadedError,
   ApprovalRequired,
   DecisionDenied,
   DecisionSkipped,
   DecisionStopped,
   HandshakeError,
+  MutationApplyFailed,
   SidecarUnavailable,
   SpendGuardConfigError,
   SpendGuardConnectionError,
@@ -212,6 +232,49 @@ export interface CommitEstimatedRequest {
   traceparent?: string;
   tracestate?: string;
   providerResponseMetadata?: string;
+  // ── SLICE 5 multi-event extension ───────────────────────────────────────
+  //
+  // When `outcomeKind` is present, `commitEstimated()` emits TWO events on
+  // the same EmitTraceEvents bidi stream:
+  //   1. the original LLM_CALL_POST event (single-event SLICE 4 shape), and
+  //   2. a second LLM_CALL_POST-kind event carrying the outcome semantics —
+  //      `outcome` field = SUCCESS / PROVIDER_ERROR depending on `outcomeKind`,
+  //      with `actualInputTokens` / `actualOutputTokens` re-asserted and
+  //      `actualErrorMessage` threaded onto the wire's
+  //      `providerResponseMetadata` JSON envelope.
+  // When absent, behavior is unchanged from SLICE 4 — a single event is sent.
+  //
+  // **Declared deviation #1**: the slice doc references a `LLM_CALL_OUTCOME`
+  // proto event kind and a `LlmCallOutcomeKind` enum that do not yet exist
+  // in `sidecar_adapter/v1/adapter.proto`. To honor the slice scope without
+  // a proto bump (which would require a coordinated sidecar release), the
+  // second event reuses `LLM_CALL_POST` and projects FAILURE onto the
+  // existing `LlmCallPostPayload_Outcome.PROVIDER_ERROR`. When the sidecar
+  // ships dedicated `LLM_CALL_OUTCOME` / `LlmCallOutcomeKind` types, this
+  // path is the migration target — adapters reading the events MUST treat
+  // a (post, post) pair with second event's `provider_event_id` carrying
+  // the actuals as semantically equivalent to the future
+  // (LLM_CALL_POST, LLM_CALL_OUTCOME) pair.
+  //
+  // Fields are *additive*; they never change the meaning of existing fields.
+  outcomeKind?: "SUCCESS" | "FAILURE";
+  /**
+   * `int64`-as-string, mirroring SLICE 4 `actualInputTokens` semantics for
+   * the multi-event path. When `outcomeKind` is set and this is provided,
+   * the outcome event carries the value verbatim; when omitted on the
+   * outcome event, the SDK reuses `actualInputTokens` from this request
+   * (avoids a double-spec for callers that already populate the SLICE 4
+   * field).
+   */
+  actualInputTokensWire?: string;
+  /** `int64`-as-string companion of `actualOutputTokens` (see above). */
+  actualOutputTokensWire?: string;
+  /**
+   * Free-form error message threaded onto the outcome event's
+   * `providerResponseMetadata` JSON envelope as `{"error_message": "..."}`.
+   * Only consulted when `outcomeKind === "FAILURE"`; ignored on SUCCESS.
+   */
+  actualErrorMessage?: string;
 }
 
 export interface ReleaseRequest {
@@ -270,10 +333,29 @@ export interface ResumeAfterApprovalRequest {
 /** Alias for `CommitEstimatedRequest` exposed for the lower-level entry point. */
 export type EmitLlmCallPostRequest = CommitEstimatedRequest;
 
-// ── SLICE 5 placeholder marker ────────────────────────────────────────────
+// ── SLICE 7 placeholder marker ────────────────────────────────────────────
+//
+// The lower-level methods `confirmPublishOutcome` / `resumeAfterApproval` /
+// `safeConfirmApplyFailed` / `emitLlmCallPost` ship as named stubs that throw
+// with this marker until the SLICE 7 (lower-level RPC surface) lands. SLICE 5
+// finishes the hot-path RPCs (`release` / `queryBudget` placeholder + the
+// multi-event `commitEstimated` extension) so the SLICE 5 marker constant
+// is gone.
 
-const SLICE_5_NOT_WIRED =
-  "not yet wired — SLICE 5 (see docs/slices/COV_S05_05_d05_release_query.md)";
+const SLICE_7_NOT_WIRED =
+  "not yet wired — SLICE 7 (see docs/slices/COV_S05_05_d05_release_query.md anti-scope)";
+
+// ── SLICE 5 §9.4 placeholder marker ────────────────────────────────────────
+//
+// `queryBudget` is a public-surface method (LOCKED §4.2) but the sidecar wire
+// is intentionally deferred — design.md §9.4 (locked decision #4) declares
+// the TS surface precedes the Python surface AND the sidecar implementation.
+// SLICE 5 wires the placeholder shape so adapters can program against the
+// method; the throw message carries the tracking-issue URL so production
+// callers see a clear "feature not yet available" instead of a stray gRPC
+// NOT_FOUND.
+const QUERY_BUDGET_NOT_YET_WIRED =
+  "query_budget not yet wired in sidecar; tracked at https://github.com/m24927605/agentic-spendguard/issues/TBD-queryBudget";
 
 // ── SpendGuardClient ──────────────────────────────────────────────────────
 
@@ -623,7 +705,7 @@ export class SpendGuardClient implements AsyncDisposable {
         timeout: this.cfg.handshakeTimeoutMs,
       }).response;
     } catch (err) {
-      throw classifyRpcError(err, "handshake");
+      throw mapGrpcStatusToError(err, { rpc: "handshake" });
     }
     if (resp.protocolVersion !== this.cfg.protocolVersion) {
       throw new HandshakeError(
@@ -699,7 +781,7 @@ export class SpendGuardClient implements AsyncDisposable {
         timeout: this.cfg.decisionTimeoutMs,
       }).response;
     } catch (err) {
-      throw classifyRpcError(err, "reserve");
+      throw mapGrpcStatusToError(err, { rpc: "reserve" });
     }
     if (resp.error && resp.error.code !== 0) {
       throw new SpendGuardError(
@@ -755,7 +837,21 @@ export class SpendGuardClient implements AsyncDisposable {
    * Mutually exclusive with the deferred provider-report path: this method
    * always sends `estimated_amount_atomic`; the `provider_reported_amount_atomic`
    * wire field stays empty. Adapters needing the provider-report path use the
-   * lower-level `emitLlmCallPost` (SLICE 5+).
+   * lower-level `emitLlmCallPost` (SLICE 7+).
+   *
+   * **SLICE 5 multi-event extension.** When `req.outcomeKind` is set, the
+   * client emits TWO events on the same bidi stream — the original
+   * LLM_CALL_POST event first, then a second LLM_CALL_POST-kind event whose
+   * `outcome` field reflects `outcomeKind` (SUCCESS → SUCCESS,
+   * FAILURE → PROVIDER_ERROR) and whose `providerResponseMetadata` carries a
+   * `{"error_message": ...}` envelope when `actualErrorMessage` is supplied.
+   * Both events are acked individually; if either ack is non-ACCEPTED the
+   * method raises `SpendGuardError`. See the JSDoc on
+   * `CommitEstimatedRequest.outcomeKind` for the LLM_CALL_OUTCOME proto-kind
+   * deviation note (Declared Deviation #1 in SLICE 5).
+   *
+   * When `req.outcomeKind` is ABSENT, behaviour is identical to SLICE 4 —
+   * a single event is sent, a single ack is drained.
    *
    * @throws SidecarUnavailable on UNAVAILABLE / DEADLINE_EXCEEDED / CANCELLED.
    * @throws SpendGuardError on rejected ack or any other gRPC failure surface.
@@ -774,23 +870,28 @@ export class SpendGuardClient implements AsyncDisposable {
     if (adapter === null) {
       throw new SidecarUnavailable("transport not established for commitEstimated");
     }
-    const event = this.buildLlmCallPostEvent(req);
+    const events: ProtoTraceEvent[] = [this.buildLlmCallPostEvent(req)];
+    if (req.outcomeKind !== undefined) {
+      events.push(this.buildLlmCallOutcomeEvent(req));
+    }
     let call: ReturnType<SidecarAdapterClient["emitTraceEvents"]>;
     try {
       call = adapter.emitTraceEvents({
         timeout: this.cfg.traceTimeoutMs,
       });
-      await call.requests.send(event);
+      for (const event of events) {
+        await call.requests.send(event);
+      }
       await call.requests.complete();
     } catch (err) {
-      throw classifyRpcError(err, "commitEstimated");
+      throw mapGrpcStatusToError(err, { rpc: "commitEstimated" });
     }
 
     // Drain the ack stream — sidecar emits exactly one ack per inbound event.
     try {
-      let acked = false;
+      let acked = 0;
       for await (const ack of call.responses) {
-        acked = true;
+        acked += 1;
         if (ack.status !== TraceEventAck_Status.ACCEPTED) {
           throw new SpendGuardError(buildAckRejectMessage(ack));
         }
@@ -799,79 +900,140 @@ export class SpendGuardClient implements AsyncDisposable {
       // (e.g. trailers-only cancellation) doesn't silently disappear.
       await call.status;
       await call.trailers;
-      if (!acked) {
+      if (acked === 0) {
         throw new SpendGuardError("EmitTraceEvents closed without an ack from sidecar");
+      }
+      if (acked < events.length) {
+        throw new SpendGuardError(
+          `EmitTraceEvents acked ${acked} of ${events.length} events before closing`,
+        );
       }
     } catch (err) {
       if (err instanceof SpendGuardError) throw err;
-      throw classifyRpcError(err, "commitEstimated");
+      throw mapGrpcStatusToError(err, { rpc: "commitEstimated" });
     }
   }
 
   /**
    * Explicit release of a held reservation. Matches Agent Spend Protocol
-   * Draft-01 §4. SLICE 5 wires the body.
+   * Draft-01 §4 one-to-one (the proto wire's
+   * `ReleaseReservationRequest` carries the canonical ASP fields at tags 1-3
+   * and SpendGuard extensions at tag 100+).
    *
-   * @throws SpendGuardError until SLICE 5 wires the body.
+   * Behaviour:
+   *   - Disabled-mode short-circuit returns a synthetic
+   *     `makeDisabledReleaseOutcome(req)` — no UDS contact.
+   *   - Pre-handshake call throws `HandshakeError` via the `sessionId` getter
+   *     gate (the request envelope requires the negotiated session id).
+   *   - Wire envelope built by `buildReleaseRequest(req, sessionId)`.
+   *   - Response mapped by `mapReleaseResponse(res, decisionIdHint)`.
+   *   - Errors mapped centrally through `mapGrpcStatusToError`, with the
+   *     `release`-specific NOT_FOUND override (reservation lookup misses
+   *     surface as a plain `SpendGuardError("reservation not found")` so
+   *     adapters can distinguish "no such reservation" from the rich
+   *     FAILED_PRECONDITION cluster).
+   *
+   * @throws HandshakeError before `handshake()` completes.
+   * @throws SidecarUnavailable on UNAVAILABLE / DEADLINE_EXCEEDED / CANCELLED.
+   * @throws MutationApplyFailed on FAILED_PRECONDITION + IDEMPOTENCY_CONFLICT
+   *   or BUDGET_EXCEEDED — or an unknown FAILED_PRECONDITION reason (the
+   *   conservative default; never bare `SpendGuardError` for this cluster).
+   * @throws ApprovalBundleHotReloadedError on FAILED_PRECONDITION +
+   *   BUNDLE_HOT_RELOADED.
+   * @throws SpendGuardError on NOT_FOUND ("reservation not found") + any
+   *   other unmapped gRPC failure.
    */
   async release(req: ReleaseRequest): Promise<ReleaseOutcome> {
-    void req;
-    throw new SpendGuardError(`release() ${SLICE_5_NOT_WIRED}`);
+    if (this.cfg.disabled) return makeDisabledReleaseOutcome(req);
+    if (this.handshakeResult === null) {
+      throw new HandshakeError(
+        "release() requires handshake(); call await client.handshake() before release()",
+      );
+    }
+    if (this.adapterClient === null) {
+      await this.connect();
+    }
+    const adapter = this.adapterClient;
+    if (adapter === null) {
+      throw new SidecarUnavailable("transport not established for release");
+    }
+    const grpcReq = buildReleaseRequest(req, this.handshakeResult.sessionId);
+    let resp: ProtoReleaseReservationResponse;
+    try {
+      resp = await adapter.releaseReservation(grpcReq, {
+        timeout: this.cfg.publishTimeoutMs,
+      }).response;
+    } catch (err) {
+      throw mapGrpcStatusToError(err, { rpc: "release", releaseNotFoundAsPlain: true });
+    }
+    return mapReleaseResponse(resp);
   }
 
   /**
    * Read-only budget snapshot. Locked decision #4 of design.md §9: in v0.1.x
-   * the substrate ships the method signature but the sidecar wire is a
-   * follow-up. SLICE 5 wires the request envelope; the sidecar RPC itself
-   * may still be a placeholder.
+   * the substrate ships the method signature but the sidecar wire is NOT yet
+   * implemented. SLICE 5 wires the §9.4 placeholder body — adapters call this
+   * method, catch the explicit `SpendGuardError`, and surface a clear "feature
+   * not yet available" upstream rather than a stray NOT_FOUND from a missing
+   * RPC route.
    *
-   * @throws SpendGuardError until SLICE 5 wires the body.
+   * Disabled-mode short-circuit returns a synthetic
+   * `makeDisabledQueryBudgetResult(req)` so unit tests can program against
+   * the method without a sidecar.
+   *
+   * @throws HandshakeError before `handshake()` completes.
+   * @throws SpendGuardError carrying the tracking-issue URL otherwise.
    */
   async queryBudget(req: QueryBudgetRequest): Promise<QueryBudgetResult> {
-    void req;
-    throw new SpendGuardError(`queryBudget() ${SLICE_5_NOT_WIRED}`);
+    if (this.cfg.disabled) return makeDisabledQueryBudgetResult(req);
+    if (this.handshakeResult === null) {
+      throw new HandshakeError(
+        "queryBudget() requires handshake(); call await client.handshake() before queryBudget()",
+      );
+    }
+    throw new SpendGuardError(QUERY_BUDGET_NOT_YET_WIRED);
   }
 
-  // ── Lower-level surface (release / resume / confirm land in SLICE 5) ────
+  // ── Lower-level surface (deferred to SLICE 7+) ──────────────────────────
 
   /**
-   * Confirm `publish_effect` outcome. SLICE 5 wires body.
-   * @throws SpendGuardError until SLICE 5 wires the body.
+   * Confirm `publish_effect` outcome. SLICE 7 wires body.
+   * @throws SpendGuardError until SLICE 7 wires the body.
    */
   async confirmPublishOutcome(req: PublishOutcomeRequest): Promise<string> {
     void req;
-    throw new SpendGuardError(`confirmPublishOutcome() ${SLICE_5_NOT_WIRED}`);
+    throw new SpendGuardError(`confirmPublishOutcome() ${SLICE_7_NOT_WIRED}`);
   }
 
   /**
    * Resume after a human approver acted on a `REQUIRE_APPROVAL` decision.
-   * SLICE 5 wires the body; references this method from `ApprovalRequired.resume`.
-   * @throws SpendGuardError until SLICE 5 wires the body.
+   * SLICE 7 wires the body; references this method from `ApprovalRequired.resume`.
+   * @throws SpendGuardError until SLICE 7 wires the body.
    */
   async resumeAfterApproval(req: ResumeAfterApprovalRequest): Promise<DecisionOutcome> {
     void req;
-    throw new SpendGuardError(`resumeAfterApproval() ${SLICE_5_NOT_WIRED}`);
+    throw new SpendGuardError(`resumeAfterApproval() ${SLICE_7_NOT_WIRED}`);
   }
 
   /**
    * Safe-ack the `APPLY_FAILED` publish outcome — swallows transport errors
-   * so the caller's original exception is never shadowed. SLICE 5 wires body.
-   * @throws SpendGuardError until SLICE 5 wires the body.
+   * so the caller's original exception is never shadowed. SLICE 7 wires body.
+   * @throws SpendGuardError until SLICE 7 wires the body.
    */
   async safeConfirmApplyFailed(req: ApplyFailedRequest): Promise<void> {
     void req;
-    throw new SpendGuardError(`safeConfirmApplyFailed() ${SLICE_5_NOT_WIRED}`);
+    throw new SpendGuardError(`safeConfirmApplyFailed() ${SLICE_7_NOT_WIRED}`);
   }
 
   /**
    * Lower-level entry point that `commitEstimated()` wraps. Provided so
-   * adapters that need the raw trace-event surface have access. SLICE 5
+   * adapters that need the raw trace-event surface have access. SLICE 7
    * wires body (the provider-report path).
-   * @throws SpendGuardError until SLICE 5 wires the body.
+   * @throws SpendGuardError until SLICE 7 wires the body.
    */
   async emitLlmCallPost(req: EmitLlmCallPostRequest): Promise<void> {
     void req;
-    throw new SpendGuardError(`emitLlmCallPost() ${SLICE_5_NOT_WIRED}`);
+    throw new SpendGuardError(`emitLlmCallPost() ${SLICE_7_NOT_WIRED}`);
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
@@ -1063,6 +1225,107 @@ export class SpendGuardClient implements AsyncDisposable {
         },
       },
       providerResponseMetadata: req.providerResponseMetadata ?? "",
+    };
+  }
+
+  /**
+   * Build the SLICE 5 multi-event "outcome" companion event for
+   * `commitEstimated()` when `req.outcomeKind` is set.
+   *
+   * The event reuses `TraceEvent_EventKind.LLM_CALL_POST` (per Declared
+   * Deviation #1 — `LLM_CALL_OUTCOME` does not exist as a proto enum value
+   * in `sidecar_adapter/v1/adapter.proto` yet).
+   *
+   * TODO(GH-issue-TBD): proto bump for `LLM_CALL_OUTCOME` +
+   * sidecar `x-spendguard-reason-code` trailer extension. Both deferred to
+   * the cross-component slice that touches `proto/` and
+   * `services/sidecar/`. Track at
+   * https://github.com/m24927605/agentic-spendguard/issues/TBD-proto-bump-llm-call-outcome
+   * (R2 follow-up; not in scope for D05 SLICE 5).
+   *
+   * The `outcome` field on the inner `LlmCallPostPayload` carries the
+   * semantic:
+   *
+   *   - `outcomeKind === "SUCCESS"` → `LlmCallPostPayload_Outcome.SUCCESS`
+   *   - `outcomeKind === "FAILURE"` → `LlmCallPostPayload_Outcome.PROVIDER_ERROR`
+   *
+   * Actuals (`actualInputTokens` / `actualOutputTokens`) prefer the SLICE 5
+   * `*Wire` fields when supplied (int64-as-string form), falling back to
+   * the SLICE 4 numeric `actualInputTokens` / `actualOutputTokens` shape so
+   * adapters do not need to double-specify. `actualErrorMessage` is threaded
+   * onto `TraceEvent.providerResponseMetadata` as a JSON envelope
+   * `{"error_message": "..."}` only when `outcomeKind === "FAILURE"`.
+   *
+   * `estimatedAmountAtomic` is intentionally set to an empty string on the
+   * outcome event — the first event already booked the commit; the outcome
+   * event only carries observation, not commit semantics. The sidecar will
+   * surface a rejection ack if it requires the field (`mock-sidecar`'s tests
+   * lock this in).
+   *
+   * @private
+   */
+  private buildLlmCallOutcomeEvent(req: CommitEstimatedRequest): ProtoTraceEvent {
+    if (this.handshakeResult === null) {
+      throw new HandshakeError("internal: buildLlmCallOutcomeEvent without handshake");
+    }
+    if (req.outcomeKind === undefined) {
+      throw new SpendGuardError(
+        "internal: buildLlmCallOutcomeEvent called without outcomeKind set",
+      );
+    }
+    const ts = wallClockToTimestamp(Date.now());
+    const inputWire =
+      req.actualInputTokensWire ??
+      (req.actualInputTokens !== undefined ? String(req.actualInputTokens) : undefined);
+    const outputWire =
+      req.actualOutputTokensWire ??
+      (req.actualOutputTokens !== undefined ? String(req.actualOutputTokens) : undefined);
+    const outcomeEnum: LlmCallPostPayload_Outcome =
+      req.outcomeKind === "SUCCESS"
+        ? LlmCallPostPayload_Outcome.SUCCESS
+        : LlmCallPostPayload_Outcome.PROVIDER_ERROR;
+    const errorMessageEnvelope =
+      req.outcomeKind === "FAILURE" && req.actualErrorMessage !== undefined
+        ? JSON.stringify({ error_message: req.actualErrorMessage })
+        : (req.providerResponseMetadata ?? "");
+    return {
+      sessionId: this.handshakeResult.sessionId,
+      trace: buildTraceContext(req.traceparent ?? "", req.tracestate ?? ""),
+      ids: {
+        runId: req.runId,
+        stepId: req.stepId,
+        llmCallId: req.llmCallId,
+        toolCallId: "",
+        decisionId: req.decisionId,
+        snapshotId: "",
+      },
+      kind: TraceEvent_EventKind.LLM_CALL_POST,
+      eventTime: ts,
+      payload: {
+        oneofKind: "llmCallPost",
+        llmCallPost: {
+          reservationId: req.reservationId,
+          providerReportedAmountAtomic: "",
+          unit: mapUnitRef(req.unit),
+          pricing: {
+            pricingVersion: req.pricing.pricingVersion,
+            priceSnapshotHash: req.pricing.pricingHash,
+            fxRateVersion: "",
+            unitConversionVersion: "",
+          },
+          providerEventId: req.providerEventId,
+          outcome: outcomeEnum,
+          // The outcome companion event carries observation; the booking
+          // amount stayed on the first event. Empty string is wire-equivalent
+          // to "absent" for the proto3 string field.
+          estimatedAmountAtomic: "",
+          ...(inputWire !== undefined ? { actualInputTokens: inputWire } : {}),
+          ...(outputWire !== undefined ? { actualOutputTokens: outputWire } : {}),
+          ...(req.deltaBRatio !== undefined ? { deltaBRatio: req.deltaBRatio } : {}),
+          ...(req.deltaCRatio !== undefined ? { deltaCRatio: req.deltaCRatio } : {}),
+        },
+      },
+      providerResponseMetadata: errorMessageEnvelope,
     };
   }
 }
@@ -1428,34 +1691,196 @@ function mapDecisionResponse(resp: ProtoDecisionResponse, tenantId: string): Dec
   });
 }
 
-// ── RPC error classification ─────────────────────────────────────────────
+// ── Central gRPC Status → typed-error mapper (SLICE 5) ────────────────────
 
 /**
- * Translate an `RpcError` from protobuf-ts (which wraps the @grpc/grpc-js
- * status) into a typed SpendGuard exception. Mirrors Python
- * `_classify_rpc_error` at client.py:929:
+ * Trailer-metadata header name carrying the SpendGuard reason code for the
+ * FAILED_PRECONDITION cluster.
  *
- *   - UNAVAILABLE / DEADLINE_EXCEEDED / CANCELLED → `SidecarUnavailable`
- *   - everything else → `SpendGuardError`
+ * **R2 layering note (D05 SLICE 5)**: the production sidecar
+ * (`services/sidecar/src/domain/error.rs:107-134` `DomainError::to_status`)
+ * currently emits FAILED_PRECONDITION with the discriminator baked into the
+ * Status message string (e.g. `"idempotency conflict: ..."`) and does NOT
+ * set the `x-spendguard-reason-code` trailer. The mock sidecar
+ * (`tests/_support/mockSidecar.ts:426`) DOES set the trailer because tests
+ * were written before the production gap was reviewed.
  *
- * Non-RpcError throws are wrapped as `SpendGuardError` to preserve the
- * untyped surface for higher layers (SLICE 8 adds retry routing).
+ * Mapper dispatch order (see `readReasonCode`):
+ *   1. PRIMARY: parse the `RpcError.message` string (production sidecar
+ *      path — `DomainError::Display` prefixes are the lockable contract).
+ *   2. SECONDARY: read the `x-spendguard-reason-code` trailer (mock
+ *      compatibility + forward-compat hook).
+ *
+ * TODO(cross-component-slice): when the sidecar sets
+ * `x-spendguard-reason-code` trailer alongside `e.to_status()`, the
+ * message-string parse becomes secondary. Track at the cross-component
+ * sidecar trailer extension slice (NOT in scope for D05 SLICE 5).
  */
-function classifyRpcError(err: unknown, op: string): SpendGuardError {
-  if (err instanceof RpcError) {
-    const code = err.code; // already a string like "UNAVAILABLE"
-    if (code === "UNAVAILABLE" || code === "DEADLINE_EXCEEDED" || code === "CANCELLED") {
-      return new SidecarUnavailable(
-        `${op} failed: code=${code} detail=${JSON.stringify(err.message)}`,
-        { cause: err },
+const REASON_CODE_HEADER = "x-spendguard-reason-code";
+
+/**
+ * Lockable contract: `DomainError::Display` prefix → canonical reason code.
+ *
+ * Sourced from `services/sidecar/src/domain/error.rs` `#[error(...)]`
+ * attributes (lines 26-45) — these strings ARE the public Status-message
+ * format the sidecar emits via `Status::failed_precondition(self.to_string())`.
+ * Match is case-insensitive prefix on the bare `RpcError.message`
+ * (anchored at the start; the `: <detail>` tail varies per call).
+ *
+ * Forward-compat: the bracket-tagged `[BUNDLE_HOT_RELOADED]` form comes from
+ * `services/sidecar/src/server/adapter_uds.rs:1379` (resume path) and is
+ * included so dispatch already works when a future cross-component slice
+ * unifies the release/resume Status surface.
+ *
+ * Ordered ARRAY (not a map): longest / most-specific prefixes FIRST so a
+ * shorter prefix doesn't accidentally swallow a longer one.
+ */
+const REASON_CODE_PREFIXES: ReadonlyArray<readonly [string, string]> = [
+  // Forward-compat: bracket-tagged emission from the resume path.
+  ["[bundle_hot_reloaded]", "BUNDLE_HOT_RELOADED"],
+  // Defensive: matches the test fixture wording ("bundle hot-reloaded ...")
+  // and any future un-bracketed sidecar emission without coupling to exact
+  // detail text.
+  ["bundle hot-reload", "BUNDLE_HOT_RELOADED"],
+  // DomainError::IdempotencyConflict (error.rs:44-45).
+  ["idempotency conflict", "IDEMPOTENCY_CONFLICT"],
+  // FAILED_PRECONDITION cluster mapped to BUDGET_EXCEEDED — the five
+  // variants from error.rs (lines 26-39) that to_status() routes to
+  // Status::failed_precondition (excluding IdempotencyConflict above).
+  ["reservation state conflict", "BUDGET_EXCEEDED"],
+  ["reservation ttl expired", "BUDGET_EXCEEDED"],
+  ["pricing freeze mismatch", "BUDGET_EXCEEDED"],
+  ["overrun reservation", "BUDGET_EXCEEDED"],
+  ["multi-reservation commit deferred", "BUDGET_EXCEEDED"],
+];
+
+/**
+ * Context passed to `mapGrpcStatusToError`. The `rpc` field is folded into
+ * the typed-error message; `releaseNotFoundAsPlain` opt-in flips NOT_FOUND
+ * into a plain `SpendGuardError("reservation not found")` for the
+ * `release()` call path (the only RPC that needs the override — `reserve` /
+ * `handshake` / `commitEstimated` never legitimately surface NOT_FOUND).
+ */
+export interface MapGrpcStatusContext {
+  rpc: string;
+  releaseNotFoundAsPlain?: boolean;
+}
+
+/**
+ * Translate a gRPC `Status` (surfaced as a protobuf-ts `RpcError`) into a
+ * typed SpendGuard exception. Replaces the SLICE 3 `classifyRpcError` as the
+ * single dispatcher for handshake / reserve / commitEstimated / release.
+ *
+ * Dispatch table:
+ *   - `UNAVAILABLE` / `DEADLINE_EXCEEDED` / `CANCELLED` → `SidecarUnavailable`
+ *     (mirrors Python `_classify_rpc_error`; SLICE 8 wires retry on this
+ *     cluster).
+ *   - `FAILED_PRECONDITION` — dispatch on `REASON_CODE_HEADER` metadata:
+ *       * `IDEMPOTENCY_CONFLICT` | `BUDGET_EXCEEDED` → `MutationApplyFailed`
+ *       * `BUNDLE_HOT_RELOADED` → `ApprovalBundleHotReloadedError`
+ *       * unknown / missing reason → `MutationApplyFailed` (default; never
+ *         a bare `SpendGuardError` for this cluster, so adapters can route
+ *         on `instanceof MutationApplyFailed` without surprise).
+ *   - `NOT_FOUND` — usually `SpendGuardError`; when
+ *     `ctx.releaseNotFoundAsPlain` is true, returns the exact-message
+ *     `SpendGuardError("reservation not found")` so callers can `===`-match.
+ *   - `ABORTED` → `SpendGuardError` (Python parity).
+ *   - any other gRPC status → `SpendGuardError`.
+ *   - any other thrown value (non-RpcError) → `SpendGuardError` with the
+ *     value preserved on `cause`.
+ *
+ * Every returned error preserves the original `RpcError` (or thrown value)
+ * on `cause` so adapters debugging in dev tools see the underlying gRPC
+ * status + trailer metadata.
+ */
+function mapGrpcStatusToError(err: unknown, ctx: MapGrpcStatusContext): SpendGuardError {
+  if (err instanceof SpendGuardError) return err;
+  if (!(err instanceof RpcError)) {
+    return new SpendGuardError(`${ctx.rpc} failed: ${errorMessage(err)}`, { cause: err });
+  }
+  const code = err.code;
+  const cause = err;
+  if (code === "UNAVAILABLE" || code === "DEADLINE_EXCEEDED" || code === "CANCELLED") {
+    return new SidecarUnavailable(
+      `${ctx.rpc} failed: code=${code} detail=${JSON.stringify(err.message)}`,
+      { cause },
+    );
+  }
+  if (code === "FAILED_PRECONDITION") {
+    const reason = readReasonCode(err);
+    if (reason === "BUNDLE_HOT_RELOADED") {
+      return new ApprovalBundleHotReloadedError(
+        `${ctx.rpc} failed: code=FAILED_PRECONDITION reason=BUNDLE_HOT_RELOADED detail=${JSON.stringify(err.message)}`,
+        { originalBundleHash: "", currentBundleHash: "" },
+        { cause },
       );
     }
-    return new SpendGuardError(`${op} failed: code=${code} detail=${JSON.stringify(err.message)}`, {
-      cause: err,
-    });
+    // IDEMPOTENCY_CONFLICT / BUDGET_EXCEEDED / unknown → MutationApplyFailed
+    // (the conservative default per review-standards §5: callers see a
+    // typed exception, never bare SpendGuardError, for FAILED_PRECONDITION).
+    const reasonSuffix = reason !== undefined ? ` reason=${reason}` : "";
+    return new MutationApplyFailed(
+      `${ctx.rpc} failed: code=FAILED_PRECONDITION${reasonSuffix} detail=${JSON.stringify(err.message)}`,
+      { cause },
+    );
   }
-  if (err instanceof SpendGuardError) return err;
-  return new SpendGuardError(`${op} failed: ${errorMessage(err)}`, { cause: err });
+  if (code === "NOT_FOUND") {
+    if (ctx.releaseNotFoundAsPlain === true) {
+      return new SpendGuardError("reservation not found", { cause });
+    }
+    return new SpendGuardError(
+      `${ctx.rpc} failed: code=NOT_FOUND detail=${JSON.stringify(err.message)}`,
+      { cause },
+    );
+  }
+  if (code === "ABORTED") {
+    return new SpendGuardError(
+      `${ctx.rpc} failed: code=ABORTED detail=${JSON.stringify(err.message)}`,
+      { cause },
+    );
+  }
+  return new SpendGuardError(
+    `${ctx.rpc} failed: code=${code} detail=${JSON.stringify(err.message)}`,
+    { cause },
+  );
+}
+
+/**
+ * Resolve the canonical SpendGuard reason code for a FAILED_PRECONDITION
+ * `RpcError`. Two layered discriminators (see R2 layering note on
+ * `REASON_CODE_HEADER`):
+ *
+ *   1. PRIMARY: `RpcError.message` string parse against
+ *      `REASON_CODE_PREFIXES` (production sidecar — `DomainError::Display`).
+ *   2. SECONDARY: `x-spendguard-reason-code` trailer (mock harness +
+ *      forward-compat for the cross-component slice that will extend the
+ *      sidecar to set the trailer alongside `e.to_status()`).
+ *
+ * Returns `undefined` when neither discriminator yields a match — the
+ * caller falls back to the conservative `MutationApplyFailed` default per
+ * `review-standards §5`.
+ *
+ * `RpcMetadata` values are `string | string[]`; when an array is supplied
+ * we take the first entry (gRPC-js coalesces duplicate headers).
+ */
+function readReasonCode(err: RpcError): string | undefined {
+  // PRIMARY: message-string prefix dispatch. Production sidecar's
+  // DomainError::Display strings (see REASON_CODE_PREFIXES). Case-fold the
+  // candidate; the prefix table is already lowercase.
+  const msg = err.message;
+  if (typeof msg === "string" && msg.length > 0) {
+    const lower = msg.toLowerCase();
+    for (const [prefix, code] of REASON_CODE_PREFIXES) {
+      if (lower.startsWith(prefix)) return code;
+    }
+  }
+  // SECONDARY: trailer metadata. Mock sidecar tests + future
+  // cross-component slice when the sidecar starts setting the trailer.
+  const raw = err.meta?.[REASON_CODE_HEADER];
+  if (raw === undefined) return undefined;
+  if (typeof raw === "string") return raw;
+  if (Array.isArray(raw) && raw.length > 0 && typeof raw[0] === "string") return raw[0];
+  return undefined;
 }
 
 /** Build a human-readable rejection message for a non-ACCEPTED ack. */
@@ -1521,6 +1946,81 @@ function makeDisabledDecision(req: ReserveRequest): DecisionOutcome {
     ttlExpiresAtSeconds: 0,
     reasonCodes: Object.freeze(["disabled_mode"]),
     matchedRuleIds: Object.freeze([]),
+  };
+}
+
+/**
+ * Disabled-mode `release()` outcome — a synthetic, signature-empty
+ * acknowledgement that records the caller's `reservationId` in the released
+ * list. **For tests only** — production code that relies on this has
+ * silently lost the audit chain entry for the release.
+ */
+function makeDisabledReleaseOutcome(req: ReleaseRequest): ReleaseOutcome {
+  return {
+    auditEventSignature: new Uint8Array(),
+    ledgerTransactionId: "",
+    releasedReservationIds: Object.freeze([req.reservationId]),
+  };
+}
+
+/**
+ * Disabled-mode `queryBudget()` result — a synthetic zero snapshot at the
+ * caller's `asOfSeconds` (or `0` when unset). The unit is forced to
+ * `USD_MICROS` with denomination 1 because the disabled mode has no handshake
+ * context to consult. **For tests only** — production code that relies on
+ * this is reading a fake budget.
+ */
+function makeDisabledQueryBudgetResult(req: QueryBudgetRequest): QueryBudgetResult {
+  return {
+    availableAtomic: "0",
+    reservedAtomic: "0",
+    committedAtomic: "0",
+    unit: { unit: "USD_MICROS", denomination: 1 },
+    asOfSeconds: req.asOfSeconds ?? 0,
+  };
+}
+
+// ── Release wire mapping (SLICE 5) ────────────────────────────────────────
+
+/**
+ * Translate the public `ReleaseRequest` to the snake_case-on-wire
+ * `ReleaseReservationRequest` proto. ASP Draft-01 §4 fields land at proto
+ * tags 1-3; SpendGuard extensions (sessionId / tenantId / workloadInstanceId)
+ * land at tags 100+.
+ *
+ * `sessionId` is the handshake-cached value (callers gated above pass it in
+ * verbatim). Empty strings on `tenantId` / `workloadInstanceId` mean
+ * "sidecar defaults apply" per the proto's documented semantic.
+ */
+function buildReleaseRequest(
+  req: ReleaseRequest,
+  sessionId: string,
+): ProtoReleaseReservationRequest {
+  return {
+    reservationId: req.reservationId,
+    idempotencyKey: req.idempotencyKey,
+    reasonCodes: [...(req.reasonCodes ?? [])],
+    tenantId: req.tenantId ?? "",
+    workloadInstanceId: req.workloadInstanceId ?? "",
+    sessionId,
+  };
+}
+
+/**
+ * Translate the wire `ReleaseReservationResponse` to the public-surface
+ * `ReleaseOutcome`. The wire returns:
+ *   - `auditEventSignature` — detached Ed25519 signature over the emitted
+ *     `audit.release` CloudEvent (may be empty on idempotent replay miss).
+ *   - `ledgerTransactionId` — sidecar's release-side transaction id.
+ *   - `releasedReservationIds` — single-element array in the current
+ *     single-reservation-per-call model; preserved as readonly to match the
+ *     `ReleaseOutcome` type.
+ */
+function mapReleaseResponse(resp: ProtoReleaseReservationResponse): ReleaseOutcome {
+  return {
+    auditEventSignature: resp.auditEventSignature ?? new Uint8Array(),
+    ledgerTransactionId: resp.ledgerTransactionId,
+    releasedReservationIds: Object.freeze([...resp.releasedReservationIds]),
   };
 }
 

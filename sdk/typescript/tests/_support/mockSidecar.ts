@@ -1,9 +1,14 @@
-// Mock sidecar UDS server for SLICE 3 lifecycle tests + SLICE 4 RPC bodies.
+// Mock sidecar UDS server for SLICE 3 lifecycle tests + SLICE 4 / SLICE 5
+// RPC bodies.
 //
-// SLICE 3 only verified the connect → close lifecycle. SLICE 4 extends the
+// SLICE 3 only verified the connect → close lifecycle. SLICE 4 extended the
 // mock with REAL `SidecarAdapter` service handlers for handshake /
 // requestDecision / emitTraceEvents so the new RPC bodies can be exercised
-// against a deterministic in-memory sidecar.
+// against a deterministic in-memory sidecar. SLICE 5 adds:
+//   - `ReleaseReservation` handler (default success + parameterizable failing
+//     handler with configurable gRPC Status code + trailer reason-code).
+//   - Multi-event emitTraceEvents capture: tests can observe both
+//     LLM_CALL_POST AND a second-event payload on the same bidi stream.
 //
 // SLICE 9 ships the full cross-language fixture mock per `tests.md` §4.2; this
 // file remains the lighter-weight per-slice harness.
@@ -14,7 +19,7 @@ import { join } from "node:path";
 
 import {
   status as GrpcStatus,
-  type Metadata,
+  Metadata,
   Server,
   ServerCredentials,
   type ServerDuplexStream,
@@ -29,6 +34,8 @@ import {
   HandshakeRequest,
   HandshakeRequest_CapabilityLevel,
   HandshakeResponse,
+  ReleaseReservationRequest,
+  ReleaseReservationResponse,
   TraceEvent,
   TraceEventAck,
   TraceEventAck_Status,
@@ -49,6 +56,60 @@ export interface MockSidecarHooks {
   onRequestDecision?: (req: DecisionRequest) => DecisionResponse;
   /** Custom emitTraceEvents handler. Default acks every event as ACCEPTED. */
   onEmitTraceEvents?: (event: TraceEvent) => TraceEventAck;
+  /**
+   * Custom releaseReservation handler (SLICE 5). Default returns a
+   * deterministic success with `release_id` derived from
+   * `mock-release-${decisionCount}`. Throw a `ReleaseGrpcFailure` to surface
+   * a gRPC Status (NOT_FOUND / FAILED_PRECONDITION / UNAVAILABLE) with an
+   * optional trailer reason-code; the harness packs the reason into the
+   * standard `x-spendguard-reason-code` trailer metadata field.
+   */
+  onReleaseReservation?: (req: ReleaseReservationRequest) => ReleaseReservationResponse;
+}
+
+/**
+ * Helper to throw a gRPC Status from a mock RPC handler. The handler runtime
+ * (Handshake / RequestDecision / ReleaseReservation) catches this, packs the
+ * reason-code (when supplied AND `suppressTrailer` is not set) onto the
+ * trailer `x-spendguard-reason-code` metadata, and forwards the status to
+ * grpc-js. Tests use this for the typed-error-mapper coverage.
+ *
+ * **D05 SLICE 5 R2**: the production sidecar
+ * (`services/sidecar/src/domain/error.rs::DomainError::to_status`) does NOT
+ * set the trailer — it bakes the reason-code prefix into the Status message
+ * string. Tests that need to exercise the production code path pass
+ * `suppressTrailer: true` so the trailer is omitted and the SDK mapper
+ * falls through to message-string parse.
+ *
+ * Usage:
+ *
+ *     // Mock-style: trailer set (legacy test convention).
+ *     throw new ReleaseGrpcFailure(GrpcStatus.FAILED_PRECONDITION,
+ *       "bundle hot-reloaded", "BUNDLE_HOT_RELOADED");
+ *
+ *     // Production-shape: message-only, no trailer.
+ *     throw new ReleaseGrpcFailure(GrpcStatus.FAILED_PRECONDITION,
+ *       "idempotency conflict: replay body diverged",
+ *       undefined, { suppressTrailer: true });
+ */
+export class ReleaseGrpcFailure extends Error {
+  readonly code: number;
+  readonly reason?: string;
+  readonly suppressTrailer: boolean;
+  constructor(
+    code: number,
+    message: string,
+    reason?: string,
+    opts: { suppressTrailer?: boolean } = {},
+  ) {
+    super(message);
+    this.name = "ReleaseGrpcFailure";
+    this.code = code;
+    if (reason !== undefined) {
+      this.reason = reason;
+    }
+    this.suppressTrailer = opts.suppressTrailer === true;
+  }
 }
 
 /** Default handshake response — CONTINUE-ready session with capability_required=L3. */
@@ -122,6 +183,33 @@ export function makeDegradeResponse(args: { decisionId?: string } = {}): Decisio
   };
 }
 
+/** Default release response — success with synthetic signature + tx id. */
+const DEFAULT_RELEASE_RESPONSE: ReleaseReservationResponse = {
+  auditEventSignature: new Uint8Array([0x73, 0x69, 0x67]),
+  ledgerTransactionId: "mock-release-tx-1",
+  releasedReservationIds: ["mock-reservation-1"],
+};
+
+/**
+ * Convenience: build a ReleaseReservationResponse with custom released ids.
+ * Test helper for the release() success-path assertions.
+ */
+export function makeReleaseResponse(
+  args: {
+    auditEventSignature?: Uint8Array;
+    ledgerTransactionId?: string;
+    releasedReservationIds?: string[];
+  } = {},
+): ReleaseReservationResponse {
+  return {
+    auditEventSignature: args.auditEventSignature ?? DEFAULT_RELEASE_RESPONSE.auditEventSignature,
+    ledgerTransactionId: args.ledgerTransactionId ?? DEFAULT_RELEASE_RESPONSE.ledgerTransactionId,
+    releasedReservationIds: args.releasedReservationIds ?? [
+      ...DEFAULT_RELEASE_RESPONSE.releasedReservationIds,
+    ],
+  };
+}
+
 /**
  * Mock UDS sidecar with full SidecarAdapter service.
  *
@@ -150,6 +238,15 @@ export class MockSidecar {
   private handshakeCount = 0;
   /** Tracks how many emitTraceEvents events have been served. */
   private traceEventCount = 0;
+  /** Tracks how many releaseReservation calls have been served (SLICE 5). */
+  private releaseCount = 0;
+  /**
+   * Captured trace events from the most recent EmitTraceEvents call. Tests
+   * assert against this to verify multi-event ordering (LLM_CALL_POST followed
+   * by outcome event). Each new EmitTraceEvents call resets the array (so a
+   * test only ever observes one call's-worth of events).
+   */
+  private capturedTraceEvents: TraceEvent[] = [];
 
   private constructor(socketPath: string, socketDir: string, hooks: MockSidecarHooks) {
     this.socketPath = socketPath;
@@ -184,6 +281,20 @@ export class MockSidecar {
   /** How many emitTraceEvents events have been served since start. */
   get traceEventsServed(): number {
     return this.traceEventCount;
+  }
+
+  /** How many releaseReservation calls have been served since start (SLICE 5). */
+  get releasesServed(): number {
+    return this.releaseCount;
+  }
+
+  /**
+   * Snapshot of the events captured during the most recent EmitTraceEvents
+   * call. Each entry is a deep-cloned `TraceEvent` so the caller can inspect
+   * payload fields without racing the next call.
+   */
+  get lastEmittedTraceEvents(): readonly TraceEvent[] {
+    return this.capturedTraceEvents;
   }
 
   /**
@@ -223,6 +334,17 @@ export class MockSidecar {
           requestSerialize: (msg: TraceEvent) => Buffer.from(TraceEvent.toBinary(msg)),
           responseSerialize: (msg: TraceEventAck) => Buffer.from(TraceEventAck.toBinary(msg)),
           responseDeserialize: (buf: Buffer) => TraceEventAck.fromBinary(buf),
+        },
+        ReleaseReservation: {
+          path: `/${typeName}/ReleaseReservation`,
+          requestStream: false,
+          responseStream: false,
+          requestDeserialize: (buf: Buffer) => ReleaseReservationRequest.fromBinary(buf),
+          requestSerialize: (msg: ReleaseReservationRequest) =>
+            Buffer.from(ReleaseReservationRequest.toBinary(msg)),
+          responseSerialize: (msg: ReleaseReservationResponse) =>
+            Buffer.from(ReleaseReservationResponse.toBinary(msg)),
+          responseDeserialize: (buf: Buffer) => ReleaseReservationResponse.fromBinary(buf),
         },
       },
       {
@@ -265,9 +387,13 @@ export class MockSidecar {
           }
         },
         EmitTraceEvents: (call: ServerDuplexStream<TraceEvent, TraceEventAck>) => {
+          // SLICE 5: reset capture array at the start of each new call so the
+          // multi-event capture only ever shows one call's-worth of events.
+          this.capturedTraceEvents = [];
           const handler = this.hooks.onEmitTraceEvents;
           call.on("data", (event: TraceEvent) => {
             this.traceEventCount += 1;
+            this.capturedTraceEvents.push(event);
             try {
               const ack = handler
                 ? handler(event)
@@ -296,6 +422,44 @@ export class MockSidecar {
             // — the call is already torn down. Test cleanup uses
             // `close()` to force-shutdown.
           });
+        },
+        ReleaseReservation: (
+          call: ServerUnaryCall<ReleaseReservationRequest, ReleaseReservationResponse>,
+          callback: sendUnaryData<ReleaseReservationResponse>,
+        ) => {
+          this.releaseCount += 1;
+          try {
+            const handler = this.hooks.onReleaseReservation;
+            const response = handler
+              ? handler(call.request)
+              : {
+                  ...DEFAULT_RELEASE_RESPONSE,
+                  releasedReservationIds: [call.request.reservationId],
+                };
+            callback(null, response);
+          } catch (err) {
+            if (err instanceof ReleaseGrpcFailure) {
+              const trailers = new Metadata();
+              if (err.reason !== undefined && !err.suppressTrailer) {
+                trailers.set("x-spendguard-reason-code", err.reason);
+              }
+              callback({
+                code: err.code,
+                details: err.message,
+                metadata: trailers,
+                name: err.name,
+                message: err.message,
+              });
+              return;
+            }
+            callback({
+              code: GrpcStatus.UNKNOWN,
+              details: err instanceof Error ? err.message : String(err),
+              metadata: emptyMetadata(),
+              name: "Error",
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
         },
       },
     );
@@ -358,8 +522,5 @@ export class MockSidecar {
 
 /** Build an empty `Metadata` object for synthetic error responses. */
 function emptyMetadata(): Metadata {
-  // Lazy require avoids a top-level import that would tug the grpc-js Metadata
-  // class into every test file that imports MockSidecar.
-  const grpc = require("@grpc/grpc-js") as { Metadata: new () => Metadata };
-  return new grpc.Metadata();
+  return new Metadata();
 }

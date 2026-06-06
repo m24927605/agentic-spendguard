@@ -61,8 +61,16 @@ export class SpendGuardConfigError extends SpendGuardError {
  * Adapters typically map `SidecarUnavailable` → 503 upstream (the `statusCode`
  * is the conventional HTTP analog; the SDK itself does not speak HTTP).
  *
- * SLICE 8 wires retry classification for `UNAVAILABLE` / `DEADLINE_EXCEEDED`
- * / `CANCELLED` into this class via `_classify_rpc_error` parity.
+ * Raised by `mapGrpcStatusToError` (SLICE 5) for:
+ *   - gRPC `UNAVAILABLE` — channel torn down / sidecar gone.
+ *   - gRPC `DEADLINE_EXCEEDED` — request timed out before reply.
+ *   - gRPC `CANCELLED` — server (or client) cancelled mid-flight.
+ *
+ * The original `RpcError` is preserved in `cause` so adapters can dig into
+ * the underlying gRPC trailer metadata if they need to.
+ *
+ * SLICE 8 wires retry classification for the same cluster into this class
+ * via `_classify_rpc_error` parity.
  */
 export class SidecarUnavailable extends SpendGuardError {
   override name = "SidecarUnavailable";
@@ -267,6 +275,12 @@ export class ApprovalLapsedError extends DecisionDenied {
  * currently-installed bundle differs. The adapter MUST refuse to resume —
  * re-evaluation may produce a different decision that the operator did not
  * see when they approved.
+ *
+ * Raised by `mapGrpcStatusToError` (SLICE 5) when a release / reserve trip
+ * surfaces gRPC `FAILED_PRECONDITION` with the reason-code metadata field
+ * set to `BUNDLE_HOT_RELOADED`. When the bundle hashes are not carried in
+ * trailer metadata the constructor receives empty strings; adapters should
+ * treat that as "hashes unavailable" and re-fetch from the handshake cache.
  */
 export class ApprovalBundleHotReloadedError extends SpendGuardError {
   override name = "ApprovalBundleHotReloadedError";
@@ -287,6 +301,14 @@ export class ApprovalBundleHotReloadedError extends SpendGuardError {
  * Adapter's `publish_effect` step failed to apply the mutation patch. The
  * adapter should call `client.safeConfirmApplyFailed(...)` to anchor the
  * rollback in the audit chain.
+ *
+ * Raised by `mapGrpcStatusToError` (SLICE 5) when a release / reserve trip
+ * surfaces gRPC `FAILED_PRECONDITION` with the reason-code metadata field set
+ * to `IDEMPOTENCY_CONFLICT` (replay of a release with a different request
+ * body), `BUDGET_EXCEEDED` (reservation can no longer be released against the
+ * current ledger state), or any unknown FAILED_PRECONDITION reason — the
+ * latter is the conservative default so adapters never see a bare
+ * `SpendGuardError` for FAILED_PRECONDITION trips.
  */
 export class MutationApplyFailed extends SpendGuardError {
   override name = "MutationApplyFailed";

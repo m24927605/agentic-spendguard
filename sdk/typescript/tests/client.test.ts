@@ -154,9 +154,9 @@ describe("SpendGuardClient — constructor validation", () => {
   });
 });
 
-// ── C-04: disabled short-circuit + SLICE 5 placeholders ───────────────────
+// ── C-04: disabled short-circuit + SLICE 7 lower-level placeholders ───────
 
-describe("SpendGuardClient — SLICE 5 placeholders (release / queryBudget / lower-level)", () => {
+describe("SpendGuardClient — SLICE 7 lower-level placeholders", () => {
   const cfg = { socketPath: "/tmp/x.sock", tenantId: "t" } as const;
 
   it("C-04 (partial): disabled:true sets config flag", () => {
@@ -164,21 +164,21 @@ describe("SpendGuardClient — SLICE 5 placeholders (release / queryBudget / low
     expect(client.config.disabled).toBe(true);
   });
 
-  it("release() throws SpendGuardError with SLICE 5 marker", async () => {
+  it("release() before handshake() throws HandshakeError (SLICE 5 wired the body)", async () => {
     const client = new SpendGuardClient(cfg);
     await expect(
       client.release({ reservationId: "r-1", idempotencyKey: "sg-abc" }),
-    ).rejects.toThrowError(/SLICE 5/);
+    ).rejects.toThrowError(/handshake/);
   });
 
-  it("queryBudget() throws SpendGuardError with SLICE 5 marker", async () => {
+  it("queryBudget() before handshake() throws HandshakeError (SLICE 5 wired the gate)", async () => {
     const client = new SpendGuardClient(cfg);
     await expect(client.queryBudget({ scopeId: "tenant/test/global" })).rejects.toThrowError(
-      /SLICE 5/,
+      /handshake/,
     );
   });
 
-  it("confirmPublishOutcome() throws SpendGuardError with SLICE 5 marker", async () => {
+  it("confirmPublishOutcome() throws SpendGuardError with SLICE 7 marker", async () => {
     const client = new SpendGuardClient(cfg);
     await expect(
       client.confirmPublishOutcome({
@@ -186,7 +186,7 @@ describe("SpendGuardClient — SLICE 5 placeholders (release / queryBudget / low
         effectHash: new Uint8Array([0x01]),
         outcome: "APPLIED",
       }),
-    ).rejects.toThrowError(/SLICE 5/);
+    ).rejects.toThrowError(/SLICE 7/);
   });
 });
 
@@ -496,11 +496,10 @@ describe("SpendGuardClient.fromEnv()", () => {
   });
 });
 
-// ── Spy that resumeAfterApproval is delegated correctly when SLICE 4 wires
-//    the body. SLICE 3 only verifies the throw shape.
+// ── Lower-level surface stubs (deferred to SLICE 7) ───────────────────────
 
-describe("SpendGuardClient — placeholder delegation (SLICE 5)", () => {
-  it("resumeAfterApproval throws SpendGuardError with SLICE 5 marker", async () => {
+describe("SpendGuardClient — placeholder delegation (SLICE 7 deferrals)", () => {
+  it("resumeAfterApproval throws SpendGuardError with SLICE 7 marker", async () => {
     const client = new SpendGuardClient({
       socketPath: "/tmp/x.sock",
       tenantId: "t",
@@ -514,7 +513,7 @@ describe("SpendGuardClient — placeholder delegation (SLICE 5)", () => {
     ).rejects.toThrowError(/resumeAfterApproval\(\)/);
   });
 
-  it("safeConfirmApplyFailed throws (SLICE 5 will wire swallow semantics)", async () => {
+  it("safeConfirmApplyFailed throws (SLICE 7 will wire swallow semantics)", async () => {
     const client = new SpendGuardClient({
       socketPath: "/tmp/x.sock",
       tenantId: "t",
@@ -528,7 +527,7 @@ describe("SpendGuardClient — placeholder delegation (SLICE 5)", () => {
     ).rejects.toThrowError(/safeConfirmApplyFailed\(\)/);
   });
 
-  it("emitLlmCallPost throws SpendGuardError with SLICE 5 marker (provider-report path)", async () => {
+  it("emitLlmCallPost throws SpendGuardError with SLICE 7 marker (provider-report path)", async () => {
     const client = new SpendGuardClient({
       socketPath: "/tmp/x.sock",
       tenantId: "t",
