@@ -40,8 +40,8 @@ export default defineConfig({
     pricing: "src/pricing.ts",
     "pricing/demo": "src/pricing/demo.ts",
     promptHash: "src/promptHash.ts",
-    // SLICE 7+ entries (populated when the source files land):
-    // runPlan: "src/runPlan.ts",
+    // SLICE 7 (COV_S05_07) entry — `withRunPlan` + `currentRunPlan` substrate.
+    runPlan: "src/runPlan.ts",
   },
   format: ["esm"],
   // `resolve: true` inlines cross-entry type re-exports rather than spilling

@@ -50,6 +50,10 @@
       "types": "./dist/promptHash.d.ts",
       "import": "./dist/promptHash.js"
     },
+    "./runPlan": {
+      "types": "./dist/runPlan.d.ts",
+      "import": "./dist/runPlan.js"
+    },
     "./proto": {
       "types": "./dist/proto.d.ts",
       "import": "./dist/proto.js"

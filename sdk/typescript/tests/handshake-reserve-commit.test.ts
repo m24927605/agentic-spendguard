@@ -482,8 +482,8 @@ describe("reserve() — design.md §4.7", () => {
       expect(req.ids?.decisionId).toBe("d-explicit");
       expect(req.ids?.runId).toBe("run-explicit");
       expect(req.sessionId).toBe(handshake.sessionId);
-      // SLICE 7 wires withRunPlan; until then plannedStepsHint stays at proto3
-      // default 0 — anti-scope gate.
+      // SLICE 7 R2: without an active withRunPlan scope, plannedStepsHint
+      // stays at proto3 default 0. (Active-plan path tested in runPlan.test.ts.)
       expect(req.plannedStepsHint).toBe(0);
       await client.close();
     } finally {

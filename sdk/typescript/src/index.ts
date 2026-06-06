@@ -27,11 +27,22 @@
 //     the main barrel would unconditionally pull the embedded entries into
 //     the main bundle even for adapters that never call demo helpers.
 //
+// SLICE 7 (COV_S05_07) R2 adds the run-plan substrate (LOCKED budget-hint shape):
+//   - `withRunPlan` + `currentRunPlan` from `./runPlan.js`.
+//   - `RunPlan` interface `{ plannedCalls: number; plannedTools: number }` per
+//     design.md §4.7 + implementation.md §9 (Signal 3 — caller-declared total
+//     planned work fed into run-projection).
+//
+// The slice 7 wiring inside `SpendGuardClient.buildDecisionRequest` auto-folds
+// `currentRunPlan()` into the wire `DecisionRequest.plannedStepsHint`
+// (`plannedCalls + plannedTools` when an active plan is in scope, `0`
+// otherwise). Identity fields (`runId` / `parentRunId` / `traceparent` /
+// `tracestate` / `budgetGrantJti`) stay on `ReserveRequest` and are
+// caller-threaded per the SLICE 4-5 wire path.
+//
 // What's INTENTIONALLY NOT exported yet (anti-scope per future slice docs):
-//   - `withRunPlan` / `currentRunPlan` — SLICE 7.
-// The placeholder re-exports for those land in their respective slices to
-// avoid forward-shipping a half-implemented symbol that a downstream adapter
-// could accidentally consume.
+//   - OTel / retry / idempotency-cache surface — SLICE 8.
+//   - `@withRunPlan(...)` decorator syntax — v0.2 minor (design §4.7 line 303).
 
 // ── Client ────────────────────────────────────────────────────────────────
 
@@ -128,3 +139,9 @@ export { computePromptHash } from "./promptHash.js";
 export { PricingLookup, USD_MICROS_PER_USD } from "./pricing.js";
 
 export type { PriceKey, PriceTable } from "./pricing.js";
+
+// ── SLICE 7: runPlan substrate ────────────────────────────────────────────
+
+export { currentRunPlan, withRunPlan } from "./runPlan.js";
+
+export type { RunPlan } from "./runPlan.js";

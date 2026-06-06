@@ -101,6 +101,7 @@ import {
   SpendGuardError,
 } from "./errors.js";
 import { computePromptHash } from "./promptHash.js";
+import { currentRunPlan } from "./runPlan.js";
 import { VERSION } from "./version.js";
 
 // Suppress the unused-import warning by referencing in JSDoc — these are
@@ -1068,8 +1069,9 @@ export class SpendGuardClient implements AsyncDisposable {
    *      from `cfg.runProjectionDefault` when non-empty. **This is the
    *      SLICE 4 consumption of MJ-1** — SLICE 3 stored the field on the
    *      config; this method wires it onto the wire.
-   *   5. `plannedStepsHint` lands as the proto3 default `0` until SLICE 7
-   *      wires `withRunPlan` (anti-scope of this slice).
+   *   5. `plannedStepsHint` is `plan.plannedCalls + plan.plannedTools` when
+   *      a `withRunPlan` scope is active (SLICE 7 R2), otherwise the proto3
+   *      default `0`.
    *
    * `runtime_metadata` is encoded as a hand-built `google.protobuf.Struct`
    * payload because the SDK does not yet ship `computePromptHash` (SLICE 6).
@@ -1082,6 +1084,25 @@ export class SpendGuardClient implements AsyncDisposable {
       // Re-asserts the gate `reserve()` already enforced; lets TS narrow.
       throw new HandshakeError("internal: buildDecisionRequest without handshake");
     }
+    // ── SLICE 7 (COV_S05_07) R2 — Signal 3 plannedStepsHint auto-fold ────
+    //
+    // When an adapter has wrapped its agent body in `withRunPlan({ plannedCalls,
+    // plannedTools }, fn)`, every nested `reserve()` call ships the sum on
+    // the wire `DecisionRequest.plannedStepsHint` field (Signal 3). The
+    // sidecar forwards the hint to `run_cost_projector`, which uses Signal 3
+    // to override its history-induced Signal 1 estimate. Without an active
+    // plan, the field stays at proto3 default `0` and the projector falls
+    // back to Signal 1.
+    //
+    // R2 retired the SLICE 7 R1 identity auto-fold (runId / parentRunId /
+    // traceparent / tracestate / budgetGrantJti) — those fields stay on
+    // `ReserveRequest` and are caller-threaded per the SLICE 4-5 wire path.
+    // The LOCKED `RunPlan` shape (design.md §4.7 + impl.md §9) is purely a
+    // budget-hint surface; identity propagation needs its own future spec
+    // (`RunContext` / `withRunContext`).
+    const plan = currentRunPlan();
+    const plannedStepsHint = plan !== null ? plan.plannedCalls + plan.plannedTools : 0;
+
     const trigger = triggerEnumOf(req.trigger);
     const trace = buildTraceContext(req.traceparent ?? "", req.tracestate ?? "");
     const ids = {
@@ -1130,10 +1151,12 @@ export class SpendGuardClient implements AsyncDisposable {
       parentRunId: req.parentRunId ?? "",
       budgetGrantJti: req.budgetGrantJti ?? "",
       idempotency,
-      // SLICE 7 wires `withRunPlan`; until then send the proto3 default `0`
-      // which the projector treats as "Signal 3 inactive" per
-      // run-cost-projector-spec-v1alpha1.md §5.2.
-      plannedStepsHint: 0,
+      // SLICE 7 R2: Signal 3 — `plannedCalls + plannedTools` when an active
+      // `withRunPlan` scope is in flight, otherwise proto3 default `0`. The
+      // sidecar enforces the upper bound `[0, MAX_PLANNED_STEPS]` server-side
+      // (`services/run_cost_projector/src/server.rs`) so the SDK doesn't gate
+      // on a value the server may bump independently.
+      plannedStepsHint,
     };
   }
 

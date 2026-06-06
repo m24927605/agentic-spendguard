@@ -326,3 +326,95 @@ describe("LOCKED §4.9 — DEMO_PRICING is subpath-only (NOT on main barrel)", (
     expect(typeof DEMO_PRICING_VERSION).toBe("string");
   });
 });
+
+// ── SLICE 7 (COV_S05_07) R2 — runPlan barrel + subpath reachability ───────
+//
+// design.md §3 module layout pins `withRunPlan` + `currentRunPlan` + `RunPlan`
+// on BOTH the main `@spendguard/sdk` barrel (line 76) AND the dedicated
+// `@spendguard/sdk/runPlan` subpath (line 98). The slice's plannedStepsHint
+// auto-fold inside `SpendGuardClient.buildDecisionRequest` is the substrate
+// adapters (D04 / D06 / D08 / D29) consume — surface gaps here break every
+// adapter that follows.
+//
+// R2 retired the SLICE 7 R1 identity-propagation shape; the LOCKED budget-hint
+// surface is `{ plannedCalls, plannedTools }` with `currentRunPlan()` returning
+// `RunPlan | null` (design.md §4.7 line 300).
+
+import {
+  currentRunPlan as MainBarrelCurrentRunPlan,
+  type RunPlan as MainBarrelRunPlan,
+  withRunPlan as MainBarrelWithRunPlan,
+} from "../src/index.js";
+
+import {
+  currentRunPlan as SubpathCurrentRunPlan,
+  type RunPlan as SubpathRunPlan,
+  withRunPlan as SubpathWithRunPlan,
+} from "../src/runPlan.js";
+
+describe("LOCKED §4.7 / §3 — SLICE 7 R2 barrel + subpath reachability", () => {
+  it("re-exports withRunPlan from the main barrel as a callable function", () => {
+    expect(typeof MainBarrelWithRunPlan).toBe("function");
+  });
+
+  it("re-exports currentRunPlan from the main barrel as a callable function", () => {
+    expect(typeof MainBarrelCurrentRunPlan).toBe("function");
+    // LOCKED contract (design.md §4.7 line 300): currentRunPlan returns
+    // `RunPlan | null` — outside a withRunPlan scope, it must be `null`,
+    // NOT `undefined`.
+    expect(MainBarrelCurrentRunPlan()).toBeNull();
+  });
+
+  it("re-exports withRunPlan from the `/runPlan` subpath as a callable function", () => {
+    expect(typeof SubpathWithRunPlan).toBe("function");
+  });
+
+  it("re-exports currentRunPlan from the `/runPlan` subpath as a callable function", () => {
+    expect(typeof SubpathCurrentRunPlan).toBe("function");
+  });
+
+  it("withRunPlan + currentRunPlan share the SAME function reference across barrel + subpath", () => {
+    // Cross-entry identity — the main barrel must re-export the SAME function
+    // from the subpath, not a separate copy. Otherwise adapters that mix
+    // barrel + subpath imports would see split-brain ALS storages.
+    expect(MainBarrelWithRunPlan).toBe(SubpathWithRunPlan);
+    expect(MainBarrelCurrentRunPlan).toBe(SubpathCurrentRunPlan);
+  });
+
+  it("RunPlan type is mutually assignable across barrel + subpath", () => {
+    // TS compile-time identity check: a literal typed as the main-barrel
+    // RunPlan must be assignable to the subpath RunPlan and vice versa.
+    const planMain: MainBarrelRunPlan = { plannedCalls: 1, plannedTools: 0 };
+    const planSub: SubpathRunPlan = planMain;
+    const backToMain: MainBarrelRunPlan = planSub;
+    expect(backToMain.plannedCalls).toBe(1);
+    expect(backToMain.plannedTools).toBe(0);
+  });
+
+  it("RunPlan shape is exactly {plannedCalls, plannedTools} — design.md §4.7", () => {
+    // §1.2 P0 verbatim signature gate — the LOCKED surface is the budget-hint
+    // shape, NOT identity propagation. Construct via the curried HOF so we
+    // observe the stored RunPlan that callers read back from currentRunPlan.
+    let observed: MainBarrelRunPlan | null = null;
+    const wrapped = MainBarrelWithRunPlan({ plannedCalls: 5, plannedTools: 2 }, async () => {
+      observed = MainBarrelCurrentRunPlan();
+    });
+    return wrapped().then(() => {
+      expect(observed).not.toBeNull();
+      expect(Object.keys(observed ?? {}).sort()).toEqual(["plannedCalls", "plannedTools"]);
+      expect(observed).toEqual({ plannedCalls: 5, plannedTools: 2 });
+    });
+  });
+
+  it("withRunPlan is curried — calling it returns a wrapper, NOT the result", () => {
+    // §1.2 P0 verbatim signature gate — withRunPlan(plan, fn) returns a NEW
+    // callable `(...args) => Promise<TRet>`; the wrapped fn is only invoked
+    // when the returned callable is called.
+    let invoked = false;
+    const wrapped = MainBarrelWithRunPlan({ plannedCalls: 0, plannedTools: 0 }, async () => {
+      invoked = true;
+    });
+    expect(typeof wrapped).toBe("function");
+    expect(invoked).toBe(false);
+  });
+});
