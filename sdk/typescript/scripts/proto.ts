@@ -414,9 +414,7 @@ function reportSize(): void {
   const headroomKb = (headroom / 1024).toFixed(1);
   console.log(`proto:gen OK — generated ${kb} KB (budget 250 KB, headroom ${headroomKb} KB).`);
   if (totalBytes > budgetBytes) {
-    fail(
-      `generated tree (${kb} KB) exceeds 250 KB budget (design §10). Trim before committing.`,
-    );
+    fail(`generated tree (${kb} KB) exceeds 250 KB budget (design §10). Trim before committing.`);
   }
 }
 

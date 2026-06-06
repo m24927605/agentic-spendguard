@@ -126,7 +126,22 @@ export interface SpendGuardClientOptions {
   // Forward-reserved (not used in v0.1.x; types defined for D04-D29 to
   // import without a version bump later)
   runtime?: "uds-grpc"; // future: "fetch"
+  // Default `run_projection` policy applied when callers do not pass one
+  // explicitly on `reserve()`. Slice-doc-driven amendment added in
+  // COV_S05_03 R2; env fallback: `SPENDGUARD_RUN_PROJECTION_DEFAULT`.
+  // SLICE 3 only stores the value; SLICE 4 wires consumption when
+  // `reserve()` body lands. Forward-compatible default `""` means "leave
+  // policy unset; rely on contract bundle defaults".
+  runProjectionDefault?: RunProjectionPolicy;
 }
+
+/**
+ * Default `run_projection` policy. Forward-extensible string literal; v0.1.x
+ * ships `""` (no default) plus the two ASP-Draft-01 policies the contract
+ * DSL defines. The literal-string form lets adapters pass policy names that
+ * land in a future contract DSL bump without a v0.minor on the SDK.
+ */
+export type RunProjectionPolicy = "" | "STRICT_CEILING" | "ELASTIC" | (string & {});
 
 export class SpendGuardClient implements AsyncDisposable {
   constructor(opts: SpendGuardClientOptions);
@@ -331,6 +346,8 @@ Mirrors Python:
 | `SPENDGUARD_DECISION_TIMEOUT_MS` | int | 250 | |
 | `SPENDGUARD_HANDSHAKE_TIMEOUT_MS` | int | 2000 | |
 | `SPENDGUARD_DISABLE` | `"1"` / `"true"` | unset | When set, every method short-circuits to a no-op success. Used in unit test envs where the sidecar isn't available. **Must be advertised as "for tests only" in JSDoc** — production users who set this and forget have silently lost enforcement. |
+| `SPENDGUARD_RUN_PROJECTION_DEFAULT` | string | `""` | Default `run_projection` policy applied when callers do not pass one on `reserve()`. Maps to `SpendGuardClientOptions.runProjectionDefault`. Empty string = leave policy unset; rely on contract bundle default. **Added in COV_S05_03 R2 per slice-doc-driven amendment**; SLICE 3 only stores the value; SLICE 4 wires consumption. |
+| `SPENDGUARD_SOCKET_PATH` | path | — | Slice-doc alias of `SPENDGUARD_SIDECAR_UDS`; wins when both are set. Added in COV_S05_03 R2 to document the alias the slice doc introduces. The bare constructor still throws if neither is set + `socketPath` is unpassed (matches §5.2). |
 
 ### 5.2 Explicit config wins. Env is fallback. Both empty + required → throws `SpendGuardConfigError` at constructor.
 
