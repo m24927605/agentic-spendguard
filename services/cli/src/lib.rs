@@ -21,6 +21,7 @@ use std::path::PathBuf;
 
 pub mod ca;
 pub mod paths;
+pub mod preflight;
 pub mod shell;
 pub mod tools;
 pub mod trust;
@@ -63,6 +64,26 @@ pub struct InstallOpts {
     /// Override shell detection (parsed; rc emission in SLICE 5).
     #[arg(long, value_enum)]
     pub shell: Option<ShellKind>,
+
+    /// SLICE 6 (COV_10) — bypass the Gemini OAuth free-tier refusal
+    /// preflight gate. The operator accepts that their Gemini CLI may
+    /// stop working until they sign out and re-authenticate, because
+    /// SpendGuard's self-signed CA breaks Gemini's OAuth refresh
+    /// handshake against `accounts.google.com`. Default `false` so the
+    /// safe path is the default.
+    #[arg(long, default_value_t = false)]
+    pub force_allow_gemini_oauth: bool,
+}
+
+impl InstallOpts {
+    /// Project the install opts down to the preflight override flags. A
+    /// helper so future overrides (additional gates) can be carried in
+    /// `InstallOpts` and surfaced here without touching the install seam.
+    pub fn preflight_overrides(&self) -> preflight::PreflightOverrides {
+        preflight::PreflightOverrides {
+            allow_gemini_oauth: self.force_allow_gemini_oauth,
+        }
+    }
 }
 
 /// `spendguard uninstall` options.
@@ -227,6 +248,18 @@ pub fn install_with_backends(
     shell_env: shell::EnvView<'_>,
     proxy_url: &str,
 ) -> Result<InstallReport> {
+    // SLICE 6 (COV_10) — gate before any side effects per design §3.5 +
+    // review-standards T10 ("Gemini OAuth gate is enforced before any
+    // trust-store mutation … exits before issuing or installing any
+    // cert"). The slice-prompt's suggested placement (between env-vars
+    // build and resolve_shell, L264–L267) would already have written 4
+    // PEM files and called trust_backend.add_root — that violates T10.
+    // We refuse cleanly here, before generate_root_ca, so a `Ctrl-C`-
+    // resistant install reaches the keychain only after the gate clears.
+    // Deviation #2: placement is BEFORE CA issuance, not BEFORE
+    // resolve_shell.
+    install_with_preflight_env(opts, home)?;
+
     let out_dir = match &opts.ca_out {
         Some(dir) => {
             std::fs::create_dir_all(dir)
@@ -314,6 +347,43 @@ pub fn install_with_backends(
 /// design §4 + slice doc §3. Lives as a constant so the SLICE 6 / SLICE 7
 /// follow-ups have one knob to flip when the operator wants a custom port.
 pub const DEFAULT_PROXY_URL: &str = "https://localhost:8443";
+
+/// SLICE 6 (COV_10): construct the preflight env from the install-call
+/// home arg + process-env env vars, then run the gate. Pulled into its own
+/// function so the install path stays linear. The `home` arg lets the
+/// SLICE 5 hermetic-test pattern (tempdir-rooted HOME via
+/// `install_with_backends(home=Some(tmp))`) flow through to the preflight
+/// detector — without it, the lib-test `install_refuses_when_gemini_oauth_detected`
+/// would need to mutate process-global HOME, racing other tests.
+///
+/// Env-var resolution still goes through `std::env::var` for
+/// `GEMINI_API_KEY` / `GOOGLE_APPLICATION_CREDENTIALS` because:
+///   1. The slice doc doesn't ask for env-var injection (only HOME).
+///   2. Tests can use `HomeGuard`-style mutexes if they ever need to
+///      assert behaviour under specific env-var states — out of scope
+///      for the v1 gate which trusts the operator's shell.
+fn install_with_preflight_env(
+    opts: &InstallOpts,
+    home: Option<&std::path::Path>,
+) -> Result<(), PreflightRefusal> {
+    fn leak_str(s: String) -> &'static str {
+        Box::leak(s.into_boxed_str())
+    }
+    let gemini_api_key = std::env::var("GEMINI_API_KEY").ok().map(leak_str);
+    let google_application_credentials = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
+        .ok()
+        .map(leak_str);
+    let env = preflight::BaseEnv {
+        home,
+        gemini_api_key,
+        google_application_credentials,
+    };
+    preflight::run_preflight(&env, opts.preflight_overrides())
+}
+
+/// Re-export so the install seam can propagate the refusal up via `?`
+/// (`anyhow::Result` accepts `Box<dyn Error>` via `From`).
+pub use preflight::PreflightRefusal;
 
 /// Build the full 14-row `ToolReport` list from `tools::TOOL_OVERRIDES`,
 /// resolving `EnvVar` rows against `(ca_pem_path, proxy_url)` and leaving
@@ -657,6 +727,7 @@ mod tests {
             scope: TrustScope::User,
             ca_out: Some(tmp.path().to_path_buf()),
             shell: None,
+            force_allow_gemini_oauth: false,
         };
         let backend = NoopTrustStore::default();
         let report = install_with_backends(
@@ -712,6 +783,7 @@ mod tests {
             scope: TrustScope::User,
             ca_out: Some(tmp.path().to_path_buf()),
             shell: None,
+            force_allow_gemini_oauth: false,
         };
         let backend = NoopTrustStore::default();
         let report = install_with_backends(
@@ -815,6 +887,7 @@ mod tests {
             scope: TrustScope::User,
             ca_out: Some(tmp.path().to_path_buf()),
             shell: None,
+            force_allow_gemini_oauth: false,
         };
         let backend = NoopTrustStore::default();
         let report = install_with_backends(
@@ -860,6 +933,7 @@ mod tests {
             scope: TrustScope::User,
             ca_out: Some(tmp.path().to_path_buf()),
             shell: None,
+            force_allow_gemini_oauth: false,
         };
         let backend = NoopTrustStore::default();
         let report = install_with_backends(
@@ -929,6 +1003,7 @@ mod tests {
             // `--shell bash` makes the test deterministic regardless of
             // what `$SHELL` happens to be on the runner.
             shell: Some(ShellKind::Bash),
+            force_allow_gemini_oauth: false,
         };
         let backend = NoopTrustStore::default();
         let env = shell::EnvView {
@@ -984,6 +1059,7 @@ mod tests {
             scope: TrustScope::User,
             ca_out: Some(ca_tmp.path().to_path_buf()),
             shell: Some(ShellKind::Zsh),
+            force_allow_gemini_oauth: false,
         };
         let env = shell::EnvView {
             shell: Some("/bin/zsh"),
@@ -1028,6 +1104,7 @@ mod tests {
             scope: TrustScope::User,
             ca_out: Some(ca_tmp.path().to_path_buf()),
             shell: None,
+            force_allow_gemini_oauth: false,
         };
         let env = shell::EnvView {
             shell: Some("cmd.exe"),
@@ -1045,6 +1122,215 @@ mod tests {
             !report.shell_env_vars.is_empty(),
             "shell_env_vars must carry the setx breadcrumb"
         );
+    }
+
+    // ──────────── SLICE 6 (COV_10) Gemini OAuth refusal preflight ────────
+
+    /// Helper for the SLICE 6 tests: seed `~/.gemini/oauth_creds.json` in
+    /// the given home and return the tempdir for the caller to keep alive.
+    fn seed_gemini_oauth_creds(home: &std::path::Path) {
+        std::fs::create_dir_all(home.join(".gemini")).expect("create .gemini dir");
+        std::fs::write(
+            home.join(".gemini").join("oauth_creds.json"),
+            br#"{"access_token":"fake","refresh_token":"fake"}"#,
+        )
+        .expect("seed oauth_creds.json");
+    }
+
+    /// SLICE 6: `install_with_backends` with Gemini OAuth state present
+    /// AND no `--force-allow-gemini-oauth` flag must:
+    ///   1. Return `Err` carrying the `PreflightRefusal::GeminiOauthFreetier`
+    ///      message.
+    ///   2. NOT write any of the 4 PEM files (CA issuance never ran).
+    ///   3. NOT call `add_root` on the trust backend.
+    ///   4. NOT write a shell rc block.
+    ///
+    /// This is the threat-model `T10` regression: the gate runs BEFORE any
+    /// trust-store mutation.
+    #[test]
+    fn slice6_install_refuses_when_gemini_oauth_detected_without_force_flag() {
+        let home_tmp = tempfile::tempdir().expect("home tempdir");
+        let ca_tmp = tempfile::tempdir().expect("ca tempdir");
+
+        seed_gemini_oauth_creds(home_tmp.path());
+
+        let opts = InstallOpts {
+            scope: TrustScope::User,
+            ca_out: Some(ca_tmp.path().to_path_buf()),
+            shell: Some(ShellKind::Bash),
+            force_allow_gemini_oauth: false,
+        };
+        let backend = NoopTrustStore::default();
+        let env = shell::EnvView {
+            shell: Some("/bin/bash"),
+            ..Default::default()
+        };
+
+        // Lock process env so GEMINI_API_KEY / GOOGLE_APPLICATION_CREDENTIALS
+        // are reproducibly unset for the duration. The HomeGuard serialises
+        // against the other slice5_/slice6_ tests in this binary; we use
+        // it here too so the preflight env-var probes are deterministic
+        // (a developer with GEMINI_API_KEY set in their shell would
+        // otherwise see ApiKeyMode and the test would never refuse).
+        let _guard = HomeGuard::set(home_tmp.path());
+        let _api_guard = EnvVarGuard::unset("GEMINI_API_KEY");
+        let _sa_guard = EnvVarGuard::unset("GOOGLE_APPLICATION_CREDENTIALS");
+
+        let err = install_with_backends(
+            &opts,
+            &backend,
+            Some(home_tmp.path()),
+            env,
+            DEFAULT_PROXY_URL,
+        )
+        .expect_err("install MUST refuse");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Refusing to install"),
+            "refusal message must surface in anyhow chain, got: {msg}"
+        );
+        assert!(
+            msg.contains("--force-allow-gemini-oauth"),
+            "refusal message must surface the override flag, got: {msg}"
+        );
+
+        // No CA file written — issuance never ran.
+        let pem_files: Vec<_> = std::fs::read_dir(ca_tmp.path())
+            .expect("read ca_tmp")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            pem_files.is_empty(),
+            "no PEM files should have been written; found: {pem_files:?}"
+        );
+
+        // Trust backend `add_root` never called.
+        let added = backend.added.lock().unwrap().clone();
+        assert!(
+            added.is_empty(),
+            "add_root MUST NOT have been called; got: {added:?}"
+        );
+
+        // Shell rc never written — `.bashrc` in tempdir HOME is absent.
+        let bashrc = home_tmp.path().join(".bashrc");
+        assert!(
+            !bashrc.exists(),
+            "shell rc MUST NOT have been written; found: {bashrc:?}"
+        );
+    }
+
+    /// SLICE 6: `install_with_backends` with Gemini OAuth state present
+    /// AND `--force-allow-gemini-oauth=true` proceeds with the full
+    /// install (CA + trust + rc). Operator has accepted the consequences.
+    #[test]
+    fn slice6_install_proceeds_when_force_allow_gemini_oauth_set() {
+        let home_tmp = tempfile::tempdir().expect("home tempdir");
+        let ca_tmp = tempfile::tempdir().expect("ca tempdir");
+
+        seed_gemini_oauth_creds(home_tmp.path());
+
+        let opts = InstallOpts {
+            scope: TrustScope::User,
+            ca_out: Some(ca_tmp.path().to_path_buf()),
+            shell: Some(ShellKind::Bash),
+            force_allow_gemini_oauth: true,
+        };
+        let backend = NoopTrustStore::default();
+        let env = shell::EnvView {
+            shell: Some("/bin/bash"),
+            ..Default::default()
+        };
+
+        let _guard = HomeGuard::set(home_tmp.path());
+        // Even with vars set, the gate is bypassed; we unset them so the
+        // test asserts purely the bypass behaviour.
+        let _api_guard = EnvVarGuard::unset("GEMINI_API_KEY");
+        let _sa_guard = EnvVarGuard::unset("GOOGLE_APPLICATION_CREDENTIALS");
+
+        let report = install_with_backends(
+            &opts,
+            &backend,
+            Some(home_tmp.path()),
+            env,
+            DEFAULT_PROXY_URL,
+        )
+        .expect("install with force flag must proceed");
+
+        // CA was issued + written.
+        assert!(report.ca_pem_path.exists(), "CA PEM must be written");
+        assert!(report.ca_key_path.exists(), "CA key must be written");
+
+        // Trust backend `add_root` was called.
+        let added = backend.added.lock().unwrap().clone();
+        assert_eq!(added.len(), 1, "add_root must have been called once");
+
+        // Shell rc was written.
+        let bashrc = home_tmp.path().join(".bashrc");
+        assert!(bashrc.exists(), ".bashrc must be written");
+        let content = std::fs::read_to_string(&bashrc).expect("read .bashrc");
+        assert!(content.contains("HTTPS_PROXY"));
+    }
+
+    /// SLICE 6: `uninstall_with_backends` bypasses preflight entirely.
+    /// Per slice doc anti-scope: "uninstall is always safe to run
+    /// regardless of Gemini state (the user is undoing the install)".
+    /// We assert this by seeding the OAuth refusal condition and
+    /// confirming uninstall succeeds without inspecting Gemini.
+    #[test]
+    fn slice6_uninstall_bypasses_preflight_under_gemini_oauth_state() {
+        let home_tmp = tempfile::tempdir().expect("home tempdir");
+
+        seed_gemini_oauth_creds(home_tmp.path());
+
+        // Pre-seed a shell rc with a SpendGuard marker block so strip_rc
+        // has something to remove. Use the literal markers from
+        // `shell::MARKER_BEGIN` / `MARKER_END` so strip_rc actually
+        // matches.
+        let bashrc = home_tmp.path().join(".bashrc");
+        std::fs::write(
+            &bashrc,
+            format!(
+                "alias g='git'\n{}\nexport HTTPS_PROXY=\"https://localhost:8443\"\n{}\n",
+                shell::MARKER_BEGIN,
+                shell::MARKER_END,
+            ),
+        )
+        .expect("seed bashrc");
+
+        let backend = NoopTrustStore::default();
+        let uopts = UninstallOpts {
+            scope: TrustScope::User,
+            ca_fingerprint: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            ),
+        };
+        let env = shell::EnvView {
+            shell: Some("/bin/bash"),
+            ..Default::default()
+        };
+
+        let _guard = HomeGuard::set(home_tmp.path());
+        let _api_guard = EnvVarGuard::unset("GEMINI_API_KEY");
+        let _sa_guard = EnvVarGuard::unset("GOOGLE_APPLICATION_CREDENTIALS");
+
+        let report =
+            uninstall_with_backends(&uopts, &backend, env).expect("uninstall must succeed");
+
+        // Trust backend `remove_root` was called — uninstall ran fully.
+        let removed = backend.removed.lock().unwrap().clone();
+        assert_eq!(removed.len(), 1, "remove_root must have been called once");
+
+        // The marker block was stripped from .bashrc.
+        let after = std::fs::read_to_string(&bashrc).expect("read");
+        assert!(
+            !after.contains("HTTPS_PROXY"),
+            "marker block must be stripped"
+        );
+        assert!(
+            after.contains("alias g='git'"),
+            "non-marker lines must be preserved"
+        );
+        assert_eq!(report.removed_files, vec![bashrc]);
     }
 
     /// HomeGuard — atomic process-global HOME setter for the SLICE 5
@@ -1090,6 +1376,72 @@ mod tests {
                 match self.prior.take() {
                     Some(v) => std::env::set_var("HOME", v),
                     None => std::env::remove_var("HOME"),
+                }
+            }
+        }
+    }
+
+    /// SLICE 6: atomic per-var env unsetter for the Gemini OAuth tests.
+    /// The preflight reads `GEMINI_API_KEY` / `GOOGLE_APPLICATION_CREDENTIALS`
+    /// from process env via `install_with_preflight_env`, so a developer
+    /// with those set in their shell would see a different `GeminiPreflight`
+    /// outcome and the test would race. The guard:
+    ///   1. Acquires a per-var mutex serialising with itself.
+    ///   2. Snapshots the prior value.
+    ///   3. Removes the var.
+    ///   4. Restores on Drop.
+    ///
+    /// **Per-var mutex** — each var has its own lock so a test can hold
+    /// two guards simultaneously without self-deadlocking. SLICE 6 tests
+    /// always grab `GEMINI_API_KEY` first then `GOOGLE_APPLICATION_CREDENTIALS`;
+    /// a future test that needs the reverse order MUST acquire in the
+    /// SAME order to avoid deadlock.
+    struct EnvVarGuard {
+        name: &'static str,
+        prior: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl EnvVarGuard {
+        fn unset(name: &'static str) -> Self {
+            // Per-var mutex; pick by name. Adding a new var to the slice
+            // 6 test set requires extending this match.
+            static GEMINI_API_KEY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            static GOOGLE_APPLICATION_CREDENTIALS_LOCK: std::sync::Mutex<()> =
+                std::sync::Mutex::new(());
+            let lock = match name {
+                "GEMINI_API_KEY" => GEMINI_API_KEY_LOCK
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()),
+                "GOOGLE_APPLICATION_CREDENTIALS" => GOOGLE_APPLICATION_CREDENTIALS_LOCK
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner()),
+                _ => panic!(
+                    "EnvVarGuard: no mutex registered for env var `{name}` \
+                     (add a new static lock above)"
+                ),
+            };
+            let prior = std::env::var_os(name);
+            // SAFETY: per-var lock serialises all mutations of this var.
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::remove_var(name);
+            }
+            Self {
+                name,
+                prior,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            #[allow(unused_unsafe)]
+            unsafe {
+                match self.prior.take() {
+                    Some(v) => std::env::set_var(self.name, v),
+                    None => std::env::remove_var(self.name),
                 }
             }
         }

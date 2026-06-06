@@ -112,6 +112,7 @@ fn debian_install_lands_cert_in_merged_bundle() {
         scope: TrustScope::System,
         ca_out: Some(tmp.path().to_path_buf()),
         shell: None,
+        force_allow_gemini_oauth: false,
     };
     let report = install_with_trust_store(&opts, &store).expect("install");
     let _cleanup = TrustStoreCleanup {
@@ -159,6 +160,7 @@ fn rhel_install_lands_cert_in_extracted_bundle() {
         scope: TrustScope::System,
         ca_out: Some(tmp.path().to_path_buf()),
         shell: None,
+        force_allow_gemini_oauth: false,
     };
     let report = install_with_trust_store(&opts, &store).expect("install");
     let _cleanup = TrustStoreCleanup {
@@ -201,6 +203,7 @@ fn arch_install_lands_cert_in_p11_kit() {
         scope: TrustScope::System,
         ca_out: Some(tmp.path().to_path_buf()),
         shell: None,
+        force_allow_gemini_oauth: false,
     };
     let report = install_with_trust_store(&opts, &store).expect("install");
     let _cleanup = TrustStoreCleanup {

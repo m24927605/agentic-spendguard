@@ -116,6 +116,7 @@ fn windows_real_install_lands_ca_in_user_root_store() {
         scope: TrustScope::User,
         ca_out: Some(tmp.path().to_path_buf()),
         shell: None,
+        force_allow_gemini_oauth: false,
     };
     let store = WindowsTrustStore::new();
     let report = install_with_trust_store(&opts, &store).expect("install");
@@ -151,6 +152,7 @@ fn windows_real_install_lands_ca_in_system_root_store() {
         scope: TrustScope::System,
         ca_out: Some(tmp.path().to_path_buf()),
         shell: None,
+        force_allow_gemini_oauth: false,
     };
     let store = WindowsTrustStore::new();
     let report = install_with_trust_store(&opts, &store).expect("install (must run elevated)");
@@ -187,6 +189,7 @@ fn windows_real_install_uninstall_round_trip_leaves_user_store_clean() {
         scope: TrustScope::User,
         ca_out: Some(tmp.path().to_path_buf()),
         shell: None,
+        force_allow_gemini_oauth: false,
     };
     let store = WindowsTrustStore::new();
     let report = install_with_trust_store(&opts, &store).expect("install");

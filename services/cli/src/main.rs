@@ -11,7 +11,7 @@
 //! with a "see SLICE 7" message so the surface area is stable from day one.
 
 use clap::{Parser, Subcommand};
-use spendguard_cli::{install, DoctorOpts, InstallOpts, UninstallOpts};
+use spendguard_cli::{install, DoctorOpts, InstallOpts, PreflightRefusal, UninstallOpts};
 
 #[derive(Parser, Debug)]
 #[command(
@@ -54,7 +54,20 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Install(opts) => {
-            let report = install(&opts)?;
+            // SLICE 6 (COV_10): the preflight refusal carries a multi-line
+            // user-facing message that we want printed verbatim to stderr,
+            // not collapsed into anyhow's `error:` chain. Match on the
+            // typed refusal first; everything else flows through `?`.
+            let report = match install(&opts) {
+                Ok(r) => r,
+                Err(e) => {
+                    if let Some(refusal) = e.downcast_ref::<PreflightRefusal>() {
+                        eprintln!("{refusal}");
+                        std::process::exit(2);
+                    }
+                    return Err(e);
+                }
+            };
             // `serde_json` keeps the surface JSON-greppable for the
             // forthcoming demo target without extra plumbing.
             let json = serde_json::to_string_pretty(&report)?;

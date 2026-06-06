@@ -259,6 +259,7 @@ fn macos_real_install_lands_ca_in_login_keychain() {
         scope: TrustScope::User,
         ca_out: Some(tmp.path().to_path_buf()),
         shell: None,
+        force_allow_gemini_oauth: false,
     };
     let store = MacosTrustStore::new();
     let report = install_with_trust_store(&opts, &store).expect("install");
@@ -290,6 +291,7 @@ fn macos_real_uninstall_round_trip_removes_ca() {
         scope: TrustScope::User,
         ca_out: Some(tmp.path().to_path_buf()),
         shell: None,
+        force_allow_gemini_oauth: false,
     };
     let store = MacosTrustStore::new();
     let report = install_with_trust_store(&opts, &store).expect("install");
@@ -325,6 +327,7 @@ fn macos_real_doctor_reflects_install_state() {
         scope: TrustScope::User,
         ca_out: Some(tmp.path().to_path_buf()),
         shell: None,
+        force_allow_gemini_oauth: false,
     };
     let store = MacosTrustStore::new();
     let report = install_with_trust_store(&opts, &store).expect("install");
@@ -361,6 +364,7 @@ fn macos_real_uninstall_is_idempotent() {
         scope: TrustScope::User,
         ca_out: Some(tmp.path().to_path_buf()),
         shell: None,
+        force_allow_gemini_oauth: false,
     };
     let store = MacosTrustStore::new();
     let report = install_with_trust_store(&opts, &store).expect("install");
