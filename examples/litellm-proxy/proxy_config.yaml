@@ -1,0 +1,100 @@
+# Minimal LiteLLM proxy config with SpendGuard guardrail (COV_D11 SLICE 5).
+#
+# Operators copy this stanza into their `proxy_config.yaml` and set
+# `SPENDGUARD_*` environment variables (or the inline keys below)
+# before booting `litellm --config proxy_config.yaml`.
+#
+# This is the ZERO-PYTHON install path: there is NO module fork
+# required. The factory function below reads SpendGuard config from
+# env vars (with inline overrides) at proxy boot and constructs a
+# fully wired `SpendGuardGuardrail` via the SLICE 4 / 4b factory
+# machinery.
+#
+# For the FORK path (multi-tenant resolver via Python module), see
+# `examples/litellm-proxy-composite/proxy_config.yaml` — that path is
+# untouched and remains supported (review-standards §5.5 invariant).
+#
+# Reference docs (when SLICE 7 lands):
+#   docs/site/docs/integrations/litellm-guardrail.md
+
+# ---------------------------------------------------------------------------
+# Provider routing (operator-supplied — REPLACE with your real model_list).
+# ---------------------------------------------------------------------------
+model_list:
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+# ---------------------------------------------------------------------------
+# SpendGuard guardrail entry.
+#
+# LiteLLM resolves the dotted `guardrail:` path via
+# `litellm.proxy.types_utils.utils.get_instance_fn`, which splits the
+# string on `.` (last component = attribute name, prefix = module
+# path). It then calls the resolved callable as a class-style
+# constructor:
+#
+#   spendguard_guardrail_factory(
+#       guardrail_name="spendguard",
+#       event_hook="pre_call",
+#       default_on=True,
+#       **extra_inline_keys,
+#   )
+#
+# The factory:
+#   * Strips LiteLLM's binding kwargs (guardrail_name / event_hook /
+#     default_on / supported_event_hooks / etc.).
+#   * Merges remaining inline keys with `SPENDGUARD_*` env vars
+#     (inline wins; env fills gaps).
+#   * Delegates to `SpendGuardGuardrail.from_config` — same code path
+#     SLICE 4 / 4b ships, so the disabled-mode + resolver-module +
+#     single-tenant binding wiring all work identically here.
+#   * Raises `SpendGuardConfigError` at boot time when required keys
+#     (`tenant_id`, `sidecar_address`) are absent from both inline
+#     and env (review-standards §5.4 Major: fail-closed at boot).
+# ---------------------------------------------------------------------------
+guardrails:
+  - guardrail_name: spendguard
+    litellm_params:
+      # Dotted module path resolved by LiteLLM's registry.
+      # Use dots throughout (NOT `module:function`) — LiteLLM's
+      # `get_instance_fn` only understands the dot-separated shape.
+      guardrail: spendguard.integrations.litellm_guardrail.spendguard_guardrail_factory
+      mode: pre_call
+      default_on: true
+      # ---------------------------------------------------------
+      # Optional inline config. Every key below is optional; an
+      # unset inline key falls back to the matching
+      # `SPENDGUARD_*` environment variable. Inline keys win when
+      # set to a non-empty value.
+      # ---------------------------------------------------------
+      # tenant_id: my-tenant
+      # sidecar_address: unix:///var/run/spendguard.sock
+      # api_key: sk-spendguard-...
+      # disabled: false
+      # proxy_timeout_ms: 5000
+      #
+      # Resolver-module dispatch (multi-tenant operator factory):
+      # resolver_module: myapp.spendguard.callbacks:make_triple
+      #
+      # Single-tenant binding (used when resolver_module is unset):
+      # budget_id: my-budget
+      # window_instance_id: my-window
+      # unit_id: my-unit
+      # pricing_version: v2026.05.09-1
+      # fx_rate_version: v2026.05.09-1
+      # unit_conversion_version: v2026.05.09-1
+      # price_snapshot_hash_hex: deadbeef...  # 64 hex chars / 32 bytes
+
+# ---------------------------------------------------------------------------
+# Standard LiteLLM settings (operator-supplied). The SpendGuard
+# guardrail registry entry above coexists with the legacy
+# `litellm_settings.callbacks` path — operators migrating from the
+# legacy callback can keep it set during the migration window.
+# ---------------------------------------------------------------------------
+litellm_settings:
+  drop_params: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY

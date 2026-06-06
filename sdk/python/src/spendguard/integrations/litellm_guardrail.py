@@ -1090,6 +1090,259 @@ class SpendGuardGuardrail(CustomGuardrail):
         self._delegate = _NoopGuardrailDelegate()  # type: ignore[assignment]
 
 
+# ---------------------------------------------------------------------------
+# SLICE 5 — operator-facing ``guardrails:`` registry entry factory.
+#
+# `spendguard_guardrail_factory` is what an operator references from
+# ``proxy_config.yaml``'s ``guardrails: [{litellm_params: {guardrail: ...}}]``
+# entry. It MUST tolerate two calling conventions:
+#
+#   1. Direct programmatic call (tests, ad-hoc bootstrap):
+#          spendguard_guardrail_factory({"tenant_id": "...", ...})
+#      — the dict is the parsed litellm_params from yaml.
+#
+#   2. LiteLLM's `get_instance_fn` resolves the dotted path
+#      `spendguard.integrations.litellm_guardrail.spendguard_guardrail_factory`
+#      to THIS function and instantiates it like a class:
+#          factory(guardrail_name="spendguard",
+#                   event_hook="pre_call",
+#                   default_on=True,
+#                   **extra_litellm_params)
+#      — LiteLLM splices `guardrail_name` / `event_hook` /
+#      `default_on` plus every other key in `litellm_params` (yaml
+#      block) as kwargs.
+#
+# Path 2 is verified against
+# `litellm/proxy/guardrails/guardrail_registry.py:516-571`
+# (`initialize_custom_guardrail` → `_guardrail_class(...)`).
+#
+# Bootstrap validator (§5.4 Major from review-standards): missing
+# required keys (`tenant_id` / `sidecar_address`) OR a non-importable
+# `resolver_module` surface a `SpendGuardConfigError` at boot time —
+# BEFORE the first hook runs. `from_config` already does this for the
+# required-key paths; the resolver-module path is exercised at
+# construction (not lazily on first hook) so an operator typo never
+# wedges first request.
+# ---------------------------------------------------------------------------
+
+
+# Module path used by LiteLLM's `get_instance_fn` to resolve the
+# factory at proxy boot. Pinned here as a constant so
+# `test_factory_function_importable_via_module_path` can introspect
+# the exact spelling the README + yaml example reference.
+SPENDGUARD_GUARDRAIL_MODULE_PATH = (
+    "spendguard.integrations.litellm_guardrail.spendguard_guardrail_factory"
+)
+
+# Env var → config dict key mapping used by `_merge_inline_and_env`.
+# The right-hand side mirrors the key spelling SLICE 4 / 4b's
+# `_coerce_config_dict` consumes; the left-hand side is the env var
+# spelling SLICE 4 / 4b's `_read_env_config` consumes. We keep both
+# spellings consistent so an operator reading the yaml example can
+# guess the env var without grepping the SDK.
+_ENV_VAR_TO_CONFIG_KEY: dict[str, str] = {
+    "SPENDGUARD_TENANT_ID": "tenant_id",
+    "SPENDGUARD_SIDECAR_ADDRESS": "sidecar_address",
+    "SPENDGUARD_API_KEY": "api_key",
+    "SPENDGUARD_DISABLED": "disabled",
+    "SPENDGUARD_PROXY_TIMEOUT_MS": "proxy_timeout_ms",
+    "SPENDGUARD_RESOLVER_MODULE": "resolver_module",
+    "SPENDGUARD_BUDGET_ID": "budget_id",
+    "SPENDGUARD_WINDOW_INSTANCE_ID": "window_instance_id",
+    "SPENDGUARD_UNIT_ID": "unit_id",
+    "SPENDGUARD_PRICING_VERSION": "pricing_version",
+    "SPENDGUARD_FX_RATE_VERSION": "fx_rate_version",
+    "SPENDGUARD_UNIT_CONVERSION_VERSION": "unit_conversion_version",
+    "SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX": "price_snapshot_hash_hex",
+}
+
+# Legacy env var alias accepted by SLICE 4's `_read_env_config` —
+# routed into `sidecar_address` only when the canonical var is unset.
+# Kept separate so `_merge_inline_and_env` does not regress operators
+# still using the legacy spelling.
+_LEGACY_SIDECAR_UDS_ENV = "SPENDGUARD_SIDECAR_UDS"
+
+# Keys LiteLLM's registry adds to the kwargs splice that are NOT
+# SpendGuard config — they describe the registry binding itself and
+# must be filtered before we hand the dict to `from_config`.
+# `guardrail` is the dotted module path of THIS factory; `mode` is the
+# event-hook spelling (`pre_call` / etc.); `default_on` toggles the
+# registry-side default; `event_hook` is LiteLLM's internal alias for
+# `mode` passed by `_guardrail_class(...)` callsite.
+_REGISTRY_KEYS_TO_DROP: frozenset[str] = frozenset({
+    "guardrail",
+    "mode",
+    "event_hook",
+    "default_on",
+    "guardrail_name",
+    "supported_event_hooks",
+    "skip_system_message_in_guardrail",
+    "skip_tool_message_in_guardrail",
+})
+
+
+def _merge_inline_and_env(
+    litellm_params: dict[str, Any],
+) -> dict[str, Any]:
+    """Merge inline yaml params with environment-variable fallbacks.
+
+    Inline keys win over env vars (operator's explicit yaml is
+    authoritative). Missing keys are filled from the corresponding
+    ``SPENDGUARD_*`` env var when present.
+
+    Filters out LiteLLM-registry binding keys (``guardrail`` / ``mode``
+    / ``event_hook`` / ``default_on`` / ``guardrail_name``) so the
+    merged dict shape matches what ``from_config`` expects.
+
+    Returns:
+        A dict suitable for ``SpendGuardGuardrail.from_config``. The
+        dict is a fresh object — never mutates the caller's
+        ``litellm_params``.
+    """
+    if not isinstance(litellm_params, dict):
+        raise SpendGuardConfigError(
+            "spendguard_guardrail_factory expects a dict of litellm_params; "
+            f"got {type(litellm_params).__name__}. Operators using "
+            "proxy_config.yaml should reference this function via the "
+            f"dotted module path: {SPENDGUARD_GUARDRAIL_MODULE_PATH!r}.",
+        )
+
+    # Step 1: copy inline params with registry-binding keys stripped
+    # so they never leak into `from_config` and surface as a
+    # confusing "unknown key" error from a future hardener pass.
+    merged: dict[str, Any] = {
+        key: value
+        for key, value in litellm_params.items()
+        if key not in _REGISTRY_KEYS_TO_DROP
+    }
+
+    # Step 2: fill missing keys from env vars. We treat a None / empty
+    # string inline value as "missing" so a yaml entry like
+    # `tenant_id: ""` (operator mistake) does not silently mask an
+    # env var that would otherwise satisfy the binding — instead the
+    # env var takes over. Explicit non-empty inline values win.
+    for env_var, config_key in _ENV_VAR_TO_CONFIG_KEY.items():
+        inline_value = merged.get(config_key)
+        if _is_explicit_value(inline_value):
+            continue
+        env_value = os.environ.get(env_var, "").strip()
+        if env_value:
+            merged[config_key] = env_value
+
+    # Legacy alias: route SPENDGUARD_SIDECAR_UDS into `sidecar_address`
+    # only when neither inline nor the canonical env var supplied a
+    # value. Mirrors SLICE 4's `_read_env_config` fallback.
+    if not _is_explicit_value(merged.get("sidecar_address")):
+        legacy = os.environ.get(_LEGACY_SIDECAR_UDS_ENV, "").strip()
+        if legacy:
+            merged["sidecar_address"] = legacy
+
+    return merged
+
+
+def _is_explicit_value(value: Any) -> bool:
+    """A value is considered "explicit" when the operator clearly meant
+    to set it. None / empty-string / whitespace-only do NOT count as
+    explicit so env-var fallback fires. Boolean False DOES count
+    (otherwise `disabled: false` would silently mask an env var).
+    """
+    if value is None:
+        return False
+    if isinstance(value, str):
+        return bool(value.strip())
+    return True
+
+
+def spendguard_guardrail_factory(
+    litellm_params: dict[str, Any] | None = None,
+    /,
+    **kwargs: Any,
+) -> SpendGuardGuardrail:
+    """LiteLLM ``proxy_config.yaml`` guardrail registry factory.
+
+    Called by LiteLLM during proxy boot when ``proxy_config.yaml``'s
+    ``guardrails:`` section references the dotted module path
+    ``spendguard.integrations.litellm_guardrail.spendguard_guardrail_factory``.
+    Reads SpendGuard config keys from ``litellm_params`` (inline yaml)
+    with env-var fallback for missing keys.
+
+    Two calling conventions:
+
+    1. Direct programmatic call (a single dict argument)::
+
+           spendguard_guardrail_factory({
+               "tenant_id": "my-tenant",
+               "sidecar_address": "unix:///run/spendguard.sock",
+           })
+
+    2. LiteLLM registry call (kwargs splice; see
+       ``litellm/proxy/guardrails/guardrail_registry.py:563-568``)::
+
+           spendguard_guardrail_factory(
+               guardrail_name="spendguard",
+               event_hook="pre_call",
+               default_on=True,
+               tenant_id="my-tenant",
+               sidecar_address="unix:///run/spendguard.sock",
+           )
+
+       LiteLLM's registry filters ``guardrail`` / ``mode`` /
+       ``default_on`` itself but passes through every other key in the
+       yaml ``litellm_params:`` block as ``**extra_params``. Our
+       factory tolerates the binding-key splice
+       (``guardrail_name`` / ``event_hook`` / ``supported_event_hooks``
+       / ``skip_system_message_in_guardrail`` etc.) by stripping them
+       inside ``_merge_inline_and_env`` before delegating to
+       ``SpendGuardGuardrail.from_config``.
+
+    Inline config keys (all optional; env vars fill gaps):
+        * ``tenant_id`` (required if env unset)
+        * ``sidecar_address`` (required if env unset; legacy
+          aliases ``socket_path`` / ``sidecar_uds`` honoured)
+        * ``api_key`` / ``disabled`` / ``proxy_timeout_ms``
+        * ``resolver_module``
+        * ``budget_id`` / ``window_instance_id`` / ``unit_id``
+        * ``pricing_version`` / ``fx_rate_version`` /
+          ``unit_conversion_version`` / ``price_snapshot_hash_hex``
+
+    Bootstrap validator (review-standards §5.4 Major): when required
+    keys are absent from BOTH inline and env, OR when
+    ``resolver_module`` is set but the module is non-importable,
+    raises ``SpendGuardConfigError`` at boot time (NOT first hook
+    call). This is the "fail-closed at boot" gate that surfaces
+    misconfiguration BEFORE the first request reaches the proxy.
+
+    Returns:
+        A fully constructed ``SpendGuardGuardrail`` ready to register
+        with the LiteLLM proxy. Non-singleton — calling the factory
+        twice returns two distinct instances (no module-level
+        mutable state; mirrors review-standards 1.4).
+
+    Raises:
+        SpendGuardConfigError: required key missing from both inline
+            and env; or ``resolver_module`` is set but cannot be
+            imported / does not satisfy the triple-factory contract;
+            or ``litellm_params`` is not a dict.
+    """
+    # Accept both `factory(dict)` and `factory(key=value, ...)` calling
+    # conventions. When LiteLLM passes a kwargs splice, the positional
+    # `litellm_params` is None and we treat the kwargs dict as the
+    # config payload. When tests / ad-hoc callers pass a single dict,
+    # we use it directly.
+    if litellm_params is None:
+        litellm_params = kwargs
+    elif kwargs:
+        # Defensive: a caller that supplies both a dict AND kwargs is
+        # ambiguous. We merge kwargs into the dict (kwargs win) so
+        # LiteLLM's splice — which always lands in kwargs — overrides
+        # any inline dict shipped through an alternate code path. The
+        # SLICE 4b "kwargs are authoritative" contract carries over.
+        litellm_params = {**litellm_params, **kwargs}
+
+    parsed = _merge_inline_and_env(litellm_params)
+    return SpendGuardGuardrail.from_config(parsed)
+
+
 class _NoopGuardrailDelegate:
     """No-op stand-in for ``_LoopBoundCallback`` in disabled mode.
 
@@ -1120,4 +1373,8 @@ class _NoopGuardrailDelegate:
         return None
 
 
-__all__ = ["SpendGuardGuardrail"]
+__all__ = [
+    "SPENDGUARD_GUARDRAIL_MODULE_PATH",
+    "SpendGuardGuardrail",
+    "spendguard_guardrail_factory",
+]

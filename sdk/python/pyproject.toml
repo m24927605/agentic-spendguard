@@ -77,6 +77,24 @@ litellm = [
   # granian without this direct floor.
   "granian>=2.7.4",
 ]
+# COV_D11 SLICE 5 (review-standards §5.2 Blocker): NEW canonical extras
+# name `litellm-guardrail` for the `CustomGuardrail`-based proxy plugin
+# shipped in `spendguard.integrations.litellm_guardrail`. Floor is
+# `litellm[proxy]>=1.55.0` since `CustomGuardrail` is the LiteLLM 1.55+
+# surface — earlier releases shipped the legacy `CustomLogger` path
+# only (still wired by the `litellm` extra above, floor 1.50).
+#
+# Distinct from the legacy `litellm` extra above so existing operators
+# on `pip install spendguard-sdk[litellm]` are NEVER force-upgraded
+# past 1.50 (review-standards §5.2: "Existing `litellm` extra
+# unchanged"). The two extras can coexist; operators wanting both
+# surfaces install both.
+litellm-guardrail = [
+  "litellm[proxy]>=1.55,<2.0",
+  # Carry forward the CVE-2026-42544 granian floor — `litellm[proxy]`
+  # can resolve an older granian without this direct pin.
+  "granian>=2.7.4",
+]
 dev = [
   "grpcio-tools>=1.62,<1.72",
   "pytest>=8",
