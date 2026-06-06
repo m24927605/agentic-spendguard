@@ -30,6 +30,11 @@ export const DEFAULT_SOCKET_PATH = "/var/run/spendguard/adapter.sock" as const;
  * Resolved env-var snapshot. Every field is optional because the env may be
  * sparsely populated; the constructor combines this snapshot with the explicit
  * options and validates the union.
+ *
+ * `runProjectionDefault` is typed as the same `RunProjectionPolicy` literal
+ * union surfaced by `SpendGuardClientConfig` so the env path produces the
+ * same shape the explicit-options path produces (no `string` vs literal-union
+ * drift between the two entry points).
  */
 export interface ResolvedEnvConfig {
   socketPath?: string;
@@ -37,7 +42,7 @@ export interface ResolvedEnvConfig {
   workloadInstanceId?: string;
   decisionTimeoutMs?: number;
   handshakeTimeoutMs?: number;
-  runProjectionDefault?: string;
+  runProjectionDefault?: import("./config.js").RunProjectionPolicy;
   disabled?: boolean;
 }
 

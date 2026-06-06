@@ -65,6 +65,7 @@ export type {
   SpendGuardClientConfig,
   SpendGuardClientOptions,
   ResolvedConfig,
+  RunProjectionPolicy,
 } from "./config.js";
 // `validateConfig` is intentionally NOT re-exported — it's a constructor-internal
 // helper. Adapters do not need to revalidate.

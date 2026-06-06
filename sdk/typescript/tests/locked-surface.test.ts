@@ -31,6 +31,7 @@ import {
   // canonical way to import LOCKED symbol names. If any of these names
   // changes shape or disappears, this file fails typecheck.
   type ResolvedConfig as MainBarrelResolvedConfig,
+  type RunProjectionPolicy as MainBarrelRunProjectionPolicy,
   SpendGuardClient,
 } from "../src/index.js";
 
@@ -43,6 +44,7 @@ import {
   type SpendGuardClientConfig as ClientSubpathClientConfig,
   type SpendGuardClientOptions as ClientSubpathClientOptions,
   type ResolvedConfig as ClientSubpathResolvedConfig,
+  type RunProjectionPolicy as ClientSubpathRunProjectionPolicy,
   SpendGuardClient as ClientSubpathSpendGuardClient,
 } from "../src/client.js";
 
@@ -96,6 +98,46 @@ const _runProjectionDefaultField: MainBarrelClientOptions = {
   runProjectionDefault: "STRICT_CEILING",
 };
 void _runProjectionDefaultField;
+
+// ── MJ-1 closure: RunProjectionPolicy is a TYPE export, not a string field ──
+//
+// SLICE 3 R2 review surfaced MJ-1: the slice doc requires `RunProjectionPolicy`
+// to be a string-literal union with at minimum the two ASP Draft-01 policies
+// + the literal-string escape hatch `(string & {})`. SLICE 4 wires the type;
+// the assertions below prove (a) the type exists on both barrels, (b) it
+// retypes `runProjectionDefault` on `SpendGuardClientConfig`, and (c) the
+// literal-string members are reachable from the union.
+
+// (a) Cross-barrel identity: same type from both entry points.
+const _runProjectionPolicyCrossIdentity: AssertMutuallyAssignable<
+  MainBarrelRunProjectionPolicy,
+  ClientSubpathRunProjectionPolicy
+> = true;
+void _runProjectionPolicyCrossIdentity;
+
+// (b) The literal members are reachable — assigning each LOCKED policy name to
+// the type slot proves the union includes them. If `RunProjectionPolicy` lost
+// either member, these assignments would fail to typecheck.
+const _policyEmpty: MainBarrelRunProjectionPolicy = "";
+const _policyStrict: MainBarrelRunProjectionPolicy = "STRICT_CEILING";
+const _policyElastic: MainBarrelRunProjectionPolicy = "ELASTIC";
+const _policyForwardCompat: MainBarrelRunProjectionPolicy = "FUTURE_POLICY_VARIANT";
+void _policyEmpty;
+void _policyStrict;
+void _policyElastic;
+void _policyForwardCompat;
+
+// (c) `runProjectionDefault` is typed as `RunProjectionPolicy`, NOT `string`.
+// The test trick: extract the field's type via indexed access and assert
+// mutual assignability to `RunProjectionPolicy`. If SLICE 3's `?: string` were
+// still in place, this would not typecheck (`string` is wider than the policy
+// union — assignment from `string` to the union fails).
+type RunProjectionDefaultFieldType = NonNullable<MainBarrelClientOptions["runProjectionDefault"]>;
+const _runProjectionDefaultFieldIsPolicy: AssertMutuallyAssignable<
+  RunProjectionDefaultFieldType,
+  MainBarrelRunProjectionPolicy
+> = true;
+void _runProjectionDefaultFieldIsPolicy;
 
 // ── Runtime smoke (guards against name-only regression) ───────────────────
 

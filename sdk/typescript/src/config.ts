@@ -130,11 +130,30 @@ export interface SpendGuardClientConfig {
   disabled?: boolean;
   /**
    * Default `run_projection` policy when callers do not pass one. Slice-doc
-   * addition; env fallback: `SPENDGUARD_RUN_PROJECTION_DEFAULT`. Wired in
-   * SLICE 4 once `reserve()` exists to consume it; SLICE 3 only stores it.
+   * addition; env fallback: `SPENDGUARD_RUN_PROJECTION_DEFAULT`. SLICE 4
+   * wires consumption: when set to a non-empty value, the resolved policy
+   * is folded into the `DecisionRequest.inputs.runtime_metadata` under the
+   * `run_projection_policy` key so the sidecar's projector observes the
+   * default per design.md §4.2 R2 amendment.
    */
-  runProjectionDefault?: string;
+  runProjectionDefault?: RunProjectionPolicy;
 }
+
+/**
+ * Default `run_projection` policy. Forward-extensible string-literal union per
+ * design.md §4.2 R2 amendment + COV_S05_03 R2 commitment MJ-1.
+ *
+ * v0.1.x ships:
+ *   - `""` — leave policy unset; rely on contract-bundle default.
+ *   - `"STRICT_CEILING"` — ASP Draft-01 strict-ceiling policy.
+ *   - `"ELASTIC"` — ASP Draft-01 elastic policy.
+ *
+ * The third member `(string & {})` is the standard TS literal-string escape
+ * hatch: adapters can pass policy names that land in a future contract DSL
+ * bump without forcing a v0.minor on the SDK, while preserving completion
+ * suggestions for the two named members above.
+ */
+export type RunProjectionPolicy = "" | "STRICT_CEILING" | "ELASTIC" | (string & {});
 
 /**
  * **LOCKED §4.1 spec name** for the constructor options. Identical to
@@ -172,7 +191,7 @@ export interface ResolvedConfig {
   otelTracer?: Tracer;
   runtime: "uds-grpc";
   disabled: boolean;
-  runProjectionDefault: string;
+  runProjectionDefault: RunProjectionPolicy;
 }
 
 // ── validateConfig — runtime checks (slice doc deliverable) ────────────────

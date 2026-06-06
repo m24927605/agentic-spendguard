@@ -154,17 +154,46 @@ describe("SpendGuardClient — constructor validation", () => {
   });
 });
 
-// ── C-04: disabled short-circuit; RPCs throw "wired in SLICE 4-5" ─────────
+// ── C-04: disabled short-circuit + SLICE 5 placeholders ───────────────────
 
-describe("SpendGuardClient — SLICE 3 RPC placeholders", () => {
+describe("SpendGuardClient — SLICE 5 placeholders (release / queryBudget / lower-level)", () => {
   const cfg = { socketPath: "/tmp/x.sock", tenantId: "t" } as const;
 
-  it("C-04 (partial): disabled:true sets config flag; SLICE 4 wires short-circuit", () => {
+  it("C-04 (partial): disabled:true sets config flag", () => {
     const client = new SpendGuardClient({ ...cfg, disabled: true });
     expect(client.config.disabled).toBe(true);
   });
 
-  it("reserve() throws SpendGuardError with SLICE 4-5 marker", async () => {
+  it("release() throws SpendGuardError with SLICE 5 marker", async () => {
+    const client = new SpendGuardClient(cfg);
+    await expect(
+      client.release({ reservationId: "r-1", idempotencyKey: "sg-abc" }),
+    ).rejects.toThrowError(/SLICE 5/);
+  });
+
+  it("queryBudget() throws SpendGuardError with SLICE 5 marker", async () => {
+    const client = new SpendGuardClient(cfg);
+    await expect(client.queryBudget({ scopeId: "tenant/test/global" })).rejects.toThrowError(
+      /SLICE 5/,
+    );
+  });
+
+  it("confirmPublishOutcome() throws SpendGuardError with SLICE 5 marker", async () => {
+    const client = new SpendGuardClient(cfg);
+    await expect(
+      client.confirmPublishOutcome({
+        decisionId: "d",
+        effectHash: new Uint8Array([0x01]),
+        outcome: "APPLIED",
+      }),
+    ).rejects.toThrowError(/SLICE 5/);
+  });
+});
+
+describe("SpendGuardClient — SLICE 4 RPC pre-handshake gate", () => {
+  const cfg = { socketPath: "/tmp/x.sock", tenantId: "t" } as const;
+
+  it("reserve() before handshake() throws HandshakeError", async () => {
     const client = new SpendGuardClient(cfg);
     await expect(
       client.reserve({
@@ -177,22 +206,10 @@ describe("SpendGuardClient — SLICE 3 RPC placeholders", () => {
         projectedClaims: [],
         idempotencyKey: "sg-abcdef",
       }),
-    ).rejects.toThrowError(SpendGuardError);
-    await expect(
-      client.reserve({
-        trigger: "LLM_CALL_PRE",
-        runId: "run-1",
-        stepId: "step-1",
-        llmCallId: "llm-1",
-        decisionId: "d-1",
-        route: "openai|gpt-4o-mini",
-        projectedClaims: [],
-        idempotencyKey: "sg-abcdef",
-      }),
-    ).rejects.toThrowError(/SLICE 4-5/);
+    ).rejects.toThrowError(HandshakeError);
   });
 
-  it("commitEstimated() throws SpendGuardError with SLICE 4-5 marker", async () => {
+  it("commitEstimated() before handshake() throws HandshakeError", async () => {
     const client = new SpendGuardClient(cfg);
     await expect(
       client.commitEstimated({
@@ -207,53 +224,7 @@ describe("SpendGuardClient — SLICE 3 RPC placeholders", () => {
         providerEventId: "ev-1",
         outcome: "SUCCESS",
       }),
-    ).rejects.toThrowError(/SLICE 4-5/);
-  });
-
-  it("release() throws SpendGuardError with SLICE 4-5 marker", async () => {
-    const client = new SpendGuardClient(cfg);
-    await expect(
-      client.release({ reservationId: "r-1", idempotencyKey: "sg-abc" }),
-    ).rejects.toThrowError(/SLICE 4-5/);
-  });
-
-  it("queryBudget() throws SpendGuardError with SLICE 4-5 marker", async () => {
-    const client = new SpendGuardClient(cfg);
-    await expect(client.queryBudget({ scopeId: "tenant/test/global" })).rejects.toThrowError(
-      /SLICE 4-5/,
-    );
-  });
-
-  it("confirmPublishOutcome() throws SpendGuardError with SLICE 4-5 marker", async () => {
-    const client = new SpendGuardClient(cfg);
-    await expect(
-      client.confirmPublishOutcome({
-        decisionId: "d",
-        effectHash: new Uint8Array([0x01]),
-        outcome: "APPLIED",
-      }),
-    ).rejects.toThrowError(/SLICE 4-5/);
-  });
-
-  it("handshake() throws SpendGuardError with SLICE 4-5 marker", async () => {
-    const client = new SpendGuardClient(cfg);
-    await expect(client.handshake()).rejects.toThrowError(/SLICE 4-5/);
-  });
-
-  it("requestDecision is an alias of reserve and throws the same error", async () => {
-    const client = new SpendGuardClient(cfg);
-    await expect(
-      client.requestDecision({
-        trigger: "LLM_CALL_PRE",
-        runId: "r",
-        stepId: "s",
-        llmCallId: "l",
-        decisionId: "d",
-        route: "x",
-        projectedClaims: [],
-        idempotencyKey: "sg-1",
-      }),
-    ).rejects.toThrowError(/reserve\(\)/);
+    ).rejects.toThrowError(HandshakeError);
   });
 });
 
@@ -528,8 +499,8 @@ describe("SpendGuardClient.fromEnv()", () => {
 // ── Spy that resumeAfterApproval is delegated correctly when SLICE 4 wires
 //    the body. SLICE 3 only verifies the throw shape.
 
-describe("SpendGuardClient — placeholder delegation", () => {
-  it("resumeAfterApproval throws SpendGuardError with SLICE 4-5 marker", async () => {
+describe("SpendGuardClient — placeholder delegation (SLICE 5)", () => {
+  it("resumeAfterApproval throws SpendGuardError with SLICE 5 marker", async () => {
     const client = new SpendGuardClient({
       socketPath: "/tmp/x.sock",
       tenantId: "t",
@@ -543,7 +514,7 @@ describe("SpendGuardClient — placeholder delegation", () => {
     ).rejects.toThrowError(/resumeAfterApproval\(\)/);
   });
 
-  it("safeConfirmApplyFailed throws (SLICE 4 will wire swallow semantics)", async () => {
+  it("safeConfirmApplyFailed throws (SLICE 5 will wire swallow semantics)", async () => {
     const client = new SpendGuardClient({
       socketPath: "/tmp/x.sock",
       tenantId: "t",
@@ -557,7 +528,7 @@ describe("SpendGuardClient — placeholder delegation", () => {
     ).rejects.toThrowError(/safeConfirmApplyFailed\(\)/);
   });
 
-  it("emitLlmCallPost throws SpendGuardError with SLICE 4-5 marker", async () => {
+  it("emitLlmCallPost throws SpendGuardError with SLICE 5 marker (provider-report path)", async () => {
     const client = new SpendGuardClient({
       socketPath: "/tmp/x.sock",
       tenantId: "t",

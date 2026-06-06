@@ -1,54 +1,308 @@
-// Minimal mock sidecar UDS server for SLICE 3 lifecycle tests.
+// Mock sidecar UDS server for SLICE 3 lifecycle tests + SLICE 4 RPC bodies.
 //
-// SLICE 3 only verifies the connect → close lifecycle and `Symbol.asyncDispose`
-// semantics — there is no need to implement the full SidecarAdapter service
-// here. We bind a real `@grpc/grpc-js` server to a UDS path and let the client
-// connect, then verify the channel is created and torn down cleanly.
+// SLICE 3 only verified the connect → close lifecycle. SLICE 4 extends the
+// mock with REAL `SidecarAdapter` service handlers for handshake /
+// requestDecision / emitTraceEvents so the new RPC bodies can be exercised
+// against a deterministic in-memory sidecar.
 //
-// SLICE 9 ships the full mock with handshake / reserve / commit / release
-// behaviors per `tests.md` §4.2.
+// SLICE 9 ships the full cross-language fixture mock per `tests.md` §4.2; this
+// file remains the lighter-weight per-slice harness.
 
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Server, ServerCredentials } from "@grpc/grpc-js";
+import {
+  status as GrpcStatus,
+  type Metadata,
+  Server,
+  ServerCredentials,
+  type ServerDuplexStream,
+  type ServerUnaryCall,
+  type sendUnaryData,
+} from "@grpc/grpc-js";
+
+import {
+  DecisionRequest,
+  DecisionResponse,
+  DecisionResponse_Decision,
+  HandshakeRequest,
+  HandshakeRequest_CapabilityLevel,
+  HandshakeResponse,
+  TraceEvent,
+  TraceEventAck,
+  TraceEventAck_Status,
+} from "../../src/_proto/spendguard/sidecar_adapter/v1/adapter.js";
 
 /**
- * Mock UDS sidecar. Binds an empty gRPC server to a tempfile socket; the
- * server accepts the client's connection attempts but does NOT register any
- * services. SLICE 3 tests check only the channel-open + close path; SLICE 4+
- * extends this mock with handshake + RPC handlers.
+ * Behavior hooks for the mock SidecarAdapter service. Tests register a hook
+ * per RPC and drive the mock through expected (or adversarial) flows.
+ *
+ * Each hook is optional — when omitted, the mock returns a deterministic
+ * "happy path" default (CONTINUE for reserve, ACCEPTED for trace events,
+ * synthetic session for handshake).
+ */
+export interface MockSidecarHooks {
+  /** Custom handshake handler. Default returns a fixed session id + bundle. */
+  onHandshake?: (req: HandshakeRequest) => HandshakeResponse;
+  /** Custom requestDecision handler. Default returns CONTINUE. */
+  onRequestDecision?: (req: DecisionRequest) => DecisionResponse;
+  /** Custom emitTraceEvents handler. Default acks every event as ACCEPTED. */
+  onEmitTraceEvents?: (event: TraceEvent) => TraceEventAck;
+}
+
+/** Default handshake response — CONTINUE-ready session with capability_required=L3. */
+const DEFAULT_HANDSHAKE_RESPONSE: HandshakeResponse = {
+  sidecarVersion: "mock-0.0.0",
+  schemaBundle: {
+    schemaBundleId: "mock-schema",
+    schemaBundleHash: new Uint8Array([0xaa, 0xbb]),
+    canonicalSchemaVersion: "spendguard.v1alpha1",
+  },
+  contractBundle: {
+    bundleId: "mock-contract",
+    bundleHash: new Uint8Array([0xcc, 0xdd]),
+    bundleSignature: new Uint8Array([0xee]),
+    signingKeyId: "mock-key-1",
+  },
+  capabilityRequired: HandshakeRequest_CapabilityLevel.L3_POLICY_HOOK,
+  protocolVersion: 1,
+  sessionId: "mock-session-1",
+  signingKeyId: "mock-key-1",
+  announcementSignature: new Uint8Array([0xff, 0x00, 0x01]),
+};
+
+/** Default decision response — CONTINUE with reserved id `mock-reservation-1`. */
+const DEFAULT_DECISION_RESPONSE: DecisionResponse = {
+  decisionId: "mock-decision-1",
+  auditDecisionEventId: "mock-audit-1",
+  decision: DecisionResponse_Decision.CONTINUE,
+  reasonCodes: ["mock_allow"],
+  matchedRuleIds: ["mock-rule-1"],
+  mutationPatchJson: "",
+  effectHash: new Uint8Array([0x10, 0x20]),
+  ledgerTransactionId: "mock-tx-1",
+  reservationIds: ["mock-reservation-1"],
+  ttlExpiresAt: { seconds: "0", nanos: 0 },
+  approvalRequestId: "",
+  approverRole: "",
+  terminal: false,
+  runCodeTriggered: "",
+};
+
+/** Convenience: build a DecisionResponse with a STOP outcome. */
+export function makeStopResponse(
+  args: {
+    decisionId?: string;
+    reasonCodes?: string[];
+    matchedRuleIds?: string[];
+  } = {},
+): DecisionResponse {
+  return {
+    ...DEFAULT_DECISION_RESPONSE,
+    decisionId: args.decisionId ?? "mock-decision-stop",
+    decision: DecisionResponse_Decision.STOP,
+    reasonCodes: args.reasonCodes ?? ["mock_deny", "budget_exhausted"],
+    matchedRuleIds: args.matchedRuleIds ?? ["mock-rule-deny"],
+    reservationIds: [],
+    ledgerTransactionId: "",
+    terminal: true,
+  };
+}
+
+/** Convenience: build a DecisionResponse with a DEGRADE outcome. */
+export function makeDegradeResponse(args: { decisionId?: string } = {}): DecisionResponse {
+  return {
+    ...DEFAULT_DECISION_RESPONSE,
+    decisionId: args.decisionId ?? "mock-decision-degrade",
+    decision: DecisionResponse_Decision.DEGRADE,
+    mutationPatchJson: '[{"op":"replace","path":"/model","value":"gpt-4o-mini"}]',
+    reasonCodes: ["mock_degrade", "budget_threshold"],
+    matchedRuleIds: ["mock-rule-degrade"],
+  };
+}
+
+/**
+ * Mock UDS sidecar with full SidecarAdapter service.
+ *
+ * Usage:
+ *
+ *     const mock = await MockSidecar.start({
+ *       onRequestDecision: (req) => makeDegradeResponse({ decisionId: req.ids?.decisionId }),
+ *     });
+ *     try { ... } finally { await mock.close(); }
+ *
+ * Or with `await using`:
+ *
+ *     await using mock = await MockSidecar.start();
  */
 export class MockSidecar {
   /** The UDS path the server is bound to. Stable across the mock's lifetime. */
   readonly socketPath: string;
+  /** Mutable hooks — tests can update mid-test if they need to flip behavior. */
+  hooks: MockSidecarHooks;
   private readonly server: Server;
   private readonly socketDir: string;
   private bound = false;
+  /** Tracks how many requestDecision calls have been served (idempotency tests). */
+  private decisionCount = 0;
+  /** Tracks how many handshake calls have been served (idempotency tests). */
+  private handshakeCount = 0;
+  /** Tracks how many emitTraceEvents events have been served. */
+  private traceEventCount = 0;
 
-  private constructor(socketPath: string, socketDir: string) {
+  private constructor(socketPath: string, socketDir: string, hooks: MockSidecarHooks) {
     this.socketPath = socketPath;
     this.socketDir = socketDir;
+    this.hooks = hooks;
     this.server = new Server();
   }
 
   /**
    * Start a fresh mock instance on a random UDS path under the system tempdir.
-   * Each test should `await using mock = await MockSidecar.start()` so the
-   * cleanup runs on scope exit.
+   * Pass `hooks` to override any of the default RPC behaviors.
    */
-  static async start(): Promise<MockSidecar> {
+  static async start(hooks: MockSidecarHooks = {}): Promise<MockSidecar> {
     const dir = mkdtempSync(join(tmpdir(), "spendguard-mock-"));
     const path = join(dir, "adapter.sock");
-    const mock = new MockSidecar(path, dir);
+    const mock = new MockSidecar(path, dir, hooks);
+    mock.registerService();
     await mock.bind();
     return mock;
   }
 
+  /** How many requestDecision calls have been served since start. */
+  get decisionsServed(): number {
+    return this.decisionCount;
+  }
+
+  /** How many handshake calls have been served since start. */
+  get handshakesServed(): number {
+    return this.handshakeCount;
+  }
+
+  /** How many emitTraceEvents events have been served since start. */
+  get traceEventsServed(): number {
+    return this.traceEventCount;
+  }
+
+  /**
+   * Register the SidecarAdapter service on `this.server`. The method paths must
+   * exactly match the protobuf-ts client's request URI — see
+   * `node_modules/@protobuf-ts/grpc-transport/build/es2015/grpc-transport.js`
+   * `makeUnaryRequest(\`/${typeName}/${methodName}\`, ...)`.
+   */
+  private registerService(): void {
+    const typeName = "spendguard.sidecar_adapter.v1.SidecarAdapter";
+    this.server.addService(
+      {
+        Handshake: {
+          path: `/${typeName}/Handshake`,
+          requestStream: false,
+          responseStream: false,
+          requestDeserialize: (buf: Buffer) => HandshakeRequest.fromBinary(buf),
+          requestSerialize: (msg: HandshakeRequest) => Buffer.from(HandshakeRequest.toBinary(msg)),
+          responseSerialize: (msg: HandshakeResponse) =>
+            Buffer.from(HandshakeResponse.toBinary(msg)),
+          responseDeserialize: (buf: Buffer) => HandshakeResponse.fromBinary(buf),
+        },
+        RequestDecision: {
+          path: `/${typeName}/RequestDecision`,
+          requestStream: false,
+          responseStream: false,
+          requestDeserialize: (buf: Buffer) => DecisionRequest.fromBinary(buf),
+          requestSerialize: (msg: DecisionRequest) => Buffer.from(DecisionRequest.toBinary(msg)),
+          responseSerialize: (msg: DecisionResponse) => Buffer.from(DecisionResponse.toBinary(msg)),
+          responseDeserialize: (buf: Buffer) => DecisionResponse.fromBinary(buf),
+        },
+        EmitTraceEvents: {
+          path: `/${typeName}/EmitTraceEvents`,
+          requestStream: true,
+          responseStream: true,
+          requestDeserialize: (buf: Buffer) => TraceEvent.fromBinary(buf),
+          requestSerialize: (msg: TraceEvent) => Buffer.from(TraceEvent.toBinary(msg)),
+          responseSerialize: (msg: TraceEventAck) => Buffer.from(TraceEventAck.toBinary(msg)),
+          responseDeserialize: (buf: Buffer) => TraceEventAck.fromBinary(buf),
+        },
+      },
+      {
+        Handshake: (
+          call: ServerUnaryCall<HandshakeRequest, HandshakeResponse>,
+          callback: sendUnaryData<HandshakeResponse>,
+        ) => {
+          this.handshakeCount += 1;
+          try {
+            const handler = this.hooks.onHandshake;
+            const response = handler ? handler(call.request) : DEFAULT_HANDSHAKE_RESPONSE;
+            callback(null, response);
+          } catch (err) {
+            callback({
+              code: GrpcStatus.UNKNOWN,
+              details: err instanceof Error ? err.message : String(err),
+              metadata: emptyMetadata(),
+              name: "Error",
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        },
+        RequestDecision: (
+          call: ServerUnaryCall<DecisionRequest, DecisionResponse>,
+          callback: sendUnaryData<DecisionResponse>,
+        ) => {
+          this.decisionCount += 1;
+          try {
+            const handler = this.hooks.onRequestDecision;
+            const response = handler ? handler(call.request) : DEFAULT_DECISION_RESPONSE;
+            callback(null, response);
+          } catch (err) {
+            callback({
+              code: GrpcStatus.UNKNOWN,
+              details: err instanceof Error ? err.message : String(err),
+              metadata: emptyMetadata(),
+              name: "Error",
+              message: err instanceof Error ? err.message : String(err),
+            });
+          }
+        },
+        EmitTraceEvents: (call: ServerDuplexStream<TraceEvent, TraceEventAck>) => {
+          const handler = this.hooks.onEmitTraceEvents;
+          call.on("data", (event: TraceEvent) => {
+            this.traceEventCount += 1;
+            try {
+              const ack = handler
+                ? handler(event)
+                : {
+                    eventId: `mock-event-${this.traceEventCount}`,
+                    status: TraceEventAck_Status.ACCEPTED,
+                  };
+              call.write(ack);
+            } catch (err) {
+              call.write({
+                eventId: `mock-event-${this.traceEventCount}`,
+                status: TraceEventAck_Status.REJECTED,
+                error: {
+                  code: 13 /* RESERVATION_STATE_CONFLICT — synthetic for tests */,
+                  message: err instanceof Error ? err.message : String(err),
+                  details: {},
+                },
+              });
+            }
+          });
+          call.on("end", () => {
+            call.end();
+          });
+          call.on("error", () => {
+            // grpc-js may surface CANCELLED here; we don't need to do anything
+            // — the call is already torn down. Test cleanup uses
+            // `close()` to force-shutdown.
+          });
+        },
+      },
+    );
+  }
+
   private async bind(): Promise<void> {
     return new Promise<void>((resolve, reject) => {
-      // `unix:` prefix is the @grpc/grpc-js convention for UDS bind targets.
       this.server.bindAsync(
         `unix:${this.socketPath}`,
         ServerCredentials.createInsecure(),
@@ -78,11 +332,8 @@ export class MockSidecar {
   async close(): Promise<void> {
     if (this.bound) {
       await new Promise<void>((resolve) => {
-        // `tryShutdown` waits for in-flight RPCs; for SLICE 3 there are none,
-        // but we use it anyway to match the production graceful-close path.
         this.server.tryShutdown((err) => {
           if (err) {
-            // forceShutdown ensures the test doesn't hang if shutdown wedges.
             this.server.forceShutdown();
           }
           resolve();
@@ -90,9 +341,6 @@ export class MockSidecar {
       });
       this.bound = false;
     }
-    // Best-effort socket file cleanup. On macOS the kernel may have already
-    // removed it once the server closed the listening fd; on Linux we have to
-    // unlink it ourselves.
     try {
       if (existsSync(this.socketPath)) {
         rmSync(this.socketPath, { force: true });
@@ -106,4 +354,12 @@ export class MockSidecar {
   async [Symbol.asyncDispose](): Promise<void> {
     await this.close();
   }
+}
+
+/** Build an empty `Metadata` object for synthetic error responses. */
+function emptyMetadata(): Metadata {
+  // Lazy require avoids a top-level import that would tug the grpc-js Metadata
+  // class into every test file that imports MockSidecar.
+  const grpc = require("@grpc/grpc-js") as { Metadata: new () => Metadata };
+  return new grpc.Metadata();
 }
