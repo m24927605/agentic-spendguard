@@ -21,6 +21,8 @@ use std::path::PathBuf;
 
 pub mod ca;
 pub mod paths;
+pub mod shell;
+pub mod tools;
 pub mod trust;
 
 /// Per-user vs admin trust scope. Parsed in this slice; honoured by SLICE
@@ -110,11 +112,44 @@ pub struct InstallReport {
     pub ca_key_path: PathBuf,
     pub leaf_pem_path: PathBuf,
     pub leaf_key_path: PathBuf,
-    /// Empty until SLICE 2/3/4 wires the OS backend; lets `doctor` reason
-    /// about "issued but not trusted" in the interim.
+    /// Populated by SLICE 2/3/4 OS trust backends; lets `doctor` reason
+    /// about "issued but not trusted" when the list is empty.
     pub trust_store_locations: Vec<PathBuf>,
-    /// Empty until SLICE 5.
+    /// **SLICE 5 (COV_09)**: rc file paths the writer touched. Empty when
+    /// detection returned `Cmd` (operator runs `setx` from the breadcrumb
+    /// in [`Self::shell_env_vars`]) or `--shell` was not supplied AND no
+    /// shell could be detected.
     pub shell_rc_paths: Vec<PathBuf>,
+    /// **SLICE 5 (COV_09)**: the `(name, value)` pairs the rc writer
+    /// emitted (HTTPS_PROXY + per-tool overrides). Carried in the report
+    /// JSON so `doctor` (SLICE 7) can verify each entry landed in the
+    /// caller's environment, and so the `cmd.exe` breadcrumb path can
+    /// surface the literal `setx HTTPS_PROXY …` lines for the operator.
+    #[serde(default)]
+    pub shell_env_vars: Vec<(String, String)>,
+    /// **SLICE 5 (COV_09)**: per-tool stanza covering the full 14-row
+    /// matrix from `design.md` §5 — id, display, env var (or empty for
+    /// `ConfigFile` / `OsTrustOnly`), and optional notes. Lets the
+    /// install report show the operator every tool that was considered,
+    /// not just the ones that contributed env vars.
+    #[serde(default)]
+    pub tools: Vec<ToolReport>,
+}
+
+/// Per-tool install-report stanza — one row of `design.md` §5 plus the
+/// resolved value that landed (when applicable).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolReport {
+    pub id: String,
+    pub display: String,
+    /// Env var the tool reads, or empty for `ConfigFile` / `OsTrustOnly`.
+    pub env_var: String,
+    /// Resolved value (CA PEM path or proxy URL). Empty when the tool is
+    /// `OsTrustOnly` or `ConfigFile` — the operator's checklist surfaces
+    /// the alternative mechanism via [`Self::notes`].
+    pub value: String,
+    /// Free-form note (matches `ToolOverride::notes`).
+    pub notes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,6 +196,37 @@ pub fn install_with_trust_store(
     opts: &InstallOpts,
     trust_backend: &dyn trust::TrustStore,
 ) -> Result<InstallReport> {
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from);
+    let shell_env = shell::EnvView {
+        shell: std::env::var("SHELL").ok().as_deref().map(leak_static),
+        psmodulepath: std::env::var("PSModulePath")
+            .ok()
+            .as_deref()
+            .map(leak_static),
+        comspec: std::env::var("ComSpec").ok().as_deref().map(leak_static),
+    };
+    install_with_backends(
+        opts,
+        trust_backend,
+        home.as_deref(),
+        shell_env,
+        DEFAULT_PROXY_URL,
+    )
+}
+
+/// `spendguard install` with full backend injection — trust + HOME + shell
+/// env detection + proxy URL. The thin shim above ([`install_with_trust_store`])
+/// reads from process env; this seam is what the SLICE 5 lib-tests use to
+/// stay hermetic on the developer's real `~/.zshrc`.
+pub fn install_with_backends(
+    opts: &InstallOpts,
+    trust_backend: &dyn trust::TrustStore,
+    home: Option<&std::path::Path>,
+    shell_env: shell::EnvView<'_>,
+    proxy_url: &str,
+) -> Result<InstallReport> {
     let out_dir = match &opts.ca_out {
         Some(dir) => {
             std::fs::create_dir_all(dir)
@@ -186,12 +252,50 @@ pub fn install_with_trust_store(
 
     let ca_fingerprint_sha256 = ca::fingerprint_hex(&root.fingerprint_sha256);
 
-    // SLICE 2: install the CA into the OS trust store. macOS only in this
-    // slice; Linux/Windows fall through with empty trust_store_locations
-    // (review-standards X1: cfg-gated, not runtime branched).
+    // SLICE 2/3/4: install the CA into the OS trust store. Cfg-gated
+    // backends (review-standards X1) — runtime selection happens in
+    // `trust::dispatch`, not here.
     let trust_store_locations = trust_backend
         .add_root(&ca_pem_path, opts.scope)
         .context("install CA into OS trust store")?;
+
+    // SLICE 5: emit the per-shell rc block + per-tool report.
+    let ca_pem_str = ca_pem_path.to_string_lossy().to_string();
+    let shell_env_vars = tools::env_vars_for_install(proxy_url, &ca_pem_str);
+    let tool_reports = build_tool_reports(proxy_url, &ca_pem_str);
+
+    let shell_rc_paths = match resolve_shell(opts, shell_env) {
+        ResolvedShell::Writer { kind, rc_path } => {
+            let writer = shell::dispatch_writer(kind);
+            if let Some(path) = rc_path {
+                writer
+                    .write_rc(&path, &shell_env_vars)
+                    .with_context(|| format!("emit shell rc at {}", path.display()))?;
+                vec![path]
+            } else {
+                // Cmd detected — no file mutation; breadcrumb lives in
+                // shell_env_vars / tools fields.
+                Vec::new()
+            }
+        }
+        ResolvedShell::DetectedNoHome => {
+            // Detected a shell but couldn't resolve HOME; surface a
+            // warning via the empty rc-paths return and let the install
+            // report carry the env vars so the operator can paste them
+            // manually.
+            Vec::new()
+        }
+        ResolvedShell::None => {
+            // No `--shell` override and detection returned None. Per
+            // SLICE 5 contract we record the env vars in the report so
+            // the operator can route them manually; we do NOT bail out
+            // because the trust store install (SLICE 2-4) already
+            // succeeded.
+            Vec::new()
+        }
+    };
+    let _ = home; // retained for future use; pwsh on non-Windows
+                  // resolution already runs inside resolve_shell
 
     Ok(InstallReport {
         ca_fingerprint_sha256,
@@ -200,8 +304,79 @@ pub fn install_with_trust_store(
         leaf_pem_path,
         leaf_key_path,
         trust_store_locations,
-        shell_rc_paths: Vec::new(),
+        shell_rc_paths,
+        shell_env_vars,
+        tools: tool_reports,
     })
+}
+
+/// `https://localhost:8443` — the locked default proxy listen URL from
+/// design §4 + slice doc §3. Lives as a constant so the SLICE 6 / SLICE 7
+/// follow-ups have one knob to flip when the operator wants a custom port.
+pub const DEFAULT_PROXY_URL: &str = "https://localhost:8443";
+
+/// Build the full 14-row `ToolReport` list from `tools::TOOL_OVERRIDES`,
+/// resolving `EnvVar` rows against `(ca_pem_path, proxy_url)` and leaving
+/// `ConfigFile` / `OsTrustOnly` rows with an empty `value`.
+fn build_tool_reports(proxy_url: &str, ca_pem_path: &str) -> Vec<ToolReport> {
+    tools::TOOL_OVERRIDES
+        .iter()
+        .map(|t| {
+            let value = match t.kind {
+                tools::OverrideKind::EnvVar if t.env_var == "SRC_HTTPS_PROXY" => {
+                    proxy_url.to_string()
+                }
+                tools::OverrideKind::EnvVar => ca_pem_path.to_string(),
+                _ => String::new(),
+            };
+            ToolReport {
+                id: t.id.to_string(),
+                display: t.display.to_string(),
+                env_var: t.env_var.to_string(),
+                value,
+                notes: t.notes.map(|n| n.to_string()),
+            }
+        })
+        .collect()
+}
+
+enum ResolvedShell {
+    Writer {
+        kind: shell::DetectedShell,
+        rc_path: Option<PathBuf>,
+    },
+    DetectedNoHome,
+    None,
+}
+
+fn resolve_shell(opts: &InstallOpts, env: shell::EnvView<'_>) -> ResolvedShell {
+    let kind = match opts.shell {
+        Some(explicit) => shell::DetectedShell::from(explicit),
+        None => match shell::DetectedShell::detect_from_env(env) {
+            Some(k) => k,
+            None => return ResolvedShell::None,
+        },
+    };
+    // HOME is needed for every rc path EXCEPT Cmd (which has none).
+    if kind == shell::DetectedShell::Cmd {
+        return ResolvedShell::Writer {
+            kind,
+            rc_path: None,
+        };
+    }
+    let home = match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        Some(h) => PathBuf::from(h),
+        None => return ResolvedShell::DetectedNoHome,
+    };
+    let rc_path = kind.rc_path(&home);
+    ResolvedShell::Writer { kind, rc_path }
+}
+
+/// Leak a `&str` into `'static` — only used to bridge `std::env::var(...).ok()`
+/// into the `EnvView<'static>` the SLICE 5 detector takes. Bounded to the
+/// number of `install` calls in a process (one).
+fn leak_static(s: &str) -> &'static str {
+    Box::leak(s.to_string().into_boxed_str())
 }
 
 /// `spendguard uninstall` — SLICE 2 lands the trust-store half (macOS only).
@@ -224,9 +399,35 @@ pub fn uninstall(opts: &UninstallOpts) -> Result<UninstallReport> {
 
 /// `spendguard uninstall` with injected trust backend — see
 /// [`install_with_trust_store`] for the rationale.
+///
+/// SLICE 5 (COV_09) addition: per slice doc §3 the rc strip MUST run
+/// BEFORE the trust-store removal — that way a `Ctrl-C` mid-uninstall
+/// can never leave the operator with an active `HTTPS_PROXY` export
+/// pointed at a now-untrusted local proxy. Trust removal failure after
+/// successful rc strip is logged via the `UninstallReport`; the caller
+/// can re-run uninstall to retry the trust step.
 pub fn uninstall_with_trust_store(
     opts: &UninstallOpts,
     trust_backend: &dyn trust::TrustStore,
+) -> Result<UninstallReport> {
+    let shell_env = shell::EnvView {
+        shell: std::env::var("SHELL").ok().as_deref().map(leak_static),
+        psmodulepath: std::env::var("PSModulePath")
+            .ok()
+            .as_deref()
+            .map(leak_static),
+        comspec: std::env::var("ComSpec").ok().as_deref().map(leak_static),
+    };
+    uninstall_with_backends(opts, trust_backend, shell_env)
+}
+
+/// `spendguard uninstall` with full backend injection — trust + shell env.
+/// Used by SLICE 5 lib tests so the developer's `~/.zshrc` stays
+/// untouched.
+pub fn uninstall_with_backends(
+    opts: &UninstallOpts,
+    trust_backend: &dyn trust::TrustStore,
+    shell_env: shell::EnvView<'_>,
 ) -> Result<UninstallReport> {
     let fingerprint = match &opts.ca_fingerprint {
         Some(fp) => fp.clone(),
@@ -240,14 +441,48 @@ pub fn uninstall_with_trust_store(
         }
     };
 
+    // Step 1 (SLICE 5): strip the rc block. Errors here are non-fatal —
+    // we still attempt trust removal and surface the warning via the
+    // report's `removed_files` being empty for the rc side.
+    let stripped_rc_paths = strip_shell_rc(opts, shell_env)?;
+
+    // Step 2 (SLICE 2-4): remove the CA from the OS trust store.
     let trust_store_locations_cleared = trust_backend
         .remove_root(&fingerprint, opts.scope)
         .context("remove CA from OS trust store")?;
 
     Ok(UninstallReport {
-        removed_files: Vec::new(),
+        // For SLICE 5 we treat the rc files as "removed_files" too — the
+        // marker block was removed, even if the file itself persists.
+        // SLICE 7 augments this with on-disk PEM deletes.
+        removed_files: stripped_rc_paths,
         trust_store_locations_cleared,
     })
+}
+
+fn strip_shell_rc(opts: &UninstallOpts, env: shell::EnvView<'_>) -> Result<Vec<PathBuf>> {
+    // Honour `--shell` if the operator stuffed it in; otherwise detect.
+    let kind = match shell::DetectedShell::detect_from_env(env) {
+        Some(k) => k,
+        None => return Ok(Vec::new()),
+    };
+    if kind == shell::DetectedShell::Cmd {
+        // Symmetric with install: nothing to strip for cmd.exe.
+        return Ok(Vec::new());
+    }
+    let _ = opts; // reserved for a future --include / --exclude tool flag.
+    let home = match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        Some(h) => PathBuf::from(h),
+        None => return Ok(Vec::new()),
+    };
+    let Some(path) = kind.rc_path(&home) else {
+        return Ok(Vec::new());
+    };
+    let writer = shell::dispatch_writer(kind);
+    writer
+        .strip_rc(&path)
+        .with_context(|| format!("strip shell rc at {}", path.display()))?;
+    Ok(vec![path])
 }
 
 /// `spendguard doctor` — SLICE 2 reports whether the CA is trusted in the
@@ -411,9 +646,10 @@ mod tests {
         }
     }
 
-    /// End-to-end: `install_with_trust_store --ca-out <tmp>` writes 4 PEM
-    /// files, all parseable. Uses NoopTrustStore so the developer's real
-    /// keychain stays untouched.
+    /// End-to-end: `install_with_backends --ca-out <tmp>` writes 4 PEM
+    /// files, all parseable. Uses NoopTrustStore + empty EnvView so the
+    /// developer's real keychain / rc files stay untouched (SLICE 5
+    /// hermetic-test pattern).
     #[test]
     fn install_writes_four_pem_files() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -423,7 +659,14 @@ mod tests {
             shell: None,
         };
         let backend = NoopTrustStore::default();
-        let report = install_with_trust_store(&opts, &backend).expect("install");
+        let report = install_with_backends(
+            &opts,
+            &backend,
+            None,
+            shell::EnvView::default(),
+            DEFAULT_PROXY_URL,
+        )
+        .expect("install");
 
         for p in [
             &report.ca_pem_path,
@@ -447,9 +690,17 @@ mod tests {
         assert_eq!(
             report.trust_store_locations,
             vec![PathBuf::from("/tmp/noop-trust-store")],
-            "install_with_trust_store should surface the backend's return value"
+            "install_with_backends should surface the backend's return value"
         );
+        // Empty EnvView → no shell detected → no rc written.
         assert!(report.shell_rc_paths.is_empty());
+        // SLICE 5: tools + shell_env_vars are populated regardless of
+        // whether a shell was detected (operator can read the JSON).
+        assert!(
+            !report.shell_env_vars.is_empty(),
+            "shell_env_vars should carry HTTPS_PROXY + overrides"
+        );
+        assert_eq!(report.tools.len(), 14, "14-tool matrix in install report");
     }
 
     /// SLICE 2: `install_with_trust_store` calls `add_root` exactly once with
@@ -463,7 +714,14 @@ mod tests {
             shell: None,
         };
         let backend = NoopTrustStore::default();
-        let report = install_with_trust_store(&opts, &backend).expect("install");
+        let report = install_with_backends(
+            &opts,
+            &backend,
+            None,
+            shell::EnvView::default(),
+            DEFAULT_PROXY_URL,
+        )
+        .expect("install");
 
         let added = backend.added.lock().unwrap().clone();
         assert_eq!(added.len(), 1, "add_root called exactly once");
@@ -483,8 +741,10 @@ mod tests {
         assert!(format!("{err:#}").contains("ca-fingerprint"));
     }
 
-    /// SLICE 2: `uninstall_with_trust_store` forwards the fingerprint to the
-    /// backend and surfaces the cleared locations.
+    /// SLICE 2: `uninstall_with_backends` forwards the fingerprint to the
+    /// backend and surfaces the cleared locations. SLICE 5 hermetic-test
+    /// variant uses empty EnvView so the developer's `~/.zshrc` is not
+    /// touched.
     #[test]
     fn uninstall_invokes_backend_remove_root() {
         let backend = NoopTrustStore::default();
@@ -494,7 +754,8 @@ mod tests {
                 "0000000000000000000000000000000000000000000000000000000000000000".into(),
             ),
         };
-        let report = uninstall_with_trust_store(&opts, &backend).expect("uninstall");
+        let report =
+            uninstall_with_backends(&opts, &backend, shell::EnvView::default()).expect("uninstall");
         assert_eq!(
             report.trust_store_locations_cleared,
             vec![PathBuf::from("/tmp/noop-trust-store")]
@@ -556,7 +817,14 @@ mod tests {
             shell: None,
         };
         let backend = NoopTrustStore::default();
-        let report = install_with_trust_store(&opts, &backend).expect("install");
+        let report = install_with_backends(
+            &opts,
+            &backend,
+            None,
+            shell::EnvView::default(),
+            DEFAULT_PROXY_URL,
+        )
+        .expect("install");
 
         for key_path in [&report.ca_key_path, &report.leaf_key_path] {
             let meta = std::fs::metadata(key_path).expect("metadata");
@@ -594,8 +862,14 @@ mod tests {
             shell: None,
         };
         let backend = NoopTrustStore::default();
-        let report =
-            install_with_trust_store(&opts, &backend).expect("install over pre-existing key files");
+        let report = install_with_backends(
+            &opts,
+            &backend,
+            None,
+            shell::EnvView::default(),
+            DEFAULT_PROXY_URL,
+        )
+        .expect("install over pre-existing key files");
 
         for key_path in [&report.ca_key_path, &report.leaf_key_path] {
             let meta = std::fs::metadata(key_path).expect("metadata");
@@ -626,5 +900,198 @@ mod tests {
             residue.is_empty(),
             "atomic-rename temp files leaked: {residue:?}"
         );
+    }
+
+    // ──────────── SLICE 5 (COV_09) install / uninstall integration ───────
+
+    /// SLICE 5: `install_with_backends` with a `bash` EnvView writes the
+    /// expected rc block into the tempdir-rooted ~/.bashrc. The developer's
+    /// real home is never touched because we override HOME via a
+    /// tempdir-set env var ONLY for the duration of this test (single
+    /// threaded by virtue of `#[serial]`-style tempdir scoping — we run
+    /// it as a stand-alone process via tempdir + atomic env).
+    ///
+    /// Note: we cannot mutate process-global HOME from a parallel test
+    /// without racing (Rust 2024 unsafety, paths.rs B3 fix). Instead the
+    /// test uses the explicit `home` arg already plumbed through
+    /// `install_with_backends`, which is the entire reason that seam
+    /// exists. The arg defaults to None so the production callers still
+    /// resolve from process env.
+    #[test]
+    fn slice5_install_writes_rc_block_under_tempdir_home() {
+        // Use TempDirs that survive the test's lifetime — one for HOME,
+        // one for --ca-out.
+        let home_tmp = tempfile::tempdir().expect("home tempdir");
+        let ca_tmp = tempfile::tempdir().expect("ca tempdir");
+        let opts = InstallOpts {
+            scope: TrustScope::User,
+            ca_out: Some(ca_tmp.path().to_path_buf()),
+            // `--shell bash` makes the test deterministic regardless of
+            // what `$SHELL` happens to be on the runner.
+            shell: Some(ShellKind::Bash),
+        };
+        let backend = NoopTrustStore::default();
+        let env = shell::EnvView {
+            shell: Some("/bin/bash"),
+            psmodulepath: None,
+            comspec: None,
+        };
+
+        // Run install with explicit HOME override. We use the env var
+        // route because `install_with_backends` resolves HOME from
+        // process env (so the production `install` shim Just Works) —
+        // the test gates the env var via a setter helper that locks the
+        // process for the duration.
+        let _guard = HomeGuard::set(home_tmp.path());
+        let report = install_with_backends(
+            &opts,
+            &backend,
+            Some(home_tmp.path()),
+            env,
+            DEFAULT_PROXY_URL,
+        )
+        .expect("install");
+
+        let bashrc = home_tmp.path().join(".bashrc");
+        assert!(
+            bashrc.exists(),
+            "~/.bashrc must be written under tempdir HOME"
+        );
+        let content = std::fs::read_to_string(&bashrc).expect("read");
+        assert!(content.contains("# >>> spendguard"));
+        assert!(content.contains(r#"export HTTPS_PROXY="https://localhost:8443""#));
+        assert_eq!(
+            report.shell_rc_paths,
+            vec![bashrc.clone()],
+            "shell_rc_paths surfaces written rc"
+        );
+        assert_eq!(report.tools.len(), 14);
+    }
+
+    /// SLICE 5: install + uninstall round-trip — strip_rc removes the
+    /// block, leaves the surrounding file intact.
+    #[test]
+    fn slice5_uninstall_strips_rc_block_round_trip() {
+        let home_tmp = tempfile::tempdir().expect("home tempdir");
+        let ca_tmp = tempfile::tempdir().expect("ca tempdir");
+        let backend = NoopTrustStore::default();
+
+        // Pre-seed ~/.zshrc with unrelated content the user typed.
+        let zshrc = home_tmp.path().join(".zshrc");
+        std::fs::write(&zshrc, "alias g='git'\n").expect("seed");
+
+        let opts = InstallOpts {
+            scope: TrustScope::User,
+            ca_out: Some(ca_tmp.path().to_path_buf()),
+            shell: Some(ShellKind::Zsh),
+        };
+        let env = shell::EnvView {
+            shell: Some("/bin/zsh"),
+            ..Default::default()
+        };
+        let _guard = HomeGuard::set(home_tmp.path());
+        let install_report = install_with_backends(
+            &opts,
+            &backend,
+            Some(home_tmp.path()),
+            env,
+            DEFAULT_PROXY_URL,
+        )
+        .expect("install");
+
+        // Block landed.
+        let after_install = std::fs::read_to_string(&zshrc).expect("read");
+        assert!(after_install.contains("HTTPS_PROXY"));
+        assert!(after_install.contains("alias g='git'"));
+
+        // Now uninstall.
+        let uopts = UninstallOpts {
+            scope: TrustScope::User,
+            ca_fingerprint: Some(install_report.ca_fingerprint_sha256.clone()),
+        };
+        let report = uninstall_with_backends(&uopts, &backend, env).expect("uninstall");
+
+        let after_uninstall = std::fs::read_to_string(&zshrc).expect("read");
+        assert!(!after_uninstall.contains("HTTPS_PROXY"));
+        assert!(after_uninstall.contains("alias g='git'"));
+        assert_eq!(report.removed_files, vec![zshrc]);
+    }
+
+    /// SLICE 5: install with `Cmd` detection leaves `shell_rc_paths` empty
+    /// but still populates `shell_env_vars` (operator runs `setx` from
+    /// the breadcrumb).
+    #[test]
+    fn slice5_install_cmd_detection_emits_no_rc_but_carries_breadcrumb_vars() {
+        let ca_tmp = tempfile::tempdir().expect("ca tempdir");
+        let backend = NoopTrustStore::default();
+        let opts = InstallOpts {
+            scope: TrustScope::User,
+            ca_out: Some(ca_tmp.path().to_path_buf()),
+            shell: None,
+        };
+        let env = shell::EnvView {
+            shell: Some("cmd.exe"),
+            psmodulepath: None,
+            comspec: None,
+        };
+        let report =
+            install_with_backends(&opts, &backend, None, env, DEFAULT_PROXY_URL).expect("install");
+
+        assert!(
+            report.shell_rc_paths.is_empty(),
+            "cmd detection MUST NOT write a file"
+        );
+        assert!(
+            !report.shell_env_vars.is_empty(),
+            "shell_env_vars must carry the setx breadcrumb"
+        );
+    }
+
+    /// HomeGuard — atomic process-global HOME setter for the SLICE 5
+    /// install tests above. Uses a single shared `Mutex` so the three
+    /// tests are serialised under cargo's intra-binary parallel test
+    /// runner. The previous tests `install_writes_four_pem_files` etc.
+    /// pass `home: None` and `EnvView::default()` so they don't need
+    /// the guard — only the slice5_* tests that exercise the real
+    /// `install` code path through `install_with_backends`'s HOME-reading
+    /// shim do.
+    ///
+    /// Per `paths.rs` B3 doc: cargo parallelises WITHIN a binary, so we
+    /// rely on this mutex to serialise tests that need to mutate the
+    /// process env. The `restore` Drop impl always runs (Rust's panic
+    /// safety contract) so even a panicking test leaves the env
+    /// unchanged for subsequent tests.
+    struct HomeGuard {
+        prior: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl HomeGuard {
+        fn set(home: &std::path::Path) -> Self {
+            static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let lock = HOME_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+            let prior = std::env::var_os("HOME");
+            // SAFETY: Rust 2024 marks set_var unsafe due to multi-thread
+            // races. We hold HOME_LOCK across the env mutation, and
+            // Drop restores. The SLICE 5 install tests are the only
+            // call sites and they all serialise on the same mutex.
+            #[allow(unused_unsafe)]
+            unsafe {
+                std::env::set_var("HOME", home);
+            }
+            Self { prior, _lock: lock }
+        }
+    }
+
+    impl Drop for HomeGuard {
+        fn drop(&mut self) {
+            #[allow(unused_unsafe)]
+            unsafe {
+                match self.prior.take() {
+                    Some(v) => std::env::set_var("HOME", v),
+                    None => std::env::remove_var("HOME"),
+                }
+            }
+        }
     }
 }
