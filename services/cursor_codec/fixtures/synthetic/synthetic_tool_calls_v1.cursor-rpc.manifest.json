@@ -1,0 +1,27 @@
+{
+  "fixture": "synthetic_tool_calls_v1.cursor-rpc",
+  "kind": "synthetic",
+  "cursor_min_version": "synthetic",
+  "cursor_max_version": "synthetic",
+  "captured_utc": "2026-06-07T00:00:00Z",
+  "frames": 4,
+  "shape": "Cursor Agent mode tool-call session: user prompt + assistant tool_calls envelope + tool result message; response stream ends with finish_reason=tool_calls (NOT stop)",
+  "field_evidence": [
+    {"field": "messages[1].content", "evidence": "carries Cursor-observed tool_calls JSON shape inline in the placeholder string content field (per RECON.md §2.2 the wire is still UTF-8 string today)"},
+    {"field": "messages[2].role", "evidence": "tool — exercises the role vocabulary beyond user|assistant|system"},
+    {"field": "model", "evidence": "gpt-4o (Cursor labels both gpt-4o and claude-3.5-sonnet directly in capture)"},
+    {"field": "CursorChatResponseChunk.finish_reason", "evidence": "tool_calls (not stop) — translator must NOT mis-classify as a normal completion"}
+  ],
+  "expected_replay_report": {
+    "request_frames_decoded": 1,
+    "response_chunks_decoded": 2,
+    "end_of_stream_frames": 1,
+    "finish_reason": "tool_calls",
+    "cumulative_output_tokens": 2,
+    "sidecar_reserve_calls": 1,
+    "sidecar_commit_calls": 1,
+    "upstream_error": false,
+    "all_frames_round_trip": true
+  },
+  "review_standards_refs": ["W1", "W3", "W5", "C1", "C4", "R4"]
+}

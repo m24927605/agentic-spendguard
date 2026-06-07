@@ -1,0 +1,28 @@
+{
+  "fixture": "synthetic_multiturn_v1.cursor-rpc",
+  "kind": "synthetic",
+  "cursor_min_version": "synthetic",
+  "cursor_max_version": "synthetic",
+  "captured_utc": "2026-06-07T00:00:00Z",
+  "frames": 5,
+  "shape": "multi-turn conversation (4 messages: system+user+assistant+user) + 3-chunk streaming response + EOS trailers (grpc-status:0)",
+  "field_evidence": [
+    {"field": "messages", "tag": 1, "wire_type": "length-delimited", "evidence": "4 repeated Message entries; first role=system asserts CursorChatRequest.system precedence rule (translator drops top-level system when leading messages entry is role=system)"},
+    {"field": "model", "tag": 2, "wire_type": "length-delimited", "evidence": "claude-3.5-sonnet"},
+    {"field": "system", "tag": 3, "wire_type": "length-delimited", "evidence": "same string as messages[0].content; translator drops"},
+    {"field": "max_tokens", "tag": 4, "wire_type": "varint", "evidence": "256"},
+    {"field": "temperature", "tag": 5, "wire_type": "fixed32", "evidence": "0.2"}
+  ],
+  "expected_replay_report": {
+    "request_frames_decoded": 1,
+    "response_chunks_decoded": 3,
+    "end_of_stream_frames": 1,
+    "finish_reason": "stop",
+    "cumulative_output_tokens": 11,
+    "sidecar_reserve_calls": 1,
+    "sidecar_commit_calls": 1,
+    "upstream_error": false,
+    "all_frames_round_trip": true
+  },
+  "review_standards_refs": ["W1", "W3", "W5", "C1", "C4", "R4"]
+}

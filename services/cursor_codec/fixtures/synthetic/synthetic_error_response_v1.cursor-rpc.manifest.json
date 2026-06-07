@@ -1,0 +1,25 @@
+{
+  "fixture": "synthetic_error_response_v1.cursor-rpc",
+  "kind": "synthetic",
+  "cursor_min_version": "synthetic",
+  "cursor_max_version": "synthetic",
+  "captured_utc": "2026-06-07T00:00:00Z",
+  "frames": 2,
+  "shape": "Cursor request + immediate trailers frame with grpc-status:13 (gRPC INTERNAL); NO response data chunks",
+  "field_evidence": [
+    {"field": "trailers.payload", "evidence": "grpc-status:13\\rgrpc-message:upstream provider returned 500"},
+    {"field": "Frame.flags", "evidence": "0x02 on the trailers frame — review-standards W3 (end-of-stream detected without optimistic data decode)"}
+  ],
+  "expected_replay_report": {
+    "request_frames_decoded": 1,
+    "response_chunks_decoded": 0,
+    "end_of_stream_frames": 1,
+    "finish_reason": null,
+    "cumulative_output_tokens": null,
+    "sidecar_reserve_calls": 1,
+    "sidecar_commit_calls": 0,
+    "upstream_error": true,
+    "all_frames_round_trip": true
+  },
+  "review_standards_refs": ["W1", "W3", "W5", "P3", "C1", "C4", "R4"]
+}

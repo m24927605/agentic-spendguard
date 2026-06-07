@@ -66,6 +66,7 @@ pub mod envelope;
 pub mod framing;
 pub mod openai_models;
 pub mod reencode;
+pub mod replay;
 pub mod translate;
 
 #[cfg(feature = "mitm")]
@@ -80,6 +81,11 @@ pub use framing::{
 pub use openai_models::{
     OpenAiChatRequest, OpenAiChatResponseChunk, OpenAiChunkChoice, OpenAiChunkDelta, OpenAiMessage,
     OpenAiUsage,
+};
+pub use replay::{
+    read_fixture, read_fixture_bytes, replay_fixture, replay_fixture_bytes, request_frame,
+    response_chunk_frame, trailers_frame, write_fixture_bytes, Direction, FixtureFrame,
+    ReplayError, ReplayReport, FIXTURE_MAGIC, FIXTURE_VERSION,
 };
 pub use translate::{
     cursor_request_to_openai, extract_cursor_output_tokens, extract_openai_output_tokens,

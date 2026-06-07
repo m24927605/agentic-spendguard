@@ -72,6 +72,7 @@ export default defineConfig({
             { label: 'LiteLLM SDK monkey-patch shim', slug: 'docs/integrations/litellm-sdk-shim' },
             { label: 'Kong AI Gateway (Go + Lua plugin)', slug: 'docs/integrations/kong-ai-gateway' },
             { label: 'Dify Model Provider Plugin', slug: 'docs/integrations/dify' },
+            { label: 'Cursor IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/cursor-mitm' },
           ],
         },
         {

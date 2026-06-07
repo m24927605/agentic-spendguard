@@ -1,0 +1,25 @@
+{
+  "fixture": "synthetic_long_stream_v1.cursor-rpc",
+  "kind": "synthetic",
+  "cursor_min_version": "synthetic",
+  "cursor_max_version": "synthetic",
+  "captured_utc": "2026-06-07T00:00:00Z",
+  "frames": 15,
+  "shape": "1 request + 12 streaming content chunks + 1 terminal finish chunk (finish_reason=stop) + 1 EOS trailers (grpc-status:0)",
+  "field_evidence": [
+    {"field": "CursorChatResponseChunk.cumulative_output_tokens", "evidence": "monotonically increasing across chunks; terminal chunk repeats the final value"},
+    {"field": "CursorChatResponseChunk.model", "evidence": "stamped only on the first content chunk; empty on follow-ups (RECON.md §3 observation)"},
+    {"field": "frames_read", "evidence": "13 data frames + 1 EOS = 14 frame records; envelope_count=15 includes the 1 request frame"}
+  ],
+  "expected_replay_report": {
+    "request_frames_decoded": 1,
+    "response_chunks_decoded": 13,
+    "end_of_stream_frames": 1,
+    "finish_reason": "stop",
+    "sidecar_reserve_calls": 1,
+    "sidecar_commit_calls": 1,
+    "upstream_error": false,
+    "all_frames_round_trip": true
+  },
+  "review_standards_refs": ["W1", "W3", "W5", "C1", "C4", "R4"]
+}

@@ -187,6 +187,26 @@ else ifeq ($(DEMO_MODE),dify_plugin_real)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),cursor_mitm_fixture)
+	@echo "[demo] DEMO_MODE=cursor_mitm_fixture → D17 SLICE 9 (Cursor IDE MITM codec — EXPERIMENTAL, SOW only)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/cursor_mitm_fixture/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               cursor-mitm-fixture-runner (Rust 1.83 running"
+	@echo "[demo]               services/cursor_codec example cursor_mitm_fixture_demo)."
+	@echo "[demo]   Driver replays 4 synthetic .cursor-rpc fixtures (multi-turn,"
+	@echo "[demo]   tool calls, error response, long stream) through the codec"
+	@echo "[demo]   pipeline + POSTs each translated body to the counting stub."
+	@echo "[demo]   Asserts 4 reserves + 3 commits + 1 upstream error + W5 byte-"
+	@echo "[demo]   for-byte preservation across the corpus."
+	@echo "[demo]   LEGAL POSTURE: This is NOT a real Cursor binary demo. Codec"
+	@echo "[demo]   is EXPERIMENTAL, gated to SOW customers. See"
+	@echo "[demo]   services/cursor_codec/SOW.md + design.md §1."
+	$(COMPOSE) -f cursor_mitm_fixture/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),litellm_sdk_real)
 	@echo "[demo] DEMO_MODE=litellm_sdk_real → COV_D12 SLICE 7 (LiteLLM SDK monkey-patch shim)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -355,6 +375,15 @@ else ifeq ($(DEMO_MODE),dify_plugin_real)
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),cursor_mitm_fixture)
+	@echo "[demo] running cursor-mitm-fixture-runner (Rust 1.83 — codec replay + counting stub)..."
+	$(COMPOSE) -f cursor_mitm_fixture/docker-compose.yaml run --rm cursor-mitm-fixture-runner
+	@echo "[demo] verifying D17 SLICE 9 (cursor_mitm_fixture — legal posture + audit chain hygiene)..."
+	@$(MAKE) demo-verify-cursor-mitm-fixture
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: cursor_mitm_fixture runs against the codec's in-memory mock sidecar; no rows land in canonical_events (see SOW.md §6)"
 else ifeq ($(DEMO_MODE),litellm_sdk_real)
 	@echo "[demo] running litellm-sdk-shim-runner (Python 3.12 + litellm + install_shim)..."
 	$(COMPOSE) -f litellm_sdk_real/docker-compose.yaml run --rm litellm-sdk-shim-runner
@@ -695,6 +724,24 @@ demo-verify-dify-plugin-real:
 		   RAISE NOTICE 'COV_D10 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
 		 END; \$$\$$;"
 	@echo "[demo] COV_D10 SLICE 7 dify_plugin_real verification done"
+
+# D17 SLICE 9 (cursor_mitm_fixture demo) verification. The codec runs
+# against the in-memory mock sidecar lane (per SOW.md §6 legal posture
+# — no real reserve/commit gRPC dance), so the ledger DB has NO rows
+# attributable to this demo. The verify SQL therefore asserts the
+# **negative** gates:
+#
+#   - Zero `api.cursor.sh` references in any audit_outbox payload
+#     (review-standards §6 C1 no-live-traffic invariant).
+#   - Zero Cursor session token shapes (`sk-cur-` / `cursor_pat_`)
+#     leaked into the audit chain.
+#
+# The runner's own stdout (`CURSOR_MITM_FIXTURE_DEMO_OK` line) is the
+# positive gate; it asserts 4 reserves + 3 commits + W5 byte-for-byte
+# preservation and exits non-zero on any drift.
+demo-verify-cursor-mitm-fixture:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_cursor_mitm_fixture.sql
+	@echo "[demo] D17 SLICE 9 cursor_mitm_fixture verification done"
 
 # COV_D12 SLICE 7 (litellm_sdk_real demo) verification. Mirrors the
 # dify_plugin_real layout: ledger-DB assertions in

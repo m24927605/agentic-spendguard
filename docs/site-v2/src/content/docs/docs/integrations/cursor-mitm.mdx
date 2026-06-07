@@ -1,0 +1,188 @@
+---
+title: "Cursor IDE MITM codec — EXPERIMENTAL, SOW only"
+description: >-
+  Reverse-engineered Connect-RPC codec that lets SpendGuard interpose
+  budget reservation on a Cursor IDE Agent session. EXPERIMENTAL,
+  gated to Enterprise SOW customers who signed the maintenance
+  addendum. Codec breaks whenever Cursor changes their wire protocol.
+  Customer accepts break-window risk. DO NOT SHIP IN GA CONFIG.
+sidebar:
+  badge:
+    text: Experimental
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="EXPERIMENTAL — SOW only">
+  **DO NOT SHIP AS A GA FEATURE.** This integration is gated to
+  Enterprise SOW customers who signed the maintenance addendum. The
+  codec breaks whenever Cursor changes their wire protocol. The
+  Customer accepts break-window risk as part of the SOW. See the
+  [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/SOW.md)
+  in the repo for the full legal posture.
+</Aside>
+
+> **Legal posture.** This codec implements
+> **reverse-engineered interoperability**. The wire format documented
+> in
+> [`PROTOCOL.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/PROTOCOL.md)
+> is observed from outside the Cursor binary; no vendor source code
+> is included. SpendGuard customers who enable the codec do so under
+> an Enterprise SOW that explicitly acknowledges (a) the codec can
+> break whenever Cursor changes their wire protocol, and (b) the
+> customer is responsible for confirming their own Cursor terms of
+> service permit on-host MITM of outbound traffic.
+
+## Why the Cursor IDE needs a custom adapter
+
+Cursor IDE's Agent surface does **not** call `api.openai.com` /
+`api.anthropic.com`. It calls `api.cursor.sh` over private
+Connect-RPC carrying Cursor's proprietary message envelope.
+SpendGuard's standard adapters (model middleware, base-URL swap,
+OpenAI-compatible egress proxy) cannot see the messages — wire bytes
+are Cursor-internal protobuf, not OpenAI JSON.
+
+SOW customers who deploy Cursor at the workforce scale and want
+SpendGuard budget gating on Cursor sessions accept the codec-break
+risk in exchange for full session coverage.
+
+## What the codec does
+
+```
+Cursor IDE ──TLS→ SpendGuard egress proxy (D02 leaf w/ api.cursor.sh SAN)
+                       │
+                       ├─ if Host == api.cursor.sh AND feature `cursor-mitm-experimental`
+                       │     │
+                       │     ▼
+                       │  services/cursor_codec
+                       │     ├─ framing::ConnectRpcReader  → DecodedFrame
+                       │     ├─ envelope::CursorRequest::decode → ChatRequest
+                       │     ├─ translator::to_openai → CanonicalRequest
+                       │     │    └→ ledger::reserve → reservation_id
+                       │     ├─ upstream HTTPS to api.cursor.sh (re-encoded forward)
+                       │     ├─ envelope::CursorResponseStream::decode (server-streaming)
+                       │     ├─ translator::to_openai_chunks → CanonicalResponseChunks
+                       │     │    └→ ledger::commit_estimated / release
+                       │     └─ framing::ConnectRpcWriter → original Cursor wire
+                       │
+                       └─ else: D02 default pass-through (no codec)
+```
+
+The codec ships under the workspace feature flag
+`cursor-mitm-experimental`. Default builds do not compile the codec
+crate; the feature must be explicitly opted into at the egress-proxy
+and CLI consumer level.
+
+## Three loud "EXPERIMENTAL" markers
+
+Per
+[`design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D17_cursor_mitm/design.md)
+§6, the codec carries three loud markers at all times. A reviewer
+rejects any diff that removes any of them.
+
+1. **Cargo manifest:**
+   [`services/cursor_codec/Cargo.toml`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/Cargo.toml)
+   carries `[package.metadata.experimental]` with the exact `reason`
+   string `Reverse-engineered Cursor wire protocol. Breaks on
+   vendor release.`
+2. **Stderr banner:** every codec public entry point calls
+   `assert_experimental_banner_emitted()` which prints to stderr on
+   first use per process:
+   ```
+   [EXPERIMENTAL] cursor-mitm codec active. Codec break SLA:
+   docs/customer/sow-cursor-mitm.md. DO NOT SHIP IN GA CONFIG.
+   ```
+3. **SOW addendum doc:**
+   [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/SOW.md)
+   carries `Status: EXPERIMENTAL — SOW only` above the fold,
+   `noindex: true` in the front-matter, and the literal warning
+   `DO NOT SHIP AS A GA FEATURE` as a top-level callout.
+
+## Break-Window SLA
+
+The SOW addendum fills in:
+
+| Field | Customer-side value |
+|-------|---------------------|
+| Codec-break detection window | typically ≤24 hours after Cursor release |
+| Codec-fix turnaround target | typically ≤5 business days |
+| Customer escalation contact | on-call channel |
+| SpendGuard escalation contact | SpendGuard customer-success on-call |
+| Cursor client version range tested | min/max Cursor IDE version at delivery |
+
+On codec break, SpendGuard re-captures the latest Cursor wire bytes
+(per the customer's on-host capture workflow), refreshes the proto
+description + the fixture corpus, and republishes a feature-flagged
+build. The Customer redeploys within their own change-management
+window.
+
+## Sealed-secret credential model
+
+The Customer's Cursor session bearer tokens are end-to-end opaque to
+the codec. They flow through unmodified from the Cursor IDE binary
+to `api.cursor.sh`; the codec does NOT decrypt, log, or persist them.
+The audit chain redacts message-body fields beyond
+`model` / `max_tokens` / `temperature` per POST_GA_03's tenant
+redaction policy.
+
+The codec introduces NO new long-lived secrets. The D02 trust store
+covers `api.cursor.sh` once the leaf cert SAN is extended for the
+SOW deployment.
+
+## Operator threat model
+
+The codec is **best-effort gating**, not a hard policy gate. When
+the codec cannot understand the wire shape (because Cursor changed
+it), the egress proxy **releases the held reservation and lets the
+call pass through**. This is the same posture the codec uses for
+unknown Cursor model strings. Failures are loud (decode-error metric
++ stderr banner + structured log) but they do NOT block the
+Customer's Cursor session.
+
+The full threat-model table is in
+[`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/cursor_codec/SOW.md)
+§4.
+
+## Demo
+
+A fixture-based demo proves the codec correctness end-to-end against
+four synthetic `.cursor-rpc` fixtures
+(multi-turn / tool calls / error response / long stream). The demo
+does NOT boot the Cursor IDE binary and does NOT touch
+`api.cursor.sh`:
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=cursor_mitm_fixture
+```
+
+The demo's
+[`README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/cursor_mitm_fixture/README.md)
+documents the layered pipeline (framing decode → envelope decode →
+translation → mock sidecar reserve+commit → byte-for-byte
+preservation → counting-stub POST) and the deviations from a
+hypothetical "boot the Cursor binary" demo.
+
+The Customer's deployment exercises the same codec against live
+Cursor traffic with their own validated capture path. This demo
+proves the codec correctness in isolation.
+
+## Limitations
+
+- **Live Cursor traffic stays out of CI.** Recorded fixtures only.
+  Real-capture evidence lives in SOW-customer-side artifacts.
+- **No Cursor non-Agent surfaces.** Tab autocomplete and Cmd-K
+  inline edits are out of scope; only the Agent surface is gated.
+- **Best-effort gating, not hard fail-closed.** Unknown wire shapes
+  release and pass through; the codec is loud about it but it does
+  not block the Customer's Cursor session.
+- **Version pin.** Every fixture is tagged with a Cursor client
+  version range. Replay against a live Cursor version outside the
+  tested window returns 503 with `X-SpendGuard-Codec-Break` header.
+- **Windsurf codec is a separate D18** — out of scope for D17.
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in 5 minutes
+- [Contract YAML reference](../../contracts/yaml/) — author allow/stop rules
+- Other adapter integrations: [Pydantic-AI](../pydantic-ai/) · [LangChain](../langchain/) · [Kong AI Gateway](../kong-ai-gateway/) · [Dify](../dify/) · [LiteLLM SDK shim](../litellm-sdk-shim/)

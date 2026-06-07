@@ -847,6 +847,20 @@ async def main() -> int:
         return await run_maf_python_mode()
     if DEMO_MODE == "maf_python_with_agt":
         return await run_maf_python_with_agt_mode()
+    if DEMO_MODE == "cursor_mitm_fixture":
+        # D17 SLICE 9: the cursor_mitm_fixture demo's runner is a
+        # Rust binary (services/cursor_codec example
+        # cursor_mitm_fixture_demo) launched directly by the Makefile
+        # target. This Python entry point is a clean no-op so the
+        # demo container in compose.yaml exits 0 if someone wires
+        # SPENDGUARD_DEMO_MODE=cursor_mitm_fixture into the base
+        # demo image.
+        print(
+            "[demo] cursor_mitm_fixture runner is the Rust example "
+            "(services/cursor_codec/examples/cursor_mitm_fixture_demo.rs); "
+            "see deploy/demo/cursor_mitm_fixture/docker-compose.yaml + README.md."
+        )
+        return 0
     return await run_agent_mode()
 
 
