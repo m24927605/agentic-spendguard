@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub mod ca;
+pub mod doctor;
 pub mod paths;
 pub mod preflight;
 pub mod shell;

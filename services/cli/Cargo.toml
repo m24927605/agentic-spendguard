@@ -40,6 +40,16 @@ anyhow = "1"
 sha2 = "0.10"
 hex = "0.4"
 
+# SLICE 7 (COV_11): decode the PEM base64 body to DER so the doctor can
+# SHA-256 the cert content (identity-equivalent to the install-time
+# `ca::fingerprint_hex`). Deviation #4: TLS handshake probe is deferred
+# to a follow-up (slice doc §3.2 calls it "optional"); SLICE 7 surfaces
+# TCP reachability only, which is sufficient to distinguish the
+# "proxy not running" failure mode from "proxy running but trust broken"
+# (the latter shows up via the CA-fingerprint check, which already
+# verifies the trust store entry).
+base64 = "0.22"
+
 # R2 fix per security review (M1): PKCS8 key buffers held as Zeroizing<String>
 # per implementation.md §3 so they wipe on drop before allocator reuse.
 zeroize = { version = "1", features = ["derive"] }
