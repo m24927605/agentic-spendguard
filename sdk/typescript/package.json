@@ -1,8 +1,7 @@
 {
   "name": "@spendguard/sdk",
-  "version": "0.0.0",
-  "private": true,
-  "description": "SpendGuard SDK — runtime safety layer client for AI agent frameworks (TypeScript half; mirror of spendguard-sdk on PyPI). PRE-RELEASE substrate; first published release ships in slice COV_S05_10 as 0.1.0.",
+  "version": "0.1.0",
+  "description": "SpendGuard SDK — runtime safety layer client for AI agent frameworks (TypeScript half; mirror of spendguard-sdk on PyPI). v0.1.0 is the first public release; see CHANGELOG.md.",
   "license": "Apache-2.0",
   "author": "Michael Chen <m24927605@gmail.com>",
   "homepage": "https://github.com/m24927605/agentic-spendguard",
@@ -18,7 +17,18 @@
     "node": ">=20.10.0"
   },
   "sideEffects": false,
-  "files": ["dist/", "src/_proto/", "README.md"],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "fixtures/cross-language/v1.json",
+    "README.md",
+    "LICENSE_NOTICES.md",
+    "CHANGELOG.md"
+  ],
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -79,7 +89,9 @@
     "lint": "biome check src tests scripts",
     "format": "biome format --write src tests scripts",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit",
-    "size": "echo 'sdk/typescript: size placeholder (wired in COV_S05_10)' && exit 0",
+    "size": "bash scripts/size-budget.sh",
+    "version-check": "bash scripts/version-check.sh",
+    "prepublishOnly": "bash scripts/prepublish.sh",
     "proto:gen": "tsx scripts/proto.ts",
     "proto:check": "tsx scripts/proto.ts --check"
   },

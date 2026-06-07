@@ -4,6 +4,11 @@ node_modules/
 # build output (populated in COV_S05_02+)
 dist/
 
+# prepublish-time fixture copy. Canonical source is sdk/fixtures/cross-language/v1.json.
+# scripts/prepublish.sh copies it here so npm's `files` field (which cannot
+# reach `../`) picks it up. Never committed.
+fixtures/
+
 # tsup / vitest caches
 .tsup/
 .vitest/

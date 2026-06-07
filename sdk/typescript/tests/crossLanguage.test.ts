@@ -39,10 +39,7 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import {
-  deriveIdempotencyKey,
-  deriveUuidFromSignature,
-} from "../src/ids.js";
+import { deriveIdempotencyKey, deriveUuidFromSignature } from "../src/ids.js";
 import { computePromptHash } from "../src/promptHash.js";
 
 // Resolve `sdk/fixtures/cross-language/v1.json` from this test file's
@@ -50,21 +47,11 @@ import { computePromptHash } from "../src/promptHash.js";
 // not derived from cwd, so the suite passes whether vitest is invoked from
 // the repo root or from `sdk/typescript/`.
 const _here = path.dirname(fileURLToPath(import.meta.url));
-const FIXTURES_PATH = path.resolve(
-  _here,
-  "..",
-  "..",
-  "fixtures",
-  "cross-language",
-  "v1.json",
-);
+const FIXTURES_PATH = path.resolve(_here, "..", "..", "fixtures", "cross-language", "v1.json");
 
 interface Fixture {
   id: string;
-  fn:
-    | "derive_idempotency_key"
-    | "compute_prompt_hash"
-    | "derive_uuid_from_signature";
+  fn: "derive_idempotency_key" | "compute_prompt_hash" | "derive_uuid_from_signature";
   description?: string;
   inputs: Record<string, unknown>;
   expected_output: string;
@@ -105,10 +92,9 @@ function evaluateFixture(f: Fixture): string {
         asString(f.inputs.tenant_id, `${f.id}.tenant_id`),
       );
     case "derive_uuid_from_signature":
-      return deriveUuidFromSignature(
-        asString(f.inputs.signature, `${f.id}.signature`),
-        { scope: asString(f.inputs.scope, `${f.id}.scope`) },
-      );
+      return deriveUuidFromSignature(asString(f.inputs.signature, `${f.id}.signature`), {
+        scope: asString(f.inputs.scope, `${f.id}.scope`),
+      });
     default: {
       // Exhaustiveness gate: unknown `fn` would mean v1.json grew a new
       // function the TS suite hasn't taught itself to dispatch yet.
@@ -150,13 +136,7 @@ describe("cross-language parity v1 (P0 byte-equivalence gate)", () => {
       // contract above + review-standards §2.7.
       if (actual !== fixture.expected_output) {
         throw new Error(
-          `CROSS-LANGUAGE DRIFT for fixture ${fixture.id} (${fixture.fn}):\n` +
-            `  inputs:   ${JSON.stringify(fixture.inputs)}\n` +
-            `  expected: ${fixture.expected_output}\n` +
-            `  actual:   ${actual}\n` +
-            `TS implementation has diverged from Python. This is a P0 ` +
-            `review-standards §2 blocker — drift here breaks audit-chain ` +
-            `rule dedup and idempotency replay collapse.`,
+          `CROSS-LANGUAGE DRIFT for fixture ${fixture.id} (${fixture.fn}):\n  inputs:   ${JSON.stringify(fixture.inputs)}\n  expected: ${fixture.expected_output}\n  actual:   ${actual}\nTS implementation has diverged from Python. This is a P0 review-standards §2 blocker — drift here breaks audit-chain rule dedup and idempotency replay collapse.`,
         );
       }
       expect(actual).toBe(fixture.expected_output);
