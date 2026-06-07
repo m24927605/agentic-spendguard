@@ -1,0 +1,31 @@
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.manus_credit",
+  "source": "spendguard-importer-manus",
+  "id": "018f4b15-6d61-7c15-91fe-d0156d61acab",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/ws_FAKE_byok_001/manus/workspace/ws_FAKE_byok_001/session/ses_FAKE_byok_006",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "ws_FAKE_byok_001",
+    "workspace_id": "ws_FAKE_byok_001",
+    "session_id": "ses_FAKE_byok_006",
+    "tier": "enterprise_byok",
+    "status": "completed",
+    "credits_consumed": 1024,
+    "credit_cost_micro_usd": 0,
+    "amount_micro_usd": 0,
+    "pricing_version": "manus-credit-v1-2026-06",
+    "model": "manus.session/credit",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "window_start": "2026-06-05T20:00:00Z",
+    "window_end": "2026-06-05T22:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "manus_team_api",
+    "ingestion_mode": "fixture",
+    "fixture_provenance_sha256": "535d5cf688f486cac501436eb24e6357fa6c3677464001a0402e86686a50b0de",
+    "dedupe_key": "manus:ses_FAKE_byok_006"
+  }
+}

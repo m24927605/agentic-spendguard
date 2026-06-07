@@ -1,0 +1,297 @@
+---
+title: "Genspark billing importer (Super Agent — reconciliation only)"
+description: >-
+  Post-hoc importer for Genspark Super Agent admin usage. SpendGuard
+  cannot enforce Genspark spend — Genspark runs the agent loop entirely
+  inside its cloud VM. The importer pulls credit consumption, converts
+  to estimated $ via a vendored price table, and emits signed audit
+  events tagged reservation_source=subscription_meter /
+  import_source=genspark_team_api.
+sidebar:
+  badge:
+    text: Reconciliation only
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="SpendGuard cannot enforce Genspark spend — only Genspark can">
+  Genspark Super Agent runs the agent loop inside Genspark's cloud
+  VM. The customer's network never carries the per-LLM-call payload;
+  the egress proxy + SDK adapters intercept nothing. The Genspark
+  importer is **reconciliation only** — it pulls post-hoc credit
+  consumption so the dashboard CIO/CFO single-pane-of-glass view
+  doesn't collapse, but it does **not** gate, throttle, or
+  short-circuit Genspark sessions. That contract belongs to Genspark.
+  See the
+  [framework-coverage strategy memo Archetype IV](https://github.com/m24927605/agentic-spendguard/blob/main/docs/strategy/framework-coverage-2026-06.md)
+  for the architectural reasoning.
+</Aside>
+
+## What this is
+
+The `spendguard-importer-genspark` crate (D16) is a Rust binary +
+library that:
+
+1. Pulls usage from the Genspark admin API
+   (`/v1/admin/usage?workspace=…&from=…&to=…`) — feature-gated behind
+   `live` so the default build is HTTP-free.
+2. Converts **credits** to estimated USD via a vendored price table at
+   `services/importer_genspark/assets/genspark_credit_prices.json`.
+3. Emits signed `spendguard.audit.import.genspark_credit` CloudEvents
+   tagged with `reservation_source=subscription_meter` and
+   `import_source=genspark_team_api` — landing on the same dashboard
+   surface as D13 subscription-meter rows and the D14 Devin importer
+   rows.
+
+The default merge gate is a **sanitized fixture replay** — the
+committed `tests/fixtures/genspark_usage.json` snapshot. Live mode is
+operator-opt-in.
+
+## Credit → $ conversion
+
+| Plan | Monthly $ | Monthly credit grant | `usd_per_credit` |
+|------|-----------|---------------------|-------------------|
+| **plus** | $19.99 | 10,000 | $0.001999/credit |
+| **pro** | $24.99 | 12,500 | $0.0019992/credit |
+| **premium** | $249.99 | 125,000 | $0.00199992/credit |
+
+The conversion is pure:
+`round(credits_consumed × usd_per_credit × 1_000_000)` in micro-USD,
+saturating at `i64::MAX` on overflow. The price table's
+`pricing_version` is stamped on every emitted row at the moment of
+conversion — back-revisions to the rate file do **not** rewrite
+historical audit rows.
+
+### Unknown-plan fallback
+
+If the Genspark API returns a plan slug that is **not** in the
+embedded price table (e.g. a future `"enterprise"` tier, or a
+mid-window rename), the importer emits the row with
+`amount_micro_usd = 0` and stamps
+`reason_code = "genspark_plan_unknown"`. Dashboards must distinguish
+**"unknown rate"** from **"zero spend"** — the credit field is still
+populated, so operators see Genspark consumption volume even when the
+dollar mapping is unknown. Both fields are always set together;
+setting only one would either silently mis-price (visible non-zero
+USD with no rate) or leave the dashboard with no signal.
+
+## Install
+
+### Fixture mode (default merge gate)
+
+<div is:raw>
+
+```bash
+cargo run -p spendguard-importer-genspark --bin importer_genspark -- \
+    --mode fixture \
+    --fixture services/importer_genspark/tests/fixtures/genspark_usage.json \
+    --tenant <your-tenant> \
+    --budget <your-budget-id>
+```
+
+</div>
+
+The binary prints one CloudEvent per record to stdout; the demo
+runner script (`deploy/demo/import_genspark_fixture_demo.sh`) wires
+the INSERT path against the demo postgres.
+
+### Live mode (operator-opt-in)
+
+<div is:raw>
+
+```bash
+export GENSPARK_API_TOKEN=<Admin API token, at least 32 chars>
+export GENSPARK_API_BASE_URL=https://api.genspark.ai/v1   # optional override
+
+cargo run -p spendguard-importer-genspark --features live --bin importer_genspark -- \
+    --mode live \
+    --tenant <your-tenant> \
+    --budget <your-budget-id>
+```
+
+</div>
+
+The `live` feature pulls `reqwest` with `rustls-tls` only (no
+`native-tls`, no `openssl-sys`) and uses a 30s per-request timeout
+plus bounded exponential backoff (cap: 1 hour) for resilience against
+rate-limits.
+
+The runtime gate on `GENSPARK_API_TOKEN` enforces three checks at
+startup with distinct error messages so operators can debug:
+
+1. **Missing** — the env var is not set.
+2. **Empty** — the env var is set but blank after trimming whitespace.
+3. **Too short** — the value is fewer than 32 characters (catches
+   placeholders like `"TODO"` / `"changeme"`).
+
+Scope the token to the **Genspark Admin Usage API** scope only —
+least privilege.
+
+## Idempotency
+
+Re-running the same window does not double-emit. The CloudEvent
+`event.id` is a deterministic UUIDv5 derived from
+`(workspace_id, task_id, window_end)`; canonical_ingest dedups via the
+existing `event_replay_dedup` table.
+
+You can re-run the demo as many times as you like:
+
+<div is:raw>
+
+```bash
+make -C deploy/demo demo-verify-import-genspark-fixture
+make -C deploy/demo demo-verify-import-genspark-fixture   # idempotent; 0 new rows
+```
+
+</div>
+
+## Sample CloudEvent
+
+<div is:raw>
+
+```json
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.genspark_credit",
+  "source": "spendguard-importer-genspark",
+  "id": "018f4a3a-d971-7c16-91fe-d0169e715ba0",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/demo/genspark/workspace/FAKE_ws_001/task/FAKE_task_001",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "demo",
+    "budget_id": "genspark-budget",
+    "workspace_id": "FAKE_ws_001",
+    "task_id": "FAKE_task_001",
+    "plan": "plus",
+    "credits_consumed": 3200.0,
+    "usd_per_credit": 0.001999,
+    "amount_micro_usd": 6396800,
+    "reason_code": null,
+    "pricing_version": "genspark-credit-v1-2026-06",
+    "window_start": "2026-06-01T00:00:00Z",
+    "window_end": "2026-06-01T01:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "genspark_team_api",
+    "ingestion_mode": "fixture",
+    "fixture_provenance_sha256": "fd2c0bb772bfbf2605ce09204aed0025cd754c3edce7296ee281637e5a52baf6",
+    "task_category": "research"
+  }
+}
+```
+
+</div>
+
+## Sample price table
+
+<div is:raw>
+
+```json
+{
+  "pricing_version": "genspark-credit-v1-2026-06",
+  "effective_from": "2026-06-01T00:00:00Z",
+  "currency": "USD",
+  "rates": [
+    { "plan": "plus",    "monthly_usd": 19.99,  "monthly_credits": 10000,  "usd_per_credit": 0.001999 },
+    { "plan": "pro",     "monthly_usd": 24.99,  "monthly_credits": 12500,  "usd_per_credit": 0.0019992 },
+    { "plan": "premium", "monthly_usd": 249.99, "monthly_credits": 125000, "usd_per_credit": 0.00199992 }
+  ]
+}
+```
+
+</div>
+
+## Why we cannot gate
+
+The Genspark Super Agent loop runs **entirely inside Genspark's cloud
+VM**. The customer's egress proxy never sees the LLM API call payload —
+Genspark's VM dials OpenAI / Anthropic / other providers from inside
+their own network boundary. The admin API exposes only post-hoc
+credit aggregates, not a pre-call hook.
+
+This is **Archetype IV** in the SpendGuard framework-coverage
+analysis: a fully managed cloud agent where the customer has zero
+network visibility. The only feasible integration is reconciliation —
+pull the bill after the fact, surface it on the dashboard, alert on
+threshold crossings. Gating is architecturally impossible without
+Genspark shipping a pre-call webhook.
+
+## Operator scheduling
+
+The importer is a **periodic worker**, not a daemon. Schedule it via
+cron, Kubernetes CronJob, or whatever your environment supports:
+
+<div is:raw>
+
+```yaml
+# Kubernetes CronJob example — pull every hour.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: spendguard-importer-genspark
+spec:
+  schedule: "0 * * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          containers:
+            - name: importer
+              image: ghcr.io/m24927605/agentic-spendguard/importer-genspark:latest
+              env:
+                - name: GENSPARK_API_TOKEN
+                  valueFrom:
+                    secretKeyRef:
+                      name: genspark-admin-token
+                      key: token
+              args:
+                - --mode=live
+                - --tenant=$(SPENDGUARD_TENANT_ID)
+                - --budget=$(SPENDGUARD_BUDGET_ID)
+          restartPolicy: OnFailure
+```
+
+</div>
+
+## What you see on the dashboard
+
+* Estimated $ per task, per workspace — labelled with
+  `pricing_version`.
+* Credits consumed (always present, even for unknown-plan rows).
+* `reservation_source = subscription_meter` filter groups Genspark
+  spend alongside Devin and the Claude Code Pro / Codex
+  subscription-meter rows (advisory rows that skip the BYOK ledger).
+* Plan-level pivot: `plus` vs `pro` vs `premium` vs unknown.
+* Task-category breakdown (`research` / `code_generation` / …) when
+  the vendor populates it.
+
+## Implementation pointers
+
+* Crate scaffold + Cargo.toml:
+  `services/importer_genspark/Cargo.toml` — workspace-excluded,
+  `publish = false`, `live` feature gated.
+* Pure conversion:
+  `services/importer_genspark/src/import_record.rs`
+  (`import_record_to_audit_row`) — no I/O, no clock read.
+* Price table:
+  `services/importer_genspark/src/credit_price_table.rs` —
+  saturating arithmetic, rejects NaN/Infinity/negative inputs.
+* CloudEvent builder:
+  `services/importer_genspark/src/cloudevent_envelope.rs` —
+  golden-tested via `tests/golden/cloudevent_v1alpha1_*.json`.
+* Fixture loader:
+  `services/importer_genspark/src/fixture_loader.rs` — hard-rejects
+  non-synthetic IDs at parse time (T9).
+* Live client:
+  `services/importer_genspark/src/live/client.rs` — rustls-only
+  `reqwest` wrapper with typed 401/403/429/5xx errors plus a strict
+  three-way token gate (missing / empty / too-short).
+* Migration:
+  `services/ledger/migrations/0061_import_source_widen_genspark.sql` —
+  widens the existing `audit_outbox.import_source` CHECK to include
+  `genspark_team_api`.
+
+For the full design rationale + slice-level breakdown, see
+[`docs/specs/coverage/D16_genspark_importer/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D16_genspark_importer/design.md).

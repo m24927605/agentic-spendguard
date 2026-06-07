@@ -1,0 +1,43 @@
+# D15 — Manus credit price table.
+#
+# Source of truth for credit -> micro-USD conversion. The asset is
+# `include_str!`-d at compile time so the binary ships with a self-
+# contained rate table — no I/O, no runtime config load.
+#
+# Locked decisions (design §5):
+#   #1  reservation_source = 'import_manus'; rows tagged distinctly from
+#       D13 subscription_meter so dashboards can filter importer vs meter.
+#   #12 Integer micro-USD only in the conversion hot path; saturating
+#       multiply guards i64 overflow.
+#
+# Three tiers (review-standards §2 P1-P3):
+#   team_plan       -> $39/mo / 1900 credits = $0.020526 / credit
+#                                            = 20_526 micro-USD/credit
+#                      (integer-rounded from 20_526.3...; truncating
+#                      toward zero per P1 — documented here so a future
+#                      operator does not lose 0.3 micro-USD/credit by
+#                      accident.)
+#   enterprise      -> 0 micro-USD (operator override required at deploy
+#                      time per P2; dashboards show NULL spend until
+#                      override lands).
+#   enterprise_byok -> 0 micro-USD (LOAD-BEARING per P3 — BYOK tier
+#                      customers pay the LLM provider directly, so the
+#                      importer must NOT double-bill them. NEVER raise
+#                      this to a non-zero number without re-reading the
+#                      BYOK contract.)
+
+pricing_version = "manus-credit-v1-2026-06"
+effective_from  = "2026-06-01T00:00:00Z"
+currency        = "USD"
+
+[tiers.team_plan]
+credit_cost_micro_usd = 20526
+note                  = "Published 2026-06 Manus Team plan retail rate: $39/mo / 1900 credits = $0.020526/credit; integer-truncated to 20_526 micro-USD/credit."
+
+[tiers.enterprise]
+credit_cost_micro_usd = 0
+note                  = "Negotiated per contract; operator-override required at deploy time. Dashboards show NULL spend on these rows until override lands."
+
+[tiers.enterprise_byok]
+credit_cost_micro_usd = 0
+note                  = "LOAD-BEARING: BYOK tier customers pay the LLM provider direct; importer must NOT double-bill them. Never raise without re-reading the BYOK contract (review-standards P3)."

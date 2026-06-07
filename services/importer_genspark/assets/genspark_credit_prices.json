@@ -1,0 +1,28 @@
+{
+  "pricing_version": "genspark-credit-v1-2026-06",
+  "effective_from": "2026-06-01T00:00:00Z",
+  "currency": "USD",
+  "rates": [
+    {
+      "plan": "plus",
+      "monthly_usd": 19.99,
+      "monthly_credits": 10000,
+      "usd_per_credit": 0.001999,
+      "note": "Published 2026-06 Genspark Plus retail rate: $19.99/mo, 10,000 monthly credits → $0.001999/credit."
+    },
+    {
+      "plan": "pro",
+      "monthly_usd": 24.99,
+      "monthly_credits": 12500,
+      "usd_per_credit": 0.0019992,
+      "note": "Published 2026-06 Genspark Pro retail rate: $24.99/mo, 12,500 monthly credits → $0.0019992/credit."
+    },
+    {
+      "plan": "premium",
+      "monthly_usd": 249.99,
+      "monthly_credits": 125000,
+      "usd_per_credit": 0.00199992,
+      "note": "Published 2026-06 Genspark Premium retail rate: $249.99/mo, 125,000 monthly credits → $0.00199992/credit."
+    }
+  ]
+}

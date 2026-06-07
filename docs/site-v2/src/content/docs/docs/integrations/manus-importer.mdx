@@ -1,0 +1,255 @@
+---
+title: "Manus billing importer (Butterfly Effect — reconciliation only)"
+description: >-
+  Post-hoc importer for Manus admin REST credit usage. SpendGuard cannot
+  enforce Manus spend — Manus runs each agent task inside a vendor-managed
+  VM. The importer pulls aggregate credit consumption, converts to
+  estimated $ via a vendored TOML price table, and emits signed audit
+  events tagged reservation_source=subscription_meter /
+  import_source=manus_team_api.
+sidebar:
+  badge:
+    text: Reconciliation only
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="SpendGuard cannot enforce Manus spend — only Manus can">
+  Manus (Butterfly Effect, Meta-acquired 2026) runs each agent task
+  inside a vendor-managed VM. The customer's network never carries
+  the per-LLM-call payload; the egress proxy + SDK adapters intercept
+  nothing. The Manus importer is **reconciliation only** — it pulls
+  post-hoc credit usage so the dashboard CIO/CFO single-pane-of-glass
+  view doesn't collapse, but it does **not** gate, throttle, or
+  short-circuit Manus sessions. That contract belongs to Manus.
+  See the
+  [framework-coverage strategy memo Archetype IV](https://github.com/m24927605/agentic-spendguard/blob/main/docs/strategy/framework-coverage-2026-06.md)
+  for the architectural reasoning.
+</Aside>
+
+## What this is
+
+The `spendguard-importer-manus` crate (D15) is a Rust binary +
+library that:
+
+1. Pulls aggregate credit usage from the Manus admin REST API
+   (`/v1/usage`) — feature-gated behind `live` so the default build
+   is HTTP-free.
+2. Converts vendor **credits** to estimated USD via the vendored TOML
+   price table at `services/importer_manus/assets/price_table.toml`
+   (integer micro-USD, saturating multiply).
+3. Emits signed `spendguard.audit.import.manus_credit` CloudEvents
+   tagged with `reservation_source=subscription_meter` (D14/D16
+   family-aligned) and `import_source=manus_team_api` — landing on
+   the same dashboard surface as D13 subscription-meter rows and the
+   sibling D14 Devin / D16 Genspark importers.
+
+The default merge gate is a **sanitized fixture replay** — the
+committed `tests/fixtures/manus_usage.json` snapshot. Live mode is
+operator-opt-in.
+
+## Credit → $ conversion (three tiers)
+
+| Tier               | `credit_cost_micro_usd` | Audit row shape |
+|--------------------|-------------------------|-----------------|
+| **team_plan**       | `20_526` (≈ $0.020526/credit) | $39/mo / 1900 credits, integer-truncated. Headline conversion: 47 credits × 20_526 = 964_722 micro-USD. |
+| **enterprise**      | `0` (operator override required) | Negotiated per contract; dashboards show NULL spend until override lands. |
+| **enterprise_byok** | `0` (LOAD-BEARING) | BYOK tier customers pay the LLM provider direct. The importer **MUST NOT** double-bill them. |
+
+The conversion is pure: `credits × credit_cost_micro_usd` in integer
+micro-USD, saturating at `i64::MAX` on overflow. The price table's
+`pricing_version` is stamped on every emitted row at the moment of
+conversion — back-revisions to the rate file do **not** rewrite
+historical audit rows.
+
+### Why `enterprise_byok = 0` is load-bearing
+
+BYOK customers bring their own LLM provider keys (Anthropic / OpenAI /
+etc.) and pay the LLM bill directly. If the importer charges them
+*again* on the Manus side, the SpendGuard dashboard double-counts the
+spend. The price table's BYOK row is documented as load-bearing —
+**never raise without re-reading the BYOK contract**.
+
+## Install
+
+### Fixture mode (default merge gate)
+
+```bash
+cargo run -p spendguard-importer-manus --bin importer_manus -- \
+    --mode fixture \
+    --fixture services/importer_manus/tests/fixtures/manus_usage.json
+```
+
+The binary prints one CloudEvent per **terminal** session to stdout
+(in-progress sessions filtered by default — pass
+`--include-in-progress` to see them too). The demo runner script
+(`deploy/demo/import_manus_fixture_demo.sh`) wires the INSERT path
+against a throwaway demo postgres.
+
+### Live mode (operator-opt-in)
+
+```bash
+export MANUS_API_TOKEN=<Team+ admin API token>
+export MANUS_API_BASE_URL=https://api.manus.ai   # optional override
+
+cargo run -p spendguard-importer-manus --features live --bin importer_manus -- \
+    --mode live
+```
+
+The `live` feature pulls `reqwest` with `rustls-tls` only (no
+`native-tls`, no `openssl-sys`), uses a 30s per-request timeout, and
+bounded exponential backoff (cap: 1 hour) for rate-limit resilience.
+Cursor pagination is hard-capped at 10_000 pages to prevent a
+misbehaving vendor `next_cursor` from looping forever.
+
+Scope the token to the **Manus Team+ admin API** scope only — least
+privilege.
+
+## Idempotency
+
+Re-running the same window does not double-emit. The CloudEvent
+`event.id` is a deterministic UUIDv5 derived from
+`(workspace_id, session_id, window_end)`; the audit-row `dedupe_key`
+is `manus:<session_id>` (vendor-isolated namespace so D14 / D16 keys
+never collide); canonical_ingest dedups via the existing
+`event_replay_dedup` table.
+
+You can re-run the demo as many times as you like:
+
+```bash
+make -C deploy/demo demo-import-manus-fixture
+make -C deploy/demo demo-import-manus-fixture   # idempotent; 0 new rows
+```
+
+## Sample CloudEvent
+
+<div is:raw>
+
+```json
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.manus_credit",
+  "source": "spendguard-importer-manus",
+  "id": "018f4b15-6d61-7c15-91fe-d0156d61aca0",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/ws_FAKE_team_001/manus/workspace/ws_FAKE_team_001/session/ses_FAKE_team_completed_001",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "ws_FAKE_team_001",
+    "workspace_id": "ws_FAKE_team_001",
+    "session_id": "ses_FAKE_team_completed_001",
+    "tier": "team_plan",
+    "status": "completed",
+    "credits_consumed": 47,
+    "credit_cost_micro_usd": 20526,
+    "amount_micro_usd": 964722,
+    "pricing_version": "manus-credit-v1-2026-06",
+    "model": "manus.session/credit",
+    "input_tokens": 0,
+    "output_tokens": 0,
+    "window_start": "2026-06-05T14:00:00Z",
+    "window_end": "2026-06-05T15:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "manus_team_api",
+    "ingestion_mode": "fixture",
+    "fixture_provenance_sha256": "535d5cf688f486cac501436eb24e6357fa6c3677464001a0402e86686a50b0de",
+    "dedupe_key": "manus:ses_FAKE_team_completed_001"
+  }
+}
+```
+
+</div>
+
+## Sample price table (TOML)
+
+<div is:raw>
+
+```toml
+pricing_version = "manus-credit-v1-2026-06"
+effective_from  = "2026-06-01T00:00:00Z"
+currency        = "USD"
+
+[tiers.team_plan]
+credit_cost_micro_usd = 20526
+# $39/mo / 1900 credits = $0.020526/credit; integer-truncated.
+
+[tiers.enterprise]
+credit_cost_micro_usd = 0
+# Operator override required at deploy time.
+
+[tiers.enterprise_byok]
+credit_cost_micro_usd = 0
+# LOAD-BEARING: BYOK customers pay LLM provider direct.
+```
+
+</div>
+
+## Why we cannot gate
+
+The Manus agent loop runs **entirely inside Butterfly Effect's
+vendor-managed VM**. The customer's egress proxy never sees the LLM
+API call payload — the Manus VM dials OpenAI / Anthropic from inside
+the vendor's own network boundary. The admin API exposes only
+post-hoc aggregate credit usage, not a pre-call hook.
+
+This is **Archetype IV** in the SpendGuard framework-coverage
+analysis: a fully managed cloud agent where the customer has zero
+network visibility. The only feasible integration is reconciliation —
+pull the bill after the fact, surface it on the dashboard, alert on
+threshold crossings. Gating is architecturally impossible without
+Manus shipping a pre-call webhook.
+
+## What you see on the dashboard
+
+* Estimated $ per session, per workspace — labelled with
+  `pricing_version`.
+* Credits consumed (always present, even for enterprise/BYOK
+  zero-amount rows).
+* `reservation_source = subscription_meter` filter groups Manus spend
+  alongside Devin (D14) and Genspark (D16) importer rows and Claude
+  Code Pro / Codex (D13) advisory rows that skip the BYOK ledger.
+* Per-importer filter via `import_source = manus_team_api`.
+* Tier-level pivot: `team_plan` vs `enterprise` vs `enterprise_byok`.
+
+## Sibling importer integrations
+
+D15 is part of a three-importer family that covers the agent-vendor
+Archetype IV ecosystem:
+
+* **[D14 Devin importer](/docs/integrations/devin-importer/)** —
+  Cognition Labs ACU usage.
+* D15 Manus importer (this page).
+* D16 Genspark importer — Genspark `genspark_team_api` usage.
+
+All three follow the same locked invariants: `reservation_source =
+subscription_meter`, `import_source = <vendor>_team_api`, deterministic
+UUIDv5 event IDs, vendor-prefixed dedupe keys (`devin:` / `manus:` /
+`genspark:`), default build HTTP-free, live mode rustls-only behind
+the `live` feature flag.
+
+## Implementation pointers
+
+* Crate scaffold + Cargo.toml: `services/importer_manus/Cargo.toml`
+  — workspace-excluded, `publish = false`, `live` feature gated.
+* Pure conversion: `services/importer_manus/src/audit.rs`
+  (`import_record_to_audit_row`) — no I/O, no clock read, integer
+  micro-USD only.
+* Price table: `services/importer_manus/src/pricing.rs` +
+  `assets/price_table.toml` — saturating arithmetic, rejects
+  negative credits.
+* CloudEvent builder: `services/importer_manus/src/cloudevent_envelope.rs`
+  — golden-tested via `tests/golden/cloudevent_v1alpha1_*.json`.
+* Fixture loader: `services/importer_manus/src/fixture.rs` —
+  hard-rejects non-synthetic IDs (`ws_FAKE_*` / `ses_FAKE_*`) at parse
+  time.
+* Live client: `services/importer_manus/src/live/client.rs` —
+  rustls-only `reqwest` wrapper with typed 401/403/429/5xx errors,
+  bounded cursor pagination.
+* Migration: `services/ledger/migrations/0060_import_source_widen_manus.sql`
+  — widens the existing `audit_outbox.import_source` CHECK to include
+  `manus_team_api`.
+
+For the full design rationale + slice-level breakdown, see
+[`docs/specs/coverage/D15_manus_importer/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D15_manus_importer/design.md).

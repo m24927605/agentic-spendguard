@@ -1,0 +1,29 @@
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.genspark_credit",
+  "source": "spendguard-importer-genspark",
+  "id": "018f4a3a-d971-7c16-91fe-d0169e715ba0",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/demo/genspark/workspace/FAKE_ws_001/task/FAKE_task_001",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "demo",
+    "budget_id": "genspark-budget",
+    "workspace_id": "FAKE_ws_001",
+    "task_id": "FAKE_task_001",
+    "plan": "plus",
+    "credits_consumed": 3200.0,
+    "usd_per_credit": 0.001999,
+    "amount_micro_usd": 6396800,
+    "reason_code": null,
+    "pricing_version": "genspark-credit-v1-2026-06",
+    "window_start": "2026-06-01T00:00:00Z",
+    "window_end": "2026-06-01T01:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "genspark_team_api",
+    "ingestion_mode": "fixture",
+    "fixture_provenance_sha256": "fd2c0bb772bfbf2605ce09204aed0025cd754c3edce7296ee281637e5a52baf6",
+    "task_category": "research"
+  }
+}

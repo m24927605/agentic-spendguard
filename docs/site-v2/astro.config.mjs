@@ -78,6 +78,8 @@ export default defineConfig({
             { label: 'Windsurf IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/windsurf-mitm' },
             { label: 'Subscription-tier meter (Claude Code Pro + Codex)', slug: 'docs/integrations/subscription-meter' },
             { label: 'Devin billing importer (Cognition Labs — reconciliation only)', slug: 'docs/integrations/devin-importer' },
+            { label: 'Manus billing importer (Butterfly Effect — reconciliation only)', slug: 'docs/integrations/manus-importer' },
+            { label: 'Genspark billing importer (Super Agent — reconciliation only)', slug: 'docs/integrations/genspark-importer' },
           ],
         },
         {

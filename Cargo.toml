@@ -20,6 +20,8 @@ exclude = [
   "services/envoy_extproc",
   "services/ids",
   "services/importer_devin",
+  "services/importer_genspark",
+  "services/importer_manus",
   "services/leases",
   "services/ledger",
   "services/outbox_forwarder",

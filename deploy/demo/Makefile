@@ -915,6 +915,60 @@ demo-verify-import-devin-fixture:
 	@bash ./import_devin_fixture_demo.sh
 	@echo "[demo] D14 COV_72 import_devin_fixture verification done"
 
+# D15 COV_74 — import_manus_fixture demo. Self-contained: spins up a
+# throwaway postgres:16-alpine container, applies mig 0060 (widen
+# import_source CHECK to include 'manus_team_api'), runs the
+# spendguard-importer-manus binary against the committed sanitized
+# fixture in `services/importer_manus/tests/fixtures/manus_usage.json`,
+# INSERTs the emitted CloudEvents as audit_outbox rows, and runs the
+# verifier SQL to assert:
+#
+#   - EXACTLY 7 audit_outbox rows with import_source='manus_team_api' +
+#     reservation_source='subscription_meter' (8 sessions in fixture, 1
+#     in_progress filtered per E3).
+#   - team_plan total = 20_731_260 micro-USD (acceptance A5.4 headline).
+#   - >= 1 enterprise row with amount=0 (P2 operator-override default).
+#   - >= 1 enterprise_byok row with amount=0 (P3 LOAD-BEARING; BYOK
+#     customers MUST NOT be double-billed).
+#   - ZERO ledger_entries rows under ws_FAKE_% (D13 §4.3 fork).
+#   - Every row carries model='manus.session/credit', tokens=0, and
+#     dedupe_key LIKE 'manus:%'.
+#
+# Idempotent: ON CONFLICT (event_id) DO NOTHING. Re-running lands zero
+# new rows (deterministic UUIDv5).
+demo-verify-import-manus-fixture:
+	@bash ./import_manus_fixture_demo.sh
+	@echo "[demo] D15 COV_74 import_manus_fixture verification done"
+
+# Alias preferred by the D15 spec deliverable prompt. Calls the same
+# runner as demo-verify-import-manus-fixture.
+demo-import-manus-fixture: demo-verify-import-manus-fixture
+
+# D16 COV_88 — import_genspark_fixture demo. Self-contained: spins up a
+# throwaway postgres:16-alpine container, applies mig 0061 (widen
+# import_source CHECK to include 'genspark_team_api'), runs the
+# spendguard-importer-genspark binary against the committed sanitized
+# fixture in `services/importer_genspark/tests/fixtures/genspark_usage.json`,
+# INSERTs the emitted CloudEvents as audit_outbox rows, and runs the
+# verifier SQL to assert:
+#
+#   - >= 3 audit_outbox rows with import_source='genspark_team_api' +
+#     reservation_source='subscription_meter' for tenant=demo.
+#   - >= 1 plus-plan row with amount_micro_usd > 0 (credit → $ conversion
+#     correctness).
+#   - >= 1 premium-plan row with amount_micro_usd > 0 (premium-rate
+#     correctness).
+#   - >= 1 unknown-plan row with amount_micro_usd = 0 AND
+#     reason_code='genspark_plan_unknown' (T7 / F4 fallback).
+#   - ZERO ledger_entries rows under demo tenant (D13 §4.3 fork).
+#   - 3200-credit plus row → 6_396_800 micro-USD (hand-computed).
+#
+# Idempotent: ON CONFLICT (event_id) DO NOTHING. Re-running lands zero
+# new rows (deterministic UUIDv5).
+demo-verify-import-genspark-fixture:
+	@bash ./import_genspark_fixture_demo.sh
+	@echo "[demo] D16 COV_88 import_genspark_fixture verification done"
+
 # D18 SLICE 82 (windsurf_mitm_fixture demo) verification. Mirrors the
 # cursor_mitm_fixture verification: the codec runs against the
 # in-memory mock sidecar lane, so the verify SQL asserts the
@@ -1286,7 +1340,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture demo-verify-import-manus-fixture demo-import-manus-fixture demo-verify-import-genspark-fixture
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

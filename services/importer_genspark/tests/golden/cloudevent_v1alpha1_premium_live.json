@@ -1,0 +1,29 @@
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.genspark_credit",
+  "source": "spendguard-importer-genspark",
+  "id": "018f4a3a-d971-7c16-91fe-d0169e715bac",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/demo/genspark/workspace/FAKE_ws_002/task/FAKE_task_003",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "demo",
+    "budget_id": "genspark-budget",
+    "workspace_id": "FAKE_ws_002",
+    "task_id": "FAKE_task_003",
+    "plan": "premium",
+    "credits_consumed": 50000.0,
+    "usd_per_credit": 0.00199992,
+    "amount_micro_usd": 99996000,
+    "reason_code": null,
+    "pricing_version": "genspark-credit-v1-2026-06",
+    "window_start": "2026-06-01T00:00:00Z",
+    "window_end": "2026-06-01T01:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "genspark_team_api",
+    "ingestion_mode": "live",
+    "fixture_provenance_sha256": null,
+    "task_category": "code_generation"
+  }
+}
