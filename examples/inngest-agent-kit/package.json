@@ -1,0 +1,22 @@
+{
+  "name": "spendguard-inngest-agent-kit-example",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runnable Node example: wrapWithSpendGuard(step.ai) inside an Inngest function. Demonstrates the retry-dedup headline — N attempts of one step body produce one logical PRE / one logical decision via SpendGuard's in-process idempotency cache.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "start:mock": "node index.mjs --mock",
+    "start:real": "node index.mjs --real"
+  },
+  "dependencies": {
+    "@inngest/agent-kit": "^0.13.2",
+    "@spendguard/inngest-agent-kit": "^0.1.0",
+    "@spendguard/sdk": "^0.1.0",
+    "inngest": "^3.43.1"
+  }
+}

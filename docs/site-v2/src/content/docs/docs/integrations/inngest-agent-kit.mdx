@@ -1,0 +1,318 @@
+---
+title: "Inngest AgentKit (TypeScript) — wrapWithSpendGuard(step.ai)"
+description: >-
+  Install Agentic SpendGuard as a wrapper around any @inngest/agent-kit
+  step.ai namespace. Drop-in via `wrapWithSpendGuard(step.ai, client, opts)`
+  inside an Inngest function. Pre-call budget reservation before the upstream
+  HTTP request fires, post-call commit reconciles real token usage,
+  retry-safe by Inngest step identity reuse.
+---
+
+
+> [Inngest AgentKit](https://github.com/inngest/agent-kit) wraps every
+> LLM call as a durable step via `step.ai.infer()` / `step.ai.wrap()`.
+> Inngest's deterministic-retry contract gives us the cleanest pre-call
+> hook SpendGuard has in TypeScript: on failure, the SAME step body runs
+> again with the SAME `step.id` and (when supplied) the SAME
+> `step.idempotencyKey`. SpendGuard ships as `wrapWithSpendGuard(step.ai,
+> client, opts)` — a stock factory you drop onto any Inngest function's
+> `step.ai` and hand back to the function body. No wrapper class
+> required. The SpendGuard `idempotencyKey` is derived deterministically
+> from Inngest's own step identity so N retry attempts collapse to ONE
+> logical decision in the SpendGuard audit chain.
+
+## Install
+
+```bash
+pnpm add @spendguard/sdk @spendguard/inngest-agent-kit @inngest/agent-kit inngest
+```
+
+`@spendguard/sdk` and `@inngest/agent-kit` are declared as peer
+dependencies so the adapter pins neither — your project's lockfile wins.
+Node 20.10+ is required (the substrate uses stable `AsyncLocalStorage`).
+
+## Quick start
+
+Minimal end-to-end wire — connect a `SpendGuardClient` to the sidecar UDS,
+wrap the function's `step.ai`, and drive `sgStep.infer(...)` inside the
+function body:
+
+```ts
+import { Inngest } from "inngest";
+import { openai } from "@inngest/agent-kit/models";
+import { SpendGuardClient, InMemoryIdempotencyCache } from "@spendguard/sdk";
+import { wrapWithSpendGuard } from "@spendguard/inngest-agent-kit";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  runtimeKind: "inngest-agent-kit",
+});
+await client.connect();
+await client.handshake();
+
+const cache = new InMemoryIdempotencyCache();
+const inngest = new Inngest({ id: "my-app" });
+
+export const agentFn = inngest.createFunction(
+  { id: "agent-fn", retries: 2 },
+  { event: "agent/run" },
+  async ({ step }) => {
+    const sgStep = wrapWithSpendGuard(step.ai, client, {
+      tenantId: "00000000-0000-4000-8000-000000000001",
+      budgetId: "44444444-4444-4444-8444-444444444444",
+      idempotencyCache: cache,
+      claimEstimator: ({ model, body }) => [{
+        scopeId: "44444444-4444-4444-8444-444444444444",
+        amountAtomic: "1000000",
+        unit: { unit: "USD_MICROS", denomination: 1 },
+      }],
+    });
+    return await sgStep.infer("call-openai", {
+      model: openai({ model: "gpt-4o-mini" }),
+      body: { messages: [{ role: "user", content: "hi" }] },
+    });
+  },
+);
+```
+
+What happens on each `sgStep.infer(...)` call:
+
+1. The wrap derives a SpendGuard identity tuple `(decisionId,
+   idempotencyKey, llmCallId, stepId)` from Inngest's runtime context.
+   `decisionId` and `idempotencyKey` are seeded from
+   `step.idempotencyKey ?? step.id` — both attempt-invariant by
+   Inngest's own contract.
+2. If an `idempotencyCache` is supplied, the wrap probes it first. On
+   cache HIT the cached `DecisionOutcome` short-circuits the sidecar
+   round-trip; on MISS the wrap falls through to
+   `client.reserve({ trigger: "LLM_CALL_PRE", … })`.
+3. On `DecisionDenied` / `DecisionStopped` / `DecisionSkipped` /
+   `ApprovalRequired` (without a resumer) / `SidecarUnavailable`, the
+   adapter rethrows — the Inngest step body throws, Inngest records the
+   step as failed, and the upstream LLM HTTP call NEVER leaves the
+   process. **Review-standards §3.1 + §5 enforced.**
+4. On `CONTINUE`, the wrapped `step.ai.infer(...)` runs verbatim against
+   the inner namespace. The Inngest runtime orchestrates retries /
+   replays as usual.
+5. After the inner response returns, the bracket reads
+   `usage.total_tokens` (with fallback probe order for cross-provider
+   robustness) and emits a `SUCCESS` commit via
+   `client.commitEstimated(...)`. Provider error → commit fires with
+   `outcome="PROVIDER_ERROR"` then the error rethrows.
+
+## Retry dedup — the headline contract
+
+Inngest retries the same step body with the **same `step.id`** (and the
+same `step.idempotencyKey` when one is supplied). The adapter feeds that
+identity into SpendGuard's `idempotencyKey` derivation, so:
+
+- **Attempt 0** fires `reserve` against the sidecar.
+- **Attempts 1+** (on retry) re-derive the **same** key. With
+  `idempotencyCache` supplied, the cached `DecisionOutcome`
+  short-circuits the sidecar round-trip; without it, the sidecar's own
+  dedup layer absorbs the duplicate.
+- The SpendGuard audit chain records **one** `LLM_CALL_PRE` row across
+  N attempts — no double-billing on retry.
+
+```ts
+// retries: 2 means up to 3 attempts (0 + 2 retries).
+inngest.createFunction({ id: "agent-fn", retries: 2 }, ...);
+```
+
+A **NEW Inngest function invocation** (new `ctx.runId`) for the same
+step name produces a **DIFFERENT** `idempotencyKey` — fresh runs are NOT
+deduped against prior runs. The identity tuple includes `runId` as a
+scope seal.
+
+`attempt` is intentionally NOT part of the seed (review-standards §6.5
+— branch-covered).
+
+## Configuration
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Type</th><th>Required</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>tenantId</code></td><td><code>string</code></td><td>YES</td><td>Tenant UUID the call is billed to. First field of the idempotency-key canonical tuple.</td></tr>
+    <tr><td><code>budgetId</code></td><td><code>string</code></td><td>NO</td><td>Budget UUID used as the projected claim's <code>scopeId</code>. When unset, the adapter falls back to <code>tenantId</code>.</td></tr>
+    <tr><td><code>windowInstanceId</code></td><td><code>string</code></td><td>NO</td><td>Optional budget window UUID. Forwarded to the substrate when set.</td></tr>
+    <tr><td><code>unit</code></td><td><code>UnitRef</code></td><td>NO</td><td>Defaults to <code>&lbrace; unit: "USD_MICROS", denomination: 1 &rbrace;</code> on the commit path.</td></tr>
+    <tr><td><code>pricing</code></td><td><code>PricingFreeze</code></td><td>NO</td><td>Empty-freeze default when unset; sidecar server-side defaults take over.</td></tr>
+    <tr><td><code>claimEstimator</code></td><td><code>ClaimEstimator</code></td><td>NO</td><td>Maps <code>ClaimEstimatorInput</code> → <code>readonly BudgetClaim[]</code>. Default: zero-amount probe claim. Production consumers MUST override.</td></tr>
+    <tr><td><code>route</code></td><td><code>string</code></td><td>NO</td><td>Defaults to <code>"llm.call.inngest"</code> (LOCKED, design.md §4).</td></tr>
+    <tr><td><code>callSignatureFn</code></td><td><code>CallSignatureFn</code></td><td>NO</td><td>Optional signature override. Default: step identity drives derivation.</td></tr>
+    <tr><td><code>claimEstimate</code></td><td><code>ClaimEstimate</code></td><td>NO</td><td>Higher-fidelity numeric hints forwarded verbatim on the reserve request.</td></tr>
+    <tr><td><code>onApprovalRequired</code></td><td><code>(err, input) =&gt; Promise&lt;DecisionOutcome|null|undefined&gt;</code></td><td>NO</td><td>Resumes <code>ApprovalRequired</code> with the supplied outcome; <code>null</code>/<code>undefined</code> re-throws.</td></tr>
+    <tr><td><code>idempotencyCache</code></td><td><code>IdempotencyCache</code></td><td>NO</td><td>Same-process cache (typically <code>InMemoryIdempotencyCache</code> from <code>@spendguard/sdk</code>). Drives the retry-dedup short-circuit; without it, layered defence via the sidecar's own dedup still holds.</td></tr>
+  </tbody>
+</table>
+
+## Limitations
+
+**SpendGuard's Inngest AgentKit adapter is pre-call reserve + post-call
+commit only.** A few important things to know before you ship it in
+front of high-volume retry-heavy workloads:
+
+- **Stream-per-chunk gating is anti-scope for v0.1.x.** `step.ai.infer`
+  is non-streaming by Inngest design (`design.md` §3 non-goal). The
+  D04 / D06 / D08 composite demos' `STREAM` step is replaced by
+  `RETRY_DEDUP` in the D29 composite — the retry-safe reserve dedup is
+  D29's headline contract.
+- **Retry-dedup short-circuit requires either an
+  `idempotencyCache` OR sidecar-side dedup.** Without an in-process
+  cache, the wrap still emits byte-identical `idempotencyKey` to the
+  sidecar on every attempt — the sidecar's own idempotency layer catches
+  the duplicate. The in-process cache pillar is the recommended
+  configuration (saves a UDS round-trip per retry) but the layered
+  defence is the safety guarantee.
+- **Cross-step budget enforcement is out of scope.** The adapter gates
+  per-step. Multi-step budget contracts are the SpendGuard contract
+  layer's concern (see [Contract YAML reference](../../contracts/yaml/)).
+- **Approval-resume UI is out of scope.** `ApprovalRequired` flows
+  through to the consumer's `onApprovalRequired` callback if supplied;
+  the adapter does NOT ship an approval UI. The Inngest function's
+  failure handler observes the error and can route it to your operator
+  console.
+- **Substrate dependency on `UnitRef` broadening.** The TS substrate's
+  public `UnitRef` does not yet expose `unit_id`
+  (`sdk/typescript/src/client.ts::mapUnitRef` hardcodes empty). The
+  `--real` demo flow surfaces the substrate-side `claim[0].unit.unit_id
+  empty` error from the sidecar's `ReserveSet` validator — the same
+  cross-slice gap D04 / D06 / D08 surface against the same substrate.
+  The adapter's wire shape and retry-dedup contract are independently
+  verified by 76 vitest cases; the `--mock` demo mode exercises the
+  bracket end-to-end without going through the substrate validator. A
+  future hardening slice picks up the SDK-side broadening + adapter
+  wire-through together.
+- **`SidecarUnavailable` propagates as-is.** Strict-mode default
+  (review-standards §5.2 / §5.7). The future `degrade=auto` mode is
+  LOCKED OUT of v0.1.x.
+- **Browser is unsupported** (D05 §6 UDS-only). The adapter runs only
+  in Node 20.10+ where `AsyncLocalStorage` is available.
+
+## Demo
+
+A bundled docker-compose demo proves the full ALLOW + DENY +
+RETRY_DEDUP matrix end-to-end against the sidecar + counting-stub
+upstream:
+
+```bash
+make demo-up DEMO_MODE=inngest_agent_kit
+```
+
+The mode boots `postgres + sidecar + inngest-agent-kit-runner +
+counting-stub`, then runs three invocations from the Node example at
+[`examples/inngest-agent-kit/`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/inngest-agent-kit/):
+
+- **ALLOW** — small message within budget. `wrapWithSpendGuard`'s
+  `reserve()` returns `CONTINUE`, the upstream HTTP call fires, counter
+  `+1`, the bracket emits a `SUCCESS` commit.
+- **DENY** — body carries `spendguard_estimate_override=2000000000`
+  which blows past the seeded `1B` hard-cap. The sidecar contract
+  evaluator emits `SPENDGUARD_DENY`, the bracket throws `DecisionDenied`,
+  the wrapped `step.ai.infer` halts BEFORE the upstream HTTP call.
+  Counting-stub counter UNCHANGED (proves the gate fires pre-call).
+- **RETRY_DEDUP** — driver replays the SAME step body 3× with the SAME
+  `(runId, step.id, idempotencyKey)` and incremented `step.attempt`.
+  The SpendGuard reserve fires EXACTLY ONCE across all 3 attempts.
+  Counting-stub counter `+3` (one per attempt — the upstream HTTP layer
+  still fires; the dedup happens above it at the SpendGuard reservation
+  layer). The SQL gate `COV_D29_DEDUP_GATE` asserts the ledger sees
+  exactly 2 total reservations (ALLOW + RETRY_DEDUP) — not 4 (ALLOW + 3
+  attempts).
+
+Success line on a clean run (LOCKED — CI greps for the exact spelling):
+
+```
+[demo] inngest_agent_kit ALL 3 steps PASS (ALLOW + DENY + RETRY_DEDUP)
+```
+
+Full details and the verify-SQL gates are in
+[`deploy/demo/inngest_agent_kit/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/inngest_agent_kit/README.md).
+
+The standalone `--mock` mode (no sidecar required) runs against the same
+factory + an in-process `SpendGuardClient` double:
+
+```bash
+cd examples/inngest-agent-kit
+pnpm install
+node index.mjs --mock
+```
+
+The mock mode explicitly asserts the "DENY ⇒ inner step.ai is NEVER
+invoked" invariant and the "N retry attempts → 1 SpendGuard
+reservation" headline, exiting non-zero if either is violated.
+
+## Troubleshooting
+
+Common boot-time and first-call errors. The substrate's typed exceptions
+are re-exported from `@spendguard/inngest-agent-kit` so you can
+pattern-match on `DecisionDenied` / `SidecarUnavailable` without taking
+a second import.
+
+- **`DecisionDenied: reserve() denied by contract`** — Expected
+  behaviour when the budget is exhausted or a contract rule emitted
+  `SPENDGUARD_DENY`. The bracket rethrows, the Inngest step body throws,
+  and the upstream LLM HTTP call never fires. Check the sidecar logs for
+  the rule that matched; the decision row in the ledger carries
+  `decision_context.contract_rule`.
+
+- **Budget gate not blocking — LLM call fires anyway.** Almost always
+  caused by `wrapWithSpendGuard(...)` not being threaded into the
+  function body. Inspect the `sgStep` variable — it MUST be the wrapped
+  `step.ai`, not the raw `step.ai` reference passed by Inngest's
+  `({ step })` destructure.
+
+- **Retry is producing N reservations instead of 1.** Either the
+  consumer is not supplying an `idempotencyCache` AND the sidecar's
+  idempotency layer is misconfigured, OR each retry is somehow getting a
+  fresh `runId` (verify the Inngest function's `retries:` setting —
+  Inngest reuses `runId` across retries by default). The
+  `COV_D29_DEDUP_GATE` SQL fixture in
+  `deploy/demo/verify_step_inngest_agent_kit.sql` is the canonical
+  regression test.
+
+- **`SidecarUnavailable: handshake timeout`** — The sidecar's UDS path
+  (`SPENDGUARD_SIDECAR_UDS`, default `/var/run/spendguard/adapter.sock`)
+  is not reachable. Check that the sidecar container is up, the socket
+  file exists, and your Node process has read/write permission on it.
+
+- **`ApprovalRequired` propagates without your resume callback firing.**
+  The `onApprovalRequired` option must return a `DecisionOutcome` (not
+  null/undefined) to resume. A `null` return causes the original error
+  to propagate unchanged — `Runner.run(...)` halts and the step body
+  errors out for Inngest's retry layer to observe.
+
+- **Token counts on commit don't match what the provider reports.** The
+  bracket's `extractTotalTokens(result)` probes (in order)
+  `result.usage.total_tokens` → `result.usage_metadata.total_tokens` →
+  `result.response_metadata.token_usage.total_tokens`. If none are
+  present (rare; defensive fallback), the commit ships `0` for the
+  missing field — check the provider's raw response shape.
+
+- **Class identity check fails: `err instanceof DecisionDenied` is
+  false** — You imported `DecisionDenied` from `@spendguard/sdk`
+  directly while the wrap threw from `@spendguard/inngest-agent-kit`.
+  Class identity IS preserved (re-export, not subclass), so the check
+  works regardless of which import you use. If the check fails, suspect
+  a duplicate `@spendguard/sdk` in your `node_modules` tree.
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in 5 minutes.
+- [LangChain.js callback handler](../langchain-ts/) — LangChain.js
+  callback-handler sibling adapter.
+- [Vercel AI SDK (covers Mastra)](../vercel-ai/) — Vercel AI middleware
+  sibling.
+- [OpenAI Agents SDK (TypeScript)](../openai-agents-ts/) — OpenAI Agents
+  SDK TS sibling.
+- [Contract YAML reference](../../contracts/yaml/) — author allow/stop
+  rules.
+- Other adapter integrations:
+  [Pydantic-AI](../pydantic-ai/) ·
+  [LangChain & LangGraph (Python)](../langchain/) ·
+  [OpenAI Agents SDK (Python)](../openai-agents/) ·
+  [Microsoft AGT](../agt/) ·
+  [LiteLLM proxy guardrail](../litellm-proxy/)

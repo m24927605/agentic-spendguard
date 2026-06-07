@@ -1,6 +1,6 @@
 {
   "name": "@spendguard/inngest-agent-kit",
-  "version": "0.1.0-pre",
+  "version": "0.1.0",
   "description": "Inngest AgentKit adapter for SpendGuard budget guardrails — drop-in via `wrapWithSpendGuard(step.ai, client, opts)` inside an Inngest function, retry-safe by step identity.",
   "license": "Apache-2.0",
   "author": "Michael Chen <m24927605@gmail.com>",

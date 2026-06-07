@@ -245,6 +245,6 @@ function validateOptions(opts) {
 }
 
 // src/version.ts
-var VERSION = "0.1.0-pre";
+var VERSION = "0.1.0";
 
 export { VERSION, deriveIdentity, deriveStepIdempotencyKey, extractProviderEventId, extractTotalTokens, wrapWithSpendGuard };

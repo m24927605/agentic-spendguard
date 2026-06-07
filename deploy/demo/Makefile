@@ -152,6 +152,24 @@ else ifeq ($(DEMO_MODE),openai_agents_ts)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),inngest_agent_kit)
+	@echo "[demo] DEMO_MODE=inngest_agent_kit → COV_D29 SLICE 5 (Inngest AgentKit retry-dedup)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/inngest_agent_kit/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               inngest-agent-kit-runner (Node 20 running"
+	@echo "[demo]               examples/inngest-agent-kit/index.mjs --real)."
+	@echo "[demo]   Driver issues 3 calls through wrapWithSpendGuard(step.ai):"
+	@echo "[demo]   ALLOW + DENY + RETRY_DEDUP (replaces D04/D06/D08's STREAM"
+	@echo "[demo]   because step.ai.infer is non-streaming, design.md §3"
+	@echo "[demo]   non-goal). RETRY_DEDUP replays the same (runId, step.id,"
+	@echo "[demo]   idempotencyKey) 3× and asserts the SpendGuard reserve"
+	@echo "[demo]   fires EXACTLY ONCE across attempts — the D29 headline."
+	$(COMPOSE) -f inngest_agent_kit/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),approval_hot_reload)
 	@echo "[demo] DEMO_MODE=approval_hot_reload → same stack as DEMO_MODE=approval."
 	@echo "[demo]   Exercises issue #59 BUNDLE_HOT_RELOADED error path end-to-end:"
@@ -223,6 +241,14 @@ else ifeq ($(DEMO_MODE),openai_agents_ts)
 	$(COMPOSE) -f openai_agents_ts/docker-compose.yaml run --rm openai-agents-runner
 	@echo "[demo] verifying COV_D08 SLICE 5 (openai_agents_ts ALLOW + DENY + STREAM)..."
 	@$(MAKE) demo-verify-openai-agents-ts
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),inngest_agent_kit)
+	@echo "[demo] running inngest-agent-kit-runner (Node 20 + wrapWithSpendGuard(step.ai))..."
+	$(COMPOSE) -f inngest_agent_kit/docker-compose.yaml run --rm inngest-agent-kit-runner
+	@echo "[demo] verifying COV_D29 SLICE 5 (inngest_agent_kit ALLOW + DENY + RETRY_DEDUP)..."
+	@$(MAKE) demo-verify-inngest-agent-kit
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure
@@ -509,6 +535,39 @@ demo-verify-vercel-ai-mastra:
 		 END; \$$\$$;"
 	@echo "[demo] COV_D06 SLICE 7 vercel_ai_mastra verification done"
 
+# COV_D29 SLICE 5 (inngest_agent_kit demo) verification. Mirrors the
+# openai_agents_ts layout: ledger-DB assertions in
+# verify_step_inngest_agent_kit.sql + headline retry-dedup gate +
+# INV-2 strict-order DO block + a cross-DB canonical_events check
+# under spendguard_canonical that asserts at least 2 decision rows +
+# 1 outcome row landed after the outbox forwarder drained.
+#
+# The D29 headline retry-dedup gate is the load-bearing assertion:
+# 3 retry attempts of the same step body must collapse to ONE
+# reservation row in the ledger. The SQL trips with
+# `COV_D29_DEDUP_GATE` if the dedup contract is broken.
+demo-verify-inngest-agent-kit:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_inngest_agent_kit.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 2 THEN \
+		     RAISE EXCEPTION 'COV_D29_GATE: canonical_events.decision >= 2 expected (ALLOW + DENY), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D29_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D29 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D29 SLICE 5 inngest_agent_kit verification done"
+
 # COV_D08 SLICE 5 (openai_agents_ts demo) verification. Mirrors the
 # langchain_ts / vercel_ai_mastra layout: ledger-DB assertions in
 # verify_step_openai_agents_ts.sql + INV-2 strict-order DO block + a
@@ -642,7 +701,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

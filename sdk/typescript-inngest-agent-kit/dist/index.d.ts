@@ -305,6 +305,6 @@ declare function extractTotalTokens(result: unknown): number;
  */
 declare function extractProviderEventId(result: unknown): string;
 
-declare const VERSION: "0.1.0-pre";
+declare const VERSION: "0.1.0";
 
 export { type CallSignatureFn, type ClaimEstimator, type ClaimEstimatorInput, type DerivedIdentity, type InngestRuntimeCtx, type StepAi, VERSION, type WrapWithSpendGuardOptions, deriveIdentity, deriveStepIdempotencyKey, extractProviderEventId, extractTotalTokens, wrapWithSpendGuard };

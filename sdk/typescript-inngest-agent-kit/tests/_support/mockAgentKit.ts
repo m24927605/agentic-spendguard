@@ -7,9 +7,23 @@
 // `infer` with `ctx.step.attempt = n+1` and the SAME `step.id` + SAME
 // `step.idempotencyKey` when the inner body throws — same as the real
 // runtime's deterministic-retry contract.
+//
+// SLICE 4 extension — `runStepUntil(sg, opts)` simulates Inngest's
+// deterministic-retry replay loop end-to-end against the LOCKED public
+// `wrapWithSpendGuard(...)` factory: every retry replays the same
+// `(runId, stepId, idempotencyKey)` and advances `step.attempt`, exactly
+// like the real Inngest runtime.
 
 import { vi } from "vitest";
 import type { InngestRuntimeCtx, StepAi } from "../../src/wrapWithSpendGuard.js";
+
+import {
+  ApprovalRequired,
+  DecisionDenied,
+  DecisionSkipped,
+  DecisionStopped,
+  SidecarUnavailable,
+} from "@spendguard/sdk";
 
 export interface MockStepAiResult {
   stepAi: StepAi;
@@ -97,4 +111,98 @@ export function makeRuntimeCtx(overrides: Partial<InngestRuntimeCtx> = {}): Inng
     ...(overrides.eventId !== undefined ? { eventId: overrides.eventId } : {}),
     ...(overrides.runId !== undefined ? { runId: overrides.runId } : {}),
   };
+}
+
+// ── runStepUntil — Inngest deterministic-retry replay loop ────────────────
+//
+// SLICE 4 retry-dedup E2E gate. `runStepUntil(sg, opts)` simulates the
+// Inngest runtime's retry semantics around a wrapped `step.ai`:
+//
+//   - Attempt 0 invokes `sg.infer(name, opts, ctx)` with `step.attempt = 0`.
+//   - On provider-side throw (any non-typed-substrate Error), the harness
+//     re-invokes `sg.infer(...)` with the SAME `(runId, stepId,
+//     idempotencyKey)` and `step.attempt = n+1` — exactly mirroring
+//     Inngest's deterministic-retry contract.
+//   - On any typed substrate error (`DecisionDenied`, `DecisionStopped`,
+//     `DecisionSkipped`, `ApprovalRequired`, `SidecarUnavailable`), the
+//     harness STOPS retrying (mirrors Inngest's NonRetriable handling for
+//     known-fatal errors).
+//   - Otherwise replays until `maxAttempts` is reached; the last error
+//     surfaces to the caller.
+//
+// Returns `{ result, attempts }` on success; throws the last attempt's
+// error after `maxAttempts` are exhausted.
+
+export interface RunStepUntilArgs {
+  /** Max retry attempts the harness will simulate (1 = no retries). */
+  maxAttempts: number;
+  /** Inngest `ctx.runId` — stable across attempts. */
+  runId: string;
+  /** Inngest `step.id` — stable across attempts. */
+  stepId: string;
+  /** Optional `step.idempotencyKey` — stable across attempts when set. */
+  idempotencyKey?: string;
+  /** Optional Inngest `ctx.eventId`. */
+  eventId?: string;
+  /** First positional argument to `sg.infer(...)`. */
+  callName: string;
+  /** Second positional argument to `sg.infer(...)` (`{ model, body }`). */
+  callOpts: { model: unknown; body: unknown };
+}
+
+export interface RunStepUntilResult<TOut = unknown> {
+  result: TOut;
+  attempts: number;
+}
+
+function isFatalSubstrateError(err: unknown): boolean {
+  return (
+    err instanceof DecisionDenied ||
+    err instanceof DecisionStopped ||
+    err instanceof DecisionSkipped ||
+    err instanceof ApprovalRequired ||
+    err instanceof SidecarUnavailable
+  );
+}
+
+/**
+ * Drive a `wrapWithSpendGuard(...)` result through an Inngest-like
+ * deterministic-retry replay loop. Surfaces (a) the final result on
+ * success and (b) the number of attempts the harness made — both useful
+ * for assertion in the SLICE 4 integration tests.
+ */
+export async function runStepUntil<TOut = unknown>(
+  sg: StepAi,
+  args: RunStepUntilArgs,
+): Promise<RunStepUntilResult<TOut>> {
+  let attempts = 0;
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < args.maxAttempts; attempt += 1) {
+    attempts = attempt + 1;
+    const step: InngestRuntimeCtx["step"] = {
+      id: args.stepId,
+      attempt,
+    };
+    if (args.idempotencyKey !== undefined) {
+      step.idempotencyKey = args.idempotencyKey;
+    }
+    const ctx: InngestRuntimeCtx = { runId: args.runId, step };
+    if (args.eventId !== undefined) {
+      ctx.eventId = args.eventId;
+    }
+    try {
+      const result = (await sg.infer(args.callName, args.callOpts, ctx)) as TOut;
+      return { result, attempts };
+    } catch (err) {
+      lastErr = err;
+      // Fatal substrate errors — stop replay. Mirrors Inngest's
+      // NonRetriable semantics for typed control-flow errors so a
+      // DecisionDenied at PRE doesn't keep firing reserves.
+      if (isFatalSubstrateError(err)) {
+        throw err;
+      }
+      // Otherwise loop into the next attempt with attempt = n+1.
+    }
+  }
+  throw lastErr;
 }

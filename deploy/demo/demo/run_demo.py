@@ -837,6 +837,8 @@ async def main() -> int:
         return await run_vercel_ai_mastra_mode()
     if DEMO_MODE == "openai_agents_ts":
         return await run_openai_agents_ts_mode()
+    if DEMO_MODE == "inngest_agent_kit":
+        return await run_inngest_agent_kit_mode()
     return await run_agent_mode()
 
 
@@ -3621,6 +3623,72 @@ async def run_openai_agents_ts_mode() -> int:
     # spelling so the CI grep targets stay uniform across the JS/TS
     # adapter demo modes.
     print("[demo] openai_agents_ts ALL 3 steps PASS (ALLOW + DENY + STREAM)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE=inngest_agent_kit (COV_D29 SLICE 5) — verifier-side driver for
+# the Inngest AgentKit wrap retry-dedup contract. Mirrors
+# run_openai_agents_ts_mode: the inngest-agent-kit-runner container does the
+# 3 wrapWithSpendGuard(step.ai) calls (ALLOW + DENY + RETRY_DEDUP), and
+# this Python handler polls counting-stub /_count to assert the upstream-hit
+# count is >= 2 (ALLOW + at least one RETRY_DEDUP attempt; DENY MUST NOT
+# have hit upstream).
+#
+# Note vs the langchain_ts / vercel_ai_mastra / openai_agents_ts modes:
+# the third step is RETRY_DEDUP not STREAM (Inngest AgentKit's
+# `step.ai.infer` is non-streaming, design.md §3 non-goal); the counter
+# delta is `+(1 + SPENDGUARD_DEMO_RETRIES)` not `+1` because each retry
+# attempt's body still fires the upstream HTTP. The headline retry-dedup
+# contract is verified at the SQL level (verify_step_inngest_agent_kit.sql
+# COV_D29_DEDUP_GATE) — N attempts collapse to 1 SpendGuard reservation.
+# ---------------------------------------------------------------------------
+
+
+async def run_inngest_agent_kit_mode() -> int:
+    """Counting-stub verifier for the inngest-agent-kit-runner driver.
+
+    Polls `GET counting-stub:8765/_count` and asserts the running tally
+    is >= 2 (ALLOW + at least one RETRY_DEDUP attempt). The DENY step
+    never contacts the upstream because `wrapWithSpendGuard`'s
+    `reserve()` throws `DecisionDenied` BEFORE the wrapped
+    `step.ai.infer`'s HTTP call leaves the Node process, so the counter
+    is unchanged by the DENY step.
+
+    The retry-dedup contract itself (3 attempts → 1 SpendGuard
+    reservation) is verified by the SQL gate
+    (verify_step_inngest_agent_kit.sql COV_D29_DEDUP_GATE). This Python
+    handler only complements that with the counter-side proof.
+
+    Returns 0 on success; non-zero on failure with a clear error.
+    """
+    import httpx
+
+    print(f"[demo] inngest_agent_kit verifier targeting {_COUNTING_STUB_URL}")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        try:
+            calls = await _read_counting_stub_hits(http)
+        except Exception as e:  # noqa: BLE001
+            print(f"[demo] FATAL: counting-stub /_count unreachable: {e!r}",
+                  file=sys.stderr)
+            return 7
+
+    if calls < 2:
+        print(
+            f"[demo] FATAL: inngest-agent-kit-runner expected >= 2 counting-stub "
+            f"hits (ALLOW + RETRY_DEDUP attempts), got {calls}. The runner "
+            "either did not finish or the DENY step leaked through to the "
+            "upstream — INV-2 violated.",
+            file=sys.stderr,
+        )
+        return 7
+
+    print(f"[demo] inngest_agent_kit counter OK: counting-stub hits={calls} (>= 2)")
+    # Mirrors the langchain_ts / vercel_ai_mastra / openai_agents_ts
+    # success-line locked spelling so the CI grep targets stay uniform
+    # across the JS/TS adapter demo modes. RETRY_DEDUP is the D29 third
+    # step (replaces STREAM because step.ai.infer is non-streaming).
+    print("[demo] inngest_agent_kit ALL 3 steps PASS (ALLOW + DENY + RETRY_DEDUP)")
     return 0
 
 
