@@ -1,0 +1,244 @@
+---
+title: "DSPy budget control with SpendGuard"
+description: >-
+  Pre-call token budget enforcement for DSPy programs (dspy-ai >= 2.6)
+  using Agentic SpendGuard. One BaseCallback covers every dspy.LM
+  subclass — LiteLLM-routed, OpenAI direct, Anthropic direct, custom
+  subclasses — because gating sits at the BaseCallback boundary, not
+  the provider boundary.
+---
+
+> Your DSPy program runs `dspy.ChainOfThought("question -> answer")`
+> in a loop over a thousand inputs. Each iteration dispatches a model
+> call. Without a gate, you find out the cost on next month's billing
+> dashboard. SpendGuard plugs a single `SpendGuardDSPyCallback` into
+> DSPy via `dspy.configure(callbacks=[callback])` so every LM call
+> reserves against a budget *before* the upstream call goes out — and
+> the same callback works whether DSPy routes through LiteLLM, hits a
+> provider SDK directly, or uses a custom `dspy.LM` subclass with no
+> changes.
+
+## Why you'd want this
+
+- **One callback, every routing.** DSPy's `dspy.LM` is plural by
+  default — it ships with LiteLLM-backed routing, but custom subclasses
+  can bypass LiteLLM entirely. Gating at the `BaseCallback` boundary
+  means the same callback instance covers all of them.
+- **Pre-call refusal, not post-hoc accounting.** DENY raises
+  `DecisionDenied` BEFORE DSPy dispatches the LM HTTP. The upstream
+  call is **never** issued — verified by the `agent_real_dspy` demo
+  which asserts counting-stub hits remain unchanged on the DENY turn.
+- **D12 + D21 coexist safely.** When both the LiteLLM SDK shim (D12)
+  and this DSPy callback (D21) are installed, a single
+  `dspy.Predict(...)` call triggers exactly ONE reserve. A shared
+  `_SHIM_IN_FLIGHT` contextvar coordinates between the two so neither
+  double-reserves.
+- **Audit + approval pipeline shared with every other framework.** The
+  callback writes to the same SpendGuard ledger as the LangChain,
+  Pydantic-AI, OpenAI Agents, Google ADK, and AWS Strands integrations.
+
+## When to use D21 vs D12 (decision matrix)
+
+| Path | When to use |
+|------|------------|
+| **D12 LiteLLM shim (transitive)** | You already use `litellm` SDK directly and want one install to cover all framework callers. DSPy routes through LiteLLM by default, so D12 gates it transitively without DSPy-specific configuration. |
+| **D21 BaseCallback (direct)** | You want first-class DSPy gating, OR you use custom `dspy.LM` subclasses that bypass LiteLLM, OR D12 is too broad for your install footprint. D21 fires on EVERY `dspy.LM` invocation regardless of routing. |
+
+The two paths can be installed together safely — the shared
+`_SHIM_IN_FLIGHT` contextvar ensures a single `dspy.LM` call triggers
+exactly ONE reserve when both are active.
+
+## Setup (60 seconds)
+
+```bash
+pip install 'spendguard-sdk[dspy]'
+```
+
+Bring up a sidecar via the demo stack:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## Wire it up
+
+```python
+import asyncio
+import dspy
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.dspy import (
+    SpendGuardDSPyCallback, BudgetBinding,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="openai.gpt-4o-mini",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    def resolve(model_str: str) -> BudgetBinding:
+        # DSPy gates per-LM-call so the resolver maps the LM's
+        # model string ("openai/gpt-4o-mini", "anthropic/claude-3",
+        # "custom-bypass", ...) to the budget binding.
+        return BudgetBinding(
+            budget_id="my-budget", window_instance_id="my-window",
+            unit=unit, pricing=pricing,
+        )
+
+    def reconcile(outputs):
+        first = outputs[0] if outputs else None
+        usage = getattr(first, "usage", {}) or {}
+        total = usage.get("total_tokens", 100)
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget", unit=unit, amount_atomic=str(total),
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    cb = SpendGuardDSPyCallback(
+        client=client,
+        budget_resolver=resolve,
+        claim_reconciler=reconcile,
+    )
+    dspy.configure(
+        lm=dspy.LM("openai/gpt-4o-mini"),
+        # MUST be FIRST in the callbacks list so reserve precedes any
+        # user observer callback.
+        callbacks=[cb],
+    )
+
+    qa = dspy.ChainOfThought("question -> answer")
+    result = qa(question="What is 2+2?")
+    print(result.answer)
+
+
+asyncio.run(main())
+```
+
+**Placement matters.** The callback MUST appear FIRST in the
+`callbacks=[...]` list so reserve precedes any user observer
+callback. A user callback that runs first could mutate `inputs` the
+estimator hashes, which would break idempotency on DSPy's retry
+loops.
+
+## What you get
+
+- **Pre-call budget reservation** on every `dspy.LM` invocation,
+  including the LM calls inside `dspy.Predict` / `dspy.ChainOfThought`
+  / `dspy.ReAct` / custom modules.
+- **D12 + D21 coexistence.** When both are installed, a shared
+  `_SHIM_IN_FLIGHT` contextvar ensures exactly one reserve per call.
+- **Custom-LM subclass coverage.** DSPy's `BaseCallback` fires for
+  ANY `dspy.LM` subclass, including ones that bypass LiteLLM and hit
+  provider SDKs directly.
+- **DEGRADE fails closed** by default. Set
+  `SPENDGUARD_DSPY_FAIL_OPEN=1` (env) or `fail_closed=False`
+  (constructor) for dev-only fail-open behaviour.
+
+## Limitations
+
+D21 v1 explicitly does NOT close any of:
+
+- **Token-by-token streaming gating.** `on_lm_end` reports
+  end-of-call usage only; intra-call streaming tokens are not gated.
+- **`on_tool_start` / `on_tool_end` callbacks.** Tool spend rolls into
+  the parent LM reservation. Per-tool budgets are reserved for D21.1.
+- **`on_module_start` / `on_module_end` callbacks.** Higher-level than
+  necessary — LM-boundary gating subsumes it.
+- **Async DSPy callbacks.** DSPy >= 2.6 hooks are sync. The callback
+  raises `SyncInAsyncContext` when invoked from inside a running event
+  loop — run DSPy from a sync entrypoint or pre-emit reservations via
+  the `SpendGuardClient` directly.
+
+These are documented in the `D21_dspy/design.md` §3 non-goals section
+so operator expectations match the shipping surface.
+
+## Common patterns
+
+### Cross-framework run_id correlation
+
+```python
+from spendguard.integrations.dspy import RunContext
+
+def factory():
+    # Bridge a parent LangChain / Strands / pydantic-ai run_id into
+    # the DSPy gate so all four adapters share one trace.
+    return RunContext(run_id="my-parent-run-1")
+
+cb = SpendGuardDSPyCallback(
+    client=client,
+    budget_resolver=resolve,
+    claim_reconciler=reconcile,
+    run_context_factory=factory,
+)
+```
+
+DSPy itself does NOT carry a stable run-scope identifier (the
+`call_id` is per-LM-call). Provide the factory only when you want
+cross-framework correlation.
+
+### DENY behavior
+
+When `request_decision` returns DENY, the callback:
+
+1. Raises `DecisionDenied` directly from `on_lm_start`.
+2. DSPy surfaces the exception to the caller before dispatching the
+   LM HTTP:
+   ```python
+   from spendguard.integrations.dspy import DecisionDenied
+   try:
+       result = qa(question="...")
+   except DecisionDenied as exc:
+       # handle the budget refusal
+       ...
+   ```
+3. The model HTTP is **never** issued (verified by the
+   `agent_real_dspy` demo).
+4. Nothing is stashed — no commit or release fires.
+
+### DEGRADE behavior
+
+DEGRADE means the sidecar returned a non-CONTINUE outcome the adapter
+should not block on (e.g. a temporary downgrade). By default the
+callback fails closed and raises `SpendGuardDegradeBlocked`. Set
+`fail_closed=False` or `SPENDGUARD_DSPY_FAIL_OPEN=1` to allow the
+call; no commit row will be produced in that case (the reservation
+TTL-sweeps).
+
+### Custom `dspy.LM` subclasses (D12-bypass)
+
+```python
+class MyCustomLM(dspy.LM):
+    def __init__(self):
+        super().__init__(model="custom-bypass")
+
+    def basic_request(self, prompt, **kwargs):
+        # Hit your provider SDK directly, bypassing LiteLLM.
+        return my_provider.complete(prompt)
+
+dspy.configure(lm=MyCustomLM(), callbacks=[cb])
+```
+
+`on_lm_start` and `on_lm_end` still fire on every invocation. The
+`budget_resolver` receives `"custom-bypass"` and decides which budget
+to debit. This is the load-bearing D12-bypass coverage proof — the
+`agent_real_dspy` demo's step 3 exercises exactly this pattern.
+
+## Related
+
+- [Quickstart](/docs/quickstart/) — full stack up in 5 minutes
+- [Contract DSL reference](/docs/contracts/yaml/) — author allow/stop rules
+- Other integrations: [LiteLLM SDK shim (D12 transitive)](/docs/integrations/litellm-sdk-shim/) · [Pydantic-AI](/docs/integrations/pydantic-ai/) · [LangChain & LangGraph](/docs/integrations/langchain/) · [OpenAI Agents SDK](/docs/integrations/openai-agents/) · [Google ADK](/docs/integrations/adk/) · [AWS Strands](/docs/integrations/aws-strands/)

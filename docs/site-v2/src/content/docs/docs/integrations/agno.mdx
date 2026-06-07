@@ -1,0 +1,195 @@
+---
+title: "Agno budget control with SpendGuard"
+description: >-
+  Pre-call token budget enforcement for Agno (agno >= 2.0) using
+  Agentic SpendGuard. One pre/post hook pair covers every Agno Model
+  provider — OpenAIChat, Claude, Gemini, Groq, xAI, DeepSeek — because
+  gating sits at the agent-runtime boundary, not the model boundary.
+---
+
+> Your Agno `Agent` runs `await agent.arun(prompt)` in a loop over
+> hundreds of inputs. Each iteration dispatches a model call. Without
+> a gate, you find out the cost on next month's billing dashboard.
+> SpendGuard plugs a single `(pre_hook, post_hook)` pair into Agno via
+> `Agent(pre_hooks=[pre()], post_hooks=[post()])` so every model
+> invocation reserves against a budget *before* the upstream call
+> goes out — and the same pair works for OpenAIChat, Claude, Gemini,
+> Groq, xAI, or DeepSeek backends with zero changes.
+
+## Why you'd want this
+
+- **One hook pair, every backend.** Agno's `Model` abstraction is
+  plural (OpenAIChat / Claude / Gemini / Groq / xAI / DeepSeek /
+  custom). Gating at the agent-runtime boundary means the same
+  factory pair covers all of them; you don't write per-vendor
+  wrappers.
+- **Pre-call refusal, not post-hoc accounting.** DENY surfaces as
+  Agno's `InputCheckError` (with the original `DecisionDenied`
+  chained via `__cause__`) BEFORE Agno dispatches the model HTTP.
+  The upstream call is **never** issued.
+- **Provider-agnostic by shape, not by string.** Reads
+  `run_output.metrics.total_tokens` (or `input_tokens + output_tokens`
+  fallback) — no model-string parsing required.
+- **Audit + approval pipeline shared with every other framework.**
+  The hooks write to the same SpendGuard ledger as the LangChain,
+  Pydantic-AI, OpenAI Agents, Google ADK, AWS Strands, and DSPy
+  integrations. The shared `spendguard_run_context` contextvar means
+  a parent LangChain run wrapping an Agno agent reuses the same
+  `run_id`.
+
+## Setup (60 seconds)
+
+```bash
+pip install 'spendguard-sdk[agno]'
+```
+
+Bring up a sidecar via the demo stack:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## Wire it up
+
+```python
+import asyncio
+
+from agno.agent import Agent
+from agno.models.openai import OpenAIChat
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.agno import (
+    RunContext, SpendGuardAgnoPreHook, SpendGuardAgnoPostHook,
+    run_context,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    pre = SpendGuardAgnoPreHook(
+        client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+    )
+    post = SpendGuardAgnoPostHook(
+        client=client,
+        unit=unit,
+        pricing=pricing,
+    )
+
+    agent = Agent(
+        model=OpenAIChat(id="gpt-4o-mini"),
+        pre_hooks=[pre()],
+        post_hooks=[post()],
+    )
+
+    async with run_context(RunContext(run_id="my-run-1")):
+        response = await agent.arun("Say hello in three words.")
+    print(response.content)
+
+
+asyncio.run(main())
+```
+
+**Factory calls matter.** `pre_hooks=[pre()]` — note the `()`. The
+`SpendGuardAgnoPreHook` instance is a factory; calling it returns the
+closure Agno introspects via `inspect.signature`. The same pattern
+applies to `SpendGuardAgnoPostHook`.
+
+## How it works
+
+Agno's `Agent.arun(...)` walks `pre_hooks` after building the run
+context, then dispatches the model HTTP, then walks `post_hooks` with
+the run output. Each hook is filtered by `inspect.signature` against
+Agno's internal `all_args` dict — the closure receives only the
+arguments it declares.
+
+The SpendGuard pre-hook declares `(agent, run_input)` and:
+
+1. Resolves the `RunContext.run_id` from the shared contextvar.
+2. Derives a stable signature over `agent.model.id || run_input`.
+3. Mints deterministic `llm_call_id` / `decision_id` /
+   `idempotency_key` via `derive_uuid_from_signature` so retries hit
+   the sidecar cache.
+4. Calls `client.request_decision(LLM_CALL_PRE, ...)`.
+5. Stashes the reservation by `(run_id, signature)` in a 10k-bounded
+   FIFO map.
+6. On STOP / DENY, wraps the `DecisionDenied` into Agno's
+   `InputCheckError` so Agno's hook-loop actually halts the run
+   (Agno's runtime catches `Exception` and only re-raises
+   `Input/OutputCheckError` — see DEVIATION-1 below).
+
+The post-hook declares `(agent, run_output)` and:
+
+1. Recomputes the same signature from `run_output.input`.
+2. Pops the inflight slot. If missing, logs a warning + no-ops —
+   never commits without a matching reserve.
+3. Extracts `total_tokens` from `run_output.metrics` (preferring
+   `total_tokens`, falling back to `input_tokens + output_tokens`).
+4. Calls `client.emit_llm_call_post(SUCCESS, ...)` on a healthy run.
+5. On `status == ERROR` / `run_output.error` set, emits
+   `outcome=PROVIDER_ERROR` so the projector releases the
+   reservation (no leak).
+
+## Multi-model `Team` agents
+
+A single `SpendGuardAgnoPreHook` instance handles multi-model
+`Team` agents because the default claim estimator resolves
+`agent.model.id` at CALL time, not construction time. You don't need
+one hook pair per backend.
+
+## DEVIATIONS vs spec
+
+The D22 design.md was authored against an Agno 1.x proposal that
+didn't ship the `pre_hooks` / `post_hooks` surface; that surface
+crystallised in Agno 2.x. The shipped adapter pins `agno>=2.0,<3`
+and tracks the actual 2.x contract:
+
+| Deviation | Spec said | Reality | Resolution |
+|---|---|---|---|
+| DEVIATION-1 | `STOP / DENY raises DecisionDenied; Agno propagates` | Agno 2.x hook loop only re-raises `Input/OutputCheckError`; everything else is logged + the model is still called | Pre-hook wraps `DecisionDenied` into `InputCheckError`. Original chained on `__cause__` so downstream catches still work |
+| DEVIATION-2 | Post-hook declares `(agent, run_response)` | Agno 2.x passes the result under `run_output` and filters by parameter name | Post-hook closure declares `(agent, run_output)`. Tests assert the literal name |
+
+Both deviations are documented in the module docstrings and exercised
+by the unit suite (`tests/integrations/agno/test_agno_pre_post.py`
+T16 / T17 / T28).
+
+## Limitations
+
+D22 v1 explicitly does NOT close any of:
+
+- **Token-by-token streaming gating.** Streaming via
+  `Agent.arun(stream=True)` is gated at PRE (before stream open) and
+  POST (after stream end). Mid-stream chunks are not separately
+  gated.
+- **`tool_hooks` per-tool budget gating.** Tool spend rolls into the
+  parent LM reservation. Per-tool budgets are reserved for D22.1.
+- **DEGRADE mutation patch application.** Surfaced as
+  `MutationApplyFailed` rather than applied (parity with
+  pydantic-ai / langchain integrations).
+- **Approval-resume UI.** `ApprovalRequired` propagates (wrapped as
+  `InputCheckError` per DEVIATION-1); callers handle resume.
+
+## Reference
+
+* Spec: `docs/specs/coverage/D22_agno/`
+* Module: `sdk/python/src/spendguard/integrations/agno/`
+* Demo overlay: `deploy/demo/agent_real_agno/`
+* Test suite: `sdk/python/tests/integrations/agno/`

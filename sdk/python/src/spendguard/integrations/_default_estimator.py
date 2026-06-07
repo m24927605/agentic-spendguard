@@ -384,6 +384,79 @@ def agt_default_claim_estimator(
     return estimator
 
 
+def agno_default_claim_estimator(
+    *,
+    budget_id: str,
+    window_instance_id: str,
+    unit: Any,
+    model: str,
+) -> Callable[[Any, Any], list[Any]]:
+    """Agno ``(agent, run_input) → list[BudgetClaim]``.
+
+    Resolves the model family from ``agent.model.id`` at CALL time so
+    a single hook instance can serve multi-model ``Team`` agents
+    (review-standards §5). The constructor-time ``model`` arg is the
+    fallback used only when ``agent.model.id`` is absent (custom /
+    duck-typed test models).
+
+    ``run_input`` may be any of:
+      - ``str`` — wrapped as a single user message.
+      - ``list`` — forwarded as-is (assumed to be Agno's message list
+        shape).
+      - any other object — ``str``-coerced into a single user
+        message; this catches custom Agno ``RunInput`` shapes that
+        expose their content via ``__str__`` / ``input_content``.
+    """
+    def estimator(agent: Any, run_input: Any) -> list[Any]:
+        agno_model = (
+            str(getattr(getattr(agent, "model", None), "id", "") or "")
+            or model
+            or ""
+        )
+        fns = estimator_for_model(agno_model)
+        # Prefer Agno's RunInput.input_content when present (matches
+        # the signature derivation in _hook.py:_default_call_signature).
+        content: Any
+        if isinstance(run_input, str):
+            content = run_input
+        elif isinstance(run_input, list):
+            messages = run_input
+            input_tokens = fns.count_input_tokens(messages, agno_model)
+            output_tokens = fns.count_output_tokens_max(None, agno_model)
+            return [
+                _build_claim(
+                    budget_id=budget_id,
+                    window_instance_id=window_instance_id,
+                    unit=unit,
+                    amount_atomic=input_tokens + output_tokens,
+                )
+            ]
+        else:
+            content = (
+                getattr(run_input, "input_content", None)
+                if run_input is not None
+                else None
+            )
+            if not isinstance(content, str):
+                try:
+                    content = str(run_input) if run_input is not None else ""
+                except Exception:  # noqa: BLE001
+                    content = ""
+
+        messages = [{"role": "user", "content": content}]
+        input_tokens = fns.count_input_tokens(messages, agno_model)
+        output_tokens = fns.count_output_tokens_max(None, agno_model)
+        return [
+            _build_claim(
+                budget_id=budget_id,
+                window_instance_id=window_instance_id,
+                unit=unit,
+                amount_atomic=input_tokens + output_tokens,
+            )
+        ]
+    return estimator
+
+
 # Sentinel used by integrations to detect "user didn't pass a value vs
 # user passed None on purpose". Per spec §8.5 backward compat both
 # should default to the integration-built default estimator.
@@ -398,6 +471,7 @@ _NO_DEFAULT = object()
 __all__ = [
     "_NO_DEFAULT",
     "adk_default_claim_estimator",
+    "agno_default_claim_estimator",
     "agt_default_claim_estimator",
     "langchain_default_claim_estimator",
     "litellm_default_claim_estimator",

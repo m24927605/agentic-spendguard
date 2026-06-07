@@ -70,6 +70,8 @@ export default defineConfig({
             { label: 'Microsoft AGT', slug: 'docs/integrations/agt' },
             { label: 'Google ADK (Python)', slug: 'docs/integrations/adk' },
             { label: 'AWS Strands (Python)', slug: 'docs/integrations/aws-strands' },
+            { label: 'DSPy (Python)', slug: 'docs/integrations/dspy' },
+            { label: 'Agno (Python)', slug: 'docs/integrations/agno' },
             { label: 'LiteLLM proxy guardrail', slug: 'docs/integrations/litellm-proxy' },
             { label: 'LiteLLM SDK monkey-patch shim', slug: 'docs/integrations/litellm-sdk-shim' },
             { label: 'Kong AI Gateway (Go + Lua plugin)', slug: 'docs/integrations/kong-ai-gateway' },

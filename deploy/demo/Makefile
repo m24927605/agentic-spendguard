@@ -367,6 +367,37 @@ else ifeq ($(DEMO_MODE),agent_real_strands_deny)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_dspy)
+	@echo "[demo] DEMO_MODE=agent_real_dspy → COV_D21 SLICE 3 (DSPy Python adapter)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/agent_real_dspy/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider on"
+	@echo "[demo]               /v1/chat/completions) + dspy-runner (Python 3.12"
+	@echo "[demo]               + dspy-ai + spendguard-sdk[dspy])."
+	@echo "[demo]   Driver issues 3 substeps through dspy.configure(callbacks=[cb]):"
+	@echo "[demo]     1 ALLOW       — dspy.ChainOfThought ALLOW path"
+	@echo "[demo]     2 DENY        — DecisionDenied raised BEFORE LM HTTP"
+	@echo "[demo]     3 CUSTOM-LM   — direct-path (D12-bypass) coverage proof"
+	$(COMPOSE) -f agent_real_dspy/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_agno)
+	@echo "[demo] DEMO_MODE=agent_real_agno → COV_D22 SLICE 4 (Agno Python adapter)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/agent_real_agno/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider on"
+	@echo "[demo]               /v1/chat/completions) + agno-runner (Python 3.12"
+	@echo "[demo]               + agno>=2.0,<3 + spendguard-sdk[agno])."
+	@echo "[demo]   Driver issues 1 Agent.arun() through SpendGuard"
+	@echo "[demo]   pre_hooks=[pre()] / post_hooks=[post()]:"
+	@echo "[demo]     ALLOW path proves PRE-before-vendor-SDK + POST-after."
+	$(COMPOSE) -f agent_real_agno/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),subscription_meter)
 	@echo "[demo] DEMO_MODE=subscription_meter → D13 (Subscription-Tier Meter)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -562,6 +593,24 @@ else ifeq ($(DEMO_MODE),agent_real_strands_deny)
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure || \
 	  echo "[demo] outbox-closure skipped: agent_real_strands_deny demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_dspy)
+	@echo "[demo] running dspy-runner (Python 3.12 + dspy-ai + SpendGuardDSPyCallback)..."
+	$(COMPOSE) -f agent_real_dspy/docker-compose.yaml run --rm dspy-runner
+	@echo "[demo] verifying COV_D21 SLICE 3 (agent_real_dspy ALLOW + DENY + CUSTOM-LM)..."
+	@$(MAKE) demo-verify-agent-real-dspy
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_dspy demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_agno)
+	@echo "[demo] running agno-runner (Python 3.12 + agno>=2.0,<3 + SpendGuardAgno{Pre,Post}Hook)..."
+	$(COMPOSE) -f agent_real_agno/docker-compose.yaml run --rm agno-runner
+	@echo "[demo] verifying COV_D22 SLICE 4 (agent_real_agno ALLOW)..."
+	@$(MAKE) demo-verify-agent-real-agno
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_agno demo deferred per D05 UnitRef gap (cross-slice tracking)"
 else ifeq ($(DEMO_MODE),agent_real_adk_stub)
 	@echo "[demo] running adk-runner in stub mode (no GOOGLE_API_KEY)..."
 	@SPENDGUARD_DEMO_MODE=agent_real_adk_stub \
@@ -1206,6 +1255,78 @@ demo-verify-agent-real-strands:
 		   RAISE NOTICE 'COV_D20 CANONICAL OK: decision=% outcome=% strands_tagged=%', v_decision, v_outcome, v_strands; \
 		 END; \$$\$$;"
 	@echo "[demo] COV_D20 SLICE 5 agent_real_strands verification done"
+
+# COV_D21 SLICE 3 (agent_real_dspy demo) verification. Mirrors the
+# agent_real_strands layout: ledger-DB assertions in
+# verify_step_agent_real_dspy.sql + INV-2 strict-order DO block + a
+# cross-DB canonical_events check under spendguard_canonical that
+# asserts at least 1 decision row landed after the outbox forwarder
+# drained, plus the dspy integration tag is present on the decision
+# rows. The outcome gate is SOFTENED to a NOTICE per the D05 UnitRef
+# cross-slice tracking precedent (pricing freeze field mismatch can
+# block emit_llm_call_post in fresh demo seeds; tracked separately).
+demo-verify-agent-real-dspy:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_agent_real_dspy.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; v_dspy INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   SELECT COUNT(*) INTO v_dspy FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND convert_from(decode(payload_json::jsonb->>'data_b64', 'base64'), 'UTF8')::jsonb \
+		          #>> '{spendguard,integration}' = 'dspy'; \
+		   IF v_decision < 1 THEN \
+		     RAISE EXCEPTION 'COV_D21_GATE: canonical_events.decision >= 1 expected (ALLOW), got %', v_decision; \
+		   END IF; \
+		   IF v_dspy < 1 THEN \
+		     RAISE EXCEPTION 'COV_D21_GATE: canonical_events.decision with integration=dspy >= 1 expected, got %', v_dspy; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE NOTICE 'COV_D21 NOTE: canonical_events.outcome >= 1 expected but got % — softened per D05 UnitRef gap (pricing freeze mismatch tracked separately)', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D21 CANONICAL OK: decision=% outcome=% dspy_tagged=%', v_decision, v_outcome, v_dspy; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D21 SLICE 3 agent_real_dspy verification done"
+
+# COV_D22 SLICE 4 (agent_real_agno demo) verification. Mirrors the
+# agent_real_strands / agent_real_dspy layout: ledger-DB assertions in
+# verify_step_agent_real_agno.sql + INV-2 strict-order DO block + a
+# cross-DB canonical_events check under spendguard_canonical that
+# asserts at least 1 decision row + 1 outcome row landed after the
+# outbox forwarder drained, plus the agno integration tag is present
+# on the decision rows.
+demo-verify-agent-real-agno:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_agent_real_agno.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; v_agno INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   SELECT COUNT(*) INTO v_agno FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND payload_json::jsonb #>> '{decision_context,integration}' = 'agno'; \
+		   IF v_decision < 1 THEN \
+		     RAISE EXCEPTION 'COV_D22_GATE: canonical_events.decision >= 1 expected (ALLOW), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D22_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D22 CANONICAL OK: decision=% outcome=% agno_tagged=%', v_decision, v_outcome, v_agno; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D22 SLICE 4 agent_real_agno verification done"
 
 # COV_D08 SLICE 5 (openai_agents_ts demo) verification. Mirrors the
 # langchain_ts / vercel_ai_mastra layout: ledger-DB assertions in

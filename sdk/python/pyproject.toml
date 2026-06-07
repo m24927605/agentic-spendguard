@@ -80,6 +80,17 @@ adk = [
 strands = [
   "strands-agents>=1.0,<2",
 ]
+# COV_D21 SLICE 1: DSPy Python adapter extra. ``dspy-ai`` >=2.6 ships
+# the GA ``BaseCallback`` (``on_lm_start`` / ``on_lm_end``) with stable
+# UUID ``call_id`` semantics; earlier 0.x releases used
+# ``dspy.functional`` wrappers that did not fire per LM call. Cap below
+# 3.x to fail-closed against a future breaking-change major. The
+# integration also coexists with D12 (LiteLLM SDK shim) via the shared
+# ``spendguard._litellm_shim._IN_FLIGHT`` contextvar.  See
+# ``docs/specs/coverage/D21_dspy/design.md`` §5.
+dspy = [
+  "dspy-ai>=2.6,<3.0",
+]
 # COV_D07 SLICE_05: Microsoft Agent Framework (MAF) v1 GA extra. The
 # `agent-framework` umbrella package re-exports everything from
 # `agent-framework-core` (chat client + middleware contracts) so
@@ -94,6 +105,22 @@ agent-framework = [
 agt = [
   "agent-governance-toolkit>=3.4",
   "agent-os-kernel>=3.0",
+]
+# COV_D22 SLICE 1: Agno Python adapter extra. `agno` ships
+# ``pre_hooks=[...]`` / ``post_hooks=[...]`` on ``Agent.run`` /
+# ``arun`` starting with the 2.x line (agno 2.0+) — see
+# ``docs/specs/coverage/D22_agno/design.md``. The spec's ``>=1.0,<2.0``
+# cap was authored against an early proposal; the public surface
+# crystallised in the 2.x line (provider-agnostic callable hooks,
+# ``inspect``-based signature injection that filters by parameter
+# name). We pin ``>=2.0,<3.0`` so the extra fail-closes against a
+# future breaking-change major. Hook callables MUST declare the
+# literal parameter names Agno injects: ``(agent, run_input,
+# run_context, session)`` for ``pre_hooks`` and ``(agent, run_output,
+# run_context, session)`` for ``post_hooks`` — see
+# ``agno.agent._hooks.execute_pre_hooks`` and ``execute_post_hooks``.
+agno = [
+  "agno>=2.0,<3",
 ]
 litellm = [
   # `[proxy]` sub-extra pulls fastapi/uvicorn/gunicorn that the
