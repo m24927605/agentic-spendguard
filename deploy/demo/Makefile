@@ -167,6 +167,26 @@ else ifeq ($(DEMO_MODE),openai_agents_ts)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),dify_plugin_real)
+	@echo "[demo] DEMO_MODE=dify_plugin_real → COV_D10 SLICE 7 (Dify Model Provider Plugin)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/dify_plugin/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               dify-plugin-runner (Python 3.12 running the"
+	@echo "[demo]               SpendGuardLLM adapter directly via the dify-"
+	@echo "[demo]               plugin SDK boundary)."
+	@echo "[demo]   Driver issues 3 SpendGuardLLM._invoke calls (ALLOW + DENY +"
+	@echo "[demo]   STREAM) and asserts INV-1 (DENY skips upstream) + INV-2"
+	@echo "[demo]   (strict-order) + INV-5 (real usage commits)."
+	@echo "[demo]   Demo scope: focused on plugin SDK boundary — Dify Workspace"
+	@echo "[demo]   chat-messages routing is upstream of the plugin and out of"
+	@echo "[demo]   scope for the D10 plugin value proposition (see deviation"
+	@echo "[demo]   note in deploy/demo/dify_plugin/docker-compose.yaml)."
+	$(COMPOSE) -f dify_plugin/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),inngest_agent_kit)
 	@echo "[demo] DEMO_MODE=inngest_agent_kit → COV_D29 SLICE 5 (Inngest AgentKit retry-dedup)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -296,6 +316,14 @@ else ifeq ($(DEMO_MODE),openai_agents_ts)
 	$(COMPOSE) -f openai_agents_ts/docker-compose.yaml run --rm openai-agents-runner
 	@echo "[demo] verifying COV_D08 SLICE 5 (openai_agents_ts ALLOW + DENY + STREAM)..."
 	@$(MAKE) demo-verify-openai-agents-ts
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),dify_plugin_real)
+	@echo "[demo] running dify-plugin-runner (Python 3.12 + SpendGuardLLM._invoke)..."
+	$(COMPOSE) -f dify_plugin/docker-compose.yaml run --rm dify-plugin-runner
+	@echo "[demo] verifying COV_D10 SLICE 7 (dify_plugin_real ALLOW + DENY + STREAM)..."
+	@$(MAKE) demo-verify-dify-plugin-real
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure
@@ -596,6 +624,34 @@ demo-verify-kong-gateway-real:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_kong_gateway_real.sql
 	@echo "[demo] D09 SLICE 7 kong_gateway_real verification done"
 
+# D10 SLICE 7 (dify_plugin_real demo) verification. Mirrors the
+# kong_gateway_real layout: ledger-DB assertions in
+# verify_step_dify_plugin_real.sql + INV-2 strict-order DO block + a
+# cross-DB canonical_events check under spendguard_canonical that
+# asserts at least 2 decision rows + 1 outcome row landed after the
+# outbox forwarder drained.
+demo-verify-dify-plugin-real:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_dify_plugin_real.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 2 THEN \
+		     RAISE EXCEPTION 'COV_D10_GATE: canonical_events.decision >= 2 expected (ALLOW + DENY), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D10_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D10 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D10 SLICE 7 dify_plugin_real verification done"
+
 # COV_D06 SLICE 7 (vercel_ai_mastra demo) verification. Mirrors the
 # langchain_ts layout: ledger-DB assertions in
 # verify_step_vercel_ai_mastra.sql + INV-2 strict-order DO block + a
@@ -846,7 +902,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

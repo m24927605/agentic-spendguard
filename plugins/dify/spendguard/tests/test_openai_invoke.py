@@ -400,18 +400,33 @@ def test_O09_missing_openai_api_key_raises_invoke_authorization_error():
 # O10 — streaming in v1 -> InvokeError (SLICE 6 deferral)
 # ---------------------------------------------------------------------------
 
-def test_O10_streaming_raises_invoke_error_in_v1():
-    """v1 ships non-streaming only; stream=True -> InvokeError naming SLICE 6."""
+def test_O10_streaming_now_returns_generator_after_slice_6():
+    """SLICE 6 implements ``_stream_generate`` for OpenAI + Anthropic.
+
+    SLICE 4 stub raised ``InvokeError`` when ``stream=True`` was passed
+    (because the streaming path was deferred). SLICE 6 wires the SSE
+    proxy; ``_invoke(stream=True)`` now returns a generator instead.
+
+    This test pins the SLICE 6 contract: streaming returns a generator
+    object (not a single ``LLMResult``). Per-chunk semantics are covered
+    by ``test_streaming.py``.
+    """
+    from collections.abc import Generator
     client = _stub_sidecar_client()
     llm = _make_llm_with_seeded_reservation(client)
-    with pytest.raises(InvokeError, match="streaming"):
-        llm._invoke(
-            model="spendguard/gpt-4o-mini",
-            credentials=_make_credentials(),
-            prompt_messages=[UserPromptMessage(content="hi")],
-            model_parameters={},
-            stream=True,
-        )
+    # We don't need to mock anything — generators are lazy. Just check
+    # the return type contract change from SLICE 4 (InvokeError) -> SLICE 6
+    # (Generator).
+    result = llm._invoke(
+        model="spendguard/gpt-4o-mini",
+        credentials=_make_credentials(),
+        prompt_messages=[UserPromptMessage(content="hi")],
+        model_parameters={},
+        stream=True,
+    )
+    # Generator returned; we deliberately do NOT iterate it here to keep
+    # the test focused on the API contract change.
+    assert isinstance(result, Generator)
 
 
 # ---------------------------------------------------------------------------

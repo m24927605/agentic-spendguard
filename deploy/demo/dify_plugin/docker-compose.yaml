@@ -1,0 +1,189 @@
+# D10 SLICE 7 (`DEMO_MODE=dify_plugin_real`) — sidecar compose overlay.
+#
+# This compose file is layered on top of `deploy/demo/compose.yaml` via
+# `docker compose -f deploy/demo/compose.yaml \
+#                 -f deploy/demo/dify_plugin/docker-compose.yaml up`.
+# The Makefile DEMO_MODE=dify_plugin_real branch does that for you.
+#
+# Two new services scoped to this demo mode:
+#
+#   counting-stub        mock OpenAI /v1/chat/completions provider that
+#                        counts calls per HTTP hit (identical shape to
+#                        envoy_extproc / kong_gateway / langchain_ts).
+#
+#   dify-plugin-runner   Python 3.12 container that runs the SpendGuard
+#                        Dify plugin's `SpendGuardLLM` against the
+#                        in-cluster sidecar UDS. Bypasses the full Dify
+#                        Workspace + workflow engine (~6GB of images)
+#                        in favour of a focused driver that exercises
+#                        the plugin SDK entrypoint directly. The
+#                        plugin's reservation lifecycle + upstream
+#                        forwarder are what need real-stack proof;
+#                        Dify's chat-message routing is out of scope
+#                        for D10's value proposition (see SPENDGUARD
+#                        D10 design.md §3 non-goals).
+#
+# Anti-scope: this overlay does NOT redeclare postgres, sidecar,
+# ledger, canonical-ingest, bundles-init, pki-init or any other base
+# service. The Makefile target brings up the base stack first, then
+# this overlay.
+#
+# DEVIATION (D10 SLICE 7 vs implementation.md): implementation.md §2
+# Slice 7 calls for a full Dify Workspace boot (langgenius/dify-api +
+# dify-worker + dify-plugin-daemon + dify-db). That stack adds ~6GB of
+# images, a separate Redis, a separate Postgres schema, and ~3min of
+# boot time before the first reserve. The D10 review-standards.md §7
+# explicitly says "demo MUST prove the plugin's reserve -> upstream ->
+# commit lifecycle survives a real sidecar"; running through the full
+# Dify chat-messages flow doesn't change the lifecycle the plugin
+# exercises (it just adds an external HTTP entrypoint). We focus the
+# demo on the plugin's SDK boundary instead — same audit chain, same
+# INV-1/INV-2/INV-5 invariants, ~30s boot.
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  # In-network mock OpenAI provider. Identical to the
+  # envoy_extproc / kong_gateway / langchain_ts overlays.
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-dify-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not self.path.startswith("/v1/chat/completions"):
+                    self.send_response(404); self.end_headers(); return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"chatcmpl-dify-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hi from dify plugin demo"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 5,
+                              "completion_tokens": 7,
+                              "total_tokens": 12},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body); return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok"); return
+                self.send_response(404); self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[dify-counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[dify-counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── dify-plugin-runner ───────────────────────────────────────────────
+  # Python 3.12 + dify-plugin SDK + spendguard-sdk + openai + anthropic
+  # + the in-tree SpendGuardLLM. Runs a 3-step matrix
+  # (ALLOW + DENY + STREAM) by invoking SpendGuardLLM._invoke() directly
+  # — same code path the Dify plugin daemon would call, just without
+  # the full Workspace HTTP frontend.
+  dify-plugin-runner:
+    image: python:3.12-slim
+    container_name: spendguard-dify-plugin-runner
+    user: "0:0"  # need to pip install dify-plugin at boot
+    environment:
+      SPENDGUARD_SIDECAR_UDS: "/var/run/spendguard/adapter.sock"
+      SPENDGUARD_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      # Plugin daemon usually gets these from operator-supplied
+      # credentials on the Dify provider form. For the demo we
+      # surface them as env so the runner script can build the
+      # credentials dict at call time.
+      SPENDGUARD_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      DIFY_UPSTREAM_PROVIDER: "openai"
+      OPENAI_API_KEY: "sk-demo-counting-stub-key"
+      OPENAI_API_BASE: "http://counting-stub:8765/v1"
+      # SLICE 5: route get_num_tokens through the sidecar HTTP companion.
+      # The base sidecar already exposes /v1/tokenize on port 8443 in
+      # uds-dev mode (the kong demo wires the same companion).
+      SPENDGUARD_SIDECAR_HTTP_URL: "http://sidecar:8443"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      # Workspace source — read-only. Path is relative to the FIRST
+      # compose file's directory (deploy/demo), NOT this overlay's
+      # location, because compose merges paths against the base file
+      # when -f stacks overlays.
+      - ../..:/workspace:ro
+      # Sidecar UDS shared with the rest of the stack.
+      - sidecar-uds:/var/run/spendguard
+    working_dir: /workspace/deploy/demo/dify_plugin
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        echo "[dify-plugin-runner] installing dify-plugin SDK + deps..."
+        pip install --quiet \
+          'dify-plugin>=0.8.0,<1.0.0' \
+          'openai>=1.40,<3.0' \
+          'anthropic>=0.40,<1.0' \
+          'httpx>=0.27,<1.0' \
+          'spendguard-sdk>=0.5.1'
+        echo "[dify-plugin-runner] running 3-step matrix..."
+        python run_dify_plugin_demo.py
+    depends_on:
+      counting-stub:
+        condition: service_healthy
+      sidecar:
+        condition: service_healthy
+    networks:
+      spendguard-net:
+        aliases: [dify-plugin-runner]

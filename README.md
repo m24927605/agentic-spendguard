@@ -251,6 +251,7 @@ async with SpendGuardClient(
 | **LiteLLM proxy** (legacy `CustomLogger` callback) | `spendguard.integrations.litellm` | Every `/v1/chat/completions` through the LiteLLM proxy | [`docs/specs/litellm-integration/PROXY_RECIPE.md`](docs/specs/litellm-integration/PROXY_RECIPE.md) |
 | **LiteLLM proxy guardrail** (new `CustomGuardrail` registry) | `spendguard.integrations.litellm_guardrail` | Every `/v1/chat/completions` through the LiteLLM proxy, registered via `guardrails:` (zero-Python install for single-tenant) | [LiteLLM proxy guardrail docs](https://agenticspendguard.dev/docs/integrations/litellm-proxy/) |
 | **Kong AI Gateway** | `plugins/kong/spendguard-go/` (Go plugin) **and** `plugins/kong/spendguard-lua/` (experimental Lua) | Kong DataPlane `access` (reserve) + `body_filter` (commit). Bind via `KongPlugin` CRD or `kong.conf`; plugin dials a SpendGuard companion service over HTTPS+mTLS; covers OpenAI `/v1/chat/completions` + Anthropic `/v1/messages` upstreams | [`examples/kong-gateway-composite/`](examples/kong-gateway-composite/) |
+| **Dify Model Provider Plugin** | `plugins/dify/spendguard/` (Python plugin, packaged as `.difypkg`) | Every Dify `chat-message` / agent step / workflow LLM node routes through `SpendGuardLLM._invoke()` → sidecar reserve → upstream (OpenAI or Anthropic) → end-of-stream commit; install via `dify plugin install` (Dify Cloud) or sideload `.difypkg` (self-host); covers SSE streaming + `get_num_tokens` via sidecar `/v1/tokenize` HTTP companion | [`plugins/dify/spendguard/`](plugins/dify/spendguard/) |
 | **Drop-in (14 tools)** | _no SDK; Pattern 2 env-var redirect_ | Every OpenAI-compatible base URL tool — drop in SpendGuard in 30 seconds, one env var | [Drop-in landing](https://agenticspendguard.dev/docs/drop-in/) |
 
 ---
@@ -274,6 +275,7 @@ make demo-up DEMO_MODE=vercel_ai_mastra       # Vercel AI SDK (covers Mastra): A
 make demo-up DEMO_MODE=inngest_agent_kit      # Inngest AgentKit: ALLOW+DENY+RETRY_DEDUP ⭐
 make demo-up DEMO_MODE=maf_dotnet_real        # Microsoft Agent Framework .NET: ALLOW+DENY+ALLOW2 ⭐
 make demo-up DEMO_MODE=maf_python_real        # Microsoft Agent Framework Python: ALLOW+DENY+ALLOW2 ⭐
+make demo-up DEMO_MODE=dify_plugin_real       # Dify Model Provider Plugin: ALLOW+DENY+STREAM ⭐
 make demo-up DEMO_MODE=maf_python_with_agt    # MAF + AGT coexistence smoke
 make demo-up DEMO_MODE=approval_hot_reload    # frozen-pricing regression
 make demo-up DEMO_MODE=multi_provider_usd     # multi-provider USD normalization

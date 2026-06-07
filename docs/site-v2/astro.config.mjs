@@ -70,6 +70,7 @@ export default defineConfig({
             { label: 'Microsoft AGT', slug: 'docs/integrations/agt' },
             { label: 'LiteLLM proxy guardrail', slug: 'docs/integrations/litellm-proxy' },
             { label: 'Kong AI Gateway (Go + Lua plugin)', slug: 'docs/integrations/kong-ai-gateway' },
+            { label: 'Dify Model Provider Plugin', slug: 'docs/integrations/dify' },
           ],
         },
         {

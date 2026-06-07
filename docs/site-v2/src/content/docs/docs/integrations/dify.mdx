@@ -1,0 +1,220 @@
+---
+title: "Dify Model Provider Plugin — spendguard"
+description: >-
+  Install Agentic SpendGuard as a Dify Model Provider Plugin. Per-call
+  budget reservation + signed audit chain for every chat-message,
+  agent step, and workflow node in self-hosted Dify and Dify Cloud.
+  Forwards to OpenAI or Anthropic upstream after a fail-closed sidecar
+  decision.
+---
+
+
+> Dify v1.0+ ships the **Model Provider Plugin SDK** — a Python plugin
+> daemon that Dify core dispatches LLM calls to. SpendGuard slots in
+> as `spendguard` — a provider that admins select in the Dify
+> provider dropdown. Every `chat-message`, `agent` step, and
+> `workflow` LLM node routes through SpendGuard's reserve →
+> upstream → commit lifecycle before the operator's chosen real
+> provider sees the traffic.
+
+## Why a Dify plugin
+
+Dify is the largest no-code LLM-app SaaS alternative. Self-hosted Dify
+deployments running against OpenAI / Anthropic / Bedrock have
+**no budget primitive** (only a `quota` for per-workspace rate
+limiting) and **no signed audit chain**. The Dify plugin daemon is the
+single funnel every LLM call passes through, so it is the cleanest
+MITM point for SpendGuard's pre-call gate.
+
+- **`_invoke`** — non-streaming reserve → upstream → commit
+- **`_stream_generate`** — SSE proxy with end-of-stream commit on real usage
+- **`get_num_tokens`** — routes through the sidecar `/v1/tokenize`
+  HTTP companion when configured; falls back to chars/4 otherwise
+
+The plugin runs in its own container per Dify's v1 contract; image
+base is `langgenius/dify-plugin-daemon:0.8`-compatible, plus the
+SpendGuard SDK and the upstream provider SDKs.
+
+## Install
+
+### Dify Cloud
+
+```bash
+dify plugin install m24927605/spendguard:1.0.0
+```
+
+The marketplace listing carries the official build signature; Dify
+Cloud verifies the cosign-signed `.difypkg` before activating the
+plugin.
+
+### Self-hosted Dify
+
+Download the released bundle and sideload it via the Dify CLI:
+
+```bash
+gh release download dify-plugin-v1.0.0 \
+  --repo m24927605/agentic-spendguard \
+  --pattern "spendguard-*.difypkg"
+
+dify plugin install ./spendguard-*.difypkg
+```
+
+For air-gapped self-host deployments, bake the plugin into the Dify
+plugin-daemon image:
+
+```dockerfile
+FROM langgenius/dify-plugin-daemon:0.8
+COPY spendguard-1.0.0.difypkg /opt/dify/plugins/
+RUN dify plugin install /opt/dify/plugins/spendguard-1.0.0.difypkg
+```
+
+Then in your Dify provider UI, pick **SpendGuard (Budget-Gated
+Forwarder)** in the Model Provider dropdown.
+
+## Configuration
+
+The plugin reads two pieces of state per installation:
+
+1. **Plugin daemon env vars** — set on the `dify-plugin-daemon`
+   container by the platform operator. Read once at boot.
+2. **Provider credentials** — entered per-workspace via the Dify
+   provider form. Read on every `_invoke` call.
+
+### Plugin daemon environment
+
+| Env | Required | Default | Purpose |
+|-----|----------|---------|---------|
+| `SPENDGUARD_SIDECAR_UDS` | YES | — | Path to the SpendGuard sidecar UDS (`/run/spendguard/adapter.sock`). |
+| `SPENDGUARD_TENANT_ID` | YES | — | Tenant UUID asserted at the handshake. |
+| `SPENDGUARD_SIDECAR_HTTP_URL` | NO | — | If set, `get_num_tokens` routes through the sidecar HTTP companion at `/v1/tokenize`. Falls back to chars/4 when absent or unreachable. |
+| `SPENDGUARD_DIFY_FAIL_OPEN` | NO | `0` | Dev only. When `1`, sidecar errors degrade-to-allow with a WARN log. |
+
+### Provider credentials (per Dify workspace)
+
+The Dify provider form exposes these fields:
+
+| Field | Required | Notes |
+|-------|----------|-------|
+| **Upstream Provider** | YES | `openai` or `anthropic` (v1 ships both). `gemini` / `bedrock` are reserved for v1.1 and currently raise `InvokeError`. |
+| **OpenAI API Key** | when provider = openai | Plain `sk-...` |
+| **Anthropic API Key** | when provider = anthropic | Plain `sk-ant-...` |
+| **Upstream Base URL** | NO | Override the upstream API root (LiteLLM proxy, Azure OpenAI, etc.) |
+| **SpendGuard Tenant ID** | YES | Must match `SPENDGUARD_TENANT_ID` on the daemon. |
+| **SpendGuard Budget ID** | YES | The budget the workspace charges against. |
+| **SpendGuard Window Instance ID** | YES | The time-window the budget rolls in. |
+
+## Lifecycle
+
+```
+Dify core (chat-messages / agent step / workflow LLM node)
+   ↓ RPC bus
+dify-plugin-daemon
+   ↓ SpendGuardLLM._invoke()
+   1. Build DifyCallContext from credentials + prompt_messages
+   2. _DifyReservation.reserve  ── UDS+mTLS ──▶ SpendGuard sidecar
+                                                   ALLOW | DENY | DEGRADE
+   3. ALLOW → upstream forward (OpenAI / Anthropic)
+   4. SUCCESS → emit_llm_call_post(SUCCESS, real usage)
+   5. FAILURE → emit_llm_call_post(FAILURE)
+```
+
+- **DENY** maps to `InvokeAuthorizationError` (Dify HTTP 403).
+- **DEGRADE** maps to `InvokeServerUnavailableError` (Dify HTTP 503)
+  unless `SPENDGUARD_DIFY_FAIL_OPEN=1` is set on the daemon.
+- **Real usage** is read from `response.usage` on the upstream and
+  fed to `commit_success` so the audit row carries
+  `actual_input_tokens` / `actual_output_tokens` — never the
+  estimator snapshot (INV-5).
+
+## Streaming
+
+`_stream_generate` proxies SSE chunk-by-chunk and commits at
+end-of-stream with the accumulated real usage. For OpenAI, the
+plugin sets `stream_options.include_usage=true` unconditionally so the
+final chunk carries `prompt_tokens` and `completion_tokens` (otherwise
+the commit would land with zero-token usage). For Anthropic, the
+plugin accumulates `input_tokens` from `message_start` and
+`output_tokens` from `message_delta`.
+
+When the upstream omits a usage chunk entirely (rare; some
+compatibility layers), commit falls back to a `chars/4` estimator on
+the accumulated content and logs a WARN. The reservation amount
+booked at `reserve` time is the floor; if the estimator under-counts,
+the budget is still safe.
+
+Mid-stream cancellation by the Dify caller is classified as
+`CANCELLED` and routes through `release_failure` rather than
+`commit_success` — the reservation is released cleanly and the audit
+row reflects the cancellation.
+
+## Limitations
+
+- **Workflow-step gating beyond the model node is out of v1 scope.**
+  RAG retrieval, tool-call cost on workflow edges, and per-prompt
+  dataset-search budgets are future slot types.
+- **No replacement for Dify's native quota.** SpendGuard gates dollar
+  spend; Dify's quota gates per-workspace request rate. Operators
+  typically run both, on orthogonal axes.
+- **Bedrock and Gemini upstream are reserved for v1.1.** The provider
+  dropdown lists them but the plugin raises `InvokeError("upstream
+  provider not supported in this plugin version")` at `_invoke` time.
+- **Per-app budget keys.** v1 resolver reads workspace + app IDs
+  passed by Dify. Per-prompt-class or per-user fine-grained budget
+  keys require a custom resolver (out of v1 scope).
+
+## Demo
+
+A bundled docker-compose demo proves the full ALLOW + DENY + STREAM
+matrix end-to-end against the real SpendGuard sidecar:
+
+```bash
+make demo-up DEMO_MODE=dify_plugin_real
+```
+
+The mode boots `postgres + sidecar + ledger + canonical-ingest +
+counting-stub + dify-plugin-runner`, then drives three calls through
+`SpendGuardLLM._invoke()` directly (bypassing the full Dify Workspace
+chat-message HTTP surface to keep the demo focused on the plugin
+boundary):
+
+- **ALLOW** — small body within budget → SpendGuard reserve →
+  counting-stub answers → commit with real usage.
+- **DENY** — points the call at a non-existent budget → sidecar DENY
+  → counting-stub counter UNCHANGED (proves the gate fires before
+  the upstream call).
+- **STREAM** — `stream=True` body within budget → SSE chunks yield
+  through the plugin → end-of-stream commit with accumulated usage.
+
+The verify SQL in
+[`deploy/demo/verify_step_dify_plugin_real.sql`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/verify_step_dify_plugin_real.sql)
+gates:
+
+- `ledger_transactions.reserve >= 2` (ALLOW + STREAM)
+- `ledger_transactions.commit_estimated >= 2`
+- `ledger_transactions.denied_decision >= 1` (the DENY step)
+- INV-2 strict order: earliest reserve predates earliest outcome.
+
+## Troubleshooting
+
+- **`SPENDGUARD_SIDECAR_UDS is missing`** — Set the env var on the
+  plugin daemon container. The plugin refuses to boot without it
+  rather than fail silently at the first call.
+- **`InvokeAuthorizationError: SpendGuard denied the call`** — The
+  sidecar fired DENY. The exception carries the `decision_id` so
+  operators can trace the verdict in the audit chain.
+- **`InvokeServerUnavailableError: SpendGuard sidecar unavailable`** —
+  Sidecar handshake failed (UDS missing, mTLS bundle stale). Check
+  `kubectl logs -l app.kubernetes.io/name=spendguard-sidecar`.
+- **`upstream provider 'gemini' not supported in this plugin version`** —
+  v1 ships OpenAI + Anthropic only. The form lists Gemini / Bedrock
+  for forward-compat; pick one of the supported providers for now.
+- **`get_num_tokens` returns chars/4** — Either `SPENDGUARD_SIDECAR_HTTP_URL`
+  is unset on the daemon, or the companion at that URL is
+  unreachable. The fallback is non-fatal; configure the URL when you
+  want token-accurate cost prediction.
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in 5 minutes
+- [Contract YAML reference](../../contracts/yaml/) — author allow/stop rules
+- Other adapter integrations: [Pydantic-AI](../pydantic-ai/) · [LangChain](../langchain/) · [OpenAI Agents SDK](../openai-agents/) · [Kong AI Gateway](../kong-ai-gateway/) · [LiteLLM proxy](../litellm-proxy/)

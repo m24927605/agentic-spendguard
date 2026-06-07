@@ -1,6 +1,6 @@
 """Upstream provider forwarders for the SpendGuard Dify plugin.
 
-v1 ships an OpenAI forwarder. Anthropic lands in SLICE 5; Gemini and
+v1 ships OpenAI + Anthropic forwarders (SLICE 4 + SLICE 5). Gemini and
 Bedrock are stubbed and raise ``InvokeError`` when selected
 (review-standards.md 4.7) so the v1 form does not silently fall through.
 """
@@ -22,14 +22,30 @@ def build_upstream_client(credentials: Mapping[str, Any]) -> UpstreamClient:
     (``provider/spendguard.yaml``). Unknown / v1.1+ providers raise
     ``InvokeError`` with the explicit "not supported in this plugin
     version" message (review-standards.md 4.7).
+
+    Anthropic landed in SLICE 5 — the anthropic SDK import is lazy so
+    operators who only enable OpenAI don't pay the import-time cost.
     """
     upstream = str(credentials.get("upstream_provider") or "").strip().lower()
     if upstream == "openai":
         return OpenAIUpstream()
-    if upstream in ("anthropic", "gemini", "bedrock"):
+    if upstream == "anthropic":
+        # Lazy import: only operators picking Anthropic pay the cost.
+        # If the optional dep isn't installed, we surface an actionable
+        # InvokeError rather than the cryptic ImportError.
+        try:
+            from .anthropic import AnthropicUpstream
+        except ImportError as exc:  # pragma: no cover
+            raise InvokeError(
+                "anthropic provider selected but the 'anthropic' package "
+                "is not installed in the plugin daemon. Install with: "
+                "pip install anthropic>=0.40",
+            ) from exc
+        return AnthropicUpstream()
+    if upstream in ("gemini", "bedrock"):
         raise InvokeError(
             f"upstream provider {upstream!r} not supported in this plugin "
-            "version (v1 ships OpenAI only; Anthropic/Gemini/Bedrock land "
+            "version (v1 ships OpenAI + Anthropic; Gemini/Bedrock land "
             "in v1.1).",
         )
     if not upstream:

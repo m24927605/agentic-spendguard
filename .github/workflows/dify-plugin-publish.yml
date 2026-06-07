@@ -1,0 +1,181 @@
+# Package and publish the SpendGuard Dify Model Provider Plugin
+# (`plugins/dify/spendguard/`) as a `.difypkg` bundle.
+#
+# Trigger: any GitHub release tagged `dify-plugin-v*` (e.g.
+# `dify-plugin-v1.0.0`).
+#
+# Distribution model — DEVIATION FROM npm OIDC PATTERN:
+#   Dify plugins are NOT distributed via npm or PyPI; they ship as
+#   `.difypkg` zip bundles built by `dify plugin package`. The Dify
+#   plugin marketplace (https://marketplace.dify.ai) accepts uploads via
+#   either:
+#     a) Manual upload through the marketplace web UI (current default),
+#     b) `dify plugin publish` against a maintainer API token (rollout
+#        window; OIDC trusted-publisher equivalent not yet shipped).
+#   This workflow:
+#     - Always builds and verifies the .difypkg.
+#     - Always attaches the .difypkg to the GitHub release as a signed
+#       asset (cosign keyless via OIDC) so operators can sideload via
+#       `dify plugin install ./spendguard-VERSION.difypkg`.
+#     - Optionally publishes to the marketplace when the
+#       `DIFY_MARKETPLACE_TOKEN` repo secret is present.
+#
+# Self-host operators don't need the marketplace at all — they just
+# download the `.difypkg` from the GitHub release and run
+# `dify plugin install` against it.
+
+name: Publish SpendGuard Dify Plugin
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # allow manual trigger for re-publish testing
+
+jobs:
+  publish:
+    if: startsWith(github.ref, 'refs/tags/dify-plugin-v')
+    runs-on: ubuntu-latest
+    environment:
+      name: dify-marketplace
+      url: https://marketplace.dify.ai/plugins/spendguard
+    defaults:
+      run:
+        working-directory: plugins/dify/spendguard
+    permissions:
+      # OIDC token for cosign keyless signing of the .difypkg.
+      id-token: write
+      # release asset upload + checksum write-back.
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: plugins/dify/spendguard/requirements.txt
+
+      - name: Install plugin runtime deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Test-time deps for the gating step below.
+          pip install pytest pytest-asyncio ruff
+
+      - name: Lint (ruff)
+        run: ruff check .
+
+      - name: Unit tests (35 pre-slice-5 + 25 new in slice 5-6)
+        # The full matrix runs against mocks (no network, no sidecar).
+        env:
+          # Default env so _DifyReservation.__init__ doesn't raise on
+          # import-side instantiation; individual tests override via
+          # monkeypatch.
+          SPENDGUARD_SIDECAR_UDS: "/tmp/fake-spendguard.sock"
+          SPENDGUARD_TENANT_ID: "test-tenant"
+        run: python -m pytest tests/ -v
+
+      - name: Verify version parity (manifest.yaml vs CHANGELOG.md)
+        # CHANGELOG.md MUST carry an entry for the released version.
+        # The release tag (dify-plugin-vX.Y.Z) drives the manifest
+        # bump; this step asserts CHANGELOG.md mentions X.Y.Z.
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#dify-plugin-v}"
+          if ! grep -q "^## \[$TAG\]" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md missing entry for [$TAG]"
+            exit 1
+          fi
+          echo "version parity OK: tag=$TAG"
+
+      - name: Install Dify plugin CLI
+        # The official `dify` CLI builds the .difypkg via
+        # `dify plugin package`. Install it into the runner env.
+        # NOTE: as of 2026-06, the CLI is distributed via a release
+        # binary on the langgenius/dify-plugin-daemon repo.
+        run: |
+          set -euo pipefail
+          DIFY_CLI_VERSION="0.8.0"
+          # Best-effort install — if the official release naming
+          # changes, fall back to the npm equivalent
+          # @dify/plugin-cli@latest.
+          curl -fsSL \
+            "https://github.com/langgenius/dify-plugin-daemon/releases/download/v${DIFY_CLI_VERSION}/dify-plugin-daemon-${DIFY_CLI_VERSION}-linux-amd64" \
+            -o /tmp/dify || {
+              echo "::warning::Dify CLI binary not available; falling back to npm @dify/plugin-cli"
+              npm install -g @dify/plugin-cli@latest
+              exit 0
+            }
+          chmod +x /tmp/dify
+          sudo mv /tmp/dify /usr/local/bin/dify
+          dify version || dify --version
+
+      - name: Build .difypkg
+        # `dify plugin package` zips the plugin tree per the
+        # marketplace contract and writes a versioned filename.
+        run: |
+          set -euo pipefail
+          dify plugin package . --out ../../../dist/spendguard.difypkg
+          ls -la ../../../dist/
+
+      - name: Compute SHA-256 checksum
+        run: |
+          set -euo pipefail
+          cd ../../../dist
+          shasum -a 256 spendguard.difypkg > spendguard.difypkg.sha256
+          cat spendguard.difypkg.sha256
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign .difypkg (cosign keyless OIDC)
+        # Keyless signing — the OIDC token from the runner is the
+        # identity; cosign writes a signature + a Fulcio-issued
+        # certificate that pins the workflow file + ref.
+        env:
+          COSIGN_EXPERIMENTAL: "1"
+        run: |
+          set -euo pipefail
+          cd ../../../dist
+          cosign sign-blob --yes \
+            --output-signature spendguard.difypkg.sig \
+            --output-certificate spendguard.difypkg.pem \
+            spendguard.difypkg
+          ls -la
+
+      - name: Upload .difypkg + signature to GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          cd ../../../dist
+          gh release upload "$GITHUB_REF_NAME" \
+            spendguard.difypkg \
+            spendguard.difypkg.sha256 \
+            spendguard.difypkg.sig \
+            spendguard.difypkg.pem \
+            --clobber
+
+      - name: Publish to Dify marketplace (optional)
+        # Skipped unless the maintainer has provisioned the marketplace
+        # API token. Self-host operators don't need this step; they
+        # download the .difypkg from the GitHub release.
+        if: ${{ env.HAS_MARKETPLACE_TOKEN == 'true' }}
+        env:
+          HAS_MARKETPLACE_TOKEN: ${{ secrets.DIFY_MARKETPLACE_TOKEN != '' }}
+          DIFY_MARKETPLACE_TOKEN: ${{ secrets.DIFY_MARKETPLACE_TOKEN }}
+        run: |
+          set -euo pipefail
+          # Marketplace publish API is rolling out as of 2026-06; the
+          # exact command may shift. When available:
+          #   dify plugin publish ../../../dist/spendguard.difypkg \
+          #     --token "$DIFY_MARKETPLACE_TOKEN"
+          # For now we surface a warning so the manual-upload step is
+          # explicit.
+          if command -v dify >/dev/null 2>&1 && dify plugin publish --help 2>/dev/null; then
+            dify plugin publish ../../../dist/spendguard.difypkg \
+              --token "$DIFY_MARKETPLACE_TOKEN"
+          else
+            echo "::warning::dify plugin publish unavailable; upload spendguard.difypkg manually to https://marketplace.dify.ai/plugins"
+          fi

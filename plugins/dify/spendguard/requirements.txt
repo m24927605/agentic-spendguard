@@ -6,3 +6,15 @@
 dify-plugin>=0.8.0,<1.0.0
 spendguard-sdk>=0.5.1
 openai>=1.40,<3.0
+# SLICE 5: Anthropic upstream forwarder. Required when operator picks
+# upstream_provider=anthropic on the Dify provider form. We ship it as a
+# baseline dep (not an optional extra) because Dify plugin distribution
+# uses `dify plugin pack` which produces a single .difypkg with all deps
+# pinned — there's no extras concept in the Dify plugin format. Operators
+# who never use Anthropic still pay ~12MB on disk; we judge the operator
+# UX win (no separate install step) worth the cost.
+anthropic>=0.40,<1.0
+# HTTP client for sidecar /v1/tokenize companion in get_num_tokens
+# (SLICE 5). httpx is already a transitive dep of openai+anthropic so
+# adding it explicit is free.
+httpx>=0.27,<1.0
