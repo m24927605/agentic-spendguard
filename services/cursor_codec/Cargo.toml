@@ -1,0 +1,53 @@
+[package]
+name = "spendguard-cursor-codec"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard Cursor IDE MITM codec — reverse-engineered Connect-RPC framing + envelope decode for api.cursor.sh. EXPERIMENTAL. SOW-only. Codec breaks whenever Cursor changes the wire protocol. DO NOT SHIP IN GA CONFIG."
+publish = false
+
+# Per D17 review-standards §1 (E1):
+# `services/cursor_codec/Cargo.toml` MUST carry `[package.metadata.experimental]`
+# with the literal `reason` string below. Reviewer greps for it.
+[package.metadata.experimental]
+reason = "Reverse-engineered Cursor wire protocol. Breaks on vendor release."
+
+[lib]
+name = "spendguard_cursor_codec"
+path = "src/lib.rs"
+
+[features]
+# Default features are empty. `mitm` is the per-crate feature that
+# gates Cursor-specific code (framing reader, envelope decode). The
+# workspace-level feature `cursor-mitm-experimental` (D17 design §6)
+# is what `services/egress_proxy` and `services/cli` enable; that
+# feature pulls this crate in as an `optional = true` dep, at which
+# point the consumer turns the `mitm` feature on here.
+default = []
+mitm = []
+
+[dependencies]
+# Connect-RPC framing parser. `bytes` is the canonical byte buffer
+# crate across the workspace (sidecar, canonical_ingest, ledger).
+bytes = "1"
+
+# Cursor envelope protobuf decode. `prost` 0.13 is the workspace-wide
+# version; matches services/sidecar / services/tokenizer.
+prost = "0.13"
+prost-types = "0.13"
+
+# Error handling. `thiserror` is the workspace-wide derive macro for
+# typed errors; the rest of the codec returns `Result<_, CodecError>`
+# / `Result<_, DecodeError>` shaped the same way ledger and sidecar do.
+thiserror = "1"
+
+[build-dependencies]
+# `prost-build` generates the Rust types from `src/proto/cursor.proto`.
+# Matches the build.rs pattern in services/tokenizer / services/sidecar.
+prost-build = "0.13"
+
+[dev-dependencies]
+# Round-trip helpers (encode → decode) for the envelope tests reuse
+# `prost`'s Message trait. No additional dev deps are required for
+# SLICE 1-4; SLICE 8 will add wiremock / testcontainers for the
+# fixture replay harness.

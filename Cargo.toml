@@ -12,6 +12,7 @@ exclude = [
   "services/cli",
   "services/control_plane",
   "services/cost_advisor",
+  "services/cursor_codec",
   "services/dashboard",
   "services/doctor",
   "services/egress_proxy",

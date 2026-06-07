@@ -1,0 +1,77 @@
+// SpendGuard-authored observation of the Cursor api.cursor.sh wire protocol.
+// Reconstructed from black-box capture. NOT vendor source.
+//
+// Per D17 design.md §8 decision 6 and review-standards.md §2 (R1, R3):
+// this file documents an observed wire shape. Field names are
+// SpendGuard-chosen; field numbers match what is on the wire as
+// observed at MITM capture time. No vendor copyright header, no
+// vendor-attributed license text, no vendor .proto pasted verbatim.
+//
+// SLICE 3 lands a minimal placeholder for the envelope that the SLICE
+// 8 capture corpus will refine field-by-field with hex evidence in
+// PROTOCOL.md.
+
+syntax = "proto3";
+
+package spendguard.cursor_codec.v1alpha1;
+
+// CursorChatRequest is the request envelope SpendGuard observes Cursor
+// IDE Agent serialise to `api.cursor.sh` for an Agent chat call.
+// The fields here are a minimal placeholder per the SLICE 3 charter
+// (see RECON.md §3). SLICE 8 will refine based on real capture
+// evidence; the unknown-fields preservation contract is the load-
+// bearing invariant — vendor field additions survive through
+// `serialize_unknown_fields_in_extras`-style passthrough.
+message CursorChatRequest {
+  // Repeated message history sent up to Cursor. Each Message carries a
+  // role tag and a content blob. The shape mirrors public OpenAI /
+  // Anthropic chat schemas observed in Cursor docs.
+  repeated Message messages = 1;
+
+  // Model identifier as Cursor labels it (e.g. "claude-3.5-sonnet",
+  // "gpt-4o", or Cursor's internal vendor prefix).
+  string model = 2;
+
+  // Optional system prompt. Cursor sometimes sends this separately
+  // from the messages list.
+  optional string system = 3;
+
+  // Optional max_tokens budget hint. SpendGuard reads this to seed
+  // reservation. uint32 is wide enough for any observed Cursor budget.
+  optional uint32 max_tokens = 4;
+
+  // Optional sampling temperature.
+  optional float temperature = 5;
+}
+
+// Message is a single chat turn (system / user / assistant / tool).
+message Message {
+  // Role string. Observed values: "system" | "user" | "assistant" | "tool".
+  string role = 1;
+
+  // Content payload. Cursor may embed multimodal blobs here in future;
+  // SLICE 3 ships a plain UTF-8 string and lets unknown fields cover
+  // vendor additions until SLICE 8 refines.
+  string content = 2;
+}
+
+// CursorChatResponseChunk is one server-streaming chunk decoded from a
+// `0x00`-flagged Connect-RPC frame. The terminal chunk on the wire is
+// signalled at the framing layer (flag `0x02`), not in this envelope.
+message CursorChatResponseChunk {
+  // The model that produced the chunk. May be empty on follow-up
+  // chunks if Cursor only stamps it on the first chunk.
+  string model = 1;
+
+  // Delta content appended in this chunk.
+  string delta = 2;
+
+  // Optional finish_reason, set only on the final data chunk.
+  optional string finish_reason = 3;
+
+  // Optional token counter for the cumulative output token count up to
+  // and including this chunk. Cursor's docs document this on the
+  // unary final response; whether it appears on every chunk is
+  // capture-time observable in SLICE 8.
+  optional uint32 cumulative_output_tokens = 4;
+}
