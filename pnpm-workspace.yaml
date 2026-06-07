@@ -14,4 +14,5 @@ packages:
   - "sdk/typescript-langchain"
   - "sdk/typescript-vercel-ai"
   - "sdk/typescript-openai-agents"
+  - "sdk/typescript-inngest-agent-kit"
   - "docs/site-v2"
