@@ -367,6 +367,26 @@ else ifeq ($(DEMO_MODE),agent_real_strands_deny)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),subscription_meter)
+	@echo "[demo] DEMO_MODE=subscription_meter → D13 (Subscription-Tier Meter)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/subscription_meter/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock vendor — Anthropic shape) +"
+	@echo "[demo]               subscription-meter-runner (Python 3.12 driver that"
+	@echo "[demo]               POSTs three requests through the sidecar gRPC"
+	@echo "[demo]               adapter with reservation_source=SUBSCRIPTION_METER)."
+	@echo "[demo]   Driver issues:"
+	@echo "[demo]     1. ClaudeCodePro PASS  — under all thresholds."
+	@echo "[demo]     2. ClaudeCodePro SOFT  — over alert_at, CONTINUE + alert."
+	@echo "[demo]     3. ClaudeCodePro HARD  — over hard_cap, STOP + synthetic 429."
+	@echo "[demo]   Asserts: audit_outbox row with reservation_source='subscription_meter'"
+	@echo "[demo]            for each step + ZERO ledger_entries rows for the meter tenant"
+	@echo "[demo]            + a hard-cap STOP decision on step 3."
+	$(COMPOSE) -f subscription_meter/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),approval_hot_reload)
 	@echo "[demo] DEMO_MODE=approval_hot_reload → same stack as DEMO_MODE=approval."
 	@echo "[demo]   Exercises issue #59 BUNDLE_HOT_RELOADED error path end-to-end:"
@@ -549,6 +569,11 @@ else ifeq ($(DEMO_MODE),agent_real_adk_stub)
 	    -e SPENDGUARD_DEMO_MODE=agent_real_adk_stub adk-runner
 	@echo "[demo] verifying COV_D19 SLICE 5 (agent_real_adk_stub PRE + POST)..."
 	@$(MAKE) demo-verify-agent-real-adk
+else ifeq ($(DEMO_MODE),subscription_meter)
+	@echo "[demo] running subscription-meter-runner (Python 3.12 + sidecar gRPC client)..."
+	$(COMPOSE) -f subscription_meter/docker-compose.yaml run --rm subscription-meter-runner
+	@echo "[demo] verifying D13 subscription_meter (3 meter steps + no ledger writes)..."
+	@$(MAKE) demo-verify-subscription-meter
 else
 	@echo "[demo] core services up; running demo container (DEMO_MODE=$(DEMO_MODE))..."
 	$(COMPOSE) build demo
@@ -859,6 +884,14 @@ demo-verify-dify-plugin-real:
 demo-verify-cursor-mitm-fixture:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_cursor_mitm_fixture.sql
 	@echo "[demo] D17 SLICE 9 cursor_mitm_fixture verification done"
+
+# D13 (subscription_meter demo) — assert the meter rows landed without
+# producing ledger entries.  Mirrors the cursor_mitm verify pattern:
+# audit_outbox rows tagged reservation_source='subscription_meter' for
+# the demo tenant, ZERO ledger_entries rows under the same tenant.
+demo-verify-subscription-meter:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_subscription_meter.sql
+	@echo "[demo] D13 subscription_meter verification done"
 
 # D18 SLICE 82 (windsurf_mitm_fixture demo) verification. Mirrors the
 # cursor_mitm_fixture verification: the codec runs against the
@@ -1231,7 +1264,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

@@ -76,6 +76,7 @@ export default defineConfig({
             { label: 'Dify Model Provider Plugin', slug: 'docs/integrations/dify' },
             { label: 'Cursor IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/cursor-mitm' },
             { label: 'Windsurf IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/windsurf-mitm' },
+            { label: 'Subscription-tier meter (Claude Code Pro + Codex)', slug: 'docs/integrations/subscription-meter' },
           ],
         },
         {

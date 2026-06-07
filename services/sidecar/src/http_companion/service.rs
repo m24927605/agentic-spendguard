@@ -595,6 +595,10 @@ impl DecisionService for RealDecisionService {
                 request_hash: vec![].into(),
             }),
             planned_steps_hint: 0,
+            // D13 COV_61: HTTP companion plugins are BYOK-only today.
+            // The proxy / SDK is the only producer of SUBSCRIPTION_METER.
+            reservation_source: crate::proto::common::v1::ReservationSource::Byok as i32,
+            meter_only_estimate: false,
         };
 
         // 4) Drive the same idempotency cache the gRPC adapter does

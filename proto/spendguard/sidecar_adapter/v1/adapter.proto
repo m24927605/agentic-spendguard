@@ -377,6 +377,29 @@ message DecisionRequest {
   // run_cost_projector validation (services/run_cost_projector/src/
   // server.rs MAX_PLANNED_STEPS).
   int32 planned_steps_hint = 17;
+
+  // === D13 COV_61 additive: subscription meter reservation source ===
+  //
+  // When the egress_proxy / SDK classifier routes a request through the
+  // subscription-meter path (Claude Code Pro / Codex on ChatGPT Plus),
+  // it flags this field so the sidecar skips ledger_entries +
+  // reservations writes and only writes the audit_outbox row tagged
+  // `reservation_source = subscription_meter`.
+  //
+  // Wire-compat: proto3 default 0 = RESERVATION_SOURCE_UNSPECIFIED is
+  // treated as BYOK by the sidecar (legacy behaviour).
+  //
+  // Tag 18: next stable tag after planned_steps_hint (17).
+  spendguard.common.v1.ReservationSource reservation_source = 18;
+
+  // === D13 COV_62 additive: meter-only estimate request ===
+  //
+  // When true, the sidecar runs in meter-only mode: it computes the
+  // meter snapshot (via subscription_meter::meter_only_estimate) and
+  // returns it in DecisionResponse.subscription_meter, but NEVER calls
+  // the ledger. Only meaningful when reservation_source ==
+  // RESERVATION_SOURCE_SUBSCRIPTION_METER.
+  bool meter_only_estimate = 19;
 }
 
 message DecisionResponse {
@@ -456,6 +479,17 @@ message DecisionResponse {
   // integration. SLICE_02-time decoders should treat empty-string as
   // "no RUN_* triggered" and not as an error.
   string run_code_triggered = 16;
+
+  // === D13 COV_61 additive: subscription meter snapshot ===
+  //
+  // Populated only when the request's reservation_source == SUBSCRIPTION_METER.
+  // Carries the current period counters and the cap evaluation outcome
+  // so the adapter can short-circuit on hard-cap blocks (synthetic 429)
+  // without re-querying the sidecar.
+  //
+  // Wire-compat: proto3 default absent message; legacy decoders ignore.
+  // Tag 17: next stable after run_code_triggered (16).
+  spendguard.common.v1.SubscriptionMeter subscription_meter = 17;
 }
 
 // ============================================================================

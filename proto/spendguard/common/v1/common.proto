@@ -417,3 +417,57 @@ message Idempotency {
   // sha256 of canonical request body for replay-on-retry consistency check.
   bytes  request_hash = 2;
 }
+
+// ============================================================================
+// SUBSCRIPTION METER (per D13 §4)
+// ============================================================================
+
+// Reservation source: tags an audit_outbox row so dashboards and
+// importers can tell BYOK-charged (real ledger entry) rows apart from
+// subscription-meter (advisory; no ledger entry) rows.
+//
+// Wire-compat: additive enum. RESERVATION_SOURCE_UNSPECIFIED = 0
+// preserves wire-compat for clients emitted before D13.  Legacy rows
+// default to BYOK at the audit_outbox column level (NOT NULL DEFAULT
+// 'byok' per migration 0044).
+enum ReservationSource {
+  RESERVATION_SOURCE_UNSPECIFIED       = 0;
+  RESERVATION_SOURCE_BYOK              = 1;
+  RESERVATION_SOURCE_SUBSCRIPTION_METER = 2;
+}
+
+// Subscription meter snapshot — returned to the adapter when the
+// classifier routes a request through the subscription meter path.
+// All values are best-effort retail-price estimates in micro-USD.
+//
+// The sidecar does NOT write ledger_entries for these rows; the
+// canonical record lives in `subscription_meters` (migration 0044).
+message SubscriptionMeter {
+  // The plan that produced this meter row.
+  string plan = 1;  // "claude_code_pro" | "codex_chatgpt" | "unknown"
+
+  // Current period (UTC calendar month default).
+  google.protobuf.Timestamp period_start = 2;
+  google.protobuf.Timestamp period_end   = 3;
+
+  // Atomic counters (micro-USD).
+  int64 consumed_atomic     = 4;
+  int64 monthly_cap_atomic  = 5;
+  int64 alert_at_atomic     = 6;
+  // 0 means "no hard cap" — kept as int64 (not optional) so legacy
+  // decoders read 0 = soft mode.
+  int64 hard_cap_at_atomic  = 7;
+
+  // Cap evaluation outcome carried to the adapter.
+  enum CapDecision {
+    CAP_DECISION_UNSPECIFIED = 0;
+    CAP_PASS                 = 1;
+    CAP_SOFT_ALERT           = 2;
+    CAP_HARD_BLOCK           = 3;  // synthetic 429
+  }
+  CapDecision cap_decision = 8;
+
+  // For hard-cap blocks only — seconds until window reset, bounded at
+  // 86400 (24h) per design §4.5 to prevent CLIs hanging > 24h.
+  int64 retry_after_seconds = 9;
+}

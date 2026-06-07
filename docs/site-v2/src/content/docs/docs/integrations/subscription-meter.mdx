@@ -1,0 +1,148 @@
+---
+title: "Subscription-tier meter (Claude Code Pro + Codex on ChatGPT Plus)"
+description: >-
+  Best-effort meter for flat-fee subscription plans where SpendGuard
+  cannot enforce the dollar (the vendor settles internally) but can
+  estimate retail $, alert on soft caps, and optionally short-circuit
+  with a synthetic 429 hard cap.
+sidebar:
+  badge:
+    text: Advisory
+    variant: note
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="Meter, not enforcement">
+  Anthropic / OpenAI settle subscription quota **internally**. The
+  meter is an advisory estimate based on retail token prices — it is
+  the closest SpendGuard can get to a dollar without a real BYOK ledger
+  entry. Live reconciliation will reuse this exact same audit row
+  shape once each vendor ships an Admin Usage API.
+</Aside>
+
+## Why we cannot enforce the dollar
+
+Claude Code Pro/Max and Codex on ChatGPT Plus/Pro use OAuth
+subscriptions. Traffic still hits `api.anthropic.com/v1/messages` and
+`chatgpt.com/backend-api/codex/responses`, so the proxy sees the calls
+— but Anthropic and OpenAI settle quota against the flat fee
+internally. If SpendGuard's BYOK ledger charged each token at retail
+price, it would invent a phantom dollar on top of the $20/mo plan.
+
+Instead, the **subscription_meter** mode:
+
+* Classifies each request as BYOK vs subscription **before** opening
+  a ledger transaction.
+* For subscription requests, runs a **meter-only estimate** (tokens ×
+  retail price ÷ 1M) and tags the audit row with
+  `reservation_source = subscription_meter`.
+* Skips both `ledger_entries` and `reservations` writes — the meter
+  row is the canonical record.
+
+## Three modes
+
+| Mode        | Default | Behaviour                                              |
+|-------------|:-------:|--------------------------------------------------------|
+| `meter`     |   ✅    | Estimate only; no alert, no block.                     |
+| `soft_cap`  |        | Emit `subscription_soft_cap_alert` at `alert_at_atomic`; CONTINUE. |
+| `hard_cap`  |        | At `hard_cap_at_atomic`, short-circuit DENY + synthetic 429. |
+
+The mode is per-tenant via the `subscription_caps` table (cap-aware
+SQL coming in the next slice; today the sidecar reads thresholds from
+`DecisionRequest.runtime_metadata.subscription`).
+
+## Classification
+
+The classifier requires **both** signals to match before flagging a
+request as subscription:
+
+| Signal | Claude Code Pro | Codex / ChatGPT-OAuth |
+|--------|------------------|------------------------|
+| `Authorization` prefix | `sk-ant-oat01-…` | `eyJ…` (JWT header) |
+| `User-Agent` | `claude-cli/<ver>` or `claude-code/<ver>` | `codex_cli_rs/<ver>` |
+| BYOK distinguisher | `sk-ant-api03-…` | `sk-proj-…` / `sk-…` |
+
+UA alone is forgeable (operators routinely use `claude-cli` with a
+BYOK key); token alone is insufficient because OAuth tokens leak more
+easily than the CLI binary. Both must match — see
+[`classifier.rs`](https://github.com/m24927605/agentic-spendguard/blob/main/services/sidecar/src/subscription_meter/classifier.rs).
+
+## Hard-cap synthetic 429
+
+When `hard_cap` mode is active and the projected meter consumption
+crosses `hard_cap_at_atomic`, the sidecar short-circuits before the
+ledger:
+
+```json
+{
+  "error": {
+    "type": "rate_limit_exceeded",
+    "message": "spendguard subscription cap reached",
+    "code": "spendguard_subscription_cap"
+  }
+}
+```
+
+The shape is **vendor-matched** so claude-cli / codex_cli_rs treat
+it identically to a vendor 429 and exit cleanly. The distinct
+`code = "spendguard_subscription_cap"` lets operators distinguish
+SpendGuard-injected from vendor-injected 429s in their dashboards.
+
+`Retry-After` is bounded at 86 400 s (24 h) — protects CLIs from a
+misconfigured cap window asking them to wait more than a day.
+
+## Migrations & schema
+
+D13 ships three additive migrations:
+
+* `0044_subscription_meter.sql` — `subscription_meters` table +
+  `audit_outbox.reservation_source` column.
+* `0045_subscription_alerts.sql` — `subscription_alerts` table with
+  cooldown (default 1 h, mirrors `stats_aggregator` drift_alert).
+* `0046_subscription_importer.sql` — `subscription_import_jobs`
+  table + `audit_outbox.import_source` column.
+
+All three are RLS-enabled with the standard tenant-id isolation
+policy. See
+[`services/ledger/migrations/`](https://github.com/m24927605/agentic-spendguard/tree/main/services/ledger/migrations).
+
+## Importer stubs
+
+The flat-fee meter is best-effort. To true it up against the vendor's
+billing report, D13 ships **stub** importer crates that lock the
+contract for Day-2 reconciliation:
+
+```rust
+pub fn import_record_to_audit_row(rec: &ImportRecord) -> AuditRowDraft {
+    AuditRowDraft {
+        tenant_id: rec.tenant_id.clone(),
+        reservation_source: "subscription_meter",
+        import_source: rec.importer_kind.as_str(),
+        ..
+    }
+}
+```
+
+D14 / D15 / D16 light up Devin / Manus / Genspark live importers.
+Anthropic Console Usage and OpenAI Admin Usage stay stubbed until
+their respective Admin APIs ship.
+
+## Demo
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=subscription_meter
+```
+
+Walks three cap-decision scenarios (PASS / SOFT / HARD), asserts the
+hard-cap response carries `Retry-After ∈ [1, 86_400]`, and verifies
+the load-bearing invariant: **zero** `ledger_entries` rows and
+**zero** `reservations` rows under the meter tenant.
+
+See [`deploy/demo/subscription_meter/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/subscription_meter/README.md).
+
+## See also
+
+* [Design — `docs/specs/coverage/D13_subscription_meter/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D13_subscription_meter/design.md)
+* [Implementation skeleton — `implementation.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D13_subscription_meter/implementation.md)
+* [Review standards — `review-standards.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D13_subscription_meter/review-standards.md)

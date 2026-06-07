@@ -11,6 +11,13 @@ pub mod http_companion;
 pub mod metrics;
 pub mod prompt_hash;
 pub mod server;
+// D13 — subscription-tier meter (Claude Code Pro / Codex on ChatGPT
+// Plus). Pure-Rust module; no runtime deps beyond chrono + serde_json
+// for the synthetic 429 body. Sidecar branches on
+// DecisionRequest.reservation_source = SUBSCRIPTION_METER at the top
+// of `decision::transaction::run_through_reserve` to skip ledger
+// writes (see subscription_meter::route_decision_request).
+pub mod subscription_meter;
 
 pub mod proto {
     pub mod common {

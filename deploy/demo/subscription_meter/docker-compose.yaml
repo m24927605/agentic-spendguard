@@ -1,0 +1,154 @@
+# D13 (`DEMO_MODE=subscription_meter`) — sidecar compose overlay.
+#
+# This compose file is layered on top of `deploy/demo/compose.yaml` via
+# `docker compose -f deploy/demo/compose.yaml \
+#                 -f deploy/demo/subscription_meter/docker-compose.yaml up`.
+# The Makefile DEMO_MODE=subscription_meter branch does that for you.
+#
+# Two new services scoped to this demo mode:
+#
+#   counting-stub                       mock Anthropic provider — same
+#                                       /v1/messages shape used by the
+#                                       Cursor / Windsurf demos but with
+#                                       the Anthropic response envelope.
+#
+#   subscription-meter-runner           Python 3.12 container that calls
+#                                       the sidecar's adapter UDS gRPC
+#                                       three times with three different
+#                                       cap configurations (PASS / SOFT /
+#                                       HARD) and asserts each response
+#                                       carried the expected decision +
+#                                       subscription_meter snapshot.
+#
+# # CRITICAL DESIGN POSTURE NOTE
+#
+# This demo does NOT call api.anthropic.com — that would charge real
+# tokens against a real BYOK key.  The runner only talks to the local
+# sidecar gRPC adapter; the counting-stub stays present so the
+# negative invariant (no upstream HTTP) is verifiable.
+#
+# Anti-scope: this overlay does NOT redeclare postgres, sidecar,
+# ledger, canonical-ingest, bundles-init, pki-init or any other base
+# service. The Makefile target brings up the base stack first, then
+# this overlay.
+
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  # Mock Anthropic provider — verbatim from the cursor/windsurf demos
+  # except we shape the response as `/v1/messages` so the runner can
+  # smoke-test the upstream path is NOT reached when a hard-cap fires.
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-subscription-meter-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not self.path.startswith("/v1/messages"):
+                    self.send_response(404); self.end_headers(); return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"msg_subscription_meter_{HITS['calls']}",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text",
+                                  "text": "hi from subscription_meter demo"}],
+                    "model": "claude-3-5-sonnet-20241022",
+                    "usage": {"input_tokens": 10, "output_tokens": 20},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body); return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok"); return
+                self.send_response(404); self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[subscription-meter-counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write(
+            "[subscription-meter-counting-stub] listening on :8765\n"
+        )
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── subscription-meter-runner ─────────────────────────────────────
+  # Pure-Python driver: walks through three subscription_meter
+  # scenarios and asserts the sidecar responded with the correct cap
+  # decision in each case.
+  #
+  # This runner does NOT call any real vendor API.  Three pure-local
+  # cap evaluations are performed against the in-tree
+  # `subscription_meter` Rust module via a thin shim binary; we use
+  # the runner to assert the wire shape only.
+  subscription-meter-runner:
+    image: python:3.12-slim
+    container_name: spendguard-subscription-meter-runner
+    user: "0:0"
+    environment:
+      SPENDGUARD_SUBSCRIPTION_METER_TENANT_ID: "00000000-0000-4000-8000-00000000d013"
+      SPENDGUARD_SUBSCRIPTION_METER_COUNTING_STUB_URL: "http://counting-stub:8765"
+    volumes:
+      - ../..:/workspace
+    working_dir: /workspace/deploy/demo/subscription_meter
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        echo "[subscription-meter-runner] running cap evaluation walk..."
+        python3 runner.py
+        echo "[subscription-meter-runner] SUBSCRIPTION_METER_DEMO_OK"
+    depends_on:
+      counting-stub:
+        condition: service_healthy
+    networks:
+      spendguard-net:
+        aliases: [subscription-meter-runner]

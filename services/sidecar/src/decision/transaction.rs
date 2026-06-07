@@ -286,6 +286,12 @@ pub struct DecisionOutput {
     /// DecisionResponse.run_code_triggered tag 16 (SLICE_02 wired the
     /// field; SLICE_09 populates the value).
     pub run_code_triggered: String,
+    /// D13 COV_61 — Optional subscription meter snapshot.  Populated
+    /// only when the request was routed through the meter-only path
+    /// (DecisionRequest.reservation_source == SUBSCRIPTION_METER).
+    /// build_response() forwards this verbatim into DecisionResponse
+    /// tag 17.
+    pub subscription_meter: Option<crate::proto::common::v1::SubscriptionMeter>,
 }
 
 /// SLICE_09 Phase E — projector call with built-in fall-through.
@@ -556,6 +562,9 @@ async fn replay_existing_decision_by_idempotency(
         } else {
             response.run_code_triggered
         },
+        // D13: replays of BYOK decisions never carry a meter snapshot;
+        // subscription-meter requests short-circuit before this point.
+        subscription_meter: None,
     }))
 }
 
@@ -625,6 +634,25 @@ pub async fn run_through_reserve(
         return Err(DomainError::Draining);
     }
     crate::bootstrap::catalog::enforce_freshness_gate(state, cfg)?;
+
+    // D13 COV_61: subscription-meter short-circuit.
+    //
+    // When the egress proxy / SDK has classified the request as a
+    // subscription-tier call (Claude Code Pro / Codex on ChatGPT Plus),
+    // it sets `reservation_source = SUBSCRIPTION_METER`. The sidecar
+    // MUST NOT open a ledger transaction for these rows — Anthropic /
+    // OpenAI settle the flat fee internally and ledger_entries would
+    // double-count it as a phantom dollar over the $20/mo plan.
+    //
+    // Instead we build an advisory `DecisionOutput` that carries the
+    // meter snapshot in `subscription_meter` and returns CONTINUE (or
+    // STOP when a hard-cap fires).  See
+    // subscription_meter::route_decision_request for the full lane.
+    if req.reservation_source
+        == crate::proto::common::v1::ReservationSource::SubscriptionMeter as i32
+    {
+        return crate::subscription_meter::route_decision_request(cfg, state, ctx, req);
+    }
 
     // Validate the adapter idempotency key before any mutating downstream
     // call. The run-cost projector Project RPC mutates per-run state, so
@@ -919,6 +947,7 @@ pub async fn run_through_reserve(
                 matched_rule_ids: matched_rules.clone(),
                 reason_codes: reason_codes.clone(),
                 run_code_triggered: run_code_triggered.clone(),
+                subscription_meter: None,
             })
         }
         Some(Outcome::Replay(r)) => {
@@ -965,6 +994,7 @@ pub async fn run_through_reserve(
                 matched_rule_ids: matched_rules.clone(),
                 reason_codes: reason_codes.clone(),
                 run_code_triggered: run_code_triggered.clone(),
+                subscription_meter: None,
             })
         }
         Some(Outcome::Error(e)) => Err(DomainError::DecisionStage(format!(
@@ -1525,6 +1555,7 @@ async fn run_record_denied_decision(
             matched_rule_ids: matched_rules.to_vec(),
             reason_codes: reason_codes.to_vec(),
             run_code_triggered: run_code_triggered_local.clone(),
+            subscription_meter: None,
         }),
         Some(DeniedOutcome::Replay(r)) => {
             // Codex R1 P1 — known POC gap: Replay path returns the
@@ -1567,6 +1598,7 @@ async fn run_record_denied_decision(
                 matched_rule_ids: matched_rules.to_vec(),
                 reason_codes: reason_codes.to_vec(),
                 run_code_triggered: run_code_triggered_local.clone(),
+                subscription_meter: None,
             })
         }
         Some(DeniedOutcome::Error(e)) => Err(DomainError::DecisionStage(format!(
@@ -1613,6 +1645,8 @@ pub fn build_response(out: DecisionOutput) -> DecisionResponse {
         // clients deserializing this response see proto3 default empty
         // string, identical to pre-bump behavior.
         run_code_triggered: out.run_code_triggered,
+        // D13 COV_61 — meter snapshot (None when not subscription).
+        subscription_meter: out.subscription_meter,
     }
 }
 
@@ -2672,6 +2706,7 @@ mod slice_02_decision_match_tests {
             matched_rule_ids: vec![],
             reason_codes: vec![],
             run_code_triggered: String::new(),
+            subscription_meter: None,
         }
     }
 

@@ -749,6 +749,10 @@ impl AdapterUds {
                         // post-approval state). Empty string per
                         // proto3 default.
                         run_code_triggered: String::new(),
+                        // D13 COV_61: resume path is never the
+                        // subscription-meter lane (approvals are a
+                        // BYOK-only feature).
+                        subscription_meter: None,
                     };
                     Ok(Response::new(ResumeAfterApprovalResponse {
                         outcome: Some(ResumeOutcome::Decision(decision_resp)),
@@ -869,6 +873,8 @@ impl AdapterUds {
                         // comment above — resume path does not emit
                         // RUN_* codes.
                         run_code_triggered: String::new(),
+                        // D13 COV_61: resume_approved is BYOK-only.
+                        subscription_meter: None,
                     };
                     Ok(Response::new(ResumeAfterApprovalResponse {
                         outcome: Some(ResumeOutcome::Decision(decision_resp)),
