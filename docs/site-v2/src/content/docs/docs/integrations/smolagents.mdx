@@ -1,0 +1,233 @@
+---
+title: "SmolAgents budget control with SpendGuard"
+description: >-
+  Pre-call token budget enforcement for HuggingFace SmolAgents using
+  Agentic SpendGuard. One wrapper class subclasses the single
+  smolagents.Model ABC and covers InferenceClientModel, OpenAIServerModel
+  (vLLM / Ollama / Together / Groq), and TransformersModel — gated
+  identically with one wrapper instance.
+---
+
+> Your SmolAgents `CodeAgent` runs `agent.run("...")` across many
+> tool-calling steps and you cannot tell which step blew the budget —
+> until the bill arrives. SpendGuard subclasses the `smolagents.Model`
+> ABC and wraps an inner Model so every `generate()` call reserves
+> against a budget BEFORE the upstream HTTP fires. One class covers
+> every vendor backend that's compatible with the SmolAgents Model
+> interface — you only change the inner constructor.
+
+## Why you'd want this
+
+- **One wrapper, every backend.** SmolAgents' `Model` ABC sits ABOVE
+  the vendor SDK boundary. `InferenceClientModel` (HF Inference API),
+  `OpenAIServerModel` (vLLM / Ollama / Together / Groq /
+  OpenAI-compatible), and `TransformersModel` (in-process HuggingFace
+  transformers) are gated identically by one `SpendGuardSmolModel`
+  instance because gating sits at the ABC layer.
+- **Pre-call refusal, not post-hoc accounting.** DENY raises
+  `DecisionDenied` directly out of `generate()`. `MultiStepAgent.step`
+  has no framework-side catch on the model path (verified against
+  smolagents 1.26), so the raise reaches the `CodeAgent.run` caller
+  cleanly — the upstream model HTTP is **never** issued.
+- **Both `<1.5` and `>=1.5` agents work.** Legacy SmolAgents agents
+  invoke `model(messages, ...)`; current agents call
+  `model.generate(...)`. The wrapper defines both with `__call__`
+  delegating to `generate` so install-time version drift cannot
+  silently bypass the gate.
+- **Audit + approval pipeline shared with every other framework.**
+  The wrapper writes to the same SpendGuard ledger as the LangChain,
+  Pydantic-AI, OpenAI Agents, Google ADK, AWS Strands, DSPy, Agno,
+  BeeAI, and AutoGen integrations. The shared `spendguard_run_context`
+  contextvar (reused from `spendguard.integrations.openai_agents`)
+  means a parent OpenAI Agents run wrapping a SmolAgents `CodeAgent`
+  reuses the same `run_id`.
+
+## Two paths — pick the right one
+
+| If your inner Model is | Install | Integration |
+|------------------------|---------|-------------|
+| `InferenceClientModel` (HF Inference API) | `pip install 'spendguard-sdk[smolagents]'` | `SpendGuardSmolModel(inner=InferenceClientModel(...))` — direct wrap |
+| `OpenAIServerModel` (vLLM / Ollama / Together / Groq / OpenAI-compatible) | (same) | `SpendGuardSmolModel(inner=OpenAIServerModel(...))` — direct wrap |
+| `TransformersModel` (in-process HF transformers) | (same) | `SpendGuardSmolModel(inner=TransformersModel(...))` — direct wrap; **token-count only** (no GPU-second accounting in this release) |
+| `LiteLLMModel` | `pip install spendguard-litellm-shim` | **Do NOT wrap** — use the [LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/) instead. The wrapper REFUSES this combination at construction time to prevent double-gating. |
+| `step_callbacks=[...]` telemetry mirror | (same as wrapper) | `spendguard_step_callback(client, run_id=...)` — **informational only, does NOT gate** |
+
+## Setup (60 seconds)
+
+```bash
+pip install 'spendguard-sdk[smolagents]'
+```
+
+The extra resolves `smolagents>=1.5,<2`. Vendor backends
+(`huggingface_hub`, `openai`, `transformers`) are NOT pinned — SmolAgents
+itself declares those as appropriate sub-extras and you pick the inner
+Model class.
+
+```python
+from smolagents import CodeAgent, OpenAIServerModel
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.smolagents import (
+    SpendGuardSmolModel, spendguard_step_callback,
+    RunContext, run_context,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+client = SpendGuardClient(socket_path="/var/run/spendguard/sidecar.sock",
+                          tenant_id="...")
+await client.connect()
+await client.handshake()
+
+unit = common_pb2.UnitRef(unit_id="usd_micros",
+                          token_kind="output_token",
+                          model_family="gpt-4")
+pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+guarded = SpendGuardSmolModel(
+    inner=OpenAIServerModel(model_id="gpt-4o-mini",
+                            api_base="https://api.openai.com/v1",
+                            api_key="..."),
+    client=client,
+    budget_id="...",
+    window_instance_id="...",
+    unit=unit,
+    pricing=pricing,
+    claim_estimator=lambda messages: [common_pb2.BudgetClaim(...)],
+)
+
+agent = CodeAgent(
+    model=guarded,
+    tools=[],
+    step_callbacks=[spendguard_step_callback(client, run_id="my-run-1")],
+)
+
+# CodeAgent.run is SYNC (smolagents Model.generate is sync). The
+# run_context contextmanager is async — pre-bind the contextvar via an
+# outer async scope so the sync agent inherits the run_id:
+async with run_context(RunContext(run_id="my-run-1")):
+    # Drive the agent inside a thread executor so the wrapper's
+    # asyncio.run does not collide with this outer loop:
+    import asyncio, contextvars
+    ctx = contextvars.copy_context()
+    result = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: ctx.run(agent.run, "Say hello in three words."),
+    )
+```
+
+That's it. Every `model.generate(...)` call now:
+
+1. Reserves against the budget via `RequestDecision(LLM_CALL_PRE)`.
+2. On `ALLOW`, calls the inner model (`OpenAIServerModel` /
+   `InferenceClientModel` / `TransformersModel`) — the upstream HTTP
+   fires only after the reservation is confirmed.
+3. On success, commits the reservation with the real
+   `ChatMessage.token_usage.input_tokens + output_tokens` count.
+4. On `DENY`, raises `DecisionDenied` — your `CodeAgent.run` propagates
+   the error cleanly; the upstream HTTP is **never** issued.
+
+## `step_callbacks` — informational telemetry only
+
+SmolAgents `MultiStepAgent` accepts `step_callbacks: list[Callable]`.
+They fire **AFTER** each `ActionStep` / `PlanningStep` completes —
+they **cannot deny** a pending LLM call and they **cannot reserve**
+before provider HTTP. Useful for telemetry mirroring, not gating.
+
+The `spendguard_step_callback(client, run_id=...)` helper returns a
+sync `Callable[[ActionStep | PlanningStep], None]` that emits an
+informational `agent_step` audit event. The callable catches every
+`Exception` so a sidecar outage during telemetry cannot abort the
+host agent run. The wrapper (`SpendGuardSmolModel`) is the gating
+surface; the helper is for trace symmetry with other frameworks'
+post-step hooks.
+
+## Why no LiteLLMModel wrap?
+
+SmolAgents ships `LiteLLMModel` — a Model subclass that routes via
+LiteLLM. SpendGuard already gates every `litellm.acompletion` /
+`completion` / `Router.acompletion` call in the running interpreter
+via the [LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/) (D12).
+Wrapping a `LiteLLMModel` with `SpendGuardSmolModel` would
+**double-gate** — D12 fires PRE first, then D25 fires PRE again on the
+SmolAgents call boundary, producing two reservations per call.
+
+The wrapper refuses this combination at construction time:
+
+```python
+>>> SpendGuardSmolModel(inner=LiteLLMModel(...), ...)
+spendguard.integrations.smolagents.SpendGuardConfigError:
+SpendGuardSmolModel refuses to wrap a smolagents LiteLLMModel —
+the D12 LiteLLM SDK shim already gates every litellm.acompletion
+call. Use the shim directly: `pip install spendguard-litellm-shim`
+and let the raw LiteLLMModel call through.
+```
+
+## Polyglot trace sharing
+
+The shared `spendguard_run_context` contextvar is **reused** from
+`spendguard.integrations.openai_agents` (review-standards §1.3). A
+polyglot agent stack — say, an OpenAI Agents `Runner.run` invoking a
+SmolAgents `CodeAgent` step — shares one `run_id` across all audit
+rows because both adapters read the same module-level contextvar:
+
+```python
+from agents import Runner, Agent
+from smolagents import CodeAgent, OpenAIServerModel
+
+from spendguard.integrations.openai_agents import (
+    SpendGuardAgentsModel, RunContext, run_context,
+)
+from spendguard.integrations.smolagents import SpendGuardSmolModel
+
+async with run_context(RunContext(run_id="poly-1")):
+    # ... drive both an openai_agents Agent and a smolagents CodeAgent;
+    # every audit row tagged decision_context.integration=openai_agents
+    # OR decision_context.integration=smolagents, all sharing run_id=poly-1.
+    ...
+```
+
+## Demo it locally
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard
+cd agentic-spendguard
+make demo DEMO_MODE=agent_real_smolagents
+```
+
+The demo spins up the SpendGuard sidecar + a mock OpenAI-compatible
+provider (`counting-stub`), then drives `SpendGuardSmolModel(inner=
+OpenAIServerModel(...)).generate(...)` against the stub. The verify
+SQL asserts:
+
+- 1 `LLM_CALL_PRE` decision row with `decision='ALLOW'`,
+  `route='llm.call'`, and
+  `decision_context.integration='smolagents'`.
+- 1 paired `LLM_CALL_POST` outcome row with `outcome='SUCCESS'` and
+  `estimated_amount_atomic` matching the stub's reported token usage.
+
+## Production checklist
+
+- **Budget pre-allocation.** Reserve a budget per tenant / per
+  `CodeAgent.run` invocation; `claim_estimator` projects the expected
+  cost from the message payload.
+- **Run context.** Bind one `run_context(RunContext(run_id=...))`
+  per `CodeAgent.run` call. The same `run_id` ties together all
+  audit rows the agent produces — across the wrapper, the
+  `step_callbacks` telemetry, and any other framework adapters
+  running in the same stack.
+- **Drive from a sync entry point** OR pre-bind the contextvar in an
+  outer async scope and dispatch the sync agent via a thread
+  executor. SmolAgents `Model.generate` is **synchronous**; the
+  wrapper bridges async sidecar RPCs via `asyncio.run`, which
+  raises `SyncInAsyncContext` if invoked inside a running event loop.
+- **Per-vendor pricing.** SmolAgents inner Models expose `model_id`
+  differently (`InferenceClientModel` / `OpenAIServerModel` set it;
+  `TransformersModel` does not). The wrapper has **no default
+  claim_estimator** — you pass one explicitly so the projector can
+  resolve unit pricing without depending on a non-standardized
+  attribute.
+
+## Source spec
+
+- `docs/specs/coverage/D25_smolagents/design.md`
+- `docs/specs/coverage/D25_smolagents/implementation.md`
+- `docs/specs/coverage/D25_smolagents/review-standards.md`

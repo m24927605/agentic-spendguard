@@ -1,0 +1,33 @@
+{
+  "model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+  "payload_start": {
+    "messages": [
+      {"role": "user", "content": "What is the budget cap?"}
+    ],
+    "serialized": {
+      "model": "anthropic.claude-3-5-sonnet-20241022-v2:0",
+      "class_name": "BedrockConverse"
+    }
+  },
+  "payload_end": {
+    "response": {
+      "raw": {
+        "response_id": "bedrock-conv-resp-001",
+        "output": {
+          "message": {
+            "role": "assistant",
+            "content": [
+              {"text": "The budget cap is 100 atomic units per window."}
+            ]
+          }
+        },
+        "stopReason": "end_turn",
+        "usage": {
+          "inputTokens": 7,
+          "outputTokens": 8,
+          "totalTokens": 15
+        }
+      }
+    }
+  }
+}

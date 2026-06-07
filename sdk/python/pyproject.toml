@@ -154,6 +154,77 @@ beeai = [
 autogen = [
   "autogen-core>=0.4,<1.0",
 ]
+# COV_D25 SLICE 1: SmolAgents Python adapter extra. ``smolagents>=1.5``
+# is the canonical floor: ``Model.generate(messages, ...)`` is the
+# stable ABC entry point (legacy ``Model.__call__`` aliased through
+# both versions — review-standards §3.1). ``smolagents.models.
+# ChatMessage`` + ``TokenUsage`` shape (``input_tokens`` /
+# ``output_tokens``) is stable across the 1.x line. Cap below 2.x to
+# fail-closed against a future breaking-change major. See
+# ``docs/specs/coverage/D25_smolagents/design.md`` §5. Vendor backends
+# (``huggingface_hub``, ``openai``, ``transformers``) are NOT pinned
+# here — smolagents itself declares those as appropriate sub-extras
+# and the operator picks the inner Model class. The wrapper is
+# composition-only and never instantiates a vendor SDK directly
+# (review-standards §1.1 / §1.2). LiteLLMModel users are covered
+# transitively by D12 (the LiteLLM SDK shim); the wrapper REFUSES to
+# wrap a LiteLLMModel at construction time to prevent double-gating.
+smolagents = [
+  "smolagents>=1.5,<2",
+]
+# COV_D26 SLICE 1: Letta (ex-MemGPT) Python adapter extra. Letta ships
+# provider-specific subclasses of ``letta.llm_api.llm_client_base.LLMClientBase``
+# (OpenAIClient / AnthropicClient / GoogleAIClient / DeepSeekClient).
+# SpendGuard subclasses the shared ABC and wraps an inner client; one
+# wrapper covers all providers because gating sits at the ABC layer.
+# Floor at 0.8 — ``send_llm_request`` has been stable since 0.6.x but
+# 0.8 is the first release with the normalized
+# ``ChatCompletionResponse.usage.total_tokens`` field this adapter
+# reads. Cap below 1.x to fail-closed against a future breaking-change
+# major. See ``docs/specs/coverage/D26_letta/design.md``.
+letta = [
+  "letta>=0.8,<1.0",
+]
+# COV_D27 SLICE 1: LlamaIndex Python adapter extra. ``llama-index-core``
+# >=0.12 ships the stable ``BaseCallbackHandler`` + ``CBEventType.LLM`` +
+# ``EventPayload.MESSAGES`` / ``RESPONSE`` / ``SERIALIZED`` surface we
+# gate against — verified against 0.12.0–0.12.50. The adapter resolves
+# only ``llama-index-core``; operators install whichever provider
+# sub-package (``llama-index-llms-openai``, ``-anthropic``, ``-gemini``,
+# ``-bedrock-converse``) they actually use — D27 covers them all via
+# response-shape detection rather than per-vendor monkey-patching. The
+# LiteLLM-routed path (``llama-index-llms-litellm``) is covered
+# transitively by D12 (LiteLLM SDK shim); see design.md §1 + §3 for the
+# two-path coverage matrix. No upper cap — LlamaIndex's callback surface
+# has been stable across the 0.12.x line (verified 0.12.0–0.12.50). See
+# ``docs/specs/coverage/D27_llamaindex/design.md`` §5.
+llamaindex = [
+  "llama-index-core>=0.12",
+]
+# COV_D28 SLICE 1: Atomic Agents (BrainBlend AI) + Instructor (Jason
+# Liu) Python adapter extra. Atomic Agents is Pydantic-first; BaseAgent
+# is constructed via ``BaseAgentConfig(client=<instructor>, ...)`` and
+# at run time calls ``self.client.chat.completions.create_with_completion(
+# response_model=..., ...)``. The only surface that observes every call
+# — including Instructor's validation-retry loop — is the Instructor
+# object itself, so SpendGuard wraps it via composition (see
+# ``docs/specs/coverage/D28_atomic_agents/design.md`` §1 for the
+# rejected raw-SDK alternative).
+#
+# DEVIATION-A vs spec design.md §8.2 pin ``atomic-agents>=1.0,<2.0``:
+# the actual PyPI release line is 2.x (latest ``2.8.0`` as of
+# 2026-06-08); there is no published 1.x line under the current
+# ``atomic-agents`` package name. We pin ``>=2.0,<3`` so the extra:
+#   1. Fail-closes against a future breaking-change major (3.x line),
+#   2. Floors at the version where ``BaseAgent`` /
+#      ``BaseAgentConfig(client=<instructor>)`` are GA — verified
+#      against ``atomic-agents==2.8.0`` from PyPI.
+# Cap ``instructor>=1.5,<2.0`` per spec (1.9.x is current; 1.5 is the
+# floor where ``create_with_completion`` is stable).
+atomic-agents = [
+  "atomic-agents>=2.0,<3",
+  "instructor>=1.5,<2.0",
+]
 litellm = [
   # `[proxy]` sub-extra pulls fastapi/uvicorn/gunicorn that the
   # `litellm` CLI subprocess needs to boot. Without it,

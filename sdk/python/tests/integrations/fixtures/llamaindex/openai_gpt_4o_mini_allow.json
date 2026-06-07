@@ -1,0 +1,37 @@
+{
+  "model": "gpt-4o-mini",
+  "payload_start": {
+    "messages": [
+      {"role": "user", "content": "What is the budget cap?"}
+    ],
+    "serialized": {
+      "model": "gpt-4o-mini",
+      "class_name": "OpenAI"
+    }
+  },
+  "payload_end": {
+    "response": {
+      "raw": {
+        "id": "chatcmpl-abc",
+        "object": "chat.completion",
+        "created": 1719500000,
+        "model": "gpt-4o-mini",
+        "choices": [
+          {
+            "index": 0,
+            "message": {
+              "role": "assistant",
+              "content": "The budget cap is 100 atomic units per window."
+            },
+            "finish_reason": "stop"
+          }
+        ],
+        "usage": {
+          "prompt_tokens": 12,
+          "completion_tokens": 30,
+          "total_tokens": 42
+        }
+      }
+    }
+  }
+}

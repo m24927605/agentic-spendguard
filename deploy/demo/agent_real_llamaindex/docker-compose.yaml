@@ -1,0 +1,244 @@
+# COV_D27 SLICE 5 (`DEMO_MODE=agent_real_llamaindex`) — sidecar compose overlay.
+#
+# Mirrors `deploy/demo/agent_real_letta/docker-compose.yaml`
+# field-for-field; only the runner service differs (Python LlamaIndex
+# `Settings.callback_manager = CallbackManager([handler])` wiring vs
+# Letta's `Agent.step()` wrapping a `SpendGuardLettaClient`).
+#
+# Layered on top of `deploy/demo/compose.yaml` via:
+#   docker compose -f deploy/demo/compose.yaml \
+#                  -f deploy/demo/agent_real_llamaindex/docker-compose.yaml up
+# The Makefile `DEMO_MODE=agent_real_llamaindex` branch does that for you.
+#
+# Services declared here:
+#
+#   counting-stub          mock provider accepting OpenAI-shape requests
+#                          so LlamaIndex's `OpenAI` LLM gets responses
+#                          without needing a real OPENAI_API_KEY (the
+#                          stub variant uses `MockLLM` so even this stub
+#                          isn't hit on the synthesis call — the embed
+#                          step is local for MockEmbedding).
+#
+#   llamaindex-runner      Python 3.12 container that `pip install -e`s
+#                          the in-tree `spendguard-sdk` with the
+#                          `[llamaindex]` extra, plus
+#                          `llama-index-core>=0.12` (the synthesis-only
+#                          floor; provider sub-packages
+#                          `llama-index-llms-openai` etc. are operator-
+#                          installed at production time). Runs the demo
+#                          driver from `deploy/demo/demo/run_demo.py`
+#                          with SPENDGUARD_DEMO_MODE=agent_real_llamaindex.
+#
+# Anti-scope: this overlay does NOT redeclare postgres, sidecar, ledger,
+# canonical-ingest, bundles-init, pki-init or any other base service —
+# the Makefile target brings up the base stack first, then this overlay.
+#
+# Two-path matrix (per design.md §3):
+#   - LiteLLM-routed via `llama-index-llms-litellm`: D12 covers
+#     transitively (operators install D12; D27 PRE still fires for the
+#     outer LlamaIndex event but D12's contextvar recursion guard
+#     prevents double-reservation on the inner LiteLLM call).
+#   - Direct provider via `llama-index-llms-openai` / `-anthropic` /
+#     `-gemini` / `-bedrock-converse`: D27 covers via the callback
+#     manager. This demo exercises the direct path.
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  # Mock OpenAI provider on /v1/chat/completions. LlamaIndex's `OpenAI`
+  # LLM (used in the live `agent_real_llamaindex` variant) hits that
+  # endpoint; the stub serves it with a canned response so the runner
+  # exercises the real handler PRE/POST lifecycle without a paid API key.
+  #
+  # The stub variant `agent_real_llamaindex_stub` uses `MockLLM` which
+  # doesn't hit any HTTP endpoint — counting-stub is still up but its
+  # hit counter stays at 0 on synthesis turns (proves the
+  # zero-provider-HTTP-on-DENY invariant for the stub mode too).
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not self.path.startswith("/v1/chat/completions"):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"chatcmpl-llamaindex-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "The budget cap is 100 atomic units per window."},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 12,
+                              "completion_tokens": 30,
+                              "total_tokens": 42},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok")
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── llamaindex-runner ────────────────────────────────────────────────
+  # Python 3.12 container that pip-installs the in-tree `spendguard-sdk`
+  # with the `[llamaindex]` extra (resolving `llama-index-core>=0.12`),
+  # then runs the canonical `deploy/demo/demo/run_demo.py` driver with
+  # SPENDGUARD_DEMO_MODE=agent_real_llamaindex. Provider sub-packages
+  # are NOT pulled by the adapter extra — for live mode the driver
+  # installs `llama-index-llms-openai` explicitly. The stub mode uses
+  # `MockLLM` shipped in `llama-index-core` itself, so the stub variant
+  # needs no provider package at all (CI smoke path).
+  llamaindex-runner:
+    image: python:3.12-slim-bookworm
+    container_name: spendguard-llamaindex-runner
+    # Demo-only: run as root inside the container so the named-volume
+    # site-packages tree (mounted by docker as root-owned) is writable.
+    # Production deployments of `spendguard-sdk[llamaindex]` run under
+    # the consumer's own runtime; the adapter itself never touches the
+    # filesystem at runtime.
+    working_dir: /opt/spendguard/deploy/demo/demo
+    environment:
+      SPENDGUARD_SIDECAR_UDS: "/var/run/spendguard/adapter.sock"
+      SPENDGUARD_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_UNIT_ID: "66666666-6666-4666-8666-666666666666"
+      SPENDGUARD_PRICING_VERSION: "demo-pricing-v1"
+      SPENDGUARD_FX_RATE_VERSION: "demo-fx-v1"
+      SPENDGUARD_UNIT_CONVERSION_VERSION: "demo-conv-v1"
+      SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX: "0000000000000000000000000000000000000000000000000000000000000000"
+      SPENDGUARD_HANDSHAKE_TIMEOUT_MS: "30000"
+      SPENDGUARD_COUNTING_STUB_URL: "http://counting-stub:8765"
+      SPENDGUARD_DEMO_MODE: "agent_real_llamaindex"
+      # LlamaIndex's `OpenAI` LLM reads OPENAI_API_KEY + OPENAI_BASE_URL
+      # at construction (via the underlying openai package). Pointing
+      # at counting-stub means no real API key is needed for the live
+      # variant; the stub variant uses MockLLM so it ignores both.
+      OPENAI_API_KEY: "sk-spendguard-demo-stub"
+      OPENAI_BASE_URL: "http://counting-stub:8765/v1"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_CACHE_DIR: "off"
+    volumes:
+      # Workspace source — read-only.
+      - ../..:/opt/spendguard:ro
+      # Sidecar UDS shared with the rest of the stack.
+      - sidecar-uds:/var/run/spendguard
+      # Writable site-packages persistence across re-runs.
+      - llamaindex-runner-venv:/opt/venv
+    tmpfs:
+      - /tmp
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        echo "[llamaindex-runner] python $$(python --version)"
+
+        # Build a virtualenv on the named volume so repeat runs are fast.
+        if [ ! -d /opt/venv/bin ]; then
+          echo "[llamaindex-runner] creating venv at /opt/venv..."
+          python -m venv /opt/venv
+        fi
+        . /opt/venv/bin/activate
+
+        echo "[llamaindex-runner] installing in-tree spendguard-sdk[llamaindex]..."
+        # The adapter extra resolves llama-index-core only; the
+        # provider sub-packages are operator-installed. The stub
+        # variant uses MockLLM from llama-index-core itself so no
+        # provider package is needed for CI smoke.
+        pip install -e '/opt/spendguard/sdk/python[llamaindex]' || true
+        # Live variant pulls llama-index-llms-openai explicitly; the
+        # stub variant skips it. The Makefile's SPENDGUARD_DEMO_MODE
+        # env decides which path the driver takes.
+        if [ "$$SPENDGUARD_DEMO_MODE" = "agent_real_llamaindex" ]; then
+          pip install 'llama-index-llms-openai' || \
+            echo "[llamaindex-runner] llama-index-llms-openai install failed — "\
+                 "driver will fall back to MockLLM (CI smoke path)."
+        fi
+
+        echo "[llamaindex-runner] sidecar UDS ready check..."
+        for i in $$(seq 1 60); do
+          if [ -S "$$SPENDGUARD_SIDECAR_UDS" ]; then
+            echo "[llamaindex-runner] sidecar UDS visible at $$SPENDGUARD_SIDECAR_UDS"
+            break
+          fi
+          sleep 1
+        done
+
+        echo "[llamaindex-runner] launching run_demo.py (SPENDGUARD_DEMO_MODE=$$SPENDGUARD_DEMO_MODE)..."
+        exec python /opt/spendguard/deploy/demo/demo/run_demo.py
+    depends_on:
+      sidecar:
+        condition: service_healthy
+      counting-stub:
+        condition: service_healthy
+    networks:
+      spendguard-net:
+        aliases: [llamaindex-runner]
+
+volumes:
+  llamaindex-runner-venv:

@@ -1,0 +1,338 @@
+---
+title: "Atomic Agents (Instructor) budget control with SpendGuard"
+description: >-
+  Pre-call token budget enforcement for Atomic Agents (BrainBlend AI)
+  + Instructor (Jason Liu) using Agentic SpendGuard. Wraps the
+  Instructor object via composition so every call — including
+  Instructor's validation-retry loop — gets its own reservation.
+---
+
+> Your Atomic Agents `BaseAgent` runs `agent.run({...})` with a
+> Pydantic `output_schema`, and Instructor re-prompts the provider
+> when validation fails. Wrap the raw provider SDK and you miss
+> every retry — silently undercounting cost and breaking the audit
+> chain. SpendGuard wraps the **Instructor object** via composition
+> so every call, including the retry loop, lands a reservation
+> BEFORE the provider HTTP fires.
+
+## Why you'd want this
+
+- **Per-attempt gating, not per-outer-call.** Instructor's
+  validation-retry loop re-prompts the provider every time Pydantic
+  rejects the parsed response. SpendGuard intercepts the per-attempt
+  raw provider method (`inner.client.chat.completions.create`)
+  so EACH retry attempt lands its own reservation. Wrapping the
+  outer `chat.completions.create_with_completion` would gate the
+  whole retry loop ONCE — undercount.
+- **One wrapper, every provider.** Instructor unifies OpenAI /
+  Anthropic / Gemini / Cohere behind a single `Instructor` /
+  `AsyncInstructor` object. SpendGuard wraps that object via
+  composition; the same wrapper instance covers every backend.
+- **Pre-call refusal, not post-hoc accounting.** DENY raises
+  `DecisionDenied` directly out of the gated raw method. Atomic
+  Agents' `BaseAgent.run` has no framework-side catch on the
+  create-call path (verified against `atomic-agents==2.8.0`), so the
+  raise reaches the caller cleanly — the upstream provider call is
+  **never** issued.
+- **Audit + approval pipeline shared with every other framework.**
+  The wrapper writes to the same SpendGuard ledger as the
+  LangChain, Pydantic-AI, OpenAI Agents, Google ADK, AWS Strands,
+  DSPy, Agno, BeeAI, AutoGen, SmolAgents, Letta, and LlamaIndex
+  integrations. The shared `spendguard_run_context` contextvar
+  (reused from `spendguard.integrations.openai_agents`) means a
+  parent LangChain run wrapping an Atomic Agents call reuses the
+  same `run_id`.
+
+## Setup (60 seconds)
+
+```bash
+pip install 'spendguard-sdk[atomic-agents]'
+# Transitively pulls atomic-agents>=2.0,<3 + instructor>=1.5,<2.0.
+```
+
+Bring up a sidecar via the demo stack:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## The Instructor-wrap rationale
+
+Atomic Agents is Pydantic-first; `BaseAgent` is constructed via
+`BaseAgentConfig(client=<instructor>, ...)` and at run time calls
+`self.client.chat.completions.create_with_completion(response_model=output_schema, ...)`.
+There is no first-class LLM-call middleware. Two candidate gate
+points:
+
+| Candidate | Coverage | Verdict |
+|-----------|----------|---------|
+| Wrap raw provider SDK before `instructor.from_openai(...)` | Misses **every** Instructor validation retry — the retry loop calls Instructor's patched `create_fn` which holds its own reference to the raw method captured at `from_openai` time | **Rejected** |
+| Wrap the **Instructor object** + intercept the per-attempt raw provider method | Every call AND every retry — each gets its own reservation | **Adopted** |
+
+The rejected raw-SDK wrap looks simpler, but it silently undercounts
+Instructor's retries because the patched `create_fn` calls the
+**closure-captured** raw method, NOT a fresh `client.chat.completions.create`
+lookup each time. Wrapping the raw client AFTER
+`instructor.from_openai(...)` does NOT update what `create_fn`
+calls.
+
+## Wire it up
+
+```python
+import asyncio
+import instructor
+from openai import OpenAI
+from atomic_agents.agents.base_agent import BaseAgent, BaseAgentConfig
+from pydantic import BaseModel
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.atomic_agents import (
+    wrap_instructor_client,
+    RunContext, run_context,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+class Answer(BaseModel):
+    final: str
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    def estimate(kwargs):
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget",
+            unit=unit,
+            amount_atomic="500",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    raw_instructor = instructor.from_openai(OpenAI(), mode=instructor.Mode.TOOLS)
+    guarded = wrap_instructor_client(
+        raw_instructor,
+        spendguard_client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate,
+    )
+
+    agent = BaseAgent(BaseAgentConfig(
+        client=guarded,
+        model="gpt-4o-mini",
+        system_prompt_generator=...,
+        input_schema=...,
+        output_schema=Answer,
+    ))
+
+    async with run_context(RunContext(run_id="my-run-1")):
+        result = agent.run({"query": "What's 2+2?"})
+    print(result.final)
+
+
+asyncio.run(main())
+```
+
+**`claim_estimator` is required.** Per design.md §5 the wrapper does
+not ship a default estimator because Instructor's polyglot routing
+(OpenAI / Anthropic / Gemini / Cohere) makes any single default
+wrong. The operator supplies the projection — `claim_estimator`
+receives the FULL kwargs dict (model / messages / response_model /
+tools / tool_choice) so it can project provider-aware claims.
+
+## How it works
+
+```text
+BaseAgent.run({...})
+  → guarded.chat.completions.create_with_completion(
+        model=..., messages=..., response_model=output_schema, ...)
+    → inner.create_with_completion(...)        [Instructor's outer call]
+      └─ retry_sync(func=guarded_raw_create, ...)
+          └─ for each attempt:
+              ├─ guarded_raw_create(messages, **kwargs)
+              │   ├─ ctx = current_run_context()
+              │   ├─ signature = blake2b(messages | model
+              │   │     | response_model.qualname | tools | tool_choice)
+              │   ├─ sidecar.RequestDecision(LLM_CALL_PRE)
+              │   │     ALLOW → call original raw create
+              │   │     DENY  → raise DecisionDenied (no inner HTTP)
+              │   ├─ result = original_raw_create(messages, **kwargs)
+              │   └─ sidecar.emit_llm_call_post(SUCCESS|FAILURE|CANCELLED,
+              │                                  estimated=usage.total_tokens)
+              └─ Instructor's process_response parses + retries if
+                 Pydantic rejects → re-enters the loop, fresh gate
+                 fires with mutated messages (different signature →
+                 different llm_call_id → fresh reservation)
+```
+
+The proxy:
+
+1. Locates the raw provider method via
+   `inner.client.chat.completions.create` (or
+   `inner.create_fn.__wrapped__` fallback).
+2. Wraps it with a sync/async gated closure that does PRE / inner /
+   POST.
+3. Re-runs `instructor.patch(create=gated_raw, mode=inner.mode)` to
+   mint a new `create_fn` that drives Instructor's retry loop
+   against the gated raw method.
+
+Each Instructor retry attempt re-enters the gate naturally because
+Instructor's `retry_sync` / `retry_async` calls the (now gated) raw
+method per attempt. The retry's `messages` differs by the injected
+validation error (Instructor's `handle_reask_kwargs`), so
+`_signature(kwargs)` diverges → fresh `llm_call_id` per attempt —
+without an explicit retry counter (review-standards §2.2 makes an
+explicit counter a Blocker because it would couple the wrapper to
+Instructor's internal retry state).
+
+## DEVIATIONS from spec
+
+### DEVIATION-A — `atomic-agents>=2.0,<3` pin
+
+The spec pinned `atomic-agents>=1.0,<2.0`. Reality (2026-06-08): the
+actual PyPI release line is 2.x with `2.8.0` as the latest. We pin
+`>=2.0,<3` so the extra fail-closes against a future
+breaking-change major (3.x line) and floors at the version where
+`BaseAgent` / `BaseAgentConfig(client=<instructor>)` are GA.
+
+### DEVIATION-B — subpackage layout
+
+The spec specified a single flat `atomic_agents.py` module. We split
+into a `atomic_agents/` subpackage mirroring the autogen / beeai /
+dspy layout: the import-time guard fires cleanly on a missing extra
+while `_hook` stays directly importable for tests.
+
+### DEVIATION-C — gate at raw provider method, not `create_with_completion`
+
+The spec described gating at `chat.completions.create_with_completion`
+with the claim that "Instructor's internal retries re-enter this
+proxy → each gets its own reservation". Reality (verified against
+`instructor==1.14.5` and `1.15.1`): Instructor's outer
+`create_with_completion` is called ONCE; `instructor.core.retry.retry_sync`
+then calls `self.create_fn` per attempt, which is the
+`instructor.patch`-wrapped function whose retry loop calls the raw
+provider method per attempt. The load-bearing intercept point is the
+raw provider method, not the outer chat-completions surface.
+
+## Polyglot run-context sharing
+
+The `RunContext` / `run_context()` / `current_run_context()` symbols
+re-export from `spendguard.integrations.openai_agents` (with a
+contextvar-name-equivalent fallback when the `[openai-agents]` extra
+isn't installed). A polyglot stack mixing OpenAI Agents, AutoGen,
+LlamaIndex, and Atomic Agents in one run shares a single trace
+because all four adapters read the same module-level
+`spendguard_run_context` contextvar.
+
+```python
+from spendguard.integrations.openai_agents import RunContext, run_context
+
+async with run_context(RunContext(run_id="polyglot-run-1")):
+    # Both calls land under the same run_id in the ledger:
+    await openai_agents_runner.run(agent, "...")
+    atomic_agent.run({"query": "..."})
+```
+
+## Async path
+
+When you build the Instructor via `instructor.from_openai(AsyncOpenAI(...))`,
+the factory dispatches to `SpendGuardAsyncInstructorProxy`
+automatically. `agent.run_async(...)` (where supported) works
+unchanged — direct `await` on the sidecar, no `asyncio.run`
+bridging.
+
+```python
+from openai import AsyncOpenAI
+raw = instructor.from_openai(AsyncOpenAI())  # AsyncInstructor
+guarded = wrap_instructor_client(raw, ...)   # SpendGuardAsyncInstructorProxy
+
+async with run_context(RunContext(run_id="async-run-1")):
+    parsed, raw = await guarded.chat.completions.create_with_completion(
+        model="gpt-4o-mini", response_model=Answer,
+        messages=[{"role": "user", "content": "..."}],
+    )
+```
+
+## Sync proxy inside an async context
+
+The sync proxy bridges to the async sidecar via `asyncio.run(...)`.
+That raises `RuntimeError` from inside a running event loop;
+SpendGuard surfaces this as a typed `_SyncInAsyncContext`
+(a `SpendGuardConfigError` subclass). The error message points the
+operator at `AsyncInstructor` as the fix:
+
+```python
+# WRONG — sync proxy inside async context.
+async def bad():
+    raw = instructor.from_openai(OpenAI())  # sync
+    guarded = wrap_instructor_client(raw, ...)
+    # This raises _SyncInAsyncContext:
+    parsed, _ = guarded.chat.completions.create_with_completion(...)
+
+# RIGHT — async proxy.
+async def good():
+    raw = instructor.from_openai(AsyncOpenAI())  # async
+    guarded = wrap_instructor_client(raw, ...)
+    parsed, _ = await guarded.chat.completions.create_with_completion(...)
+```
+
+## Provider-routing note
+
+Operator must pick a `claim_estimator` matching the inner
+Instructor's provider:
+
+- OpenAI: `spendguard.integrations.openai_agents._default_estimator`
+  covers this case.
+- Anthropic: project from the Anthropic `messages.create` kwargs
+  shape (`messages`, `max_tokens`, `system`).
+- Gemini: from `generationConfig.maxOutputTokens` and `contents`.
+- Cohere: from `chat`'s `max_tokens` and `message`.
+
+The estimator receives the FULL kwargs dict so it can introspect
+which provider Instructor is targeting before projecting the
+reservation amount.
+
+## See also
+
+- [LlamaIndex (Python)](/docs/integrations/llamaindex/) — another
+  composition-based wrap of a client object.
+- [Letta (Python)](/docs/integrations/letta/) — same pattern,
+  different framework.
+
+## Limitations
+
+D28 v1 explicitly does NOT close any of:
+
+- **Streaming.** `instructor.Partial[...]` /
+  `Iterable[...]` is out of POC scope; commit only after the final
+  parsed response via Instructor's standard
+  `create_with_completion` path.
+- **Anthropic-native messages surface** (`client.messages.create`).
+  Atomic Agents documents `chat.completions`.
+- **Patching `BaseAgent` directly.** That surface churns per
+  release; the Instructor-wrap is forward-stable.
+- **Wrapping Instructor's `Mode` selection logic.** That's
+  Instructor's concern.
+
+## Reference
+
+* Spec: `docs/specs/coverage/D28_atomic_agents/`
+* Module: `sdk/python/src/spendguard/integrations/atomic_agents/`
+* Demo overlay: `deploy/demo/agent_real_atomic_agents/`
+* Test suite: `sdk/python/tests/integrations/atomic_agents/`

@@ -1,0 +1,280 @@
+---
+title: "LlamaIndex budget control with SpendGuard"
+description: >-
+  Pre-call token budget enforcement for LlamaIndex — the dominant RAG
+  framework. The D27 CallbackManager handler gates every CBEventType.LLM
+  event across OpenAI / Anthropic / Gemini / Bedrock Converse providers.
+  The LiteLLM-routed path is covered transitively by D12.
+---
+
+> Your LlamaIndex `VectorStoreIndex(...).as_query_engine().query("...")`
+> dispatches into `OpenAI(model="gpt-4o-mini")._chat` — bypassing every
+> SpendGuard provider-level adapter you have wired today. SpendGuard
+> registers a `BaseCallbackHandler` on `Settings.callback_manager` so
+> every `CBEventType.LLM` event reserves against a budget BEFORE the
+> upstream provider HTTP fires. One handler instance covers every
+> provider sub-package — OpenAI, Anthropic, Gemini, Bedrock Converse —
+> because gating sits at the LlamaIndex event boundary, not the model
+> subclass.
+
+## Read this first: two-path coverage matrix
+
+LlamaIndex providers split into two routes. D27 covers one of them; the
+other is covered transitively by D12 (the LiteLLM SDK shim). Pick
+based on which LlamaIndex provider package you import.
+
+| LlamaIndex package | Coverage | Install |
+|--------------------|----------|---------|
+| `llama-index-llms-litellm` (`LiteLLM(...)`) | **D12** ([LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/)) — transitive | `pip install 'spendguard-sdk'` + `spendguard_litellm_shim.install(...)` |
+| `llama-index-llms-openai` (`OpenAI(...)`) | **D27** (this page) | `pip install 'spendguard-sdk[llamaindex]'` |
+| `llama-index-llms-anthropic` | **D27** | (same) |
+| `llama-index-llms-gemini` / `-google-genai` | **D27** | (same) |
+| `llama-index-llms-bedrock-converse` | **D27** | (same) |
+
+Operators using mixed setups install **both** D12 + D27. D12's
+contextvar recursion guard prevents double-reservation on the
+LiteLLM-routed inner call (the LlamaIndex event still fires PRE; D12
+short-circuits the inner `acompletion` reserve).
+
+If you scrolled past the table to find the "real" answer: the answer
+is the table. The LiteLLM-routed and direct-provider paths take
+different integrations.
+
+## Why you'd want this
+
+- **One handler, every LlamaIndex provider.** LlamaIndex's
+  `BaseCallbackHandler` + `CBEventType.LLM` sits ABOVE the vendor SDK
+  boundary. SpendGuard subclasses the handler ABC and gates by event
+  type; one handler instance covers `OpenAI` / `Anthropic` / `Gemini` /
+  `BedrockConverse` identically. You don't write per-vendor adapters.
+- **Per-event gating, not per-query.** LlamaIndex's `QueryEngine`
+  fans a single user query into multiple LLM calls (retriever scoring,
+  refinement, synthesis). Query-level gating over-grants
+  reservations. D27 sits at the `CBEventType.LLM` event level, which
+  observes every LLM call the query engine dispatches.
+- **Filter is one enum compare.** Non-LLM events
+  (`CBEventType.EMBEDDING` / `RETRIEVE` / `CHUNK` / `QUERY` /
+  `NODE_PARSING`) early-return with zero sidecar calls. The 80%+ of
+  callback fires that aren't LLM calls cost essentially nothing.
+- **Pre-call refusal, not post-hoc accounting.** DENY raises
+  `SpendGuardLlamaIndexDenied` directly out of `on_event_start()`.
+  LlamaIndex's `CallbackManager.event(...)` context manager
+  propagates the exception out through the enclosing `LLM.chat` /
+  `LLM.predict` call BEFORE the upstream provider HTTP fires —
+  verified by a zero-hit counting-stub on the DENY turn.
+- **Audit + approval pipeline shared with every other framework.**
+  The handler writes to the same SpendGuard ledger as the LangChain,
+  Pydantic-AI, OpenAI Agents, Google ADK, AWS Strands, DSPy, Agno,
+  BeeAI, AutoGen / AG2, SmolAgents, and Letta integrations.
+
+## Setup (60 seconds)
+
+```bash
+pip install 'spendguard-sdk[llamaindex]'
+# Install whichever provider sub-package you actually use:
+pip install llama-index-llms-openai            # OpenAI
+# pip install llama-index-llms-anthropic       # Anthropic
+# pip install llama-index-llms-gemini          # Gemini
+# pip install llama-index-llms-bedrock-converse # Bedrock Converse
+```
+
+The `[llamaindex]` extra resolves `llama-index-core>=0.12` only —
+provider sub-packages are operator-installed because most teams pick
+exactly one vendor. The handler doesn't care which one; vendor
+detection is by response shape, not class-name parsing.
+
+Bring up a sidecar via the demo stack:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## Wire it up
+
+```python
+import asyncio
+
+from llama_index.core import Settings, VectorStoreIndex, Document
+from llama_index.core.callbacks import CallbackManager
+from llama_index.llms.openai import OpenAI
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.llamaindex import (
+    SpendGuardLlamaIndexHandler,
+    SpendGuardLlamaIndexDenied,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    handler = SpendGuardLlamaIndexHandler(
+        client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+        # claim_estimator is OPTIONAL: when omitted, the handler
+        # dispatches off payload[EventPayload.SERIALIZED]["model"]
+        # via the project-wide default estimator.
+    )
+
+    # ONE registration; propagates to every LLM in the query graph.
+    Settings.callback_manager = CallbackManager([handler])
+    Settings.llm = OpenAI(model="gpt-4o-mini")
+
+    docs = [Document(text="The budget cap is 100 atomic units per window.")]
+    index = VectorStoreIndex.from_documents(docs)
+    response = index.as_query_engine().query("What is the budget cap?")
+    print(response)
+
+    # DENY:
+    try:
+        index.as_query_engine().query("...")
+    except SpendGuardLlamaIndexDenied as exc:
+        print(f"denied: {exc.reason_codes}")
+
+
+asyncio.run(main())
+```
+
+**`claim_estimator` is optional.** When omitted, the handler
+dispatches the project-wide default estimator off the model field in
+`payload[EventPayload.SERIALIZED]["model"]`. Family detection:
+`"gpt-*"` / `"o1*"` → OpenAI; `"claude-*"` → Anthropic; `"gemini-*"` →
+Gemini; `"anthropic.*"` / `"amazon.*"` → Bedrock; else → chars/4
+fallback with a single `warnings.warn` per (model, process).
+
+## How it works
+
+```text
+Settings.callback_manager = CallbackManager([handler])
+  ↓ query_engine.query("...")
+  ↓ LLM._llm_predict / _chat
+  ↓ on_event_start(CBEventType.LLM, payload={MESSAGES|PROMPT, SERIALIZED}, event_id=...)
+    → SpendGuardLlamaIndexHandler._on_llm_start
+       ├─ signature = blake2b(model | messages, digest_size=16)
+       ├─ llm_call_id / decision_id derived from signature
+       ├─ run_id = run_id_fn(payload) → trace_id → parent_id → derived UUID
+       ├─ client.request_decision(LLM_CALL_PRE, projected_claims)
+       │     CONTINUE → stash by event_id in self._state
+       │     DENY     → SpendGuardLlamaIndexDenied raises (provider HTTP never dispatched)
+       └─ return
+  ↓ (if ALLOW) provider HTTP
+  ↓ on_event_end(CBEventType.LLM, payload={RESPONSE}, event_id=...)
+    → SpendGuardLlamaIndexHandler._on_llm_end
+       ├─ pending = self._state.pop(event_id)
+       ├─ total_tokens = _extract_total_tokens(response)
+       │     ├─ OpenAI:  raw["usage"]["total_tokens"]
+       │     ├─ Anthropic:  raw["usage"]["input_tokens"] + ["output_tokens"]
+       │     ├─ Gemini:  raw["usage_metadata"]["total_token_count"]
+       │     └─ Bedrock Converse:  raw["usage"]["inputTokens"] + ["outputTokens"]
+       └─ client.emit_llm_call_post(SUCCESS, estimated=total_tokens)
+```
+
+The handler keys per-LLM-call state off `event_id` (LlamaIndex's
+cross-call correlation key) in `self._state: dict[str, _PendingCall]`.
+Concurrent query engines (via `concurrent.futures` dispatch) get
+distinct `event_id` values per LlamaIndex contract, so the stash is
+isolation-safe under parallel dispatch.
+
+### Sync-from-async bridge
+
+LlamaIndex's callback contract is fully synchronous —
+`on_event_start` / `on_event_end` are called from inside the
+`CallbackManager.event(...)` context manager regardless of whether
+the enclosing query was sync (`.query()`) or async (`.aquery()`).
+SpendGuard's client is async-only. The handler owns a per-instance
+daemon thread + asyncio loop and dispatches each
+`client.request_decision(...)` / `emit_llm_call_post(...)` coroutine
+onto it via `asyncio.run_coroutine_threadsafe`. This avoids
+`nest_asyncio` and works equally for both `.query()` and `.aquery()`.
+
+## Run-ID resolution cascade
+
+The handler resolves the SpendGuard `run_id` per the design.md §5
+cascade:
+
+1. `run_id_fn(payload)` — when constructed with a non-default
+   `run_id_fn`, the override wins when it returns a non-empty string.
+2. `self._trace_id` — set via `start_trace(trace_id)` on the handler;
+   LlamaIndex's `CallbackManager.start_trace_with_id("run-abc")`
+   invokes this on every registered handler.
+3. `parent_id` — the LlamaIndex event-graph parent. Useful when a
+   sub-graph is dispatched without a fresh `start_trace`.
+4. Derived UUID from the payload signature — deterministic per
+   `(model, messages)`, so retries reuse the same `run_id`.
+
+Use `start_trace` / `end_trace` to bind a run id explicitly:
+
+```python
+Settings.callback_manager.start_trace_with_id("my-run-1")
+response = index.as_query_engine().query("...")
+Settings.callback_manager.end_trace_with_id("my-run-1")
+```
+
+## What D27 does NOT cover
+
+- **LlamaIndex.TS** (`@llamaindex/cloud` and the TypeScript port) —
+  different callback shape; deferred to a separate JS adapter
+  deliverable.
+- **Streaming intra-chunk gating.** `CBEventType.CHUNK` is
+  observational; commit fires at turn boundary (parity with LangChain
+  / OpenAI Agents priors). The reservation covers the full streamed
+  response.
+- **`CBEventType.EMBEDDING` / `RETRIEVE` gating.** Embedding cost is
+  a separate budget axis with a different `BudgetClaim` shape; this
+  handler explicitly filters non-LLM events at entry.
+- **Re-gating the LiteLLM-routed path.** Operators install D12; the
+  contextvar guard prevents double-reservation. See the matrix at the
+  top of this page.
+- **`Settings` mutation by SpendGuard.** The handler does NOT
+  auto-register itself on `Settings.callback_manager`. The operator
+  wires the registration explicitly so the handler installation is
+  visible at the integration point.
+
+## Try the demo
+
+```bash
+cd deploy/demo
+# Stub variant — no API key, uses MockLLM (CI gate):
+make demo DEMO_MODE=agent_real_llamaindex_stub
+# Live variant — points llama-index-llms-openai at the counting-stub:
+make demo DEMO_MODE=agent_real_llamaindex
+```
+
+This brings up the full sidecar stack, installs
+`spendguard-sdk[llamaindex]` and `llama-index-llms-openai` in a
+runner container, and drives one
+`VectorStoreIndex.from_documents` → `query_engine.query(...)` cycle
+through `Settings.callback_manager = CallbackManager([handler])`.
+The verification gates assert the ledger holds a `reserve` +
+`commit_estimated` pair under `tenant_id =
+00000000-0000-4000-8000-000000000001` and the canonical event log
+holds a `spendguard.audit.decision` row.
+
+## See also
+
+- [D12 LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/) —
+  covers `llama-index-llms-litellm` transitively. Coexists with D27
+  safely (D27 reserves at the LlamaIndex event layer, D12
+  short-circuits at the LiteLLM layer when its in-flight contextvar
+  is set).
+- [LangChain](/docs/integrations/langchain/) — sibling reference for
+  the callback-handler pattern (LangChain's `BaseCallbackHandler`).
+- [Source: `spendguard/integrations/llamaindex`](https://github.com/m24927605/agentic-spendguard/tree/main/sdk/python/src/spendguard/integrations/llamaindex)
+- [Source: D27 design spec](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D27_llamaindex/design.md)

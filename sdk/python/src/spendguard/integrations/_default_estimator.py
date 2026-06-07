@@ -457,6 +457,92 @@ def agno_default_claim_estimator(
     return estimator
 
 
+def llamaindex_default_claim_estimator(
+    *,
+    budget_id: str,
+    window_instance_id: str,
+    unit: Any,  # noqa: ANN401 — common_pb2.UnitRef
+    model: str,
+) -> Callable[[Mapping[str, Any]], list[Any]]:
+    """LlamaIndex ``ClaimEstimator = Callable[[payload_dict], list[BudgetClaim]]``.
+
+    Receives the LlamaIndex ``payload`` dict passed to
+    ``on_event_start`` (keyed by ``EventPayload.MESSAGES`` /
+    ``EventPayload.PROMPT`` / ``EventPayload.SERIALIZED``). The
+    estimator pulls the model from
+    ``payload[EventPayload.SERIALIZED]["model"]`` per call so a
+    multi-model query engine dispatches to the right encoder; falls
+    back to the construction-time ``model`` arg when the payload
+    serialized field is absent.
+
+    Treatment of message content mirrors
+    ``langchain_default_claim_estimator``: ``payload[MESSAGES]`` is
+    forwarded to ``fns.count_input_tokens`` directly when it's a list;
+    a single ``payload[PROMPT]`` string is wrapped as one user message.
+    LlamaIndex's ``EventPayload`` enum members are hashable so
+    ``payload[EventPayload.MESSAGES]`` and ``payload["messages"]`` both
+    work — we accept either at runtime (real enum or the stub fallback
+    used by unit tests).
+    """
+    # No upfront fns; re-dispatch per call because LlamaIndex's
+    # SERIALIZED["model"] may differ from the construction-time `model`
+    # when callers override Settings.llm mid-session.
+
+    def estimator(payload: Mapping[str, Any]) -> list[Any]:
+        # SERIALIZED["model"] is the authoritative provider model; fall
+        # back to the closure-captured model when the payload is sparse.
+        effective_model = model
+        # Look up via real EventPayload.SERIALIZED enum first; fall
+        # back to the literal string the stub fallback uses.
+        try:
+            from llama_index.core.callbacks.schema import (  # type: ignore[import-not-found]
+                EventPayload as _EP,
+            )
+
+            serialized = payload.get(_EP.SERIALIZED)
+            messages_raw = payload.get(_EP.MESSAGES)
+            prompt_raw = payload.get(_EP.PROMPT)
+        except ImportError:
+            serialized = payload.get("serialized")
+            messages_raw = payload.get("messages")
+            prompt_raw = payload.get("prompt")
+
+        if isinstance(serialized, Mapping):
+            payload_model = serialized.get("model")
+            if isinstance(payload_model, str) and payload_model:
+                effective_model = payload_model
+
+        fns = estimator_for_model(effective_model)
+
+        # Coerce messages to the shape expected by count_input_tokens.
+        messages: list[Any]
+        if isinstance(messages_raw, list):
+            messages = list(messages_raw)
+        elif isinstance(prompt_raw, str):
+            messages = [{"role": "user", "content": prompt_raw}]
+        elif prompt_raw is not None:
+            messages = [{"role": "user", "content": str(prompt_raw)}]
+        else:
+            messages = []
+
+        input_tokens = fns.count_input_tokens(messages, effective_model)
+        # LlamaIndex's callback surface doesn't expose max_tokens on
+        # the payload; the cap lives on the inner ``LLM`` instance.
+        # Use family default for output projection (mirrors LangChain).
+        output_tokens = fns.count_output_tokens_max(None, effective_model)
+        amount = input_tokens + output_tokens
+        return [
+            _build_claim(
+                budget_id=budget_id,
+                window_instance_id=window_instance_id,
+                unit=unit,
+                amount_atomic=amount,
+            )
+        ]
+
+    return estimator
+
+
 # Sentinel used by integrations to detect "user didn't pass a value vs
 # user passed None on purpose". Per spec §8.5 backward compat both
 # should default to the integration-built default estimator.
@@ -475,6 +561,7 @@ __all__ = [
     "agt_default_claim_estimator",
     "langchain_default_claim_estimator",
     "litellm_default_claim_estimator",
+    "llamaindex_default_claim_estimator",
     "openai_agents_default_claim_estimator",
     "pydantic_ai_default_claim_estimator",
 ]

@@ -439,6 +439,89 @@ else ifeq ($(DEMO_MODE),agent_real_ag2)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_smolagents)
+	@echo "[demo] DEMO_MODE=agent_real_smolagents → COV_D25 SLICE 5 (SmolAgents Python adapter)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/agent_real_smolagents/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider on"
+	@echo "[demo]               /v1/chat/completions) + smolagents-runner (Python 3.12"
+	@echo "[demo]               + smolagents>=1.5,<2 + spendguard-sdk[smolagents])."
+	@echo "[demo]   Driver issues 1 SpendGuardSmolModel.generate() through"
+	@echo "[demo]   inner=OpenAIServerModel(...):"
+	@echo "[demo]     ALLOW path proves PRE-before-vendor-HTTP + POST-after."
+	$(COMPOSE) -f agent_real_smolagents/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_letta)
+	@echo "[demo] DEMO_MODE=agent_real_letta → COV_D26 SLICE 5 (Letta library-mode adapter)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/agent_real_letta/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider on"
+	@echo "[demo]               /v1/chat/completions) + letta-runner (Python 3.12"
+	@echo "[demo]               + letta>=0.8,<1.0 + spendguard-sdk[letta])."
+	@echo "[demo]   Driver issues 1 Agent.step() through"
+	@echo "[demo]   SpendGuardLettaClient(inner=OpenAIClient(...)):"
+	@echo "[demo]     ALLOW path proves PRE-before-provider-HTTP + POST-after."
+	@echo "[demo]   NOTE: ~70%% of Letta deployments are server-mode REST — use"
+	@echo "[demo]         D02 + D03 egress proxy for those. D26 covers"
+	@echo "[demo]         library-mode (in-process Agent.step()) only."
+	$(COMPOSE) -f agent_real_letta/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_llamaindex)
+	@echo "[demo] DEMO_MODE=agent_real_llamaindex → COV_D27 SLICE 5 (LlamaIndex callback-manager adapter)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/agent_real_llamaindex/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI on /v1/chat/completions)"
+	@echo "[demo]               + llamaindex-runner (Python 3.12 +"
+	@echo "[demo]               llama-index-core>=0.12 + llama-index-llms-openai"
+	@echo "[demo]               + spendguard-sdk[llamaindex])."
+	@echo "[demo]   Driver issues 1 VectorStoreIndex.from_documents -> query through"
+	@echo "[demo]   Settings.callback_manager = CallbackManager([SpendGuardLlamaIndexHandler]):"
+	@echo "[demo]     ALLOW path proves PRE-before-provider-HTTP + POST-after."
+	@echo "[demo]   Two-path coverage matrix: llama-index-llms-litellm is covered"
+	@echo "[demo]         transitively by D12; this demo covers the direct provider"
+	@echo "[demo]         path (D27)."
+	$(COMPOSE) -f agent_real_llamaindex/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_llamaindex_stub)
+	@echo "[demo] DEMO_MODE=agent_real_llamaindex_stub → COV_D27 no-API-key variant."
+	@echo "[demo]   Reuses the agent_real_llamaindex overlay so the runner has"
+	@echo "[demo]   llama-index-core installed (required by the integration's"
+	@echo "[demo]   import-time guard), but the driver exercises the handler"
+	@echo "[demo]   against MockLLM from llama_index.core.llms (no provider"
+	@echo "[demo]   sub-package required, no API key needed). CI gate G09."
+	$(COMPOSE) -f agent_real_llamaindex/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_atomic_agents)
+	@echo "[demo] DEMO_MODE=agent_real_atomic_agents → COV_D28 SLICE 4 (Atomic Agents + Instructor adapter)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/agent_real_atomic_agents/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider serving"
+	@echo "[demo]               Instructor TOOLS-mode function-tool calls whose"
+	@echo "[demo]               'arguments' JSON deserializes into Answer Pydantic"
+	@echo "[demo]               schema) + atomic-agents-runner (Python 3.12 +"
+	@echo "[demo]               instructor>=1.5,<2.0 + atomic-agents>=2.0,<3 +"
+	@echo "[demo]               openai + pydantic + spendguard-sdk[atomic-agents])."
+	@echo "[demo]   Driver wraps Instructor via wrap_instructor_client(...) →"
+	@echo "[demo]   SpendGuardInstructorProxy. Per DEVIATION-C the gate intercepts"
+	@echo "[demo]   the raw provider create method (per-attempt boundary inside"
+	@echo "[demo]   Instructor's retry loop), proving PRE-before-vendor-HTTP +"
+	@echo "[demo]   POST-after on every Instructor retry attempt."
+	$(COMPOSE) -f agent_real_atomic_agents/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),subscription_meter)
 	@echo "[demo] DEMO_MODE=subscription_meter → D13 (Subscription-Tier Meter)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -681,6 +764,49 @@ else ifeq ($(DEMO_MODE),agent_real_ag2)
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure || \
 	  echo "[demo] outbox-closure skipped: agent_real_ag2 demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_smolagents)
+	@echo "[demo] running smolagents-runner (Python 3.12 + smolagents>=1.5,<2 + SpendGuardSmolModel)..."
+	$(COMPOSE) -f agent_real_smolagents/docker-compose.yaml run --rm smolagents-runner
+	@echo "[demo] verifying COV_D25 SLICE 5 (agent_real_smolagents ALLOW)..."
+	@$(MAKE) demo-verify-agent-real-smolagents
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_smolagents demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_letta)
+	@echo "[demo] running letta-runner (Python 3.12 + letta>=0.8,<1.0 + SpendGuardLettaClient)..."
+	$(COMPOSE) -f agent_real_letta/docker-compose.yaml run --rm letta-runner
+	@echo "[demo] verifying COV_D26 SLICE 5 (agent_real_letta ALLOW)..."
+	@$(MAKE) demo-verify-agent-real-letta
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_letta demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_llamaindex)
+	@echo "[demo] running llamaindex-runner (Python 3.12 + llama-index-core + llama-index-llms-openai + SpendGuardLlamaIndexHandler)..."
+	$(COMPOSE) -f agent_real_llamaindex/docker-compose.yaml run --rm llamaindex-runner
+	@echo "[demo] verifying COV_D27 SLICE 5 (agent_real_llamaindex ALLOW)..."
+	@$(MAKE) demo-verify-agent-real-llamaindex
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_llamaindex demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_llamaindex_stub)
+	@echo "[demo] running llamaindex-runner in stub mode (no API key, MockLLM)..."
+	@SPENDGUARD_DEMO_MODE=agent_real_llamaindex_stub \
+	  $(COMPOSE) -f agent_real_llamaindex/docker-compose.yaml run --rm \
+	    -e SPENDGUARD_DEMO_MODE=agent_real_llamaindex_stub llamaindex-runner
+	@echo "[demo] verifying COV_D27 SLICE 5 (agent_real_llamaindex_stub PRE + POST)..."
+	@$(MAKE) demo-verify-agent-real-llamaindex
+else ifeq ($(DEMO_MODE),agent_real_atomic_agents)
+	@echo "[demo] running atomic-agents-runner (Python 3.12 + instructor + atomic-agents + SpendGuardInstructorProxy)..."
+	$(COMPOSE) -f agent_real_atomic_agents/docker-compose.yaml run --rm atomic-agents-runner
+	@echo "[demo] verifying COV_D28 SLICE 4 (agent_real_atomic_agents ALLOW)..."
+	@$(MAKE) demo-verify-agent-real-atomic-agents
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_atomic_agents demo deferred per D05 UnitRef gap (cross-slice tracking)"
 else ifeq ($(DEMO_MODE),agent_real_adk_stub)
 	@echo "[demo] running adk-runner in stub mode (no GOOGLE_API_KEY)..."
 	@SPENDGUARD_DEMO_MODE=agent_real_adk_stub \
@@ -1470,6 +1596,133 @@ demo-verify-agent-real-autogen:
 		   RAISE NOTICE 'COV_D24 CANONICAL OK: decision=% outcome=% autogen_tagged=%', v_decision, v_outcome, v_autogen; \
 		 END; \$$\$$;"
 	@echo "[demo] COV_D24 SLICE 5 agent_real_autogen verification done"
+
+# COV_D25 SLICE 5 (agent_real_smolagents demo) verification. Mirrors
+# demo-verify-agent-real-autogen layout: ledger-DB assertions in
+# verify_step_agent_real_smolagents.sql + INV-2 strict-order DO block +
+# a cross-DB canonical_events check under spendguard_canonical that
+# asserts at least 1 decision row + 1 outcome row landed after the
+# outbox forwarder drained, plus the smolagents integration tag is
+# present on the decision rows.
+demo-verify-agent-real-smolagents:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_agent_real_smolagents.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; v_smol INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   SELECT COUNT(*) INTO v_smol FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND payload_json::jsonb #>> '{decision_context,integration}' = 'smolagents'; \
+		   IF v_decision < 1 THEN \
+		     RAISE EXCEPTION 'COV_D25_GATE: canonical_events.decision >= 1 expected (ALLOW), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D25_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D25 CANONICAL OK: decision=% outcome=% smolagents_tagged=%', v_decision, v_outcome, v_smol; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D25 SLICE 5 agent_real_smolagents verification done"
+
+# COV_D26 SLICE 5 (agent_real_letta demo) verification. Mirrors
+# demo-verify-agent-real-autogen layout: ledger-DB assertions in
+# verify_step_agent_real_letta.sql + INV-2 strict-order DO block + a
+# cross-DB canonical_events check under spendguard_canonical that
+# asserts at least 1 decision row + 1 outcome row landed after the
+# outbox forwarder drained, with the `integration = 'letta'` tag.
+demo-verify-agent-real-letta:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_agent_real_letta.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; v_letta INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   SELECT COUNT(*) INTO v_letta FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND payload_json::jsonb #>> '{decision_context,integration}' = 'letta'; \
+		   IF v_decision < 1 THEN \
+		     RAISE EXCEPTION 'COV_D26_GATE: canonical_events.decision >= 1 expected (ALLOW), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D26_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D26 CANONICAL OK: decision=% outcome=% letta_tagged=%', v_decision, v_outcome, v_letta; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D26 SLICE 5 agent_real_letta verification done"
+
+# COV_D27 SLICE 5 (agent_real_llamaindex demo) verification. Mirrors
+# demo-verify-agent-real-letta layout: ledger-DB assertions in
+# verify_step_agent_real_llamaindex.sql + INV-2 strict-order DO block
+# + a cross-DB canonical_events check under spendguard_canonical that
+# asserts at least 1 decision row + 1 outcome row landed after the
+# outbox forwarder drained.
+demo-verify-agent-real-llamaindex:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_agent_real_llamaindex.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 1 THEN \
+		     RAISE EXCEPTION 'COV_D27_GATE: canonical_events.decision >= 1 expected (ALLOW), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D27_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D27 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D27 SLICE 5 agent_real_llamaindex verification done"
+
+# COV_D28 SLICE 4 (agent_real_atomic_agents demo) verification.
+# Mirrors demo-verify-agent-real-autogen / agent-real-beeai / letta
+# layout: ledger-DB assertions in
+# verify_step_agent_real_atomic_agents.sql + INV-2 strict-order DO
+# block + a cross-DB canonical_events check under spendguard_canonical
+# that asserts at least 1 decision row + 1 outcome row landed after
+# the outbox forwarder drained, plus the atomic_agents integration
+# tag is present on the decision rows.
+demo-verify-agent-real-atomic-agents:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_agent_real_atomic_agents.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; v_atomic INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   SELECT COUNT(*) INTO v_atomic FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND payload_json::jsonb #>> '{decision_context,integration}' = 'atomic_agents'; \
+		   IF v_decision < 1 THEN \
+		     RAISE EXCEPTION 'COV_D28_GATE: canonical_events.decision >= 1 expected (ALLOW), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D28_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D28 CANONICAL OK: decision=% outcome=% atomic_agents_tagged=%', v_decision, v_outcome, v_atomic; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D28 SLICE 4 agent_real_atomic_agents verification done"
 
 # COV_D08 SLICE 5 (openai_agents_ts demo) verification. Mirrors the
 # langchain_ts / vercel_ai_mastra layout: ledger-DB assertions in

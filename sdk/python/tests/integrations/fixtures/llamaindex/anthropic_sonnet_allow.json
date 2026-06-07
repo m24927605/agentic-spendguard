@@ -1,0 +1,33 @@
+{
+  "model": "claude-3-5-sonnet-20241022",
+  "payload_start": {
+    "messages": [
+      {"role": "user", "content": "What is the budget cap?"}
+    ],
+    "serialized": {
+      "model": "claude-3-5-sonnet-20241022",
+      "class_name": "Anthropic"
+    }
+  },
+  "payload_end": {
+    "response": {
+      "raw": {
+        "id": "msg_01ABCXYZ123",
+        "type": "message",
+        "role": "assistant",
+        "content": [
+          {
+            "type": "text",
+            "text": "The budget cap is 100 atomic units per window."
+          }
+        ],
+        "model": "claude-3-5-sonnet-20241022",
+        "stop_reason": "end_turn",
+        "usage": {
+          "input_tokens": 10,
+          "output_tokens": 15
+        }
+      }
+    }
+  }
+}

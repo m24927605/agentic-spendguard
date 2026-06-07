@@ -1,0 +1,265 @@
+---
+title: "Letta (ex-MemGPT) budget control with SpendGuard"
+description: >-
+  Pre-call token budget enforcement for Letta (formerly MemGPT) — the
+  stateful agent platform with persistent memory. Library mode uses
+  the D26 LLMClientBase wrap; server mode uses the D02 + D03
+  egress-proxy drop-in.
+---
+
+> Your Letta `Agent.step()` fans out into 3-4 internal LLM calls per
+> turn (reasoning → tool select → reflection) and you can't tell which
+> one blew the budget — until the bill arrives. SpendGuard subclasses
+> `letta.llm_api.llm_client_base.LLMClientBase` (the shared ABC every
+> Letta provider client derives from) and wraps an inner client so
+> every `send_llm_request()` call reserves against a budget BEFORE
+> the upstream HTTP fires. One wrapper covers every Letta provider —
+> OpenAI, Anthropic, Google, DeepSeek — because gating sits at the
+> ABC layer.
+
+## Read this first: library mode vs server mode
+
+**~70% of Letta deployments run as `letta server` REST** (the
+canonical production shape). For server mode, **do not** install D26 —
+use the egress-proxy drop-in instead. D26 is for embedded library mode
+only.
+
+| If you run Letta as | Use | Why |
+|---------------------|-----|-----|
+| **`letta server` REST** (recommended production shape) | [D02 closed-CLI install](/docs/integrations/litellm-proxy/) + [D03 base-URL drop-in](/docs/integrations/openai-agents/) — skip D26 | Egress-proxy already covers it; no SDK changes inside Letta. One drop-in gates every provider call. |
+| **Embedded library** (`from letta import ...`) | **D26 `wrap_llm_client(inner=OpenAIClient(...), ...)`** (this page) | The only safe per-call gate without upstream hooks. `step_callback` is too coarse — it fires once per turn even when the turn fans out into 3-4 LLM calls. |
+| **LiteLLM-routed** (any Letta deployment whose inner provider is `LiteLLMClient`) | [D12 LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/) covers transitively | No D26 work needed. |
+
+If you scrolled past the table to find the "real" answer: the answer
+is the table. Library mode and server mode are different products and
+take different integrations. D26 is library-mode only.
+
+## Why you'd want this (library mode)
+
+- **One wrapper, every Letta provider.** Letta's
+  `letta.llm_api.llm_client_base.LLMClientBase` ABC sits ABOVE the
+  vendor SDK boundary. SpendGuard subclasses the ABC and wraps an
+  inner client via composition; one wrapper instance gates
+  `OpenAIClient` / `AnthropicClient` / `GoogleAIClient` /
+  `DeepSeekClient` identically. You don't write per-vendor adapters.
+- **Per-call gating, not per-turn.** Letta's only built-in hook
+  (`step_callback`) fires once per `Agent.step()` even though a turn
+  frequently fans out into 3-4 internal LLM calls (reasoning → tool
+  select → reflection). Step-level gating over-grants reservations.
+  D26 sits at `send_llm_request`, which observes every LLM call.
+- **Pre-call refusal, not post-hoc accounting.** DENY raises
+  `DecisionDenied` directly out of `send_llm_request()`.
+  `LLMClientBase` has no framework-side catch on this path (verified
+  against letta 0.8.0), so the raise reaches the `Agent.step` caller
+  cleanly — the upstream model call is **never** issued.
+- **Audit + approval pipeline shared with every other framework.**
+  The wrapper writes to the same SpendGuard ledger as the LangChain,
+  Pydantic-AI, OpenAI Agents, Google ADK, AWS Strands, DSPy, Agno,
+  BeeAI, AutoGen / AG2, and SmolAgents integrations. The shared
+  `spendguard_run_context` contextvar (reused from
+  `spendguard.integrations.openai_agents`) means a parent LangChain
+  run wrapping a Letta agent reuses the same `run_id`.
+
+## Setup (60 seconds)
+
+```bash
+pip install 'spendguard-sdk[letta]'
+pip install 'letta>=0.8,<1.0'
+```
+
+Bring up a sidecar via the demo stack:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## Wire it up
+
+```python
+import asyncio
+
+from letta.llm_api.openai_client import OpenAIClient
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.letta import (
+    SpendGuardLettaClient,
+    wrap_llm_client,
+    RunContext, run_context,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    def estimate(request_data):
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget",
+            unit=unit,
+            amount_atomic="500",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    inner = OpenAIClient()  # reads OPENAI_API_KEY + OPENAI_BASE_URL
+    guarded = wrap_llm_client(
+        inner=inner,
+        client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate,
+    )
+
+    # Hand `guarded` to your Letta Agent per its documented
+    # LLMClient injection point. Letta's `Agent` calls
+    # `inner.send_llm_request` once per internal reasoning step;
+    # the wrapper inserts PRE/POST around each call.
+    agent = letta_agent_factory(llm_client=guarded, ...)  # your factory
+
+    async with run_context(RunContext(run_id="my-run-1")):
+        response = await agent.step("Say hello in three words.")
+    print(response)
+
+
+asyncio.run(main())
+```
+
+**`claim_estimator` is required.** Per design.md §5 the wrapper does
+not ship a default estimator because per-provider tokenizer mismatch
+makes a single default fragile (OpenAI `cl100k_base` vs Anthropic vs
+Gemini). The operator supplies the projection.
+
+## How it works
+
+```text
+Agent.step(message)
+  → (internal reasoning loop, fans out to 3-4 LLM calls per turn)
+    → SpendGuardLettaClient.send_llm_request(request_data, llm_config, tools, ...)
+        ├─ ctx = current_run_context()
+        ├─ signature = blake2b(request_data | llm_config | tools | force_tool_use)
+        ├─ llm_call_id / decision_id derived from signature
+        ├─ sidecar.RequestDecision(LLM_CALL_PRE, projected_claims)
+        │     ALLOW    → continue
+        │     DENY     → DecisionDenied propagates (no inner HTTP)
+        ├─ inner.send_llm_request(...)              ← provider HTTP
+        └─ sidecar.emit_llm_call_post(SUCCESS|FAILURE|CANCELLED,
+                                      estimated=usage.total_tokens)
+```
+
+The wrapper subclasses `letta.llm_api.llm_client_base.LLMClientBase`
+**without calling `super().__init__()`** — the ABC's init takes
+provider config (API keys, base URLs, retry policy) the wrapper
+doesn't own. Calling `super().__init__()` would silently change
+inner-client behavior under upstream refactors. The inner client is
+held by composition: SpendGuard never instantiates `OpenAIClient` /
+`AnthropicClient` / `GoogleAIClient` / `DeepSeekClient` directly.
+
+`__getattr__` delegates every `LLMClientBase` attribute the wrapper
+doesn't override (`llm_config`, `provider`, `build_request_data`,
+`convert_response_to_chat_completion`, and any future additions) to
+the inner client — without side effects, so framework-side token
+budget caps and message-history builders see a transparent passthrough.
+
+## Sync path safety
+
+Letta also exposes `send_llm_request_sync()` for older code paths.
+The wrapper's sync sibling detects an active asyncio loop via
+`asyncio.get_running_loop()` and **raises `RuntimeError` if one is
+active**, pointing at the async variant:
+
+```python
+# OK — fresh thread, no active loop:
+result = guarded.send_llm_request_sync(request_data, llm_config)
+
+# Raises RuntimeError — inside an active loop, use the async path:
+async def inside_loop():
+    return guarded.send_llm_request_sync(request_data, llm_config)
+    # ^ RuntimeError("...send_llm_request_sync called from inside an
+    #                 active asyncio loop. Use `await
+    #                 client.send_llm_request(...)` instead — the
+    #                 async variant is the canonical Letta 0.8+ path.")
+```
+
+This is intentional — silent `asyncio.run()` re-entry inside a loop
+corrupts the reservation state of any in-flight `send_llm_request` on
+the parent loop.
+
+## Polyglot run-context sharing
+
+The `RunContext` / `run_context()` / `current_run_context()` symbols
+re-export from `spendguard.integrations.openai_agents` (with a
+contextvar-name-equivalent fallback when the `[openai-agents]` extra
+isn't installed). A polyglot stack mixing OpenAI Agents, Letta, and
+AutoGen in one run shares a single trace because all three adapters
+read the same module-level `spendguard_run_context` contextvar.
+
+```python
+from spendguard.integrations.openai_agents import RunContext, run_context
+
+async with run_context(RunContext(run_id="polyglot-run-1")):
+    # All three calls land under the same run_id in the ledger:
+    await openai_agents_runner.run(orchestrator_agent, "...")
+    await letta_agent.step("...")                 # gated by D26
+    await autogen_assistant.on_messages([...], cancellation_token)
+```
+
+## What D26 does NOT cover
+
+- **`letta server` REST surface** — use D02 + D03 egress-proxy
+  drop-in. See the decision table at the top of this page.
+- **`letta.embeddings.*`** — embedding gating is a separate
+  deliverable with a different `BudgetClaim` shape. Track it in the
+  Letta integration backlog; D26 is LLM-call-only.
+- **`step_callback`** — explicitly inadequate. Coarse turn-level
+  gating over-grants reservations for multi-call turns. Customers
+  layering a callback on top of D26 for higher-level telemetry is
+  fine, but D26 itself doesn't ship one.
+- **Letta-side upstream PR** — D26 is SDK-internal only. The wrapper
+  is built around composition over `LLMClientBase`; no Letta
+  maintainer action is on the critical path.
+
+## Try the demo
+
+```bash
+cd deploy/demo
+make demo DEMO_MODE=agent_real_letta
+```
+
+This brings up the full sidecar stack, installs `letta>=0.8,<1.0`
+and `spendguard-sdk[letta]` in a runner container, and drives one
+`send_llm_request` through `SpendGuardLettaClient`. The verification
+gates assert the ledger holds a `reserve` + `commit_estimated` pair
+under `tenant_id = 00000000-0000-4000-8000-000000000001` and the
+canonical event log holds a `spendguard.audit.decision` row tagged
+with `decision_context.integration = 'letta'`.
+
+## See also
+
+- [D02 closed CLI install](/docs/integrations/litellm-proxy/) — the
+  server-mode path. Use this if you run `letta server`.
+- [D03 base-URL drop-in](/docs/integrations/openai-agents/) — the
+  server-mode response shape. Pairs with D02.
+- [D12 LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/) — covers
+  LiteLLM-routed Letta deployments transitively. Coexists with D26
+  safely (D26 reserves at the `LLMClientBase` layer, D12
+  short-circuits at the LiteLLM layer when its in-flight contextvar
+  is set).
+- [D24 AutoGen / AG2 (Python)](/docs/integrations/autogen/) — sibling
+  reference. Same `inner` wrap pattern, different ABC.
+- [Source: `spendguard/integrations/letta`](https://github.com/m24927605/agentic-spendguard/tree/main/sdk/python/src/spendguard/integrations/letta)
+- [Source: D26 design spec](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D26_letta/design.md)

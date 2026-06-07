@@ -1,0 +1,36 @@
+{
+  "model": "gemini-1.5-flash",
+  "payload_start": {
+    "messages": [
+      {"role": "user", "content": "What is the budget cap?"}
+    ],
+    "serialized": {
+      "model": "gemini-1.5-flash",
+      "class_name": "Gemini"
+    }
+  },
+  "payload_end": {
+    "response": {
+      "raw": {
+        "id": "gemini-flash-resp-001",
+        "candidates": [
+          {
+            "content": {
+              "parts": [
+                {"text": "The budget cap is 100 atomic units per window."}
+              ],
+              "role": "model"
+            },
+            "finish_reason": "STOP",
+            "index": 0
+          }
+        ],
+        "usage_metadata": {
+          "prompt_token_count": 13,
+          "candidates_token_count": 20,
+          "total_token_count": 33
+        }
+      }
+    }
+  }
+}

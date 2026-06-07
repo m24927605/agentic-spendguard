@@ -1,0 +1,18 @@
+{
+  "model": "gpt-4o-mini",
+  "payload_start": {
+    "messages": [
+      {"role": "user", "content": "What is the budget cap?"}
+    ],
+    "serialized": {
+      "model": "gpt-4o-mini",
+      "class_name": "OpenAI"
+    }
+  },
+  "sidecar_decision": {
+    "decision": "STOP",
+    "decision_id": "dec-deny-d27-001",
+    "reason_codes": ["BUDGET_EXHAUSTED"]
+  },
+  "payload_end": null
+}
