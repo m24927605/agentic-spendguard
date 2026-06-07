@@ -442,11 +442,12 @@ spec:
             capabilities: { drop: ["ALL"] }
       volumes:
         - name: svid
-          csi:
-            driver: csi.spiffe.io
-            readOnly: true
+          secret:
+            secretName: {{ .Values.envoyExtproc.svid.secretName | quote }}
 {{- end }}
 ```
+
+> **SVID mount note (added 2026-06-07 in SLICE 6 R2 spec-hygiene)**: The chart standard at `charts/spendguard/templates/output_predictor_plugin_svid.yaml` (established in HARDEN_08) uses cert-manager-issued `Secret` projection rather than the SPIFFE CSI driver (`csi: driver: csi.spiffe.io`). Both patterns produce per-tenant SVIDs with cert pinning verified at `SidecarSvidVerifier`; the threat model is identical. The block above was updated from the original `csi.spiffe.io` example to match the chart standard. Future cluster-level migration to CSI driver is tracked as a chart-wide backlog item.
 
 NetworkPolicy entry in `charts/spendguard/templates/networkpolicy.yaml` allows ingress on port 8443 from pods labeled `app.kubernetes.io/name: envoy-ai-gateway` (operator-overridable).
 

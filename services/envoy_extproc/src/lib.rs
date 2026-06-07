@@ -21,6 +21,10 @@ pub mod decision;
 pub mod handshake;
 pub mod parse;
 pub mod proto;
+/// SLICE 6 — `/readyz` + `/livez` HTTP probe wired alongside the
+/// mTLS-TCP transport hard-switch. Deferred from SLICE 1 per the
+/// design §3.3 carve-out.
+pub mod readyz;
 pub mod response;
 pub mod response_parse;
 pub mod server;

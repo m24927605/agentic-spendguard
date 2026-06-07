@@ -1,0 +1,236 @@
+{{- /*
+COV_06 — D01 Envoy AI Gateway ExtProc sidecar Helm sub-chart.
+
+Spec refs:
+  - docs/specs/coverage/D01_envoy_extproc/design.md §3.3 (transport
+    hard-switch — production deployment shape LOCKED at SLICE 6:
+    mTLS-over-TCP, per-tenant SVID minting carries over from
+    HARDEN_08, /readyz probe lands here too)
+  - docs/specs/coverage/D01_envoy_extproc/design.md §3.4 (deny-on-fail-closed)
+  - docs/specs/coverage/D01_envoy_extproc/implementation.md §6
+  - docs/specs/coverage/D01_envoy_extproc/review-standards.md §7.1
+  - docs/slices/COV_06_envoy_extproc_helm.md
+
+Resources rendered when envoyExtproc.enabled=true:
+  - Deployment   — main gRPC server + readyz probe + SVID volume + SecurityContext
+  - Service      — ClusterIP exposing the gRPC port to Envoy AI Gateway pods
+  - ServiceAccount — workload identity for cert-manager binding
+  - ServiceMonitor — Prometheus scrape of the readyz/metrics surface (optional, gated)
+  - NetworkPolicy — ingress restricted to app.kubernetes.io/name=envoy-ai-gateway pods (§7.1)
+
+Pattern mirrors:
+  - charts/spendguard/templates/output_predictor.yaml (Deployment shape,
+    securityContext baseline, runtime image gates)
+  - charts/spendguard/templates/output_predictor_plugin_svid.yaml
+    (per-tenant SVID minting via cert-manager — carried over per design §3.3)
+*/ -}}
+{{- if .Values.envoyExtproc.enabled }}
+{{- $component := "envoy-extproc" -}}
+{{- $fullname := include "spendguard.fullname" . -}}
+
+{{- /* Production profile gates: matches output_predictor.yaml SLICE_03 R3 N2.
+       image.tag MUST be semver or digest-pinned; chart.profile=demo allows
+       alpha tags. tenant_id is REQUIRED in production (matches GA_03). */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- if eq .Values.envoyExtproc.image.tag "" -}}
+{{- fail "envoyExtproc.image.tag is required under chart.profile=production" -}}
+{{- end -}}
+{{- include "spendguard.validateProductionImageTag" (dict "root" . "name" "envoyExtproc" "tag" .Values.envoyExtproc.image.tag) -}}
+{{- end -}}
+
+{{- /* SLICE 6 R2 m3 fix: image.tag falls back to Chart.AppVersion when
+       not explicitly set. Production profile already gates on non-empty
+       tag above (the production fail-closed check fires before this
+       block), so this default only fires under chart.profile=demo. */ -}}
+{{- $effectiveImageTag := default .Chart.AppVersion .Values.envoyExtproc.image.tag -}}
+{{- $effectiveImage := merge (dict "tag" $effectiveImageTag) .Values.envoyExtproc.image -}}
+
+{{- if eq .Values.chart.profile "production" -}}
+{{- if eq (toString .Values.envoyExtproc.tenantId) "" -}}
+{{- fail "envoyExtproc.tenantId is required under chart.profile=production (matches GA_03 fail-closed posture)" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" (toString .Values.envoyExtproc.tenantId)) -}}
+{{- fail "envoyExtproc.tenantId must be a UUID under chart.profile=production" -}}
+{{- end -}}
+{{- if eq .Values.envoyExtproc.svid.secretName "" -}}
+{{- fail "envoyExtproc.svid.secretName is required under chart.profile=production (per-tenant SVID minted by cert-manager; mounts tls.crt/tls.key/ca.crt — design §3.3 mTLS pin)" -}}
+{{- end -}}
+{{- if eq .Values.envoyExtproc.sidecarUrl "" -}}
+{{- fail "envoyExtproc.sidecarUrl is required under chart.profile=production (mTLS-over-TCP sidecar endpoint, e.g. https://<release>-spendguard-sidecar:8443)" -}}
+{{- end -}}
+{{- if not (hasPrefix "https://" (toString .Values.envoyExtproc.sidecarUrl)) -}}
+{{- fail "envoyExtproc.sidecarUrl must start with `https://` — plaintext disallowed under chart.profile=production (design §3.3)" -}}
+{{- end -}}
+{{- end -}}
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-envoy-extproc
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.envoyExtproc.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $fullname }}-envoy-extproc
+      # Container security baseline mirrors output_predictor (SLICE_03 R2 M7).
+      securityContext:
+        {{- include "spendguard.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: envoy-extproc
+          image: {{ include "spendguard.image" (merge (dict "image" $effectiveImage "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "spendguard.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - { name: grpc,    containerPort: 9443 }
+            - { name: probe,   containerPort: 9090 }
+          env:
+            # Bind gRPC ExtProc server on every interface so the
+            # ClusterIP Service can route. The probe listener stays on
+            # the same pod IP space but on a different port.
+            - { name: SPENDGUARD_EXTPROC_BIND_ADDR,    value: "0.0.0.0:9443" }
+            - { name: SPENDGUARD_EXTPROC_READYZ_ADDR,  value: "0.0.0.0:9090" }
+            # SLICE 6 — production transport is mTLS-TCP (design §3.3).
+            # Production image is built `--no-default-features` so even
+            # an operator typo flipping this to `uds` fails closed at
+            # boot (defense in depth, see config.rs UdsTransportDisabled).
+            - { name: SPENDGUARD_EXTPROC_TRANSPORT,    value: "tcp" }
+            - { name: SPENDGUARD_EXTPROC_SIDECAR_URL,  value: {{ .Values.envoyExtproc.sidecarUrl | quote }} }
+            - { name: SPENDGUARD_EXTPROC_TENANT_ID,    value: {{ .Values.envoyExtproc.tenantId | quote }} }
+            # SVID material paths inside the pod. cert-manager (via
+            # `envoyExtproc.svid.secretName`) projects tls.crt / tls.key /
+            # ca.crt at the configured mount.
+            - { name: SPENDGUARD_EXTPROC_CLIENT_CERT_PATH, value: {{ printf "%s/tls.crt" .Values.envoyExtproc.svid.mountPath | quote }} }
+            - { name: SPENDGUARD_EXTPROC_CLIENT_KEY_PATH,  value: {{ printf "%s/tls.key" .Values.envoyExtproc.svid.mountPath | quote }} }
+            - { name: SPENDGUARD_EXTPROC_CA_BUNDLE_PATH,   value: {{ printf "%s/ca.crt" .Values.envoyExtproc.svid.mountPath | quote }} }
+            - { name: SPENDGUARD_EXTPROC_REQUEST_TIMEOUT_MS, value: {{ .Values.envoyExtproc.requestTimeoutMs | quote }} }
+            # POC default workload id; production deploys use the
+            # downward-API per-pod metadata.name pattern so two replicas
+            # don't collide on audit-chain producer_instance_id.
+            - name: _POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: SPENDGUARD_EXTPROC_WORKLOAD_INSTANCE_ID, value: "envoy-extproc-$(_POD_NAME)" }
+          volumeMounts:
+            # SVID Secret projection (cert-manager-issued per HARDEN_08).
+            - name: svid
+              mountPath: {{ .Values.envoyExtproc.svid.mountPath | quote }}
+              readOnly: true
+            # readOnlyRootFilesystem requires /tmp writable — same
+            # pattern as services/output_predictor (SLICE_03 R2 M7).
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: probe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.envoyExtproc.resources | nindent 12 }}
+      volumes:
+        - name: svid
+          secret:
+            secretName: {{ .Values.envoyExtproc.svid.secretName | quote }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-envoy-extproc
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-envoy-extproc
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: grpc,  port: 9443, targetPort: grpc  }
+    - { name: probe, port: 9090, targetPort: probe }
+  selector:
+    {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+
+{{- /* SLICE 6 — NetworkPolicy ingress restriction per design §3.3 +
+       review-standards §7.1: gRPC port 9443 is reachable only from
+       pods carrying `app.kubernetes.io/name: envoy-ai-gateway`.
+       Probe port 9090 stays open to the Prometheus / kubelet scrapers
+       (kubelet must reach /readyz + /livez or the pod NotReady-loops).
+*/ -}}
+{{- if .Values.envoyExtproc.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-envoy-extproc-ingress
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # gRPC ExtProc port — only Envoy AI Gateway pods may dial it.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: envoy-ai-gateway
+      ports:
+        - { protocol: TCP, port: 9443 }
+    # Probe port — kubelet readiness + monitoring namespace.
+    - from:
+        # kubelet does NOT carry pod labels; the standard pattern is
+        # to omit the `from:` selector and rely on the port restriction
+        # (Kubernetes implicitly allows kubelet for httpGet probes).
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.envoyExtproc.networkPolicy.prometheusNamespace | quote }}
+      ports:
+        - { protocol: TCP, port: 9090 }
+{{- end }}
+
+{{- /* SLICE 6 — ServiceMonitor for Prometheus scrape of the readyz /
+       livez endpoints. Gated by serviceMonitor.enabled so clusters
+       without the Prometheus Operator CRDs don't fail render-time. */ -}}
+{{- if .Values.envoyExtproc.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $fullname }}-envoy-extproc
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+    {{- with .Values.envoyExtproc.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  endpoints:
+    - port: probe
+      path: /livez
+      interval: {{ .Values.envoyExtproc.serviceMonitor.interval | quote }}
+{{- end }}
+
+{{- end }}

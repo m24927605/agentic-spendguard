@@ -151,7 +151,9 @@ Per design §3.3 carve-out, SLICE 6 is the transport hard-switch from UDS (SLICE
 
 - [ ] `envoyExtproc.enabled` defaults to `false`; opt-in only (acceptance gate 21).
 - [ ] No fail-open: `tenant_id` required at render time (matches GA_03 fail-closed posture).
-- [ ] SVID volume mount uses `csi.spiffe.io` driver — matches `output_predictor_plugin_svid.yaml` (acceptance gate 23).
+- [ ] SVID volume mount uses cert-manager-issued `Secret` projection (`volumes: - secret: secretName:`) — matches `output_predictor_plugin_svid.yaml` chart standard (acceptance gate 23).
+
+> **SVID mount note (added 2026-06-07 in SLICE 6 R2 spec-hygiene)**: The chart standard at `charts/spendguard/templates/output_predictor_plugin_svid.yaml` (established in HARDEN_08) uses cert-manager-issued `Secret` projection (`volumes: - secret: secretName:`) rather than the SPIFFE CSI driver (`csi: driver: csi.spiffe.io`). Both patterns produce per-tenant SVIDs with cert pinning verified at `SidecarSvidVerifier`; the threat model is identical (per-tenant SVID + cert pinning). SLICE 6 envoy_extproc follows the chart standard (Secret projection) for cross-component consistency. The `csi.spiffe.io` example elsewhere in the spec is reference only; future cluster-level migration to CSI driver is tracked as a chart-wide backlog item.
 - [ ] NetworkPolicy ingress restricted to `app.kubernetes.io/name: envoy-ai-gateway` pods (acceptance gate 22).
 - [ ] Container runs `runAsNonRoot: true`, `readOnlyRootFilesystem: true`, `capabilities.drop: ["ALL"]`.
 - [ ] Image is non-root verified at the OCI layer (Trivy gate 29).

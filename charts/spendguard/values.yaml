@@ -597,6 +597,78 @@ egressProxy:
     requests: { cpu: "50m",  memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
 
+# ── COV_06 — D01 Envoy AI Gateway ExtProc sidecar (SLICE 6) ─────────
+# Spec: docs/specs/coverage/D01_envoy_extproc/design.md §3.3 + §3.4.
+#
+# Deployment shape LOCKED at SLICE 6: mTLS-over-TCP transport (UDS dev
+# carve-out compiled out of the production image via
+# `--no-default-features`); per-tenant SVID minting via cert-manager
+# (mirrors HARDEN_08 output_predictor_plugin_svid.yaml pattern);
+# NetworkPolicy ingress restricted to `app.kubernetes.io/name=envoy-ai-gateway`
+# pods. Defaults to disabled — operators flip `enabled: true` once
+# they wire their Envoy AI Gateway ExternalProcessor config to point
+# at the rendered Service.
+envoyExtproc:
+  enabled: false
+  # 1 replica by default for SLICE 6. Production operators bump to 2+
+  # for HA; the ExtProc stream state is per-request so horizontal
+  # scaling is safe (no shared mutable state between replicas).
+  replicas: 1
+  image:
+    repository: spendguard/envoy-extproc
+    # Round-2 fix M5 (mirrors output_predictor.yaml): production
+    # profile requires semver (vN.N.N) or digest pin (@sha256:HEX);
+    # demo can use alpha tags as below.
+    # SLICE 6 R2 m3 fix: empty default — template falls back to
+    # `Chart.AppVersion` so the image tag tracks chart releases by
+    # default (matches review-standards.md §7.2). Operators MAY pin
+    # explicitly (e.g. "0.1.0-alpha.1" or "@sha256:..." digest).
+    tag: ""
+    pullPolicy: IfNotPresent
+  # SLICE 6 — mTLS-TCP sidecar endpoint. MUST be `https://` (the
+  # template fails render otherwise under chart.profile=production).
+  # Default points at the in-chart sidecar Service.
+  sidecarUrl: ""
+  # SLICE 6 — UUID of the tenant this gateway processes. REQUIRED
+  # under chart.profile=production (matches GA_03 fail-closed posture).
+  # The SidecarSvidVerifier pins the sidecar's leaf cert URI SAN
+  # against `spiffe://spendguard.platform/sidecar/<tenantId>`.
+  tenantId: ""
+  # Hot-path RPC timeout (ms). Spec implementation.md §11 lists 50ms
+  # as the envelope; 75ms gives GC headroom (matches Contract §14
+  # p99 budget).
+  requestTimeoutMs: 75
+  # SLICE 6 — per-tenant SVID mounted from a cert-manager-issued
+  # Secret. `secretName` MUST contain tls.crt / tls.key / ca.crt
+  # (the verifier extracts the sidecar SVID URI SAN from the cert's
+  # subjectAltName extension). `mountPath` is the in-pod directory the
+  # PEMs project to.
+  svid:
+    secretName: ""
+    mountPath: /run/secrets/svid
+  # SLICE 6 — NetworkPolicy ingress restriction. Default opt-in
+  # because production deployments rely on the ingress block to prove
+  # that only Envoy AI Gateway pods can dial the ExtProc gRPC port.
+  # `prometheusNamespace` is the namespace the readyz / livez scrape
+  # comes from; matches networkPolicy.metricsIngress.prometheusNamespace
+  # pattern.
+  networkPolicy:
+    enabled: true
+    prometheusNamespace: monitoring
+  # SLICE 6 — ServiceMonitor for Prometheus Operator clusters. Default
+  # off so clusters without the CRD don't fail render-time.
+  # SLICE 6 R2 m4 fix: stays default-off — current ServiceMonitor
+  # scrapes `/livez` (200-always liveness probe), which is NOT a
+  # metrics surface. Enable when SLICE 7 exposes `/metrics` endpoint
+  # (currently `/livez` is a 200-always probe, not a metrics surface).
+  serviceMonitor:
+    enabled: false
+    interval: 15s
+    additionalLabels: {}
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits:   { cpu: "500m", memory: "512Mi" }
+
 # ── SLICE_11 — NetworkPolicy for L2 bypass-resistance ───────────────
 # Spec: docs/slices/SLICE_11_multi_provider_routing.md §2 + §9.5.
 #

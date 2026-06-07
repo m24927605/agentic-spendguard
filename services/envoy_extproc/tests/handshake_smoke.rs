@@ -1,3 +1,5 @@
+#![cfg(feature = "uds-dev")]
+
 //! Integration smoke tests for the ExtProc gRPC server.
 //!
 //! ## SLICE 1

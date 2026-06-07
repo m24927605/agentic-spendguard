@@ -1,3 +1,5 @@
+#![cfg(feature = "uds-dev")]
+
 //! SLICE 5 — Envoy AI Gateway v0.6 wire-format conformance tests.
 //!
 //! ## What this file proves

@@ -13,12 +13,29 @@ path = "src/main.rs"
 name = "spendguard_envoy_extproc"
 path = "src/lib.rs"
 
+[features]
+# SLICE 6 — UDS transport is the SLICE 1-5 carve-out per design §3.3;
+# production builds compile with `--no-default-features` so the
+# `UnixListener` / `UnixStream` code paths drop out entirely (the §7.1
+# production grep gate sees only `#[cfg(...)]`-gated lines). Tests and
+# local-dev builds keep `uds-dev` on so the SLICE 1-5 mock sidecar
+# handshake fixture and the docker-compose demo continue to work
+# without an mTLS cert authority. Production Helm wiring uses
+# `Transport::Tcp` exclusively and `--no-default-features` is set in
+# the chart-published image build.
+default = ["uds-dev"]
+uds-dev = []
+
 [dependencies]
 # gRPC + protobuf. tonic 0.12 / prost 0.13 — workspace-aligned with
 # services/egress_proxy and services/sidecar so the shared
 # spendguard-provider-routing crate (and any future direct sidecar adapter
 # proto re-exports) Just Works.
-tonic = { version = "0.12", features = ["transport"] }
+#
+# SLICE 6 turns on the `tls` feature so tonic's ClientTlsConfig is
+# available for the mTLS-TCP sidecar dial; the existing `transport`
+# feature is preserved for the UDS dev path.
+tonic = { version = "0.12", features = ["transport", "tls", "tls-roots"] }
 prost = "0.13"
 prost-types = "0.13"
 
@@ -26,9 +43,24 @@ prost-types = "0.13"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 
-# Sidecar UDS client transport.
+# Sidecar transport. hyper-util is the bridge for the (dev) UDS
+# service_fn connector and for the SLICE 6 readyz HTTP probe. hyper +
+# http-body-util power the tiny /readyz + /livez listener.
 hyper-util = { version = "0.1", features = ["tokio"] }
+hyper = { version = "1", features = ["http1", "server"] }
+http-body-util = "0.1"
 tower = "0.5"
+
+# SLICE 6 — rustls + tokio-rustls give us a custom `ServerCertVerifier`
+# so we can pin the SPIFFE URI SAN against the configured tenant id
+# (mirrors `services/output_predictor/src/plugin_client.rs` cert
+# pinning shape from HARDEN_08).
+rustls = "0.23"
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+rustls-pemfile = "2"
+x509-parser = "0.16"
+sha2 = "0.10"
+hex = "0.4"
 
 # COV_01 — provider routing table shared with services/egress_proxy.
 # SLICE 1 doesn't call route() yet (handshake-only), but main() still
