@@ -15,7 +15,7 @@ use spendguard_sidecar::{
     config::Config,
     domain::state::SidecarState,
     drain,
-    http_companion::{self, HttpCompanionConfig, NoopDecisionService},
+    http_companion::{self, service::RealDecisionService, HttpCompanionConfig},
     metrics::SidecarMetrics,
     proto::sidecar_adapter::v1::sidecar_adapter_server::SidecarAdapterServer,
     server::adapter_uds,
@@ -278,31 +278,35 @@ async fn main() -> Result<()> {
         info!(addr = %cfg.metrics_addr, "metrics server bound");
     }
 
-    // 3c) D09 SLICE 1: optional HTTP companion listener for Kong /
+    // 3c) D09 SLICE 1+3: optional HTTP companion listener for Kong /
     //     Coze / Botpress out-of-process plugins. Default OFF (port=0);
     //     enabled when SPENDGUARD_SIDECAR_HTTP_COMPANION_PORT > 0.
-    //     SLICE 1 ships the wire surface against a stub
-    //     DecisionService — SLICE 3 will swap in the production impl
-    //     that delegates to decision::transaction::run_through_reserve.
+    //     SLICE 3 swaps the SLICE 1 stub for the production
+    //     `RealDecisionService` that delegates straight to
+    //     `decision::transaction::run_through_reserve` /
+    //     `run_commit_estimated` / `run_release`. The wire shape
+    //     remains identical so a Kong DataPlane is not affected by
+    //     the swap.
     if cfg.http_companion_port > 0 {
         match build_http_companion_config(&cfg, &mtls).await {
             Ok(companion_cfg) => {
-                // SLICE 1 stub: NoopDecisionService. Production wiring
-                // lands in SLICE 3; until then this surface answers
-                // with a fixed ALLOW so a Kong DataPlane operator can
-                // smoke-test the handshake + JSON wire format without
-                // touching the ledger.
-                let service = Arc::new(NoopDecisionService::default());
+                // SLICE 3: production backend. Owns a clone of the
+                // full sidecar state so the listener shares the same
+                // ledger client, signer, idempotency cache, and
+                // contract bundle as the gRPC adapter. Audit rows
+                // are wholly attributable to the same producer
+                // identity regardless of transport.
+                let service = Arc::new(RealDecisionService::new(cfg.clone(), state.clone()));
                 tokio::spawn(async move {
                     if let Err(e) = http_companion::run_companion(companion_cfg, service).await {
-                        tracing::error!(err = %e, "D09 SLICE 1 http_companion exited");
+                        tracing::error!(err = %e, "D09 http_companion exited");
                     }
                 });
                 info!(
                     port = cfg.http_companion_port,
                     host = %cfg.http_companion_host,
                     allow_pod_network = cfg.http_companion_allow_pod_network,
-                    "D09 SLICE 1: http_companion enabled (stub backend)"
+                    "D09 SLICE 3: http_companion enabled (RealDecisionService)"
                 );
             }
             Err(e) => {

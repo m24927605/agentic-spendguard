@@ -3,3 +3,6 @@
 # output lives at `target/kong/spendguard.so` under the workspace root.
 spendguard.so
 spendguard
+# Stray binary `go build` emits when the test harness builds the
+# package directly (named after the module dir).
+spendguard-go

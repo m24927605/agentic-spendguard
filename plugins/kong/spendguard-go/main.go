@@ -44,7 +44,7 @@ import (
 // PluginVersion is reported to Kong's plugin-server and surfaced in
 // `/metrics` labels (SLICE 6). Bump with every plugin .so revision so
 // operators can correlate audit anomalies with deploys.
-const PluginVersion = "0.1.0-d09-slice2"
+const PluginVersion = "0.1.0-d09-slice4"
 
 // Priority is Kong's plugin execution-order field; higher values run
 // earlier. `ai-proxy` is 770; SpendGuard MUST run before `ai-proxy`
@@ -67,18 +67,20 @@ func main() {
 
 // Access is invoked by Kong on every request after the body has
 // been buffered (we require `request_buffering: true` on the route
-// per design §3.3). SLICE 3 will replace the body with the reserve
-// flow; SLICE 2 ships an empty hook so the plugin loads cleanly
-// against Kong's go-plugin-server.
-func (c *Config) Access(_ *pdk.PDK) {
-	// SLICE 2: no-op. SLICE 3 implements the access flow per
-	// `implementation.md` §5.
+// per design §3.3). SLICE 3 wires the production reserve flow:
+// parse body → tokenize → decision → ALLOW/DENY/DEGRADE per
+// `implementation.md` §5.
+//
+// The production code is in `runAccess` (access.go); this method is
+// a one-liner so the Kong plugin-server's reflection-based
+// dispatcher can find the entry point.
+func (c *Config) Access(k *pdk.PDK) {
+	runAccess(k, c)
 }
 
 // BodyFilter is invoked repeatedly as Kong streams the upstream
 // response back to the client. SLICE 4 accumulates chunks and emits
-// the trace event on end-of-body; SLICE 2 ships an empty hook.
-func (c *Config) BodyFilter(_ *pdk.PDK) {
-	// SLICE 2: no-op. SLICE 4 implements the body_filter flow per
-	// `implementation.md` §6.
+// the trace event on end-of-body via `runBodyFilter` (body_filter.go).
+func (c *Config) BodyFilter(k *pdk.PDK) {
+	runBodyFilter(k, c)
 }

@@ -41,11 +41,11 @@ type Config struct {
 	// ClientCertPEM — workload cert presented to the sidecar.
 	// SVID-style URI SAN encodes the tenant; HARDEN_08 / SLICE 6
 	// wires per-tenant SVIDs from cert-manager.
-	ClientCertPEM string `json:"client_cert_pem"`
+	ClientCertPEM  string `json:"client_cert_pem"`
 	ClientCertFile string `json:"client_cert_file"`
 
 	// ClientKeyPEM — private key matching the workload cert.
-	ClientKeyPEM string `json:"client_key_pem"`
+	ClientKeyPEM  string `json:"client_key_pem"`
 	ClientKeyFile string `json:"client_key_file"`
 
 	// TenantID — tenant assertion sent to the sidecar in every
