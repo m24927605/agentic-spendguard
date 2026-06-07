@@ -1,0 +1,222 @@
+---
+title: "Devin billing importer (Cognition Labs — reconciliation only)"
+description: >-
+  Post-hoc importer for Devin Team API usage. SpendGuard cannot enforce
+  Devin spend — Devin runs the agent loop entirely inside Cognition's
+  cloud VM. The importer pulls ACU consumption, converts to estimated $
+  via a vendored price table, and emits signed audit events tagged
+  reservation_source=subscription_meter / import_source=devin_team_api.
+sidebar:
+  badge:
+    text: Reconciliation only
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="SpendGuard cannot enforce Devin spend — only Cognition can">
+  Devin (Cognition Labs) runs the agent loop inside Cognition's cloud
+  VM. The customer's network never carries the per-LLM-call payload;
+  the egress proxy + SDK adapters intercept nothing. The Devin
+  importer is **reconciliation only** — it pulls post-hoc usage so
+  the dashboard CIO/CFO single-pane-of-glass view doesn't collapse,
+  but it does **not** gate, throttle, or short-circuit Devin
+  sessions. That contract belongs to Cognition. See the
+  [framework-coverage strategy memo Archetype IV](https://github.com/m24927605/agentic-spendguard/blob/main/docs/strategy/framework-coverage-2026-06.md)
+  for the architectural reasoning.
+</Aside>
+
+## What this is
+
+The `spendguard-importer-devin` crate (D14) is a Rust binary +
+library that:
+
+1. Pulls usage from the [Devin Team
+   API](https://docs.devin.ai/api-reference/team-usage) (`/api/v1/teams/{id}/usage`)
+   — feature-gated behind `live` so the default build is HTTP-free.
+2. Converts **ACU (Agent Compute Unit, ≈ $2.25/ACU)** to estimated
+   USD via a vendored price table at
+   `services/importer_devin/assets/devin_acu_prices.json`.
+3. Emits signed `spendguard.audit.import.devin_acu` CloudEvents
+   tagged with `reservation_source=subscription_meter` and
+   `import_source=devin_team_api` — landing on the same dashboard
+   surface as D13 subscription-meter rows.
+
+The default merge gate is a **sanitized fixture replay** — the
+committed `tests/fixtures/devin_usage.json` snapshot. Live mode is
+operator-opt-in.
+
+## ACU → $ conversion
+
+| Plan | `usd_per_acu` | Audit row shape |
+|------|--------------|-----------------|
+| **team** | $2.25/ACU (Cognition published rate, 2026-06) | `amount_micro_usd > 0`, `reason_code = NULL` |
+| **enterprise** | _negotiated per contract_ | `amount_micro_usd = NULL`, `reason_code = "devin_enterprise_negotiated_rate"` |
+
+The conversion is pure: `round(acu_consumed × usd_per_acu × 1_000_000)`
+in micro-USD, saturating at `i64::MAX` on overflow. The price table's
+`pricing_version` is stamped on every emitted row at the moment of
+conversion — back-revisions to the rate file do **not** rewrite
+historical audit rows.
+
+### Enterprise NULL-rate caveat
+
+Enterprise plans negotiate ACU rates under NDA. SpendGuard cannot
+guess the dollar amount — so the importer emits
+`amount_micro_usd = NULL` and stamps
+`reason_code = "devin_enterprise_negotiated_rate"`. Dashboards must
+distinguish **"unknown rate"** from **"zero spend"** — the row's ACU
+field is still populated, so operators see Devin consumption volume
+even when the dollar mapping is private.
+
+## Install
+
+### Fixture mode (default merge gate)
+
+```bash
+cargo run -p spendguard-importer-devin --bin importer_devin -- \
+    --mode fixture \
+    --fixture services/importer_devin/tests/fixtures/devin_usage.json \
+    --tenant <your-tenant> \
+    --budget <your-budget-id>
+```
+
+The binary prints one CloudEvent per record to stdout; the demo
+runner script (`deploy/demo/import_devin_fixture_demo.sh`) wires the
+INSERT path against the demo postgres.
+
+### Live mode (operator-opt-in)
+
+```bash
+export DEVIN_API_TOKEN=<Team Admin API token>
+export DEVIN_API_BASE_URL=https://api.devin.ai/api/v1   # optional override
+
+cargo run -p spendguard-importer-devin --features live --bin importer_devin -- \
+    --mode live \
+    --tenant <your-tenant> \
+    --budget <your-budget-id>
+```
+
+The `live` feature pulls `reqwest` with `rustls-tls` only (no
+`native-tls`, no `openssl-sys`) and uses a 30s per-request timeout
+plus bounded exponential backoff (cap: 1 hour) for resilience
+against rate-limits.
+
+Scope the token to the **Devin Team Admin API** scope only — least
+privilege.
+
+## Idempotency
+
+Re-running the same window does not double-emit. The CloudEvent
+`event.id` is a deterministic UUIDv5 derived from
+`(devin_team_id, devin_session_id, window_end)`; canonical_ingest
+dedups via the existing `event_replay_dedup` table.
+
+You can re-run the demo as many times as you like:
+
+```bash
+make -C deploy/demo demo-verify-import-devin-fixture
+make -C deploy/demo demo-verify-import-devin-fixture   # idempotent; 0 new rows
+```
+
+## Sample CloudEvent
+
+<div is:raw>
+
+```json
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.devin_acu",
+  "source": "spendguard-importer-devin",
+  "id": "018f4a3a-d971-7c14-91fe-d014de71aca0",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/demo/devin/team/TEAM_FIXTURE_001/session/SESSION_FIXTURE_001",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "demo",
+    "budget_id": "devin-budget",
+    "devin_team_id": "TEAM_FIXTURE_001",
+    "devin_session_id": "SESSION_FIXTURE_001",
+    "acu_consumed": 12.5,
+    "usd_per_acu": 2.25,
+    "amount_micro_usd": 28125000,
+    "pricing_version": "devin-acu-v1-2026-06",
+    "window_start": "2026-06-01T00:00:00Z",
+    "window_end": "2026-06-01T01:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "devin_team_api",
+    "ingestion_mode": "fixture",
+    "fixture_provenance_sha256": "aa4c172164a8a6a5d4e97c6bde4ac455e01f5f37932b8a3561ef213049144807"
+  }
+}
+```
+
+</div>
+
+The full schema doc lives at
+[`docs/specs/coverage/D14_devin_importer/cloudevent-schema.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D14_devin_importer/cloudevent-schema.md).
+
+## Sample price table
+
+<div is:raw>
+
+```json
+{
+  "pricing_version": "devin-acu-v1-2026-06",
+  "effective_from": "2026-06-01T00:00:00Z",
+  "currency": "USD",
+  "rates": [
+    { "plan": "team",       "usd_per_acu": 2.25 },
+    { "plan": "enterprise", "usd_per_acu": null }
+  ]
+}
+```
+
+</div>
+
+## Why we cannot gate
+
+The Devin agent loop runs **entirely inside Cognition's cloud VM**.
+The customer's egress proxy never sees the LLM API call payload —
+Cognition's VM dials OpenAI / Anthropic from inside their own
+network boundary. The Team API exposes only post-hoc ACU
+consumption, not a pre-call hook.
+
+This is **Archetype IV** in the SpendGuard framework-coverage
+analysis: a fully managed cloud agent where the customer has zero
+network visibility. The only feasible integration is reconciliation
+— pull the bill after the fact, surface it on the dashboard, alert
+on threshold crossings. Gating is architecturally impossible without
+Cognition shipping a pre-call webhook.
+
+## What you see on the dashboard
+
+* Estimated $ per session, per team — labelled with
+  `pricing_version`.
+* ACU consumed (always present, even for enterprise NULL-rate rows).
+* `reservation_source = subscription_meter` filter groups Devin spend
+  alongside Claude Code Pro / Codex on ChatGPT (advisory rows that
+  skip the BYOK ledger).
+* Plan-level pivot: `team` vs `enterprise`.
+
+## Implementation pointers
+
+* Crate scaffold + Cargo.toml: `services/importer_devin/Cargo.toml`
+  — workspace-excluded, `publish = false`, `live` feature gated.
+* Pure conversion: `services/importer_devin/src/import_record.rs`
+  (`import_record_to_audit_row`) — no I/O, no clock read.
+* Price table: `services/importer_devin/src/acu_price_table.rs` —
+  saturating arithmetic, rejects NaN/Infinity/negative inputs.
+* CloudEvent builder: `services/importer_devin/src/cloudevent_envelope.rs`
+  — golden-tested via `tests/golden/cloudevent_v1alpha1_*.json`.
+* Fixture loader: `services/importer_devin/src/fixture_loader.rs` —
+  hard-rejects non-synthetic IDs at parse time (T5).
+* Live client: `services/importer_devin/src/live/client.rs` —
+  rustls-only `reqwest` wrapper with typed 401/403/429/5xx errors.
+* Migration: `services/ledger/migrations/0059_import_source_widen.sql` —
+  widens the existing `audit_outbox.import_source` CHECK to include
+  `devin_team_api`.
+
+For the full design rationale + slice-level breakdown, see
+[`docs/specs/coverage/D14_devin_importer/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D14_devin_importer/design.md).

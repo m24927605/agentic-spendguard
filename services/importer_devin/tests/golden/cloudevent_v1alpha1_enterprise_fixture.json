@@ -1,0 +1,26 @@
+{
+  "specversion": "1.0",
+  "type": "spendguard.audit.import.devin_acu",
+  "source": "spendguard-importer-devin",
+  "id": "018f4a3a-d971-7c14-91fe-d014de71acab",
+  "time": "2026-06-08T12:00:00Z",
+  "datacontenttype": "application/json",
+  "subject": "tenant/demo/devin/team/TEAM_FIXTURE_002/session/SESSION_FIXTURE_003",
+  "data": {
+    "schema_version": "v1alpha1",
+    "tenant_id": "demo",
+    "budget_id": "devin-budget",
+    "devin_team_id": "TEAM_FIXTURE_002",
+    "devin_session_id": "SESSION_FIXTURE_003",
+    "acu_consumed": 100.0,
+    "usd_per_acu": null,
+    "amount_micro_usd": null,
+    "pricing_version": "devin-acu-v1-2026-06",
+    "window_start": "2026-06-01T00:00:00Z",
+    "window_end": "2026-06-01T01:00:00Z",
+    "reservation_source": "subscription_meter",
+    "import_source": "devin_team_api",
+    "ingestion_mode": "fixture",
+    "fixture_provenance_sha256": "aa4c172164a8a6a5d4e97c6bde4ac455e01f5f37932b8a3561ef213049144807"
+  }
+}

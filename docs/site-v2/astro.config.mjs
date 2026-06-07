@@ -77,6 +77,7 @@ export default defineConfig({
             { label: 'Cursor IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/cursor-mitm' },
             { label: 'Windsurf IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/windsurf-mitm' },
             { label: 'Subscription-tier meter (Claude Code Pro + Codex)', slug: 'docs/integrations/subscription-meter' },
+            { label: 'Devin billing importer (Cognition Labs — reconciliation only)', slug: 'docs/integrations/devin-importer' },
           ],
         },
         {

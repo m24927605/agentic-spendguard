@@ -1,0 +1,66 @@
+[package]
+name        = "spendguard-importer-devin"
+version     = "0.0.1"
+edition     = "2021"
+license     = "Apache-2.0"
+publish     = false
+description = "SpendGuard Devin (Cognition Labs) billing importer — Archetype IV (fully managed cloud-agent). Post-hoc usage import from the Devin Team API; ACU → USD conversion via vendored price table; emits spendguard.audit.import.devin_acu CloudEvents. RECONCILIATION ONLY — SpendGuard cannot gate Devin sessions."
+
+# D14 design §6 locked decision #7: `live` is off by default. Default
+# `cargo tree` MUST NOT show any HTTP client crate. CI enforces via
+# acceptance gate A2.4.
+[package.metadata.spendguard]
+archetype = "IV-unreachable"
+gating    = "reconciliation_only"
+
+[lib]
+name = "spendguard_importer_devin"
+path = "src/lib.rs"
+
+[[bin]]
+name = "importer_devin"
+path = "src/bin/importer_devin.rs"
+# Binary requires `live` to be useful (fixture flow goes through
+# library API directly from tests + demo). We compile-stub it under
+# the default feature so workspace `cargo build` still succeeds.
+required-features = []
+
+[features]
+# D14 design §6 locked decision #7: default features empty — live mode
+# is opt-in only. The pure-Rust no-IO contract surface (price table +
+# import record conversion + CloudEvent envelope + fixture loader)
+# is always available; only the HTTP client + async runtime are gated.
+default = []
+live    = ["dep:reqwest", "dep:tokio", "dep:url", "dep:tracing"]
+
+[dependencies]
+# Pure deps — no HTTP, no async runtime in the default-feature tree.
+anyhow      = "1"
+chrono      = { version = "0.4", features = ["serde"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+uuid        = { version = "1", features = ["v4", "v5", "v7", "serde"] }
+sha2        = "0.10"
+hex         = "0.4"
+thiserror   = "1"
+
+# Live-only deps — optional, MUST NOT appear in default-feature
+# `cargo tree -e=normal`. Acceptance A2.4 enforces; review-standards
+# T2 / T4 enforce rustls-only.
+reqwest = { version = "0.12", default-features = false,
+            features = ["json", "rustls-tls"], optional = true }
+tokio   = { version = "1", features = ["rt", "rt-multi-thread", "macros",
+            "time", "signal"], optional = true }
+url     = { version = "2", optional = true }
+tracing = { version = "0.1", optional = true }
+
+[dev-dependencies]
+# wiremock pulls in tokio macros under the hood; safe because dev-deps
+# are not in the runtime binary's normal `cargo tree`.
+wiremock     = "0.6"
+tokio        = { version = "1", features = ["macros", "rt-multi-thread"] }
+pretty_assertions = "1"
+tempfile     = "3"
+
+[package.metadata.docs.rs]
+all-features = true

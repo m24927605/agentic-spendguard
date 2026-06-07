@@ -1,0 +1,17 @@
+{
+  "pricing_version": "devin-acu-v1-2026-06",
+  "effective_from": "2026-06-01T00:00:00Z",
+  "currency": "USD",
+  "rates": [
+    {
+      "plan": "team",
+      "usd_per_acu": 2.25,
+      "note": "Published 2026-06 Cognition Devin Team plan retail rate; ≈ $2.25/ACU."
+    },
+    {
+      "plan": "enterprise",
+      "usd_per_acu": null,
+      "note": "Negotiated per contract; importer emits amount_micro_usd=NULL + reason_code=devin_enterprise_negotiated_rate so dashboards distinguish 'unknown rate' from 'zero spend'."
+    }
+  ]
+}

@@ -1,0 +1,40 @@
+{
+  "_meta": {
+    "generated_at": "2026-06-08T00:00:00Z",
+    "schema": "devin_usage_fixture_v1",
+    "synthetic_only": true,
+    "vendor_snapshot_url": "https://api.devin.ai/api/v1/teams/TEAM_FIXTURE_001/usage"
+  },
+  "usage": [
+    {
+      "acu_consumed": 12.5,
+      "budget_id": "devin-budget",
+      "devin_session_id": "SESSION_FIXTURE_001",
+      "devin_team_id": "TEAM_FIXTURE_001",
+      "plan": "team",
+      "tenant_id": "demo",
+      "window_end": "2026-06-01T01:00:00Z",
+      "window_start": "2026-06-01T00:00:00Z"
+    },
+    {
+      "acu_consumed": 4.0,
+      "budget_id": "devin-budget",
+      "devin_session_id": "SESSION_FIXTURE_002",
+      "devin_team_id": "TEAM_FIXTURE_001",
+      "plan": "team",
+      "tenant_id": "demo",
+      "window_end": "2026-06-01T02:00:00Z",
+      "window_start": "2026-06-01T01:00:00Z"
+    },
+    {
+      "acu_consumed": 100.0,
+      "budget_id": "devin-budget",
+      "devin_session_id": "SESSION_FIXTURE_003",
+      "devin_team_id": "TEAM_FIXTURE_002",
+      "plan": "enterprise",
+      "tenant_id": "demo",
+      "window_end": "2026-06-01T01:00:00Z",
+      "window_start": "2026-06-01T00:00:00Z"
+    }
+  ]
+}

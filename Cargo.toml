@@ -19,6 +19,7 @@ exclude = [
   "services/endpoint_catalog",
   "services/envoy_extproc",
   "services/ids",
+  "services/importer_devin",
   "services/leases",
   "services/ledger",
   "services/outbox_forwarder",

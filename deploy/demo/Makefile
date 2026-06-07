@@ -893,6 +893,28 @@ demo-verify-subscription-meter:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_subscription_meter.sql
 	@echo "[demo] D13 subscription_meter verification done"
 
+# D14 COV_72 — import_devin_fixture demo. Self-contained: spins up a
+# throwaway postgres:16-alpine container, applies mig 0059 (widen
+# import_source CHECK to include 'devin_team_api'), runs the
+# spendguard-importer-devin binary against the committed sanitized
+# fixture in `services/importer_devin/tests/fixtures/devin_usage.json`,
+# INSERTs the emitted CloudEvents as audit_outbox rows, and runs the
+# verifier SQL to assert:
+#
+#   - >= 1 audit_outbox row with import_source='devin_team_api' +
+#     reservation_source='subscription_meter' for tenant=demo.
+#   - >= 1 team-plan row with amount_micro_usd > 0 (acceptance A10.3,
+#     ACU → $ conversion correctness).
+#   - >= 1 enterprise-plan row with amount_micro_usd IS NULL AND
+#     reason_code='devin_enterprise_negotiated_rate' (A10.1).
+#   - ZERO ledger_entries rows under demo tenant (D13 §4.3 fork).
+#
+# Idempotent: ON CONFLICT (event_id) DO NOTHING. Re-running lands zero
+# new rows (deterministic UUIDv5).
+demo-verify-import-devin-fixture:
+	@bash ./import_devin_fixture_demo.sh
+	@echo "[demo] D14 COV_72 import_devin_fixture verification done"
+
 # D18 SLICE 82 (windsurf_mitm_fixture demo) verification. Mirrors the
 # cursor_mitm_fixture verification: the codec runs against the
 # in-memory mock sidecar lane, so the verify SQL asserts the
@@ -1264,7 +1286,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans
