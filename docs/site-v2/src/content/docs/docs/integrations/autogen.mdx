@@ -1,0 +1,238 @@
+---
+title: "AutoGen / AG2 budget control with SpendGuard"
+description: >-
+  Pre-call token budget enforcement for AutoGen 0.4+ (Microsoft) and
+  AG2 (community fork) using Agentic SpendGuard. One wrapper class
+  covers BOTH lineages because they share
+  autogen_core.models.ChatCompletionClient as the LLM abstraction —
+  AG2 vendored the namespace unchanged.
+---
+
+> Your AutoGen `AssistantAgent` runs `await agent.on_messages(...)`
+> across a `MagenticOneGroupChat` or `Swarm` and you cannot tell which
+> step blew the budget — until the bill arrives. SpendGuard subclasses
+> the single ABC both AutoGen 0.4+ and AG2 use under the hood
+> (`autogen_core.models.ChatCompletionClient`) and wraps an inner
+> client so every `create()` call reserves against a budget BEFORE
+> the upstream HTTP fires. One class covers BOTH lineages with zero
+> configuration — only your `AssistantAgent` import path changes.
+
+## Why you'd want this
+
+- **One wrapper, two lineages.** AutoGen 0.4+ (Microsoft, maintenance
+  mode as of 2026-02) and AG2 (community fork, ~48k stars,
+  Apache-2.0) share `autogen_core.models.ChatCompletionClient`
+  unchanged. SpendGuard subclasses the ABC and wraps an inner client;
+  the same wrapper works against either lineage's `AssistantAgent`,
+  `MagenticOneGroupChat`, or `Swarm`.
+- **One wrapper, every provider.** AutoGen's `ChatCompletionClient`
+  abstraction sits ABOVE the vendor SDK boundary
+  (`OpenAIChatCompletionClient` / `AnthropicChatCompletionClient` /
+  `AzureAIChatCompletionClient` / LiteLLM-routed). Gating at the ABC
+  layer means one wrapper instance covers all of them; you don't
+  write per-vendor adapters.
+- **Pre-call refusal, not post-hoc accounting.** DENY raises
+  `DecisionDenied` directly out of `create()`. `ChatCompletionClient`
+  has no framework-side catch on the create path in either lineage
+  (verified against autogen-core 0.4.0 and ag2 0.7.0), so the raise
+  reaches the `AssistantAgent` caller cleanly — the upstream model
+  call is **never** issued.
+- **Audit + approval pipeline shared with every other framework.**
+  The wrapper writes to the same SpendGuard ledger as the LangChain,
+  Pydantic-AI, OpenAI Agents, Google ADK, AWS Strands, DSPy, Agno,
+  and BeeAI integrations. The shared `spendguard_run_context`
+  contextvar (reused from `spendguard.integrations.openai_agents`)
+  means a parent LangChain run wrapping an AutoGen agent reuses the
+  same `run_id`.
+
+## Setup (60 seconds)
+
+```bash
+pip install 'spendguard-sdk[autogen]'
+# Then pick your lineage:
+pip install autogen-agentchat>=0.4 autogen-ext[openai]   # Microsoft AutoGen 0.4+
+# OR
+pip install ag2>=0.7                                     # AG2 community fork
+```
+
+Bring up a sidecar via the demo stack:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## Decision table
+
+| If you use | Install | Integration import |
+|---|---|---|
+| AutoGen 0.4+ (Microsoft) | `pip install 'spendguard-sdk[autogen]' autogen-agentchat autogen-ext[openai]` | `from spendguard.integrations.autogen import SpendGuardChatCompletionClient` |
+| AG2 (community fork) | `pip install 'spendguard-sdk[autogen]' ag2` | (same import) |
+| Routing via LiteLLM | D12 shim covers transitively | See [LiteLLM SDK shim docs](/docs/integrations/litellm-sdk-shim/) |
+
+## Wire it up
+
+```python
+import asyncio
+
+from autogen_agentchat.agents import AssistantAgent  # or `from ag2.agents import AssistantAgent`
+from autogen_core import CancellationToken
+from autogen_core.models import UserMessage
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.autogen import (
+    SpendGuardChatCompletionClient,
+    RunContext, run_context,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    def estimate(messages):
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget",
+            unit=unit,
+            amount_atomic="500",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    guarded = SpendGuardChatCompletionClient(
+        inner=OpenAIChatCompletionClient(model="gpt-4o-mini"),
+        client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate,
+    )
+
+    agent = AssistantAgent(name="x", model_client=guarded)
+
+    async with run_context(RunContext(run_id="my-run-1")):
+        result = await agent.on_messages(
+            [UserMessage(content="Say hello in three words.", source="user")],
+            CancellationToken(),
+        )
+    print(result.chat_message.content)
+
+
+asyncio.run(main())
+```
+
+**`claim_estimator` is required.** Per design.md §5 the wrapper does
+not ship a default estimator because `ChatCompletionClient.model` is
+not standardized across vendor implementations — `OpenAIChatCompletionClient.model`
+exists, `AnthropicChatCompletionClient` uses `_model_name`. The
+operator supplies the projection.
+
+## How it works
+
+```text
+AssistantAgent.on_messages(...)
+  → SpendGuardChatCompletionClient.create(messages, tools, ...)
+      ├─ ctx = current_run_context()
+      ├─ signature = blake2b(messages | tools | extra_create_args)
+      ├─ llm_call_id / decision_id derived from signature
+      ├─ sidecar.RequestDecision(LLM_CALL_PRE, projected_claims)
+      │     ALLOW   → continue
+      │     DENY    → DecisionDenied propagates (no inner HTTP)
+      ├─ inner.create(messages, tools, ...)           ← provider HTTP
+      └─ sidecar.emit_llm_call_post(SUCCESS|FAILURE|CANCELLED,
+                                    estimated=usage.prompt + completion)
+```
+
+The wrapper subclasses `autogen_core.models.ChatCompletionClient`
+without calling `super().__init__()` (the ABC has no shared state in
+either lineage — verified at module load). The inner client is held
+by composition: SpendGuard never instantiates
+`OpenAIChatCompletionClient` / `AnthropicChatCompletionClient` / any
+vendor SDK directly.
+
+The `LINEAGE` constant tells you which lineage is loaded alongside
+`autogen-core`:
+
+```python
+from spendguard.integrations.autogen import LINEAGE
+print(LINEAGE)  # "autogen" / "ag2" / "both" / "core-only"
+```
+
+But it is **telemetry only** — business logic in `create()` and
+`create_stream()` NEVER branches on it (review-standards §1.1 makes
+any `LINEAGE` conditional in the gate path a Blocker finding). The
+same wrapper instance works against either lineage.
+
+## Polyglot run-context sharing
+
+The `RunContext` / `run_context()` / `current_run_context()` symbols
+re-export from `spendguard.integrations.openai_agents` (with a
+contextvar-name-equivalent fallback when the `[openai-agents]` extra
+isn't installed). A polyglot stack mixing OpenAI Agents, AutoGen, and
+Pydantic-AI in one run shares a single trace because all three
+adapters read the same module-level `spendguard_run_context`
+contextvar.
+
+```python
+from spendguard.integrations.openai_agents import RunContext, run_context
+
+async with run_context(RunContext(run_id="polyglot-run-1")):
+    # Both calls land under the same run_id in the ledger:
+    await openai_agents_runner.run(agent, "...")
+    await autogen_assistant.on_messages([...], cancellation_token)
+```
+
+## Streaming
+
+`create_stream()` is pass-through to the inner client in this
+release. Stream gating brackets the WHOLE stream at the model
+boundary; intra-stream tool calls inherit the parent reservation.
+Per-chunk gating is tracked as follow-on parity with the OpenAI
+Agents POC.
+
+## Cancellation
+
+When the framework cancels via `CancellationToken`, the inner client
+raises `asyncio.CancelledError` (AutoGen) or anyio's equivalent
+(AG2). The wrapper classifies the exception by type name
+(`type(exc).__name__ == "CancelledError"` — matches the D12 LiteLLM
+shim pattern, avoids cross-loop `isinstance` mismatches) and emits
+`emit_llm_call_post(outcome="CANCELLED")` so the projector releases
+the reservation.
+
+## Limitations
+
+D24 v1 explicitly does NOT close any of:
+
+- **Token-by-token streaming gating.** Per-chunk gating is reserved
+  for D24.1.
+- **`count_tokens()` / `total_usage()` / `remaining_tokens()` side
+  effects.** These methods pass through to the inner client unchanged
+  — required by `AssistantAgent`'s token-budget caps (a counter or
+  timer at the wrapper layer would confuse the cap logic).
+- **AG2-specific extensions** (e.g. `register_for_llm` decorator).
+  Those are AG2-only and orthogonal to the LLM gate.
+- **Microsoft AGT integration** (D7, already shipped via
+  `spendguard.integrations.agt`). AGT is a separate framework, not
+  AutoGen.
+
+## Reference
+
+* Spec: `docs/specs/coverage/D24_autogen_ag2/`
+* Module: `sdk/python/src/spendguard/integrations/autogen/`
+* Demo overlay: `deploy/demo/agent_real_autogen/`
+* Test suite: `sdk/python/tests/integrations/autogen/`

@@ -122,6 +122,38 @@ agt = [
 agno = [
   "agno>=2.0,<3",
 ]
+# COV_D23 SLICE 1: BeeAI Framework (IBM Research + Linux Foundation)
+# Python adapter extra. ``beeai-framework`` ships ``Emitter`` with
+# ``match(matcher, callback, options) -> CleanupFn`` and ``EventMeta``
+# (``id``, ``name``, ``path``, ``created_at``, ``source``, ``creator``,
+# ``context``, ``group_id``, ``trace``, ``data_type``) — verified
+# against the live wheel at
+# ``beeai_framework/emitter/emitter.py:30-235``.
+#
+# DEVIATION-A vs spec §4 / design.md pyproject hint ``>=0.3,<1.0``:
+# BeeAI's actual PyPI release line is ``0.1.x`` (latest ``0.1.81`` as
+# of 2026-06-08). The ``>=0.3`` cap in design.md predates the
+# project's first PyPI publish under the ``beeai-framework`` name;
+# the IBM team is still on the 0.1.x series. We pin
+# ``>=0.1.81,<0.2`` so the extra:
+#   1. Fail-closes against a future breaking-change minor (0.2 line),
+#   2. Floors at the version where ``Emitter.match`` returns a
+#      ``CleanupFn`` and the agent-runtime ``BaseAgent.emitter``
+#      cached_property is stable (verified at
+#      ``beeai_framework/agents/base.py``).
+beeai = [
+  "beeai-framework>=0.1.81,<0.2",
+]
+# COV_D24 SLICE 1: AutoGen 0.4+ / AG2 Python adapter extra. Both
+# lineages re-export ``autogen_core.models.ChatCompletionClient`` as
+# the LLM abstraction. Operators pick the lineage they need
+# (autogen-agentchat or ag2) — the extra only resolves the shared
+# ``autogen-core`` base so we never force one lineage on the other.
+# Cap below 1.x to fail-closed against a future breaking-change major.
+# See ``docs/specs/coverage/D24_autogen_ag2/design.md``.
+autogen = [
+  "autogen-core>=0.4,<1.0",
+]
 litellm = [
   # `[proxy]` sub-extra pulls fastapi/uvicorn/gunicorn that the
   # `litellm` CLI subprocess needs to boot. Without it,

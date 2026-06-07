@@ -398,6 +398,47 @@ else ifeq ($(DEMO_MODE),agent_real_agno)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_beeai)
+	@echo "[demo] DEMO_MODE=agent_real_beeai → COV_D23 SLICE 4 (BeeAI Framework Python adapter)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/agent_real_beeai/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider on"
+	@echo "[demo]               /v1/chat/completions) + beeai-runner (Python 3.12"
+	@echo "[demo]               + beeai-framework>=0.1.81,<0.2 + spendguard-sdk[beeai])."
+	@echo "[demo]   Driver issues 1 BaseAgent.run() through SpendGuard"
+	@echo "[demo]   subscribe_spendguard(agent, client, ...):"
+	@echo "[demo]     ALLOW path proves *.start reserve BEFORE provider HTTP +"
+	@echo "[demo]     *.success commit after."
+	$(COMPOSE) -f agent_real_beeai/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_autogen)
+	@echo "[demo] DEMO_MODE=agent_real_autogen → COV_D24 SLICE 5 (AutoGen 0.4+ / AG2 adapter)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/agent_real_autogen/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider on"
+	@echo "[demo]               /v1/chat/completions) + autogen-runner (Python 3.12"
+	@echo "[demo]               + autogen-core>=0.4,<1.0 + autogen-agentchat"
+	@echo "[demo]               + autogen-ext[openai] + spendguard-sdk[autogen])."
+	@echo "[demo]   Driver issues 1 AssistantAgent.on_messages() through"
+	@echo "[demo]   SpendGuardChatCompletionClient(inner=OpenAIChatCompletionClient(...)):"
+	@echo "[demo]     ALLOW path proves PRE-before-vendor-SDK + POST-after."
+	$(COMPOSE) -f agent_real_autogen/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_ag2)
+	@echo "[demo] DEMO_MODE=agent_real_ag2 → COV_D24 SLICE 5 (AG2 lineage of D24)."
+	@echo "[demo]   Same overlay as agent_real_autogen but the driver"
+	@echo "[demo]   requests the ag2 lineage (falls back to autogen if"
+	@echo "[demo]   ag2 isn't installed). One wrapper covers both lineages."
+	$(COMPOSE) -f agent_real_autogen/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),subscription_meter)
 	@echo "[demo] DEMO_MODE=subscription_meter → D13 (Subscription-Tier Meter)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -611,6 +652,35 @@ else ifeq ($(DEMO_MODE),agent_real_agno)
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure || \
 	  echo "[demo] outbox-closure skipped: agent_real_agno demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_beeai)
+	@echo "[demo] running beeai-runner (Python 3.12 + beeai-framework>=0.1.81,<0.2 + subscribe_spendguard)..."
+	$(COMPOSE) -f agent_real_beeai/docker-compose.yaml run --rm beeai-runner
+	@echo "[demo] verifying COV_D23 SLICE 4 (agent_real_beeai ALLOW)..."
+	@$(MAKE) demo-verify-agent-real-beeai
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_beeai demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_autogen)
+	@echo "[demo] running autogen-runner (Python 3.12 + autogen-agentchat + SpendGuardChatCompletionClient)..."
+	$(COMPOSE) -f agent_real_autogen/docker-compose.yaml run --rm autogen-runner
+	@echo "[demo] verifying COV_D24 SLICE 5 (agent_real_autogen ALLOW)..."
+	@$(MAKE) demo-verify-agent-real-autogen
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_autogen demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_ag2)
+	@echo "[demo] running autogen-runner with SPENDGUARD_DEMO_MODE=agent_real_ag2 (AG2 lineage)..."
+	@SPENDGUARD_DEMO_MODE=agent_real_ag2 \
+	  $(COMPOSE) -f agent_real_autogen/docker-compose.yaml run --rm \
+	    -e SPENDGUARD_DEMO_MODE=agent_real_ag2 autogen-runner
+	@echo "[demo] verifying COV_D24 SLICE 5 (agent_real_ag2 ALLOW — shared verifier)..."
+	@$(MAKE) demo-verify-agent-real-autogen
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_ag2 demo deferred per D05 UnitRef gap (cross-slice tracking)"
 else ifeq ($(DEMO_MODE),agent_real_adk_stub)
 	@echo "[demo] running adk-runner in stub mode (no GOOGLE_API_KEY)..."
 	@SPENDGUARD_DEMO_MODE=agent_real_adk_stub \
@@ -1327,6 +1397,79 @@ demo-verify-agent-real-agno:
 		   RAISE NOTICE 'COV_D22 CANONICAL OK: decision=% outcome=% agno_tagged=%', v_decision, v_outcome, v_agno; \
 		 END; \$$\$$;"
 	@echo "[demo] COV_D22 SLICE 4 agent_real_agno verification done"
+
+# COV_D23 SLICE 4 (agent_real_beeai demo) verification. Mirrors the
+# agent_real_agno / agent_real_dspy layout: ledger-DB assertions in
+# verify_step_agent_real_beeai.sql + INV-2 strict-order DO block + a
+# cross-DB canonical_events check under spendguard_canonical that
+# asserts at least 1 decision row + 1 outcome row landed after the
+# outbox forwarder drained, plus the beeai integration tag is present
+# on the decision rows.
+demo-verify-agent-real-beeai:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_agent_real_beeai.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; v_beeai INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   SELECT COUNT(*) INTO v_beeai FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND payload_json::jsonb #>> '{decision_context,integration}' = 'beeai'; \
+		   IF v_decision < 1 THEN \
+		     RAISE EXCEPTION 'COV_D23_GATE: canonical_events.decision >= 1 expected (ALLOW), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D23_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D23 CANONICAL OK: decision=% outcome=% beeai_tagged=%', v_decision, v_outcome, v_beeai; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D23 SLICE 4 agent_real_beeai verification done"
+
+# COV_D24 SLICE 5 (agent_real_autogen / agent_real_ag2 demo) verification.
+# Mirrors the agent_real_agno / agent_real_beeai layout: ledger-DB
+# assertions in verify_step_agent_real_autogen.sql + INV-2 strict-order
+# DO block + a cross-DB canonical_events check under spendguard_canonical
+# that asserts at least 1 decision row + 1 outcome row landed after the
+# outbox forwarder drained, plus the autogen integration tag is present
+# on the decision rows.
+#
+# The same verifier covers both DEMO_MODE=agent_real_autogen and
+# DEMO_MODE=agent_real_ag2 (review-standards §5: "Both modes share a
+# single verify_step_autogen.sql"). The decision_context tag is the
+# same string ('autogen') in both cases — the wrapper is one class —
+# but the lineage label on decision rows tells operators which
+# AssistantAgent flavor was loaded.
+demo-verify-agent-real-autogen:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_agent_real_autogen.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; v_autogen INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   SELECT COUNT(*) INTO v_autogen FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND payload_json::jsonb #>> '{decision_context,integration}' = 'autogen'; \
+		   IF v_decision < 1 THEN \
+		     RAISE EXCEPTION 'COV_D24_GATE: canonical_events.decision >= 1 expected (ALLOW), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D24_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D24 CANONICAL OK: decision=% outcome=% autogen_tagged=%', v_decision, v_outcome, v_autogen; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D24 SLICE 5 agent_real_autogen verification done"
 
 # COV_D08 SLICE 5 (openai_agents_ts demo) verification. Mirrors the
 # langchain_ts / vercel_ai_mastra layout: ledger-DB assertions in

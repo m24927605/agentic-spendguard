@@ -859,6 +859,12 @@ async def main() -> int:
         return await run_dspy_real_mode()
     if DEMO_MODE == "agent_real_agno":
         return await run_agno_mode()
+    if DEMO_MODE == "agent_real_beeai":
+        return await run_beeai_mode()
+    if DEMO_MODE == "agent_real_autogen":
+        return await run_autogen_mode()
+    if DEMO_MODE == "agent_real_ag2":
+        return await run_autogen_mode(lineage="ag2")
     if DEMO_MODE == "cursor_mitm_fixture":
         # D17 SLICE 9: the cursor_mitm_fixture demo's runner is a
         # Rust binary (services/cursor_codec example
@@ -5341,6 +5347,483 @@ async def run_agno_mode() -> int:
             )
             await post_cb(agent=agent, run_output=run_output)
         print("[demo] agent_real_agno run completed: ALLOW path (stub)")
+
+    await client.close()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# COV_D24 SLICE 5 (agent_real_autogen / agent_real_ag2):
+# Exercises SpendGuardChatCompletionClient against a real AutoGen 0.4+
+# AssistantAgent with OpenAIChatCompletionClient pointed at the local
+# counting-stub. Falls back to the duck-typed driver path when
+# autogen-agentchat isn't importable (CI smoke gate). Mirrors
+# run_agno_mode + run_dspy_real_mode.
+#
+# A second mode (`agent_real_ag2`) reuses this same function with
+# `lineage="ag2"` — the wrapper is unchanged because both lineages
+# re-export `autogen_core.models.ChatCompletionClient`. AG2's
+# AssistantAgent import path differs (`ag2.agents` vs
+# `autogen_agentchat.agents`); the runner tries the requested one
+# first, then falls back to the available alternative so a single
+# install (autogen-agentchat OR ag2) still exercises the wrapper.
+# ---------------------------------------------------------------------------
+
+
+async def run_autogen_mode(lineage: str = "autogen") -> int:  # noqa: PLR0915
+    """COV_D24: drive AutoGen / AG2 AssistantAgent through SpendGuard wrap."""
+    from types import SimpleNamespace
+
+    from spendguard import SpendGuardClient, new_uuid7
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+
+    unit = common_pb2.UnitRef(
+        unit_id=unit_id, token_kind="output_token", model_family="gpt-4"
+    )
+    pricing = common_pb2.PricingFreeze(
+        pricing_version=pricing_version,
+        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
+        fx_rate_version=fx,
+        unit_conversion_version=unit_conv,
+    )
+
+    # Load the integration via package-namespace bypass — the demo
+    # container may or may not have `autogen-core` installed; the
+    # in-tree spendguard.integrations.autogen barrel raises ImportError
+    # when the extra is missing. We load the _hook module directly so
+    # the smoke path still works. Mirrors the agno / dspy demo path.
+    import importlib
+    import types as _t
+    pkg_name = "spendguard.integrations.autogen"
+    if pkg_name not in sys.modules:
+        from pathlib import Path as _P
+        ns = _t.ModuleType(pkg_name)
+        sdk_root = _P("/opt/spendguard/sdk/python/src/spendguard/integrations/autogen")
+        if not sdk_root.exists():
+            sdk_root = _P(__file__).resolve().parents[3] / \
+                "sdk/python/src/spendguard/integrations/autogen"
+        ns.__path__ = [str(sdk_root)]
+        sys.modules[pkg_name] = ns
+    hook_mod = importlib.import_module(
+        "spendguard.integrations.autogen._hook"
+    )
+    SpendGuardChatCompletionClient = hook_mod.SpendGuardChatCompletionClient
+    AutoGenRunContext = hook_mod.RunContext
+    autogen_run_context = hook_mod.run_context
+    LINEAGE = hook_mod.LINEAGE
+    print(f"[demo] autogen LINEAGE probe → {LINEAGE} (requested lineage={lineage})")
+
+    def estimate_claims(_messages):
+        return [
+            common_pb2.BudgetClaim(
+                budget_id=budget_id,
+                unit=unit,
+                amount_atomic="500",
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id=window_id,
+            ),
+        ]
+
+    run_id = str(new_uuid7())
+    print(f"[demo] autogen run_id={run_id} (lineage={lineage})")
+
+    real_autogen_used = False
+    try:
+        # Try the requested lineage first, then fall back to whatever
+        # is installed. Both lineages expose ``AssistantAgent`` and
+        # the OpenAI-backed ``OpenAIChatCompletionClient`` import path
+        # is provided by ``autogen-ext`` regardless.
+        if lineage == "ag2":
+            try:
+                from ag2.agents import AssistantAgent  # type: ignore[import-not-found]
+                lineage_used = "ag2"
+            except ImportError:
+                from autogen_agentchat.agents import AssistantAgent  # type: ignore[import-not-found]
+                lineage_used = "autogen"
+                print(
+                    f"[demo] ag2 not installed; falling back to autogen "
+                    f"(lineage_used={lineage_used})",
+                    file=sys.stderr,
+                )
+        else:
+            try:
+                from autogen_agentchat.agents import AssistantAgent  # type: ignore[import-not-found]
+                lineage_used = "autogen"
+            except ImportError:
+                from ag2.agents import AssistantAgent  # type: ignore[import-not-found]
+                lineage_used = "ag2"
+                print(
+                    f"[demo] autogen-agentchat not installed; falling back to ag2 "
+                    f"(lineage_used={lineage_used})",
+                    file=sys.stderr,
+                )
+
+        from autogen_core import CancellationToken  # type: ignore[import-not-found]
+        from autogen_ext.models.openai import OpenAIChatCompletionClient  # type: ignore[import-not-found]
+        # AssistantAgent.on_messages takes BaseChatMessage subclasses
+        # (TextMessage) — NOT the autogen_core.models LLMMessage types
+        # (UserMessage / SystemMessage etc.). Those are model-layer
+        # types the AssistantAgent converts internally.
+        from autogen_agentchat.messages import TextMessage  # type: ignore[import-not-found]
+
+        inner = OpenAIChatCompletionClient(model="gpt-4o-mini")
+        guarded = SpendGuardChatCompletionClient(
+            inner=inner,
+            client=client,
+            budget_id=budget_id,
+            window_instance_id=window_id,
+            unit=unit,
+            pricing=pricing,
+            claim_estimator=estimate_claims,
+        )
+        agent = AssistantAgent(name="spendguard_autogen_demo", model_client=guarded)
+        async with autogen_run_context(AutoGenRunContext(run_id=run_id)):
+            cancellation_token = CancellationToken()
+            result = await agent.on_messages(
+                [TextMessage(content="Say hello in three words.", source="user")],
+                cancellation_token,
+            )
+        # AutoGen / AG2 return a ``Response`` with a chat_message attr.
+        chat_msg = getattr(result, "chat_message", None)
+        content_snippet = getattr(chat_msg, "content", "") if chat_msg else ""
+        print(
+            f"[demo] agent_real_autogen run completed: ALLOW path "
+            f"lineage_used={lineage_used} content={str(content_snippet)[:48]!r}"
+        )
+        real_autogen_used = True
+    except ImportError as exc:
+        print(
+            f"[demo] autogen-agentchat / ag2 not importable ({exc}); "
+            "using duck-typed driver path (CI smoke gate).",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[demo] AssistantAgent.on_messages raised "
+            f"{type(exc).__name__}: {exc}; falling back to duck-typed path.",
+            file=sys.stderr,
+        )
+
+    if not real_autogen_used:
+        # Duck-typed driver — call wrapper.create directly without an
+        # AssistantAgent. The wrapper has no autogen-agentchat
+        # dependency at runtime; only the demo's optional agent layer
+        # does. This exercises the full PRE/POST lifecycle the way the
+        # AssistantAgent would, with a FakeChatCompletionClient
+        # standing in for the OpenAIChatCompletionClient.
+
+        class _FakeInner:
+            """Minimal duck-typed inner client matching the wrapper's needs."""
+
+            def __init__(self):
+                self.calls = 0
+
+            async def create(self, messages, *, tools=(), tool_choice="auto",
+                              json_output=None, extra_create_args=None,
+                              cancellation_token=None, **_kwargs):
+                self.calls += 1
+                # Shape mirrors autogen_core.models.CreateResult.
+                return SimpleNamespace(
+                    content="hi from duck-typed inner",
+                    usage=SimpleNamespace(
+                        prompt_tokens=12, completion_tokens=20
+                    ),
+                )
+
+            def create_stream(self, messages, **_kwargs):
+                async def _s():
+                    yield SimpleNamespace(content="chunk")
+
+                return _s()
+
+            async def close(self):
+                """No-op for the duck-typed fake."""
+
+            def actual_usage(self):
+                return SimpleNamespace(prompt_tokens=0, completion_tokens=0)
+
+            def total_usage(self):
+                return SimpleNamespace(prompt_tokens=12, completion_tokens=20)
+
+            def count_tokens(self, messages, *, tools=()):
+                return sum(len(getattr(m, "content", "")) for m in messages) // 4
+
+            def remaining_tokens(self, messages, *, tools=()):
+                return 1000
+
+            @property
+            def capabilities(self):
+                return {"vision": False}
+
+            @property
+            def model_info(self):
+                return {"family": "duck-typed"}
+
+        inner = _FakeInner()
+        guarded = SpendGuardChatCompletionClient(
+            inner=inner,
+            client=client,
+            budget_id=budget_id,
+            window_instance_id=window_id,
+            unit=unit,
+            pricing=pricing,
+            claim_estimator=estimate_claims,
+        )
+        messages = [SimpleNamespace(content="Say hello in three words.", source="user", role="user")]
+        async with autogen_run_context(AutoGenRunContext(run_id=run_id)):
+            result = await guarded.create(messages)
+        print(
+            f"[demo] agent_real_autogen run completed: ALLOW path (stub) "
+            f"inner_calls={inner.calls} usage_total={result.usage.prompt_tokens + result.usage.completion_tokens}"
+        )
+
+    await client.close()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# COV_D23 SLICE 4 — agent_real_beeai
+# ---------------------------------------------------------------------------
+# Drive a BeeAI `ReActAgent` end-to-end with SpendGuard's
+# `subscribe_spendguard(agent, client, ...)`. Falls back to a duck-typed
+# Emitter driver when `beeai-framework` is not importable inside the demo
+# container (CI smoke gate). Mirrors run_agno_mode + run_dspy_real_mode.
+# ---------------------------------------------------------------------------
+
+
+async def run_beeai_mode() -> int:
+    """COV_D23: drive `beeai_framework.agents.react.ReActAgent` through SpendGuard."""
+    from types import SimpleNamespace
+
+    from spendguard import SpendGuardClient, new_uuid7
+    from spendguard._proto.spendguard.common.v1 import common_pb2
+
+    socket_path = _env("SPENDGUARD_SIDECAR_UDS")
+    tenant_id = _env("SPENDGUARD_TENANT_ID")
+    budget_id = _env("SPENDGUARD_BUDGET_ID")
+    window_id = _env("SPENDGUARD_WINDOW_INSTANCE_ID")
+    unit_id = _env("SPENDGUARD_UNIT_ID")
+    pricing_version = _env("SPENDGUARD_PRICING_VERSION")
+    fx = _env("SPENDGUARD_FX_RATE_VERSION")
+    unit_conv = _env("SPENDGUARD_UNIT_CONVERSION_VERSION")
+    snapshot_hash_hex = _env("SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX")
+
+    print(f"[demo] connecting to sidecar at {socket_path}")
+    deadline = time.monotonic() + HANDSHAKE_TIMEOUT_S
+    client: SpendGuardClient | None = None
+    last_err: BaseException | None = None
+    while time.monotonic() < deadline:
+        try:
+            c = _demo_client(socket_path=socket_path, tenant_id=tenant_id)
+            await c.connect()
+            await c.handshake()
+            client = c
+            break
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            await asyncio.sleep(1)
+    if client is None:
+        print(f"[demo] FATAL: handshake timeout: {last_err}", file=sys.stderr)
+        return 3
+    print(f"[demo] handshake ok session_id={client.session_id}")
+
+    unit = common_pb2.UnitRef(
+        unit_id=unit_id, token_kind="output_token", model_family="gpt-4"
+    )
+    pricing = common_pb2.PricingFreeze(
+        pricing_version=pricing_version,
+        price_snapshot_hash=bytes.fromhex(snapshot_hash_hex),
+        fx_rate_version=fx,
+        unit_conversion_version=unit_conv,
+    )
+
+    # Load the integration via the package-namespace bypass — the demo
+    # container may or may not have `beeai-framework` installed; the
+    # in-tree `spendguard.integrations.beeai` package raises
+    # ImportError when the extra is missing. We load the `_hook` /
+    # `_options` modules directly so the smoke path still works.
+    import importlib
+    import types as _t
+    pkg_name = "spendguard.integrations.beeai"
+    if pkg_name not in sys.modules:
+        from pathlib import Path as _P
+        ns = _t.ModuleType(pkg_name)
+        sdk_root = _P("/opt/spendguard/sdk/python/src/spendguard/integrations/beeai")
+        if not sdk_root.exists():
+            sdk_root = _P(__file__).resolve().parents[3] / \
+                "sdk/python/src/spendguard/integrations/beeai"
+        ns.__path__ = [str(sdk_root)]
+        sys.modules[pkg_name] = ns
+    hook_mod = importlib.import_module("spendguard.integrations.beeai._hook")
+    options_mod = importlib.import_module(
+        "spendguard.integrations.beeai._options"
+    )
+    subscribe_spendguard = hook_mod.subscribe_spendguard
+    BeeAIRunContext = options_mod.RunContext
+    beeai_run_context = hook_mod.run_context
+
+    def estimate_claims(_event):
+        return [
+            common_pb2.BudgetClaim(
+                budget_id=budget_id,
+                unit=unit,
+                amount_atomic="500",
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id=window_id,
+            ),
+        ]
+
+    run_id = str(new_uuid7())
+    print(f"[demo] beeai run_id={run_id}")
+
+    real_beeai_used = False
+    unsubscribe = None
+    try:
+        from beeai_framework.agents.react import (  # type: ignore[import-not-found]
+            ReActAgent,
+        )
+        from beeai_framework.backend.chat import (  # type: ignore[import-not-found]
+            ChatModel,
+        )
+
+        llm = ChatModel.from_name("openai:gpt-4o-mini")
+        agent = ReActAgent(llm=llm, tools=[])
+        unsubscribe = subscribe_spendguard(
+            agent=agent,
+            client=client,
+            budget_id=budget_id,
+            window_instance_id=window_id,
+            unit=unit,
+            pricing=pricing,
+            claim_estimator=estimate_claims,
+        )
+        async with beeai_run_context(BeeAIRunContext(run_id=run_id)):
+            result = await agent.run("Say hello in three words.")
+        rid = getattr(result, "id", getattr(result, "run_id", "unknown"))
+        print(
+            f"[demo] agent_real_beeai run completed: ALLOW path "
+            f"result.id={rid}"
+        )
+        real_beeai_used = True
+    except ImportError as exc:
+        print(
+            f"[demo] beeai-framework not importable ({exc}); using duck-typed "
+            "driver path (CI smoke gate).",
+            file=sys.stderr,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[demo] beeai ReActAgent.run raised "
+            f"{type(exc).__name__}: {exc}; falling back to duck-typed path.",
+            file=sys.stderr,
+        )
+    finally:
+        if unsubscribe is not None:
+            try:
+                unsubscribe()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if not real_beeai_used:
+        # Duck-typed driver — emulates BeeAI's Emitter so the
+        # subscriber wired through subscribe_spendguard exercises the
+        # exact same _on_start / _on_success code paths as the real
+        # framework would. Mirrors the SLICE 3 unit tests'
+        # `_FakeEmitter`.
+        class _FakeEmitter:
+            def __init__(self) -> None:
+                self.predicates = []
+                self.callbacks = []
+
+            def match(self, matcher, callback, options=None):  # noqa: D401, ARG002
+                self.predicates.append(matcher)
+                self.callbacks.append(callback)
+                idx = len(self.predicates) - 1
+
+                def _unsub() -> None:
+                    self.predicates[idx] = lambda _ev: False
+
+                return _unsub
+
+            async def emit(self, name: str, data, path: str) -> None:
+                meta = SimpleNamespace(name=name, path=path, id=f"evt-{name}")
+                for pred, cb in zip(
+                    self.predicates, self.callbacks, strict=False
+                ):
+                    if pred(meta):
+                        await cb(data, meta)
+
+        emitter = _FakeEmitter()
+        agent_stub = SimpleNamespace(emitter=emitter)
+        unsubscribe = subscribe_spendguard(
+            agent=agent_stub,
+            client=client,
+            budget_id=budget_id,
+            window_instance_id=window_id,
+            unit=unit,
+            pricing=pricing,
+            claim_estimator=estimate_claims,
+        )
+        try:
+            async with beeai_run_context(BeeAIRunContext(run_id=run_id)):
+                # PRE: subscribe_spendguard's *.start handler reserves.
+                await emitter.emit(
+                    "start",
+                    SimpleNamespace(
+                        input=["Say hello in three words."],
+                        modelId="gpt-4o-mini",
+                    ),
+                    "agent.react.llm.demo-001.start",
+                )
+                # POST: subscribe_spendguard's *.success handler commits.
+                await emitter.emit(
+                    "success",
+                    SimpleNamespace(
+                        usage={
+                            "prompt_tokens": 8,
+                            "completion_tokens": 14,
+                            "total_tokens": 22,
+                        },
+                        id="chatcmpl-beeai-stub-1",
+                    ),
+                    "agent.react.llm.demo-001.success",
+                )
+            print("[demo] agent_real_beeai run completed: ALLOW path (stub)")
+        finally:
+            if unsubscribe is not None:
+                try:
+                    unsubscribe()
+                except Exception:  # noqa: BLE001
+                    pass
 
     await client.close()
     return 0

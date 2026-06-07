@@ -1,0 +1,232 @@
+---
+title: "BeeAI Framework budget control with SpendGuard"
+description: >-
+  Pre-call token budget enforcement for the BeeAI Framework
+  (beeai-framework >= 0.1.81) using Agentic SpendGuard. One
+  subscribe_spendguard call covers every BeeAI ChatModel provider —
+  OpenAIChatModel, WatsonxChatModel, OllamaChatModel, GroqChatModel —
+  because gating sits at the agent-runtime Emitter, not the model
+  boundary.
+---
+
+> Your BeeAI `ReActAgent` runs `await agent.run(prompt)` against an
+> open-ended tool loop, fanning out across multiple LLM calls per
+> turn. Without a gate, you find out the cost on next month's billing
+> dashboard. SpendGuard plugs a single subscriber into BeeAI via
+> `subscribe_spendguard(agent, client, ...)` so every LLM step
+> reserves against a budget *before* the upstream call goes out — and
+> the same subscriber works for `OpenAIChatModel`, `WatsonxChatModel`,
+> `OllamaChatModel`, `GroqChatModel`, or any other `ChatModel` you
+> wire into the agent.
+
+## Why you'd want this
+
+- **One subscriber, every backend.** BeeAI's `ChatModel` abstraction
+  is plural (OpenAI / Watsonx / Ollama / Groq / custom). Gating at
+  the agent-runtime `Emitter` boundary means a single
+  `subscribe_spendguard` call covers all of them; you don't write
+  per-vendor wrappers.
+- **Pre-call refusal, not post-hoc accounting.** DENY surfaces as
+  `DecisionDenied`; BeeAI's `Emitter._invoke` wraps it as
+  `EmitterError` preserving `__cause__`, so the model HTTP is
+  **never** issued and your `try/except` can catch by either type.
+- **Provider-agnostic by shape, not by string.** Reads
+  `usage.total_tokens` (with `prompt_tokens + completion_tokens`
+  fallback) from the `*.success` payload — no model-string parsing
+  required.
+- **Audit + approval pipeline shared with every other framework.**
+  The subscriber writes to the same SpendGuard ledger as the
+  LangChain, Pydantic-AI, OpenAI Agents, Google ADK, AWS Strands,
+  DSPy, and Agno integrations. The shared `spendguard_run_context`
+  contextvar means a parent LangChain run wrapping a BeeAI agent
+  reuses the same `run_id`.
+
+## Setup (60 seconds)
+
+```bash
+pip install 'spendguard-sdk[beeai]'
+```
+
+Bring up a sidecar via the demo stack:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## Wire it up
+
+```python
+import asyncio
+
+from beeai_framework.agents.react import ReActAgent
+from beeai_framework.backend.chat import ChatModel
+
+from spendguard import SpendGuardClient, new_uuid7
+from spendguard.integrations.beeai import (
+    RunContext, run_context, subscribe_spendguard,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    llm = ChatModel.from_name("openai:gpt-4o-mini")
+    agent = ReActAgent(llm=llm, tools=[])
+
+    unsubscribe = subscribe_spendguard(
+        agent, client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+    )
+    try:
+        async with run_context(RunContext(run_id=str(new_uuid7()))):
+            result = await agent.run("Say hello in three words.")
+        print(result.result.text)
+    finally:
+        unsubscribe()
+
+
+asyncio.run(main())
+```
+
+**Hold the unsubscribe.** `subscribe_spendguard` returns a no-arg
+callable that unhooks the listener from the agent's `Emitter`. The
+adapter is NOT idempotent in that calling `subscribe_spendguard` a
+second time on the same agent installs a second listener — always
+call the returned `unsubscribe()` in a `finally:` block.
+
+## How it works
+
+BeeAI's `Emitter` publishes events on hierarchical paths like
+`agent.react.llm.<uuid>.start`, `.success`, and `.error`. The
+subscriber registers ONE predicate on `agent.emitter.match` that
+fires for any event whose `name` is `start` / `success` / `error`
+AND whose `path` contains an `llm` segment — covering `ReActAgent`,
+`Workflow`, and any other agent that publishes under `llm.*`.
+
+For each `start` event:
+1. The handler derives a stable per-call key
+   (`EventMeta.path` with the trailing `.start` segment stripped),
+   a deterministic `llm_call_id` + `decision_id` (distinct scopes
+   under `derive_uuid_from_signature`), and a SpendGuard
+   `RequestDecision(LLM_CALL_PRE)` envelope.
+2. `client.request_decision(...)` runs BEFORE any provider HTTP. On
+   `CONTINUE`, the reservation is stashed in a bounded FIFO inflight
+   map (10 000 entry cap, one-shot warning on eviction). On DENY,
+   `DecisionDenied` propagates — BeeAI's `Emitter._invoke` wraps
+   it as `EmitterError` preserving `__cause__`, and the model HTTP
+   is never reached.
+3. The matching `success` event pops the inflight slot and calls
+   `client.emit_llm_call_post(SUCCESS, total_tokens)` with the real
+   `usage.total_tokens` from the provider response.
+4. An `error` event pops the slot and calls
+   `emit_llm_call_post(PROVIDER_ERROR, 0)` so the reservation is
+   released rather than abandoned to TTL-sweep.
+
+## Claim estimator
+
+If you omit `claim_estimator=`, the subscriber wires in the shared
+`langchain_default_claim_estimator` keyed on the live `model_id`
+extracted from each event payload. That covers OpenAI / Anthropic /
+Gemini / Cohere / Llama models out of the box via the bundled
+tokenizers.
+
+For custom behaviour, pass `claim_estimator=` with a
+`(BeeAiStartEvent) → list[BudgetClaim]` callable:
+
+```python
+from spendguard.integrations.beeai import BeeAiStartEvent
+
+def my_estimator(ev: BeeAiStartEvent) -> list[common_pb2.BudgetClaim]:
+    # Project a flat 500-token reservation per call.
+    return [
+        common_pb2.BudgetClaim(
+            budget_id="my-budget",
+            unit=common_pb2.UnitRef(unit_id="usd_micros"),
+            amount_atomic="500",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )
+    ]
+
+unsubscribe = subscribe_spendguard(
+    agent, client,
+    budget_id="my-budget",
+    window_instance_id="my-window",
+    unit=unit,
+    pricing=pricing,
+    claim_estimator=my_estimator,
+)
+```
+
+## run_context rule
+
+Every BeeAI `*.start` event MUST fire inside an active
+`run_context(...)` block. The handler raises `RuntimeError` with an
+actionable message otherwise — wrap your `agent.run(...)` call:
+
+```python
+async with run_context(RunContext(run_id=str(new_uuid7()))):
+    result = await agent.run("...")
+```
+
+The `spendguard_run_context` ContextVar is SHARED across every
+SpendGuard adapter (LangChain, Pydantic-AI, OpenAI Agents, Agno,
+DSPy, ADK, Strands, BeeAI). A parent LangChain run wrapping a BeeAI
+agent reuses the same `run_id` without explicit threading.
+
+## Troubleshooting
+
+**ImportError on `spendguard.integrations.beeai`.** You missed the
+`[beeai]` extra. Reinstall:
+
+```bash
+pip install 'spendguard-sdk[beeai]'
+```
+
+The extra pins `beeai-framework>=0.1.81,<0.2` — the actual PyPI
+release line at the time of writing (the spec's `>=0.3,<1.0` cap
+predates the project's first PyPI publish under that name; see
+`DEVIATION-A` in the module docstring).
+
+**`RuntimeError: subscriber fired outside an active run_context()`.**
+You're calling `agent.run(...)` without the
+`async with run_context(...)` wrap. Bind a fresh `RunContext` (with
+a freshly minted `run_id`) per top-level run.
+
+**DEGRADE behaviour.** Mutation patches are NOT applied (parity with
+LangChain / Pydantic-AI / Agno). The handler stashes the inflight
+slot and lets the call proceed; the eventual `*.success` commits at
+the projected envelope.
+
+## Out of scope
+
+* **Tool-call gating.** `subscribe_spendguard` filters by the
+  presence of an `llm` segment in the event path; `tool.*` paths
+  fall through to the `integrations.agt` territory.
+* **Mid-stream gating.** `newToken` / `partialUpdate` events are
+  silently ignored; commit only fires on `success`.
+* **TypeScript adapter.** Tier 3 is Python-only per the build plan
+  §2.3; the TS port is deferred.
+
+## References
+
+* Spec: [`docs/specs/coverage/D23_beeai/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D23_beeai)
+* Module: [`sdk/python/src/spendguard/integrations/beeai/`](https://github.com/m24927605/agentic-spendguard/tree/main/sdk/python/src/spendguard/integrations/beeai)
+* Demo: [`deploy/demo/agent_real_beeai/`](https://github.com/m24927605/agentic-spendguard/tree/main/deploy/demo/agent_real_beeai)

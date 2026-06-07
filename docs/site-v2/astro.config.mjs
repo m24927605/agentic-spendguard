@@ -72,6 +72,8 @@ export default defineConfig({
             { label: 'AWS Strands (Python)', slug: 'docs/integrations/aws-strands' },
             { label: 'DSPy (Python)', slug: 'docs/integrations/dspy' },
             { label: 'Agno (Python)', slug: 'docs/integrations/agno' },
+            { label: 'BeeAI Framework (Python)', slug: 'docs/integrations/beeai' },
+            { label: 'AutoGen / AG2 (Python)', slug: 'docs/integrations/autogen' },
             { label: 'LiteLLM proxy guardrail', slug: 'docs/integrations/litellm-proxy' },
             { label: 'LiteLLM SDK monkey-patch shim', slug: 'docs/integrations/litellm-sdk-shim' },
             { label: 'Kong AI Gateway (Go + Lua plugin)', slug: 'docs/integrations/kong-ai-gateway' },
