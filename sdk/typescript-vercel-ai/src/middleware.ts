@@ -55,7 +55,7 @@ import type {
 } from "ai";
 import { deriveIdempotencyKey } from "./ids.js";
 import type { SpendGuardMiddlewareOptions } from "./options.js";
-import { wrapGenerateStub, wrapStreamStub } from "./wrapper.js";
+import { makeWrapGenerate, makeWrapStream } from "./wrapper.js";
 
 // ── Internal stash shape ──────────────────────────────────────────────────
 
@@ -237,9 +237,16 @@ export function createSpendGuardMiddleware(
       return params;
     },
 
-    // SLICE 4 wires the real commit / release paths; SLICE 2/3 stubs throw.
-    wrapGenerate: wrapGenerateStub,
-    wrapStream: wrapStreamStub,
+    // SLICE 4 + SLICE 5 wire the real commit / release paths via the stash
+    // lookup pointer (avoids an import cycle with `./wrapper.js`). The
+    // factories build hook callbacks typed against AI SDK v4's
+    // `LanguageModelV1Middleware` shape.
+    wrapGenerate: makeWrapGenerate(opts.client, (params) =>
+      STASH.get(params as LanguageModelV1CallOptions),
+    ),
+    wrapStream: makeWrapStream(opts.client, (params) =>
+      STASH.get(params as LanguageModelV1CallOptions),
+    ),
   };
 }
 
