@@ -219,6 +219,6 @@ interface ExtractedUsage {
  */
 declare function extractUsage(response: ModelResponse | undefined | null): ExtractedUsage;
 
-declare const VERSION: "0.1.0-pre";
+declare const VERSION: "0.1.0";
 
 export { type ExtractedUsage, SpendGuardAgentsModel, type SpendGuardAgentsOptions, VERSION, deriveAgentSignature, extractUsage, withSpendGuard };

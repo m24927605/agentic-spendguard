@@ -5,6 +5,31 @@ export { ApprovalRequired, DecisionDenied, DecisionStopped, SidecarUnavailable, 
 import { blake2b } from '@noble/hashes/blake2b';
 import { bytesToHex } from '@noble/hashes/utils';
 
+// src/defaultEstimator.ts
+var MODEL_BASELINE_TOKENS = Object.freeze({
+  "gpt-4o-mini": 500,
+  "gpt-4o": 1500,
+  "gpt-4.1-mini": 500,
+  "gpt-4.1": 1500,
+  o1: 3e3,
+  "o3-mini": 1500,
+  o3: 3e3
+});
+var DEFAULT_BASELINE_TOKENS = 800;
+function resolveBaselineTokens(modelName) {
+  return MODEL_BASELINE_TOKENS[modelName] ?? DEFAULT_BASELINE_TOKENS;
+}
+function defaultClaimEstimator(opts) {
+  const baseline = resolveBaselineTokens(opts.modelName);
+  const amountAtomic = String(baseline);
+  return (_input) => [
+    {
+      scopeId: opts.scopeId,
+      amountAtomic,
+      unit: opts.unit
+    }
+  ];
+}
 function deriveAgentSignature(input, systemInstructions) {
   const repr = renderInputCanonical(input);
   const sysSegment = systemInstructions == null ? "" : systemInstructions;
@@ -80,7 +105,7 @@ async function bracketedGetResponse(inner, request, opts, innerModelName) {
     llmCallId,
     trigger: TRIGGER_PRE
   });
-  const claims = projectClaimsSlice2(request, opts);
+  const claims = projectClaimsSlice3(request, opts, innerModelName);
   const req = {
     trigger: TRIGGER_PRE,
     runId: ctx.runId,
@@ -136,14 +161,13 @@ async function bracketedGetResponse(inner, request, opts, innerModelName) {
   }
   return response;
 }
-function projectClaimsSlice2(_request, opts, _innerModelName) {
-  return [
-    {
-      scopeId: opts.budgetId ?? opts.tenantId,
-      amountAtomic: "0",
-      unit: DEFAULT_UNIT
-    }
-  ];
+function projectClaimsSlice3(request, opts, innerModelName) {
+  const scopeId = opts.budgetId ?? opts.tenantId;
+  return defaultClaimEstimator({
+    scopeId,
+    unit: DEFAULT_UNIT,
+    modelName: innerModelName
+  })(request.input);
 }
 async function safeCommit(opts, req) {
   try {
@@ -159,10 +183,10 @@ async function safeCommit(opts, req) {
 // src/withSpendGuard.ts
 function withSpendGuard(inner, opts) {
   validateOpts(opts);
-  inner.model ?? "";
+  const innerModelName = inner.model ?? "";
   const wrapped = {
     async getResponse(request) {
-      return bracketedGetResponse(inner, request, opts);
+      return bracketedGetResponse(inner, request, opts, innerModelName);
     },
     /**
      * Stream pass-through. v0.1.x scope: NO PRE/POST gating around the
@@ -253,6 +277,6 @@ var SpendGuardAgentsModel = class {
 };
 
 // src/version.ts
-var VERSION = "0.1.0-pre";
+var VERSION = "0.1.0";
 
 export { SpendGuardAgentsModel, VERSION, deriveAgentSignature, extractUsage, withSpendGuard };

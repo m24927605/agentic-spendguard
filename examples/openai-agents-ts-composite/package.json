@@ -1,0 +1,24 @@
+{
+  "name": "spendguard-openai-agents-ts-example",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runnable Node example: withSpendGuard(model) vs real @openai/agents Agent + Runner against a sidecar UDS. TS sibling of examples/openai-agents-composite/ (Python).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "start": "node demo.mjs",
+    "start:mock": "node demo.mjs --mock",
+    "start:real": "node demo.mjs --real",
+    "start:allow": "SPENDGUARD_DEMO_STEP=allow node demo.mjs",
+    "start:deny": "SPENDGUARD_DEMO_STEP=deny node demo.mjs",
+    "start:stream": "SPENDGUARD_DEMO_STEP=stream node demo.mjs"
+  },
+  "dependencies": {
+    "@openai/agents": "^0.11.6",
+    "@spendguard/openai-agents": "^0.1.0",
+    "@spendguard/sdk": "^0.1.0"
+  }
+}

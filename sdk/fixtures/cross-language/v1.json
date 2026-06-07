@@ -237,6 +237,91 @@
         "scope": "custom-test-scope"
       },
       "expected_output": "cf460197-b943-49a9-b936-dfb4b830c9b2"
+    },
+    {
+      "id": "FXOA1",
+      "fn": "derive_agent_signature",
+      "description": "D08 openai_agents — simple string input, no system instructions",
+      "inputs": {
+        "input": "Say hi",
+        "system_instructions": null
+      },
+      "expected_output": "0b8e468f6a5faab3cf0459d24035a33c"
+    },
+    {
+      "id": "FXOA2",
+      "fn": "derive_agent_signature",
+      "description": "D08 openai_agents — string input + system instructions",
+      "inputs": {
+        "input": "Say hi",
+        "system_instructions": "Be polite"
+      },
+      "expected_output": "bb805e8a571a9ee6772e1b3985575deb"
+    },
+    {
+      "id": "FXOA3",
+      "fn": "derive_agent_signature",
+      "description": "D08 openai_agents — short ASCII input + sys instructions (string-shape, cross-language byte-equal)",
+      "inputs": {
+        "input": "tools test",
+        "system_instructions": "Use the calculator tool"
+      },
+      "_note": "v0.1.x cross-language byte equality is limited to string-shape inputs because Python repr(list-of-dict) and TS JSON.stringify(list-of-dict) emit different byte sequences (single vs double quotes). The TS adapter falls back to JSON.stringify for non-string inputs, the Python adapter uses repr; the design.md §8 rendering quirk documents this divergence. A future v2.json could mint a canonical JSON form on both sides to close this gap; for now, FXOA* rows ship string-input only.",
+      "expected_output": "d2b0f7783bcbf3be27cc841b98e4c4ec"
+    },
+    {
+      "id": "FXOA4",
+      "fn": "derive_agent_signature",
+      "description": "D08 openai_agents — empty string input + empty system",
+      "inputs": {
+        "input": "",
+        "system_instructions": ""
+      },
+      "expected_output": "7d6395228c93bac41591f4c6b65aea03"
+    },
+    {
+      "id": "FXOA5",
+      "fn": "derive_agent_signature",
+      "description": "D08 openai_agents — multi-byte UTF-8 input + CJK tenant",
+      "inputs": {
+        "input": "Hello, 世界!",
+        "system_instructions": null
+      },
+      "expected_output": "3941e46a71c2a2cf4b196f5bb6c21e87"
+    },
+    {
+      "id": "FXOA1_IK",
+      "fn": "derive_idempotency_key",
+      "description": "D08 openai_agents — FXOA1 signature → idempotencyKey for runId=r-1",
+      "inputs": {
+        "tenant_id": "t-1",
+        "session_id": "s-1",
+        "run_id": "r-1",
+        "step_id": "r-1:oai-call:0b8e468f6a5faab3",
+        "llm_call_id": "9fa6e431-89e0-403e-8eee-2b252a7bd77c",
+        "trigger": "LLM_CALL_PRE"
+      },
+      "expected_output": "sg-e4d1ba4a538f53e1f25839e227de8f1f"
+    },
+    {
+      "id": "FXOA1_DEC",
+      "fn": "derive_uuid_from_signature",
+      "description": "D08 openai_agents — FXOA1 signature → decision_id UUID",
+      "inputs": {
+        "signature": "0b8e468f6a5faab3cf0459d24035a33c",
+        "scope": "decision_id"
+      },
+      "expected_output": "b18ca2dd-a146-4d69-952f-c6215b6b4d75"
+    },
+    {
+      "id": "FXOA1_LLM",
+      "fn": "derive_uuid_from_signature",
+      "description": "D08 openai_agents — FXOA1 signature → llm_call_id UUID",
+      "inputs": {
+        "signature": "0b8e468f6a5faab3cf0459d24035a33c",
+        "scope": "llm_call_id"
+      },
+      "expected_output": "9fa6e431-89e0-403e-8eee-2b252a7bd77c"
     }
   ]
 }

@@ -835,6 +835,8 @@ async def main() -> int:
         return await run_langchain_ts_mode()
     if DEMO_MODE == "vercel_ai_mastra":
         return await run_vercel_ai_mastra_mode()
+    if DEMO_MODE == "openai_agents_ts":
+        return await run_openai_agents_ts_mode()
     return await run_agent_mode()
 
 
@@ -3570,6 +3572,55 @@ async def run_vercel_ai_mastra_mode() -> int:
     # Mirrors the langchain_ts success-line locked spelling so the CI
     # grep targets stay uniform across the JS/TS adapter demo modes.
     print("[demo] vercel_ai_mastra ALL 3 steps PASS (ALLOW + DENY + STREAM)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE=openai_agents_ts (COV_D08 SLICE 5) — verifier-side driver for the
+# @openai/agents TS adapter. Mirrors run_langchain_ts_mode /
+# run_vercel_ai_mastra_mode: the openai-agents-runner container does the 3
+# real Agent + Runner.run(...) calls through withSpendGuard(model), and this
+# Python handler polls counting-stub /_count to assert the upstream-hit
+# count is >= 2 (one ALLOW + one STREAM; DENY MUST NOT have hit upstream).
+# ---------------------------------------------------------------------------
+
+
+async def run_openai_agents_ts_mode() -> int:
+    """Counting-stub verifier for the openai-agents-runner driver.
+
+    Polls `GET counting-stub:8765/_count` and asserts the running tally
+    is >= 2 (one ALLOW + one STREAM upstream hit). The DENY step never
+    contacts the upstream because `withSpendGuard`'s `reserve()` throws
+    `DecisionDenied` BEFORE the inner `OpenAIChatCompletionsModel`'s HTTP
+    call leaves the Node process, so the counter is unchanged by the DENY
+    step. Returns 0 on success; non-zero on failure with a clear error.
+    """
+    import httpx
+
+    print(f"[demo] openai_agents_ts verifier targeting {_COUNTING_STUB_URL}")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        try:
+            calls = await _read_counting_stub_hits(http)
+        except Exception as e:  # noqa: BLE001
+            print(f"[demo] FATAL: counting-stub /_count unreachable: {e!r}",
+                  file=sys.stderr)
+            return 7
+
+    if calls < 2:
+        print(
+            f"[demo] FATAL: openai-agents-runner expected >= 2 counting-stub "
+            f"hits (ALLOW + STREAM), got {calls}. The runner either "
+            "did not finish or the DENY step leaked through to the "
+            "upstream — INV-2 violated.",
+            file=sys.stderr,
+        )
+        return 7
+
+    print(f"[demo] openai_agents_ts counter OK: counting-stub hits={calls} (>= 2)")
+    # Mirrors the langchain_ts / vercel_ai_mastra success-line locked
+    # spelling so the CI grep targets stay uniform across the JS/TS
+    # adapter demo modes.
+    print("[demo] openai_agents_ts ALL 3 steps PASS (ALLOW + DENY + STREAM)")
     return 0
 
 

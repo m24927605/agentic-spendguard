@@ -55,6 +55,7 @@ import {
   deriveIdempotencyKey,
   deriveUuidFromSignature,
 } from "@spendguard/sdk";
+import { defaultClaimEstimator } from "./defaultEstimator.js";
 import type { SpendGuardAgentsOptions } from "./options.js";
 import { currentRunContext } from "./runContext.js";
 import { deriveAgentSignature } from "./signature.js";
@@ -127,7 +128,7 @@ export async function bracketedGetResponse(
     trigger: TRIGGER_PRE,
   });
 
-  const claims = projectClaimsSlice2(request, opts, innerModelName);
+  const claims = projectClaimsSlice3(request, opts, innerModelName);
   const req: ReserveRequest = {
     trigger: TRIGGER_PRE,
     runId: ctx.runId,
@@ -208,25 +209,26 @@ export async function bracketedGetResponse(
 }
 
 /**
- * SLICE 2 placeholder claim projection. Returns a single coarse claim
- * keyed by the budgetId-or-tenantId scope and a `0` amount so the reserve
- * still threads a well-formed claim through the substrate while the
- * authoritative numbers land on the POST commit. SLICE 3 (default
- * estimator + cross-language fixture) replaces this with the Python
- * `_default_estimator.MODEL_BASELINE_TOKENS` table.
+ * SLICE 3 claim projection. Routes the inner model name through
+ * `MODEL_BASELINE_TOKENS` to mint a per-model baseline amount. The
+ * legacy `0`-amount projection from SLICE 2 was a placeholder; SLICE 3
+ * replaces it with the design.md §11 literal table. Caller-supplied
+ * `claimEstimator` (additive optional, lands in a future minor on the
+ * options surface) overrides this default — Python parity "explicit
+ * non-null wins". For now, when no override is exposed, the default
+ * is unconditional.
  */
-function projectClaimsSlice2(
-  _request: ModelRequest,
+function projectClaimsSlice3(
+  request: ModelRequest,
   opts: SpendGuardAgentsOptions,
-  _innerModelName: string,
+  innerModelName: string,
 ): BudgetClaim[] {
-  return [
-    {
-      scopeId: opts.budgetId ?? opts.tenantId,
-      amountAtomic: "0",
-      unit: DEFAULT_UNIT,
-    },
-  ];
+  const scopeId = opts.budgetId ?? opts.tenantId;
+  return defaultClaimEstimator({
+    scopeId,
+    unit: DEFAULT_UNIT,
+    modelName: innerModelName,
+  })(request.input);
 }
 
 /**

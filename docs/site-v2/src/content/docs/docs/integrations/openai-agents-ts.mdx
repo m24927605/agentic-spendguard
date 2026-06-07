@@ -1,0 +1,371 @@
+---
+title: "OpenAI Agents SDK (TypeScript) — withSpendGuard(model)"
+description: >-
+  Install Agentic SpendGuard as a wrapper around any @openai/agents Model.
+  Drop-in via `withSpendGuard(inner, { client, tenantId })` — pre-call budget
+  reservation before the upstream OpenAI HTTP request fires, post-call commit
+  reconciles real token usage, signed audit trail. Multi-framework runs share
+  one trace via the shared `runContext()` AsyncLocalStorage.
+---
+
+
+> `@openai/agents` (TypeScript) is OpenAI's canonical JS agent runtime. Its
+> `Model` interface (`OpenAIChatCompletionsModel`, `OpenAIResponsesModel`)
+> is structurally identical to the Python SDK, so the Python wrapper
+> (subclass `Model`, bracket `getResponse()` with `reserve → call →
+> commitEstimated`) ports cleanly. SpendGuard ships as
+> `withSpendGuard(inner, opts)` — a stock factory you drop onto any
+> `@openai/agents` `Model` and hand to `new Agent({ model })`. No model
+> subclassing required, although the sibling `SpendGuardAgentsModel` class
+> form exists for codebases that prefer `instanceof` checks or subclass
+> factories.
+
+## Install
+
+```bash
+pnpm add @spendguard/sdk @spendguard/openai-agents @openai/agents
+```
+
+`@spendguard/sdk` and `@openai/agents` are declared as peer dependencies
+so the adapter pins neither — your project's lockfile wins. Node 20.10+
+is required (the substrate uses `await using` + stable
+`AsyncLocalStorage`).
+
+For real OpenAI HTTP, the standard `@openai/agents-openai` provider
+ships the `OpenAIChatCompletionsModel` / `OpenAIResponsesModel` you wrap:
+
+```bash
+pnpm add @openai/agents-openai
+```
+
+## Quick start
+
+Minimal end-to-end wire — connect a `SpendGuardClient` to the sidecar UDS,
+build the wrapped model, hand it to `new Agent({ model })`, and drive
+through `Runner.run(agent, ..., runContext)`:
+
+```ts
+import { Agent, Runner } from "@openai/agents";
+import { OpenAIChatCompletionsModel, OpenAIProvider } from "@openai/agents-openai";
+import { SpendGuardClient, newUuid7 } from "@spendguard/sdk";
+import { withSpendGuard, runContext } from "@spendguard/openai-agents";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  runtimeKind: "openai-agents-ts",
+});
+await client.connect();
+await client.handshake();
+
+const provider = new OpenAIProvider({ apiKey: process.env.OPENAI_API_KEY });
+const inner = new OpenAIChatCompletionsModel(provider.openaiClient, "gpt-4o-mini");
+const guarded = withSpendGuard(inner, {
+  client,
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  budgetId: "44444444-4444-4444-8444-444444444444",
+});
+
+const agent = new Agent({
+  name: "my-budget-aware-agent",
+  instructions: "Reply concisely.",
+  model: guarded,
+});
+
+try {
+  const runId = newUuid7();
+  const result = await runContext({ runId }, () =>
+    Runner.run(agent, "Say hello in three words."),
+  );
+  console.log("Runner.run OK", { runId, output: result.finalOutput });
+} finally {
+  await client.close();
+}
+```
+
+What happens on each `Runner.run(...)` call:
+
+1. The `withSpendGuard` factory's `getResponse(request)` derives a stable
+   BLAKE2b-128 signature from `(request.input, request.systemInstructions)`,
+   mints a deterministic `(decisionId, llmCallId)` pair via the substrate's
+   `deriveUuidFromSignature(...)`, and builds an idempotency key via
+   `deriveIdempotencyKey({ tenantId, sessionId: runId, runId, stepId,
+   llmCallId, trigger: "LLM_CALL_PRE" })`.
+2. `client.reserve({ trigger: "LLM_CALL_PRE", projectedClaims, … })` fires
+   with a per-model baseline `BudgetClaim` (looked up from the
+   `MODEL_BASELINE_TOKENS` table; unknown models fall back to 800 tokens).
+3. On `DecisionDenied` / `DecisionStopped` / `ApprovalRequired`, the
+   adapter rethrows — `Runner.run(...)` halts BEFORE the inner Model's
+   `getResponse(...)` HTTP call fires. **Reviewer gate 1.3 enforced**:
+   `inner.callCount` stays at `0` on every non-CONTINUE path.
+4. On `CONTINUE`, the inner Model is invoked with the request verbatim
+   (no field rewriting). The Runner orchestrates tool calls / handoffs as
+   usual.
+5. After the inner response returns, the bracket reads `usage.totalTokens`
+   (accepting both AI SDK v4 canonical camelCase AND snake_case shapes
+   for cross-provider robustness) and emits a `SUCCESS` commit via
+   `client.commitEstimated(...)`. Provider error → commit fires with
+   `outcome="PROVIDER_ERROR"`, then the error rethrows.
+
+## Class form — `SpendGuardAgentsModel`
+
+The class form is a sibling surface for codebases that prefer subclass
+factories or need an `instanceof` check. Both surfaces delegate to the
+same `bracketedGetResponse(...)` shared core, so the bracket NEVER drifts
+between them — review-standards §1.2 reviewer gate.
+
+```ts
+import { SpendGuardAgentsModel, runContext } from "@spendguard/openai-agents";
+
+const guarded = new SpendGuardAgentsModel({
+  inner,
+  client,
+  tenantId: "tenant-prod",
+  budgetId: "budget-team-7",
+});
+```
+
+## Shared `runContext()` — one trace across frameworks
+
+A multi-framework agent (LangChain.js + Vercel AI + Agents SDK in the
+same Node process) deserves ONE trace. SpendGuard backs `runContext()`
+with a single `AsyncLocalStorage` keyed on
+`Symbol.for("@spendguard/run-context/v1")` — every adapter (D04 / D06 /
+D08 / D29) imports the same Symbol from the global registry, so a single
+`runContext({ runId }, …)` scope flows through every nested LLM call no
+matter which framework drove it.
+
+```ts
+const runId = newUuid7();
+await runContext({ runId }, async () => {
+  // LangChain.js call — handler.handleChatModelStart reads the SAME runId.
+  await chat.invoke([new HumanMessage("hello")]);
+  // Vercel AI call — middleware.transformParams reads the SAME runId.
+  await generateText({ model: wrappedAi, prompt: "hi" });
+  // OpenAI Agents call — withSpendGuard reads the SAME runId.
+  await Runner.run(agent, "Say hi");
+});
+```
+
+> **Naming note**: `@openai/agents` also exports a type named `RunContext`
+> for the per-run state the OpenAI runner threads through tools. To avoid
+> the collision, alias one of them:
+>
+> ```ts
+> import type { RunContext as SpendGuardRunContext } from "@spendguard/openai-agents";
+> import { RunContext } from "@openai/agents";
+> ```
+
+## Configuration
+
+The v0.1.0 options surface is intentionally narrow. The richer
+`unitId` / `windowInstanceId` / pricing / `claimEstimator` shape the
+design anticipates is deferred (see **Limitations** below) — until the
+substrate broadens `UnitRef`, the adapter projects sensible defaults.
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Type</th><th>Required</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>client</code></td><td><code>SpendGuardClient</code></td><td>YES</td><td>Configured substrate client from <code>@spendguard/sdk</code>. The adapter does NOT own the client lifecycle — the consumer calls <code>connect()</code> / <code>handshake()</code> / <code>close()</code>.</td></tr>
+    <tr><td><code>tenantId</code></td><td><code>string</code></td><td>YES</td><td>Tenant UUID the call is billed to. Forwarded to the substrate as the <code>reserve()</code> claim scope and as the first field of the idempotency-key canonical tuple.</td></tr>
+    <tr><td><code>budgetId</code></td><td><code>string</code></td><td>NO</td><td>Budget UUID used as the projected claim's <code>scopeId</code>. When unset, the adapter falls back to <code>tenantId</code> as the scopeId.</td></tr>
+  </tbody>
+</table>
+
+A future minor (`v0.x`) extends this surface field-for-field with the
+design.md §4 superset (`windowInstanceId`, `unit`, `pricing`,
+`claimEstimator`) once the substrate broadens `UnitRef`. The
+extensions are additive optional fields — no breaking change to the
+v0.1.0 shape.
+
+## Default claim projection (`MODEL_BASELINE_TOKENS`)
+
+When no `claimEstimator` is supplied (the v0.1.0 surface), the bracket
+projects a single per-model baseline `BudgetClaim`:
+
+| Model           | Baseline (tokens) |
+| --------------- | ----------------- |
+| `gpt-4o-mini`   | 500               |
+| `gpt-4o`        | 1500              |
+| `gpt-4.1-mini`  | 500               |
+| `gpt-4.1`       | 1500              |
+| `o1`            | 3000              |
+| `o3-mini`       | 1500              |
+| `o3`            | 3000              |
+| _unknown_       | 800               |
+
+The values are byte-identical to the `design.md` §11 literal table. The
+TS adapter ships the literal-numbers form for v0.1.x; per-model
+tokenizer dispatch (Strategy A — the Python sibling's v0.5.x extension)
+lands as additive optional in a future TS minor. A user-supplied
+`claimEstimator` (the future `v0.x` options surface) is the escape
+hatch in the interim.
+
+## Limitations
+
+**SpendGuard's OpenAI Agents TS adapter is pre-call reserve + post-call
+commit only.** The bracket gates BEFORE the inner OpenAI HTTP call and
+commits AFTER `inner.getResponse(...)` returns. A few important things to
+know before you ship it in front of streaming-heavy workloads or rely on
+the full design surface:
+
+- **Stream-per-chunk gating is OUT of `v0.1.x`.**
+  `withSpendGuard(...)`'s `getStreamedResponse(...)` is **pass-through with
+  no PRE/POST gating** — the stream forwards verbatim. POST_D08 / `v0.2`
+  will add per-chunk gating when the substrate's `LLM_STREAM_DELTA`
+  trigger ships. For now, every stream call bypasses the reserve / commit
+  bracket; long-running streams that need mid-stream enforcement should
+  drive non-streaming Agent.run() turns instead.
+- **DEGRADE patch application surfaces as `MutationApplyFailed`.**
+  The DEGRADE-mutation-apply path is anti-scope for v0.1.x (design.md §3
+  non-goals). Substrate DEGRADE outcomes flow through as CONTINUE — the
+  bracket does NOT rewrite the inner request. Built-in claim mutation
+  lands in a later slice. Matches the Python `openai_agents.py`
+  `SpendGuardAgentsModel` v0.5.1 stance.
+- **Substrate dependency on `UnitRef` broadening.** Per the design.md §4
+  superset, the v0.1.0 options surface omits `windowInstanceId`,
+  `unit`, `pricing`, and `claimEstimator`. The TS substrate's
+  public `UnitRef` does not yet expose `unit_id`
+  (`sdk/typescript/src/client.ts::mapUnitRef` hardcodes empty); a
+  future hardening slice picks up the SDK-side broadening + adapter
+  wire-through together.
+- **No mid-stream cap on streamed responses.** SpendGuard reserves the
+  predicted budget at pre-call time. The commit happens at end-of-call
+  against the real `usage.totalTokens`. The adapter never tears down a
+  mid-flight stream to halt token emission — overruns land in the audit
+  chain and reflect at commit time, but the tokens were already emitted.
+- **`raiseError` semantics: SpendGuard substrate errors propagate
+  UNCHANGED.** `DecisionDenied` / `DecisionStopped` / `ApprovalRequired`
+  raised by `client.reserve(...)` are NOT caught — they propagate through
+  `Runner.run(...)` to the caller. The bracket also does NOT swallow
+  `SidecarUnavailable` on the reserve path (the future `degrade=auto`
+  mode is LOCKED OUT of v0.1.x — design.md §3 non-goals); the Runner
+  caller decides whether a sidecar outage halts the run.
+- **Browser is unsupported** (D05 §6 UDS-only). The adapter runs only in
+  Node 20.10+ where `AsyncLocalStorage` is available.
+
+## Demo
+
+A bundled docker-compose demo proves the full ALLOW + DENY + STREAM
+matrix end-to-end against a real `@openai/agents` `Agent` + `Runner.run`
++ sidecar + counting-stub provider:
+
+```bash
+make demo-up DEMO_MODE=openai_agents_ts
+```
+
+The mode boots `postgres + sidecar + openai-agents-runner +
+counting-stub`, then runs three invocations from the Node example at
+[`examples/openai-agents-ts-composite/`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/openai-agents-ts-composite/):
+
+- **ALLOW** — small message within budget. `withSpendGuard`'s
+  `getResponse(request)` fires PRE, `client.reserve()` returns ALLOW,
+  the wrapped Model's HTTP call fires, counter `+1`, the bracket emits a
+  `SUCCESS` commit with real token usage.
+- **DENY** — `Agent.modelSettings.extraBody.spendguard_estimate_override =
+  "2000000000"` blows past the seeded 1B hard-cap. The sidecar contract
+  evaluator emits `SPENDGUARD_DENY`, the bracket throws `DecisionDenied`,
+  `Runner.run(...)` halts BEFORE the upstream HTTP call. Counting-stub
+  counter UNCHANGED (proves the gate fires pre-call).
+- **STREAM** — pass-through stream call followed by a second
+  non-streaming `Runner.run(...)` to verify the bracket discipline
+  survives. Counter `+1`.
+
+Success line on a clean run (LOCKED — CI greps for the exact spelling):
+
+```
+[demo] openai_agents_ts ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+Full details and the verify-SQL gates are in
+[`deploy/demo/openai_agents_ts/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/openai_agents_ts/README.md).
+
+The standalone `--mock` mode (no sidecar required) runs against the same
+factory + an in-process `SpendGuardClient` double:
+
+```bash
+cd examples/openai-agents-ts-composite
+pnpm install
+node demo.mjs --mock
+```
+
+The mock mode explicitly asserts the "DENY ⇒ inner Model is NEVER
+invoked" invariant (review-standards §1.6 reviewer gate 1.6) and exits
+non-zero if violated.
+
+## Troubleshooting
+
+Common boot-time and first-call errors. The substrate's typed exceptions
+are re-exported from `@spendguard/openai-agents` so you can pattern-match
+on `DecisionDenied` / `SidecarUnavailable` without taking a second
+import.
+
+- **`DecisionDenied: reserve() denied by contract`** — Expected
+  behaviour when the budget is exhausted or a contract rule emitted
+  `SPENDGUARD_DENY`. The bracket rethrows, `Runner.run(...)` halts, and
+  the upstream OpenAI HTTP call never fires. Check the sidecar logs for
+  the rule that matched; the decision row in the ledger carries
+  `decision_context.contract_rule`.
+
+- **Budget gate not blocking — OpenAI call fires anyway.** Almost always
+  caused by `withSpendGuard(...)` not being threaded into the `Agent({
+  model })` slot. Inspect the model you pass to `new Agent(...)` — it
+  MUST be the wrapped one, not the raw `OpenAIChatCompletionsModel(...)`
+  reference.
+
+- **`@spendguard/openai-agents called outside an active runContext().`** —
+  Every `Runner.run(...)` driven through `withSpendGuard(...)` MUST be
+  wrapped in `await runContext({ runId }, () => Runner.run(agent,
+  input))`. The error message includes the exact wrap snippet to apply.
+
+- **`SidecarUnavailable: handshake timeout`** — The sidecar's UDS path
+  (`SPENDGUARD_SIDECAR_UDS`, default `/var/run/spendguard/adapter.sock`)
+  is not reachable. Check that the sidecar container is up, the socket
+  file exists, and your Node process has read/write permission on it.
+  In the demo overlay this is wired by
+  `deploy/demo/openai_agents_ts/docker-compose.yaml`; outside the demo,
+  mount the same socket path into your Node container's
+  `/var/run/spendguard/`.
+
+- **`RunContext` import collides with `@openai/agents`'s `RunContext`** —
+  Alias one of them at import time:
+
+  ```ts
+  import type { RunContext as SpendGuardRunContext } from "@spendguard/openai-agents";
+  import { RunContext } from "@openai/agents";
+  ```
+
+- **Token counts on commit don't match what the provider reports.** The
+  bracket's `extractUsage(response)` accepts both `Usage`-class camelCase
+  (`{inputTokens, outputTokens, totalTokens}`) AND snake_case
+  (`{prompt_tokens, completion_tokens, total_tokens}`) shapes — the
+  Agents SDK ships the Usage class for OpenAI providers, but custom
+  providers passing raw OpenAI HTTP shapes through verbatim are also
+  supported. If neither shape is present (rare; defensive fallback), the
+  commit ships `0` for the missing fields — check the provider's raw
+  response with `response.providerData`.
+
+- **Class identity check fails: `err instanceof DecisionDenied` is false**
+  — You imported `DecisionDenied` from `@spendguard/sdk` directly while
+  the wrapped model's bracket threw from `@spendguard/openai-agents`.
+  Class identity IS preserved (re-export, not subclass), so the check
+  works regardless of which import you use. If the check fails, suspect
+  a duplicate `@spendguard/sdk` in your `node_modules` tree.
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in 5 minutes.
+- [Vercel AI SDK (covers Mastra)](../vercel-ai/) — Vercel AI middleware
+  sibling of this adapter.
+- [LangChain.js callback handler](../langchain-ts/) — LangChain.js
+  callback-handler sibling.
+- [Pydantic-AI](../pydantic-ai/) — Python sibling.
+- [Contract YAML reference](../../contracts/yaml/) — author allow/stop
+  rules.
+- Other adapter integrations:
+  [LangChain & LangGraph (Python)](../langchain/) ·
+  [OpenAI Agents SDK (Python)](../openai-agents/) ·
+  [Microsoft AGT](../agt/) ·
+  [LiteLLM proxy guardrail](../litellm-proxy/)

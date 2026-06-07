@@ -1,6 +1,6 @@
 {
   "name": "@spendguard/openai-agents",
-  "version": "0.1.0-pre",
+  "version": "0.1.0",
   "description": "OpenAI Agents SDK (TypeScript) adapter for SpendGuard budget guardrails — drop-in via `withSpendGuard(model, opts)` on any `@openai/agents` Model.",
   "license": "Apache-2.0",
   "author": "Michael Chen <m24927605@gmail.com>",
@@ -59,7 +59,7 @@
     "lint": "biome check src tests",
     "format": "biome format --write src tests",
     "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit",
-    "prepublishOnly": "echo 'D08 SLICE 6 will wire prepublish gates' && exit 1"
+    "prepublishOnly": "bash scripts/prepublish.sh"
   },
   "dependencies": {
     "@noble/hashes": "^1.4.0"
