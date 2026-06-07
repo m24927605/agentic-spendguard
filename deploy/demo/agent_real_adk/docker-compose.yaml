@@ -1,0 +1,243 @@
+# COV_D19 SLICE 5 (`DEMO_MODE=agent_real_adk`) — sidecar compose overlay.
+#
+# Mirrors `deploy/demo/maf_python/docker-compose.yaml` field-for-field;
+# only the runner service differs (Python `google.adk.agents.LlmAgent`
+# wired with `SpendGuardAdkCallback` via `before_/after_model_callback`
+# vs MAF's `SpendGuardMiddleware.process(context, call_next)`).
+# Layered on top of `deploy/demo/compose.yaml` via `docker compose -f
+# deploy/demo/compose.yaml -f deploy/demo/agent_real_adk/docker-compose.yaml up`.
+# The Makefile `DEMO_MODE=agent_real_adk` branch does that for you.
+#
+# Services declared here:
+#
+#   counting-stub          mock Gemini `/v1beta/models/.../generateContent`
+#                          provider. By-value duplicate of the maf_dotnet /
+#                          openai_agents_ts / inngest_agent_kit overlays'
+#                          stub so the overlays remain independent.
+#
+#   adk-runner             Python 3.12 container that `pip install -e`s
+#                          the in-tree `spendguard-sdk` with the `[adk]`
+#                          extra, then runs the demo driver from
+#                          `deploy/demo/demo/run_demo.py` against the
+#                          sidecar UDS with SPENDGUARD_DEMO_MODE=agent_real_adk.
+#
+# Anti-scope: this overlay does NOT redeclare postgres, sidecar, ledger,
+# canonical-ingest, bundles-init, pki-init or any other base service —
+# the Makefile target brings up the base stack first, then this overlay.
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  # Pared-down Gemini-stub: ADK with `model="gemini-2.0-flash"` will
+  # try to hit the public Gemini API by default. Our demo overrides
+  # the API endpoint via env when running stub mode; in agent_real_adk
+  # mode (with GOOGLE_API_KEY set) we let the agent hit the real
+  # Gemini API directly and use the counting-stub only as a fallback
+  # for the LiteLlm-wrapped variant.
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                # Match both OpenAI-shape (LiteLlm) and Gemini-shape
+                # endpoints so the same stub serves both adapter variants.
+                if not (
+                    self.path.startswith("/v1/chat/completions")
+                    or "generateContent" in self.path
+                ):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                HITS["calls"] += 1
+
+                # Default: OpenAI-shape response (LiteLlm path).
+                if self.path.startswith("/v1/chat/completions"):
+                    body = {
+                        "id": f"chatcmpl-counting-{HITS['calls']}",
+                        "object": "chat.completion",
+                        "created": int(time.time()),
+                        "model": "gpt-4o-mini",
+                        "choices": [{
+                            "index": 0,
+                            "message": {"role": "assistant",
+                                        "content": "hi from counting stub"},
+                            "finish_reason": "stop",
+                        }],
+                        "usage": {"prompt_tokens": 5,
+                                  "completion_tokens": 7,
+                                  "total_tokens": 12},
+                        "_counting_stub_hits": HITS["calls"],
+                    }
+                else:
+                    # Gemini-shape response — minimal fields the ADK
+                    # parser consumes (text content + usage_metadata).
+                    body = {
+                        "candidates": [{
+                            "content": {
+                                "role": "model",
+                                "parts": [{"text": "hi from counting stub"}],
+                            },
+                            "finishReason": "STOP",
+                        }],
+                        "usageMetadata": {
+                            "promptTokenCount": 12,
+                            "candidatesTokenCount": 30,
+                            "totalTokenCount": 42,
+                        },
+                        "responseId": f"recorded-{HITS['calls']}",
+                    }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok")
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── adk-runner ────────────────────────────────────────────────
+  # Python 3.12 container that pip-installs the in-tree
+  # `spendguard-sdk` with the `[adk]` extra, then runs the canonical
+  # `deploy/demo/demo/run_demo.py` driver with
+  # SPENDGUARD_DEMO_MODE=agent_real_adk. The driver wires
+  # `LlmAgent(model="gemini-2.0-flash")` through
+  # `SpendGuardAdkCallback`'s before_/after_model_callback slots.
+  #
+  # Pre-install (rather than wheel-build) keeps the image build cache
+  # warm across iterations; the demo-as-quality-gate principle (project
+  # memory) requires the wire shape to match what the production publish
+  # bundle ships.
+  adk-runner:
+    image: python:3.12-slim-bookworm
+    container_name: spendguard-adk-runner
+    # Demo-only: run as root inside the container so the named-volume
+    # site-packages tree (mounted by docker as root-owned) is writable.
+    # Production deployments of `spendguard-sdk[adk]` run under the
+    # consumer's own runtime; the adapter itself never touches the
+    # filesystem at runtime.
+    working_dir: /opt/spendguard/deploy/demo/demo
+    environment:
+      SPENDGUARD_SIDECAR_UDS: "/var/run/spendguard/adapter.sock"
+      SPENDGUARD_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_UNIT_ID: "66666666-6666-4666-8666-666666666666"
+      SPENDGUARD_PRICING_VERSION: "demo-pricing-v1"
+      SPENDGUARD_FX_RATE_VERSION: "demo-fx-v1"
+      SPENDGUARD_UNIT_CONVERSION_VERSION: "demo-conv-v1"
+      SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX: "0000000000000000000000000000000000000000000000000000000000000000"
+      SPENDGUARD_HANDSHAKE_TIMEOUT_MS: "30000"
+      SPENDGUARD_COUNTING_STUB_URL: "http://counting-stub:8765"
+      SPENDGUARD_DEMO_MODE: "agent_real_adk"
+      # GOOGLE_API_KEY threaded from the host env; if not present the
+      # driver fails fast with exit 8 (matching the langchain demo's
+      # OPENAI_API_KEY check). For CI without a key, use
+      # DEMO_MODE=agent_real_adk_stub instead.
+      GOOGLE_API_KEY: "${GOOGLE_API_KEY:-}"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_CACHE_DIR: "off"
+    volumes:
+      # Workspace source — read-only.
+      - ../..:/opt/spendguard:ro
+      # Sidecar UDS shared with the rest of the stack.
+      - sidecar-uds:/var/run/spendguard
+      # Writable site-packages persistence across re-runs.
+      - adk-runner-venv:/opt/venv
+    tmpfs:
+      - /tmp
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        echo "[adk-runner] python $$(python --version)"
+
+        # Build a virtualenv on the named volume so repeat runs are fast.
+        if [ ! -d /opt/venv/bin ]; then
+          echo "[adk-runner] creating venv at /opt/venv..."
+          python -m venv /opt/venv
+        fi
+        . /opt/venv/bin/activate
+
+        echo "[adk-runner] installing in-tree spendguard-sdk[adk]..."
+        # The SDK lives at /opt/spendguard/sdk/python; install editable
+        # so the demo always reflects the current SDK shape (parity with
+        # the .NET runner's project-reference wire-up).
+        pip install -e '/opt/spendguard/sdk/python[adk]'
+
+        echo "[adk-runner] sidecar UDS ready check..."
+        for i in $$(seq 1 60); do
+          if [ -S "$$SPENDGUARD_SIDECAR_UDS" ]; then
+            echo "[adk-runner] sidecar UDS visible at $$SPENDGUARD_SIDECAR_UDS"
+            break
+          fi
+          sleep 1
+        done
+
+        echo "[adk-runner] launching run_demo.py (SPENDGUARD_DEMO_MODE=$$SPENDGUARD_DEMO_MODE)..."
+        exec python /opt/spendguard/deploy/demo/demo/run_demo.py
+    depends_on:
+      sidecar:
+        condition: service_healthy
+      counting-stub:
+        condition: service_healthy
+    networks:
+      spendguard-net:
+        aliases: [adk-runner]
+
+volumes:
+  adk-runner-venv:

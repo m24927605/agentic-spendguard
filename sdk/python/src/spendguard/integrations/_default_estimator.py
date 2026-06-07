@@ -260,6 +260,82 @@ def litellm_default_claim_estimator(
     return estimator
 
 
+def adk_default_claim_estimator(
+    *,
+    budget_id: str,
+    window_instance_id: str,
+    unit: Any,
+    model: str,
+) -> Callable[[Any], list[Any]]:
+    """Google ADK ``ClaimEstimator = Callable[[LlmRequest], list[BudgetClaim]]``.
+
+    ADK passes an ``LlmRequest`` to ``before_model_callback``; the
+    estimator walks ``llm_request.contents`` for text parts and applies
+    the family tokenizer. Family dispatch (Gemini / OpenAI via LiteLlm
+    prefix strip / Anthropic / chars-of-4 fallback) is done per call
+    via the request's own ``model`` field — ADK models can be swapped
+    mid-run (``LlmAgent.model`` rebinding) so the integration-setup
+    ``model`` is only a hint, not the source of truth.
+
+    ``setup_model`` is kept for parity with the langchain/openai_agents
+    factories and used as the fallback when ``llm_request.model`` is
+    absent (rare — ADK always sets it). A no-string-match drop-through
+    triggers ``estimator_for_model("")`` which returns the family
+    default (chars/4 with a deferred ``warnings.warn``).
+    """
+    # No upfront fns; re-dispatch per call because ADK requests can
+    # carry a different model than the integration-setup model
+    # (similar to LiteLLM model aliases).
+
+    def estimator(req: Any) -> list[Any]:
+        effective_model = str(getattr(req, "model", "") or "") or model
+        fns = estimator_for_model(effective_model)
+        # ADK LlmRequest.contents: list[Content] where Content has
+        # parts: list[Part], part.text: str (text turn) /
+        # part.function_call / part.function_response. We extract text
+        # turns for counting; non-text parts (function-call payloads,
+        # images) are counted via a conservative repr fallback.
+        contents = getattr(req, "contents", None) or []
+        messages: list[Any] = []
+        for content in contents:
+            role = getattr(content, "role", "user") or "user"
+            parts = getattr(content, "parts", None) or []
+            text_chunks: list[str] = []
+            for p in parts:
+                text = getattr(p, "text", None)
+                if isinstance(text, str) and text:
+                    text_chunks.append(text)
+                    continue
+                # Function-call / function-response / image / blob:
+                # fall back to repr so the chars/4 path still sees
+                # SOMETHING reasonable rather than counting 0 tokens.
+                fc = getattr(p, "function_call", None)
+                fr = getattr(p, "function_response", None)
+                if fc is not None:
+                    text_chunks.append(repr(fc))
+                elif fr is not None:
+                    text_chunks.append(repr(fr))
+            messages.append({"role": role, "content": " ".join(text_chunks)})
+        input_tokens = fns.count_input_tokens(messages, effective_model)
+        # ADK's callback surface doesn't expose max_tokens on the
+        # request directly; the cap lives on the LlmAgent's
+        # generation_config. Use family default for output projection;
+        # callers needing exact max_tokens behaviour should supply
+        # their own claim_estimator (mirrors langchain/openai_agents).
+        output_tokens = fns.count_output_tokens_max(None, effective_model)
+        amount = input_tokens + output_tokens
+        return [
+            _build_claim(
+                budget_id=budget_id,
+                window_instance_id=window_instance_id,
+                unit=unit,
+                amount_atomic=amount,
+            )
+        ]
+
+    return estimator
+
+
 def agt_default_claim_estimator(
     *,
     budget_id: str,
@@ -321,6 +397,7 @@ _NO_DEFAULT = object()
 
 __all__ = [
     "_NO_DEFAULT",
+    "adk_default_claim_estimator",
     "agt_default_claim_estimator",
     "langchain_default_claim_estimator",
     "litellm_default_claim_estimator",

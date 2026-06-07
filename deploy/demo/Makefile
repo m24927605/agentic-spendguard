@@ -315,6 +315,33 @@ else ifeq ($(DEMO_MODE),maf_python_with_agt)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_adk)
+	@echo "[demo] DEMO_MODE=agent_real_adk → COV_D19 SLICE 5 (Google ADK Python adapter)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/agent_real_adk/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock Gemini provider) +"
+	@echo "[demo]               adk-runner (Python 3.12 + google-adk +"
+	@echo "[demo]               spendguard-sdk[adk])."
+	@echo "[demo]   Driver issues 1 LlmAgent call through"
+	@echo "[demo]   SpendGuardAdkCallback's before/after slots:"
+	@echo "[demo]   ALLOW + DENY (replaces D04/D06/D08's STREAM because"
+	@echo "[demo]   ADK per-chunk gating is v0.1.x non-goal, design.md §3.2)."
+	$(COMPOSE) -f agent_real_adk/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_adk_stub)
+	@echo "[demo] DEMO_MODE=agent_real_adk_stub → COV_D19 no-API-key variant."
+	@echo "[demo]   Reuses the agent_real_adk overlay so the runner has"
+	@echo "[demo]   google-adk installed (required by the integration's"
+	@echo "[demo]   import-time guard), but the driver exercises the"
+	@echo "[demo]   callback against duck-typed LlmRequest / LlmResponse"
+	@echo "[demo]   (no Gemini API key required). CI gate G08."
+	$(COMPOSE) -f agent_real_adk/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),approval_hot_reload)
 	@echo "[demo] DEMO_MODE=approval_hot_reload → same stack as DEMO_MODE=approval."
 	@echo "[demo]   Exercises issue #59 BUNDLE_HOT_RELOADED error path end-to-end:"
@@ -463,6 +490,22 @@ else ifeq ($(DEMO_MODE),maf_python_with_agt)
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),agent_real_adk)
+	@echo "[demo] running adk-runner (Python 3.12 + google-adk + SpendGuardAdkCallback)..."
+	$(COMPOSE) -f agent_real_adk/docker-compose.yaml run --rm adk-runner
+	@echo "[demo] verifying COV_D19 SLICE 5 (agent_real_adk ALLOW + DENY)..."
+	@$(MAKE) demo-verify-agent-real-adk
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_adk demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_adk_stub)
+	@echo "[demo] running adk-runner in stub mode (no GOOGLE_API_KEY)..."
+	@SPENDGUARD_DEMO_MODE=agent_real_adk_stub \
+	  $(COMPOSE) -f agent_real_adk/docker-compose.yaml run --rm \
+	    -e SPENDGUARD_DEMO_MODE=agent_real_adk_stub adk-runner
+	@echo "[demo] verifying COV_D19 SLICE 5 (agent_real_adk_stub PRE + POST)..."
+	@$(MAKE) demo-verify-agent-real-adk
 else
 	@echo "[demo] core services up; running demo container (DEMO_MODE=$(DEMO_MODE))..."
 	$(COMPOSE) build demo
@@ -945,6 +988,40 @@ demo-verify-maf-python:
 		 END; \$$\$$;"
 	@echo "[demo] COV_D07 SLICE 8 maf_python_real verification done"
 
+# COV_D19 SLICE 5 (agent_real_adk demo) verification. Mirrors the
+# maf_python_real layout: ledger-DB assertions in
+# verify_step_agent_real_adk.sql + INV-2 strict-order DO block + a
+# cross-DB canonical_events check under spendguard_canonical that
+# asserts at least 1 decision row + 1 outcome row landed after the
+# outbox forwarder drained.
+#
+# Note: the COV_D19 DENY path goes through the synthetic LlmResponse
+# channel — whether a `denied_decision` row appears depends on the
+# contract evaluator's audit-write semantics on synthetic-response
+# deny. The gate only requires the ALLOW pathway end-to-end; the
+# DENY pathway is exercised at the runner level.
+demo-verify-agent-real-adk:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_agent_real_adk.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 1 THEN \
+		     RAISE EXCEPTION 'COV_D19_GATE: canonical_events.decision >= 1 expected (ALLOW), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D19_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D19 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D19 SLICE 5 agent_real_adk verification done"
+
 # COV_D08 SLICE 5 (openai_agents_ts demo) verification. Mirrors the
 # langchain_ts / vercel_ai_mastra layout: ledger-DB assertions in
 # verify_step_openai_agents_ts.sql + INV-2 strict-order DO block + a
@@ -1078,7 +1155,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

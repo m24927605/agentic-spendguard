@@ -62,6 +62,14 @@ langgraph = [
 openai-agents = [
   "openai-agents>=0.17",
 ]
+# COV_D19 SLICE_1: Google ADK Python adapter extra. `google-adk` 1.x
+# is the GA line shipping `LlmAgent` + `before_model_callback` /
+# `after_model_callback`. Cap below 2.x to fail-closed against a
+# future breaking-change major. See
+# `docs/specs/coverage/D19_google_adk/design.md` §5.
+adk = [
+  "google-adk>=1.0,<2",
+]
 # COV_D07 SLICE_05: Microsoft Agent Framework (MAF) v1 GA extra. The
 # `agent-framework` umbrella package re-exports everything from
 # `agent-framework-core` (chat client + middleware contracts) so

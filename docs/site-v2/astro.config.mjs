@@ -68,6 +68,7 @@ export default defineConfig({
             { label: 'Inngest AgentKit (TypeScript)', slug: 'docs/integrations/inngest-agent-kit' },
             { label: 'Microsoft Agent Framework (.NET + Python)', slug: 'docs/integrations/microsoft-agent-framework' },
             { label: 'Microsoft AGT', slug: 'docs/integrations/agt' },
+            { label: 'Google ADK (Python)', slug: 'docs/integrations/adk' },
             { label: 'LiteLLM proxy guardrail', slug: 'docs/integrations/litellm-proxy' },
             { label: 'LiteLLM SDK monkey-patch shim', slug: 'docs/integrations/litellm-sdk-shim' },
             { label: 'Kong AI Gateway (Go + Lua plugin)', slug: 'docs/integrations/kong-ai-gateway' },
