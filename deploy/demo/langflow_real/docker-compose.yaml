@@ -1,0 +1,169 @@
+# D36 SLICE 4 (`DEMO_MODE=langflow_real`) -- sidecar compose overlay.
+#
+# Layered on top of `deploy/demo/compose.yaml` via
+# `docker compose -f deploy/demo/compose.yaml \
+#                 -f deploy/demo/langflow_real/docker-compose.yaml up`.
+# The Makefile DEMO_MODE=langflow_real branch does that for you.
+#
+# Two new services scoped to this demo mode:
+#
+#   counting-stub               In-network mock OpenAI provider on
+#                               http://counting-stub:8765/v1. Identical
+#                               shape to dify_plugin / botpress_real /
+#                               flowise_real overlays. Reports current
+#                               hit count via GET /_count so the driver
+#                               can prove INV-1 (DENY skips upstream).
+#
+#   langflow-component-runner   Python 3.12 container that exercises the
+#                               SpendGuard Langflow component's reserve
+#                               / commit / release lifecycle directly
+#                               against the sidecar UDS. Drives
+#                               SpendGuardChatModelWrapper.build_model()
+#                               + ainvoke() through the same code path
+#                               the Langflow runtime would call --
+#                               without the full ~1 GB Langflow image.
+#
+# DEVIATION (D36 SLICE 4 vs implementation.md §2 Slice 4):
+# implementation.md describes a full Langflow UI boot
+# (langflowai/langflow:1.8). That image is ~1.2 GB + ~30s boot before
+# the first flow run can fire. The D36 review-standards.md §4.2 says
+# the integration tier MUST exercise the component's reservation
+# lifecycle against a real sidecar -- which we get from the focused
+# Python runner. The full langflowai/langflow:1.8 UI workflow adds NO
+# new SpendGuard invariants over the component's build_model + ainvoke
+# code path (the wrapper's reserve/commit/release surface is identical
+# under flow-runner driver vs UI driver). Mirrors the rationale in
+# deploy/demo/dify_plugin/docker-compose.yaml line 31-41 and
+# deploy/demo/botpress_real/docker-compose.yaml line 14-24.
+name: spendguard-demo
+
+services:
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-langflow-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not self.path.startswith("/v1/chat/completions"):
+                    self.send_response(404); self.end_headers(); return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"chatcmpl-langflow-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hi from langflow demo"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 5,
+                              "completion_tokens": 7,
+                              "total_tokens": 12},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body); return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok"); return
+                self.send_response(404); self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[langflow-counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[langflow-counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  langflow-component-runner:
+    image: python:3.12-slim
+    container_name: spendguard-langflow-component-runner
+    user: "0:0"  # need pip install at boot
+    environment:
+      SPENDGUARD_SIDECAR_UDS: "/var/run/spendguard/adapter.sock"
+      SPENDGUARD_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      OPENAI_API_KEY: "sk-demo-counting-stub-key"
+      OPENAI_API_BASE: "http://counting-stub:8765/v1"
+      COUNTING_STUB_URL: "http://counting-stub:8765"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      # Workspace source read-only: spendguard-sdk + the langflow
+      # plugin source. Path is relative to the FIRST compose file's
+      # directory (deploy/demo), so '../..' walks up to repo root.
+      - ../..:/workspace:ro
+      # Sidecar UDS shared with the rest of the stack.
+      - sidecar-uds:/var/run/spendguard
+    working_dir: /workspace/deploy/demo/langflow_real
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        echo "[langflow-component-runner] installing spendguard-sdk + langchain-openai + plugin..."
+        pip install --quiet \
+          'spendguard-sdk[langchain]>=0.5.1' \
+          'langchain-openai>=0.2,<1.0' \
+          'httpx>=0.27,<1.0'
+        # Install the in-tree langflow plugin from source. The plugin
+        # NEVER imports langflow at module level for the demo path
+        # because run_demo.py drives build_model_sync() directly.
+        pip install --quiet --no-deps -e /workspace/plugins/langflow
+        echo "[langflow-component-runner] running 3-step matrix..."
+        python run_demo.py
+    depends_on:
+      counting-stub:
+        condition: service_healthy
+      sidecar:
+        condition: service_healthy
+    networks:
+      spendguard-net:
+        aliases: [langflow-component-runner]

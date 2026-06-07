@@ -1,0 +1,154 @@
+---
+title: "n8n community node — n8n-nodes-spendguard"
+description: >-
+  Install Agentic SpendGuard as a first-class n8n community node. The
+  SpendGuard Chat Model sub-node wraps any AI Language Model sub-node so
+  the AI Agent's invocations pre-reserve budget via the SpendGuard
+  sidecar, deny-paths short-circuit before the provider HTTP fires, and
+  commits ride the SpendGuard audit chain.
+---
+
+> [n8n](https://n8n.io/) is the dominant self-hostable no-code automation
+> surface. Its AI Agent node accepts an `ai_languageModel` sub-node
+> connection (`lmChatOpenAi`, `lmChatAnthropic`, etc.) — but those Chat
+> Model sub-nodes send prompts directly to the provider, with no
+> pre-call refusal and no per-workflow attribution. SpendGuard ships
+> `n8n-nodes-spendguard` as a community node that drops between the
+> Chat Model and the AI Agent: it forwards the wrapped model verbatim,
+> attaches D04's `SpendGuardCallbackHandler`, and the AI Agent's run
+> manager triggers `LLM_CALL_PRE` against the SpendGuard sidecar before
+> the provider HTTP fires.
+
+## Why SpendGuard for n8n
+
+n8n's `ai_languageModel` sub-node mechanism is the cleanest pre-call
+extension point in the no-code automation category. A workflow that
+calls OpenAI / Anthropic / Bedrock today has no pre-call dollar gate,
+no reservation, no signed audit. The SpendGuard Chat Model node drops
+in and:
+
+- Reserves projected spend against the operator-configured budget
+  **before** the AI Agent's run manager dispatches the upstream HTTP.
+  DENY skips upstream entirely — the workflow execution surfaces
+  `NodeApiError(httpCode: "403")` and zero provider tokens are charged.
+- Commits real `inputTokens + outputTokens` from the provider's usage
+  payload at end-of-call via D04's `handleLLMEnd`.
+- Carries the n8n `executionId`, node name, and (optionally) a
+  workflow-author-specified custom run identifier through to the
+  SpendGuard audit chain — workflow runs are first-class in the ledger.
+
+## Install (self-hosted n8n)
+
+```bash
+# 1. Enable community packages on your self-hosted n8n.
+export N8N_COMMUNITY_PACKAGES_ENABLED=true
+
+# 2. Install the package.
+n8n npm install n8n-nodes-spendguard
+```
+
+Then, from the n8n editor:
+
+1. Open **Credentials** and create a new **SpendGuard API** credential:
+   - **Tenant ID** — your SpendGuard tenant UUID.
+   - **Sidecar UDS Path** — the Unix domain socket the runner pod uses
+     to reach the SpendGuard sidecar (default
+     `/var/run/spendguard/sidecar.sock`).
+   - **Budget ID** — UUID of the SpendGuard budget to charge.
+   - **Window Instance ID** — UUID of the active window instance.
+   - **Runtime Kind** — defaults to `n8n`.
+2. In any workflow, drop a **SpendGuard Chat Model** node between your
+   Chat Model (`lmChatAnthropic`, `lmChatOpenAi`, …) and the **AI
+   Agent** node:
+
+```
+[Chat Model] ──(ai_languageModel)──> [SpendGuard Chat Model] ──(ai_languageModel)──> [AI Agent]
+```
+
+3. Save and execute the workflow. The SpendGuard sidecar's audit chain
+   now records every model call the AI Agent dispatches.
+
+## Install (n8n Cloud)
+
+n8n Cloud's runner policy blocks UDS / local FS mounts; the community
+node v0.1.x targets **self-hosted only**. A control-plane HTTPS
+alternative is on the v0.2 roadmap.
+
+## Behaviour matrix
+
+| Path                                | What happens                                                                                                                                  |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sidecar **ALLOW**                   | `supplyData` returns the upstream model with the SpendGuard handler attached; AI Agent invokes the model; `handleLLMEnd` commits real usage.  |
+| Sidecar **DENY**                    | Handler throws `DecisionDenied`; AI Agent's run manager propagates the throw, surfacing as `NodeApiError(httpCode: "403")`. **No upstream HTTP.** |
+| Sidecar **APPROVAL_REQUIRED**       | `NodeApiError(httpCode: "428")` with the approval request ID in the description. Approve in the SpendGuard console and re-run.                  |
+| Sidecar **UNAVAILABLE**             | `NodeApiError(httpCode: "503")` — sidecar UDS unreachable from the runner pod.                                                                |
+| Sidecar **HANDSHAKE FAILURE**       | `NodeApiError(httpCode: "502")` — TLS / SVID rejection.                                                                                       |
+| Token usage present on the response | Commit posts real `inputTokens + outputTokens`. INV-5 primary.                                                                                |
+| Token usage missing                 | D04's handler emits the WARN log + falls back to the estimator snapshot. INV-5 secondary.                                                     |
+
+## Run identity
+
+n8n's `executionId` is the SpendGuard `sessionId`; the node name is the
+`stepId`. The `runId` is composed via the node's **Run ID Source**
+parameter:
+
+- `Execution ID + Node Name` (default) → `runId = "${executionId}:${nodeName}"`.
+- `Node Name` → `runId = nodeName`.
+- `Custom Expression` → `runId = customRunId` (or falls back to
+  `${executionId}:${nodeName}` when the expression is empty).
+
+The `idempotencyKey` the SpendGuard sidecar receives is the
+`deriveIdempotencyKey({tenantId, sessionId, runId, stepId, llmCallId,
+trigger: "LLM_CALL_PRE"})` derivation from `@spendguard/sdk` — the
+exact same helper the Python and TypeScript adapters use, so audit-chain
+dedup works across every framework.
+
+## Decision matrix vs the egress proxy
+
+You can also gate n8n spend at the network layer via the SpendGuard
+egress proxy (set `OPENAI_BASE_URL` on the workflow's HTTP Request /
+Chat Model node). Both paths reach the same audit chain; pick by
+topology:
+
+| When                                                                                          | Path                              |
+| --------------------------------------------------------------------------------------------- | --------------------------------- |
+| You own the n8n runtime + want a first-class node in the editor UI.                           | `n8n-nodes-spendguard`            |
+| You want per-workflow / per-execution attribution in the audit chain.                         | `n8n-nodes-spendguard`            |
+| n8n is a managed Cloud workload + you want zero community-node install.                       | Egress proxy                      |
+| You want one config that covers n8n + every other tenant tool that dials the same provider.   | Egress proxy                      |
+
+## Limitations
+
+- **No SpendGuard Tool / Memory wrapping.** v0.1.x covers the
+  `ai_languageModel` sub-node only — `ai_tool` and `ai_memory` are
+  contract-layer concerns and are out of scope.
+- **No workflow-level cross-step budget reservation.** Each model
+  invocation is its own reservation; for workflow-spanning budgets,
+  drive `withRunPlan` from a Code node ahead of the AI Agent.
+- **n8n Cloud not supported.** UDS / local FS not reachable from
+  managed runners; the egress-proxy path covers Cloud.
+- **n8n ≥ 1.50.** Earlier releases used string literals instead of
+  `NodeConnectionType` enum constants; the community node does not
+  load.
+- **CJS only.** n8n's community-node loader does not support ESM
+  community nodes as of n8n 1.50.
+
+## Demo
+
+```bash
+make demo-up DEMO_MODE=n8n_real
+```
+
+Brings up the base SpendGuard stack (postgres / ledger / sidecar /
+canonical-ingest / outbox-forwarder) plus an in-network counting stub
+and a Node 20 runner that exercises the integration's reserve / commit
+/ release lifecycle in a 3-step matrix (ALLOW + DENY + STREAM). The
+matrix verifies INV-1 (DENY skips upstream) and INV-5 (real usage
+commits) at the SpendGuard ledger layer.
+
+## Source
+
+- Community node: `sdk/typescript-n8n/`
+- Demo overlay: `deploy/demo/n8n_real/`
+- Example workflow: `examples/n8n/`
+- Spec: `docs/specs/coverage/D37_n8n/`

@@ -71,7 +71,7 @@ quick-filter layer over the same data.
 | 8 | [GitHub Copilot CLI (BYOK)](#copilot-cli) | Env var | `COPILOT_PROVIDER_BASE_URL=http://localhost:9000/v1` | [docs.github.com](https://docs.github.com/en/copilot/github-copilot-cli/using-byok) | Vendor-native | [Open ↗](./copilot-cli/) |
 | 9 | [Tabnine Enterprise](#tabnine) | Admin UI | BYO LLM endpoint `http://localhost:9000/v1` | [docs.tabnine.com](https://docs.tabnine.com/main/software-configuration/connect-custom-llm) | Spec | [Open ↗](./tabnine/) |
 | 10 | [AnythingLLM](#anythingllm) | Admin UI | Generic OpenAI provider, Base URL `http://localhost:9000/v1` | [docs.anythingllm.com](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url) | Live | [Open ↗](./anythingllm/) |
-| 11 | [LobeChat](#lobechat) | UI field | Custom base URL `http://localhost:9000/v1` | [lobehub.com](https://lobehub.com/docs/self-hosting/usage/byok) | Spec | [Open ↗](./lobechat/) |
+| 11 | [LobeChat](#lobechat) | Env var | `OPENAI_PROXY_URL=http://localhost:9000/v1` | [lobehub.com](https://lobehub.com/docs/self-hosting/environment-variables/model-provider#openai_proxy_url) | Live | [Open ↗](./lobechat/) |
 | 12 | [Cody self-hosted Enterprise](#cody) | Site config | Sourcegraph relay endpoint `http://localhost:9000/v1` | [sourcegraph.com](https://sourcegraph.com/docs/cody/clients/install-vscode) | Spec | [Open ↗](./cody/) |
 | 13 | [Augment (BYOK)](#augment) | UI field | LLM custom endpoint `http://localhost:9000/v1` | [docs.augmentcode.com](https://docs.augmentcode.com/setup/byok) | Spec | [Open ↗](./augment/) |
 | 14 | [Dify](#dify) | Plugin manifest | Custom Model Provider plugin → base URL `http://localhost:9000/v1` | [docs.dify.ai](https://docs.dify.ai/plugins/model-provider) | Spec | [Open ↗](./dify/) |
@@ -230,17 +230,19 @@ Source: [AnythingLLM custom OpenAI base URL](https://docs.anythingllm.com/llm-co
 
 <h3 id="lobechat">LobeChat</h3>
 
-LobeChat self-hosted ships a **Custom base URL** field on the
-language-model settings panel. Drop the SpendGuard URL in and every
-chat completion routes through it. Full walkthrough in the
-[LobeChat recipe](./lobechat/) (D34).
+LobeChat honours an `OPENAI_PROXY_URL` env var that rewrites the
+OpenAI upstream for every server-side chat at `/api/chat/openai`. Set
+it at container boot and every chat routes through SpendGuard with no
+LobeChat code change. The full per-tool walkthrough — Docker /
+Vercel / Cloud / Client-mode notes, the `DEMO_MODE=lobechat_real`
+smoke — lives in the [LobeChat recipe](./lobechat/).
 
 ```text
-Settings → Language Model → Custom Base URL
-http://localhost:9000/v1
+docker run -e OPENAI_PROXY_URL=http://localhost:9000/v1 \
+           -e ACCESS_CODE=... -p 3210:3210 lobehub/lobe-chat:1.40.0
 ```
 
-Source: [LobeChat BYOK self-hosting guide](https://lobehub.com/docs/self-hosting/usage/byok).
+Source: [LobeChat — `OPENAI_PROXY_URL` env var](https://lobehub.com/docs/self-hosting/environment-variables/model-provider#openai_proxy_url).
 
 <h3 id="cody">Cody self-hosted Enterprise</h3>
 

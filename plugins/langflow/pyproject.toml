@@ -1,0 +1,68 @@
+[project]
+name = "spendguard-langflow-component"
+version = "0.1.0"
+description = "SpendGuard custom component for Langflow -- drag-drop budget gate for any LangChain chat model."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [
+    { name = "Michael Chen", email = "m24927605@gmail.com" },
+]
+keywords = [
+    "langflow",
+    "langchain",
+    "spendguard",
+    "agent-runtime",
+    "budget",
+    "governance",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "spendguard-sdk[langchain]>=0.5.1",
+    "langflow>=1.8.0,<2.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.4",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+spendguard-langflow-install = "spendguard_langflow._install:main"
+
+[project.urls]
+Homepage = "https://spendguard.dev"
+Documentation = "https://spendguard.dev/docs/integrations/langflow"
+Source = "https://github.com/michael-chen/agentic-spendguard"
+Issues = "https://github.com/michael-chen/agentic-spendguard/issues"
+
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/spendguard_langflow"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/spendguard_langflow/metadata/spendguard_chat_model_wrapper.yaml" = "spendguard_langflow/metadata/spendguard_chat_model_wrapper.yaml"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/spendguard_langflow",
+    "metadata",
+    "README.md",
+    "pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"

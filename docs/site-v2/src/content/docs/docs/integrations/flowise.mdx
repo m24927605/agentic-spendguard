@@ -1,0 +1,145 @@
+---
+title: "Flowise custom node — @spendguard/flowise-nodes"
+description: >-
+  Install Agentic SpendGuard as a Flowise custom node. The
+  SpendGuard ChatModel Wrapper drops onto any canvas, wraps any
+  BaseChatModel, and attaches the D04 SpendGuardCallbackHandler so every
+  chat invocation reserves spend against the SpendGuard sidecar before
+  the upstream HTTP fires. Fail-closed default; conservative $1
+  USD-micros default claim per call.
+---
+
+> [Flowise](https://flowiseai.com/) is the largest open-source no-code
+> visual agent builder (~40k GitHub stars, Apache-2.0). Each canvas node
+> is a TypeScript class implementing the `INode` contract; chat-model
+> nodes wrap the upstream HTTP behind a draggable anchor. SpendGuard
+> ships as `@spendguard/flowise-nodes` — install via `npm`, restart
+> Flowise, the wrapper appears under **Spend Guard → SpendGuard
+> ChatModel Wrapper**. Drop it between any ChatModel and your downstream
+> Chain / Agent, and every invocation reserves spend against the
+> SpendGuard sidecar before the upstream model HTTP fires.
+
+## Why SpendGuard for Flowise
+
+Flowise's per-node ChatModel config is the cleanest extension point in
+the no-code visual-builder ecosystem — but a chatflow calling OpenAI /
+Anthropic / Bedrock today has no pre-call dollar gate, no reservation,
+no signed audit. The SpendGuard wrapper drops in and:
+
+- Reserves projected spend against the operator-configured budget
+  **before** the canvas dispatches the upstream HTTP. DENY skips
+  upstream entirely — the prediction surfaces a SpendGuard error and
+  zero provider tokens are charged.
+- Commits real `inputTokens + outputTokens` from the LangChain.js
+  callback handler's end-of-call hook (the wrapper reuses D04's
+  `SpendGuardCallbackHandler` verbatim).
+- Adds ONE node to the canvas — the builder doesn't write TypeScript,
+  doesn't fork the Flowise codebase, and doesn't lose any other Flowise
+  feature.
+
+## Install
+
+### Path 1 — npm install into Flowise source
+
+```bash
+cd /path/to/Flowise
+pnpm add @spendguard/flowise-nodes
+pnpm restart
+```
+
+The wrapper appears under **Spend Guard → SpendGuard ChatModel Wrapper**
+in the canvas sidebar.
+
+### Path 2 — drop-in for the official Docker image
+
+```bash
+npm pack @spendguard/flowise-nodes
+mkdir -p ~/.flowise/nodes/spendguard
+tar -xzf spendguard-flowise-nodes-0.1.0.tgz \
+    -C ~/.flowise/nodes/spendguard --strip-components=1
+docker restart flowise
+```
+
+### Path 3 — custom Dockerfile layer
+
+```dockerfile
+FROM flowiseai/flowise:2
+USER root
+RUN npm install -g @spendguard/flowise-nodes && \
+    cp -r /usr/local/lib/node_modules/@spendguard/flowise-nodes/dist \
+          /root/.flowise/nodes/spendguard
+USER node
+```
+
+## Configure on the canvas
+
+| Input                       | Required | Notes                                                                                  |
+| --------------------------- | -------- | -------------------------------------------------------------------------------------- |
+| `chatModel`                 | required | Any Flowise `BaseChatModel` (ChatOpenAI, ChatAnthropic, ChatBedrock, ChatGoogleVertexAI, ...). |
+| `tenantId`                  | required | SpendGuard tenant UUID.                                                                |
+| `budgetId`                  | required | SpendGuard budget UUID to charge.                                                      |
+| `windowInstanceId`          | required | Active SpendGuard budget-window instance UUID.                                         |
+| `unit`                      | default  | Defaults to `usd_micros`; override per provider unit.                                  |
+| `sidecarUds`                | optional | Falls back to env `SPENDGUARD_SIDECAR_UDS`.                                            |
+| `route`                     | optional | Defaults to `llm.call`; per-route SpendGuard policies attach here.                     |
+| `claimEstimatorJson`        | optional | JSON `{"amountAtomic":"...","scopeId":"..."}`. Empty → conservative $1 USD-micros default per call. |
+
+## Behaviour matrix
+
+| Path                       | What happens                                                                                                                       |
+| -------------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| Sidecar **ALLOW**          | Wrapper appends the handler; the wrapped model dispatches upstream; commit posts real `inputTokens + outputTokens`.                |
+| Sidecar **DENY**           | The D04 handler throws inside `handleChatModelStart`. **No upstream HTTP.** Flowise surfaces the error in the prediction response. |
+| Sidecar **DEGRADE**        | Default fail-closed — handler throws.                                                                                              |
+| `claimEstimatorJson` blank | Conservative `$1` USD-micros default claim per call (works out-of-the-box for a no-code builder).                                  |
+| `claimEstimatorJson` set   | JSON override drives the reservation amount; per-route tuning happens here.                                                        |
+
+## Decision matrix vs the egress proxy
+
+You can also gate Flowise spend at the network layer via the SpendGuard
+egress proxy (set the Flowise process's `OPENAI_BASE_URL` to the
+SpendGuard endpoint). Both paths reach the same audit chain; pick by
+topology:
+
+| When                                                                                                  | Path                              |
+| ----------------------------------------------------------------------------------------------------- | --------------------------------- |
+| You own the Flowise canvas + want a visual entry in the sidebar + per-node budget control.            | `@spendguard/flowise-nodes`        |
+| Flowise is one of many tools dialing the same provider URL — you want one config that covers them all. | Egress proxy `OPENAI_BASE_URL`     |
+| You need canvas-node-level metadata in the audit chain (`canvas_node_id`, `flow_id`).                  | `@spendguard/flowise-nodes`        |
+| You can't touch the Flowise install (managed deployment, no SDK install allowed).                     | Egress proxy                       |
+
+## Limitations
+
+- **ChatModel anchor only.** Embeddings, vector stores, tool nodes, and
+  RAG sources are gated via the SpendGuard egress proxy (see the
+  [drop-in guide](/docs/drop-in/)).
+- **Per-node budget only.** Cross-node budget invariants are the
+  contract layer's job (D04 / D05) — chain canvas budgets via the
+  contract DSL, not the wrapper.
+- **Self-hosted Flowise only.** Flowise Cloud doesn't allow custom node
+  drop-in; the wrapper is sideload-only.
+- **No mid-stream cap.** End-of-stream commit only; the sidecar still
+  caps pre-call.
+- **`flowise-components` 2.x only.** Pinned via `peerDependencies` to
+  `>=2.0.0`. 1.x had a different INode contract; the wrapper doesn't
+  load.
+
+## Demo
+
+```bash
+make demo-up DEMO_MODE=flowise_real
+```
+
+Brings up the base SpendGuard stack (postgres / ledger / sidecar /
+canonical-ingest / outbox-forwarder) plus an in-network counting stub
+and a Node 20 runner that exercises the wrapper's reserve / commit /
+release lifecycle in a 3-step matrix (ALLOW + DENY + STREAM). The
+matrix verifies INV-1 (DENY skips upstream) and INV-5 (real usage
+commits) at the SpendGuard ledger layer.
+
+## Source
+
+- Wrapper package: `integrations/flowise/`
+- Demo overlay: `deploy/demo/flowise_real/`
+- Example chatflow: `examples/flowise/`
+- Spec: `docs/specs/coverage/D35_flowise/`

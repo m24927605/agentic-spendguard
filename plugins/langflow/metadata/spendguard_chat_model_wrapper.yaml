@@ -1,0 +1,56 @@
+# SpendGuard Langflow custom component metadata.
+#
+# Loaded by Langflow's component metadata pipeline when the operator
+# vendors this file into $LANGFLOW_COMPONENTS_PATH (alongside the
+# generated spendguard_chat_model_wrapper.py shim).
+#
+# Version field MUST match plugins/langflow/src/spendguard_langflow/_version.py
+# AND plugins/langflow/pyproject.toml (review-standards §3.2).
+component:
+  name: SpendGuardChatModelWrapper
+  display_name: SpendGuard Budget Gate
+  category: models
+  icon: shield
+  description: >-
+    Wraps any LangChain chat model with a SpendGuard budget gate. Drop
+    a ChatOpenAI / ChatAnthropic node into the Inner Model input. Every
+    downstream call pre-reserves spend through the SpendGuard sidecar
+    and commits real usage end-of-call. DENY / DEGRADE verdicts surface
+    as Langflow runtime errors -- fail-closed by default.
+  version: 0.1.0
+  documentation: https://spendguard.dev/docs/integrations/langflow
+  tags:
+    - budget
+    - governance
+    - langchain
+    - spendguard
+  inputs:
+    - name: inner
+      type: LanguageModel
+      handle: true
+      required: true
+    - name: sidecar_uds_path
+      type: text
+      required: true
+    - name: tenant_id
+      type: secret
+      required: true
+    - name: budget_id
+      type: text
+      required: true
+    - name: window_instance_id
+      type: text
+      required: true
+    - name: unit_token_kind
+      type: text
+      advanced: true
+    - name: model_family
+      type: text
+      advanced: true
+    - name: claim_estimator_chars_per_token
+      type: int
+      advanced: true
+  outputs:
+    - name: model
+      type: LanguageModel
+      handle: true

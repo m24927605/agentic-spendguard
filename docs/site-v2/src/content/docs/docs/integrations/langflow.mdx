@@ -1,0 +1,177 @@
+---
+title: "Langflow Custom Component — spendguard-langflow-component"
+description: >-
+  Drag-drop budget gate for any LangChain chat model running inside
+  Langflow 1.8+. The SpendGuardChatModelWrapper card pre-reserves spend
+  through the SpendGuard sidecar before every model call and commits
+  real usage end-of-call. Fail-closed by default. Install via PyPI.
+---
+
+
+> [Langflow](https://github.com/langflow-ai/langflow) (DataStax, MIT,
+> ~80k stars) is a visual builder for LangChain Python flows.
+> Operators drag-drop nodes; each LLM node holds a per-node
+> `BaseChatModel` config (`ChatOpenAI`, `ChatAnthropic`, etc.). The
+> SpendGuard component is shipped as a separate PyPI package --
+> `spendguard-langflow-component` -- because Langflow loads custom
+> components from `$LANGFLOW_COMPONENTS_PATH` rather than the
+> spendguard-sdk install tree. Drag-drop a `ChatOpenAI` node into the
+> wrapper's **Inner Model** input. Downstream nodes see a budget-gated
+> `LanguageModel` handle indistinguishable from a raw `ChatOpenAI`.
+
+## Why SpendGuard for Langflow
+
+A self-hosted Langflow stack against OpenAI / Anthropic / Vertex today
+has **no budget primitive**, no signed audit chain, no pre-call dollar
+gate. Langflow's component metadata system gives us a first-class
+canvas card slot -- the cleanest extension point in the visual-builder
+category. The SpendGuard component:
+
+- Pre-reserves projected spend against the operator-configured budget
+  **before** the inner model dispatches the upstream HTTP. DENY skips
+  upstream entirely -- the canvas surfaces an error node and zero
+  provider tokens are charged.
+- Commits real `total_tokens` from the response usage frame
+  end-of-call. INV-5.
+- Tags every decision in the audit chain as
+  `integration=langchain, source=langflow` so SpendGuard operators can
+  distinguish Langflow-driven calls from raw LangChain SDK callers.
+- Surfaces `DecisionDenied` / `DecisionSkipped` as Langflow runtime
+  errors -- fail-closed by default. `SPENDGUARD_LANGFLOW_FAIL_OPEN=1`
+  mirrors the per-integration escape-hatch convention.
+
+## Install (PyPI)
+
+```bash
+pip install spendguard-langflow-component
+spendguard-langflow-install --target $LANGFLOW_COMPONENTS_PATH
+```
+
+Restart Langflow. The **SpendGuard Budget Gate** card appears under the
+**Models** category in the canvas palette. Drag it onto your flow and
+connect a `ChatOpenAI` / `ChatAnthropic` / `ChatVertexAI` node into the
+**Inner Model** input.
+
+The package depends on `spendguard-sdk[langchain]>=0.5.1` and
+`langflow>=1.8.0,<2.0.0`. The `spendguard-langflow-install` CLI refuses
+to write to system paths (`/usr`, `/etc`, `/System`, ...) so a
+misconfigured `--target` can't corrupt your Langflow install tree.
+
+## Install (air-gapped / vendor-drop)
+
+When `pip install` isn't available (offline operators, image-baked
+deploys):
+
+```bash
+# Clone the SpendGuard repo or download a release tarball.
+git clone https://github.com/michael-chen/agentic-spendguard
+cd agentic-spendguard/plugins/langflow
+
+# Drop the component shim + metadata into your Langflow tree.
+cp src/spendguard_langflow/metadata/spendguard_chat_model_wrapper.yaml \
+   $LANGFLOW_COMPONENTS_PATH/
+
+# The shim re-imports the installed package; ensure spendguard-sdk +
+# this plugin are pip-installable from your offline wheel cache.
+pip install --no-index --find-links wheels/ \
+  'spendguard-sdk[langchain]>=0.5.1' \
+  spendguard-langflow-component
+```
+
+## Canvas inputs
+
+| Input | Type | Required | Default |
+|---|---|---|---|
+| `inner` | `LanguageModel` handle | yes | -- |
+| `sidecar_uds_path` | text | yes | `/run/spendguard/sidecar.sock` (falls back to env `SPENDGUARD_SIDECAR_UDS`) |
+| `tenant_id` | secret | yes | -- |
+| `budget_id` | text | yes | -- |
+| `window_instance_id` | text | yes | -- |
+| `unit_token_kind` | text (advanced) | no | `output_token` |
+| `model_family` | text (advanced) | no | `gpt-4` |
+| `claim_estimator_chars_per_token` | int (advanced) | no | `4` |
+
+## Behaviour matrix
+
+| Path | What happens |
+|---|---|
+| Sidecar **ALLOW** | `_agenerate` reserves -> dispatches upstream -> commits real `total_tokens`. |
+| Sidecar **DENY** | `DecisionDenied` raised before any upstream HTTP. Canvas surfaces an error node; zero provider tokens. (INV-1) |
+| Sidecar **DEGRADE** (default fail-closed) | `DecisionSkipped` raised; canvas surfaces an error node. |
+| `SPENDGUARD_LANGFLOW_FAIL_OPEN=1` (dev only) | DEGRADE falls back to direct dispatch; WARN logged. Not for production. |
+| Streaming (`astream`) | Same reserve-before-call; commit fires end-of-stream from the final chunk's usage frame. |
+| Caller-bound `run_context(...)` | Auto-bind no-ops; caller's `run_id` is used. (INV-3) |
+
+## Decision matrix vs the egress proxy
+
+You can also gate Langflow spend at the network layer via the SpendGuard
+egress proxy (set `OPENAI_BASE_URL=http://egress-proxy:9000/v1` on the
+Langflow container). Both paths reach the same audit chain; pick by
+topology:
+
+| When | Path |
+|---|---|
+| You own the Langflow runtime + want a first-class canvas component visible to flow authors. | `spendguard-langflow-component` |
+| Langflow runs as a managed black box + you want zero canvas-side config. | Egress proxy `OPENAI_BASE_URL` |
+| You want per-flow `flow_id` in the audit chain. | `spendguard-langflow-component` (auto-bound `run_context`) |
+| You want one config that covers Langflow + every other tenant tool that dials the same provider URL. | Egress proxy |
+| You're using Langflow's v1.8+ global model-provider config (one model for the whole flow). | Egress proxy today; component v1.1 will intercept. |
+
+## Limitations (v1)
+
+- **No embeddings / retrieval / tool-node gating.** The budget gate
+  fires only at the LLM call boundary. RAG, vector-store, and tool
+  nodes are out of scope.
+- **No token-by-token mid-stream cap.** End-of-stream commit only. The
+  sidecar can still issue a hard pre-call cap; mid-stream interruption
+  would need Langflow's streaming hook surface, which doesn't exist yet.
+- **Global model-provider config interception deferred to v1.1.**
+  Langflow 1.8 added a flow-wide model setting; v1 D36 wraps per-node
+  only. Operators relying on the global config should pair the wrapper
+  with the egress proxy.
+- **No Langflow Cloud (DataStax-hosted) marketplace push.** PyPI is the
+  install surface; Cloud marketplace push is a follow-up.
+- **Per-flow budget IDs read from canvas inputs only.** Pulling budget
+  IDs from Langflow flow metadata is deferred.
+- **`langflow>=1.8.0,<2.0.0` floor.** v1.7 lacked the stable
+  `HandleInput` + `LanguageModel` handle support the wrapper depends on.
+
+## Demo
+
+```bash
+make demo-up DEMO_MODE=langflow_real
+```
+
+Brings up the base SpendGuard stack (postgres / ledger / sidecar /
+canonical-ingest / outbox-forwarder) plus an in-network counting stub
+and a Python 3.12 runner that exercises the component's
+`build_model_sync` + `ainvoke` lifecycle in a 3-step matrix
+(ALLOW + DENY + STREAM). The matrix verifies INV-1 (DENY skips
+upstream) and INV-5 (real usage commits) at the SpendGuard ledger
+layer; the verify SQL also asserts the `integration=langchain` +
+`source=langflow` tags landed in `audit_outbox.decision_context`.
+
+The demo does NOT boot the full Langflow UI image (~1.2 GB) -- the
+wrapper's `build_model_sync` is the chokepoint the Langflow component
+runtime calls under the hood, so driving it directly proves the same
+reserve / commit / release lifecycle the UI flow runner would
+exercise. See the compose overlay's `DEVIATION` note for the full
+rationale.
+
+## Coexists with other SpendGuard integrations?
+
+Yes. The Langflow component and the raw `spendguard-sdk[langchain]`
+SDK integration share the same SDK code path
+(`spendguard.integrations.langchain.SpendGuardChatModel`) -- audit
+shapes and ledger semantics are identical. A flow that uses the
+Langflow component in one node and a Python script that uses the
+SpendGuard LangChain SDK in another node will produce homogeneous
+audit rows. They can also coexist with the SpendGuard egress proxy --
+the proxy will gate any provider HTTP the component lets through,
+adding a second defense layer at the network boundary.
+
+## Source
+
+- Component package: [`plugins/langflow/`](https://github.com/michael-chen/agentic-spendguard/tree/main/plugins/langflow)
+- Demo overlay: [`deploy/demo/langflow_real/`](https://github.com/michael-chen/agentic-spendguard/tree/main/deploy/demo/langflow_real)
+- Spec: [`docs/specs/coverage/D36_langflow/`](https://github.com/michael-chen/agentic-spendguard/tree/main/docs/specs/coverage/D36_langflow)

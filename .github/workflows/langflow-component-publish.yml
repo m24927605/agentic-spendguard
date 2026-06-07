@@ -1,0 +1,66 @@
+# Auto-publish spendguard-langflow-component to PyPI via Trusted Publisher OIDC.
+#
+# Trigger: any GitHub release tagged `langflow-component-v*`
+#          (e.g. `langflow-component-v0.1.0`).
+# Auth:   no PyPI API token -- PyPI trusts THIS workflow file via OIDC.
+#         Setup: PyPI -> Manage account -> Publishing -> Add trusted publisher
+#           - PyPI Project Name: spendguard-langflow-component
+#           - Owner:             m24927605
+#           - Repository:        agentic-spendguard
+#           - Workflow filename: langflow-component-publish.yml
+#           - Environment:       pypi (optional but recommended)
+#
+# Future releases:
+#   gh release create langflow-component-v0.1.0 --title "..." --notes "..."
+# CI then builds + uploads with NO secret in any config.
+
+name: Publish spendguard-langflow-component to PyPI
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # allow manual trigger for re-publish testing
+
+jobs:
+  publish:
+    # Only fire for langflow-component-v* tags. Other release tags
+    # (e.g. sdk-v* / helm-chart-v*) are ignored.
+    if: startsWith(github.ref, 'refs/tags/langflow-component-v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/spendguard-langflow-component/${{ github.ref_name }}
+    permissions:
+      # OIDC token for Trusted Publisher exchange with PyPI.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build deps
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build sdist + wheel
+        run: python -m build plugins/langflow
+
+      - name: Verify wheel contains metadata YAML
+        # G5 from acceptance.md: the wheel MUST include the metadata
+        # YAML at spendguard_langflow/metadata/spendguard_chat_model_wrapper.yaml.
+        # Fail fast here so a botched build never lands on PyPI.
+        run: |
+          set -euo pipefail
+          WHEEL=$(ls plugins/langflow/dist/spendguard_langflow_component-*.whl | head -n1)
+          echo "Inspecting wheel: $WHEEL"
+          unzip -l "$WHEEL" | grep -E 'spendguard_chat_model_wrapper\.yaml'
+
+      - name: Verify build artifacts
+        run: python -m twine check plugins/langflow/dist/*
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: plugins/langflow/dist/
+          # No `password:` -- Trusted Publisher OIDC flow.

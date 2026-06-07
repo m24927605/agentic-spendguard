@@ -15,4 +15,5 @@ packages:
   - "sdk/typescript-vercel-ai"
   - "sdk/typescript-openai-agents"
   - "sdk/typescript-inngest-agent-kit"
+  - "sdk/typescript-n8n"
   - "docs/site-v2"

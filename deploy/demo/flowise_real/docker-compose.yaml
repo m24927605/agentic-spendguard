@@ -1,0 +1,179 @@
+# D35 SLICE 5 (`DEMO_MODE=flowise_real`) — sidecar compose overlay.
+#
+# Mirrors deploy/demo/botpress_real/docker-compose.yaml field-for-field —
+# only the runner service differs (the @spendguard/flowise-nodes
+# wrapper's reserve/commit lifecycle delegates via the SpendGuard
+# sidecar HTTP companion at /v1/decision + /v1/trace, same wire shape
+# as D32 Botpress).
+#
+# Layered on top of `deploy/demo/compose.yaml` via
+# `docker compose -f deploy/demo/compose.yaml \
+#                 -f deploy/demo/flowise_real/docker-compose.yaml up`.
+# The Makefile DEMO_MODE=flowise_real branch does that for you.
+#
+# DEVIATION (D35 SLICE 5 vs implementation.md §9): implementation.md
+# Slice 5 calls for a full Flowise 2.x self-host (flowiseai/flowise:2.x,
+# ~1.2 GB image + ~30s boot, UI-driven chatflow config). The wrapper's
+# value-add is the per-canvas-node wiring; the actual budget enforcement
+# wire shape is identical to D32 Botpress and D31 Coze — sidecar
+# reserve + commit. The D35 review-standards.md tier-1 gate (full Flowise
+# runtime) lives in the wrapper's testcontainers E2E suite at
+# integrations/flowise/tests/e2e/flowiseContainer.test.ts; the demo
+# focuses on the wrapper's reserve / commit / release lifecycle — the
+# same lifecycle the full Flowise runtime exercises, just driven via a
+# focused 3-step Node runner. INV-1 / INV-5 are verifiable from the
+# focused runner; the full runtime adds no new invariants over the
+# integration tier (see deploy/demo/botpress_real for the parallel
+# rationale).
+
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  # In-network mock OpenAI / Anthropic / Bedrock provider. Identical to
+  # the botpress_real / dify_plugin / inngest_agent_kit overlays'
+  # counting-stub.
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-flowise-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not (self.path.startswith("/v1/chat/completions")
+                        or self.path.startswith("/v1/messages")
+                        or self.path.startswith("/model/")):
+                    self.send_response(404); self.end_headers(); return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"chatcmpl-flowise-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hi from flowise demo"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 5,
+                              "completion_tokens": 7,
+                              "total_tokens": 12,
+                              "inputTokens": 5,
+                              "outputTokens": 7},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body); return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok"); return
+                self.send_response(404); self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[flowise-counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[flowise-counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── flowise-integration-runner ───────────────────────────────────────
+  # Node 20 container that runs a focused 3-step matrix (ALLOW + DENY +
+  # STREAM) against the sidecar HTTP companion — same wire shape the
+  # @spendguard/flowise-nodes wrapper drives in production through D04's
+  # SpendGuardCallbackHandler. The hosted Flowise 2.x runtime invariant
+  # is exercised in the wrapper's testcontainers E2E suite.
+  flowise-integration-runner:
+    image: node:20.10-bookworm-slim
+    container_name: spendguard-flowise-integration-runner
+    user: "0:0"  # need write access to the staging dir
+    working_dir: /opt/spendguard/deploy/demo/flowise_real
+    environment:
+      # Sidecar HTTP companion endpoint exposed by the base sidecar on
+      # port 8443 (uds-dev mode wires both UDS + HTTP companion).
+      SPENDGUARD_FLOWISE_SIDECAR_URL: "http://sidecar:8443"
+      SPENDGUARD_FLOWISE_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_FLOWISE_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_FLOWISE_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_COUNTING_STUB_URL: "http://counting-stub:8765"
+      PYTHONUNBUFFERED: "1"
+      NODE_PATH: "/opt/spendguard/integrations/flowise/node_modules"
+    volumes:
+      # Workspace source — read-only. Path is relative to the FIRST
+      # compose file's directory (deploy/demo), NOT this overlay's
+      # location, because compose merges paths against the base file.
+      - ../..:/opt/spendguard:ro
+      # Sidecar UDS shared with the rest of the stack (the sidecar
+      # publishes both UDS and HTTP companion when in uds-dev mode).
+      - sidecar-uds:/var/run/spendguard
+      - flowise-runner-modules:/var/lib/flowise-runner/node_modules
+    tmpfs:
+      - /tmp
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        echo "[flowise-integration-runner] node $$(node --version)"
+        # Stage a writable copy because the workspace mount is read-only.
+        STAGING=/tmp/flowise-stage
+        mkdir -p "$$STAGING"
+        cp /opt/spendguard/deploy/demo/flowise_real/run_flowise_demo.mjs "$$STAGING/"
+        echo "[flowise-integration-runner] running 3-step matrix..."
+        cd "$$STAGING"
+        exec node run_flowise_demo.mjs
+    depends_on:
+      counting-stub:
+        condition: service_healthy
+      sidecar:
+        condition: service_healthy
+    networks:
+      spendguard-net:
+        aliases: [flowise-integration-runner]
+
+volumes:
+  flowise-runner-modules:

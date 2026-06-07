@@ -1,17 +1,182 @@
 ---
-title: "LobeChat with SpendGuard"
+title: "LobeChat + SpendGuard (drop-in via OPENAI_PROXY_URL)"
 description: >-
-  Drop SpendGuard into LobeChat by setting the Custom base URL in the
-  Language Model settings to a running SpendGuard egress proxy. Recipe
-  in progress; the exact UI step is on the drop-in landing.
-pagefind: false
+  Point LobeChat's OpenAI provider at a running SpendGuard egress proxy with
+  one environment variable. Every chat is reserved before the call and
+  committed after; no LobeChat code change, no fork, no plugin install.
 ---
 
-## Coming soon
+LobeChat ([LobeHub](https://lobehub.com/), Apache-2.0, 55k+ stars, Docker
+first-class) honours an `OPENAI_PROXY_URL` env var that rewrites the
+OpenAI upstream for every server-side chat. SpendGuard exposes an
+OpenAI-compatible endpoint at `/v1/chat/completions`. Setting one env
+var on the LobeChat container puts SpendGuard's pre-call budget gate and
+KMS-signed audit chain in the request path of every LobeChat session.
+Five minutes, one env var, one verification step.
 
-The full walkthrough lands with D34 (LobeChat recipe). In the meantime,
-the setting to use is row 11 of the
-[drop-in landing matrix](../#find-your-tool): in LobeChat Settings →
-Language Model, set the Custom base URL to `http://localhost:9000/v1`.
+## Prerequisites
 
-Source: [LobeChat self-hosting BYOK](https://lobehub.com/docs/self-hosting/usage/byok).
+- LobeChat self-hosted (Docker, Vercel, or Kubernetes). The pinned image
+  `lobehub/lobe-chat:1.40.0` is the version this recipe was verified
+  against. LobeChat Cloud cannot point at a `localhost` SpendGuard;
+  deploy SpendGuard with the [Helm chart](../../deployment/helm/) and
+  use the public URL.
+- A running SpendGuard egress proxy reachable from LobeChat. The
+  fastest path is `make demo-up DEMO_MODE=proxy` from a clone of the
+  SpendGuard repo (binds `http://localhost:9000/v1`). Production
+  deployments use the [Helm chart](../../deployment/helm/).
+- One real OpenAI / Azure OpenAI key — SpendGuard forwards to the real
+  upstream and ignores the inbound `Authorization` header.
+
+## Step 1: set `OPENAI_PROXY_URL` on your LobeChat container
+
+The single decisive env var is `OPENAI_PROXY_URL`. Set it to your
+SpendGuard egress proxy's `/v1` endpoint at boot time.
+
+```bash
+docker run -d --name lobe-chat \
+    -p 3210:3210 \
+    -e OPENAI_API_KEY=sk-... \
+    -e OPENAI_PROXY_URL=http://host.docker.internal:9000/v1 \
+    -e ACCESS_CODE=your-access-code \
+    -e NEXT_PUBLIC_SERVICE_MODE=server \
+    lobehub/lobe-chat:1.40.0
+```
+
+The trailing `/v1` is required — LobeChat appends `/chat/completions`
+to whatever you set. Omitting `/v1` yields
+`http://host.docker.internal:9000/chat/completions`, which the egress
+proxy does not match.
+
+## Step 2: confirm the env var landed
+
+```bash
+docker exec lobe-chat env | grep OPENAI_PROXY_URL
+# OPENAI_PROXY_URL=http://host.docker.internal:9000/v1
+```
+
+If the env var is empty, your `docker run` invocation dropped it. Set
+it explicitly or use the compose snippet in Step 5.
+
+## Step 3: send a test chat from the LobeChat UI
+
+Open `http://localhost:3210` in your browser, enter your `ACCESS_CODE`,
+start a new chat in the default `OpenAI / gpt-4o-mini` session, and
+send "Say hi". LobeChat's server route POSTs to `/api/chat/openai`,
+which reads `OPENAI_PROXY_URL` and forwards to SpendGuard's
+`/v1/chat/completions`. SpendGuard calls the contract, reserves the
+predicted tokens, forwards to OpenAI, and on response commits the
+actual usage.
+
+## Step 4: verify end-to-end
+
+```bash
+# From a clone of github.com/m24927605/agentic-spendguard:
+export OPENAI_API_KEY=sk-...
+make demo-up DEMO_MODE=lobechat_real
+```
+
+The smoke boots SpendGuard plus LobeChat with `OPENAI_PROXY_URL` set
+in the compose env block, sends one chat through LobeChat's
+`/api/chat/openai` route, and asserts the audit chain in Postgres
+shows one `reserve` row and one `commit_estimated` row for the call.
+A successful run prints `[lobechat-smoke] OK: reserve+commit verified`.
+
+Want the full file set without cloning? See
+[`examples/lobechat/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/lobechat).
+Drop the env file into your existing LobeChat deployment, and every
+chat routes through SpendGuard from the next container restart.
+
+## Step 5: docker-compose snippet (production-like)
+
+```yaml
+services:
+  lobe-chat:
+    image: lobehub/lobe-chat:1.40.0
+    ports:
+      - "3210:3210"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_PROXY_URL: http://spendguard-egress-proxy:9000/v1
+      ACCESS_CODE: ${LOBECHAT_ACCESS_CODE}
+      NEXT_PUBLIC_SERVICE_MODE: server
+    depends_on:
+      spendguard-egress-proxy:
+        condition: service_healthy
+```
+
+## Deployment notes
+
+### Docker / docker-compose
+
+The Docker image is `lobehub/lobe-chat:1.40.0`. Mount a volume at
+`/app/data` if you need conversation persistence (server-mode default
+uses in-memory store and loses chat history on container restart).
+
+### Vercel
+
+LobeChat-on-Vercel inherits `OPENAI_PROXY_URL` from the Vercel
+project's Environment Variables panel. Add the env var with the
+production URL of your SpendGuard egress proxy — a Kubernetes Service
+URL or a hosted SpendGuard URL. A `localhost` value will not work
+from Vercel's edge runtime.
+
+### LobeChat Cloud (lobechat.com)
+
+LobeChat Cloud cannot reach a `localhost` SpendGuard. Deploy
+SpendGuard via the [Helm chart](../../deployment/helm/) and use the
+public Kubernetes Service URL (or your hosted SpendGuard URL) as the
+proxy URL.
+
+### Client mode (browser-side keys)
+
+Server mode (the default in this recipe) is recommended. If you must
+run LobeChat in client mode, each user overrides the base URL
+per-session in the UI: **Settings → Language Model → OpenAI → API
+Proxy Address** → your SpendGuard URL. Per-session overrides do not
+honour `OPENAI_PROXY_URL`; the env var only applies to the server
+route, and a client-mode browser will call OpenAI directly if the user
+forgets the per-session override.
+
+## Gotchas
+
+- **Trailing `/v1` is mandatory.** LobeChat appends `/chat/completions`
+  to whatever you set in `OPENAI_PROXY_URL`. Omitting `/v1` breaks the
+  egress proxy route.
+- **`OPENAI_API_KEY` is sent verbatim but discarded upstream.**
+  SpendGuard's egress proxy ignores the inbound `Authorization` header
+  and substitutes the upstream credential from its own config. The
+  LobeChat-side key exists only to satisfy LobeChat's "key present"
+  validation.
+- **`ACCESS_CODE` gates the UI, not the API.** The ACCESS_CODE
+  prevents anonymous browser sessions; the server route at
+  `/api/chat/openai` still requires the access code in the
+  `X-LOBE-CHAT-AUTH` request header. Set it on every API caller.
+- **Client mode bypasses the env var.** `OPENAI_PROXY_URL` is read by
+  the LobeChat server only. Client-mode browsers call OpenAI directly
+  unless the user sets the per-session UI override.
+- **Streaming works.** LobeChat uses Server-Sent Events for streaming
+  chat responses; the SpendGuard egress proxy injects
+  `stream_options.include_usage=true` and commits on the terminating
+  `[DONE]` event.
+
+## What works today
+
+| Surface | Status |
+|---|---|
+| Server-mode chat (non-streaming) | Verified end-to-end |
+| Server-mode chat (streaming SSE) | Verified end-to-end |
+| OpenAI / Azure OpenAI upstreams via `OPENAI_PROXY_URL` | Verified end-to-end |
+| Anthropic / Bedrock / Vertex / Gemini provider tiles | Out of scope (LobeChat reads provider-specific env vars; this recipe covers the OpenAI proxy only) |
+| Client-mode (browser keys) | Documented via UI override; not smoke-covered |
+| Plugin marketplace, TTS, image, vision | Out of scope |
+| LobeChat Cloud | Out of scope (cannot reach `localhost`; Helm only) |
+
+## What next
+
+- [Set a real budget on Kubernetes](../../deployment/helm/)
+- [Open the SpendGuard dashboard](../../operations/dashboard/)
+- [Cover the rest of your stack (Pattern 3 install)](../../deployment/docker-compose/)
+- Back to the [drop-in landing](../)
+
+**Maintainer docs:** [LobeChat — Environment Variables: `OPENAI_PROXY_URL`](https://lobehub.com/docs/self-hosting/environment-variables/model-provider#openai_proxy_url)

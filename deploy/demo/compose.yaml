@@ -1087,6 +1087,76 @@ services:
       - ./verify_step_anythingllm_real.sql:/smoke/verify.sql:ro
     networks: [spendguard-net]
 
+  # ---------------------------------------------------------------------
+  # DEMO_MODE=lobechat_real (D34) — LobeChat container, pinned image,
+  # profile-gated so it never leaks into other demo modes. LobeChat
+  # reads OPENAI_PROXY_URL at boot and rewrites the OpenAI upstream
+  # for every server-mode chat to egress-proxy:9000/v1. ACCESS_CODE
+  # is required on the X-LOBE-CHAT-AUTH header for /api/chat/openai.
+  # ---------------------------------------------------------------------
+  lobechat:
+    image: lobehub/lobe-chat:1.40.0
+    profiles: ["lobechat_real"]
+    container_name: spendguard-lobechat
+    environment:
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+      # Trailing /v1 is mandatory — LobeChat appends /chat/completions
+      # to whatever path you set. Mirrors the D34 recipe page Step 1.
+      OPENAI_PROXY_URL: "http://egress-proxy:9000/v1"
+      OPENAI_MODEL_LIST: "+gpt-4o-mini"
+      ACCESS_CODE: "spendguard-lobechat-smoke"
+      # Server mode is the ONLY configuration where OPENAI_PROXY_URL
+      # gates every chat (per D34 design.md §2.5). Client mode bypasses
+      # the env var; do not override.
+      NEXT_PUBLIC_SERVICE_MODE: "server"
+    ports:
+      - "127.0.0.1:3210:3210"
+    networks: [spendguard-net]
+    depends_on:
+      egress-proxy:
+        condition: service_healthy
+    healthcheck:
+      # LobeChat exposes /api/health on the same port; returns 200 once
+      # the Next.js runtime is up. Wide start_period because LobeChat
+      # cold-starts slowly on first container boot.
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3210/api/health >/dev/null 2>&1 || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 15s
+
+  # ---------------------------------------------------------------------
+  # DEMO_MODE=lobechat_real smoke runner. Alpine + curl + jq +
+  # postgresql-client; runs lobechat_smoke.sh end-to-end. Pattern-locked
+  # from anythingllm-smoke (D33).
+  # ---------------------------------------------------------------------
+  lobechat-smoke:
+    image: alpine:3.20
+    profiles: ["lobechat_real"]
+    container_name: spendguard-lobechat-smoke
+    environment:
+      LOBECHAT_URL: "http://lobechat:3210"
+      LOBECHAT_ACCESS_CODE: "spendguard-lobechat-smoke"
+      PROXY_URL: "http://egress-proxy:9000"
+      POSTGRES_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    depends_on:
+      lobechat:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        apk add --no-cache bash curl jq postgresql16-client >/dev/null &&
+        bash /smoke/lobechat_smoke.sh
+    volumes:
+      - ./lobechat_smoke.sh:/smoke/lobechat_smoke.sh:ro
+      - ./verify_step_lobechat_real.sql:/smoke/verify.sql:ro
+    networks: [spendguard-net]
+
 networks:
   spendguard-net:
     driver: bridge

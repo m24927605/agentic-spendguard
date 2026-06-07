@@ -1,0 +1,77 @@
+{
+  "name": "@spendguard/flowise-nodes",
+  "version": "0.1.0",
+  "description": "SpendGuard Flowise custom nodes — pre-call budget enforcement via the SpendGuardChatModelWrapper INode. Drops onto any Flowise canvas, wraps any BaseChatModel, attaches the D04 SpendGuardCallbackHandler so every chat invocation reserves spend against the SpendGuard sidecar before the upstream HTTP fires.",
+  "license": "Apache-2.0",
+  "author": "Michael Chen <m24927605@gmail.com>",
+  "homepage": "https://github.com/m24927605/agentic-spendguard",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/m24927605/agentic-spendguard.git",
+    "directory": "integrations/flowise"
+  },
+  "bugs": "https://github.com/m24927605/agentic-spendguard/issues",
+  "keywords": [
+    "llm",
+    "agent",
+    "spend",
+    "budget",
+    "spendguard",
+    "flowise",
+    "no-code",
+    "visual-builder",
+    "langchain",
+    "callback-handler",
+    "guardrails"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE_NOTICES.md"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./nodes/SpendGuardChatModelWrapper": {
+      "types": "./dist/nodes/SpendGuardChatModelWrapper.d.ts",
+      "import": "./dist/nodes/SpendGuardChatModelWrapper.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "biome check src tests",
+    "format": "biome format --write src tests",
+    "typecheck": "tsc --noEmit"
+  },
+  "peerDependencies": {
+    "@spendguard/sdk": "^0.1.0",
+    "@spendguard/langchain": "^0.1.0",
+    "flowise-components": ">=2.0.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@types/node": "^20.14.0",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

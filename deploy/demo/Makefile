@@ -60,6 +60,20 @@ else ifeq ($(DEMO_MODE),anythingllm_real)
 	$(COMPOSE) --profile anythingllm_real up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar egress-proxy anythingllm
+else ifeq ($(DEMO_MODE),lobechat_real)
+	@echo "[demo] DEMO_MODE=lobechat_real → D34 SLICE 1 (LobeChat drop-in recipe)."
+	@echo "[demo]   Base stack: proxy mode + LobeChat (lobehub/lobe-chat:1.40.0)."
+	@echo "[demo]   LobeChat boots with OPENAI_PROXY_URL=http://egress-proxy:9000/v1"
+	@echo "[demo]     in the compose env block (no admin API call — the env var"
+	@echo "[demo]     does the work at container boot). Smoke runner sends one chat"
+	@echo "[demo]     through LobeChat /api/chat/openai, asserts reserve +"
+	@echo "[demo]     commit_estimated in the ledger audit chain. Real OpenAI"
+	@echo "[demo]     gpt-4o-mini round-trip."
+	@echo "[demo]   Pattern 2 (base-URL redirect) — no LobeChat code change."
+	@test -n "$$OPENAI_API_KEY" || (echo "[demo] FATAL: OPENAI_API_KEY required for DEMO_MODE=lobechat_real" >&2; exit 8)
+	$(COMPOSE) --profile lobechat_real up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar egress-proxy lobechat
 else ifeq ($(DEMO_MODE),cost_advisor)
 	@echo "[demo] DEMO_MODE=cost_advisor → postgres + ledger + canonical-ingest + sidecar"
 	@echo "[demo]                          + bundle-registry + dashboard."
@@ -216,6 +230,68 @@ else ifeq ($(DEMO_MODE),botpress_real)
 	@echo "[demo]   exercised in CI via testcontainers-node (see deviation"
 	@echo "[demo]   note in deploy/demo/botpress_real/docker-compose.yaml)."
 	$(COMPOSE) -f botpress_real/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),n8n_real)
+	@echo "[demo] DEMO_MODE=n8n_real → D37 SLICE 5 (n8n community node)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/n8n_real/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               n8n-integration-runner (Node 20 exercising"
+	@echo "[demo]               the SpendGuardChatModel sub-node's"
+	@echo "[demo]               reserve/commit/release lifecycle via the"
+	@echo "[demo]               sidecar HTTP companion)."
+	@echo "[demo]   Driver issues 3 calls (ALLOW + DENY + STREAM) and asserts"
+	@echo "[demo]   INV-1 (DENY skips upstream) + INV-5 (real usage commits)."
+	@echo "[demo]   Demo scope: focused on the integration's reserve/commit"
+	@echo "[demo]   wire shape — full n8n v1.50 self-host (~600 MB image,"
+	@echo "[demo]   ~30s boot) is exercised in CI via testcontainers-node."
+	$(COMPOSE) -f n8n_real/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),flowise_real)
+	@echo "[demo] DEMO_MODE=flowise_real → D35 SLICE 5 (@spendguard/flowise-nodes)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/flowise_real/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               flowise-integration-runner (Node 20 exercising"
+	@echo "[demo]               the @spendguard/flowise-nodes wrapper's"
+	@echo "[demo]               reserve/commit/release lifecycle directly via"
+	@echo "[demo]               the D09 HTTP companion)."
+	@echo "[demo]   Driver issues 3 calls (ALLOW + DENY + STREAM) through the"
+	@echo "[demo]   wrapper's reserve/commit/release path and asserts"
+	@echo "[demo]   INV-1 (DENY skips upstream) + INV-5 (real usage commits)."
+	@echo "[demo]   Demo scope: focused on the wrapper's sidecar boundary —"
+	@echo "[demo]   full Flowise 2.x runtime (~1.2 GB image, UI-driven chatflow"
+	@echo "[demo]   config) is exercised in the integrations/flowise/tests/e2e"
+	@echo "[demo]   testcontainers suite (see deviation note in"
+	@echo "[demo]   deploy/demo/flowise_real/docker-compose.yaml)."
+	$(COMPOSE) -f flowise_real/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),langflow_real)
+	@echo "[demo] DEMO_MODE=langflow_real → D36 SLICE 4 (spendguard-langflow-component)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/langflow_real/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               langflow-component-runner (Python 3.12 exercising"
+	@echo "[demo]               the SpendGuardChatModelWrapper's build_model_sync()"
+	@echo "[demo]               + ainvoke lifecycle directly against the sidecar UDS)."
+	@echo "[demo]   Driver issues 3 calls (ALLOW + DENY + STREAM) through the"
+	@echo "[demo]   wrapper's reserve/commit/release path and asserts INV-1"
+	@echo "[demo]   (DENY skips upstream) + INV-5 (real usage commits)."
+	@echo "[demo]   Demo scope: focused on the SpendGuard component's SDK boundary"
+	@echo "[demo]   — full Langflow 1.8 UI runtime (~1.2 GB image) is exercised"
+	@echo "[demo]   in CI via plugins/langflow tests + the metadata YAML schema"
+	@echo "[demo]   check (see deviation note in"
+	@echo "[demo]   deploy/demo/langflow_real/docker-compose.yaml)."
+	$(COMPOSE) -f langflow_real/docker-compose.yaml up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
@@ -646,6 +722,13 @@ else ifeq ($(DEMO_MODE),anythingllm_real)
 	@echo "[demo]   - asserts reserve + commit_estimated in the ledger audit chain"
 	$(COMPOSE) --profile anythingllm_real run --rm anythingllm-smoke
 	@echo "[demo] PASS — AnythingLLM drop-in via Generic OpenAI provider verified"
+else ifeq ($(DEMO_MODE),lobechat_real)
+	@echo "[demo] running LobeChat OPENAI_PROXY_URL smoke (D34)..."
+	@echo "[demo]   - LobeChat reads OPENAI_PROXY_URL at container boot (no admin call)"
+	@echo "[demo]   - sends one chat through /api/chat/openai to the SpendGuard egress proxy"
+	@echo "[demo]   - asserts reserve + commit_estimated in the ledger audit chain"
+	$(COMPOSE) --profile lobechat_real run --rm lobechat-smoke
+	@echo "[demo] PASS — LobeChat drop-in via OPENAI_PROXY_URL verified"
 else ifeq ($(DEMO_MODE),cost_advisor)
 	@echo "[demo] running cost_advisor demo container (full closed loop)..."
 	$(COMPOSE) run --rm cost-advisor-demo
@@ -690,6 +773,30 @@ else ifeq ($(DEMO_MODE),botpress_real)
 	$(COMPOSE) -f botpress_real/docker-compose.yaml run --rm botpress-integration-runner
 	@echo "[demo] verifying D32 SLICE 5 (botpress_real ALLOW + DENY + STREAM)..."
 	@$(MAKE) demo-verify-botpress-real
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),n8n_real)
+	@echo "[demo] running n8n-integration-runner (Node 20 + n8n-nodes-spendguard)..."
+	$(COMPOSE) -f n8n_real/docker-compose.yaml run --rm n8n-integration-runner
+	@echo "[demo] verifying D37 SLICE 5 (n8n_real ALLOW + DENY + STREAM)..."
+	@$(MAKE) demo-verify-n8n-real
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),flowise_real)
+	@echo "[demo] running flowise-integration-runner (Node 20 + @spendguard/flowise-nodes)..."
+	$(COMPOSE) -f flowise_real/docker-compose.yaml run --rm flowise-integration-runner
+	@echo "[demo] verifying D35 SLICE 5 (flowise_real ALLOW + DENY + STREAM)..."
+	@$(MAKE) demo-verify-flowise-real
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),langflow_real)
+	@echo "[demo] running langflow-component-runner (Python 3.12 + spendguard-langflow-component)..."
+	$(COMPOSE) -f langflow_real/docker-compose.yaml run --rm langflow-component-runner
+	@echo "[demo] verifying D36 SLICE 4 (langflow_real ALLOW + DENY + STREAM)..."
+	@$(MAKE) demo-verify-langflow-real
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure
@@ -956,6 +1063,9 @@ else ifeq ($(DEMO_MODE),kong_gateway_real)
 else ifeq ($(DEMO_MODE),anythingllm_real)
 	@echo "[demo] DEMO_MODE=anythingllm_real — smoke runner already asserted reserve + commit."
 	@echo "[demo] Skipping demo-verify-step7 (Mock LLM token-count assertions do not apply to a real OpenAI round-trip)."
+else ifeq ($(DEMO_MODE),lobechat_real)
+	@echo "[demo] DEMO_MODE=lobechat_real — smoke runner already asserted reserve + commit."
+	@echo "[demo] Skipping demo-verify-step7 (Mock LLM token-count assertions do not apply to a real OpenAI round-trip)."
 else ifneq (,$(findstring agent_real,$(DEMO_MODE)))
 	@echo "[demo] DEMO_MODE=$(DEMO_MODE) — skipping demo-verify-step7."
 	@echo "[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)"
@@ -1219,6 +1329,89 @@ demo-verify-botpress-real:
 		   RAISE NOTICE 'D32_BOTPRESS CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
 		 END; \$$\$$;"
 	@echo "[demo] D32 SLICE 5 botpress_real verification done"
+
+# D37 SLICE 5 (n8n_real demo) verification. Mirrors the botpress_real
+# layout: ledger-DB assertions in verify_step_n8n_real.sql (6 gates per
+# review-standards.md §8) covering integration-tagged decision count,
+# DENY presence, commit row, INV-1, streaming row, and canonical_events
+# forwarding.
+demo-verify-n8n-real:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_n8n_real.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 2 THEN \
+		     RAISE EXCEPTION 'D37_N8N_GATE: canonical_events.decision >= 2 expected (ALLOW + DENY), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'D37_N8N_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'D37_N8N CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@echo "[demo] D37 SLICE 5 n8n_real verification done"
+
+# D35 SLICE 5 (flowise_real demo) verification. Mirrors the
+# botpress_real layout: ledger-DB assertions in
+# verify_step_flowise_real.sql (6 gates per review-standards.md §5.7)
+# covering integration-tagged decision count, DENY presence, commit row,
+# INV-1 (no upstream hits on DENY), streaming row, and canonical_events
+# forwarding.
+demo-verify-flowise-real:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_flowise_real.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 2 THEN \
+		     RAISE EXCEPTION 'D35_FLOWISE_GATE: canonical_events.decision >= 2 expected (ALLOW + DENY), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'D35_FLOWISE_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'D35_FLOWISE CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@echo "[demo] D35 SLICE 5 flowise_real verification done"
+
+# D36 SLICE 4 (langflow_real demo) verification. Mirrors the
+# botpress_real / flowise_real layout: ledger-DB assertions in
+# verify_step_langflow_real.sql (6 gates per review-standards.md §5.7)
+# covering integration=langchain + source=langflow decision count, DENY
+# presence, commit row, INV-1 (no upstream hits on DENY), streaming row,
+# and canonical_events forwarding.
+demo-verify-langflow-real:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_langflow_real.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 2 THEN \
+		     RAISE EXCEPTION 'D36_LANGFLOW_GATE: canonical_events.decision >= 2 expected (ALLOW + DENY), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'D36_LANGFLOW_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'D36_LANGFLOW CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@echo "[demo] D36 SLICE 4 langflow_real verification done"
 
 # D31 SLICE 3 (coze_studio_real demo) verification. Mirrors the
 # dify_plugin_real layout: ledger-DB assertions in

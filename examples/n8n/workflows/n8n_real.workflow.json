@@ -1,0 +1,80 @@
+{
+  "name": "SpendGuard - AI Agent + Chat Model",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "1d3a7c5e-0e0a-4f5b-9f3c-001100110011",
+      "name": "Manual Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [220, 360]
+    },
+    {
+      "parameters": {
+        "text": "Tell me three things about agent-runtime budget guardrails."
+      },
+      "id": "2d3a7c5e-0e0a-4f5b-9f3c-002200220022",
+      "name": "AI Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1,
+      "position": [520, 360]
+    },
+    {
+      "parameters": {
+        "budgetIdOverride": "",
+        "route": "llm.call",
+        "runIdSource": "executionId",
+        "claimAmountAtomic": "1000000",
+        "unit": "usd_micros"
+      },
+      "id": "3d3a7c5e-0e0a-4f5b-9f3c-003300330033",
+      "name": "SpendGuard Chat Model",
+      "type": "n8n-nodes-base.spendGuardChatModel",
+      "typeVersion": 1,
+      "position": [820, 480],
+      "credentials": {
+        "spendGuardApi": {
+          "id": "spendguard-credentials-1",
+          "name": "SpendGuard (demo)"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "model": "claude-3-5-sonnet-20241022",
+        "options": {}
+      },
+      "id": "4d3a7c5e-0e0a-4f5b-9f3c-004400440044",
+      "name": "Anthropic Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatAnthropic",
+      "typeVersion": 1,
+      "position": [1120, 600]
+    }
+  ],
+  "connections": {
+    "Manual Trigger": {
+      "main": [[{ "node": "AI Agent", "type": "main", "index": 0 }]]
+    },
+    "Anthropic Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "SpendGuard Chat Model",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "SpendGuard Chat Model": {
+      "ai_languageModel": [
+        [{ "node": "AI Agent", "type": "ai_languageModel", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "00000000-0000-0000-0000-000000000037",
+  "tags": ["spendguard", "demo"],
+  "pinData": {}
+}

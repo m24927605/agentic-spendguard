@@ -1,0 +1,71 @@
+{
+  "nodes": [
+    {
+      "id": "chatOpenAI_0",
+      "type": "customNode",
+      "data": {
+        "id": "chatOpenAI_0",
+        "label": "ChatOpenAI",
+        "name": "chatOpenAI",
+        "type": "ChatOpenAI",
+        "baseClasses": ["BaseChatModel", "BaseLanguageModel"],
+        "category": "Chat Models",
+        "inputs": {
+          "modelName": "gpt-4o-mini",
+          "openAIApiKey": "{{OPENAI_API_KEY}}",
+          "basePath": "{{OPENAI_BASE_URL}}"
+        }
+      }
+    },
+    {
+      "id": "spendGuardWrapper_0",
+      "type": "customNode",
+      "data": {
+        "id": "spendGuardWrapper_0",
+        "label": "SpendGuard ChatModel Wrapper",
+        "name": "spendGuardChatModelWrapper",
+        "type": "BaseChatModel",
+        "baseClasses": ["BaseChatModel", "BaseLanguageModel"],
+        "category": "Spend Guard",
+        "inputs": {
+          "chatModel": "{{chatOpenAI_0.data.instance}}",
+          "tenantId": "00000000-0000-4000-8000-000000000001",
+          "budgetId": "44444444-4444-4444-8444-444444444444",
+          "windowInstanceId": "55555555-5555-4555-8555-555555555555",
+          "unit": "usd_micros",
+          "sidecarUds": "{{SPENDGUARD_SIDECAR_UDS}}",
+          "route": "llm.call",
+          "claimEstimatorJson": "{\"amountAtomic\":\"999999999999\",\"scopeId\":\"deny-test\"}"
+        }
+      }
+    },
+    {
+      "id": "conversationChain_0",
+      "type": "customNode",
+      "data": {
+        "id": "conversationChain_0",
+        "label": "Conversation Chain",
+        "name": "conversationChain",
+        "type": "ConversationChain",
+        "category": "Chains",
+        "inputs": {
+          "model": "{{spendGuardWrapper_0.data.instance}}"
+        }
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "chatOpenAI_0",
+      "target": "spendGuardWrapper_0",
+      "sourceHandle": "chatOpenAI_0-output-chatOpenAI-ChatOpenAI",
+      "targetHandle": "spendGuardWrapper_0-input-chatModel-BaseChatModel"
+    },
+    {
+      "source": "spendGuardWrapper_0",
+      "target": "conversationChain_0",
+      "sourceHandle": "spendGuardWrapper_0-output-BaseChatModel-BaseChatModel",
+      "targetHandle": "conversationChain_0-input-model-BaseChatModel"
+    }
+  ]
+}

@@ -1,0 +1,75 @@
+{
+  "name": "n8n-nodes-spendguard",
+  "version": "0.1.0",
+  "description": "SpendGuard pre-call budget enforcement for n8n AI Agent workflows — drop a sub-node between Chat Model and AI Agent.",
+  "license": "Apache-2.0",
+  "author": "Michael Chen <m24927605@gmail.com>",
+  "homepage": "https://github.com/m24927605/agentic-spendguard",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/m24927605/agentic-spendguard.git",
+    "directory": "sdk/typescript-n8n"
+  },
+  "bugs": "https://github.com/m24927605/agentic-spendguard/issues",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20.10"
+  },
+  "keywords": [
+    "n8n-community-node-package",
+    "spendguard",
+    "ai",
+    "langchain",
+    "budget",
+    "fincops",
+    "guardrails"
+  ],
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE_NOTICES.md",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "build": "tsc && node scripts/copy-assets.js",
+    "dev": "tsc --watch",
+    "lint": "biome check src tests",
+    "lintfix": "biome check src tests --write",
+    "format": "biome format src tests --write",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "size": "bash scripts/size-budget.sh",
+    "prepack": "pnpm run build"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "credentials": [
+      "dist/credentials/SpendGuardApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/SpendGuardChatModel/SpendGuardChatModel.node.js"
+    ]
+  },
+  "dependencies": {
+    "@spendguard/sdk": "workspace:*",
+    "@spendguard/langchain": "workspace:*"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*",
+    "@langchain/core": "^0.3.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@langchain/core": "^0.3.0",
+    "@types/node": "^20.14.0",
+    "n8n-workflow": "^1.50.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}
