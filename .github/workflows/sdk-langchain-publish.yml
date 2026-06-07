@@ -1,0 +1,111 @@
+# Auto-publish @spendguard/langchain to npm via Trusted Publisher OIDC.
+#
+# Trigger: any GitHub release tagged `langchain-v*` (e.g. `langchain-v0.1.0`).
+# Auth:   no npm API token in steady state — npm trusts THIS workflow file
+#         via OIDC provenance.
+#         Setup: npm → @spendguard/langchain → Settings → Trusted publishers
+#           - Owner:             m24927605
+#           - Repository:        agentic-spendguard
+#           - Workflow filename: sdk-langchain-publish.yml
+#           - Environment:       npm (optional but recommended)
+#
+# During the npm Trusted Publisher rollout window (D04 review-standards
+# §14.4) the workflow falls back to `NODE_AUTH_TOKEN` (the `NPM_TOKEN` repo
+# secret) so the first publish can still happen. Once the Trusted Publisher
+# entry is in place on npm, the token can be revoked.
+#
+# Future releases: `gh release create langchain-v0.1.0 --title "..." --notes "..."`
+# CI then runs lint -> typecheck -> test -> build -> size and only then
+# `npm publish --provenance --access public`.
+#
+# Adapter package layout note: this workflow targets
+# `sdk/typescript-langchain/` (the @spendguard/langchain adapter), NOT
+# `sdk/typescript/` (the @spendguard/sdk substrate; that one is published by
+# `sdk-ts-publish.yml`).
+
+name: Publish @spendguard/langchain to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # allow manual trigger for re-publish testing
+
+jobs:
+  publish:
+    # Only fire for langchain-v* tags. Other release tags
+    # (ts-sdk-v*, sdk-v*, helm-chart-v*, …) are ignored so each package's
+    # release cadence stays independent.
+    if: startsWith(github.ref, 'refs/tags/langchain-v')
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@spendguard/langchain/v/${{ github.ref_name }}
+    defaults:
+      run:
+        working-directory: sdk/typescript-langchain
+    permissions:
+      # OIDC token for Trusted Publisher exchange with npm + the npm
+      # `--provenance` flag (which also requires id-token: write).
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # Pin pnpm to the same major as the lockfile (lockfile v9 = pnpm 9+).
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          # `cache: pnpm` requires the lockfile to be in cwd, but we override
+          # cwd via defaults.run.working-directory. The lockfile lives at the
+          # repo root because the SDK + langchain adapter share one pnpm
+          # workspace (see `pnpm-workspace.yaml`).
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install deps (workspace-aware, frozen lockfile)
+        # `--frozen-lockfile` ensures the published artifact matches the
+        # committed lockfile exactly. The install runs from the package
+        # directory but pnpm walks up to the workspace root so the
+        # @spendguard/sdk workspace link resolves correctly.
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify version parity (package.json vs src/version.ts)
+        run: bash scripts/version-check.sh
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test (handler + cross-language fixture parity)
+        run: pnpm run test
+
+      - name: Build (tsup ESM + .d.ts emit)
+        run: pnpm run build
+
+      - name: Prepublish (version-check + build refresh)
+        # `pnpm publish` runs the `prepublishOnly` hook automatically; we
+        # invoke it explicitly here so the size budget step below measures
+        # the exact pack contents the publish step will upload.
+        run: bash scripts/prepublish.sh
+
+      - name: Size budget (npm pack tarball ≤ 50 KB)
+        run: bash scripts/size-budget.sh
+
+      - name: Publish to npm (Trusted Publisher OIDC + provenance)
+        # `--provenance` requires id-token: write (set on the job).
+        # `--access public` is also pinned in `publishConfig` but kept here
+        # so the published-access mode is explicit at the call site.
+        # NODE_AUTH_TOKEN is the rollout-window fallback per D04
+        # review-standards §14.4; with Trusted Publisher configured on npm
+        # it is ignored.
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

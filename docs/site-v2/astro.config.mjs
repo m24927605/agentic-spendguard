@@ -61,6 +61,7 @@ export default defineConfig({
           items: [
             { label: 'Pydantic-AI', slug: 'docs/integrations/pydantic-ai' },
             { label: 'LangChain & LangGraph', slug: 'docs/integrations/langchain' },
+            { label: 'LangChain.js callback handler', slug: 'docs/integrations/langchain-ts' },
             { label: 'OpenAI Agents SDK', slug: 'docs/integrations/openai-agents' },
             { label: 'Microsoft AGT', slug: 'docs/integrations/agt' },
             { label: 'LiteLLM proxy guardrail', slug: 'docs/integrations/litellm-proxy' },

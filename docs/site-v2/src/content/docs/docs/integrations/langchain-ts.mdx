@@ -1,0 +1,226 @@
+---
+title: "LangChain.js callback handler"
+description: >-
+  Install Agentic SpendGuard as a LangChain.js BaseCallbackHandler. Drop-in
+  via `callbacks: [handler]` on any ChatModel — pre-call budget reservation
+  before the upstream provider HTTP request fires, end-of-stream commit
+  reconciles real token usage, signed audit trail.
+---
+
+
+> LangChain.js (`@langchain/core@^0.3`) is the dominant TS agent stack. SpendGuard
+> ships as `SpendGuardCallbackHandler` — a stock `BaseCallbackHandler` you drop
+> onto any `ChatOpenAI` / `ChatAnthropic` / `BaseChatModel` via `callbacks: [handler]`.
+> No model subclassing, no proxy fork. The same handler covers LangGraph because
+> LangGraph builds on `BaseChatModel`.
+
+## Install
+
+```bash
+pnpm add @spendguard/sdk @spendguard/langchain @langchain/core @langchain/openai
+```
+
+Both `@spendguard/sdk` AND `@langchain/core` are declared as peer dependencies
+so the adapter pins neither — your project's lockfile wins. Node 20.10+ is
+required (the substrate uses `await using` + stable `AsyncLocalStorage`).
+
+## Quick start
+
+Minimal end-to-end wire — connect a `SpendGuardClient` to the sidecar UDS, hand
+it to a `SpendGuardCallbackHandler`, drop the handler onto `ChatOpenAI`'s
+`callbacks:` array:
+
+```ts
+import { ChatOpenAI } from "@langchain/openai";
+import { HumanMessage } from "@langchain/core/messages";
+import { SpendGuardClient } from "@spendguard/sdk";
+import { SpendGuardCallbackHandler } from "@spendguard/langchain";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  runtimeKind: "langchain-js",
+});
+await client.connect();
+await client.handshake();
+
+const handler = new SpendGuardCallbackHandler({
+  client,
+  budgetId: "44444444-4444-4444-8444-444444444444",
+});
+
+const model = new ChatOpenAI({
+  model: "gpt-4o-mini",
+  callbacks: [handler],
+});
+
+try {
+  const res = await model.invoke([new HumanMessage("hello langchain")]);
+  console.log(res.content);
+} finally {
+  await client.close();
+}
+```
+
+What happens on each `model.invoke()`:
+
+1. LangChain's `RunManager` fires `handleChatModelStart` BEFORE the OpenAI
+   HTTP call. The handler derives the canonical idempotency key from
+   `(tenantId, runId, parentRunId)` and calls `client.reserve(...)` with
+   `trigger="LLM_CALL_PRE"`.
+2. On `DecisionDenied` (DENY / STOP / APPROVAL_REQUIRED), the handler **throws**
+   — `raiseError = true` is wired so the throw propagates through
+   `CallbackManager` and halts `model.invoke()` BEFORE the provider HTTP call.
+3. On success, the inflight `(decisionId, reservationId)` is stashed keyed
+   by LangChain's `runId`. The OpenAI HTTP call fires.
+4. `handleLLMEnd` consumes the inflight entry, extracts the provider's
+   reported `tokenUsage`, and emits a `SUCCESS` commit via
+   `client.commitEstimated(...)`. `handleLLMError` symmetrically emits a
+   `PROVIDER_ERROR` commit with the error message threaded onto
+   `actualErrorMessage`.
+
+## Configuration
+
+The v0.1.0 handler options surface is intentionally narrow. The richer
+`unitId` / `windowInstanceId` / pricing / `claimEstimator` shape the design
+anticipates is deferred (see **Limitations** below) — until the substrate
+broadens `UnitRef`, the adapter projects sensible defaults instead.
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Type</th><th>Required</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>client</code></td><td><code>SpendGuardClient</code></td><td>YES</td><td>Configured substrate client from <code>@spendguard/sdk</code>. The adapter does NOT own the client lifecycle — the consumer calls <code>connect()</code> / <code>handshake()</code> / <code>close()</code>.</td></tr>
+    <tr><td><code>tenantId</code></td><td><code>string</code></td><td>NO</td><td>Tenant UUID override. Defaults to whatever tenant the <code>client</code> was configured with at construction time.</td></tr>
+    <tr><td><code>budgetId</code></td><td><code>string</code></td><td>NO</td><td>Budget UUID used as the projected claim's <code>scopeId</code>. When unset, the handler falls back to <code>tenantId</code> as the scopeId.</td></tr>
+  </tbody>
+</table>
+
+A future minor (`v0.x`) extends this surface field-for-field with the Python
+`SpendGuardChatModel` constructor (`windowInstanceId`, `unit`, `pricing`,
+`claimEstimator`, `route`, `callSignatureFn`, `claimEstimate`,
+`onApprovalRequired`) once the substrate broadens `UnitRef`. The
+extensions are additive optional fields — no breaking change to the v0.1.0
+shape.
+
+## Limitations
+
+**SpendGuard's LangChain.js adapter is callback-based pre-call + end-of-stream commit only.**
+The handler gates BEFORE the upstream provider HTTP call, and commits AFTER
+the stream completes. A few important things to know before you ship it in
+front of long streaming responses or rely on D04/5's full design surface:
+
+- **Callback-based architecture, not a model subclass.** LangChain.js prefers
+  callback handlers; SpendGuard ships a `BaseCallbackHandler` rather than a
+  `BaseChatModel` subclass wrapper. The throw-to-halt mechanism relies on
+  `raiseError = true` and `awaitHandlers = true` — both pinned on the
+  handler instance. If you override them downstream, the budget gate stops
+  working.
+- **`raiseError = true` propagation is load-bearing.** Without it,
+  `CallbackManager` swallows the throw from `handleChatModelStart` and the
+  budget gate never blocks the LLM call. The adapter pins it explicitly to
+  defend against future `@langchain/core` drift; do NOT override it on the
+  handler instance.
+- **No mid-stream cap on streamed responses.** SpendGuard reserves the
+  predicted budget at pre-call time. The commit happens at end-of-stream
+  against the real `tokenUsage`. The handler never tears down a mid-flight
+  stream to halt token emission — overruns land in the audit chain and
+  reflect at commit time, but the tokens were already emitted.
+- **Substrate dependency on `UnitRef` broadening for `unitId` /
+  `windowInstanceId` pass-through.** Per **D04/5 deviation #1**, the TS
+  substrate's public `UnitRef` does not currently expose `unit_id`
+  (`sdk/typescript/src/client.ts::mapUnitRef` hardcodes empty). The v0.1.0
+  handler options surface therefore omits the `windowInstanceId` / `unit` /
+  `pricing` / `claimEstimator` fields the design.md §4 surface anticipates;
+  the adapter projects sensible defaults instead. The next D04 hardening
+  slice picks up the SDK-side broadening + adapter wire-through together.
+- **DEGRADE patch application surfaces as `MutationApplyFailed`.** Matches
+  the Python `spendguard-sdk[langchain]` v0.5.1 stance. Built-in claim
+  mutation lands in a later slice.
+- **No tool-call mid-loop gating.** Each tool call is its own LangChain
+  event; the substrate handles per-call PRE/POST. Cross-tool budget
+  enforcement is the contract layer's job, not the adapter's.
+
+## Demo
+
+A bundled docker-compose demo proves the full ALLOW + DENY + STREAM matrix
+end-to-end against a real `ChatOpenAI` + sidecar + counting-stub provider:
+
+```bash
+make demo-up DEMO_MODE=langchain_ts
+```
+
+The mode boots `postgres + sidecar + langchain-runner + counting-stub`, then
+runs three invocations from the Node example at
+[`examples/langchain-ts/`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/langchain-ts/):
+
+- **ALLOW** — small message within budget. `handleChatModelStart` fires PRE,
+  `client.reserve()` returns ALLOW, the `ChatOpenAI` HTTP call fires, counter
+  +1, `handleLLMEnd` emits a `SUCCESS` commit with real token usage.
+- **DENY** — `spendguard_estimate_override=2000000000` blows past the seeded
+  1B hard-cap. The sidecar contract evaluator emits `SPENDGUARD_DENY`,
+  `client.reserve()` throws `DecisionDenied`, `model.invoke()` halts BEFORE
+  the OpenAI HTTP call. Counting-stub counter UNCHANGED (proves the gate
+  fires pre-call).
+- **STREAM** — `streaming: true` keeps the SSE chunked path. PRE fires once
+  at stream open, POST commits once at stream end against real
+  `usage.completion_tokens`.
+
+Success line on a clean run:
+
+```
+[demo] langchain_ts ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+Full details and the verify-SQL gates are in
+[`deploy/demo/langchain_ts/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/langchain_ts/README.md).
+
+## Troubleshooting
+
+Common boot-time and first-call errors. The substrate's typed exceptions are
+re-exported from `@spendguard/langchain` so you can pattern-match on
+`DecisionDenied` / `SidecarUnavailable` without taking a second import.
+
+- **`DecisionDenied: reserve() denied by contract`** — Expected behaviour
+  when the budget is exhausted or a contract rule emitted `SPENDGUARD_DENY`.
+  The handler rethrows, `model.invoke()` halts, and the OpenAI HTTP call
+  never fires. Check the sidecar logs for the rule that matched; the
+  decision row in the ledger carries `decision_context.contract_rule`.
+
+- **Budget gate not blocking — provider call fires anyway.** Almost always
+  caused by `raiseError = false` somewhere on the call path (override on
+  the handler instance, or a wrapping `CallbackManager` that strips it).
+  The adapter pins `raiseError = true` and `awaitHandlers = true` at
+  construction; do not override either. Reproduce by setting
+  `LANGCHAIN_VERBOSE=true` — the `CallbackManager` will log the swallowed
+  throw.
+
+- **`SidecarUnavailable: handshake timeout`** — The sidecar's UDS path
+  (`SPENDGUARD_SIDECAR_UDS`, default `/var/run/spendguard/adapter.sock`)
+  is not reachable. Check that the sidecar container is up, the socket
+  file exists, and your Node process has read/write permission on it. In
+  the demo overlay this is wired by `deploy/demo/langchain_ts/docker-compose.yaml`;
+  outside the demo, mount the same socket path into your Node container's
+  `/var/run/spendguard/`.
+
+- **`handleLLMEnd: no inflight entry for runId=...`** — The adapter logs
+  a warn-and-return when it sees a POST commit for a `runId` that has no
+  inflight reservation. This is benign in the degradation case
+  (`SidecarUnavailable` on the PRE — the adapter let the LLM call
+  proceed without a gate). If you see it without a preceding
+  `SidecarUnavailable`, suspect a duplicate `handleLLMEnd` delivery from
+  the framework — the substrate's in-process `DecisionCache` collapses
+  the duplicate at commit time.
+
+- **`TypeError: client.reserve is not a function`** — You imported
+  `@spendguard/langchain` against a `@spendguard/sdk` version that
+  predates the `reserve()` rename. The v0.1.0 adapter requires
+  `@spendguard/sdk@^0.1.0`. Upgrade with `pnpm add @spendguard/sdk@latest`.
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in 5 minutes
+- [LangChain & LangGraph (Python)](../langchain/) — Python sibling of this adapter
+- [Contract YAML reference](../../contracts/yaml/) — author allow/stop rules
+- Other adapter integrations: [Pydantic-AI](../pydantic-ai/) · [OpenAI Agents SDK](../openai-agents/) · [Microsoft AGT](../agt/) · [LiteLLM proxy guardrail](../litellm-proxy/)

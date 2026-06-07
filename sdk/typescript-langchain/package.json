@@ -24,7 +24,9 @@
   "files": [
     "dist/**/*.js",
     "dist/**/*.d.ts",
-    "README.md"
+    "README.md",
+    "LICENSE_NOTICES.md",
+    "CHANGELOG.md"
   ],
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -42,7 +44,10 @@
     "test:watch": "vitest",
     "lint": "biome check src tests",
     "format": "biome format --write src tests",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit"
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.tests.json --noEmit",
+    "size": "bash scripts/size-budget.sh",
+    "version-check": "bash scripts/version-check.sh",
+    "prepublishOnly": "bash scripts/prepublish.sh"
   },
   "peerDependencies": {
     "@spendguard/sdk": "workspace:*",

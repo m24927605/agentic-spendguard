@@ -241,6 +241,7 @@ async with SpendGuardClient(
 | **Pydantic-AI** | `spendguard.integrations.pydantic_ai` | Every `Model.request()` | — |
 | **LangChain** | `spendguard.integrations.langchain` | Every `BaseChatModel` invocation | — |
 | **LangGraph** | same module | Same wrapper (LangGraph builds on `BaseChatModel`) | — |
+| **LangChain.js (TS/JS)** | `@spendguard/langchain` (`SpendGuardCallbackHandler`) | Every LangChain.js `BaseChatModel` / `BaseLLM` invocation; covers LangGraph because it builds on `BaseChatModel` | [`examples/langchain-ts/`](examples/langchain-ts/) |
 | **OpenAI Agents SDK** | `spendguard.integrations.openai_agents` | Every model call inside an `Agent` run | [`examples/openai-agents-composite/`](examples/openai-agents-composite/) |
 | **Microsoft AGT** | `spendguard.integrations.agt` | AGT's PolicyEngine + SpendGuard as a policy plugin | [`microsoft/agent-governance-toolkit#2398`](https://github.com/microsoft/agent-governance-toolkit/pull/2398) |
 | **LiteLLM proxy** (legacy `CustomLogger` callback) | `spendguard.integrations.litellm` | Every `/v1/chat/completions` through the LiteLLM proxy | [`docs/specs/litellm-integration/PROXY_RECIPE.md`](docs/specs/litellm-integration/PROXY_RECIPE.md) |
