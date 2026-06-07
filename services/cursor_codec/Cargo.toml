@@ -24,7 +24,16 @@ path = "src/lib.rs"
 # feature pulls this crate in as an `optional = true` dep, at which
 # point the consumer turns the `mitm` feature on here.
 default = []
-mitm = []
+mitm = [
+    "dep:tokio",
+    "dep:tonic",
+    "dep:hyper-util",
+    "dep:tower",
+    "dep:async-stream",
+    "dep:uuid",
+    "dep:anyhow",
+    "dep:tracing",
+]
 
 [dependencies]
 # Connect-RPC framing parser. `bytes` is the canonical byte buffer
@@ -41,13 +50,45 @@ prost-types = "0.13"
 # / `Result<_, DecodeError>` shaped the same way ledger and sidecar do.
 thiserror = "1"
 
+# SLICE 5 — OpenAI ChatCompletion request/chunk shape. We keep this
+# minimal (serde_json::Value internally for additive fields) to avoid
+# pulling the full openai crate. Same `serde` workspace version used
+# by services/egress_proxy.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SLICE 6 — sidecar UDS gRPC client + MITM session state machine.
+# Gated on `mitm` so the default build (and SLICE 5-only consumers)
+# keep the dependency surface narrow. Mirrors the
+# services/egress_proxy/src/sidecar_client.rs pattern.
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "net", "time"], optional = true }
+tonic = { version = "0.12", features = ["transport"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
+async-stream = { version = "0.3", optional = true }
+uuid = { version = "1", features = ["v7", "v4"], optional = true }
+anyhow = { version = "1", optional = true }
+tracing = { version = "0.1", optional = true }
+
 [build-dependencies]
 # `prost-build` generates the Rust types from `src/proto/cursor.proto`.
 # Matches the build.rs pattern in services/tokenizer / services/sidecar.
 prost-build = "0.13"
 
+# SLICE 6 — sidecar adapter / common proto stubs.
+tonic-build = "0.12"
+
 [dev-dependencies]
 # Round-trip helpers (encode → decode) for the envelope tests reuse
-# `prost`'s Message trait. No additional dev deps are required for
-# SLICE 1-4; SLICE 8 will add wiremock / testcontainers for the
-# fixture replay harness.
+# `prost`'s Message trait. SLICE 6 wires the in-process gRPC server
+# stub for the reserve/commit/release tests, so dev pulls in the same
+# tokio+tonic surface that the `mitm` feature exposes at runtime.
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "net", "time", "rt-multi-thread"] }
+tonic = { version = "0.12", features = ["transport"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }
+async-stream = "0.3"
+tempfile = "3"
+
+[package.metadata.docs.rs]
+all-features = true

@@ -12,16 +12,23 @@
 //! layer is public Connect-RPC; the envelope is reconstructed from
 //! black-box capture (no vendor source).
 //!
-//! ## Crate scope (D17 SLICE 1-4)
+//! ## Crate scope (D17 SLICE 1-7)
 //!
-//! * [`framing`] — Connect-RPC length-prefixed frame reader.
-//! * [`cursor_proto`] — prost-generated types for the observed envelope.
-//! * [`envelope`] — typed decode helpers + `DecodeError`.
+//! * [`framing`] — Connect-RPC length-prefixed frame reader (SLICE 2).
+//! * [`cursor_proto`] — prost-generated types for the observed envelope
+//!   (SLICE 3).
+//! * [`envelope`] — typed decode helpers + `DecodeError` (SLICE 3).
+//! * [`openai_models`] — minimal OpenAI Chat Completions request /
+//!   chunk shape that the translator pivots through (SLICE 5).
+//! * [`translate`] — Cursor ↔ OpenAI translation (SLICE 5).
+//! * [`reencode`] — byte-for-byte re-encode round-trip helpers (SLICE 7).
+//! * [`sidecar_client`] — sidecar UDS gRPC client (SLICE 6, `mitm`).
+//! * [`mitm_session`] — per-connection MITM state machine (SLICE 6,
+//!   `mitm`).
 //!
-//! Translator (SLICE 5), reserve/commit pipeline (SLICE 6), response
-//! re-encode (SLICE 7), and the egress-proxy hook (SLICE 4 in
+//! The egress-proxy hook (SLICE 4 in
 //! [`design.md`](../../docs/specs/coverage/D17_cursor_mitm/design.md)
-//! §7) all land in later slices.
+//! §7) and `.cursor-rpc` fixture replay harness (SLICE 8) follow.
 //!
 //! ## Feature gates
 //!
@@ -57,11 +64,35 @@ use std::sync::OnceLock;
 pub mod cursor_proto;
 pub mod envelope;
 pub mod framing;
+pub mod openai_models;
+pub mod reencode;
+pub mod translate;
+
+#[cfg(feature = "mitm")]
+pub mod mitm_session;
+#[cfg(feature = "mitm")]
+pub mod sidecar_client;
 
 pub use envelope::{decode_chat_request, decode_chat_response_chunk, DecodeError};
 pub use framing::{
     ConnectRpcReader, Frame, DEFAULT_MAX_FRAME_LEN, FLAG_COMPRESSED, FLAG_END_OF_STREAM,
 };
+pub use openai_models::{
+    OpenAiChatRequest, OpenAiChatResponseChunk, OpenAiChunkChoice, OpenAiChunkDelta, OpenAiMessage,
+    OpenAiUsage,
+};
+pub use translate::{
+    cursor_request_to_openai, extract_cursor_output_tokens, extract_openai_output_tokens,
+    openai_chunk_to_cursor,
+};
+
+#[cfg(feature = "mitm")]
+pub use mitm_session::{
+    InMemorySidecar, MitmSession, ReleaseReason, SessionError, SessionResult, SidecarDecision,
+    SidecarLane, UpstreamConnector,
+};
+#[cfg(feature = "mitm")]
+pub use sidecar_client::{connect_with_retry, SidecarConfig, SidecarHandle};
 
 /// Emit the experimental banner to stderr on first call per process.
 ///
