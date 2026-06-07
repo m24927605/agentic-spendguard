@@ -1,0 +1,206 @@
+# COV_d07 SLICE 8 (`DEMO_MODE=maf_python_real`) — sidecar compose overlay.
+#
+# Mirrors `deploy/demo/inngest_agent_kit/docker-compose.yaml` field-for-field;
+# only the runner service differs (Python `agent_framework.ChatMiddleware`
+# subclass driving `SpendGuardMiddleware.process(context, call_next)` vs
+# Inngest AgentKit's `wrapWithSpendGuard(step.ai)`). Layered on top of
+# `deploy/demo/compose.yaml` via `docker compose -f
+# deploy/demo/compose.yaml -f deploy/demo/maf_python/docker-compose.yaml up`.
+# The Makefile `DEMO_MODE=maf_python_real` branch does that for you.
+#
+# Services declared here:
+#
+#   counting-stub          mock OpenAI `/v1/chat/completions` provider. By-value
+#                          duplicate of the maf_dotnet / openai_agents_ts /
+#                          inngest_agent_kit overlays' stub so the overlays
+#                          remain independent.
+#
+#   maf-python-runner      Python 3.12 container that `pip install -e`s the
+#                          in-tree `spendguard-sdk` with the
+#                          `[agent-framework]` extra, then runs
+#                          `examples/maf-python/run.py --real` against the
+#                          sidecar UDS.
+#
+# Anti-scope: this overlay does NOT redeclare postgres, sidecar, ledger,
+# canonical-ingest, bundles-init, pki-init or any other base service —
+# the Makefile target brings up the base stack first, then this overlay.
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not self.path.startswith("/v1/chat/completions"):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"chatcmpl-counting-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hi from counting stub"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 5,
+                              "completion_tokens": 7,
+                              "total_tokens": 12},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok")
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── maf-python-runner ────────────────────────────────────────────────
+  # Python 3.12 container that pip-installs the in-tree
+  # `spendguard-sdk` with the `[agent-framework]` extra, then runs
+  # `examples/maf-python/run.py --real` against the sidecar UDS.
+  # Pre-install (rather than wheel-build) keeps the image build cache
+  # warm across iterations; the demo-as-quality-gate principle (project
+  # memory) requires the wire shape to match what the production publish
+  # bundle ships.
+  maf-python-runner:
+    image: python:3.12-slim-bookworm
+    container_name: spendguard-maf-python-runner
+    # Demo-only: run as root inside the container so the named-volume
+    # site-packages tree (mounted by docker as root-owned) is writable.
+    # Production deployments of `spendguard-sdk[agent-framework]` run
+    # under the consumer's own runtime; the adapter itself never touches
+    # the filesystem at runtime.
+    working_dir: /opt/spendguard/examples/maf-python
+    environment:
+      SPENDGUARD_SIDECAR_UDS: "/var/run/spendguard/adapter.sock"
+      SPENDGUARD_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_UNIT_ID: "66666666-6666-4666-8666-666666666666"
+      SPENDGUARD_PRICING_VERSION: "demo-pricing-v1"
+      SPENDGUARD_HANDSHAKE_TIMEOUT_MS: "30000"
+      SPENDGUARD_COUNTING_STUB_URL: "http://counting-stub:8765"
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+      PIP_NO_CACHE_DIR: "off"
+    volumes:
+      # Workspace source — read-only.
+      - ../..:/opt/spendguard:ro
+      # Sidecar UDS shared with the rest of the stack.
+      - sidecar-uds:/var/run/spendguard
+      # Writable site-packages persistence across re-runs.
+      - maf-python-runner-venv:/opt/venv
+    tmpfs:
+      - /tmp
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        echo "[maf-python-runner] python $$(python --version)"
+
+        # Stage a writable example dir; the workspace mount is RO.
+        STAGING=/tmp/maf-python-stage
+        rm -rf "$$STAGING"
+        cp -r /opt/spendguard/examples/maf-python "$$STAGING"
+
+        # Build a virtualenv on the named volume so repeat runs are fast.
+        if [ ! -d /opt/venv/bin ]; then
+          echo "[maf-python-runner] creating venv at /opt/venv..."
+          python -m venv /opt/venv
+        fi
+        . /opt/venv/bin/activate
+
+        echo "[maf-python-runner] installing example deps..."
+        pip install -r "$$STAGING/requirements.txt"
+
+        echo "[maf-python-runner] installing in-tree spendguard-sdk[agent-framework]..."
+        # The SDK lives at /opt/spendguard/sdk/python; install editable
+        # so the demo always reflects the current SDK shape (parity with
+        # the .NET runner's project-reference wire-up).
+        pip install -e '/opt/spendguard/sdk/python[agent-framework]'
+
+        echo "[maf-python-runner] sidecar UDS ready check..."
+        for i in $$(seq 1 60); do
+          if [ -S "$$SPENDGUARD_SIDECAR_UDS" ]; then
+            echo "[maf-python-runner] sidecar UDS visible at $$SPENDGUARD_SIDECAR_UDS"
+            break
+          fi
+          sleep 1
+        done
+
+        echo "[maf-python-runner] launching run.py --real..."
+        exec python "$$STAGING/run.py" --real
+    depends_on:
+      sidecar:
+        condition: service_healthy
+      counting-stub:
+        condition: service_healthy
+    networks:
+      spendguard-net:
+        aliases: [maf-python-runner]
+
+volumes:
+  maf-python-runner-venv:

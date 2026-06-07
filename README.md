@@ -246,6 +246,7 @@ async with SpendGuardClient(
 | **OpenAI Agents SDK (Python)** | `spendguard.integrations.openai_agents` | Every model call inside an `Agent` run | [`examples/openai-agents-composite/`](examples/openai-agents-composite/) |
 | **OpenAI Agents SDK (TS/JS)** | `@spendguard/openai-agents` (`withSpendGuard(model, opts)` factory + `SpendGuardAgentsModel` class) | Every `Runner.run(agent, ...)` call drives `getResponse(request)` through the SpendGuard bracket; multi-framework runs share one trace via the shared `runContext()` AsyncLocalStorage | [`examples/openai-agents-ts-composite/`](examples/openai-agents-ts-composite/) |
 | **Inngest AgentKit (TS/JS)** | `@spendguard/inngest-agent-kit` (`wrapWithSpendGuard(step.ai, client, opts)` factory) | Every `step.ai.infer()` / `step.ai.wrap()` call drives `reserve` → provider → `commitEstimated` through the SpendGuard bracket; **N retry attempts of the same step body collapse to ONE logical reservation** via Inngest's step identity reuse — the headline retry-dedup contract | [`examples/inngest-agent-kit/`](examples/inngest-agent-kit/) |
+| **Microsoft Agent Framework (.NET + Python)** | `Spendguard.AgentFramework` NuGet (`services.AddSpendGuard(...)` + `inner.UseSpendGuard(sp)` DI extension) **and** `spendguard.integrations.agent_framework` (`SpendGuardMiddleware(client=..., ...)` subclass of `agent_framework.ChatMiddleware`) | Every MAF `IChatClient.GetResponseAsync(...)` (.NET) / `ChatClient.get_response(...)` (Python) call drives `reserve` → provider → `commitEstimated` through the SpendGuard bracket at the chat-client boundary `Microsoft.Agents.AI.ChatAgent` itself uses; both languages share one design and one demo matrix | [`examples/maf-dotnet/`](examples/maf-dotnet/) · [`examples/maf-python/`](examples/maf-python/) |
 | **Microsoft AGT** | `spendguard.integrations.agt` | AGT's PolicyEngine + SpendGuard as a policy plugin | [`microsoft/agent-governance-toolkit#2398`](https://github.com/microsoft/agent-governance-toolkit/pull/2398) |
 | **LiteLLM proxy** (legacy `CustomLogger` callback) | `spendguard.integrations.litellm` | Every `/v1/chat/completions` through the LiteLLM proxy | [`docs/specs/litellm-integration/PROXY_RECIPE.md`](docs/specs/litellm-integration/PROXY_RECIPE.md) |
 | **LiteLLM proxy guardrail** (new `CustomGuardrail` registry) | `spendguard.integrations.litellm_guardrail` | Every `/v1/chat/completions` through the LiteLLM proxy, registered via `guardrails:` (zero-Python install for single-tenant) | [LiteLLM proxy guardrail docs](https://agenticspendguard.dev/docs/integrations/litellm-proxy/) |
@@ -270,6 +271,9 @@ make demo-up DEMO_MODE=litellm_deny           # LiteLLM proxy: 3 fail-closed sub
 make demo-up DEMO_MODE=langchain_ts           # LangChain.js: ALLOW+DENY+STREAM
 make demo-up DEMO_MODE=vercel_ai_mastra       # Vercel AI SDK (covers Mastra): ALLOW+DENY+STREAM ⭐
 make demo-up DEMO_MODE=inngest_agent_kit      # Inngest AgentKit: ALLOW+DENY+RETRY_DEDUP ⭐
+make demo-up DEMO_MODE=maf_dotnet_real        # Microsoft Agent Framework .NET: ALLOW+DENY+ALLOW2 ⭐
+make demo-up DEMO_MODE=maf_python_real        # Microsoft Agent Framework Python: ALLOW+DENY+ALLOW2 ⭐
+make demo-up DEMO_MODE=maf_python_with_agt    # MAF + AGT coexistence smoke
 make demo-up DEMO_MODE=approval_hot_reload    # frozen-pricing regression
 make demo-up DEMO_MODE=multi_provider_usd     # multi-provider USD normalization
 ```

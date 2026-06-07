@@ -1,0 +1,78 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    COV_d07 SLICE 8 — both-language MAF demo (the .NET half).
+
+    Minimal console app that wraps an `IChatClient` with the
+    SpendGuard `SpendGuardChatMiddleware` and drives 3 calls
+    (ALLOW + DENY + STREAM-equivalent ALLOW2) against the demo
+    counting-stub via plain HTTP. The Microsoft Agent Framework
+    contract is honoured at the chat-client boundary:
+    `IChatClient.GetResponseAsync` is the seam the middleware gates,
+    and that's the same seam `Microsoft.Agents.AI.ChatAgent` itself
+    drives in production. We don't instantiate a `ChatAgent` here
+    because the demo's counting-stub backend doesn't speak the
+    OpenAI tool-call protocol the GA `ChatAgent` expects on its
+    auto-function-invocation loop; the chat-client seam is
+    contractually equivalent for the gate.
+  -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Spendguard.Examples.MafDotnet</RootNamespace>
+    <AssemblyName>spendguard-maf-dotnet-demo</AssemblyName>
+    <!--
+      The demo binary is not a NuGet artefact. Disable packaging so
+      the package-validation gate in CI doesn't try to harvest it.
+    -->
+    <IsPackable>false</IsPackable>
+    <!--
+      Some Microsoft.Extensions.AI preview generators emit CS1591 noise
+      on internal types; the example treats warnings as warnings (not
+      errors) since this is a sample, not a published library.
+    -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!--
+      Microsoft.Extensions.AI gives us the `IChatClient` contract +
+      `DelegatingChatClient` base — the same seam the SpendGuard
+      middleware extends. Pinned to match the version the
+      `Spendguard.AgentFramework` package itself depends on
+      (sdk/dotnet-agent-framework/Spendguard.AgentFramework/Spendguard.AgentFramework.csproj).
+    -->
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="[10.5.1,12.0.0)" />
+    <!--
+      Microsoft.Agents.AI is the MAF GA NuGet (renamed from
+      Microsoft.Agents.Framework between spec authoring and SLICE_01).
+      We reference the Abstractions assembly so a future revision of
+      this example can swap in `ChatAgent` against a real provider
+      without changing the sample's middleware-wiring story.
+    -->
+    <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="[1.9.0,2.0.0)" />
+
+    <!-- DI host so the SpendGuard wire-up reads identically to the
+         service-collection install path documented in the
+         integrations page. -->
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" Version="[8.0.0,11.0.0)" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Console" Version="[8.0.0,11.0.0)" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="[8.0.0,11.0.0)" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Build against the in-tree SpendGuard.AgentFramework project so
+      the demo always reflects the current SDK shape (no waiting on a
+      NuGet publish). The compose overlay copies the demo + sdk source
+      into a read-only mount and runs `dotnet run` in the example
+      directory.
+    -->
+    <ProjectReference Include="..\..\sdk\dotnet-agent-framework\Spendguard.AgentFramework\Spendguard.AgentFramework.csproj" />
+  </ItemGroup>
+
+</Project>

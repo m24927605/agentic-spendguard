@@ -1,0 +1,372 @@
+---
+title: "Microsoft Agent Framework (MAF) — SpendGuardMiddleware (both languages)"
+description: >-
+  Install Agentic SpendGuard as a Microsoft Agent Framework middleware
+  in both .NET 8 (Spendguard.AgentFramework NuGet) and Python
+  (spendguard-sdk[agent-framework]). Drop-in via
+  services.AddSpendGuard(...) + UseSpendGuard(sp) on the .NET side
+  and SpendGuardMiddleware(client=..., ...) on the Python side. Pre-call
+  budget reservation before the upstream HTTP request fires, post-call
+  commit reconciles real token usage, signed audit chain.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+
+> [Microsoft Agent Framework (MAF)](https://github.com/microsoft/agent-framework)
+> GA'd 2026-04 as the unified successor to Semantic Kernel + AutoGen
+> (both upstream lines are now maintenance-only). It ships in both
+> **.NET** (`Microsoft.Agents.AI` + `Microsoft.Extensions.AI`) and
+> **Python** (`agent_framework`), with a wire-stable `ChatMiddleware`
+> contract on the chat-client boundary. SpendGuard slots in at that
+> boundary in both languages — `IChatClient.UseSpendGuard(sp)` on
+> .NET, `SpendGuardMiddleware(client=..., ...)` on Python — so a single
+> design document and a single demo matrix cover both halves.
+
+<Aside type="note">
+This is the SpendGuard middleware that sits **inside MAF's own
+chat-client pipeline**. For the policy-engine framing one layer up
+(Microsoft Agent Governance Toolkit), see
+[Microsoft AGT](../agt/). Both can be combined — see
+[Coexistence with AGT](#coexistence-with-agt) below.
+</Aside>
+
+## Install
+
+### .NET
+
+```bash
+dotnet add package Spendguard.AgentFramework
+dotnet add package Microsoft.Agents.AI.Abstractions
+dotnet add package Microsoft.Extensions.AI.Abstractions
+```
+
+`Spendguard.AgentFramework` targets `net8.0`. The middleware
+extends `Microsoft.Extensions.AI.DelegatingChatClient` so it slots
+into any `IChatClient`-shaped pipeline — both
+`Microsoft.Agents.AI.ChatAgent` (the MAF GA agent) and hand-written
+`IChatClient` consumers gate through the same seam.
+
+### Python
+
+```bash
+pip install 'spendguard-sdk[agent-framework]'
+```
+
+`agent-framework>=1.0,<2` is pulled in as an optional extra. The
+`SpendGuardMiddleware` subclass of `agent_framework.ChatMiddleware`
+is the integration's public surface.
+
+## Quick start
+
+### .NET
+
+```csharp
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.DependencyInjection;
+using Spendguard.AgentFramework.Extensions;
+using Spendguard.AgentFramework.Options;
+
+var services = new ServiceCollection();
+services.AddLogging();
+services.AddSpendGuard(o =>
+{
+    o.TenantId        = "00000000-0000-4000-8000-000000000001";
+    o.BudgetId        = "44444444-4444-4444-8444-444444444444";
+    o.WindowInstanceId = "55555555-5555-4555-8555-555555555555";
+    o.SidecarSocketPath = "/var/run/spendguard/adapter.sock";
+    o.OnSidecarUnavailable = OnSidecarUnavailable.Deny;
+});
+
+await using var sp = services.BuildServiceProvider();
+IChatClient inner = /* OpenAIChatClient / AzureChatClient / etc. */;
+IChatClient gated = inner.UseSpendGuard(sp);
+
+var resp = await gated.GetResponseAsync(new[]
+{
+    new ChatMessage(ChatRole.User, "hello"),
+});
+```
+
+The same gated `IChatClient` can be handed to a `ChatAgent`:
+
+```csharp
+using Microsoft.Agents.AI;
+
+var agent = new ChatAgent(gated, instructions: "Be brief.");
+var result = await agent.RunAsync("hello");
+```
+
+### Python
+
+```python
+import asyncio
+
+from agent_framework import ChatAgent
+from agent_framework.openai import OpenAIChatClient
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.agent_framework import (
+    SpendGuardAgentFrameworkOptions,
+    SpendGuardMiddleware,
+    run_context,
+    RunContext,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+        runtime_kind="microsoft-agent-framework-python",
+    )
+    await client.connect()
+    await client.handshake()
+
+    options = SpendGuardAgentFrameworkOptions(
+        tenant_id="00000000-0000-4000-8000-000000000001",
+        budget_id="44444444-4444-4444-8444-444444444444",
+        window_instance_id="55555555-5555-4555-8555-555555555555",
+        sidecar_socket_path="/var/run/spendguard/adapter.sock",
+    )
+
+    def _claim_estimator(messages):
+        claim = common_pb2.BudgetClaim()
+        claim.budget_id = options.budget_id
+        claim.window_instance_id = options.window_instance_id
+        claim.amount_atomic = "1000000"  # placeholder; real cost is from pricing
+        claim.unit.unit_id = "usd_micros"
+        return [claim]
+
+    chat_middleware = SpendGuardMiddleware(
+        client=client,
+        options=options,
+        unit=common_pb2.UnitRef(unit_id="usd_micros"),
+        pricing=common_pb2.PricingFreeze(pricing_version="prod-pricing-v1"),
+        claim_estimator=_claim_estimator,
+    )
+
+    agent = ChatAgent(
+        chat_client=OpenAIChatClient(...),
+        middleware=[chat_middleware],
+    )
+
+    async with run_context(RunContext(run_id="run-123")):
+        result = await agent.run("Hello!")
+        print(result)
+
+
+asyncio.run(main())
+```
+
+## What happens on each gated chat-client call
+
+Both languages share the same lifecycle:
+
+1. The middleware derives a stable identity tuple `(decisionId,
+   idempotencyKey, llmCallId, stepId)` from the current `RunContext`
+   plus a content hash of the rendered messages + options. Same
+   logical call → same idempotency key → sidecar dedupes retries.
+2. The middleware calls `RequestDecision(LLM_CALL_PRE)` against the
+   sidecar UDS. On `CONTINUE` / `DEGRADE` the call proceeds; on
+   `STOP` / `STOP_RUN_PROJECTION` / unknown-decision the middleware
+   throws (`SpendGuardDecisionDeniedException` on .NET,
+   `DecisionDenied` on Python); on `REQUIRE_APPROVAL` it throws a
+   pending-approval error.
+3. **Review-standards §3.1 + §5 enforced:** when the middleware
+   throws, the inner `IChatClient` / `call_next()` HTTP **never
+   fires**. The substrate's `--mock` demo explicitly asserts this
+   invariant.
+4. On inner-call exception, the middleware releases the reservation
+   before re-raising so the budget isn't pinned by a failed call.
+5. After the inner call returns, the middleware emits an
+   `LLM_CALL_POST` trace event with the provider-reported usage
+   (`ChatResponse.Usage` on .NET, `ChatResponse.usage_details` on
+   Python). The `LLM_CALL_POST` event is what closes the audit chain
+   for the call.
+
+## Configuration
+
+The `.NET` and Python options surfaces are case-translated mirrors per
+review-standards §2.3 P2:
+
+| .NET (`SpendGuardOptions`) | Python (`SpendGuardAgentFrameworkOptions`) | Required | Default | Description |
+| -------------------------- | ------------------------------------------ | -------- | ------- | ----------- |
+| `TenantId` | `tenant_id` | YES | — | Tenant UUID the call is billed to. |
+| `BudgetId` | `budget_id` | YES | — | Budget UUID the projected claim's `scope_id` points at. |
+| `WindowInstanceId` | `window_instance_id` | YES | — | Time-window scope on the budget. |
+| `SidecarSocketPath` | `sidecar_socket_path` | YES | `/var/run/spendguard/adapter.sock` (.NET) / `/var/run/spendguard/sidecar.sock` (Python) | UDS path the middleware connects to. |
+| `OnSidecarUnavailable` | `on_sidecar_unavailable` | NO | `Deny` / `"deny"` | Fail-closed default per `design.md` ADR-005. `Allow` / `"allow"` is opt-in fail-open with a logged warning. |
+| `SdkVersion` | (set by SDK) | NO | matches package version | Handshake metadata. |
+| `RuntimeKind` | (set by SDK) | NO | `microsoft-agent-framework-dotnet` / `microsoft-agent-framework-python` | Routes capability negotiation in the sidecar. |
+
+The `claim_estimator` / `claimEstimate` callable lives on the
+middleware constructor (Python) or on the `ITokenEstimator` DI
+binding (.NET). It maps the `ChatContext.messages` /
+`IEnumerable<ChatMessage>` to a `BudgetClaim` (Python) or token
+count (.NET). v1 ships a `SimpleTokenEstimator` on .NET; Python
+requires the caller to supply one explicitly (`ADR-004`).
+
+## Coexistence with AGT
+
+`design.md §1.3 + ADR-006` — `spendguard.integrations.agt` is a
+policy-engine hook **above** MAF, while this MAF middleware is the
+framework-native chat-client hook. Both can be combined:
+
+- An `AGT` composite evaluator can run inside an MAF middleware
+  delegate.
+- A single `SpendGuardClient` shared between both surfaces produces
+  one handshake + one reservation per LLM call regardless of which
+  integration surface is responsible.
+
+The composite path is smoke-tested by
+`DEMO_MODE=maf_python_with_agt`; the dedicated demos
+(`DEMO_MODE=agent_real_agt` for AGT, `DEMO_MODE=maf_dotnet_real` /
+`DEMO_MODE=maf_python_real` for MAF) remain the load-bearing demos
+for each integration.
+
+## Limitations
+
+- **Streaming-per-chunk gating is anti-scope for v0.1.x.** The
+  `IAsyncEnumerable<ChatResponseUpdate>` boundary (.NET) and the
+  streaming `ChatMiddleware` overload (Python) are left as-is for a
+  follow-up slice. The composite demo's third step is **ALLOW2**
+  (a second non-streaming ALLOW) instead of STREAM — same shape as
+  D04 / D06 / D08's STREAM step from a load-bearing matrix
+  perspective; the byte-level streaming gate is the follow-up.
+- **Tool-level (function-call) gating is opt-in.** ADR-002 — token
+  budget is separable from tool-cost budget. The opt-in second
+  middleware (`SpendGuardToolMiddleware` on Python; a parallel
+  `SpendGuardFunctionInvocationMiddleware` planned on .NET) gates
+  individual function invocations.
+- **Sidecar dependency is fail-closed by default.** `OnSidecarUnavailable
+  = Allow` / `on_sidecar_unavailable="allow"` is an explicit opt-in
+  with a logged warning at every unreachable request. Reviewer Sec3
+  flags every use site.
+- **.NET 7 / Framework 4.x are unsupported.** `net8.0` is the only
+  supported TFM in this slice; `netstandard2.1` multi-targeting is
+  deferred to a build-host upgrade (the in-tree build host carries
+  only net8.0 reference packs at the time of writing).
+- **Substrate dependency on `UnitRef` broadening.** The Python +
+  .NET adapters both hit the same D05 `UnitRef.unit_id empty`
+  substrate validation gap D04 / D06 / D08 surface against the same
+  sidecar. The adapters' wire shapes and middleware contracts are
+  independently verified by their unit suites; the
+  `--mock` demo modes exercise the bracket end-to-end without going
+  through the substrate's `ReserveSet` validator. A future SDK-side
+  `unit_id` broadening lands the `--real` demos green here and
+  across the sibling D04 / D06 / D08 modes simultaneously.
+
+## Demos
+
+Two load-bearing demo modes (one per language) plus a smoke
+composite:
+
+```bash
+# .NET 8 console app driving IChatClient.UseSpendGuard(sp)
+make demo-up DEMO_MODE=maf_dotnet_real
+
+# Python driving SpendGuardMiddleware.process(...)
+make demo-up DEMO_MODE=maf_python_real
+
+# composite smoke: MAF + AGT coexistence (optional)
+make demo-up DEMO_MODE=maf_python_with_agt
+```
+
+Each mode boots the same base stack
+(`postgres + sidecar + ...`) plus a counting-stub provider, then runs
+three calls through the SpendGuard-wrapped boundary:
+
+- **ALLOW** — small message within budget → upstream HTTP fires →
+  counter `+1`.
+- **DENY** — `trigger-deny` marker → sidecar contract evaluator
+  emits `SPENDGUARD_DENY` → middleware throws **before** the inner
+  call fires → counter `+0`.
+- **ALLOW2** — second small message → upstream HTTP fires →
+  counter `+1`. Replaces D04 / D06 / D08's STREAM step (streaming
+  gating is v0.1.x non-goal).
+
+Success lines on a clean run (LOCKED — CI greps for the exact
+spelling):
+
+```
+[demo] maf_dotnet ALL 3 steps PASS (ALLOW + DENY + ALLOW2)
+[demo] maf_python ALL 3 steps PASS (ALLOW + DENY + ALLOW2)
+```
+
+Full details and the verify-SQL gates are in
+[`deploy/demo/maf_dotnet/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/maf_dotnet/README.md)
+and
+[`deploy/demo/maf_python/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/maf_python/README.md).
+
+The standalone `--mock` modes (no sidecar required) run against the
+same factories with in-process `SpendGuardClient` doubles:
+
+```bash
+# .NET
+dotnet run --project examples/maf-dotnet -- --mock
+
+# Python
+python examples/maf-python/run.py --mock
+```
+
+The mock modes explicitly assert the **"DENY ⇒ inner is NEVER
+invoked"** invariant (INV-1.6) and exit non-zero if violated.
+
+## Troubleshooting
+
+- **`SpendGuardDecisionDeniedException` (.NET) / `DecisionDenied`
+  (Python).** Expected behaviour when the budget is exhausted or a
+  contract rule emits `SPENDGUARD_DENY`. The middleware throws, the
+  inner chat client's HTTP **never fires**. Check the sidecar logs
+  for the rule that matched.
+
+- **Budget gate not blocking — LLM call fires anyway.** Almost
+  always caused by the middleware not being threaded into the
+  pipeline. Inspect the `IChatClient` (.NET) returned by
+  `UseSpendGuard(sp)` — it MUST be passed to the `ChatAgent`
+  constructor / consumer code, not bypassed. Python: verify the
+  `SpendGuardMiddleware` instance is in the `ChatAgent(middleware=[
+  ... ])` list.
+
+- **`SidecarUnavailableException` / `SidecarUnavailable`
+  (handshake timeout).** The sidecar's UDS path
+  (`SidecarSocketPath` / `sidecar_socket_path`, default
+  `/var/run/spendguard/adapter.sock`) is not reachable. Check that
+  the sidecar container is up, the socket file exists, and your
+  process has read/write permission on it.
+
+- **Token counts on commit don't match what the provider reports.**
+  The .NET middleware reads `ChatResponse.Usage.TotalTokenCount`;
+  Python reads `ChatResponse.usage_details["total_token_count"]`
+  with `input_token_count + output_token_count` fallback. If the
+  provider's response shape is non-standard, override the
+  `claim_estimator` (Python) or `ITokenEstimator` (.NET) DI binding
+  so the middleware uses your accurate count.
+
+- **Class identity check fails: `err instanceof DecisionDenied`
+  (Python).** The `DecisionDenied` re-export is the same class object
+  as `spendguard.errors.DecisionDenied`, so the check works regardless
+  of which import you use. If the check fails, suspect a duplicate
+  `spendguard` package in your `site-packages` tree.
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in
+  5 minutes.
+- [Microsoft AGT](../agt/) — policy-engine framing one layer up.
+- [OpenAI Agents SDK (Python)](../openai-agents/) — Python adapter
+  for the OpenAI Agents SDK.
+- [OpenAI Agents SDK (TypeScript)](../openai-agents-ts/) — TS
+  sibling.
+- [Inngest AgentKit (TypeScript)](../inngest-agent-kit/) — durable
+  retry-dedup adapter for `step.ai`.
+- [Contract YAML reference](../../contracts/yaml/) — author
+  allow/stop rules.
+- Other adapter integrations:
+  [Pydantic-AI](../pydantic-ai/) ·
+  [LangChain & LangGraph (Python)](../langchain/) ·
+  [LangChain.js callback handler](../langchain-ts/) ·
+  [Vercel AI SDK (covers Mastra)](../vercel-ai/) ·
+  [LiteLLM proxy guardrail](../litellm-proxy/)

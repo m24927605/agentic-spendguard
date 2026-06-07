@@ -1,0 +1,66 @@
+# COV_d07 SLICE 8 — multi-stage .NET 8 build for the maf-dotnet demo.
+#
+# Stage 1 (sdk): build the in-tree `Spendguard.AgentFramework` library
+#              + the `examples/maf-dotnet` console app against the
+#              in-tree project reference, producing a self-contained
+#              publish output.
+# Stage 2 (runtime): ship the publish output on top of
+#              `dotnet/runtime:8.0` for a minimal runtime image. The
+#              compose overlay mounts the sidecar UDS into the runtime
+#              container's `/var/run/spendguard/`.
+#
+# We do NOT use the `dotnet/sdk:8.0` image at runtime — the runtime-only
+# image cuts ~250 MiB out of the final layer. This matches the project's
+# image-size policy noted in deploy/demo/runtime/Dockerfile.* siblings.
+
+ARG DOTNET_SDK_VERSION=8.0
+ARG DOTNET_RUNTIME_VERSION=8.0
+
+# ── Stage 1: SDK build ────────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/sdk:${DOTNET_SDK_VERSION} AS build
+
+WORKDIR /src
+
+# The project references reach into ../../sdk/dotnet-agent-framework/ so
+# the entire SpendGuard tree must be available at build time. The compose
+# overlay COPIES the repo root in via a build context override; we just
+# need the relative-path expectations of the .csproj to resolve.
+COPY . /src
+
+# Restore + publish in Release mode. We pass
+# `-p:UseAppHost=false` so the publish output is a `.dll` invoked via
+# `dotnet`, avoiding the per-runtime-identifier apphost binary that
+# would force a `--runtime` flag.
+RUN dotnet publish \
+        examples/maf-dotnet/Maf.Dotnet.csproj \
+        --configuration Release \
+        --output /publish \
+        -p:UseAppHost=false \
+        -p:GenerateDocumentationFile=false
+
+# ── Stage 2: runtime image ────────────────────────────────────────────────
+FROM mcr.microsoft.com/dotnet/runtime:${DOTNET_RUNTIME_VERSION} AS runtime
+
+# Run as the demo non-root UID for parity with the other runners. The
+# compose overlay mounts the sidecar UDS into `/var/run/spendguard/` —
+# the sidecar itself opens the socket with mode 0660 and the demo runs
+# under the same group ID. UID 65532 = nonroot in Distroless / cncf.
+ARG DEMO_UID=65532
+ARG DEMO_GID=65532
+USER root
+RUN groupadd --system --gid ${DEMO_GID} sgdemo \
+    && useradd --system --uid ${DEMO_UID} --gid sgdemo --home /home/sgdemo \
+              --create-home --shell /usr/sbin/nologin sgdemo
+
+WORKDIR /opt/spendguard-maf-dotnet
+COPY --from=build /publish /opt/spendguard-maf-dotnet
+RUN chown -R ${DEMO_UID}:${DEMO_GID} /opt/spendguard-maf-dotnet
+
+USER ${DEMO_UID}:${DEMO_GID}
+
+# `--real` is the default — the compose overlay sets `DEMO_MODE=maf_dotnet_real`
+# and the entrypoint forwards to the publish-output assembly. The
+# `--mock` mode is available for laptop iteration via
+# `dotnet run --project examples/maf-dotnet -- --mock` (no container).
+ENTRYPOINT ["dotnet", "/opt/spendguard-maf-dotnet/spendguard-maf-dotnet-demo.dll"]
+CMD ["--real"]

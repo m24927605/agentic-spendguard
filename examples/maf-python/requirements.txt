@@ -1,0 +1,15 @@
+# COV_d07 SLICE 8 — Python half of the both-language MAF demo.
+#
+# The demo runs against the in-tree spendguard-sdk source via a `pip
+# install -e` performed by the compose overlay's entrypoint, so the
+# requirements file lists only the upstream packages the example pulls
+# in directly.
+
+# Microsoft Agent Framework (MAF) — provides ChatAgent + ChatMiddleware
+# + ChatContext + ChatResponse + Message. Pinned to match the SpendGuard
+# SDK's `[agent-framework]` extra (sdk/python/pyproject.toml).
+agent-framework>=1.0,<2
+
+# HTTP client for the counting-stub poll. The substrate uses httpx
+# throughout the test surface so the example matches.
+httpx>=0.27,<1

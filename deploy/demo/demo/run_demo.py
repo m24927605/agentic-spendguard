@@ -839,6 +839,12 @@ async def main() -> int:
         return await run_openai_agents_ts_mode()
     if DEMO_MODE == "inngest_agent_kit":
         return await run_inngest_agent_kit_mode()
+    if DEMO_MODE == "maf_dotnet_real":
+        return await run_maf_dotnet_mode()
+    if DEMO_MODE == "maf_python_real":
+        return await run_maf_python_mode()
+    if DEMO_MODE == "maf_python_with_agt":
+        return await run_maf_python_with_agt_mode()
     return await run_agent_mode()
 
 
@@ -3690,6 +3696,123 @@ async def run_inngest_agent_kit_mode() -> int:
     # step (replaces STREAM because step.ai.infer is non-streaming).
     print("[demo] inngest_agent_kit ALL 3 steps PASS (ALLOW + DENY + RETRY_DEDUP)")
     return 0
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE=maf_dotnet_real (COV_D07 SLICE 8) — verifier-side driver for
+# the .NET MAF middleware adapter. Mirrors run_openai_agents_ts_mode: the
+# maf-dotnet-runner container does the 3 calls
+# (ALLOW + DENY + ALLOW2) through IChatClient.UseSpendGuard(sp), and this
+# Python handler polls counting-stub /_count to assert the upstream-hit
+# count is >= 2 (one ALLOW + one ALLOW2; DENY MUST NOT have hit upstream).
+#
+# Note vs the langchain_ts / openai_agents_ts modes: the third step is
+# ALLOW2 not STREAM (per-chunk gating is v0.1.x non-goal, design.md §3
+# non-goal). The counter delta is `+2` (ALLOW + ALLOW2), DENY counter
+# delta is `+0`.
+# ---------------------------------------------------------------------------
+
+
+async def run_maf_dotnet_mode() -> int:
+    """Counting-stub verifier for the maf-dotnet-runner driver.
+
+    Polls `GET counting-stub:8765/_count` and asserts the running tally
+    is >= 2 (ALLOW + ALLOW2 upstream hits). The DENY step never
+    contacts the upstream because `SpendGuardChatMiddleware`'s
+    `RequestDecisionAsync()` throws SpendGuardDecisionDeniedException
+    BEFORE the inner IChatClient's HTTP call leaves the .NET process,
+    so the counter is unchanged by the DENY step.
+
+    Returns 0 on success; non-zero on failure with a clear error.
+    """
+    import httpx
+
+    print(f"[demo] maf_dotnet verifier targeting {_COUNTING_STUB_URL}")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        try:
+            calls = await _read_counting_stub_hits(http)
+        except Exception as e:  # noqa: BLE001
+            print(f"[demo] FATAL: counting-stub /_count unreachable: {e!r}",
+                  file=sys.stderr)
+            return 7
+
+    if calls < 2:
+        print(
+            f"[demo] FATAL: maf-dotnet-runner expected >= 2 counting-stub "
+            f"hits (ALLOW + ALLOW2), got {calls}. The runner either "
+            "did not finish or the DENY step leaked through to the "
+            "upstream — INV-2 violated.",
+            file=sys.stderr,
+        )
+        return 7
+
+    print(f"[demo] maf_dotnet counter OK: counting-stub hits={calls} (>= 2)")
+    # Mirrors the openai_agents_ts / inngest_agent_kit success-line
+    # locked spelling. ALLOW2 is the D07 third step (replaces STREAM
+    # because per-chunk gating is v0.1.x non-goal — design.md §3).
+    print("[demo] maf_dotnet ALL 3 steps PASS (ALLOW + DENY + ALLOW2)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE=maf_python_real (COV_D07 SLICE 8) — verifier-side driver for
+# the Python MAF middleware adapter. Mirrors run_maf_dotnet_mode: the
+# maf-python-runner container does the 3 calls
+# (ALLOW + DENY + ALLOW2) through SpendGuardMiddleware.process(...), and
+# this Python handler polls counting-stub /_count to assert the
+# upstream-hit count is >= 2 (ALLOW + ALLOW2; DENY MUST NOT have hit
+# upstream).
+# ---------------------------------------------------------------------------
+
+
+async def run_maf_python_mode() -> int:
+    """Counting-stub verifier for the maf-python-runner driver.
+
+    Polls `GET counting-stub:8765/_count` and asserts the running tally
+    is >= 2 (ALLOW + ALLOW2 upstream hits). The DENY step never
+    contacts the upstream because `SpendGuardMiddleware.process()`
+    raises DecisionDenied BEFORE the inner call_next HTTP call leaves
+    the Python process, so the counter is unchanged by the DENY step.
+
+    Returns 0 on success; non-zero on failure with a clear error.
+    """
+    import httpx
+
+    print(f"[demo] maf_python verifier targeting {_COUNTING_STUB_URL}")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        try:
+            calls = await _read_counting_stub_hits(http)
+        except Exception as e:  # noqa: BLE001
+            print(f"[demo] FATAL: counting-stub /_count unreachable: {e!r}",
+                  file=sys.stderr)
+            return 7
+
+    if calls < 2:
+        print(
+            f"[demo] FATAL: maf-python-runner expected >= 2 counting-stub "
+            f"hits (ALLOW + ALLOW2), got {calls}. The runner either "
+            "did not finish or the DENY step leaked through to the "
+            "upstream — INV-2 violated.",
+            file=sys.stderr,
+        )
+        return 7
+
+    print(f"[demo] maf_python counter OK: counting-stub hits={calls} (>= 2)")
+    # Mirrors the maf_dotnet / openai_agents_ts / inngest_agent_kit
+    # success-line locked spelling.
+    print("[demo] maf_python ALL 3 steps PASS (ALLOW + DENY + ALLOW2)")
+    return 0
+
+
+async def run_maf_python_with_agt_mode() -> int:
+    """Counting-stub verifier for the maf-python-with-agt-runner driver.
+
+    Smoke-only — the AGT + MAF coexistence overlay reuses the same
+    run.py driver as the load-bearing maf_python_real mode. The
+    verifier just asserts the counter ticked twice (ALLOW + ALLOW2)
+    and the DENY step didn't leak; the AGT half is informational.
+    """
+    return await run_maf_python_mode()
 
 
 if __name__ == "__main__":

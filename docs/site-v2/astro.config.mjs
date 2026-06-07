@@ -66,6 +66,7 @@ export default defineConfig({
             { label: 'OpenAI Agents SDK (Python)', slug: 'docs/integrations/openai-agents' },
             { label: 'OpenAI Agents SDK (TypeScript)', slug: 'docs/integrations/openai-agents-ts' },
             { label: 'Inngest AgentKit (TypeScript)', slug: 'docs/integrations/inngest-agent-kit' },
+            { label: 'Microsoft Agent Framework (.NET + Python)', slug: 'docs/integrations/microsoft-agent-framework' },
             { label: 'Microsoft AGT', slug: 'docs/integrations/agt' },
             { label: 'LiteLLM proxy guardrail', slug: 'docs/integrations/litellm-proxy' },
           ],
