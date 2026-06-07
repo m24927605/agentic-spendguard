@@ -101,6 +101,19 @@ pub fn estimate_tokens(
     // we just want safe arithmetic here).
     let predicted_a = resp.input_tokens.saturating_mul(2);
 
+    // SLICE 7 (COV_07) demo override: when the binary is built with
+    // `--features uds-dev` (default for cargo build / docker-compose,
+    // OFF for the production chart image) AND the request body carried
+    // `spendguard_estimate_override`, we substitute the override into
+    // `predicted_a_tokens` so the demo DENY step can bust the seeded
+    // 1B-atomic hard-cap without needing a 500M-token prompt body.
+    // Production binaries do not compile this branch.
+    #[cfg(feature = "uds-dev")]
+    let predicted_a = match parsed.demo_estimate_override {
+        Some(n) => n,
+        None => predicted_a,
+    };
+
     Ok(ClaimEstimate {
         input_tokens: resp.input_tokens,
         tokenizer_tier: resp.tier,
@@ -190,6 +203,8 @@ mod tests {
                 },
             ],
             raw_text: String::new(),
+            #[cfg(feature = "uds-dev")]
+            demo_estimate_override: None,
         };
 
         let claim = estimate_tokens(&tokenizer, &parsed).expect("Tier 2 tokenize ok");
@@ -229,6 +244,8 @@ mod tests {
                 tool_calls: Vec::new(),
             }],
             raw_text: String::new(),
+            #[cfg(feature = "uds-dev")]
+            demo_estimate_override: None,
         };
 
         let claim = estimate_tokens(&tokenizer, &parsed).expect("Tier 2 tokenize ok");
@@ -257,6 +274,8 @@ mod tests {
                 tool_calls: Vec::new(),
             }],
             raw_text: String::new(),
+            #[cfg(feature = "uds-dev")]
+            demo_estimate_override: None,
         };
 
         let claim = estimate_tokens(&tokenizer, &parsed).expect("Tier 3 fallback ok");
@@ -301,6 +320,8 @@ mod tests {
                 tool_calls: Vec::new(),
             }],
             raw_text: String::new(),
+            #[cfg(feature = "uds-dev")]
+            demo_estimate_override: None,
         };
         assert!(estimate_tokens_or_warn(&tokenizer, &parsed).is_some());
     }

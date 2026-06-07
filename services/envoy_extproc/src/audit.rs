@@ -309,6 +309,8 @@ mod tests {
             tokenizer_kind: Some(EncoderKind::OpenAi),
             messages: Vec::new(),
             raw_text: String::new(),
+            #[cfg(feature = "uds-dev")]
+            demo_estimate_override: None,
         });
         s.estimate = Some(LocalClaimEstimate {
             input_tokens: 50,

@@ -1,0 +1,248 @@
+# COV_07 (D01 envoy_extproc demo) — sidecar compose overlay.
+#
+# This compose file is layered on top of `deploy/demo/compose.yaml` via
+# `docker compose -f deploy/demo/compose.yaml -f deploy/demo/envoy_extproc/docker-compose.yaml up`.
+# The Makefile DEMO_MODE=envoy_extproc branch does that for you.
+#
+# It declares the three NEW services that only this demo mode needs:
+#
+#   counting-stub      mock OpenAI /v1/chat/completions provider that
+#                      counts calls per HTTP hit. Mirrors the
+#                      _start_counting_provider helper used by the
+#                      litellm_guardrail demo, but stands alone so
+#                      Envoy can route to it as an upstream cluster.
+#
+#   envoy-extproc      services/envoy_extproc binary built with the
+#                      `uds-dev` cargo feature (design §3.3 SLICE 1-5
+#                      carve-out — the demo doesn't ship cert-manager
+#                      so production mTLS-TCP is not in scope here;
+#                      uds-dev lets envoy_extproc dial the demo
+#                      sidecar at /var/run/spendguard/adapter.sock).
+#
+#   envoy-gateway      stock envoyproxy/envoy image running the
+#                      vendored envoy-config.yaml. Calls out to
+#                      envoy-extproc via the ExtProc filter and
+#                      forwards traffic to counting-stub.
+#
+# All three services join the `spendguard-demo_spendguard-net` network
+# (created by the parent compose) so they can reach `sidecar` and the
+# `spendguard-postgres` healthcheck graph runs in the parent file.
+#
+# Anti-scope: this overlay does NOT redeclare postgres, sidecar, ledger,
+# canonical-ingest, bundles-init, pki-init or any other base service —
+# the Makefile target brings up the base stack first, then this overlay.
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  # In-network mock OpenAI provider. Counts every POST /v1/chat/completions
+  # and returns a fixed `usage` block with non-zero completion_tokens so
+  # the audit chain has a real provider amount to reconcile.
+  #
+  # Implements just enough of the OpenAI Chat Completions response shape
+  # for Envoy's upstream cluster to treat this as a normal HTTP backend.
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not self.path.startswith("/v1/chat/completions"):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"chatcmpl-counting-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hi from counting stub"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 5,
+                              "completion_tokens": 7,
+                              "total_tokens": 12},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok")
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                # Stderr is the demo log surface; keep it concise.
+                sys.stderr.write(
+                    f"[counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      # python:3.12-slim has no wget/curl — use python urllib to probe
+      # the /healthz endpoint. Exit 0 only on HTTP 200 body=='ok'.
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── envoy-extproc ────────────────────────────────────────────────────
+  # SpendGuard's Envoy ExternalProcessor sidecar (services/envoy_extproc).
+  # Built with `--features uds-dev` per design §3.3 carve-out — the demo
+  # dials the sidecar via the named UDS volume `sidecar-uds`, same as
+  # egress-proxy already does in the parent compose.
+  envoy-extproc:
+    build:
+      # NOTE: build.context is resolved relative to the working-directory
+      # of the FIRST compose file (deploy/demo/compose.yaml), NOT this
+      # overlay's location. That matches how `egress-proxy` in the parent
+      # uses `context: ../..` from deploy/demo/. We follow the same
+      # convention so `docker compose -f compose.yaml -f envoy_extproc/...`
+      # finds the workspace root.
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.envoy_extproc
+    container_name: spendguard-envoy-extproc
+    user: "65532:65532"
+    environment:
+      RUST_LOG: "info,spendguard_envoy_extproc=debug"
+      # Bind 0.0.0.0 inside the container; the parent compose's network
+      # makes this reachable as `envoy-extproc:9443` to Envoy.
+      SPENDGUARD_EXTPROC_BIND_ADDR: "0.0.0.0:9443"
+      SPENDGUARD_EXTPROC_READYZ_ADDR: "0.0.0.0:9090"
+      # Demo carve-out: SLICE 1-5 UDS path. uds-dev feature is on, so
+      # the binary honours this env var; production Helm sets TRANSPORT=tcp.
+      SPENDGUARD_EXTPROC_TRANSPORT: "uds"
+      SPENDGUARD_EXTPROC_SIDECAR_UDS_PATH: "/var/run/spendguard/adapter.sock"
+      # Seed identity (matches the demo seed in 30_seed_demo_state.sh).
+      SPENDGUARD_EXTPROC_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_EXTPROC_WORKLOAD_INSTANCE_ID: "envoy-extproc-demo-1"
+      # Dev mode opts in to demo defaults for budget/window/unit ids and
+      # makes the missing-sidecar-URL gate (TCP) inert — irrelevant here
+      # because TRANSPORT=uds, but belt-and-braces against a future flip.
+      SPENDGUARD_EXTPROC_DEV_MODE: "1"
+      # Bump the per-request sidecar RPC budget to 5000ms in demo mode.
+      # The production 75ms p99 budget assumes pre-warmed sidecar caches,
+      # which is not true on a fresh `make demo-up` boot — the FIRST
+      # ALLOW call triggers contract-bundle / pricing-snapshot loading
+      # in the sidecar (~hundreds of ms cold). Production Helm keeps
+      # the 75ms ceiling because pods steady-state are well within it.
+      SPENDGUARD_EXTPROC_REQUEST_TIMEOUT_MS: "5000"
+      # COV_07 demo overrides: the SLICE 1-6 binary hardcodes the
+      # `budget-envoy-extproc-default` budget_id and the matching
+      # window_instance_id as non-UUID strings (the production wiring
+      # plan is for Helm SLICE 6 to inject the real ids via env). The
+      # demo seed (`30_seed_demo_state.sh`) only creates UUID-shaped
+      # rows, so we point envoy_extproc at those ids here so the
+      # ledger ReserveSet RPC actually resolves a budget. Production
+      # Helm sets these to the customer's real ids.
+      SPENDGUARD_EXTPROC_DEFAULT_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_EXTPROC_DEFAULT_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_EXTPROC_DEFAULT_UNIT_ID: "66666666-6666-4666-8666-666666666666"
+    volumes:
+      # Share the sidecar UDS named volume that the parent compose
+      # mounts into the sidecar service.
+      - sidecar-uds:/var/run/spendguard
+    networks:
+      spendguard-net:
+        aliases: [envoy-extproc]
+    depends_on:
+      sidecar:
+        condition: service_healthy
+    healthcheck:
+      # /readyz returns the literal string "ready" once the sidecar
+      # handshake has succeeded (services/envoy_extproc/src/readyz.rs).
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:9090/readyz | grep -q ready"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # ── envoy-gateway ────────────────────────────────────────────────────
+  # Stock Envoy image running the vendored envoy-config.yaml. The config
+  # wires the ExtProc HTTP filter at the route level, dispatches the
+  # `chat_completions` route to the counting-stub upstream, and exposes
+  # the proxy on :10000 inside the network (and host :10000 for the
+  # run_demo.py driver).
+  #
+  # Pinned to a major.minor Envoy version per review-standards §8.3
+  # adversarial check: no `:latest` tag.
+  envoy-gateway:
+    image: envoyproxy/envoy:v1.31-latest
+    container_name: spendguard-envoy-gateway
+    command:
+      - envoy
+      - -c
+      - /etc/envoy/envoy.yaml
+      - --log-level
+      - info
+    volumes:
+      # Path is resolved relative to the parent compose's working
+      # directory (deploy/demo/), same convention as other relative
+      # mounts in compose.yaml.
+      - ./envoy_extproc/envoy-config.yaml:/etc/envoy/envoy.yaml:ro
+    ports:
+      - "127.0.0.1:10000:10000"
+      - "127.0.0.1:9901:9901"
+    networks:
+      spendguard-net:
+        aliases: [envoy-gateway]
+    depends_on:
+      envoy-extproc:
+        condition: service_healthy
+      counting-stub:
+        condition: service_healthy
+    healthcheck:
+      # Envoy admin /ready returns LIVE once the cluster manager has
+      # initialised. Good enough for the run_demo.py preflight.
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:9901/ready | grep -q LIVE"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s

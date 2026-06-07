@@ -87,11 +87,54 @@ pub const DEFAULT_UNIT_ID: &str = "unit-openai-output-token";
 /// Pin-locked budget_id default for the demo flow. Matches the
 /// `deploy/demo/` seed values; production wiring (SLICE 6 Helm) will
 /// inject the real budget id via env.
+///
+/// SLICE 7 (COV_07) demo: the docker-compose demo overrides this via
+/// `SPENDGUARD_EXTPROC_DEFAULT_BUDGET_ID` so the demo binary dials the
+/// UUID-shaped budget seeded by `30_seed_demo_state.sh`. The fallback
+/// remains the human-readable string for unit-test stability; reading
+/// the env once at first call is cheap and avoids touching the
+/// stateless `build_request_decision` signature.
 pub const DEFAULT_BUDGET_ID: &str = "budget-envoy-extproc-default";
 
 /// Pin-locked window instance default. Same source as DEFAULT_BUDGET_ID
 /// — the budget window the demo seed creates.
 pub const DEFAULT_WINDOW_INSTANCE_ID: &str = "window-envoy-extproc-default";
+
+/// SLICE 7 (COV_07) demo override: read `SPENDGUARD_EXTPROC_DEFAULT_UNIT_ID`
+/// once at first call. Same rationale as [`env_default_budget_id`] —
+/// the seeded unit id is UUID-shaped; the binary const is human-readable.
+fn env_default_unit_id() -> &'static str {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<String> = OnceLock::new();
+    CELL.get_or_init(|| {
+        std::env::var("SPENDGUARD_EXTPROC_DEFAULT_UNIT_ID")
+            .unwrap_or_else(|_| DEFAULT_UNIT_ID.to_string())
+    })
+}
+
+/// SLICE 7 (COV_07) demo override: read `SPENDGUARD_EXTPROC_DEFAULT_BUDGET_ID`
+/// once at first call so the demo compose can inject the UUID-shaped
+/// budget the ledger seed expects. Falls back to [`DEFAULT_BUDGET_ID`]
+/// when the env var is unset, preserving unit-test stability.
+fn env_default_budget_id() -> &'static str {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<String> = OnceLock::new();
+    CELL.get_or_init(|| {
+        std::env::var("SPENDGUARD_EXTPROC_DEFAULT_BUDGET_ID")
+            .unwrap_or_else(|_| DEFAULT_BUDGET_ID.to_string())
+    })
+}
+
+/// SLICE 7 (COV_07) demo override: read
+/// `SPENDGUARD_EXTPROC_DEFAULT_WINDOW_INSTANCE_ID` once at first call.
+fn env_default_window_instance_id() -> &'static str {
+    use std::sync::OnceLock;
+    static CELL: OnceLock<String> = OnceLock::new();
+    CELL.get_or_init(|| {
+        std::env::var("SPENDGUARD_EXTPROC_DEFAULT_WINDOW_INSTANCE_ID")
+            .unwrap_or_else(|_| DEFAULT_WINDOW_INSTANCE_ID.to_string())
+    })
+}
 
 /// Build the sidecar `RequestDecision` from a `StreamState`.
 ///
@@ -128,7 +171,14 @@ pub fn build_request_decision(
     // header for cross-system idempotency.
     let idempotency_key = derive_idempotency_key(stream_id, &parsed.model_id);
 
-    let unit_id = ctx.unit_id.unwrap_or(DEFAULT_UNIT_ID);
+    // SLICE 7: env-driven default. `ctx.unit_id: Option<&'a str>` is the
+    // explicit per-request override; falling back to a `&'static str`
+    // returned from a `OnceLock` keeps the lifetimes monotonic without
+    // changing the public signature.
+    let unit_id: &str = match ctx.unit_id {
+        Some(s) => s,
+        None => env_default_unit_id(),
+    };
     let unit = UnitRef {
         unit_id: unit_id.to_string(),
         kind: UnitKind::Token as i32,
@@ -143,11 +193,11 @@ pub fn build_request_decision(
     // §1.3 + §3.1.4: Strategy A only in v1, B/C MUST stay 0.
     let claim_amount_atomic = estimate.predicted_a_tokens.to_string();
     let claim = BudgetClaim {
-        budget_id: DEFAULT_BUDGET_ID.to_string(),
+        budget_id: env_default_budget_id().to_string(),
         unit: Some(unit.clone()),
         amount_atomic: claim_amount_atomic,
         direction: Direction::Debit as i32,
-        window_instance_id: DEFAULT_WINDOW_INSTANCE_ID.to_string(),
+        window_instance_id: env_default_window_instance_id().to_string(),
     };
 
     // Sidecar ClaimEstimate proto mirror. SLICE 2's local
@@ -258,6 +308,8 @@ mod tests {
             tokenizer_kind: Some(EncoderKind::OpenAi),
             messages: Vec::new(),
             raw_text: String::new(),
+            #[cfg(feature = "uds-dev")]
+            demo_estimate_override: None,
         });
         s.estimate = Some(LocalClaimEstimate {
             input_tokens,
@@ -303,10 +355,12 @@ mod tests {
         // Strategy A reservation = input * 2.
         assert_eq!(claim.amount_atomic, "200");
         assert_eq!(claim.direction, Direction::Debit as i32);
-        assert_eq!(claim.budget_id, DEFAULT_BUDGET_ID);
-        assert_eq!(claim.window_instance_id, DEFAULT_WINDOW_INSTANCE_ID);
+        // SLICE 7: env_default_*_id() falls back to the const when the
+        // env vars are unset (test default).
+        assert_eq!(claim.budget_id, env_default_budget_id());
+        assert_eq!(claim.window_instance_id, env_default_window_instance_id());
         let unit = claim.unit.as_ref().expect("unit set");
-        assert_eq!(unit.unit_id, DEFAULT_UNIT_ID);
+        assert_eq!(unit.unit_id, env_default_unit_id());
         assert_eq!(unit.kind, UnitKind::Token as i32);
         assert_eq!(unit.token_kind, "output_token");
         assert_eq!(unit.model_family, "gpt-4o-mini");
@@ -343,6 +397,8 @@ mod tests {
             tokenizer_kind: Some(EncoderKind::OpenAi),
             messages: Vec::new(),
             raw_text: String::new(),
+            #[cfg(feature = "uds-dev")]
+            demo_estimate_override: None,
         });
         let ctx = DecisionBuildCtx {
             tenant_id: "00000000-0000-4000-8000-000000000001",

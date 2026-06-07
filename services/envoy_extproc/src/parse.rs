@@ -73,6 +73,17 @@ pub struct ParsedRequest {
     /// library treats `raw_text` as the lone Tier 3 input when
     /// `messages.is_empty()`.
     pub raw_text: String,
+    /// SLICE 7 (COV_07) demo-only hook: when the binary is built with
+    /// the `uds-dev` cargo feature AND the request body carries
+    /// `"spendguard_estimate_override": "<digits>"`, this field is
+    /// populated with the parsed `i64`. The tokenize stage swaps the
+    /// estimate in iff the feature is on; production builds (chart
+    /// image, `--no-default-features`) never reach this code path
+    /// because the field-extractor itself is feature-gated. Mirrors
+    /// the `litellm_guardrail` SDK demo path so both demos can exercise
+    /// the DENY lane against the seeded 1B-atomic hard-cap.
+    #[cfg(feature = "uds-dev")]
+    pub demo_estimate_override: Option<i64>,
 }
 
 /// Parse errors mapped 1:1 to ExtProc handler outcomes.
@@ -120,6 +131,20 @@ pub fn parse_request_body(path: &str, body: &Bytes) -> Result<ParsedRequest, Par
     let tokenizer_kind = resolve_tokenizer_kind(cfg, path, &value);
     let (messages, raw_text) = extract_messages(cfg.request_shape, &value);
 
+    // SLICE 7 demo override extraction (uds-dev only). Accepts either a
+    // JSON number or a JSON string of digits — matches the SDK
+    // `litellm_guardrail` resolver's shape so both demos use the same
+    // request envelope.
+    #[cfg(feature = "uds-dev")]
+    let demo_estimate_override = value
+        .get("spendguard_estimate_override")
+        .and_then(|v| match v {
+            Value::Number(n) => n.as_i64(),
+            Value::String(s) => s.trim().parse::<i64>().ok(),
+            _ => None,
+        })
+        .filter(|n| *n > 0);
+
     Ok(ParsedRequest {
         provider: cfg.kind,
         provider_str: cfg.kind.as_str(),
@@ -128,6 +153,8 @@ pub fn parse_request_body(path: &str, body: &Bytes) -> Result<ParsedRequest, Par
         tokenizer_kind,
         messages,
         raw_text,
+        #[cfg(feature = "uds-dev")]
+        demo_estimate_override,
     })
 }
 

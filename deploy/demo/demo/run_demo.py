@@ -829,6 +829,8 @@ async def main() -> int:
         return await run_litellm_direct_mode()
     if DEMO_MODE == "litellm_guardrail":
         return await run_litellm_guardrail_mode()
+    if DEMO_MODE == "envoy_extproc":
+        return await run_envoy_extproc_mode()
     return await run_agent_mode()
 
 
@@ -3274,6 +3276,181 @@ async def run_litellm_guardrail_mode() -> int:
         if counting_runner is not None:
             await counting_runner.cleanup()
             print("[demo] counting provider stopped")
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE=envoy_extproc (COV_07 — D01 final slice) — 3-step driver
+# against the stock Envoy + SpendGuard ExtProc filter chain.
+#
+# Topology (deploy/demo/envoy_extproc/docker-compose.yaml overlay):
+#   client (this script) -> envoy-gateway:10000 (host-mapped) ->
+#                              ExtProc -> envoy-extproc:9443 ->
+#                                            sidecar UDS
+#                           upstream -> counting-stub:8765
+#
+# The driver hits the Envoy gateway directly (not LiteLLM); the
+# counting-stub exposes `GET /_count` so we can read the per-step
+# call counter from the demo container without sharing process
+# memory with the stub.
+#
+# Steps:
+#   step 1 ALLOW : HTTP 200 + counter +1 + reservation row + commit row
+#   step 2 DENY  : HTTP 4xx + counter UNCHANGED + denied_decision row
+#   step 3 STREAM: HTTP 200 + counter +1 + end-of-stream commit row
+#
+# Success line per review-standards §8.1 LOCKED (mirror of D11/6
+# §6.7 spelling for CI grep consistency).
+# ---------------------------------------------------------------------------
+
+
+_ENVOY_GATEWAY_URL = os.environ.get(
+    "SPENDGUARD_ENVOY_GATEWAY_URL", "http://envoy-gateway:10000",
+)
+_COUNTING_STUB_URL = os.environ.get(
+    "SPENDGUARD_COUNTING_STUB_URL", "http://counting-stub:8765",
+)
+
+
+async def _wait_for_envoy_gateway(url: str, timeout_s: float = 30.0) -> None:
+    """Poll Envoy admin /ready until the cluster manager flips LIVE."""
+    import httpx
+    deadline = time.monotonic() + timeout_s
+    admin_url = url.replace(":10000", ":9901")
+    last_err = ""
+    async with httpx.AsyncClient(timeout=2.0) as http:
+        while time.monotonic() < deadline:
+            try:
+                r = await http.get(f"{admin_url}/ready")
+                if r.status_code == 200 and "LIVE" in r.text:
+                    print(f"[demo] Envoy gateway ready ({admin_url}/ready)")
+                    return
+                last_err = f"status={r.status_code} body={r.text[:80]!r}"
+            except (httpx.ConnectError, httpx.ReadError) as e:
+                last_err = repr(e)
+            await asyncio.sleep(0.5)
+    raise RuntimeError(f"Envoy gateway not ready after {timeout_s}s: {last_err}")
+
+
+async def _read_counting_stub_hits(client: Any) -> int:
+    """Probe `GET counting-stub:8765/_count` and return the running tally."""
+    r = await client.get(f"{_COUNTING_STUB_URL}/_count")
+    if r.status_code != 200:
+        raise RuntimeError(f"counting-stub /_count returned {r.status_code}")
+    return int(r.json()["calls"])
+
+
+async def run_envoy_extproc_mode() -> int:
+    """3 steps (ALLOW + DENY + STREAM) per slice doc + design §3.5."""
+    import httpx
+
+    print(f"[demo] envoy_extproc driver targeting {_ENVOY_GATEWAY_URL}")
+    await _wait_for_envoy_gateway(_ENVOY_GATEWAY_URL)
+
+    async with httpx.AsyncClient(timeout=20.0) as http:
+        # ---- Step 1: ALLOW ----
+        pre_calls = await _read_counting_stub_hits(http)
+        r = await http.post(
+            f"{_ENVOY_GATEWAY_URL}/v1/chat/completions",
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "hello envoy_extproc"}],
+            },
+            headers={"x-request-id": "demo-envoy-allow-1"},
+        )
+        post_calls = await _read_counting_stub_hits(http)
+        print(f"[demo] (1) ALLOW step: HTTP {r.status_code} "
+              f"counter pre={pre_calls} post={post_calls}")
+        if r.status_code != 200:
+            print(f"[demo] FATAL: ALLOW step expected 200, got {r.status_code} "
+                  f"body={r.text[:200]!r}", file=sys.stderr)
+            return 7
+        if post_calls != pre_calls + 1:
+            print(f"[demo] FATAL: ALLOW step counting-stub hit pre={pre_calls} "
+                  f"post={post_calls} (expected +1)", file=sys.stderr)
+            return 7
+        usage = r.json().get("usage", {})
+        if int(usage.get("completion_tokens", 0)) <= 0:
+            print(f"[demo] FATAL: ALLOW requires completion_tokens > 0; "
+                  f"usage={usage}", file=sys.stderr)
+            return 7
+        print(f"[demo] (1) ALLOW positive control: counting_calls={post_calls} "
+              f"completion_tokens={usage.get('completion_tokens')}")
+
+        # ---- Step 2: DENY ----
+        # `spendguard_estimate_override=2_000_000_000` blows past the
+        # seeded 1B-atomic hard-cap (deploy/demo/init/bundles/generate.sh
+        # demo-budget `limit_amount_atomic: "1000000000"`). The
+        # envoy_extproc binary's `uds-dev` cargo feature substitutes
+        # the override into `predicted_a_tokens` (see
+        # services/envoy_extproc/src/tokenize.rs); the sidecar contract
+        # evaluator fires `hard-cap-deny → STOP`; ExtProc surfaces
+        # `immediate_response 4xx`. Production binaries
+        # (`--no-default-features`) never compile the override branch
+        # — same demo-only opt-in as the litellm_guardrail path.
+        counting_pre_deny = await _read_counting_stub_hits(http)
+        try:
+            r_deny = await http.post(
+                f"{_ENVOY_GATEWAY_URL}/v1/chat/completions",
+                json={
+                    "model": "gpt-4o-mini",
+                    "messages": [
+                        {"role": "user", "content": "trigger envoy deny"},
+                    ],
+                    "spendguard_estimate_override": "2000000000",
+                },
+                headers={"x-request-id": "demo-envoy-deny-1"},
+            )
+        except httpx.RequestError as e:
+            print(f"[demo] FATAL: DENY step transport failure: {e!r}",
+                  file=sys.stderr)
+            return 7
+        counting_post_deny = await _read_counting_stub_hits(http)
+        print(f"[demo] (2) DENY step: HTTP {r_deny.status_code} "
+              f"counter pre={counting_pre_deny} post={counting_post_deny}")
+        if counting_post_deny != counting_pre_deny:
+            print("[demo] FATAL: DENY step did NOT block upstream — "
+                  f"counting hit pre={counting_pre_deny} "
+                  f"post={counting_post_deny}", file=sys.stderr)
+            return 7
+        if r_deny.status_code < 400:
+            print(f"[demo] FATAL: DENY step expected HTTP non-2xx, "
+                  f"got {r_deny.status_code} body={r_deny.text[:200]!r}",
+                  file=sys.stderr)
+            return 7
+        print("[demo] (2) DENY negative control passed (counter unchanged + 4xx)")
+
+        # ---- Step 3: STREAM ----
+        # `stream=true` in the body keeps Envoy's response-body
+        # BUFFERED mode in scope (design §3.5); the commit lane runs
+        # at end-of-response-body. Within budget so the response is
+        # HTTP 200 and the counter increments by 1.
+        pre_stream = await _read_counting_stub_hits(http)
+        r_stream = await http.post(
+            f"{_ENVOY_GATEWAY_URL}/v1/chat/completions",
+            json={
+                "model": "gpt-4o-mini",
+                "messages": [{"role": "user", "content": "stream envoy_extproc"}],
+                "stream": True,
+            },
+            headers={"x-request-id": "demo-envoy-stream-1"},
+        )
+        post_stream = await _read_counting_stub_hits(http)
+        print(f"[demo] (3) STREAM step: HTTP {r_stream.status_code} "
+              f"counter pre={pre_stream} post={post_stream}")
+        if r_stream.status_code != 200:
+            print(f"[demo] FATAL STREAM: expected 200, got {r_stream.status_code}",
+                  file=sys.stderr)
+            return 7
+        if post_stream != pre_stream + 1:
+            print(f"[demo] FATAL STREAM: counting-stub hit pre={pre_stream} "
+                  f"post={post_stream} (expected +1)", file=sys.stderr)
+            return 7
+
+    # review-standards §8.1: success-line literal LOCKED. Mirrors the
+    # D11/6 (`litellm_guardrail`) §6.7 spelling so CI grep targets one
+    # canonical pattern across both demos.
+    print("[demo] envoy_extproc ALL 3 steps PASS (ALLOW + DENY + STREAM)")
+    return 0
 
 
 if __name__ == "__main__":

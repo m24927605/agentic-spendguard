@@ -1,0 +1,54 @@
+# syntax=docker/dockerfile:1.7
+#
+# COV_07 (D01 envoy_extproc demo) — multi-stage builder for the
+# spendguard-envoy-extproc binary. Mirrors Dockerfile.egress_proxy but
+# compiles with `--features uds-dev` per design §3.3 carve-out: the
+# demo compose does not stand up cert-manager, so the SLICE 1-5 UDS
+# transport is the only path that lets envoy_extproc dial the demo
+# sidecar at /var/run/spendguard/adapter.sock.
+#
+# Production Helm wiring (SLICE 6) builds the chart-published image
+# with `--no-default-features` so the same source compiles down to
+# the mTLS-TCP-only production binary. See review-standards §7.1.
+FROM rust:1.91-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev protobuf-compiler libprotobuf-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+# Vendor the shared /proto tree so build.rs can resolve SpendGuard
+# sidecar_adapter proto imports relative to the envoy_extproc crate.
+COPY proto ./proto
+RUN ln -sf /usr/include/google ./proto/google
+# Path-dep crates consumed by the envoy_extproc service.
+COPY services/ids ./services/ids
+COPY crates/spendguard-tokenizer ./crates/spendguard-tokenizer
+COPY crates/spendguard-provider-routing ./crates/spendguard-provider-routing
+COPY services/envoy_extproc ./services/envoy_extproc
+WORKDIR /build/services/envoy_extproc
+# `uds-dev` is the default cargo feature; the explicit `--features
+# uds-dev` flag is belt-and-braces so a future builder.yml override
+# can't accidentally strip it off the demo image without flipping a
+# secondary env var.
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=cargo-target-envoy-extproc,target=/build/services/envoy_extproc/target,sharing=locked \
+    cargo build --release --bin spendguard-envoy-extproc --features uds-dev \
+    && cp target/release/spendguard-envoy-extproc /spendguard-envoy-extproc
+
+# ---------------------------------------------------------------------------
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates wget libssl3 \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /spendguard-envoy-extproc /usr/local/bin/spendguard-envoy-extproc
+
+# Same non-root UID as the rest of the demo services for sidecar-uds
+# named-volume permission compatibility.
+USER 65532:65532
+
+ENTRYPOINT ["/usr/local/bin/spendguard-envoy-extproc"]

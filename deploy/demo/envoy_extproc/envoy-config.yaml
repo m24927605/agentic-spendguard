@@ -1,0 +1,124 @@
+# COV_07 (D01 envoy_extproc demo) — Envoy bootstrap config.
+#
+# Minimal Envoy v3 config that wires the ExtProc HTTP filter for the
+# `/v1/chat/completions` route. Every inbound request fans out:
+#
+#   client (run_demo.py / curl)
+#     -> envoy-gateway:10000
+#        -> envoy-extproc:9443  (ExtProc gRPC; SpendGuard sidecar)
+#        -> counting-stub:8765  (upstream OpenAI-shape backend)
+#
+# The ExtProc filter is configured with `failure_mode_allow: false` —
+# matches design §3.4: if the SpendGuard processor is unreachable or
+# returns an error, Envoy fails closed (HTTP 5xx) instead of letting
+# traffic through ungated. Review-standards §1.8.
+#
+# The `processing_mode` enables request-headers + request-body +
+# response-body phases per design §3.5 (no TRAILERS phase). The
+# body modes are `BUFFERED` so the SpendGuard sidecar sees the full
+# JSON payload before any byte hits the upstream — gives the
+# Strategy A reservation a chance to fire before the network call.
+#
+# Anti-scope: no AI Gateway control-plane CRDs, no upstream cluster
+# discovery (counting-stub is statically wired), no streaming SSE
+# enforcement (response-body BUFFERED).
+
+admin:
+  address:
+    socket_address:
+      address: 0.0.0.0
+      port_value: 9901
+
+static_resources:
+  listeners:
+    - name: listener_chat
+      address:
+        socket_address:
+          address: 0.0.0.0
+          port_value: 10000
+      filter_chains:
+        - filters:
+            - name: envoy.filters.network.http_connection_manager
+              typed_config:
+                "@type": type.googleapis.com/envoy.extensions.filters.network.http_connection_manager.v3.HttpConnectionManager
+                stat_prefix: spendguard_demo
+                codec_type: AUTO
+                route_config:
+                  name: local_route
+                  virtual_hosts:
+                    - name: chat_vhost
+                      domains: ["*"]
+                      routes:
+                        - match:
+                            prefix: "/v1/chat/completions"
+                          route:
+                            cluster: counting_stub
+                            # Headroom for the ExtProc round-trip plus
+                            # the upstream call. Demo only.
+                            timeout: 30s
+                        - match:
+                            prefix: "/"
+                          direct_response:
+                            status: 404
+                            body:
+                              inline_string: "not found"
+                http_filters:
+                  - name: envoy.filters.http.ext_proc
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.ext_proc.v3.ExternalProcessor
+                      grpc_service:
+                        envoy_grpc:
+                          cluster_name: spendguard_extproc
+                        timeout: 5s
+                      # Design §3.4: fail-closed. If SpendGuard ExtProc
+                      # is unreachable or errors, Envoy MUST NOT let
+                      # the call through; a 5xx is the correct
+                      # operator-visible signal.
+                      failure_mode_allow: false
+                      # Design §3.5: v1 wire-format scope.
+                      processing_mode:
+                        request_header_mode: SEND
+                        request_body_mode: BUFFERED
+                        response_header_mode: SEND
+                        response_body_mode: BUFFERED
+                        request_trailer_mode: SKIP
+                        response_trailer_mode: SKIP
+                  - name: envoy.filters.http.router
+                    typed_config:
+                      "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
+
+  clusters:
+    # SpendGuard ExtProc service — uses HTTP/2 (required by gRPC).
+    - name: spendguard_extproc
+      connect_timeout: 5s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      typed_extension_protocol_options:
+        envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+          "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+          explicit_http_config:
+            http2_protocol_options: {}
+      load_assignment:
+        cluster_name: spendguard_extproc
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: envoy-extproc
+                      port_value: 9443
+
+    # Counting-stub upstream (mock OpenAI provider). HTTP/1.1.
+    - name: counting_stub
+      connect_timeout: 5s
+      type: STRICT_DNS
+      lb_policy: ROUND_ROBIN
+      load_assignment:
+        cluster_name: counting_stub
+        endpoints:
+          - lb_endpoints:
+              - endpoint:
+                  address:
+                    socket_address:
+                      address: counting-stub
+                      port_value: 8765
