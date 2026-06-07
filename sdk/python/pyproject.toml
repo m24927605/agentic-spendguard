@@ -62,6 +62,17 @@ langgraph = [
 openai-agents = [
   "openai-agents>=0.17",
 ]
+# COV_D07 SLICE_05: Microsoft Agent Framework (MAF) v1 GA extra. The
+# `agent-framework` umbrella package re-exports everything from
+# `agent-framework-core` (chat client + middleware contracts) so
+# the standard install path matches the design.md §3.4 install hint
+# `pip install 'spendguard-sdk[agent-framework]'`. The middleware
+# contract (`from agent_framework import ChatMiddleware`) is GA as of
+# the 1.x line; we cap below 2.x to fail-closed against a future
+# breaking-change major.
+agent-framework = [
+  "agent-framework>=1.0,<2",
+]
 agt = [
   "agent-governance-toolkit>=3.4",
   "agent-os-kernel>=3.0",
