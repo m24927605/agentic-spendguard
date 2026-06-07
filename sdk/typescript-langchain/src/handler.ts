@@ -139,6 +139,20 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
    */
   name = "spendguard_callback_handler";
 
+  /**
+   * `raiseError = true` — review-standards.md §1.3 P0 LOCK. Without this, a
+   * throw from `handleChatModelStart` is swallowed by `CallbackManager`
+   * before it can halt `model.invoke()`; the budget gate would never block
+   * the LLM call.
+   *
+   * `awaitHandlers = true` — review-standards.md §1.3 + @langchain/core
+   * `base.js:118-120`: setting `raiseError` already forces awaiting (the
+   * core code does `awaitHandlers = raiseError || ...`), but pinning it
+   * explicitly here defends against future @langchain/core drift.
+   */
+  override raiseError = true;
+  override awaitHandlers = true;
+
   /** Substrate client handed in by the consumer; never mutated. */
   private readonly client: SpendGuardClient;
 
