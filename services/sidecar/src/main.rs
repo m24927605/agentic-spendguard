@@ -15,6 +15,7 @@ use spendguard_sidecar::{
     config::Config,
     domain::state::SidecarState,
     drain,
+    http_companion::{self, HttpCompanionConfig, NoopDecisionService},
     metrics::SidecarMetrics,
     proto::sidecar_adapter::v1::sidecar_adapter_server::SidecarAdapterServer,
     server::adapter_uds,
@@ -275,6 +276,42 @@ async fn main() -> Result<()> {
             run_metrics_server(metrics_addr, metrics_handle).await;
         });
         info!(addr = %cfg.metrics_addr, "metrics server bound");
+    }
+
+    // 3c) D09 SLICE 1: optional HTTP companion listener for Kong /
+    //     Coze / Botpress out-of-process plugins. Default OFF (port=0);
+    //     enabled when SPENDGUARD_SIDECAR_HTTP_COMPANION_PORT > 0.
+    //     SLICE 1 ships the wire surface against a stub
+    //     DecisionService — SLICE 3 will swap in the production impl
+    //     that delegates to decision::transaction::run_through_reserve.
+    if cfg.http_companion_port > 0 {
+        match build_http_companion_config(&cfg, &mtls).await {
+            Ok(companion_cfg) => {
+                // SLICE 1 stub: NoopDecisionService. Production wiring
+                // lands in SLICE 3; until then this surface answers
+                // with a fixed ALLOW so a Kong DataPlane operator can
+                // smoke-test the handshake + JSON wire format without
+                // touching the ledger.
+                let service = Arc::new(NoopDecisionService::default());
+                tokio::spawn(async move {
+                    if let Err(e) = http_companion::run_companion(companion_cfg, service).await {
+                        tracing::error!(err = %e, "D09 SLICE 1 http_companion exited");
+                    }
+                });
+                info!(
+                    port = cfg.http_companion_port,
+                    host = %cfg.http_companion_host,
+                    allow_pod_network = cfg.http_companion_allow_pod_network,
+                    "D09 SLICE 1: http_companion enabled (stub backend)"
+                );
+            }
+            Err(e) => {
+                // Per design §3.4 the companion fails closed; a
+                // misconfigured listener does NOT degrade the UDS
+                // path silently.
+                return Err(anyhow!("D09 SLICE 1: http_companion misconfigured: {e}"));
+            }
+        }
     }
 
     // 4) Bind UDS for the in-process adapter.
@@ -561,3 +598,25 @@ fn load_manifest_signing_key() -> Result<ed25519_dalek::VerifyingKey> {
 // async_stream is needed for UDS incoming adapter.
 #[allow(dead_code)]
 fn _kept_for_compile_unit(_a: Arc<()>) {}
+
+/// D09 SLICE 1: assemble the HttpCompanionConfig from env + the mTLS
+/// paths already populated by cert-manager. Returns an error if any
+/// PEM file is missing — fail-closed per design §3.4.
+async fn build_http_companion_config(
+    cfg: &Config,
+    mtls: &MTlsPaths,
+) -> Result<HttpCompanionConfig> {
+    let tls = spendguard_sidecar::http_companion::mtls::ServerTlsConfig::from_pem_files(
+        std::path::Path::new(&mtls.workload_cert_pem),
+        std::path::Path::new(&mtls.workload_key_pem),
+        std::path::Path::new(&mtls.trust_ca_pem),
+    )
+    .context("D09 SLICE 1: load http_companion mTLS PEMs")?;
+    Ok(HttpCompanionConfig {
+        host: cfg.http_companion_host.clone(),
+        port: cfg.http_companion_port,
+        allow_pod_network: cfg.http_companion_allow_pod_network,
+        max_body_bytes: cfg.http_companion_max_body_bytes,
+        tls: Arc::new(tls),
+    })
+}

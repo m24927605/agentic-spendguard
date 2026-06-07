@@ -1780,6 +1780,10 @@ mod post_ga_01_release_tests {
             reservation_ttl_seconds: 600,
             runtime_env_path: String::new(),
             hot_reload_poll_ms: 0,
+            http_companion_port: 0,
+            http_companion_host: "127.0.0.1".into(),
+            http_companion_allow_pod_network: false,
+            http_companion_max_body_bytes: 4 * 1024 * 1024,
         }
     }
 

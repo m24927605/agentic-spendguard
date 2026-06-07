@@ -166,6 +166,37 @@ pub struct Config {
     /// Set to 0 to disable the watcher (legacy behavior pre-CA-P3.7).
     #[serde(default = "default_hot_reload_poll_ms")]
     pub hot_reload_poll_ms: u64,
+
+    // -- D09 SLICE 1: HTTP companion listener -----------------------------
+    /// HTTP companion port. Default 0 (disabled). When > 0, the sidecar
+    /// binds an axum+rustls listener for the Kong/Coze/Botpress
+    /// translation layer. Per D09 design §3.1 the companion is mTLS-only
+    /// and per §3.4 fail-closed by default. Defaults loop back; see
+    /// `http_companion_allow_pod_network` for the explicit opt-in to
+    /// 0.0.0.0 binding required when the sidecar runs as a sibling pod.
+    #[serde(default = "default_http_companion_port")]
+    pub http_companion_port: u16,
+
+    /// HTTP companion bind host. Default `127.0.0.1`. Per review-standards
+    /// §2.8 binding `0.0.0.0` requires `http_companion_allow_pod_network`
+    /// to be true; otherwise startup fails closed.
+    #[serde(default = "default_http_companion_host")]
+    pub http_companion_host: String,
+
+    /// HTTP companion pod-network exposure gate. Per review-standards
+    /// §2.8 + §1.4: even with this flag, mTLS remains mandatory. Setting
+    /// this flag emits a "pod-network exposure enabled" startup log so
+    /// the deviation from the loopback-only default is auditable.
+    #[serde(default)]
+    pub http_companion_allow_pod_network: bool,
+
+    /// Maximum HTTP companion request body size in bytes. Per
+    /// review-standards §2.4 the body cap is enforced at the axum
+    /// extractor layer (`DefaultBodyLimit`) so a malicious peer cannot
+    /// stream gigabytes through the JSON decoder. Default 4 MiB matches
+    /// POST_GA_03 sidecar token-encoder cap.
+    #[serde(default = "default_http_companion_max_body_bytes")]
+    pub http_companion_max_body_bytes: usize,
 }
 
 fn default_uds_path() -> String {
@@ -222,6 +253,19 @@ fn default_runtime_env_path() -> String {
 }
 fn default_hot_reload_poll_ms() -> u64 {
     500
+}
+
+// D09 SLICE 1: HTTP companion defaults. Port 0 → listener disabled.
+// Defaults align with the design doc's loopback-only contract and the
+// 4 MiB body cap from POST_GA_03.
+fn default_http_companion_port() -> u16 {
+    0
+}
+fn default_http_companion_host() -> String {
+    "127.0.0.1".to_string()
+}
+fn default_http_companion_max_body_bytes() -> usize {
+    4 * 1024 * 1024
 }
 
 impl Config {

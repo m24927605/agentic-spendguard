@@ -7,6 +7,7 @@ pub mod decision;
 pub mod domain;
 pub mod drain;
 pub mod fencing;
+pub mod http_companion;
 pub mod metrics;
 pub mod prompt_hash;
 pub mod server;

@@ -1,0 +1,5 @@
+# D09 SLICE 2 — built artifacts. `make build-kong-plugin` mirrors the
+# .so into this directory for the verification harness; canonical
+# output lives at `target/kong/spendguard.so` under the workspace root.
+spendguard.so
+spendguard

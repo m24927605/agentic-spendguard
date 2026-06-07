@@ -9,6 +9,15 @@ description = "SpendGuard per-workload-instance sidecar: in-process adapter UDS 
 name = "spendguard-sidecar"
 path = "src/main.rs"
 
+# D09 SLICE 1: integration test for the HTTP companion wire surface.
+# Requires the http-companion-test-support feature so it can reach
+# `test_support::ephemeral_pki` and `build_router_for_tests` from the
+# library crate.
+[[test]]
+name = "http_companion_test"
+path = "tests/http_companion_test.rs"
+required-features = ["http-companion-test-support"]
+
 [dependencies]
 
 # Direct rustls dep so main() can call CryptoProvider::install_default()
@@ -86,6 +95,21 @@ spendguard-signing = { path = "../signing" }
 # Phase 5 GA hardening S22: fail-open / fail-closed policy matrix.
 spendguard-policy = { path = "../policy" }
 
+# D09 SLICE 1: HTTP companion listener (axum) over mTLS for out-of-process
+# plugins that cannot speak the adapter UDS gRPC contract (Kong Go plugin,
+# Coze plugin daemon, Botpress integration). Mirrors the gRPC adapter
+# handler semantics 1:1 but speaks JSON over HTTP/1.1+mTLS. Default OFF;
+# enabled when SPENDGUARD_SIDECAR_HTTP_COMPANION_PORT > 0.
+axum = { version = "0.7", features = ["json", "http1"] }
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+rustls-pki-types = "1"
+# rcgen — gated behind `http-companion-test-support` so the integration
+# tests can mint an ephemeral CA + workload + client cert without
+# checking PEMs into the repo. Optional and feature-gated so release
+# binaries never link rcgen.
+rcgen = { version = "0.13", optional = true }
+
 [build-dependencies]
 tonic-build = "0.12"
 prost-build = "0.13"
@@ -94,8 +118,22 @@ prost-build = "0.13"
 default = []
 # Enable experimental Lambda Extensions runtime support (Phase 2+).
 lambda-extension = []
+# D09 SLICE 1: surface http_companion::test_support + build_router_for_tests
+# for integration tests living in `services/sidecar/tests/`. cargo runs
+# integration tests against the lib compiled WITHOUT `cfg(test)`, so the
+# integration-only re-exports gate on this feature instead. The feature
+# also turns on the optional `rcgen` dep used by the ephemeral PKI
+# helper; release binaries do NOT link rcgen.
+http-companion-test-support = ["dep:rcgen"]
 
 [dev-dependencies]
 testcontainers = "0.23"
 pretty_assertions = "1"
 tempfile = "3"
+
+# D09 SLICE 1: integration tests use reqwest as an mTLS client. rcgen
+# is gated behind the `http-companion-test-support` feature in
+# [dependencies] above (optional) so the integration test crate can
+# opt into the test-support module without pulling rcgen into release
+# builds.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls-manual-roots", "json"] }
