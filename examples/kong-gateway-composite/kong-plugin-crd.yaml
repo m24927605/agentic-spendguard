@@ -1,0 +1,101 @@
+# D09 SLICE 6 — Reference KongPlugin CRDs for SpendGuard.
+#
+# This file is a reference manifest that operators can copy into
+# their Kong installation. It defines two `KongPlugin` resources:
+#
+#   1. spendguard-go     — primary, recommended for production
+#   2. spendguard-lua    — experimental fallback for Kong OSS 3.0–3.5
+#
+# Operators bind either plugin to a Service / Route / Ingress by
+# adding the `konghq.com/plugins: spendguard-go` annotation.
+#
+# Spec refs:
+#   - docs/specs/coverage/D09_kong_ai_gateway/design.md §3.5 (multi-
+#     provider scope: openai + anthropic in v1)
+#   - docs/specs/coverage/D09_kong_ai_gateway/implementation.md §11
+#     (wire diagram — Kong DataPlane dials companion at port 8443)
+#   - charts/spendguard/templates/kong_plugin_sidecar.yaml (matches
+#     the Helm-rendered Service name `<release>-spendguard-kong-companion`)
+#
+# Prerequisites:
+#   - `helm install spendguard ... --set kongPlugin.enabled=true`
+#     so the companion Service exists at the documented hostname.
+#   - The Kong DataPlane pods carry the label
+#     `app.kubernetes.io/name=kong` so the chart's NetworkPolicy
+#     allows ingress.
+#   - The SpendGuard sidecar's per-tenant SVID Secret holds the
+#     workload cert this plugin presents to the companion.
+
+---
+# Primary Go plugin — the supported production path.
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: spendguard-go
+  namespace: kong
+  annotations:
+    # Bind via Service annotation: konghq.com/plugins: spendguard-go
+    spendguard.io/distribution: "go"
+    spendguard.io/spec: "D09"
+plugin: spendguard
+config:
+  # Companion Service rendered by the Helm chart. The
+  # `<release>-spendguard-kong-companion` name + 8443 port match
+  # charts/spendguard/templates/kong_plugin_sidecar.yaml.
+  sidecar_url: "https://spendguard-kong-companion.spendguard.svc.cluster.local:8443"
+  # CA bundle that signs the companion's server cert. Mounted from
+  # the same per-tenant SVID Secret the plugin uses for client mTLS.
+  sidecar_ca_file: "/var/run/secrets/spendguard/ca.crt"
+  # Workload cert + key — minted by cert-manager per HARDEN_08. The
+  # SVID URI SAN encodes the tenant so the companion's verifier
+  # rejects cross-tenant traffic at the TLS layer.
+  client_cert_file: "/var/run/secrets/spendguard/tls.crt"
+  client_key_file: "/var/run/secrets/spendguard/tls.key"
+  # Tenant assertion. Must match the SVID URI SAN tenant.
+  tenant_id: "00000000-0000-4000-8000-000000000001"
+  # Per design §3.4 fail-closed default. Flip to true ONLY after
+  # operator review — the startup log records the deviation so it
+  # is auditable.
+  fail_open: false
+  # Per-request HTTP timeout to the companion (ms). 500ms keeps
+  # SpendGuard inside Kong's typical p99 upstream budget.
+  timeout_ms: 500
+
+---
+# Experimental Lua port — for Kong OSS 3.0–3.5 deployments that
+# cannot host a go-plugin-server subprocess. NOT recommended for
+# production.
+apiVersion: configuration.konghq.com/v1
+kind: KongPlugin
+metadata:
+  name: spendguard-lua
+  namespace: kong
+  annotations:
+    spendguard.io/distribution: "lua"
+    spendguard.io/spec: "D09"
+    spendguard.io/experimental: "true"
+plugin: spendguard
+config:
+  sidecar_url: "https://spendguard-kong-companion.spendguard.svc.cluster.local:8443"
+  sidecar_ca_file: "/var/run/secrets/spendguard/ca.crt"
+  client_cert_file: "/var/run/secrets/spendguard/tls.crt"
+  client_key_file: "/var/run/secrets/spendguard/tls.key"
+  tenant_id: "00000000-0000-4000-8000-000000000001"
+  fail_open: false
+  timeout_ms: 500
+  prompt_class: "general"
+
+---
+# Reference Service annotation pattern — apply to the AI-Proxy or
+# upstream LLM Service the plugin should gate. Bind exactly one
+# distribution (Go OR Lua, not both, to avoid double-commit).
+#
+# apiVersion: v1
+# kind: Service
+# metadata:
+#   name: my-llm-upstream
+#   annotations:
+#     konghq.com/plugins: "spendguard-go"
+# spec:
+#   selector: { app: my-llm-app }
+#   ports: [{ port: 80 }]

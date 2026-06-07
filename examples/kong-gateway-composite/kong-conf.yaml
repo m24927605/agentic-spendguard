@@ -1,0 +1,66 @@
+# D09 SLICE 6 — Reference declarative-config snippet for DB-less Kong.
+#
+# Operators running Kong in DB-less mode (KONG_DATABASE=off) declare
+# every plugin instance inline via `kong.yml`. This file is the
+# reference snippet they merge into theirs.
+#
+# Spec ref:
+#   - docs/specs/coverage/D09_kong_ai_gateway/design.md §5 ("install
+#     via KongPlugin CRD or kong.conf" — anti-scope on Kong control-
+#     plane plugin-registry distribution).
+#
+# Required environment for the DataPlane process:
+#   KONG_PLUGINS=bundled,spendguard
+#   KONG_PLUGINSERVER_NAMES=spendguard
+#   KONG_PLUGINSERVER_SPENDGUARD_START_CMD=/usr/local/bin/spendguard
+#   KONG_PLUGINSERVER_SPENDGUARD_QUERY_CMD=/usr/local/bin/spendguard -dump
+#
+# The `/usr/local/bin/spendguard` binary is the go-plugin-server
+# executable that the Helm chart's `kong_plugin_sidecar.yaml`
+# companion is paired with; see `examples/kong-gateway-composite/
+# go-build.sh` for the build recipe.
+
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: openai-upstream
+    url: https://api.openai.com
+    plugins:
+      - name: spendguard
+        config:
+          sidecar_url: https://spendguard-kong-companion.spendguard.svc.cluster.local:8443
+          sidecar_ca_file: /var/run/secrets/spendguard/ca.crt
+          client_cert_file: /var/run/secrets/spendguard/tls.crt
+          client_key_file: /var/run/secrets/spendguard/tls.key
+          tenant_id: 00000000-0000-4000-8000-000000000001
+          fail_open: false
+          timeout_ms: 500
+    routes:
+      - name: openai-chat
+        paths:
+          - /v1/chat/completions
+        # design §3.3: SpendGuard requires the body to be buffered so
+        # the `access` phase can read it once. Without this Kong's
+        # `kong.request.get_raw_body()` returns nil.
+        request_buffering: true
+        response_buffering: true
+
+  - name: anthropic-upstream
+    url: https://api.anthropic.com
+    plugins:
+      - name: spendguard
+        config:
+          sidecar_url: https://spendguard-kong-companion.spendguard.svc.cluster.local:8443
+          sidecar_ca_file: /var/run/secrets/spendguard/ca.crt
+          client_cert_file: /var/run/secrets/spendguard/tls.crt
+          client_key_file: /var/run/secrets/spendguard/tls.key
+          tenant_id: 00000000-0000-4000-8000-000000000001
+          fail_open: false
+          timeout_ms: 500
+    routes:
+      - name: anthropic-messages
+        paths:
+          - /v1/messages
+        request_buffering: true
+        response_buffering: true

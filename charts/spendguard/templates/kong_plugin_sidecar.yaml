@@ -1,0 +1,214 @@
+{{- /*
+D09 SLICE 6 — Kong AI Gateway plugin sidecar companion.
+
+Spec refs:
+  - docs/specs/coverage/D09_kong_ai_gateway/design.md §3.1 (HTTPS+mTLS
+    transport — Kong DataPlane lives in a separate netns, can't speak UDS)
+  - docs/specs/coverage/D09_kong_ai_gateway/design.md §3.4 (fail-closed
+    default — companion returns 503 on dep unavailable; plugin honours)
+  - docs/specs/coverage/D09_kong_ai_gateway/implementation.md §8
+    (kong_plugin_sidecar.yaml: Deployment, not DaemonSet, because the
+    Kong DataPlane and the companion live in sibling pods)
+  - docs/specs/coverage/D09_kong_ai_gateway/review-standards.md §7.1
+    (NetworkPolicy ingress restriction by app.kubernetes.io/name=kong)
+
+Resources rendered when kongPlugin.enabled=true:
+  - Deployment        — sidecar binary with --http-companion-bind
+  - Service           — ClusterIP exposing the companion port (8443) +
+                        probe port (9090) to Kong DataPlane pods
+  - ServiceAccount    — workload identity for cert-manager binding
+  - ServiceMonitor    — optional Prometheus scrape (gated)
+  - NetworkPolicy     — ingress restricted to Kong DataPlane pods
+
+Pattern mirrors:
+  - charts/spendguard/templates/envoy_extproc.yaml (closest sibling —
+    out-of-process plugin pattern, mTLS-TCP, per-tenant SVID, prober)
+  - charts/spendguard/templates/output_predictor.yaml (securityContext
+    baseline, runtime image gates)
+*/ -}}
+{{- if .Values.kongPlugin.enabled }}
+{{- $component := "kong-plugin-companion" -}}
+{{- $fullname := include "spendguard.fullname" . -}}
+
+{{- /* Production profile gates: mirror envoyExtproc.yaml. */ -}}
+{{- if eq .Values.chart.profile "production" -}}
+{{- if eq .Values.kongPlugin.image.tag "" -}}
+{{- fail "kongPlugin.image.tag is required under chart.profile=production (semver vN.N.N or @sha256:HEX digest pin)" -}}
+{{- end -}}
+{{- include "spendguard.validateProductionImageTag" (dict "root" . "name" "kongPlugin" "tag" .Values.kongPlugin.image.tag) -}}
+{{- if eq (toString .Values.kongPlugin.tenantId) "" -}}
+{{- fail "kongPlugin.tenantId is required under chart.profile=production (matches GA_03 fail-closed posture)" -}}
+{{- end -}}
+{{- if not (regexMatch "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" (toString .Values.kongPlugin.tenantId)) -}}
+{{- fail "kongPlugin.tenantId must be a UUID under chart.profile=production" -}}
+{{- end -}}
+{{- if eq .Values.kongPlugin.svid.secretName "" -}}
+{{- fail "kongPlugin.svid.secretName is required under chart.profile=production (per-tenant SVID minted by cert-manager; mounts tls.crt/tls.key/ca.crt — design §3.1 mTLS)" -}}
+{{- end -}}
+{{- end -}}
+
+{{- /* Image tag fall-back to Chart.AppVersion under demo profile. */ -}}
+{{- $effectiveImageTag := default .Chart.AppVersion .Values.kongPlugin.image.tag -}}
+{{- $effectiveImage := merge (dict "tag" $effectiveImageTag) .Values.kongPlugin.image -}}
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}-kong-companion
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  replicas: {{ .Values.kongPlugin.replicas }}
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 8 }}
+    spec:
+      serviceAccountName: {{ $fullname }}-kong-companion
+      securityContext:
+        {{- include "spendguard.podSecurityContext" . | nindent 8 }}
+      containers:
+        - name: companion
+          image: {{ include "spendguard.image" (merge (dict "image" $effectiveImage "global" .Values.global) .) }}
+          imagePullPolicy: {{ .Values.global.imagePullPolicy }}
+          securityContext:
+            {{- include "spendguard.containerSecurityContext" . | nindent 12 }}
+          ports:
+            - { name: companion, containerPort: {{ .Values.kongPlugin.port }} }
+            - { name: probe,     containerPort: 9090 }
+          env:
+            # ── HTTP companion bind ───────────────────────────────
+            # `0.0.0.0` exposes the listener on the pod network so
+            # sibling Kong DataPlane pods can dial it. Loopback-only
+            # binding is the secure default for in-pod sidecars; here
+            # we explicitly opt into pod-network exposure via the
+            # `allow_pod_network` flag below. mTLS remains mandatory.
+            - { name: SPENDGUARD_SIDECAR_HTTP_COMPANION_PORT,    value: {{ .Values.kongPlugin.port | quote }} }
+            - { name: SPENDGUARD_SIDECAR_HTTP_COMPANION_HOST,    value: "0.0.0.0" }
+            - { name: SPENDGUARD_SIDECAR_HTTP_COMPANION_ALLOW_POD_NETWORK, value: "true" }
+            - { name: SPENDGUARD_SIDECAR_HTTP_COMPANION_MAX_BODY_BYTES,    value: {{ .Values.kongPlugin.maxBodyBytes | quote }} }
+            # ── Tenant + workload identity ────────────────────────
+            - { name: SPENDGUARD_SIDECAR_TENANT_ID, value: {{ .Values.kongPlugin.tenantId | quote }} }
+            - { name: SPENDGUARD_SIDECAR_REGION,    value: {{ .Values.global.region | quote }} }
+            # Per-pod producer instance id via downward API so two
+            # replicas never collide on audit-chain producer_instance_id.
+            - name: _POD_NAME
+              valueFrom: { fieldRef: { fieldPath: metadata.name } }
+            - { name: SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID, value: "kong-companion-$(_POD_NAME)" }
+            # ── mTLS material (per-tenant SVID Secret) ────────────
+            # cert-manager (via `kongPlugin.svid.secretName`) projects
+            # tls.crt / tls.key / ca.crt at the configured mount path.
+            # The companion's mTLS verifier extracts the SVID URI SAN
+            # from the cert and matches against the tenant assertion.
+            - { name: SPENDGUARD_SIDECAR_TLS_CERT_PATH, value: {{ printf "%s/tls.crt" .Values.kongPlugin.svid.mountPath | quote }} }
+            - { name: SPENDGUARD_SIDECAR_TLS_KEY_PATH,  value: {{ printf "%s/tls.key" .Values.kongPlugin.svid.mountPath | quote }} }
+            - { name: SPENDGUARD_SIDECAR_TLS_CA_PATH,   value: {{ printf "%s/ca.crt"  .Values.kongPlugin.svid.mountPath | quote }} }
+            # ── Probe address ─────────────────────────────────────
+            - { name: SPENDGUARD_SIDECAR_METRICS_ADDR, value: "0.0.0.0:9090" }
+          volumeMounts:
+            - name: svid
+              mountPath: {{ .Values.kongPlugin.svid.mountPath | quote }}
+              readOnly: true
+            # readOnlyRootFilesystem requires /tmp writable.
+            - name: tmp
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: probe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: probe
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.kongPlugin.resources | nindent 12 }}
+      volumes:
+        - name: svid
+          secret:
+            secretName: {{ .Values.kongPlugin.svid.secretName | quote }}
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fullname }}-kong-companion
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $fullname }}-kong-companion
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - { name: companion, port: {{ .Values.kongPlugin.port }}, targetPort: companion }
+    - { name: probe,     port: 9090,                            targetPort: probe     }
+  selector:
+    {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 4 }}
+
+{{- /* NetworkPolicy — ingress restricted to Kong DataPlane pods. */ -}}
+{{- if .Values.kongPlugin.networkPolicy.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $fullname }}-kong-companion-ingress
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    # Companion port — only Kong DataPlane pods may dial.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: {{ .Values.kongPlugin.networkPolicy.kongNamespaceLabel | quote }}
+      ports:
+        - { protocol: TCP, port: {{ .Values.kongPlugin.port }} }
+    # Probe port — Prometheus + kubelet probes.
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Values.kongPlugin.networkPolicy.prometheusNamespace | quote }}
+      ports:
+        - { protocol: TCP, port: 9090 }
+{{- end }}
+
+{{- /* ServiceMonitor — gated on Prometheus Operator CRDs. */ -}}
+{{- if .Values.kongPlugin.serviceMonitor.enabled }}
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {{ $fullname }}-kong-companion
+  labels:
+    {{- include "spendguard.componentLabels" (merge (dict "component" $component) .) | nindent 4 }}
+    {{- with .Values.kongPlugin.serviceMonitor.additionalLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  selector:
+    matchLabels:
+      {{- include "spendguard.selector" (merge (dict "component" $component) .) | nindent 6 }}
+  endpoints:
+    - port: probe
+      path: /livez
+      interval: {{ .Values.kongPlugin.serviceMonitor.interval | quote }}
+{{- end }}
+
+{{- end }}

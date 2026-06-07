@@ -69,6 +69,7 @@ export default defineConfig({
             { label: 'Microsoft Agent Framework (.NET + Python)', slug: 'docs/integrations/microsoft-agent-framework' },
             { label: 'Microsoft AGT', slug: 'docs/integrations/agt' },
             { label: 'LiteLLM proxy guardrail', slug: 'docs/integrations/litellm-proxy' },
+            { label: 'Kong AI Gateway (Go + Lua plugin)', slug: 'docs/integrations/kong-ai-gateway' },
           ],
         },
         {

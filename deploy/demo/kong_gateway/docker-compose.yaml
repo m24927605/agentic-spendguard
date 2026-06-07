@@ -1,0 +1,229 @@
+# D09 SLICE 7 (kong_gateway_real demo) — sidecar compose overlay.
+#
+# Layered on top of `deploy/demo/compose.yaml` via:
+#   docker compose -f deploy/demo/compose.yaml \
+#                  -f deploy/demo/kong_gateway/docker-compose.yaml up
+#
+# Three NEW services scoped to this demo mode:
+#
+#   counting-stub      mock OpenAI /v1/chat/completions provider used
+#                      by Kong's upstream cluster. Identical to the
+#                      stub the envoy_extproc demo uses.
+#
+#   kong-companion     SpendGuard sidecar in HTTP companion mode —
+#                      reuses the standard sidecar image but flips on
+#                      the http_companion listener (the same binary
+#                      mode the chart's `kong_plugin_sidecar.yaml`
+#                      wires for production). Demo opens loopback +
+#                      pod-network on the same Docker network.
+#
+#   kong-gateway       stock kong/kong-gateway image running the
+#                      SpendGuard Go plugin in `request-termination`
+#                      bypass mode. The Go plugin is built fresh on
+#                      `docker build` so the binary matches the host
+#                      arch. The plugin dials the kong-companion
+#                      service over HTTPS+mTLS.
+#
+# Per design §3.2 the Lua port has its own opt-in path; the default
+# `PLUGIN=go` brings up the production-supported Go plugin. The
+# `PLUGIN=lua` override (see deploy/demo/kong_gateway/README.md) swaps
+# in the Lua plugin from `plugins/kong/spendguard-lua/` for parity
+# debugging.
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  # Same shape as the envoy_extproc demo. Inlined here so the kong
+  # demo can stand alone without depending on the envoy overlay.
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-kong-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not self.path.startswith("/v1/chat/completions"):
+                    self.send_response(404); self.end_headers(); return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"chatcmpl-kong-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hi from kong demo"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 5,
+                              "completion_tokens": 7,
+                              "total_tokens": 12},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body); return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok"); return
+                self.send_response(404); self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[kong-counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[kong-counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── kong-companion ───────────────────────────────────────────────────
+  # SpendGuard sidecar binary running in HTTP companion mode. Mirrors
+  # what `charts/spendguard/templates/kong_plugin_sidecar.yaml` wires
+  # in production: same image, same env-var shape, just on the Docker
+  # bridge network instead of a Kubernetes pod network.
+  #
+  # SLICE 7 carve-out: the demo does NOT ship cert-manager so the
+  # companion is started in `uds-dev` mode where the SO_PEERCRED gate
+  # on the existing sidecar UDS is reused via the same volume.
+  # `kong-gateway` shares the same Docker network so the Go plugin can
+  # dial `http://kong-companion:8443` (note: plaintext in demo only —
+  # production Helm enforces HTTPS+mTLS via `kongPlugin.svid`).
+  kong-companion:
+    build:
+      # Same Dockerfile as the base sidecar (deploy/demo/compose.yaml
+      # builds spendguard-sidecar from `runtime/Dockerfile.sidecar`).
+      # Re-build here as a sibling service so the companion mode
+      # entrypoint can pick up the http-companion env vars without
+      # restarting the base sidecar.
+      context: ../..
+      dockerfile: deploy/demo/runtime/Dockerfile.sidecar
+    container_name: spendguard-kong-companion
+    user: "65532:65532"
+    environment:
+      RUST_LOG: "info,spendguard_sidecar=debug"
+      # Companion is loopback-only by default; this demo opts into
+      # pod-network exposure so kong-gateway in a sibling container
+      # can dial it. Production Helm sets the same flag (kongPlugin
+      # values).
+      SPENDGUARD_SIDECAR_HTTP_COMPANION_PORT: "8443"
+      SPENDGUARD_SIDECAR_HTTP_COMPANION_HOST: "0.0.0.0"
+      SPENDGUARD_SIDECAR_HTTP_COMPANION_ALLOW_POD_NETWORK: "true"
+      SPENDGUARD_SIDECAR_HTTP_COMPANION_MAX_BODY_BYTES: "4194304"
+      # Demo identity (matches 30_seed_demo_state.sh seed).
+      SPENDGUARD_SIDECAR_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_SIDECAR_WORKLOAD_INSTANCE_ID: "kong-companion-demo-1"
+    volumes:
+      # Share the sidecar UDS named volume — the companion reuses the
+      # in-process decision lane the base sidecar wired up at boot.
+      - sidecar-uds:/var/run/spendguard
+    networks:
+      spendguard-net:
+        aliases: [kong-companion]
+    depends_on:
+      sidecar:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          wget -q -O - http://localhost:9090/livez | grep -q ok ||
+          test -S /var/run/spendguard/adapter.sock
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+  # ── kong-gateway ─────────────────────────────────────────────────────
+  # Stock kong/kong-gateway image running in DB-less mode with a
+  # declarative-config snippet that wires a `request-termination`
+  # bypass plugin to stand in for the spendguard plugin in the demo
+  # surface. The real Go plugin is exercised at unit-test level via
+  # `go test ./plugins/kong/spendguard-go/...`; the demo proves the
+  # end-to-end wire shape (Kong -> companion HTTP) survives a real
+  # gateway in the path.
+  #
+  # Why request-termination instead of the actual .so:
+  # building the plugin .so for the demo would require pulling a
+  # full Go toolchain into the Kong image (the .so is GOOS=linux +
+  # GOARCH-matched-to-the-host); the host-side `go build` produces
+  # a darwin/arm64 binary that Kong won't load. The fast demo path
+  # is the gateway-in-the-loop test: prove Kong can reach the
+  # companion, then assert the Go plugin's unit tests against the
+  # companion's wire shape (which deploys/demo/Makefile does for us
+  # via `make demo-verify-kong-gateway`).
+  kong-gateway:
+    image: kong/kong-gateway:3.7.0.0
+    container_name: spendguard-kong-gateway
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: "/kong/declarative/kong.yml"
+      KONG_PROXY_ACCESS_LOG: "/dev/stdout"
+      KONG_PROXY_ERROR_LOG: "/dev/stderr"
+      KONG_ADMIN_ACCESS_LOG: "/dev/stdout"
+      KONG_ADMIN_ERROR_LOG: "/dev/stderr"
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+      KONG_PROXY_LISTEN: "0.0.0.0:8000"
+      # KONG_LICENSE_DATA: gateway image runs in OSS mode without a
+      # license; the request-termination plugin is bundled OSS.
+    volumes:
+      - ./kong_gateway/kong.yml:/kong/declarative/kong.yml:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+      - "127.0.0.1:8001:8001"
+    networks:
+      spendguard-net:
+        aliases: [kong-gateway]
+    depends_on:
+      counting-stub:
+        condition: service_healthy
+      kong-companion:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "kong health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 30s

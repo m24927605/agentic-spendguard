@@ -1,0 +1,34 @@
+# D09 SLICE 7 — Kong gateway compose overlay (top-level pointer).
+#
+# implementation.md §9 names this file as the Kong demo compose
+# entry; the actual service definitions live in
+# `kong_gateway/docker-compose.yaml` so the topology mirrors the
+# directory convention every other demo overlay follows
+# (`envoy_extproc/docker-compose.yaml`,
+# `langchain_ts/docker-compose.yaml`, etc).
+#
+# This file `extends` the canonical location so operators who docker-
+# compose up against `compose.kong.yaml` get the same services.
+# Direct `docker compose -f deploy/demo/compose.yaml -f deploy/demo/
+# compose.kong.yaml up` is supported; the Makefile target invokes
+# the canonical location.
+#
+# Operators MAY remove this file if they only use the Makefile entry
+# (`make demo-up DEMO_MODE=kong_gateway_real`); it exists for spec
+# compliance with implementation.md §9 path naming.
+
+name: spendguard-demo
+
+services:
+  counting-stub:
+    extends:
+      file: kong_gateway/docker-compose.yaml
+      service: counting-stub
+  kong-companion:
+    extends:
+      file: kong_gateway/docker-compose.yaml
+      service: kong-companion
+  kong-gateway:
+    extends:
+      file: kong_gateway/docker-compose.yaml
+      service: kong-gateway

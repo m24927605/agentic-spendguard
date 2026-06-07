@@ -669,6 +669,79 @@ envoyExtproc:
     requests: { cpu: "100m", memory: "128Mi" }
     limits:   { cpu: "500m", memory: "512Mi" }
 
+# ── D09 SLICE 6 — Kong AI Gateway plugin sidecar companion ─────────
+# Spec: docs/specs/coverage/D09_kong_ai_gateway/design.md §3.1 + §4 row 6.
+#
+# Renders a small Deployment that runs a SpendGuard sidecar in
+# "HTTP-companion" mode: same binary as the in-pod sidecar but with
+# `--http-companion-bind 0.0.0.0:8443` enabled, so Kong DataPlane pods
+# (which live in a separate network namespace) can dial it over
+# mTLS-TCP per design §3.1.
+#
+# Disabled by default — operators who run Kong AI Gateway flip
+# `kongPlugin.enabled=true` and supply the SVID Secret + sidecar
+# trust material. Production profile gates mirror envoyExtproc:
+#   - image.tag MUST be semver or digest pin under chart.profile=production
+#   - tenantId MUST be a UUID under chart.profile=production
+#   - svid.secretName MUST be supplied under chart.profile=production
+kongPlugin:
+  enabled: false
+  # 2 replicas by default so a rolling restart never drops the listener
+  # the Kong worker depends on. Per-companion state is in-process
+  # idempotency cache only; the durable reservation row lives in the
+  # ledger DB so horizontal scaling is safe.
+  replicas: 2
+  image:
+    repository: spendguard/sidecar
+    # Empty default — template falls back to Chart.AppVersion under
+    # demo profile; production fails fast unless explicitly pinned.
+    tag: ""
+    pullPolicy: IfNotPresent
+  # UUID of the tenant this Kong DataPlane processes. REQUIRED under
+  # chart.profile=production (matches GA_03 fail-closed posture).
+  tenantId: ""
+  # Per-tenant SVID Secret minted by cert-manager (HARDEN_08). The
+  # Secret MUST contain tls.crt + tls.key + ca.crt.
+  svid:
+    secretName: ""
+    mountPath: /run/secrets/svid
+    # cert-manager issuer used to mint per-tenant SVIDs. Optional —
+    # operators bring their own Secret via `secretName` above. Set
+    # `svidIssuer` to drive a chart-managed Certificate resource.
+    issuer: ""
+  # HTTP companion bind. 8443 is the default; mTLS is mandatory.
+  port: 8443
+  # Per-request body cap matches the sidecar's
+  # `http_companion_max_body_bytes` default (4 MiB). Increase only
+  # for large-prompt workloads; the upper bound is gated by axum's
+  # extractor + DoS surface.
+  maxBodyBytes: 4194304
+  # The Kong plugin's plugin-side timeout is 500ms (Go) / 500ms (Lua);
+  # this is the server-side request budget the companion enforces
+  # before returning 503 to the plugin. Keep it above the plugin's
+  # budget so the plugin never sees a server-side timeout.
+  requestTimeoutMs: 1500
+  # NetworkPolicy ingress restriction. Default opt-in because the
+  # production deployment relies on it to prove only Kong DataPlane
+  # pods (`app.kubernetes.io/name=kong` labels) can reach the
+  # companion port.
+  networkPolicy:
+    enabled: true
+    # Namespace selector for Kong DataPlane pods. Most operators run
+    # Kong in `kong` namespace; override to match your install.
+    kongNamespaceLabel: kong
+    # Scrape namespace for the companion's /metrics endpoint.
+    prometheusNamespace: monitoring
+  # Optional ServiceMonitor (Prometheus Operator). Default off so
+  # clusters without the CRD don't fail render.
+  serviceMonitor:
+    enabled: false
+    interval: 15s
+    additionalLabels: {}
+  resources:
+    requests: { cpu: "100m", memory: "128Mi" }
+    limits:   { cpu: "1",    memory: "512Mi" }
+
 # ── SLICE_11 — NetworkPolicy for L2 bypass-resistance ───────────────
 # Spec: docs/slices/SLICE_11_multi_provider_routing.md §2 + §9.5.
 #

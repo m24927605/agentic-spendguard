@@ -1,0 +1,235 @@
+---
+title: "Kong AI Gateway — spendguard plugin (Go + Lua)"
+description: >-
+  Install Agentic SpendGuard as a first-class Kong AI Gateway plugin.
+  Pre-call budget reservation in the `access` phase, post-call commit
+  in `body_filter`. Go plugin for production, Lua port for Kong OSS
+  3.0–3.5 deployments. Sidecar talks JSON-over-HTTPS+mTLS to a
+  SpendGuard companion service.
+---
+
+
+> Kong AI Gateway ships the `ai-proxy` / `ai-prompt-guard` /
+> `ai-rate-limiting-advanced` plugin family in 2026. SpendGuard slots
+> in alongside as `spendguard` — a Kong plugin that runs in `access`
+> + `body_filter` and gates upstream LLM API traffic before any
+> provider receives it. The Go plugin (`plugins/kong/spendguard-go/`)
+> is the supported production path; an experimental Lua port lives at
+> `plugins/kong/spendguard-lua/` for Kong OSS deployments that cannot
+> host a `go-plugin-server` subprocess.
+
+## Why a Kong plugin
+
+Kong DataPlane workers live in a **separate network namespace** from
+the SpendGuard sidecar pod, so the standard adapter UDS contract
+(SO_PEERCRED-authenticated, in-pod) is unreachable. The Kong plugin
+speaks the same decision lane over an **HTTPS+mTLS** companion
+listener instead:
+
+- `POST /v1/tokenize` — token-count the request body
+- `POST /v1/decision` — reserve verdict (`ALLOW` / `DENY` / `DEGRADE`)
+- `POST /v1/trace` — emit the `LLM_CALL_POST.SUCCESS` / `RUN_ABORTED`
+  trace event at end-of-body
+
+The companion service ships as a SpendGuard sidecar in "HTTP
+companion" mode — same binary, same audit chain, different transport.
+
+## Install
+
+### Production (Helm)
+
+```bash
+helm install spendguard ./charts/spendguard \
+  --set kongPlugin.enabled=true \
+  --set kongPlugin.tenantId=00000000-0000-4000-8000-000000000001 \
+  --set kongPlugin.svid.secretName=spendguard-kong-svid
+```
+
+The chart renders four resources for the Kong path:
+
+- **Deployment** `release-name-spendguard-kong-companion` — sidecar
+  binary running with `SPENDGUARD_SIDECAR_HTTP_COMPANION_PORT=8443`
+- **Service** `release-name-spendguard-kong-companion` — ClusterIP
+  exposing port 8443 (mTLS) + 9090 (probes)
+- **ServiceAccount** — workload identity for cert-manager binding
+- **NetworkPolicy** — ingress restricted to pods carrying
+  `app.kubernetes.io/name=kong` (the Kong DataPlane label)
+
+The plugin itself ships as the SpendGuard Go plugin binary (or the
+Lua rockspec). Bake it into your Kong DataPlane image via the
+reference recipe in
+[`examples/kong-gateway-composite/go-build.sh`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/kong-gateway-composite/go-build.sh).
+
+### Bind the plugin
+
+The reference manifests at
+[`examples/kong-gateway-composite/`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/kong-gateway-composite/)
+ship two `KongPlugin` resources (Go + Lua). Apply one, then annotate
+the target Service:
+
+```bash
+kubectl apply -f examples/kong-gateway-composite/kong-plugin-crd.yaml
+kubectl annotate svc my-llm-upstream \
+  konghq.com/plugins=spendguard-go --overwrite
+```
+
+For DB-less mode (`KONG_DATABASE=off`) operators inline the plugin
+into their declarative `kong.yml` — see
+[`examples/kong-gateway-composite/kong-conf.yaml`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/kong-gateway-composite/kong-conf.yaml)
+for the worked example.
+
+## Configuration
+
+The plugin schema is field-equivalent across the Go and Lua
+distributions. Both accept the same `KongPlugin` CRD.
+
+| Key | Required | Default | Purpose |
+|-----|----------|---------|---------|
+| `sidecar_url` | YES | — | HTTPS URL of the SpendGuard companion. Must start with `https://`. |
+| `sidecar_ca_pem` / `sidecar_ca_file` | YES (one of) | — | CA bundle that signs the companion's workload cert. |
+| `client_cert_pem` / `client_cert_file` | YES (one of) | — | Plugin workload cert (SVID URI SAN encodes the tenant). |
+| `client_key_pem` / `client_key_file` | YES (one of) | — | Matching private key. |
+| `tenant_id` | YES | — | Tenant UUID; must match the SVID URI SAN tenant. |
+| `fail_open` | YES | `false` | Fail-closed by default. When `true`, sidecar errors degrade-to-allow with a `kong.log.warn`. |
+| `timeout_ms` | YES | `500` | Per-request HTTP timeout to the companion (50–30000ms). |
+| `budget_id` | NO | — | Optional explicit budget binding for multi-budget tenants. |
+| `prompt_class` | YES | `general` | Contract-evaluator prompt class. |
+
+### Plugin priority
+
+`PRIORITY = 950`, above Kong's `ai-proxy` (770). SpendGuard fires
+**before** `ai-proxy` so the reserve happens upstream of upstream
+auth and provider routing. See
+[`docs/specs/coverage/D09_kong_ai_gateway/review-standards.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D09_kong_ai_gateway/review-standards.md)
+§6.3 for the constraint rationale.
+
+### Request buffering
+
+Kong's `access` phase needs the full request body before SpendGuard
+can token-count it. Set `request_buffering: true` on the routes you
+gate; otherwise `kong.request.get_raw_body()` returns nil and the
+plugin fails closed with `SPENDGUARD_EMPTY_BODY`.
+
+## Lifecycle
+
+Per [`docs/specs/coverage/D09_kong_ai_gateway/design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D09_kong_ai_gateway/design.md)
+§3.3, the plugin runs in two phases:
+
+### `access` (reserve)
+
+1. `kong.request.get_raw_body()` — pull the buffered upstream body
+2. Detect provider shape (OpenAI `/v1/chat/completions` vs Anthropic
+   `/v1/messages`) by JSON keys + path
+3. `POST /v1/tokenize` — `input_tokens`
+4. `POST /v1/decision` — verdict
+5. Branch:
+   - **ALLOW** → stash `reservation_id` in `kong.ctx.shared` and fall through
+   - **DENY** → `kong.response.exit(429, { code: "SPENDGUARD_DENY" })`
+   - **DEGRADE** → `fail_open=false` → `kong.response.exit(503)`,
+     otherwise log + fall through
+
+### `body_filter` (commit)
+
+1. Accumulate `ngx.arg[1]` chunks until `ngx.arg[2]` is true
+2. Parse provider usage (OpenAI `usage.prompt_tokens` / Anthropic
+   `usage.input_tokens`)
+3. `POST /v1/trace` with `ACCEPTED` + token counts (or `REJECTED` on
+   upstream 5xx / parse failure)
+4. Flag `kong.ctx.shared[spendguard_committed] = "1"` so a duplicate
+   filter invocation is a no-op
+
+## Limitations
+
+**SpendGuard's Kong plugin is INV-5 end-of-stream commit only.** The
+gate runs at the `access` phase and the reconciliation runs at
+end-of-body — there is no token-by-token cap fired mid-flight.
+
+Specifically:
+
+- **No streaming SSE budget enforcement.** Kong's
+  `response_buffering: true` buffers the full upstream response
+  before the `body_filter` phase fires; SpendGuard reads the buffered
+  body once at end-of-body. Mid-stream cancellation is a v1
+  non-goal per design §3.5.
+- **No Bedrock SigV4 mutation.** v1 covers OpenAI-shaped and
+  Anthropic-shaped payloads. Bedrock routing reuses Kong's
+  `ai-proxy` route_type field; SpendGuard does not mutate
+  upstream-auth headers.
+- **No Konnect SaaS plane integration.** Distribution is via
+  `KongPlugin` CRD or `kong.conf` only. SpendGuard does not ship
+  to Kong's hosted plugin registry.
+
+## Lua fallback
+
+The Lua port exists for Kong OSS 3.0–3.5 deployments that cannot
+host a `go-plugin-server` subprocess alongside the worker. It covers
+the same `access` + `body_filter` lifecycle and is documented as
+**experimental**:
+
+```bash
+luarocks install spendguard
+```
+
+Then bind via the same `KongPlugin` CRD with `plugin: spendguard`
+(the Lua port and Go plugin both register under the same `spendguard`
+plugin name). The Lua port does NOT get the conformance-test
+guarantee — see
+[`plugins/kong/spendguard-lua/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/plugins/kong/spendguard-lua/README.md)
+for the parity table.
+
+## Demo
+
+A bundled docker-compose demo proves the full ALLOW + DENY + STREAM
+matrix end-to-end against a real Kong gateway + SpendGuard companion
++ counting-stub provider:
+
+```bash
+make demo-up DEMO_MODE=kong_gateway_real
+```
+
+The mode boots `postgres + sidecar + kong-companion + kong-gateway +
+counting-stub`, then issues three calls through Kong:
+
+- **ALLOW** — small body within budget → HTTP 200, counting-stub
+  counter `+1`, sidecar reservation row exists.
+- **DENY** — `X-Spendguard-Estimate-Override: 2000000000` header
+  blows past the seeded 1B hard-cap → HTTP 429, counting-stub
+  counter UNCHANGED (proves the gate fires before the upstream
+  call).
+- **STREAM** — `stream=true` body within budget → HTTP 200,
+  counting-stub `+1`, end-of-body commit row.
+
+Success line on a clean run:
+
+```
+[demo] kong_gateway_real ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+Full details and the verify-SQL gates are in
+[`deploy/demo/kong_gateway/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/kong_gateway/README.md).
+
+## Troubleshooting
+
+- **`SPENDGUARD_EMPTY_BODY`** — Set `request_buffering: true` on the
+  route. The `access` phase needs the buffered body to token-count.
+- **`SPENDGUARD_UNRECOGNISED_REQUEST`** — The body did not look like
+  OpenAI `/v1/chat/completions` or Anthropic `/v1/messages` shape.
+  v1 covers only those two providers; route Bedrock / Mistral
+  through `ai-proxy` first so SpendGuard sees the normalised body.
+- **`SPENDGUARD_FAIL_CLOSED: plugin misconfigured`** — Missing or
+  malformed `sidecar_url` / `client_cert_*` / `tenant_id`. Check
+  the startup log; the plugin refuses to load on misconfiguration.
+- **`SPENDGUARD_TOKENIZE_UNREACHABLE`** — The plugin could not reach
+  the companion. Check the NetworkPolicy renders correctly (the Kong
+  DataPlane pods must carry `app.kubernetes.io/name=kong`).
+- **`429 SPENDGUARD_DENY` without a real overage** — The contract
+  evaluator emitted a hard-cap STOP. Check the seeded budget /
+  bundle config; the `X-Spendguard-Estimate-Override` demo header
+  is **demo-only** and not compiled into production binaries.
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in 5 minutes
+- [Contract YAML reference](../../contracts/yaml/) — author allow/stop rules
+- [Drop-in: LiteLLM proxy mode](../../drop-in/litellm/) — egress-path alternative
+- Other adapter integrations: [Pydantic-AI](../pydantic-ai/) · [LangChain](../langchain/) · [OpenAI Agents SDK](../openai-agents/) · [Microsoft AGT](../agt/)

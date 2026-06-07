@@ -105,6 +105,21 @@ else ifeq ($(DEMO_MODE),envoy_extproc)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub envoy-extproc envoy-gateway
+else ifeq ($(DEMO_MODE),kong_gateway_real)
+	@echo "[demo] DEMO_MODE=kong_gateway_real → D09 SLICE 7 (Kong AI Gateway plugin)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/kong_gateway/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               kong-companion (SpendGuard HTTP companion) +"
+	@echo "[demo]               kong-gateway (kong/kong-gateway:3.7)."
+	@echo "[demo]   Driver issues 3 calls (ALLOW + DENY + STREAM) through Kong"
+	@echo "[demo]   and asserts INV-2 strict-order. The bypass plugin stands"
+	@echo "[demo]   in for the Go .so (see deploy/demo/kong_gateway/README.md)."
+	$(COMPOSE) -f kong_gateway/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub kong-companion kong-gateway
 else ifeq ($(DEMO_MODE),langchain_ts)
 	@echo "[demo] DEMO_MODE=langchain_ts → COV_D04 SLICE 5 (LangChain.js callback handler)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -370,6 +385,9 @@ else ifeq ($(DEMO_MODE),litellm_guardrail)
 else ifeq ($(DEMO_MODE),envoy_extproc)
 	@echo "[demo] verifying COV_07 (envoy_extproc ALLOW + DENY + STREAM)..."
 	@$(MAKE) demo-verify-envoy-extproc
+else ifeq ($(DEMO_MODE),kong_gateway_real)
+	@echo "[demo] verifying D09 SLICE 7 (kong_gateway_real ALLOW + DENY + STREAM)..."
+	@$(MAKE) demo-verify-kong-gateway-real
 else ifneq (,$(findstring agent_real,$(DEMO_MODE)))
 	@echo "[demo] DEMO_MODE=$(DEMO_MODE) — skipping demo-verify-step7."
 	@echo "[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)"
@@ -570,6 +588,13 @@ demo-verify-envoy-extproc:
 		   RAISE NOTICE 'COV_07 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
 		 END; \$$\$$;"
 	@echo "[demo] COV_07 envoy_extproc verification done"
+
+# D09 SLICE 7 (kong_gateway_real demo) verification. Mirrors the
+# envoy_extproc layout: ledger-DB assertions in
+# verify_step_kong_gateway_real.sql + INV-2 strict-order DO block.
+demo-verify-kong-gateway-real:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_kong_gateway_real.sql
+	@echo "[demo] D09 SLICE 7 kong_gateway_real verification done"
 
 # COV_D06 SLICE 7 (vercel_ai_mastra demo) verification. Mirrors the
 # langchain_ts layout: ledger-DB assertions in
@@ -821,7 +846,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

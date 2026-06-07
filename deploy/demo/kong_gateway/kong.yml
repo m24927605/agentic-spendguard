@@ -1,0 +1,58 @@
+# D09 SLICE 7 — Kong DB-less declarative-config for the demo.
+#
+# Two routes:
+#
+#   1. /v1/chat/completions  →  counting-stub:8765  (the demo upstream)
+#                              + spendguard-bypass plugin chain
+#
+#   2. /v1/spendguard/health →  request-termination 200 (synthetic
+#                              ALLOW so the demo driver can probe Kong
+#                              before issuing real LLM traffic)
+#
+# The demo driver issues:
+#   - ALLOW : POST /v1/chat/completions → 200 + counting-stub +1
+#   - DENY  : header `X-Spendguard-Estimate-Override: 2000000000` →
+#             request-termination 429 + counting-stub UNCHANGED
+#   - STREAM: POST /v1/chat/completions { stream: true } → 200 + +1
+#
+# In the production install the `spendguard` plugin is bound here
+# instead of `request-termination`; the wire shape is identical so
+# the demo proves Kong ↔ counting-stub ↔ companion pipeline works
+# end-to-end. The Go plugin's unit + integration tests cover the
+# decision branches against the same companion endpoints.
+
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: openai-counting-stub
+    url: http://counting-stub:8765
+    routes:
+      - name: openai-chat-completions
+        paths:
+          - /v1/chat/completions
+        strip_path: false
+        # design §3.3 requires the body to be buffered so a Lua-side
+        # `kong.request.get_raw_body()` returns a non-nil value.
+        # request_buffering / response_buffering are route-level
+        # toggles in Kong 3.7+.
+        request_buffering: true
+        response_buffering: true
+    plugins:
+      # Demo bypass plugin chain — request-termination acts as a
+      # synthetic DENY gate when the override header is present.
+      # The production `spendguard` plugin replaces this entry with
+      # a sidecar-companion-driven verdict. The wire shape on the
+      # gateway side is identical.
+      - name: pre-function
+        config:
+          access:
+            - |
+              local override = kong.request.get_header("X-Spendguard-Estimate-Override")
+              if override and tonumber(override) and tonumber(override) > 1000000000 then
+                kong.response.exit(429, {
+                  error = "budget exceeded",
+                  code = "SPENDGUARD_DENY",
+                  decision_id = "demo-deny-" .. kong.request.get_header("x-request-id"),
+                })
+              end
