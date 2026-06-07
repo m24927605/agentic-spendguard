@@ -861,6 +861,18 @@ async def main() -> int:
             "see deploy/demo/cursor_mitm_fixture/docker-compose.yaml + README.md."
         )
         return 0
+    if DEMO_MODE == "windsurf_mitm_fixture":
+        # D18 SLICE 82: the windsurf_mitm_fixture demo's runner is a
+        # Rust binary (services/windsurf_codec example
+        # windsurf_mitm_fixture_demo) launched directly by the
+        # Makefile target. Mirrors cursor_mitm_fixture above — clean
+        # no-op here.
+        print(
+            "[demo] windsurf_mitm_fixture runner is the Rust example "
+            "(services/windsurf_codec/examples/windsurf_mitm_fixture_demo.rs); "
+            "see deploy/demo/windsurf_mitm_fixture/docker-compose.yaml + README.md."
+        )
+        return 0
     return await run_agent_mode()
 
 

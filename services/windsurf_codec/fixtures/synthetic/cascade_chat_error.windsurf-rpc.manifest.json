@@ -1,0 +1,25 @@
+{
+  "fixture": "cascade_chat_error.windsurf-rpc",
+  "kind": "synthetic",
+  "windsurf_min_version": "synthetic",
+  "windsurf_max_version": "synthetic",
+  "captured_utc": "2026-06-07T00:00:00Z",
+  "frames": 2,
+  "wire_version": "cascade.v2.0",
+  "shape": "request + upstream grpc-status:13 trailers (no response deltas) — codec reserves but does NOT commit",
+  "redaction_sha256": "synthetic-no-redaction-needed",
+  "sow_id": "synthetic",
+  "expected_replay_report": {
+    "request_frames_decoded": 1,
+    "response_frames_decoded": 0,
+    "end_of_stream_frames": 1,
+    "finish_reason": null,
+    "cumulative_output_tokens": null,
+    "sidecar_reserve_calls": 1,
+    "sidecar_commit_calls": 0,
+    "upstream_error": true,
+    "all_frames_round_trip": true,
+    "unsupported_wire_version_seen": false,
+    "decoder_skipped": false
+  }
+}

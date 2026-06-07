@@ -1,0 +1,101 @@
+[package]
+name = "spendguard-windsurf-codec"
+version = "0.1.0-alpha"
+edition = "2021"
+license = "Apache-2.0"
+description = "SpendGuard Windsurf IDE / Codeium managed-Cascade MITM codec — reverse-engineered gRPC-Web framing + Cascade envelope decode for server.codeium.com. EXPERIMENTAL. SOW-only. Codec breaks whenever Codeium changes the wire protocol. DO NOT SHIP IN GA CONFIG."
+publish = false
+
+# Per D18 review-standards (mirrors D17 E1):
+# `services/windsurf_codec/Cargo.toml` MUST carry
+# `[package.metadata.experimental]` with the literal `reason` string
+# below. Reviewer greps for it.
+[package.metadata.experimental]
+reason = "Reverse-engineered Windsurf / Codeium Cascade wire protocol. Breaks on vendor release."
+
+[lib]
+name = "spendguard_windsurf_codec"
+path = "src/lib.rs"
+
+[features]
+# Default features are empty. `mitm` is the per-crate feature that
+# gates Windsurf-specific code (framing reader, envelope decode). The
+# workspace-level feature `windsurf-mitm-experimental` (D18 design §6)
+# is what `services/egress_proxy` and `services/cli` enable; that
+# feature pulls this crate in as an `optional = true` dep, at which
+# point the consumer turns the `mitm` feature on here. Mirror of D17's
+# `cursor-mitm-experimental` two-channel opt-in.
+default = []
+mitm = [
+    "dep:tokio",
+    "dep:tonic",
+    "dep:hyper-util",
+    "dep:tower",
+    "dep:async-stream",
+    "dep:uuid",
+    "dep:anyhow",
+    "dep:tracing",
+]
+
+[dependencies]
+# gRPC-Web framing parser. `bytes` is the canonical byte buffer crate
+# across the workspace (sidecar, canonical_ingest, ledger).
+bytes = "1"
+
+# Cascade envelope protobuf decode. `prost` 0.13 is the workspace-wide
+# version; matches services/sidecar / services/tokenizer / cursor_codec.
+prost = "0.13"
+prost-types = "0.13"
+
+# Error handling. `thiserror` is the workspace-wide derive macro for
+# typed errors; the rest of the codec returns `Result<_, CodecError>`
+# / `Result<_, DecodeError>` shaped the same way ledger and sidecar do.
+thiserror = "1"
+
+# SLICE 80 — fixture hashing / wire-version detection via SHA-256. Same
+# version as services/tokenizer.
+sha2 = "0.10"
+hex = "0.4"
+
+# OpenAI ChatCompletion request/chunk shape (canonical translation
+# target). We keep this minimal (serde_json::Value internally for
+# additive fields) to avoid pulling the full openai crate. Same `serde`
+# workspace version used by services/egress_proxy and cursor_codec.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# SLICE 78 — sidecar UDS gRPC client + MITM session state machine.
+# Gated on `mitm` so the default build keeps the dependency surface
+# narrow. Mirrors the services/cursor_codec/src/sidecar_client.rs +
+# mitm_session.rs pattern.
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "net", "time"], optional = true }
+tonic = { version = "0.12", features = ["transport"], optional = true }
+hyper-util = { version = "0.1", features = ["tokio"], optional = true }
+tower = { version = "0.5", features = ["util"], optional = true }
+async-stream = { version = "0.3", optional = true }
+uuid = { version = "1", features = ["v7", "v4"], optional = true }
+anyhow = { version = "1", optional = true }
+tracing = { version = "0.1", optional = true }
+
+[build-dependencies]
+# `prost-build` generates the Rust types from `src/proto/windsurf.proto`.
+# Matches the build.rs pattern in services/cursor_codec.
+prost-build = "0.13"
+
+# SLICE 78 — sidecar adapter / common proto stubs.
+tonic-build = "0.12"
+
+[dev-dependencies]
+# Round-trip helpers (encode → decode) for the envelope tests reuse
+# `prost`'s Message trait. SLICE 78 wires the in-process gRPC server
+# stub for the reserve/commit/release tests, so dev pulls in the same
+# tokio+tonic surface that the `mitm` feature exposes at runtime.
+tokio = { version = "1", features = ["rt", "macros", "sync", "io-util", "net", "time", "rt-multi-thread"] }
+tonic = { version = "0.12", features = ["transport"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+tower = { version = "0.5", features = ["util"] }
+async-stream = "0.3"
+tempfile = "3"
+
+[package.metadata.docs.rs]
+all-features = true

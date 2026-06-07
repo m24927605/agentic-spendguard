@@ -73,6 +73,7 @@ export default defineConfig({
             { label: 'Kong AI Gateway (Go + Lua plugin)', slug: 'docs/integrations/kong-ai-gateway' },
             { label: 'Dify Model Provider Plugin', slug: 'docs/integrations/dify' },
             { label: 'Cursor IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/cursor-mitm' },
+            { label: 'Windsurf IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/windsurf-mitm' },
           ],
         },
         {

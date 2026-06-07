@@ -1,0 +1,123 @@
+// SpendGuard-authored observation of the Windsurf / Codeium Cascade
+// wire protocol on server.codeium.com.
+// Reconstructed from black-box capture. NOT vendor source.
+//
+// Per D18 design.md §3 decision 6 and review-standards (R1, R3,
+// mirrored from D17): this file documents an observed wire shape.
+// Field names are SpendGuard-chosen; field numbers match what is on
+// the wire as observed at MITM capture time. No vendor copyright
+// header, no vendor-attributed license text, no vendor .proto pasted
+// verbatim.
+//
+// SLICE 75-76 lands a minimal placeholder for the envelope that the
+// SLICE 80 capture corpus will refine field-by-field with hex evidence
+// in PROTOCOL.md.
+
+syntax = "proto3";
+
+package spendguard.windsurf_codec.v1alpha1;
+
+// CascadeRequest is the request envelope SpendGuard observes the
+// Windsurf IDE Cascade runtime serialise to
+// `server.codeium.com` / `windsurf-server.codeium.com` for a managed
+// Cascade chat call. The shape mirrors the OpenAI / Anthropic chat
+// schema family observed in public Codeium documentation.
+//
+// The fields here are a minimal placeholder per the SLICE 75 charter
+// (see RECON.md §3). SLICE 80 will refine based on real capture
+// evidence; the unknown-fields preservation contract is the load-
+// bearing invariant — vendor field additions survive through prost's
+// silent unknown-field drop with byte-perfect tee fallback per
+// design.md §4.4.
+message CascadeRequest {
+  // Repeated message history sent up to Codeium. Each CascadeMessage
+  // carries a role tag and a content blob. The shape mirrors public
+  // OpenAI / Anthropic chat schemas observed in Codeium docs.
+  repeated CascadeMessage messages = 1;
+
+  // Model identifier as Codeium labels it (e.g. "gpt-4o",
+  // "claude-3.5-sonnet", or Codeium's internal "cascade-base").
+  string model_name = 2;
+
+  // Optional max_tokens budget hint. SpendGuard reads this to seed
+  // reservation. uint32 is wide enough for any observed Codeium
+  // budget.
+  optional uint32 max_tokens = 3;
+
+  // Optional tool declarations attached to the Cascade request.
+  // Cascade Agent mode emits these when the IDE has tool exposure
+  // enabled; SLICE 80 fixtures cover both with-tools and without-
+  // tools shapes.
+  repeated CascadeToolDecl tool_declarations = 4;
+
+  // Optional workspace identifier — Codeium uses this to scope the
+  // tenant. SpendGuard redacts this in fixtures and logs.
+  optional string workspace_id = 5;
+
+  // Cascade wire-version stamp. Either an explicit string the codec
+  // recognises (e.g. "cascade.v2.0", "cascade.v2.1") OR omitted, in
+  // which case the codec falls back to SHA-256 of the first 64 bytes
+  // of the preamble per `src/version.rs::detect_version`.
+  optional string cascade_wire_version = 99;
+}
+
+// CascadeMessage is a single chat turn (system / user / assistant /
+// tool).
+message CascadeMessage {
+  // Role string. Observed values: "system" | "user" | "assistant" |
+  // "tool".
+  string role = 1;
+
+  // Content payload. Cascade may embed multimodal blobs here in
+  // future; SLICE 75-76 ships a plain UTF-8 string and lets unknown
+  // fields cover vendor additions until SLICE 80 refines.
+  string content = 2;
+}
+
+// CascadeToolDecl is a single tool/function declaration attached to a
+// Cascade request. The schema field is intentionally a free-form JSON
+// string at this layer — SpendGuard does not inspect tool schemas at
+// the codec boundary; the egress proxy translates the entire request
+// before the schema is parsed.
+message CascadeToolDecl {
+  // Tool name, e.g. "read_file", "edit_block".
+  string name = 1;
+
+  // JSON-serialised tool schema, redacted in fixtures.
+  string schema = 2;
+}
+
+// CascadeResponseDelta is one server-streaming delta decoded from a
+// gRPC-Web data frame. The terminal frame on the wire is signalled at
+// the framing layer (flag `0x02`), not in this envelope.
+message CascadeResponseDelta {
+  // The model that produced this delta. May be empty on follow-up
+  // deltas if Codeium only stamps it on the first delta.
+  string model_name = 1;
+
+  // Delta text content appended in this chunk.
+  optional string text_chunk = 2;
+
+  // Optional finish_reason, set only on the final data delta.
+  // Observed values: "stop" | "tool_calls" | "length" | "error".
+  optional string finish_reason = 3;
+
+  // Optional CascadeUsage block; Codeium stamps this on the terminal
+  // delta when the stream completed successfully. SpendGuard's SLICE
+  // 78 commit lane reads this to extract actuals.
+  optional CascadeUsage usage = 4;
+
+  // Cascade wire-version stamp (see CascadeRequest).
+  optional string cascade_wire_version = 99;
+}
+
+// CascadeUsage carries the token counts Codeium reports on the
+// terminal stream delta.
+message CascadeUsage {
+  // Input (prompt) token count.
+  uint32 input_tokens = 1;
+
+  // Output (completion) token count up to and including the terminal
+  // delta.
+  uint32 output_tokens = 2;
+}

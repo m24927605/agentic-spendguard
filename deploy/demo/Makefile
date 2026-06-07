@@ -207,6 +207,28 @@ else ifeq ($(DEMO_MODE),cursor_mitm_fixture)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),windsurf_mitm_fixture)
+	@echo "[demo] DEMO_MODE=windsurf_mitm_fixture → D18 SLICE 82 (Windsurf IDE / Codeium MITM codec — EXPERIMENTAL, SOW only)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/windsurf_mitm_fixture/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               windsurf-mitm-fixture-runner (Rust 1.87 running"
+	@echo "[demo]               services/windsurf_codec example windsurf_mitm_fixture_demo)."
+	@echo "[demo]   Driver replays 6 synthetic .windsurf-rpc fixtures (simple,"
+	@echo "[demo]   tool calls, long streaming, error response, unknown wire"
+	@echo "[demo]   version, truncated body) through the codec pipeline + POSTs"
+	@echo "[demo]   each translated body to the counting stub."
+	@echo "[demo]   Asserts 4 reserves + 3 commits + 1 upstream error + 1"
+	@echo "[demo]   unsupported wire version + 1 decoder_skipped + byte-for-"
+	@echo "[demo]   byte preservation across the corpus."
+	@echo "[demo]   LEGAL POSTURE: This is NOT a real Windsurf binary demo."
+	@echo "[demo]   Codec is EXPERIMENTAL, gated to SOW customers. See"
+	@echo "[demo]   services/windsurf_codec/SOW.md + D18 design.md §1."
+	$(COMPOSE) -f windsurf_mitm_fixture/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),litellm_sdk_real)
 	@echo "[demo] DEMO_MODE=litellm_sdk_real → COV_D12 SLICE 7 (LiteLLM SDK monkey-patch shim)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -384,6 +406,15 @@ else ifeq ($(DEMO_MODE),cursor_mitm_fixture)
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure || \
 	  echo "[demo] outbox-closure skipped: cursor_mitm_fixture runs against the codec's in-memory mock sidecar; no rows land in canonical_events (see SOW.md §6)"
+else ifeq ($(DEMO_MODE),windsurf_mitm_fixture)
+	@echo "[demo] running windsurf-mitm-fixture-runner (Rust 1.87 — codec replay + counting stub)..."
+	$(COMPOSE) -f windsurf_mitm_fixture/docker-compose.yaml run --rm windsurf-mitm-fixture-runner
+	@echo "[demo] verifying D18 SLICE 82 (windsurf_mitm_fixture — legal posture + audit chain hygiene)..."
+	@$(MAKE) demo-verify-windsurf-mitm-fixture
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: windsurf_mitm_fixture runs against the codec's in-memory mock sidecar; no rows land in canonical_events (see SOW.md §6)"
 else ifeq ($(DEMO_MODE),litellm_sdk_real)
 	@echo "[demo] running litellm-sdk-shim-runner (Python 3.12 + litellm + install_shim)..."
 	$(COMPOSE) -f litellm_sdk_real/docker-compose.yaml run --rm litellm-sdk-shim-runner
@@ -742,6 +773,24 @@ demo-verify-dify-plugin-real:
 demo-verify-cursor-mitm-fixture:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_cursor_mitm_fixture.sql
 	@echo "[demo] D17 SLICE 9 cursor_mitm_fixture verification done"
+
+# D18 SLICE 82 (windsurf_mitm_fixture demo) verification. Mirrors the
+# cursor_mitm_fixture verification: the codec runs against the
+# in-memory mock sidecar lane, so the verify SQL asserts the
+# **negative** gates:
+#
+#   - Zero `server.codeium.com` / `windsurf-server.codeium.com`
+#     references in any audit_outbox payload.
+#   - Zero Codeium credential shapes (`sk-codeium-` / `wsf_` /
+#     `codeium_pat_` / `cdm_`) leaked into the audit chain.
+#
+# The runner's own stdout (`WINDSURF_MITM_FIXTURE_DEMO_OK` line) is
+# the positive gate; it asserts 4 reserves + 3 commits + 1 upstream
+# error + 1 unsupported wire version + 1 decoder_skipped + byte-for-
+# byte preservation and exits non-zero on any drift.
+demo-verify-windsurf-mitm-fixture:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_windsurf_mitm_fixture.sql
+	@echo "[demo] D18 SLICE 82 windsurf_mitm_fixture verification done"
 
 # COV_D12 SLICE 7 (litellm_sdk_real demo) verification. Mirrors the
 # dify_plugin_real layout: ledger-DB assertions in

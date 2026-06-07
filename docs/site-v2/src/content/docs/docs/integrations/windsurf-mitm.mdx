@@ -1,0 +1,218 @@
+---
+title: "Windsurf IDE MITM codec — EXPERIMENTAL, SOW only"
+description: >-
+  Reverse-engineered gRPC-Web codec that lets SpendGuard interpose
+  budget reservation on a Windsurf IDE Cascade session. EXPERIMENTAL,
+  gated to Enterprise SOW customers who signed the maintenance
+  addendum. Codec breaks whenever Codeium changes their wire
+  protocol. Customer accepts break-window risk. DO NOT SHIP IN GA
+  CONFIG.
+sidebar:
+  badge:
+    text: Experimental
+    variant: caution
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="danger" title="EXPERIMENTAL — SOW only">
+  **DO NOT SHIP AS A GA FEATURE.** This integration is gated to
+  Enterprise SOW customers who signed the maintenance addendum. The
+  codec breaks whenever Codeium changes their wire protocol. The
+  Customer accepts break-window risk as part of the SOW. See the
+  [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/SOW.md)
+  in the repo for the full legal posture.
+</Aside>
+
+> **Legal posture.** This codec implements
+> **reverse-engineered interoperability**. The wire format documented
+> in
+> [`PROTOCOL.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/PROTOCOL.md)
+> is observed from outside the Windsurf binary; no vendor source code
+> is included. SpendGuard customers who enable the codec do so under
+> an Enterprise SOW that explicitly acknowledges (a) the codec can
+> break whenever Codeium changes their wire protocol, and (b) the
+> customer is responsible for confirming their own Windsurf / Codeium
+> terms of service permit on-host MITM of outbound traffic.
+
+## Why the Windsurf IDE needs a custom adapter
+
+Windsurf IDE's managed Cascade mode does **not** call `api.openai.com`
+or `api.anthropic.com`. It calls `server.codeium.com` and
+`windsurf-server.codeium.com` over private gRPC-Web carrying
+Codeium's proprietary Cascade envelope. SpendGuard's standard
+adapters (model middleware, base-URL swap, OpenAI-compatible egress
+proxy) cannot see the messages — wire bytes are Codeium-internal
+protobuf, not OpenAI JSON.
+
+SOW customers who deploy Windsurf at the workforce scale and want
+SpendGuard budget gating on Cascade sessions accept the codec-break
+risk in exchange for full session coverage.
+
+## What the codec does
+
+```
+Windsurf IDE ──TLS→ SpendGuard egress proxy (D02 leaf w/ server.codeium.com SAN)
+                       │
+                       ├─ if Host == server.codeium.com AND feature `windsurf-mitm-experimental`
+                       │                                AND env `SPENDGUARD_EXPERIMENTAL_CODECS=1`
+                       │     │
+                       │     ▼
+                       │  services/windsurf_codec
+                       │     ├─ framing::GrpcWebReader  → DecodedFrame
+                       │     ├─ version::is_known       → fail-closed on unknown stamp
+                       │     ├─ envelope::CascadeRequest::decode → CascadeRequest
+                       │     ├─ translate::to_openai → CanonicalRequest
+                       │     │    └→ ledger::reserve → reservation_id
+                       │     ├─ upstream HTTPS to server.codeium.com (byte-perfect tee)
+                       │     ├─ envelope::CascadeResponseDelta::decode (server-streaming)
+                       │     ├─ translate::to_openai_chunks → CanonicalResponseChunks
+                       │     │    └→ ledger::commit_estimated / release
+                       │     └─ passthrough: byte-for-byte (codec never mutates wire bytes)
+                       │
+                       └─ else: D02 default pass-through (no codec)
+```
+
+The codec ships under the workspace feature flag
+`windsurf-mitm-experimental`. Default builds do not compile the codec
+crate; the feature must be explicitly opted into at the egress-proxy
+and CLI consumer level **AND** the env var
+`SPENDGUARD_EXPERIMENTAL_CODECS=1` must be set.
+
+## Four loud "EXPERIMENTAL" markers
+
+Per
+[`design.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D18_windsurf_mitm/design.md)
+§3, the codec carries four loud markers at all times. A reviewer
+rejects any diff that removes any of them.
+
+1. **Cargo manifest:**
+   [`services/windsurf_codec/Cargo.toml`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/Cargo.toml)
+   carries `[package.metadata.experimental]` with the exact `reason`
+   string `Reverse-engineered Windsurf / Codeium Cascade wire
+   protocol. Breaks on vendor release.`
+2. **Stderr banner:** every codec public entry point calls
+   `assert_experimental_banner_emitted()` which prints to stderr on
+   first use per process:
+   ```
+   [EXPERIMENTAL] windsurf-mitm codec active. Vendor protocol:
+   undocumented. Support tier: SOW only. SOW:
+   services/windsurf_codec/SOW.md. DO NOT SHIP IN GA CONFIG.
+   ```
+3. **Two-channel opt-in:** both
+   `SPENDGUARD_EXPERIMENTAL_CODECS=1` (env var) AND
+   `[experimental.windsurf_codec] enabled = true`
+   (`spendguard.toml`) are required. Either alone is insufficient.
+4. **SOW addendum doc:**
+   [`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/SOW.md)
+   carries `Status: EXPERIMENTAL — SOW only` above the fold,
+   `noindex: true` in the front-matter, and the literal warning
+   `DO NOT SHIP AS A GA FEATURE` as a top-level callout.
+
+## Break-Window SLA
+
+The SOW addendum fills in:
+
+| Field | Customer-side value |
+|-------|---------------------|
+| Codec-break detection window | typically ≤24 hours after Codeium release |
+| Codec-fix turnaround target | typically ≤5 business days |
+| Customer escalation contact | on-call channel |
+| SpendGuard escalation contact | SpendGuard customer-success on-call |
+| Windsurf client version range tested | min/max Windsurf IDE version at delivery |
+| Cascade wire-version range tested | default: `cascade.v2.0`, `cascade.v2.1` |
+
+On codec break, SpendGuard re-captures the latest Cascade wire bytes
+(per the customer's on-host capture workflow), refreshes the proto
+description + the fixture corpus, and republishes a feature-flagged
+build. The Customer redeploys within their own change-management
+window.
+
+## Sealed-secret credential model
+
+The Customer's Windsurf / Codeium session bearer tokens are
+end-to-end opaque to the codec. They flow through unmodified from
+the Windsurf IDE binary to `server.codeium.com`; the codec does NOT
+decrypt, log, or persist them. The audit chain redacts message-body
+fields beyond `model_name` / `max_tokens` per POST_GA_03's tenant
+redaction policy.
+
+The codec's test suite gates against any of these credential
+prefixes leaking into committed fixture payloads:
+
+- `sk-codeium-`
+- `wsf_`
+- `codeium_pat_`
+- `cdm_`
+
+The codec introduces NO new long-lived secrets. The D02 trust store
+covers `server.codeium.com` once the leaf cert SAN is extended for
+the SOW deployment.
+
+## Operator threat model
+
+The codec is **best-effort gating**, not a hard policy gate. When
+the codec cannot understand the wire shape (because Codeium changed
+it), the egress proxy **emits `decoder_skipped` and lets the call
+pass through**. This is the same posture the codec uses for unknown
+Cascade model strings. Failures are loud (decode-error metric +
+stderr banner + structured log) but they do NOT block the
+Customer's Cascade session.
+
+When the wire-version stamp is outside the registry (unknown
+Cascade release), the codec fails **closed** at the decode boundary
+with `windsurf_wire_version_unsupported` — the request is NOT
+forwarded; the IDE sees the synthetic 503.
+
+The full threat-model table is in
+[`SOW.md`](https://github.com/m24927605/agentic-spendguard/blob/main/services/windsurf_codec/SOW.md)
+§4.
+
+## Demo
+
+A fixture-based demo proves the codec correctness end-to-end against
+six synthetic `.windsurf-rpc` fixtures (simple / tool calls / long
+streaming / error response / unknown wire version / truncated body).
+The demo does NOT boot the Windsurf IDE binary and does NOT touch
+`server.codeium.com`:
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=windsurf_mitm_fixture
+```
+
+The demo's
+[`README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/windsurf_mitm_fixture/README.md)
+documents the layered pipeline (framing decode → version gate →
+envelope decode → translation → mock sidecar reserve+commit →
+byte-for-byte preservation → counting-stub POST) and the deviations
+from a hypothetical "boot the Windsurf binary" demo.
+
+The Customer's deployment exercises the same codec against live
+Cascade traffic with their own validated capture path. This demo
+proves the codec correctness in isolation.
+
+## Limitations
+
+- **Live Windsurf traffic stays out of CI.** Recorded fixtures only.
+  Real-capture evidence lives in SOW-customer-side artifacts.
+- **No Windsurf non-Cascade surfaces.** Tab autocomplete and inline
+  diff are out of scope; only the managed-Cascade surface is gated.
+- **No Codeium standalone clients.** Only Windsurf IDE Cascade is
+  covered. Bare-Codeium API clients use a different upstream
+  pattern.
+- **Best-effort gating on body-decode failures.** Unknown body
+  shapes on known wire versions emit `decoder_skipped` and pass
+  through; the codec is loud about it but it does not block the
+  Customer's Cascade session.
+- **Fail-closed gating on wire-version drift.** Unknown wire
+  versions (outside the registry) return 503 with
+  `windsurf_wire_version_unsupported` — different from the body-
+  decode failure path.
+- **Cursor codec is a separate D17** — out of scope for D18.
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in 5 minutes
+- [Contract YAML reference](../../contracts/yaml/) — author allow/stop rules
+- Cursor IDE MITM codec (separate D17): [Cursor MITM](../cursor-mitm/)
+- Other adapter integrations: [Pydantic-AI](../pydantic-ai/) · [LangChain](../langchain/) · [Kong AI Gateway](../kong-ai-gateway/) · [Dify](../dify/) · [LiteLLM SDK shim](../litellm-sdk-shim/)

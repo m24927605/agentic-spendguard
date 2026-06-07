@@ -33,5 +33,6 @@ exclude = [
   "services/ttl_sweeper",
   "services/usage_poller",
   "services/webhook_receiver",
+  "services/windsurf_codec",
 ]
 resolver = "2"
