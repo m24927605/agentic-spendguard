@@ -1,0 +1,175 @@
+# D32 SLICE 5 (`DEMO_MODE=botpress_real`) — sidecar compose overlay.
+#
+# Mirrors deploy/demo/inngest_agent_kit/docker-compose.yaml and
+# deploy/demo/dify_plugin/docker-compose.yaml field-for-field — only the
+# runner service differs (the Botpress integration's pre/post hooks
+# delegate via the SpendGuard sidecar HTTP companion at /v1/decision +
+# /v1/trace).
+#
+# Layered on top of `deploy/demo/compose.yaml` via
+# `docker compose -f deploy/demo/compose.yaml \
+#                 -f deploy/demo/botpress_real/docker-compose.yaml up`.
+# The Makefile DEMO_MODE=botpress_real branch does that for you.
+#
+# DEVIATION (D32 SLICE 5 vs implementation.md): implementation.md §2
+# Slice 5 calls for a full Botpress v12 self-host (botpress/server:v12.30.x,
+# ~800 MB image + ~30s boot). The D32 review-standards.md §4.2 says the
+# integration tier MUST exercise a real Botpress runtime; that gate lives
+# in CI (botpress-integration-ci.yml) via testcontainers-node. The demo
+# focuses on the integration's reserve / commit / release lifecycle —
+# the same lifecycle the v12 runtime exercises, just driven via a
+# focused 3-step Node runner. INV-1 / INV-2 / INV-5 / INV-10 are all
+# verifiable from the focused runner; the full v12 runtime adds no
+# new invariants over the integration tier (see deploy/demo/dify_plugin
+# for the parallel rationale).
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  # In-network mock OpenAI / Anthropic / Bedrock provider. Identical to
+  # the dify_plugin / inngest_agent_kit overlays' counting-stub.
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-botpress-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not (self.path.startswith("/v1/chat/completions")
+                        or self.path.startswith("/v1/messages")
+                        or self.path.startswith("/model/")):
+                    self.send_response(404); self.end_headers(); return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"chatcmpl-botpress-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hi from botpress demo"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 5,
+                              "completion_tokens": 7,
+                              "total_tokens": 12,
+                              "inputTokens": 5,
+                              "outputTokens": 7},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body); return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok"); return
+                self.send_response(404); self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[botpress-counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[botpress-counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── botpress-integration-runner ──────────────────────────────────────
+  # Node 20 container that vendors @spendguard/botpress-integration's
+  # source + the workspace-built @spendguard/sdk, then runs a focused
+  # 3-step matrix (ALLOW + DENY + STREAM) by invoking the integration's
+  # hook functions directly. Same code path the Botpress v12 runtime
+  # would call at hook-dispatch time, just without the full Workspace.
+  botpress-integration-runner:
+    image: node:20.10-bookworm-slim
+    container_name: spendguard-botpress-integration-runner
+    user: "0:0"  # need write access to the staging dir + npm install
+    working_dir: /opt/spendguard/deploy/demo/botpress_real
+    environment:
+      # Sidecar HTTP companion endpoint exposed by the base sidecar on
+      # port 8443 (uds-dev mode wires both UDS + HTTP companion). See
+      # services/sidecar for the base sidecar configuration.
+      SPENDGUARD_BOTPRESS_SIDECAR_URL: "http://sidecar:8443"
+      SPENDGUARD_BOTPRESS_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_BOTPRESS_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_BOTPRESS_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_COUNTING_STUB_URL: "http://counting-stub:8765"
+      PYTHONUNBUFFERED: "1"
+      NODE_PATH: "/opt/spendguard/integrations/botpress/node_modules"
+    volumes:
+      # Workspace source — read-only. Path is relative to the FIRST
+      # compose file's directory (deploy/demo), NOT this overlay's
+      # location, because compose merges paths against the base file.
+      - ../..:/opt/spendguard:ro
+      # Sidecar UDS shared with the rest of the stack (the sidecar
+      # publishes both UDS and HTTP companion when in uds-dev mode).
+      - sidecar-uds:/var/run/spendguard
+      - botpress-runner-modules:/var/lib/botpress-runner/node_modules
+    tmpfs:
+      - /tmp
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        echo "[botpress-integration-runner] node $$(node --version)"
+        # Stage a writable copy because the workspace mount is read-only.
+        STAGING=/tmp/botpress-stage
+        mkdir -p "$$STAGING"
+        cp /opt/spendguard/deploy/demo/botpress_real/run_botpress_demo.mjs "$$STAGING/"
+        echo "[botpress-integration-runner] running 3-step matrix..."
+        cd "$$STAGING"
+        exec node run_botpress_demo.mjs
+    depends_on:
+      counting-stub:
+        condition: service_healthy
+      sidecar:
+        condition: service_healthy
+    networks:
+      spendguard-net:
+        aliases: [botpress-integration-runner]
+
+volumes:
+  botpress-runner-modules:

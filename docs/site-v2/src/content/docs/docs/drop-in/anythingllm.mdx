@@ -1,18 +1,148 @@
 ---
-title: "AnythingLLM with SpendGuard"
+title: "AnythingLLM + SpendGuard (drop-in via Generic OpenAI provider)"
 description: >-
-  Drop SpendGuard into AnythingLLM by setting the Custom OpenAI-compatible
-  base URL in the admin UI to a running SpendGuard egress proxy. Recipe
-  in progress; the exact UI step is on the drop-in landing.
-pagefind: false
+  Point AnythingLLM's Generic OpenAI provider at a running SpendGuard egress
+  proxy. Every chat is reserved before the call and committed after; no
+  AnythingLLM code change, no fork, no plugin install.
 ---
 
-## Coming soon
+AnythingLLM ([Mintplex Labs](https://anythingllm.com/), MIT, 30+ providers,
+desktop + Docker + self-hosted) ships a **Generic OpenAI** provider whose
+Base URL field accepts any OpenAI-compatible endpoint. SpendGuard exposes
+an OpenAI-compatible endpoint at `/v1/chat/completions`. Pointing the
+former at the latter puts SpendGuard's pre-call budget gate and
+KMS-signed audit chain in the request path of every AnythingLLM workspace
+chat. Five minutes, one panel, one verification step.
 
-The full walkthrough lands with D33 (AnythingLLM recipe). In the
-meantime, the setting to use is row 10 of the
-[drop-in landing matrix](../#find-your-tool): in the AnythingLLM admin
-UI, set the Custom OpenAI-compatible Base URL to
-`http://localhost:9000/v1`.
+## Prerequisites
 
-Source: [AnythingLLM custom OpenAI base URL](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url).
+- AnythingLLM running locally (Docker, Desktop, or self-hosted). The
+  pinned image `mintplexlabs/anythingllm:1.8.4` is the version this
+  recipe was verified against.
+- A running SpendGuard egress proxy reachable from AnythingLLM. The
+  fastest path is `make demo-up DEMO_MODE=proxy` from a clone of the
+  SpendGuard repo (binds `http://localhost:9000/v1`). Production
+  deployments use the [Helm chart](../../deployment/helm/).
+- One real OpenAI / Anthropic / Bedrock / Vertex / Azure OpenAI key —
+  SpendGuard forwards to the real upstream and ignores the inbound
+  `Authorization` header.
+
+## Step 1: open the LLM Preference panel
+
+In AnythingLLM's left rail, click **Settings → LLM Preference**. The
+panel shows a grid of provider tiles.
+
+## Step 2: pick the Generic OpenAI provider
+
+Scroll to **Generic OpenAI** (not "OpenAI" — that tile targets
+`api.openai.com` directly and does not expose a Base URL field). Click
+the **Generic OpenAI** tile.
+
+## Step 3: fill in the four fields
+
+| Field | Value | Notes |
+|---|---|---|
+| **Base URL** | `http://localhost:9000/v1` | Or your SpendGuard egress proxy URL. The trailing `/v1` is required — AnythingLLM appends `/chat/completions` to whatever you paste. |
+| **API Key** | `sk-anythingllm-spendguard` | Any non-empty string. SpendGuard's egress proxy ignores this and substitutes the upstream credential from its own config. |
+| **Chat Model Name** | `gpt-4o-mini` | The model identifier the real upstream expects. SpendGuard does not rewrite this. |
+| **Token context window** | `128000` | AnythingLLM-side rate-limit hint only. SpendGuard's contract decides reservation size. |
+
+Click **Save Settings**.
+
+## Step 4: send a test chat
+
+Open any Workspace and send a message. AnythingLLM POSTs to
+SpendGuard's `/v1/chat/completions`; SpendGuard calls the contract,
+reserves the predicted tokens, forwards to the real upstream, and on
+response commits the actual usage.
+
+## Verify end-to-end
+
+```bash
+# From a clone of github.com/m24927605/agentic-spendguard:
+export OPENAI_API_KEY=sk-...
+make demo-up DEMO_MODE=anythingllm_real
+```
+
+The smoke boots SpendGuard plus AnythingLLM, configures the Generic
+OpenAI provider through AnythingLLM's `/api/v1/system/update-env`
+endpoint, sends one chat, and asserts the audit chain in Postgres
+shows one `reserve` row and one `commit_estimated` row for the call.
+A successful run prints `[anythingllm-smoke] OK: reserve+commit
+verified`.
+
+Want the full file set without cloning? See
+[`examples/anythingllm/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/anythingllm).
+Drop the env file and update-env JSON into your existing AnythingLLM
+deployment, and the panel comes up pre-configured.
+
+## Deployment notes
+
+### Docker
+
+The Docker image is `mintplexlabs/anythingllm:1.8.4`. Point its
+`STORAGE_DIR` at a host volume so settings persist across restarts:
+
+```bash
+docker run -d \
+  -p 3001:3001 \
+  -v anythingllm-storage:/app/server/storage \
+  -e STORAGE_DIR=/app/server/storage \
+  mintplexlabs/anythingllm:1.8.4
+```
+
+### Desktop
+
+AnythingLLM Desktop is GUI-only. Follow Steps 1-4 above; the "Verify
+end-to-end" smoke does not apply (Desktop ships no admin API). To
+confirm SpendGuard sees the call, open the SpendGuard dashboard at
+`http://localhost:8090` and watch the audit feed during your next chat.
+
+### AnythingLLM Cloud
+
+AnythingLLM Cloud cannot reach a `localhost` SpendGuard. Deploy
+SpendGuard with the [Helm chart](../../deployment/helm/) and use the
+public Kubernetes Service URL (or your sidecar-injected hostname) as
+the Base URL.
+
+## Gotchas
+
+- **Trailing `/v1` is mandatory.** AnythingLLM appends
+  `/chat/completions` to your Base URL. Omitting `/v1` yields
+  `http://localhost:9000/chat/completions`, which the egress proxy
+  does not match.
+- **Generic OpenAI, not OpenAI.** The plain `OpenAI` tile in the
+  provider grid does not expose a Base URL field. The **Generic
+  OpenAI** tile is the only one that does.
+- **The `API Key` field is sent verbatim but discarded.** SpendGuard's
+  egress proxy ignores the inbound `Authorization` header and
+  substitutes the upstream credential from its own config. The
+  AnythingLLM-side key exists only to satisfy AnythingLLM's
+  "field non-empty" validation.
+- **Streaming works.** AnythingLLM uses Server-Sent Events for
+  streaming responses; the SpendGuard egress proxy injects
+  `stream_options.include_usage=true` and commits on the terminating
+  `[DONE]` event.
+- **One Workspace, one provider.** AnythingLLM applies the LLM
+  Preference globally across Workspaces. To split traffic between
+  SpendGuard-gated and direct calls, run two AnythingLLM instances.
+
+## What works today
+
+| Surface | Status |
+|---|---|
+| Workspace chat (non-streaming) | Verified end-to-end |
+| Workspace chat (streaming SSE) | Verified end-to-end |
+| OpenAI / Anthropic / Bedrock / Vertex / Azure OpenAI upstreams | Routes through SpendGuard's multi-provider matrix |
+| AnythingLLM Embedding provider | Out of scope (no SpendGuard gate on embeddings) |
+| Agent-Skills, voice, multimodal | Out of scope |
+| AnythingLLM Desktop verification harness | Out of scope (no admin API) |
+
+## What next
+
+- [Set a real budget on Kubernetes](../../deployment/helm/)
+- [Open the SpendGuard dashboard](../../operations/dashboard/)
+- [Cover the rest of your stack (Pattern 3 install)](../../deployment/docker-compose/)
+- Back to the [drop-in landing](../)
+
+**Maintainer docs:** [AnythingLLM — Custom OpenAI Base URL](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url)

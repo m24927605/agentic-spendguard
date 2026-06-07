@@ -1,0 +1,199 @@
+# D31 SLICE 2 — Coze Studio + SpendGuard smoke stack.
+#
+# Standalone compose for the curl-driven smoke harness (smoke.sh). Boots:
+#
+#   coze-postgres     Coze Studio's metadata store (separate DB name
+#                     `coze_db` per INV-8 — never co-tenants with
+#                     spendguard_ledger).
+#   coze-redis        Coze Studio's job queue.
+#   coze-studio       Coze Studio itself. Pinned by SHA256 digest per
+#                     INV-9; bumps go through this same harness as the
+#                     canary.
+#   spendguard-sidecar Sidecar built from `services/sidecar/`. Runs in
+#                     HTTP companion mode bound to 0.0.0.0:8443 so the
+#                     smoke (and a real Coze workspace) can reach the
+#                     companion endpoint.
+#   spendguard-postgres  Ledger store. Separate volume + DB name
+#                     (`spendguard_ledger`) so the smoke can assert the
+#                     audit row without colliding with the coze DB.
+#   pki-init          One-shot init container that mints the mTLS
+#                     bundle: a self-signed CA + sidecar server cert +
+#                     a Coze-side client cert (writes to a shared
+#                     volume so both the sidecar and the smoke
+#                     harness can read).
+#
+# This file is for the smoke harness only. The headline DEMO_MODE=
+# coze_studio_real demo lives at deploy/demo/coze_studio/ and overlays
+# the standard compose.yaml — that path runs against the demo's shared
+# postgres + sidecar so a single audit chain covers all demo modes.
+name: spendguard-coze-smoke
+
+services:
+  # ── pki-init ─────────────────────────────────────────────────────────
+  # Mints a self-signed CA + 2 leaf certs into /pki/. Writes the same 3
+  # files smoke.sh and the snippet point at:
+  #   /pki/spendguard-ca.pem     CA bundle
+  #   /pki/sidecar-server.pem    sidecar server cert (CN=spendguard-sidecar)
+  #   /pki/sidecar-server.key    server key
+  #   /pki/coze-client.pem       Coze-side client cert
+  #   /pki/coze-client.key       client key
+  pki-init:
+    image: alpine:3.20
+    container_name: spendguard-coze-pki-init
+    user: "0:0"
+    command:
+      - sh
+      - -c
+      - |
+        set -euo pipefail
+        apk add --no-cache openssl >/dev/null
+        cd /pki
+        if [ -f spendguard-ca.pem ]; then
+          echo "[pki-init] bundle already present, skipping"
+          exit 0
+        fi
+        # 1. CA
+        openssl genrsa -out spendguard-ca.key 4096
+        openssl req -x509 -new -nodes -key spendguard-ca.key -sha256 \
+          -days 30 -out spendguard-ca.pem \
+          -subj "/CN=spendguard-coze-smoke-ca"
+        # 2. sidecar server cert
+        openssl genrsa -out sidecar-server.key 2048
+        openssl req -new -key sidecar-server.key \
+          -out sidecar-server.csr -subj "/CN=spendguard-sidecar"
+        cat > sidecar-server.ext <<EOF
+        subjectAltName = DNS:spendguard-sidecar,DNS:localhost
+        EOF
+        openssl x509 -req -in sidecar-server.csr -CA spendguard-ca.pem \
+          -CAkey spendguard-ca.key -CAcreateserial \
+          -out sidecar-server.pem -days 30 -sha256 \
+          -extfile sidecar-server.ext
+        # 3. Coze-side client cert
+        openssl genrsa -out coze-client.key 2048
+        openssl req -new -key coze-client.key -out coze-client.csr \
+          -subj "/CN=coze-studio-client"
+        openssl x509 -req -in coze-client.csr -CA spendguard-ca.pem \
+          -CAkey spendguard-ca.key -CAcreateserial \
+          -out coze-client.pem -days 30 -sha256
+        chmod 0444 /pki/*.pem /pki/*.key
+        echo "[pki-init] bundle ready in /pki"
+    volumes:
+      - coze-smoke-pki:/pki
+
+  # ── spendguard-postgres ──────────────────────────────────────────────
+  spendguard-postgres:
+    image: postgres:16
+    container_name: spendguard-coze-postgres
+    environment:
+      - POSTGRES_USER=spendguard
+      - POSTGRES_PASSWORD=spendguard
+      - POSTGRES_DB=spendguard_ledger
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U spendguard -d spendguard_ledger"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - coze-smoke-ledger:/var/lib/postgresql/data
+
+  # ── coze-postgres ────────────────────────────────────────────────────
+  # Separate Postgres container — Coze and SpendGuard ledger DBs MUST
+  # stay isolated per INV-8 (no `spendguard_ledger` co-tenancy with
+  # `coze_db`). Separate volume guarantees no shared state on reset.
+  coze-postgres:
+    image: postgres:16
+    container_name: spendguard-coze-cozedb
+    environment:
+      - POSTGRES_USER=coze
+      - POSTGRES_PASSWORD=coze
+      - POSTGRES_DB=coze_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coze -d coze_db"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - coze-smoke-cozedb:/var/lib/postgresql/data
+
+  # ── coze-redis ───────────────────────────────────────────────────────
+  coze-redis:
+    image: redis:7-alpine
+    container_name: spendguard-coze-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  # ── coze-studio ──────────────────────────────────────────────────────
+  # Pinned by SHA256 digest per INV-9 / G1 §3.2.1. The digest below is a
+  # placeholder for a future pinned bump; the smoke.sh harness short-
+  # circuits when `COZE_IMAGE_AVAILABLE=0` (CI / first-run) so the
+  # harness gates the rest of the topology without requiring a fixed
+  # 1.5GB pull on every workstation. Set COZE_IMAGE_AVAILABLE=1 when
+  # pulling a known-good Coze digest.
+  coze-studio:
+    # The digest placeholder is a load-bearing literal: pin-and-bump
+    # workflow replaces this string when promoting a new Coze release.
+    image: ghcr.io/coze-dev/coze-studio@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    container_name: spendguard-coze-studio
+    depends_on:
+      coze-postgres:
+        condition: service_healthy
+      coze-redis:
+        condition: service_healthy
+      pki-init:
+        condition: service_completed_successfully
+    environment:
+      - COZE_DB_HOST=coze-postgres
+      - COZE_DB_NAME=coze_db
+      - COZE_DB_USER=coze
+      - COZE_DB_PASSWORD=coze
+      - COZE_REDIS_HOST=coze-redis
+      - COZE_REDIS_PORT=6379
+    volumes:
+      - coze-smoke-pki:/etc/coze:ro
+    profiles:
+      # `coze` profile is opt-in; smoke.sh stages this only when the
+      # operator confirms COZE_IMAGE_AVAILABLE=1. Default smoke run
+      # exercises the companion contract without the heavy image pull.
+      - coze
+
+  # ── spendguard-sidecar ───────────────────────────────────────────────
+  # Built from local source; HTTP companion mode bound to 8443. mTLS
+  # enforced against the pki-init bundle.
+  spendguard-sidecar:
+    build:
+      context: ../..
+      dockerfile: services/sidecar/Dockerfile
+    image: spendguard-sidecar:coze-smoke
+    container_name: spendguard-coze-sidecar
+    depends_on:
+      spendguard-postgres:
+        condition: service_healthy
+      pki-init:
+        condition: service_completed_successfully
+    command:
+      - "--http-companion-bind=0.0.0.0:8443"
+      - "--http-companion-server-cert=/pki/sidecar-server.pem"
+      - "--http-companion-server-key=/pki/sidecar-server.key"
+      - "--http-companion-client-ca=/pki/spendguard-ca.pem"
+    environment:
+      - SPENDGUARD_LEDGER_URL=postgres://spendguard:spendguard@spendguard-postgres:5432/spendguard_ledger
+      - SPENDGUARD_LOG_LEVEL=info
+      - SPENDGUARD_INTEGRATION_TAG=coze_studio
+    volumes:
+      - coze-smoke-pki:/pki:ro
+    ports:
+      # Smoke runs from the host so 8443 is bound to localhost.
+      - "127.0.0.1:8443:8443"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS --max-time 2 http://localhost:9090/healthz || exit 1"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+volumes:
+  coze-smoke-pki:
+  coze-smoke-ledger:
+  coze-smoke-cozedb:

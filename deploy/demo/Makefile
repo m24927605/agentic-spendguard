@@ -48,6 +48,18 @@ else ifeq ($(DEMO_MODE),agent_real_openai_agents_proxy)
 	$(COMPOSE) up -d --build \
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar egress-proxy
+else ifeq ($(DEMO_MODE),anythingllm_real)
+	@echo "[demo] DEMO_MODE=anythingllm_real → D33 SLICE 1 (AnythingLLM drop-in recipe)."
+	@echo "[demo]   Base stack: proxy mode + AnythingLLM (mintplexlabs/anythingllm:1.8.4)."
+	@echo "[demo]   Smoke runner configures the Generic OpenAI provider via"
+	@echo "[demo]     /api/v1/system/update-env, sends one Workspace chat through"
+	@echo "[demo]     SpendGuard, then asserts reserve + commit_estimated in the"
+	@echo "[demo]     ledger audit chain. Real OpenAI gpt-4o-mini round-trip."
+	@echo "[demo]   Pattern 2 (base-URL redirect) — no AnythingLLM code change."
+	@test -n "$$OPENAI_API_KEY" || (echo "[demo] FATAL: OPENAI_API_KEY required for DEMO_MODE=anythingllm_real" >&2; exit 8)
+	$(COMPOSE) --profile anythingllm_real up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar egress-proxy anythingllm
 else ifeq ($(DEMO_MODE),cost_advisor)
 	@echo "[demo] DEMO_MODE=cost_advisor → postgres + ledger + canonical-ingest + sidecar"
 	@echo "[demo]                          + bundle-registry + dashboard."
@@ -187,6 +199,48 @@ else ifeq ($(DEMO_MODE),dify_plugin_real)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),botpress_real)
+	@echo "[demo] DEMO_MODE=botpress_real → D32 SLICE 5 (Botpress Integration SDK)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/botpress_real/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               botpress-integration-runner (Node 20 exercising"
+	@echo "[demo]               the @spendguard/botpress-integration hook"
+	@echo "[demo]               lifecycle directly via the D09 HTTP companion)."
+	@echo "[demo]   Driver issues 3 calls (ALLOW + DENY + STREAM) through the"
+	@echo "[demo]   integration's reserve/commit/release path and asserts"
+	@echo "[demo]   INV-1 (DENY skips upstream) + INV-5 (real usage commits)."
+	@echo "[demo]   Demo scope: focused on Botpress integration SDK boundary —"
+	@echo "[demo]   full Botpress v12 self-host (~800 MB image, ~30s boot) is"
+	@echo "[demo]   exercised in CI via testcontainers-node (see deviation"
+	@echo "[demo]   note in deploy/demo/botpress_real/docker-compose.yaml)."
+	$(COMPOSE) -f botpress_real/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),coze_studio_real)
+	@echo "[demo] DEMO_MODE=coze_studio_real → COV_D31 SLICE 3 (Coze Studio Model Provider)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/coze_studio/compose.override.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               coze-postgres + coze-redis (Coze metadata —"
+	@echo "[demo]               separate DB per INV-8) +"
+	@echo "[demo]               coze-seed (idempotent ledger seed) +"
+	@echo "[demo]               coze-runner (Python 3.12 demo driver)."
+	@echo "[demo]   Driver issues 3 companion-endpoint calls (ALLOW + DENY +"
+	@echo "[demo]   STREAM) and asserts INV-1 (DENY skips upstream) + INV-2"
+	@echo "[demo]   (strict-order) + INV-5 (end-of-stream commit)."
+	@echo "[demo]   Coze Studio container is profiled-off by default (~1.5GB"
+	@echo "[demo]   image); the companion contract is the proof surface."
+	@echo "[demo]   Set COMPOSE_PROFILES=coze to bring up the full Coze UI."
+	@test -n "$$OPENAI_API_KEY" || (echo "[demo] FATAL: OPENAI_API_KEY required for DEMO_MODE=coze_studio_real" >&2; exit 8)
+	$(COMPOSE) -f coze_studio/compose.override.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub \
+	    coze-postgres coze-redis coze-seed
 else ifeq ($(DEMO_MODE),cursor_mitm_fixture)
 	@echo "[demo] DEMO_MODE=cursor_mitm_fixture → D17 SLICE 9 (Cursor IDE MITM codec — EXPERIMENTAL, SOW only)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -585,6 +639,13 @@ else ifeq ($(DEMO_MODE),agent_real_openai_agents_proxy)
 	    --env SPENDGUARD_PROXY_BASE_URL=http://egress-proxy:9000/v1 \
 	    demo
 	@echo "[demo] PASS — 1-env-var launch claim verified against real openai-agents SDK"
+else ifeq ($(DEMO_MODE),anythingllm_real)
+	@echo "[demo] running AnythingLLM Generic OpenAI provider smoke (D33)..."
+	@echo "[demo]   - configures AnythingLLM via /api/v1/system/update-env"
+	@echo "[demo]   - sends one Workspace chat through the SpendGuard egress proxy"
+	@echo "[demo]   - asserts reserve + commit_estimated in the ledger audit chain"
+	$(COMPOSE) --profile anythingllm_real run --rm anythingllm-smoke
+	@echo "[demo] PASS — AnythingLLM drop-in via Generic OpenAI provider verified"
 else ifeq ($(DEMO_MODE),cost_advisor)
 	@echo "[demo] running cost_advisor demo container (full closed loop)..."
 	$(COMPOSE) run --rm cost-advisor-demo
@@ -621,6 +682,22 @@ else ifeq ($(DEMO_MODE),dify_plugin_real)
 	$(COMPOSE) -f dify_plugin/docker-compose.yaml run --rm dify-plugin-runner
 	@echo "[demo] verifying COV_D10 SLICE 7 (dify_plugin_real ALLOW + DENY + STREAM)..."
 	@$(MAKE) demo-verify-dify-plugin-real
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),botpress_real)
+	@echo "[demo] running botpress-integration-runner (Node 20 + @spendguard/botpress-integration)..."
+	$(COMPOSE) -f botpress_real/docker-compose.yaml run --rm botpress-integration-runner
+	@echo "[demo] verifying D32 SLICE 5 (botpress_real ALLOW + DENY + STREAM)..."
+	@$(MAKE) demo-verify-botpress-real
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),coze_studio_real)
+	@echo "[demo] running coze-runner (Python 3.12 + companion endpoint driver)..."
+	$(COMPOSE) -f coze_studio/compose.override.yaml run --rm coze-runner
+	@echo "[demo] verifying COV_D31 SLICE 3 (coze_studio_real ALLOW + DENY + STREAM)..."
+	@$(MAKE) demo-verify-coze-studio-real
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure
@@ -876,6 +953,9 @@ else ifeq ($(DEMO_MODE),envoy_extproc)
 else ifeq ($(DEMO_MODE),kong_gateway_real)
 	@echo "[demo] verifying D09 SLICE 7 (kong_gateway_real ALLOW + DENY + STREAM)..."
 	@$(MAKE) demo-verify-kong-gateway-real
+else ifeq ($(DEMO_MODE),anythingllm_real)
+	@echo "[demo] DEMO_MODE=anythingllm_real — smoke runner already asserted reserve + commit."
+	@echo "[demo] Skipping demo-verify-step7 (Mock LLM token-count assertions do not apply to a real OpenAI round-trip)."
 else ifneq (,$(findstring agent_real,$(DEMO_MODE)))
 	@echo "[demo] DEMO_MODE=$(DEMO_MODE) — skipping demo-verify-step7."
 	@echo "[demo] verify_step7.sql asserts hardcoded Mock LLM token counts (committed=42)"
@@ -1111,6 +1191,45 @@ demo-verify-dify-plugin-real:
 		   RAISE NOTICE 'COV_D10 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
 		 END; \$$\$$;"
 	@echo "[demo] COV_D10 SLICE 7 dify_plugin_real verification done"
+
+# D32 SLICE 5 (botpress_real demo) verification. Mirrors the
+# dify_plugin_real layout: ledger-DB assertions in
+# verify_step_botpress_real.sql (6 gates per review-standards.md §5.7)
+# covering integration-tagged decision count, DENY presence, commit row,
+# INV-1 (no upstream hits on DENY), streaming row, and canonical_events
+# forwarding.
+demo-verify-botpress-real:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_botpress_real.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 2 THEN \
+		     RAISE EXCEPTION 'D32_BOTPRESS_GATE: canonical_events.decision >= 2 expected (ALLOW + DENY), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'D32_BOTPRESS_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'D32_BOTPRESS CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@echo "[demo] D32 SLICE 5 botpress_real verification done"
+
+# D31 SLICE 3 (coze_studio_real demo) verification. Mirrors the
+# dify_plugin_real layout: ledger-DB assertions in
+# verify_step_coze_studio_real.sql (A1..A7) covering the 7
+# implementation.md §2 Slice 3 SQL gates — count + DENY + commit +
+# streaming + INV-1 stub-hits + canonical-events soft-check + audit
+# chain monotonicity (with a fallback when spendguard_verify_chain is
+# unavailable in this DB).
+demo-verify-coze-studio-real:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_coze_studio_real.sql
+	@echo "[demo] COV_D31 SLICE 3 coze_studio_real verification done"
 
 # D17 SLICE 9 (cursor_mitm_fixture demo) verification. The codec runs
 # against the in-memory mock sidecar lane (per SOW.md §6 legal posture

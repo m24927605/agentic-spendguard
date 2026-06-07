@@ -1,0 +1,137 @@
+---
+title: "Botpress Integration SDK — @spendguard/botpress-integration"
+description: >-
+  Install Agentic SpendGuard as a first-class Botpress integration. The
+  `beforeAiGeneration` hook reserves budget before Botpress dispatches the
+  upstream model HTTP; the `afterAiGeneration` hook commits real usage
+  end-of-call. Throws Botpress RuntimeError on DENY / DEGRADE / config
+  errors; fail-closed by default.
+---
+
+
+> [Botpress](https://botpress.com/) ships an Integration SDK with
+> `beforeAiGeneration` / `afterAiGeneration` hooks the runtime fires
+> before and after every model call. SpendGuard ships as
+> `@spendguard/botpress-integration` — install via `botpress integrations
+> push` on self-hosted Botpress v12 (or via the marketplace on Botpress
+> Cloud, pending approval). The integration pre-reserves spend against
+> the SpendGuard sidecar HTTP companion, lets Botpress own the upstream
+> HTTP, and commits real usage from `event.payload.usage` post-call.
+> Fail-closed default: a DENY or DEGRADE verdict raises a Botpress
+> `RuntimeError` with a stable `code` field so the conversation
+> deterministically surfaces the budget signal.
+
+## Why SpendGuard for Botpress
+
+Botpress's hook surface gives you the cleanest pre / post-model-call
+extension point in the Category D plugin ecosystem. A bot calling OpenAI
+/ Anthropic / Bedrock today has no pre-call dollar gate, no reservation,
+no signed audit. The SpendGuard integration drops in and:
+
+- Reserves projected spend against the operator-configured budget
+  **before** Botpress dispatches the upstream HTTP. DENY skips upstream
+  entirely — the conversation surfaces `BUDGET_DENIED` and zero provider
+  tokens are charged.
+- Commits real `inputTokens + outputTokens` from the upstream usage
+  frame, end-of-hook. Missing usage falls back to the estimator snapshot
+  and emits a WARN.
+- Catches sidecar misconfig at integration **register** time via a
+  1-token reserve+release probe (`validateConfiguration`), so operators
+  see SpendGuard wiring errors on the integration form save rather than
+  the first conversation message.
+
+## Install (self-hosted Botpress v12)
+
+```bash
+# 1. Install the integration package + peer deps.
+pnpm add @spendguard/botpress-integration @spendguard/sdk @botpress/sdk
+
+# 2. Push the integration to your Botpress v12 server.
+botpress integrations push
+```
+
+Then, from the Botpress Studio UI, open the integration's configuration
+form and set:
+
+- `sidecarUrl` — the SpendGuard sidecar HTTP companion URL (e.g.
+  `http://sidecar:8443` in a sibling-pod / sibling-container topology).
+- `spendguardBudgetId` — UUID of the SpendGuard budget to charge.
+- `spendguardWindowInstanceId` — UUID of the active window instance.
+- `upstreamProvider` — one of `openai`, `anthropic`, `bedrock`.
+- `tenantId` — operator tenant identifier.
+- Optional `tlsCertPath` / `tlsKeyPath` / `tlsRootCaPath` — mTLS
+  material paths when the sidecar enforces client-cert auth.
+
+Saving the form triggers the `register` lifecycle, which issues a 1-token
+reserve+release probe against the sidecar. A successful save means the
+SpendGuard wiring is end-to-end live; a failed save surfaces the error
+code directly in the form.
+
+## Install (Botpress Cloud)
+
+Marketplace push (`botpress integrations push --marketplace`) is pending
+approval; the sideload via `botpress integrations push` is the v1
+invariant and works on Cloud through the SDK upload path.
+
+## Behaviour matrix
+
+| Path                                       | What happens                                                                                                                |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------- |
+| Sidecar **ALLOW**                          | `beforeAiGeneration` returns `{ data }`; Botpress dispatches upstream; `afterAiGeneration` commits real `inputTokens+outputTokens`. |
+| Sidecar **DENY**                           | `beforeAiGeneration` throws `RuntimeError("BUDGET_DENIED")`. **No upstream HTTP.** Reason codes flow through on the error message. |
+| Sidecar **DEGRADE** (default fail-closed)  | `beforeAiGeneration` throws `RuntimeError("BUDGET_DEGRADED")`.                                                               |
+| Sidecar DEGRADE + `SPENDGUARD_BOTPRESS_FAIL_OPEN=1` | `beforeAiGeneration` returns a sentinel handle; `afterAiGeneration` no-ops on the commit; WARN logged. Dev escape only.    |
+| `event.payload.usage` present              | Commit posts `actual_amount_atomic = inputTokens + outputTokens`. INV-5 primary.                                            |
+| `event.payload.usage` missing              | Commit posts the estimator-snapshot amount; WARN log carries the substring `falling back to estimator`. INV-5 secondary.    |
+| Conversation cancelled mid-generation      | `afterAiGeneration` releases the reservation with `outcome=REJECTED` and the CANCELLED classification is logged.            |
+
+## Decision matrix vs the egress proxy
+
+You can also gate Botpress spend at the network layer via the SpendGuard
+egress proxy (set `OPENAI_BASE_URL=http://egress-proxy:9000/v1`). Both
+paths reach the same audit chain; pick by topology:
+
+| When                                                                                                  | Path                              |
+| ----------------------------------------------------------------------------------------------------- | --------------------------------- |
+| You own the Botpress runtime + want a first-class integration entry in the Studio UI.                 | `@spendguard/botpress-integration` |
+| Botpress is a managed Cloud workload + you want zero plugin install + zero Studio-side config.        | Egress proxy `OPENAI_BASE_URL`     |
+| You need conversation-level metadata in the audit chain (`bot_id`, `conversation_id`, `user_id`).     | `@spendguard/botpress-integration` |
+| You want one config that covers Botpress + every other tenant tool that dials the same provider URL. | Egress proxy                       |
+
+## Limitations
+
+- **No workflow-node gating beyond the AI hook.** The integration covers
+  `beforeAiGeneration` / `afterAiGeneration` only; RAG, tool-call, and
+  knowledge-base nodes are out of scope for v1.
+- **No token-by-token mid-stream cap.** End-of-hook commit only. The
+  sidecar can still issue a hard cap pre-call; mid-stream interruption
+  would require Botpress hooks we don't have.
+- **No Botpress channel plugin coverage.** WhatsApp / Slack / Web Chat
+  channels are orthogonal — SpendGuard sees every model call the
+  integration intercepts regardless of channel.
+- **`@botpress/sdk` 0.7 only.** Pinned via `peerDependencies` to
+  `>=0.7.0 <0.8.0`. 0.8.x is a follow-up; 0.6 lacked the AI generation
+  hooks entirely.
+- **Botpress v12 only.** v11 had a different hook surface; the
+  integration does not load.
+- **Strategy C deferred.** Per-conversation customer plugin contract
+  lands in v1.1.
+
+## Demo
+
+```bash
+make demo-up DEMO_MODE=botpress_real
+```
+
+Brings up the base SpendGuard stack (postgres / ledger / sidecar /
+canonical-ingest / outbox-forwarder) plus an in-network counting stub
+and a Node 20 runner that exercises the integration's reserve / commit /
+release lifecycle in a 3-step matrix (ALLOW + DENY + STREAM). The
+matrix verifies INV-1 (DENY skips upstream) and INV-5 (real usage
+commits) at the SpendGuard ledger layer.
+
+## Source
+
+- Integration package: `integrations/botpress/`
+- Demo overlay: `deploy/demo/botpress_real/`
+- Spec: `docs/specs/coverage/D32_botpress/`

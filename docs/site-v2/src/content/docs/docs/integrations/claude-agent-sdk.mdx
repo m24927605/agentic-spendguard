@@ -1,0 +1,233 @@
+---
+title: "Anthropic claude-agent-sdk — egress proxy recipe"
+description: >-
+  SpendGuard gates Anthropic's first-party claude-agent-sdk (Python + TS)
+  via the egress proxy plus a trusted root CA — not through an SDK
+  callback. The SDK subprocesses the claude CLI, so the LLM call lives
+  inside the CLI process; PreToolUse is tool-scope, not LLM-scope. The
+  egress proxy is the only LLM-scope gate.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+<Aside type="caution" title="PreToolUse is NOT the LLM-scope gate">
+  `claude-agent-sdk` exposes a **`PreToolUse`** hook. That hook fires on
+  tool invocations (Bash, Edit, Read) — **not** on the underlying
+  `messages → response` exchange. If you want SpendGuard to gate the LLM
+  call itself, the **egress proxy** plus the **D02 root-CA install** is
+  the only path. Do not register a budget cap as a `PreToolUse` hook and
+  call it done — the model call has already left the process by the
+  time the next tool fires.
+</Aside>
+
+> [Anthropic's `claude-agent-sdk`](https://github.com/anthropics/claude-agent-sdk-python)
+> is the only first-party agent SDK Anthropic ships. It is unusual:
+> the SDK **subprocesses the `claude` CLI binary** to run the agent
+> loop, so every `messages` request leaves the Python (or Node) process
+> as an HTTPS call from inside the CLI, not from the SDK. SpendGuard
+> gates it the same way it gates any HTTPS-honouring CLI: a forward
+> proxy at `localhost:9000` plus a trusted root CA that the CLI accepts.
+> The D02 `spendguard install` step handles both.
+
+## Why an SDK adapter does not exist
+
+The SDK's `PreToolUse` hook is **tool-scope**: it runs when the agent
+decides to use a tool (`Bash`, `Edit`, `Read`, `WebFetch`). It does
+**not** see the underlying `POST /v1/messages` request. By the time
+`PreToolUse` fires for the next tool, the LLM has already been called,
+the tokens are already billed, and the model has already produced its
+response.
+
+So there is nothing to wrap at the SDK level that would actually gate
+the dollar. The honest gate is one layer down — at the HTTPS boundary
+the CLI honours `HTTPS_PROXY` and `NODE_EXTRA_CA_CERTS` for. That
+boundary is what D02 already configures and what the SpendGuard egress
+proxy already terminates. Anthropic traffic flows through the proxy's
+existing per-provider route ([`routing.rs`](https://github.com/m24927605/agentic-spendguard/blob/main/services/egress_proxy/src/routing.rs)).
+D30 is the recipe that wires it together.
+
+## How the gate works
+
+```
+your code (Python or TypeScript)
+    uses claude_agent_sdk / @anthropic-ai/claude-agent-sdk
+         │  subprocess
+         ▼
+    `claude` CLI binary (Node)
+         │  HTTPS_PROXY=http://localhost:9000
+         │  NODE_EXTRA_CA_CERTS=<spendguard CA>
+         ▼
+    SpendGuard egress proxy  ── route: api.anthropic.com/v1/messages
+         │
+         │  PRE: sidecar RequestDecision → CONTINUE / STOP
+         │  ↳ forward to api.anthropic.com
+         │  POST: sidecar ConfirmPublishOutcome (commit_estimated)
+         ▼
+    audit_outbox: one RESERVE_RESPONSE row + one matching COMMIT_OUTCOME row
+```
+
+The CLI is the HTTPS client. The egress proxy is the gate. The
+`audit_outbox` rows close the audit chain.
+
+## Prerequisites
+
+- A running SpendGuard egress proxy at `http://localhost:9000`. The
+  [Quickstart](../../quickstart/) brings the full stack up in 5 minutes.
+- `spendguard install` ran clean on this host (D02). The CLI installer
+  drops the SpendGuard root CA into the OS trust store and writes
+  `HTTPS_PROXY` + `NODE_EXTRA_CA_CERTS` into your shell rc.
+- An Anthropic API key in `ANTHROPIC_API_KEY`. This recipe is BYOK
+  only — [Claude Code Pro / Max subscription metering](../subscription-meter/)
+  is a separate integration.
+- For Python: Python 3.11 or newer. For TypeScript: Node.js 20 or newer.
+
+## Recipe — Python
+
+```bash
+pip install claude-agent-sdk
+
+# spendguard install already wired your shell. Verify:
+echo "$HTTPS_PROXY"      # → http://localhost:9000
+echo "$NODE_EXTRA_CA_CERTS"  # → /etc/ssl/spendguard/ca.crt (or your platform path)
+```
+
+```python
+# examples/claude-agent-sdk/example.py
+import anyio
+from claude_agent_sdk import query, ClaudeAgentOptions
+
+PROMPT = "List two ways to reverse a string in Python in under 30 words."
+
+async def main() -> None:
+    async for msg in query(
+        prompt=PROMPT,
+        options=ClaudeAgentOptions(model="claude-sonnet-4-5", max_turns=1),
+    ):
+        print(msg)
+
+if __name__ == "__main__":
+    anyio.run(main)
+```
+
+Run it. The CLI subprocess inherits `HTTPS_PROXY` from your shell
+environment, so the `messages` call flows through the SpendGuard egress
+proxy. The proxy emits one `RESERVE_RESPONSE` row and one matching
+`COMMIT_OUTCOME` row in `audit_outbox` — verify with the SQL in
+[Verifying SpendGuard captured the call](#verifying-spendguard-captured-the-call)
+below.
+
+## Recipe — TypeScript
+
+```bash
+npm install @anthropic-ai/claude-agent-sdk
+
+echo "$HTTPS_PROXY"           # → http://localhost:9000
+echo "$NODE_EXTRA_CA_CERTS"   # → /etc/ssl/spendguard/ca.crt (or your platform path)
+```
+
+```ts
+// example.mjs
+import { query } from "@anthropic-ai/claude-agent-sdk";
+
+const PROMPT = "List two ways to reverse a string in Python in under 30 words.";
+
+for await (const msg of query({
+  prompt: PROMPT,
+  options: { model: "claude-sonnet-4-5", maxTurns: 1 },
+})) {
+  console.log(msg);
+}
+```
+
+The TypeScript SDK is the same shape as the Python SDK and uses the
+same `claude` CLI binary underneath. Both honour `HTTPS_PROXY` and
+`NODE_EXTRA_CA_CERTS` and produce the same audit-chain rows.
+
+## Verifying SpendGuard captured the call
+
+After one `query(...)` completes, SpendGuard has written two rows to
+`audit_outbox` — one `RESERVE_RESPONSE` at PRE time and one
+`COMMIT_OUTCOME` at POST time, sharing the same `request_id`. Query
+them directly to confirm:
+
+```sql
+SELECT
+    payload->>'event_type'           AS event_type,
+    payload->>'provider'             AS provider,
+    payload->>'model'                AS model,
+    payload->>'committed_input_tokens'  AS input_tokens,
+    payload->>'committed_output_tokens' AS output_tokens,
+    payload->>'request_id'           AS request_id
+FROM audit_outbox
+WHERE payload->>'provider' = 'anthropic'
+  AND payload->>'model' LIKE 'claude-%'
+ORDER BY created_at DESC
+LIMIT 2;
+```
+
+You should see exactly two rows for the call: one with
+`event_type = RESERVE_RESPONSE` (the pre-call reservation) and one with
+`event_type = COMMIT_OUTCOME` (the post-call commit) — both carry the
+same `request_id`, and the commit row has `committed_input_tokens > 0`
+and `committed_output_tokens > 0`. The SpendGuard dashboard surfaces
+the same rows under
+[Operations → Dashboard](../../operations/dashboard/).
+
+## What `PreToolUse` is — and is not
+
+`PreToolUse` is the SDK hook that fires when the agent is about to
+**invoke a tool** (`Bash`, `Edit`, `Read`, `WebFetch`, custom MCP
+tools). It does **not** fire on the underlying LLM call. The
+distinction matters for budget control:
+
+- A `PreToolUse` hook that rejects expensive tools is a **tool-policy**
+  gate. It stops `Bash("rm -rf /")` or `WebFetch("https://...")`. It is
+  the right place to encode "this agent may not run code" or "this
+  agent may not call this domain".
+- A `PreToolUse` hook that tries to enforce a budget is a **lie**. By
+  the time the next tool fires, the LLM has already responded. Tokens
+  have already been billed. The hook cannot rewind the messages
+  exchange that produced the tool-use decision.
+
+For LLM-scope gating — the place where SpendGuard's pre-call
+reservation actually saves spend — the egress proxy at
+`api.anthropic.com/v1/messages` is the only correct surface. The
+recipe on this page assumes that surface is in place via D02.
+
+## Troubleshooting
+
+- **`ssl.SSLCertVerificationError` from the CLI subprocess.** The
+  SpendGuard root CA is not in the trust store the CLI is reading. Re-run
+  `spendguard install`; on Linux verify `update-ca-certificates` ran;
+  on macOS verify the cert was added to the system keychain via
+  `security add-trusted-cert`. On Node, confirm `NODE_EXTRA_CA_CERTS`
+  points at a PEM file the current user can read.
+- **Calls hit `api.anthropic.com` directly — no audit rows.** Your
+  current shell did not pick up the rc snippet that `spendguard install`
+  wrote. Open a fresh terminal or `source ~/.zshrc` / `~/.bashrc`,
+  then re-check `echo "$HTTPS_PROXY"`. If you launched the SDK from an
+  IDE, restart the IDE so it inherits the updated environment.
+- **`HTTPS_PROXY` is set but `NODE_EXTRA_CA_CERTS` is empty.** The CLI
+  is Node-based and validates the proxy's leaf cert against Node's own
+  bundled CA list. Without `NODE_EXTRA_CA_CERTS`, the connection fails
+  with `unable to verify the first certificate`. Both env vars must be
+  set; `spendguard install` sets both.
+- **`PreToolUse` blocks a tool but the LLM call still happened.**
+  Working as designed — see [What `PreToolUse` is — and is not](#what-pretooluse-is--and-is-not).
+  Move the budget cap to the egress proxy (this recipe).
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in 5
+  minutes.
+- [Drop in 14 tools (overview)](../../drop-in/) — Pattern 2 quick
+  wins for other OpenAI-compatible CLIs and IDEs.
+- [Subscription-tier meter](../subscription-meter/) — for Claude Code
+  Pro / Max plans (not covered by this BYOK recipe).
+- [Operations → Dashboard](../../operations/dashboard/) — find the
+  audit-chain rows for your run.
+- Anthropic upstream:
+  [`claude-agent-sdk-python`](https://github.com/anthropics/claude-agent-sdk-python) ·
+  [`claude-agent-sdk-typescript`](https://github.com/anthropics/claude-agent-sdk-typescript).
+- Runnable example:
+  [`examples/claude-agent-sdk/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/claude-agent-sdk).

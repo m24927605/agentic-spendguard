@@ -1,0 +1,102 @@
+# Auto-publish @spendguard/botpress-integration to npm via Trusted
+# Publisher OIDC.
+#
+# Trigger: any GitHub release tagged `botpress-integration-v*`
+# (e.g. `botpress-integration-v0.1.0`).
+# Auth:   no npm API token in steady state — npm trusts THIS workflow
+#         file via OIDC provenance.
+#         Setup: npm → @spendguard/botpress-integration → Settings →
+#                Trusted publishers
+#           - Owner:             m24927605
+#           - Repository:        agentic-spendguard
+#           - Workflow filename: botpress-integration-publish.yml
+#           - Environment:       npm (optional but recommended)
+#
+# Marketplace push: the `botpress integrations push --marketplace`
+# step at the bottom of this workflow is conditional on
+# `secrets.BOTPRESS_MARKETPLACE_TOKEN`. If absent on PR CI the workflow
+# treats the marketplace push as a no-op (review-standards.md §5.16).
+#
+# Path note: this workflow targets `integrations/botpress/` (the
+# @spendguard/botpress-integration package), NOT `sdk/typescript-*`
+# (those have their own publish workflows).
+
+name: Publish @spendguard/botpress-integration to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # allow manual trigger for re-publish testing
+
+jobs:
+  publish:
+    # Only fire for botpress-integration-v* tags. Other release tags
+    # (ts-sdk-v*, langchain-v*, vercel-ai-v*, openai-agents-v*,
+    # inngest-agent-kit-v*, helm-chart-v*, dify-plugin-v*, …) are
+    # ignored so each package's release cadence stays independent.
+    if: startsWith(github.ref, 'refs/tags/botpress-integration-v')
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@spendguard/botpress-integration/v/${{ github.ref_name }}
+    defaults:
+      run:
+        working-directory: integrations/botpress
+    permissions:
+      # OIDC token for Trusted Publisher exchange with npm + the npm
+      # `--provenance` flag (which also requires id-token: write).
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install deps (workspace-aware, frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test (unit tier)
+        run: pnpm run test
+
+      - name: Build (tsup ESM + .d.ts emit)
+        run: pnpm run build
+
+      - name: Pack dry-run (verify tarball manifest)
+        run: pnpm pack --dry-run
+
+      - name: Publish to npm (Trusted Publisher OIDC + provenance)
+        # `--provenance` requires id-token: write (set on the job).
+        # `--access public` is also pinned in `publishConfig` but kept
+        # here so the published-access mode is explicit at the call site.
+        # NODE_AUTH_TOKEN is the rollout-window fallback; with Trusted
+        # Publisher configured on npm it is ignored.
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Marketplace push (Botpress Cloud — optional)
+        # Conditional on the BOTPRESS_MARKETPLACE_TOKEN secret being
+        # present. Absent on PR CI is NOT a failure (review-standards.md
+        # §5.16).
+        if: ${{ secrets.BOTPRESS_MARKETPLACE_TOKEN != '' }}
+        run: |
+          echo "marketplace push placeholder — wire to botpress CLI when policy approves"
+          # botpress integrations push --marketplace
+        env:
+          BOTPRESS_TOKEN: ${{ secrets.BOTPRESS_MARKETPLACE_TOKEN }}

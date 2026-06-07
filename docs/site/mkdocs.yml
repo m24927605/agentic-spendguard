@@ -67,6 +67,7 @@ nav:
       - LangChain & LangGraph: integrations/langchain.md
       - OpenAI Agents SDK: integrations/openai-agents.md
       - Microsoft AGT: integrations/agt.md
+      - Coze Studio (no-code): integrations/coze-studio.md
   - Operations:
       - Dashboard: operations/dashboard.md
       - Control plane API: operations/control-plane.md

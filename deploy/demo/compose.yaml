@@ -1029,6 +1029,64 @@ services:
         condition: service_healthy
     networks: [spendguard-net]
 
+  # ---------------------------------------------------------------------
+  # DEMO_MODE=anythingllm_real (D33) — AnythingLLM container, pinned
+  # image, profile-gated so it never leaks into other demo modes.
+  # AnythingLLM points its Generic OpenAI provider at egress-proxy and
+  # exposes its admin API on port 3001 inside the spendguard-net.
+  # ---------------------------------------------------------------------
+  anythingllm:
+    image: mintplexlabs/anythingllm:1.8.4
+    profiles: ["anythingllm_real"]
+    container_name: spendguard-anythingllm
+    environment:
+      STORAGE_DIR: "/app/server/storage"
+      SERVER_PORT: "3001"
+    ports:
+      - "127.0.0.1:3001:3001"
+    volumes:
+      - anythingllm-storage:/app/server/storage
+    networks: [spendguard-net]
+    depends_on:
+      egress-proxy:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:3001/api/ping | grep -q online"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+  # ---------------------------------------------------------------------
+  # DEMO_MODE=anythingllm_real smoke runner. Alpine + curl + jq +
+  # postgresql-client; runs anythingllm_smoke.sh end-to-end.
+  # ---------------------------------------------------------------------
+  anythingllm-smoke:
+    image: alpine:3.20
+    profiles: ["anythingllm_real"]
+    container_name: spendguard-anythingllm-smoke
+    environment:
+      ANYTHINGLLM_URL: "http://anythingllm:3001"
+      PROXY_URL: "http://egress-proxy:9000"
+      POSTGRES_URL: "postgres://spendguard:spendguard_demo@postgres:5432/spendguard_ledger"
+      OPENAI_API_KEY: "${OPENAI_API_KEY:-}"
+    depends_on:
+      anythingllm:
+        condition: service_healthy
+      egress-proxy:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        apk add --no-cache bash curl jq postgresql16-client >/dev/null &&
+        bash /smoke/anythingllm_smoke.sh
+    volumes:
+      - ./anythingllm_smoke.sh:/smoke/anythingllm_smoke.sh:ro
+      - ./verify_step_anythingllm_real.sql:/smoke/verify.sql:ro
+    networks: [spendguard-net]
+
 networks:
   spendguard-net:
     driver: bridge
@@ -1043,3 +1101,5 @@ volumes:
   # compose (TCP is the demo transport); mount exists so any future
   # peer container can experiment with UDS without a compose rebuild.
   tokenizer-uds:
+  # D33 SLICE 1: AnythingLLM admin storage — profile-gated.
+  anythingllm-storage:

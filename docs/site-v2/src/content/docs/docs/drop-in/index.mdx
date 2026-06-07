@@ -70,7 +70,7 @@ quick-filter layer over the same data.
 | 7 | [Zed AI](#zed) | TOML key | `api_url = "http://localhost:9000/v1"` | [zed.dev](https://zed.dev/docs/ai/configuration) | Vendor-native | [Open ↗](./zed/) |
 | 8 | [GitHub Copilot CLI (BYOK)](#copilot-cli) | Env var | `COPILOT_PROVIDER_BASE_URL=http://localhost:9000/v1` | [docs.github.com](https://docs.github.com/en/copilot/github-copilot-cli/using-byok) | Vendor-native | [Open ↗](./copilot-cli/) |
 | 9 | [Tabnine Enterprise](#tabnine) | Admin UI | BYO LLM endpoint `http://localhost:9000/v1` | [docs.tabnine.com](https://docs.tabnine.com/main/software-configuration/connect-custom-llm) | Spec | [Open ↗](./tabnine/) |
-| 10 | [AnythingLLM](#anythingllm) | Admin UI | Custom OpenAI-compatible base URL `http://localhost:9000/v1` | [docs.anythingllm.com](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url) | Spec | [Open ↗](./anythingllm/) |
+| 10 | [AnythingLLM](#anythingllm) | Admin UI | Generic OpenAI provider, Base URL `http://localhost:9000/v1` | [docs.anythingllm.com](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url) | Live | [Open ↗](./anythingllm/) |
 | 11 | [LobeChat](#lobechat) | UI field | Custom base URL `http://localhost:9000/v1` | [lobehub.com](https://lobehub.com/docs/self-hosting/usage/byok) | Spec | [Open ↗](./lobechat/) |
 | 12 | [Cody self-hosted Enterprise](#cody) | Site config | Sourcegraph relay endpoint `http://localhost:9000/v1` | [sourcegraph.com](https://sourcegraph.com/docs/cody/clients/install-vscode) | Spec | [Open ↗](./cody/) |
 | 13 | [Augment (BYOK)](#augment) | UI field | LLM custom endpoint `http://localhost:9000/v1` | [docs.augmentcode.com](https://docs.augmentcode.com/setup/byok) | Spec | [Open ↗](./augment/) |
@@ -214,13 +214,15 @@ Source: [Tabnine connect custom LLM](https://docs.tabnine.com/main/software-conf
 
 <h3 id="anythingllm">AnythingLLM</h3>
 
-AnythingLLM's admin UI exposes a **Custom OpenAI-compatible base URL**
-under LLM Configuration. Set the SpendGuard URL and click `Save`. The
-full per-tool walkthrough lives in the [AnythingLLM recipe](./anythingllm/)
-(D33).
+AnythingLLM ships a **Generic OpenAI** provider tile under
+**Settings → LLM Preference**. Pick the tile, set the Base URL to your
+SpendGuard egress endpoint (trailing `/v1` required), and any non-empty
+API Key. The full per-tool walkthrough — four exact fields, Docker /
+Desktop / Cloud notes, the `DEMO_MODE=anythingllm_real` smoke — lives in
+the [AnythingLLM recipe](./anythingllm/).
 
 ```text
-Admin → LLM Configuration → Custom OpenAI-compatible base URL
+Settings → LLM Preference → Generic OpenAI → Base URL
 http://localhost:9000/v1
 ```
 

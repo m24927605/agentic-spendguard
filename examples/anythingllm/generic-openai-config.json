@@ -1,0 +1,8 @@
+{
+  "_comment": "Payload for AnythingLLM POST /api/v1/system/update-env. Pre-configures the Generic OpenAI provider to point at a SpendGuard egress proxy. Trailing /v1 on GenericOpenAiBasePath is mandatory — AnythingLLM appends /chat/completions to whatever you set. GenericOpenAiKey is sent verbatim but SpendGuard's egress proxy ignores it and substitutes the upstream credential from its own config. See setup.sh for the full bootstrap that POSTs this and runs a verification chat.",
+  "LLMProvider": "generic-openai",
+  "GenericOpenAiBasePath": "http://localhost:9000/v1",
+  "GenericOpenAiKey": "sk-anythingllm-spendguard",
+  "GenericOpenAiModelPref": "gpt-4o-mini",
+  "GenericOpenAiTokenLimit": 128000
+}

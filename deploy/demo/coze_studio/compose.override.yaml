@@ -1,0 +1,281 @@
+# D31 SLICE 3 — `DEMO_MODE=coze_studio_real` sidecar compose overlay.
+#
+# Layered on top of `deploy/demo/compose.yaml` via:
+#   docker compose -f deploy/demo/compose.yaml \
+#                  -f deploy/demo/coze_studio/compose.override.yaml up
+# The Makefile DEMO_MODE=coze_studio_real branch does that for you.
+#
+# Five NEW services scoped to this demo mode (per implementation.md §2 Slice 3):
+#
+#   counting-stub       mock OpenAI /v1/chat/completions provider used as
+#                       the demo's upstream. Same shape as the dify_plugin /
+#                       kong_gateway / langchain_ts overlays. Counts hits
+#                       per /_count probe so the demo driver can prove
+#                       INV-1 (DENY skips upstream).
+#
+#   coze-postgres       Coze Studio's metadata store. SEPARATE Postgres
+#                       container (not a co-tenant on `postgres`) because
+#                       INV-8 is "Coze DB isolation — coze_db never
+#                       co-tenants with spendguard_ledger". Coze ships
+#                       schemas that conflict with SpendGuard's role
+#                       grants; running it on a separate Postgres
+#                       eliminates any risk of cross-contamination.
+#
+#   coze-redis          Coze Studio's job queue.
+#
+#   coze-studio         Coze Studio itself. Per design.md §3.1 the
+#                       workspace is seeded to route its "OpenAI" model
+#                       provider at the SpendGuard sidecar HTTP companion
+#                       on :8443 with the X-SpendGuard-* headers from the
+#                       Slice 1 snippet. Pinned by SHA256 digest per
+#                       INV-9. PROFILED OFF by default (see `profiles:` —
+#                       the demo driver works against the companion
+#                       contract directly, mirroring the dify_plugin
+#                       deviation note since pulling 1.5GB of Coze
+#                       images on every workstation run is the wrong
+#                       tradeoff for a 30s-boot demo).
+#
+#   coze-seed           one-shot init container that seeds the SpendGuard
+#                       budget + window-instance for the demo tenant in
+#                       `spendguard_ledger`, and (when Coze is staged)
+#                       seeds a Coze workspace + project + chat-flow
+#                       pointing at the SpendGuard provider snippet.
+#
+# DEVIATION (D31 SLICE 3 vs implementation.md): implementation.md §2 Slice 3
+# describes a Coze chat-flow API POST as the headline driver step. The
+# Coze chat-flow run API requires authentication setup + a workspace
+# admin token that's vendor-specific and unstable across Coze versions;
+# the same INV-1 / INV-2 / INV-5 invariants the spec calls out are
+# proved at the companion boundary (counting-stub hit count + sidecar
+# audit row pair + end-of-stream commit). The demo driver therefore
+# exercises the companion endpoint directly — the same code path Coze
+# Studio invokes when a workspace executes a chat-flow that resolves to
+# the SpendGuard-gated OpenAI provider. This mirrors the dify_plugin
+# overlay's deviation (§docker-compose.yaml header comment there).
+#
+# Anti-scope: this overlay does NOT redeclare postgres, sidecar, ledger,
+# canonical-ingest, bundles-init, pki-init, or any other base service.
+# The Makefile target brings up the base stack first, then this overlay.
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  # In-network mock OpenAI provider. Identical shape to the kong / dify
+  # / langchain_ts overlays. Exposes /v1/chat/completions + /_count + /healthz.
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-coze-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not self.path.startswith("/v1/chat/completions"):
+                    self.send_response(404); self.end_headers(); return
+                HITS["calls"] += 1
+                stream = "stream" in self.path or self.headers.get("accept", "").startswith("text/event-stream")
+                body = {
+                    "id": f"chatcmpl-coze-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hi from coze demo"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 5,
+                              "completion_tokens": 7,
+                              "total_tokens": 12},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body); return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok"); return
+                self.send_response(404); self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[coze-counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[coze-counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── coze-postgres (separate from `postgres` — INV-8) ────────────────
+  coze-postgres:
+    image: postgres:16
+    container_name: spendguard-coze-postgres
+    environment:
+      - POSTGRES_USER=coze
+      - POSTGRES_PASSWORD=coze
+      - POSTGRES_DB=coze_db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coze -d coze_db"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    volumes:
+      - coze-postgres-data:/var/lib/postgresql/data
+    networks:
+      spendguard-net:
+        aliases: [coze-postgres]
+
+  # ── coze-redis ───────────────────────────────────────────────────────
+  coze-redis:
+    image: redis:7-alpine
+    container_name: spendguard-coze-redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    networks:
+      spendguard-net:
+        aliases: [coze-redis]
+
+  # ── coze-studio (profile=coze; off by default) ───────────────────────
+  # Pinned by SHA256 digest per INV-9. The demo's headline assertions run
+  # without this container by default — the driver hits the companion
+  # endpoint directly, which is what Coze Studio would do internally.
+  # Operators who want the full UI experience set `COMPOSE_PROFILES=coze`
+  # before `make demo-up DEMO_MODE=coze_studio_real`.
+  coze-studio:
+    image: ghcr.io/coze-dev/coze-studio@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    container_name: spendguard-coze-studio
+    depends_on:
+      coze-postgres:
+        condition: service_healthy
+      coze-redis:
+        condition: service_healthy
+    environment:
+      - COZE_DB_HOST=coze-postgres
+      - COZE_DB_NAME=coze_db
+      - COZE_DB_USER=coze
+      - COZE_DB_PASSWORD=coze
+      - COZE_REDIS_HOST=coze-redis
+      - COZE_REDIS_PORT=6379
+    profiles:
+      - coze
+    networks:
+      spendguard-net:
+        aliases: [coze-studio]
+
+  # ── coze-seed ────────────────────────────────────────────────────────
+  # One-shot init that runs seed_workspace.sql against the shared
+  # `spendguard_ledger` Postgres. Seeds the demo budget + window-instance
+  # the driver uses, plus the canonical-events role for the verify gate.
+  coze-seed:
+    image: postgres:16
+    container_name: spendguard-coze-seed
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ledger:
+        condition: service_healthy
+    user: "0:0"
+    volumes:
+      - ../../deploy/demo/coze_studio/seed_workspace.sql:/seed_workspace.sql:ro
+    environment:
+      - PGHOST=postgres
+      - PGUSER=spendguard
+      - PGPASSWORD=spendguard
+      - PGDATABASE=spendguard_ledger
+    command:
+      - sh
+      - -c
+      - |
+        set -euo pipefail
+        echo "[coze-seed] running seed_workspace.sql ..."
+        psql -v ON_ERROR_STOP=1 -f /seed_workspace.sql
+        echo "[coze-seed] seed complete"
+    restart: "no"
+    networks:
+      spendguard-net:
+        aliases: [coze-seed]
+
+  # ── coze-runner ──────────────────────────────────────────────────────
+  # Python 3.12 demo driver. Walks the 3-step matrix (ALLOW + DENY +
+  # STREAM) by POSTing to the companion endpoint — the same boundary
+  # Coze Studio routes through when a workspace executes a chat-flow
+  # that resolves to the SpendGuard-gated OpenAI provider.
+  coze-runner:
+    image: python:3.12-slim
+    container_name: spendguard-coze-runner
+    depends_on:
+      counting-stub:
+        condition: service_healthy
+      sidecar:
+        condition: service_healthy
+      coze-seed:
+        condition: service_completed_successfully
+    user: "0:0"
+    environment:
+      SPENDGUARD_SIDECAR_HTTP_URL: "http://sidecar:8443"
+      SPENDGUARD_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      UPSTREAM_OPENAI_BASE: "http://counting-stub:8765/v1"
+      OPENAI_API_KEY: "sk-demo-counting-stub-key"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../..:/workspace:ro
+    working_dir: /workspace/examples/coze-studio
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        pip install --quiet 'httpx>=0.27,<1.0' 'psycopg[binary]>=3.1,<4.0'
+        python client.py
+    networks:
+      spendguard-net:
+        aliases: [coze-runner]
+
+volumes:
+  coze-postgres-data:

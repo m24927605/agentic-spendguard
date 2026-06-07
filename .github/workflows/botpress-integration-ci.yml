@@ -1,0 +1,75 @@
+# D32 SLICE 4 — integration-tier CI for @spendguard/botpress-integration.
+#
+# Runs on PRs that touch `integrations/botpress/**`. Boots a real Botpress
+# v12 container via testcontainers-node and exercises I01–I04. The unit
+# tier (37 tests) runs as part of the publish workflow + every push;
+# this workflow is the heavier path that pulls the ~800 MB Botpress
+# image so unrelated PRs don't pay the cost.
+#
+# review-standards.md §4.7 / §4.8 / §4.9: path-filter + docker layer
+# cache + vitest.integration.config.ts gating.
+
+name: Botpress integration CI
+
+on:
+  pull_request:
+    paths:
+      - "integrations/botpress/**"
+      - ".github/workflows/botpress-integration-ci.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "integrations/botpress/**"
+      - ".github/workflows/botpress-integration-ci.yml"
+
+jobs:
+  integration-tier:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: integrations/botpress
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Build
+        run: pnpm run build
+
+      - name: Unit tests (37 tests)
+        run: pnpm run test
+
+      - name: Docker layer cache (Botpress v12 image)
+        # The Botpress image is ~800 MB; amortise across runs.
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.docker-cache
+          key: docker-botpress-server-v12.30.x
+
+      - name: Integration tests (I01–I04 against real Botpress v12)
+        # When SPENDGUARD_BOTPRESS_USE_DOCKER=1 is set, the suite spins up
+        # the real Botpress v12 testcontainer. Otherwise it runs the
+        # in-process emulation (still I01–I04, same assertion surface).
+        # CI sets the flag to exercise the heavy path.
+        env:
+          SPENDGUARD_BOTPRESS_USE_DOCKER: "1"
+        run: pnpm run test:integration

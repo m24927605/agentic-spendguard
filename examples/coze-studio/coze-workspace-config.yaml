@@ -1,0 +1,74 @@
+# SpendGuard-gated OpenAI provider for Coze Studio (ByteDance OSS, Apache-2.0).
+#
+# This snippet wires a Coze workspace's "Model Provider → OpenAI" custom-endpoint
+# form so every Coze chat-flow / agent / workflow LLM call routes through the
+# SpendGuard sidecar HTTP companion. SpendGuard reserves the spend pre-call,
+# forwards the real call to upstream OpenAI, then commits real usage end-of-stream.
+#
+# Two install paths:
+#   1. Paste the YAML body below into the workspace YAML editor verbatim
+#      (Coze Studio ≥ v1 supports YAML-level provider config).
+#   2. Or fill the equivalent fields in the web form:
+#        Provider              = openai
+#        Display Name          = SpendGuard-Gated OpenAI
+#        Base URL              = https://<sidecar-host>:8443/v1/openai
+#        API Key               = ${OPENAI_API_KEY}
+#        Custom Headers        = (3 X-SpendGuard-* rows, see below)
+#        TLS / Client Cert     = (CA + client cert + key, see below)
+#        Models                = gpt-4o-mini, gpt-4o, gpt-3.5-turbo
+#
+# See examples/coze-studio/README.md for the full operator walkthrough.
+# See examples/coze-studio/headers-cheatsheet.md for the X-SpendGuard-* header
+# format rules (workspace_id → tenant; budget UUID → budget; window-instance UUID).
+#
+# v1 is fail-closed only: on DENY/DEGRADE the companion returns HTTP 502/503 and
+# Coze surfaces a workflow error through its own UI. There is NO escape-hatch
+# field in this snippet (design.md §3.4 lock). Operators who need permissive
+# (continue-on-error) semantics install the SpendGuard egress proxy (D02/D03)
+# instead.
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Coze Studio workspace → Model Provider → OpenAI (custom endpoint)
+# ──────────────────────────────────────────────────────────────────────────────
+
+provider: openai
+display_name: SpendGuard-Gated OpenAI
+
+# Sidecar HTTP companion endpoint. Coze appends /chat/completions itself, so
+# we expose the /v1/openai prefix here. For in-cluster install:
+#   base_url: https://spendguard-sidecar.spendguard.svc.cluster.local:8443/v1/openai
+# For docker-compose / localhost smoke + demo:
+#   base_url: https://localhost:8443/v1/openai
+base_url: https://spendguard-sidecar.spendguard.svc.cluster.local:8443/v1/openai
+
+# OpenAI key passed through to the sidecar, which forwards to upstream OpenAI.
+# NEVER hardcode a literal key here — env-var ref only (INV-6, G1 negative grep).
+api_key: ${OPENAI_API_KEY}
+
+# Three required headers — companion's tenant resolver reads these. Missing
+# X-SpendGuard-Tenant-Id → companion returns 400 MISSING_TENANT (INV-4).
+custom_headers:
+  X-SpendGuard-Tenant-Id: "<COZE_WORKSPACE_ID>"
+  X-SpendGuard-Budget-Id: "<SPENDGUARD_BUDGET_ID>"
+  X-SpendGuard-Window-Instance-Id: "<SPENDGUARD_WINDOW_INSTANCE_ID>"
+
+# mTLS material. The sidecar companion is mTLS-only — Coze must present a
+# client cert (D09 SLICE 1 §3.1 lock). For docker-compose demo, paths point at
+# the bundle minted by pki-init; for k8s install, mount via secret + projected
+# volume per docs/site/docs/integrations/coze-studio.md "Install".
+tls:
+  ca_cert_path: /etc/coze/spendguard-ca.pem
+  client_cert_path: /etc/coze/coze-client.pem
+  client_key_path: /etc/coze/coze-client.key
+
+# Surface the OpenAI models Coze should advertise in this provider. The sidecar
+# companion forwards the request body unchanged, so any model the upstream
+# OpenAI account supports works — listing them here just controls Coze's UI
+# model picker. At least 2 entries (G1 §3.1.6) keeps the picker useful.
+models:
+  - id: gpt-4o-mini
+    display_name: GPT-4o mini (SpendGuard-gated)
+  - id: gpt-4o
+    display_name: GPT-4o (SpendGuard-gated)
+  - id: gpt-3.5-turbo
+    display_name: GPT-3.5 Turbo (SpendGuard-gated)
