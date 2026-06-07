@@ -1,0 +1,52 @@
+name: dotnet-build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'sdk/dotnet-agent-framework/**'
+      - 'proto/**'
+      - '.github/workflows/dotnet-build.yml'
+  pull_request:
+    paths:
+      - 'sdk/dotnet-agent-framework/**'
+      - 'proto/**'
+      - '.github/workflows/dotnet-build.yml'
+
+jobs:
+  build:
+    name: build + test (.NET 8)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.x
+
+      - name: Restore
+        working-directory: sdk/dotnet-agent-framework
+        run: dotnet restore Spendguard.AgentFramework.sln
+
+      - name: Build (Release)
+        working-directory: sdk/dotnet-agent-framework
+        run: dotnet build Spendguard.AgentFramework.sln -c Release --no-restore
+
+      - name: Test (Release, --no-build)
+        working-directory: sdk/dotnet-agent-framework
+        run: dotnet test Spendguard.AgentFramework.sln -c Release --no-build --logger trx
+
+      - name: Pack (Release, dry-run)
+        working-directory: sdk/dotnet-agent-framework
+        run: dotnet pack Spendguard.AgentFramework/Spendguard.AgentFramework.csproj -c Release --no-build -o ./dist
+
+      - name: Upload nupkg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spendguard-agentframework-nupkg
+          path: sdk/dotnet-agent-framework/dist/*.nupkg

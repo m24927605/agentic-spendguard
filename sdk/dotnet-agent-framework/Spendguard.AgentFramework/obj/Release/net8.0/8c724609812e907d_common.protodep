@@ -1,0 +1,2 @@
+obj/Release/net8.0/spendguard/common/v1/Common.cs: /Users/michael.chen/.nuget/packages/grpc.tools/2.65.0/build/native/include/google/protobuf/timestamp.proto\
+ Protos/spendguard/common/v1/common.proto

@@ -1,0 +1,105 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      D07 SLICE_01 deviation note:
+        - design.md §3.3 calls for <TargetFrameworks>netstandard2.1;net8.0</TargetFrameworks>.
+        - Local build host only has the .NET 10 SDK (no net8.0 reference packs).
+        - We target net8.0 as a single TFM so the package surface stays
+          ABI-compatible with the original spec; multi-targeting back to
+          netstandard2.1 is deferred until a build host with both packs is
+          available. This deviation is documented in the slice report.
+    -->
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <!-- xmldoc warning policy: do not fail the build for missing-comment warnings
+         on internal generated proto types; we still warn on public surface. -->
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+  </PropertyGroup>
+
+  <!-- ===========================================================
+       NuGet package metadata (Pkg2 / Pkg3 per review-standards §2.6)
+       =========================================================== -->
+  <PropertyGroup>
+    <IsPackable>true</IsPackable>
+    <PackageId>Spendguard.AgentFramework</PackageId>
+    <Version>0.1.0-pre</Version>
+    <Authors>SpendGuard Authors</Authors>
+    <Company>SpendGuard</Company>
+    <Description>SpendGuard middleware for Microsoft Agent Framework. Gates LLM calls against the SpendGuard sidecar (UDS gRPC) so every call reserves budget, audits via canonical_events, and fails closed by default.</Description>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <RepositoryUrl>https://github.com/spendguardhq/agentic-spendguard</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PackageProjectUrl>https://github.com/spendguardhq/agentic-spendguard</PackageProjectUrl>
+    <PackageTags>spendguard;maf;agent-framework;budget;llm;observability</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageReleaseNotes>0.1.0-pre: initial pre-release. SLICE_01-04 bundled (csproj + UDS gRPC client + middleware + xUnit tests).</PackageReleaseNotes>
+    <Copyright>Copyright (c) SpendGuard Authors</Copyright>
+    <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+
+    <!-- Pkg3: SourceLink + deterministic build -->
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <DebugType>embedded</DebugType>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(CI)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="README.md" Pack="true" PackagePath="\" />
+  </ItemGroup>
+
+  <!-- ===========================================================
+       Runtime dependencies
+       ===========================================================
+       Deviation from design.md §3.3:
+         - design.md called for `Microsoft.Agents.Framework`.
+         - The actual GA NuGet package is `Microsoft.Agents.AI` (1.9.0 as of
+           2026-06). Microsoft renamed the package between spec authoring and
+           SLICE_01 implementation; implementation.md §2.5 explicitly permits
+           this indirection. We pin Microsoft.Agents.AI[.Abstractions] 1.x.
+         - We depend only on the Abstractions assembly for the middleware
+           contract; concrete chat client wiring stays in the consumer's DI
+           container.
+       =========================================================== -->
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Agents.AI.Abstractions" Version="[1.9.0,2.0.0)" />
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="[10.5.1,12.0.0)" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="[8.0.0,11.0.0)" />
+    <PackageReference Include="Microsoft.Extensions.Options" Version="[8.0.0,11.0.0)" />
+    <PackageReference Include="Microsoft.Extensions.Logging.Abstractions" Version="[8.0.0,11.0.0)" />
+
+    <!-- gRPC over UDS -->
+    <PackageReference Include="Grpc.Net.Client" Version="[2.65.0,3.0.0)" />
+    <PackageReference Include="Google.Protobuf" Version="[3.27.0,4.0.0)" />
+
+    <!-- XxHash3 for idempotency-key derivation -->
+    <PackageReference Include="System.IO.Hashing" Version="[8.0.0,11.0.0)" />
+
+    <!-- SourceLink -->
+    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="8.0.0" PrivateAssets="All" />
+  </ItemGroup>
+
+  <!-- Proto code generation -->
+  <ItemGroup>
+    <PackageReference Include="Grpc.Tools" Version="[2.65.0,3.0.0)" PrivateAssets="All" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      GrpcServices="Both" so the test project (which references this library)
+      can spin up an in-process server using the SidecarAdapter.SidecarAdapterBase
+      stub. The base class is internal-only on the wire side; consumers do not
+      need to host a server in production. The extra footprint is < 4 KiB.
+    -->
+    <Protobuf Include="Protos\spendguard\sidecar_adapter\v1\adapter.proto" GrpcServices="Both" Access="Public" ProtoRoot="Protos" />
+    <Protobuf Include="Protos\spendguard\common\v1\common.proto" GrpcServices="None" Access="Public" ProtoRoot="Protos" />
+  </ItemGroup>
+
+</Project>

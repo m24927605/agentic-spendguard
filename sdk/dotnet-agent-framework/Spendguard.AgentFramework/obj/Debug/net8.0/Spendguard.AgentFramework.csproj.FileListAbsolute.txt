@@ -1,0 +1,13 @@
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/bin/Debug/net8.0/Spendguard.AgentFramework.deps.json
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/bin/Debug/net8.0/Spendguard.AgentFramework.dll
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/bin/Debug/net8.0/Spendguard.AgentFramework.xml
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/obj/Debug/net8.0/Spendguard.AgentFramework.csproj.AssemblyReference.cache
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/obj/Debug/net8.0/Spendguard.AgentFramework.GeneratedMSBuildEditorConfig.editorconfig
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/obj/Debug/net8.0/Spendguard.AgentFramework.AssemblyInfoInputs.cache
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/obj/Debug/net8.0/Spendguard.AgentFramework.AssemblyInfo.cs
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/obj/Debug/net8.0/Spendguard.AgentFramework.csproj.CoreCompileInputs.cache
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/obj/Debug/net8.0/Spendguard.AgentFramework.sourcelink.json
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/obj/Debug/net8.0/Spendguard.AgentFramework.dll
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/obj/Debug/net8.0/refint/Spendguard.AgentFramework.dll
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/obj/Debug/net8.0/Spendguard.AgentFramework.xml
+/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/obj/Debug/net8.0/ref/Spendguard.AgentFramework.dll

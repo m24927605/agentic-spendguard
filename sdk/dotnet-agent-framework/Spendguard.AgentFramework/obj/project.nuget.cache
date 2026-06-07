@@ -1,0 +1,29 @@
+{
+  "version": 2,
+  "dgSpecHash": "jKAB7X/6bZk=",
+  "success": true,
+  "projectFilePath": "/Users/michael.chen/products/agentic-spendguard/sdk/dotnet-agent-framework/Spendguard.AgentFramework/Spendguard.AgentFramework.csproj",
+  "expectedPackageFiles": [
+    "/Users/michael.chen/.nuget/packages/google.protobuf/3.27.0/google.protobuf.3.27.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/grpc.core.api/2.65.0/grpc.core.api.2.65.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/grpc.net.client/2.65.0/grpc.net.client.2.65.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/grpc.net.common/2.65.0/grpc.net.common.2.65.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/grpc.tools/2.65.0/grpc.tools.2.65.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/microsoft.agents.ai.abstractions/1.9.0/microsoft.agents.ai.abstractions.1.9.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/microsoft.build.tasks.git/8.0.0/microsoft.build.tasks.git.8.0.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/microsoft.extensions.ai.abstractions/10.5.1/microsoft.extensions.ai.abstractions.10.5.1.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/microsoft.extensions.dependencyinjection.abstractions/8.0.0/microsoft.extensions.dependencyinjection.abstractions.8.0.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/microsoft.extensions.logging.abstractions/8.0.0/microsoft.extensions.logging.abstractions.8.0.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/microsoft.extensions.options/8.0.0/microsoft.extensions.options.8.0.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/microsoft.extensions.primitives/8.0.0/microsoft.extensions.primitives.8.0.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/microsoft.sourcelink.common/8.0.0/microsoft.sourcelink.common.8.0.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/microsoft.sourcelink.github/8.0.0/microsoft.sourcelink.github.8.0.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/system.io.hashing/8.0.0/system.io.hashing.8.0.0.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/system.io.pipelines/10.0.6/system.io.pipelines.10.0.6.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/system.text.encodings.web/10.0.6/system.text.encodings.web.10.0.6.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/system.text.json/10.0.6/system.text.json.10.0.6.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/microsoft.netcore.app.ref/8.0.27/microsoft.netcore.app.ref.8.0.27.nupkg.sha512",
+    "/Users/michael.chen/.nuget/packages/microsoft.aspnetcore.app.ref/8.0.27/microsoft.aspnetcore.app.ref.8.0.27.nupkg.sha512"
+  ],
+  "logs": []
+}

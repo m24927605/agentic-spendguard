@@ -1,0 +1,798 @@
+// SpendGuard Sidecar ↔ Adapter IPC.
+//
+// Spec references:
+//   - Sidecar Architecture spec v1alpha1 §3 (in_process_adapter +
+//     local_sidecar responsibilities), §5 (UDS peer credentials + handshake),
+//     §11 (lifecycle drain)
+//   - Contract DSL spec v1alpha1 §6 (decision transaction stages),
+//     §11 (effect schema + RFC6902 mutation patches), §15 (trigger points),
+//     §8 (sub-agent budget grant)
+//   - Trace Schema spec v1alpha1 §3.4 (idempotency_key fallback),
+//     §7 (span tree + canonical events)
+//   - Stage 2 POC Topology spec v1alpha1 §4.6 (adapter publish API
+//     idempotency via effect_hash), §11 (adapter UDS gRPC)
+//
+// Transport: gRPC over Unix Domain Socket (Linux/macOS) or named pipe
+// (Windows fallback). Auth: SO_PEERCRED / LOCAL_PEERCRED (per Sidecar §5).
+// No mTLS over UDS (peer credentials suffice).
+//
+// Compatibility: proto3, additive evolution; protocol_handshake negotiates
+// version + capability levels.
+
+syntax = "proto3";
+
+package spendguard.sidecar_adapter.v1;
+
+import "google/protobuf/timestamp.proto";
+import "google/protobuf/struct.proto";
+import "spendguard/common/v1/common.proto";
+
+// ============================================================================
+// SERVICE
+// ============================================================================
+
+service SidecarAdapter {
+  // -- Handshake (per Sidecar §5 protocol_handshake) ------------------------
+
+  // Initial handshake; mandatory before any other RPC. Negotiates SDK version,
+  // runtime kind, capability level, tenant_id assertion, key epochs.
+  rpc Handshake(HandshakeRequest) returns (HandshakeResponse);
+
+  // -- Decision boundary (per Contract §15 trigger points) -----------------
+
+  // Adapter requests a decision at a *.pre trigger point.
+  // Sidecar runs Contract §6 stages 1-5 and returns DecisionResult.
+  // Sidecar may take up to Contract §14 latency budget (50ms p99 warm).
+  rpc RequestDecision(DecisionRequest) returns (DecisionResponse);
+
+  // Adapter confirms publish_effect outcome (per Contract §6 stage 7).
+  // Idempotent via effect_hash (Stage 2 §4.6).
+  rpc ConfirmPublishOutcome(PublishOutcomeRequest)
+      returns (PublishOutcomeResponse);
+
+  // -- Trace events (per Contract §15 *.post triggers; observation only) ---
+
+  // Adapter emits canonical/lifecycle events (agent.run.start, agent.step.post
+  // tool.call.post, llm.call.post for commit, etc.). Server-streamed because
+  // sidecar may emit follow-up acks or correction events.
+  rpc EmitTraceEvents(stream TraceEvent) returns (stream TraceEventAck);
+
+  // -- Sub-agent budget grant (per Contract §8) ----------------------------
+
+  // Parent agent requests budget_grant JWT to delegate to child agent.
+  rpc IssueBudgetGrant(IssueBudgetGrantRequest)
+      returns (IssueBudgetGrantResponse);
+
+  // Parent revokes a previously issued grant.
+  rpc RevokeBudgetGrant(RevokeBudgetGrantRequest)
+      returns (RevokeBudgetGrantResponse);
+
+  // Child agent uses grant to bootstrap budget context.
+  rpc ConsumeBudgetGrant(ConsumeBudgetGrantRequest)
+      returns (ConsumeBudgetGrantResponse);
+
+  // -- Lifecycle drain (per Sidecar §11) -----------------------------------
+
+  // Sidecar signals adapter that drain has begun; adapter should stop
+  // initiating new decision boundaries and let in-flight finish.
+  rpc StreamDrainSignal(DrainSubscribeRequest) returns (stream DrainSignal);
+
+  // -- Approval resume (Phase 5 GA hardening S16) --------------------------
+
+  // Adapter calls this AFTER the human approver has approved/denied the
+  // pending approval (REQUIRE_APPROVAL outcome from RequestDecision).
+  // Sidecar:
+  //   1. Looks up the approval by (tenant_id, decision_id, approval_id).
+  //   2. Reads the current state (must be `approved` or `denied`).
+  //   3. For `approved`: re-runs Contract evaluation + Ledger.ReserveSet
+  //      with a NEW idempotency key derived from approval_id (so a
+  //      replay can never double-publish the effect).
+  //   4. For `denied`: emits the deny audit row + returns Decision::STOP.
+  //   5. For other states (pending/expired/cancelled): returns the
+  //      typed Error code so the adapter raises the right exception.
+  //
+  // Idempotent: repeated ResumeAfterApproval calls with the same
+  // (decision_id, approval_id) produce the same DecisionResponse
+  // because the idempotency key includes both.
+  rpc ResumeAfterApproval(ResumeAfterApprovalRequest)
+      returns (ResumeAfterApprovalResponse);
+
+  // -- Explicit Release (Draft-01 §4 of Agent Spend Protocol) ---------------
+
+  // Adapter-initiated release of a held reservation before commit.
+  // Use when the provider call is aborted, the client times out, or the
+  // agent run is cancelled — and the adapter wants to surface that
+  // explicitly rather than waiting for an outcome-driven (APPLY_FAILED
+  // or trace-event-driven) implicit release.
+  //
+  // Coexists with the implicit release paths in ConfirmPublishOutcome and
+  // EmitTraceEvents; those remain unchanged. Implicit paths are still the
+  // default for adapters that report outcomes naturally; the explicit RPC
+  // is for adapters that want to match the Agent Spend Protocol Draft-01
+  // wire shape (docs/specs/agent-spend-protocol/draft-01.md §4).
+  //
+  // Idempotent: repeated ReleaseReservation calls with the same
+  // (reservation_id, idempotency_key) pair return the original outcome.
+  rpc ReleaseReservation(ReleaseReservationRequest)
+      returns (ReleaseReservationResponse);
+}
+
+// ============================================================================
+// ResumeAfterApproval (Phase 5 S16)
+// ============================================================================
+
+message ResumeAfterApprovalRequest {
+  // Original decision that returned REQUIRE_APPROVAL.
+  string tenant_id = 1;
+  string decision_id = 2;
+  // The approval the adapter is resuming. Must match an existing
+  // approval_requests row scoped to (tenant_id, decision_id).
+  string approval_id = 3;
+
+  // Adapter-supplied identity for fencing + idempotency. Same as
+  // DecisionRequest's analogous fields.
+  string workload_instance_id = 4;
+  string session_id = 5;
+}
+
+message ResumeAfterApprovalResponse {
+  oneof outcome {
+    // Approval was `approved`; sidecar re-ran Contract + Reserve and
+    // returns the standard DecisionResponse (Continue + reservation
+    // ids, OR Stop if a fresh Ledger check failed).
+    DecisionResponse decision = 1;
+
+    // Approval was `denied`; the audit deny-decision row has been
+    // emitted; adapter raises a typed deny exception.
+    ResumeAfterApprovalDenied denied = 2;
+
+    // Approval was in a non-terminal state (pending) OR a terminal
+    // non-actionable state (expired / cancelled). Adapter raises a
+    // typed "still waiting" or "unresolvable" exception.
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message ResumeAfterApprovalDenied {
+  // The deny audit row's event id (so the adapter can correlate
+  // logs).
+  string audit_decision_event_id = 1;
+  // Free-form reason from approver (resolution_reason).
+  string approver_reason = 2;
+  // Approver identity (for application-level audit log).
+  string approver_subject = 3;
+  // Matched contract rules that drove REQUIRE_APPROVAL in the first
+  // place, so the adapter can render a useful error.
+  repeated string matched_rule_ids = 4;
+}
+
+// ============================================================================
+// Handshake
+// ============================================================================
+
+message HandshakeRequest {
+  string sdk_version = 1;
+  string runtime_kind = 2;                  // "pydantic-ai" / "langgraph" / etc.
+  string runtime_version = 3;
+
+  enum CapabilityLevel {
+    CAPABILITY_LEVEL_UNSPECIFIED = 0;
+    L0_INGEST = 0x10;                        // OTel ingest only; no enforcement
+    L1_LLM_CALL = 0x20;
+    L2_STEP = 0x30;
+    L3_POLICY_HOOK = 0x40;                   // full step-boundary enforcement
+    L4_RUNTIME_NATIVE = 0x50;                // research-grade; not Phase 1
+  }
+  CapabilityLevel capability_level = 4;
+
+  // Tenant assertion (sidecar verifies vs SO_PEERCRED + signed manifest).
+  string tenant_id_assertion = 5;
+  string workload_instance_id = 6;          // sidecar's own; echo for sanity
+  uint32 protocol_version = 7;               // 1 for this spec
+}
+
+message HandshakeResponse {
+  string sidecar_version = 1;
+  spendguard.common.v1.SchemaBundleRef schema_bundle = 2;
+  spendguard.common.v1.ContractBundleRef contract_bundle = 3;
+
+  // Capability required by loaded contract (per Sidecar §3.3).
+  // If higher than adapter's capability_level → adapter MUST refuse to load.
+  HandshakeRequest.CapabilityLevel capability_required = 4;
+
+  // Active key epochs (per Sidecar §5 v1.1 patch + Trace §6 dual_read).
+  message KeyEpochs {
+    repeated string producer_signing_key_epochs = 1;
+    repeated string hmac_tenant_salt_epochs = 2;
+  }
+  KeyEpochs active_key_epochs = 5;
+
+  uint32 protocol_version = 6;
+
+  // Negotiated session identifiers; adapter must include in subsequent RPCs.
+  string session_id = 7;
+
+  // === Sidecar announcement signature (per Sidecar §5 + Stage 2 §12.1) ===
+  //
+  // Sidecar signs the canonical encoding of all fields above (sidecar_version,
+  // schema_bundle, contract_bundle, capability_required, active_key_epochs,
+  // protocol_version, session_id) using the platform-issued sidecar workload
+  // key. Adapter verifies against the Helm-pinned root CA bundle chain.
+  // Required for Phase 1; without this the adapter cannot trust handshake
+  // claims about bundle/capability state.
+  string signing_key_id = 8;
+  bytes  announcement_signature = 9;       // ed25519 over canonical encoding
+}
+
+// ============================================================================
+// ClaimEstimate — egress_proxy / SDK supplied prediction metadata (SLICE_10).
+// ============================================================================
+//
+// All 17 prediction columns the audit chain expects per
+// `audit-chain-prediction-extension-v1alpha1.md` §2.1+§2.2.
+//
+// Field-tag layout:
+//   1..15   — hot-path fields (single-byte varint).
+//   16..    — additive / cold metadata.
+//
+// Sentinel semantics mirror the CloudEvent extension attributes
+// (`spendguard/common/v1/common.proto` tags 300-317):
+//   * predicted_b_tokens = 0   → Strategy B null (cache miss → L1 cold-start
+//                                fall back to A as reservation)
+//   * predicted_c_tokens = 0   → Strategy C null (no plugin OR plugin
+//                                returned no signal)
+//   * prediction_confidence = 0.0 → Strategy A row (NULL on SQL side)
+//   * cold_start_layer_used = ""   → warm path (no cold-start fallback)
+//   * tokenizer_version_id = ""    → Tier 3 fallback (heuristic, no
+//                                     versioned encoder)
+//   * run_predicted_remaining_steps = -1 → projector unreachable
+//   * run_steps_completed_so_far = 0 → run is at first call (cold cache)
+//   * run_code_triggered = ""      → no RUN_* code emitted
+message ClaimEstimate {
+  // ── Tokenizer ───────────────────────────────────────────────────────────
+  // Tier 2 = local exact BPE; Tier 3 = chars/4 heuristic fallback.
+  string tokenizer_tier        = 1;  // "T1" | "T2" | "T3"
+  string tokenizer_version_id  = 2;  // UUIDv7; "" for T3.
+  int64  input_tokens          = 3;
+
+  // ── Output predictor — Strategy A/B/C ──────────────────────────────────
+  int64  predicted_a_tokens          = 4;
+  int64  predicted_b_tokens          = 5;  // 0 = unset.
+  int64  predicted_c_tokens          = 6;  // 0 = unset.
+  string reserved_strategy           = 7;  // "A" | "B" | "C"
+  string prediction_strategy_used    = 8;  // "A" | "B" | "C"
+  string prediction_policy_used      = 9;  // STRICT_CEILING | EMPIRICAL_RUN_CEILING | ADAPTIVE_CEILING | SHADOW_ONLY
+  float  prediction_confidence       = 10; // 0.0 = unset.
+  int64  prediction_sample_size      = 11; // 0 = N/A
+  string cold_start_layer_used       = 12; // "L1"|"L2"|"L3"|"L4"|"" = warm
+
+  // ── Classifier + prompt-class fingerprint ──────────────────────────────
+  // Spec §8.2: fingerprint capture both predictor's view + caller's view.
+  string classifier_version          = 13;
+  string fingerprint_version         = 14;
+  string prompt_class_fingerprint    = 15;
+
+  // ── Run-cost projector — 3 run-level audit cols ───────────────────────
+  int64  run_projection_at_decision_atomic = 16;
+  int32  run_predicted_remaining_steps     = 17; // -1 = projector unreachable.
+  int64  run_steps_completed_so_far        = 18;
+  string run_code_triggered                = 19; // "" = no RUN_* emitted.
+
+  // Aggregator mirror fields (canonical_events 0018). These are not
+  // common.v1 CloudEvent tag-300 fields, so sidecar copies them into
+  // the signed CloudEvent data JSON for canonical_ingest to mirror.
+  string model        = 20;
+  string prompt_class = 21;
+}
+
+// ============================================================================
+// RequestDecision (per Contract §15 *.pre triggers)
+// ============================================================================
+
+message DecisionRequest {
+  string session_id = 1;
+
+  // Trigger point (per Contract §15).
+  enum Trigger {
+    TRIGGER_UNSPECIFIED = 0;
+    RUN_PRE = 1;
+    AGENT_STEP_PRE = 2;
+    LLM_CALL_PRE = 3;
+    TOOL_CALL_PRE = 4;
+  }
+  Trigger trigger = 2;
+
+  // W3C trace context + spendguard IDs (per Trace §3).
+  spendguard.common.v1.TraceContext trace = 3;
+  spendguard.common.v1.SpendGuardIds ids = 4;
+
+  // Route classification (per Contract §scope).
+  string route = 5;
+
+  // Inputs schema (per Contract §12; pre-normalized to canonical units).
+  // Hot-path: NO Platform Pricing DB query here (Stage 2 §9.4).
+  message Inputs {
+    // Estimated cost projection for this decision boundary.
+    // Sidecar normalized via cached pricing schema (in-process, < 1ms).
+    repeated spendguard.common.v1.BudgetClaim projected_claims = 1;
+
+    // Risk band hints (per Contract §14): p50 / p90 / p95 / p99.
+    string projected_p50_atomic = 2;
+    string projected_p90_atomic = 3;
+    string projected_p95_atomic = 4;
+    string projected_p99_atomic = 5;
+    spendguard.common.v1.UnitRef projected_unit = 6;
+
+    // Free-form runtime metadata (kept opaque server-side).
+    google.protobuf.Struct runtime_metadata = 7;
+
+    // === SLICE_10 additive: ClaimEstimate enrichment ===
+    //
+    // egress_proxy (after SLICE_10) calls tokenizer library + output_predictor
+    // + run_cost_projector BEFORE constructing this DecisionRequest, and
+    // attaches the full prediction metadata here. The sidecar reads these
+    // values into the audit_decision CloudEvent (common.v1 tags 300-313)
+    // so the audit chain carries the entire prediction story end-to-end.
+    //
+    // Wire-compat per proto3 additive evolution:
+    //   * SLICE_09 and earlier producers (SDK wrapper, legacy egress_proxy)
+    //     omit this field; sidecar treats it as "estimate not supplied" and
+    //     leaves the prediction CloudEvent tags at proto3 defaults (existing
+    //     behaviour — Strategy A imputed locally if needed in legacy path,
+    //     audit row prediction fields = NULL).
+    //   * SLICE_10 egress_proxy / SLICE_12 SDK populate this field; sidecar
+    //     reads the values verbatim into the CloudEvent.
+    //
+    // Tag 8 (next free in Inputs); additive.
+    ClaimEstimate claim_estimate = 8;
+  }
+  Inputs inputs = 6;
+
+  // Sub-agent context (per Contract §8) — filled if child agent.
+  string parent_run_id = 7;
+  string budget_grant_jti = 8;
+
+  // Idempotency at the trigger level; sidecar may return same decision twice.
+  spendguard.common.v1.Idempotency idempotency = 9;
+
+  // === SLICE_09 additive: Signal 3 pass-through ===
+  //
+  // SDK with_run_plan decorator (SLICE_12) writes this into the
+  // request_decision metadata; sidecar passes through to
+  // run_cost_projector.Project per run-cost-projector-spec-v1alpha1.md §5.
+  //
+  // Wire-compat per proto3 additive evolution: v1alpha1 clients send 0
+  // (proto3 default), which the projector treats as "Signal 3 inactive"
+  // per spec §5.2. v1alpha2 clients with the SDK decorator send a
+  // positive integer naming the total planned LLM + tool steps.
+  //
+  // Tag 17 chosen as the next stable tag after the v1alpha2 run_code_
+  // triggered field (tag 16 on DecisionResponse). DecisionRequest tags
+  // 10-15 are reserved for future hot-path fields per
+  // common.proto §field-number convention.
+  //
+  // SLICE_02 stubbed RUN_* code pass-through but did NOT add this field
+  // (no projector to consume it); SLICE_09 lands the field + activates
+  // the projector wire. Field cap 10000 enforced server-side at
+  // run_cost_projector validation (services/run_cost_projector/src/
+  // server.rs MAX_PLANNED_STEPS).
+  int32 planned_steps_hint = 17;
+}
+
+message DecisionResponse {
+  string decision_id = 1;
+  string audit_decision_event_id = 2;
+
+  // Final decision (per Contract §11 effect schema).
+  enum Decision {
+    DECISION_UNSPECIFIED = 0;
+    CONTINUE = 1;
+    DEGRADE = 2;
+    SKIP = 3;
+    STOP = 4;
+    REQUIRE_APPROVAL = 5;
+    // === v1alpha2 additive change ===
+    // Explicit decision when stop is driven by run projection, distinct
+    // from per-call STOP. Effect lattice still maps to STOP for old
+    // consumers (per Contract DSL v1alpha2 §3.4); the new field
+    // `run_code_triggered` carries the RUN_* code explicitly so SIEM /
+    // dashboard filters can distinguish "per-call stop" from
+    // "run-projection stop" without reading `reason_codes`. STOP
+    // semantics are completely identical to v1alpha1 STOP; this enum
+    // value exists for first-class dashboard categorisation.
+    //
+    // Backwards compat (per contract-dsl-spec-v1alpha2.md §6.1 +
+    // §8.1): v1alpha1 sidecar binaries cannot emit this value
+    // (their loader refuses v1alpha2 contract bundles via
+    // capability_required mismatch). Old clients that deserialize an
+    // unknown enum value as DECISION_UNSPECIFIED must fail closed, not
+    // gracefully continue; supported SDKs map STOP_RUN_PROJECTION to
+    // the same terminal exception path as STOP. SLICE_09 lights this
+    // enum up when run_cost_projector is wired.
+    STOP_RUN_PROJECTION = 6;
+  }
+  Decision decision = 3;
+
+  repeated string reason_codes = 4;
+  repeated string matched_rule_ids = 5;
+
+  // Mutation patch (per Contract §11; RFC 6902 restricted).
+  // Only present if decision == DEGRADE.
+  string mutation_patch_json = 6;
+
+  // Idempotency key for adapter.apply_mutation (per Stage 2 §4.6).
+  // Same effect_hash → same mutation; replay safe.
+  bytes effect_hash = 7;
+
+  // Reservation context — effect already reserved + audit committed.
+  string ledger_transaction_id = 8;
+  repeated string reservation_ids = 9;
+  google.protobuf.Timestamp ttl_expires_at = 10;
+
+  // For REQUIRE_APPROVAL: approval_request_id + ttl + approver scope.
+  string approval_request_id = 11;
+  google.protobuf.Timestamp approval_ttl = 12;
+  string approver_role = 13;
+
+  // For STOP: terminal (per Contract §11).
+  bool terminal = 14;
+
+  spendguard.common.v1.Error error = 15;
+
+  // === v1alpha2 additive change ===
+  // Which RUN_* decision code triggered this decision, if any. One of:
+  //   - ""                                (per-call decision; no RUN_* match)
+  //   - "RUN_BUDGET_PROJECTION_EXCEEDED"  (per contract-dsl-v1alpha2 §3.1)
+  //   - "RUN_DRIFT_DETECTED"              (per contract-dsl-v1alpha2 §3.2)
+  //   - "RUN_STEPS_EXCEEDED"              (per contract-dsl-v1alpha2 §3.3)
+  //
+  // Tag 16 chosen as next available; v1alpha1 reserved tags 1-15 for
+  // hot-path fields (per common.proto §field-number convention).
+  // Wire-compat with v1alpha1 clients: proto3 default = "" (field
+  // absent), so old clients silently ignore.
+  //
+  // SLICE_02 (this slice) wires the field through DecisionResponse but
+  // the value is only populated by SLICE_09's run_cost_projector
+  // integration. SLICE_02-time decoders should treat empty-string as
+  // "no RUN_* triggered" and not as an error.
+  string run_code_triggered = 16;
+}
+
+// ============================================================================
+// ConfirmPublishOutcome
+// ============================================================================
+
+message PublishOutcomeRequest {
+  string session_id = 1;
+  string decision_id = 2;
+  bytes effect_hash = 3;
+
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    APPLIED = 1;                // mutation applied to runtime request
+    APPLIED_NOOP = 2;            // continue / skip / stop with no mutation
+    APPLY_FAILED = 3;            // adapter could not apply (rolled back)
+    APPROVAL_GRANTED = 4;
+    APPROVAL_DENIED = 5;
+    APPROVAL_TIMED_OUT = 6;
+  }
+  Outcome outcome = 4;
+
+  string adapter_error = 5;     // when APPLY_FAILED
+}
+
+message PublishOutcomeResponse {
+  // Audit outcome event id (CloudEvent recorded in audit_outbox).
+  string audit_outcome_event_id = 1;
+  google.protobuf.Timestamp recorded_at = 2;
+  spendguard.common.v1.Error error = 3;
+}
+
+// ============================================================================
+// EmitTraceEvents (observation; *.post triggers + lifecycle)
+// ============================================================================
+
+message TraceEvent {
+  string session_id = 1;
+  spendguard.common.v1.TraceContext trace = 2;
+  spendguard.common.v1.SpendGuardIds ids = 3;
+
+  enum EventKind {
+    EVENT_KIND_UNSPECIFIED = 0;
+    RUN_START = 1;
+    RUN_END = 2;
+    AGENT_STEP_POST = 3;
+    LLM_CALL_POST = 4;        // also drives commit lifecycle
+    TOOL_CALL_POST = 5;
+    SPAN_DELTA = 6;
+    APPROVAL_LIFECYCLE = 7;
+    ROLLBACK = 8;
+  }
+  EventKind kind = 4;
+
+  google.protobuf.Timestamp event_time = 5;
+
+  // Event-kind-specific payload; oneof guarantees typed schema rather than
+  // free-form Struct (Codex review patch — typed LlmCallPost was missing).
+  oneof payload {
+    google.protobuf.Struct generic = 6;          // RUN_*, AGENT_STEP_POST, TOOL_CALL_POST, SPAN_DELTA
+    LlmCallPostPayload llm_call_post = 8;        // drives commit lifecycle
+    ApprovalLifecyclePayload approval = 9;
+    RollbackPayload rollback = 10;
+  }
+
+  // Provider response metadata blob — kept for raw provider-specific headers
+  // not captured by typed LlmCallPostPayload. Optional; canonical truth is
+  // in `llm_call_post.provider_reported`.
+  string provider_response_metadata = 7;
+}
+
+// LLM call post payload (per Contract §6 stage 7 commit_or_release driver).
+//
+// When sidecar receives this, it triggers either CommitEstimated (if no
+// provider response yet — uses risk.p90), or ProviderReport (when provider
+// response usage is in this payload), against the underlying ledger
+// reservation.
+message LlmCallPostPayload {
+  // Reservation to commit/release; obtained from the sidecar's prior
+  // DecisionResponse for the same llm_call_id.
+  string reservation_id = 1;
+
+  // Provider-reported usage (when available; commit_state == provider_reported).
+  // Atomic amount as decimal string for NUMERIC(38,0).
+  string provider_reported_amount_atomic = 2;
+  spendguard.common.v1.UnitRef unit = 3;
+
+  // Pricing context — should match the cached contract bundle at decision
+  // time. Sidecar validates equality against ledger.pricing_snapshots.
+  spendguard.common.v1.PricingFreeze pricing = 4;
+
+  // Provider raw event id for idempotent dedupe (where applicable).
+  string provider_event_id = 5;
+
+  // Final outcome from the LLM call (success / error / etc.).
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    SUCCESS = 1;
+    PROVIDER_ERROR = 2;
+    CLIENT_TIMEOUT = 3;
+    RUN_ABORTED = 4;
+  }
+  Outcome outcome = 6;
+
+  // Phase 2B Step 7 (Contract §5 commit_state_machine): adapter-supplied
+  // estimated atomic amount that drives the CommitEstimated path. Mutually
+  // exclusive with `provider_reported_amount_atomic` (field 2).
+  //
+  //   * estimated_amount_atomic non-empty + outcome=SUCCESS
+  //       -> sidecar calls Ledger.CommitEstimated with this amount as the
+  //         estimated_amount; ledger transitions reservation 'reserved' ->
+  //         'committed' and releases the residual back to available_budget.
+  //   * provider_reported_amount_atomic non-empty
+  //       -> sidecar calls Ledger.ProviderReport (deferred to Step 8 in this
+  //         POC; sidecar returns UNIMPLEMENTED in TraceEventAck.error).
+  //   * both empty + outcome=SUCCESS
+  //       -> rejected (no commit amount supplied).
+  //   * both non-empty
+  //       -> rejected (mutually exclusive paths).
+  //   * outcome != SUCCESS
+  //       -> rejected (Release path deferred; reservation will TTL-release).
+  //
+  // NUMERIC(38,0) decimal string, same encoding as the provider-reported
+  // field. Required when the caller wants the CommitEstimated path.
+  string estimated_amount_atomic = 7;
+
+  // Optional provider-observed token totals for audit calibration.
+  //
+  // Proto3 optional is intentional: omitted means the producer did not
+  // observe real usage and the audit mirror MUST remain SQL NULL. A
+  // present value of 0 is an explicit provider-observed zero and is
+  // preserved by canonical_ingest / audit_outbox mirror code.
+  optional int64 actual_input_tokens = 8;
+  optional int64 actual_output_tokens = 9;
+
+  // Optional calibration ratios computed by the adapter when it has both
+  // actual usage and the prediction it wants to compare. Omitted means
+  // "not applicable"; 0.0 is still treated as unset by mirror code
+  // because a zero denominator/no Strategy B-C path is the dominant
+  // sentinel in the audit-chain extension.
+  optional float delta_b_ratio = 10;
+  optional float delta_c_ratio = 11;
+}
+
+message ApprovalLifecyclePayload {
+  string approval_request_id = 1;
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    REQUESTED = 1;
+    GRANTED = 2;
+    DENIED = 3;
+    EXPIRED = 4;
+  }
+  State state = 2;
+  string approver = 3;
+  google.protobuf.Timestamp deadline = 4;
+}
+
+message RollbackPayload {
+  string ledger_transaction_id = 1;
+  string reason_code = 2;
+  string compensating_ledger_transaction_id = 3;
+}
+
+message TraceEventAck {
+  string event_id = 1;                       // generated by sidecar (UUID v7)
+
+  enum Status {
+    STATUS_UNSPECIFIED = 0;
+    ACCEPTED = 1;
+    QUARANTINED = 2;
+    REJECTED = 3;
+  }
+  Status status = 2;
+
+  spendguard.common.v1.Error error = 3;
+}
+
+// ============================================================================
+// Sub-agent budget grant (per Contract §8)
+// ============================================================================
+
+message IssueBudgetGrantRequest {
+  string session_id = 1;
+  string parent_run_id = 2;
+  string child_workload_kind = 3;            // SPIFFE-id-style or plain string
+
+  // Delegation scope.
+  message Scope {
+    repeated string allowed_routes = 1;
+    repeated string allowed_runtimes = 2;
+    string max_amount_atomic = 3;
+    spendguard.common.v1.UnitRef max_amount_unit = 4;
+    google.protobuf.Timestamp expires_at = 5;
+
+    // Required JWT custom claim per Contract §8 grant.claims.
+    // Identifies the parent reservation backing this delegation; child
+    // agent's first ReserveSet recheck verifies budget headroom against
+    // this reservation's ledger state.
+    string reservation_id = 6;
+  }
+  Scope scope = 4;
+}
+
+message IssueBudgetGrantResponse {
+  // RFC 9068 JWT access token; ed25519-signed.
+  string jwt_grant = 1;
+  string grant_jti = 2;
+  google.protobuf.Timestamp issued_at = 3;
+  google.protobuf.Timestamp expires_at = 4;
+}
+
+message RevokeBudgetGrantRequest {
+  string session_id = 1;
+  string grant_jti = 2;
+  string reason = 3;
+}
+
+message RevokeBudgetGrantResponse {
+  bool revoked = 1;
+  google.protobuf.Timestamp revoked_at = 2;
+}
+
+message ConsumeBudgetGrantRequest {
+  string session_id = 1;
+  string jwt_grant = 2;
+}
+
+message ConsumeBudgetGrantResponse {
+  bool accepted = 1;
+  string parent_run_id = 2;
+  string parent_tenant_id = 3;
+  google.protobuf.Timestamp expires_at = 4;
+  spendguard.common.v1.Error error = 5;
+}
+
+// ============================================================================
+// Lifecycle drain (per Sidecar §11)
+// ============================================================================
+
+message DrainSubscribeRequest {
+  string session_id = 1;
+}
+
+message DrainSignal {
+  enum Phase {
+    PHASE_UNSPECIFIED = 0;
+    DRAIN_INITIATED = 1;       // stop accepting new decisions
+    DRAIN_TIMEOUT_APPROACHING = 2;
+    DRAIN_COMPLETE = 3;
+  }
+  Phase phase = 1;
+  google.protobuf.Timestamp deadline = 2;
+  string drain_trigger = 3;    // pod_eviction / rolling_restart / spot / ...
+}
+
+// ============================================================================
+// ReleaseReservation (Agent Spend Protocol Draft-01 §4)
+// ============================================================================
+
+// Field-tag layout: ASP Draft-01 §4 canonical fields hold tags 1-3
+// verbatim. SpendGuard extensions (tenant assertion, fencing identity)
+// live at tags 100+ so a Draft-01-generated client wire-serializes
+// identically. Tags 4-99 are reserved for future Draft-01 additions.
+message ReleaseReservationRequest {
+  // ── ASP Draft-01 §4 canonical fields ─────────────────────────────────
+
+  // The reservation to release. UUIDv7 from a prior ReserveResponse's
+  // reservation_ids. Released independently per-reservation: callers
+  // holding multiple reservations under one decision MUST call
+  // ReleaseReservation once per reservation_id.
+  string reservation_id = 1;
+
+  // Idempotency key for retries. The (reservation_id, idempotency_key)
+  // pair is the dedup key per ASP Draft-01 §3.3:
+  //   - same pair + identical body  → return original outcome
+  //   - same pair + different body  → REPLAY_CONFLICT (gRPC Status)
+  //   - different idempotency_key against a terminal reservation
+  //     → RESERVATION_SETTLED / RESERVATION_RELEASED (gRPC Status)
+  string idempotency_key = 2;
+
+  // Free-form reason codes per ASP Draft-01 §4. Optional but
+  // RECOMMENDED. SpendGuard maps known values to its internal
+  // ReleaseReason enum; unknown values default to EXPLICIT.
+  // Known mappings (aligned with the EmitTraceEvents implicit path):
+  //   "provider_error" | "runtime_error" | "client_timeout"
+  //     → RuntimeError
+  //   "run_aborted" | "run_cancelled"
+  //     → RunAborted
+  //   anything else
+  //     → Explicit
+  repeated string reason_codes = 3;
+
+  // ── SpendGuard extensions (additive, MAY be empty) ──────────────────
+  // Tags 4-99 reserved for future Draft-01 additions.
+
+  // Tenant scope assertion. If non-empty MUST match the sidecar's
+  // configured tenant_id (permission_denied on mismatch). If empty the
+  // sidecar's own tenant_id is used implicitly. Same discipline as
+  // Handshake.tenant_id_assertion.
+  string tenant_id = 100;
+
+  // Adapter identity for fencing parity with the original Reserve.
+  // If empty, sidecar config defaults are used. Fencing epoch is
+  // checked inside run_release regardless.
+  string workload_instance_id = 101;
+  string session_id = 102;
+}
+
+// Errors are returned via gRPC Status (standard tonic / Draft-01
+// idiom), not embedded in the response body. Maps:
+//   ReservationStateConflict → Status::failed_precondition
+//   ReservationTtlExpired    → Status::failed_precondition
+//   FencingEpochStale        → Status::failed_precondition
+//   IdempotencyConflict      → Status::failed_precondition
+//   (unknown reservation)    → Status::not_found
+//   (tenant mismatch)        → Status::permission_denied
+//   (invalid UUID)           → Status::invalid_argument
+message ReleaseReservationResponse {
+  // ── ASP Draft-01 §4 canonical field ──────────────────────────────────
+
+  // Detached Ed25519 signature of the emitted audit.release CloudEvent.
+  // The full event lands in the audit chain via canonical_ingest; this
+  // signature lets the adapter pin the response to the receipt. Same-
+  // process idempotent replay returns the original signature while the
+  // sidecar replay cache is warm; cache miss returns empty bytes rather
+  // than a signature over a retry event that was not persisted.
+  bytes audit_event_signature = 1;
+
+  // ── SpendGuard extensions (additive) ────────────────────────────────
+  // Tags 2-99 reserved for future Draft-01 additions.
+
+  // Ledger transaction that recorded the release.
+  string ledger_transaction_id = 100;
+
+  // Reservations released by this call (single-element array in the
+  // current single-reservation-per-call model; kept as repeated for
+  // forward compatibility with a future batch-release form).
+  repeated string released_reservation_ids = 101;
+}
