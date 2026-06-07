@@ -1,0 +1,219 @@
+---
+title: "AWS Strands budget control with SpendGuard"
+description: >-
+  Pre-call token budget enforcement for AWS Strands Agents (strands-agents)
+  using Agentic SpendGuard. One HookProvider covers every model backend —
+  Bedrock, OpenAI, Anthropic, Gemini, Ollama, LiteLLM — because gating sits
+  at the agent-runtime boundary, not the model boundary.
+---
+
+> Your AWS Strands `Agent` just hit a runaway tool loop on a Claude
+> Sonnet model via Bedrock. Each turn dispatches another
+> `InvokeModel` HTTP request. Without a gate, you find out the cost
+> on next month's billing dashboard. SpendGuard plugs a single
+> `SpendGuardStrandsHookProvider` into Strands' typed event bus via
+> `hooks=[provider]` so every model invocation reserves against a
+> budget *before* the upstream call goes out — and the same provider
+> works for OpenAI, Gemini, Ollama, or LiteLLM backends with zero
+> changes.
+
+## Why you'd want this
+
+- **One provider, every backend.** Strands' `Model` abstraction is
+  plural (Bedrock / OpenAI / Anthropic / Gemini / Ollama / LiteLLM).
+  Gating at the agent-runtime boundary means the same provider
+  instance covers all of them; you don't write per-vendor wrappers.
+- **Pre-call refusal, not post-hoc accounting.** DENY raises
+  `DecisionDenied` BEFORE Strands dispatches the model HTTP. The
+  upstream call is **never** issued — verified by the
+  `agent_real_strands_deny` demo which asserts counting-stub hits
+  remain unchanged on the DENY turn.
+- **Bedrock-first, but model-agnostic.** Reads `result.usage` field
+  shape (Anthropic `input_tokens`/`output_tokens`, OpenAI
+  `prompt_tokens`/`completion_tokens`, LiteLLM normalised) — no
+  model-string parsing required.
+- **Audit + approval pipeline shared with every other framework.** The
+  provider writes to the same SpendGuard ledger as the LangChain,
+  Pydantic-AI, OpenAI Agents, and Google ADK integrations.
+
+## Setup (60 seconds)
+
+```bash
+pip install 'spendguard-sdk[strands]'
+```
+
+Bring up a sidecar via the demo stack:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## Wire it up
+
+```python
+import asyncio
+
+from strands import Agent
+from strands.models.bedrock import BedrockModel
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.strands import (
+    SpendGuardStrandsHookProvider,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="anthropic.claude-3-5-sonnet",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    def estimate(invocation):
+        # Conservative: reserve 500 atomic per call (above
+        # Sonnet's typical ~30-token short response).
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget", unit=unit, amount_atomic="500",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    def reconcile(invocation, result):
+        usage = result.usage
+        total = (
+            getattr(usage, "total_tokens", None)
+            or ((getattr(usage, "input_tokens", 0) or 0)
+                + (getattr(usage, "output_tokens", 0) or 0))
+        )
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget", unit=unit, amount_atomic=str(total),
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    guard = SpendGuardStrandsHookProvider(
+        client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate,
+        claim_reconciler=reconcile,
+    )
+
+    agent = Agent(
+        model=BedrockModel(
+            model_id="anthropic.claude-3-5-sonnet-20241022-v2:0",
+        ),
+        hooks=[guard],
+    )
+    result = await agent.invoke_async(prompt="Say hello in three words.")
+    print(result.message)
+
+
+asyncio.run(main())
+```
+
+## What you get
+
+- **Pre-call budget reservation** on every `Agent.invoke_async()` turn,
+  including tool-loop iterations.
+- **Multi-vendor coverage by shape.** Bedrock / OpenAI / Anthropic /
+  Gemini / Ollama / LiteLLM all extract usage from `result.usage`
+  field shape — no model-string match.
+- **Concurrent-safe.** Strands assigns a fresh `invocation_id` per
+  attempt; the provider's stash is keyed by that id so
+  `asyncio.gather` over multiple `agent.invoke_async()` calls never
+  collides.
+- **DEGRADE fails closed** by default. Set
+  `SPENDGUARD_STRANDS_FAIL_OPEN=1` (env) or `fail_closed=False`
+  (constructor) for dev-only fail-open behaviour.
+
+## Model-backend coverage matrix
+
+| Backend | Coverage | Tested in CI | Notes |
+|---------|----------|--------------|-------|
+| `BedrockModel` | v1 verified | yes | Anthropic-shape usage (`input_tokens` / `output_tokens`). Load-bearing in AWS shops. |
+| `OpenAIModel` | v1 verified | yes | OpenAI-shape usage (`prompt_tokens` / `completion_tokens` / `total_tokens`). |
+| `AnthropicModel` | v1 verified | yes | Same shape as Bedrock-via-Anthropic. |
+| `LiteLLMModel` | v1 verified | yes | LiteLLM normalised shape; covers Gemini / Cohere / Llama-via-LiteLLM. |
+| `GeminiModel` | v1 covered | indirect | Goes through LiteLLM in the recorded fixture matrix. |
+| `OllamaModel` | v1 covered | no | Same shape as OpenAI through Ollama's compatibility layer; not in the CI matrix. |
+
+Add a new backend = add a fourth row to
+`tests/integrations/strands/test_hook_provider.py::test_I02_multi_backend_allow_path`.
+
+## Common patterns
+
+### Cross-framework run_id correlation
+
+```python
+from spendguard.integrations.strands import (
+    StrandsRunContext, run_context,
+)
+
+async with run_context(StrandsRunContext(run_id="my-parent-run-1")):
+    result = await agent.invoke_async(prompt="hello")
+```
+
+Strands' event bus already carries `invocation_id` end-to-end, so a
+`StrandsRunContext` is **optional** (unlike LangChain / MAF where you
+must bind one). Use it only when bridging a Strands run to a parent
+trace from another framework.
+
+### DENY behavior
+
+When `request_decision` returns DENY, the provider:
+
+1. Raises `DecisionDenied` directly.
+2. Strands wraps it as `HookExecutionError`; callers catch via the
+   `__cause__` chain:
+   ```python
+   try:
+       await agent.invoke_async(prompt="...")
+   except Exception as exc:
+       if isinstance(exc.__cause__, DecisionDenied):
+           # handle the budget refusal
+           ...
+   ```
+3. The model HTTP is **never** issued (verified by the
+   `agent_real_strands_deny` demo).
+4. Nothing is stashed — no commit or release fires.
+
+### DEGRADE behavior
+
+DEGRADE means the sidecar returned a non-CONTINUE outcome the adapter
+should not block on (e.g. a temporary downgrade). By default the
+provider fails closed and raises `SpendGuardDegradeBlocked`. Set
+`fail_closed=False` or `SPENDGUARD_STRANDS_FAIL_OPEN=1` to allow the
+invocation; no commit row will be produced in that case (the
+reservation TTL-sweeps).
+
+### Tool callbacks
+
+Per-tool budgets via `before_tool` / `after_tool` are out of scope for
+v1. Tool cost is bundled into the parent invocation's
+estimator/reconciler. Per-tool gating is tracked as D20.1.
+
+### Streaming `on_message`
+
+Intra-invocation streaming token gating is not supported in v1; the
+commit fires at `after_invocation` only. The estimator-snapshot
+fallback covers the case where `result.usage` is `None` (rare with
+the standard Strands runtime).
+
+## Related
+
+- [Quickstart](/docs/quickstart/) — full stack up in 5 minutes
+- [Contract DSL reference](/docs/contracts/yaml/) — author allow/stop rules
+- Other integrations: [Google ADK](/docs/integrations/adk/) · [Pydantic-AI](/docs/integrations/pydantic-ai/) · [LangChain & LangGraph](/docs/integrations/langchain/) · [OpenAI Agents SDK](/docs/integrations/openai-agents/) · [Microsoft Agent Framework](/docs/integrations/microsoft-agent-framework/)

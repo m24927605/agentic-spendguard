@@ -342,6 +342,31 @@ else ifeq ($(DEMO_MODE),agent_real_adk_stub)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_strands)
+	@echo "[demo] DEMO_MODE=agent_real_strands → COV_D20 SLICE 5 (AWS Strands Python adapter)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/agent_real_strands/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock Bedrock + OpenAI provider)"
+	@echo "[demo]               + strands-runner (Python 3.12 + strands-agents +"
+	@echo "[demo]               spendguard-sdk[strands])."
+	@echo "[demo]   Driver issues 1 Agent.invoke_async() through"
+	@echo "[demo]   SpendGuardStrandsHookProvider's before/after invocation slots:"
+	@echo "[demo]   ALLOW + multi-backend coverage matrix proof."
+	$(COMPOSE) -f agent_real_strands/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),agent_real_strands_deny)
+	@echo "[demo] DEMO_MODE=agent_real_strands_deny → COV_D20 SLICE 5 DENY variant."
+	@echo "[demo]   Same base + overlay as agent_real_strands; the runner"
+	@echo "[demo]   exercises one ALLOW turn followed by one DENY turn and"
+	@echo "[demo]   asserts counting-stub recorded zero new hits on DENY"
+	@echo "[demo]   (INV-2 zero-provider-HTTP-on-DENY proof)."
+	$(COMPOSE) -f agent_real_strands_deny/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),approval_hot_reload)
 	@echo "[demo] DEMO_MODE=approval_hot_reload → same stack as DEMO_MODE=approval."
 	@echo "[demo]   Exercises issue #59 BUNDLE_HOT_RELOADED error path end-to-end:"
@@ -499,6 +524,24 @@ else ifeq ($(DEMO_MODE),agent_real_adk)
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure || \
 	  echo "[demo] outbox-closure skipped: agent_real_adk demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_strands)
+	@echo "[demo] running strands-runner (Python 3.12 + strands-agents + SpendGuardStrandsHookProvider)..."
+	$(COMPOSE) -f agent_real_strands/docker-compose.yaml run --rm strands-runner
+	@echo "[demo] verifying COV_D20 SLICE 5 (agent_real_strands ALLOW)..."
+	@$(MAKE) demo-verify-agent-real-strands
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_strands demo deferred per D05 UnitRef gap (cross-slice tracking)"
+else ifeq ($(DEMO_MODE),agent_real_strands_deny)
+	@echo "[demo] running strands-runner-deny (ALLOW + DENY proof)..."
+	$(COMPOSE) -f agent_real_strands_deny/docker-compose.yaml run --rm strands-runner-deny
+	@echo "[demo] verifying COV_D20 SLICE 5 (agent_real_strands_deny ALLOW + DENY)..."
+	@$(MAKE) demo-verify-agent-real-strands
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure || \
+	  echo "[demo] outbox-closure skipped: agent_real_strands_deny demo deferred per D05 UnitRef gap (cross-slice tracking)"
 else ifeq ($(DEMO_MODE),agent_real_adk_stub)
 	@echo "[demo] running adk-runner in stub mode (no GOOGLE_API_KEY)..."
 	@SPENDGUARD_DEMO_MODE=agent_real_adk_stub \
@@ -1021,6 +1064,39 @@ demo-verify-agent-real-adk:
 		   RAISE NOTICE 'COV_D19 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
 		 END; \$$\$$;"
 	@echo "[demo] COV_D19 SLICE 5 agent_real_adk verification done"
+
+# COV_D20 SLICE 5 (agent_real_strands demo) verification. Mirrors the
+# agent_real_adk layout: ledger-DB assertions in
+# verify_step_agent_real_strands.sql + INV-2 strict-order DO block + a
+# cross-DB canonical_events check under spendguard_canonical that
+# asserts at least 1 decision row + 1 outcome row landed after the
+# outbox forwarder drained, plus the strands integration tag is
+# present on the decision rows.
+demo-verify-agent-real-strands:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_agent_real_strands.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; v_strands INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   SELECT COUNT(*) INTO v_strands FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision' \
+		      AND payload_json::jsonb #>> '{decision_context,integration}' = 'strands'; \
+		   IF v_decision < 1 THEN \
+		     RAISE EXCEPTION 'COV_D20_GATE: canonical_events.decision >= 1 expected (ALLOW), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D20_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D20 CANONICAL OK: decision=% outcome=% strands_tagged=%', v_decision, v_outcome, v_strands; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D20 SLICE 5 agent_real_strands verification done"
 
 # COV_D08 SLICE 5 (openai_agents_ts demo) verification. Mirrors the
 # langchain_ts / vercel_ai_mastra layout: ledger-DB assertions in

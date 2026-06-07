@@ -70,6 +70,16 @@ openai-agents = [
 adk = [
   "google-adk>=1.0,<2",
 ]
+# COV_D20 SLICE_1: AWS Strands Agents SDK extra. `strands-agents` 1.x is
+# the GA line shipping `HookProvider.register_hooks(registry)` with
+# `BeforeInvocationEvent` / `AfterInvocationEvent`. Cap below 2.x to
+# fail-closed against a future breaking-change major. See
+# `docs/specs/coverage/D20_aws_strands/design.md` §5. The hook layer
+# is model-agnostic so the same provider gates Bedrock + OpenAI +
+# Anthropic + Gemini + Ollama + LiteLLM backends identically.
+strands = [
+  "strands-agents>=1.0,<2",
+]
 # COV_D07 SLICE_05: Microsoft Agent Framework (MAF) v1 GA extra. The
 # `agent-framework` umbrella package re-exports everything from
 # `agent-framework-core` (chat client + middleware contracts) so
