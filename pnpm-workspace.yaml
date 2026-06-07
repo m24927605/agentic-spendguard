@@ -11,4 +11,5 @@
 # `pnpm install` from the repo root working end-to-end.
 packages:
   - "sdk/typescript"
+  - "sdk/typescript-langchain"
   - "docs/site-v2"
