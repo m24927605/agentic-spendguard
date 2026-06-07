@@ -1,0 +1,43 @@
+version: 0.1.0
+type: plugin
+author: spendguard
+name: spendguard
+label:
+  en_US: SpendGuard (Budget-Gated Forwarder)
+  zh_Hans: SpendGuard (预算闸门转发)
+description:
+  en_US: >-
+    Forwards LLM calls to your chosen upstream (OpenAI, Anthropic, Gemini,
+    Bedrock) after reserving budget against a SpendGuard sidecar. Fail-closed
+    pre-call budget gate plus a signed audit chain for every Dify workspace
+    chat-app, agent, and workflow LLM step. Configure the plugin daemon
+    container with SPENDGUARD_SIDECAR_UDS and SPENDGUARD_TENANT_ID.
+  zh_Hans: >-
+    Dify Model Provider Plugin。每一次 LLM 调用先向 SpendGuard sidecar 预留
+    预算后再转发到上游 (OpenAI / Anthropic / Gemini / Bedrock)。fail-closed
+    预算闸门 + 签名审计链。
+icon: icon_s_en.svg
+created_at: "2026-06-07T00:00:00Z"
+resource:
+  memory: 268435456
+  permission:
+    model:
+      enabled: true
+      llm: true
+plugins:
+  models:
+    - "provider/spendguard.yaml"
+meta:
+  version: 0.0.1
+  arch:
+    - "amd64"
+    - "arm64"
+  runner:
+    language: "python"
+    version: "3.12"
+    entrypoint: "main"
+tags:
+  - llm
+  - budget
+  - audit
+  - forwarder

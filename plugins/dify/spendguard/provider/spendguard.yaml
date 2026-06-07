@@ -1,0 +1,102 @@
+provider: spendguard
+label:
+  en_US: SpendGuard (Budget-Gated Forwarder)
+  zh_Hans: SpendGuard (预算闸门转发)
+description:
+  en_US: >-
+    Pre-call budget reservation + signed audit chain. Selects the upstream
+    LLM provider and forwards every call through the SpendGuard sidecar.
+  zh_Hans: 预算预留 + 审计链；先经 sidecar 再转发到上游 LLM Provider。
+icon_small:
+  en_US: icon_s_en.svg
+icon_large:
+  en_US: icon_l_en.svg
+background: "#0F172A"
+help:
+  title:
+    en_US: "How to configure SpendGuard"
+    zh_Hans: "如何配置 SpendGuard"
+  url:
+    en_US: https://docs.spendguard.dev/integrations/dify
+supported_model_types:
+  - llm
+configurate_methods:
+  - predefined-model
+models:
+  llm:
+    predefined:
+      - "models/llm/llm.yaml"
+provider_credential_schema:
+  credential_form_schemas:
+    - variable: upstream_provider
+      label:
+        en_US: Upstream Provider
+        zh_Hans: 上游 Provider
+      type: select
+      required: true
+      default: openai
+      options:
+        - value: openai
+          label:
+            en_US: OpenAI
+        - value: anthropic
+          label:
+            en_US: Anthropic (v1.1+)
+        - value: gemini
+          label:
+            en_US: Google Gemini (v1.1+)
+        - value: bedrock
+          label:
+            en_US: AWS Bedrock (v1.1+)
+      placeholder:
+        en_US: Select upstream LLM provider
+    - variable: openai_api_key
+      label:
+        en_US: OpenAI API Key
+      type: secret-input
+      required: false
+      placeholder:
+        en_US: sk-... (required when Upstream Provider = OpenAI)
+    - variable: anthropic_api_key
+      label:
+        en_US: Anthropic API Key
+      type: secret-input
+      required: false
+      placeholder:
+        en_US: sk-ant-... (required when Upstream Provider = Anthropic)
+    - variable: upstream_base_url
+      label:
+        en_US: Upstream Base URL (optional)
+      type: text-input
+      required: false
+      placeholder:
+        en_US: Override the upstream API base URL
+    - variable: spendguard_sidecar_address
+      label:
+        en_US: SpendGuard Sidecar Address
+      type: text-input
+      required: true
+      default: "/run/spendguard/adapter.sock"
+      placeholder:
+        en_US: Path to the SpendGuard sidecar UDS
+    - variable: spendguard_tenant_id
+      label:
+        en_US: SpendGuard Tenant ID
+      type: text-input
+      required: true
+      placeholder:
+        en_US: tenant identifier asserted at handshake
+    - variable: spendguard_budget_id
+      label:
+        en_US: SpendGuard Budget ID
+      type: text-input
+      required: true
+      placeholder:
+        en_US: budget to charge against
+    - variable: spendguard_window_instance_id
+      label:
+        en_US: SpendGuard Window Instance ID
+      type: text-input
+      required: true
+      placeholder:
+        en_US: time-window instance ID

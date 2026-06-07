@@ -1,0 +1,8 @@
+# Dify Plugin SDK floor.
+# Spec design.md §5 / implementation.md §2 pinned dify-plugin>=0.2.0,<0.3.0
+# DEVIATION: as of 2026-06 the live PyPI floor is 0.8+; 0.2.x predates the
+# v1 Model Provider Plugin contract that ships LargeLanguageModel. We pin to
+# the v1-compatible major. Documented in SLICE_1234 retro.
+dify-plugin>=0.8.0,<1.0.0
+spendguard-sdk>=0.5.1
+openai>=1.40,<3.0

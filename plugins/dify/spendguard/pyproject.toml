@@ -1,0 +1,75 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "spendguard-dify-plugin"
+version = "0.1.0"
+description = "SpendGuard Model Provider Plugin for Dify - budget-gated upstream forwarder + signed audit chain"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "Apache-2.0"
+authors = [
+  { name = "Michael Chen", email = "m24927605@gmail.com" },
+]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "License :: OSI Approved :: Apache Software License",
+  "Topic :: Software Development :: Libraries",
+  "Development Status :: 3 - Alpha",
+]
+# Hard runtime dependencies. Dify plugin daemon image base
+# (langgenius/dify-plugin-sdk-python:0.8+) already ships dify-plugin and
+# tiktoken; we list both for editable installs outside the daemon container.
+# NOTE: design spec pinned dify-plugin>=0.2.0,<0.3.0 — the live v1 contract
+# floor is 0.8+. See requirements.txt for rationale.
+dependencies = [
+  "dify-plugin>=0.8.0,<1.0.0",
+  "spendguard-sdk>=0.5.1",
+  "openai>=1.40,<3.0",
+]
+
+[project.optional-dependencies]
+anthropic = [
+  # Wired in SLICE 5. Listed here so an operator picking
+  # upstream_provider=anthropic in advance can pre-install the dep.
+  "anthropic>=0.40",
+]
+test = [
+  "pytest>=7.4",
+  "pytest-asyncio>=0.23",
+  "respx>=0.21",
+  "ruff>=0.4",
+]
+
+[tool.hatch.build.targets.wheel]
+# Editable install needs the wheel to know which top-level packages live
+# in the plugin tree. Dify plugins ship as a `.difypkg` so this is purely
+# for in-tree pytest.
+packages = [
+  "provider",
+  "models",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+testpaths = ["tests"]
+# Per-test scoped loops avoid cross-test interference with the
+# daemon-scoped loop the plugin uses for the sync/async bridge.
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "ANN", "RUF"]
+ignore = [
+  "ANN401",  # Any sometimes unavoidable (Dify dict[str, Any] credentials)
+  "ANN101",  # self type hint (deprecated rule)
+  "ANN102",  # cls type hint (deprecated rule)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "S101"]  # asserts ok in tests
