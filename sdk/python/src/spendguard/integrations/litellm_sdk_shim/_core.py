@@ -95,11 +95,37 @@ def _build_default_binding(options: SpendGuardShimOptions) -> SimpleNamespace:
         token_kind="output_token",
         model_family="gpt-4",
     )
+    # Read the operator-supplied pricing fingerprint when present so
+    # the commit's PricingFreeze tuple matches the reservation's
+    # canonical pricing tuple. The sidecar enforces tuple equality
+    # between reserve + commit; a mismatch lands the commit on the
+    # REJECTED path with `pricing freeze mismatch`. Defaults below
+    # are the placeholder fingerprint used by unit tests where the
+    # sidecar is mocked and tuple equality is not enforced.
+    pricing_version = os.environ.get(
+        "SPENDGUARD_PRICING_VERSION", "",
+    ).strip() or "shim-v1"
+    snapshot_hash_hex = os.environ.get(
+        "SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX", "",
+    ).strip()
+    if snapshot_hash_hex:
+        try:
+            price_snapshot_hash = bytes.fromhex(snapshot_hash_hex)
+        except ValueError:
+            price_snapshot_hash = b"\x00" * 32
+    else:
+        price_snapshot_hash = b"\x00" * 32
+    fx_rate_version = os.environ.get(
+        "SPENDGUARD_FX_RATE_VERSION", "",
+    ).strip() or "shim-v1"
+    unit_conversion_version = os.environ.get(
+        "SPENDGUARD_UNIT_CONVERSION_VERSION", "",
+    ).strip() or "shim-v1"
     pricing = common_pb2.PricingFreeze(
-        pricing_version="shim-v1",
-        price_snapshot_hash=b"\x00" * 32,
-        fx_rate_version="shim-v1",
-        unit_conversion_version="shim-v1",
+        pricing_version=pricing_version,
+        price_snapshot_hash=price_snapshot_hash,
+        fx_rate_version=fx_rate_version,
+        unit_conversion_version=unit_conversion_version,
     )
     return SimpleNamespace(
         budget_id=budget_id,
@@ -284,13 +310,24 @@ class _DirectCore:
         reservation_id = outcome.reservation_ids[0]
 
         # ─── Provider call ──────────────────────────────────────────
+        # Catch BOTH ``Exception`` and ``asyncio.CancelledError``.
+        # In Python 3.8+ CancelledError inherits from ``BaseException``
+        # (not ``Exception``), so a bare ``except Exception`` would let
+        # cancellation skip the release commit + LEAK a reservation
+        # past the TTL window. The audit chain MUST see a CANCELLED
+        # outcome so an operator can correlate the missing commit.
         try:
             response = await _original_acompletion(**litellm_kwargs)
-        except Exception as call_exc:
+        except (Exception, asyncio.CancelledError) as call_exc:
             # Best-effort release — swallow SpendGuardError (TTL sweep
             # is the durable backstop), bubble any other rare error.
+            release_outcome = (
+                "CANCELLED"
+                if isinstance(call_exc, asyncio.CancelledError)
+                else "FAILURE"
+            )
             try:
-                await self._client.emit_llm_call_post(
+                await asyncio.shield(self._client.emit_llm_call_post(
                     run_id=run_id,
                     step_id=step_id,
                     llm_call_id=llm_call_id,
@@ -301,18 +338,22 @@ class _DirectCore:
                     unit=self._binding.unit,
                     pricing=self._binding.pricing,
                     provider_event_id="",
-                    outcome=(
-                        "CANCELLED"
-                        if isinstance(call_exc, asyncio.CancelledError)
-                        else "FAILURE"
-                    ),
-                )
+                    outcome=release_outcome,
+                ))
             except SpendGuardError as rel_exc:
                 log.warning(
                     "spendguard_litellm_shim: release RPC failed for "
                     "llm_call_id=%s err=%r; reservation will TTL-sweep.",
                     llm_call_id,
                     rel_exc,
+                )
+            except asyncio.CancelledError:
+                # The shielded release itself got cancelled — TTL is
+                # the backstop. Don't suppress the original cancel.
+                log.warning(
+                    "spendguard_litellm_shim: release RPC cancelled "
+                    "for llm_call_id=%s; reservation will TTL-sweep.",
+                    llm_call_id,
                 )
             raise
 

@@ -1,0 +1,152 @@
+# D12 SLICE 7 (`DEMO_MODE=litellm_sdk_deny`) — sidecar compose overlay.
+#
+# Layered on top of `deploy/demo/compose.yaml`:
+#   docker compose -f deploy/demo/compose.yaml \
+#                  -f deploy/demo/litellm_sdk_deny/docker-compose.yaml up
+# The Makefile DEMO_MODE=litellm_sdk_deny branch does that for you.
+#
+# Same topology as litellm_sdk_real (counting-stub + runner) but the
+# runner exercises the 3 fail-closed sub-steps (DENY budget exhausted,
+# DENY sidecar unreachable, ALLOW positive control). The verify SQL
+# expects at least one denied_decision row.
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-litellm-sdk-deny-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not self.path.startswith("/v1/chat/completions"):
+                    self.send_response(404); self.end_headers(); return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"chatcmpl-litellm-sdk-deny-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hi from litellm-sdk-deny demo"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 5,
+                              "completion_tokens": 7,
+                              "total_tokens": 12},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body); return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok"); return
+                self.send_response(404); self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[litellm-sdk-deny-counting-stub] {self.command} "
+                    f"{self.path} -> hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[litellm-sdk-deny-counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── litellm-sdk-shim-runner (DENY variant) ──────────────────────────
+  litellm-sdk-shim-runner:
+    image: python:3.12-slim
+    container_name: spendguard-litellm-sdk-deny-runner
+    user: "0:0"
+    environment:
+      SPENDGUARD_SIDECAR_UDS: "/var/run/spendguard/adapter.sock"
+      SPENDGUARD_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_UNIT_ID: "66666666-6666-4666-8666-666666666666"
+      SPENDGUARD_PRICING_VERSION: "demo-pricing-v1"
+      SPENDGUARD_FX_RATE_VERSION: "demo-fx-v1"
+      SPENDGUARD_UNIT_CONVERSION_VERSION: "demo-units-v1"
+      OPENAI_API_KEY: "sk-demo-litellm-sdk-deny-counting-stub-key"
+      OPENAI_API_BASE: "http://counting-stub:8765/v1"
+      SPENDGUARD_DEMO_VARIANT: "deny"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      - ../..:/workspace:ro
+      - sidecar-uds:/var/run/spendguard
+      - bundles-data:/var/lib/spendguard/bundles:ro
+    working_dir: /workspace/deploy/demo/litellm_sdk_deny
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        echo "[litellm-sdk-deny-runner] installing litellm..."
+        pip install --quiet \
+          'litellm>=1.55,<2.0' \
+          'openai>=1.40,<3.0' \
+          'httpx>=0.27,<1.0'
+        echo "[litellm-sdk-deny-runner] installing in-tree spendguard-sdk..."
+        cp -r /workspace/sdk/python /tmp/spendguard-sdk
+        pip install --quiet /tmp/spendguard-sdk
+        # Source the bundle runtime.env so the shim's commit RPC ships
+        # the same SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX the reservation
+        # was created with.
+        if [ -f /var/lib/spendguard/bundles/runtime.env ]; then
+          set -a
+          . /var/lib/spendguard/bundles/runtime.env
+          set +a
+        fi
+        echo "[litellm-sdk-deny-runner] running 3-step DENY matrix..."
+        python run_litellm_sdk_deny_demo.py
+    depends_on:
+      counting-stub:
+        condition: service_healthy
+      sidecar:
+        condition: service_healthy
+    networks:
+      spendguard-net:
+        aliases: [litellm-sdk-shim-runner]

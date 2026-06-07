@@ -1,0 +1,204 @@
+# D12 SLICE 7 (`DEMO_MODE=litellm_sdk_real`) — sidecar compose overlay.
+#
+# Layered on top of `deploy/demo/compose.yaml`:
+#   docker compose -f deploy/demo/compose.yaml \
+#                  -f deploy/demo/litellm_sdk_real/docker-compose.yaml up
+# The Makefile DEMO_MODE=litellm_sdk_real branch does that for you.
+#
+# Two new services scoped to this demo mode:
+#
+#   counting-stub                 mock OpenAI /v1/chat/completions provider
+#                                 that counts calls per HTTP hit. Identical
+#                                 shape to envoy_extproc / kong_gateway /
+#                                 dify_plugin / langchain_ts overlays.
+#
+#   litellm-sdk-shim-runner       Python 3.12 container that calls real
+#                                 ``litellm.acompletion`` after
+#                                 ``install_shim`` is applied. The shim
+#                                 reserves on the in-cluster sidecar UDS;
+#                                 the counting-stub answers as the
+#                                 OpenAI upstream.
+#
+# Anti-scope: this overlay does NOT redeclare postgres, sidecar, ledger,
+# canonical-ingest, bundles-init or any other base service. The Makefile
+# target brings up the base stack first, then this overlay.
+#
+# DEMO PURPOSE: D12 closes the gap LiteLLM Issue #8842 leaves open —
+# direct ``litellm.acompletion()`` callers (and every transitive caller
+# CrewAI / DSPy / SmolAgents / Strands / BeeAI / AutoGen / Atomic Agents)
+# get a SpendGuard pre-call gate without any framework-side changes.
+# The runner proves the gate fires + commits land in the ledger.
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  # In-network mock OpenAI provider. Identical to the envoy_extproc /
+  # kong_gateway / dify_plugin overlays — counts each HTTP hit so the
+  # runner can prove INV-1 strict-ordering (DENY MUST NOT increment).
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-litellm-sdk-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not self.path.startswith("/v1/chat/completions"):
+                    self.send_response(404); self.end_headers(); return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"chatcmpl-litellm-sdk-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hi from litellm-sdk-shim demo"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 5,
+                              "completion_tokens": 7,
+                              "total_tokens": 12},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body); return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok"); return
+                self.send_response(404); self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[litellm-sdk-counting-stub] {self.command} {self.path} "
+                    f"-> hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[litellm-sdk-counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── litellm-sdk-shim-runner ──────────────────────────────────────────
+  # Python 3.12 + spendguard-sdk + litellm + the in-tree shim. Runs a
+  # 3-step matrix (ALLOW + STREAM + TRANSITIVE/CREWAI) by calling real
+  # ``litellm.acompletion`` after ``install_shim``. The shim drives the
+  # sidecar reservation lifecycle without any code at the call sites.
+  litellm-sdk-shim-runner:
+    image: python:3.12-slim
+    container_name: spendguard-litellm-sdk-shim-runner
+    user: "0:0"  # need to pip install at boot
+    environment:
+      SPENDGUARD_SIDECAR_UDS: "/var/run/spendguard/adapter.sock"
+      SPENDGUARD_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_UNIT_ID: "66666666-6666-4666-8666-666666666666"
+      # PricingFreeze tuple matches the demo seed's canonical pricing
+      # (compose.yaml defaults for the demo service). The shim's
+      # _build_default_binding reads these env vars; without them the
+      # commit RPC fails with `pricing freeze mismatch`.
+      # SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX is sourced from the bundles
+      # runtime.env at container start (see the command: stanza).
+      SPENDGUARD_PRICING_VERSION: "demo-pricing-v1"
+      SPENDGUARD_FX_RATE_VERSION: "demo-fx-v1"
+      SPENDGUARD_UNIT_CONVERSION_VERSION: "demo-units-v1"
+      # Route LiteLLM at the counting-stub OpenAI mock.
+      OPENAI_API_KEY: "sk-demo-litellm-sdk-shim-counting-stub-key"
+      OPENAI_API_BASE: "http://counting-stub:8765/v1"
+      # The runner script flips this when it expects the DENY mode driver
+      # (see deploy/demo/litellm_sdk_deny/). For litellm_sdk_real we leave
+      # this unset.
+      SPENDGUARD_DEMO_VARIANT: "real"
+      PYTHONUNBUFFERED: "1"
+    volumes:
+      # Workspace source — read-only. Path is relative to the FIRST
+      # compose file's directory (deploy/demo).
+      - ../..:/workspace:ro
+      # Sidecar UDS shared with the rest of the stack.
+      - sidecar-uds:/var/run/spendguard
+      # Bundles volume — carries runtime.env with the actual
+      # SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX matching the contract bundle
+      # the sidecar loaded. Read-only.
+      - bundles-data:/var/lib/spendguard/bundles:ro
+    working_dir: /workspace/deploy/demo/litellm_sdk_real
+    command:
+      - bash
+      - -c
+      - |
+        set -euo pipefail
+        echo "[litellm-sdk-shim-runner] installing litellm + crewai + dspy..."
+        pip install --quiet \
+          'litellm>=1.55,<2.0' \
+          'openai>=1.40,<3.0' \
+          'httpx>=0.27,<1.0' \
+          'crewai>=0.95.0,<0.220.0' \
+          'dspy-ai>=2.5,<3.0'
+        # D12 ships via the existing spendguard-sdk PyPI package, but
+        # the in-tree shim module lives ahead of the latest released
+        # wheel until D12 lands. Copy the workspace into a writable
+        # location and install from there (non-editable) so this demo
+        # always exercises the in-tree shim. Read-only volume mount
+        # forbids editable installs that would write *.egg-info next
+        # to setup.py.
+        echo "[litellm-sdk-shim-runner] installing in-tree spendguard-sdk..."
+        cp -r /workspace/sdk/python /tmp/spendguard-sdk
+        pip install --quiet /tmp/spendguard-sdk
+        # Source the bundle runtime.env so SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX
+        # carries the sha256 of the contract bundle the sidecar loaded.
+        # Mirrors deploy/demo/runtime/demo-entrypoint.sh.
+        if [ -f /var/lib/spendguard/bundles/runtime.env ]; then
+          set -a
+          . /var/lib/spendguard/bundles/runtime.env
+          set +a
+        fi
+        echo "[litellm-sdk-shim-runner] running 3-step matrix..."
+        python run_litellm_sdk_demo.py
+    depends_on:
+      counting-stub:
+        condition: service_healthy
+      sidecar:
+        condition: service_healthy
+    networks:
+      spendguard-net:
+        aliases: [litellm-sdk-shim-runner]

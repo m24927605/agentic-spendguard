@@ -187,6 +187,34 @@ else ifeq ($(DEMO_MODE),dify_plugin_real)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),litellm_sdk_real)
+	@echo "[demo] DEMO_MODE=litellm_sdk_real → COV_D12 SLICE 7 (LiteLLM SDK monkey-patch shim)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/litellm_sdk_real/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               litellm-sdk-shim-runner (Python 3.12 calling"
+	@echo "[demo]               real litellm.acompletion after install_shim)."
+	@echo "[demo]   Driver issues 3 calls: ALLOW + STREAM + TRANSITIVE/CrewAI"
+	@echo "[demo]   (CrewAI step is a clean SKIP if crewai unavailable)."
+	@echo "[demo]   D12 closes LiteLLM Issue #8842 — direct SDK callers + 7"
+	@echo "[demo]   transitive frameworks (CrewAI / DSPy / SmolAgents / Strands /"
+	@echo "[demo]   BeeAI / AutoGen / Atomic Agents) gain a SpendGuard pre-call"
+	@echo "[demo]   gate with NO framework-side changes."
+	$(COMPOSE) -f litellm_sdk_real/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),litellm_sdk_deny)
+	@echo "[demo] DEMO_MODE=litellm_sdk_deny → COV_D12 SLICE 7 (LiteLLM SDK shim DENY variant)."
+	@echo "[demo]   Same topology as litellm_sdk_real but the runner exercises"
+	@echo "[demo]   3 fail-closed sub-steps: ALLOW positive control + DENY"
+	@echo "[demo]   budget-exhausted + DENY sidecar-unreachable. Stub counter"
+	@echo "[demo]   must remain UNCHANGED on each DENY (INV-1)."
+	$(COMPOSE) -f litellm_sdk_deny/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),inngest_agent_kit)
 	@echo "[demo] DEMO_MODE=inngest_agent_kit → COV_D29 SLICE 5 (Inngest AgentKit retry-dedup)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -324,6 +352,22 @@ else ifeq ($(DEMO_MODE),dify_plugin_real)
 	$(COMPOSE) -f dify_plugin/docker-compose.yaml run --rm dify-plugin-runner
 	@echo "[demo] verifying COV_D10 SLICE 7 (dify_plugin_real ALLOW + DENY + STREAM)..."
 	@$(MAKE) demo-verify-dify-plugin-real
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),litellm_sdk_real)
+	@echo "[demo] running litellm-sdk-shim-runner (Python 3.12 + litellm + install_shim)..."
+	$(COMPOSE) -f litellm_sdk_real/docker-compose.yaml run --rm litellm-sdk-shim-runner
+	@echo "[demo] verifying COV_D12 SLICE 7 (litellm_sdk_real ALLOW + STREAM + TRANSITIVE)..."
+	@$(MAKE) demo-verify-litellm-sdk-real
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),litellm_sdk_deny)
+	@echo "[demo] running litellm-sdk-shim-runner DENY variant..."
+	$(COMPOSE) -f litellm_sdk_deny/docker-compose.yaml run --rm litellm-sdk-shim-runner
+	@echo "[demo] verifying COV_D12 SLICE 7 (litellm_sdk_deny 3 fail-closed sub-steps)..."
+	@$(MAKE) demo-verify-litellm-sdk-deny
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure
@@ -652,6 +696,42 @@ demo-verify-dify-plugin-real:
 		 END; \$$\$$;"
 	@echo "[demo] COV_D10 SLICE 7 dify_plugin_real verification done"
 
+# COV_D12 SLICE 7 (litellm_sdk_real demo) verification. Mirrors the
+# dify_plugin_real layout: ledger-DB assertions in
+# verify_step_litellm_sdk_real.sql + a cross-DB canonical_events check
+# under spendguard_canonical asserting >=2 decision rows + >=2 outcome
+# rows landed after the outbox forwarder drained.
+demo-verify-litellm-sdk-real:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_sdk_real.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 2 THEN \
+		     RAISE EXCEPTION 'COV_D12_GATE: canonical_events.decision >= 2 expected (ALLOW + STREAM), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 2 THEN \
+		     RAISE EXCEPTION 'COV_D12_GATE: canonical_events.outcome >= 2 expected (ALLOW + STREAM), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D12 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D12 SLICE 7 litellm_sdk_real verification done"
+
+# COV_D12 SLICE 7 (litellm_sdk_deny demo) verification. Asserts the
+# 3 fail-closed sub-steps produced exactly:
+#   * >=1 reserve + >=1 commit (sub-step 1 ALLOW positive control)
+#   * >=1 denied_decision (sub-step 2 reaches the sidecar)
+# Sub-step 3 (bogus UDS) fails before the sidecar so no row from it.
+demo-verify-litellm-sdk-deny:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_sdk_deny.sql
+	@echo "[demo] COV_D12 SLICE 7 litellm_sdk_deny verification done"
+
 # COV_D06 SLICE 7 (vercel_ai_mastra demo) verification. Mirrors the
 # langchain_ts layout: ledger-DB assertions in
 # verify_step_vercel_ai_mastra.sql + INV-2 strict-order DO block + a
@@ -902,7 +982,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

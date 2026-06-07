@@ -1,5 +1,60 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **`spendguard.integrations.litellm_sdk_shim`** — LiteLLM SDK
+  monkey-patch shim that closes [LiteLLM Issue #8842](https://github.com/BerriAI/litellm/issues/8842).
+  Calling `install_shim(SpendGuardShimOptions(...))` once at boot
+  replaces `litellm.acompletion`, `litellm.completion`,
+  `litellm.atext_completion`, `litellm.text_completion`, and
+  `litellm.Router.acompletion` (plus operator-defined Router
+  subclasses) with SpendGuard-gated wrappers. Direct callers AND
+  every transitive caller — CrewAI, DSPy, SmolAgents, Strands,
+  BeeAI, AutoGen, Atomic Agents — gain a fail-closed pre-call
+  budget gate with NO framework-side changes.
+  - Public API: `install_shim`, `uninstall_shim`, `is_installed`,
+    `SpendGuardShimOptions`, `SpendGuardShimAlreadyInstalled`,
+    `SpendGuardShimSyncInAsyncContext`.
+  - Idempotent install via `config_signature` hash; same options =
+    silent no-op, different options = raise.
+  - `uninstall_shim` walks `state.originals` in reverse so subclass
+    restores precede parent restores.
+  - Re-entry guard via `contextvars.ContextVar[bool]` so
+    LiteLLM-internal fallback / Router retry chains that re-enter
+    a patched entry point short-circuit to the saved original (no
+    double-reserve).
+  - Sync wrappers refuse to bridge from inside a running event loop
+    (would deadlock); raise `SpendGuardShimSyncInAsyncContext` with
+    a hint to use `await litellm.acompletion(...)` instead.
+  - End-of-stream commit reads `response.usage.completion_tokens`
+    (OpenAI shape; LiteLLM normalises Anthropic / Bedrock / Gemini).
+    `asyncio.CancelledError` mid-call routes through
+    `emit_llm_call_post(outcome=CANCELLED)` then re-raises.
+  - D12 ships via the **existing `spendguard-sdk` PyPI package** — no
+    new package, no new extras.
+- Two new demo modes prove the shim end-to-end against a real
+  SpendGuard sidecar:
+  - `DEMO_MODE=litellm_sdk_real` — 3-step matrix (ALLOW + STREAM +
+    TRANSITIVE/CrewAI).
+  - `DEMO_MODE=litellm_sdk_deny` — 3-substep fail-closed matrix
+    (ALLOW positive control + DENY budget-exhausted + DENY
+    sidecar-unreachable).
+- Documentation: `docs/site-v2/.../integrations/litellm-sdk-shim.mdx`
+  with the 4-surface decision matrix (proxy callback / proxy
+  guardrail / direct acompletion / SDK shim).
+
+### Fixed
+
+- `litellm_sdk_shim._core` now catches `asyncio.CancelledError`
+  alongside `Exception` so cancellation mid-call routes through the
+  release commit path (the audit row gets `outcome=CANCELLED`).
+  Previously cancellation skipped the release commit + leaked the
+  reservation past TTL. The release commit is wrapped in
+  `asyncio.shield` so a follow-on cancel of the outer task does not
+  abort the audit-side commit.
+
 ## 0.5.1 — 2026-06-02
 
 ### Changed

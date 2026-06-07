@@ -1,0 +1,274 @@
+---
+title: "LiteLLM SDK monkey-patch shim"
+description: >-
+  Install Agentic SpendGuard as a one-line monkey-patch on top of the
+  LiteLLM Python SDK. Direct litellm.acompletion() callers — and every
+  transitive caller (CrewAI, DSPy, SmolAgents, Strands, BeeAI, AutoGen,
+  Atomic Agents) — gain a fail-closed pre-call budget gate with NO
+  framework-side changes. Closes LiteLLM Issue #8842.
+---
+
+
+> [LiteLLM Issue #8842](https://github.com/BerriAI/litellm/issues/8842)
+> has been open for over a year: `async_pre_call_hook` only fires on
+> the proxy path. Direct `litellm.acompletion()` callers — and every
+> agent framework that uses LiteLLM as its LLM transport — bypass
+> every pre-call gate. SpendGuard's **LiteLLM SDK monkey-patch shim**
+> closes that gap. One call to `install_shim(...)` and every
+> subsequent `await litellm.acompletion(...)` in the running
+> interpreter is SpendGuard-gated.
+
+## Why a monkey-patch shim
+
+SpendGuard already ships three LiteLLM surfaces:
+
+- **`spendguard.integrations.litellm.SpendGuardLiteLLMCallback`** —
+  the legacy `CustomLogger` callback that LiteLLM proxy admins wire
+  via `litellm_settings.callbacks:`.
+- **`spendguard.integrations.litellm_guardrail.SpendGuardGuardrail`**
+  — the newer `CustomGuardrail` registry surface; the recommended
+  install for new proxy operators.
+- **`spendguard.integrations.litellm.SpendGuardDirectAcompletion`** —
+  an explicit wrapper callers can construct around `acompletion` for
+  the direct-SDK path (D11 SLICE A3).
+
+None of those cover direct callers who do not own the LLM call site:
+
+```python
+# CrewAI internals — SpendGuard cannot patch this from outside
+async def _execute(self, agent, task):
+    response = await litellm.acompletion(
+        model=agent.llm,
+        messages=self._build_prompt(task),
+    )
+    return self._parse(response)
+```
+
+SpendGuard cannot retrofit constructors into upstream framework code.
+The monkey-patch shim replaces `litellm.acompletion` (and the other
+SDK entry points) **at module level** in the running interpreter, so
+every subsequent call to those entry points — from your code, from
+CrewAI, from DSPy, from anywhere — funnels through the SpendGuard
+core.
+
+## Install
+
+```bash
+pip install 'spendguard-sdk>=0.5.1'
+```
+
+D12 ships **via the existing `spendguard-sdk` PyPI package** — no new
+package, no new extras, no extra dependency tree. The shim is
+importable wherever the SDK is installed.
+
+```python
+from spendguard import SpendGuardClient
+from spendguard.integrations.litellm_sdk_shim import (
+    SpendGuardShimOptions,
+    install_shim,
+    uninstall_shim,
+)
+
+client = SpendGuardClient(
+    socket_path="/var/run/spendguard/adapter.sock",
+    tenant_id="<your-tenant-uuid>",
+)
+await client.connect()
+await client.handshake()
+
+install_shim(SpendGuardShimOptions(
+    client=client,
+    tenant_id="<your-tenant-uuid>",
+    budget_id="<your-budget-uuid>",  # or $SPENDGUARD_BUDGET_ID
+    fail_open=False,                  # fail-closed default
+))
+
+# From this point on, every litellm.acompletion / completion /
+# Router.acompletion call (and every CrewAI / DSPy / SmolAgents /
+# Strands / BeeAI / AutoGen / Atomic Agents call that uses LiteLLM
+# under the hood) is SpendGuard-gated.
+try:
+    await crew.kickoff_async()  # transitive coverage, no CrewAI changes
+finally:
+    uninstall_shim()
+```
+
+## Patched surfaces
+
+Calling `install_shim()` replaces these LiteLLM entry points with
+SpendGuard-gated wrappers:
+
+| Entry point | Notes |
+|-------------|-------|
+| `litellm.acompletion` | The headline async path; gates every framework that uses LiteLLM. |
+| `litellm.completion` | Sync wrapper bridges via `asyncio.run` from non-async contexts. Refuses to bridge from inside a running loop (would deadlock); raises `SpendGuardShimSyncInAsyncContext` instead. |
+| `litellm.atext_completion` | `/v1/completions` async path (legacy text endpoint). |
+| `litellm.text_completion` | Sync legacy text endpoint. |
+| `litellm.Router.acompletion` | Class-level patch + walk over `Router.__subclasses__()` so operator-defined subclasses are gated too. |
+
+`embedding` / `aembedding` / `aimage_generation` / `atranscription`
+are intentionally out of v1 scope (D12.1 will cover them).
+
+## Lifecycle
+
+```
+caller → await litellm.acompletion(...)        [after install_shim()]
+   ↓
+shim wrapper:
+  if _IN_FLIGHT.get(): return await ORIGINAL(**kwargs)   [recursion guard]
+  token = _IN_FLIGHT.set(True)
+  try:
+    1. resolver → budget binding
+    2. estimator → projected claim
+    3. sidecar.request_decision  ←── BEFORE provider HTTP
+       ALLOW → continue · DENY → raise · DEGRADE → raise (fail-closed)
+    4. await ORIGINAL(**kwargs) → provider HTTP fires here
+    5. reconciler → real claim from response.usage
+    6. sidecar.emit_llm_call_post(SUCCESS)
+       exception → emit_llm_call_post(FAILURE | CANCELLED) + re-raise
+  finally:
+    _IN_FLIGHT.reset(token)
+```
+
+- The `_IN_FLIGHT` re-entry guard is a `contextvars.ContextVar` —
+  per-asyncio-task, never thread-local. LiteLLM-internal fallback
+  chains (Router retry, model alias resolution) that recursively
+  call `litellm.acompletion` short-circuit to the saved original
+  without a double-reserve.
+- DENY raises `spendguard.errors.DecisionDenied` with the
+  `decision_id` attached so operators can trace the verdict in the
+  audit chain.
+- DEGRADE raises `spendguard.errors.SidecarUnavailable` by default
+  (fail-closed). Set `fail_open=True` for dev / local-loop work; the
+  shim logs a WARN every time it allows on DEGRADE so the fail-open
+  path is observable.
+- Cancellation (`asyncio.CancelledError` mid-call) routes through
+  `emit_llm_call_post(outcome=CANCELLED)` and the original
+  `CancelledError` is re-raised — so the audit chain sees the cancel
+  and the reservation is released cleanly.
+
+## Idempotent install
+
+```python
+install_shim(opts_A)
+install_shim(opts_A)  # no-op — same options.signature
+install_shim(opts_B)  # raises SpendGuardShimAlreadyInstalled
+```
+
+The shim hashes a `config_signature` from the options object — same
+options means a silent no-op; different options requires
+`uninstall_shim()` first. This protects against a service that
+re-imports its bootstrap and accidentally double-stacks wrappers.
+
+## Transitive coverage
+
+D12's headline value is **transitive**: install the shim once at
+service boot and gain budget coverage for every framework that uses
+LiteLLM as its LLM transport.
+
+| Framework | Adoption (2026) | How it uses LiteLLM | Coverage |
+|-----------|-----------------|---------------------|----------|
+| **CrewAI** | 30k+ stars | `Agent.llm` resolves to `litellm.acompletion` | Yes |
+| **DSPy** | 18k+ stars | `dspy.LM(...).__call__` calls `litellm.completion` | Yes |
+| **SmolAgents** | HF maintained | `LiteLLMModel` calls `litellm.completion` | Yes |
+| **Strands** | new in 2026 | uses LiteLLM as default LLM transport | Yes |
+| **BeeAI** | IBM maintained | uses LiteLLM as default LLM transport | Yes |
+| **AutoGen** | MSR maintained | optional `litellm` provider | Yes |
+| **Atomic Agents** | 5k+ stars | LiteLLM is one of the supported providers | Yes |
+
+No framework-side changes; no PRs; no fork. Just `install_shim()`
+once at boot.
+
+## Choosing the right LiteLLM surface
+
+SpendGuard offers four LiteLLM integrations. Pick by deployment shape:
+
+| Surface | Use when |
+|---------|----------|
+| `litellm_guardrail` | You run the LiteLLM proxy and want a zero-Python `proxy_config.yaml` install. |
+| `litellm` (callback) | You run the LiteLLM proxy and need the legacy `CustomLogger` path (existing operators). |
+| `SpendGuardDirectAcompletion` | You own the call site for `litellm.acompletion` and prefer explicit composition over module-level patching. |
+| **`litellm_sdk_shim` (this surface)** | You DON'T own the call site (CrewAI / DSPy / etc.) — or you do, and want one `install_shim()` to cover both your code AND your transitive framework calls. |
+
+All four share the same reserve / commit / release flow under the
+hood — they only differ in how the call site reaches it.
+
+## Demo
+
+Two demo modes ship with D12. Both run end-to-end against a real
+SpendGuard sidecar:
+
+```bash
+make demo-up DEMO_MODE=litellm_sdk_real
+```
+
+Runs the 3-step matrix (ALLOW + STREAM + TRANSITIVE/CrewAI). The
+counting-stub mocks the OpenAI upstream; the SpendGuard sidecar
+gates each call via the shim. Asserts INV-1 (stub counter delta)
+and INV-2 (ledger order: reserve before outcome).
+
+```bash
+make demo-up DEMO_MODE=litellm_sdk_deny
+```
+
+Runs the 3-substep fail-closed matrix (ALLOW positive control +
+DENY budget-exhausted + DENY sidecar-unreachable). The stub counter
+MUST stay UNCHANGED on each DENY (INV-1 negative control).
+
+Verify SQL gates live in
+[`deploy/demo/verify_step_litellm_sdk_real.sql`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/verify_step_litellm_sdk_real.sql)
+and
+[`deploy/demo/verify_step_litellm_sdk_deny.sql`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/verify_step_litellm_sdk_deny.sql)
+respectively. Each gates:
+
+- `ledger_transactions.reserve` count.
+- `ledger_transactions.commit_estimated` count.
+- `ledger_transactions.denied_decision` count (DENY mode only).
+- `audit_outbox.decision_context.mode='sdk'` — differentiates shim
+  audits from proxy / direct / egress in the same canonical chain.
+
+## Limitations
+
+- **Token-by-token streaming gating** is out of v1 scope. The shim
+  commits at end-of-stream with the accumulated `response.usage`.
+- **`litellm.completion()` inside a running loop** raises
+  `SpendGuardShimSyncInAsyncContext` rather than silently bridging
+  (which would deadlock). The error message points at
+  `await litellm.acompletion(...)` instead.
+- **`embedding` / `aembedding` / `aimage_generation` /
+  `atranscription`** are not patched in v1. Reserved for D12.1.
+- **Auto-install via import hook** is intentionally not supported.
+  Operators MUST call `install_shim()` explicitly so monkey-patching
+  is observable in stack traces and reversible.
+- **Router subclasses created AFTER `install_shim()`** inherit the
+  patched parent via MRO. Subclasses that overrode `acompletion`
+  BEFORE install are walked + patched explicitly. Subclasses that
+  override `acompletion` AFTER install bypass the gate unless they
+  call `super().acompletion(...)`. Document this in your operator
+  runbook if you build custom routers.
+
+## Troubleshooting
+
+- **`SpendGuardShimAlreadyInstalled`** — `install_shim()` was called
+  twice with different options. Call `uninstall_shim()` first.
+- **`SpendGuardShimSyncInAsyncContext`** — sync `litellm.completion()`
+  inside a running event loop. Replace with
+  `await litellm.acompletion(...)`.
+- **`DecisionDenied: budget exhausted`** — the sidecar fired DENY.
+  The exception carries `decision_id` + `reason_codes`; trace the
+  decision in the audit chain (`audit_outbox.event_type =
+  'spendguard.audit.decision'`).
+- **`SidecarUnavailable: sidecar pre-call failed`** — the sidecar
+  RPC failed and `fail_open=False`. Check sidecar logs; verify the
+  UDS path. Use `fail_open=True` ONLY for local dev.
+- **`get_num_tokens` returns chars/4 fallback** — the shim does not
+  patch token-count helpers in v1. Wire the sidecar HTTP companion
+  via `SPENDGUARD_SIDECAR_HTTP_URL` if you need token-accurate
+  pre-call estimates.
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in 5 minutes
+- [LiteLLM proxy guardrail](../litellm-proxy/) — proxy-mode counterpart
+- [Dify Model Provider Plugin](../dify/) — Dify-native equivalent
+- [Microsoft Agent Framework](../microsoft-agent-framework/) — MAF chat-client middleware
