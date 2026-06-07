@@ -202,7 +202,13 @@ pub fn check_with_trust(
 
 /// Compute SHA-256 hex of the DER-encoded cert inside a PEM blob. Mirrors
 /// what `ca::fingerprint_hex` produces for the install-side fingerprint.
-fn cert_der_sha256_hex(pem_bytes: &[u8]) -> std::result::Result<String, &'static str> {
+///
+/// `pub(crate)` so SLICE 8 (`uninstall`) can re-derive the install-time
+/// fingerprint from the on-disk CA PEM when the operator omits
+/// `--ca-fingerprint`. Same identity-equivalence reasoning as the SLICE 7
+/// doctor path: the hash is over the cert DER body, which `add_root` /
+/// `remove_root` use to match the trust-store entry.
+pub(crate) fn cert_der_sha256_hex(pem_bytes: &[u8]) -> std::result::Result<String, &'static str> {
     let pem = std::str::from_utf8(pem_bytes).map_err(|_| "PEM is not UTF-8")?;
     // PEM is a base64 body bracketed by BEGIN / END lines. We strip the
     // headers + concatenate the body without any external dep beyond the

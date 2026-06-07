@@ -32,8 +32,11 @@ enum Cmd {
     /// Linux/Windows in SLICE 3/4.
     Install(InstallOpts),
 
-    /// Symmetric removal of the trust-store entry. Full on-disk + rc
-    /// cleanup lands in SLICE 7.
+    /// Symmetric inverse of `install` — strips the shell rc marker block,
+    /// removes the CA from the OS trust store, and deletes the four PEM
+    /// files. SLICE 8 (COV_12) closes the D02 deliverable. Pass
+    /// `--keep-shell-rc` or `--keep-ca-files` to preserve a specific
+    /// artefact (e.g. for CA rotation without disabling tooling).
     Uninstall(UninstallOpts),
 
     /// Healthcheck: CA fingerprint in trust store + HTTPS_PROXY
@@ -105,9 +108,26 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Cmd::Uninstall(opts) => {
+            // SLICE 8 (COV_12): uninstall is best-effort symmetric inverse.
+            // Per implementation.md §9 exit codes:
+            //   - 0 on full cleanup (`warnings.is_empty()`)
+            //   - 75 (EX_TEMPFAIL) when partial cleanup succeeded — at
+            //     least one step landed but at least one warned. The
+            //     report JSON carries the per-step `warnings` so tooling
+            //     can decide whether to retry.
+            //   - non-zero anyhow path only when the dispatch itself
+            //     failed (e.g. unsupported OS, no trust backend).
             let report = spendguard_cli::uninstall(&opts)?;
             let json = serde_json::to_string_pretty(&report)?;
             println!("{json}");
+            for warning in &report.warnings {
+                eprintln!("warning: {warning}");
+            }
+            if !report.warnings.is_empty() {
+                // EX_TEMPFAIL — per BSD sysexits.h, "temporary failure;
+                // user is invited to retry". Matches design §9.
+                std::process::exit(75);
+            }
             Ok(())
         }
         Cmd::Doctor(cli_opts) => {

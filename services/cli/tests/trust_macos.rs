@@ -302,6 +302,11 @@ fn macos_real_uninstall_round_trip_removes_ca() {
     let uninstall_opts = UninstallOpts {
         scope: TrustScope::User,
         ca_fingerprint: Some(report.ca_fingerprint_sha256.clone()),
+        // SLICE 8 (COV_12): these tests are scoped to the trust-store
+        // half — keep the rc + PEM paths out of scope so the real
+        // developer's ~/.zshrc / XDG dir stay untouched.
+        keep_shell_rc: true,
+        keep_ca_files: true,
     };
     let uninstall_report = uninstall_with_trust_store(&uninstall_opts, &store).expect("uninstall");
     assert_eq!(
@@ -345,6 +350,11 @@ fn macos_real_doctor_reflects_install_state() {
     let uninstall_opts = UninstallOpts {
         scope: TrustScope::User,
         ca_fingerprint: Some(report.ca_fingerprint_sha256.clone()),
+        // SLICE 8 (COV_12): these tests are scoped to the trust-store
+        // half — keep the rc + PEM paths out of scope so the real
+        // developer's ~/.zshrc / XDG dir stay untouched.
+        keep_shell_rc: true,
+        keep_ca_files: true,
     };
     uninstall_with_trust_store(&uninstall_opts, &store).expect("uninstall");
 
@@ -375,6 +385,11 @@ fn macos_real_uninstall_is_idempotent() {
     let uninstall_opts = UninstallOpts {
         scope: TrustScope::User,
         ca_fingerprint: Some(report.ca_fingerprint_sha256.clone()),
+        // SLICE 8 (COV_12): these tests are scoped to the trust-store
+        // half — keep the rc + PEM paths out of scope so the real
+        // developer's ~/.zshrc / XDG dir stay untouched.
+        keep_shell_rc: true,
+        keep_ca_files: true,
     };
     let first = uninstall_with_trust_store(&uninstall_opts, &store).expect("first uninstall");
     assert_eq!(first.trust_store_locations_cleared.len(), 1);

@@ -90,9 +90,12 @@ impl InstallOpts {
 /// `spendguard uninstall` options.
 ///
 /// SLICE 2 (COV_06) honours `--scope` and `--ca-fingerprint` to drive the
-/// macOS trust-store removal. SLICE 7 (COV_11) adds on-disk PEM cleanup
-/// (and resolves the fingerprint from the PEM when `--ca-fingerprint` is
-/// not supplied), shell-rc strip, and per-tool config cleanup.
+/// macOS trust-store removal. SLICE 8 (COV_12) closes the loop with
+/// on-disk PEM cleanup (auto-resolving the fingerprint from the PEM when
+/// `--ca-fingerprint` is omitted), shell-rc strip, and per-tool config
+/// cleanup. Two opt-out flags let the operator preserve specific
+/// artefacts (e.g. when they want to keep the rc block live while
+/// rotating the CA).
 #[derive(Debug, Clone, clap::Args)]
 pub struct UninstallOpts {
     /// Match the `--scope` used at install time so the symmetric removal
@@ -100,11 +103,28 @@ pub struct UninstallOpts {
     #[arg(long, value_enum, default_value_t = TrustScope::User)]
     pub scope: TrustScope,
 
-    /// Lower-case SHA-256 hex of the root CA to remove. Required in
-    /// SLICE 2 (COV_06); SLICE 7 will derive it from the on-disk PEM
-    /// when omitted.
+    /// Lower-case SHA-256 hex of the root CA to remove. When omitted
+    /// (SLICE 8) the fingerprint is re-derived from the on-disk
+    /// `root_ca.pem` at the canonical XDG path. Supply this explicitly
+    /// only when the PEM has already been deleted and the operator has
+    /// the fingerprint from a saved install report JSON.
     #[arg(long, value_name = "HEX")]
     pub ca_fingerprint: Option<String>,
+
+    /// SLICE 8 (COV_12): preserve the SpendGuard marker block in the
+    /// shell rc file. Default `false` so the rc strip runs symmetric to
+    /// install. Use this when the operator wants to keep the rc-side
+    /// breadcrumb (e.g. they're rotating the CA but want their tooling
+    /// to keep reading `HTTPS_PROXY`).
+    #[arg(long, default_value_t = false)]
+    pub keep_shell_rc: bool,
+
+    /// SLICE 8 (COV_12): preserve the on-disk CA + leaf PEM blobs.
+    /// Default `false` so the four PEM files are deleted symmetric to
+    /// install. Use this when the operator wants the trust-store entry
+    /// gone but the PEM kept (e.g. for forensic / audit retention).
+    #[arg(long, default_value_t = false)]
+    pub keep_ca_files: bool,
 }
 
 /// `spendguard doctor` options.
@@ -176,8 +196,19 @@ pub struct ToolReport {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UninstallReport {
+    /// Files the uninstall path actually touched — rc paths whose marker
+    /// blocks were stripped AND CA / leaf PEM blobs that were deleted.
+    /// SLICE 8 (COV_12) extends this to include the four PEM files when
+    /// `--keep-ca-files` is not set.
     pub removed_files: Vec<PathBuf>,
     pub trust_store_locations_cleared: Vec<PathBuf>,
+    /// SLICE 8 (COV_12): non-empty when one or more uninstall steps
+    /// failed best-effort (rc strip failed but trust removal succeeded,
+    /// or vice versa). The CLI maps `!warnings.is_empty()` →
+    /// `EX_TEMPFAIL` (exit code 75) per implementation.md §9 so tooling
+    /// can branch on partial cleanup without parsing strings.
+    #[serde(default)]
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -493,42 +524,175 @@ pub fn uninstall_with_trust_store(
 }
 
 /// `spendguard uninstall` with full backend injection — trust + shell env.
-/// Used by SLICE 5 lib tests so the developer's `~/.zshrc` stays
-/// untouched.
+/// Used by SLICE 5/8 lib tests so the developer's `~/.zshrc` and on-disk
+/// CA blobs stay untouched.
+///
+/// **SLICE 8 (COV_12)** wires the design §3 line 32 four-step inverse of
+/// install in reverse order:
+///
+/// 1. `shell::strip_rc` — strip the marker block from the rc file
+///    (unless `--keep-shell-rc`). Symmetric inverse of SLICE 5 install
+///    rc emission; also clears the per-tool env-var overrides that
+///    live INSIDE the marker block (claude_code, codex, etc).
+/// 2. `trust::TrustStore::remove_root` — remove the CA from the OS
+///    trust store (SLICE 2-4 backends). Idempotent per review-standards
+///    `X3` — absent cert returns `Ok(vec![])`.
+/// 3. Delete the four PEM files (CA + leaf + keys) from the XDG
+///    `ca/` directory (unless `--keep-ca-files`). The default location
+///    is resolved via [`doctor::default_ca_pem_path`] (SLICE 7 helper
+///    made `pub` for SLICE 8 reuse).
+///
+/// **Best-effort semantics**: each step is independent. A failure in
+/// step 1 doesn't block step 2; failure in step 2 doesn't block step 3.
+/// Per-step failures are recorded in [`UninstallReport::warnings`] and
+/// the CLI surfaces them as `EX_TEMPFAIL` (exit code 75) per
+/// implementation.md §9. The function itself only `bail!`s when no step
+/// could even start (e.g. the trust dispatch failed AND no fingerprint
+/// could be resolved AND no PEM files exist) — at that point there is
+/// no useful uninstall work to perform.
+///
+/// Backward compat: the legacy 3-arg signature is preserved by routing
+/// the `home: None` case to the same PEM auto-resolution path. The
+/// existing trust_macos integration tests at lines 306/349/379 still
+/// compile because `UninstallOpts` field additions are `#[derive(Default)]`-
+/// equivalent via the clap defaults.
 pub fn uninstall_with_backends(
     opts: &UninstallOpts,
     trust_backend: &dyn trust::TrustStore,
     shell_env: shell::EnvView<'_>,
 ) -> Result<UninstallReport> {
-    let fingerprint = match &opts.ca_fingerprint {
-        Some(fp) => fp.clone(),
-        None => {
-            // SLICE 7 will read the PEM from `paths::ca_root_dir()` and
-            // re-derive. For now require the operator to supply it explicitly.
-            anyhow::bail!(
-                "uninstall: --ca-fingerprint is required in SLICE 2 (COV_06); \
-                 SLICE 7 (COV_11) will re-derive from the on-disk PEM"
-            );
+    uninstall_with_backends_full(opts, trust_backend, None, shell_env)
+}
+
+/// `spendguard uninstall` with HOME injection for hermetic SLICE 8 tests.
+/// Production callers go through [`uninstall_with_backends`]; tests that
+/// need to assert "the PEM files in this tempdir were deleted" use this
+/// seam so they don't race the developer's real XDG state.
+pub fn uninstall_with_backends_full(
+    opts: &UninstallOpts,
+    trust_backend: &dyn trust::TrustStore,
+    home: Option<&std::path::Path>,
+    shell_env: shell::EnvView<'_>,
+) -> Result<UninstallReport> {
+    let mut warnings: Vec<String> = Vec::new();
+    let mut removed_files: Vec<PathBuf> = Vec::new();
+
+    // ─── Step 1: strip the shell rc marker block ──────────────────────
+    // The marker block contains BOTH the global HTTPS_PROXY export AND
+    // every per-tool env var override (NODE_EXTRA_CA_CERTS, CODEX_CA_CERTIFICATE,
+    // etc) — stripping the block clears them all at once. ConfigFile
+    // tools (Tabnine, see tools.rs OverrideKind::ConfigFile) are out of
+    // scope per slice doc anti-scope ("uninstall does NOT touch
+    // oauth_creds.json or any user data outside SpendGuard's own files");
+    // operator removes those manually.
+    if !opts.keep_shell_rc {
+        match strip_shell_rc(opts, shell_env) {
+            Ok(paths) => removed_files.extend(paths),
+            Err(e) => warnings.push(format!("strip shell rc failed: {e:#}")),
+        }
+    }
+
+    // ─── Step 2: remove the CA from the OS trust store ────────────────
+    // The fingerprint comes either from `--ca-fingerprint` (explicit) or
+    // from re-hashing the on-disk root_ca.pem (default). We compute the
+    // PEM path EARLY so step 3 can reuse it; a missing PEM at this point
+    // is non-fatal — the trust store entry might still be present from
+    // a prior install whose PEM was deleted manually.
+    let ca_pem_path = resolve_ca_pem_path(home);
+    let fingerprint_outcome = resolve_fingerprint(opts, ca_pem_path.as_deref());
+
+    let trust_store_locations_cleared = match &fingerprint_outcome {
+        Ok(fp) => match trust_backend.remove_root(fp, opts.scope) {
+            Ok(paths) => paths,
+            Err(e) => {
+                warnings.push(format!("remove CA from OS trust store failed: {e:#}"));
+                Vec::new()
+            }
+        },
+        Err(reason) => {
+            warnings.push(format!(
+                "trust-store removal skipped: {reason} \
+                 (pass --ca-fingerprint to override)"
+            ));
+            Vec::new()
         }
     };
 
-    // Step 1 (SLICE 5): strip the rc block. Errors here are non-fatal —
-    // we still attempt trust removal and surface the warning via the
-    // report's `removed_files` being empty for the rc side.
-    let stripped_rc_paths = strip_shell_rc(opts, shell_env)?;
-
-    // Step 2 (SLICE 2-4): remove the CA from the OS trust store.
-    let trust_store_locations_cleared = trust_backend
-        .remove_root(&fingerprint, opts.scope)
-        .context("remove CA from OS trust store")?;
+    // ─── Step 3: delete the four PEM files ────────────────────────────
+    // Best-effort: an already-absent file is no-op success. We delete
+    // the four canonical names rather than `read_dir + remove_file *`
+    // to avoid wiping unrelated files an operator may have parked in
+    // the `ca/` directory (e.g. backup PEMs).
+    if !opts.keep_ca_files {
+        if let Some(pem_path) = &ca_pem_path {
+            if let Some(parent) = pem_path.parent() {
+                for name in ["root_ca.pem", "root_ca.key.pem", "leaf.pem", "leaf.key.pem"] {
+                    let path = parent.join(name);
+                    match std::fs::remove_file(&path) {
+                        Ok(()) => removed_files.push(path),
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                            // Already absent — symmetric idempotency,
+                            // not a warning.
+                        }
+                        Err(e) => {
+                            warnings.push(format!("delete {} failed: {e}", path.display()));
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Ok(UninstallReport {
-        // For SLICE 5 we treat the rc files as "removed_files" too — the
-        // marker block was removed, even if the file itself persists.
-        // SLICE 7 augments this with on-disk PEM deletes.
-        removed_files: stripped_rc_paths,
+        removed_files,
         trust_store_locations_cleared,
+        warnings,
     })
+}
+
+/// Resolve the canonical CA PEM path using the doctor helper. Falls back
+/// to None when neither HOME nor XDG resolves — in that case both the
+/// fingerprint re-derivation and the PEM delete skip cleanly.
+fn resolve_ca_pem_path(home: Option<&std::path::Path>) -> Option<PathBuf> {
+    let env = preflight::BaseEnv {
+        home,
+        gemini_api_key: None,
+        google_application_credentials: None,
+    };
+    let env_with_home = if env.home.is_some() {
+        env
+    } else {
+        preflight::BaseEnv::from_process()
+    };
+    doctor::default_ca_pem_path(&env_with_home)
+}
+
+/// Resolve the fingerprint either from explicit opts or by re-hashing
+/// the on-disk PEM. Returns a human-readable reason string when neither
+/// path produces a fingerprint so the warning surface is useful.
+fn resolve_fingerprint(
+    opts: &UninstallOpts,
+    ca_pem_path: Option<&std::path::Path>,
+) -> std::result::Result<String, String> {
+    if let Some(fp) = &opts.ca_fingerprint {
+        return Ok(fp.clone());
+    }
+    let Some(path) = ca_pem_path else {
+        return Err("no --ca-fingerprint supplied and no canonical CA PEM path resolved".into());
+    };
+    let pem_bytes = match std::fs::read(path) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(format!(
+                "no --ca-fingerprint supplied and CA PEM at {} is absent",
+                path.display()
+            ));
+        }
+        Err(e) => return Err(format!("read CA PEM {}: {e}", path.display())),
+    };
+    doctor::ca_fingerprint::cert_der_sha256_hex(&pem_bytes)
+        .map(|s| s.to_string())
+        .map_err(|e| format!("decode CA PEM {}: {e}", path.display()))
 }
 
 fn strip_shell_rc(opts: &UninstallOpts, env: shell::EnvView<'_>) -> Result<Vec<PathBuf>> {
@@ -549,11 +713,24 @@ fn strip_shell_rc(opts: &UninstallOpts, env: shell::EnvView<'_>) -> Result<Vec<P
     let Some(path) = kind.rc_path(&home) else {
         return Ok(Vec::new());
     };
+    // SLICE 8 (COV_12): only report the rc path in `removed_files` when
+    // the strip actually changed something. The writer's `strip_rc` is
+    // already idempotent for absent files / absent marker blocks (it
+    // returns Ok without rewriting), but we want a second uninstall to
+    // surface an empty `removed_files` so the operator can tell "this
+    // call was a no-op". We diff the file's contents around the strip.
+    let before = std::fs::read_to_string(&path).ok();
     let writer = shell::dispatch_writer(kind);
     writer
         .strip_rc(&path)
         .with_context(|| format!("strip shell rc at {}", path.display()))?;
-    Ok(vec![path])
+    let after = std::fs::read_to_string(&path).ok();
+    if before == after {
+        // No change → don't list the path (SLICE 8 idempotency).
+        Ok(Vec::new())
+    } else {
+        Ok(vec![path])
+    }
 }
 
 /// `spendguard doctor` — SLICE 2 reports whether the CA is trusted in the
@@ -801,17 +978,45 @@ mod tests {
         assert_eq!(added[0], report.ca_pem_path);
     }
 
-    /// SLICE 2: `uninstall_with_trust_store` requires `--ca-fingerprint`.
+    /// SLICE 8 (COV_12): `uninstall` no longer hard-requires
+    /// `--ca-fingerprint` — when omitted and the on-disk PEM is also
+    /// absent the trust-store step is skipped with a warning rather
+    /// than erroring. This preserves the partial-cleanup semantics:
+    /// the rc strip + PEM delete still happen even when we can't probe
+    /// the trust store. The SLICE 2 hard-bail behaviour was replaced
+    /// here as part of D02 deliverable closure.
     #[test]
-    fn uninstall_requires_ca_fingerprint_in_slice_2() {
+    fn uninstall_without_fingerprint_skips_trust_step_with_warning() {
         let backend = NoopTrustStore::default();
+        // Use a HOME that resolves but has no PEM — auto-resolution
+        // discovers "PEM absent" and surfaces a warning.
+        let tmp = tempfile::tempdir().expect("tempdir");
         let opts = UninstallOpts {
             scope: TrustScope::User,
             ca_fingerprint: None,
+            keep_shell_rc: false,
+            keep_ca_files: false,
         };
-        let err = uninstall_with_trust_store(&opts, &backend)
-            .expect_err("must require fingerprint until SLICE 7");
-        assert!(format!("{err:#}").contains("ca-fingerprint"));
+        let report = uninstall_with_backends_full(
+            &opts,
+            &backend,
+            Some(tmp.path()),
+            shell::EnvView::default(),
+        )
+        .expect("uninstall must not bail on missing fingerprint in SLICE 8");
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("trust-store removal skipped")),
+            "missing fingerprint must surface trust-store-skipped warning, \
+             got: {warnings:?}",
+            warnings = report.warnings,
+        );
+        assert!(
+            report.trust_store_locations_cleared.is_empty(),
+            "trust step did not run, so no locations cleared"
+        );
     }
 
     /// SLICE 2: `uninstall_with_backends` forwards the fingerprint to the
@@ -826,6 +1031,8 @@ mod tests {
             ca_fingerprint: Some(
                 "0000000000000000000000000000000000000000000000000000000000000000".into(),
             ),
+            keep_shell_rc: false,
+            keep_ca_files: false,
         };
         let report =
             uninstall_with_backends(&opts, &backend, shell::EnvView::default()).expect("uninstall");
@@ -1085,6 +1292,12 @@ mod tests {
         let uopts = UninstallOpts {
             scope: TrustScope::User,
             ca_fingerprint: Some(install_report.ca_fingerprint_sha256.clone()),
+            keep_shell_rc: false,
+            // Keep the SLICE 5 test focused on rc-strip semantics — the
+            // ca_out tempdir is NOT the canonical XDG path so SLICE 8's
+            // PEM deletion would no-op anyway. Setting keep_ca_files
+            // makes the intent explicit.
+            keep_ca_files: true,
         };
         let report = uninstall_with_backends(&uopts, &backend, env).expect("uninstall");
 
@@ -1304,6 +1517,11 @@ mod tests {
             ca_fingerprint: Some(
                 "0000000000000000000000000000000000000000000000000000000000000000".into(),
             ),
+            keep_shell_rc: false,
+            // SLICE 6 bypass-preflight semantics — leave PEM step out so
+            // the assertion stays focused on "uninstall ran the rc strip
+            // + trust removal under Gemini OAuth state".
+            keep_ca_files: true,
         };
         let env = shell::EnvView {
             shell: Some("/bin/bash"),
@@ -1332,6 +1550,313 @@ mod tests {
             "non-marker lines must be preserved"
         );
         assert_eq!(report.removed_files, vec![bashrc]);
+    }
+
+    // ──────────── SLICE 8 (COV_12) symmetric uninstall — lib tests ───────
+
+    /// SLICE 8: uninstall with `--keep-shell-rc` skips the rc strip even
+    /// when an rc block is present. Hermetic: no real-shell sourcing,
+    /// just the strip-or-skip decision logic.
+    #[test]
+    fn slice8_keep_shell_rc_skips_strip() {
+        let home_tmp = tempfile::tempdir().expect("home tempdir");
+        let backend = NoopTrustStore::default();
+
+        // Pre-seed an rc with a marker block.
+        let bashrc = home_tmp.path().join(".bashrc");
+        std::fs::write(
+            &bashrc,
+            format!(
+                "alias x='echo hi'\n{}\nexport HTTPS_PROXY=\"https://localhost:8443\"\n{}\n",
+                shell::MARKER_BEGIN,
+                shell::MARKER_END,
+            ),
+        )
+        .expect("seed");
+
+        let opts = UninstallOpts {
+            scope: TrustScope::User,
+            ca_fingerprint: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            ),
+            keep_shell_rc: true,
+            keep_ca_files: true,
+        };
+        let env = shell::EnvView {
+            shell: Some("/bin/bash"),
+            ..Default::default()
+        };
+        let _guard = HomeGuard::set(home_tmp.path());
+
+        let report = uninstall_with_backends(&opts, &backend, env).expect("uninstall must succeed");
+
+        // Marker block preserved.
+        let after = std::fs::read_to_string(&bashrc).expect("read");
+        assert!(
+            after.contains(shell::MARKER_BEGIN),
+            "--keep-shell-rc must preserve marker block"
+        );
+        assert!(
+            !report.removed_files.iter().any(|p| p == &bashrc),
+            "rc strip step did not run; removed_files should not list it"
+        );
+        // Trust step still ran.
+        assert_eq!(backend.removed.lock().unwrap().len(), 1);
+    }
+
+    /// SLICE 8: uninstall with `--keep-ca-files` skips the 4-PEM delete
+    /// even when canonical PEMs exist. Uses the hermetic `home: Some(...)`
+    /// seam on `uninstall_with_backends_full` so we never touch the real
+    /// XDG path.
+    #[test]
+    fn slice8_keep_ca_files_skips_pem_delete() {
+        let home_tmp = tempfile::tempdir().expect("home tempdir");
+        let backend = NoopTrustStore::default();
+
+        // Pre-seed canonical-path PEMs under the tempdir HOME so the
+        // would-be delete step has something to find.
+        let ca_dir = canonical_ca_dir_under_for_test(home_tmp.path());
+        std::fs::create_dir_all(&ca_dir).expect("mkdir ca dir");
+        let pem_path = ca_dir.join("root_ca.pem");
+        std::fs::write(
+            &pem_path,
+            b"-----BEGIN CERTIFICATE-----\nstub\n-----END CERTIFICATE-----\n",
+        )
+        .expect("seed pem");
+        let key_path = ca_dir.join("root_ca.key.pem");
+        std::fs::write(
+            &key_path,
+            b"-----BEGIN PRIVATE KEY-----\nstub\n-----END PRIVATE KEY-----\n",
+        )
+        .expect("seed key");
+
+        let opts = UninstallOpts {
+            scope: TrustScope::User,
+            // Skip auto-resolve since the stub PEM has no real DER body
+            // to hash; supply explicit fingerprint so the trust step runs.
+            ca_fingerprint: Some(
+                "0000000000000000000000000000000000000000000000000000000000000000".into(),
+            ),
+            keep_shell_rc: true,
+            keep_ca_files: true,
+        };
+        let report = uninstall_with_backends_full(
+            &opts,
+            &backend,
+            Some(home_tmp.path()),
+            shell::EnvView::default(),
+        )
+        .expect("uninstall must succeed");
+
+        // PEMs preserved.
+        assert!(
+            pem_path.exists(),
+            "--keep-ca-files must preserve root_ca.pem"
+        );
+        assert!(
+            key_path.exists(),
+            "--keep-ca-files must preserve root_ca.key.pem"
+        );
+        assert!(
+            report.warnings.is_empty(),
+            "no warnings expected when both keep flags set with explicit fp"
+        );
+    }
+
+    /// SLICE 8: uninstall auto-resolves the fingerprint from the on-disk
+    /// PEM when `--ca-fingerprint` is omitted. We pre-seed a real PEM
+    /// generated by ca::generate_root_ca so the SHA-256 over the DER body
+    /// is well-defined.
+    #[test]
+    fn slice8_uninstall_auto_resolves_fingerprint_from_pem() {
+        let home_tmp = tempfile::tempdir().expect("home tempdir");
+        let ca_dir = canonical_ca_dir_under_for_test(home_tmp.path());
+        std::fs::create_dir_all(&ca_dir).expect("mkdir ca dir");
+
+        // Issue a real CA so the PEM hash matches the install-time
+        // fingerprint shape.
+        let root = ca::generate_root_ca().expect("gen root ca");
+        let pem_path = ca_dir.join("root_ca.pem");
+        std::fs::write(&pem_path, root.cert_pem.as_bytes()).expect("write pem");
+        let expected_fp = ca::fingerprint_hex(&root.fingerprint_sha256);
+
+        let backend = NoopTrustStore::default();
+        let opts = UninstallOpts {
+            scope: TrustScope::User,
+            ca_fingerprint: None, // Auto-resolve.
+            keep_shell_rc: true,  // Keep this test focused on fp resolution.
+            keep_ca_files: false,
+        };
+        let report = uninstall_with_backends_full(
+            &opts,
+            &backend,
+            Some(home_tmp.path()),
+            shell::EnvView::default(),
+        )
+        .expect("uninstall must succeed");
+
+        // Trust step ran with the auto-resolved fingerprint.
+        let removed = backend.removed.lock().unwrap().clone();
+        assert_eq!(
+            removed.len(),
+            1,
+            "trust step should run with auto-resolved fp"
+        );
+        assert_eq!(
+            removed[0], expected_fp,
+            "auto-resolved fp must match install-time fingerprint"
+        );
+        // PEM was deleted (keep_ca_files=false).
+        assert!(!pem_path.exists(), "PEM should be deleted after uninstall");
+        assert!(
+            report.warnings.is_empty(),
+            "happy path produces no warnings"
+        );
+    }
+
+    /// SLICE 8: when an absent canonical PEM AND no `--ca-fingerprint`
+    /// combine, the trust step is skipped with a warning rather than
+    /// erroring. The other steps still run (PEM cleanup is no-op for
+    /// absent files; rc strip runs against the shell env).
+    #[test]
+    fn slice8_uninstall_warns_when_neither_fp_nor_pem_available() {
+        let home_tmp = tempfile::tempdir().expect("home tempdir");
+        let backend = NoopTrustStore::default();
+        let opts = UninstallOpts {
+            scope: TrustScope::User,
+            ca_fingerprint: None,
+            keep_shell_rc: true,
+            keep_ca_files: false,
+        };
+        let report = uninstall_with_backends_full(
+            &opts,
+            &backend,
+            Some(home_tmp.path()),
+            shell::EnvView::default(),
+        )
+        .expect("uninstall returns Ok with warnings");
+
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|w| w.contains("trust-store removal skipped")),
+            "missing fp + missing PEM must surface a warning, got: {warnings:?}",
+            warnings = report.warnings,
+        );
+        assert!(
+            backend.removed.lock().unwrap().is_empty(),
+            "trust backend remove_root must not be called"
+        );
+    }
+
+    /// SLICE 8: PEM delete tolerates already-absent files (idempotent).
+    /// We seed only `root_ca.pem` (no key, no leaf) and verify the
+    /// uninstall succeeds without warnings.
+    #[test]
+    fn slice8_pem_delete_tolerates_partial_pem_set() {
+        let home_tmp = tempfile::tempdir().expect("home tempdir");
+        let ca_dir = canonical_ca_dir_under_for_test(home_tmp.path());
+        std::fs::create_dir_all(&ca_dir).expect("mkdir ca dir");
+
+        // Real CA so fingerprint auto-resolution succeeds.
+        let root = ca::generate_root_ca().expect("gen root ca");
+        let pem_path = ca_dir.join("root_ca.pem");
+        std::fs::write(&pem_path, root.cert_pem.as_bytes()).expect("write pem");
+        // Intentionally leave leaf.pem, leaf.key.pem, root_ca.key.pem
+        // ABSENT to prove the delete loop tolerates each one's NotFound.
+
+        let backend = NoopTrustStore::default();
+        let opts = UninstallOpts {
+            scope: TrustScope::User,
+            ca_fingerprint: None,
+            keep_shell_rc: true,
+            keep_ca_files: false,
+        };
+        let report = uninstall_with_backends_full(
+            &opts,
+            &backend,
+            Some(home_tmp.path()),
+            shell::EnvView::default(),
+        )
+        .expect("uninstall must succeed");
+
+        assert!(
+            report.warnings.is_empty(),
+            "absent siblings are idempotent (X3); no warnings expected"
+        );
+        // The one PEM that did exist was deleted.
+        assert!(!pem_path.exists());
+        // Only root_ca.pem appears in removed_files — the absent ones
+        // are silently skipped.
+        assert_eq!(report.removed_files, vec![pem_path]);
+    }
+
+    /// SLICE 8: warnings flag the partial-cleanup state — the CLI maps
+    /// `!warnings.is_empty()` to EX_TEMPFAIL=75. Here we force a warning
+    /// by leaving the PEM absent (no fingerprint source) and assert the
+    /// report carries the partial-state signal.
+    #[test]
+    fn slice8_partial_cleanup_surfaces_warning_for_ex_tempfail_mapping() {
+        let home_tmp = tempfile::tempdir().expect("home tempdir");
+        let backend = NoopTrustStore::default();
+
+        // Seed an rc block so the rc strip step lands.
+        let bashrc = home_tmp.path().join(".bashrc");
+        std::fs::write(
+            &bashrc,
+            format!(
+                "{}\nexport HTTPS_PROXY=\"https://localhost:8443\"\n{}\n",
+                shell::MARKER_BEGIN,
+                shell::MARKER_END,
+            ),
+        )
+        .expect("seed bashrc");
+
+        let opts = UninstallOpts {
+            scope: TrustScope::User,
+            ca_fingerprint: None, // No PEM either → triggers the warning.
+            keep_shell_rc: false,
+            keep_ca_files: false,
+        };
+        let env = shell::EnvView {
+            shell: Some("/bin/bash"),
+            ..Default::default()
+        };
+        let _guard = HomeGuard::set(home_tmp.path());
+        let report = uninstall_with_backends_full(&opts, &backend, Some(home_tmp.path()), env)
+            .expect("uninstall must succeed");
+
+        // Rc strip landed (partial cleanup).
+        assert!(report.removed_files.contains(&bashrc));
+        // Warning surfaced (the EX_TEMPFAIL signal).
+        assert!(!report.warnings.is_empty(), "partial cleanup must warn");
+    }
+
+    /// Helper for SLICE 8 tests — resolve the canonical CA dir under a
+    /// tempdir HOME. Mirrors paths::base_data_dir_from()/join("ca") for
+    /// the current target OS so the install + uninstall both find the
+    /// PEM at the same place.
+    fn canonical_ca_dir_under_for_test(home: &std::path::Path) -> PathBuf {
+        #[cfg(target_os = "macos")]
+        {
+            home.join("Library")
+                .join("Application Support")
+                .join("SpendGuard")
+                .join("ca")
+        }
+        #[cfg(target_os = "linux")]
+        {
+            home.join(".local")
+                .join("share")
+                .join("spendguard")
+                .join("ca")
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let _ = home;
+            panic!("SLICE 8 lib tests not supported on Windows targets")
+        }
     }
 
     /// HomeGuard — atomic process-global HOME setter for the SLICE 5

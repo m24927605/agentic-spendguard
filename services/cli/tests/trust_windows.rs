@@ -204,6 +204,10 @@ fn windows_real_install_uninstall_round_trip_leaves_user_store_clean() {
     let uninstall_opts = UninstallOpts {
         scope: TrustScope::User,
         ca_fingerprint: Some(report.ca_fingerprint_sha256.clone()),
+        // SLICE 8 (COV_12): keep the rc + PEM paths out of scope — the
+        // Windows trust-store test focuses on certutil shellout shape.
+        keep_shell_rc: true,
+        keep_ca_files: true,
     };
     let uninstall_report = uninstall_with_trust_store(&uninstall_opts, &store).expect("uninstall");
     assert_eq!(
