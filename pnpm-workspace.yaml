@@ -12,4 +12,5 @@
 packages:
   - "sdk/typescript"
   - "sdk/typescript-langchain"
+  - "sdk/typescript-vercel-ai"
   - "docs/site-v2"
