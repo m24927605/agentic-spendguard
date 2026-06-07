@@ -1,0 +1,332 @@
+---
+title: "Vercel AI SDK middleware (covers Mastra)"
+description: >-
+  Install Agentic SpendGuard as a Vercel AI SDK v4 LanguageModelV1Middleware.
+  Drop-in via wrapLanguageModel({ middleware: createSpendGuardMiddleware(...) })
+  on any @ai-sdk/* provider — pre-call budget reservation before the upstream
+  provider HTTP request fires, end-of-stream commit reconciles real token
+  usage, signed audit trail. Transitively covers Mastra Agents via the
+  @spendguard/vercel-ai/mastra subpath alias.
+---
+
+
+> Vercel AI SDK v4+ (`ai`) is the dominant TS-side LLM router. Mastra Agents
+> call `generateText` / `streamText` from `ai` underneath, so a single
+> middleware covers both ecosystems. SpendGuard ships as
+> `createSpendGuardMiddleware` — a stock `LanguageModelV1Middleware` you
+> drop onto any `@ai-sdk/*` provider via `wrapLanguageModel({ model, middleware })`.
+> No model subclassing, no proxy fork. Mastra users import the same factory
+> under its Mastra-idiomatic name through the
+> `@spendguard/vercel-ai/mastra` subpath alias.
+
+## Install
+
+```bash
+pnpm add @spendguard/sdk @spendguard/vercel-ai ai
+```
+
+`@spendguard/sdk`, `ai` (Vercel AI SDK), and `zod` are declared as peer
+dependencies so the adapter pins none of them — your project's lockfile
+wins. Node 20.10+ is required (the substrate uses `await using` + stable
+`AsyncLocalStorage`).
+
+For real provider HTTP, add the official `@ai-sdk/*` provider you target:
+
+```bash
+pnpm add @ai-sdk/openai     # or @ai-sdk/anthropic, @ai-sdk/google, ...
+```
+
+## Quick start
+
+Minimal end-to-end wire — connect a `SpendGuardClient` to the sidecar UDS,
+build the middleware, hand it to `wrapLanguageModel`, and use the wrapped
+model with `generateText`:
+
+```ts
+import { generateText, wrapLanguageModel } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { SpendGuardClient } from "@spendguard/sdk";
+import { createSpendGuardMiddleware } from "@spendguard/vercel-ai";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  runtimeKind: "vercel-ai-js",
+});
+await client.connect();
+await client.handshake();
+
+const middleware = createSpendGuardMiddleware({
+  client,
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  budgetId: "44444444-4444-4444-8444-444444444444",
+});
+
+const model = wrapLanguageModel({
+  model: openai("gpt-4o-mini"),
+  middleware,
+});
+
+try {
+  const { text } = await generateText({
+    model,
+    prompt: "hello vercel ai",
+  });
+  console.log(text);
+} finally {
+  await client.close();
+}
+```
+
+What happens on each `generateText` / `streamText` call:
+
+1. The middleware's `transformParams({ params })` derives a stable
+   `(runId, idempotencyKey)` pair from the `params` reference, projects a
+   coarse pre-call `BudgetClaim`, and calls
+   `client.reserve({ trigger: "LLM_CALL_PRE", ... })`.
+2. On `DecisionDenied` (DENY / STOP / APPROVAL_REQUIRED), the middleware
+   rethrows — `generateText` halts BEFORE the inner `doGenerate()` HTTP
+   call fires.
+3. On success, the inflight `(decisionId, reservationId)` is stashed on a
+   `WeakMap<LanguageModelV1CallOptions, StashEntry>` keyed by the params
+   reference itself. The provider's `doGenerate()` fires.
+4. `wrapGenerate` extracts the provider's reported `(promptTokens, completionTokens)`
+   from `result.usage` (accepting both AI SDK v4 canonical camelCase AND
+   OpenAI-passthrough snake_case shapes) and emits a `SUCCESS` commit via
+   `client.commitEstimated(...)`.
+5. For streaming (`streamText`), `wrapStream` instruments the
+   `ReadableStream<LanguageModelV1StreamPart>` with a `TransformStream`
+   that forwards every part downstream unmodified, watches for the
+   terminal `finish` part, and asynchronously emits a `SUCCESS` commit
+   when the consumer drains the stream. Mid-stream errors emit a
+   `FAILURE` commit.
+
+## Mastra Agents — same middleware, alias import
+
+Mastra Agents call `generateText` / `streamText` from `ai` underneath, so
+the same `LanguageModelV1Middleware` covers both ecosystems byte-for-byte.
+Mastra consumers import the factory under its Mastra-idiomatic name via
+the `/mastra` subpath alias:
+
+```ts
+import { Agent } from "@mastra/core";
+import { wrapLanguageModel } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { createSpendGuardLanguageMiddleware } from "@spendguard/vercel-ai/mastra";
+
+const middleware = createSpendGuardLanguageMiddleware({
+  client,
+  tenantId: "tenant-prod",
+  budgetId: "...",
+});
+
+const guardedModel = wrapLanguageModel({
+  model: openai("gpt-4o-mini"),
+  middleware,
+});
+
+const agent = new Agent({
+  name: "my-budget-aware-agent",
+  model: guardedModel,
+});
+
+// agent.generate(...) and agent.stream(...) now reserve before each
+// LLM call and commit after; deny + approval flows propagate as typed errors.
+```
+
+The factory at `@spendguard/vercel-ai/mastra` is a function-reference
+alias — strict equality (`===`) holds with the root export. One factory,
+two import paths.
+
+## Configuration
+
+The v0.1.0 middleware options surface is intentionally narrow. The richer
+`unitId` / `windowInstanceId` / pricing / `claimEstimator` shape the
+design anticipates is deferred (see **Limitations** below) — until the
+substrate broadens `UnitRef`, the middleware projects sensible defaults
+instead.
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Type</th><th>Required</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>client</code></td><td><code>SpendGuardClient</code></td><td>YES</td><td>Configured substrate client from <code>@spendguard/sdk</code>. The adapter does NOT own the client lifecycle — the consumer calls <code>connect()</code> / <code>handshake()</code> / <code>close()</code>.</td></tr>
+    <tr><td><code>tenantId</code></td><td><code>string</code></td><td>YES</td><td>Tenant UUID the call is billed to. Forwarded to the substrate as the <code>reserve()</code> claim scope and as the first field of the idempotency-key canonical tuple.</td></tr>
+    <tr><td><code>budgetId</code></td><td><code>string</code></td><td>NO</td><td>Budget UUID used as the projected claim's <code>scopeId</code>. When unset, the middleware falls back to <code>tenantId</code> as the scopeId.</td></tr>
+  </tbody>
+</table>
+
+A future minor (`v0.x`) extends this surface field-for-field with the
+design.md §4 superset (`windowInstanceId`, `unit`, `pricing`,
+`claimEstimator`, `route`, `callSignature`, `runIdProvider`,
+`providerEventIdExtractor`) once the substrate broadens `UnitRef`. The
+extensions are additive optional fields — no breaking change to the
+v0.1.0 shape.
+
+## Streaming semantics
+
+`wrapStream` returns the inner `{ stream, rawCall, rawResponse, warnings }`
+unmodified except for `stream`. The replaced `stream` is a
+`ReadableStream<LanguageModelV1StreamPart>` produced by a
+`TransformStream` that:
+
+1. Forwards every `LanguageModelV1StreamPart` downstream byte-for-byte —
+   consumers see the original stream unchanged.
+2. Watches each part for the terminal `finish` event and snapshots its
+   `usage: {promptTokens, completionTokens}` payload.
+3. On the stream's `flush()` (consumer drained), asynchronously emits a
+   `SUCCESS` commit against the captured usage tuple.
+4. On a stream-side error or upstream throw, emits a `FAILURE` commit
+   with the error message and propagates the error downstream.
+5. A single `terminal` boolean flag guards against the finish/error race
+   so exactly one of `SUCCESS` / `FAILURE` fires.
+
+Commit-side failures (e.g. sidecar UNAVAILABLE post-finish) do NOT corrupt
+the stream — the substrate's TTL reconciler closes any orphaned
+reservation via the audit chain.
+
+## Limitations
+
+**SpendGuard's Vercel AI SDK middleware is pre-call + end-of-stream commit only.**
+The middleware gates BEFORE the upstream provider HTTP call and commits
+AFTER the stream completes. A few important things to know before you
+ship it in front of long streaming responses or rely on D06's full
+design surface:
+
+- **Vercel AI SDK v4 `LanguageModelV1Middleware` shape — not v5
+  yet.** D06's spec was written against AI SDK v5 (`LanguageModelV2`).
+  The current `ai@^4` peer wires v1; the middleware targets that surface
+  natively. The v5 migration is additive when AI SDK v5 lands as the
+  default peer.
+- **`transformParams` throw-to-halt is load-bearing.** Without the
+  rethrow path in the middleware, `wrapLanguageModel` swallows the
+  decision-denied signal and the budget gate never blocks the LLM call.
+  The middleware throws `DecisionDenied` (and its `DecisionStopped` /
+  `ApprovalRequired` subclasses) directly from `transformParams` so the
+  AI SDK caller sees the typed error.
+- **No mid-stream cap on streamed responses.** SpendGuard reserves the
+  predicted budget at pre-call time. The commit happens at end-of-stream
+  against the real `usage`. The middleware never tears down a mid-flight
+  stream to halt token emission — overruns land in the audit chain and
+  reflect at commit time, but the tokens were already emitted.
+- **Substrate dependency on `UnitRef` broadening.** Per the design.md §4
+  superset, the v0.1.0 options surface omits `windowInstanceId`,
+  `unit`, `pricing`, `claimEstimator`, `route`, `callSignature`,
+  `runIdProvider`, and `providerEventIdExtractor`. The TS substrate's
+  public `UnitRef` does not yet expose `unit_id`
+  (`sdk/typescript/src/client.ts::mapUnitRef` hardcodes empty); a
+  future hardening slice picks up the SDK-side broadening + middleware
+  wire-through together.
+- **DEGRADE patch application surfaces as `MutationApplyFailed`.**
+  Matches the Python `pydantic_ai.py::SpendGuardModel` v0.5.1 stance.
+  Built-in claim mutation lands in a later slice.
+- **No tool-call mid-loop gating.** Each tool call is its own AI SDK
+  event; the substrate handles per-call PRE/POST. Cross-tool budget
+  enforcement is the contract layer's job, not the middleware's.
+
+## Demo
+
+A bundled docker-compose demo proves the full ALLOW + DENY + STREAM
+matrix end-to-end against a real `generateText` / `streamText` +
+sidecar + counting-stub provider, including the Mastra alias parity
+check at boot:
+
+```bash
+make demo-up DEMO_MODE=vercel_ai_mastra
+```
+
+The mode boots `postgres + sidecar + vercel-ai-mastra-runner +
+counting-stub`, then runs three invocations from the Node example at
+[`examples/vercel-ai-mastra/`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/vercel-ai-mastra/):
+
+- **ALLOW** — small message within budget. `transformParams` fires PRE,
+  `client.reserve()` returns ALLOW, the wrapped model's
+  `doGenerate()` HTTP call fires, counter +1, `wrapGenerate` emits a
+  `SUCCESS` commit with real token usage.
+- **DENY** — `spendguard_estimate_override=2000000000` blows past the
+  seeded 1B hard-cap. The sidecar contract evaluator emits
+  `SPENDGUARD_DENY`, `transformParams` throws `DecisionDenied`,
+  `generateText` halts BEFORE the upstream HTTP call. Counting-stub
+  counter UNCHANGED (proves the gate fires pre-call).
+- **STREAM** — `streamText` consumed via `result.textStream` async
+  iterator. PRE fires once at stream open, POST commits once at stream
+  end against real `usage.completionTokens`.
+
+Success line on a clean run:
+
+```
+[demo] vercel_ai_mastra ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+Full details and the verify-SQL gates are in
+[`deploy/demo/vercel_ai_mastra/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/vercel_ai_mastra/README.md).
+
+## Troubleshooting
+
+Common boot-time and first-call errors. The substrate's typed exceptions
+are re-exported from `@spendguard/vercel-ai` so you can pattern-match on
+`DecisionDenied` / `SidecarUnavailable` without taking a second import.
+
+- **`DecisionDenied: reserve() denied by contract`** — Expected behaviour
+  when the budget is exhausted or a contract rule emitted
+  `SPENDGUARD_DENY`. The middleware rethrows, `generateText` halts, and
+  the upstream provider HTTP call never fires. Check the sidecar logs
+  for the rule that matched; the decision row in the ledger carries
+  `decision_context.contract_rule`.
+
+- **Budget gate not blocking — provider call fires anyway.** Almost
+  always caused by the middleware not being threaded into
+  `wrapLanguageModel`. Inspect the model you pass to `generateText` —
+  it MUST be the wrapped one, not the raw `openai("...")` /
+  `anthropic("...")` reference. Reproduce by logging
+  `middleware.transformParams.toString()` — it should not be the
+  identity function.
+
+- **`SidecarUnavailable: handshake timeout`** — The sidecar's UDS path
+  (`SPENDGUARD_SIDECAR_UDS`, default `/var/run/spendguard/adapter.sock`)
+  is not reachable. Check that the sidecar container is up, the socket
+  file exists, and your Node process has read/write permission on it.
+  In the demo overlay this is wired by
+  `deploy/demo/vercel_ai_mastra/docker-compose.yaml`; outside the demo,
+  mount the same socket path into your Node container's
+  `/var/run/spendguard/`. The middleware swallows `SidecarUnavailable`
+  on the reserve path (degraded mode — LLM call proceeds without a
+  gate). Construction-time `client.handshake()` failures are
+  surfaced to the caller directly.
+
+- **`@spendguard/vercel-ai/mastra` import resolves to `undefined`** —
+  Make sure your bundler honours the package's `exports` map. The
+  `/mastra` subpath is declared in `package.json#exports` and resolves
+  via Node's ESM resolution. Older bundlers (esbuild < 0.20, Webpack
+  4) may need explicit alias entries.
+
+- **`generateText: typed error not DecisionDenied`** — You imported
+  `DecisionDenied` from `@spendguard/sdk` directly while the wrapped
+  model's middleware threw from `@spendguard/vercel-ai`. Class identity
+  IS preserved (re-export, not subclass), so
+  `err instanceof DecisionDenied` works regardless of which import you
+  use. If the check fails, suspect a duplicate `@spendguard/sdk` in
+  your `node_modules` tree.
+
+- **Token counts on commit don't match what the provider reports.** The
+  middleware's `extractUsageFromGenerate` accepts both AI SDK v4
+  canonical camelCase (`{promptTokens, completionTokens}`) AND
+  OpenAI-passthrough snake_case (`{prompt_tokens, completion_tokens}`)
+  shapes. If neither shape is present (rare; defensive fallback), the
+  commit ships `0` for the missing fields — check the provider's raw
+  response with `rawResponse?.headers`.
+
+## Related
+
+- [Quickstart](../../quickstart/) — full SpendGuard stack up in 5 minutes
+- [LangChain.js callback handler](../langchain-ts/) — LangChain.js
+  sibling of this middleware (callback-handler shape; LangChain idiom)
+- [Pydantic-AI](../pydantic-ai/) — Python sibling
+- [Contract YAML reference](../../contracts/yaml/) — author allow/stop
+  rules
+- Other adapter integrations:
+  [LangChain & LangGraph (Python)](../langchain/) ·
+  [OpenAI Agents SDK](../openai-agents/) ·
+  [Microsoft AGT](../agt/) ·
+  [LiteLLM proxy guardrail](../litellm-proxy/)

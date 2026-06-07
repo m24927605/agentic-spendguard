@@ -242,6 +242,7 @@ async with SpendGuardClient(
 | **LangChain** | `spendguard.integrations.langchain` | Every `BaseChatModel` invocation | — |
 | **LangGraph** | same module | Same wrapper (LangGraph builds on `BaseChatModel`) | — |
 | **LangChain.js (TS/JS)** | `@spendguard/langchain` (`SpendGuardCallbackHandler`) | Every LangChain.js `BaseChatModel` / `BaseLLM` invocation; covers LangGraph because it builds on `BaseChatModel` | [`examples/langchain-ts/`](examples/langchain-ts/) |
+| **Vercel AI SDK + Mastra (TS/JS)** | `@spendguard/vercel-ai` (`createSpendGuardMiddleware`) — `/mastra` subpath alias re-exports as `createSpendGuardLanguageMiddleware` | Every `wrapLanguageModel({ middleware })` call drives `generateText` / `streamText` through the SpendGuard middleware; covers Mastra Agents because Mastra resolves to the same `LanguageModelV1` boundary | [`examples/vercel-ai-mastra/`](examples/vercel-ai-mastra/) |
 | **OpenAI Agents SDK** | `spendguard.integrations.openai_agents` | Every model call inside an `Agent` run | [`examples/openai-agents-composite/`](examples/openai-agents-composite/) |
 | **Microsoft AGT** | `spendguard.integrations.agt` | AGT's PolicyEngine + SpendGuard as a policy plugin | [`microsoft/agent-governance-toolkit#2398`](https://github.com/microsoft/agent-governance-toolkit/pull/2398) |
 | **LiteLLM proxy** (legacy `CustomLogger` callback) | `spendguard.integrations.litellm` | Every `/v1/chat/completions` through the LiteLLM proxy | [`docs/specs/litellm-integration/PROXY_RECIPE.md`](docs/specs/litellm-integration/PROXY_RECIPE.md) |
@@ -264,6 +265,8 @@ make demo-up DEMO_MODE=agent_real_openai_agents          # OpenAI Agents SDK (wr
 make demo-up DEMO_MODE=agent_real_openai_agents_proxy    # openai-agents via proxy ⭐
 make demo-up DEMO_MODE=litellm_real           # LiteLLM proxy: ALLOW+DENY+STREAM+MULTI-TEAM ⭐
 make demo-up DEMO_MODE=litellm_deny           # LiteLLM proxy: 3 fail-closed sub-steps
+make demo-up DEMO_MODE=langchain_ts           # LangChain.js: ALLOW+DENY+STREAM
+make demo-up DEMO_MODE=vercel_ai_mastra       # Vercel AI SDK (covers Mastra): ALLOW+DENY+STREAM ⭐
 make demo-up DEMO_MODE=approval_hot_reload    # frozen-pricing regression
 make demo-up DEMO_MODE=multi_provider_usd     # multi-provider USD normalization
 ```

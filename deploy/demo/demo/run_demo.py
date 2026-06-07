@@ -833,6 +833,8 @@ async def main() -> int:
         return await run_envoy_extproc_mode()
     if DEMO_MODE == "langchain_ts":
         return await run_langchain_ts_mode()
+    if DEMO_MODE == "vercel_ai_mastra":
+        return await run_vercel_ai_mastra_mode()
     return await run_agent_mode()
 
 
@@ -3527,6 +3529,47 @@ async def run_langchain_ts_mode() -> int:
     # handler reprints on the verifier side so the demo's overall
     # log line landing is deterministic).
     print("[demo] langchain_ts ALL 3 steps PASS (ALLOW + DENY + STREAM)")
+    return 0
+
+
+async def run_vercel_ai_mastra_mode() -> int:
+    """Counting-stub verifier for the vercel-ai-mastra-runner driver.
+
+    Mirrors `run_langchain_ts_mode`: polls `GET counting-stub:8765/_count`
+    and asserts the running tally is >= 2 (one ALLOW + one STREAM
+    upstream hit). The DENY step never contacts the upstream because
+    `createSpendGuardMiddleware()` throws `DecisionDenied` from
+    `transformParams` BEFORE the wrapped LanguageModelV1's
+    `doGenerate()` HTTP call leaves the Node process, so the counter
+    is unchanged by the DENY step.
+
+    Returns 0 on success; non-zero on failure with a clear error.
+    """
+    import httpx
+
+    print(f"[demo] vercel_ai_mastra verifier targeting {_COUNTING_STUB_URL}")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        try:
+            calls = await _read_counting_stub_hits(http)
+        except Exception as e:  # noqa: BLE001
+            print(f"[demo] FATAL: counting-stub /_count unreachable: {e!r}",
+                  file=sys.stderr)
+            return 7
+
+    if calls < 2:
+        print(
+            f"[demo] FATAL: vercel-ai-mastra-runner expected >= 2 counting-stub "
+            f"hits (ALLOW + STREAM), got {calls}. The runner either "
+            "did not finish or the DENY step leaked through to the "
+            "upstream — INV-2 violated.",
+            file=sys.stderr,
+        )
+        return 7
+
+    print(f"[demo] vercel_ai_mastra counter OK: counting-stub hits={calls} (>= 2)")
+    # Mirrors the langchain_ts success-line locked spelling so the CI
+    # grep targets stay uniform across the JS/TS adapter demo modes.
+    print("[demo] vercel_ai_mastra ALL 3 steps PASS (ALLOW + DENY + STREAM)")
     return 0
 
 
