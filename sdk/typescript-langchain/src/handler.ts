@@ -197,7 +197,7 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
     const amountMicros =
       cap !== undefined && cap > 0n ? cap : estimatedTokens * DEFAULT_MICROS_PER_TOKEN;
     return {
-      scopeId: this.effectiveTenantId,
+      scopeId: this.opts.budgetId ?? this.effectiveTenantId,
       amountAtomic: amountMicros.toString(),
       unit: DEFAULT_UNIT,
     };

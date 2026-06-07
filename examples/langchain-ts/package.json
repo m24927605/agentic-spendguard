@@ -1,0 +1,23 @@
+{
+  "name": "spendguard-langchain-ts-example",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runnable Node example: SpendGuardCallbackHandler vs real LangChain.js ChatOpenAI against a sidecar UDS. Mirrors examples/litellm-proxy-composite/ for the JS/TS ecosystem.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "start:allow": "SPENDGUARD_DEMO_STEP=allow node index.mjs",
+    "start:deny": "SPENDGUARD_DEMO_STEP=deny node index.mjs",
+    "start:stream": "SPENDGUARD_DEMO_STEP=stream node index.mjs"
+  },
+  "dependencies": {
+    "@langchain/core": "^0.3.0",
+    "@langchain/openai": "^0.4.0",
+    "@spendguard/langchain": "^0.1.0",
+    "@spendguard/sdk": "^0.1.0"
+  }
+}

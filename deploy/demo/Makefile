@@ -105,6 +105,20 @@ else ifeq ($(DEMO_MODE),envoy_extproc)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub envoy-extproc envoy-gateway
+else ifeq ($(DEMO_MODE),langchain_ts)
+	@echo "[demo] DEMO_MODE=langchain_ts → COV_D04 SLICE 5 (LangChain.js callback handler)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/langchain_ts/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               langchain-runner (Node 20 running"
+	@echo "[demo]               examples/langchain-ts/index.mjs)."
+	@echo "[demo]   Driver issues 3 LangChain.js ChatOpenAI calls"
+	@echo "[demo]   (ALLOW + DENY + STREAM) and asserts INV-2 strict-order."
+	$(COMPOSE) -f langchain_ts/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),approval_hot_reload)
 	@echo "[demo] DEMO_MODE=approval_hot_reload → same stack as DEMO_MODE=approval."
 	@echo "[demo]   Exercises issue #59 BUNDLE_HOT_RELOADED error path end-to-end:"
@@ -155,6 +169,14 @@ else ifeq ($(DEMO_MODE),cost_advisor)
 	@echo "[demo]   (the cost_advisor write path doesn't produce forwardable audit"
 	@echo "[demo]    events; fixture rows in audit_outbox are marked"
 	@echo "[demo]    pending_forward=FALSE so the forwarder skips them)"
+else ifeq ($(DEMO_MODE),langchain_ts)
+	@echo "[demo] running langchain-runner (Node 20 + LangChain.js ChatOpenAI)..."
+	$(COMPOSE) -f langchain_ts/docker-compose.yaml run --rm langchain-runner
+	@echo "[demo] verifying COV_D04 SLICE 5 (langchain_ts ALLOW + DENY + STREAM)..."
+	@$(MAKE) demo-verify-langchain-ts
+	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
+	@sleep 5
+	@$(MAKE) demo-verify-outbox-closure
 else
 	@echo "[demo] core services up; running demo container (DEMO_MODE=$(DEMO_MODE))..."
 	$(COMPOSE) build demo
@@ -410,6 +432,34 @@ demo-verify-envoy-extproc:
 		 END; \$$\$$;"
 	@echo "[demo] COV_07 envoy_extproc verification done"
 
+# COV_D04 SLICE 5 (langchain_ts demo) verification. Mirrors the
+# envoy_extproc layout: ledger-DB assertions in
+# verify_step_langchain_ts.sql + INV-2 strict-order DO block + a
+# cross-DB canonical_events check under spendguard_canonical that
+# asserts at least 2 decision rows + 1 outcome row landed after the
+# outbox forwarder drained.
+demo-verify-langchain-ts:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_langchain_ts.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 2 THEN \
+		     RAISE EXCEPTION 'COV_D04_GATE: canonical_events.decision >= 2 expected (ALLOW + DENY), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D04_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D04 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@echo "[demo] COV_D04 SLICE 5 langchain_ts verification done"
+
 demo-verify-litellm-real:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_real.sql
 	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
@@ -487,7 +537,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-langchain-ts
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

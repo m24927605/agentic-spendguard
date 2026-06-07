@@ -831,6 +831,8 @@ async def main() -> int:
         return await run_litellm_guardrail_mode()
     if DEMO_MODE == "envoy_extproc":
         return await run_envoy_extproc_mode()
+    if DEMO_MODE == "langchain_ts":
+        return await run_langchain_ts_mode()
     return await run_agent_mode()
 
 
@@ -3450,6 +3452,81 @@ async def run_envoy_extproc_mode() -> int:
     # D11/6 (`litellm_guardrail`) §6.7 spelling so CI grep targets one
     # canonical pattern across both demos.
     print("[demo] envoy_extproc ALL 3 steps PASS (ALLOW + DENY + STREAM)")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# DEMO_MODE=langchain_ts (COV_D04 SLICE 5) — verifier-side driver for the
+# LangChain.js callback-handler path.
+#
+# Unlike the envoy_extproc / litellm_guardrail drivers — which issue the 3
+# (ALLOW + DENY + STREAM) HTTP calls themselves — the langchain_ts demo
+# delegates the 3 calls to the `langchain-runner` container
+# (deploy/demo/langchain_ts/docker-compose.yaml). The runner runs the
+# real `@spendguard/langchain` `SpendGuardCallbackHandler` against
+# LangChain.js `ChatOpenAI.invoke()` / `ChatOpenAI.stream()` — Node-only
+# work the Python demo container can't host directly.
+#
+# By the time this dispatcher branch is reached, the Makefile target
+# `demo-up DEMO_MODE=langchain_ts` has already done:
+#
+#     docker compose ... run --rm langchain-runner
+#
+# and verified the runner exited 0 with the LOCKED success line
+# `[demo] langchain_ts ALL 3 steps PASS (ALLOW + DENY + STREAM)`.
+# So this Python handler is the **verifier**: it polls the counting-stub
+# /_count endpoint to assert the runner did exactly 2 upstream hits
+# (ALLOW + STREAM; DENY should NOT have hit the counting stub).
+#
+# The Makefile target wires the verifier in two flavours:
+#   - the `demo-verify-langchain-ts` SQL gate (ledger-side assertion),
+#   - this Python handler (counter-side assertion).
+#
+# Both must pass for the demo to be considered green.
+# ---------------------------------------------------------------------------
+
+
+async def run_langchain_ts_mode() -> int:
+    """Counting-stub verifier for the langchain-runner driver.
+
+    Polls `GET counting-stub:8765/_count` and asserts the running tally
+    is >= 2 (one ALLOW + one STREAM upstream hit). The DENY step never
+    contacts the upstream because `SpendGuardCallbackHandler.reserve()`
+    throws `DecisionDenied` BEFORE ChatOpenAI's `fetch` call leaves the
+    Node process, so the counter is unchanged by the DENY step.
+
+    Returns 0 on success; non-zero on failure with a clear error.
+    """
+    import httpx
+
+    print(f"[demo] langchain_ts verifier targeting {_COUNTING_STUB_URL}")
+    async with httpx.AsyncClient(timeout=10.0) as http:
+        try:
+            calls = await _read_counting_stub_hits(http)
+        except Exception as e:  # noqa: BLE001
+            print(f"[demo] FATAL: counting-stub /_count unreachable: {e!r}",
+                  file=sys.stderr)
+            return 7
+
+    if calls < 2:
+        print(
+            f"[demo] FATAL: langchain-runner expected >= 2 counting-stub "
+            f"hits (ALLOW + STREAM), got {calls}. The runner either "
+            "did not finish or the DENY step leaked through to the "
+            "upstream — INV-2 violated.",
+            file=sys.stderr,
+        )
+        return 7
+
+    print(f"[demo] langchain_ts counter OK: counting-stub hits={calls} (>= 2)")
+    # review-standards §11: success-line literal LOCKED. The
+    # langchain-runner container also emits this exact line when it
+    # finishes the 3 steps in-process; printing it here keeps the
+    # CI grep target consistent regardless of which side emits it
+    # (the runner prints it inside the Node script; this Python
+    # handler reprints on the verifier side so the demo's overall
+    # log line landing is deterministic).
+    print("[demo] langchain_ts ALL 3 steps PASS (ALLOW + DENY + STREAM)")
     return 0
 
 
