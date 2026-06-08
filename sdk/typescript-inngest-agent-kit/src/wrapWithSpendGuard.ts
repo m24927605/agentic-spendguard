@@ -338,11 +338,16 @@ export function wrapWithSpendGuard(
     // Production consumers MUST override; the default keeps the SLICE 3
     // wiring end-to-end testable without forcing every consumer to ship a
     // custom estimator.
+    //
+    // HARDEN_D05_UR — thread caller-supplied unitId onto the default-claim
+    // wire UnitRef. Omitted unitId keeps the pre-HARDEN_D05_UR wire shape
+    // (substrate `mapUnitRef` coerces to "").
+    const claimUnit: UnitRef = options.unitId ? { ...unit, unitId: options.unitId } : unit;
     return [
       {
         scopeId: options.budgetId ?? tenantId,
         amountAtomic: "0",
-        unit,
+        unit: claimUnit,
       },
     ];
   }

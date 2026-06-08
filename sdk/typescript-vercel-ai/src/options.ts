@@ -80,4 +80,22 @@ export interface SpendGuardMiddlewareOptions {
    * see file-level JSDoc for the deferral rationale.
    */
   budgetId?: string;
+
+  /**
+   * Canonical-truth UUID of the ledger unit row. When set, threads to
+   * `BudgetClaim.unit.unitId` on the wire so the sidecar ledger can
+   * resolve the budget claim. Most operators source this from the
+   * `SPENDGUARD_UNIT_ID` env var at middleware construction time.
+   *
+   * Omitting leaves the wire field empty and the ledger will reject the
+   * reserve with `INVALID_REQUEST: claim[N].unit.unit_id empty` —
+   * recipe-style integrations (no ledger reserve) MAY omit. NB: this is
+   * the ledger UUID, distinct from the free-form unit slug — they are
+   * NOT interchangeable.
+   *
+   * Additive optional field shipped under HARDEN_D05_UR (the SDK-side
+   * `UnitRef.unitId` broadening landed in SLICE 1; this option threads
+   * it through the middleware's `transformParams` reserve path).
+   */
+  unitId?: string;
 }

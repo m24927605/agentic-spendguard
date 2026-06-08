@@ -338,10 +338,14 @@ function projectClaim(
   const totalChars = flattenPromptText(params.prompt).length;
   const estimatedTokens = BigInt(Math.max(1, Math.ceil(totalChars / CHARS_PER_TOKEN_HEURISTIC)));
   const amountMicros = estimatedTokens * DEFAULT_MICROS_PER_TOKEN;
+  // HARDEN_D05_UR — thread caller-supplied unitId onto the wire UnitRef.
+  // Omitted unitId keeps the pre-HARDEN_D05_UR wire shape (substrate
+  // `mapUnitRef` coerces to "").
+  const unit: UnitRef = opts.unitId ? { ...DEFAULT_UNIT, unitId: opts.unitId } : DEFAULT_UNIT;
   return {
     scopeId: opts.budgetId ?? opts.tenantId,
     amountAtomic: amountMicros.toString(),
-    unit: DEFAULT_UNIT,
+    unit,
   };
 }
 

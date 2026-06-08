@@ -196,10 +196,16 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
     const cap = this.opts.defaultBudgetMicrosCap;
     const amountMicros =
       cap !== undefined && cap > 0n ? cap : estimatedTokens * DEFAULT_MICROS_PER_TOKEN;
+    // HARDEN_D05_UR — thread caller-supplied unitId onto the wire UnitRef.
+    // Omitted unitId keeps the pre-HARDEN_D05_UR wire shape (substrate
+    // `mapUnitRef` coerces to "").
+    const unit: UnitRef = this.opts.unitId
+      ? { ...DEFAULT_UNIT, unitId: this.opts.unitId }
+      : DEFAULT_UNIT;
     return {
       scopeId: this.opts.budgetId ?? this.effectiveTenantId,
       amountAtomic: amountMicros.toString(),
-      unit: DEFAULT_UNIT,
+      unit,
     };
   }
 

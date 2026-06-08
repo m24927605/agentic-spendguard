@@ -224,9 +224,13 @@ function projectClaimsSlice3(
   innerModelName: string,
 ): BudgetClaim[] {
   const scopeId = opts.budgetId ?? opts.tenantId;
+  // HARDEN_D05_UR — thread caller-supplied unitId onto the wire UnitRef.
+  // Omitted unitId keeps the pre-HARDEN_D05_UR wire shape (substrate
+  // `mapUnitRef` coerces to "").
+  const unit: UnitRef = opts.unitId ? { ...DEFAULT_UNIT, unitId: opts.unitId } : DEFAULT_UNIT;
   return defaultClaimEstimator({
     scopeId,
-    unit: DEFAULT_UNIT,
+    unit,
     modelName: innerModelName,
   })(request.input);
 }

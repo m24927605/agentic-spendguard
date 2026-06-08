@@ -187,19 +187,7 @@ public sealed class SpendGuardChatMiddleware : DelegatingChatClient
                 LlmCallId = llmCallId,
             },
             Route = options?.ModelId ?? string.Empty,
-            Inputs = new DecisionRequest.Types.Inputs
-            {
-                ClaimEstimate = new ClaimEstimate
-                {
-                    TokenizerTier = "T3",
-                    InputTokens = inputTokens,
-                    PredictedATokens = Math.Max(inputTokens / 2, 1),
-                    ReservedStrategy = "A",
-                    PredictionStrategyUsed = "A",
-                    PredictionPolicyUsed = "STRICT_CEILING",
-                    Model = options?.ModelId ?? string.Empty,
-                },
-            },
+            Inputs = BuildDecisionInputs(inputTokens, options),
             Idempotency = new Idempotency
             {
                 Key = idempotencyKey,
@@ -207,6 +195,42 @@ public sealed class SpendGuardChatMiddleware : DelegatingChatClient
         };
 
         return req;
+    }
+
+    /// <summary>
+    /// Build the <see cref="DecisionRequest.Types.Inputs"/> payload. When
+    /// <see cref="SpendGuardOptions.UnitId"/> is set (HARDEN_D05_UR), the
+    /// canonical-truth ledger UUID is threaded onto <c>ProjectedUnit.UnitId</c>
+    /// so the sidecar ledger can resolve the budget claim. Omitting leaves
+    /// the wire field empty — same as the pre-HARDEN_D05_UR behaviour.
+    /// </summary>
+    private DecisionRequest.Types.Inputs BuildDecisionInputs(
+        int inputTokens,
+        ChatOptions? options)
+    {
+        var inputs = new DecisionRequest.Types.Inputs
+        {
+            ClaimEstimate = new ClaimEstimate
+            {
+                TokenizerTier = "T3",
+                InputTokens = inputTokens,
+                PredictedATokens = Math.Max(inputTokens / 2, 1),
+                ReservedStrategy = "A",
+                PredictionStrategyUsed = "A",
+                PredictionPolicyUsed = "STRICT_CEILING",
+                Model = options?.ModelId ?? string.Empty,
+            },
+        };
+
+        if (_options.UnitId is Guid unitId)
+        {
+            inputs.ProjectedUnit = new UnitRef
+            {
+                UnitId = unitId.ToString(),
+            };
+        }
+
+        return inputs;
     }
 
     private int EstimateInputTokens(IEnumerable<ChatMessage> messages)

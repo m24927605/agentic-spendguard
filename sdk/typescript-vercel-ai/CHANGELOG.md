@@ -13,6 +13,22 @@ for the cross-language behaviour parity matrix.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- `SpendGuardMiddlewareOptions.unitId` — optional canonical-truth UUID of
+  the ledger unit row. When set, `transformParams` threads it through to
+  `BudgetClaim.unit.unitId` on the reserve wire (closes the HARDEN_D05_UR
+  substrate gap that previously blocked DENY+STREAM full assertion across
+  ~14 adapter demos). Most operators source this from the
+  `SPENDGUARD_UNIT_ID` env var at middleware construction time.
+- Backward-compat: omitting `unitId` matches prior behavior (sends empty
+  string; sidecar will INVALID_REQUEST as before) — additive only, no
+  baseline test modified. Closes HARDEN_D05_UR_S02 for D06.
+
+---
+
 ## [0.1.0] — 2026-06-07
 
 First public release. TS-side Vercel AI SDK `LanguageModelV1Middleware`

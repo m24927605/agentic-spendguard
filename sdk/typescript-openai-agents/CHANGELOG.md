@@ -16,6 +16,22 @@ for the Python source the bracket is mirrored from.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- `SpendGuardAgentsOptions.unitId` — optional canonical-truth UUID of the
+  ledger unit row. When set, the bracket threads it through to
+  `BudgetClaim.unit.unitId` on the reserve wire (closes the HARDEN_D05_UR
+  substrate gap that previously blocked DENY+STREAM full assertion across
+  ~14 adapter demos). Most operators source this from the
+  `SPENDGUARD_UNIT_ID` env var at adapter construction time.
+- Backward-compat: omitting `unitId` matches prior behavior (sends empty
+  string; sidecar will INVALID_REQUEST as before) — additive only, no
+  baseline test modified. Closes HARDEN_D05_UR_S02 for D08.
+
+---
+
 ## [0.1.0] — 2026-06-07
 
 First public release. TS counterpart of `spendguard-sdk[openai-agents]`

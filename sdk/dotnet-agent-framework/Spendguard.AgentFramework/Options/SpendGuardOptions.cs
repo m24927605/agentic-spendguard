@@ -78,6 +78,24 @@ public sealed class SpendGuardOptions
     public string RuntimeKind { get; set; } = "microsoft-agent-framework-dotnet";
 
     /// <summary>
+    /// Canonical-truth UUID of the ledger unit row (FK to
+    /// <c>ledger_units.unit_id</c>). When set, the adapter threads it
+    /// through to <c>DecisionRequest.Inputs.ProjectedUnit.UnitId</c> on the
+    /// wire so the sidecar ledger can resolve the budget claim. Most
+    /// operators source this from the <c>SPENDGUARD_UNIT_ID</c> env var at
+    /// adapter construction time.
+    ///
+    /// Omitting leaves the wire field empty and the ledger will reject the
+    /// reserve with <c>INVALID_REQUEST: claim[N].unit.unit_id empty</c> —
+    /// recipe-style integrations (no ledger reserve) MAY omit. NB: this is
+    /// the ledger UUID, distinct from any free-form unit slug — they are
+    /// NOT interchangeable.
+    ///
+    /// Additive optional field shipped under HARDEN_D05_UR.
+    /// </summary>
+    public Guid? UnitId { get; set; }
+
+    /// <summary>
     /// Validates this option bag. Throws <see cref="ArgumentException"/>
     /// on any disallowed combination. Called by DI registration so misconfig
     /// surfaces at startup, not on the hot path.

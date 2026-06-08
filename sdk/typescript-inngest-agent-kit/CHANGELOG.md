@@ -11,6 +11,26 @@ for the locked design and the headline retry-dedup contract.
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- `WrapWithSpendGuardOptions.unitId` — optional canonical-truth UUID of
+  the ledger unit row. When set AND no custom `claimEstimator` is
+  supplied, the adapter threads it through to `BudgetClaim.unit.unitId`
+  on the default-claim wire (closes the HARDEN_D05_UR substrate gap that
+  previously blocked DENY+STREAM full assertion across ~14 adapter
+  demos). Most operators source this from the `SPENDGUARD_UNIT_ID` env
+  var at adapter construction time.
+- When a custom `claimEstimator` is supplied, that function is
+  responsible for setting `unit.unitId` on its returned claims —
+  `claimEstimator` always wins (Python parity "explicit non-null wins").
+- Backward-compat: omitting `unitId` matches prior behavior (sends empty
+  string; sidecar will INVALID_REQUEST as before) — additive only, no
+  baseline test modified. Closes HARDEN_D05_UR_S02 for D29.
+
+---
+
 ## [0.1.0] — 2026-06-07
 
 First public release. Closes deliverable D29 (Inngest AgentKit adapter).
