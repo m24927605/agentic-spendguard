@@ -52,8 +52,10 @@ if _ADK_PKG_NAME not in sys.modules:
 
 callback_mod = importlib.import_module("spendguard.integrations.adk._callback")
 errors_mod = importlib.import_module("spendguard.integrations.adk._errors")
+options_mod = importlib.import_module("spendguard.integrations.adk._options")
 
 SpendGuardAdkCallback = callback_mod.SpendGuardAdkCallback
+SpendGuardAdkOptions = options_mod.SpendGuardAdkOptions
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -869,3 +871,72 @@ async def test_I05_integration_concurrent_runs_dont_cross_state() -> None:
     # And the run_ids are scoped to each ctx.
     assert a_post["run_id"] == "inv-A"
     assert b_post["run_id"] == "inv-B"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# HARDEN_D05_UR — TP-01..03: `unit_id` options field threading.
+#
+# Per docs/specs/harden_d05_unit_ref/tests.md §2.2, every Python adapter
+# in the sweep MUST expose an optional ``unit_id`` on its options
+# dataclass and (a) accept it at construction, (b) thread it onto the
+# wire ``BudgetClaim.unit.unit_id``, and (c) keep constructing when the
+# field is omitted (backward compat).
+# ─────────────────────────────────────────────────────────────────────
+
+_UNIT_ID_FIXTURE = "550e8400-e29b-41d4-a716-446655440000"
+
+
+def test_TP01_options_accepts_unit_id() -> None:
+    """TP-01 — ``SpendGuardAdkOptions(unit_id=...)`` constructs."""
+    opts = SpendGuardAdkOptions(
+        tenant_id="t1",
+        budget_id="b1",
+        window_instance_id="w1",
+        unit_id=_UNIT_ID_FIXTURE,
+    )
+    assert opts.unit_id == _UNIT_ID_FIXTURE
+
+
+@pytest.mark.asyncio
+async def test_TP02_unit_id_threads_to_wire_claim() -> None:
+    """TP-02 — operator binds ``options.unit_id`` to the proto ``UnitRef``;
+    the resulting wire ``BudgetClaim.unit.unit_id`` carries it verbatim.
+    """
+    opts = SpendGuardAdkOptions(
+        tenant_id="t1",
+        budget_id="b1",
+        window_instance_id="w1",
+        unit_id=_UNIT_ID_FIXTURE,
+    )
+    client = make_client_mock(reservation_ids=("res-tp02",))
+    cb = SpendGuardAdkCallback(
+        client=client,
+        budget_id=opts.budget_id,
+        window_instance_id=opts.window_instance_id,
+        unit=common_pb2.UnitRef(unit_id=opts.unit_id or ""),
+        pricing=common_pb2.PricingFreeze(pricing_version="v1"),
+        claim_estimator=lambda req: [
+            common_pb2.BudgetClaim(
+                budget_id="b1",
+                unit=common_pb2.UnitRef(unit_id=opts.unit_id or ""),
+                amount_atomic="100",
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id="w1",
+            )
+        ],
+    )
+    ctx = make_ctx(invocation_id="inv-tp02")
+    req = make_request()
+    await cb(ctx, req)
+    kw = client.request_decision.call_args.kwargs
+    assert kw["projected_claims"][0].unit.unit_id == _UNIT_ID_FIXTURE
+
+
+def test_TP03_options_without_unit_id_constructs() -> None:
+    """TP-03 — backward compat: omitting ``unit_id`` keeps default None."""
+    opts = SpendGuardAdkOptions(
+        tenant_id="t1",
+        budget_id="b1",
+        window_instance_id="w1",
+    )
+    assert opts.unit_id is None

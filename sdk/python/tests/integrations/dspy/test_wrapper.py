@@ -836,3 +836,68 @@ def test_resolver_returning_none_rejected() -> None:
     )
     with pytest.raises(SpendGuardConfigError, match="budget_resolver"):
         cb.on_lm_start("call-bnr", make_lm_instance(), {"prompt": "hi"})
+
+
+# ─────────────────────────────────────────────────────────────────────
+# HARDEN_D05_UR — TP-01..03: `unit_id` options field threading.
+#
+# Per docs/specs/harden_d05_unit_ref/tests.md §2.2, every Python adapter
+# in the sweep MUST expose an optional ``unit_id`` on its options
+# dataclass and (a) accept it at construction, (b) thread it onto the
+# wire ``BudgetClaim.unit.unit_id``, and (c) keep constructing when the
+# field is omitted (backward compat).
+#
+# DSPy's reserve path resolves the unit binding through ``budget_resolver``,
+# so operators bind ``options.unit_id`` to the ``BudgetBinding.unit`` proto
+# inside the resolver closure (matches the production env-var flow).
+# ─────────────────────────────────────────────────────────────────────
+
+_UNIT_ID_FIXTURE = "550e8400-e29b-41d4-a716-446655440000"
+
+
+def test_TP01_options_accepts_unit_id() -> None:
+    """TP-01 — ``SpendGuardDSPyOptions(unit_id=...)`` constructs."""
+    opts = SpendGuardDSPyOptions(tenant_id="t1", unit_id=_UNIT_ID_FIXTURE)
+    assert opts.unit_id == _UNIT_ID_FIXTURE
+
+
+def test_TP02_unit_id_threads_to_wire_claim() -> None:
+    """TP-02 — operator binds ``options.unit_id`` to the proto ``UnitRef``
+    inside the ``budget_resolver``; the resulting wire
+    ``BudgetClaim.unit.unit_id`` carries it verbatim.
+    """
+    opts = SpendGuardDSPyOptions(tenant_id="t1", unit_id=_UNIT_ID_FIXTURE)
+
+    def _binding_with_unit_id() -> BudgetBinding:
+        return BudgetBinding(
+            budget_id="b1",
+            window_instance_id="w1",
+            unit=common_pb2.UnitRef(unit_id=opts.unit_id or ""),
+            pricing=common_pb2.PricingFreeze(pricing_version="v1"),
+        )
+
+    client = make_client_mock()
+    cb = make_callback(
+        client=client,
+        budget_resolver=lambda model: _binding_with_unit_id(),
+        claim_estimator=lambda inputs: [
+            common_pb2.BudgetClaim(
+                budget_id="b1",
+                unit=common_pb2.UnitRef(unit_id=opts.unit_id or ""),
+                amount_atomic="100",
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id="w1",
+            )
+        ],
+    )
+    cb.on_lm_start("call-tp02", make_lm_instance(), {"prompt": "hi"})
+    kw = client.request_decision.call_args.kwargs
+    assert kw["projected_claims"][0].unit.unit_id == _UNIT_ID_FIXTURE
+    # Clean up the pending stash so subsequent tests don't see leftover state.
+    cb.on_lm_end("call-tp02", make_lm_response(total_tokens=10), None)
+
+
+def test_TP03_options_without_unit_id_constructs() -> None:
+    """TP-03 — backward compat: omitting ``unit_id`` keeps default None."""
+    opts = SpendGuardDSPyOptions(tenant_id="t1")
+    assert opts.unit_id is None

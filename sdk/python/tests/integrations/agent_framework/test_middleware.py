@@ -772,3 +772,71 @@ class TestToolMiddleware:
             with pytest.raises(DecisionDenied):
                 await mw.process(ctx, call_next)
         assert ran == []
+
+
+# ─────────────────────────────────────────────────────────────────────
+# HARDEN_D05_UR — TP-01..03: `unit_id` options field threading.
+#
+# Per docs/specs/harden_d05_unit_ref/tests.md §2.2, every Python adapter
+# in the sweep MUST expose an optional ``unit_id`` on its options
+# dataclass and (a) accept it at construction, (b) thread it onto the
+# wire ``BudgetClaim.unit.unit_id``, and (c) keep constructing when the
+# field is omitted (backward compat).
+# ─────────────────────────────────────────────────────────────────────
+
+_UNIT_ID_FIXTURE = "550e8400-e29b-41d4-a716-446655440000"
+
+
+def test_TP01_options_accepts_unit_id() -> None:
+    """TP-01 — ``SpendGuardAgentFrameworkOptions(unit_id=...)`` constructs."""
+    opts = SpendGuardAgentFrameworkOptions(
+        tenant_id="t1",
+        budget_id="b1",
+        window_instance_id="w1",
+        unit_id=_UNIT_ID_FIXTURE,
+    )
+    assert opts.unit_id == _UNIT_ID_FIXTURE
+
+
+@pytest.mark.asyncio
+async def test_TP02_unit_id_threads_to_wire_claim() -> None:
+    """TP-02 — operator binds ``options.unit_id`` to the proto ``UnitRef``;
+    the resulting wire ``BudgetClaim.unit.unit_id`` carries it verbatim.
+    """
+    opts = SpendGuardAgentFrameworkOptions(
+        tenant_id="tenant-1",
+        budget_id="b1",
+        window_instance_id="w1",
+        unit_id=_UNIT_ID_FIXTURE,
+    )
+    fake_claim = SimpleNamespace(
+        budget_id="b1",
+        window_instance_id="w1",
+        amount_atomic="100",
+        unit=SimpleNamespace(unit_id=opts.unit_id or ""),
+    )
+    client = _make_client_mock()
+    mw = SpendGuardMiddleware(
+        client=client,
+        options=opts,
+        unit=SimpleNamespace(unit_id=opts.unit_id or ""),
+        pricing=SimpleNamespace(pricing_version="v1"),
+        claim_estimator=lambda _msgs: [fake_claim],
+    )
+    ctx = _make_chat_context()
+    response = _make_ok_response(total_tokens=42)
+    call_next = await _populate_result_call_next(ctx, response)
+    async with run_context(RunContext(run_id="run-tp02")):
+        await mw.process(ctx, call_next)
+    kw = client.request_decision.call_args.kwargs
+    assert kw["projected_claims"][0].unit.unit_id == _UNIT_ID_FIXTURE
+
+
+def test_TP03_options_without_unit_id_constructs() -> None:
+    """TP-03 — backward compat: omitting ``unit_id`` keeps default None."""
+    opts = SpendGuardAgentFrameworkOptions(
+        tenant_id="t1",
+        budget_id="b1",
+        window_instance_id="w1",
+    )
+    assert opts.unit_id is None

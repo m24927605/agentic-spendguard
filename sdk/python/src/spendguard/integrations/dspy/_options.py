@@ -107,6 +107,24 @@ class SpendGuardDSPyOptions:
     sidecar_socket_path: str = "/var/run/spendguard/sidecar.sock"
     fail_closed: bool = True
     callback_first: bool = True
+    unit_id: str | None = None
+    """Canonical-truth UUID of the ledger unit row.
+
+    When provided, the callback threads it through to
+    ``BudgetClaim.unit.unit_id`` on the wire so the sidecar ledger can
+    resolve the budget claim. Most operators source this from the
+    ``SPENDGUARD_UNIT_ID`` env var at adapter construction time.
+
+    Omitting leaves the wire field empty and the ledger rejects the
+    reserve with ``INVALID_REQUEST: claim[N].unit.unit_id empty`` —
+    recipe-style integrations (no ledger reserve) MAY omit. NB: this
+    is the ledger UUID, distinct from the free-form ``unit`` slug —
+    they are NOT interchangeable.
+
+    Additive optional field shipped under HARDEN_D05_UR (the Python
+    SDK proto ``UnitRef.unit_id`` field already exists; this option
+    threads it through the adapter's reserve path).
+    """
 
     def __post_init__(self) -> None:
         if not self.tenant_id or not self.tenant_id.strip():

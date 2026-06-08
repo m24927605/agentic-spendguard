@@ -707,3 +707,80 @@ def test_T33_decision_context_includes_lineage_and_integration_tag() -> None:
     # inner_client tag present and reflects the FakeChatCompletionClient
     # class name for audit grouping.
     assert ctx["inner_client"] == "FakeChatCompletionClient"
+
+
+# ═════════════════════════════════════════════════════════════════════
+# HARDEN_D05_UR — TP-01..03: `unit_id` options field threading.
+#
+# Per docs/specs/harden_d05_unit_ref/tests.md §2.2, every Python adapter
+# in the sweep MUST expose an optional ``unit_id`` on its options
+# dataclass and (a) accept it at construction, (b) thread it onto the
+# wire ``BudgetClaim.unit.unit_id``, and (c) keep constructing when the
+# field is omitted (backward compat).
+#
+# Python's wire path differs slightly from the TS sibling: ``unit`` is
+# a fully-formed ``common_pb2.UnitRef`` already, so the operator binds
+# ``options.unit_id`` to the proto on adapter construction. The test
+# below mirrors the TS ``SpendGuardCallbackHandler — unitId`` block.
+# ═════════════════════════════════════════════════════════════════════
+
+_UNIT_ID_FIXTURE = "550e8400-e29b-41d4-a716-446655440000"
+
+
+def test_TP01_options_accepts_unit_id() -> None:
+    """TP-01 — ``SpendGuardAutoGenOptions(unit_id=...)`` constructs."""
+    opts = SpendGuardAutoGenOptions(
+        tenant_id="t1",
+        budget_id="b1",
+        window_instance_id="w1",
+        unit_id=_UNIT_ID_FIXTURE,
+    )
+    assert opts.unit_id == _UNIT_ID_FIXTURE
+
+
+@pytest.mark.asyncio
+async def test_TP02_unit_id_threads_to_wire_claim() -> None:
+    """TP-02 — operator binds ``options.unit_id`` to the proto ``UnitRef``;
+    the resulting wire ``BudgetClaim.unit.unit_id`` carries it verbatim.
+    """
+    opts = SpendGuardAutoGenOptions(
+        tenant_id="t1",
+        budget_id="b1",
+        window_instance_id="w1",
+        unit_id=_UNIT_ID_FIXTURE,
+    )
+    # The operator threads ``opts.unit_id`` onto the proto unit, then
+    # supplies it to the wrapper. This mirrors how production code
+    # sources ``SPENDGUARD_UNIT_ID`` from the env at construction time.
+    client = make_client_mock()
+    wrapper = SpendGuardChatCompletionClient(
+        inner=FakeChatCompletionClient(),
+        client=client,
+        budget_id=opts.budget_id,
+        window_instance_id=opts.window_instance_id,
+        unit=common_pb2.UnitRef(unit_id=opts.unit_id or ""),
+        pricing=common_pb2.PricingFreeze(pricing_version="v1"),
+        claim_estimator=lambda m: [
+            common_pb2.BudgetClaim(
+                budget_id="b1",
+                unit=common_pb2.UnitRef(unit_id=opts.unit_id or ""),
+                amount_atomic="100",
+                direction=common_pb2.BudgetClaim.DEBIT,
+                window_instance_id="w1",
+            )
+        ],
+    )
+    async with run_context(RunContext(run_id="r-tp02")):
+        await wrapper.create(make_messages())
+    kw = client.request_decision.call_args.kwargs
+    assert kw["projected_claims"][0].unit.unit_id == _UNIT_ID_FIXTURE
+
+
+def test_TP03_options_without_unit_id_constructs() -> None:
+    """TP-03 — backward compat: omitting ``unit_id`` keeps default None."""
+    opts = SpendGuardAutoGenOptions(
+        tenant_id="t1",
+        budget_id="b1",
+        window_instance_id="w1",
+    )
+    assert opts.unit_id is None
