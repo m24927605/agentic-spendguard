@@ -144,6 +144,22 @@ export interface HandshakeOutcome {
 export interface UnitRef {
   unit: string;
   denomination: number;
+  /** Canonical-truth UUID of the ledger unit row.
+   *
+   * When provided, the SDK threads it verbatim onto `BudgetClaim.unit.unit_id`
+   * on the wire. When omitted, the SDK sends "" and the ledger reject with
+   * `INVALID_REQUEST: claim[N].unit.unit_id empty`.
+   *
+   * Adapters that issue ledger-backed `client.reserve()` MUST provide
+   * `unitId`. Recipe-style integrations (where no ledger reserve happens) MAY
+   * omit. The most common operator path is to set this from the
+   * `SPENDGUARD_UNIT_ID` env var at adapter construction time.
+   *
+   * NB: this is the ledger UUID, distinct from the free-form `unit` slug —
+   * they are NOT interchangeable. Multiple unit slugs can resolve to the same
+   * unit_id when migration aliasing is configured.
+   */
+  unitId?: string;
 }
 
 export interface BudgetClaim {
@@ -1619,14 +1635,16 @@ function mapUnitRef(unit: UnitRef): {
   modelFamily: string;
   creditProgram: string;
 } {
-  // The public surface compresses the proto UnitRef to its (unit, denomination)
-  // pair so adapters do not need to know about ledger_unit_id. We carry the
-  // free-form `unit` literal into `unitName` (the proto's free-form slot when
-  // kind is non-monetary) and leave the canonical-truth `unit_id` empty —
-  // ledger resolves canonical truth server-side. SLICE 6 may broaden this when
-  // pricing helpers land.
+  // The public surface compresses the proto UnitRef to its (unit, denomination,
+  // unitId?) shape. We carry the free-form `unit` literal into `unitName` (the
+  // proto's free-form slot when kind is non-monetary) and thread `unitId`
+  // through verbatim when the caller provides it — empty string triggers a
+  // ledger `INVALID_REQUEST: claim[N].unit.unit_id empty` rejection at
+  // reserve time, which is the intended fail-closed semantics for adapters
+  // that forgot to wire the canonical-truth ledger UUID (HARDEN_D05_UR closes
+  // the substrate gap that previously hardcoded "").
   return {
-    unitId: "",
+    unitId: unit.unitId ?? "",
     kind: 0,
     currency: "",
     unitName: unit.unit,

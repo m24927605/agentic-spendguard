@@ -13,6 +13,18 @@ surface — see
 
 ---
 
+## [Unreleased]
+
+### Added
+
+- `UnitRef.unitId` — optional canonical-truth UUID of the ledger unit row.
+  Adapters that issue ledger-backed reserve calls now thread this through to
+  `BudgetClaim.unit.unit_id` on the wire. Closes the HARDEN_D05_UR substrate
+  gap that previously blocked DENY+STREAM full assertion across ~14 adapter
+  demos. Backward-compat: omitting `unitId` matches prior behavior.
+
+---
+
 ## [0.1.0] — 2026-06-07
 
 First public release. Mirrors `spendguard-sdk` (Python) v0.5.1 public surface.

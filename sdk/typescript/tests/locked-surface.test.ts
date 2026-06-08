@@ -507,3 +507,38 @@ describe("LOCKED §1.5 P0 — alias identity survives SLICE 8 wrapping", () => {
     expect(client.reserve).toBe(client.requestDecision);
   });
 });
+
+// ── HARDEN_D05_UR SLICE 1 — UnitRef.unitId substrate ──────────────────────
+//
+// design.md §2.1 LOCKS the broadened `UnitRef` shape: `unit` + `denomination`
+// are required, `unitId?: string` is the new optional canonical-truth UUID
+// field. These tests are the locked-surface gate for the substrate change.
+// Wire-shape threading is exercised in `tests/unit-id-wire.test.ts`
+// (U-WS-01..06 + XA-01); these tests cover the TYPE-LEVEL surface only.
+
+import type { UnitRef as MainBarrelUnitRef } from "../src/index.js";
+
+describe("LOCKED HARDEN_D05_UR §2.1 — UnitRef.unitId substrate", () => {
+  it("UnitRef has optional unitId field (U-LS-01)", () => {
+    // Construct UnitRef WITH unitId — must compile + carry the value verbatim.
+    const u: MainBarrelUnitRef = {
+      unit: "USD_MICROS",
+      denomination: -6,
+      unitId: "550e8400-e29b-41d4-a716-446655440000",
+    };
+    expect(u.unitId).toBe("550e8400-e29b-41d4-a716-446655440000");
+  });
+
+  it("UnitRef without unitId still type-checks (U-LS-02)", () => {
+    // Backward-compat gate: the 2-field shape MUST remain assignable. If a
+    // future refactor accidentally typed `unitId: string` (required, not
+    // optional), this assignment would fail typecheck — protecting every
+    // existing call site in the 14 adapter codebases that don't yet set
+    // unitId at the call site (SLICE 2 wires them).
+    const u: MainBarrelUnitRef = {
+      unit: "USD_MICROS",
+      denomination: -6,
+    };
+    expect(u.unitId).toBeUndefined();
+  });
+});
