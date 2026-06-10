@@ -26,7 +26,10 @@ function defaultClaimEstimator(opts) {
     {
       scopeId: opts.scopeId,
       amountAtomic,
-      unit: opts.unit
+      unit: opts.unit,
+      // HARDEN_D05_WI — thread caller-supplied windowInstanceId onto the
+      // wire claim (substrate coerces omitted to "").
+      ...opts.windowInstanceId ? { windowInstanceId: opts.windowInstanceId } : {}
     }
   ];
 }
@@ -135,8 +138,10 @@ async function bracketedGetResponse(inner, request, opts, innerModelName) {
         decisionId: outcome.decisionId,
         reservationId,
         estimatedAmountAtomic: "0",
-        unit: DEFAULT_UNIT,
-        pricing: EMPTY_PRICING,
+        // HARDEN_D05_WI — reserve-time unit + freeze tuple must match the
+        // reservation even on the PROVIDER_ERROR commit path.
+        unit: claims[0]?.unit ?? DEFAULT_UNIT,
+        pricing: opts.pricing ?? EMPTY_PRICING,
         providerEventId: "",
         outcome: "PROVIDER_ERROR"
       });
@@ -151,8 +156,12 @@ async function bracketedGetResponse(inner, request, opts, innerModelName) {
       decisionId: outcome.decisionId,
       reservationId,
       estimatedAmountAtomic: String(usage.totalTokens),
-      unit: DEFAULT_UNIT,
-      pricing: EMPTY_PRICING,
+      // HARDEN_D05_WI — reuse the reserve-time unit so payload.unit_id matches
+      // the reservation (ledger rejects mismatched commit units).
+      unit: claims[0]?.unit ?? DEFAULT_UNIT,
+      // HARDEN_D05_WI — repeat the reserve-time freeze tuple (ledger rejects
+      // commits whose pricing tuple differs from the reservation's).
+      pricing: opts.pricing ?? EMPTY_PRICING,
       providerEventId,
       outcome: "SUCCESS"
     });
@@ -163,11 +172,19 @@ async function bracketedGetResponse(inner, request, opts, innerModelName) {
 }
 function projectClaimsSlice3(request, opts, innerModelName) {
   const scopeId = opts.budgetId ?? opts.tenantId;
-  return defaultClaimEstimator({
+  const unit = opts.unitId ? { ...DEFAULT_UNIT, unitId: opts.unitId } : DEFAULT_UNIT;
+  const claims = defaultClaimEstimator({
     scopeId,
-    unit: DEFAULT_UNIT,
-    modelName: innerModelName
+    unit,
+    modelName: innerModelName,
+    // HARDEN_D05_WI — thread caller-supplied windowInstanceId.
+    ...opts.windowInstanceId ? { windowInstanceId: opts.windowInstanceId } : {}
   })(request.input);
+  const override = opts.estimateOverrideAtomic;
+  if (override !== void 0 && /^[0-9]+$/.test(override)) {
+    return claims.map((claim) => ({ ...claim, amountAtomic: override }));
+  }
+  return claims;
 }
 async function safeCommit(opts, req) {
   try {

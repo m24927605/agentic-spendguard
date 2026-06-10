@@ -173,8 +173,10 @@ export async function bracketedGetResponse(
         decisionId: outcome.decisionId,
         reservationId,
         estimatedAmountAtomic: "0",
-        unit: DEFAULT_UNIT,
-        pricing: EMPTY_PRICING,
+        // HARDEN_D05_WI — reserve-time unit + freeze tuple must match the
+        // reservation even on the PROVIDER_ERROR commit path.
+        unit: claims[0]?.unit ?? DEFAULT_UNIT,
+        pricing: opts.pricing ?? EMPTY_PRICING,
         providerEventId: "",
         outcome: "PROVIDER_ERROR",
       });
@@ -194,8 +196,12 @@ export async function bracketedGetResponse(
       decisionId: outcome.decisionId,
       reservationId,
       estimatedAmountAtomic: String(usage.totalTokens),
-      unit: DEFAULT_UNIT,
-      pricing: EMPTY_PRICING,
+      // HARDEN_D05_WI — reuse the reserve-time unit so payload.unit_id matches
+      // the reservation (ledger rejects mismatched commit units).
+      unit: claims[0]?.unit ?? DEFAULT_UNIT,
+      // HARDEN_D05_WI — repeat the reserve-time freeze tuple (ledger rejects
+      // commits whose pricing tuple differs from the reservation's).
+      pricing: opts.pricing ?? EMPTY_PRICING,
       providerEventId,
       outcome: "SUCCESS",
     });
@@ -228,11 +234,20 @@ function projectClaimsSlice3(
   // Omitted unitId keeps the pre-HARDEN_D05_UR wire shape (substrate
   // `mapUnitRef` coerces to "").
   const unit: UnitRef = opts.unitId ? { ...DEFAULT_UNIT, unitId: opts.unitId } : DEFAULT_UNIT;
-  return defaultClaimEstimator({
+  const claims = defaultClaimEstimator({
     scopeId,
     unit,
     modelName: innerModelName,
+    // HARDEN_D05_WI — thread caller-supplied windowInstanceId.
+    ...(opts.windowInstanceId ? { windowInstanceId: opts.windowInstanceId } : {}),
   })(request.input);
+  // Demo/test-only: `estimateOverrideAtomic` replaces the baseline amount
+  // (mirrors the Python litellm callback's spendguard_estimate_override).
+  const override = opts.estimateOverrideAtomic;
+  if (override !== undefined && /^[0-9]+$/.test(override)) {
+    return claims.map((claim) => ({ ...claim, amountAtomic: override }));
+  }
+  return claims;
 }
 
 /**

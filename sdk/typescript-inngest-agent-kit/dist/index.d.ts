@@ -142,6 +142,36 @@ interface WrapWithSpendGuardOptions {
      * cache still returns one logical PRE per step (proven by R-06).
      */
     idempotencyCache?: IdempotencyCache;
+    /**
+     * Canonical-truth UUID of the ledger unit row. When set, threads to
+     * `BudgetClaim.unit.unitId` on the wire so the sidecar ledger can
+     * resolve the budget claim. Most operators source this from the
+     * `SPENDGUARD_UNIT_ID` env var at adapter construction time.
+     *
+     * Omitting leaves the wire field empty and the ledger will reject the
+     * reserve with `INVALID_REQUEST: claim[N].unit.unit_id empty` —
+     * recipe-style integrations (no ledger reserve) MAY omit. NB: this is
+     * the ledger UUID, distinct from the free-form unit slug — they are
+     * NOT interchangeable.
+     *
+     * Additive optional field shipped under HARDEN_D05_UR (the SDK-side
+     * `UnitRef.unitId` broadening landed in SLICE 1; this option threads
+     * it through the adapter's default `projectClaims` reserve path).
+     * Note: when the consumer supplies a custom `claimEstimator`, that
+     * function is responsible for setting `unit.unitId` on its returned
+     * claims — `claimEstimator` always wins (Python parity).
+     */
+    unitId?: string;
+    /**
+     * Demo/test-only escape hatch: when set (string-form integer), every
+     * projected claim's `amountAtomic` uses this value INSTEAD of the
+     * default / `claimEstimator`-produced amount. Mirrors the Python
+     * litellm callback's `spendguard_estimate_override` convention so demo
+     * DENY steps can blow past a seeded hard-cap deterministically.
+     * Production consumers MUST NOT set this — pricing-table estimation is
+     * the supported path. Shipped under HARDEN_D05_WI.
+     */
+    estimateOverrideAtomic?: string;
 }
 
 /**

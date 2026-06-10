@@ -57,6 +57,24 @@ import type { SpendGuardCallbackHandlerOptions } from "./options.js";
 interface InflightReservation {
   decisionId: string;
   reservationId: string;
+  /**
+   * HARDEN_D05_WI — the exact `UnitRef` the reserve-time claim carried
+   * (incl. `unitId`). Cached so the commit path sends a unit that matches
+   * the reservation; the ledger rejects commits whose `payload.unit_id`
+   * differs from the reservation's.
+   */
+  unit: UnitRef;
+  /** HARDEN_D05_WI — pricing freeze the commit must repeat (tuple-matched
+   * against the reservation by the ledger). Optional: omitted → EMPTY. */
+  pricing?: PricingFreeze;
+  /**
+   * HARDEN_D05_WI — the reserve-time claim's `amountAtomic`. SUCCESS
+   * commits fall back to this estimate when the provider reported no
+   * usable token usage (e.g. streaming providers that omit a usage
+   * frame) — the ledger rejects `estimated_amount_atomic` of 0, and the
+   * PRE-call estimate IS the canonical "estimated" amount for the step.
+   */
+  estimatedAmountAtomic: string;
 }
 
 // ── Defaults the SLICE 2 options surface deliberately omits ────────────────
@@ -194,8 +212,15 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
     }
     const estimatedTokens = BigInt(Math.max(1, Math.ceil(totalChars / CHARS_PER_TOKEN_HEURISTIC)));
     const cap = this.opts.defaultBudgetMicrosCap;
+    // Demo/test-only: `estimateOverrideAtomic` replaces the heuristic amount
+    // (mirrors the Python litellm callback's spendguard_estimate_override).
+    const override = this.opts.estimateOverrideAtomic;
     const amountMicros =
-      cap !== undefined && cap > 0n ? cap : estimatedTokens * DEFAULT_MICROS_PER_TOKEN;
+      override !== undefined && /^[0-9]+$/.test(override)
+        ? BigInt(override)
+        : cap !== undefined && cap > 0n
+          ? cap
+          : estimatedTokens * DEFAULT_MICROS_PER_TOKEN;
     // HARDEN_D05_UR — thread caller-supplied unitId onto the wire UnitRef.
     // Omitted unitId keeps the pre-HARDEN_D05_UR wire shape (substrate
     // `mapUnitRef` coerces to "").
@@ -206,6 +231,11 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
       scopeId: this.opts.budgetId ?? this.effectiveTenantId,
       amountAtomic: amountMicros.toString(),
       unit,
+      // HARDEN_D05_WI — thread caller-supplied windowInstanceId onto the
+      // wire claim (substrate coerces omitted to "").
+      ...(this.opts.windowInstanceId
+        ? { windowInstanceId: this.opts.windowInstanceId }
+        : {}),
     };
   }
 
@@ -241,6 +271,9 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
       ...(parentRunId !== undefined ? { parentRunId } : {}),
     });
     const traceparent = readTraceparent(metadata);
+    // Computed once so the reserve claim and the commit-side inflight stash
+    // share the exact same UnitRef (HARDEN_D05_WI commit/reservation match).
+    const projectedClaim = this.projectClaim(messages);
     const req: ReserveRequest = {
       trigger: "LLM_CALL_PRE",
       runId,
@@ -248,7 +281,7 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
       llmCallId: runId,
       decisionId: runId,
       route: name ?? DEFAULT_ROUTE,
-      projectedClaims: [this.projectClaim(messages)],
+      projectedClaims: [projectedClaim],
       idempotencyKey,
       ...(traceparent !== undefined ? { traceparent } : {}),
       ...(parentRunId !== undefined ? { parentRunId } : {}),
@@ -279,6 +312,9 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
     this.inflight.set(runId, {
       decisionId: outcome.decisionId,
       reservationId: outcome.reservationIds[0] ?? "",
+      unit: projectedClaim.unit,
+      ...(this.opts.pricing !== undefined ? { pricing: this.opts.pricing } : {}),
+      estimatedAmountAtomic: projectedClaim.amountAtomic,
     });
   }
 
@@ -317,22 +353,35 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
         `[spendguard:langchain] handleLLMEnd: no tokenUsage in LLMResult for runId=${runId}; committing with actual tokens = 0`,
       );
     }
+    // HARDEN_D05_WI — ledger rejects commits with estimated_amount_atomic 0;
+    // mirror the Python adapters: SUCCESS commits carry prompt+completion
+    // token sum. When the provider reported no usable usage (e.g. a
+    // streaming run without a usage frame) fall back to the reserve-time
+    // claim estimate — the PRE-call estimate IS the canonical "estimated"
+    // amount for the step.
+    const usageSum = (usage?.promptTokens ?? 0) + (usage?.completionTokens ?? 0);
+    const estimatedAmountAtomic =
+      usageSum > 0 ? String(usageSum) : pending.estimatedAmountAtomic;
     const req: CommitEstimatedRequest = {
       runId,
       stepId: STEP_ID_LLM_CALL,
       llmCallId: runId,
       decisionId: pending.decisionId,
       reservationId: pending.reservationId,
-      estimatedAmountAtomic: "0",
-      unit: DEFAULT_UNIT,
-      pricing: EMPTY_PRICING,
+      estimatedAmountAtomic,
+      // HARDEN_D05_WI — reuse the reserve-time unit so payload.unit_id matches
+      // the reservation (ledger rejects mismatched commit units).
+      unit: pending.unit ?? DEFAULT_UNIT,
+      // HARDEN_D05_WI — repeat the reserve-time freeze tuple (ledger rejects
+      // commits whose pricing tuple differs from the reservation's).
+      pricing: pending.pricing ?? EMPTY_PRICING,
       providerEventId: "",
       outcome: "SUCCESS",
       outcomeKind: "SUCCESS",
       actualInputTokensWire: String(usage?.promptTokens ?? 0),
       actualOutputTokensWire: String(usage?.completionTokens ?? 0),
     };
-    await this.client.commitEstimated(req);
+    await this.safeCommit(req);
   }
 
   /**
@@ -364,14 +413,38 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
       decisionId: pending.decisionId,
       reservationId: pending.reservationId,
       estimatedAmountAtomic: "0",
-      unit: DEFAULT_UNIT,
-      pricing: EMPTY_PRICING,
+      // HARDEN_D05_WI — reserve-time unit + freeze tuple must match the
+      // reservation even on the FAILURE commit path.
+      unit: pending.unit ?? DEFAULT_UNIT,
+      pricing: pending.pricing ?? EMPTY_PRICING,
       providerEventId: "",
       outcome: "PROVIDER_ERROR",
       outcomeKind: "FAILURE",
       actualErrorMessage: err.message,
     };
-    await this.client.commitEstimated(req);
+    await this.safeCommit(req);
+  }
+
+  /**
+   * HARDEN_D05_WI — `client.commitEstimated(...)` wrapper that warns on
+   * substrate failures so commit-side errors NEVER bubble back to the
+   * consumer. The LLM call result has already been delivered (SUCCESS
+   * path) or the original provider error is already propagating (FAILURE
+   * path) — a commit-side throw at this point (with `raiseError = true`)
+   * would corrupt that surface with an unrelated error. Sidecar TTL
+   * reconciles any orphaned reservation via the audit chain. Mirrors the
+   * vercel-ai / openai-agents `safeCommit` convention.
+   */
+  private async safeCommit(req: CommitEstimatedRequest): Promise<void> {
+    try {
+      await this.client.commitEstimated(req);
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[spendguard:langchain] commitEstimated() failed for runId=${req.runId}; ` +
+          `LLM result preserved (${reason})`,
+      );
+    }
   }
 }
 
@@ -422,19 +495,45 @@ interface ExtractedTokenUsage {
 
 function extractTokenUsage(output: LLMResult): ExtractedTokenUsage | undefined {
   const tokenUsage = output.llmOutput?.tokenUsage ?? output.llmOutput?.token_usage;
-  if (tokenUsage === undefined || tokenUsage === null || typeof tokenUsage !== "object") {
-    return undefined;
+  if (tokenUsage !== undefined && tokenUsage !== null && typeof tokenUsage === "object") {
+    const bag = tokenUsage as Record<string, unknown>;
+    const prompt = readTokenCount(bag, ["promptTokens", "prompt_tokens"]);
+    const completion = readTokenCount(bag, ["completionTokens", "completion_tokens"]);
+    if (prompt !== undefined || completion !== undefined) {
+      return {
+        promptTokens: prompt ?? 0,
+        completionTokens: completion ?? 0,
+      };
+    }
   }
-  const bag = tokenUsage as Record<string, unknown>;
-  const prompt = readTokenCount(bag, ["promptTokens", "prompt_tokens"]);
-  const completion = readTokenCount(bag, ["completionTokens", "completion_tokens"]);
-  if (prompt === undefined && completion === undefined) {
-    return undefined;
+  // HARDEN_D05_WI — streaming results carry usage on the aggregated
+  // generation message's `usage_metadata` instead of `llmOutput.tokenUsage`
+  // (LangChain ≥0.3 convention). Mirrors the Python adapter's
+  // `_extract_total_tokens` fallback chain (cross-language parity,
+  // review-standards §9).
+  for (const turn of output.generations ?? []) {
+    for (const gen of turn ?? []) {
+      const message = (gen as { message?: { usage_metadata?: unknown } } | undefined)?.message;
+      const usage = message?.usage_metadata;
+      if (usage === undefined || usage === null || typeof usage !== "object") {
+        continue;
+      }
+      const bag = usage as Record<string, unknown>;
+      const prompt = readTokenCount(bag, ["input_tokens", "promptTokens", "prompt_tokens"]);
+      const completion = readTokenCount(bag, [
+        "output_tokens",
+        "completionTokens",
+        "completion_tokens",
+      ]);
+      if (prompt !== undefined || completion !== undefined) {
+        return {
+          promptTokens: prompt ?? 0,
+          completionTokens: completion ?? 0,
+        };
+      }
+    }
   }
-  return {
-    promptTokens: prompt ?? 0,
-    completionTokens: completion ?? 0,
-  };
+  return undefined;
 }
 
 function readTokenCount(bag: Record<string, unknown>, keys: readonly string[]): number | undefined {

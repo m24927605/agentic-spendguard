@@ -90,6 +90,8 @@ function wrapWithSpendGuard(stepAi, client, options) {
   async function runReserveAndCommit(body, inputBuilder) {
     const input = inputBuilder();
     const id = deriveIdentity({ tenantId, input });
+    const claims = projectClaims(input);
+    const commitUnit = claims[0]?.unit ?? unit;
     let outcome;
     if (options.idempotencyCache !== void 0) {
       const cached = options.idempotencyCache.get(id.idempotencyKey);
@@ -99,7 +101,7 @@ function wrapWithSpendGuard(stepAi, client, options) {
     }
     if (outcome === void 0) {
       try {
-        outcome = await client.reserve(buildReserveRequest(input, id));
+        outcome = await client.reserve(buildReserveRequest(input, id, claims));
       } catch (err) {
         if (err instanceof ApprovalRequired && options.onApprovalRequired !== void 0) {
           const resumed = await options.onApprovalRequired(err, input);
@@ -119,15 +121,24 @@ function wrapWithSpendGuard(stepAi, client, options) {
       const result = await body();
       const totalTokens = extractTotalTokens(result);
       const providerEventId = extractProviderEventId(result);
-      await client.commitEstimated(
-        buildCommitRequest(input, id, outcome, {
-          outcomeStatus: "SUCCESS",
-          estimatedAmountAtomic: String(totalTokens),
-          providerEventId,
-          unit,
-          pricing
-        })
-      );
+      try {
+        await client.commitEstimated(
+          buildCommitRequest(input, id, outcome, {
+            outcomeStatus: "SUCCESS",
+            estimatedAmountAtomic: String(totalTokens),
+            providerEventId,
+            // HARDEN_D05_WI — reuse the reserve-time unit so payload.unit_id
+            // matches the reservation.
+            unit: commitUnit,
+            pricing
+          })
+        );
+      } catch (commitErr) {
+        const reason = commitErr instanceof Error ? commitErr.message : String(commitErr);
+        console.warn(
+          `[spendguard:inngest-agent-kit] SUCCESS commit failed for stepId=${id.stepId}; provider result preserved (${reason})`
+        );
+      }
       return result;
     } catch (providerErr) {
       try {
@@ -136,7 +147,9 @@ function wrapWithSpendGuard(stepAi, client, options) {
             outcomeStatus: "PROVIDER_ERROR",
             estimatedAmountAtomic: "0",
             providerEventId: "",
-            unit,
+            // HARDEN_D05_WI — reserve-time unit + freeze tuple must match
+            // the reservation even on the PROVIDER_ERROR commit path.
+            unit: commitUnit,
             pricing,
             errorMessage: providerErr instanceof Error ? providerErr.message : String(providerErr)
           })
@@ -150,8 +163,7 @@ function wrapWithSpendGuard(stepAi, client, options) {
       throw providerErr;
     }
   }
-  function buildReserveRequest(input, id) {
-    const claims = projectClaims(input);
+  function buildReserveRequest(input, id, claims) {
     const req = {
       trigger: TRIGGER_PRE,
       runId: input.runId,
@@ -190,15 +202,26 @@ function wrapWithSpendGuard(stepAi, client, options) {
   }
   function projectClaims(input) {
     if (options.claimEstimator !== void 0) {
-      return [...options.claimEstimator(input)];
+      return applyEstimateOverride([...options.claimEstimator(input)]);
     }
-    return [
+    const claimUnit = options.unitId ? { ...unit, unitId: options.unitId } : unit;
+    return applyEstimateOverride([
       {
         scopeId: options.budgetId ?? tenantId,
         amountAtomic: "0",
-        unit
+        unit: claimUnit,
+        // HARDEN_D05_WI — thread caller-supplied windowInstanceId onto the
+        // wire claim (substrate coerces omitted to "").
+        ...options.windowInstanceId ? { windowInstanceId: options.windowInstanceId } : {}
       }
-    ];
+    ]);
+  }
+  function applyEstimateOverride(claims) {
+    const override = options.estimateOverrideAtomic;
+    if (override !== void 0 && /^[0-9]+$/.test(override)) {
+      return claims.map((claim) => ({ ...claim, amountAtomic: override }));
+    }
+    return claims;
   }
   function inputFromCtx(ctx, name, model, body) {
     const stepId = ctx?.step.id ?? name;

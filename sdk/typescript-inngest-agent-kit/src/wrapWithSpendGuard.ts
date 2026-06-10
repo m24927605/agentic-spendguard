@@ -188,6 +188,14 @@ export function wrapWithSpendGuard(
   ): Promise<TOut> {
     const input = inputBuilder();
     const id = deriveIdentity({ tenantId, input });
+    // HARDEN_D05_WI — claims projected ONCE so the reserve request and the
+    // commit path share the exact same UnitRef (the ledger rejects commits
+    // whose `payload.unit_id` differs from the reservation's). On the
+    // cache-hit path the reserve is skipped but the recomputed claims still
+    // describe the reservation the cached outcome points at (the estimator
+    // is deterministic per review-standards §3.6).
+    const claims = projectClaims(input);
+    const commitUnit = claims[0]?.unit ?? unit;
 
     // PRE — in-process cache probe (review-standards §4.3 / §4.6).
     let outcome: DecisionOutcome | undefined;
@@ -201,7 +209,7 @@ export function wrapWithSpendGuard(
     // PRE — sidecar reserve (cache miss).
     if (outcome === undefined) {
       try {
-        outcome = await client.reserve(buildReserveRequest(input, id));
+        outcome = await client.reserve(buildReserveRequest(input, id, claims));
       } catch (err) {
         if (err instanceof ApprovalRequired && options.onApprovalRequired !== undefined) {
           const resumed = await options.onApprovalRequired(err, input);
@@ -231,15 +239,30 @@ export function wrapWithSpendGuard(
       const result = await body();
       const totalTokens = extractTotalTokens(result);
       const providerEventId = extractProviderEventId(result);
-      await client.commitEstimated(
-        buildCommitRequest(input, id, outcome, {
-          outcomeStatus: "SUCCESS",
-          estimatedAmountAtomic: String(totalTokens),
-          providerEventId,
-          unit,
-          pricing,
-        }),
-      );
+      // HARDEN_D05_WI — SUCCESS commit failure is warned, NOT thrown: the
+      // provider result has already been produced and a commit-side fault
+      // must not corrupt it (mirrors the vercel-ai / openai-agents
+      // `safeCommit` convention; sidecar TTL reconciles any orphaned
+      // reservation via the audit chain).
+      try {
+        await client.commitEstimated(
+          buildCommitRequest(input, id, outcome, {
+            outcomeStatus: "SUCCESS",
+            estimatedAmountAtomic: String(totalTokens),
+            providerEventId,
+            // HARDEN_D05_WI — reuse the reserve-time unit so payload.unit_id
+            // matches the reservation.
+            unit: commitUnit,
+            pricing,
+          }),
+        );
+      } catch (commitErr) {
+        const reason = commitErr instanceof Error ? commitErr.message : String(commitErr);
+        console.warn(
+          `[spendguard:inngest-agent-kit] SUCCESS commit failed for stepId=${id.stepId}; ` +
+            `provider result preserved (${reason})`,
+        );
+      }
       return result;
     } catch (providerErr) {
       // Provider-side throw → emit a PROVIDER_ERROR commit, then re-throw.
@@ -251,7 +274,9 @@ export function wrapWithSpendGuard(
             outcomeStatus: "PROVIDER_ERROR",
             estimatedAmountAtomic: "0",
             providerEventId: "",
-            unit,
+            // HARDEN_D05_WI — reserve-time unit + freeze tuple must match
+            // the reservation even on the PROVIDER_ERROR commit path.
+            unit: commitUnit,
             pricing,
             errorMessage: providerErr instanceof Error ? providerErr.message : String(providerErr),
           }),
@@ -270,8 +295,8 @@ export function wrapWithSpendGuard(
   function buildReserveRequest(
     input: ClaimEstimatorInput,
     id: ReturnType<typeof deriveIdentity>,
+    claims: BudgetClaim[],
   ): ReserveRequest {
-    const claims = projectClaims(input);
     const req: ReserveRequest = {
       trigger: TRIGGER_PRE,
       runId: input.runId,
@@ -332,7 +357,7 @@ export function wrapWithSpendGuard(
       // The estimator is called exactly once per `infer` / `wrap`
       // (review-standards §3.6); a throw here propagates as-is
       // (review-standards §5.6).
-      return [...options.claimEstimator(input)];
+      return applyEstimateOverride([...options.claimEstimator(input)]);
     }
     // Default probe claim — zero amount, scoped to budgetId ?? tenantId.
     // Production consumers MUST override; the default keeps the SLICE 3
@@ -343,13 +368,32 @@ export function wrapWithSpendGuard(
     // wire UnitRef. Omitted unitId keeps the pre-HARDEN_D05_UR wire shape
     // (substrate `mapUnitRef` coerces to "").
     const claimUnit: UnitRef = options.unitId ? { ...unit, unitId: options.unitId } : unit;
-    return [
+    return applyEstimateOverride([
       {
         scopeId: options.budgetId ?? tenantId,
         amountAtomic: "0",
         unit: claimUnit,
+        // HARDEN_D05_WI — thread caller-supplied windowInstanceId onto the
+        // wire claim (substrate coerces omitted to "").
+        ...(options.windowInstanceId
+          ? { windowInstanceId: options.windowInstanceId }
+          : {}),
       },
-    ];
+    ]);
+  }
+
+  /**
+   * Demo/test-only: `estimateOverrideAtomic` replaces every claim's
+   * `amountAtomic` (mirrors the Python litellm callback's
+   * spendguard_estimate_override). No-op when the option is unset or not
+   * a string-form integer. Shipped under HARDEN_D05_WI.
+   */
+  function applyEstimateOverride(claims: BudgetClaim[]): BudgetClaim[] {
+    const override = options.estimateOverrideAtomic;
+    if (override !== undefined && /^[0-9]+$/.test(override)) {
+      return claims.map((claim) => ({ ...claim, amountAtomic: override }));
+    }
+    return claims;
   }
 
   function inputFromCtx(

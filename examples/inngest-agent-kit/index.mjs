@@ -62,6 +62,21 @@ const TENANT_ID =
   process.env.SPENDGUARD_TENANT_ID ?? "00000000-0000-4000-8000-000000000001";
 const BUDGET_ID =
   process.env.SPENDGUARD_BUDGET_ID ?? "44444444-4444-4444-8444-444444444444";
+const UNIT_ID = process.env.SPENDGUARD_UNIT_ID;
+const WINDOW_INSTANCE_ID = process.env.SPENDGUARD_WINDOW_INSTANCE_ID;
+// HARDEN_D05_WI — pricing freeze tuple repeated on the commit path. Same
+// env convention as the Python demos (run_demo.py): version + snapshot
+// hash hex (from bundles runtime.env) + fx + unit-conversion versions.
+const PRICING = process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX
+  ? {
+      pricingVersion: process.env.SPENDGUARD_PRICING_VERSION ?? "",
+      pricingHash: Uint8Array.from(
+        Buffer.from(process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX, "hex"),
+      ),
+      fxRateVersion: process.env.SPENDGUARD_FX_RATE_VERSION ?? "",
+      unitConversionVersion: process.env.SPENDGUARD_UNIT_CONVERSION_VERSION ?? "",
+    }
+  : undefined;
 const COUNTING_STUB_URL =
   process.env.SPENDGUARD_COUNTING_STUB_URL ?? "http://counting-stub:8765";
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL ?? `${COUNTING_STUB_URL}/v1`;
@@ -376,17 +391,34 @@ async function realMain() {
     };
 
     const cache = new InMemoryIdempotencyCache();
-    const sg = wrapWithSpendGuard(stepAi, client, {
+    // HARDEN_D05_WI / HARDEN_D05_UR — the demo claims carry the seed's
+    // canonical-truth `unitId` + `windowInstanceId`, and the wrap repeats
+    // the bundles pricing freeze on the commit path.
+    const claimEstimator = () => [
+      {
+        scopeId: BUDGET_ID,
+        amountAtomic: "1000000",
+        unit: {
+          unit: "USD_MICROS",
+          denomination: 1,
+          ...(UNIT_ID ? { unitId: UNIT_ID } : {}),
+        },
+        ...(WINDOW_INSTANCE_ID ? { windowInstanceId: WINDOW_INSTANCE_ID } : {}),
+      },
+    ];
+    const baseOptions = {
       tenantId: TENANT_ID,
       budgetId: BUDGET_ID,
       idempotencyCache: cache,
-      claimEstimator: () => [
-        {
-          scopeId: BUDGET_ID,
-          amountAtomic: "1000000",
-          unit: { unit: "USD_MICROS", denomination: 1 },
-        },
-      ],
+      claimEstimator,
+      ...(PRICING ? { pricing: PRICING } : {}),
+    };
+    const sg = wrapWithSpendGuard(stepAi, client, baseOptions);
+    // Demo-only: DENY step blows past the seeded 1B hard-cap via the
+    // adapter-side estimate override (mirrors Python litellm convention).
+    const sgDeny = wrapWithSpendGuard(stepAi, client, {
+      ...baseOptions,
+      estimateOverrideAtomic: "2000000000",
     });
 
     function makeCtx({ runId, stepId, attempt, idempotencyKey }) {
@@ -425,7 +457,7 @@ async function realMain() {
       : -1;
     let denied = false;
     try {
-      await sg.infer(
+      await sgDeny.infer(
         "call-openai",
         {
           model: "gpt-4o-mini",

@@ -54,6 +54,21 @@ const useMock = !useReal;
 const SOCKET_PATH = process.env.SPENDGUARD_SIDECAR_UDS ?? "/var/run/spendguard/adapter.sock";
 const TENANT_ID = process.env.SPENDGUARD_TENANT_ID ?? "00000000-0000-4000-8000-000000000001";
 const BUDGET_ID = process.env.SPENDGUARD_BUDGET_ID ?? "44444444-4444-4444-8444-444444444444";
+const UNIT_ID = process.env.SPENDGUARD_UNIT_ID;
+const WINDOW_INSTANCE_ID = process.env.SPENDGUARD_WINDOW_INSTANCE_ID;
+// HARDEN_D05_WI — pricing freeze tuple repeated on the commit path. Same
+// env convention as the Python demos (run_demo.py): version + snapshot
+// hash hex (from bundles runtime.env) + fx + unit-conversion versions.
+const PRICING = process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX
+  ? {
+      pricingVersion: process.env.SPENDGUARD_PRICING_VERSION ?? "",
+      pricingHash: Uint8Array.from(
+        Buffer.from(process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX, "hex"),
+      ),
+      fxRateVersion: process.env.SPENDGUARD_FX_RATE_VERSION ?? "",
+      unitConversionVersion: process.env.SPENDGUARD_UNIT_CONVERSION_VERSION ?? "",
+    }
+  : undefined;
 const COUNTING_STUB_URL =
   process.env.SPENDGUARD_COUNTING_STUB_URL ?? "http://counting-stub:8765";
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL ?? `${COUNTING_STUB_URL}/v1`;
@@ -279,7 +294,7 @@ async function realMain() {
   // Both signatures exist in the v0.11 typings, but only `run(...)` is
   // exported at runtime from the barrel.
   const { Agent, run } = await import("@openai/agents");
-  const { OpenAIChatCompletionsModel, OpenAIProvider } = await import("@openai/agents-openai");
+  const { OpenAIChatCompletionsModel } = await import("@openai/agents-openai");
   const { SpendGuardClient, newUuid7 } = await import("@spendguard/sdk");
   const { withSpendGuard, runContext, DecisionDenied } = await import(
     "@spendguard/openai-agents"
@@ -289,17 +304,26 @@ async function realMain() {
 
   try {
     // Build the inner OpenAI Chat Completions model wired to the
-    // counting stub (or real OpenAI). We construct a provider so the
-    // OpenAIChatCompletionsModel sees the desired baseURL + apiKey.
-    const provider = new OpenAIProvider({
-      apiKey: OPENAI_API_KEY,
-      baseURL: OPENAI_BASE_URL,
-    });
-    const inner = new OpenAIChatCompletionsModel(provider.openaiClient, "gpt-4o-mini");
+    // counting stub (or real OpenAI). HARDEN_D05_WI: the OpenAI client is
+    // constructed directly — `OpenAIProvider` keeps its client private
+    // (`#client`) on @openai/agents-openai 0.11.x, so the previous
+    // `provider.openaiClient` read was always undefined.
+    const { default: OpenAI } = await import("openai");
+    const inner = new OpenAIChatCompletionsModel(
+      new OpenAI({ apiKey: OPENAI_API_KEY, baseURL: OPENAI_BASE_URL }),
+      "gpt-4o-mini",
+    );
 
     // step 1 ALLOW
     console.log("[demo] (1) ALLOW step — invoking Agent within budget");
-    const guardedAllow = withSpendGuard(inner, { client, tenantId: TENANT_ID, budgetId: BUDGET_ID });
+    const guardedAllow = withSpendGuard(inner, {
+      client,
+      tenantId: TENANT_ID,
+      budgetId: BUDGET_ID,
+      ...(UNIT_ID ? { unitId: UNIT_ID } : {}),
+      ...(WINDOW_INSTANCE_ID ? { windowInstanceId: WINDOW_INSTANCE_ID } : {}),
+      ...(PRICING ? { pricing: PRICING } : {}),
+    });
     const allowAgent = new Agent({
       name: "spendguard-demo-ts",
       instructions: "Reply concisely.",
@@ -326,7 +350,17 @@ async function realMain() {
 
     // step 2 DENY — `spendguard_estimate_override` blows past hard-cap.
     console.log("[demo] (2) DENY step — forcing hard-cap overflow");
-    const guardedDeny = withSpendGuard(inner, { client, tenantId: TENANT_ID, budgetId: BUDGET_ID });
+    const guardedDeny = withSpendGuard(inner, {
+      client,
+      tenantId: TENANT_ID,
+      budgetId: BUDGET_ID,
+      ...(UNIT_ID ? { unitId: UNIT_ID } : {}),
+      ...(WINDOW_INSTANCE_ID ? { windowInstanceId: WINDOW_INSTANCE_ID } : {}),
+      ...(PRICING ? { pricing: PRICING } : {}),
+      // Demo-only: DENY step blows past the seeded 1B hard-cap via the
+      // adapter-side estimate override (mirrors Python litellm convention).
+      estimateOverrideAtomic: "2000000000",
+    });
     const denyAgent = new Agent({
       name: "spendguard-demo-ts-deny",
       instructions: "Reply concisely.",
@@ -367,6 +401,9 @@ async function realMain() {
       client,
       tenantId: TENANT_ID,
       budgetId: BUDGET_ID,
+      ...(UNIT_ID ? { unitId: UNIT_ID } : {}),
+      ...(WINDOW_INSTANCE_ID ? { windowInstanceId: WINDOW_INSTANCE_ID } : {}),
+      ...(PRICING ? { pricing: PRICING } : {}),
     });
     const streamAgent = new Agent({
       name: "spendguard-demo-ts-second",

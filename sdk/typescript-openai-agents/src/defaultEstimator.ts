@@ -88,6 +88,7 @@ export function defaultClaimEstimator(opts: {
   scopeId: string;
   unit: UnitRef;
   modelName: string;
+  windowInstanceId?: string;
 }): ClaimEstimator {
   const baseline = resolveBaselineTokens(opts.modelName);
   const amountAtomic = String(baseline);
@@ -96,6 +97,9 @@ export function defaultClaimEstimator(opts: {
       scopeId: opts.scopeId,
       amountAtomic,
       unit: opts.unit,
+      // HARDEN_D05_WI — thread caller-supplied windowInstanceId onto the
+      // wire claim (substrate coerces omitted to "").
+      ...(opts.windowInstanceId ? { windowInstanceId: opts.windowInstanceId } : {}),
     },
   ];
 }

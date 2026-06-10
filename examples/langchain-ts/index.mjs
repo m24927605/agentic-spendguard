@@ -33,6 +33,19 @@ import { SpendGuardClient } from "@spendguard/sdk";
 
 const SOCKET_PATH = process.env.SPENDGUARD_SIDECAR_UDS ?? "/var/run/spendguard/adapter.sock";
 const TENANT_ID = process.env.SPENDGUARD_TENANT_ID ?? "00000000-0000-4000-8000-000000000001";
+// HARDEN_D05_WI — pricing freeze tuple repeated on the commit path. Same
+// env convention as the Python demos (run_demo.py): version + snapshot
+// hash hex (from bundles runtime.env) + fx + unit-conversion versions.
+const PRICING = process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX
+  ? {
+      pricingVersion: process.env.SPENDGUARD_PRICING_VERSION ?? "",
+      pricingHash: Uint8Array.from(
+        Buffer.from(process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX, "hex"),
+      ),
+      fxRateVersion: process.env.SPENDGUARD_FX_RATE_VERSION ?? "",
+      unitConversionVersion: process.env.SPENDGUARD_UNIT_CONVERSION_VERSION ?? "",
+    }
+  : undefined;
 const COUNTING_STUB_URL =
   process.env.SPENDGUARD_COUNTING_STUB_URL ?? "http://counting-stub:8765";
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL ?? `${COUNTING_STUB_URL}/v1`;
@@ -102,17 +115,26 @@ function makeModel({ handler, streaming = false, extraBody = undefined }) {
  * Build a `SpendGuardCallbackHandler` wired against the demo seed's budget.
  * Routing the projected claim to the demo `SPENDGUARD_BUDGET_ID` lets the
  * sidecar contract evaluator match the right hard-cap rule on the DENY
- * step. The fuller `unitId` / `windowInstanceId` / pricing override
- * surface design.md §4 anticipates is deferred (see options.ts §SLICE 5
- * deviation #1) — when the TS SDK exposes `unit_id` on `UnitRef` the
- * demo will thread it through here.
+ * step. `unitId` / `windowInstanceId` / `pricing` thread the demo seed's
+ * canonical-truth identifiers onto the wire claim + commit (HARDEN_D05_UR
+ * + HARDEN_D05_WI).
  */
-function buildHandler(client) {
+function buildHandler(client, { estimateOverrideAtomic = undefined } = {}) {
   return new SpendGuardCallbackHandler({
     client,
     ...(process.env.SPENDGUARD_BUDGET_ID
       ? { budgetId: process.env.SPENDGUARD_BUDGET_ID }
       : {}),
+    ...(process.env.SPENDGUARD_UNIT_ID
+      ? { unitId: process.env.SPENDGUARD_UNIT_ID }
+      : {}),
+    ...(process.env.SPENDGUARD_WINDOW_INSTANCE_ID
+      ? { windowInstanceId: process.env.SPENDGUARD_WINDOW_INSTANCE_ID }
+      : {}),
+    ...(PRICING ? { pricing: PRICING } : {}),
+    // Demo-only: DENY step blows past the seeded 1B hard-cap via the
+    // adapter-side estimate override (mirrors Python litellm convention).
+    ...(estimateOverrideAtomic ? { estimateOverrideAtomic } : {}),
   });
 }
 
@@ -149,7 +171,7 @@ async function runAllowStep(client) {
  */
 async function runDenyStep(client) {
   console.log("[demo] (2) DENY step — forcing hard-cap overflow");
-  const handler = buildHandler(client);
+  const handler = buildHandler(client, { estimateOverrideAtomic: "2000000000" });
   const preCount = await readCountingStubHits();
   // `spendguard_estimate_override` is a demo-only opt-in the sidecar bundles
   // recognise — same convention as the litellm_guardrail + envoy_extproc

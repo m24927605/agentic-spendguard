@@ -203,6 +203,17 @@ export interface WrapWithSpendGuardOptions {
    * claims — `claimEstimator` always wins (Python parity).
    */
   unitId?: string;
+
+  /**
+   * Demo/test-only escape hatch: when set (string-form integer), every
+   * projected claim's `amountAtomic` uses this value INSTEAD of the
+   * default / `claimEstimator`-produced amount. Mirrors the Python
+   * litellm callback's `spendguard_estimate_override` convention so demo
+   * DENY steps can blow past a seeded hard-cap deterministically.
+   * Production consumers MUST NOT set this — pricing-table estimation is
+   * the supported path. Shipped under HARDEN_D05_WI.
+   */
+  estimateOverrideAtomic?: string;
 }
 
 /**

@@ -157,6 +157,8 @@ services:
       SPENDGUARD_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
       SPENDGUARD_UNIT_ID: "66666666-6666-4666-8666-666666666666"
       SPENDGUARD_PRICING_VERSION: "demo-pricing-v1"
+      SPENDGUARD_FX_RATE_VERSION: "demo-fx-v1"
+      SPENDGUARD_UNIT_CONVERSION_VERSION: "demo-units-v1"
       SPENDGUARD_HANDSHAKE_TIMEOUT_MS: "30000"
       # ChatOpenAI is pointed at the in-network counting stub. The
       # counting stub ignores the auth header but the OpenAI SDK refuses
@@ -175,6 +177,10 @@ services:
       - ../..:/opt/spendguard:ro
       # Sidecar UDS shared with the rest of the stack.
       - sidecar-uds:/var/run/spendguard
+      # HARDEN_D05_WI: source pricing freeze from bundles runtime.env
+      # (written by pricing-seed-init / bundles-init at compose-up time) —
+      # mirrors the HARDEN_D05_UR Python overlay convention.
+      - bundles-data:/var/lib/spendguard/bundles:ro
       # Writable node_modules persistence across re-runs (named volume,
       # not mounted inside the read-only workspace tree). The entrypoint
       # uses this as the install target via a symlink from the staging
@@ -241,6 +247,19 @@ services:
           sleep 1
         done
 
+        # HARDEN_D05_WI: source bundles runtime.env so
+        # SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX matches the contract bundle
+        # the sidecar loaded (mirrors deploy/demo/runtime/demo-entrypoint.sh).
+        if [ -f /var/lib/spendguard/bundles/runtime.env ]; then
+          echo "[langchain-runner] sourcing /var/lib/spendguard/bundles/runtime.env..."
+          set -a
+          . /var/lib/spendguard/bundles/runtime.env
+          set +a
+        else
+          echo "[langchain-runner] FATAL: bundles runtime.env not found" >&2
+          exit 1
+        fi
+
         echo "[langchain-runner] launching index.mjs..."
         exec node index.mjs
     depends_on:
@@ -253,4 +272,5 @@ services:
         aliases: [langchain-runner]
 
 volumes:
+  bundles-data:
   langchain-runner-modules:

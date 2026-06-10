@@ -213,6 +213,10 @@ describe("handleChatModelStart — reserve wiring", () => {
     expect(inflight.get(RUN_ID_A)).toEqual({
       decisionId: "decision-xyz",
       reservationId: "reservation-xyz",
+      // HARDEN_D05_WI — reserve-time unit + claim estimate stashed for the
+      // commit path ("hello" → 2 tokens × 1000 micros).
+      unit: { unit: "USD_MICROS", denomination: 1 },
+      estimatedAmountAtomic: "2000",
     });
     expect(mock.reserve).toHaveBeenCalledTimes(1);
   });
@@ -501,9 +505,28 @@ describe("Concurrency + idempotency invariants", () => {
 
     const inflight = getInflight(handler);
     expect(inflight.size).toBe(3);
-    expect(inflight.get(RUN_ID_A)).toEqual({ decisionId: "d-A", reservationId: "r-A" });
-    expect(inflight.get(RUN_ID_B)).toEqual({ decisionId: "d-B", reservationId: "r-B" });
-    expect(inflight.get(RUN_ID_C)).toEqual({ decisionId: "d-C", reservationId: "r-C" });
+    // HARDEN_D05_WI — inflight entries also stash the reserve-time unit +
+    // claim estimate (commit-path fallback when usage is absent).
+    const unit = { unit: "USD_MICROS", denomination: 1 };
+    const estimatedAmountAtomic = expect.any(String);
+    expect(inflight.get(RUN_ID_A)).toEqual({
+      decisionId: "d-A",
+      reservationId: "r-A",
+      unit,
+      estimatedAmountAtomic,
+    });
+    expect(inflight.get(RUN_ID_B)).toEqual({
+      decisionId: "d-B",
+      reservationId: "r-B",
+      unit,
+      estimatedAmountAtomic,
+    });
+    expect(inflight.get(RUN_ID_C)).toEqual({
+      decisionId: "d-C",
+      reservationId: "r-C",
+      unit,
+      estimatedAmountAtomic,
+    });
 
     // Commit one runId; the other two MUST stay stashed.
     await handler.handleLLMEnd(
