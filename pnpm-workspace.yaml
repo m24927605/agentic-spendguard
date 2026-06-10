@@ -17,4 +17,5 @@ packages:
   - "sdk/typescript-inngest-agent-kit"
   - "sdk/typescript-n8n"
   - "sdk/typescript-ag-ui"
+  - "sdk/typescript-mastra"
   - "docs/site-v2"
