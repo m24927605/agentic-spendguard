@@ -166,11 +166,34 @@ export interface BudgetClaim {
   scopeId: string;
   amountAtomic: string;
   unit: UnitRef;
+  /** Canonical-truth UUID of the ledger window-instance row.
+   *
+   * When provided, the SDK threads it verbatim onto
+   * `BudgetClaim.window_instance_id` on the wire. When omitted, the SDK sends
+   * "" and the ledger rejects with
+   * `INVALID_REQUEST: claim[N].window_instance_id empty`.
+   *
+   * Adapters that issue ledger-backed `client.reserve()` MUST provide
+   * `windowInstanceId`. Recipe-style integrations (where no ledger reserve
+   * happens) MAY omit. The most common operator path is to set this from the
+   * `SPENDGUARD_WINDOW_INSTANCE_ID` env var at adapter construction time.
+   *
+   * Mirrors the HARDEN_D05_UR `UnitRef.unitId` broadening — same disease,
+   * same additive backward-compatible cure (HARDEN_D05_WI).
+   */
+  windowInstanceId?: string;
 }
 
 export interface PricingFreeze {
   pricingVersion: string;
   pricingHash: Uint8Array;
+  /** HARDEN_D05_WI — optional FX rate version of the pricing freeze tuple.
+   * When omitted the SDK sends "" (pre-HARDEN wire shape). Ledger commit
+   * validation compares the FULL tuple against the reservation's freeze, so
+   * adapters whose reservations carry a non-empty fx version MUST thread it. */
+  fxRateVersion?: string;
+  /** HARDEN_D05_WI — optional unit-conversion version (see fxRateVersion). */
+  unitConversionVersion?: string;
 }
 
 export interface ClaimEstimate {
@@ -1250,7 +1273,9 @@ export class SpendGuardClient implements AsyncDisposable {
       // direction: DEBIT (1) — SDK callers only project debits; credits are
       // generated server-side as compensating ledger entries (Stage 2 §4.6).
       direction: 1 as const,
-      windowInstanceId: "",
+      // HARDEN_D05_WI — thread caller-supplied windowInstanceId onto the
+      // wire claim. Omitted keeps the pre-HARDEN wire shape ("").
+      windowInstanceId: claim.windowInstanceId ?? "",
     }));
     const runtimeMetadata = this.buildRuntimeMetadataStruct(req);
     const inputs = {
@@ -1373,8 +1398,9 @@ export class SpendGuardClient implements AsyncDisposable {
           pricing: {
             pricingVersion: req.pricing.pricingVersion,
             priceSnapshotHash: req.pricing.pricingHash,
-            fxRateVersion: "",
-            unitConversionVersion: "",
+            // HARDEN_D05_WI — thread the full freeze tuple (omitted → "").
+            fxRateVersion: req.pricing.fxRateVersion ?? "",
+            unitConversionVersion: req.pricing.unitConversionVersion ?? "",
           },
           providerEventId: req.providerEventId,
           outcome: llmOutcomeEnumOf(req.outcome),
@@ -1475,8 +1501,9 @@ export class SpendGuardClient implements AsyncDisposable {
           pricing: {
             pricingVersion: req.pricing.pricingVersion,
             priceSnapshotHash: req.pricing.pricingHash,
-            fxRateVersion: "",
-            unitConversionVersion: "",
+            // HARDEN_D05_WI — thread the full freeze tuple (omitted → "").
+            fxRateVersion: req.pricing.fxRateVersion ?? "",
+            unitConversionVersion: req.pricing.unitConversionVersion ?? "",
           },
           providerEventId: req.providerEventId,
           outcome: outcomeEnum,
