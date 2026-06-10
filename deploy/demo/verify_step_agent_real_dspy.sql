@@ -76,23 +76,20 @@ BEGIN
     -- gate is robust against demo-mode retries or any prior-state
     -- bleed-through from the base compose seed.
     --
-    -- INV-1 / INV-2 evidence: the reserve and denied_decision counts
-    -- are the load-bearing gates — they prove the SpendGuard PRE
-    -- pipeline fires before the LM HTTP and that DENY blocks
-    -- upstream dispatch. The commit_estimated gate is SOFTENED to
-    -- `>=0` per the D05 UnitRef cross-slice tracking precedent (same
-    -- as agent_real_strands / agent_real_adk demos) — pricing freeze
-    -- field mismatch between the runner's POCO and the sidecar's
-    -- catalog snapshot is tracked separately and does not invalidate
-    -- the PRE-side proof.
+    -- INV-1 / INV-2 evidence: reserve + commit gates are HARD (HARDEN_D05_UR closed).
+    -- denied_decision is optional — the DENY substep may produce it depending
+    -- on the sidecar contract evaluator's audit-write semantics.
     IF v_reserve < 1 THEN
         RAISE EXCEPTION 'COV_D21_GATE: ledger_transactions.reserve >= 1 expected (ALLOW), got %', v_reserve;
+    END IF;
+    IF v_commit < 1 THEN
+        RAISE EXCEPTION 'COV_D21_GATE: ledger_transactions.commit_estimated >= 1 expected (ALLOW), got %', v_commit;
     END IF;
     IF v_denied < 1 THEN
         RAISE NOTICE 'COV_D21 NOTE: ledger_transactions.denied_decision >= 1 expected (DENY), got %; this is acceptable when sidecar contract did not enforce the synthetic huge-claim cap', v_denied;
     END IF;
 
-    RAISE NOTICE 'COV_D21 LEDGER OK: reserve=% commit=% denied=% (commit gate softened per D05 UnitRef cross-slice tracking)',
+    RAISE NOTICE 'COV_D21 LEDGER OK: reserve=% commit=% denied=%',
         v_reserve, v_commit, v_denied;
 END;
 $$;
@@ -114,7 +111,7 @@ BEGIN
        AND operation_kind = 'commit_estimated';
 
     IF v_first_reserve IS NULL OR v_first_commit IS NULL THEN
-        RAISE NOTICE 'COV_D21 INV-2: insufficient rows for strict-order check (reserve=%, commit=%) — D05 UnitRef gap tolerance',
+        RAISE NOTICE 'COV_D21 INV-2: insufficient rows for strict-order check (reserve=%, commit=%)',
             v_first_reserve, v_first_commit;
     ELSIF v_first_reserve > v_first_commit THEN
         RAISE EXCEPTION 'COV_D21 INV-2 VIOLATED: earliest reserve % > earliest commit %',

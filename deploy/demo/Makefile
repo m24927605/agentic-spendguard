@@ -815,8 +815,7 @@ else ifeq ($(DEMO_MODE),cursor_mitm_fixture)
 	@$(MAKE) demo-verify-cursor-mitm-fixture
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: cursor_mitm_fixture runs against the codec's in-memory mock sidecar; no rows land in canonical_events (see SOW.md §6)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),windsurf_mitm_fixture)
 	@echo "[demo] running windsurf-mitm-fixture-runner (Rust 1.87 — codec replay + counting stub)..."
 	$(COMPOSE) -f windsurf_mitm_fixture/docker-compose.yaml run --rm windsurf-mitm-fixture-runner
@@ -824,8 +823,7 @@ else ifeq ($(DEMO_MODE),windsurf_mitm_fixture)
 	@$(MAKE) demo-verify-windsurf-mitm-fixture
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: windsurf_mitm_fixture runs against the codec's in-memory mock sidecar; no rows land in canonical_events (see SOW.md §6)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),litellm_sdk_real)
 	@echo "[demo] running litellm-sdk-shim-runner (Python 3.12 + litellm + install_shim)..."
 	$(COMPOSE) -f litellm_sdk_real/docker-compose.yaml run --rm litellm-sdk-shim-runner
@@ -881,8 +879,7 @@ else ifeq ($(DEMO_MODE),agent_real_adk)
 	@$(MAKE) demo-verify-agent-real-adk
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_adk demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_strands)
 	@echo "[demo] running strands-runner (Python 3.12 + strands-agents + SpendGuardStrandsHookProvider)..."
 	$(COMPOSE) -f agent_real_strands/docker-compose.yaml run --rm strands-runner
@@ -890,8 +887,7 @@ else ifeq ($(DEMO_MODE),agent_real_strands)
 	@$(MAKE) demo-verify-agent-real-strands
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_strands demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_strands_deny)
 	@echo "[demo] running strands-runner-deny (ALLOW + DENY proof)..."
 	$(COMPOSE) -f agent_real_strands_deny/docker-compose.yaml run --rm strands-runner-deny
@@ -899,8 +895,7 @@ else ifeq ($(DEMO_MODE),agent_real_strands_deny)
 	@$(MAKE) demo-verify-agent-real-strands
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_strands_deny demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_dspy)
 	@echo "[demo] running dspy-runner (Python 3.12 + dspy-ai + SpendGuardDSPyCallback)..."
 	$(COMPOSE) -f agent_real_dspy/docker-compose.yaml run --rm dspy-runner
@@ -908,8 +903,7 @@ else ifeq ($(DEMO_MODE),agent_real_dspy)
 	@$(MAKE) demo-verify-agent-real-dspy
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_dspy demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_agno)
 	@echo "[demo] running agno-runner (Python 3.12 + agno>=2.0,<3 + SpendGuardAgno{Pre,Post}Hook)..."
 	$(COMPOSE) -f agent_real_agno/docker-compose.yaml run --rm agno-runner
@@ -917,8 +911,7 @@ else ifeq ($(DEMO_MODE),agent_real_agno)
 	@$(MAKE) demo-verify-agent-real-agno
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_agno demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_beeai)
 	@echo "[demo] running beeai-runner (Python 3.12 + beeai-framework>=0.1.81,<0.2 + subscribe_spendguard)..."
 	$(COMPOSE) -f agent_real_beeai/docker-compose.yaml run --rm beeai-runner
@@ -926,8 +919,7 @@ else ifeq ($(DEMO_MODE),agent_real_beeai)
 	@$(MAKE) demo-verify-agent-real-beeai
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_beeai demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_autogen)
 	@echo "[demo] running autogen-runner (Python 3.12 + autogen-agentchat + SpendGuardChatCompletionClient)..."
 	$(COMPOSE) -f agent_real_autogen/docker-compose.yaml run --rm autogen-runner
@@ -935,8 +927,7 @@ else ifeq ($(DEMO_MODE),agent_real_autogen)
 	@$(MAKE) demo-verify-agent-real-autogen
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_autogen demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_ag2)
 	@echo "[demo] running autogen-runner with SPENDGUARD_DEMO_MODE=agent_real_ag2 (AG2 lineage)..."
 	@SPENDGUARD_DEMO_MODE=agent_real_ag2 \
@@ -946,8 +937,7 @@ else ifeq ($(DEMO_MODE),agent_real_ag2)
 	@$(MAKE) demo-verify-agent-real-autogen
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_ag2 demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_smolagents)
 	@echo "[demo] running smolagents-runner (Python 3.12 + smolagents>=1.5,<2 + SpendGuardSmolModel)..."
 	$(COMPOSE) -f agent_real_smolagents/docker-compose.yaml run --rm smolagents-runner
@@ -955,8 +945,7 @@ else ifeq ($(DEMO_MODE),agent_real_smolagents)
 	@$(MAKE) demo-verify-agent-real-smolagents
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_smolagents demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_letta)
 	@echo "[demo] running letta-runner (Python 3.12 + letta>=0.8,<1.0 + SpendGuardLettaClient)..."
 	$(COMPOSE) -f agent_real_letta/docker-compose.yaml run --rm letta-runner
@@ -964,8 +953,7 @@ else ifeq ($(DEMO_MODE),agent_real_letta)
 	@$(MAKE) demo-verify-agent-real-letta
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_letta demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_llamaindex)
 	@echo "[demo] running llamaindex-runner (Python 3.12 + llama-index-core + llama-index-llms-openai + SpendGuardLlamaIndexHandler)..."
 	$(COMPOSE) -f agent_real_llamaindex/docker-compose.yaml run --rm llamaindex-runner
@@ -973,8 +961,7 @@ else ifeq ($(DEMO_MODE),agent_real_llamaindex)
 	@$(MAKE) demo-verify-agent-real-llamaindex
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_llamaindex demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_llamaindex_stub)
 	@echo "[demo] running llamaindex-runner in stub mode (no API key, MockLLM)..."
 	@SPENDGUARD_DEMO_MODE=agent_real_llamaindex_stub \
@@ -989,8 +976,7 @@ else ifeq ($(DEMO_MODE),agent_real_atomic_agents)
 	@$(MAKE) demo-verify-agent-real-atomic-agents
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
-	@$(MAKE) demo-verify-outbox-closure || \
-	  echo "[demo] outbox-closure skipped: agent_real_atomic_agents demo deferred per D05 UnitRef gap (cross-slice tracking)"
+	@$(MAKE) demo-verify-outbox-closure
 else ifeq ($(DEMO_MODE),agent_real_adk_stub)
 	@echo "[demo] running adk-runner in stub mode (no GOOGLE_API_KEY)..."
 	@SPENDGUARD_DEMO_MODE=agent_real_adk_stub \
@@ -1770,9 +1756,7 @@ demo-verify-agent-real-strands:
 # cross-DB canonical_events check under spendguard_canonical that
 # asserts at least 1 decision row landed after the outbox forwarder
 # drained, plus the dspy integration tag is present on the decision
-# rows. The outcome gate is SOFTENED to a NOTICE per the D05 UnitRef
-# cross-slice tracking precedent (pricing freeze field mismatch can
-# block emit_llm_call_post in fresh demo seeds; tracked separately).
+# rows. The outcome gate is a HARD EXCEPTION (HARDEN_D05_UR closed).
 demo-verify-agent-real-dspy:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_agent_real_dspy.sql
 	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
@@ -1797,7 +1781,7 @@ demo-verify-agent-real-dspy:
 		     RAISE EXCEPTION 'COV_D21_GATE: canonical_events.decision with integration=dspy >= 1 expected, got %', v_dspy; \
 		   END IF; \
 		   IF v_outcome < 1 THEN \
-		     RAISE NOTICE 'COV_D21 NOTE: canonical_events.outcome >= 1 expected but got % — softened per D05 UnitRef gap (pricing freeze mismatch tracked separately)', v_outcome; \
+		     RAISE EXCEPTION 'COV_D21_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
 		   END IF; \
 		   RAISE NOTICE 'COV_D21 CANONICAL OK: decision=% outcome=% dspy_tagged=%', v_decision, v_outcome, v_dspy; \
 		 END; \$$\$$;"
@@ -2169,7 +2153,46 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture demo-verify-import-manus-fixture demo-import-manus-fixture demo-verify-import-genspark-fixture
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture demo-verify-import-manus-fixture demo-import-manus-fixture demo-verify-import-genspark-fixture demo-verify-all-d05-ur
+
+# HARDEN_D05_UR master verification target — runs all 14+ demos sequentially
+# and asserts each exits 0 with canonical success lines. This target replaces
+# the per-demo outbox-closure softening that was in place during the marathon.
+demo-verify-all-d05-ur:
+	@echo "[harden_d05_ur] running all 14+ demos sequentially..."
+	@$(MAKE) demo-up DEMO_MODE=langchain_ts && $(MAKE) demo-verify-langchain-ts
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=vercel_ai_mastra && $(MAKE) demo-verify-vercel-ai-mastra
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=openai_agents_ts && $(MAKE) demo-verify-openai-agents-ts
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=inngest_agent_kit && $(MAKE) demo-verify-inngest-agent-kit
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=agent_real_adk_stub && $(MAKE) demo-verify-agent-real-adk
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=agent_real_strands && $(MAKE) demo-verify-agent-real-strands
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=agent_real_dspy && $(MAKE) demo-verify-agent-real-dspy
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=agent_real_agno && $(MAKE) demo-verify-agent-real-agno
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=agent_real_beeai && $(MAKE) demo-verify-agent-real-beeai
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=agent_real_autogen && $(MAKE) demo-verify-agent-real-autogen
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=agent_real_smolagents && $(MAKE) demo-verify-agent-real-smolagents
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=agent_real_letta && $(MAKE) demo-verify-agent-real-letta
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=agent_real_llamaindex && $(MAKE) demo-verify-agent-real-llamaindex
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=agent_real_atomic_agents && $(MAKE) demo-verify-agent-real-atomic-agents
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=maf_python_real && $(MAKE) demo-verify-maf-python
+	@$(MAKE) demo-down
+	@$(MAKE) demo-up DEMO_MODE=maf_dotnet_real && $(MAKE) demo-verify-maf-dotnet
+	@$(MAKE) demo-down
+	@echo "[harden_d05_ur] ALL 14+ demos PASS"
 
 demo-down:
 	$(COMPOSE) down -v --remove-orphans

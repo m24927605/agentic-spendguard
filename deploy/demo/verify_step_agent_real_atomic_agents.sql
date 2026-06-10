@@ -100,11 +100,11 @@ DECLARE
     v_first_reserve TIMESTAMPTZ;
     v_first_commit TIMESTAMPTZ;
 BEGIN
-    SELECT MIN(created_at) INTO v_first_reserve
+    SELECT MIN(recorded_at) INTO v_first_reserve
       FROM ledger_transactions
      WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
        AND operation_kind = 'reserve';
-    SELECT MIN(created_at) INTO v_first_commit
+    SELECT MIN(recorded_at) INTO v_first_commit
       FROM ledger_transactions
      WHERE tenant_id = '00000000-0000-4000-8000-000000000001'
        AND operation_kind = 'commit_estimated';

@@ -81,10 +81,10 @@ What happens on each `model.invoke()`:
 
 ## Configuration
 
-The v0.1.0 handler options surface is intentionally narrow. The richer
-`unitId` / `windowInstanceId` / pricing / `claimEstimator` shape the design
-anticipates is deferred (see **Limitations** below) — until the substrate
-broadens `UnitRef`, the adapter projects sensible defaults instead.
+The handler options surface supports `unitId` pass-through (set
+`SPENDGUARD_UNIT_ID` in the runner environment and pass it as the `unitId`
+option). The richer `windowInstanceId` / pricing / `claimEstimator` fields
+the design anticipates are deferred to a later slice.
 
 <table>
   <thead>
@@ -100,9 +100,8 @@ broadens `UnitRef`, the adapter projects sensible defaults instead.
 A future minor (`v0.x`) extends this surface field-for-field with the Python
 `SpendGuardChatModel` constructor (`windowInstanceId`, `unit`, `pricing`,
 `claimEstimator`, `route`, `callSignatureFn`, `claimEstimate`,
-`onApprovalRequired`) once the substrate broadens `UnitRef`. The
-extensions are additive optional fields — no breaking change to the v0.1.0
-shape.
+`onApprovalRequired`). The extensions are additive optional fields — no
+breaking change to the v0.1.0 shape.
 
 ## Limitations
 
@@ -127,14 +126,6 @@ front of long streaming responses or rely on D04/5's full design surface:
   against the real `tokenUsage`. The handler never tears down a mid-flight
   stream to halt token emission — overruns land in the audit chain and
   reflect at commit time, but the tokens were already emitted.
-- **Substrate dependency on `UnitRef` broadening for `unitId` /
-  `windowInstanceId` pass-through.** Per **D04/5 deviation #1**, the TS
-  substrate's public `UnitRef` does not currently expose `unit_id`
-  (`sdk/typescript/src/client.ts::mapUnitRef` hardcodes empty). The v0.1.0
-  handler options surface therefore omits the `windowInstanceId` / `unit` /
-  `pricing` / `claimEstimator` fields the design.md §4 surface anticipates;
-  the adapter projects sensible defaults instead. The next D04 hardening
-  slice picks up the SDK-side broadening + adapter wire-through together.
 - **DEGRADE patch application surfaces as `MutationApplyFailed`.** Matches
   the Python `spendguard-sdk[langchain]` v0.5.1 stance. Built-in claim
   mutation lands in a later slice.

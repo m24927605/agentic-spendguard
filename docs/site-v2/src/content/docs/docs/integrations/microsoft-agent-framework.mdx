@@ -248,15 +248,6 @@ for each integration.
   supported TFM in this slice; `netstandard2.1` multi-targeting is
   deferred to a build-host upgrade (the in-tree build host carries
   only net8.0 reference packs at the time of writing).
-- **Substrate dependency on `UnitRef` broadening.** The Python +
-  .NET adapters both hit the same D05 `UnitRef.unit_id empty`
-  substrate validation gap D04 / D06 / D08 surface against the same
-  sidecar. The adapters' wire shapes and middleware contracts are
-  independently verified by their unit suites; the
-  `--mock` demo modes exercise the bracket end-to-end without going
-  through the substrate's `ReserveSet` validator. A future SDK-side
-  `unit_id` broadening lands the `--real` demos green here and
-  across the sibling D04 / D06 / D08 modes simultaneously.
 
 ## Demos
 

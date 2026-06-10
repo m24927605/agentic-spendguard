@@ -148,8 +148,8 @@ services:
       SPENDGUARD_UNIT_ID: "66666666-6666-4666-8666-666666666666"
       SPENDGUARD_PRICING_VERSION: "demo-pricing-v1"
       SPENDGUARD_FX_RATE_VERSION: "demo-fx-v1"
-      SPENDGUARD_UNIT_CONVERSION_VERSION: "demo-conv-v1"
-      SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX: "0000000000000000000000000000000000000000000000000000000000000000"
+      SPENDGUARD_UNIT_CONVERSION_VERSION: "demo-units-v1"
+
       SPENDGUARD_HANDSHAKE_TIMEOUT_MS: "30000"
       SPENDGUARD_COUNTING_STUB_URL: "http://counting-stub:8765"
       SPENDGUARD_DEMO_MODE: "agent_real_autogen"
@@ -167,6 +167,9 @@ services:
       - ../..:/opt/spendguard:ro
       # Sidecar UDS shared with the rest of the stack.
       - sidecar-uds:/var/run/spendguard
+      # HARDEN_D05_UR: source pricing freeze from bundles runtime.env
+      # (written by pricing-seed-init / bundles-init at compose-up time).
+      - bundles-data:/var/lib/spendguard/bundles:ro
       # Writable site-packages persistence across re-runs.
       - autogen-runner-venv:/opt/venv
     tmpfs:
@@ -208,6 +211,19 @@ services:
           sleep 1
         done
 
+        # HARDEN_D05_UR: source bundles runtime.env so
+        # SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX matches the contract bundle
+        # the sidecar loaded (mirrors deploy/demo/runtime/demo-entrypoint.sh).
+        if [ -f /var/lib/spendguard/bundles/runtime.env ]; then
+          echo "[autogen-runner] sourcing /var/lib/spendguard/bundles/runtime.env..."
+          set -a
+          . /var/lib/spendguard/bundles/runtime.env
+          set +a
+        else
+          echo "[autogen-runner] FATAL: bundles runtime.env not found" >&2
+          exit 1
+        fi
+
         echo "[autogen-runner] launching run_demo.py (SPENDGUARD_DEMO_MODE=$$SPENDGUARD_DEMO_MODE)..."
         exec python /opt/spendguard/deploy/demo/demo/run_demo.py
     depends_on:
@@ -220,4 +236,5 @@ services:
         aliases: [autogen-runner]
 
 volumes:
+  bundles-data:
   autogen-runner-venv:

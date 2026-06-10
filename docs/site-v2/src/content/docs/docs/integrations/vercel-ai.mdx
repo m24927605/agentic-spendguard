@@ -140,11 +140,10 @@ two import paths.
 
 ## Configuration
 
-The v0.1.0 middleware options surface is intentionally narrow. The richer
-`unitId` / `windowInstanceId` / pricing / `claimEstimator` shape the
-design anticipates is deferred (see **Limitations** below) — until the
-substrate broadens `UnitRef`, the middleware projects sensible defaults
-instead.
+The middleware options surface supports `unitId` pass-through (set
+`SPENDGUARD_UNIT_ID` in the runner environment and pass it as the `unitId`
+option). The richer `windowInstanceId` / pricing / `claimEstimator` fields
+the design anticipates are deferred to a later slice.
 
 <table>
   <thead>
@@ -160,9 +159,8 @@ instead.
 A future minor (`v0.x`) extends this surface field-for-field with the
 design.md §4 superset (`windowInstanceId`, `unit`, `pricing`,
 `claimEstimator`, `route`, `callSignature`, `runIdProvider`,
-`providerEventIdExtractor`) once the substrate broadens `UnitRef`. The
-extensions are additive optional fields — no breaking change to the
-v0.1.0 shape.
+`providerEventIdExtractor`). The extensions are additive optional fields
+— no breaking change to the v0.1.0 shape.
 
 ## Streaming semantics
 
@@ -210,14 +208,6 @@ design surface:
   against the real `usage`. The middleware never tears down a mid-flight
   stream to halt token emission — overruns land in the audit chain and
   reflect at commit time, but the tokens were already emitted.
-- **Substrate dependency on `UnitRef` broadening.** Per the design.md §4
-  superset, the v0.1.0 options surface omits `windowInstanceId`,
-  `unit`, `pricing`, `claimEstimator`, `route`, `callSignature`,
-  `runIdProvider`, and `providerEventIdExtractor`. The TS substrate's
-  public `UnitRef` does not yet expose `unit_id`
-  (`sdk/typescript/src/client.ts::mapUnitRef` hardcodes empty); a
-  future hardening slice picks up the SDK-side broadening + middleware
-  wire-through together.
 - **DEGRADE patch application surfaces as `MutationApplyFailed`.**
   Matches the Python `pydantic_ai.py::SpendGuardModel` v0.5.1 stance.
   Built-in claim mutation lands in a later slice.

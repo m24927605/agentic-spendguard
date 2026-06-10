@@ -175,17 +175,6 @@ front of high-volume retry-heavy workloads:
   the adapter does NOT ship an approval UI. The Inngest function's
   failure handler observes the error and can route it to your operator
   console.
-- **Substrate dependency on `UnitRef` broadening.** The TS substrate's
-  public `UnitRef` does not yet expose `unit_id`
-  (`sdk/typescript/src/client.ts::mapUnitRef` hardcodes empty). The
-  `--real` demo flow surfaces the substrate-side `claim[0].unit.unit_id
-  empty` error from the sidecar's `ReserveSet` validator — the same
-  cross-slice gap D04 / D06 / D08 surface against the same substrate.
-  The adapter's wire shape and retry-dedup contract are independently
-  verified by 76 vitest cases; the `--mock` demo mode exercises the
-  bracket end-to-end without going through the substrate validator. A
-  future hardening slice picks up the SDK-side broadening + adapter
-  wire-through together.
 - **`SidecarUnavailable` propagates as-is.** Strict-mode default
   (review-standards §5.2 / §5.7). The future `degrade=auto` mode is
   LOCKED OUT of v0.1.x.
