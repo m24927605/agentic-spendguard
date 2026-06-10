@@ -254,8 +254,26 @@ litellm-guardrail = [
   # can resolve an older granian without this direct pin.
   "granian>=2.7.4",
 ]
+# COV_D39 SLICE 2 (`COV_D39_02_py_mirror`): AG-UI display-event extra.
+# `spendguard.integrations.ag_ui` itself has ZERO runtime deps beyond
+# stdlib and imports `ag_ui` NOWHERE outside its compat test
+# (implementation.md §1.2) — this extra exists only for users who
+# validate built events through the `ag-ui-protocol` pydantic models
+# (`ag_ui.core.CustomEvent.model_validate(...)`). Floor 0.1.19 is the
+# latest release verified at impl time (2026-06-10, also the spec
+# baseline — design.md §10.2); cap below 0.2 to fail-closed against
+# AG-UI's fast-moving 0.x line. Display-only: AG-UI events can neither
+# grant nor deny spend (design.md §1.1).
+ag-ui = [
+  "ag-ui-protocol>=0.1.19,<0.2",
+]
 dev = [
   "grpcio-tools>=1.62,<1.72",
+  # COV_D39 SLICE 2: exact compat-test pin consumed by
+  # tests/integrations/ag_ui/test_ag_ui_compat.py (TA-28). Bumping the
+  # pin is routine maintenance; a compat failure is a P1, not a wire
+  # change (design.md §10.3/§10.4).
+  "ag-ui-protocol==0.1.19",
   "pytest>=8",
   "pytest-asyncio>=0.23",
   "ruff>=0.5",
