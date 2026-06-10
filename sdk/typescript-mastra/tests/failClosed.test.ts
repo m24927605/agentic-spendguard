@@ -15,16 +15,18 @@
 // adapter degradation).
 
 import { Agent } from "@mastra/core/agent";
-import type { ProcessInputStepArgs } from "@mastra/core/processors";
+import type { ProcessInputStepArgs, ProcessLLMResponseArgs } from "@mastra/core/processors";
 import {
   ApprovalRequired,
   DecisionDenied,
   DecisionStopped,
   HandshakeError,
   SidecarUnavailable,
+  SpendGuardError,
 } from "@spendguard/sdk";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { SpendGuardProcessor } from "../src/index.js";
+import type { SpendGuardProcessorOptions } from "../src/index.js";
 import { type DecisionPlan, MockSpendGuardClient } from "./_support/mockSidecar.js";
 import { RecordingStubModel } from "./_support/stubModel.js";
 
@@ -167,4 +169,197 @@ describe("COV_D38_02 fail-closed reserve subset (TP-10, TP-13..TP-16)", () => {
     await expect(agent.generate("hello")).rejects.toThrow(/sentinel-reserve-failure-7f3a/);
     expect(stub.totalCalls).toBe(0);
   }, 30_000);
+});
+
+// ── COV_D38_04 — FULL §7 fail-closed matrix ───────────────────────────────
+//
+// Every design §7 matrix row gets a test pinning BOTH halves of the LOCKED
+// contract: (a) the typed error propagates (hook boundary: `instanceof`;
+// agent boundary: message-match — the V2 residual split, gh #181), and
+// (b) ZERO provider calls + ZERO commit RPCs. Rows already pinned by the
+// COV_D38_02 subset above (DENY TP-10, SidecarUnavailable TP-13,
+// HandshakeError TP-15, sentinel TP-16) are not duplicated; this block
+// completes the matrix: constructor row, STOP / STOP_RUN_PROJECTION /
+// REQUIRE_APPROVAL through the REAL agent loop, the sidecar-timeout flavour
+// of SidecarUnavailable, and the "any other substrate error" →
+// SpendGuardError row. The commit-path rows of §7 (rows 6-8) are pinned by
+// TP-27/TP-28/TP-29 in processor.test.ts — they are POST-dispatch by design
+// (§7.4 LOCKED asymmetry) and deliberately not re-tested as reserve rows.
+
+describe("COV_D38_04 full §7 fail-closed matrix", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("§7 row 1: invalid options → TypeError at construction (matrix-level re-verify of TP-03)", () => {
+    const mock = new MockSpendGuardClient();
+    expect(() => new SpendGuardProcessor({} as never)).toThrow(TypeError);
+    expect(() => new SpendGuardProcessor({ tenantId: "t" } as never)).toThrow(TypeError);
+    expect(() => new SpendGuardProcessor({ client: mock.client, tenantId: "" })).toThrow(TypeError);
+    expect(() => new SpendGuardProcessor(null as never)).toThrow(TypeError);
+    // Construction failure means NO RPC ever fires.
+    expect(mock.reserveCalls).toHaveLength(0);
+    expect(mock.commitCalls).toHaveLength(0);
+  });
+
+  it("§7 row 2 (STOP): DecisionStopped through the real Agent — step aborts, zero provider calls, zero commits", async () => {
+    const { agent, mock, stub } = makeAgent({ kind: "STOP" });
+    await expect(agent.generate("stop me")).rejects.toThrow(/mock STOP terminal/);
+    expect(stub.totalCalls).toBe(0);
+    expect(mock.reserveCalls).toHaveLength(1);
+    expect(mock.reserveCalls[0]?.rejected?.name).toBe("DecisionStopped");
+    expect(mock.commitCalls).toHaveLength(0);
+  }, 30_000);
+
+  it("§7 row 2 (STOP_RUN_PROJECTION): DecisionStopped with the projection reason — same abort contract", async () => {
+    // The sidecar surfaces STOP_RUN_PROJECTION decisions as DecisionStopped
+    // carrying the projection reason code (substrate taxonomy) — the
+    // adapter's contract is identical to plain STOP: propagate, zero calls.
+    const mock = new MockSpendGuardClient({
+      defaultDecision: { kind: "STOP", reasonCodes: ["STOP_RUN_PROJECTION"] },
+    });
+    const guard = new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-srp" });
+    await expect(guard.processInputStep(makeArgs("projected over"))).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof DecisionStopped &&
+        err instanceof DecisionDenied &&
+        err.reasonCodes.includes("STOP_RUN_PROJECTION"),
+    );
+
+    const stub = new RecordingStubModel();
+    const agent = new Agent({
+      id: "srp-agent",
+      name: "srp-agent",
+      instructions: "test agent",
+      model: stub as never,
+      inputProcessors: [new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-srp" })],
+    });
+    await expect(agent.generate("projected over")).rejects.toThrow(/mock STOP terminal/);
+    expect(stub.totalCalls).toBe(0);
+    expect(mock.commitCalls).toHaveLength(0);
+  }, 30_000);
+
+  it("§7 row 3 (REQUIRE_APPROVAL): ApprovalRequired through the real Agent — aborts, zero provider calls (no resume helper in v1)", async () => {
+    const { agent, mock, stub } = makeAgent({ kind: "APPROVAL_REQUIRED" });
+    await expect(agent.generate("needs approval")).rejects.toThrow(/mock approval required/);
+    expect(stub.totalCalls).toBe(0);
+    expect(mock.reserveCalls).toHaveLength(1);
+    expect(mock.reserveCalls[0]?.rejected?.name).toBe("ApprovalRequired");
+    expect(mock.commitCalls).toHaveLength(0);
+  }, 30_000);
+
+  it("§7 row 4 (timeout flavour): SidecarUnavailable from a reserve TIMEOUT propagates identically", async () => {
+    const mock = new MockSpendGuardClient({
+      defaultDecision: { kind: "SIDECAR_UNAVAILABLE", message: "reserve deadline exceeded (2s)" },
+    });
+    const guard = new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-timeout" });
+    await expect(guard.processInputStep(makeArgs("slow sidecar"))).rejects.toSatisfy(
+      (err: unknown) =>
+        err instanceof SidecarUnavailable && /deadline exceeded/.test((err as Error).message),
+    );
+
+    const stub = new RecordingStubModel();
+    const agent = new Agent({
+      id: "timeout-agent",
+      name: "timeout-agent",
+      instructions: "test agent",
+      model: stub as never,
+      inputProcessors: [
+        new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-timeout" }),
+      ],
+    });
+    await expect(agent.generate("slow sidecar")).rejects.toThrow(/deadline exceeded/);
+    expect(stub.totalCalls).toBe(0);
+    expect(mock.commitCalls).toHaveLength(0);
+  }, 30_000);
+
+  it("§7 row 5: any other substrate error (SpendGuardError) → step aborts FAIL-CLOSED, zero provider calls", async () => {
+    const substrateError = new SpendGuardError("substrate internal: unexpected wire frame");
+    const mock = new MockSpendGuardClient({
+      defaultDecision: { kind: "SENTINEL_ERROR", error: substrateError },
+    });
+    const guard = new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-sge" });
+    await expect(guard.processInputStep(makeArgs("substrate boom"))).rejects.toBe(substrateError);
+
+    const stub = new RecordingStubModel();
+    const agent = new Agent({
+      id: "sge-agent",
+      name: "sge-agent",
+      instructions: "test agent",
+      model: stub as never,
+      inputProcessors: [new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-sge" })],
+    });
+    await expect(agent.generate("substrate boom")).rejects.toThrow(/unexpected wire frame/);
+    expect(stub.totalCalls).toBe(0);
+    expect(mock.commitCalls).toHaveLength(0);
+  }, 30_000);
+
+  it("matrix invariant: a failed reserve leaves NO inflight entry — a later commit hook warns + no-ops", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const mock = new MockSpendGuardClient({ defaultDecision: { kind: "DENY" } });
+    const guard = new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-noentry" });
+    const state: Record<string, unknown> = {};
+
+    const argsBag = {
+      ...makeArgs("deny then settle"),
+      state,
+    } as unknown as ProcessInputStepArgs;
+    await expect(guard.processInputStep(argsBag)).rejects.toSatisfy(
+      (err: unknown) => err instanceof DecisionDenied,
+    );
+    // The throw happened BEFORE the inflight push and the state stash, so a
+    // (hypothetical) commit-hook delivery finds nothing to settle.
+    expect(state).toEqual({});
+    await guard.processLLMResponse({
+      chunks: [],
+      state,
+      stepNumber: 0,
+      steps: [],
+      retryCount: 0,
+      fromCache: false,
+      abort: () => {
+        throw new Error("unexpected abort");
+      },
+    } as unknown as ProcessLLMResponseArgs);
+    expect(mock.commitCalls).toHaveLength(0);
+    expect(warnSpy).toHaveBeenCalledWith(expect.stringContaining("no inflight entry"));
+  });
+
+  it("TP-04 matrix-level re-verify: no fail-open knob exists on the options surface (runtime probe)", async () => {
+    // The authoritative type-level gate lives in lockedSurface.test.ts; the
+    // §7 matrix re-verifies at the matrix level that the FULLY-POPULATED
+    // options literal exposes no enforcement-weakening key.
+    const mock = new MockSpendGuardClient();
+    const fullOptions: Required<SpendGuardProcessorOptions> = {
+      client: mock.client,
+      tenantId: "tenant-matrix-tp04",
+      budgetId: "budget-matrix",
+      unitId: "unit-matrix",
+      route: "mastra-llm",
+      defaultBudgetMicrosCap: 1n,
+      claimEstimator: () => [],
+      runIdProvider: () => "run-matrix",
+    };
+    for (const forbidden of ["failOpen", "degradeOnUnavailable", "enforcementMode"]) {
+      expect(Object.keys(fullOptions)).not.toContain(forbidden);
+    }
+    // And no env escape hatch (§7 LOCKED rule 2): construction with
+    // SPENDGUARD_DISABLE set still reserves (and still fail-closes).
+    const saved = process.env.SPENDGUARD_DISABLE;
+    process.env.SPENDGUARD_DISABLE = "1";
+    try {
+      const denyMock = new MockSpendGuardClient({ defaultDecision: { kind: "DENY" } });
+      const guard = new SpendGuardProcessor({ client: denyMock.client, tenantId: "tenant-env" });
+      await expect(guard.processInputStep(makeArgs("env escape probe"))).rejects.toSatisfy(
+        (err: unknown) => err instanceof DecisionDenied,
+      );
+      expect(denyMock.reserveCalls).toHaveLength(1);
+    } finally {
+      if (saved === undefined) {
+        delete process.env.SPENDGUARD_DISABLE;
+      } else {
+        process.env.SPENDGUARD_DISABLE = saved;
+      }
+    }
+  });
 });

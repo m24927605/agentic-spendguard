@@ -82,6 +82,21 @@ describe("COV_D38_03 extractUsage (V4-pinned shapes)", () => {
     expect(extractUsage({ chunks: [{ type: "text-delta", payload: {} }] })).toBeUndefined();
     expect(extractUsage({ chunks: [{ type: "finish", payload: {} }] })).toBeUndefined();
     expect(extractUsage({ chunks: "nope" })).toBeUndefined();
+    // COV_D38_04 floor top-up: finish chunk with a missing / null payload
+    // (usageFromChunkPayload's non-object guard).
+    expect(extractUsage({ chunks: [{ type: "finish" }] })).toBeUndefined();
+    expect(extractUsage({ chunks: [{ type: "finish", payload: null }] })).toBeUndefined();
+    // response-metadata with unusable payloads never fabricates an id.
+    expect(
+      extractUsage({
+        chunks: [
+          { type: "response-metadata" },
+          { type: "response-metadata", payload: { id: "" } },
+          { type: "response-metadata", payload: { id: 42 } },
+          { type: "finish", payload: { output: { usage: { inputTokens: 1, outputTokens: 2 } } } },
+        ],
+      }),
+    ).toEqual({ inputTokens: 1, outputTokens: 2 });
   });
 
   it("partial / non-numeric usage is treated as absent (no fabricated zeros)", () => {

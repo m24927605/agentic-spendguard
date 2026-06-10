@@ -19,6 +19,10 @@ import {
   VERSION,
 } from "../src/index.js";
 import type { SpendGuardProcessorOptions } from "../src/index.js";
+// COV_D38_04: runtime-import the type-only options module so the v8
+// coverage report scores it (it compiles to an empty module; without this
+// import it shows as 0 % and noisily drags the package floor).
+import "../src/options.js";
 import { MockSpendGuardClient } from "./_support/mockSidecar.js";
 
 // ── Type-level assertions (compile-time gates; vitest just hosts them) ────

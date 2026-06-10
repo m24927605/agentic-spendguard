@@ -662,3 +662,222 @@ describe("COV_D38_03 commit + failure paths (TP-23..TP-31)", () => {
     expect(mock.commitCalls[0]?.request.outcomeKind).toBe("SUCCESS");
   }, 30_000);
 });
+
+// ── COV_D38_04 — threading (TP-17/TP-19 family) + backstop-for-real ───────
+
+describe("COV_D38_04 estimator threading + settlement details", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("TP-17 family (unitId): estimator-supplied claim unitId reaches the wire UNTOUCHED — even when options.unitId differs", async () => {
+    const mock = new MockSpendGuardClient();
+    const guard = new SpendGuardProcessor({
+      client: mock.client,
+      tenantId: "tenant-thread-unit",
+      // The options-level unitId would drive the DEFAULT projection; the
+      // estimator overrides the WHOLE projection (design §6.4 last line),
+      // so the estimator's unit must win verbatim.
+      unitId: "options-level-unit",
+      claimEstimator: () => [
+        {
+          ...makeBudgetClaim("scope-thread", 42n),
+          unit: { unit: "USD_MICROS", denomination: 1, unitId: "estimator-level-unit" },
+        },
+      ],
+    });
+    await guard.processInputStep(makeArgs([dbMessage("user", ["thread unit"])]));
+    expect(mock.lastReserveRequest?.projectedClaims[0]?.unit.unitId).toBe("estimator-level-unit");
+  });
+
+  it("TP-17 family (windowInstanceId): estimator claim windowInstanceId threads verbatim onto the reserve wire (HARDEN_D05_WI)", async () => {
+    const mock = new MockSpendGuardClient();
+    const guard = new SpendGuardProcessor({
+      client: mock.client,
+      tenantId: "tenant-thread-wi",
+      claimEstimator: () => [
+        {
+          ...makeBudgetClaim("scope-wi", 7n),
+          windowInstanceId: "11111111-1111-4111-8111-111111111111",
+        },
+      ],
+    });
+    await guard.processInputStep(makeArgs([dbMessage("user", ["thread wi"])]));
+    const claim = mock.lastReserveRequest?.projectedClaims[0];
+    expect(claim?.windowInstanceId).toBe("11111111-1111-4111-8111-111111111111");
+
+    // Default projection sends NO windowInstanceId (the §6.4 LOCKED shape
+    // has none — recipe-style; ledger-backed callers supply it via the
+    // estimator, exactly the substrate's documented contract).
+    const mockDefault = new MockSpendGuardClient();
+    const guardDefault = new SpendGuardProcessor({
+      client: mockDefault.client,
+      tenantId: "tenant-thread-wi",
+    });
+    await guardDefault.processInputStep(makeArgs([dbMessage("user", ["thread wi"])]));
+    const defaultClaim = mockDefault.lastReserveRequest?.projectedClaims[0];
+    expect(defaultClaim !== undefined && "windowInstanceId" in defaultClaim).toBe(false);
+  });
+
+  it("TP-19 family (commit-side unitId): options.unitId rides the inflight entry onto the commit unit (tuple match)", async () => {
+    const mock = new MockSpendGuardClient();
+    const guard = new SpendGuardProcessor({
+      client: mock.client,
+      tenantId: "tenant-commit-unit",
+      unitId: "66666666-6666-4666-8666-666666666666",
+    });
+    const state: Record<string, unknown> = {};
+    await guard.processInputStep(makeArgs([dbMessage("user", ["ping"])], state));
+    await guard.processLLMResponse(
+      makeResponseArgs(state, [finishChunk({ inputTokens: 1, outputTokens: 1 })]),
+    );
+    const commit = mock.commitCalls[0]?.request;
+    expect(commit?.unit).toEqual({
+      unit: "USD_MICROS",
+      denomination: 1,
+      unitId: "66666666-6666-4666-8666-666666666666",
+    });
+  });
+
+  it("pricing threading: the commit repeats the reserve's (empty) pricing-freeze tuple (HARDEN_D05_WI)", async () => {
+    const mock = new MockSpendGuardClient();
+    const guard = new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-pricing" });
+    const state: Record<string, unknown> = {};
+    await guard.processInputStep(makeArgs([dbMessage("user", ["ping"])], state));
+    await guard.processLLMResponse(
+      makeResponseArgs(state, [finishChunk({ inputTokens: 1, outputTokens: 1 })]),
+    );
+    const commit = mock.commitCalls[0]?.request;
+    // Reserve sends no pricing freeze → the commit's freeze tuple must be
+    // the SAME empty tuple (the commit must tuple-match the reservation).
+    expect(commit?.pricing).toEqual({ pricingVersion: "", pricingHash: new Uint8Array(0) });
+  });
+
+  it("backstop-commits-for-real (D38_03 R1 minor 3): response-hook settlement suppressed → the OUTPUT runner backstop commits", async () => {
+    const mock = new MockSpendGuardClient();
+    const guard = new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-backstop" });
+    // Suppress the response-hook settlement on this INSTANCE (simulates the
+    // V4-pinned cached-replay / output-mounted-only ordering where the
+    // response hook does not settle) — no src change, pure test override.
+    const responseSpy = vi
+      .spyOn(guard, "processLLMResponse")
+      .mockImplementation(async () => undefined);
+    const outputSpy = vi.spyOn(guard, "processOutputStep");
+    const stub = new RecordingStubModel();
+    const agent = new Agent({
+      id: "backstop-agent",
+      name: "backstop-agent",
+      instructions: "reply",
+      model: stub as never,
+      inputProcessors: [guard],
+      outputProcessors: [guard],
+    });
+
+    const result = await agent.generate("ping");
+    expect(result.text).toBe("stub-reply");
+
+    // The suppressed response hook DID fire (proving suppression was the
+    // only reason it didn't settle) and the backstop committed FOR REAL.
+    expect(responseSpy).toHaveBeenCalled();
+    expect(outputSpy).toHaveBeenCalled();
+    expect(mock.reserveCalls).toHaveLength(1);
+    expect(mock.commitCalls).toHaveLength(1);
+    const commit = mock.commitCalls[0]?.request;
+    expect(commit?.outcome).toBe("SUCCESS");
+    expect(commit?.outcomeKind).toBe("SUCCESS");
+    expect(commit?.decisionId).toBe(mock.reserveCalls[0]?.resolved?.decisionId);
+    expect(commit?.reservationId).toBe(mock.reserveCalls[0]?.resolved?.reservationIds[0]);
+    // The real loop feeds flat usage to processOutputStep (V4 pin): the
+    // backstop settles with actuals, not the §6.6 fallback.
+    expect(commit?.actualInputTokensWire).toBe("10");
+    expect(commit?.actualOutputTokensWire).toBe("5");
+    expect(commit?.estimatedAmountAtomic).toBe("15");
+  }, 30_000);
+
+  it("V7 error-chunk message flavours: string error / POJO without message / chunk without payload", async () => {
+    // payload.error is a STRING → String(error) is the commit message.
+    const mock1 = new MockSpendGuardClient();
+    const guard1 = new SpendGuardProcessor({ client: mock1.client, tenantId: "tenant-ec1" });
+    const state1: Record<string, unknown> = {};
+    await guard1.processInputStep(makeArgs([dbMessage("user", ["ping"])], state1));
+    await guard1.processLLMResponse(
+      makeResponseArgs(state1, [{ type: "error", payload: { error: "string-flavoured boom" } }]),
+    );
+    expect(mock1.commitCalls[0]?.request.actualErrorMessage).toBe("string-flavoured boom");
+    expect(mock1.commitCalls[0]?.request.outcomeKind).toBe("FAILURE");
+
+    // payload.error is a POJO with a NON-string message → String(error).
+    const mock2 = new MockSpendGuardClient();
+    const guard2 = new SpendGuardProcessor({ client: mock2.client, tenantId: "tenant-ec2" });
+    const state2: Record<string, unknown> = {};
+    await guard2.processInputStep(makeArgs([dbMessage("user", ["ping"])], state2));
+    await guard2.processLLMResponse(
+      makeResponseArgs(state2, [{ type: "error", payload: { error: { message: 42 } } }]),
+    );
+    expect(mock2.commitCalls[0]?.request.actualErrorMessage).toBe("[object Object]");
+
+    // error chunk WITHOUT a usable payload → placeholder message, still a
+    // FAILURE settlement (the signal is the chunk type, not the payload).
+    const mock3 = new MockSpendGuardClient();
+    const guard3 = new SpendGuardProcessor({ client: mock3.client, tenantId: "tenant-ec3" });
+    const state3: Record<string, unknown> = {};
+    await guard3.processInputStep(makeArgs([dbMessage("user", ["ping"])], state3));
+    await guard3.processLLMResponse(makeResponseArgs(state3, [{ type: "error" }]));
+    expect(mock3.commitCalls[0]?.request.actualErrorMessage).toBe(
+      "provider error (no message exposed)",
+    );
+
+    // payload present but NO error key → same placeholder.
+    const mock4 = new MockSpendGuardClient();
+    const guard4 = new SpendGuardProcessor({ client: mock4.client, tenantId: "tenant-ec4" });
+    const state4: Record<string, unknown> = {};
+    await guard4.processInputStep(makeArgs([dbMessage("user", ["ping"])], state4));
+    await guard4.processLLMResponse(makeResponseArgs(state4, [{ type: "error", payload: {} }]));
+    expect(mock4.commitCalls[0]?.request.actualErrorMessage).toBe(
+      "provider error (no message exposed)",
+    );
+  });
+
+  it("non-integer usage tokens → BigInt sum fails safe to the reserve-time projection (§6.6 fallback estimate)", async () => {
+    const mock = new MockSpendGuardClient();
+    const guard = new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-frac" });
+    const state: Record<string, unknown> = {};
+    // "abcdefgh" → 2000-micros projection (TP-18 fixture).
+    await guard.processInputStep(makeArgs([dbMessage("user", ["abcdefgh"])], state));
+    // Fractional token counts are finite numbers (pass extractUsage) but
+    // BigInt(1.5) throws — the settlement must fall back, not crash.
+    await guard.processLLMResponse(
+      makeResponseArgs(state, [finishChunk({ inputTokens: 1.5, outputTokens: 2.5 })]),
+    );
+    expect(mock.commitCalls).toHaveLength(1);
+    const commit = mock.commitCalls[0]?.request;
+    expect(commit?.estimatedAmountAtomic).toBe("2000");
+    expect(commit?.outcome).toBe("SUCCESS");
+  });
+
+  it("commit-key recovery falls back to runIdProvider when the state stash is missing", async () => {
+    const mock = new MockSpendGuardClient();
+    const guard = new SpendGuardProcessor({
+      client: mock.client,
+      tenantId: "tenant-keyfall",
+      runIdProvider: () => "provider-run-key",
+    });
+    // Reserve with one state bag…
+    await guard.processInputStep(makeArgs([dbMessage("user", ["ping"])], {}));
+    // …commit hook arrives with a DIFFERENT (empty) state bag — the
+    // secondary recovery source (runIdProvider) finds the entry.
+    await guard.processLLMResponse(
+      makeResponseArgs({}, [finishChunk({ inputTokens: 1, outputTokens: 1 })]),
+    );
+    expect(mock.commitCalls).toHaveLength(1);
+    expect(mock.commitCalls[0]?.request.runId).toBe("provider-run-key");
+  });
+
+  it("processLLMRequest is a no-op in v1 (design §11.3 LOCKED): no RPC, undefined result", () => {
+    const mock = new MockSpendGuardClient();
+    const guard = new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-noop" });
+    expect(guard.processLLMRequest({} as never)).toBeUndefined();
+    expect(mock.reserveCalls).toHaveLength(0);
+    expect(mock.commitCalls).toHaveLength(0);
+  });
+});

@@ -95,4 +95,36 @@ describe("COV_D38_02 InflightMap (TP-32..TP-35)", () => {
     expect(map.size()).toBe(0);
     expect(map.internalFifoLength()).toBeLessThanOrEqual(2 * capacity);
   });
+
+  // ── COV_D38_04 coverage floor top-up (tests.md §1: inflight.ts 100 %) ──
+
+  it("COV_D38_04: eviction walks PAST lazily-dead FIFO nodes to the oldest LIVE entry", () => {
+    const map = new InflightMap(2);
+    // Push + pop leaves a dead node at the FIFO head (lazy compaction).
+    map.push("run-A", entry({ llmCallId: "llm-A", runId: "run-A" }));
+    expect(map.pop("run-A")?.llmCallId).toBe("llm-A");
+    // Fill to capacity, then overflow: eviction must skip the dead A node
+    // and evict B (the oldest LIVE), keeping C and D.
+    map.push("run-B", entry({ llmCallId: "llm-B", runId: "run-B" }));
+    map.push("run-C", entry({ llmCallId: "llm-C", runId: "run-C" }));
+    map.push("run-D", entry({ llmCallId: "llm-D", runId: "run-D" }));
+    expect(map.size()).toBe(2);
+    expect(map.pop("run-B")).toBeUndefined();
+    expect(map.pop("run-C")?.llmCallId).toBe("llm-C");
+    expect(map.pop("run-D")?.llmCallId).toBe("llm-D");
+  });
+
+  it("COV_D38_04 (white-box): pop's defensive shift-undefined guard returns undefined", () => {
+    // src/inflight.ts pop() guards `queue.shift()` returning undefined for
+    // type narrowing; a well-formed queue can never produce it (length is
+    // checked first), so the guard is white-box-covered here to honestly
+    // meet the 100 %-stmt floor WITHOUT touching src (anti-scope).
+    const map = new InflightMap();
+    (map as unknown as { queues: Map<string, unknown> }).queues.set("ghost", {
+      length: 1,
+      shift: () => undefined,
+    });
+    expect(map.pop("ghost")).toBeUndefined();
+    expect(map.size()).toBe(0);
+  });
 });
