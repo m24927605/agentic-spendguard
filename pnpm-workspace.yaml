@@ -16,4 +16,5 @@ packages:
   - "sdk/typescript-openai-agents"
   - "sdk/typescript-inngest-agent-kit"
   - "sdk/typescript-n8n"
+  - "sdk/typescript-ag-ui"
   - "docs/site-v2"

@@ -1,0 +1,419 @@
+{
+  "version": 1,
+  "generated_at": "2026-06-10",
+  "generated_with": {
+    "package": "@spendguard/ag-ui",
+    "version": "0.1.0"
+  },
+  "fixtures": [
+    {
+      "id": "AGUI-FX01",
+      "builder": "buildBudgetSnapshot",
+      "description": "snapshot minimal — required-only, no unit_id, no timestamp",
+      "inputs": {
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "remaining_atomic": "25000000",
+        "reserved_atomic": "0",
+        "spent_atomic": "0",
+        "as_of": "2026-06-10T07:59:00Z"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.budget.snapshot\",\"type\":\"CUSTOM\",\"value\":{\"as_of\":\"2026-06-10T07:59:00Z\",\"budget_id\":\"budget-dev-monthly\",\"remaining_atomic\":\"25000000\",\"reserved_atomic\":\"0\",\"schema_version\":\"1\",\"spent_atomic\":\"0\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.budget.snapshot\",\"type\":\"CUSTOM\",\"value\":{\"as_of\":\"2026-06-10T07:59:00Z\",\"budget_id\":\"budget-dev-monthly\",\"remaining_atomic\":\"25000000\",\"reserved_atomic\":\"0\",\"schema_version\":\"1\",\"spent_atomic\":\"0\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX02",
+      "builder": "buildBudgetSnapshot",
+      "description": "snapshot maximal — unit_id present, timestamp present",
+      "inputs": {
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "unit_id": "0197a001-2222-7000-8000-0000000unit1",
+        "remaining_atomic": "24000000",
+        "reserved_atomic": "1000000",
+        "spent_atomic": "950000",
+        "as_of": "2026-06-10T08:00:05Z"
+      },
+      "timestamp_ms": 1765843200000,
+      "expected_canonical_json": "{\"name\":\"spendguard.budget.snapshot\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"as_of\":\"2026-06-10T08:00:05Z\",\"budget_id\":\"budget-dev-monthly\",\"remaining_atomic\":\"24000000\",\"reserved_atomic\":\"1000000\",\"schema_version\":\"1\",\"spent_atomic\":\"950000\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.budget.snapshot\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"as_of\":\"2026-06-10T08:00:05Z\",\"budget_id\":\"budget-dev-monthly\",\"remaining_atomic\":\"24000000\",\"reserved_atomic\":\"1000000\",\"schema_version\":\"1\",\"spent_atomic\":\"950000\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX03",
+      "builder": "buildBudgetSnapshot",
+      "description": "snapshot — 40-digit remaining_atomic + timestamp_ms 0 (0 != absent)",
+      "inputs": {
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "output_token",
+        "remaining_atomic": "1234567890123456789012345678901234567890",
+        "reserved_atomic": "0",
+        "spent_atomic": "0",
+        "as_of": "2026-06-10T07:59:00Z"
+      },
+      "timestamp_ms": 0,
+      "expected_canonical_json": "{\"name\":\"spendguard.budget.snapshot\",\"timestamp\":0,\"type\":\"CUSTOM\",\"value\":{\"as_of\":\"2026-06-10T07:59:00Z\",\"budget_id\":\"budget-dev-monthly\",\"remaining_atomic\":\"1234567890123456789012345678901234567890\",\"reserved_atomic\":\"0\",\"schema_version\":\"1\",\"spent_atomic\":\"0\",\"unit\":\"output_token\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.budget.snapshot\",\"timestamp\":0,\"type\":\"CUSTOM\",\"value\":{\"as_of\":\"2026-06-10T07:59:00Z\",\"budget_id\":\"budget-dev-monthly\",\"remaining_atomic\":\"1234567890123456789012345678901234567890\",\"reserved_atomic\":\"0\",\"schema_version\":\"1\",\"spent_atomic\":\"0\",\"unit\":\"output_token\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX04",
+      "builder": "buildBudgetSnapshot",
+      "description": "snapshot — unit_id present, timestamp absent",
+      "inputs": {
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "unit_id": "0197a001-2222-7000-8000-0000000unit1",
+        "remaining_atomic": "25000000",
+        "reserved_atomic": "0",
+        "spent_atomic": "0",
+        "as_of": "2026-06-10T07:59:00Z"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.budget.snapshot\",\"type\":\"CUSTOM\",\"value\":{\"as_of\":\"2026-06-10T07:59:00Z\",\"budget_id\":\"budget-dev-monthly\",\"remaining_atomic\":\"25000000\",\"reserved_atomic\":\"0\",\"schema_version\":\"1\",\"spent_atomic\":\"0\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.budget.snapshot\",\"type\":\"CUSTOM\",\"value\":{\"as_of\":\"2026-06-10T07:59:00Z\",\"budget_id\":\"budget-dev-monthly\",\"remaining_atomic\":\"25000000\",\"reserved_atomic\":\"0\",\"schema_version\":\"1\",\"spent_atomic\":\"0\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX05",
+      "builder": "buildReservationCreated",
+      "description": "created minimal — required-only, ALLOW, no timestamp",
+      "inputs": {
+        "decision_id": "0197a001-aaaa-7000-8000-000000000d01",
+        "reservation_id": "0197a001-bbbb-7000-8000-000000000r01",
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "amount_atomic_reserved": "1000000",
+        "decision": "ALLOW",
+        "ttl_expires_at": "2026-06-10T08:00:00Z",
+        "event_time": "2026-06-10T07:59:58Z"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.reservation.created\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_reserved\":\"1000000\",\"budget_id\":\"budget-dev-monthly\",\"decision\":\"ALLOW\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T07:59:58Z\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"ttl_expires_at\":\"2026-06-10T08:00:00Z\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.reservation.created\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_reserved\":\"1000000\",\"budget_id\":\"budget-dev-monthly\",\"decision\":\"ALLOW\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T07:59:58Z\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"ttl_expires_at\":\"2026-06-10T08:00:00Z\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX06",
+      "builder": "buildReservationCreated",
+      "description": "created maximal — every optional set, ALLOW_WITH_CAPS, timestamp",
+      "inputs": {
+        "decision_id": "0197a001-aaaa-7000-8000-000000000d01",
+        "reservation_id": "0197a001-bbbb-7000-8000-000000000r01",
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "amount_atomic_reserved": "1000000",
+        "decision": "ALLOW_WITH_CAPS",
+        "ttl_expires_at": "2026-06-10T08:00:00Z",
+        "event_time": "2026-06-10T07:59:58Z",
+        "unit_id": "0197a001-2222-7000-8000-0000000unit1",
+        "reason_codes": [
+          "degrade_applied",
+          "model_capped"
+        ],
+        "matched_rule_ids": [
+          "rule-cap-model",
+          "rule-budget-soft"
+        ],
+        "run_id": "0197a001-cccc-7000-8000-00000000run1",
+        "llm_call_id": "0197a001-dddd-7000-8000-0000000call1"
+      },
+      "timestamp_ms": 1765843200000,
+      "expected_canonical_json": "{\"name\":\"spendguard.reservation.created\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_reserved\":\"1000000\",\"budget_id\":\"budget-dev-monthly\",\"decision\":\"ALLOW_WITH_CAPS\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T07:59:58Z\",\"llm_call_id\":\"0197a001-dddd-7000-8000-0000000call1\",\"matched_rule_ids\":[\"rule-cap-model\",\"rule-budget-soft\"],\"reason_codes\":[\"degrade_applied\",\"model_capped\"],\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"run_id\":\"0197a001-cccc-7000-8000-00000000run1\",\"schema_version\":\"1\",\"ttl_expires_at\":\"2026-06-10T08:00:00Z\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.reservation.created\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_reserved\":\"1000000\",\"budget_id\":\"budget-dev-monthly\",\"decision\":\"ALLOW_WITH_CAPS\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T07:59:58Z\",\"llm_call_id\":\"0197a001-dddd-7000-8000-0000000call1\",\"matched_rule_ids\":[\"rule-cap-model\",\"rule-budget-soft\"],\"reason_codes\":[\"degrade_applied\",\"model_capped\"],\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"run_id\":\"0197a001-cccc-7000-8000-00000000run1\",\"schema_version\":\"1\",\"ttl_expires_at\":\"2026-06-10T08:00:00Z\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX07",
+      "builder": "buildReservationCreated",
+      "description": "created Unicode — CJK + emoji + astral in reason_codes, U+001F in matched_rule_ids",
+      "inputs": {
+        "decision_id": "0197a001-aaaa-7000-8000-000000000d01",
+        "reservation_id": "0197a001-bbbb-7000-8000-000000000r01",
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "amount_atomic_reserved": "1000000",
+        "decision": "ALLOW",
+        "ttl_expires_at": "2026-06-10T08:00:00Z",
+        "event_time": "2026-06-10T07:59:58Z",
+        "reason_codes": [
+          "預算已拒絕",
+          "💸",
+          "𐍈"
+        ],
+        "matched_rule_ids": [
+          "rule\u001fctl"
+        ]
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.reservation.created\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_reserved\":\"1000000\",\"budget_id\":\"budget-dev-monthly\",\"decision\":\"ALLOW\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T07:59:58Z\",\"matched_rule_ids\":[\"rule\\u001fctl\"],\"reason_codes\":[\"預算已拒絕\",\"💸\",\"𐍈\"],\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"ttl_expires_at\":\"2026-06-10T08:00:00Z\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.reservation.created\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_reserved\":\"1000000\",\"budget_id\":\"budget-dev-monthly\",\"decision\":\"ALLOW\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T07:59:58Z\",\"matched_rule_ids\":[\"rule\\u001fctl\"],\"reason_codes\":[\"預算已拒絕\",\"💸\",\"𐍈\"],\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"ttl_expires_at\":\"2026-06-10T08:00:00Z\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX08",
+      "builder": "buildReservationCommitted",
+      "description": "committed minimal — outcome SUCCESS, no timestamp",
+      "inputs": {
+        "decision_id": "0197a001-aaaa-7000-8000-000000000d01",
+        "reservation_id": "0197a001-bbbb-7000-8000-000000000r01",
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "amount_atomic_estimated": "950000",
+        "outcome": "SUCCESS",
+        "event_time": "2026-06-10T08:00:02Z"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.reservation.committed\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_estimated\":\"950000\",\"budget_id\":\"budget-dev-monthly\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:02Z\",\"outcome\":\"SUCCESS\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.reservation.committed\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_estimated\":\"950000\",\"budget_id\":\"budget-dev-monthly\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:02Z\",\"outcome\":\"SUCCESS\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX09",
+      "builder": "buildReservationCommitted",
+      "description": "committed — outcome PROVIDER_ERROR",
+      "inputs": {
+        "decision_id": "0197a001-aaaa-7000-8000-000000000d01",
+        "reservation_id": "0197a001-bbbb-7000-8000-000000000r01",
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "amount_atomic_estimated": "950000",
+        "outcome": "PROVIDER_ERROR",
+        "event_time": "2026-06-10T08:00:02Z"
+      },
+      "timestamp_ms": 1765843200000,
+      "expected_canonical_json": "{\"name\":\"spendguard.reservation.committed\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_estimated\":\"950000\",\"budget_id\":\"budget-dev-monthly\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:02Z\",\"outcome\":\"PROVIDER_ERROR\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.reservation.committed\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_estimated\":\"950000\",\"budget_id\":\"budget-dev-monthly\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:02Z\",\"outcome\":\"PROVIDER_ERROR\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX10",
+      "builder": "buildReservationCommitted",
+      "description": "committed — outcome CLIENT_TIMEOUT",
+      "inputs": {
+        "decision_id": "0197a001-aaaa-7000-8000-000000000d01",
+        "reservation_id": "0197a001-bbbb-7000-8000-000000000r01",
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "amount_atomic_estimated": "950000",
+        "outcome": "CLIENT_TIMEOUT",
+        "event_time": "2026-06-10T08:00:02Z"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.reservation.committed\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_estimated\":\"950000\",\"budget_id\":\"budget-dev-monthly\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:02Z\",\"outcome\":\"CLIENT_TIMEOUT\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.reservation.committed\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_estimated\":\"950000\",\"budget_id\":\"budget-dev-monthly\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:02Z\",\"outcome\":\"CLIENT_TIMEOUT\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX11",
+      "builder": "buildReservationCommitted",
+      "description": "committed — outcome RUN_ABORTED",
+      "inputs": {
+        "decision_id": "0197a001-aaaa-7000-8000-000000000d01",
+        "reservation_id": "0197a001-bbbb-7000-8000-000000000r01",
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "amount_atomic_estimated": "950000",
+        "outcome": "RUN_ABORTED",
+        "event_time": "2026-06-10T08:00:02Z"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.reservation.committed\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_estimated\":\"950000\",\"budget_id\":\"budget-dev-monthly\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:02Z\",\"outcome\":\"RUN_ABORTED\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.reservation.committed\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_estimated\":\"950000\",\"budget_id\":\"budget-dev-monthly\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:02Z\",\"outcome\":\"RUN_ABORTED\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX12",
+      "builder": "buildReservationCommitted",
+      "description": "committed maximal — amount_atomic_observed + unit_id + run/llm ids",
+      "inputs": {
+        "decision_id": "0197a001-aaaa-7000-8000-000000000d01",
+        "reservation_id": "0197a001-bbbb-7000-8000-000000000r01",
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "amount_atomic_estimated": "950000",
+        "outcome": "SUCCESS",
+        "event_time": "2026-06-10T08:00:02Z",
+        "unit_id": "0197a001-2222-7000-8000-0000000unit1",
+        "amount_atomic_observed": "940123",
+        "run_id": "0197a001-cccc-7000-8000-00000000run1",
+        "llm_call_id": "0197a001-dddd-7000-8000-0000000call1"
+      },
+      "timestamp_ms": 1765843200000,
+      "expected_canonical_json": "{\"name\":\"spendguard.reservation.committed\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_estimated\":\"950000\",\"amount_atomic_observed\":\"940123\",\"budget_id\":\"budget-dev-monthly\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:02Z\",\"llm_call_id\":\"0197a001-dddd-7000-8000-0000000call1\",\"outcome\":\"SUCCESS\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"run_id\":\"0197a001-cccc-7000-8000-00000000run1\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.reservation.committed\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_estimated\":\"950000\",\"amount_atomic_observed\":\"940123\",\"budget_id\":\"budget-dev-monthly\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:02Z\",\"llm_call_id\":\"0197a001-dddd-7000-8000-0000000call1\",\"outcome\":\"SUCCESS\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"run_id\":\"0197a001-cccc-7000-8000-00000000run1\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX13",
+      "builder": "buildReservationReleased",
+      "description": "released minimal — single Draft-01 §4 reason code",
+      "inputs": {
+        "reservation_id": "0197a001-bbbb-7000-8000-000000000r01",
+        "reason_codes": [
+          "client_timeout"
+        ],
+        "event_time": "2026-06-10T08:00:30Z"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.reservation.released\",\"type\":\"CUSTOM\",\"value\":{\"event_time\":\"2026-06-10T08:00:30Z\",\"reason_codes\":[\"client_timeout\"],\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.reservation.released\",\"type\":\"CUSTOM\",\"value\":{\"event_time\":\"2026-06-10T08:00:30Z\",\"reason_codes\":[\"client_timeout\"],\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX14",
+      "builder": "buildReservationReleased",
+      "description": "released maximal — every optional set, timestamp",
+      "inputs": {
+        "reservation_id": "0197a001-bbbb-7000-8000-000000000r01",
+        "decision_id": "0197a001-aaaa-7000-8000-000000000d01",
+        "reason_codes": [
+          "provider_error",
+          "run_cancelled"
+        ],
+        "ledger_transaction_id": "0197a001-eeee-7000-8000-000000000tx1",
+        "run_id": "0197a001-cccc-7000-8000-00000000run1",
+        "llm_call_id": "0197a001-dddd-7000-8000-0000000call1",
+        "event_time": "2026-06-10T08:00:30Z"
+      },
+      "timestamp_ms": 1765843200000,
+      "expected_canonical_json": "{\"name\":\"spendguard.reservation.released\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:30Z\",\"ledger_transaction_id\":\"0197a001-eeee-7000-8000-000000000tx1\",\"llm_call_id\":\"0197a001-dddd-7000-8000-0000000call1\",\"reason_codes\":[\"provider_error\",\"run_cancelled\"],\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"run_id\":\"0197a001-cccc-7000-8000-00000000run1\",\"schema_version\":\"1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.reservation.released\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T08:00:30Z\",\"ledger_transaction_id\":\"0197a001-eeee-7000-8000-000000000tx1\",\"llm_call_id\":\"0197a001-dddd-7000-8000-0000000call1\",\"reason_codes\":[\"provider_error\",\"run_cancelled\"],\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"run_id\":\"0197a001-cccc-7000-8000-00000000run1\",\"schema_version\":\"1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX15",
+      "builder": "buildDecisionDenied",
+      "description": "denied minimal — denied_kind DENY",
+      "inputs": {
+        "decision_id": "0197a001-ffff-7000-8000-000000000d02",
+        "denied_kind": "DENY",
+        "reason_codes": [
+          "BUDGET_EXHAUSTED"
+        ],
+        "event_time": "2026-06-10T08:01:00Z"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.decision.denied\",\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"DENY\",\"event_time\":\"2026-06-10T08:01:00Z\",\"reason_codes\":[\"BUDGET_EXHAUSTED\"],\"schema_version\":\"1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.decision.denied\",\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"DENY\",\"event_time\":\"2026-06-10T08:01:00Z\",\"reason_codes\":[\"BUDGET_EXHAUSTED\"],\"schema_version\":\"1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX16",
+      "builder": "buildDecisionDenied",
+      "description": "denied — denied_kind STOP (run ceiling)",
+      "inputs": {
+        "decision_id": "0197a001-ffff-7000-8000-000000000d02",
+        "denied_kind": "STOP",
+        "reason_codes": [
+          "RUN_CEILING"
+        ],
+        "event_time": "2026-06-10T08:01:00Z"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.decision.denied\",\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"STOP\",\"event_time\":\"2026-06-10T08:01:00Z\",\"reason_codes\":[\"RUN_CEILING\"],\"schema_version\":\"1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.decision.denied\",\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"STOP\",\"event_time\":\"2026-06-10T08:01:00Z\",\"reason_codes\":[\"RUN_CEILING\"],\"schema_version\":\"1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX17",
+      "builder": "buildDecisionDenied",
+      "description": "denied — denied_kind STOP_RUN_PROJECTION",
+      "inputs": {
+        "decision_id": "0197a001-ffff-7000-8000-000000000d02",
+        "denied_kind": "STOP_RUN_PROJECTION",
+        "reason_codes": [
+          "RUN_BUDGET_PROJECTION_EXCEEDED"
+        ],
+        "event_time": "2026-06-10T08:01:00Z"
+      },
+      "timestamp_ms": 1765843200000,
+      "expected_canonical_json": "{\"name\":\"spendguard.decision.denied\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"STOP_RUN_PROJECTION\",\"event_time\":\"2026-06-10T08:01:00Z\",\"reason_codes\":[\"RUN_BUDGET_PROJECTION_EXCEEDED\"],\"schema_version\":\"1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.decision.denied\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"STOP_RUN_PROJECTION\",\"event_time\":\"2026-06-10T08:01:00Z\",\"reason_codes\":[\"RUN_BUDGET_PROJECTION_EXCEEDED\"],\"schema_version\":\"1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX18",
+      "builder": "buildDecisionDenied",
+      "description": "denied — denied_kind SKIP",
+      "inputs": {
+        "decision_id": "0197a001-ffff-7000-8000-000000000d02",
+        "denied_kind": "SKIP",
+        "reason_codes": [
+          "step_budget_skip"
+        ],
+        "event_time": "2026-06-10T08:01:00Z"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.decision.denied\",\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"SKIP\",\"event_time\":\"2026-06-10T08:01:00Z\",\"reason_codes\":[\"step_budget_skip\"],\"schema_version\":\"1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.decision.denied\",\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"SKIP\",\"event_time\":\"2026-06-10T08:01:00Z\",\"reason_codes\":[\"step_budget_skip\"],\"schema_version\":\"1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX19",
+      "builder": "buildDecisionDenied",
+      "description": "denied — denied_kind APPROVAL_REQUIRED with the ASP Draft-01 §2 \"approval_required\" code",
+      "inputs": {
+        "decision_id": "0197a001-ffff-7000-8000-000000000d02",
+        "denied_kind": "APPROVAL_REQUIRED",
+        "reason_codes": [
+          "approval_required",
+          "over_step_threshold"
+        ],
+        "event_time": "2026-06-10T08:01:00Z"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.decision.denied\",\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"APPROVAL_REQUIRED\",\"event_time\":\"2026-06-10T08:01:00Z\",\"reason_codes\":[\"approval_required\",\"over_step_threshold\"],\"schema_version\":\"1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.decision.denied\",\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"APPROVAL_REQUIRED\",\"event_time\":\"2026-06-10T08:01:00Z\",\"reason_codes\":[\"approval_required\",\"over_step_threshold\"],\"schema_version\":\"1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX20",
+      "builder": "buildDecisionDenied",
+      "description": "denied maximal — every optional set incl. unit_id, timestamp",
+      "inputs": {
+        "decision_id": "0197a001-ffff-7000-8000-000000000d02",
+        "denied_kind": "DENY",
+        "reason_codes": [
+          "BUDGET_EXHAUSTED",
+          "rule_hard_cap"
+        ],
+        "event_time": "2026-06-10T08:01:00Z",
+        "matched_rule_ids": [
+          "rule-hard-cap"
+        ],
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "unit_id": "0197a001-2222-7000-8000-0000000unit1",
+        "run_id": "0197a001-cccc-7000-8000-00000000run1",
+        "llm_call_id": "0197a001-dddd-7000-8000-0000000call1"
+      },
+      "timestamp_ms": 1765843200000,
+      "expected_canonical_json": "{\"name\":\"spendguard.decision.denied\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"budget_id\":\"budget-dev-monthly\",\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"DENY\",\"event_time\":\"2026-06-10T08:01:00Z\",\"llm_call_id\":\"0197a001-dddd-7000-8000-0000000call1\",\"matched_rule_ids\":[\"rule-hard-cap\"],\"reason_codes\":[\"BUDGET_EXHAUSTED\",\"rule_hard_cap\"],\"run_id\":\"0197a001-cccc-7000-8000-00000000run1\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.decision.denied\",\"timestamp\":1765843200000,\"type\":\"CUSTOM\",\"value\":{\"budget_id\":\"budget-dev-monthly\",\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"DENY\",\"event_time\":\"2026-06-10T08:01:00Z\",\"llm_call_id\":\"0197a001-dddd-7000-8000-0000000call1\",\"matched_rule_ids\":[\"rule-hard-cap\"],\"reason_codes\":[\"BUDGET_EXHAUSTED\",\"rule_hard_cap\"],\"run_id\":\"0197a001-cccc-7000-8000-00000000run1\",\"schema_version\":\"1\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX21",
+      "builder": "buildDecisionDenied",
+      "description": "denied Unicode — CJK + emoji + astral reason_codes, U+001F matched_rule_ids",
+      "inputs": {
+        "decision_id": "0197a001-ffff-7000-8000-000000000d02",
+        "denied_kind": "DENY",
+        "reason_codes": [
+          "預算已拒絕",
+          "💸",
+          "𐍈"
+        ],
+        "event_time": "2026-06-10T08:01:00Z",
+        "matched_rule_ids": [
+          "rule\u001fctl"
+        ]
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.decision.denied\",\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"DENY\",\"event_time\":\"2026-06-10T08:01:00Z\",\"matched_rule_ids\":[\"rule\\u001fctl\"],\"reason_codes\":[\"預算已拒絕\",\"💸\",\"𐍈\"],\"schema_version\":\"1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.decision.denied\",\"type\":\"CUSTOM\",\"value\":{\"decision\":\"DENY\",\"decision_id\":\"0197a001-ffff-7000-8000-000000000d02\",\"denied_kind\":\"DENY\",\"event_time\":\"2026-06-10T08:01:00Z\",\"matched_rule_ids\":[\"rule\\u001fctl\"],\"reason_codes\":[\"預算已拒絕\",\"💸\",\"𐍈\"],\"schema_version\":\"1\"}}\n\n"
+    },
+    {
+      "id": "AGUI-FX22",
+      "builder": "buildReservationCreated",
+      "description": "created — unit_id present, timestamp absent",
+      "inputs": {
+        "decision_id": "0197a001-aaaa-7000-8000-000000000d01",
+        "reservation_id": "0197a001-bbbb-7000-8000-000000000r01",
+        "budget_id": "budget-dev-monthly",
+        "window_instance_id": "0197a001-0000-7000-8000-00000000win1",
+        "unit": "usd_micros",
+        "amount_atomic_reserved": "1000000",
+        "decision": "ALLOW",
+        "ttl_expires_at": "2026-06-10T08:00:00Z",
+        "event_time": "2026-06-10T07:59:58Z",
+        "unit_id": "0197a001-2222-7000-8000-0000000unit1"
+      },
+      "expected_canonical_json": "{\"name\":\"spendguard.reservation.created\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_reserved\":\"1000000\",\"budget_id\":\"budget-dev-monthly\",\"decision\":\"ALLOW\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T07:59:58Z\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"ttl_expires_at\":\"2026-06-10T08:00:00Z\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}",
+      "expected_sse": "data: {\"name\":\"spendguard.reservation.created\",\"type\":\"CUSTOM\",\"value\":{\"amount_atomic_reserved\":\"1000000\",\"budget_id\":\"budget-dev-monthly\",\"decision\":\"ALLOW\",\"decision_id\":\"0197a001-aaaa-7000-8000-000000000d01\",\"event_time\":\"2026-06-10T07:59:58Z\",\"reservation_id\":\"0197a001-bbbb-7000-8000-000000000r01\",\"schema_version\":\"1\",\"ttl_expires_at\":\"2026-06-10T08:00:00Z\",\"unit\":\"usd_micros\",\"unit_id\":\"0197a001-2222-7000-8000-0000000unit1\",\"window_instance_id\":\"0197a001-0000-7000-8000-00000000win1\"}}\n\n"
+    }
+  ]
+}
