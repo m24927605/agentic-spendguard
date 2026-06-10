@@ -13,7 +13,45 @@ for the cross-language behaviour parity matrix.
 
 ---
 
-## [Unreleased]
+## [0.2.0] — 2026-06-10
+
+D38 Phase-0 reconciliation release (see
+[`docs/specs/coverage/D38_mastra/design.md`](../../docs/specs/coverage/D38_mastra/design.md)
+§9 and the dated 2026-06-10 amendment appended to
+[`docs/specs/coverage/D06_vercel_ai_sdk/design.md`](../../docs/specs/coverage/D06_vercel_ai_sdk/design.md)
+§9), plus the previously unreleased `unitId` addition from
+HARDEN_D05_UR_S02.
+
+### Changed
+
+- **`ai` peer dependency tightened from `>=4.0.0` (unbounded) to
+  `">=4.0.0 <5"`** — peer-dep drift correction per D38 design §9.2.
+  The shipped middleware implements `LanguageModelV1Middleware` with
+  `middlewareVersion: "v1"` — the **AI SDK v4** middleware shape. AI
+  SDK v5+ `wrapLanguageModel` consumes `LanguageModelV2Middleware`,
+  which this artifact does not satisfy; the previous unbounded range
+  advertised compatibility the package does not have. With
+  `">=4.0.0 <5"` the package manager fails fast for `ai@5` / `ai@6`
+  consumers instead of installing a silently incompatible middleware.
+  We explicitly do NOT declare `>=5.0.0 <7`: that would be a worse lie
+  — the v1-shaped middleware can never satisfy v5+'s
+  `LanguageModelV2Middleware` contract.
+- **Mastra users: the recommended Mastra integration is
+  `@spendguard/mastra` (deliverable D38).**
+  Mastra owns its own agent loop since v0.14.0 (Aug 2025), so this
+  middleware covers Mastra only for **explicit AI SDK `LanguageModel`
+  instances** handed to Mastra; the model-router string syntax has no
+  `wrapLanguageModel` injection point and is covered by
+  `@spendguard/mastra`. The `@spendguard/vercel-ai/mastra` subpath
+  alias remains published and functional for explicit-instance users.
+
+### D06 follow-on (not in this release)
+
+- AI SDK v5 (`LanguageModelV2Middleware`) and v6 (`LanguageModelV3`)
+  middleware variants — with their new peer ranges and conformance
+  tests — are the **D06 follow-on deliverable** (out of D38 scope, D38
+  design §9.3). Until that ships, the explicit-instance Mastra
+  coverage above is bounded by the v4 model shape.
 
 ### Added
 
@@ -272,4 +310,5 @@ surface toward the design.md §4 superset when the TS substrate broadens
 `UnitRef`. Every post-0.1.0 addition is backward-compatible (new
 optional fields only) so the v0.1.0 type lock holds.
 
+[0.2.0]: https://github.com/m24927605/agentic-spendguard/releases/tag/vercel-ai-v0.2.0
 [0.1.0]: https://github.com/m24927605/agentic-spendguard/releases/tag/vercel-ai-v0.1.0

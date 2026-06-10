@@ -94,3 +94,17 @@ Race guard: a single `terminal: bool` ensures exactly one of `onFinish` / `onErr
 8. Provider usage flows through `CommitEstimated` (Python Stage 7 mode). ProviderReport is v0.2.
 9. `runIdProvider` wins over `currentRunPlan()`. Neither → `SpendGuardConfigError` on first `transformParams` (fail-fast).
 10. DEGRADE patches raise `MutationApplyFailed` in v0.1 (matches `pydantic_ai.py:599-602`).
+
+## 9. Amendment 2026-06-10 (D38 Phase-0)
+
+This section is APPENDED per [`D38_mastra/design.md`](../D38_mastra/design.md) §9.1 (LOCKED). The original sections are left byte-intact above the amendment (no history rewrite). The title's "(covers Mastra)" stays for historical traceability; this amendment paragraph is the authoritative scope statement.
+
+(a) **Stale transitive-coverage rationale.** The §1/§3-era rationale "Mastra Agents call `generateText`/`streamText` from `ai` underneath" is stale: Mastra owns its own agent loop since v0.14.0 (Aug 2025).
+
+(b) **Mastra coverage re-scoped.** D06's Mastra coverage is re-scoped to **explicit AI SDK `LanguageModel` instances** handed to Mastra (Mastra still consumes `doGenerate`/`doStream` model objects); the model-router string syntax has no `wrapLanguageModel` injection point and is covered by **D38** (`@spendguard/mastra`).
+
+(c) **Subpath alias status.** The `@spendguard/vercel-ai/mastra` subpath alias remains published and functional for explicit-instance users; its docs gain a pointer to `@spendguard/mastra` as the recommended Mastra integration.
+
+(d) **Locked decision #5 corrected.** Locked decision #5 ("AI SDK v5+ only. No v4 back-compat shim.") is corrected to match shipped reality — per D38 design §9.2: shipped 0.x targets the AI SDK v4 line (`LanguageModelV1Middleware`); v5 (`LanguageModelV2Middleware`) and v6 (`LanguageModelV3`) variants are the D06 follow-on. The `ai` peer-dep is accordingly tightened from the unbounded `>=4.0.0` to `">=4.0.0 <5"`, released as `@spendguard/vercel-ai` 0.2.0 with a CHANGELOG entry (D38 design §9.2 records the full justification for deviating from a `>=5.0.0 <7` tightening, which would advertise compatibility the artifact does not have).
+
+Consequence recorded honestly: because Mastra 1.0 consumes `LanguageModelV2`/`V3` instances, D06's *explicit-instance Mastra* coverage is bounded by the v4 model shape until the follow-on ships — one more reason D38 (`@spendguard/mastra`) is the primary Mastra answer.
