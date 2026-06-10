@@ -1,6 +1,6 @@
 import { MessageList } from '@mastra/core/agent';
 import { Processor, ProcessInputStepArgs, ProcessLLMResponseArgs, ProcessOutputStepArgs, ProcessAPIErrorArgs, ProcessLLMRequestArgs } from '@mastra/core/processors';
-import { BudgetClaim, SpendGuardClient } from '@spendguard/sdk';
+import { BudgetClaim, SpendGuardClient, PricingFreeze } from '@spendguard/sdk';
 export { DecisionDenied, SidecarUnavailable, SpendGuardError } from '@spendguard/sdk';
 
 interface ClaimEstimatorInput {
@@ -35,6 +35,22 @@ interface SpendGuardProcessorOptions {
     /** Override the run-id resolution (§6.3). Wins over Mastra-context-derived
      *  and content-derived run ids. */
     runIdProvider?: () => string;
+    /**
+     * Pricing freeze tuple the commit path repeats back to the ledger.
+     * Must match the reservation's freeze: the production sidecar stamps
+     * reservations with the LOADED BUNDLE's pricing freeze, so ledger-backed
+     * commits that send the empty tuple are rejected with
+     * `pricing freeze mismatch` (proved live by the COV_D38_05 demo). The
+     * demos source it from `SPENDGUARD_PRICING_VERSION` +
+     * `SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX` + `SPENDGUARD_FX_RATE_VERSION` +
+     * `SPENDGUARD_UNIT_CONVERSION_VERSION` (same convention as
+     * `sdk/typescript-langchain`'s `pricing` option — D04 parity). Omitting
+     * sends the empty tuple — fine when the reservation also carries the
+     * empty tuple (recipe-style/no-bundle sidecars), rejected otherwise.
+     * Additive optional field per the design.md §6.7 dated amendment #3
+     * (2026-06-11, orchestrator-ratified).
+     */
+    pricing?: PricingFreeze;
 }
 
 declare class SpendGuardProcessor implements Processor {
@@ -102,7 +118,8 @@ declare class SpendGuardProcessor implements Processor {
     /**
      * Emit the settlement `commitEstimated` for a popped reservation —
      * tuple-matched to the reserve (HARDEN_D05_WI): same identity tuple, same
-     * unit, same (empty) pricing freeze.
+     * unit, same pricing freeze (`opts.pricing` stash; empty tuple when the
+     * option is absent — design §6.7 amendment #3).
      *
      *   - SUCCESS + usage: actuals on the wire fields; estimate = token sum
      *     (shipped-D04-handler wire shape, HARDEN_D05_WI — the ledger rejects

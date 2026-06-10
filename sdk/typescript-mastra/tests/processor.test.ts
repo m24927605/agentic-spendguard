@@ -739,7 +739,7 @@ describe("COV_D38_04 estimator threading + settlement details", () => {
     });
   });
 
-  it("pricing threading: the commit repeats the reserve's (empty) pricing-freeze tuple (HARDEN_D05_WI)", async () => {
+  it("pricing threading back-compat: absent `pricing` option → the commit sends the empty freeze tuple (HARDEN_D05_WI; §6.7 amendment #3)", async () => {
     const mock = new MockSpendGuardClient();
     const guard = new SpendGuardProcessor({ client: mock.client, tenantId: "tenant-pricing" });
     const state: Record<string, unknown> = {};
@@ -748,9 +748,55 @@ describe("COV_D38_04 estimator threading + settlement details", () => {
       makeResponseArgs(state, [finishChunk({ inputTokens: 1, outputTokens: 1 })]),
     );
     const commit = mock.commitCalls[0]?.request;
-    // Reserve sends no pricing freeze → the commit's freeze tuple must be
-    // the SAME empty tuple (the commit must tuple-match the reservation).
+    // No `pricing` option → the commit's freeze tuple is the empty tuple
+    // (pre-amendment wire shape — matches no-bundle reservations only).
     expect(commit?.pricing).toEqual({ pricingVersion: "", pricingHash: new Uint8Array(0) });
+  });
+
+  it("pricing threading: `pricing` option rides the inflight entry onto the commit wire verbatim (§6.7 amendment #3; D04 handler.ts:316/377 parity)", async () => {
+    const mock = new MockSpendGuardClient();
+    const pricing = {
+      pricingVersion: "2026-06-01",
+      pricingHash: new Uint8Array([0xde, 0xad, 0xbe, 0xef]),
+      fxRateVersion: "fx-2026-06",
+      unitConversionVersion: "uc-1",
+    };
+    const guard = new SpendGuardProcessor({
+      client: mock.client,
+      tenantId: "tenant-pricing-opt",
+      pricing,
+    });
+    const state: Record<string, unknown> = {};
+    await guard.processInputStep(makeArgs([dbMessage("user", ["ping"])], state));
+    await guard.processLLMResponse(
+      makeResponseArgs(state, [finishChunk({ inputTokens: 1, outputTokens: 1 })]),
+    );
+    const commit = mock.commitCalls[0]?.request;
+    // The sidecar stamps the reservation with the loaded bundle's freeze;
+    // the commit must repeat the SAME tuple (HARDEN_D05_WI — empty-tuple
+    // commits are rejected with `pricing freeze mismatch`, proved live by
+    // the COV_D38_05 demo).
+    expect(commit?.pricing).toEqual(pricing);
+  });
+
+  it("pricing threading: the FAILURE settlement path also repeats the `pricing` option tuple (§6.7 amendment #3)", async () => {
+    const mock = new MockSpendGuardClient();
+    const pricing = { pricingVersion: "2026-06-01", pricingHash: new Uint8Array([7]) };
+    const guard = new SpendGuardProcessor({
+      client: mock.client,
+      tenantId: "tenant-pricing-fail",
+      pricing,
+    });
+    const state: Record<string, unknown> = {};
+    await guard.processInputStep(makeArgs([dbMessage("user", ["ping"])], state));
+    await guard.processLLMResponse(
+      makeResponseArgs(state, [
+        { type: "error", payload: { error: new Error("provider exploded") } },
+      ]),
+    );
+    const commit = mock.commitCalls[0]?.request;
+    expect(commit?.outcomeKind).toBe("FAILURE");
+    expect(commit?.pricing).toEqual(pricing);
   });
 
   it("backstop-commits-for-real (D38_03 R1 minor 3): response-hook settlement suppressed → the OUTPUT runner backstop commits", async () => {

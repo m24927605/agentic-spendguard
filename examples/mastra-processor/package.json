@@ -1,0 +1,23 @@
+{
+  "name": "spendguard-mastra-processor-example",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runnable Node example: SpendGuardProcessor (@spendguard/mastra) mounted on a real @mastra/core Agent via inputProcessors/outputProcessors against the SpendGuard sidecar UDS. Mirrors examples/vercel-ai-mastra/ for the dedicated Mastra adapter (D38).",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "start": "node index.mjs",
+    "start:allow": "SPENDGUARD_DEMO_STEP=allow node index.mjs",
+    "start:deny": "SPENDGUARD_DEMO_STEP=deny node index.mjs",
+    "start:stream": "SPENDGUARD_DEMO_STEP=stream node index.mjs"
+  },
+  "dependencies": {
+    "@mastra/core": "^1.41.0",
+    "@spendguard/mastra": "^0.1.0",
+    "@spendguard/sdk": "^0.5.0",
+    "zod": "^3.25.0"
+  }
+}

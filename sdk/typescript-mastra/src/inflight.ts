@@ -18,7 +18,7 @@
 // lazily compacted out of the global FIFO (see compactIfNeeded) so a
 // long-lived steady state of reserve→commit cycles stays bounded too.
 
-import type { UnitRef } from "@spendguard/sdk";
+import type { PricingFreeze, UnitRef } from "@spendguard/sdk";
 
 export interface InflightEntry {
   decisionId: string;
@@ -35,6 +35,15 @@ export interface InflightEntry {
    * §6.5 dated amendment (2026-06-10, orchestrator-ratified).
    */
   unit: UnitRef;
+  /**
+   * Reserve-time pricing freeze stash (`opts.pricing`) — the commit must
+   * repeat the reservation's freeze tuple (HARDEN_D05_WI; D04 precedent
+   * `pending.pricing = opts.pricing`, handler.ts:316/377). Absent → the
+   * commit sends the empty tuple. Additive field per the design.md §6.7
+   * dated amendment #3 (2026-06-11, orchestrator-ratified — mirrors the
+   * amendment-#1 `unit` field).
+   */
+  pricing?: PricingFreeze;
 }
 
 const DEFAULT_CAPACITY = 10_000;

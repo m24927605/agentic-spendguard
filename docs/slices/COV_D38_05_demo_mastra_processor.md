@@ -11,6 +11,10 @@ Ship the demo-as-quality-gate proof: `examples/mastra-processor/` 3-step runner 
 
 The demo run must be REAL (demo-as-quality-gate memory rule) — reviewer sign-off requires the demo actually executed at head.
 
+### Pre-R1 fix rider (2026-06-11, orchestrator-ratified)
+
+The live demo run proved design §6.6's "commits repeat the same empty pricing tuple" assumption empirically WRONG against the production sidecar: the reservation is stamped with the LOADED BUNDLE's pricing freeze and the adapter's empty-tuple commit is REJECTED (`pricing freeze mismatch: payload pricing tuple differs from original reservation`). The orchestrator ruled the adapter must be fixed in this slice (the initial client-boundary commit wrapper workaround in `examples/mastra-processor/index.mjs` was unacceptable for GA docs and is REMOVED). The fix is design.md §6.7 dated amendment #3: additive `pricing?: PricingFreeze` on `SpendGuardProcessorOptions` (D04 `handler.ts:316/377` parity; env convention `SPENDGUARD_PRICING_VERSION` + `SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX` + FX + UNIT_CONVERSION), reserve-time inflight stash (mirror of amendment #1's `unit`), commit sends `entry.pricing ?? EMPTY_PRICING`. This rider therefore ALSO touches `sdk/typescript-mastra/src/{options,inflight,processor}.ts` + `tests/{lockedSurface,processor}.test.ts` (option key joins the §5 verbatim-surface tests) — a ratified exception to this slice's "no `src/` behavior changes" anti-scope row.
+
 ## Files touched
 
 Exact set per implementation.md §1 / §6 / §8 (row COV_D38_05):
@@ -23,6 +27,12 @@ Exact set per implementation.md §1 / §6 / §8 (row COV_D38_05):
 | `deploy/demo/mastra_processor/docker-compose.yaml` | NEW — counting-stub (verbatim copy per per-overlay isolation convention) + `mastra-processor-runner` on `node:22.13-bookworm-slim` |
 | `deploy/demo/verify_step_mastra_processor.sql` | NEW — `COV_D38_GATE` assertions, structure copied from `verify_step_langchain_ts.sql` |
 | `deploy/demo/Makefile` | `DEMO_MODE=mastra_processor` branches (demo-up echo/compose + run/verify dispatch, mirroring the `vercel_ai_mastra` branches at lines ~163-178 and ~747-751) + NEW target `demo-verify-mastra-processor` (mirrors `demo-verify-langchain-ts`) + `.PHONY` |
+| `sdk/typescript-mastra/src/options.ts` | RIDER (2026-06-11) — additive `pricing?: PricingFreeze` option (§6.7 amendment #3) |
+| `sdk/typescript-mastra/src/inflight.ts` | RIDER — `InflightEntry.pricing` reserve-time stash |
+| `sdk/typescript-mastra/src/processor.ts` | RIDER — stash `opts.pricing` at reserve; commit sends `entry.pricing ?? EMPTY_PRICING` |
+| `sdk/typescript-mastra/tests/lockedSurface.test.ts` | RIDER — `pricing` key joins the TP-04 `Required<>` surface object |
+| `sdk/typescript-mastra/tests/processor.test.ts` | RIDER — pricing threading (SUCCESS + FAILURE) + absent-option back-compat tests |
+| `docs/specs/coverage/D38_mastra/design.md` | RIDER — §6.7 dated append-only amendment #3 |
 
 ## LOCKED surface quoted verbatim — design.md §10 (Demo overlay, name LOCKED)
 
@@ -73,7 +83,7 @@ Demo naming decision — design.md §11.12:
 
 | ID | Question (design §12 verbatim) | Pre-declared alternatives (design §12 verbatim) | PIN (record at impl) |
 |---|---|---|---|
-| V6 | Does the model-router string path honor a base-URL override (env or per-provider config) for `"openai/..."`? | router-string demo / LOCKED explicit-instance fallback + TP-22 router-mount test (§10) | _unpinned_ |
+| V6 | Does the model-router string path honor a base-URL override (env or per-provider config) for `"openai/..."`? | router-string demo / LOCKED explicit-instance fallback + TP-22 router-mount test (§10) | **PINNED NO → LOCKED explicit-instance fallback** (2026-06-11, `@mastra/core` 1.41.0). Empirical probe (node script, chat/completions-only stub on :8765, `OPENAI_BASE_URL=http://127.0.0.1:8765/v1`): the router string resolves via ModelsDevGateway → vendored `createOpenAI({apiKey, headers}).responses(modelId)` (@ai-sdk/openai 2.0.106). `OPENAI_BASE_URL` IS honored for the base URL, BUT `.responses()` speaks the OpenAI **Responses API** — the stub received `POST /v1/responses` (hit log: `["POST /v1/responses"]`) and the call failed `Not Found`. The LOCKED-verbatim counting-stub serves only `/v1/chat/completions`, so the router path cannot reach it. Demo runner uses the LOCKED fallback (explicit counting-stub-backed `LanguageModelV2` instance, `examples/mastra-processor/index.mjs` — full pin block in the file header); the router-path enforcement claim is carried by TP-22 (`tests/mastraIntegration.test.ts`). No third wiring introduced. |
 
 If V6 pins NO: use the LOCKED explicit-instance fallback in the demo runner and record that the router-path enforcement claim is carried by TP-22 (vitest) — do NOT invent a third wiring (e.g. patching Mastra internals).
 
@@ -113,7 +123,7 @@ git diff --stat -- deploy/demo/vercel_ai_mastra deploy/demo/verify_step_vercel_a
 
 ## Anti-scope (review-standards §13 row COV_D38_05)
 
-- Demo/example/Makefile/SQL ONLY — NO `sdk/typescript-mastra/src/` behavior changes.
+- Demo/example/Makefile/SQL ONLY — NO `sdk/typescript-mastra/src/` behavior changes. **EXCEPTION (2026-06-11, orchestrator-ratified pre-R1 fix rider above)**: the design §6.7 amendment-#3 `pricing` option threading (`options.ts` / `inflight.ts` / `processor.ts` + tests).
 - `deploy/demo/vercel_ai_mastra/**` and `deploy/demo/verify_step_vercel_ai_mastra.sql` are READ-ONLY (design §9.4 / A5.8).
 - The `demo-verify-all-d05-ur` master target is NOT touched (HARDEN_D05_UR scope is closed).
 - NO docs page / README content / publish workflow — COV_D38_06.

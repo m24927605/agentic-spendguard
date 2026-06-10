@@ -4,7 +4,7 @@
 # operator's entry point for the demo bring-up flow.
 
 .PHONY: demo-up demo-down demo-logs demo-clean demo-build help \
-        demo-verify-ag-ui-events \
+        demo-verify-ag-ui-events demo-verify-mastra-processor \
         sdk-ts-proto sdk-ts-proto-check
 
 help:
@@ -17,7 +17,7 @@ help:
 	@echo "  make sdk-ts-proto      Regenerate TS SDK proto stubs (sdk/typescript/src/_proto/)"
 	@echo "  make sdk-ts-proto-check  CI determinism gate: fail if generated tree drifts"
 
-demo-up demo-down demo-logs demo-clean demo-build demo-verify-ag-ui-events:
+demo-up demo-down demo-logs demo-clean demo-build demo-verify-ag-ui-events demo-verify-mastra-processor:
 	$(MAKE) -C deploy/demo $@
 
 # Mirrors `make -C sdk/python proto`. Delegates to pnpm so the codegen script

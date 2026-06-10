@@ -196,6 +196,24 @@ else ifeq ($(DEMO_MODE),vercel_ai_mastra)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),mastra_processor)
+	@echo "[demo] DEMO_MODE=mastra_processor → COV_D38 SLICE 5 (@spendguard/mastra dedicated Processor)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/mastra_processor/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               mastra-processor-runner (Node 22.13 running"
+	@echo "[demo]               examples/mastra-processor/index.mjs — Mastra"
+	@echo "[demo]               needs Node >= 22.13; first runner off node:20.10)."
+	@echo "[demo]   Driver issues 3 real @mastra/core Agent calls"
+	@echo "[demo]   (ALLOW + DENY + STREAM) through SpendGuardProcessor"
+	@echo "[demo]   mounted via inputProcessors/outputProcessors, asserts"
+	@echo "[demo]   INV-2 strict-order AND /_count UNCHANGED across the DENY"
+	@echo "[demo]   step (zero provider HTTP — live fail-closed proof)."
+	$(COMPOSE) -f mastra_processor/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub
 else ifeq ($(DEMO_MODE),openai_agents_ts)
 	@echo "[demo] DEMO_MODE=openai_agents_ts → COV_D08 SLICE 5 (OpenAI Agents SDK TS adapter)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -789,6 +807,11 @@ else ifeq ($(DEMO_MODE),vercel_ai_mastra)
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),mastra_processor)
+	@echo "[demo] running mastra-processor-runner (Node 22.13 + @mastra/core Agent + SpendGuardProcessor)..."
+	$(COMPOSE) -f mastra_processor/docker-compose.yaml run --rm mastra-processor-runner
+	@echo "[demo] verifying COV_D38 SLICE 5 (mastra_processor ALLOW + DENY + STREAM)..."
+	@$(MAKE) demo-verify-mastra-processor
 else ifeq ($(DEMO_MODE),openai_agents_ts)
 	@echo "[demo] running openai-agents-runner (Node 20 + @openai/agents Agent + Runner.run)..."
 	$(COMPOSE) -f openai_agents_ts/docker-compose.yaml run --rm openai-agents-runner
@@ -1631,6 +1654,38 @@ demo-verify-vercel-ai-mastra:
 		 END; \$$\$$;"
 	@echo "[demo] COV_D06 SLICE 7 vercel_ai_mastra verification done"
 
+# COV_D38 SLICE 5 (mastra_processor demo) verification. Mirrors the
+# demo-verify-langchain-ts layout (design §10): ledger-DB assertions in
+# verify_step_mastra_processor.sql (COV_D38_GATE prefix: reserve >= 2,
+# commit_estimated >= 2, denied_decision >= 1, INV-2 strict-order,
+# audit decision rows >= 2) + a cross-DB canonical_events check under
+# spendguard_canonical that asserts at least 2 decision rows + 1
+# outcome row landed after the outbox forwarder drained + the
+# outbox-closure check (per design §10 the closure check lives INSIDE
+# this target — gate A5.4 runs it via `make demo-verify-mastra-processor`).
+demo-verify-mastra-processor:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_mastra_processor.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision < 2 THEN \
+		     RAISE EXCEPTION 'COV_D38_GATE: canonical_events.decision >= 2 expected (ALLOW + DENY), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome < 1 THEN \
+		     RAISE EXCEPTION 'COV_D38_GATE: canonical_events.outcome >= 1 expected (ALLOW commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D38 CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@$(MAKE) demo-verify-outbox-closure
+	@echo "[demo] COV_D38 SLICE 5 mastra_processor verification done"
+
 # COV_D29 SLICE 5 (inngest_agent_kit demo) verification. Mirrors the
 # openai_agents_ts layout: ledger-DB assertions in
 # verify_step_inngest_agent_kit.sql + headline retry-dedup gate +
@@ -2222,7 +2277,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture demo-verify-import-manus-fixture demo-import-manus-fixture demo-verify-import-genspark-fixture demo-verify-all-d05-ur demo-verify-ag-ui-events
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-mastra-processor demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture demo-verify-import-manus-fixture demo-import-manus-fixture demo-verify-import-genspark-fixture demo-verify-all-d05-ur demo-verify-ag-ui-events
 
 # HARDEN_D05_UR master verification target — runs all 14+ demos sequentially
 # and asserts each exits 0 with canonical success lines. This target replaces

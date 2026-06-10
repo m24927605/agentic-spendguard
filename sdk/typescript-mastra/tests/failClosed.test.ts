@@ -339,6 +339,8 @@ describe("COV_D38_04 full §7 fail-closed matrix", () => {
       defaultBudgetMicrosCap: 1n,
       claimEstimator: () => [],
       runIdProvider: () => "run-matrix",
+      // §6.7 amendment #3 (2026-06-11): `pricing` is part of the §5 surface.
+      pricing: { pricingVersion: "v-matrix", pricingHash: new Uint8Array([1]) },
     };
     for (const forbidden of ["failOpen", "degradeOnUnavailable", "enforcementMode"]) {
       expect(Object.keys(fullOptions)).not.toContain(forbidden);

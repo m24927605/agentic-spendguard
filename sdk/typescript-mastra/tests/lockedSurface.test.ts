@@ -96,6 +96,8 @@ describe("COV_D38_02 locked surface (TP-01..TP-06)", () => {
       defaultBudgetMicrosCap: 1_000_000n,
       claimEstimator: () => [],
       runIdProvider: () => "run-tp04",
+      // §6.7 amendment #3 (2026-06-11): `pricing` is part of the §5 surface.
+      pricing: { pricingVersion: "v-tp04", pricingHash: new Uint8Array([1]) },
     };
     for (const forbidden of ["failOpen", "degradeOnUnavailable", "enforcementMode"]) {
       expect(Object.keys(fullOptions)).not.toContain(forbidden);

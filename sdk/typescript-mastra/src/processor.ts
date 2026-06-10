@@ -141,8 +141,9 @@ import { type ExtractedUsage, extractUsage } from "./usage.js";
 
 const DEFAULT_ROUTE = "mastra-llm";
 const DEFAULT_UNIT: UnitRef = { unit: "USD_MICROS", denomination: 1 };
-// Reserve sends no pricing freeze, so commits repeat the same empty tuple
-// (HARDEN_D05_WI: the commit's freeze tuple must match the reservation's).
+// Default commit freeze tuple when `opts.pricing` is absent (HARDEN_D05_WI:
+// the commit's freeze tuple must match the reservation's — empty matches
+// only no-bundle reservations; see design §6.7 amendment #3, 2026-06-11).
 const EMPTY_PRICING: PricingFreeze = { pricingVersion: "", pricingHash: new Uint8Array(0) };
 const CHARS_PER_TOKEN_HEURISTIC = 4;
 const DEFAULT_MICROS_PER_TOKEN = 1_000n;
@@ -278,6 +279,11 @@ export class SpendGuardProcessor implements Processor {
       // a custom claimEstimator may reserve under a different unit/unitId,
       // and the commit must tuple-match the reservation (HARDEN_D05_WI).
       unit: claims[0]?.unit ?? this.buildUnit(),
+      // Reserve-time pricing-freeze stash (design §6.7 amendment #3,
+      // 2026-06-11): the production sidecar stamps the reservation with the
+      // loaded bundle's freeze, and the commit must repeat it
+      // (HARDEN_D05_WI; D04 `pending.pricing = opts.pricing` precedent).
+      ...(this.opts.pricing !== undefined ? { pricing: this.opts.pricing } : {}),
     });
     // Stash the §6.5 inflight key for the commit hooks (V4 pin header):
     // the commit hooks expose no step messages, so they recover the key
@@ -413,7 +419,8 @@ export class SpendGuardProcessor implements Processor {
   /**
    * Emit the settlement `commitEstimated` for a popped reservation —
    * tuple-matched to the reserve (HARDEN_D05_WI): same identity tuple, same
-   * unit, same (empty) pricing freeze.
+   * unit, same pricing freeze (`opts.pricing` stash; empty tuple when the
+   * option is absent — design §6.7 amendment #3).
    *
    *   - SUCCESS + usage: actuals on the wire fields; estimate = token sum
    *     (shipped-D04-handler wire shape, HARDEN_D05_WI — the ledger rejects
@@ -453,7 +460,13 @@ export class SpendGuardProcessor implements Processor {
       // custom claimEstimator's unit/unitId tuple-matches on the commit
       // (HARDEN_D05_WI; D04 `pending.unit = projectedClaim.unit` precedent).
       unit: entry.unit,
-      pricing: EMPTY_PRICING,
+      // Reserve-time pricing-freeze reuse (design §6.7 amendment #3,
+      // 2026-06-11): repeat the stashed `opts.pricing` tuple — the sidecar
+      // stamps reservations with the loaded bundle's freeze and rejects
+      // empty-tuple commits with `pricing freeze mismatch` (proved live by
+      // the COV_D38_05 demo). Absent option → empty tuple (back-compat:
+      // matches no-bundle reservations only).
+      pricing: entry.pricing ?? EMPTY_PRICING,
       providerEventId:
         outcome.outcomeKind === "SUCCESS" ? (outcome.usage?.providerEventId ?? "") : "",
       ...(outcome.outcomeKind === "SUCCESS"
