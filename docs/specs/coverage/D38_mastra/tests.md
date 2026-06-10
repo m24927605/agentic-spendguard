@@ -54,7 +54,7 @@ Numbered as **TP-XX** (unit/integration, vitest, no live network) and **TA-XX** 
 | # | Test | Verifies |
 |---|---|---|
 | TP-23 | Happy path: reserve → stub model responds → exactly ONE `commitEstimated` with `outcome="SUCCESS"`, `outcomeKind="SUCCESS"`, `decisionId`/`reservationId` from the reserve outcome | lifecycle correlation |
-| TP-24 | Usage exposed (V4 shape, camelCase) → `actualInputTokensWire`/`actualOutputTokensWire` carry it; `estimatedAmountAtomic="0"` | actuals path |
+| TP-24 | Usage exposed (V4 shape, camelCase) → `actualInputTokensWire`/`actualOutputTokensWire` carry it; `estimatedAmountAtomic` = input+output token SUM (D04/HARDEN_D05_WI wire shape — the ledger rejects 0; corrected per design.md §6.7 amendment 2026-06-10, was `"0"`) | actuals path |
 | TP-25 | Usage exposed snake_case → same as TP-24 | cross-shape parity (D04/D06 discipline) |
 | TP-26 | Usage ABSENT → commit carries `estimatedAmountAtomic === projectedAmountAtomic` from the reserve-time inflight entry; no actuals fields | §6.6 LOCKED fallback |
 | TP-27 | Provider error mid-step → FAILURE commit (`outcome="PROVIDER_ERROR"`, `outcomeKind="FAILURE"`, `actualErrorMessage`) when the V7 signal exists; if V7 pinned "no error hook", test asserts NO success commit fires and the inflight entry remains for TTL settlement | failure settlement (design §6.1) |

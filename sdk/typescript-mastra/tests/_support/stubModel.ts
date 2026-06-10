@@ -81,6 +81,31 @@ export class RecordingStubModel {
 }
 
 /**
+ * Failing variant for TP-27 (provider error → FAILURE settlement): every
+ * provider-boundary crossing throws. Counts crossings like
+ * `RecordingStubModel` so tests can assert the call DID reach the provider
+ * (the reserve passed) before the error surfaced.
+ */
+export class ThrowingStubModel extends RecordingStubModel {
+  readonly errorMessage: string;
+
+  constructor(errorMessage = "stub provider boom", options: StubModelOptions = {}) {
+    super(options);
+    this.errorMessage = errorMessage;
+  }
+
+  override async doGenerate(_options: unknown): Promise<unknown> {
+    this.doGenerateCalls += 1;
+    throw new Error(this.errorMessage);
+  }
+
+  override async doStream(_options: unknown): Promise<unknown> {
+    this.doStreamCalls += 1;
+    throw new Error(this.errorMessage);
+  }
+}
+
+/**
  * Tool-calling variant for TP-12 (1 tool call → 2 reserves): the FIRST step
  * emits a `tool-call` (forcing a tool-call continuation step), every later
  * step emits plain text. Counts crossings like `RecordingStubModel`.

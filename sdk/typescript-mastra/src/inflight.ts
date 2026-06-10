@@ -18,6 +18,8 @@
 // lazily compacted out of the global FIFO (see compactIfNeeded) so a
 // long-lived steady state of reserve→commit cycles stays bounded too.
 
+import type { UnitRef } from "@spendguard/sdk";
+
 export interface InflightEntry {
   decisionId: string;
   reservationId: string;
@@ -26,6 +28,13 @@ export interface InflightEntry {
   idempotencyKey: string;
   /** Reserve-time projection — §6.6 commit-estimation fallback. */
   projectedAmountAtomic: string;
+  /**
+   * Reserve-time unit (the projected claims' `claim[0].unit`) — the commit
+   * must tuple-match the reservation (HARDEN_D05_WI; D04 precedent
+   * `pending.unit = projectedClaim.unit`). Additive field per the design.md
+   * §6.5 dated amendment (2026-06-10, orchestrator-ratified).
+   */
+  unit: UnitRef;
 }
 
 const DEFAULT_CAPACITY = 10_000;

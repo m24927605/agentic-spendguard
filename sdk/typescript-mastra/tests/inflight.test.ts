@@ -15,6 +15,7 @@ function entry(overrides: Partial<InflightEntry> & { llmCallId: string }): Infli
     llmCallId: overrides.llmCallId,
     idempotencyKey: overrides.idempotencyKey ?? `sg-${overrides.llmCallId}`,
     projectedAmountAtomic: overrides.projectedAmountAtomic ?? "1000",
+    unit: overrides.unit ?? { unit: "USD_MICROS", denomination: 1 },
   };
 }
 

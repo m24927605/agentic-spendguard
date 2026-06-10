@@ -21,6 +21,9 @@ Exact set per implementation.md §8 (row COV_D38_03):
 | `sdk/typescript-mastra/src/usage.ts` | NEW — `extractUsage` per implementation.md §3.5 (V4-pinned fields; camelCase + snake_case; `undefined`, not zeros, when absent) |
 | `sdk/typescript-mastra/tests/processor.test.ts` | extend with TP-23..TP-31 (commit/failure/streaming) |
 | `sdk/typescript-mastra/tests/usage.test.ts` | NEW — usage-shape tests (TP-24..TP-26 support) |
+| `sdk/typescript-mastra/tests/_support/stubModel.ts` | recording/throwing/tool-calling stub models for the real-Agent loop tests (TP-23/27b/28/30/31) |
+| `sdk/typescript-mastra/src/inflight.ts` | R2 — additive `InflightEntry.unit` (reserve-time unit; design §6.7 amendment 2026-06-10) |
+| `sdk/typescript-mastra/tests/inflight.test.ts` | R2 — entry fixture carries the new `unit` field |
 
 ## LOCKED surface quoted verbatim
 
@@ -38,6 +41,8 @@ Exact set per implementation.md §8 (row COV_D38_03):
 
 > - When the response/output hook exposes provider usage (Mastra 1.x normalizes nested AI SDK v6 usage to flat fields — `[VERIFY-AT-IMPL: V4]` pins the exact field names), commit with `estimatedAmountAtomic: "0"`, `actualInputTokensWire` / `actualOutputTokensWire` from usage — identical wire shape to the shipped D04 handler.
 > - **When usage is NOT available at the hook** (LOCKED fallback): commit with `estimatedAmountAtomic = projectedAmountAtomic` carried in the inflight entry (the §6.4 default-estimator projection) and actuals omitted. The reservation settles at the estimate; the audit chain records that no provider actuals were observed.
+
+> **NOTE (append-only, 2026-06-10, orchestrator-ratified)**: the `estimatedAmountAtomic: "0"` literal in the quoted first bullet is a ratified erratum — the D04/HARDEN_D05_WI wire shape controls (SUCCESS-with-usage estimate = input+output token sum; the ledger rejects 0; usage-absent fallback unchanged). See design.md §6.7 amendment #2. The same amendment (#1) adds the reserve-time `unit` to the §6.5 inflight entry so commits tuple-match the reservation under a custom `claimEstimator` (R1 Major 1). TP-24 below predates the erratum; the implemented assertion is the token-sum estimate.
 
 ### Streaming posture — design.md §8 (LOCKED — D04/D24 parity)
 
@@ -69,8 +74,8 @@ Failure settlement decision — design.md §11.9:
 
 | ID | Question (design §12 verbatim) | Pre-declared alternatives (design §12 verbatim) | PIN (record at impl) |
 |---|---|---|---|
-| V4 | Which usage fields (flat normalized) does `processLLMResponse` / `processOutputStep` expose, and which hook fires last on streamed steps? | usage actuals / LOCKED estimated-amount fallback (§6.6); backstop-commit ordering (§6.1) | _unpinned_ |
-| V7 | Does the Processor surface expose an error/abort signal usable for the FAILURE commit? | FAILURE commit at the signal / TTL-sweep-only settlement (§6.1) | _unpinned_ |
+| V4 | Which usage fields (flat normalized) does `processLLMResponse` / `processOutputStep` expose, and which hook fires last on streamed steps? | usage actuals / LOCKED estimated-amount fallback (§6.6); backstop-commit ordering (§6.1) | **PINNED (COV_D38_03, `@mastra/core` 1.41.0)** — usage actuals selected. Flat fields: camelCase `inputTokens`/`outputTokens` (`LanguageModelUsage = LanguageModelV2Usage & {...}`; the loop's `normalizeUsage()` flattens AI SDK v6/V3 nested usage onto them, as §6.6 predicted; both fields `number \| undefined`). Exposure: `processOutputStep` carries flat `args.usage` directly; `processLLMResponse` carries NO flat usage field — usage rides the stripped `finish` chunk's `payload.output.usage` in `args.chunks` (provider response id at a `response-metadata` chunk's `payload.id`). Ordering on streamed steps: `processLLMResponse` (input-processor runner; installed .d.ts: "called after the LLM step completes (or a cached response is replayed)", with `fromCache: boolean` flagging replays) fires FIRST, `processOutputStep` (output-processor runner) fires LAST → `processOutputStep` is the §6.1 backstop; it only fires for `outputProcessors`-mounted instances. Key recovery at the commit hooks (V3 corollary): hooks expose no step messages, so the reserve hook stashes the §6.5 runId key in the per-request per-processor `state` bag (one `processorStates` Map is threaded through every runner the loop builds for a request); `runIdProvider` is the secondary source. Full pin block: `sdk/typescript-mastra/src/usage.ts` + `src/processor.ts` headers. |
+| V7 | Does the Processor surface expose an error/abort signal usable for the FAILURE commit? | FAILURE commit at the signal / TTL-sweep-only settlement (§6.1) | **PINNED (COV_D38_03, `@mastra/core` 1.41.0)** — FAILURE commit at the signal. TWO signals, deduped by the FIFO inflight pop: (1) PRIMARY (empirically proven, TP-27b): model-execution errors arrive as an `error` CHUNK on `processLLMResponse`'s `args.chunks` (`{ type: "error", payload: { error } }`, `payload.error.message` preserved) — a throwing model yields chunks `["step-start","error"]` at the response hook, which emits the FAILURE commit before Mastra rethrows; (2) SECONDARY: the installed `processAPIError` hook (non-retryable API rejections; `runProcessAPIError` iterates input+output+error processors so the `inputProcessors` mount receives it; empirically NOT invoked for plain model throws). Mid-stream consumer abort invokes neither signal → sidecar TTL sweep is the LOCKED settlement backstop (§6.1 last row / §8). NO cancel-before-dispatch hook exists → NO `client.release()` path (§11.9). |
 
 ## Test/verification plan (tests.md §4: TP-23..TP-31)
 
@@ -102,6 +107,10 @@ pnpm -C sdk/typescript-mastra run test tests/processor.test.ts tests/usage.test.
 - NO weakening of the reserve path: the commit-path swallow is the ONLY swallow, post-dispatch only (review-standards §2.6).
 - NO auxiliary-LLM coverage (memory titles, ModerationProcessor classifier, scorers) and NO AI SDK v6 V3 middleware (design §4, §9.3).
 - `deploy/demo/vercel_ai_mastra/**` + `verify_step_vercel_ai_mastra.sql` byte-untouched (design §9.4).
+
+## Residual notes
+
+- backstop-commits-for-real test (output-mounted-only / cached-replay settlement via `processOutputStep`) deferred to COV_D38_04 (R1 minor 3).
 
 ## Backlinks
 

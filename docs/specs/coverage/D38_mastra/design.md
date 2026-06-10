@@ -228,6 +228,13 @@ Mirrors D04/D06 exactly: `estimatedTokens = max(1, ceil(stepText.length / 4))`, 
 - When the response/output hook exposes provider usage (Mastra 1.x normalizes nested AI SDK v6 usage to flat fields — `[VERIFY-AT-IMPL: V4]` pins the exact field names), commit with `estimatedAmountAtomic: "0"`, `actualInputTokensWire` / `actualOutputTokensWire` from usage — identical wire shape to the shipped D04 handler.
 - **When usage is NOT available at the hook** (LOCKED fallback): commit with `estimatedAmountAtomic = projectedAmountAtomic` carried in the inflight entry (the §6.4 default-estimator projection) and actuals omitted. The reservation settles at the estimate; the audit chain records that no provider actuals were observed.
 
+### 6.7 Dated amendments (append-only)
+
+**2026-06-10 — orchestrator-ratified (COV_D38_03 R1; HARDEN_D05_WI):**
+
+1. **§6.5 entry shape — ADDITIVE `unit` field.** The inflight entry carries the reserve-time unit: `{ decisionId, reservationId, runId, llmCallId, idempotencyKey, projectedAmountAtomic, unit }`, where `unit` is the projected claims' `claim[0].unit`. Rationale: commits must tuple-match the reservation (repo-wide HARDEN_D05_WI invariant; D04 precedent `pending.unit = projectedClaim.unit`, `sdk/typescript-langchain/src/handler.ts:315/373`). A custom `claimEstimator` may reserve under a different unit/unitId than the §6.4 default projection; `settleCommit` therefore reuses `entry.unit` rather than re-deriving the default-options unit. §6.5 above is NOT rewritten — this subsection amends it (COV_D38_03 R1 Major 1).
+2. **§6.6 erratum — the `estimatedAmountAtomic: "0"` literal is WRONG** (LOCKED-DISPUTE ratified by R1 + orchestrator). §6.6 simultaneously locks "identical wire shape to the shipped D04 handler", and the shipped D04/HARDEN_D05_WI wire shape on SUCCESS-with-usage is `estimatedAmountAtomic` = input+output token SUM (the ledger rejects `estimated_amount_atomic = 0` bookings); when usage is absent, the reserve-time projection fallback in the second bullet applies unchanged. The D04/HARDEN_D05_WI convention controls; read §6.6's first bullet with estimate = usage sum, not `"0"`. `tests.md` TP-24 is corrected to match.
+
 ## 7. Error taxonomy + fail-closed semantics (LOCKED)
 
 | Condition | Error surfaced | Where | Step outcome |
