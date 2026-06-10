@@ -4,6 +4,23 @@
 
 ### Added
 
+- **`spendguard.integrations.ag_ui`** — AG-UI spend-event family
+  (coverage deliverable D39, slice 2). **Display-only**: the events are a
+  presentation surface — SpendGuard enforcement happens in the SpendGuard
+  adapters and sidecar before the provider call; the events report
+  decisions already made and can neither grant nor deny spend. Pure
+  builders for the five `spendguard.*` AG-UI `CUSTOM` events:
+  `spendguard.budget.snapshot`, `spendguard.reservation.created`,
+  `spendguard.reservation.committed`, `spendguard.reservation.released`,
+  and `spendguard.decision.denied` — the 1:1 snake_case mirror of
+  `@spendguard/ag-ui` (npm). Includes `canonical_event_json` (locked
+  sorted-keys/UTF-8/no-whitespace rule; byte-identical to the TS output
+  for identical inputs, proven against the frozen
+  `sdk/fixtures/cross-language/ag_ui_v1.json` corpus) and `encode_sse`.
+  Zero runtime deps beyond stdlib; new optional extra
+  `ag-ui = ["ag-ui-protocol>=0.1.19,<0.2"]` exists only for users who
+  validate events through the upstream pydantic models. Events are
+  unsigned UI hints — never the audit chain.
 - **`spendguard.integrations.litellm_sdk_shim`** — LiteLLM SDK
   monkey-patch shim that closes [LiteLLM Issue #8842](https://github.com/BerriAI/litellm/issues/8842).
   Calling `install_shim(SpendGuardShimOptions(...))` once at boot

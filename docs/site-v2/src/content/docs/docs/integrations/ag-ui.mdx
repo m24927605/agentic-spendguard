@@ -1,0 +1,279 @@
+---
+title: "AG-UI spend events (display-only)"
+description: >-
+  Render SpendGuard budget state, the reservation lifecycle, and deny reasons
+  in any AG-UI frontend via the spendguard.* CUSTOM event family — pure
+  builders in @spendguard/ag-ui (npm) and spendguard.integrations.ag_ui
+  (PyPI). Display-only: enforcement stays in the SpendGuard adapters and
+  sidecar.
+---
+
+> **Display-only.** AG-UI events are a presentation surface. SpendGuard
+> enforcement happens in the SpendGuard adapters and sidecar before the
+> provider call; these events report decisions already made and can neither
+> grant nor deny spend.
+
+[AG-UI](https://github.com/ag-ui-protocol/ag-ui) is the event-based protocol
+between an agent backend and its frontend, with first-party integrations
+across LangGraph, CrewAI, Microsoft Agent Framework, Google ADK, AWS Strands,
+Mastra, Pydantic AI, Agno, LlamaIndex, and AG2. A SpendGuard-guarded agent
+enforces budgets at the sidecar — but until now the human watching the
+frontend saw nothing: a denied call surfaced as an opaque agent error.
+
+The `spendguard.*` event family closes that presentation gap. It rides
+AG-UI's sanctioned extension slot (`CUSTOM` events: `name` + `value`) and
+reuses the [ASP Draft-01](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/agent-spend-protocol/draft-01.md)
+field vocabulary verbatim wherever a concept overlaps.
+
+```text
+            (enforcement plane — unchanged)
+agent code ──► SpendGuard adapter ──► sidecar UDS gRPC ──► ledger + audit chain
+                    │
+                    │  DecisionOutcome / CommitEstimated ack / DecisionDenied err
+                    ▼
+            (presentation plane — this page)
+            build*() pure builders ──► AG-UI CUSTOM event objects
+                    │
+                    ├──► encodeSse(event) ──► SSE frame ──► AG-UI frontend
+                    └──► any AgUiEmit transport the host app already has
+```
+
+These events are **unsigned UI hints**. They are NOT the SpendGuard audit
+chain and MUST NOT be treated as audit records — the signed audit chain
+lives in the sidecar/ledger.
+
+## Install
+
+```bash
+npm install @spendguard/ag-ui          # TypeScript / JavaScript
+pip install spendguard-sdk             # Python — spendguard.integrations.ag_ui
+```
+
+Both packages have **zero runtime dependencies** and never import AG-UI
+libraries at runtime. `@ag-ui/core` is an optional peer (TS); the
+`spendguard-sdk[ag-ui]` extra pulls `ag-ui-protocol` only for users who
+validate events through its pydantic models.
+
+## The five events
+
+| Builder (TS / Python) | AG-UI CUSTOM `name` | Emitted when |
+|---|---|---|
+| `buildBudgetSnapshot` / `build_budget_snapshot` | `spendguard.budget.snapshot` | Host app wants to render current budget state (run start, periodic refresh) |
+| `buildReservationCreated` / `build_reservation_created` | `spendguard.reservation.created` | Sidecar `reserve` returned ALLOW / ALLOW_WITH_CAPS (SpendGuard `CONTINUE` / `DEGRADE`) |
+| `buildReservationCommitted` / `build_reservation_committed` | `spendguard.reservation.committed` | `commitEstimated` acked |
+| `buildReservationReleased` / `build_reservation_released` | `spendguard.reservation.released` | `release` acked (abort / timeout / cancel path) |
+| `buildDecisionDenied` / `build_decision_denied` | `spendguard.decision.denied` | Sidecar denied the call pre-dispatch (any deny-class outcome) |
+
+Every payload carries `schema_version: "1"`. One example per event:
+
+### `spendguard.budget.snapshot`
+
+<div is:raw>
+
+```json
+{
+  "type": "CUSTOM",
+  "name": "spendguard.budget.snapshot",
+  "value": {
+    "schema_version": "1",
+    "budget_id": "44444444-4444-4444-8444-444444444444",
+    "window_instance_id": "55555555-5555-4555-8555-555555555555",
+    "unit": "usd_micros",
+    "unit_id": "66666666-6666-4666-8666-666666666666",
+    "remaining_atomic": "500",
+    "reserved_atomic": "0",
+    "spent_atomic": "0",
+    "as_of": "2026-06-10T07:59:58Z"
+  }
+}
+```
+
+</div>
+
+### `spendguard.reservation.created`
+
+<div is:raw>
+
+```json
+{
+  "type": "CUSTOM",
+  "name": "spendguard.reservation.created",
+  "value": {
+    "schema_version": "1",
+    "decision_id": "018f4a3a-d971-7c14-91fe-d014de71aca0",
+    "reservation_id": "018f4a3a-e2b0-7d21-8a44-2c9f51c0be11",
+    "budget_id": "44444444-4444-4444-8444-444444444444",
+    "window_instance_id": "55555555-5555-4555-8555-555555555555",
+    "unit": "usd_micros",
+    "unit_id": "66666666-6666-4666-8666-666666666666",
+    "amount_atomic_reserved": "5000",
+    "decision": "ALLOW",
+    "ttl_expires_at": "2026-06-10T08:09:58Z",
+    "run_id": "018f4a3a-d100-7aaa-8bbb-0123456789ab",
+    "llm_call_id": "018f4a3a-d200-7ccc-8ddd-0123456789ab",
+    "event_time": "2026-06-10T07:59:58Z"
+  }
+}
+```
+
+</div>
+
+### `spendguard.reservation.committed`
+
+<div is:raw>
+
+```json
+{
+  "type": "CUSTOM",
+  "name": "spendguard.reservation.committed",
+  "value": {
+    "schema_version": "1",
+    "decision_id": "018f4a3a-d971-7c14-91fe-d014de71aca0",
+    "reservation_id": "018f4a3a-e2b0-7d21-8a44-2c9f51c0be11",
+    "budget_id": "44444444-4444-4444-8444-444444444444",
+    "window_instance_id": "55555555-5555-4555-8555-555555555555",
+    "unit": "usd_micros",
+    "unit_id": "66666666-6666-4666-8666-666666666666",
+    "amount_atomic_estimated": "5000",
+    "outcome": "SUCCESS",
+    "event_time": "2026-06-10T08:00:01Z"
+  }
+}
+```
+
+</div>
+
+`amount_atomic_estimated` is a documented SpendGuard delta from ASP:
+SpendGuard's commit lane today is `CommitEstimated`, and the field is named
+distinctly from ASP's `amount_atomic_observed` so no consumer mistakes it
+for provider-reported usage.
+
+### `spendguard.reservation.released`
+
+<div is:raw>
+
+```json
+{
+  "type": "CUSTOM",
+  "name": "spendguard.reservation.released",
+  "value": {
+    "schema_version": "1",
+    "reservation_id": "018f4a3a-e2b0-7d21-8a44-2c9f51c0be11",
+    "reason_codes": ["client_timeout"],
+    "ledger_transaction_id": "018f4a3a-f000-7eee-8fff-0123456789ab",
+    "event_time": "2026-06-10T08:00:31Z"
+  }
+}
+```
+
+</div>
+
+### `spendguard.decision.denied`
+
+<div is:raw>
+
+```json
+{
+  "type": "CUSTOM",
+  "name": "spendguard.decision.denied",
+  "value": {
+    "schema_version": "1",
+    "decision_id": "018f4a3b-0a00-7111-8222-0123456789ab",
+    "decision": "DENY",
+    "denied_kind": "STOP",
+    "reason_codes": ["BUDGET_EXHAUSTED"],
+    "budget_id": "44444444-4444-4444-8444-444444444444",
+    "unit": "usd_micros",
+    "event_time": "2026-06-10T08:00:05Z"
+  }
+}
+```
+
+</div>
+
+`decision` is always the ASP literal `"DENY"`; `denied_kind` carries the
+finer-grained SpendGuard taxonomy (`DENY` / `STOP` / `STOP_RUN_PROJECTION` /
+`SKIP` / `APPROVAL_REQUIRED`).
+
+## TypeScript quickstart
+
+```ts
+import { buildReservationCreated, encodeSse } from "@spendguard/ag-ui";
+
+// `outcome` is the DecisionOutcome your SpendGuard adapter already got back
+// from `client.reserve(...)` — the builders never mint IDs, never read
+// clocks, never touch the network.
+const event = buildReservationCreated(
+  {
+    decisionId: outcome.decisionId,
+    reservationId: outcome.reservationIds[0]!,
+    budgetId,
+    windowInstanceId,
+    unit: "usd_micros",
+    unitId,
+    amountAtomicReserved: "5000",
+    decision: outcome.decision === "DEGRADE" ? "ALLOW_WITH_CAPS" : "ALLOW",
+    ttlExpiresAt: new Date(outcome.ttlExpiresAtSeconds * 1000).toISOString(),
+    eventTime: new Date().toISOString(),
+  },
+  { timestampMs: Date.now() },
+);
+
+const frame = encodeSse(event); // "data: {...canonical JSON...}\n\n"
+```
+
+## Python quickstart
+
+```python
+from spendguard.integrations.ag_ui import (
+    ReservationCreatedInput, build_reservation_created, encode_sse,
+)
+
+evt = build_reservation_created(ReservationCreatedInput(
+    decision_id=outcome.decision_id,
+    reservation_id=outcome.reservation_ids[0],
+    budget_id=budget_id, window_instance_id=window_instance_id,
+    unit="usd_micros", unit_id=unit_id,
+    amount_atomic_reserved="5000",
+    decision="ALLOW", ttl_expires_at="2026-06-10T08:00:00Z",
+    event_time="2026-06-10T07:59:58Z",
+))
+sse_frame = encode_sse(evt)   # hand to your AG-UI transport
+```
+
+For identical inputs the TS and Python canonical serializations are
+**byte-identical** — proven against the shared frozen fixture corpus
+`sdk/fixtures/cross-language/ag_ui_v1.json`.
+
+## ASP Draft-01 mapping
+
+Payload keys reuse the ASP Draft-01 vocabulary verbatim wherever the concept
+overlaps (`budget_id`, `window_instance_id`, `unit`, `*_atomic` decimal
+strings, `decision_id`, `reservation_id`, `reason_codes`, `event_time`,
+`ttl_expires_at`, the `ALLOW`/`ALLOW_WITH_CAPS`/`DENY` decision enum). The
+full mapping table lives in the locked spec:
+[`docs/specs/coverage/D39_ag_ui/design.md` §5.8](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D39_ag_ui/design.md).
+
+## Run the demo
+
+```bash
+make demo-up DEMO_MODE=ag_ui_events && make demo-verify-ag-ui-events
+```
+
+A Node runner drives a REAL sidecar run (handshake → budget snapshot → ALLOW
+reserve/commit against a counting provider stub → an over-cap reserve the
+**sidecar** denies pre-dispatch) and replays the recorded `spendguard.*`
+frames over SSE. The verify gate asserts the exact 4-frame sequence,
+canonical bytes, and that the `reservation_id` in the event stream exists in
+the real ledger — display events provably describe real ledger state. The
+runner also proves the provider stub's hit counter did not move on the
+denied call: enforcement happened at the sidecar; the AG-UI event merely
+reports it.
+
+## 0.x churn note
+
+AG-UI is entirely 0.x (fast release cadence, no spec-stability policy). The
+SpendGuard packages own their event types — structurally matching the AG-UI
+`CUSTOM` shape and compat-tested against exactly pinned AG-UI releases in
+CI. If an AG-UI release moves, the SpendGuard wire shape does not: consumers
+key off `schema_version` in every payload.

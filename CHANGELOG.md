@@ -6,6 +6,18 @@ Version tags follow `vYYYY.MM.DD-ga.N` for GA release candidates and GA releases
 
 ## Unreleased
 
+- **AG-UI spend-event family (D39, display-only)** — new `@spendguard/ag-ui`
+  npm package + `spendguard.integrations.ag_ui` Python module: pure builders
+  for the five `spendguard.*` AG-UI `CUSTOM` events
+  (`spendguard.budget.snapshot`, `spendguard.reservation.created`,
+  `spendguard.reservation.committed`, `spendguard.reservation.released`,
+  `spendguard.decision.denied`) with a locked canonical-JSON serializer
+  (byte-identical TS↔Python via the frozen `ag_ui_v1.json` corpus) and an
+  SSE encode helper. Display-only: the events report decisions the
+  SpendGuard adapters + sidecar already made and can neither grant nor deny
+  spend. New `DEMO_MODE=ag_ui_events` + `make demo-verify-ag-ui-events`
+  prove the family end-to-end against a real sidecar run (exact 4-frame SSE
+  gate + SSE↔ledger reservation join + ledger SQL gates).
 - GA readiness phase started after HARDEN_08.
 - Release bundle tooling added in GA_01.
 - Operator upgrade warning: before rolling a SLICE_02+ sidecar, grep

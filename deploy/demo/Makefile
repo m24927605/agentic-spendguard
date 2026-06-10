@@ -7,8 +7,10 @@
 #   make demo-clean   Remove built images.
 #
 # Demo modes: set DEMO_MODE before running.
-#   DEMO_MODE=agent     (default) full Pydantic-AI Agent.run() with Mock LLM
-#   DEMO_MODE=decision  handshake + RequestDecision + ConfirmPublishOutcome only
+#   DEMO_MODE=agent         (default) full Pydantic-AI Agent.run() with Mock LLM
+#   DEMO_MODE=decision      handshake + RequestDecision + ConfirmPublishOutcome only
+#   DEMO_MODE=ag_ui_events  COV_D39: spendguard.* AG-UI display events over SSE
+#                           (real sidecar run; verify with demo-verify-ag-ui-events)
 
 COMPOSE := docker compose -f compose.yaml
 # Default to "decision" mode (Handshake + RequestDecision +
@@ -160,6 +162,23 @@ else ifeq ($(DEMO_MODE),langchain_ts)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),ag_ui_events)
+	@echo "[demo] DEMO_MODE=ag_ui_events → COV_D39 SLICE 3 (AG-UI spend-event family, display-only)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/ag_ui_events/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               ag-ui-runner (Node 20 running"
+	@echo "[demo]               examples/ag-ui-events/index.mjs, then serving"
+	@echo "[demo]               the recorded SSE frames on :8077)."
+	@echo "[demo]   Runner drives a REAL sidecar run (snapshot + ALLOW"
+	@echo "[demo]   reserve/commit + DENY) and renders each decision as a"
+	@echo "[demo]   spendguard.* AG-UI CUSTOM event. Display-only: the deny is"
+	@echo "[demo]   enforced by the sidecar pre-dispatch; AG-UI just reports it."
+	$(COMPOSE) -f ag_ui_events/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub ag-ui-runner
 else ifeq ($(DEMO_MODE),vercel_ai_mastra)
 	@echo "[demo] DEMO_MODE=vercel_ai_mastra → COV_D06 SLICE 7 (Vercel AI SDK middleware, covers Mastra)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -744,6 +763,24 @@ else ifeq ($(DEMO_MODE),langchain_ts)
 	@echo "[demo] waiting 5s for outbox forwarder to drain audit chain..."
 	@sleep 5
 	@$(MAKE) demo-verify-outbox-closure
+else ifeq ($(DEMO_MODE),ag_ui_events)
+	@echo "[demo] waiting for ag-ui-runner health (snapshot + ALLOW + DENY steps, then SSE replay server)..."
+	@for i in $$(seq 1 90); do \
+	  st=$$(docker inspect -f '{{.State.Health.Status}}' spendguard-ag-ui-runner 2>/dev/null || echo starting); \
+	  if [ "$$st" = "healthy" ]; then break; fi; \
+	  if [ "$$st" = "unhealthy" ]; then \
+	    echo "[demo] FATAL: ag-ui-runner unhealthy — runner logs follow:" >&2; \
+	    docker logs spendguard-ag-ui-runner >&2 || true; exit 9; \
+	  fi; \
+	  sleep 2; \
+	done; \
+	st=$$(docker inspect -f '{{.State.Health.Status}}' spendguard-ag-ui-runner 2>/dev/null || echo missing); \
+	if [ "$$st" != "healthy" ]; then \
+	  echo "[demo] FATAL: ag-ui-runner did not become healthy (status=$$st)" >&2; \
+	  docker logs spendguard-ag-ui-runner >&2 || true; exit 9; \
+	fi
+	@echo "[demo] verifying COV_D39 SLICE 3 (ag_ui_events 4-frame SSE + ledger join + SQL gates)..."
+	@$(MAKE) demo-verify-ag-ui-events
 else ifeq ($(DEMO_MODE),vercel_ai_mastra)
 	@echo "[demo] running vercel-ai-mastra-runner (Node 20 + Vercel AI SDK + Mastra alias)..."
 	$(COMPOSE) -f vercel_ai_mastra/docker-compose.yaml run --rm vercel-ai-mastra-runner
@@ -2076,6 +2113,38 @@ demo-verify-langchain-ts:
 		 END; \$$\$$;"
 	@echo "[demo] COV_D04 SLICE 5 langchain_ts verification done"
 
+# COV_D39 SLICE 3 (ag_ui_events demo) verification — the hard gate
+# (design.md §9 / implementation.md §8):
+#   1. sse-probe captures the ag-ui-runner's recorded event stream.
+#   2. verify_sse.py asserts the EXACT 4-frame sequence (snapshot →
+#      created → committed → denied), required non-empty fields,
+#      unit_id presence, ID joins, denied taxonomy, and the §7
+#      canonical-bytes round-trip; prints RESERVATION_ID=<uuid>.
+#   3. Display↔ledger join: that reservation_id must exist in the
+#      ledger `reservations` projection for the demo tenant
+#      (PK column: reservation_id — services/ledger/migrations/
+#      0010_projections.sql; resolves the design §9.3 marker).
+#   4. verify_step_ag_ui_events.sql house-style ledger gates.
+#   5. TD-04: counting-stub /_count must report exactly 1 call — the
+#      DENY step provably never reached the provider (enforcement
+#      happened at the sidecar; AG-UI events are display-only).
+demo-verify-ag-ui-events:
+	@$(COMPOSE) -f ag_ui_events/docker-compose.yaml run --rm --no-deps sse-probe \
+	  > /tmp/spendguard-ag-ui-capture.sse
+	@python3 ag_ui_events/verify_sse.py /tmp/spendguard-ag-ui-capture.sse \
+	  | tee /tmp/spendguard-ag-ui-verify.out
+	@RES_ID=$$(grep '^RESERVATION_ID=' /tmp/spendguard-ag-ui-verify.out | cut -d= -f2); \
+	  $(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 -c \
+	  "DO \$$\$$ BEGIN IF NOT EXISTS (SELECT 1 FROM reservations WHERE reservation_id = '$$RES_ID'::uuid AND tenant_id = '00000000-0000-4000-8000-000000000001') THEN RAISE EXCEPTION 'COV_D39_GATE: SSE reservation_id % not found in ledger reservations', '$$RES_ID'; END IF; END; \$$\$$;"
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 \
+	  < verify_step_ag_ui_events.sql
+	@echo "[demo] TD-04: asserting counting-stub saw exactly 1 call (deny never reached the provider)..."
+	@$(COMPOSE) -f ag_ui_events/docker-compose.yaml exec -T counting-stub python -c \
+	  "import urllib.request, json, sys; \
+	   calls = json.load(urllib.request.urlopen('http://localhost:8765/_count', timeout=5))['calls']; \
+	   sys.exit(0 if calls == 1 else print(f'COV_D39_GATE: counting-stub calls == 1 expected, got {calls}', file=sys.stderr) or 1)"
+	@echo "[demo] COV_D39 ag_ui_events verification done"
+
 demo-verify-litellm-real:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_real.sql
 	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
@@ -2153,7 +2222,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture demo-verify-import-manus-fixture demo-import-manus-fixture demo-verify-import-genspark-fixture demo-verify-all-d05-ur
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture demo-verify-import-manus-fixture demo-import-manus-fixture demo-verify-import-genspark-fixture demo-verify-all-d05-ur demo-verify-ag-ui-events
 
 # HARDEN_D05_UR master verification target — runs all 14+ demos sequentially
 # and asserts each exits 0 with canonical success lines. This target replaces

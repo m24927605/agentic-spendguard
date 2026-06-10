@@ -1,0 +1,286 @@
+# COV_D39 SLICE 3 (`DEMO_MODE=ag_ui_events`) — sidecar compose overlay.
+#
+# This compose file is layered on top of `deploy/demo/compose.yaml` via
+# `docker compose -f deploy/demo/compose.yaml -f deploy/demo/ag_ui_events/docker-compose.yaml up`.
+# The Makefile DEMO_MODE=ag_ui_events branch does that for you.
+#
+# It declares the THREE services this demo mode needs on top of the base
+# postgres + sidecar + ledger + outbox-forwarder stack:
+#
+#   counting-stub   mock OpenAI /v1/chat/completions provider that counts
+#                   calls per HTTP hit. By-value copy of the langchain_ts
+#                   overlay's stub (overlay-independence convention).
+#
+#   ag-ui-runner    Node 20 container (langchain-runner staging pattern)
+#                   running examples/ag-ui-events/index.mjs: a REAL
+#                   sidecar run (handshake → snapshot → ALLOW
+#                   reserve/commit → DENY) whose decisions are rendered
+#                   as spendguard.* AG-UI CUSTOM events, then replayed
+#                   over SSE on :8077. Display-only: the events report
+#                   decisions the sidecar already made and can NOT
+#                   enforce, grant, or deny anything — the runner's deny
+#                   step proves the sidecar (not AG-UI) blocked the call.
+#
+#   sse-probe       one-shot curl that fetches the recorded event stream
+#                   (`profiles: ["verify"]` — only runs from the verify
+#                   target, never at demo-up).
+#
+# All services join the `spendguard-demo_spendguard-net` network so they
+# can reach `sidecar` and the `spendguard-postgres` healthcheck graph
+# from the parent compose.
+#
+# Anti-scope: this overlay does NOT redeclare postgres, sidecar, ledger,
+# canonical-ingest, bundles-init, pki-init or any other base service —
+# the Makefile target brings up the base stack first, then this overlay.
+name: spendguard-demo
+
+services:
+  # ── counting-stub ────────────────────────────────────────────────────
+  # In-network mock OpenAI provider. Counts every POST /v1/chat/completions
+  # and returns a fixed `usage` block with non-zero completion_tokens.
+  #
+  # Identical to deploy/demo/langchain_ts/docker-compose.yaml's
+  # counting-stub — by-value duplicated so the overlays remain independent
+  # (avoids hidden cross-file dependency).
+  counting-stub:
+    image: python:3.12-slim
+    container_name: spendguard-counting-stub
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    command:
+      - python
+      - -c
+      - |
+        import http.server, json, time, sys
+        HITS = {"calls": 0}
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length)
+                if not self.path.startswith("/v1/chat/completions"):
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                HITS["calls"] += 1
+                body = {
+                    "id": f"chatcmpl-counting-{HITS['calls']}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "gpt-4o-mini",
+                    "choices": [{
+                        "index": 0,
+                        "message": {"role": "assistant",
+                                    "content": "hi from counting stub"},
+                        "finish_reason": "stop",
+                    }],
+                    "usage": {"prompt_tokens": 5,
+                              "completion_tokens": 7,
+                              "total_tokens": 12},
+                    "_counting_stub_hits": HITS["calls"],
+                }
+                payload = json.dumps(body).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.send_header("x-counting-stub-hits", str(HITS["calls"]))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def do_GET(self):
+                if self.path == "/_count":
+                    body = json.dumps({"calls": HITS["calls"]}).encode()
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                if self.path in ("/healthz", "/livez"):
+                    self.send_response(200)
+                    self.send_header("Content-Length", "2")
+                    self.end_headers()
+                    self.wfile.write(b"ok")
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, *args, **_kwargs):
+                sys.stderr.write(
+                    f"[counting-stub] {self.command} {self.path} -> "
+                    f"hits={HITS['calls']}\n"
+                )
+
+        server = http.server.HTTPServer(("0.0.0.0", 8765), Handler)
+        sys.stderr.write("[counting-stub] listening on :8765\n")
+        server.serve_forever()
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request,sys;
+          r=urllib.request.urlopen('http://localhost:8765/healthz',timeout=2);
+          sys.exit(0 if r.read()==b'ok' else 1)"
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    networks:
+      spendguard-net:
+        aliases: [counting-stub]
+
+  # ── ag-ui-runner ─────────────────────────────────────────────────────
+  # Node 20 container that vendors the workspace-built `@spendguard/sdk`
+  # + `@spendguard/ag-ui` dist artefacts into a self-contained
+  # node_modules tree, runs `examples/ag-ui-events/index.mjs` (real
+  # sidecar run), then stays up serving the recorded SSE frames on
+  # :8077. The healthcheck only turns healthy AFTER all demo steps
+  # succeeded (the HTTP server starts last).
+  #
+  # Staging pattern reused by-value from the langchain_ts overlay's
+  # langchain-runner (read-only workspace mount + writable /tmp staging
+  # + named-volume node_modules + `file:` dep overrides).
+  ag-ui-runner:
+    image: node:20.10-bookworm-slim
+    container_name: spendguard-ag-ui-runner
+    # Demo-only: run as root inside the container so the named-volume
+    # node_modules tree (mounted by docker as root-owned) is writable.
+    # The base sidecar / ledger production images keep their non-root
+    # posture.
+    working_dir: /opt/spendguard/examples/ag-ui-events
+    environment:
+      # SpendGuard sidecar wiring — identical seed identity to the
+      # langchain_ts runner.
+      SPENDGUARD_SIDECAR_UDS: "/var/run/spendguard/adapter.sock"
+      SPENDGUARD_TENANT_ID: "00000000-0000-4000-8000-000000000001"
+      SPENDGUARD_BUDGET_ID: "44444444-4444-4444-8444-444444444444"
+      SPENDGUARD_WINDOW_INSTANCE_ID: "55555555-5555-4555-8555-555555555555"
+      SPENDGUARD_UNIT_ID: "66666666-6666-4666-8666-666666666666"
+      SPENDGUARD_PRICING_VERSION: "demo-pricing-v1"
+      SPENDGUARD_FX_RATE_VERSION: "demo-fx-v1"
+      SPENDGUARD_UNIT_CONVERSION_VERSION: "demo-units-v1"
+      SPENDGUARD_HANDSHAKE_TIMEOUT_MS: "30000"
+      # Seeded opening balance: 30_seed_demo_state.sh credits
+      # available_budget with exactly 500 atomic units at compose-up.
+      # verify_step_ag_ui_events.sql cross-checks this value against the
+      # actual seed ledger entry so the budget.snapshot event is never a
+      # fabricated number (design.md §9.2).
+      SPENDGUARD_DEMO_OPENING_BALANCE_ATOMIC: "500"
+      SPENDGUARD_COUNTING_STUB_URL: "http://counting-stub:8765"
+    volumes:
+      # Workspace source — read-only.
+      - ../..:/opt/spendguard:ro
+      # Sidecar UDS shared with the rest of the stack.
+      - sidecar-uds:/var/run/spendguard
+      # HARDEN_D05_WI: source pricing freeze from bundles runtime.env
+      # (written by pricing-seed-init / bundles-init at compose-up time).
+      - bundles-data:/var/lib/spendguard/bundles:ro
+      # Writable node_modules persistence across re-runs (named volume,
+      # not mounted inside the read-only workspace tree).
+      - ag-ui-runner-modules:/var/lib/ag-ui-runner/node_modules
+    tmpfs:
+      - /tmp
+      - /home/node/.npm
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+
+        # NOTE: every $ that should reach the container shell at runtime
+        # (not be interpolated by docker compose at parse time) is
+        # written as $$ in this YAML literal.
+
+        echo "[ag-ui-runner] node $$(node --version) npm $$(npm --version)"
+
+        # The workspace mount is read-only; stage a writable copy of the
+        # example into /tmp and resolve the SpendGuard halves via `file:`
+        # deps against the read-only mount's pre-built dist artefacts.
+        STAGING=/tmp/ag-ui-events-stage
+        mkdir -p "$$STAGING"
+        cp /opt/spendguard/examples/ag-ui-events/package.json "$$STAGING/"
+        cp /opt/spendguard/examples/ag-ui-events/index.mjs "$$STAGING/"
+
+        mkdir -p /var/lib/ag-ui-runner/node_modules
+        ln -sf /var/lib/ag-ui-runner/node_modules "$$STAGING/node_modules"
+
+        cd "$$STAGING"
+
+        # Override the published-version deps with `file:` references to
+        # the in-tree workspace builds.
+        node -e "
+          const fs = require('fs');
+          const pkg = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          pkg.dependencies['@spendguard/sdk'] = 'file:/opt/spendguard/sdk/typescript';
+          pkg.dependencies['@spendguard/ag-ui'] = 'file:/opt/spendguard/sdk/typescript-ag-ui';
+          fs.writeFileSync('package.json', JSON.stringify(pkg, null, 2));
+        "
+
+        echo "[ag-ui-runner] installing example deps..."
+        npm install --no-audit --no-fund --no-package-lock --loglevel=warn
+
+        echo "[ag-ui-runner] sidecar UDS ready check..."
+        for i in $$(seq 1 60); do
+          if [ -S "$$SPENDGUARD_SIDECAR_UDS" ]; then
+            echo "[ag-ui-runner] sidecar UDS visible at $$SPENDGUARD_SIDECAR_UDS"
+            break
+          fi
+          sleep 1
+        done
+
+        # HARDEN_D05_WI: source bundles runtime.env so
+        # SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX matches the contract bundle
+        # the sidecar loaded.
+        if [ -f /var/lib/spendguard/bundles/runtime.env ]; then
+          echo "[ag-ui-runner] sourcing /var/lib/spendguard/bundles/runtime.env..."
+          set -a
+          . /var/lib/spendguard/bundles/runtime.env
+          set +a
+        else
+          echo "[ag-ui-runner] FATAL: bundles runtime.env not found" >&2
+          exit 1
+        fi
+
+        echo "[ag-ui-runner] launching index.mjs..."
+        exec node index.mjs
+    healthcheck:
+      # Healthy only once the replay server is up — i.e. after the
+      # snapshot + ALLOW + DENY steps all succeeded.
+      test:
+        - CMD-SHELL
+        - >-
+          node -e "fetch('http://localhost:8077/healthz')
+          .then(r => process.exit(r.ok ? 0 : 1))
+          .catch(() => process.exit(1))"
+      interval: 3s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+    depends_on:
+      sidecar:
+        condition: service_healthy
+      counting-stub:
+        condition: service_healthy
+    networks:
+      spendguard-net:
+        aliases: [ag-ui-runner]
+
+  # ── sse-probe ────────────────────────────────────────────────────────
+  # One-shot capture of the recorded event stream. Only runs under the
+  # `verify` profile (the `demo-verify-ag-ui-events` Makefile target);
+  # stdout is redirected to the host temp capture file the verify gate
+  # parses.
+  sse-probe:
+    image: curlimages/curl:8.10.1
+    container_name: spendguard-ag-ui-sse-probe
+    profiles: ["verify"]
+    command: ["curl", "-sS", "--max-time", "30", "http://ag-ui-runner:8077/events"]
+    networks:
+      spendguard-net:
+        aliases: [sse-probe]
+
+volumes:
+  bundles-data:
+  ag-ui-runner-modules:

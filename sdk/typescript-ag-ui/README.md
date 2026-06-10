@@ -48,21 +48,30 @@ Every payload carries `schema_version: "1"`.
 ## Quickstart
 
 ```ts
-import {
-  buildReservationCreated,
-  encodeSse,
-} from "@spendguard/ag-ui";
+import { buildReservationCreated, encodeSse } from "@spendguard/ag-ui";
+import type { DecisionOutcome } from "@spendguard/sdk";
 
 // Inputs come from your SpendGuard adapter's DecisionOutcome — the builders
-// never mint IDs, never read clocks, never touch the network.
+// never mint IDs, never read clocks, never touch the network. In a real
+// adapter these three values arrive from `client.reserve(...)` and your
+// SpendGuard configuration (e.g. the SPENDGUARD_* env vars).
+declare const outcome: DecisionOutcome;
+declare const windowInstanceId: string;
+declare const unitId: string;
+
+const reservationId = outcome.reservationIds[0];
+if (reservationId === undefined) {
+  throw new Error("reserve() returned no reservation_id");
+}
+
 const event = buildReservationCreated(
   {
     decisionId: outcome.decisionId,
-    reservationId: outcome.reservationIds[0],
+    reservationId,
     budgetId: "budget-dev-monthly",
-    windowInstanceId: windowInstanceId,
+    windowInstanceId,
     unit: "usd_micros",
-    unitId: unitId,
+    unitId,
     amountAtomicReserved: "1000000",
     decision: "ALLOW", // SpendGuard wire: CONTINUE → ALLOW; DEGRADE → ALLOW_WITH_CAPS
     ttlExpiresAt: "2026-06-10T08:00:00Z",
@@ -73,6 +82,10 @@ const event = buildReservationCreated(
 
 const frame = encodeSse(event); // "data: {...canonical JSON...}\n\n"
 ```
+
+(`@spendguard/sdk` here is only the type import for the example — the
+package itself depends on neither `@spendguard/sdk` nor `@ag-ui/core` at
+runtime.)
 
 Builders are **pure**: same input, same bytes — the canonical serialization
 (`canonicalEventJson`) is byte-identical to the Python mirror
