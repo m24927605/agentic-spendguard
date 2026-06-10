@@ -65,6 +65,10 @@ export interface StashEntry {
   reservationId: string;
   runId: string;
   idempotencyKey: string;
+  /** HARDEN_D05_WI — reserve-time UnitRef (incl. unitId); commit must match. */
+  unit: UnitRef;
+  /** HARDEN_D05_WI — reserve-time pricing freeze; commit must tuple-match. */
+  pricing?: PricingFreeze;
 }
 
 // ── Shared constants (mirror middleware.ts) ────────────────────────────────
@@ -397,15 +401,34 @@ async function safeCommit(
         actualErrorMessage: string;
       },
 ): Promise<void> {
+  // HARDEN_D05_WI — ledger rejects commits with estimated_amount_atomic 0;
+  // mirror the Python adapters: SUCCESS commits carry prompt+completion
+  // token sum (the stub-safe fallback stays "0" only when usage is absent,
+  // matching client.py's fail-soft semantics).
+  let estimatedAmountAtomic = "0";
+  if (outcome.outcomeKind === "SUCCESS") {
+    try {
+      estimatedAmountAtomic = (
+        BigInt(outcome.actualInputTokensWire || "0") +
+        BigInt(outcome.actualOutputTokensWire || "0")
+      ).toString();
+    } catch {
+      estimatedAmountAtomic = "0";
+    }
+  }
   const req: CommitEstimatedRequest = {
     runId: entry.runId,
     stepId: STEP_ID_LLM_CALL,
     llmCallId: entry.runId,
     decisionId: entry.decisionId,
     reservationId: entry.reservationId,
-    estimatedAmountAtomic: "0",
-    unit: DEFAULT_UNIT,
-    pricing: EMPTY_PRICING,
+    estimatedAmountAtomic,
+    // HARDEN_D05_WI — reuse the reserve-time unit so payload.unit_id matches
+    // the reservation (ledger rejects mismatched commit units).
+    unit: entry.unit ?? DEFAULT_UNIT,
+    // HARDEN_D05_WI — repeat the reserve-time freeze tuple (ledger rejects
+    // commits whose pricing tuple differs from the reservation's).
+    pricing: entry.pricing ?? EMPTY_PRICING,
     providerEventId: "",
     outcome: outcome.outcome,
     outcomeKind: outcome.outcomeKind,

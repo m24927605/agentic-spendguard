@@ -176,15 +176,27 @@ function instrumentStream(inner, onTerminal) {
   });
 }
 async function safeCommit(client, entry, outcome) {
+  let estimatedAmountAtomic = "0";
+  if (outcome.outcomeKind === "SUCCESS") {
+    try {
+      estimatedAmountAtomic = (BigInt(outcome.actualInputTokensWire || "0") + BigInt(outcome.actualOutputTokensWire || "0")).toString();
+    } catch {
+      estimatedAmountAtomic = "0";
+    }
+  }
   const req = {
     runId: entry.runId,
     stepId: STEP_ID_LLM_CALL,
     llmCallId: entry.runId,
     decisionId: entry.decisionId,
     reservationId: entry.reservationId,
-    estimatedAmountAtomic: "0",
-    unit: DEFAULT_UNIT,
-    pricing: EMPTY_PRICING,
+    estimatedAmountAtomic,
+    // HARDEN_D05_WI — reuse the reserve-time unit so payload.unit_id matches
+    // the reservation (ledger rejects mismatched commit units).
+    unit: entry.unit ?? DEFAULT_UNIT,
+    // HARDEN_D05_WI — repeat the reserve-time freeze tuple (ledger rejects
+    // commits whose pricing tuple differs from the reservation's).
+    pricing: entry.pricing ?? EMPTY_PRICING,
     providerEventId: "",
     outcome: outcome.outcome,
     outcomeKind: outcome.outcomeKind,
@@ -253,6 +265,7 @@ function createSpendGuardMiddleware(opts) {
         tenantId: opts.tenantId,
         runId
       });
+      const projectedClaim = projectClaim(params, opts);
       const req = {
         trigger: "LLM_CALL_PRE",
         runId,
@@ -260,7 +273,7 @@ function createSpendGuardMiddleware(opts) {
         llmCallId: runId,
         decisionId: runId,
         route: DEFAULT_ROUTE,
-        projectedClaims: [projectClaim(params, opts)],
+        projectedClaims: [projectedClaim],
         idempotencyKey
       };
       let outcome;
@@ -280,7 +293,9 @@ function createSpendGuardMiddleware(opts) {
         decisionId: outcome.decisionId,
         reservationId: outcome.reservationIds[0] ?? "",
         runId,
-        idempotencyKey
+        idempotencyKey,
+        unit: projectedClaim.unit,
+        ...opts.pricing !== void 0 ? { pricing: opts.pricing } : {}
       });
       return params;
     },
@@ -335,11 +350,15 @@ function flattenPromptText(prompt) {
 function projectClaim(params, opts) {
   const totalChars = flattenPromptText(params.prompt).length;
   const estimatedTokens = BigInt(Math.max(1, Math.ceil(totalChars / CHARS_PER_TOKEN_HEURISTIC)));
-  const amountMicros = estimatedTokens * DEFAULT_MICROS_PER_TOKEN;
+  const amountMicros = opts.estimateOverrideAtomic !== void 0 && /^[0-9]+$/.test(opts.estimateOverrideAtomic) ? BigInt(opts.estimateOverrideAtomic) : estimatedTokens * DEFAULT_MICROS_PER_TOKEN;
+  const unit = opts.unitId ? { ...DEFAULT_UNIT2, unitId: opts.unitId } : DEFAULT_UNIT2;
   return {
     scopeId: opts.budgetId ?? opts.tenantId,
     amountAtomic: amountMicros.toString(),
-    unit: DEFAULT_UNIT2
+    unit,
+    // HARDEN_D05_WI — thread caller-supplied windowInstanceId onto the
+    // wire claim (substrate coerces omitted to "").
+    ...opts.windowInstanceId ? { windowInstanceId: opts.windowInstanceId } : {}
   };
 }
 

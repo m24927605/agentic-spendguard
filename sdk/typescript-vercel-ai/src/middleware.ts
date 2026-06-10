@@ -44,6 +44,7 @@ import {
   type BudgetClaim,
   DecisionDenied,
   type DecisionOutcome,
+  type PricingFreeze,
   type ReserveRequest,
   type UnitRef,
   deriveUuidFromSignature,
@@ -84,6 +85,16 @@ interface StashEntry {
    * can pass it onto the commit / release RPCs without re-deriving.
    */
   idempotencyKey: string;
+  /**
+   * HARDEN_D05_WI — the exact `UnitRef` the reserve-time claim carried
+   * (incl. `unitId`). Cached so the commit path sends a unit that matches
+   * the reservation; the ledger rejects commits whose `payload.unit_id`
+   * differs from the reservation's.
+   */
+  unit: UnitRef;
+  /** HARDEN_D05_WI — pricing freeze the commit must repeat (tuple-matched
+   * against the reservation by the ledger). Optional: omitted → EMPTY. */
+  pricing?: PricingFreeze;
 }
 
 // ── Defaults the SLICE 2/3 options surface deliberately omits ────────────
@@ -194,6 +205,9 @@ export function createSpendGuardMiddleware(
         tenantId: opts.tenantId,
         runId,
       });
+      // Computed once so the reserve claim and the commit-side stash share
+      // the exact same UnitRef (HARDEN_D05_WI commit/reservation match).
+      const projectedClaim = projectClaim(params, opts);
       const req: ReserveRequest = {
         trigger: "LLM_CALL_PRE",
         runId,
@@ -201,7 +215,7 @@ export function createSpendGuardMiddleware(
         llmCallId: runId,
         decisionId: runId,
         route: DEFAULT_ROUTE,
-        projectedClaims: [projectClaim(params, opts)],
+        projectedClaims: [projectedClaim],
         idempotencyKey,
       };
 
@@ -233,6 +247,8 @@ export function createSpendGuardMiddleware(
         reservationId: outcome.reservationIds[0] ?? "",
         runId,
         idempotencyKey,
+        unit: projectedClaim.unit,
+        ...(opts.pricing !== undefined ? { pricing: opts.pricing } : {}),
       });
       return params;
     },
@@ -337,7 +353,12 @@ function projectClaim(
 ): BudgetClaim {
   const totalChars = flattenPromptText(params.prompt).length;
   const estimatedTokens = BigInt(Math.max(1, Math.ceil(totalChars / CHARS_PER_TOKEN_HEURISTIC)));
-  const amountMicros = estimatedTokens * DEFAULT_MICROS_PER_TOKEN;
+  // Demo/test-only: `estimateOverrideAtomic` replaces the heuristic amount
+  // (mirrors the Python litellm callback's spendguard_estimate_override).
+  const amountMicros =
+    opts.estimateOverrideAtomic !== undefined && /^[0-9]+$/.test(opts.estimateOverrideAtomic)
+      ? BigInt(opts.estimateOverrideAtomic)
+      : estimatedTokens * DEFAULT_MICROS_PER_TOKEN;
   // HARDEN_D05_UR — thread caller-supplied unitId onto the wire UnitRef.
   // Omitted unitId keeps the pre-HARDEN_D05_UR wire shape (substrate
   // `mapUnitRef` coerces to "").
@@ -346,6 +367,9 @@ function projectClaim(
     scopeId: opts.budgetId ?? opts.tenantId,
     amountAtomic: amountMicros.toString(),
     unit,
+    // HARDEN_D05_WI — thread caller-supplied windowInstanceId onto the
+    // wire claim (substrate coerces omitted to "").
+    ...(opts.windowInstanceId ? { windowInstanceId: opts.windowInstanceId } : {}),
   };
 }
 

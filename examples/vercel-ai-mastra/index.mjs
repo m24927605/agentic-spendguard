@@ -48,6 +48,21 @@ import { createSpendGuardLanguageMiddleware } from "@spendguard/vercel-ai/mastra
 const SOCKET_PATH = process.env.SPENDGUARD_SIDECAR_UDS ?? "/var/run/spendguard/adapter.sock";
 const TENANT_ID = process.env.SPENDGUARD_TENANT_ID ?? "00000000-0000-4000-8000-000000000001";
 const BUDGET_ID = process.env.SPENDGUARD_BUDGET_ID;
+const UNIT_ID = process.env.SPENDGUARD_UNIT_ID;
+const WINDOW_INSTANCE_ID = process.env.SPENDGUARD_WINDOW_INSTANCE_ID;
+// HARDEN_D05_WI — pricing freeze tuple repeated on the commit path. Same
+// env convention as the Python demos (run_demo.py): version + snapshot
+// hash hex (from bundles runtime.env) + fx + unit-conversion versions.
+const PRICING = process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX
+  ? {
+      pricingVersion: process.env.SPENDGUARD_PRICING_VERSION ?? "",
+      pricingHash: Uint8Array.from(
+        Buffer.from(process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX, "hex"),
+      ),
+      fxRateVersion: process.env.SPENDGUARD_FX_RATE_VERSION ?? "",
+      unitConversionVersion: process.env.SPENDGUARD_UNIT_CONVERSION_VERSION ?? "",
+    }
+  : undefined;
 const COUNTING_STUB_URL =
   process.env.SPENDGUARD_COUNTING_STUB_URL ?? "http://counting-stub:8765";
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL ?? `${COUNTING_STUB_URL}/v1`;
@@ -262,11 +277,17 @@ function buildOpenAiBody(options, extraBody, { stream }) {
  * demo `SPENDGUARD_BUDGET_ID` lets the sidecar contract evaluator
  * match the right hard-cap rule on the DENY step.
  */
-function buildWrappedModel(client, { extraBody = undefined } = {}) {
+function buildWrappedModel(client, { extraBody = undefined, estimateOverrideAtomic = undefined } = {}) {
   const middleware = createSpendGuardMiddleware({
     client,
     tenantId: TENANT_ID,
     ...(BUDGET_ID ? { budgetId: BUDGET_ID } : {}),
+    ...(UNIT_ID ? { unitId: UNIT_ID } : {}),
+    ...(WINDOW_INSTANCE_ID ? { windowInstanceId: WINDOW_INSTANCE_ID } : {}),
+    ...(PRICING ? { pricing: PRICING } : {}),
+    // Demo-only: DENY step blows past the seeded 1B hard-cap via the
+    // adapter-side estimate override (mirrors Python litellm convention).
+    ...(estimateOverrideAtomic ? { estimateOverrideAtomic } : {}),
   });
   return wrapLanguageModel({
     model: makeCountingStubModel({ extraBody }),
@@ -315,6 +336,7 @@ async function runDenyStep(client) {
   const preCount = await readCountingStubHits();
   const model = buildWrappedModel(client, {
     extraBody: { spendguard_estimate_override: "2000000000" },
+    estimateOverrideAtomic: "2000000000",
   });
   let denied = false;
   let errKind = "";
