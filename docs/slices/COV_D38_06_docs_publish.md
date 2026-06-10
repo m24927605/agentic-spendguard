@@ -62,11 +62,36 @@ Bundle budget (implementation.md §2): **40 KB minified, 12 KB gzipped** for `di
 
 | ID | Question (design §12 verbatim) | Pre-declared alternatives (design §12 verbatim) | PIN (record at impl) |
 |---|---|---|---|
-| V8 | Does `withMastra()` (plain-AI-SDK mounting) run the same Processor hooks? | document as supported usage variant B / document as unsupported in v1 | _unpinned_ |
+| V8 | Does `withMastra()` (plain-AI-SDK mounting) run the same Processor hooks? | document as supported usage variant B / document as unsupported in v1 | **PINNED: documented as UNSUPPORTED in v1** (2026-06-11, `@mastra/core` 1.41.0) — see "Marker resolution" below |
 
 V8 is a documentation pin: the answer selects what the README/docs page SAY; it does not change any code path.
 
+### Marker resolution (recorded at impl, 2026-06-11, installed `@mastra/core@1.41.0`)
+
+**V8 — pinned: documented as unsupported in v1** (second pre-declared alternative). Evidence against the installed tree:
+
+1. **`withMastra()` is NOT part of `@mastra/core`.** It ships in the separate `@mastra/ai-sdk` package — per `@mastra/core@1.41.0`'s own vendored reference (`node_modules/@mastra/core/dist/docs/references/reference-ai-sdk-with-mastra.md`: `import { withMastra } from '@mastra/ai-sdk'`). `@mastra/ai-sdk` is neither a D38 peer dependency nor installed anywhere in the workspace (`node_modules/@mastra/` contains only `core`), so the package cannot typecheck, test, or pin hook behaviour against it. No installed `.d.ts` for `withMastra` exists to read — the "not-applicable with evidence" outcome for any supported-variant-B claim.
+2. **Hook-surface mismatch on the documented shape.** The vendored reference's `WithMastraOptions.inputProcessors` example exercises `processInput` (run-once) on a plain `generateText` call — there is no Mastra agent loop on that path. The shipped adapter's commit settlement is pinned to agent-loop runner semantics (V4: per-request `processorStates` Map threading the §6.5 runId key between `processInputStep` and `processLLMResponse`; V7: `error` chunk on the response hook), none of which is verified — or verifiable in-repo — on the `withMastra` wrapper path.
+3. **Type-level note**: `@mastra/core`'s `InputProcessor` union accepts a processor with only `id + processInputStep`, so `SpendGuardProcessor` would *mount* type-wise; whether the plain-AI-SDK wrapper *fires* `processInputStep`/`processLLMResponse` with the agent-loop arg shapes is exactly what cannot be evidenced without `@mastra/ai-sdk` installed. Unverifiable enforcement is documented as unsupported (fail-closed documentation posture).
+
+User-facing wording shipped: README "Known limitations" + docs page (`mastra.mdx`) both state `withMastra()` is unsupported in v1 and route plain-AI-SDK users to D06 `wrapLanguageModel` or a Mastra `Agent`.
+
 Also closes the register: TA-12 requires every V1–V8 marker to have a recorded answer + `@mastra/core` version in its owning slice doc (V1/V2/V3/V5 → COV_D38_02; V4/V7 → COV_D38_03; V6 → COV_D38_05; V8 → here).
+
+### TA-12 — VERIFY-AT-IMPL register closure (recorded 2026-06-11; all pins vs installed `@mastra/core@1.41.0`)
+
+| ID | Pinned answer (selected pre-declared alternative) | Pinned where (slice doc + code anchor) | Status |
+|---|---|---|---|
+| V1 | Hook signatures recorded; `implements Processor` typecheck is the gate; installed `Processor` REQUIRES `readonly id` (design §6.7 amendment #4) | `COV_D38_02_processor_reserve.md` "Marker resolutions" + `sdk/typescript-mastra/src/processor.ts` header | CLOSED |
+| V2 | **Throw directly** halts the step pre-provider (TripWire `abort()` not required and unusable); consumer contract: `instanceof` at hook boundary, message-match at Agent boundary (residual gh #181) | `COV_D38_02_processor_reserve.md` "Marker resolutions" + V2 residual note; `// RESIDUAL(D38-V2)` in `src/processor.ts` | CLOSED (residual tracked as gh #181) |
+| V3 | **No shared correlation id** at both hooks → LOCKED per-`runId` FIFO fallback (§6.5); commit-hook key recovery via per-request `state` bag | `COV_D38_02_processor_reserve.md` "Marker resolutions"; corollary in `COV_D38_03` V4 pin + `src/processor.ts` header | CLOSED |
+| V4 | **Usage actuals selected**: flat camelCase `inputTokens`/`outputTokens`; `processLLMResponse` fires FIRST (usage via stripped `finish` chunk), `processOutputStep` LAST (flat `args.usage`) = §6.1 backstop | `COV_D38_03_commit_failure_paths.md` pin table + `src/usage.ts` / `src/processor.ts` headers | CLOSED |
+| V5 | Mount key **`inputProcessors`** (separate `outputProcessors`; no unified list); quickstart copies it (+ `outputProcessors` same instance for the backstop) | `COV_D38_02_processor_reserve.md` "Marker resolutions"; README/docs-page quickstarts | CLOSED |
+| V6 | **Router-string base-URL override pinned NO** for the LOCKED counting-stub (router resolves to the OpenAI **Responses API**, `POST /v1/responses`; `OPENAI_BASE_URL` honored but stub serves chat/completions only) → LOCKED explicit-instance demo fallback; router-mount enforcement carried by TP-22 | `COV_D38_05_demo_mastra_processor.md` pin table + `examples/mastra-processor/index.mjs` header | CLOSED |
+| V7 | **FAILURE commit at the signal**: primary `error` chunk on `processLLMResponse` chunks; secondary `processAPIError`; mid-stream abort → TTL sweep; no cancel-before-dispatch hook → no `client.release()` | `COV_D38_03_commit_failure_paths.md` pin table + `src/processor.ts` header | CLOSED |
+| V8 | **Documented as unsupported in v1** — `withMastra()` ships in `@mastra/ai-sdk` (outside peer set, not installed; no `.d.ts` to verify hook parity) | THIS doc, "Marker resolution" above; README + `mastra.mdx` limitation entries | CLOSED |
+
+Register closure: **8/8 markers pinned**, each recording the selected pre-declared alternative + `@mastra/core@1.41.0`. No marker introduced a third option or weakened a LOCKED decision.
 
 ## Test/verification plan (tests.md §4: TA-06 final run, TA-10, TA-12)
 

@@ -1,0 +1,118 @@
+# Auto-publish @spendguard/mastra to npm via Trusted Publisher OIDC.
+#
+# Trigger: any GitHub release tagged `mastra-v*` (e.g. `mastra-v0.1.0`).
+# Auth:   no npm API token in steady state — npm trusts THIS workflow file
+#         via OIDC provenance.
+#         Setup: npm → @spendguard/mastra → Settings → Trusted publishers
+#           - Owner:             m24927605
+#           - Repository:        agentic-spendguard
+#           - Workflow filename: sdk-ts-mastra-publish.yml
+#           - Environment:       npm (optional but recommended)
+#
+# During the npm Trusted Publisher rollout window (mirrors D04
+# review-standards §14.4) the workflow falls back to `NODE_AUTH_TOKEN`
+# (the `NPM_TOKEN` repo secret) so the first publish can still happen.
+# Once the Trusted Publisher entry is in place on npm, the token can be
+# revoked.
+#
+# Future releases: `gh release create mastra-v0.1.0 --title "..." --notes "..."`
+# CI then runs lint -> typecheck -> test -> build -> prepublish -> size and
+# only then `npm publish --provenance --access public`.
+#
+# Adapter package layout note: this workflow targets `sdk/typescript-mastra/`
+# (the @spendguard/mastra dedicated Mastra Processor adapter, deliverable
+# D38), NOT `sdk/typescript/` (the @spendguard/sdk substrate;
+# `sdk-ts-publish.yml`), NOT `sdk/typescript-vercel-ai/` (the
+# @spendguard/vercel-ai middleware; `sdk-vercel-ai-publish.yml`), and NOT
+# `sdk/typescript-langchain/` (`sdk-langchain-publish.yml`).
+#
+# Node 22 runner: Mastra 1.x floor is Node >=22.13.0 (package.json engines)
+# — the first publish workflow off the Node 20 runner base; do NOT "fix" it
+# back to 20.
+
+name: Publish @spendguard/mastra to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # allow manual trigger for re-publish testing
+
+jobs:
+  publish:
+    # Only fire for mastra-v* tags. Other release tags (ts-sdk-v*, sdk-v*,
+    # langchain-v*, vercel-ai-v*, helm-chart-v*, …) are ignored so each
+    # package's release cadence stays independent.
+    if: startsWith(github.ref, 'refs/tags/mastra-v')
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@spendguard/mastra/v/${{ github.ref_name }}
+    defaults:
+      run:
+        working-directory: sdk/typescript-mastra
+    permissions:
+      # OIDC token for Trusted Publisher exchange with npm + the npm
+      # `--provenance` flag (which also requires id-token: write).
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # Pin pnpm to the same major as the lockfile (lockfile v9 = pnpm 9+).
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          # Mastra 1.x floor: Node >=22.13.0 (A7.7 / design §11.14).
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          # `cache: pnpm` requires the lockfile path: it lives at the repo
+          # root because the SDK + adapters share one pnpm workspace (see
+          # `pnpm-workspace.yaml`).
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install deps (workspace-aware, frozen lockfile)
+        # `--frozen-lockfile` ensures the published artifact matches the
+        # committed lockfile exactly. The install runs from the package
+        # directory but pnpm walks up to the workspace root so the
+        # @spendguard/sdk workspace link resolves correctly.
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify version parity (package.json vs src/version.ts)
+        run: bash scripts/version-check.sh
+
+      - name: Lint
+        run: pnpm run lint
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test (processor + fail-closed matrix + real @mastra/core Agent integration)
+        run: pnpm run test
+
+      - name: Build (tsup ESM + .d.ts emit)
+        run: pnpm run build
+
+      - name: Prepublish (version-check + clean rebuild + size budget)
+        # `npm publish` runs the `prepublishOnly` hook automatically; we
+        # invoke it explicitly here so the gates exercised by it also gate
+        # the artifact the explicit size-budget step below measures.
+        run: bash scripts/prepublish.sh
+
+      - name: Size budget (dist/index.js ≤ 40 KB min / ≤ 12 KB gz)
+        run: bash scripts/size-budget.sh
+
+      - name: Publish to npm (Trusted Publisher OIDC + provenance)
+        # `--provenance` requires id-token: write (set on the job).
+        # `--access public` is also pinned in `publishConfig` but kept
+        # here so the published-access mode is explicit at the call site.
+        # NODE_AUTH_TOKEN is the rollout-window fallback per D04
+        # review-standards §14.4; with Trusted Publisher configured on
+        # npm it is ignored.
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

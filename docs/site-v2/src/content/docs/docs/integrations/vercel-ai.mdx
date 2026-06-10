@@ -19,6 +19,16 @@ description: >-
 > under its Mastra-idiomatic name through the
 > `@spendguard/vercel-ai/mastra` subpath alias.
 
+> **Using Mastra? See [`@spendguard/mastra`](/docs/integrations/mastra/)** —
+> the recommended Mastra integration (deliverable D38). Mastra owns its own
+> agent loop since v0.14.0; this page's coverage is scoped to **explicit AI
+> SDK model instances** handed to Mastra (the `/mastra` subpath alias
+> remains published and functional for that path), while model-router-string
+> Agents have no `wrapLanguageModel` injection point and are covered by
+> `@spendguard/mastra`'s `SpendGuardProcessor` at the agent-step boundary.
+> See the dated 2026-06-10 amendment in
+> [`D06 design.md` §9](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D06_vercel_ai_sdk/design.md).
+
 ## Install
 
 ```bash

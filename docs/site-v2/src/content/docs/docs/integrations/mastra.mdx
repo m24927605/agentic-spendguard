@@ -1,0 +1,226 @@
+---
+title: "Mastra Processor (hard budget gate)"
+description: >-
+  Hard, fail-closed, pre-dispatch budget enforcement for Mastra Agents via
+  @spendguard/mastra's SpendGuardProcessor — covers model-router strings and
+  explicit AI SDK instances at the agent-step processor boundary, backed by
+  the SpendGuard sidecar, Postgres ledger, and signed audit chain.
+---
+
+> **Fail-closed, pre-dispatch.** `SpendGuardProcessor` reserves budget
+> against the durable SpendGuard ledger BEFORE the provider call leaves the
+> process. A sidecar DENY — or an unreachable sidecar — aborts the agent
+> step with a typed error. There is no fail-open knob and no env escape
+> hatch.
+
+[Mastra](https://mastra.ai) owns its own agent loop since v0.14.0 —
+`@mastra/core` no longer calls `generateText` / `streamText` from `ai`. Its
+flagship model-router string syntax (`model: "openai/gpt-4o"`, 40+
+providers) resolves models internally with **no injection point for
+`wrapLanguageModel`**, so the
+[Vercel AI SDK middleware](/docs/integrations/vercel-ai/) (D06) cannot reach
+that path. `@spendguard/mastra` gates one level up: Mastra's
+[`Processor` interface](https://mastra.ai/reference/processors/processor-interface)
+runs lifecycle hooks around every agent step — including tool-call
+continuations — regardless of where the model came from. D06 gates a *model
+instance*; this adapter gates an *agent step*.
+
+Per step:
+
+1. `processInputStep` → **RESERVE** (`LLM_CALL_PRE`) — DENY / STOP /
+   approval-required / sidecar-unreachable all throw; the provider call
+   never fires.
+2. `processLLMResponse` → **SUCCESS commit** with provider usage actuals
+   when exposed (the commit settles at the usage sum; when usage is absent
+   it settles at the reserve-time estimate). Commits always tuple-match the
+   reservation — same unit, same pricing freeze.
+3. `processOutputStep` → backstop commit (at most one commit per
+   reservation); provider errors settle via a FAILURE commit.
+4. Crash / hard abort with no hook fired → the sidecar TTL sweep settles
+   the open reservation.
+
+Streaming is bracketed whole-step: one reserve before the first chunk, one
+commit after the stream completes. No per-chunk gating.
+
+## Positioning vs Mastra's `CostGuardProcessor`
+
+Factual contrast only, sourced from upstream's own documentation:
+
+| Dimension | Mastra `CostGuardProcessor` (per its own docs) | `@spendguard/mastra` `SpendGuardProcessor` |
+|---|---|---|
+| Enforcement point | After cost data is observed; cost persisted **asynchronously** | **Pre-dispatch**: budget reserved BEFORE the provider call leaves the process |
+| Ceiling semantics | "treat `maxCost` as a best-effort threshold, not a hard ceiling" | Hard ceiling: reservation against a durable ledger; DENY halts the step |
+| Failure posture | **Fail-open** on missing context / query failure | **Fail-closed**: sidecar unreachable or DENY ⇒ step aborts with a typed error |
+| Backing store | Requires OLAP observability store (DuckDB/ClickHouse; Postgres unsupported for metrics) | SpendGuard sidecar + Postgres ledger + signed audit chain (already deployed for every other SpendGuard adapter) |
+| Scope | run / resource / thread, block or warn | tenant / budget / window via SpendGuard contract DSL; shared budgets across Python, LangChain, proxy, and gateway adapters |
+| Cross-runtime budget | Mastra-only | Same `budget_id` enforced across every SpendGuard integration |
+
+The two are complementary: `CostGuardProcessor` remains a good soft-warn UX
+layer; `SpendGuardProcessor` is the hard enforcement layer.
+
+## Install
+
+<div is:raw>
+
+```bash
+pnpm add @spendguard/sdk @spendguard/mastra @mastra/core
+```
+
+</div>
+
+`@spendguard/sdk` and `@mastra/core` (`>=1.0.0 <2`) are peer dependencies.
+Node `>=22.13.0` (Mastra 1.x floor). ESM-only.
+
+## Quickstart
+
+Mount via the Agent's `inputProcessors` list (the installed `@mastra/core`
+1.x mount key — it drives both the reserve and the SUCCESS commit). Mount
+the SAME instance on `outputProcessors` too: that arms the backstop commit
+for streamed-step ordering.
+
+<div is:raw>
+
+```ts
+import { Agent } from "@mastra/core/agent";
+import { SpendGuardClient } from "@spendguard/sdk";
+import { SpendGuardProcessor } from "@spendguard/mastra";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  runtimeKind: "mastra-js",
+});
+await client.connect();
+await client.handshake();
+
+const guard = new SpendGuardProcessor({
+  client,
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  budgetId: "44444444-4444-4444-8444-444444444444",
+  // Ledger-backed reserves MUST set the ledger unit-row UUID:
+  unitId: process.env.SPENDGUARD_UNIT_ID,
+});
+
+const agent = new Agent({
+  id: "guarded-agent",
+  name: "guarded-agent",
+  instructions: "You are a budget-guarded assistant.",
+  model: "openai/gpt-4o-mini", // router string — no wrapLanguageModel needed
+  inputProcessors: [guard],
+  outputProcessors: [guard], // same instance: arms the backstop commit
+});
+
+const result = await agent.generate("hello mastra");
+console.log(result.text);
+```
+
+</div>
+
+Explicit AI SDK model instances (`model: openai("gpt-4o-mini")`) mount
+identically — the processor boundary is model-source-independent.
+
+### Pricing freeze (production sidecars)
+
+Production sidecars stamp every reservation with the loaded bundle's
+pricing freeze and **reject** commits that repeat the empty tuple
+(`pricing freeze mismatch`). Pass the freeze through the `pricing` option —
+the demos source it from the standard env convention:
+
+<div is:raw>
+
+```ts
+const guarded = new SpendGuardProcessor({
+  client,
+  tenantId,
+  pricing: {
+    pricingVersion: process.env.SPENDGUARD_PRICING_VERSION ?? "",
+    pricingHash: Uint8Array.from(
+      Buffer.from(process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX ?? "", "hex"),
+    ),
+    fxRateVersion: process.env.SPENDGUARD_FX_RATE_VERSION ?? "",
+    unitConversionVersion: process.env.SPENDGUARD_UNIT_CONVERSION_VERSION ?? "",
+  },
+});
+```
+
+</div>
+
+Omit `pricing` only against recipe-style/no-bundle sidecars (the reserve
+then also carries the empty tuple). A custom `claimEstimator` replaces the
+whole default claim projection — its claims forward verbatim onto
+`ReserveRequest.projectedClaims`, which is also the only surface that
+carries `windowInstanceId`; the commit path reuses the reserve-time unit,
+so estimator-supplied `unit` / `unitId` are honored end-to-end.
+
+### Catching a denial
+
+The processor throws the `@spendguard/sdk` typed errors from the reserve
+hook. Mastra 1.41.0 serializes processor errors inside its internal
+workflow engine, so the **consumer catch contract** is two-level
+([gh #181](https://github.com/m24927605/agentic-spendguard/issues/181)):
+
+- **Agent boundary** (`agent.generate()` rejection): the typed error's
+  *message* is preserved, the class instance is not — match on the message,
+  e.g. `/sidecar (DENY|STOP|SKIP|REQUIRE_APPROVAL)/`.
+- **Hook boundary** (your own processors in the same pipeline):
+  `instanceof DecisionDenied` holds and catches all denial flavours
+  (`DecisionStopped`, `ApprovalRequired` are subclasses).
+
+## Known limitations
+
+> **Auxiliary LLM calls** — Mastra memory title generation,
+> `ModerationProcessor`'s classifier call, scorers. OUT of v1 scope.
+> Documented known limitation; workaround: wrap those models explicitly via
+> D06 `wrapLanguageModel` (the
+> [Vercel AI SDK middleware](/docs/integrations/vercel-ai/)). These calls
+> invoke models outside the agent-step processor pipeline and are NOT gated
+> by `SpendGuardProcessor`.
+
+- **Router strings resolve to the OpenAI Responses API** (verified against
+  `@mastra/core` 1.41.0): the router path honors `OPENAI_BASE_URL`, but the
+  resolved model speaks `POST /v1/responses`. If your gateway/stub serves
+  only `/v1/chat/completions`, hand the Agent an explicit AI SDK instance —
+  enforcement is identical on both paths.
+- **`withMastra()` (plain-AI-SDK mounting) is unsupported in v1** — it
+  ships in the separate `@mastra/ai-sdk` package, outside this adapter's
+  peer set. Use a Mastra `Agent`, or gate plain AI SDK calls with D06.
+- **Mastra `Workflow` step gating** and **tool-call PRE gating** are v2
+  candidates; `processInputStep` already gates the LLM call after each
+  tool result.
+- Streaming is whole-step bracketed — per-chunk gating is explicitly out of
+  scope.
+
+## Run the demo
+
+<div is:raw>
+
+```bash
+make demo-up DEMO_MODE=mastra_processor
+make -C deploy/demo demo-verify-mastra-processor
+```
+
+</div>
+
+Boots postgres + sidecar + counting-stub + a real `@mastra/core` Agent
+runner ([`examples/mastra-processor/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/mastra-processor))
+and proves ALLOW + DENY + STREAM end-to-end — the DENY step shows the
+provider stub's hit counter did NOT move, the live fail-closed proof:
+
+<div is:raw>
+
+```text
+[demo] mastra_processor ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+</div>
+
+HARD SQL gates (`COV_D38_GATE`) then assert reserve/commit/deny rows,
+strict reserve-before-outcome ordering, and audit-chain closure in the real
+ledger.
+
+## Links
+
+- npm: [`@spendguard/mastra`](https://www.npmjs.com/package/@spendguard/mastra)
+- Locked spec set: [`docs/specs/coverage/D38_mastra/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D38_mastra)
+- Sibling adapter: [Vercel AI SDK middleware](/docs/integrations/vercel-ai/)
+  — explicit AI SDK model instances (AI SDK v4 line)
