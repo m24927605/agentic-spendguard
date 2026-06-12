@@ -1,7 +1,9 @@
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Duration;
 
-use chrono::Utc;
-use serde_json::Value;
+use base64::{engine::general_purpose, Engine as _};
+use chrono::{DateTime, Timelike, Utc};
+use serde_json::{json, Value};
 use spendguard_ledger::session_reservations::{
     commit_session_delta, expire_session, release_session, reserve_session,
     CommitSessionDeltaLedgerRequest, ExpireSessionLedgerRequest, PricingFreezeRef,
@@ -13,6 +15,7 @@ use testcontainers_modules::postgres::Postgres;
 use uuid::Uuid;
 
 const SESSION_RESERVATIONS_SQL: &str = include_str!("../migrations/0062_session_reservations.sql");
+static TEST_AUDIT_SEQUENCE: AtomicI64 = AtomicI64::new(1);
 const MINIMAL_DEPENDENCIES_SQL: &str = r#"
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -453,7 +456,101 @@ async fn insert_fixture(pool: &sqlx::PgPool) -> Fixture {
     }
 }
 
+fn utc_now_seconds() -> DateTime<Utc> {
+    Utc::now().with_nanosecond(0).expect("truncate nanos")
+}
+
+fn format_event_time(value: DateTime<Utc>) -> String {
+    value.format("%Y-%m-%dT%H:%M:%S+00:00").to_string()
+}
+
+fn tuple_outcome(mut outcome: Value, f: &Fixture, event_time: Option<DateTime<Utc>>) -> Value {
+    let object = outcome.as_object_mut().expect("object outcome");
+    object.insert("tenant_id".into(), json!(f.tenant_id.to_string()));
+    object.insert("budget_id".into(), json!(f.budget_id.to_string()));
+    object.insert(
+        "window_instance_id".into(),
+        json!(f.window_instance_id.to_string()),
+    );
+    object.insert("unit".into(), json!({ "unit_id": f.unit_id.to_string() }));
+    object.insert("unit_id".into(), json!(f.unit_id.to_string()));
+    object.insert(
+        "pricing_version".into(),
+        json!(f.pricing.pricing_version.clone()),
+    );
+    object.insert(
+        "price_snapshot_hash_hex".into(),
+        json!(f.pricing.price_snapshot_hash_hex.clone()),
+    );
+    object.insert(
+        "fx_rate_version".into(),
+        json!(f.pricing.fx_rate_version.clone()),
+    );
+    object.insert(
+        "unit_conversion_version".into(),
+        json!(f.pricing.unit_conversion_version.clone()),
+    );
+    if let Some(event_time) = event_time {
+        object.insert("event_time".into(), json!(format_event_time(event_time)));
+    }
+    outcome
+}
+
+fn test_audit_context(
+    session_event_type: &str,
+    session_reservation_id: Uuid,
+    event_outcome: Value,
+) -> Value {
+    let decision_sequence = TEST_AUDIT_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+    let outcome_sequence = TEST_AUDIT_SEQUENCE.fetch_add(1, Ordering::SeqCst);
+    let recorded_at = utc_now_seconds();
+    let decision_id = Uuid::new_v4().to_string();
+
+    let signed_part = |phase: &str, cloud_event_type: &str, producer_sequence: i64| {
+        let data = json!({
+            "event_outcome": event_outcome.clone(),
+            "phase": phase,
+            "session_event_type": session_event_type,
+            "session_reservation_id": session_reservation_id.to_string(),
+        });
+        json!({
+            "audit_event_id": Uuid::new_v4().to_string(),
+            "audit_outbox_id": Uuid::new_v4().to_string(),
+            "data_b64": general_purpose::STANDARD.encode(serde_json::to_vec(&data).unwrap()),
+            "producer_sequence": producer_sequence,
+            "signature_hex": "11".repeat(64),
+            "type": cloud_event_type,
+        })
+    };
+
+    json!({
+        "decision": signed_part("decision", "spendguard.audit.decision", decision_sequence),
+        "decision_id": decision_id,
+        "outcome": signed_part("outcome", "spendguard.audit.outcome", outcome_sequence),
+        "producer_id": "ledger:session-reservation-ledger",
+        "recorded_at": format_event_time(recorded_at),
+        "signing_key_id": "ed25519:test-session-reservations",
+        "time_nanos": 0,
+        "time_seconds": recorded_at.timestamp(),
+    })
+}
+
 fn reserve_req(f: &Fixture, session_id: &str, amount: &str) -> ReserveSessionLedgerRequest {
+    let session_reservation_id = Uuid::new_v4();
+    let ttl_expires_at = format_event_time(utc_now_seconds() + chrono::Duration::seconds(60));
+    let outcome = tuple_outcome(
+        json!({
+            "status": "accepted",
+            "session_reservation_id": session_reservation_id.to_string(),
+            "reserved_amount_atomic": amount,
+            "committed_amount_atomic": "0",
+            "remaining_amount_atomic": amount,
+            "released_amount_atomic": "0",
+            "ttl_expires_at": ttl_expires_at,
+        }),
+        f,
+        None,
+    );
     ReserveSessionLedgerRequest {
         tenant_id: f.tenant_id,
         budget_id: f.budget_id,
@@ -465,6 +562,57 @@ fn reserve_req(f: &Fixture, session_id: &str, amount: &str) -> ReserveSessionLed
         estimated_amount_atomic: amount.into(),
         ttl_seconds: 60,
         idempotency_key: format!("{session_id}-reserve"),
+        server_mint: Some(json!({
+            "session_reservation_id": session_reservation_id.to_string(),
+            "ttl_expires_at": ttl_expires_at,
+        })),
+        audit_context: Some(test_audit_context(
+            "spendguard.audit.session.reserve",
+            session_reservation_id,
+            outcome,
+        )),
+    }
+}
+
+fn denied_reserve_req(f: &Fixture, session_id: &str, amount: &str) -> ReserveSessionLedgerRequest {
+    let session_reservation_id = Uuid::new_v4();
+    let ttl_expires_at = format_event_time(utc_now_seconds() + chrono::Duration::seconds(60));
+    let audit_outcome = tuple_outcome(
+        json!({
+            "status": "denied",
+            "reason": "INSUFFICIENT_AVAILABLE_BUDGET",
+            "session_reservation_id": session_reservation_id.to_string(),
+            "session_id": session_id,
+            "route": "livekit/agent",
+            "requested_amount_atomic": amount,
+            "committed_amount_atomic": "0",
+            "remaining_amount_atomic": "0",
+            "released_amount_atomic": "0",
+            "ttl_expires_at": ttl_expires_at,
+        }),
+        f,
+        None,
+    );
+    ReserveSessionLedgerRequest {
+        tenant_id: f.tenant_id,
+        budget_id: f.budget_id,
+        window_instance_id: f.window_instance_id,
+        unit_id: f.unit_id,
+        pricing: f.pricing.clone(),
+        session_id: session_id.into(),
+        route: "livekit/agent".into(),
+        estimated_amount_atomic: amount.into(),
+        ttl_seconds: 60,
+        idempotency_key: format!("{session_id}-reserve"),
+        server_mint: Some(json!({
+            "session_reservation_id": session_reservation_id.to_string(),
+            "ttl_expires_at": ttl_expires_at,
+        })),
+        audit_context: Some(test_audit_context(
+            "spendguard.audit.session.denied",
+            session_reservation_id,
+            audit_outcome,
+        )),
     }
 }
 
@@ -473,13 +621,28 @@ fn commit_req(
     session_reservation_id: Uuid,
     streaming_commit_id: &str,
     amount: &str,
+    committed_after: &str,
+    remaining_after: &str,
 ) -> CommitSessionDeltaLedgerRequest {
+    let event_time = utc_now_seconds();
+    let outcome = tuple_outcome(
+        json!({
+            "status": "accepted",
+            "session_reservation_id": session_reservation_id.to_string(),
+            "streaming_commit_id": streaming_commit_id,
+            "amount_atomic_delta": amount,
+            "committed_amount_atomic": committed_after,
+            "remaining_amount_atomic": remaining_after,
+        }),
+        f,
+        Some(event_time),
+    );
     CommitSessionDeltaLedgerRequest {
         session_reservation_id,
         streaming_commit_id: streaming_commit_id.into(),
         amount_atomic_delta: amount.into(),
         outcome: "estimated".into(),
-        event_time: Utc::now(),
+        event_time,
         idempotency_key: format!("{streaming_commit_id}-idem"),
         tenant_id: Some(f.tenant_id),
         budget_id: Some(f.budget_id),
@@ -489,23 +652,156 @@ fn commit_req(
         price_snapshot_hash_hex: Some(f.pricing.price_snapshot_hash_hex.clone()),
         fx_rate_version: Some(f.pricing.fx_rate_version.clone()),
         unit_conversion_version: Some(f.pricing.unit_conversion_version.clone()),
+        audit_context: Some(test_audit_context(
+            "spendguard.audit.session.commit_delta",
+            session_reservation_id,
+            outcome,
+        )),
     }
 }
 
-fn release_req(session_reservation_id: Uuid, key: &str) -> ReleaseSessionLedgerRequest {
+fn denied_commit_req(
+    f: &Fixture,
+    session_reservation_id: Uuid,
+    streaming_commit_id: &str,
+    amount: &str,
+    committed_after: &str,
+    remaining_after: &str,
+) -> CommitSessionDeltaLedgerRequest {
+    let event_time = utc_now_seconds();
+    let outcome = tuple_outcome(
+        json!({
+            "status": "denied",
+            "reason": "OVERRUN_RESERVATION",
+            "session_reservation_id": session_reservation_id.to_string(),
+            "attempted_amount_atomic_delta": amount,
+            "committed_amount_atomic": committed_after,
+            "remaining_amount_atomic": remaining_after,
+        }),
+        f,
+        Some(event_time),
+    );
+    CommitSessionDeltaLedgerRequest {
+        session_reservation_id,
+        streaming_commit_id: streaming_commit_id.into(),
+        amount_atomic_delta: amount.into(),
+        outcome: "estimated".into(),
+        event_time,
+        idempotency_key: format!("{streaming_commit_id}-idem"),
+        tenant_id: Some(f.tenant_id),
+        budget_id: Some(f.budget_id),
+        window_instance_id: Some(f.window_instance_id),
+        unit_id: Some(f.unit_id),
+        pricing_version: Some(f.pricing.pricing_version.clone()),
+        price_snapshot_hash_hex: Some(f.pricing.price_snapshot_hash_hex.clone()),
+        fx_rate_version: Some(f.pricing.fx_rate_version.clone()),
+        unit_conversion_version: Some(f.pricing.unit_conversion_version.clone()),
+        audit_context: Some(test_audit_context(
+            "spendguard.audit.session.denied",
+            session_reservation_id,
+            outcome,
+        )),
+    }
+}
+
+fn release_req(
+    f: &Fixture,
+    session_reservation_id: Uuid,
+    key: &str,
+    committed_amount: &str,
+    released_amount: &str,
+) -> ReleaseSessionLedgerRequest {
+    let event_time = utc_now_seconds();
+    let outcome = tuple_outcome(
+        json!({
+            "status": "accepted",
+            "session_reservation_id": session_reservation_id.to_string(),
+            "reason_code": "EXPLICIT",
+            "session_status": "released",
+            "released_this_call_atomic": released_amount,
+            "released_amount_atomic": released_amount,
+            "committed_amount_atomic": committed_amount,
+            "remaining_amount_atomic": "0",
+        }),
+        f,
+        Some(event_time),
+    );
     ReleaseSessionLedgerRequest {
         session_reservation_id,
         reason_code: "EXPLICIT".into(),
-        event_time: Utc::now(),
+        event_time,
         idempotency_key: key.into(),
+        audit_context: Some(test_audit_context(
+            "spendguard.audit.session.release",
+            session_reservation_id,
+            outcome,
+        )),
     }
 }
 
-fn expire_req(session_reservation_id: Uuid, key: &str) -> ExpireSessionLedgerRequest {
+fn early_expire_req(
+    f: &Fixture,
+    session_reservation_id: Uuid,
+    key: &str,
+    ttl_expires_at: &str,
+    committed_amount: &str,
+    remaining_amount: &str,
+) -> ExpireSessionLedgerRequest {
+    let event_time = utc_now_seconds();
+    let outcome = tuple_outcome(
+        json!({
+            "status": "denied",
+            "reason": "SESSION_TTL_NOT_EXPIRED",
+            "session_reservation_id": session_reservation_id.to_string(),
+            "ttl_expires_at": ttl_expires_at,
+            "committed_amount_atomic": committed_amount,
+            "remaining_amount_atomic": remaining_amount,
+        }),
+        f,
+        Some(event_time),
+    );
     ExpireSessionLedgerRequest {
         session_reservation_id,
-        event_time: Utc::now(),
+        event_time,
         idempotency_key: key.into(),
+        audit_context: Some(test_audit_context(
+            "spendguard.audit.session.denied",
+            session_reservation_id,
+            outcome,
+        )),
+    }
+}
+
+fn expire_req(
+    f: &Fixture,
+    session_reservation_id: Uuid,
+    key: &str,
+    committed_amount: &str,
+    released_amount: &str,
+) -> ExpireSessionLedgerRequest {
+    let event_time = utc_now_seconds();
+    let outcome = tuple_outcome(
+        json!({
+            "status": "accepted",
+            "session_reservation_id": session_reservation_id.to_string(),
+            "session_status": "expired",
+            "released_this_call_atomic": released_amount,
+            "released_amount_atomic": released_amount,
+            "committed_amount_atomic": committed_amount,
+            "remaining_amount_atomic": "0",
+        }),
+        f,
+        Some(event_time),
+    );
+    ExpireSessionLedgerRequest {
+        session_reservation_id,
+        event_time,
+        idempotency_key: key.into(),
+        audit_context: Some(test_audit_context(
+            "spendguard.audit.session.expired",
+            session_reservation_id,
+            outcome,
+        )),
     }
 }
 
@@ -614,7 +910,68 @@ async fn session_reservation_lifecycle_enforces_invariants() {
         .expect_err("same reserve key with different payload conflicts");
     assert_sqlstate(err, "40P03");
 
-    let commit = commit_req(&fixture, session_reservation_id, "delta-1", "1000");
+    let denied_reserve = denied_reserve_req(&fixture, "voice-session-denied", "999999");
+    let denied_reserve_outcome = reserve_session(&pool, &denied_reserve)
+        .await
+        .expect("reserve denial");
+    assert_eq!(json_str(&denied_reserve_outcome, "status"), "denied");
+    assert_eq!(
+        json_str(&denied_reserve_outcome, "reason"),
+        "INSUFFICIENT_AVAILABLE_BUDGET"
+    );
+    assert_eq!(
+        json_str(&denied_reserve_outcome, "available_amount_atomic"),
+        "100000"
+    );
+    assert!(denied_reserve_outcome
+        .get("ledger_transaction_id")
+        .is_some());
+    assert_eq!(
+        account_balance(&pool, &fixture, "available_budget").await,
+        "100000"
+    );
+    assert_eq!(
+        account_balance(&pool, &fixture, "reserved_hold").await,
+        "100000"
+    );
+
+    let denied_reserve_replay = reserve_session(&pool, &denied_reserve)
+        .await
+        .expect("reserve denial replay");
+    assert_eq!(denied_reserve_replay, denied_reserve_outcome);
+    let denied_session_reservation_id =
+        Uuid::parse_str(json_str(&denied_reserve_outcome, "session_reservation_id")).unwrap();
+    let reserve_denied_audit_rows: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)
+          FROM audit_outbox ao
+          CROSS JOIN LATERAL (
+              SELECT convert_from(decode(ao.cloudevent_payload->>'data_b64', 'base64'), 'UTF8')::jsonb AS data
+          ) decoded
+         WHERE decoded.data->>'session_reservation_id' = $1
+           AND decoded.data->>'session_event_type' = 'spendguard.audit.session.denied'
+        "#,
+    )
+    .bind(denied_session_reservation_id.to_string())
+    .fetch_one(&pool)
+    .await
+    .expect("reserve denied audit rows");
+    assert_eq!(reserve_denied_audit_rows, 2);
+    let mut conflicting_denied_reserve = denied_reserve.clone();
+    conflicting_denied_reserve.estimated_amount_atomic = "999998".into();
+    let err = reserve_session(&pool, &conflicting_denied_reserve)
+        .await
+        .expect_err("same denied reserve key with different payload conflicts");
+    assert_sqlstate(err, "40P03");
+
+    let commit = commit_req(
+        &fixture,
+        session_reservation_id,
+        "delta-1",
+        "1000",
+        "1000",
+        "99000",
+    );
     let commit_outcome = commit_session_delta(&pool, &commit)
         .await
         .expect("commit delta");
@@ -654,7 +1011,14 @@ async fn session_reservation_lifecycle_enforces_invariants() {
         .expect_err("same streaming commit id with different payload conflicts");
     assert_sqlstate(err, "40P03");
 
-    let over_budget = commit_req(&fixture, session_reservation_id, "delta-over", "100000");
+    let over_budget = denied_commit_req(
+        &fixture,
+        session_reservation_id,
+        "delta-over",
+        "100000",
+        "1000",
+        "99000",
+    );
     let over_budget_outcome = commit_session_delta(&pool, &over_budget)
         .await
         .expect("over-budget denial outcome");
@@ -685,15 +1049,27 @@ async fn session_reservation_lifecycle_enforces_invariants() {
     .expect("denied event count");
     assert_eq!(denied_events, 1);
 
-    let mut mismatched_tuple =
-        commit_req(&fixture, session_reservation_id, "delta-mismatch", "1000");
+    let mut mismatched_tuple = commit_req(
+        &fixture,
+        session_reservation_id,
+        "delta-mismatch",
+        "1000",
+        "2000",
+        "98000",
+    );
     mismatched_tuple.unit_id = Some(Uuid::new_v4());
     let err = commit_session_delta(&pool, &mismatched_tuple)
         .await
         .expect_err("tuple mismatch rejects commit");
     assert_sqlstate(err, "P0001");
 
-    let release = release_req(session_reservation_id, "release-1");
+    let release = release_req(
+        &fixture,
+        session_reservation_id,
+        "release-1",
+        "1000",
+        "99000",
+    );
     let release_outcome = release_session(&pool, &release).await.expect("release");
     assert_eq!(json_str(&release_outcome, "status"), "accepted");
     assert_eq!(
@@ -721,10 +1097,12 @@ async fn session_reservation_lifecycle_enforces_invariants() {
         .expect("release replay");
     assert_eq!(release_replay, release_outcome);
 
-    let release_after_settled =
-        release_session(&pool, &release_req(session_reservation_id, "release-2"))
-            .await
-            .expect("release after settled");
+    let release_after_settled = release_session(
+        &pool,
+        &release_req(&fixture, session_reservation_id, "release-2", "1000", "0"),
+    )
+    .await
+    .expect("release after settled");
     assert_eq!(
         json_str(&release_after_settled, "released_this_call_atomic"),
         "0"
@@ -738,12 +1116,26 @@ async fn session_reservation_lifecycle_enforces_invariants() {
     .expect("reserve expiring session");
     let expiry_session_id =
         Uuid::parse_str(json_str(&expiry_reserve, "session_reservation_id")).unwrap();
-    let expiry_commit = commit_req(&fixture, expiry_session_id, "delta-expire", "2000");
+    let expiry_commit = commit_req(
+        &fixture,
+        expiry_session_id,
+        "delta-expire",
+        "2000",
+        "2000",
+        "3000",
+    );
     commit_session_delta(&pool, &expiry_commit)
         .await
         .expect("pre-expiry commit");
 
-    let early_expire = expire_req(expiry_session_id, "expire-early");
+    let early_expire = early_expire_req(
+        &fixture,
+        expiry_session_id,
+        "expire-early",
+        json_str(&expiry_reserve, "ttl_expires_at"),
+        "2000",
+        "3000",
+    );
     let early_expire_outcome = expire_session(&pool, &early_expire)
         .await
         .expect("early expire denial");
@@ -772,9 +1164,12 @@ async fn session_reservation_lifecycle_enforces_invariants() {
     .await
     .expect("force ttl expiry");
 
-    let expire_outcome = expire_session(&pool, &expire_req(expiry_session_id, "expire-1"))
-        .await
-        .expect("expire session");
+    let expire_outcome = expire_session(
+        &pool,
+        &expire_req(&fixture, expiry_session_id, "expire-1", "2000", "3000"),
+    )
+    .await
+    .expect("expire session");
     assert_eq!(json_str(&expire_outcome, "status"), "accepted");
     assert_eq!(json_str(&expire_outcome, "session_status"), "expired");
     assert_eq!(
@@ -828,7 +1223,13 @@ async fn concurrent_idempotent_replays_return_original_outcome() {
     .expect("reserve entry count");
     assert_eq!(reserve_entry_count, 2);
 
-    let release = release_req(session_reservation_id, "release-race");
+    let release = release_req(
+        &fixture,
+        session_reservation_id,
+        "release-race",
+        "0",
+        "10000",
+    );
     let (a, b) = tokio::join!(
         release_session(&pool, &release),
         release_session(&pool, &release)
@@ -866,7 +1267,7 @@ async fn concurrent_idempotent_replays_return_original_outcome() {
     .await
     .expect("force ttl expiry");
 
-    let expire = expire_req(expiry_session_id, "expire-race");
+    let expire = expire_req(&fixture, expiry_session_id, "expire-race", "0", "9000");
     let (a, b) = tokio::join!(
         expire_session(&pool, &expire),
         expire_session(&pool, &expire)

@@ -27,7 +27,10 @@ From `acceptance.md` §6:
 |---|---|
 | `deploy/demo/session_reservation/*` | Demo overlay and driver. |
 | `deploy/demo/verify_step_session_reservation.sql` | Hard SQL gate. |
+| `deploy/demo/verify_step_session_reservation_canonical.sql` | Canonical DB hard gate scoped to the three demo session reservation IDs. |
 | `deploy/demo/Makefile` | Demo branch and verify target. |
+| `services/ledger/src/session_reservations.rs` | Signed audit context/server mint request threading for focused ledger entrypoints. |
+| `services/ledger/tests/session_reservations.rs` | Regression coverage for required signed-shape session audit context. |
 | docs/specs or site docs | Handoff note to D41 adapter docs if needed. |
 
 ## VERIFY-AT-IMPL pins

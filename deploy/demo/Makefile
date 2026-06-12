@@ -17,6 +17,9 @@
 #   DEMO_MODE=openclaw_provider_plugin
 #                           COV_D40B: OpenClaw in-process provider plugin
 #                           wrapper + local counting stub
+#   DEMO_MODE=session_reservation
+#                           COV_D41S: session-scoped reserve/stream/release
+#                           substrate demo + strict audit ingest gate
 
 COMPOSE := docker compose -f compose.yaml
 # Default to "decision" mode (Handshake + RequestDecision +
@@ -216,6 +219,14 @@ else ifeq ($(DEMO_MODE),openclaw_provider_plugin)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub
+else ifeq ($(DEMO_MODE),session_reservation)
+	@echo "[demo] DEMO_MODE=session_reservation → COV_D41S substrate demo."
+	@echo "[demo]   Minimal stack: postgres + pki + bundles + ledger +"
+	@echo "[demo]               canonical-ingest + outbox-forwarder."
+	@echo "[demo]   Direct substrate gate; no sidecar or ttl-sweeper build."
+	$(COMPOSE) up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    ledger canonical-ingest outbox-forwarder
 else ifeq ($(DEMO_MODE),vercel_ai_mastra)
 	@echo "[demo] DEMO_MODE=vercel_ai_mastra → COV_D06 SLICE 7 (Vercel AI SDK middleware, covers Mastra)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -848,6 +859,12 @@ else ifeq ($(DEMO_MODE),openclaw_provider_plugin)
 	$(COMPOSE) -f openclaw_provider_plugin/docker-compose.yaml run --rm openclaw-provider-plugin-runner
 	@echo "[demo] verifying COV_D40B SLICE 5 (openclaw_provider_plugin ALLOW + DENY + STREAM + PROVIDER_ERROR)..."
 	@$(MAKE) demo-verify-openclaw-provider-plugin
+else ifeq ($(DEMO_MODE),session_reservation)
+	@echo "[demo] running D41 session reservation substrate driver (signed audit decision/outcome pairs)..."
+	@python3 session_reservation/driver.py
+	@echo "[demo] waiting 8s for outbox forwarder to drain session audit rows..."
+	@sleep 8
+	@$(MAKE) demo-verify-session-reservation
 else ifeq ($(DEMO_MODE),vercel_ai_mastra)
 	@echo "[demo] running vercel-ai-mastra-runner (Node 20 + Vercel AI SDK + Mastra alias)..."
 	$(COMPOSE) -f vercel_ai_mastra/docker-compose.yaml run --rm vercel-ai-mastra-runner
@@ -1236,6 +1253,15 @@ demo-verify-outbox-closure:
 		   RAISE NOTICE 'canonical_events count=%', v_count; \
 		 END; \$$\$$;"
 	@echo "[demo] outbox closure verification done"
+
+demo-verify-session-reservation:
+	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_session_reservation.sql
+	@echo "[demo] verifying canonical_events carried D41 session audit pairs..."
+	@SESSION_ID="$$( $(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -tA -v ON_ERROR_STOP=1 -c "SELECT session_reservation_id FROM session_reservations WHERE tenant_id = '00000000-0000-4000-8000-000000000001' AND session_id = 'd41-session-reservation-demo'" )"; \
+	DENIED_SESSION_ID="$$( $(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -tA -v ON_ERROR_STOP=1 -c "SELECT session_reservation_id FROM session_reservations WHERE tenant_id = '00000000-0000-4000-8000-000000000001' AND session_id = 'd41-session-reservation-deny-demo'" )"; \
+	EXPIRED_SESSION_ID="$$( $(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -tA -v ON_ERROR_STOP=1 -c "SELECT session_reservation_id FROM session_reservations WHERE tenant_id = '00000000-0000-4000-8000-000000000001' AND session_id = 'd41-session-reservation-expire-demo'" )"; \
+	$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -v session_id="$$SESSION_ID" -v denied_session_id="$$DENIED_SESSION_ID" -v expired_session_id="$$EXPIRED_SESSION_ID" < verify_step_session_reservation_canonical.sql
+	@echo "[demo] session_reservation verification done"
 
 # Phase 3 wedge DENY verification: contract evaluator STOP path emits
 # 1 denied_decision ledger_transactions row (no entries) + 1
@@ -2382,7 +2408,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-mastra-processor demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture demo-verify-import-manus-fixture demo-import-manus-fixture demo-verify-import-genspark-fixture demo-verify-all-d05-ur demo-verify-ag-ui-events demo-verify-openclaw-base-url demo-verify-openclaw-provider-plugin
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-session-reservation demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-mastra-processor demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture demo-verify-import-manus-fixture demo-import-manus-fixture demo-verify-import-genspark-fixture demo-verify-all-d05-ur demo-verify-ag-ui-events demo-verify-openclaw-base-url demo-verify-openclaw-provider-plugin
 
 # HARDEN_D05_UR master verification target — runs all 14+ demos sequentially
 # and asserts each exits 0 with canonical success lines. This target replaces

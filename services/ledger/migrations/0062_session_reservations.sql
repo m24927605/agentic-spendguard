@@ -101,8 +101,78 @@ CREATE TABLE IF NOT EXISTS session_reservation_events (
 
 CREATE OR REPLACE FUNCTION session_reservation_request_hash(p_request JSONB)
 RETURNS BYTEA AS $$
-    SELECT digest(convert_to(p_request::TEXT, 'UTF8'), 'sha256');
+    SELECT digest(
+        convert_to((p_request - 'audit_context')::TEXT, 'UTF8'),
+        'sha256'
+    );
 $$ LANGUAGE SQL IMMUTABLE SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION session_audit_tuple_fields(
+    p_tenant_id UUID,
+    p_budget_id UUID,
+    p_window_instance_id UUID,
+    p_unit_id UUID,
+    p_pricing_version TEXT,
+    p_price_snapshot_hash BYTEA,
+    p_fx_rate_version TEXT,
+    p_unit_conversion_version TEXT,
+    p_event_time TIMESTAMPTZ DEFAULT NULL
+) RETURNS JSONB AS $$
+    SELECT jsonb_strip_nulls(jsonb_build_object(
+        'tenant_id', p_tenant_id::TEXT,
+        'budget_id', p_budget_id::TEXT,
+        'window_instance_id', p_window_instance_id::TEXT,
+        'unit', jsonb_build_object('unit_id', p_unit_id::TEXT),
+        'unit_id', p_unit_id::TEXT,
+        'pricing_version', p_pricing_version,
+        'price_snapshot_hash_hex', encode(p_price_snapshot_hash, 'hex'),
+        'fx_rate_version', p_fx_rate_version,
+        'unit_conversion_version', p_unit_conversion_version,
+        'event_time', CASE
+            WHEN p_event_time IS NULL THEN NULL
+            ELSE to_jsonb(to_char(
+                p_event_time AT TIME ZONE 'UTC',
+                'YYYY-MM-DD"T"HH24:MI:SS"+00:00"'
+            ))
+        END
+    ));
+$$ LANGUAGE SQL STABLE SECURITY DEFINER;
+
+CREATE OR REPLACE FUNCTION session_validate_audit_data(
+    p_data_b64 TEXT,
+    p_session_event_type TEXT,
+    p_session_reservation_id UUID,
+    p_phase TEXT,
+    p_audit_event_outcome JSONB
+) RETURNS VOID AS $$
+DECLARE
+    v_data JSONB;
+BEGIN
+    IF p_data_b64 IS NULL OR p_data_b64 = '' THEN
+        RAISE EXCEPTION 'SESSION_AUDIT_DATA_INVALID: data_b64 is required'
+            USING ERRCODE = '22023';
+    END IF;
+
+    v_data := convert_from(decode(p_data_b64, 'base64'), 'UTF8')::JSONB;
+
+    IF v_data->>'session_event_type' IS DISTINCT FROM p_session_event_type THEN
+        RAISE EXCEPTION 'SESSION_AUDIT_DATA_INVALID: session_event_type mismatch'
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_data->>'session_reservation_id' IS DISTINCT FROM p_session_reservation_id::TEXT THEN
+        RAISE EXCEPTION 'SESSION_AUDIT_DATA_INVALID: session_reservation_id mismatch'
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_data->>'phase' IS DISTINCT FROM p_phase THEN
+        RAISE EXCEPTION 'SESSION_AUDIT_DATA_INVALID: phase mismatch'
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_data->'event_outcome' IS DISTINCT FROM p_audit_event_outcome THEN
+        RAISE EXCEPTION 'SESSION_AUDIT_DATA_INVALID: event_outcome mismatch'
+            USING ERRCODE = '22023';
+    END IF;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
 
 CREATE OR REPLACE FUNCTION session_account_balance(p_ledger_account_id UUID)
 RETURNS NUMERIC(38,0) AS $$
@@ -133,29 +203,168 @@ CREATE OR REPLACE FUNCTION session_ledger_tx(
     p_request_hash BYTEA,
     p_minimal_replay_response JSONB,
     p_session_event_type TEXT,
-    p_session_reservation_id UUID
+    p_session_reservation_id UUID,
+    p_audit_context JSONB DEFAULT '{}'::JSONB,
+    p_audit_event_outcome JSONB DEFAULT NULL
 ) RETURNS UUID AS $$
 DECLARE
     v_tx_id UUID := gen_random_uuid();
-    v_audit_outbox_id UUID := gen_random_uuid();
-    v_audit_event_id UUID := gen_random_uuid();
-    v_decision_id UUID := gen_random_uuid();
-    v_recorded_month DATE := date_trunc('month', clock_timestamp())::DATE;
+    v_decision_context JSONB := COALESCE(p_audit_context->'decision', '{}'::JSONB);
+    v_outcome_context JSONB := COALESCE(p_audit_context->'outcome', '{}'::JSONB);
+    v_decision_audit_outbox_id UUID := COALESCE(NULLIF(v_decision_context->>'audit_outbox_id', '')::UUID, gen_random_uuid());
+    v_outcome_audit_outbox_id UUID := COALESCE(NULLIF(v_outcome_context->>'audit_outbox_id', '')::UUID, gen_random_uuid());
+    v_decision_event_id UUID := COALESCE(NULLIF(v_decision_context->>'audit_event_id', '')::UUID, gen_random_uuid());
+    v_outcome_event_id UUID := COALESCE(NULLIF(v_outcome_context->>'audit_event_id', '')::UUID, gen_random_uuid());
+    v_decision_id UUID := COALESCE(NULLIF(p_audit_context->>'decision_id', '')::UUID, gen_random_uuid());
+    v_recorded_at TIMESTAMPTZ := COALESCE(NULLIF(p_audit_context->>'recorded_at', '')::TIMESTAMPTZ, clock_timestamp());
+    v_recorded_month DATE := date_trunc('month', v_recorded_at)::DATE;
     v_workload_id TEXT := 'session-reservation-ledger';
-    v_producer_sequence BIGINT := nextval_per_shard(1::smallint);
-    v_payload JSONB;
+    v_producer_id TEXT := 'ledger:session-reservation-ledger';
+    v_signing_key_id TEXT := NULLIF(p_audit_context->>'signing_key_id', '');
+    v_decision_sequence BIGINT := COALESCE(NULLIF(v_decision_context->>'producer_sequence', '')::BIGINT, nextval_per_shard(1::smallint));
+    v_outcome_sequence BIGINT := COALESCE(NULLIF(v_outcome_context->>'producer_sequence', '')::BIGINT, nextval_per_shard(1::smallint));
+    v_time_seconds BIGINT;
+    v_time_nanos BIGINT;
+    v_decision_data_b64 TEXT;
+    v_outcome_data_b64 TEXT;
+    v_decision_payload JSONB;
+    v_outcome_payload JSONB;
+    v_decision_payload_sig BYTEA;
+    v_outcome_payload_sig BYTEA;
+    v_audit_event_outcome JSONB := COALESCE(p_audit_event_outcome, p_minimal_replay_response);
 BEGIN
-    v_payload := jsonb_build_object(
-        'specversion', '1.0',
-        'id', v_audit_event_id::TEXT,
-        'type', p_session_event_type,
-        'source', 'urn:spendguard:ledger:session-reservations',
-        'subject', p_session_reservation_id::TEXT,
-        'time', to_jsonb(clock_timestamp()),
-        'datacontenttype', 'application/json',
-        'signing_key_id', 'ledger-server-mint:session-reservation:v1',
-        'data', p_minimal_replay_response
+    IF p_audit_context IS NULL OR p_audit_context = '{}'::JSONB THEN
+        RAISE EXCEPTION 'SESSION_AUDIT_CONTEXT_REQUIRED: signed audit_context is required for session events'
+            USING ERRCODE = '22023';
+    END IF;
+    IF p_audit_context ? 'producer_id'
+       AND p_audit_context->>'producer_id' IS DISTINCT FROM v_producer_id THEN
+        RAISE EXCEPTION 'SESSION_AUDIT_CONTEXT_INVALID: producer_id must be ledger:session-reservation-ledger'
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_signing_key_id IS NULL OR v_signing_key_id !~ '^ed25519:' THEN
+        RAISE EXCEPTION 'SESSION_AUDIT_CONTEXT_INVALID: signing_key_id must be ed25519:*'
+            USING ERRCODE = '22023';
+    END IF;
+    IF p_audit_context->>'decision_id' IS NULL
+       OR p_audit_context->>'recorded_at' IS NULL
+       OR p_audit_context->>'time_seconds' IS NULL
+       OR p_audit_context->>'time_nanos' IS NULL THEN
+        RAISE EXCEPTION 'SESSION_AUDIT_CONTEXT_INVALID: decision_id, recorded_at, and time fields are required'
+            USING ERRCODE = '22023';
+    END IF;
+    IF v_decision_context->>'audit_event_id' IS NULL
+       OR v_decision_context->>'data_b64' IS NULL
+       OR v_decision_context->>'producer_sequence' IS NULL
+       OR v_decision_context->>'signature_hex' IS NULL
+       OR v_outcome_context->>'audit_event_id' IS NULL
+       OR v_outcome_context->>'data_b64' IS NULL
+       OR v_outcome_context->>'producer_sequence' IS NULL
+       OR v_outcome_context->>'signature_hex' IS NULL THEN
+        RAISE EXCEPTION 'SESSION_AUDIT_CONTEXT_INVALID: decision/outcome signed envelope fields are required'
+            USING ERRCODE = '22023';
+    END IF;
+
+    v_time_seconds := COALESCE(
+        NULLIF(p_audit_context->>'time_seconds', '')::BIGINT,
+        FLOOR(EXTRACT(EPOCH FROM v_recorded_at))::BIGINT
     );
+    v_time_nanos := COALESCE(
+        NULLIF(p_audit_context->>'time_nanos', '')::BIGINT,
+        FLOOR(
+            (EXTRACT(EPOCH FROM v_recorded_at) - FLOOR(EXTRACT(EPOCH FROM v_recorded_at)))
+            * 1000000000
+        )::BIGINT
+    );
+
+    v_decision_data_b64 := COALESCE(
+        NULLIF(v_decision_context->>'data_b64', ''),
+        encode(
+            convert_to(
+                jsonb_build_object(
+                    'session_event_type', p_session_event_type,
+                    'session_reservation_id', p_session_reservation_id::TEXT,
+                    'phase', 'decision',
+                    'event_outcome', v_audit_event_outcome
+                )::TEXT,
+                'UTF8'
+            ),
+            'base64'
+        )
+    );
+    v_outcome_data_b64 := COALESCE(
+        NULLIF(v_outcome_context->>'data_b64', ''),
+        encode(
+            convert_to(
+                jsonb_build_object(
+                    'session_event_type', p_session_event_type,
+                    'session_reservation_id', p_session_reservation_id::TEXT,
+                    'phase', 'outcome',
+                    'event_outcome', v_audit_event_outcome
+                )::TEXT,
+                'UTF8'
+            ),
+            'base64'
+        )
+    );
+
+    PERFORM session_validate_audit_data(
+        v_decision_data_b64, p_session_event_type, p_session_reservation_id,
+        'decision', v_audit_event_outcome
+    );
+    PERFORM session_validate_audit_data(
+        v_outcome_data_b64, p_session_event_type, p_session_reservation_id,
+        'outcome', v_audit_event_outcome
+    );
+
+    v_decision_payload := jsonb_build_object(
+        'specversion', '1.0',
+        'type', 'spendguard.audit.decision',
+        'source', 'urn:spendguard:ledger:session-reservations',
+        'id', v_decision_event_id::TEXT,
+        'time_seconds', v_time_seconds,
+        'time_nanos', v_time_nanos,
+        'datacontenttype', 'application/json',
+        'data_b64', v_decision_data_b64,
+        'tenantid', p_tenant_id::TEXT,
+        'runid', '',
+        'decisionid', v_decision_id::TEXT,
+        'schema_bundle_id', '',
+        'producer_id', v_producer_id,
+        'producer_sequence', v_decision_sequence,
+        'signing_key_id', v_signing_key_id
+    );
+    v_outcome_payload := jsonb_build_object(
+        'specversion', '1.0',
+        'type', 'spendguard.audit.outcome',
+        'source', 'urn:spendguard:ledger:session-reservations',
+        'id', v_outcome_event_id::TEXT,
+        'time_seconds', v_time_seconds,
+        'time_nanos', v_time_nanos,
+        'datacontenttype', 'application/json',
+        'data_b64', v_outcome_data_b64,
+        'tenantid', p_tenant_id::TEXT,
+        'runid', '',
+        'decisionid', v_decision_id::TEXT,
+        'schema_bundle_id', '',
+        'producer_id', v_producer_id,
+        'producer_sequence', v_outcome_sequence,
+        'signing_key_id', v_signing_key_id
+    );
+    v_decision_payload_sig := CASE
+        WHEN v_decision_context ? 'signature_hex' THEN decode(v_decision_context->>'signature_hex', 'hex')
+        ELSE decode('', 'hex')
+    END;
+    v_outcome_payload_sig := CASE
+        WHEN v_outcome_context ? 'signature_hex' THEN decode(v_outcome_context->>'signature_hex', 'hex')
+        ELSE decode('', 'hex')
+    END;
+
+    IF octet_length(v_decision_payload_sig) <> 64
+       OR octet_length(v_outcome_payload_sig) <> 64 THEN
+        RAISE EXCEPTION 'SESSION_AUDIT_CONTEXT_INVALID: Ed25519 signatures must be 64 bytes'
+            USING ERRCODE = '22023';
+    END IF;
 
     INSERT INTO ledger_transactions (
         ledger_transaction_id, tenant_id, operation_kind, posting_state,
@@ -163,10 +372,10 @@ BEGIN
         audit_decision_event_id, decision_id,
         effective_at, recorded_at, lock_order_token
     ) VALUES (
-        v_tx_id, p_tenant_id, p_operation_kind, 'posted', clock_timestamp(),
+        v_tx_id, p_tenant_id, p_operation_kind, 'posted', v_recorded_at,
         p_idempotency_key, p_request_hash, p_minimal_replay_response,
-        v_audit_event_id, v_decision_id,
-        clock_timestamp(), clock_timestamp(),
+        v_decision_event_id, v_decision_id,
+        v_recorded_at, v_recorded_at,
         'session:' || encode(digest(p_idempotency_key, 'sha256'), 'hex')
     );
 
@@ -179,14 +388,23 @@ BEGIN
         recorded_at, recorded_month,
         producer_sequence, idempotency_key
     ) VALUES (
-        v_audit_outbox_id, v_audit_event_id, v_decision_id,
+        v_decision_audit_outbox_id, v_decision_event_id, v_decision_id,
         p_tenant_id, v_tx_id,
-        'spendguard.audit.outcome', v_payload,
-        digest(convert_to(v_payload::TEXT, 'UTF8'), 'sha256'),
+        'spendguard.audit.decision', v_decision_payload,
+        v_decision_payload_sig,
         1, v_workload_id,
         TRUE, 0,
-        clock_timestamp(), v_recorded_month,
-        v_producer_sequence, p_idempotency_key
+        v_recorded_at, v_recorded_month,
+        v_decision_sequence, p_idempotency_key
+    ), (
+        v_outcome_audit_outbox_id, v_outcome_event_id, v_decision_id,
+        p_tenant_id, v_tx_id,
+        'spendguard.audit.outcome', v_outcome_payload,
+        v_outcome_payload_sig,
+        1, v_workload_id,
+        TRUE, 0,
+        v_recorded_at, v_recorded_month,
+        v_outcome_sequence, p_idempotency_key
     );
 
     INSERT INTO audit_outbox_global_keys (
@@ -195,10 +413,15 @@ BEGIN
         workload_instance_id, producer_sequence,
         idempotency_key, recorded_month, audit_outbox_id
     ) VALUES (
-        v_audit_event_id, p_tenant_id, v_decision_id,
+        v_decision_event_id, p_tenant_id, v_decision_id,
+        'spendguard.audit.decision', p_operation_kind,
+        v_workload_id, v_decision_sequence,
+        p_idempotency_key || ':decision', v_recorded_month, v_decision_audit_outbox_id
+    ), (
+        v_outcome_event_id, p_tenant_id, v_decision_id,
         'spendguard.audit.outcome', p_operation_kind,
-        v_workload_id, v_producer_sequence,
-        p_idempotency_key, v_recorded_month, v_audit_outbox_id
+        v_workload_id, v_outcome_sequence,
+        p_idempotency_key || ':outcome', v_recorded_month, v_outcome_audit_outbox_id
     );
 
     RETURN v_tx_id;
@@ -305,9 +528,10 @@ DECLARE
     v_amount                  NUMERIC(38,0) := (p_request->>'estimated_amount_atomic')::NUMERIC(38,0);
     v_ttl_seconds             BIGINT := (p_request->>'ttl_seconds')::BIGINT;
     v_idempotency_key         TEXT := p_request->>'idempotency_key';
+    v_server_mint             JSONB := COALESCE(p_request->'server_mint', '{}'::JSONB);
     v_request_hash            BYTEA := session_reservation_request_hash(p_request);
     v_existing                RECORD;
-    v_session_reservation_id  UUID := gen_random_uuid();
+    v_session_reservation_id  UUID := COALESCE(NULLIF(v_server_mint->>'session_reservation_id', '')::UUID, gen_random_uuid());
     v_ttl_expires_at          TIMESTAMPTZ;
     v_available_account_id    UUID;
     v_reserved_account_id     UUID;
@@ -315,6 +539,8 @@ DECLARE
     v_tx_id                   UUID;
     v_tx_key                  TEXT;
     v_outcome                 JSONB;
+    v_audit_outcome           JSONB;
+    v_selected_audit_context  JSONB;
     v_status                  TEXT;
 BEGIN
     IF v_amount IS NULL OR v_amount <= 0 THEN
@@ -397,7 +623,10 @@ BEGIN
         v_tenant_id, v_budget_id, v_window_instance_id, v_unit_id, 'reserved_hold'
     );
     v_available_balance := session_account_balance(v_available_account_id);
-    v_ttl_expires_at := clock_timestamp() + (v_ttl_seconds * INTERVAL '1 second');
+    v_ttl_expires_at := COALESCE(
+        NULLIF(v_server_mint->>'ttl_expires_at', '')::TIMESTAMPTZ,
+        clock_timestamp() + (v_ttl_seconds * INTERVAL '1 second')
+    );
 
     IF v_available_balance < v_amount THEN
         v_status := 'denied';
@@ -405,32 +634,49 @@ BEGIN
             'status', 'denied',
             'reason', 'INSUFFICIENT_AVAILABLE_BUDGET',
             'session_reservation_id', v_session_reservation_id::TEXT,
-            'tenant_id', v_tenant_id::TEXT,
-            'budget_id', v_budget_id::TEXT,
-            'window_instance_id', v_window_instance_id::TEXT,
-            'unit_id', v_unit_id::TEXT,
             'requested_amount_atomic', v_amount::TEXT,
             'available_amount_atomic', v_available_balance::TEXT,
             'committed_amount_atomic', '0',
             'remaining_amount_atomic', '0',
             'released_amount_atomic', '0',
             'ttl_expires_at', to_jsonb(v_ttl_expires_at)
+        ) || session_audit_tuple_fields(
+            v_tenant_id, v_budget_id, v_window_instance_id, v_unit_id,
+            v_pricing_version, v_price_snapshot_hash,
+            v_fx_rate_version, v_unit_conversion_version
+        );
+        v_audit_outcome := jsonb_build_object(
+            'status', 'denied',
+            'reason', 'INSUFFICIENT_AVAILABLE_BUDGET',
+            'session_reservation_id', v_session_reservation_id::TEXT,
+            'session_id', v_session_id,
+            'route', v_route,
+            'requested_amount_atomic', v_amount::TEXT,
+            'committed_amount_atomic', '0',
+            'remaining_amount_atomic', '0',
+            'released_amount_atomic', '0',
+            'ttl_expires_at', to_jsonb(v_ttl_expires_at)
+        ) || session_audit_tuple_fields(
+            v_tenant_id, v_budget_id, v_window_instance_id, v_unit_id,
+            v_pricing_version, v_price_snapshot_hash,
+            v_fx_rate_version, v_unit_conversion_version
         );
     ELSE
         v_status := 'active';
         v_outcome := jsonb_build_object(
             'status', 'accepted',
             'session_reservation_id', v_session_reservation_id::TEXT,
-            'tenant_id', v_tenant_id::TEXT,
-            'budget_id', v_budget_id::TEXT,
-            'window_instance_id', v_window_instance_id::TEXT,
-            'unit_id', v_unit_id::TEXT,
             'reserved_amount_atomic', v_amount::TEXT,
             'committed_amount_atomic', '0',
             'remaining_amount_atomic', v_amount::TEXT,
             'released_amount_atomic', '0',
             'ttl_expires_at', to_jsonb(v_ttl_expires_at)
+        ) || session_audit_tuple_fields(
+            v_tenant_id, v_budget_id, v_window_instance_id, v_unit_id,
+            v_pricing_version, v_price_snapshot_hash,
+            v_fx_rate_version, v_unit_conversion_version
         );
+        v_audit_outcome := v_outcome;
     END IF;
 
     INSERT INTO session_reservations (
@@ -465,12 +711,30 @@ BEGIN
         RETURN v_existing.reserve_outcome;
     END IF;
 
+    v_tx_key := CASE
+        WHEN v_status = 'active' THEN 'session_reserve:' || v_session_reservation_id::TEXT
+        ELSE 'session_reserve_denied:' || v_session_reservation_id::TEXT
+    END;
+    v_selected_audit_context := CASE
+        WHEN v_status = 'active'
+            THEN COALESCE(p_request->'audit_context'->'accepted', p_request->'audit_context')
+        ELSE COALESCE(p_request->'audit_context'->'denied', p_request->'audit_context')
+    END;
+    v_tx_id := session_ledger_tx(
+        v_tenant_id,
+        CASE WHEN v_status = 'active' THEN 'reserve' ELSE 'denied_decision' END,
+        v_tx_key, v_request_hash, v_outcome,
+        CASE
+            WHEN v_status = 'active' THEN 'spendguard.audit.session.reserve'
+            ELSE 'spendguard.audit.session.denied'
+        END,
+        v_session_reservation_id,
+        v_selected_audit_context,
+        v_audit_outcome
+    );
+    v_outcome := v_outcome || jsonb_build_object('ledger_transaction_id', v_tx_id::TEXT);
+
     IF v_status = 'active' THEN
-        v_tx_key := 'session_reserve:' || v_session_reservation_id::TEXT;
-        v_tx_id := session_ledger_tx(
-            v_tenant_id, 'reserve', v_tx_key, v_request_hash, v_outcome,
-            'spendguard.audit.session.reserve', v_session_reservation_id
-        );
         PERFORM session_post_two_entries(
             v_tx_id, v_tenant_id, v_budget_id, v_window_instance_id, v_unit_id,
             v_available_account_id, v_reserved_account_id, v_amount,
@@ -479,10 +743,15 @@ BEGIN
         );
         UPDATE session_reservations
            SET reserve_ledger_transaction_id = v_tx_id,
-               reserve_outcome = v_outcome || jsonb_build_object('ledger_transaction_id', v_tx_id::TEXT),
+               reserve_outcome = v_outcome,
                updated_at = clock_timestamp()
          WHERE session_reservation_id = v_session_reservation_id;
-        v_outcome := v_outcome || jsonb_build_object('ledger_transaction_id', v_tx_id::TEXT);
+    ELSE
+        UPDATE session_reservations
+           SET reserve_ledger_transaction_id = v_tx_id,
+               reserve_outcome = v_outcome,
+               updated_at = clock_timestamp()
+         WHERE session_reservation_id = v_session_reservation_id;
     END IF;
 
     INSERT INTO session_reservation_events (
@@ -636,6 +905,10 @@ BEGIN
             'session_reservation_id', v_session_reservation_id::TEXT,
             'committed_amount_atomic', v_session.committed_amount_atomic::TEXT,
             'remaining_amount_atomic', (v_session.reserved_amount_atomic - v_session.committed_amount_atomic - v_session.released_amount_atomic)::TEXT
+        ) || session_audit_tuple_fields(
+            v_session.tenant_id, v_session.budget_id, v_session.window_instance_id,
+            v_session.unit_id, v_session.pricing_version, v_session.price_snapshot_hash,
+            v_session.fx_rate_version, v_session.unit_conversion_version, v_event_time
         );
     ELSIF v_session.ttl_expires_at <= clock_timestamp() THEN
         v_applied := FALSE;
@@ -647,6 +920,10 @@ BEGIN
             'ttl_expires_at', to_jsonb(v_session.ttl_expires_at),
             'committed_amount_atomic', v_session.committed_amount_atomic::TEXT,
             'remaining_amount_atomic', (v_session.reserved_amount_atomic - v_session.committed_amount_atomic - v_session.released_amount_atomic)::TEXT
+        ) || session_audit_tuple_fields(
+            v_session.tenant_id, v_session.budget_id, v_session.window_instance_id,
+            v_session.unit_id, v_session.pricing_version, v_session.price_snapshot_hash,
+            v_session.fx_rate_version, v_session.unit_conversion_version, v_event_time
         );
     ELSIF v_session.committed_amount_atomic + v_delta > v_session.reserved_amount_atomic THEN
         v_applied := FALSE;
@@ -658,6 +935,10 @@ BEGIN
             'attempted_amount_atomic_delta', v_delta::TEXT,
             'committed_amount_atomic', v_session.committed_amount_atomic::TEXT,
             'remaining_amount_atomic', (v_session.reserved_amount_atomic - v_session.committed_amount_atomic)::TEXT
+        ) || session_audit_tuple_fields(
+            v_session.tenant_id, v_session.budget_id, v_session.window_instance_id,
+            v_session.unit_id, v_session.pricing_version, v_session.price_snapshot_hash,
+            v_session.fx_rate_version, v_session.unit_conversion_version, v_event_time
         );
     ELSE
         v_applied := TRUE;
@@ -691,10 +972,15 @@ BEGIN
             'amount_atomic_delta', v_delta::TEXT,
             'committed_amount_atomic', v_new_committed::TEXT,
             'remaining_amount_atomic', v_remaining::TEXT
+        ) || session_audit_tuple_fields(
+            v_session.tenant_id, v_session.budget_id, v_session.window_instance_id,
+            v_session.unit_id, v_session.pricing_version, v_session.price_snapshot_hash,
+            v_session.fx_rate_version, v_session.unit_conversion_version, v_event_time
         );
         v_tx_id := session_ledger_tx(
             v_session.tenant_id, 'commit_estimated', v_tx_key, v_request_hash, v_outcome,
-            'spendguard.audit.session.commit_delta', v_session_reservation_id
+            'spendguard.audit.session.commit_delta', v_session_reservation_id,
+            p_request->'audit_context'
         );
         PERFORM session_post_two_entries(
             v_tx_id, v_session.tenant_id, v_session.budget_id,
@@ -710,6 +996,16 @@ BEGIN
                updated_at = clock_timestamp()
          WHERE session_reservation_id = v_session_reservation_id;
 
+        v_outcome := v_outcome || jsonb_build_object('ledger_transaction_id', v_tx_id::TEXT);
+    END IF;
+
+    IF NOT v_applied THEN
+        v_tx_key := 'session_commit_denied:' || v_session_reservation_id::TEXT || ':' || v_streaming_commit_id;
+        v_tx_id := session_ledger_tx(
+            v_session.tenant_id, 'denied_decision', v_tx_key, v_request_hash,
+            v_outcome, v_event_type, v_session_reservation_id,
+            p_request->'audit_context'
+        );
         v_outcome := v_outcome || jsonb_build_object('ledger_transaction_id', v_tx_id::TEXT);
     END IF;
 
@@ -825,11 +1121,26 @@ BEGIN
             v_session.tenant_id, v_session.budget_id, v_session.window_instance_id,
             v_session.unit_id, 'available_budget'
         );
+        v_outcome := jsonb_build_object(
+            'status', 'accepted',
+            'session_reservation_id', v_session_reservation_id::TEXT,
+            'reason_code', v_reason_code,
+            'session_status', 'released',
+            'released_this_call_atomic', v_release_amount::TEXT,
+            'released_amount_atomic', v_release_amount::TEXT,
+            'committed_amount_atomic', v_session.committed_amount_atomic::TEXT,
+            'remaining_amount_atomic', '0'
+        ) || session_audit_tuple_fields(
+            v_session.tenant_id, v_session.budget_id, v_session.window_instance_id,
+            v_session.unit_id, v_session.pricing_version, v_session.price_snapshot_hash,
+            v_session.fx_rate_version, v_session.unit_conversion_version, v_event_time
+        );
         v_tx_key := 'session_release:' || v_session_reservation_id::TEXT || ':' || v_idempotency_key;
         v_tx_id := session_ledger_tx(
             v_session.tenant_id, 'release', v_tx_key, v_request_hash,
-            jsonb_build_object('session_reservation_id', v_session_reservation_id::TEXT),
-            'spendguard.audit.session.release', v_session_reservation_id
+            v_outcome,
+            'spendguard.audit.session.release', v_session_reservation_id,
+            p_request->'audit_context'
         );
         PERFORM session_post_two_entries(
             v_tx_id, v_session.tenant_id, v_session.budget_id,
@@ -847,23 +1158,22 @@ BEGIN
          WHERE session_reservation_id = v_session_reservation_id;
     ELSE
         v_release_amount := 0;
+        v_outcome := jsonb_build_object(
+            'status', 'accepted',
+            'session_reservation_id', v_session_reservation_id::TEXT,
+            'reason_code', v_reason_code,
+            'session_status', v_session.status,
+            'released_this_call_atomic', '0',
+            'released_amount_atomic', v_session.released_amount_atomic::TEXT,
+            'committed_amount_atomic', v_session.committed_amount_atomic::TEXT,
+            'remaining_amount_atomic', (v_session.reserved_amount_atomic - v_session.committed_amount_atomic - v_session.released_amount_atomic)::TEXT
+        ) || session_audit_tuple_fields(
+            v_session.tenant_id, v_session.budget_id, v_session.window_instance_id,
+            v_session.unit_id, v_session.pricing_version, v_session.price_snapshot_hash,
+            v_session.fx_rate_version, v_session.unit_conversion_version, v_event_time
+        );
     END IF;
 
-    SELECT *
-      INTO v_session
-      FROM session_reservations
-     WHERE session_reservation_id = v_session_reservation_id;
-
-    v_outcome := jsonb_build_object(
-        'status', 'accepted',
-        'session_reservation_id', v_session_reservation_id::TEXT,
-        'reason_code', v_reason_code,
-        'session_status', v_session.status,
-        'released_this_call_atomic', v_release_amount::TEXT,
-        'released_amount_atomic', v_session.released_amount_atomic::TEXT,
-        'committed_amount_atomic', v_session.committed_amount_atomic::TEXT,
-        'remaining_amount_atomic', (v_session.reserved_amount_atomic - v_session.committed_amount_atomic - v_session.released_amount_atomic)::TEXT
-    );
     IF v_tx_id IS NOT NULL THEN
         v_outcome := v_outcome || jsonb_build_object('ledger_transaction_id', v_tx_id::TEXT);
     END IF;
@@ -950,8 +1260,21 @@ BEGIN
             'status', 'denied',
             'reason', 'SESSION_TTL_NOT_EXPIRED',
             'session_reservation_id', v_session_reservation_id::TEXT,
-            'ttl_expires_at', to_jsonb(v_session.ttl_expires_at)
+            'ttl_expires_at', to_jsonb(v_session.ttl_expires_at),
+            'committed_amount_atomic', v_session.committed_amount_atomic::TEXT,
+            'remaining_amount_atomic', (v_session.reserved_amount_atomic - v_session.committed_amount_atomic - v_session.released_amount_atomic)::TEXT
+        ) || session_audit_tuple_fields(
+            v_session.tenant_id, v_session.budget_id, v_session.window_instance_id,
+            v_session.unit_id, v_session.pricing_version, v_session.price_snapshot_hash,
+            v_session.fx_rate_version, v_session.unit_conversion_version, v_event_time
         );
+        v_tx_key := 'session_expire_denied:' || v_session_reservation_id::TEXT || ':' || v_idempotency_key;
+        v_tx_id := session_ledger_tx(
+            v_session.tenant_id, 'denied_decision', v_tx_key, v_request_hash,
+            v_outcome, 'spendguard.audit.session.denied',
+            v_session_reservation_id, p_request->'audit_context'
+        );
+        v_outcome := v_outcome || jsonb_build_object('ledger_transaction_id', v_tx_id::TEXT);
         INSERT INTO session_reservation_events (
             session_reservation_event_id, session_reservation_id,
             operation_kind, event_type, idempotency_key, request_hash,
@@ -960,7 +1283,7 @@ BEGIN
             gen_random_uuid(), v_session_reservation_id,
             'expire', 'spendguard.audit.session.denied',
             v_idempotency_key, v_request_hash,
-            NULL, NULL, v_event_time, v_outcome
+            v_tx_id, NULL, v_event_time, v_outcome
         );
         RETURN v_outcome;
     END IF;
@@ -986,11 +1309,25 @@ BEGIN
             v_session.tenant_id, v_session.budget_id, v_session.window_instance_id,
             v_session.unit_id, 'available_budget'
         );
+        v_outcome := jsonb_build_object(
+            'status', 'accepted',
+            'session_reservation_id', v_session_reservation_id::TEXT,
+            'session_status', 'expired',
+            'released_this_call_atomic', v_release_amount::TEXT,
+            'released_amount_atomic', v_release_amount::TEXT,
+            'committed_amount_atomic', v_session.committed_amount_atomic::TEXT,
+            'remaining_amount_atomic', '0'
+        ) || session_audit_tuple_fields(
+            v_session.tenant_id, v_session.budget_id, v_session.window_instance_id,
+            v_session.unit_id, v_session.pricing_version, v_session.price_snapshot_hash,
+            v_session.fx_rate_version, v_session.unit_conversion_version, v_event_time
+        );
         v_tx_key := 'session_expire:' || v_session_reservation_id::TEXT || ':' || v_idempotency_key;
         v_tx_id := session_ledger_tx(
             v_session.tenant_id, 'release', v_tx_key, v_request_hash,
-            jsonb_build_object('session_reservation_id', v_session_reservation_id::TEXT),
-            'spendguard.audit.session.expired', v_session_reservation_id
+            v_outcome,
+            'spendguard.audit.session.expired', v_session_reservation_id,
+            p_request->'audit_context'
         );
         PERFORM session_post_two_entries(
             v_tx_id, v_session.tenant_id, v_session.budget_id,
@@ -1008,22 +1345,21 @@ BEGIN
          WHERE session_reservation_id = v_session_reservation_id;
     ELSE
         v_release_amount := 0;
+        v_outcome := jsonb_build_object(
+            'status', 'accepted',
+            'session_reservation_id', v_session_reservation_id::TEXT,
+            'session_status', v_session.status,
+            'released_this_call_atomic', '0',
+            'released_amount_atomic', v_session.released_amount_atomic::TEXT,
+            'committed_amount_atomic', v_session.committed_amount_atomic::TEXT,
+            'remaining_amount_atomic', (v_session.reserved_amount_atomic - v_session.committed_amount_atomic - v_session.released_amount_atomic)::TEXT
+        ) || session_audit_tuple_fields(
+            v_session.tenant_id, v_session.budget_id, v_session.window_instance_id,
+            v_session.unit_id, v_session.pricing_version, v_session.price_snapshot_hash,
+            v_session.fx_rate_version, v_session.unit_conversion_version, v_event_time
+        );
     END IF;
 
-    SELECT *
-      INTO v_session
-      FROM session_reservations
-     WHERE session_reservation_id = v_session_reservation_id;
-
-    v_outcome := jsonb_build_object(
-        'status', 'accepted',
-        'session_reservation_id', v_session_reservation_id::TEXT,
-        'session_status', v_session.status,
-        'released_this_call_atomic', v_release_amount::TEXT,
-        'released_amount_atomic', v_session.released_amount_atomic::TEXT,
-        'committed_amount_atomic', v_session.committed_amount_atomic::TEXT,
-        'remaining_amount_atomic', (v_session.reserved_amount_atomic - v_session.committed_amount_atomic - v_session.released_amount_atomic)::TEXT
-    );
     IF v_tx_id IS NOT NULL THEN
         v_outcome := v_outcome || jsonb_build_object('ledger_transaction_id', v_tx_id::TEXT);
     END IF;
@@ -1069,8 +1405,10 @@ GRANT EXECUTE ON FUNCTION post_session_expire(JSONB)
     TO ledger_application_role;
 
 REVOKE EXECUTE ON FUNCTION session_reservation_request_hash(JSONB) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION session_audit_tuple_fields(UUID, UUID, UUID, UUID, TEXT, BYTEA, TEXT, TEXT, TIMESTAMPTZ) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION session_validate_audit_data(TEXT, TEXT, UUID, TEXT, JSONB) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION session_account_balance(UUID) FROM PUBLIC;
-REVOKE EXECUTE ON FUNCTION session_ledger_tx(UUID, TEXT, TEXT, BYTEA, JSONB, TEXT, UUID) FROM PUBLIC;
+REVOKE EXECUTE ON FUNCTION session_ledger_tx(UUID, TEXT, TEXT, BYTEA, JSONB, TEXT, UUID, JSONB, JSONB) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION session_post_two_entries(UUID, UUID, UUID, UUID, UUID, UUID, UUID, NUMERIC, TEXT, BYTEA, TEXT, TEXT, UUID, TEXT) FROM PUBLIC;
 REVOKE EXECUTE ON FUNCTION session_account_id(UUID, UUID, UUID, UUID, TEXT) FROM PUBLIC;
 

@@ -309,3 +309,67 @@ blocks further commits. Process-crash recovery remains the SR-V2 ledger TTL
 sweep: if a process dies before replay or release, `post_session_expire`
 settles the uncommitted remainder and emits the `SR-V5` audit-visible expiry
 event in the substrate closeout slice.
+
+### 2026-06-12 - `COV_D41S_05_substrate_demo_gate` SR-V5 audit/canonical pin
+
+`SR-V5` is pinned to `services/ledger/migrations/0062_session_reservations.sql`,
+`deploy/demo/session_reservation/driver.py`, and
+`deploy/demo/verify_step_session_reservation.sql` plus
+`deploy/demo/verify_step_session_reservation_canonical.sql`.
+
+Session audit events use the existing canonical-ingest allow-list by writing a
+paired `spendguard.audit.decision` and `spendguard.audit.outcome` row for each
+session lifecycle event that creates an audit-visible decision. The concrete
+session event family remains inside each CloudEvent `data_b64` payload:
+
+| Field | Pinned value |
+|---|---|
+| CloudEvent `type` | `spendguard.audit.decision` or `spendguard.audit.outcome` |
+| `data_b64.session_event_type` | One of `spendguard.audit.session.reserve`, `spendguard.audit.session.commit_delta`, `spendguard.audit.session.release`, `spendguard.audit.session.expired`, `spendguard.audit.session.denied` |
+| `data_b64.session_reservation_id` | The `session_reservation_id` for the lifecycle event |
+| `data_b64.phase` | `decision` or `outcome`, matching the envelope type |
+| `data_b64.event_outcome` | The exact JSONB audit outcome passed to `session_ledger_tx` |
+| `producer_id` | `ledger:session-reservation-ledger` |
+| `workload_instance_id` | `session-reservation-ledger` |
+
+The SQL entry procedures require an `audit_context` for every lifecycle event
+that calls `session_ledger_tx`. It carries preallocated decision/outcome event
+IDs, producer sequences, `data_b64`, and Ed25519 signatures. `audit_context` is
+excluded from idempotency request hashes; `server_mint` remains included because
+it controls `session_reservation_id` and `ttl_expires_at`. SQL pins
+`producer_id` to `ledger:session-reservation-ledger`, requires
+`signing_key_id` to be `ed25519:*`, requires 64-byte decision/outcome
+signatures, and validates that each supplied `data_b64` decodes to the exact
+`session_event_type`, `session_reservation_id`, `phase`, and `event_outcome`
+being written. This keeps immutable `audit_outbox` rows from being post-written
+or demo-patched.
+
+Each `data_b64.event_outcome` includes the locked tuple fields from §7:
+`tenant_id`, `budget_id`, `window_instance_id`, `unit`, `unit_id`,
+`pricing_version`, `price_snapshot_hash_hex`, and operation `event_time` where
+applicable. The local ledger tests use signed-shape placeholder contexts only
+to exercise SQL invariants; the demo gate is the Ed25519 and canonical-ingest
+proof.
+
+Staff+ arbitration on 2026-06-12 ratified that `session_ledger_tx` may receive
+separate `minimal_replay_response` and `audit_event_outcome` values. The former
+is the full typed RPC/procedure replay response; the latter is the signed audit
+fact embedded in `data_b64`. They are identical except where the branch outcome
+depends on locked ledger state that a caller cannot pre-sign. In particular,
+insufficient-budget reserve DENY returns `available_amount_atomic` in the typed
+response and stored replay outcome, but signs only deterministic denial facts:
+`status`, `reason`, `session_reservation_id`, `session_id`, `route`, requested
+amount, TTL, and the tuple fields. This preserves typed fail-closed reserve
+DENY without unsigned fallback, fake signatures, or caller-predicted locked
+balance bytes.
+
+The D41S_05 local demo signs the same JSON canonical form used by
+`services/canonical_ingest/src/verifier.rs::canonical_bytes_json` with the demo
+ledger Ed25519 key from the Compose `pki-data` volume. The hard gate requires
+the outbox forwarder to drain those signed rows into `canonical_events`; ledger
+row presence alone is not accepted as SR-V5 proof. The gate covers eight
+decision/outcome pairs across reserve, two commits, overrun denied, release,
+insufficient-budget reserve denied, second reserve, and TTL expiry, including
+`spendguard.audit.session.expired`.
+Both ledger and canonical gates require exact event counts and exact lifecycle
+distribution scoped to the three demo `session_reservation_id` values.

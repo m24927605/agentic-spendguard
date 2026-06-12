@@ -41,6 +41,10 @@ pub struct ReserveSessionLedgerRequest {
     pub estimated_amount_atomic: String,
     pub ttl_seconds: i64,
     pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub server_mint: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_context: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -67,6 +71,8 @@ pub struct CommitSessionDeltaLedgerRequest {
     pub fx_rate_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unit_conversion_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_context: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -75,6 +81,8 @@ pub struct ReleaseSessionLedgerRequest {
     pub reason_code: String,
     pub event_time: DateTime<Utc>,
     pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_context: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -82,6 +90,8 @@ pub struct ExpireSessionLedgerRequest {
     pub session_reservation_id: Uuid,
     pub event_time: DateTime<Utc>,
     pub idempotency_key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_context: Option<Value>,
 }
 
 pub async fn reserve_session(
