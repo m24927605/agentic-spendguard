@@ -16,6 +16,8 @@ import type { PricingFreeze, UnitRef } from "./client.js";
 
 export type SessionCommitOutcome = "SUCCESS" | "PROVIDER_ERROR" | "CLIENT_TIMEOUT" | "RUN_ABORTED";
 
+export const DEFAULT_MAX_PENDING_SESSION_DELTAS = 64;
+
 export interface ReserveSessionRequest {
   tenantId: string;
   budgetId: string;
@@ -81,6 +83,229 @@ export interface ReleaseSessionOutcome {
   releasedAmountAtomic: string;
   committedAmountAtomic: string;
   recordedAt: Date | null;
+}
+
+export interface SessionDeltaCommitInput {
+  amountAtomicDelta: string;
+  outcome: SessionCommitOutcome;
+  eventTime: Date | number | Timestamp;
+  idempotencyKey?: string;
+}
+
+export interface SessionReleaseInput {
+  reasonCode: string;
+  eventTime: Date | number | Timestamp;
+  idempotencyKey: string;
+}
+
+export interface PendingSessionDelta {
+  sequence: number;
+  request: CommitSessionDeltaRequest;
+}
+
+export interface SessionReservationHandleOptions {
+  sessionReservationId: string;
+  nextStreamingCommitSequence?: number;
+  maxPendingDeltas?: number;
+  pendingDeltas?: readonly PendingSessionDelta[];
+  released?: boolean;
+}
+
+export interface SessionReservationHandleSnapshot {
+  sessionReservationId: string;
+  nextStreamingCommitSequence: number;
+  maxPendingDeltas: number;
+  released: boolean;
+  pendingDeltas: readonly PendingSessionDelta[];
+}
+
+export interface SessionDeltaCommitClient {
+  commitSessionDelta(req: CommitSessionDeltaRequest): Promise<CommitSessionDeltaOutcome>;
+}
+
+export interface SessionReleaseClient {
+  releaseSession(req: ReleaseSessionRequest): Promise<ReleaseSessionOutcome>;
+}
+
+export class SessionReservationHandleError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionReservationHandleError";
+  }
+}
+
+export class SessionPendingDeltaLimitError extends SessionReservationHandleError {
+  constructor(maxPendingDeltas: number) {
+    super(`session pending delta buffer is full: maxPendingDeltas=${maxPendingDeltas}`);
+    this.name = "SessionPendingDeltaLimitError";
+  }
+}
+
+export class SessionReservationReleasedError extends SessionReservationHandleError {
+  constructor(sessionReservationId: string) {
+    super(`session reservation already released: ${sessionReservationId}`);
+    this.name = "SessionReservationReleasedError";
+  }
+}
+
+export class SessionReservationReplayMismatchError extends SessionReservationHandleError {
+  constructor(message: string) {
+    super(message);
+    this.name = "SessionReservationReplayMismatchError";
+  }
+}
+
+export class SessionReservationHandle {
+  readonly sessionReservationId: string;
+  readonly maxPendingDeltas: number;
+
+  private nextStreamingCommitSequenceValue: number;
+  private pendingDeltaBuffer: PendingSessionDelta[];
+  private releasedValue: boolean;
+
+  constructor(options: SessionReservationHandleOptions) {
+    assertNonEmpty(options.sessionReservationId, "sessionReservationId");
+    this.sessionReservationId = options.sessionReservationId;
+    this.maxPendingDeltas = options.maxPendingDeltas ?? DEFAULT_MAX_PENDING_SESSION_DELTAS;
+    assertPositiveInteger(this.maxPendingDeltas, "maxPendingDeltas");
+
+    this.pendingDeltaBuffer = cloneAndValidatePendingDeltas(
+      options.pendingDeltas ?? [],
+      this.sessionReservationId,
+    );
+    if (this.pendingDeltaBuffer.length > this.maxPendingDeltas) {
+      throw new SessionPendingDeltaLimitError(this.maxPendingDeltas);
+    }
+    const inferredNextSequence = inferNextSequence(this.pendingDeltaBuffer);
+    this.nextStreamingCommitSequenceValue =
+      options.nextStreamingCommitSequence ?? inferredNextSequence;
+    assertPositiveInteger(this.nextStreamingCommitSequenceValue, "nextStreamingCommitSequence");
+    if (this.nextStreamingCommitSequenceValue < inferredNextSequence) {
+      throw new SessionReservationReplayMismatchError(
+        `nextStreamingCommitSequence must be >= ${inferredNextSequence} for pending deltas`,
+      );
+    }
+    this.releasedValue = options.released ?? false;
+  }
+
+  static fromSnapshot(snapshot: SessionReservationHandleSnapshot): SessionReservationHandle {
+    return new SessionReservationHandle(snapshot);
+  }
+
+  get nextStreamingCommitSequence(): number {
+    return this.nextStreamingCommitSequenceValue;
+  }
+
+  get released(): boolean {
+    return this.releasedValue;
+  }
+
+  get pendingDeltas(): readonly PendingSessionDelta[] {
+    return this.pendingDeltaBuffer.map(clonePendingDelta);
+  }
+
+  snapshot(): SessionReservationHandleSnapshot {
+    return {
+      sessionReservationId: this.sessionReservationId,
+      nextStreamingCommitSequence: this.nextStreamingCommitSequenceValue,
+      maxPendingDeltas: this.maxPendingDeltas,
+      released: this.releasedValue,
+      pendingDeltas: this.pendingDeltas,
+    };
+  }
+
+  enqueueDelta(input: SessionDeltaCommitInput): PendingSessionDelta {
+    this.assertOpen();
+    if (this.pendingDeltaBuffer.length >= this.maxPendingDeltas) {
+      throw new SessionPendingDeltaLimitError(this.maxPendingDeltas);
+    }
+    const sequence = this.nextStreamingCommitSequenceValue;
+    const streamingCommitId = formatStreamingCommitId(this.sessionReservationId, sequence);
+    const request: CommitSessionDeltaRequest = {
+      sessionReservationId: this.sessionReservationId,
+      streamingCommitId,
+      amountAtomicDelta: input.amountAtomicDelta,
+      outcome: input.outcome,
+      eventTime: cloneEventTime(input.eventTime),
+      idempotencyKey: input.idempotencyKey ?? streamingCommitId,
+    };
+    buildCommitSessionDeltaRequest(request);
+    this.nextStreamingCommitSequenceValue += 1;
+
+    const pending = { sequence, request };
+    this.pendingDeltaBuffer.push(pending);
+    return clonePendingDelta(pending);
+  }
+
+  async commitDelta(
+    client: SessionDeltaCommitClient,
+    input: SessionDeltaCommitInput,
+  ): Promise<CommitSessionDeltaOutcome> {
+    const pending = this.enqueueDelta(input);
+    const outcome = await client.commitSessionDelta(
+      cloneCommitSessionDeltaRequest(pending.request),
+    );
+    this.ackOutcome(outcome);
+    return outcome;
+  }
+
+  async replayPending(client: SessionDeltaCommitClient): Promise<CommitSessionDeltaOutcome[]> {
+    const outcomes: CommitSessionDeltaOutcome[] = [];
+    for (const pending of [...this.pendingDeltaBuffer]) {
+      const outcome = await client.commitSessionDelta(
+        cloneCommitSessionDeltaRequest(pending.request),
+      );
+      this.ackOutcome(outcome);
+      outcomes.push(outcome);
+    }
+    return outcomes;
+  }
+
+  async release(
+    client: SessionReleaseClient,
+    input: SessionReleaseInput,
+  ): Promise<ReleaseSessionOutcome> {
+    this.assertOpen();
+    const request: ReleaseSessionRequest = {
+      sessionReservationId: this.sessionReservationId,
+      reasonCode: input.reasonCode,
+      eventTime: input.eventTime,
+      idempotencyKey: input.idempotencyKey,
+    };
+    buildReleaseSessionRequest(request);
+    const outcome = await client.releaseSession(request);
+    if (outcome.sessionReservationId !== this.sessionReservationId) {
+      throw new SessionReservationReplayMismatchError(
+        `release outcome session_reservation_id mismatch: expected ${this.sessionReservationId} got ${outcome.sessionReservationId}`,
+      );
+    }
+    this.pendingDeltaBuffer = [];
+    this.releasedValue = true;
+    return outcome;
+  }
+
+  private ackOutcome(outcome: CommitSessionDeltaOutcome): void {
+    if (outcome.sessionReservationId !== this.sessionReservationId) {
+      throw new SessionReservationReplayMismatchError(
+        `commit outcome session_reservation_id mismatch: expected ${this.sessionReservationId} got ${outcome.sessionReservationId}`,
+      );
+    }
+    const index = this.pendingDeltaBuffer.findIndex(
+      (pending) => pending.request.streamingCommitId === outcome.streamingCommitId,
+    );
+    if (index < 0) {
+      throw new SessionReservationReplayMismatchError(
+        `commit outcome streaming_commit_id is not pending: ${outcome.streamingCommitId}`,
+      );
+    }
+    this.pendingDeltaBuffer.splice(index, 1);
+  }
+
+  private assertOpen(): void {
+    if (this.releasedValue) {
+      throw new SessionReservationReleasedError(this.sessionReservationId);
+    }
+  }
 }
 
 export function buildReserveSessionRequest(req: ReserveSessionRequest): ProtoReserveSessionRequest {
@@ -166,6 +391,80 @@ function assertPositiveInteger(value: number, field: string): void {
   if (!Number.isInteger(value) || value <= 0) {
     throw new RangeError(`${field} must be a positive integer`);
   }
+}
+
+function assertNonEmpty(value: string, field: string): void {
+  if (value.length === 0) {
+    throw new RangeError(`${field} must be non-empty`);
+  }
+}
+
+function formatStreamingCommitId(sessionReservationId: string, sequence: number): string {
+  return `${sessionReservationId}/delta/${String(sequence).padStart(6, "0")}`;
+}
+
+function inferNextSequence(pendingDeltas: readonly PendingSessionDelta[]): number {
+  if (pendingDeltas.length === 0) return 1;
+  return Math.max(...pendingDeltas.map((pending) => pending.sequence)) + 1;
+}
+
+function clonePendingDelta(pending: PendingSessionDelta): PendingSessionDelta {
+  return {
+    sequence: pending.sequence,
+    request: cloneCommitSessionDeltaRequest(pending.request),
+  };
+}
+
+function cloneAndValidatePendingDeltas(
+  pendingDeltas: readonly PendingSessionDelta[],
+  sessionReservationId: string,
+): PendingSessionDelta[] {
+  const seenSequences = new Set<number>();
+  const cloned = pendingDeltas.map((pending) => {
+    assertPositiveInteger(pending.sequence, "pendingDelta.sequence");
+    if (seenSequences.has(pending.sequence)) {
+      throw new SessionReservationReplayMismatchError(
+        `duplicate pending delta sequence: ${pending.sequence}`,
+      );
+    }
+    seenSequences.add(pending.sequence);
+
+    const request = cloneCommitSessionDeltaRequest(pending.request);
+    if (request.sessionReservationId !== sessionReservationId) {
+      throw new SessionReservationReplayMismatchError(
+        `pending delta session_reservation_id mismatch: expected ${sessionReservationId} got ${request.sessionReservationId}`,
+      );
+    }
+    const expectedStreamingCommitId = formatStreamingCommitId(
+      sessionReservationId,
+      pending.sequence,
+    );
+    if (request.streamingCommitId !== expectedStreamingCommitId) {
+      throw new SessionReservationReplayMismatchError(
+        `pending delta streaming_commit_id mismatch: expected ${expectedStreamingCommitId} got ${request.streamingCommitId}`,
+      );
+    }
+    buildCommitSessionDeltaRequest(request);
+    return { sequence: pending.sequence, request };
+  });
+  return cloned.sort((left, right) => left.sequence - right.sequence);
+}
+
+function cloneCommitSessionDeltaRequest(req: CommitSessionDeltaRequest): CommitSessionDeltaRequest {
+  return {
+    sessionReservationId: req.sessionReservationId,
+    streamingCommitId: req.streamingCommitId,
+    amountAtomicDelta: req.amountAtomicDelta,
+    outcome: req.outcome,
+    eventTime: cloneEventTime(req.eventTime),
+    idempotencyKey: req.idempotencyKey,
+  };
+}
+
+function cloneEventTime(value: Date | number | Timestamp): Date | number | Timestamp {
+  if (value instanceof Date) return new Date(value.getTime());
+  if (typeof value === "number") return value;
+  return { seconds: value.seconds, nanos: value.nanos };
 }
 
 function toTimestamp(value: Date | number | Timestamp): Timestamp {

@@ -21,6 +21,12 @@ from spendguard.session import (
     ReleaseSessionRequest,
     ReserveSessionAccepted,
     ReserveSessionRequest,
+    SessionDeltaCommitInput,
+    SessionPendingDeltaLimitError,
+    SessionReleaseInput,
+    SessionReservationHandle,
+    SessionReservationReleasedError,
+    SessionReservationReplayMismatchError,
     build_commit_session_delta_request,
     build_release_session_request,
     build_reserve_session_request,
@@ -47,6 +53,24 @@ HANDSHAKE = HandshakeOutcome(
     signing_key_id="test-key",
     announcement_signature=b"",
 )
+
+
+def _accepted_commit_outcome(
+    req: CommitSessionDeltaRequest,
+    cumulative_committed_atomic: str | None = None,
+) -> CommitSessionDeltaOutcome:
+    return CommitSessionDeltaOutcome(
+        session_reservation_id=req.session_reservation_id,
+        streaming_commit_id=req.streaming_commit_id,
+        ledger_transaction_id=f"lt-{req.streaming_commit_id}",
+        audit_session_event_id=f"audit-{req.streaming_commit_id}",
+        committed_delta_atomic=req.amount_atomic_delta,
+        cumulative_committed_atomic=(
+            cumulative_committed_atomic or req.amount_atomic_delta
+        ),
+        remaining_amount_atomic="97500",
+        recorded_at=datetime(2026, 6, 12, 3, 4, 5, 678000, tzinfo=timezone.utc),
+    )
 
 
 def _ts(seconds: int, nanos: int = 0) -> Timestamp:
@@ -299,4 +323,237 @@ def test_tp_d41s_13_rejects_non_positive_commit_delta(amount: str) -> None:
                 event_time=datetime.now(timezone.utc),
                 idempotency_key="sg-d41s-commit-2",
             )
+        )
+
+
+@pytest.mark.asyncio
+async def test_sr_v4_handle_keeps_failed_delta_pending_and_replays_same_id() -> None:
+    seen: list[CommitSessionDeltaRequest] = []
+    fail_next = True
+
+    class Client:
+        async def commit_session_delta(
+            self, req: CommitSessionDeltaRequest
+        ) -> CommitSessionDeltaOutcome:
+            nonlocal fail_next
+            seen.append(req)
+            if fail_next:
+                fail_next = False
+                raise RuntimeError("simulated network drop")
+            return _accepted_commit_outcome(req)
+
+    handle = SessionReservationHandle(
+        session_reservation_id="sr-voice-1",
+        max_pending_deltas=2,
+    )
+
+    with pytest.raises(RuntimeError, match="network drop"):
+        await handle.commit_delta(
+            Client(),
+            SessionDeltaCommitInput(
+                amount_atomic_delta="2500",
+                outcome="SUCCESS",
+                event_time=datetime(
+                    2026, 6, 12, 3, 4, 5, 678000, tzinfo=timezone.utc
+                ),
+            ),
+        )
+
+    assert len(handle.pending_deltas) == 1
+    assert (
+        handle.pending_deltas[0].request.streaming_commit_id
+        == "sr-voice-1/delta/000001"
+    )
+    assert handle.next_streaming_commit_sequence == 2
+
+    replayed = await handle.replay_pending(Client())
+
+    assert len(replayed) == 1
+    assert len(seen) == 2
+    assert seen[1].streaming_commit_id == seen[0].streaming_commit_id
+    assert seen[1].idempotency_key == seen[0].idempotency_key
+    assert handle.pending_deltas == ()
+
+
+@pytest.mark.asyncio
+async def test_sr_v4_handle_enforces_bounded_pending_delta_buffer() -> None:
+    seen: list[CommitSessionDeltaRequest] = []
+
+    class Client:
+        async def commit_session_delta(
+            self, req: CommitSessionDeltaRequest
+        ) -> CommitSessionDeltaOutcome:
+            seen.append(req)
+            raise RuntimeError("sidecar unavailable")
+
+    handle = SessionReservationHandle(
+        session_reservation_id="sr-voice-1",
+        max_pending_deltas=1,
+    )
+
+    with pytest.raises(RuntimeError, match="sidecar unavailable"):
+        await handle.commit_delta(
+            Client(),
+            SessionDeltaCommitInput(
+                amount_atomic_delta="1000",
+                outcome="SUCCESS",
+                event_time=datetime(
+                    2026, 6, 12, 3, 4, 5, 678000, tzinfo=timezone.utc
+                ),
+            ),
+        )
+    assert len(handle.pending_deltas) == 1
+
+    with pytest.raises(SessionPendingDeltaLimitError):
+        await handle.commit_delta(
+            Client(),
+            SessionDeltaCommitInput(
+                amount_atomic_delta="2000",
+                outcome="SUCCESS",
+                event_time=datetime(
+                    2026, 6, 12, 3, 4, 6, 678000, tzinfo=timezone.utc
+                ),
+            ),
+        )
+    assert len(seen) == 1
+
+
+def test_sr_v4_handle_rejects_corrupted_restore_snapshots_and_rewinded_sequence() -> None:
+    handle = SessionReservationHandle(
+        session_reservation_id="sr-voice-1",
+        max_pending_deltas=2,
+    )
+    pending = handle.enqueue_delta(
+        SessionDeltaCommitInput(
+            amount_atomic_delta="1000",
+            outcome="SUCCESS",
+            event_time=datetime(2026, 6, 12, 3, 4, 5, 678000, tzinfo=timezone.utc),
+        )
+    )
+
+    with pytest.raises(SessionReservationReplayMismatchError):
+        SessionReservationHandle(
+            session_reservation_id="sr-other",
+            pending_deltas=(pending,),
+        )
+    with pytest.raises(SessionReservationReplayMismatchError):
+        SessionReservationHandle(
+            session_reservation_id="sr-voice-1",
+            pending_deltas=(pending,),
+            next_streaming_commit_sequence=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_sr_v4_handle_stores_pending_requests_by_value_for_exact_replay() -> None:
+    original_seconds = 1781233445
+    mutated_seconds = 1781233745
+    event_time = _ts(original_seconds, 678_000_000)
+    seen: list[CommitSessionDeltaRequest] = []
+    sent_seconds: list[int] = []
+    fail_next = True
+
+    class Client:
+        async def commit_session_delta(
+            self, req: CommitSessionDeltaRequest
+        ) -> CommitSessionDeltaOutcome:
+            nonlocal fail_next
+            seen.append(req)
+            if isinstance(req.event_time, Timestamp):
+                sent_seconds.append(req.event_time.seconds)
+                req.event_time.seconds = mutated_seconds
+            if fail_next:
+                fail_next = False
+                raise RuntimeError("simulated network drop")
+            return _accepted_commit_outcome(req)
+
+    handle = SessionReservationHandle(
+        session_reservation_id="sr-voice-1",
+        max_pending_deltas=2,
+    )
+
+    with pytest.raises(RuntimeError, match="network drop"):
+        await handle.commit_delta(
+            Client(),
+            SessionDeltaCommitInput(
+                amount_atomic_delta="2500",
+                outcome="SUCCESS",
+                event_time=event_time,
+            ),
+        )
+    event_time.seconds = mutated_seconds
+
+    pending_event_time = handle.pending_deltas[0].request.event_time
+    assert isinstance(pending_event_time, Timestamp)
+    assert pending_event_time.seconds == original_seconds
+
+    await handle.replay_pending(Client())
+
+    assert len(seen) == 2
+    assert sent_seconds == [original_seconds, original_seconds]
+    replay_event_time = seen[1].event_time
+    assert isinstance(replay_event_time, Timestamp)
+    assert replay_event_time.seconds == mutated_seconds
+    assert handle.snapshot().pending_deltas == ()
+
+
+@pytest.mark.asyncio
+async def test_sr_v4_release_finalizes_handle_and_blocks_further_deltas() -> None:
+    captured: ReleaseSessionRequest | None = None
+    handle = SessionReservationHandle(
+        session_reservation_id="sr-voice-1",
+        max_pending_deltas=2,
+    )
+    handle.enqueue_delta(
+        SessionDeltaCommitInput(
+            amount_atomic_delta="1000",
+            outcome="SUCCESS",
+            event_time=datetime(2026, 6, 12, 3, 4, 5, 678000, tzinfo=timezone.utc),
+        )
+    )
+
+    class ReleaseClient:
+        async def release_session(
+            self, req: ReleaseSessionRequest
+        ) -> ReleaseSessionOutcome:
+            nonlocal captured
+            captured = req
+            return ReleaseSessionOutcome(
+                session_reservation_id=req.session_reservation_id,
+                ledger_transaction_id="lt-session-release-1",
+                audit_session_event_id="audit-session-release-1",
+                released_amount_atomic="99000",
+                committed_amount_atomic="1000",
+                recorded_at=datetime(2026, 6, 12, 3, 5, tzinfo=timezone.utc),
+            )
+
+    release = await handle.release(
+        ReleaseClient(),
+        SessionReleaseInput(
+            reason_code="session_completed",
+            event_time=datetime(2026, 6, 12, 3, 5, tzinfo=timezone.utc),
+            idempotency_key="sg-d41s-release-handle-1",
+        ),
+    )
+
+    assert captured is not None
+    assert captured.session_reservation_id == "sr-voice-1"
+    assert release.released_amount_atomic == "99000"
+    assert handle.released is True
+    assert handle.pending_deltas == ()
+
+    class CommitClient:
+        async def commit_session_delta(
+            self, req: CommitSessionDeltaRequest
+        ) -> CommitSessionDeltaOutcome:
+            return _accepted_commit_outcome(req)
+
+    with pytest.raises(SessionReservationReleasedError):
+        await handle.commit_delta(
+            CommitClient(),
+            SessionDeltaCommitInput(
+                amount_atomic_delta="1",
+                outcome="SUCCESS",
+                event_time=datetime(2026, 6, 12, 3, 5, 1, tzinfo=timezone.utc),
+            ),
         )

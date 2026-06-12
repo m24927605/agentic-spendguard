@@ -14,6 +14,10 @@ import type { PricingFreeze, UnitRef } from "../src/index.js";
 import { SpendGuardClient } from "../src/index.js";
 import type { HandshakeOutcome } from "../src/index.js";
 import {
+  SessionPendingDeltaLimitError,
+  SessionReservationHandle,
+  SessionReservationReleasedError,
+  SessionReservationReplayMismatchError,
   buildCommitSessionDeltaRequest,
   buildReleaseSessionRequest,
   buildReserveSessionRequest,
@@ -22,6 +26,8 @@ import type {
   CommitSessionDeltaOutcome,
   ReleaseSessionOutcome,
   ReserveSessionOutcome,
+  CommitSessionDeltaRequest as SessionCommitDeltaRequest,
+  ReleaseSessionRequest as SessionReleaseRequest,
 } from "../src/session.js";
 
 const UNIT: UnitRef = {
@@ -61,6 +67,22 @@ function clientWithAdapter(adapter: unknown): SpendGuardClient {
   mutable.adapterClient = adapter;
   mutable.handshakeResult = HANDSHAKE;
   return client;
+}
+
+function acceptedCommitOutcome(
+  req: SessionCommitDeltaRequest,
+  cumulativeCommittedAtomic = req.amountAtomicDelta,
+): CommitSessionDeltaOutcome {
+  return {
+    sessionReservationId: req.sessionReservationId,
+    streamingCommitId: req.streamingCommitId,
+    ledgerTransactionId: `lt-${req.streamingCommitId}`,
+    auditSessionEventId: `audit-${req.streamingCommitId}`,
+    committedDeltaAtomic: req.amountAtomicDelta,
+    cumulativeCommittedAtomic,
+    remainingAmountAtomic: "97500",
+    recordedAt: new Date("2026-06-12T03:04:05.678Z"),
+  };
 }
 
 describe("D41S_01 session reservation SR-V1 proto contract", () => {
@@ -294,5 +316,203 @@ describe("D41S_01 session reservation SR-V1 proto contract", () => {
         idempotencyKey: "sg-d41s-zero-disabled",
       }),
     ).rejects.toThrow(/greater than zero/);
+  });
+
+  it("SR-V4: handle keeps a failed delta pending and replays the same commit id", async () => {
+    const seen: SessionCommitDeltaRequest[] = [];
+    let failNext = true;
+    const client = {
+      async commitSessionDelta(req: SessionCommitDeltaRequest): Promise<CommitSessionDeltaOutcome> {
+        seen.push(req);
+        if (failNext) {
+          failNext = false;
+          throw new Error("simulated network drop");
+        }
+        return acceptedCommitOutcome(req);
+      },
+    };
+    const handle = new SessionReservationHandle({
+      sessionReservationId: "sr-voice-1",
+      maxPendingDeltas: 2,
+    });
+
+    await expect(
+      handle.commitDelta(client, {
+        amountAtomicDelta: "2500",
+        outcome: "SUCCESS",
+        eventTime: new Date("2026-06-12T03:04:05.678Z"),
+      }),
+    ).rejects.toThrow(/network drop/);
+
+    expect(handle.pendingDeltas).toHaveLength(1);
+    expect(handle.pendingDeltas[0]?.request.streamingCommitId).toBe("sr-voice-1/delta/000001");
+    expect(handle.nextStreamingCommitSequence).toBe(2);
+
+    const replayed = await handle.replayPending(client);
+
+    expect(replayed).toHaveLength(1);
+    expect(seen).toHaveLength(2);
+    expect(seen[1]?.streamingCommitId).toBe(seen[0]?.streamingCommitId);
+    expect(seen[1]?.idempotencyKey).toBe(seen[0]?.idempotencyKey);
+    expect(handle.pendingDeltas).toHaveLength(0);
+  });
+
+  it("SR-V4: handle enforces a bounded pending-delta buffer", async () => {
+    const seen: SessionCommitDeltaRequest[] = [];
+    const client = {
+      async commitSessionDelta(req: SessionCommitDeltaRequest): Promise<CommitSessionDeltaOutcome> {
+        seen.push(req);
+        throw new Error("sidecar unavailable");
+      },
+    };
+    const handle = new SessionReservationHandle({
+      sessionReservationId: "sr-voice-1",
+      maxPendingDeltas: 1,
+    });
+
+    await expect(
+      handle.commitDelta(client, {
+        amountAtomicDelta: "1000",
+        outcome: "SUCCESS",
+        eventTime: new Date("2026-06-12T03:04:05.678Z"),
+      }),
+    ).rejects.toThrow(/sidecar unavailable/);
+    expect(handle.pendingDeltas).toHaveLength(1);
+
+    await expect(
+      handle.commitDelta(client, {
+        amountAtomicDelta: "2000",
+        outcome: "SUCCESS",
+        eventTime: new Date("2026-06-12T03:04:06.678Z"),
+      }),
+    ).rejects.toBeInstanceOf(SessionPendingDeltaLimitError);
+    expect(seen).toHaveLength(1);
+  });
+
+  it("SR-V4: handle rejects corrupted restore snapshots and rewinded sequence state", () => {
+    const handle = new SessionReservationHandle({
+      sessionReservationId: "sr-voice-1",
+      maxPendingDeltas: 2,
+    });
+    const pending = handle.enqueueDelta({
+      amountAtomicDelta: "1000",
+      outcome: "SUCCESS",
+      eventTime: new Date("2026-06-12T03:04:05.678Z"),
+    });
+
+    expect(
+      () =>
+        new SessionReservationHandle({
+          sessionReservationId: "sr-other",
+          pendingDeltas: [pending],
+        }),
+    ).toThrow(SessionReservationReplayMismatchError);
+    expect(
+      () =>
+        new SessionReservationHandle({
+          sessionReservationId: "sr-voice-1",
+          pendingDeltas: [pending],
+          nextStreamingCommitSequence: 1,
+        }),
+    ).toThrow(SessionReservationReplayMismatchError);
+  });
+
+  it("SR-V4: handle stores pending requests by value for exact replay", async () => {
+    const originalTime = "2026-06-12T03:04:05.678Z";
+    const mutatedTime = "2026-06-12T03:09:05.678Z";
+    const eventTime = new Date(originalTime);
+    const seen: SessionCommitDeltaRequest[] = [];
+    const sentIso: string[] = [];
+    let failNext = true;
+    const client = {
+      async commitSessionDelta(req: SessionCommitDeltaRequest): Promise<CommitSessionDeltaOutcome> {
+        seen.push(req);
+        if (req.eventTime instanceof Date) {
+          sentIso.push(req.eventTime.toISOString());
+        }
+        if (req.eventTime instanceof Date) {
+          req.eventTime.setTime(new Date(mutatedTime).getTime());
+        }
+        if (failNext) {
+          failNext = false;
+          throw new Error("simulated network drop");
+        }
+        return acceptedCommitOutcome(req);
+      },
+    };
+    const handle = new SessionReservationHandle({
+      sessionReservationId: "sr-voice-1",
+      maxPendingDeltas: 2,
+    });
+
+    await expect(
+      handle.commitDelta(client, {
+        amountAtomicDelta: "2500",
+        outcome: "SUCCESS",
+        eventTime,
+      }),
+    ).rejects.toThrow(/network drop/);
+    eventTime.setTime(new Date(mutatedTime).getTime());
+
+    const pendingEventTime = handle.pendingDeltas[0]?.request.eventTime;
+    expect(pendingEventTime).toBeInstanceOf(Date);
+    expect((pendingEventTime as Date).toISOString()).toBe(originalTime);
+
+    await handle.replayPending(client);
+
+    expect(seen).toHaveLength(2);
+    expect(sentIso).toEqual([originalTime, originalTime]);
+    const replayEventTime = seen[1]?.eventTime;
+    expect(replayEventTime).toBeInstanceOf(Date);
+    expect((replayEventTime as Date).toISOString()).toBe(mutatedTime);
+    const storedAfterReplay = handle.snapshot().pendingDeltas;
+    expect(storedAfterReplay).toHaveLength(0);
+  });
+
+  it("SR-V4: release finalizes the handle and blocks further deltas", async () => {
+    const captured: { release?: SessionReleaseRequest } = {};
+    const handle = new SessionReservationHandle({
+      sessionReservationId: "sr-voice-1",
+      maxPendingDeltas: 2,
+    });
+    handle.enqueueDelta({
+      amountAtomicDelta: "1000",
+      outcome: "SUCCESS",
+      eventTime: new Date("2026-06-12T03:04:05.678Z"),
+    });
+    const client = {
+      async releaseSession(req: SessionReleaseRequest): Promise<ReleaseSessionOutcome> {
+        captured.release = req;
+        return {
+          sessionReservationId: req.sessionReservationId,
+          ledgerTransactionId: "lt-session-release-1",
+          auditSessionEventId: "audit-session-release-1",
+          releasedAmountAtomic: "99000",
+          committedAmountAtomic: "1000",
+          recordedAt: new Date("2026-06-12T03:05:00.000Z"),
+        };
+      },
+    };
+
+    const release = await handle.release(client, {
+      reasonCode: "session_completed",
+      eventTime: new Date("2026-06-12T03:05:00.000Z"),
+      idempotencyKey: "sg-d41s-release-handle-1",
+    });
+
+    expect(captured.release?.sessionReservationId).toBe("sr-voice-1");
+    expect(release.releasedAmountAtomic).toBe("99000");
+    expect(handle.released).toBe(true);
+    expect(handle.pendingDeltas).toHaveLength(0);
+    await expect(
+      handle.commitDelta(
+        { commitSessionDelta: async (req) => acceptedCommitOutcome(req) },
+        {
+          amountAtomicDelta: "1",
+          outcome: "SUCCESS",
+          eventTime: new Date("2026-06-12T03:05:01.000Z"),
+        },
+      ),
+    ).rejects.toBeInstanceOf(SessionReservationReleasedError);
   });
 });

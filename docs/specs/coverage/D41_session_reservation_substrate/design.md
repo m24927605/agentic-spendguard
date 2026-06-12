@@ -261,3 +261,51 @@ an empty `session_id` / `sessionId` from the negotiated handshake session id.
 Proto `error` outcomes surface as `SpendGuardError`; reserve `denied` outcomes
 remain typed return values so voice adapters can fail closed with denial
 metadata. Disabled mode remains the existing explicit test-only no-op path.
+
+### 2026-06-12 - `COV_D41S_04_streaming_commit_and_reconnect` SR-V4 replay pin
+
+`SR-V4` is pinned to `sdk/typescript/src/session.ts`,
+`sdk/python/src/spendguard/session.py`, and the focused
+`session-reservation` / `test_session_reservation` SDK tests.
+
+Both SDKs expose a `SessionReservationHandle` helper for adapter code that
+wants the locked §8 reconnect behavior without inventing provider-specific
+state machines. The helper tracks:
+
+| Field | Pinned behavior |
+|---|---|
+| `session_reservation_id` / `sessionReservationId` | Reused across reconnects and every replayed delta. |
+| `next_streaming_commit_sequence` / `nextStreamingCommitSequence` | Monotonic local sequence starting at `1`; generated commit ids use `<session_reservation_id>/delta/<000001-style sequence>`. |
+| `pending_deltas` / `pendingDeltas` | Bounded in-memory list of commit requests sent or ready to send but not yet acked. |
+| `released` | Final local state; once release succeeds, further delta enqueue/commit attempts fail locally. |
+
+The maximum local pending-delta buffer defaults to `64` entries and is
+configurable per handle. When full, the helper raises
+`SessionPendingDeltaLimitError` before issuing another sidecar RPC. This is the
+bounded fail-closed point required by §8: the adapter must stop further paid
+provider turns or release/fall back to TTL rather than accumulating unbounded
+uncommitted spend.
+
+Commit flow is append-before-send:
+
+1. Generate the next monotonic `streaming_commit_id`.
+2. Build the SR-V1 `CommitSessionDeltaRequest`; zero/non-decimal deltas still
+   fail through the shared envelope builder.
+3. Append the request to the pending buffer.
+4. Call the SDK client `commitSessionDelta` / `commit_session_delta`.
+5. Remove the pending entry only after an accepted outcome echoes the same
+   `session_reservation_id` and `streaming_commit_id`.
+
+Reconnect replay iterates the pending buffer in order and resubmits the exact
+stored request bytes/fields. Because SR-V2 ledger idempotency is keyed by
+`(session_reservation_id, streaming_commit_id)`, a lost ack replays as the
+original success and cannot double count. If the sidecar/ledger returns a
+semantic error such as idempotency conflict, over-budget, or tuple mismatch,
+the helper does not catch or translate it; the SDK/client typed error surfaces
+to the adapter unchanged.
+
+Successful release clears pending local deltas, marks the handle released, and
+blocks further commits. Process-crash recovery remains the SR-V2 ledger TTL
+sweep: if a process dies before replay or release, `post_session_expire`
+settles the uncommitted remainder and emits the `SR-V5` audit-visible expiry
+event in the substrate closeout slice.

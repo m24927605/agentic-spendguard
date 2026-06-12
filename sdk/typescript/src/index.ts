@@ -182,6 +182,12 @@ export type {
 // ── D41: session reservation substrate ────────────────────────────────────
 
 export {
+  DEFAULT_MAX_PENDING_SESSION_DELTAS,
+  SessionPendingDeltaLimitError,
+  SessionReservationHandle,
+  SessionReservationHandleError,
+  SessionReservationReleasedError,
+  SessionReservationReplayMismatchError,
   buildCommitSessionDeltaRequest,
   buildReleaseSessionRequest,
   buildReserveSessionRequest,
@@ -190,9 +196,16 @@ export {
 export type {
   CommitSessionDeltaOutcome,
   CommitSessionDeltaRequest,
+  PendingSessionDelta,
   ReleaseSessionOutcome,
   ReleaseSessionRequest,
   ReserveSessionOutcome,
   ReserveSessionRequest,
   SessionCommitOutcome,
+  SessionDeltaCommitClient,
+  SessionDeltaCommitInput,
+  SessionReleaseClient,
+  SessionReleaseInput,
+  SessionReservationHandleOptions,
+  SessionReservationHandleSnapshot,
 } from "./session.js";
