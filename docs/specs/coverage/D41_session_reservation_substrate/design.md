@@ -163,3 +163,72 @@ and `ReserveSessionRequest.pricing` uses existing
 `spendguard.common.v1.PricingFreeze`. This deliberately reuses the D05 /
 HARDEN_D05_WI tuple substrate instead of adding parallel `unit_id`,
 `pricing_version`, or `price_snapshot_hash` fields.
+
+### 2026-06-12 - `COV_D41S_02_ledger_session_reservation` SR-V2 ledger transaction pin
+
+`SR-V2` is pinned to `services/ledger/migrations/0062_session_reservations.sql`,
+`services/ledger/src/session_reservations.rs`, and
+`services/ledger/tests/session_reservations.rs`.
+
+Ledger storage uses three tables:
+
+| Table | Pinned purpose |
+|---|---|
+| `session_reservations` | One row per session hold with tenant, budget, window, unit, pricing tuple, reserved amount, cumulative committed amount, released amount, status, TTL, reserve idempotency hash, and original reserve outcome. |
+| `session_commit_deltas` | One idempotent row per `(session_reservation_id, streaming_commit_id)` with amount, applied/denied state, request hash, and original commit outcome. |
+| `session_reservation_events` | Narrow audit-visible event projection for reserve, commit delta, release, expiry, and denial events. It carries `operation_kind` so denied expiry attempts replay independently from commit denials. D41S_05 signs and canonicalizes the CloudEvent envelope. |
+
+Accepted session operations also write existing ledger tables:
+
+| Operation | `ledger_transactions.operation_kind` | Double-entry movement |
+|---|---|---|
+| Reserve | `reserve` | `available_budget` debit -> `reserved_hold` credit. |
+| Streaming commit | `commit_estimated` | `reserved_hold` debit -> `committed_spend` credit. |
+| Release | `release` | `reserved_hold` debit -> `available_budget` credit for the uncommitted remainder. |
+| Expiry | `release` | `reserved_hold` debit -> `available_budget` credit for the uncommitted remainder. |
+
+Transaction boundaries are pinned to Postgres stored procedures:
+
+```text
+post_session_reserve(p_request JSONB) -> JSONB
+post_session_commit_delta(p_request JSONB) -> JSONB
+post_session_release(p_request JSONB) -> JSONB
+post_session_expire(p_request JSONB) -> JSONB
+```
+
+`post_session_reserve` locks the relevant `ledger_accounts` rows and checks
+available balance before creating an accepted hold. `post_session_commit_delta`,
+`post_session_release`, and `post_session_expire` lock the target
+`session_reservations` row `FOR UPDATE` before mutating balances. Release and
+expiry re-check their operation-level idempotency event after that lock to
+close the concurrent replay race. `SESSION_TTL_NOT_EXPIRED` expiry denials are
+also persisted under `operation_kind = 'expire'`, so the same key replays or
+conflicts after time passes instead of mutating later. Replay uses the §6
+idempotency tuples and returns the original JSONB outcome when the request hash
+is identical. Same tuple with a different request hash raises SQLSTATE `40P03`.
+
+Successful commits update only `committed_amount_atomic`; release or expiry
+settles `reserved_amount_atomic - committed_amount_atomic` into
+`released_amount_atomic`. Over-reserve commit attempts insert an unapplied
+`session_commit_deltas` row and a
+`spendguard.audit.session.denied` projection event without changing committed
+or released balances.
+
+The server-side commit procedure accepts optional internal tuple fields
+(`tenant_id`, `budget_id`, `window_instance_id`, `unit_id`, and pricing freeze
+fields) for defense in depth. If present, they must match the reservation row;
+the sidecar wire contract remains the `SR-V1` `CommitSessionDeltaRequest`
+shape from §12.
+
+All D41S_02 stored procedures are installed as `SECURITY DEFINER` and the four
+entry procedures grant execute to `ledger_application_role`; helper procedures
+are not exposed for direct public execution.
+
+Accepted reserve, commit, release, and expiry operations insert matching
+`audit_outbox` and `audit_outbox_global_keys` rows in the same transaction as
+the `ledger_transactions` row. The outbox row uses the existing
+`spendguard.audit.outcome` envelope type and carries the concrete
+`spendguard.audit.session.*` event name inside the CloudEvent payload so the
+existing deferred `ledger_transactions_must_have_audit` invariant remains
+true. D41S_02 tests install that deferred trigger and assert there are no
+ledger transactions without an audit row.

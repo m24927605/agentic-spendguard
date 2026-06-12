@@ -8,6 +8,7 @@ pub mod handlers;
 pub mod metrics;
 pub mod persistence;
 pub mod server;
+pub mod session_reservations;
 // D13 COV_65 — Subscription usage importer stubs.  D14/D15/D16 light
 // up the live Devin / Manus / Genspark backends; Anthropic + OpenAI
 // stay stubbed until their Admin APIs ship.
