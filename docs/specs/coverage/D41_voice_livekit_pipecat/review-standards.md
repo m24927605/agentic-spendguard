@@ -1,6 +1,10 @@
 # D41 voice adapters - Review Standards
 
-Use with `superpowers:code-reviewer` for every D41 adapter slice.
+Use with Codex CLI for every D41 adapter slice.
+
+2026-06-12 user-directed reviewer override: the formal R1-R5 adversarial
+review gate for D40/D41 coverage work is Codex CLI. Previous references to
+Claude Code / `superpowers:code-reviewer` are superseded by this rule.
 
 ## 1. Precedence (P0)
 
@@ -44,6 +48,8 @@ Use with `superpowers:code-reviewer` for every D41 adapter slice.
 ```text
 You are the adversarial code reviewer for slice <SLICE_ID> (round R<N>) of
 D41 - LiveKit Agents + Pipecat voice adapters.
+
+Reviewer tool: Codex CLI, per the 2026-06-12 user-directed override above.
 
 Read in order:
 1. docs/specs/coverage/D41_session_reservation_substrate/design.md

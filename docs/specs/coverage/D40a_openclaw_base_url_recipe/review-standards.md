@@ -1,6 +1,10 @@
 # D40a - Review Standards
 
-Use with `superpowers:code-reviewer` for every D40a slice. P0 and P1 findings block.
+Use with Codex CLI for every D40a slice. P0 and P1 findings block.
+
+2026-06-12 user-directed reviewer override: the formal R1-R5 adversarial
+review gate for D40/D41 coverage work is Codex CLI. Previous references to
+Claude Code / `superpowers:code-reviewer` are superseded by this rule.
 
 ## 1. Precedence (P0)
 
@@ -42,6 +46,8 @@ Use with `superpowers:code-reviewer` for every D40a slice. P0 and P1 findings bl
 ```text
 You are the adversarial code reviewer for slice <SLICE_ID> (round R<N>) of
 D40a - OpenClaw base-URL recipe.
+
+Reviewer tool: Codex CLI, per the 2026-06-12 user-directed override above.
 
 Read in order:
 1. docs/specs/coverage/D40a_openclaw_base_url_recipe/design.md
