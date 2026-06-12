@@ -6,6 +6,18 @@ Version tags follow `vYYYY.MM.DD-ga.N` for GA release candidates and GA releases
 
 ## Unreleased
 
+- **OpenClaw provider plugin adapter (D40b)** — new
+  `@spendguard/openclaw-provider-plugin` package for trusted OpenClaw
+  deployments. The adapter wraps OpenClaw's pinned `wrapStreamFn(ctx)` provider
+  hook, reserves before provider dispatch, fails closed on DENY or sidecar
+  outage, and settles SUCCESS / PROVIDER_ERROR / CLIENT_TIMEOUT / RUN_ABORTED
+  using reserve-time unit/pricing tuples. New
+  `DEMO_MODE=openclaw_provider_plugin` hard gate validates the committed
+  plugin config fixture, runs ALLOW + DENY + STREAM + PROVIDER_ERROR against
+  a local counting upstream, proves DENY leaves the provider counter
+  unchanged, and asserts ledger / canonical / outbox rows. This is an
+  in-process enforcement hook, not a sandbox; D40a base-URL routing remains
+  the durable fallback when plugin install is not acceptable.
 - **OpenClaw base-URL recipe (D40a)** — new OpenClaw drop-in recipe and
   `examples/openclaw-base-url/` config template for routing
   `api: "openai-completions"` custom-provider traffic through the SpendGuard

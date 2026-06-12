@@ -1,0 +1,159 @@
+---
+title: "OpenClaw provider plugin"
+description: >-
+  In-process OpenClaw provider wrapper for hard, fail-closed SpendGuard budget
+  enforcement before provider dispatch. Use only in trusted OpenClaw
+  deployments; D40a base-URL routing remains the durable fallback.
+---
+
+> **In-process hook, not a sandbox.** The OpenClaw provider plugin runs in the
+> OpenClaw process. It is an enforcement hook, not a sandbox boundary.
+> Operators should install it only in trusted OpenClaw deployments. Use
+> [D40a base-URL routing](/docs/drop-in/openclaw/) when the plugin API changes
+> or when plugin installation is not acceptable.
+
+`@spendguard/openclaw-provider-plugin` wraps an OpenClaw provider at the
+provider runtime hook D40b pinned to `wrapStreamFn(ctx)`. It reserves through
+the SpendGuard sidecar before calling `ctx.streamFn(params)` or the upstream
+provider wrapper, and it settles success, stream completion, provider errors,
+timeouts, and aborts against the same reservation.
+
+## What Gets Gated
+
+| Path | Status |
+|---|---|
+| Non-stream OpenAI-compatible provider call | Reserved before dispatch, SUCCESS settled after response. |
+| Streaming provider call | One reserve before first chunk, one SUCCESS settlement after iterator completion. |
+| DENY / STOP | Throws before provider dispatch; upstream counter does not move. |
+| Provider error | Settles `PROVIDER_ERROR`, then rethrows the provider error. |
+| Client timeout / abort | Settles `CLIENT_TIMEOUT` or `RUN_ABORTED`. |
+
+D40b does not claim to stabilize every historical OpenClaw plugin API. The
+pin is `openclaw@2026.6.2` at
+`openclaw/openclaw@d4819948f37d45fe8f1428401316eaae456cdf16`.
+
+## Install
+
+<div is:raw>
+
+```bash
+pnpm add @spendguard/sdk @spendguard/openclaw-provider-plugin openclaw
+```
+
+</div>
+
+Node `>=22.19.0` is required by the pinned OpenClaw package. ESM-only.
+
+## Configure
+
+Register the guarded provider through OpenClaw's provider plugin registration
+surface. The local fixture used by the demo records the pinned install shape:
+
+<div is:raw>
+
+```json
+{
+  "plugins": {
+    "spendguardProviderPlugin": {
+      "package": "@spendguard/openclaw-provider-plugin",
+      "factory": "createSpendGuardOpenClawProvider",
+      "mode": "in-process-provider-wrapper",
+      "hook": "wrapStreamFn",
+      "trustBoundary": "trusted-openclaw-process"
+    }
+  }
+}
+```
+
+</div>
+
+Pass the sidecar identity and reserve tuple explicitly:
+
+<div is:raw>
+
+```ts
+import { SpendGuardClient } from "@spendguard/sdk";
+import { createSpendGuardOpenClawProvider } from "@spendguard/openclaw-provider-plugin";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: process.env.SPENDGUARD_TENANT_ID,
+  runtimeKind: "openclaw-provider-plugin",
+});
+await client.connect();
+await client.handshake();
+
+const guardedProvider = createSpendGuardOpenClawProvider(upstreamProvider, {
+  client,
+  tenantId: process.env.SPENDGUARD_TENANT_ID,
+  budgetId: process.env.SPENDGUARD_BUDGET_ID,
+  windowInstanceId: process.env.SPENDGUARD_WINDOW_INSTANCE_ID,
+  unitId: process.env.SPENDGUARD_UNIT_ID,
+  pricing: {
+    pricingVersion: process.env.SPENDGUARD_PRICING_VERSION ?? "",
+    pricingHash: Uint8Array.from(
+      Buffer.from(process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX ?? "", "hex"),
+    ),
+    fxRateVersion: process.env.SPENDGUARD_FX_RATE_VERSION ?? "",
+    unitConversionVersion: process.env.SPENDGUARD_UNIT_CONVERSION_VERSION ?? "",
+  },
+});
+```
+
+</div>
+
+`unitId`, `windowInstanceId`, and `pricing` are required from day 1. The
+ledger rejects empty unit/window ids and rejects commits whose pricing tuple
+does not match the reservation.
+
+## Failure Posture
+
+There is no `failOpen`, `degradeOnUnavailable`, or disable flag. A DENY,
+approval stop, sidecar outage, or malformed reserve tuple aborts before the
+provider call. Provider errors are different: the provider has already been
+called, so the wrapper settles `PROVIDER_ERROR` and rethrows the original
+error to OpenClaw.
+
+## Run The Demo
+
+<div is:raw>
+
+```bash
+make demo-down
+make demo-up DEMO_MODE=openclaw_provider_plugin
+make -C deploy/demo demo-verify-openclaw-provider-plugin
+```
+
+</div>
+
+Successful runner line:
+
+<div is:raw>
+
+```text
+[demo] openclaw_provider_plugin ALL 4 steps PASS (ALLOW + DENY + STREAM + PROVIDER_ERROR)
+```
+
+</div>
+
+The demo validates the committed OpenClaw plugin config fixture, stages the
+workspace package into a Node 22.19 runner, talks to the real sidecar over
+UDS, and uses a local OpenAI-compatible counting stub. The hard gate asserts
+`reserve=3`, `commit_estimated=2`, `release=1`, `denied_decision=1`,
+canonical `decision=4`, canonical `outcome=3`, outbox closure, and
+counting-stub `calls=3` (ALLOW + STREAM + PROVIDER_ERROR only).
+
+## D40a Fallback
+
+Use [OpenClaw + SpendGuard base-URL routing](/docs/drop-in/openclaw/) when
+you cannot install an in-process plugin or need a more durable config-only
+path. D40a points OpenClaw's custom provider `baseUrl` at the SpendGuard
+egress proxy. D40b wraps the provider inside the OpenClaw process.
+
+## Links
+
+- npm package: `@spendguard/openclaw-provider-plugin`
+- Demo overlay:
+  [`deploy/demo/openclaw_provider_plugin/`](https://github.com/m24927605/agentic-spendguard/tree/main/deploy/demo/openclaw_provider_plugin)
+- Locked spec set:
+  [`docs/specs/coverage/D40b_openclaw_provider_plugin/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D40b_openclaw_provider_plugin)

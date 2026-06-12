@@ -87,6 +87,7 @@ export default defineConfig({
             { label: 'Flowise custom node (TypeScript)', slug: 'docs/integrations/flowise' },
             { label: 'Langflow custom component (Python)', slug: 'docs/integrations/langflow' },
             { label: 'n8n community node (TypeScript)', slug: 'docs/integrations/n8n' },
+            { label: 'OpenClaw provider plugin (TypeScript)', slug: 'docs/integrations/openclaw-provider-plugin' },
             { label: 'Cursor IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/cursor-mitm' },
             { label: 'Windsurf IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/windsurf-mitm' },
             { label: 'Subscription-tier meter (Claude Code Pro + Codex)', slug: 'docs/integrations/subscription-meter' },
