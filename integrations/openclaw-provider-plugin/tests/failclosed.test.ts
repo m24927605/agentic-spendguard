@@ -18,7 +18,10 @@ const outcome = {
 
 function optionsWithReserve(reserve: (req: unknown) => Promise<unknown>) {
   return {
-    client: { reserve } as unknown as OpenClawSpendGuardOptions["client"],
+    client: {
+      reserve,
+      commitEstimated: async () => {},
+    } as unknown as OpenClawSpendGuardOptions["client"],
     tenantId: "tenant_1",
     budgetId: "budget_1",
     windowInstanceId: "window_1",

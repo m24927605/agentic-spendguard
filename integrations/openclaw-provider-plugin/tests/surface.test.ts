@@ -26,6 +26,7 @@ describe("public barrel skeleton", () => {
       "OpenClawSpendGuardConfigError",
       "OpenClawSpendGuardError",
       "OpenClawSpendGuardNotImplementedError",
+      "OpenClawSpendGuardSettlementError",
       "VERSION",
       "buildOpenClawReserveRequest",
       "createSpendGuardOpenClawProvider",

@@ -172,3 +172,26 @@ result or `ctx.streamFn`. A reserve denial or sidecar outage propagates before
 Primary-source evidence is the same pinned OpenClaw source set recorded in the
 2026-06-12 `COV_D40B_01_plugin_package_init` amendment, especially the provider
 plugin guide hook-order table and `src/plugin-sdk/provider-stream.ts`.
+
+### 2026-06-12 - `COV_D40B_03_commit_failure_streaming` settlement pins
+
+`OB-V4` is pinned to the return value of the `StreamFn` produced by
+`wrapStreamFn`. The pinned OpenClaw provider API does not expose a separate
+SpendGuard-usable terminal callback for provider streams; the wrapper therefore
+owns settlement at the JavaScript boundary it returns. Non-streaming values
+settle SUCCESS after `inner(params)` resolves. Async iterable values settle
+exactly once when the iterator completes; iterator throws settle failure and
+rethrow; early iterator return settles RUN_ABORTED.
+
+`OB-V5` is pinned to thrown values observed at that same wrapper boundary.
+OpenClaw does not expose a dedicated provider-error discriminated union in the
+pinned provider hook. D40b classifies `AbortError`, `ABORT_ERR`, or an already
+aborted request `signal` as RUN_ABORTED; `TimeoutError`, `ETIMEDOUT`, or a
+timeout/timed-out message as CLIENT_TIMEOUT; every other thrown value is
+PROVIDER_ERROR. Provider errors are rethrown after settlement so OpenClaw's
+native caller surface is preserved.
+
+D40b uses the TS SDK's single-event `commitEstimated` path: set `outcome` and
+the single-event usage/metadata fields only. It must not set `outcomeKind` for
+this adapter, because `outcomeKind` asks the SDK to emit a companion terminal
+event and violates this slice's exactly-one-terminal-settlement requirement.
