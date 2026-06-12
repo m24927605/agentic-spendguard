@@ -25,6 +25,9 @@ pub enum Handler {
     IssueBudgetGrant,
     RevokeBudgetGrant,
     ConsumeBudgetGrant,
+    ReserveSession,
+    CommitSessionDelta,
+    ReleaseSession,
     StreamDrainSignal,
     ResumeAfterApproval,
     ReleaseReservation,
@@ -40,6 +43,9 @@ impl Handler {
             Self::IssueBudgetGrant => "issue_budget_grant",
             Self::RevokeBudgetGrant => "revoke_budget_grant",
             Self::ConsumeBudgetGrant => "consume_budget_grant",
+            Self::ReserveSession => "reserve_session",
+            Self::CommitSessionDelta => "commit_session_delta",
+            Self::ReleaseSession => "release_session",
             Self::StreamDrainSignal => "stream_drain_signal",
             Self::ResumeAfterApproval => "resume_after_approval",
             Self::ReleaseReservation => "release_reservation",
@@ -64,8 +70,8 @@ impl Outcome {
 
 #[derive(Default)]
 pub struct SidecarMetricsInner {
-    /// Per (handler, outcome) call counter. 10 handlers × 2 outcomes.
-    counts: [[AtomicU64; 2]; 10],
+    /// Per (handler, outcome) call counter. 13 handlers × 2 outcomes.
+    counts: [[AtomicU64; 2]; 13],
 }
 
 #[derive(Clone, Default)]
@@ -120,6 +126,9 @@ const ALL_HANDLERS: &[Handler] = &[
     Handler::IssueBudgetGrant,
     Handler::RevokeBudgetGrant,
     Handler::ConsumeBudgetGrant,
+    Handler::ReserveSession,
+    Handler::CommitSessionDelta,
+    Handler::ReleaseSession,
     Handler::StreamDrainSignal,
     Handler::ResumeAfterApproval,
     Handler::ReleaseReservation,
@@ -134,9 +143,12 @@ fn handler_index(h: Handler) -> usize {
         Handler::IssueBudgetGrant => 4,
         Handler::RevokeBudgetGrant => 5,
         Handler::ConsumeBudgetGrant => 6,
-        Handler::StreamDrainSignal => 7,
-        Handler::ResumeAfterApproval => 8,
-        Handler::ReleaseReservation => 9,
+        Handler::ReserveSession => 7,
+        Handler::CommitSessionDelta => 8,
+        Handler::ReleaseSession => 9,
+        Handler::StreamDrainSignal => 10,
+        Handler::ResumeAfterApproval => 11,
+        Handler::ReleaseReservation => 12,
     }
 }
 

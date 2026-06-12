@@ -20,6 +20,10 @@ Version tags follow `vYYYY.MM.DD-ga.N` for GA release candidates and GA releases
   DENY replay/conflict, and TTL expiry, with exact ledger/canonical gates
   scoped to three demo session reservation IDs. This is the D41 substrate that
   unblocks LiveKit/Pipecat adapters; it is not itself a framework adapter.
+  Closeout correction: sidecar UDS session RPC handlers are currently
+  fail-closed `UNIMPLEMENTED` stubs so existing request-scoped demos keep
+  building after proto codegen; the explicit sidecar-to-ledger session bridge
+  must land before voice adapters call those RPCs.
 - **OpenClaw provider plugin adapter (D40b)** — new
   `@spendguard/openclaw-provider-plugin` package for trusted OpenClaw
   deployments. The adapter wraps OpenClaw's pinned `wrapStreamFn(ctx)` provider

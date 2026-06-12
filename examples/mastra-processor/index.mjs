@@ -489,7 +489,13 @@ async function main() {
   }
 }
 
-main().catch((err) => {
-  console.error(`[demo] FAIL: ${err instanceof Error ? err.stack ?? err.message : err}`);
-  process.exit(7);
-});
+main()
+  .then(() => {
+    // Mastra may leave telemetry/workflow handles open after the demo proof
+    // line. The demo runner is single-shot, so exit explicitly on success.
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error(`[demo] FAIL: ${err instanceof Error ? err.stack ?? err.message : err}`);
+    process.exit(7);
+  });

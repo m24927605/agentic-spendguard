@@ -373,3 +373,18 @@ insufficient-budget reserve denied, second reserve, and TTL expiry, including
 `spendguard.audit.session.expired`.
 Both ledger and canonical gates require exact event counts and exact lifecycle
 distribution scoped to the three demo `session_reservation_id` values.
+
+### 2026-06-12 - Closeout correction: sidecar runtime bridge status
+
+Closeout non-regression demos caught that the SR-V1 proto additions generated
+new `SidecarAdapter` trait methods while `services/sidecar/src/server/adapter_uds.rs`
+still implemented only the pre-D41 request-scoped RPC set. The sidecar now
+implements `ReserveSession`, `CommitSessionDelta`, and `ReleaseSession` as
+compile-safe, fail-closed `UNIMPLEMENTED` stubs with metrics buckets.
+
+This is intentional as a narrow regression fix, not the voice runtime bridge.
+The D41S substrate demo validates the ledger SQL/Rust session lifecycle and
+canonical audit path directly. A follow-up bridge slice must wire the sidecar
+RPC handlers to an explicit ledger session API before LiveKit/Pipecat adapters
+call these methods. Voice adapters must not treat the fail-closed stubs as
+usable runtime coverage.

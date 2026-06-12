@@ -13,6 +13,10 @@
 //!   * EmitTraceEvents — Phase 2B Step 7: routes LLM_CALL_POST.SUCCESS with
 //!     `estimated_amount_atomic` to `decision::transaction::run_commit_estimated`
 //!     (Stage 7 commit lane). ProviderReport + Release deferred (B2/A3).
+//!   * ReserveSession / CommitSessionDelta / ReleaseSession — D41 proto
+//!     contract stubs. The ledger SQL substrate exists, but the sidecar↔ledger
+//!     gRPC bridge is intentionally not invented here; the handlers fail
+//!     closed until the D41 voice adapter bridge slice lands.
 //!   * StreamDrainSignal — emits drain phase events when sidecar marks draining.
 //!
 //! Round-2 #11: every gRPC method records a (handler, outcome) bucket
@@ -39,11 +43,12 @@ use crate::{
     metrics::{Handler, Outcome, SidecarMetrics},
     proto::sidecar_adapter::v1::{
         drain_signal::Phase as DrainPhase, sidecar_adapter_server::SidecarAdapter,
-        ConsumeBudgetGrantRequest, ConsumeBudgetGrantResponse, DecisionRequest, DecisionResponse,
-        DrainSignal, DrainSubscribeRequest, HandshakeRequest, HandshakeResponse,
-        IssueBudgetGrantRequest, IssueBudgetGrantResponse, PublishOutcomeRequest,
-        PublishOutcomeResponse, RevokeBudgetGrantRequest, RevokeBudgetGrantResponse, TraceEvent,
-        TraceEventAck,
+        CommitSessionDeltaOutcome, CommitSessionDeltaRequest, ConsumeBudgetGrantRequest,
+        ConsumeBudgetGrantResponse, DecisionRequest, DecisionResponse, DrainSignal,
+        DrainSubscribeRequest, HandshakeRequest, HandshakeResponse, IssueBudgetGrantRequest,
+        IssueBudgetGrantResponse, PublishOutcomeRequest, PublishOutcomeResponse,
+        ReleaseSessionOutcome, ReleaseSessionRequest, ReserveSessionOutcome, ReserveSessionRequest,
+        RevokeBudgetGrantRequest, RevokeBudgetGrantResponse, TraceEvent, TraceEventAck,
     },
 };
 
@@ -129,6 +134,39 @@ impl SidecarAdapter for AdapterUds {
             .inc_handler(Handler::ConsumeBudgetGrant, Outcome::Err);
         Err(Status::unimplemented(
             "ConsumeBudgetGrant: vertical slice expansion",
+        ))
+    }
+
+    async fn reserve_session(
+        &self,
+        _req: Request<ReserveSessionRequest>,
+    ) -> Result<Response<ReserveSessionOutcome>, Status> {
+        self.metrics
+            .inc_handler(Handler::ReserveSession, Outcome::Err);
+        Err(Status::unimplemented(
+            "ReserveSession: D41 ledger substrate exists; sidecar bridge deferred to voice adapter bridge slice",
+        ))
+    }
+
+    async fn commit_session_delta(
+        &self,
+        _req: Request<CommitSessionDeltaRequest>,
+    ) -> Result<Response<CommitSessionDeltaOutcome>, Status> {
+        self.metrics
+            .inc_handler(Handler::CommitSessionDelta, Outcome::Err);
+        Err(Status::unimplemented(
+            "CommitSessionDelta: D41 ledger substrate exists; sidecar bridge deferred to voice adapter bridge slice",
+        ))
+    }
+
+    async fn release_session(
+        &self,
+        _req: Request<ReleaseSessionRequest>,
+    ) -> Result<Response<ReleaseSessionOutcome>, Status> {
+        self.metrics
+            .inc_handler(Handler::ReleaseSession, Outcome::Err);
+        Err(Status::unimplemented(
+            "ReleaseSession: D41 ledger substrate exists; sidecar bridge deferred to voice adapter bridge slice",
         ))
     }
 

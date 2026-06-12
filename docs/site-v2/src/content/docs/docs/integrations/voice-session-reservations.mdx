@@ -64,6 +64,11 @@ Every new adapter using this substrate must thread `unitId`,
 `windowInstanceId`, and the pricing freeze tuple from day one. Ledger commits
 reject tuple drift.
 
+Current closeout status: the sidecar UDS methods are compile-safe,
+fail-closed `UNIMPLEMENTED` stubs. The local D41 demo validates the ledger
+session lifecycle and canonical audit path directly. A sidecar-to-ledger bridge
+slice must land before LiveKit or Pipecat adapters call the session RPCs.
+
 ## Audit Chain
 
 Session lifecycle events are written as signed audit decision/outcome pairs and
