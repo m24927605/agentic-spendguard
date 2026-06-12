@@ -1,10 +1,11 @@
 # D41 session reservation substrate - Review Standards
 
-Use with Codex CLI. This is substrate work; P0 findings block.
+Use with a Codex sub-agent. This is substrate work; P0 findings block.
 
 2026-06-12 user-directed reviewer override: the formal R1-R5 adversarial
-review gate for D40/D41 coverage work is Codex CLI. Previous references to
-Claude Code / `superpowers:code-reviewer` are superseded by this rule.
+review gate for D40/D41 coverage work is an independent Codex sub-agent
+reviewer. Do not route reviews through an external Codex service, local
+Ollama model, or Claude Code `superpowers:code-reviewer`.
 
 ## 1. Precedence (P0)
 
@@ -51,7 +52,7 @@ Claude Code / `superpowers:code-reviewer` are superseded by this rule.
 You are the adversarial code reviewer for slice <SLICE_ID> (round R<N>) of
 D41 session reservation substrate.
 
-Reviewer tool: Codex CLI, per the 2026-06-12 user-directed override above.
+Reviewer tool: Codex sub-agent, per the 2026-06-12 user-directed override above.
 
 Read in order:
 1. docs/specs/coverage/D41_session_reservation_substrate/design.md
