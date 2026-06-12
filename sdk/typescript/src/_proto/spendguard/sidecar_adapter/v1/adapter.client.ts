@@ -27,6 +27,12 @@
 import type { RpcTransport } from "@protobuf-ts/runtime-rpc";
 import type { ServiceInfo } from "@protobuf-ts/runtime-rpc";
 import { SidecarAdapter } from "./adapter";
+import type { ReleaseSessionOutcome } from "./adapter";
+import type { ReleaseSessionRequest } from "./adapter";
+import type { CommitSessionDeltaOutcome } from "./adapter";
+import type { CommitSessionDeltaRequest } from "./adapter";
+import type { ReserveSessionOutcome } from "./adapter";
+import type { ReserveSessionRequest } from "./adapter";
 import type { ReleaseReservationResponse } from "./adapter";
 import type { ReleaseReservationRequest } from "./adapter";
 import type { ResumeAfterApprovalResponse } from "./adapter";
@@ -168,6 +174,31 @@ export interface ISidecarAdapterClient {
      * @generated from protobuf rpc: ReleaseReservation
      */
     releaseReservation(input: ReleaseReservationRequest, options?: RpcOptions): UnaryCall<ReleaseReservationRequest, ReleaseReservationResponse>;
+    // -- Session reservation (D41 voice substrate SR-V1) ---------------------
+
+    /**
+     * Reserve a session-scoped ledger hold before a realtime voice session
+     * connects to paid model providers. Idempotent by
+     * (tenant_id, session_id, route, idempotency_key).
+     *
+     * @generated from protobuf rpc: ReserveSession
+     */
+    reserveSession(input: ReserveSessionRequest, options?: RpcOptions): UnaryCall<ReserveSessionRequest, ReserveSessionOutcome>;
+    /**
+     * Commit one positive streaming spend delta against an existing session
+     * reservation. Idempotent by (session_reservation_id,
+     * streaming_commit_id). amount_atomic_delta MUST be > 0.
+     *
+     * @generated from protobuf rpc: CommitSessionDelta
+     */
+    commitSessionDelta(input: CommitSessionDeltaRequest, options?: RpcOptions): UnaryCall<CommitSessionDeltaRequest, CommitSessionDeltaOutcome>;
+    /**
+     * Release the uncommitted remainder of a session-scoped reservation.
+     * Idempotent by (session_reservation_id, idempotency_key).
+     *
+     * @generated from protobuf rpc: ReleaseSession
+     */
+    releaseSession(input: ReleaseSessionRequest, options?: RpcOptions): UnaryCall<ReleaseSessionRequest, ReleaseSessionOutcome>;
 }
 // ============================================================================
 // SERVICE
@@ -319,5 +350,39 @@ export class SidecarAdapterClient implements ISidecarAdapterClient, ServiceInfo 
     releaseReservation(input: ReleaseReservationRequest, options?: RpcOptions): UnaryCall<ReleaseReservationRequest, ReleaseReservationResponse> {
         const method = this.methods[9], opt = this._transport.mergeOptions(options);
         return stackIntercept<ReleaseReservationRequest, ReleaseReservationResponse>("unary", this._transport, method, opt, input);
+    }
+    // -- Session reservation (D41 voice substrate SR-V1) ---------------------
+
+    /**
+     * Reserve a session-scoped ledger hold before a realtime voice session
+     * connects to paid model providers. Idempotent by
+     * (tenant_id, session_id, route, idempotency_key).
+     *
+     * @generated from protobuf rpc: ReserveSession
+     */
+    reserveSession(input: ReserveSessionRequest, options?: RpcOptions): UnaryCall<ReserveSessionRequest, ReserveSessionOutcome> {
+        const method = this.methods[10], opt = this._transport.mergeOptions(options);
+        return stackIntercept<ReserveSessionRequest, ReserveSessionOutcome>("unary", this._transport, method, opt, input);
+    }
+    /**
+     * Commit one positive streaming spend delta against an existing session
+     * reservation. Idempotent by (session_reservation_id,
+     * streaming_commit_id). amount_atomic_delta MUST be > 0.
+     *
+     * @generated from protobuf rpc: CommitSessionDelta
+     */
+    commitSessionDelta(input: CommitSessionDeltaRequest, options?: RpcOptions): UnaryCall<CommitSessionDeltaRequest, CommitSessionDeltaOutcome> {
+        const method = this.methods[11], opt = this._transport.mergeOptions(options);
+        return stackIntercept<CommitSessionDeltaRequest, CommitSessionDeltaOutcome>("unary", this._transport, method, opt, input);
+    }
+    /**
+     * Release the uncommitted remainder of a session-scoped reservation.
+     * Idempotent by (session_reservation_id, idempotency_key).
+     *
+     * @generated from protobuf rpc: ReleaseSession
+     */
+    releaseSession(input: ReleaseSessionRequest, options?: RpcOptions): UnaryCall<ReleaseSessionRequest, ReleaseSessionOutcome> {
+        const method = this.methods[12], opt = this._transport.mergeOptions(options);
+        return stackIntercept<ReleaseSessionRequest, ReleaseSessionOutcome>("unary", this._transport, method, opt, input);
     }
 }

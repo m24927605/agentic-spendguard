@@ -115,6 +115,23 @@ service SidecarAdapter {
   // (reservation_id, idempotency_key) pair return the original outcome.
   rpc ReleaseReservation(ReleaseReservationRequest)
       returns (ReleaseReservationResponse);
+
+  // -- Session reservation (D41 voice substrate SR-V1) ---------------------
+
+  // Reserve a session-scoped ledger hold before a realtime voice session
+  // connects to paid model providers. Idempotent by
+  // (tenant_id, session_id, route, idempotency_key).
+  rpc ReserveSession(ReserveSessionRequest) returns (ReserveSessionOutcome);
+
+  // Commit one positive streaming spend delta against an existing session
+  // reservation. Idempotent by (session_reservation_id,
+  // streaming_commit_id). amount_atomic_delta MUST be > 0.
+  rpc CommitSessionDelta(CommitSessionDeltaRequest)
+      returns (CommitSessionDeltaOutcome);
+
+  // Release the uncommitted remainder of a session-scoped reservation.
+  // Idempotent by (session_reservation_id, idempotency_key).
+  rpc ReleaseSession(ReleaseSessionRequest) returns (ReleaseSessionOutcome);
 }
 
 // ============================================================================
@@ -829,4 +846,110 @@ message ReleaseReservationResponse {
   // current single-reservation-per-call model; kept as repeated for
   // forward compatibility with a future batch-release form).
   repeated string released_reservation_ids = 101;
+}
+
+// ============================================================================
+// Session reservation (D41 voice substrate SR-V1)
+// ============================================================================
+
+// Field-tag layout locked by D41 session reservation substrate design.md §5:
+// tags 1..10 are the required request fields in design order.
+message ReserveSessionRequest {
+  string tenant_id = 1;
+  string budget_id = 2;
+  string window_instance_id = 3;
+  spendguard.common.v1.UnitRef unit = 4;
+  spendguard.common.v1.PricingFreeze pricing = 5;
+  string session_id = 6;
+  string route = 7;
+  string estimated_amount_atomic = 8;
+  uint32 ttl_seconds = 9;
+  string idempotency_key = 10;
+}
+
+message ReserveSessionOutcome {
+  oneof outcome {
+    ReserveSessionAccepted accepted = 1;
+    ReserveSessionDenied denied = 2;
+    spendguard.common.v1.Error error = 3;
+  }
+}
+
+message ReserveSessionAccepted {
+  string session_reservation_id = 1;
+  string ledger_transaction_id = 2;
+  string audit_session_event_id = 3;
+  google.protobuf.Timestamp ttl_expires_at = 4;
+  string reserved_amount_atomic = 5;
+  string remaining_amount_atomic = 6;
+}
+
+message ReserveSessionDenied {
+  string audit_session_event_id = 1;
+  repeated string reason_codes = 2;
+  repeated string matched_rule_ids = 3;
+  spendguard.common.v1.Error error = 4;
+}
+
+// Field-tag layout locked by D41 session reservation substrate design.md §5:
+// tags 1..6 are the required request fields in design order.
+message CommitSessionDeltaRequest {
+  string session_reservation_id = 1;
+  string streaming_commit_id = 2;
+  string amount_atomic_delta = 3;
+
+  enum Outcome {
+    OUTCOME_UNSPECIFIED = 0;
+    SUCCESS = 1;
+    PROVIDER_ERROR = 2;
+    CLIENT_TIMEOUT = 3;
+    RUN_ABORTED = 4;
+  }
+  Outcome outcome = 4;
+
+  google.protobuf.Timestamp event_time = 5;
+  string idempotency_key = 6;
+}
+
+message CommitSessionDeltaOutcome {
+  oneof outcome {
+    CommitSessionDeltaAccepted accepted = 1;
+    spendguard.common.v1.Error error = 2;
+  }
+}
+
+message CommitSessionDeltaAccepted {
+  string session_reservation_id = 1;
+  string streaming_commit_id = 2;
+  string ledger_transaction_id = 3;
+  string audit_session_event_id = 4;
+  string committed_delta_atomic = 5;
+  string cumulative_committed_atomic = 6;
+  string remaining_amount_atomic = 7;
+  google.protobuf.Timestamp recorded_at = 8;
+}
+
+// Field-tag layout locked by D41 session reservation substrate design.md §5:
+// tags 1..4 are the required request fields in design order.
+message ReleaseSessionRequest {
+  string session_reservation_id = 1;
+  string reason_code = 2;
+  google.protobuf.Timestamp event_time = 3;
+  string idempotency_key = 4;
+}
+
+message ReleaseSessionOutcome {
+  oneof outcome {
+    ReleaseSessionAccepted accepted = 1;
+    spendguard.common.v1.Error error = 2;
+  }
+}
+
+message ReleaseSessionAccepted {
+  string session_reservation_id = 1;
+  string ledger_transaction_id = 2;
+  string audit_session_event_id = 3;
+  string released_amount_atomic = 4;
+  string committed_amount_atomic = 5;
+  google.protobuf.Timestamp recorded_at = 6;
 }

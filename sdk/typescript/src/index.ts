@@ -178,3 +178,18 @@ export type {
   IdempotencyCache,
   InMemoryIdempotencyCacheOptions,
 } from "./cache.js";
+
+// ── D41: session reservation substrate skeleton ───────────────────────────
+
+export {
+  buildCommitSessionDeltaRequest,
+  buildReleaseSessionRequest,
+  buildReserveSessionRequest,
+} from "./session.js";
+
+export type {
+  CommitSessionDeltaRequest,
+  ReleaseSessionRequest,
+  ReserveSessionRequest,
+  SessionCommitOutcome,
+} from "./session.js";

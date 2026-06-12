@@ -50,6 +50,14 @@ from .ids import (
     workload_instance_id,
 )
 from .run_plan import RunPlan, current_run_plan, with_run_plan
+from .session import (
+    CommitSessionDeltaRequest,
+    ReleaseSessionRequest,
+    ReserveSessionRequest,
+    build_commit_session_delta_request,
+    build_release_session_request,
+    build_reserve_session_request,
+)
 
 __all__ = [
     # client
@@ -82,6 +90,13 @@ __all__ = [
     "RunPlan",
     "current_run_plan",
     "with_run_plan",
+    # session reservation skeleton (D41S_01)
+    "CommitSessionDeltaRequest",
+    "ReleaseSessionRequest",
+    "ReserveSessionRequest",
+    "build_commit_session_delta_request",
+    "build_release_session_request",
+    "build_reserve_session_request",
 ]
 
 __version__ = "0.5.1"

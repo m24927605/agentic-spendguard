@@ -131,3 +131,35 @@ Events must carry `session_reservation_id`, `tenant_id`, `budget_id`, `window_in
 ## 11. Definition of done
 
 The substrate is done when all `SR-V*` markers are pinned, request-scoped adapter tests still pass, the local session demo proves reserve -> multiple positive commits -> release, and D41 voice adapter specs can reference this design without inventing their own lifecycle.
+
+## 12. Dated implementation amendments
+
+### 2026-06-12 - `COV_D41S_01_session_contract_spec_and_proto` SR-V1 proto pin
+
+`SR-V1` is pinned to `proto/spendguard/sidecar_adapter/v1/adapter.proto`
+inside the existing `spendguard.sidecar_adapter.v1.SidecarAdapter` service.
+This placement keeps session reservation lifecycle on the same adapter UDS
+contract as request-scoped `RequestDecision`, `EmitTraceEvents`, and
+`ReleaseReservation`; D41 does not add a separate voice-only service.
+
+The RPC names are the locked semantic names from §5:
+
+```text
+rpc ReserveSession(ReserveSessionRequest) returns (ReserveSessionOutcome)
+rpc CommitSessionDelta(CommitSessionDeltaRequest) returns (CommitSessionDeltaOutcome)
+rpc ReleaseSession(ReleaseSessionRequest) returns (ReleaseSessionOutcome)
+```
+
+Field tags are pinned in design-order for each request:
+
+| Request | Tag layout |
+|---|---|
+| `ReserveSessionRequest` | `1 tenant_id`, `2 budget_id`, `3 window_instance_id`, `4 unit`, `5 pricing`, `6 session_id`, `7 route`, `8 estimated_amount_atomic`, `9 ttl_seconds`, `10 idempotency_key` |
+| `CommitSessionDeltaRequest` | `1 session_reservation_id`, `2 streaming_commit_id`, `3 amount_atomic_delta`, `4 outcome`, `5 event_time`, `6 idempotency_key` |
+| `ReleaseSessionRequest` | `1 session_reservation_id`, `2 reason_code`, `3 event_time`, `4 idempotency_key` |
+
+`ReserveSessionRequest.unit` uses existing `spendguard.common.v1.UnitRef`,
+and `ReserveSessionRequest.pricing` uses existing
+`spendguard.common.v1.PricingFreeze`. This deliberately reuses the D05 /
+HARDEN_D05_WI tuple substrate instead of adding parallel `unit_id`,
+`pricing_version`, or `price_snapshot_hash` fields.

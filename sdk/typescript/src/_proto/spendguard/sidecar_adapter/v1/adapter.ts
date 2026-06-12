@@ -27,10 +27,12 @@
 import { ServiceType } from "@protobuf-ts/runtime-rpc";
 import { MessageType } from "@protobuf-ts/runtime";
 import { PricingFreeze } from "../../common/v1/common";
+import { SubscriptionMeter } from "../../common/v1/common";
 import { Timestamp } from "../../../google/protobuf/timestamp";
 import { Struct } from "../../../google/protobuf/struct";
 import { UnitRef } from "../../common/v1/common";
 import { BudgetClaim } from "../../common/v1/common";
+import { ReservationSource } from "../../common/v1/common";
 import { Idempotency } from "../../common/v1/common";
 import { SpendGuardIds } from "../../common/v1/common";
 import { TraceContext } from "../../common/v1/common";
@@ -495,6 +497,35 @@ export interface DecisionRequest {
      * @generated from protobuf field: int32 planned_steps_hint = 17
      */
     plannedStepsHint: number;
+    /**
+     * === D13 COV_61 additive: subscription meter reservation source ===
+     *
+     * When the egress_proxy / SDK classifier routes a request through the
+     * subscription-meter path (Claude Code Pro / Codex on ChatGPT Plus),
+     * it flags this field so the sidecar skips ledger_entries +
+     * reservations writes and only writes the audit_outbox row tagged
+     * `reservation_source = subscription_meter`.
+     *
+     * Wire-compat: proto3 default 0 = RESERVATION_SOURCE_UNSPECIFIED is
+     * treated as BYOK by the sidecar (legacy behaviour).
+     *
+     * Tag 18: next stable tag after planned_steps_hint (17).
+     *
+     * @generated from protobuf field: spendguard.common.v1.ReservationSource reservation_source = 18
+     */
+    reservationSource: ReservationSource;
+    /**
+     * === D13 COV_62 additive: meter-only estimate request ===
+     *
+     * When true, the sidecar runs in meter-only mode: it computes the
+     * meter snapshot (via subscription_meter::meter_only_estimate) and
+     * returns it in DecisionResponse.subscription_meter, but NEVER calls
+     * the ledger. Only meaningful when reservation_source ==
+     * RESERVATION_SOURCE_SUBSCRIPTION_METER.
+     *
+     * @generated from protobuf field: bool meter_only_estimate = 19
+     */
+    meterOnlyEstimate: boolean;
 }
 /**
  * Inputs schema (per Contract §12; pre-normalized to canonical units).
@@ -686,6 +717,20 @@ export interface DecisionResponse {
      * @generated from protobuf field: string run_code_triggered = 16
      */
     runCodeTriggered: string;
+    /**
+     * === D13 COV_61 additive: subscription meter snapshot ===
+     *
+     * Populated only when the request's reservation_source == SUBSCRIPTION_METER.
+     * Carries the current period counters and the cap evaluation outcome
+     * so the adapter can short-circuit on hard-cap blocks (synthetic 429)
+     * without re-querying the sidecar.
+     *
+     * Wire-compat: proto3 default absent message; legacy decoders ignore.
+     * Tag 17: next stable after run_code_triggered (16).
+     *
+     * @generated from protobuf field: spendguard.common.v1.SubscriptionMeter subscription_meter = 17
+     */
+    subscriptionMeter?: SubscriptionMeter;
 }
 /**
  * Final decision (per Contract §11 effect schema).
@@ -1495,6 +1540,330 @@ export interface ReleaseReservationResponse {
      */
     releasedReservationIds: string[];
 }
+// ============================================================================
+// Session reservation (D41 voice substrate SR-V1)
+// ============================================================================
+
+/**
+ * Field-tag layout locked by D41 session reservation substrate design.md §5:
+ * tags 1..10 are the required request fields in design order.
+ *
+ * @generated from protobuf message spendguard.sidecar_adapter.v1.ReserveSessionRequest
+ */
+export interface ReserveSessionRequest {
+    /**
+     * @generated from protobuf field: string tenant_id = 1
+     */
+    tenantId: string;
+    /**
+     * @generated from protobuf field: string budget_id = 2
+     */
+    budgetId: string;
+    /**
+     * @generated from protobuf field: string window_instance_id = 3
+     */
+    windowInstanceId: string;
+    /**
+     * @generated from protobuf field: spendguard.common.v1.UnitRef unit = 4
+     */
+    unit?: UnitRef;
+    /**
+     * @generated from protobuf field: spendguard.common.v1.PricingFreeze pricing = 5
+     */
+    pricing?: PricingFreeze;
+    /**
+     * @generated from protobuf field: string session_id = 6
+     */
+    sessionId: string;
+    /**
+     * @generated from protobuf field: string route = 7
+     */
+    route: string;
+    /**
+     * @generated from protobuf field: string estimated_amount_atomic = 8
+     */
+    estimatedAmountAtomic: string;
+    /**
+     * @generated from protobuf field: uint32 ttl_seconds = 9
+     */
+    ttlSeconds: number;
+    /**
+     * @generated from protobuf field: string idempotency_key = 10
+     */
+    idempotencyKey: string;
+}
+/**
+ * @generated from protobuf message spendguard.sidecar_adapter.v1.ReserveSessionOutcome
+ */
+export interface ReserveSessionOutcome {
+    /**
+     * @generated from protobuf oneof: outcome
+     */
+    outcome: {
+        oneofKind: "accepted";
+        /**
+         * @generated from protobuf field: spendguard.sidecar_adapter.v1.ReserveSessionAccepted accepted = 1
+         */
+        accepted: ReserveSessionAccepted;
+    } | {
+        oneofKind: "denied";
+        /**
+         * @generated from protobuf field: spendguard.sidecar_adapter.v1.ReserveSessionDenied denied = 2
+         */
+        denied: ReserveSessionDenied;
+    } | {
+        oneofKind: "error";
+        /**
+         * @generated from protobuf field: spendguard.common.v1.Error error = 3
+         */
+        error: Error;
+    } | {
+        oneofKind: undefined;
+    };
+}
+/**
+ * @generated from protobuf message spendguard.sidecar_adapter.v1.ReserveSessionAccepted
+ */
+export interface ReserveSessionAccepted {
+    /**
+     * @generated from protobuf field: string session_reservation_id = 1
+     */
+    sessionReservationId: string;
+    /**
+     * @generated from protobuf field: string ledger_transaction_id = 2
+     */
+    ledgerTransactionId: string;
+    /**
+     * @generated from protobuf field: string audit_session_event_id = 3
+     */
+    auditSessionEventId: string;
+    /**
+     * @generated from protobuf field: google.protobuf.Timestamp ttl_expires_at = 4
+     */
+    ttlExpiresAt?: Timestamp;
+    /**
+     * @generated from protobuf field: string reserved_amount_atomic = 5
+     */
+    reservedAmountAtomic: string;
+    /**
+     * @generated from protobuf field: string remaining_amount_atomic = 6
+     */
+    remainingAmountAtomic: string;
+}
+/**
+ * @generated from protobuf message spendguard.sidecar_adapter.v1.ReserveSessionDenied
+ */
+export interface ReserveSessionDenied {
+    /**
+     * @generated from protobuf field: string audit_session_event_id = 1
+     */
+    auditSessionEventId: string;
+    /**
+     * @generated from protobuf field: repeated string reason_codes = 2
+     */
+    reasonCodes: string[];
+    /**
+     * @generated from protobuf field: repeated string matched_rule_ids = 3
+     */
+    matchedRuleIds: string[];
+    /**
+     * @generated from protobuf field: spendguard.common.v1.Error error = 4
+     */
+    error?: Error;
+}
+/**
+ * Field-tag layout locked by D41 session reservation substrate design.md §5:
+ * tags 1..6 are the required request fields in design order.
+ *
+ * @generated from protobuf message spendguard.sidecar_adapter.v1.CommitSessionDeltaRequest
+ */
+export interface CommitSessionDeltaRequest {
+    /**
+     * @generated from protobuf field: string session_reservation_id = 1
+     */
+    sessionReservationId: string;
+    /**
+     * @generated from protobuf field: string streaming_commit_id = 2
+     */
+    streamingCommitId: string;
+    /**
+     * @generated from protobuf field: string amount_atomic_delta = 3
+     */
+    amountAtomicDelta: string;
+    /**
+     * @generated from protobuf field: spendguard.sidecar_adapter.v1.CommitSessionDeltaRequest.Outcome outcome = 4
+     */
+    outcome: CommitSessionDeltaRequest_Outcome;
+    /**
+     * @generated from protobuf field: google.protobuf.Timestamp event_time = 5
+     */
+    eventTime?: Timestamp;
+    /**
+     * @generated from protobuf field: string idempotency_key = 6
+     */
+    idempotencyKey: string;
+}
+/**
+ * @generated from protobuf enum spendguard.sidecar_adapter.v1.CommitSessionDeltaRequest.Outcome
+ */
+export enum CommitSessionDeltaRequest_Outcome {
+    /**
+     * @generated from protobuf enum value: OUTCOME_UNSPECIFIED = 0;
+     */
+    OUTCOME_UNSPECIFIED = 0,
+    /**
+     * @generated from protobuf enum value: SUCCESS = 1;
+     */
+    SUCCESS = 1,
+    /**
+     * @generated from protobuf enum value: PROVIDER_ERROR = 2;
+     */
+    PROVIDER_ERROR = 2,
+    /**
+     * @generated from protobuf enum value: CLIENT_TIMEOUT = 3;
+     */
+    CLIENT_TIMEOUT = 3,
+    /**
+     * @generated from protobuf enum value: RUN_ABORTED = 4;
+     */
+    RUN_ABORTED = 4
+}
+/**
+ * @generated from protobuf message spendguard.sidecar_adapter.v1.CommitSessionDeltaOutcome
+ */
+export interface CommitSessionDeltaOutcome {
+    /**
+     * @generated from protobuf oneof: outcome
+     */
+    outcome: {
+        oneofKind: "accepted";
+        /**
+         * @generated from protobuf field: spendguard.sidecar_adapter.v1.CommitSessionDeltaAccepted accepted = 1
+         */
+        accepted: CommitSessionDeltaAccepted;
+    } | {
+        oneofKind: "error";
+        /**
+         * @generated from protobuf field: spendguard.common.v1.Error error = 2
+         */
+        error: Error;
+    } | {
+        oneofKind: undefined;
+    };
+}
+/**
+ * @generated from protobuf message spendguard.sidecar_adapter.v1.CommitSessionDeltaAccepted
+ */
+export interface CommitSessionDeltaAccepted {
+    /**
+     * @generated from protobuf field: string session_reservation_id = 1
+     */
+    sessionReservationId: string;
+    /**
+     * @generated from protobuf field: string streaming_commit_id = 2
+     */
+    streamingCommitId: string;
+    /**
+     * @generated from protobuf field: string ledger_transaction_id = 3
+     */
+    ledgerTransactionId: string;
+    /**
+     * @generated from protobuf field: string audit_session_event_id = 4
+     */
+    auditSessionEventId: string;
+    /**
+     * @generated from protobuf field: string committed_delta_atomic = 5
+     */
+    committedDeltaAtomic: string;
+    /**
+     * @generated from protobuf field: string cumulative_committed_atomic = 6
+     */
+    cumulativeCommittedAtomic: string;
+    /**
+     * @generated from protobuf field: string remaining_amount_atomic = 7
+     */
+    remainingAmountAtomic: string;
+    /**
+     * @generated from protobuf field: google.protobuf.Timestamp recorded_at = 8
+     */
+    recordedAt?: Timestamp;
+}
+/**
+ * Field-tag layout locked by D41 session reservation substrate design.md §5:
+ * tags 1..4 are the required request fields in design order.
+ *
+ * @generated from protobuf message spendguard.sidecar_adapter.v1.ReleaseSessionRequest
+ */
+export interface ReleaseSessionRequest {
+    /**
+     * @generated from protobuf field: string session_reservation_id = 1
+     */
+    sessionReservationId: string;
+    /**
+     * @generated from protobuf field: string reason_code = 2
+     */
+    reasonCode: string;
+    /**
+     * @generated from protobuf field: google.protobuf.Timestamp event_time = 3
+     */
+    eventTime?: Timestamp;
+    /**
+     * @generated from protobuf field: string idempotency_key = 4
+     */
+    idempotencyKey: string;
+}
+/**
+ * @generated from protobuf message spendguard.sidecar_adapter.v1.ReleaseSessionOutcome
+ */
+export interface ReleaseSessionOutcome {
+    /**
+     * @generated from protobuf oneof: outcome
+     */
+    outcome: {
+        oneofKind: "accepted";
+        /**
+         * @generated from protobuf field: spendguard.sidecar_adapter.v1.ReleaseSessionAccepted accepted = 1
+         */
+        accepted: ReleaseSessionAccepted;
+    } | {
+        oneofKind: "error";
+        /**
+         * @generated from protobuf field: spendguard.common.v1.Error error = 2
+         */
+        error: Error;
+    } | {
+        oneofKind: undefined;
+    };
+}
+/**
+ * @generated from protobuf message spendguard.sidecar_adapter.v1.ReleaseSessionAccepted
+ */
+export interface ReleaseSessionAccepted {
+    /**
+     * @generated from protobuf field: string session_reservation_id = 1
+     */
+    sessionReservationId: string;
+    /**
+     * @generated from protobuf field: string ledger_transaction_id = 2
+     */
+    ledgerTransactionId: string;
+    /**
+     * @generated from protobuf field: string audit_session_event_id = 3
+     */
+    auditSessionEventId: string;
+    /**
+     * @generated from protobuf field: string released_amount_atomic = 4
+     */
+    releasedAmountAtomic: string;
+    /**
+     * @generated from protobuf field: string committed_amount_atomic = 5
+     */
+    committedAmountAtomic: string;
+    /**
+     * @generated from protobuf field: google.protobuf.Timestamp recorded_at = 6
+     */
+    recordedAt?: Timestamp;
+}
 // @generated message type with reflection information, may provide speed optimized methods
 class ResumeAfterApprovalRequest$Type extends MessageType<ResumeAfterApprovalRequest> {
     constructor() {
@@ -1636,7 +2005,9 @@ class DecisionRequest$Type extends MessageType<DecisionRequest> {
             { no: 7, name: "parent_run_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
             { no: 8, name: "budget_grant_jti", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
             { no: 9, name: "idempotency", kind: "message", T: () => Idempotency },
-            { no: 17, name: "planned_steps_hint", kind: "scalar", T: 5 /*ScalarType.INT32*/ }
+            { no: 17, name: "planned_steps_hint", kind: "scalar", T: 5 /*ScalarType.INT32*/ },
+            { no: 18, name: "reservation_source", kind: "enum", T: () => ["spendguard.common.v1.ReservationSource", ReservationSource, "RESERVATION_SOURCE_"] },
+            { no: 19, name: "meter_only_estimate", kind: "scalar", T: 8 /*ScalarType.BOOL*/ }
         ]);
     }
 }
@@ -1682,7 +2053,8 @@ class DecisionResponse$Type extends MessageType<DecisionResponse> {
             { no: 13, name: "approver_role", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
             { no: 14, name: "terminal", kind: "scalar", T: 8 /*ScalarType.BOOL*/ },
             { no: 15, name: "error", kind: "message", T: () => Error },
-            { no: 16, name: "run_code_triggered", kind: "scalar", T: 9 /*ScalarType.STRING*/ }
+            { no: 16, name: "run_code_triggered", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 17, name: "subscription_meter", kind: "message", T: () => SubscriptionMeter }
         ]);
     }
 }
@@ -1966,6 +2338,167 @@ class ReleaseReservationResponse$Type extends MessageType<ReleaseReservationResp
  * @generated MessageType for protobuf message spendguard.sidecar_adapter.v1.ReleaseReservationResponse
  */
 export const ReleaseReservationResponse = new ReleaseReservationResponse$Type();
+// @generated message type with reflection information, may provide speed optimized methods
+class ReserveSessionRequest$Type extends MessageType<ReserveSessionRequest> {
+    constructor() {
+        super("spendguard.sidecar_adapter.v1.ReserveSessionRequest", [
+            { no: 1, name: "tenant_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 2, name: "budget_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 3, name: "window_instance_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 4, name: "unit", kind: "message", T: () => UnitRef },
+            { no: 5, name: "pricing", kind: "message", T: () => PricingFreeze },
+            { no: 6, name: "session_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 7, name: "route", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 8, name: "estimated_amount_atomic", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 9, name: "ttl_seconds", kind: "scalar", T: 13 /*ScalarType.UINT32*/ },
+            { no: 10, name: "idempotency_key", kind: "scalar", T: 9 /*ScalarType.STRING*/ }
+        ]);
+    }
+}
+/**
+ * @generated MessageType for protobuf message spendguard.sidecar_adapter.v1.ReserveSessionRequest
+ */
+export const ReserveSessionRequest = new ReserveSessionRequest$Type();
+// @generated message type with reflection information, may provide speed optimized methods
+class ReserveSessionOutcome$Type extends MessageType<ReserveSessionOutcome> {
+    constructor() {
+        super("spendguard.sidecar_adapter.v1.ReserveSessionOutcome", [
+            { no: 1, name: "accepted", kind: "message", oneof: "outcome", T: () => ReserveSessionAccepted },
+            { no: 2, name: "denied", kind: "message", oneof: "outcome", T: () => ReserveSessionDenied },
+            { no: 3, name: "error", kind: "message", oneof: "outcome", T: () => Error }
+        ]);
+    }
+}
+/**
+ * @generated MessageType for protobuf message spendguard.sidecar_adapter.v1.ReserveSessionOutcome
+ */
+export const ReserveSessionOutcome = new ReserveSessionOutcome$Type();
+// @generated message type with reflection information, may provide speed optimized methods
+class ReserveSessionAccepted$Type extends MessageType<ReserveSessionAccepted> {
+    constructor() {
+        super("spendguard.sidecar_adapter.v1.ReserveSessionAccepted", [
+            { no: 1, name: "session_reservation_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 2, name: "ledger_transaction_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 3, name: "audit_session_event_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 4, name: "ttl_expires_at", kind: "message", T: () => Timestamp },
+            { no: 5, name: "reserved_amount_atomic", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 6, name: "remaining_amount_atomic", kind: "scalar", T: 9 /*ScalarType.STRING*/ }
+        ]);
+    }
+}
+/**
+ * @generated MessageType for protobuf message spendguard.sidecar_adapter.v1.ReserveSessionAccepted
+ */
+export const ReserveSessionAccepted = new ReserveSessionAccepted$Type();
+// @generated message type with reflection information, may provide speed optimized methods
+class ReserveSessionDenied$Type extends MessageType<ReserveSessionDenied> {
+    constructor() {
+        super("spendguard.sidecar_adapter.v1.ReserveSessionDenied", [
+            { no: 1, name: "audit_session_event_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 2, name: "reason_codes", kind: "scalar", repeat: 2 /*RepeatType.UNPACKED*/, T: 9 /*ScalarType.STRING*/ },
+            { no: 3, name: "matched_rule_ids", kind: "scalar", repeat: 2 /*RepeatType.UNPACKED*/, T: 9 /*ScalarType.STRING*/ },
+            { no: 4, name: "error", kind: "message", T: () => Error }
+        ]);
+    }
+}
+/**
+ * @generated MessageType for protobuf message spendguard.sidecar_adapter.v1.ReserveSessionDenied
+ */
+export const ReserveSessionDenied = new ReserveSessionDenied$Type();
+// @generated message type with reflection information, may provide speed optimized methods
+class CommitSessionDeltaRequest$Type extends MessageType<CommitSessionDeltaRequest> {
+    constructor() {
+        super("spendguard.sidecar_adapter.v1.CommitSessionDeltaRequest", [
+            { no: 1, name: "session_reservation_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 2, name: "streaming_commit_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 3, name: "amount_atomic_delta", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 4, name: "outcome", kind: "enum", T: () => ["spendguard.sidecar_adapter.v1.CommitSessionDeltaRequest.Outcome", CommitSessionDeltaRequest_Outcome] },
+            { no: 5, name: "event_time", kind: "message", T: () => Timestamp },
+            { no: 6, name: "idempotency_key", kind: "scalar", T: 9 /*ScalarType.STRING*/ }
+        ]);
+    }
+}
+/**
+ * @generated MessageType for protobuf message spendguard.sidecar_adapter.v1.CommitSessionDeltaRequest
+ */
+export const CommitSessionDeltaRequest = new CommitSessionDeltaRequest$Type();
+// @generated message type with reflection information, may provide speed optimized methods
+class CommitSessionDeltaOutcome$Type extends MessageType<CommitSessionDeltaOutcome> {
+    constructor() {
+        super("spendguard.sidecar_adapter.v1.CommitSessionDeltaOutcome", [
+            { no: 1, name: "accepted", kind: "message", oneof: "outcome", T: () => CommitSessionDeltaAccepted },
+            { no: 2, name: "error", kind: "message", oneof: "outcome", T: () => Error }
+        ]);
+    }
+}
+/**
+ * @generated MessageType for protobuf message spendguard.sidecar_adapter.v1.CommitSessionDeltaOutcome
+ */
+export const CommitSessionDeltaOutcome = new CommitSessionDeltaOutcome$Type();
+// @generated message type with reflection information, may provide speed optimized methods
+class CommitSessionDeltaAccepted$Type extends MessageType<CommitSessionDeltaAccepted> {
+    constructor() {
+        super("spendguard.sidecar_adapter.v1.CommitSessionDeltaAccepted", [
+            { no: 1, name: "session_reservation_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 2, name: "streaming_commit_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 3, name: "ledger_transaction_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 4, name: "audit_session_event_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 5, name: "committed_delta_atomic", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 6, name: "cumulative_committed_atomic", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 7, name: "remaining_amount_atomic", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 8, name: "recorded_at", kind: "message", T: () => Timestamp }
+        ]);
+    }
+}
+/**
+ * @generated MessageType for protobuf message spendguard.sidecar_adapter.v1.CommitSessionDeltaAccepted
+ */
+export const CommitSessionDeltaAccepted = new CommitSessionDeltaAccepted$Type();
+// @generated message type with reflection information, may provide speed optimized methods
+class ReleaseSessionRequest$Type extends MessageType<ReleaseSessionRequest> {
+    constructor() {
+        super("spendguard.sidecar_adapter.v1.ReleaseSessionRequest", [
+            { no: 1, name: "session_reservation_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 2, name: "reason_code", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 3, name: "event_time", kind: "message", T: () => Timestamp },
+            { no: 4, name: "idempotency_key", kind: "scalar", T: 9 /*ScalarType.STRING*/ }
+        ]);
+    }
+}
+/**
+ * @generated MessageType for protobuf message spendguard.sidecar_adapter.v1.ReleaseSessionRequest
+ */
+export const ReleaseSessionRequest = new ReleaseSessionRequest$Type();
+// @generated message type with reflection information, may provide speed optimized methods
+class ReleaseSessionOutcome$Type extends MessageType<ReleaseSessionOutcome> {
+    constructor() {
+        super("spendguard.sidecar_adapter.v1.ReleaseSessionOutcome", [
+            { no: 1, name: "accepted", kind: "message", oneof: "outcome", T: () => ReleaseSessionAccepted },
+            { no: 2, name: "error", kind: "message", oneof: "outcome", T: () => Error }
+        ]);
+    }
+}
+/**
+ * @generated MessageType for protobuf message spendguard.sidecar_adapter.v1.ReleaseSessionOutcome
+ */
+export const ReleaseSessionOutcome = new ReleaseSessionOutcome$Type();
+// @generated message type with reflection information, may provide speed optimized methods
+class ReleaseSessionAccepted$Type extends MessageType<ReleaseSessionAccepted> {
+    constructor() {
+        super("spendguard.sidecar_adapter.v1.ReleaseSessionAccepted", [
+            { no: 1, name: "session_reservation_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 2, name: "ledger_transaction_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 3, name: "audit_session_event_id", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 4, name: "released_amount_atomic", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 5, name: "committed_amount_atomic", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 6, name: "recorded_at", kind: "message", T: () => Timestamp }
+        ]);
+    }
+}
+/**
+ * @generated MessageType for protobuf message spendguard.sidecar_adapter.v1.ReleaseSessionAccepted
+ */
+export const ReleaseSessionAccepted = new ReleaseSessionAccepted$Type();
 /**
  * @generated ServiceType for protobuf service spendguard.sidecar_adapter.v1.SidecarAdapter
  */
@@ -1979,5 +2512,8 @@ export const SidecarAdapter = new ServiceType("spendguard.sidecar_adapter.v1.Sid
     { name: "ConsumeBudgetGrant", options: {}, I: ConsumeBudgetGrantRequest, O: ConsumeBudgetGrantResponse },
     { name: "StreamDrainSignal", serverStreaming: true, options: {}, I: DrainSubscribeRequest, O: DrainSignal },
     { name: "ResumeAfterApproval", options: {}, I: ResumeAfterApprovalRequest, O: ResumeAfterApprovalResponse },
-    { name: "ReleaseReservation", options: {}, I: ReleaseReservationRequest, O: ReleaseReservationResponse }
+    { name: "ReleaseReservation", options: {}, I: ReleaseReservationRequest, O: ReleaseReservationResponse },
+    { name: "ReserveSession", options: {}, I: ReserveSessionRequest, O: ReserveSessionOutcome },
+    { name: "CommitSessionDelta", options: {}, I: CommitSessionDeltaRequest, O: CommitSessionDeltaOutcome },
+    { name: "ReleaseSession", options: {}, I: ReleaseSessionRequest, O: ReleaseSessionOutcome }
 ]);

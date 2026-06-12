@@ -844,6 +844,121 @@ export interface Idempotency {
      */
     requestHash: Uint8Array;
 }
+/**
+ * Subscription meter snapshot — returned to the adapter when the
+ * classifier routes a request through the subscription meter path.
+ * All values are best-effort retail-price estimates in micro-USD.
+ *
+ * The sidecar does NOT write ledger_entries for these rows; the
+ * canonical record lives in `subscription_meters` (migration 0044).
+ *
+ * @generated from protobuf message spendguard.common.v1.SubscriptionMeter
+ */
+export interface SubscriptionMeter {
+    /**
+     * The plan that produced this meter row.
+     *
+     * @generated from protobuf field: string plan = 1
+     */
+    plan: string; // "claude_code_pro" | "codex_chatgpt" | "unknown"
+    /**
+     * Current period (UTC calendar month default).
+     *
+     * @generated from protobuf field: google.protobuf.Timestamp period_start = 2
+     */
+    periodStart?: Timestamp;
+    /**
+     * @generated from protobuf field: google.protobuf.Timestamp period_end = 3
+     */
+    periodEnd?: Timestamp;
+    /**
+     * Atomic counters (micro-USD).
+     *
+     * @generated from protobuf field: int64 consumed_atomic = 4
+     */
+    consumedAtomic: string;
+    /**
+     * @generated from protobuf field: int64 monthly_cap_atomic = 5
+     */
+    monthlyCapAtomic: string;
+    /**
+     * @generated from protobuf field: int64 alert_at_atomic = 6
+     */
+    alertAtAtomic: string;
+    /**
+     * 0 means "no hard cap" — kept as int64 (not optional) so legacy
+     * decoders read 0 = soft mode.
+     *
+     * @generated from protobuf field: int64 hard_cap_at_atomic = 7
+     */
+    hardCapAtAtomic: string;
+    /**
+     * @generated from protobuf field: spendguard.common.v1.SubscriptionMeter.CapDecision cap_decision = 8
+     */
+    capDecision: SubscriptionMeter_CapDecision;
+    /**
+     * For hard-cap blocks only — seconds until window reset, bounded at
+     * 86400 (24h) per design §4.5 to prevent CLIs hanging > 24h.
+     *
+     * @generated from protobuf field: int64 retry_after_seconds = 9
+     */
+    retryAfterSeconds: string;
+}
+/**
+ * Cap evaluation outcome carried to the adapter.
+ *
+ * @generated from protobuf enum spendguard.common.v1.SubscriptionMeter.CapDecision
+ */
+export enum SubscriptionMeter_CapDecision {
+    /**
+     * @generated from protobuf enum value: CAP_DECISION_UNSPECIFIED = 0;
+     */
+    CAP_DECISION_UNSPECIFIED = 0,
+    /**
+     * @generated from protobuf enum value: CAP_PASS = 1;
+     */
+    CAP_PASS = 1,
+    /**
+     * @generated from protobuf enum value: CAP_SOFT_ALERT = 2;
+     */
+    CAP_SOFT_ALERT = 2,
+    /**
+     * synthetic 429
+     *
+     * @generated from protobuf enum value: CAP_HARD_BLOCK = 3;
+     */
+    CAP_HARD_BLOCK = 3
+}
+// ============================================================================
+// SUBSCRIPTION METER (per D13 §4)
+// ============================================================================
+
+/**
+ * Reservation source: tags an audit_outbox row so dashboards and
+ * importers can tell BYOK-charged (real ledger entry) rows apart from
+ * subscription-meter (advisory; no ledger entry) rows.
+ *
+ * Wire-compat: additive enum. RESERVATION_SOURCE_UNSPECIFIED = 0
+ * preserves wire-compat for clients emitted before D13.  Legacy rows
+ * default to BYOK at the audit_outbox column level (NOT NULL DEFAULT
+ * 'byok' per migration 0044).
+ *
+ * @generated from protobuf enum spendguard.common.v1.ReservationSource
+ */
+export enum ReservationSource {
+    /**
+     * @generated from protobuf enum value: RESERVATION_SOURCE_UNSPECIFIED = 0;
+     */
+    UNSPECIFIED = 0,
+    /**
+     * @generated from protobuf enum value: RESERVATION_SOURCE_BYOK = 1;
+     */
+    BYOK = 1,
+    /**
+     * @generated from protobuf enum value: RESERVATION_SOURCE_SUBSCRIPTION_METER = 2;
+     */
+    SUBSCRIPTION_METER = 2
+}
 // @generated message type with reflection information, may provide speed optimized methods
 class TraceContext$Type extends MessageType<TraceContext> {
     constructor() {
@@ -1097,3 +1212,23 @@ class Idempotency$Type extends MessageType<Idempotency> {
  * @generated MessageType for protobuf message spendguard.common.v1.Idempotency
  */
 export const Idempotency = new Idempotency$Type();
+// @generated message type with reflection information, may provide speed optimized methods
+class SubscriptionMeter$Type extends MessageType<SubscriptionMeter> {
+    constructor() {
+        super("spendguard.common.v1.SubscriptionMeter", [
+            { no: 1, name: "plan", kind: "scalar", T: 9 /*ScalarType.STRING*/ },
+            { no: 2, name: "period_start", kind: "message", T: () => Timestamp },
+            { no: 3, name: "period_end", kind: "message", T: () => Timestamp },
+            { no: 4, name: "consumed_atomic", kind: "scalar", T: 3 /*ScalarType.INT64*/ },
+            { no: 5, name: "monthly_cap_atomic", kind: "scalar", T: 3 /*ScalarType.INT64*/ },
+            { no: 6, name: "alert_at_atomic", kind: "scalar", T: 3 /*ScalarType.INT64*/ },
+            { no: 7, name: "hard_cap_at_atomic", kind: "scalar", T: 3 /*ScalarType.INT64*/ },
+            { no: 8, name: "cap_decision", kind: "enum", T: () => ["spendguard.common.v1.SubscriptionMeter.CapDecision", SubscriptionMeter_CapDecision] },
+            { no: 9, name: "retry_after_seconds", kind: "scalar", T: 3 /*ScalarType.INT64*/ }
+        ]);
+    }
+}
+/**
+ * @generated MessageType for protobuf message spendguard.common.v1.SubscriptionMeter
+ */
+export const SubscriptionMeter = new SubscriptionMeter$Type();

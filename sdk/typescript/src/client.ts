@@ -56,6 +56,7 @@ import type { status as GrpcStatus, ServiceError } from "@grpc/grpc-js";
 import { GrpcTransport } from "@protobuf-ts/grpc-transport";
 import { RpcError } from "@protobuf-ts/runtime-rpc";
 
+import { ReservationSource } from "./_proto/spendguard/common/v1/common.js";
 import { SidecarAdapterClient } from "./_proto/spendguard/sidecar_adapter/v1/adapter.client.js";
 import type {
   DecisionRequest as ProtoDecisionRequest,
@@ -1312,6 +1313,10 @@ export class SpendGuardClient implements AsyncDisposable {
       // (`services/run_cost_projector/src/server.rs`) so the SDK doesn't gate
       // on a value the server may bump independently.
       plannedStepsHint,
+      // D13 additive proto fields. These defaults preserve the pre-D13 BYOK
+      // request-scoped path until an adapter explicitly opts into meter-only.
+      reservationSource: ReservationSource.UNSPECIFIED,
+      meterOnlyEstimate: false,
     };
   }
 
