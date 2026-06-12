@@ -1,0 +1,67 @@
+{
+  "name": "@spendguard/openclaw-provider-plugin",
+  "version": "0.1.0-pre",
+  "description": "SpendGuard OpenClaw provider plugin adapter skeleton for pinned OpenClaw provider registration APIs.",
+  "license": "Apache-2.0",
+  "author": "Michael Chen <m24927605@gmail.com>",
+  "homepage": "https://github.com/m24927605/agentic-spendguard",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/m24927605/agentic-spendguard.git",
+    "directory": "integrations/openclaw-provider-plugin"
+  },
+  "bugs": "https://github.com/m24927605/agentic-spendguard/issues",
+  "keywords": [
+    "llm",
+    "agent",
+    "spend",
+    "budget",
+    "spendguard",
+    "openclaw",
+    "provider-plugin",
+    "guardrails"
+  ],
+  "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "files": [
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE_NOTICES.md"
+  ],
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "scripts": {
+    "build": "PATH=../../sdk/typescript/node_modules/.bin:$PATH tsup",
+    "test": "PATH=../../sdk/typescript/node_modules/.bin:$PATH vitest run",
+    "test:watch": "PATH=../../sdk/typescript/node_modules/.bin:$PATH vitest",
+    "typecheck": "PATH=../../sdk/typescript/node_modules/.bin:$PATH tsc --noEmit && PATH=../../sdk/typescript/node_modules/.bin:$PATH tsc -p tsconfig.tests.json --noEmit"
+  },
+  "peerDependencies": {
+    "@spendguard/sdk": "^0.1.0",
+    "openclaw": "2026.6.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "openclaw": "2026.6.2",
+    "tsup": "^8.3.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

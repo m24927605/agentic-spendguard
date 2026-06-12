@@ -28,10 +28,17 @@ From `design.md` §8:
 | File | Why |
 |---|---|
 | `integrations/openclaw-provider-plugin/package.json` | Package metadata and OpenClaw version pin. |
+| `integrations/openclaw-provider-plugin/README.md` | Slice-scope package readme and trust-boundary warning. |
+| `integrations/openclaw-provider-plugin/CHANGELOG.md` | Package changelog skeleton. |
+| `integrations/openclaw-provider-plugin/LICENSE_NOTICES.md` | Peer/license notice skeleton. |
 | `integrations/openclaw-provider-plugin/tsconfig.json` | TypeScript config. |
+| `integrations/openclaw-provider-plugin/tsconfig.tests.json` | Test typecheck config. |
 | `integrations/openclaw-provider-plugin/tsup.config.ts` | ESM build config. |
+| `integrations/openclaw-provider-plugin/vitest.config.ts` | Unit test runner config. |
 | `integrations/openclaw-provider-plugin/src/index.ts` | Placeholder public barrel. |
 | `integrations/openclaw-provider-plugin/src/version.ts` | VERSION constant. |
+| `integrations/openclaw-provider-plugin/src/{provider,options,errors,identity,flatten,usage}.ts` | Skeleton modules. |
+| `integrations/openclaw-provider-plugin/src/openclaw-api.d.ts` | Pinned OpenClaw type shim for local skeleton gates. |
 | `integrations/openclaw-provider-plugin/tests/` | Import/type skeleton tests. |
 
 ## VERIFY-AT-IMPL pins

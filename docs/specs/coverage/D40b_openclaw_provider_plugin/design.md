@@ -123,3 +123,30 @@ OpenClaw plugins run in-process. D40b does not make untrusted plugins safe. The 
 ## 10. Definition of done
 
 D40b is shipped when all six slices land on main, the live `openclaw_provider_plugin` demo passes, every `OB-V*` marker is pinned, and docs clearly distinguish D40a base-URL fallback from D40b plugin enforcement.
+
+## 11. Append-only implementation amendments
+
+### 2026-06-12 - `COV_D40B_01_plugin_package_init` OpenClaw API pins
+
+Pinned OpenClaw package: `openclaw@2026.6.2`, commit
+`d4819948f37d45fe8f1428401316eaae456cdf16`. This matches D40a's pinned
+source. The Node runtime floor is `>=22.19.0`, per OpenClaw's pinned
+`package.json` `engines.node`.
+
+Primary-source evidence:
+
+- OpenClaw pinned `package.json`: <https://github.com/openclaw/openclaw/blob/d4819948f37d45fe8f1428401316eaae456cdf16/package.json>
+- Provider plugin guide: <https://github.com/openclaw/openclaw/blob/d4819948f37d45fe8f1428401316eaae456cdf16/docs/plugins/sdk-provider-plugins.md>
+- Public provider entry facade: <https://github.com/openclaw/openclaw/blob/d4819948f37d45fe8f1428401316eaae456cdf16/packages/plugin-sdk/src/provider-entry.ts>
+- Provider type exports and provider registration API: <https://github.com/openclaw/openclaw/blob/d4819948f37d45fe8f1428401316eaae456cdf16/src/plugins/types.ts>
+- Provider stream hook exports: <https://github.com/openclaw/openclaw/blob/d4819948f37d45fe8f1428401316eaae456cdf16/src/plugin-sdk/provider-stream.ts>
+
+`OB-V1` is pinned to the capability-registration/provider plugin surface, not the draft `generate(request, context)` / `stream(request, context)` object shape. The exact imported OpenClaw type names for this slice are:
+
+- `ProviderPlugin` from `openclaw/plugin-sdk/provider-model-shared`, used as `OpenClawProvider`.
+- `OpenClawPluginApi` from `openclaw/plugin-sdk/plugin-entry`, whose provider methods include `registerProvider(provider: ProviderPlugin)` and `registerModelCatalogProvider(provider: UnifiedModelCatalogProviderPlugin)`.
+- `ProviderWrapStreamFnContext` from `openclaw/plugin-sdk/plugin-entry`, reserved for later `OB-V3`/`OB-V4` wrapper-point pinning.
+
+The public SpendGuard factory name and options surface remain locked, but the concrete OpenClaw wrapper target is `ProviderPlugin` catalog/registration behavior. OpenClaw at the pinned commit does not expose a single provider-call context type equivalent to the draft `OpenClawProviderContext`; the slice 1 placeholder keeps that type structural until `OB-V3` pins the exact pre-dispatch context. The placeholder package must not claim `generate` or `stream` interception until `OB-V3`/`OB-V4` pin the exact pre-dispatch and streaming terminal hooks.
+
+`OB-V2` is pinned as follows: `before_model_resolve` is not the provider-plugin registration surface at the pinned commit. OpenClaw provider plugins register through `definePluginEntry(...).register(api)` with `api.registerProvider(...)`; the provider guide describes `registerModelCatalogProvider` as the newer control-plane catalog surface. The provider hook list uses `catalog`, `resolveDynamicModel`, `prepareDynamicModel`, `createStreamFn`, and `wrapStreamFn` for provider/runtime behavior. Capability registration is therefore required for D40b.
