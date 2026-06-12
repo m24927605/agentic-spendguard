@@ -1,4 +1,4 @@
-import type { PricingFreeze, SpendGuardClient } from "@spendguard/sdk";
+import type { BudgetClaim, PricingFreeze, SpendGuardClient } from "@spendguard/sdk";
 
 import { OpenClawSpendGuardConfigError } from "./errors.js";
 import type { OpenClawProviderContext } from "./provider.js";
@@ -7,7 +7,7 @@ export type OpenClawClaimEstimator = (input: {
   request: unknown;
   context: OpenClawProviderContext;
   flattenedPrompt: string;
-}) => unknown;
+}) => readonly BudgetClaim[];
 
 export interface OpenClawSpendGuardOptions {
   client: SpendGuardClient;

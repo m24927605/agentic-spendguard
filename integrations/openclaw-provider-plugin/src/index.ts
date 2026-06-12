@@ -4,6 +4,7 @@ export {
   OpenClawSpendGuardNotImplementedError,
 } from "./errors.js";
 export {
+  buildOpenClawReserveRequest,
   createSpendGuardOpenClawProvider,
   type OpenClawProvider,
   type OpenClawProviderContext,

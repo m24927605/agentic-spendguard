@@ -150,3 +150,25 @@ Primary-source evidence:
 The public SpendGuard factory name and options surface remain locked, but the concrete OpenClaw wrapper target is `ProviderPlugin` catalog/registration behavior. OpenClaw at the pinned commit does not expose a single provider-call context type equivalent to the draft `OpenClawProviderContext`; the slice 1 placeholder keeps that type structural until `OB-V3` pins the exact pre-dispatch context. The placeholder package must not claim `generate` or `stream` interception until `OB-V3`/`OB-V4` pin the exact pre-dispatch and streaming terminal hooks.
 
 `OB-V2` is pinned as follows: `before_model_resolve` is not the provider-plugin registration surface at the pinned commit. OpenClaw provider plugins register through `definePluginEntry(...).register(api)` with `api.registerProvider(...)`; the provider guide describes `registerModelCatalogProvider` as the newer control-plane catalog surface. The provider hook list uses `catalog`, `resolveDynamicModel`, `prepareDynamicModel`, `createStreamFn`, and `wrapStreamFn` for provider/runtime behavior. Capability registration is therefore required for D40b.
+
+### 2026-06-12 - `COV_D40B_02_provider_wrapper_reserve` pre-dispatch wrapper point
+
+`OB-V3` is pinned to OpenClaw's provider runtime hook `wrapStreamFn`.
+The pinned provider guide states that OpenClaw calls provider hooks in order
+and lists `createStreamFn` immediately before `wrapStreamFn`; the guide's
+runtime-hook example returns a wrapper that receives `ctx.streamFn`, mutates
+request headers, and then calls the inner stream function. The pinned type
+surface has `wrapStreamFn?: (...) => StreamFn | null | undefined` and
+`ProviderWrapStreamFnContext` extends the provider prepare-extra-params context
+with `model?` and `streamFn?`; D40b must not claim session/run/turn fields on
+that context until a later OpenClaw source pin proves them. D40b therefore uses
+`wrapStreamFn(ctx)` as the pre-dispatch enforcement point: the SpendGuard
+wrapper builds `async (params) => { await client.reserve(...); return
+inner(params); }`, where `inner` is the upstream provider's `wrapStreamFn(ctx)`
+result or `ctx.streamFn`. A reserve denial or sidecar outage propagates before
+`inner(params)` is invoked, satisfying design §5 without relying on legacy
+`before_model_resolve` hooks.
+
+Primary-source evidence is the same pinned OpenClaw source set recorded in the
+2026-06-12 `COV_D40B_01_plugin_package_init` amendment, especially the provider
+plugin guide hook-order table and `src/plugin-sdk/provider-stream.ts`.

@@ -27,8 +27,14 @@ From `design.md` §6:
 | `src/identity.ts` | Substrate ID helper calls only. |
 | `src/flatten.ts` | OpenClaw request text flattening. |
 | `src/provider.ts` | Reserve and fail-closed wrapper control flow. |
+| `src/index.ts` | Export the reserve request builder for package tests. |
+| `src/openclaw-api.d.ts` | Pin the `wrapStreamFn` context and stream function shim used by `OB-V3`. |
+| `src/errors.ts` | Keep typed placeholder wording slice-neutral after reserve path lands. |
+| `vitest.config.ts` | Resolve `@spendguard/sdk` to the local built SDK during standalone package tests. |
 | `tests/provider.test.ts` | Reserve shape tests. |
 | `tests/failclosed.test.ts` | DENY/outage before upstream tests. |
+| `tests/identity.test.ts` | SDK identity delegation tests. |
+| `tests/hashReuse.test.ts` | Prompt flattening and no local hash smoke. |
 
 ## VERIFY-AT-IMPL pins
 

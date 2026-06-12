@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vitest";
 
 import { flattenOpenClawPrompt } from "../src/flatten.js";
-import { OpenClawSpendGuardNotImplementedError } from "../src/index.js";
 
-describe("OpenClaw prompt flattening skeleton", () => {
-  it("does not implement hash or flatten behavior in slice 1", () => {
-    expect(() => flattenOpenClawPrompt()).toThrow(OpenClawSpendGuardNotImplementedError);
+describe("OpenClaw prompt flattening", () => {
+  it("flattens structured prompt/message content deterministically", () => {
+    expect(
+      flattenOpenClawPrompt({
+        messages: [
+          { role: "system", content: "stay within budget" },
+          { role: "user", content: [{ type: "text", text: "hello" }] },
+        ],
+      }),
+    ).toBe("system: stay within budget\nuser: hello");
   });
 });

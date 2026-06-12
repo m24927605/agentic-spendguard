@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import type { OpenClawSpendGuardOptions } from "../src/index.js";
 import {
   OpenClawSpendGuardConfigError,
-  OpenClawSpendGuardNotImplementedError,
   VERSION,
+  buildOpenClawReserveRequest,
   createSpendGuardOpenClawProvider,
 } from "../src/index.js";
 
@@ -31,11 +31,18 @@ describe("createSpendGuardOpenClawProvider skeleton", () => {
     expect(VERSION).toBe("0.1.0-pre");
   });
 
-  it("preserves upstream identity while disabling unimplemented catalog dispatch", async () => {
-    const provider = createSpendGuardOpenClawProvider(upstream, options);
+  it("preserves upstream identity and catalog behavior", async () => {
+    const provider = createSpendGuardOpenClawProvider(
+      {
+        ...upstream,
+        catalog: { run: async () => ({ provider: { id: "upstream" } }) },
+      },
+      options,
+    );
 
     expect(provider.id).toBe(upstream.id);
-    await expect(provider.catalog?.run({})).rejects.toThrow(OpenClawSpendGuardNotImplementedError);
+    const result = await provider.catalog?.run({});
+    expect(result).toEqual({ provider: { id: "upstream" } });
   });
 
   it("requires the day-1 unit/window/pricing tuple", () => {
@@ -55,5 +62,29 @@ describe("createSpendGuardOpenClawProvider skeleton", () => {
         },
       }),
     ).toThrow(OpenClawSpendGuardConfigError);
+  });
+
+  it("builds the locked reserve request shape", () => {
+    const req = buildOpenClawReserveRequest(
+      { messages: [{ role: "user", content: "ping" }] },
+      { provider: "openai", modelId: "gpt-test" },
+      {
+        ...options,
+        client: { reserve: async () => ({}) } as unknown as OpenClawSpendGuardOptions["client"],
+        runIdProvider: () => "run_1",
+      },
+    );
+
+    expect(req.trigger).toBe("LLM_CALL_PRE");
+    expect(req.stepId).toBe("llm_call");
+    expect(req.route).toBe("openclaw-provider");
+    expect(req.runId).toBe("run_1");
+    expect(req.projectedClaims.length).toBe(1);
+    expect(req.projectedClaims[0]).toEqual({
+      scopeId: "budget_1",
+      amountAtomic: "3000",
+      unit: { unit: "USD_MICROS", denomination: 1, unitId: "usd_micros" },
+      windowInstanceId: "window_1",
+    });
   });
 });

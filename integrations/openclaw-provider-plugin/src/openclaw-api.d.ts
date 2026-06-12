@@ -4,6 +4,8 @@ declare module "openclaw/plugin-sdk/provider-model-shared" {
     run: (ctx: unknown) => Promise<unknown>;
   };
 
+  export type OpenClawStreamFn = (params: unknown) => unknown | Promise<unknown>;
+
   export type ProviderPlugin = {
     id: string;
     pluginId?: string;
@@ -15,17 +17,29 @@ declare module "openclaw/plugin-sdk/provider-model-shared" {
     auth: unknown[];
     catalog?: ProviderPluginCatalog;
     staticCatalog?: ProviderPluginCatalog;
+    createStreamFn?: (ctx: unknown) => OpenClawStreamFn | null | undefined;
+    wrapStreamFn?: (ctx: unknown) => OpenClawStreamFn | null | undefined;
     [key: string]: unknown;
   };
 }
 
 declare module "openclaw/plugin-sdk/plugin-entry" {
-  import type { ProviderPlugin } from "openclaw/plugin-sdk/provider-model-shared";
+  import type {
+    OpenClawStreamFn,
+    ProviderPlugin,
+  } from "openclaw/plugin-sdk/provider-model-shared";
 
   export type ProviderWrapStreamFnContext = {
-    streamFn?: unknown;
+    streamFn?: OpenClawStreamFn;
     provider?: string;
     modelId?: string;
+    model?: unknown;
+    agentId?: string;
+    config?: unknown;
+    agentDir?: string;
+    workspaceDir?: string;
+    extraParams?: Record<string, unknown>;
+    thinkingLevel?: unknown;
     [key: string]: unknown;
   };
 

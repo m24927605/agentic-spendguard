@@ -7,7 +7,7 @@ export class OpenClawSpendGuardError extends Error {
 
 export class OpenClawSpendGuardNotImplementedError extends OpenClawSpendGuardError {
   constructor(feature: string) {
-    super(`${feature} is not implemented in COV_D40B_01_plugin_package_init`);
+    super(`${feature} is not implemented in the current D40b slice`);
   }
 }
 
