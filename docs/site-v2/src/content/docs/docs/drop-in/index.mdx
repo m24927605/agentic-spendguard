@@ -1,11 +1,11 @@
 ---
-title: "Drop in SpendGuard in 30 seconds (14 tools, one env var)"
+title: "Drop in SpendGuard in 30 seconds (base URL tools, one config line)"
 description: >-
   Every tool that already accepts an OpenAI-compatible base URL — LiteLLM
   proxy, Aider, Continue, Cline / Roo Code, OpenHands, Goose, Zed AI,
   GitHub Copilot CLI, Tabnine Enterprise, AnythingLLM, LobeChat, Cody
-  self-hosted, Augment, Dify — works with Agentic SpendGuard out of the
-  box. One env var, no SDK install, no code change.
+  self-hosted, Augment, Dify, OpenClaw — works with Agentic SpendGuard out of
+  the box. One env var or config line, no SDK install, no code change.
 ---
 
 import DropInPicker from '../../../../components/DropInPicker.astro';
@@ -20,7 +20,7 @@ your tool's docs specify, and the next call is governed.
 
 ## How Pattern 2 works
 
-Each of these 14 tools already supports a custom OpenAI-compatible base
+Each of these tools already supports a custom OpenAI-compatible base
 URL. SpendGuard runs an OpenAI-compatible endpoint of its own; setting
 the env var (or one config line) routes the tool's traffic through
 SpendGuard before it reaches OpenAI / Anthropic / Bedrock. Pattern 2
@@ -38,7 +38,7 @@ make demo-up DEMO_MODE=proxy
 ```
 
 The egress proxy binds on `http://localhost:9000/v1`. Point any of the
-14 tools below at that URL.
+tools below at that URL.
 
 ## Find your tool
 
@@ -76,6 +76,7 @@ quick-filter layer over the same data.
 | 13 | [Augment (BYOK)](#augment) | UI field | LLM custom endpoint `http://localhost:9000/v1` | [docs.augmentcode.com](https://docs.augmentcode.com/setup/byok) | Spec | [Open ↗](./augment/) |
 | 14 | [Dify](#dify) | Plugin manifest | Custom Model Provider plugin → base URL `http://localhost:9000/v1` | [docs.dify.ai](https://docs.dify.ai/plugins/model-provider) | Spec | [Open ↗](./dify/) |
 | 15 | [CrewAI Studio (via LiteLLM)](#litellm) | Indirect | Use row 1 — point CrewAI at the LiteLLM proxy, point LiteLLM at SpendGuard | [docs.litellm.ai](https://docs.litellm.ai/docs/proxy/config_settings) | Spec | [Open ↗](./litellm/) |
+| 16 | [OpenClaw](#openclaw) | Config file | `models.providers.spendguard.baseUrl: http://localhost:9000/v1` with `api: "openai-completions"` | [github.com/openclaw/openclaw](https://github.com/openclaw/openclaw/blob/main/docs/concepts/model-providers.md) | Live | [Open ↗](./openclaw/) |
 
 Already running SpendGuard in production? Swap `http://localhost:9000/v1`
 for your SpendGuard egress proxy URL — a Kubernetes Service URL, a
@@ -243,6 +244,30 @@ docker run -e OPENAI_PROXY_URL=http://localhost:9000/v1 \
 ```
 
 Source: [LobeChat — `OPENAI_PROXY_URL` env var](https://lobehub.com/docs/self-hosting/environment-variables/model-provider#openai_proxy_url).
+
+<h3 id="openclaw">OpenClaw</h3>
+
+OpenClaw supports custom provider entries under `models.providers`.
+Set the provider `baseUrl` to the SpendGuard egress endpoint and use
+`api: "openai-completions"` for OpenAI-compatible chat traffic. The
+full per-tool walkthrough — fixture config, local / Docker URLs,
+`DEMO_MODE=openclaw_base_url` smoke, and D40b plugin boundary — lives in
+the [OpenClaw recipe](./openclaw/).
+
+```json
+{
+  "models": {
+    "providers": {
+      "spendguard": {
+        "baseUrl": "http://localhost:9000/v1",
+        "api": "openai-completions"
+      }
+    }
+  }
+}
+```
+
+Source: [OpenClaw model providers](https://github.com/openclaw/openclaw/blob/main/docs/concepts/model-providers.md).
 
 <h3 id="cody">Cody self-hosted Enterprise</h3>
 

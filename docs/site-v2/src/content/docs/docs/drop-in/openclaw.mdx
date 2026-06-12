@@ -51,7 +51,7 @@ mandatory.
     "providers": {
       "spendguard": {
         "baseUrl": "http://localhost:9000/v1",
-        "apiKey": "${OPENCLAW_SPENDGUARD_API_KEY}",
+        "apiKey": "non-secret-placeholder-do-not-use-real-key",
         "api": "openai-completions",
         "timeoutSeconds": 120,
         "models": [
@@ -75,6 +75,12 @@ mandatory.
   }
 }
 ```
+
+The `apiKey` value above is a non-secret placeholder used only to satisfy
+OpenClaw's non-empty provider-field requirement. Do not put a real upstream
+provider key in the OpenClaw config for local smoke tests or production use of
+this recipe; the SpendGuard egress proxy owns upstream credentials and
+substitutes the outbound authorization header.
 
 Set the provider id and model id to match your upstream. The OpenClaw model
 ref is `provider/model`, so the example primary model is
@@ -156,9 +162,9 @@ Use the public HTTPS endpoint for your SpendGuard egress proxy:
   inbound authorization header and uses its own provider credential path.
 - **This is not plugin-level coverage.** D40b owns the OpenClaw provider
   plugin package and in-process adapter work.
-- **Private-network trust follows OpenClaw's provider policy.** The configured
-  `baseUrl` origin is the trusted SpendGuard proxy endpoint; other private
-  destinations still need OpenClaw's explicit request policy opt-in.
+- **Private-network trust follows OpenClaw's provider policy.** Treat the
+  configured `baseUrl` origin as the trusted SpendGuard proxy endpoint and
+  consult OpenClaw's provider policy before allowing other private destinations.
 
 ## What works today
 

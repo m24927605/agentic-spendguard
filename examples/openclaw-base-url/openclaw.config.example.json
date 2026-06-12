@@ -23,7 +23,7 @@
     "providers": {
       "spendguard": {
         "baseUrl": "http://localhost:9000/v1",
-        "apiKey": "${OPENCLAW_SPENDGUARD_API_KEY}",
+        "apiKey": "non-secret-placeholder-do-not-use-real-key",
         "api": "openai-completions",
         "timeoutSeconds": 120,
         "models": [

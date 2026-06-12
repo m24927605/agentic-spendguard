@@ -6,6 +6,15 @@ Version tags follow `vYYYY.MM.DD-ga.N` for GA release candidates and GA releases
 
 ## Unreleased
 
+- **OpenClaw base-URL recipe (D40a)** — new OpenClaw drop-in recipe and
+  `examples/openclaw-base-url/` config template for routing
+  `api: "openai-completions"` custom-provider traffic through the SpendGuard
+  egress proxy at `http://localhost:9000/v1`. New
+  `DEMO_MODE=openclaw_base_url` hard gate validates the pinned OpenClaw config
+  fixture, runs ALLOW + DENY + STREAM through a local counting upstream, proves
+  DENY leaves the provider counter unchanged, and asserts exact ledger /
+  canonical / outbox rows. This is base-URL recipe coverage only; the OpenClaw
+  provider plugin remains D40b.
 - **AG-UI spend-event family (D39, display-only)** — new `@spendguard/ag-ui`
   npm package + `spendguard.integrations.ag_ui` Python module: pure builders
   for the five `spendguard.*` AG-UI `CUSTOM` events

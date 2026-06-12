@@ -26,6 +26,7 @@ From `design.md` §7:
 | `README.md` | Add OpenClaw base-URL recipe row. |
 | `CHANGELOG.md` | Add D40a entry. |
 | `docs/site-v2/src/content/docs/docs/drop-in/openclaw.mdx` | Final cross-links and polish only. |
+| `examples/openclaw-base-url/README.md` | Clarify the example API key is a local non-secret placeholder. |
 | `/Users/michael.chen/.claude/projects/-Users-michael-chen-products-agentic-spendguard/memory/project_coverage_d40a_shipped.md` | Memory closeout. |
 | `/Users/michael.chen/.claude/projects/-Users-michael-chen-products-agentic-spendguard/memory/MEMORY.md` | Index entry. |
 

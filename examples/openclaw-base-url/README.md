@@ -26,6 +26,12 @@ adjust the proxy URL for your topology:
 The trailing `/v1` is mandatory. OpenClaw appends the
 OpenAI-compatible request path behind the provider adapter.
 
+The example `apiKey` is a non-secret placeholder used only to satisfy
+OpenClaw's non-empty provider-field requirement. Do not put a real upstream
+provider key in this OpenClaw config for local smoke tests or production use of
+this recipe; the SpendGuard egress proxy owns upstream credentials and
+substitutes the outbound authorization header.
+
 ## OpenClaw keys pinned by D40a
 
 Primary OpenClaw docs at implementation time document:
