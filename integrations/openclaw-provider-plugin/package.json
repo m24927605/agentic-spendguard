@@ -49,6 +49,7 @@
   },
   "scripts": {
     "build": "PATH=../../sdk/typescript/node_modules/.bin:$PATH tsup",
+    "size": "sh scripts/size-budget.sh",
     "test": "PATH=../../sdk/typescript/node_modules/.bin:$PATH vitest run",
     "test:watch": "PATH=../../sdk/typescript/node_modules/.bin:$PATH vitest",
     "typecheck": "PATH=../../sdk/typescript/node_modules/.bin:$PATH tsc --noEmit && PATH=../../sdk/typescript/node_modules/.bin:$PATH tsc -p tsconfig.tests.json --noEmit"

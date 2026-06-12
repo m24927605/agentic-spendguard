@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { DecisionDenied, SidecarUnavailable } from "@spendguard/sdk";
 
 import type { OpenClawSpendGuardOptions } from "../src/index.js";
 import { createSpendGuardOpenClawProvider } from "../src/index.js";
@@ -36,7 +37,10 @@ function optionsWithReserve(reserve: (req: unknown) => Promise<unknown>) {
 
 describe("OpenClaw fail-closed reserve path", () => {
   it("DENY aborts before upstream provider stream dispatch", async () => {
-    const denial = new Error("budget denied");
+    const denial = new DecisionDenied("budget denied", {
+      decisionId: "deny_1",
+      reasonCodes: ["budget_exceeded"],
+    });
     const reserve = async () => {
       throw denial;
     };
@@ -62,7 +66,7 @@ describe("OpenClaw fail-closed reserve path", () => {
   });
 
   it("sidecar outage aborts before upstream provider stream dispatch", async () => {
-    const outage = new Error("sidecar unavailable");
+    const outage = new SidecarUnavailable("sidecar unavailable");
     const reserve = async () => {
       throw outage;
     };

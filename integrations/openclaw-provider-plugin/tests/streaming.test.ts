@@ -78,6 +78,7 @@ describe("OpenClaw usage and streaming settlement", () => {
     expect((commits[0] as { outcome: string }).outcome).toBe("SUCCESS");
     expect((commits[0] as { estimatedAmountAtomic: string }).estimatedAmountAtomic).toBe("7");
     expect((commits[0] as { providerEventId: string }).providerEventId).toBe("evt_stream");
+    expect((commits[0] as { outcomeKind?: unknown }).outcomeKind).toBe(undefined);
   });
 
   it("classifies aborted-signal stream throws as RUN_ABORTED", async () => {

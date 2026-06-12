@@ -5,7 +5,6 @@ export {
 } from "./errors.js";
 export {
   OpenClawSpendGuardSettlementError,
-  buildOpenClawReserveRequest,
   createSpendGuardOpenClawProvider,
   type OpenClawProvider,
   type OpenClawProviderContext,

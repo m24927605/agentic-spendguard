@@ -5,9 +5,9 @@ import {
   OpenClawSpendGuardConfigError,
   OpenClawSpendGuardSettlementError,
   VERSION,
-  buildOpenClawReserveRequest,
   createSpendGuardOpenClawProvider,
 } from "../src/index.js";
+import { buildOpenClawReserveRequest } from "../src/provider.js";
 
 const upstream = {
   id: "upstream-openai-compatible",
@@ -60,10 +60,26 @@ describe("createSpendGuardOpenClawProvider skeleton", () => {
   });
 
   it("requires the day-1 unit/window/pricing tuple", () => {
+    for (const field of ["tenantId", "budgetId", "windowInstanceId", "unitId"] as const) {
+      expect(() =>
+        createSpendGuardOpenClawProvider(upstream, {
+          ...options,
+          [field]: "",
+        }),
+      ).toThrow(OpenClawSpendGuardConfigError);
+    }
+
     expect(() =>
       createSpendGuardOpenClawProvider(upstream, {
         ...options,
-        windowInstanceId: "",
+        client: undefined as unknown as OpenClawSpendGuardOptions["client"],
+      }),
+    ).toThrow(OpenClawSpendGuardConfigError);
+
+    expect(() =>
+      createSpendGuardOpenClawProvider(upstream, {
+        ...options,
+        pricing: undefined as unknown as OpenClawSpendGuardOptions["pricing"],
       }),
     ).toThrow(OpenClawSpendGuardConfigError);
 
@@ -186,6 +202,7 @@ describe("createSpendGuardOpenClawProvider skeleton", () => {
     });
     expect((commits[0] as { pricing: unknown }).pricing).toBe(options.pricing);
     expect((commits[0] as { outcomeKind?: unknown }).outcomeKind).toBe(undefined);
+    expect((commits[0] as { actualErrorMessage?: unknown }).actualErrorMessage).toBe(undefined);
   });
 
   it("classifies AbortError as RUN_ABORTED", async () => {

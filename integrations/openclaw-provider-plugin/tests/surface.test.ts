@@ -20,15 +20,14 @@ type _FactoryShape = Expect<
 
 type _ContextShape = Expect<IsAssignable<OpenClawProviderContext, Record<string, unknown>>>;
 
-describe("public barrel skeleton", () => {
-  it("exports only the slice-1 runtime surface", () => {
+describe("public barrel", () => {
+  it("exports only the locked runtime surface", () => {
     expect(Object.keys(publicApi).sort()).toEqual([
       "OpenClawSpendGuardConfigError",
       "OpenClawSpendGuardError",
       "OpenClawSpendGuardNotImplementedError",
       "OpenClawSpendGuardSettlementError",
       "VERSION",
-      "buildOpenClawReserveRequest",
       "createSpendGuardOpenClawProvider",
     ]);
   });
