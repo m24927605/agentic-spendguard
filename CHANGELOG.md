@@ -6,6 +6,20 @@ Version tags follow `vYYYY.MM.DD-ga.N` for GA release candidates and GA releases
 
 ## Unreleased
 
+- **Session reservation substrate for voice agents (D41S)** — new
+  session-scoped reserve / streaming commit / release / TTL-expiry substrate
+  for long-lived LiveKit and Pipecat voice sessions. The substrate adds
+  `ReserveSession`, `CommitSessionDelta`, and `ReleaseSession` semantics on
+  the existing sidecar adapter contract, persists ledger holds and positive
+  streaming deltas with idempotent replay/conflict behavior, threads
+  `unitId`, `windowInstanceId`, and pricing freeze tuples through TS/Python
+  SDK surfaces, and emits signed audit decision/outcome pairs for reserve,
+  commit-delta, release, expiry, and denial events. New
+  `DEMO_MODE=session_reservation` hard gate validates primary reserve,
+  positive commits, replay, conflict, overrun denial, release, real reserve
+  DENY replay/conflict, and TTL expiry, with exact ledger/canonical gates
+  scoped to three demo session reservation IDs. This is the D41 substrate that
+  unblocks LiveKit/Pipecat adapters; it is not itself a framework adapter.
 - **OpenClaw provider plugin adapter (D40b)** — new
   `@spendguard/openclaw-provider-plugin` package for trusted OpenClaw
   deployments. The adapter wraps OpenClaw's pinned `wrapStreamFn(ctx)` provider

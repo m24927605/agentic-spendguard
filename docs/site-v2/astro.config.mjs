@@ -88,6 +88,7 @@ export default defineConfig({
             { label: 'Langflow custom component (Python)', slug: 'docs/integrations/langflow' },
             { label: 'n8n community node (TypeScript)', slug: 'docs/integrations/n8n' },
             { label: 'OpenClaw provider plugin (TypeScript)', slug: 'docs/integrations/openclaw-provider-plugin' },
+            { label: 'Voice session reservations (substrate)', slug: 'docs/integrations/voice-session-reservations' },
             { label: 'Cursor IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/cursor-mitm' },
             { label: 'Windsurf IDE MITM codec (EXPERIMENTAL — SOW only)', slug: 'docs/integrations/windsurf-mitm' },
             { label: 'Subscription-tier meter (Claude Code Pro + Codex)', slug: 'docs/integrations/subscription-meter' },

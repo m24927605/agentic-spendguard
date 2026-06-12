@@ -1,0 +1,129 @@
+---
+title: "Voice session reservations (substrate)"
+description: >-
+  Session-scoped reserve, streaming commit, replay/reconnect, release, and TTL
+  expiry substrate for long-lived LiveKit and Pipecat voice agents. This is the
+  shared D41 substrate, not a framework adapter hook by itself.
+---
+
+> **Substrate, not an adapter.** D41 session reservations are the shared
+> budget lifecycle that LiveKit and Pipecat voice adapters must use. This page
+> does not claim LiveKit or Pipecat adapter coverage; it documents the
+> reservation contract those adapters build on.
+
+Realtime voice agents keep one session open while spend accrues across STT,
+LLM turns, tool calls, streaming responses, and TTS output. A request-scoped
+reserve cannot model that lifecycle cleanly. D41 adds a session-scoped ledger
+hold so a voice adapter can reserve an envelope before the paid session starts,
+commit positive streaming deltas during the session, and release the remainder
+when the session ends or expires.
+
+```text
+voice room connect
+  -> ReserveSession      # hold session budget before paid provider dispatch
+  -> CommitSessionDelta  # positive idempotent streaming deltas
+  -> CommitSessionDelta  # reconnect replays by streaming_commit_id
+  -> ReleaseSession      # release uncommitted remainder
+  -> SessionExpire       # TTL safety net for crashed sessions
+```
+
+## What Gets Gated
+
+| Path | Status |
+|---|---|
+| Session start | `ReserveSession` creates a ledger hold before a voice adapter connects paid model traffic. |
+| Streaming spend | `CommitSessionDelta` applies positive idempotent deltas against the hold. |
+| Reconnect / replay | Identical replay returns the original outcome; same key with different payload conflicts. |
+| Overrun | Commit delta beyond the held amount is denied without mutating committed or released balances. |
+| End / crash | `ReleaseSession` releases the remainder; TTL expiry releases the remainder if the adapter disappears. |
+
+The hold is not a credit line. Every commit reduces the held remainder and
+increases committed spend. Release or expiry settles only the uncommitted
+remainder back to available budget.
+
+## Contract
+
+The substrate is pinned in the existing sidecar adapter service:
+
+<div is:raw>
+
+```text
+rpc ReserveSession(ReserveSessionRequest) returns (ReserveSessionOutcome)
+rpc CommitSessionDelta(CommitSessionDeltaRequest) returns (CommitSessionDeltaOutcome)
+rpc ReleaseSession(ReleaseSessionRequest) returns (ReleaseSessionOutcome)
+```
+
+</div>
+
+`ReserveSessionRequest` requires the normal reserve-time tuple from the current
+SpendGuard substrate: `tenant_id`, `budget_id`, `window_instance_id`, `unit`,
+`pricing`, `session_id`, `route`, `estimated_amount_atomic`, `ttl_seconds`,
+and `idempotency_key`.
+
+Every new adapter using this substrate must thread `unitId`,
+`windowInstanceId`, and the pricing freeze tuple from day one. Ledger commits
+reject tuple drift.
+
+## Audit Chain
+
+Session lifecycle events are written as signed audit decision/outcome pairs and
+canonicalized through the existing audit path. The event family is:
+
+| Event | Emitted when |
+|---|---|
+| `spendguard.audit.session.reserve` | Session hold accepted. |
+| `spendguard.audit.session.commit_delta` | Streaming delta committed. |
+| `spendguard.audit.session.release` | Remainder released. |
+| `spendguard.audit.session.expired` | TTL sweep released the remainder. |
+| `spendguard.audit.session.denied` | Session reserve or overrun denied. |
+
+Reserve DENY returns the full typed outcome to the caller, including current
+availability, while the signed audit outcome keeps deterministic denial facts
+that are stable for replay.
+
+## Run The Demo
+
+<div is:raw>
+
+```bash
+make -C deploy/demo demo-down
+make -C deploy/demo demo-up DEMO_MODE=session_reservation
+make -C deploy/demo demo-verify-session-reservation
+```
+
+</div>
+
+Successful runner line:
+
+<div is:raw>
+
+```text
+[demo] session_reservation ALL 7 steps PASS
+```
+
+</div>
+
+The demo uses the real Postgres ledger and canonical database. It covers a
+primary reserve, two positive commits, idempotent replay, conflict detection,
+overrun denial, release, a real insufficient-budget reserve DENY with
+replay/conflict checks, and a second reservation that expires through TTL. The
+hard gates assert exactly eight signed decision/outcome pairs scoped to the
+three demo session reservation IDs.
+
+## Adapter Handoff
+
+LiveKit and Pipecat adapter work should reference the locked D41 substrate
+design instead of inventing a local voice lifecycle. Adapter code is expected
+to translate framework session/room IDs into `session_id`, reserve before paid
+provider work starts, commit positive streaming deltas with stable
+`streaming_commit_id` values, and release on session end while relying on TTL
+for crash recovery.
+
+## Links
+
+- Demo overlay:
+  [`deploy/demo/session_reservation/`](https://github.com/m24927605/agentic-spendguard/tree/main/deploy/demo/session_reservation)
+- Locked substrate spec:
+  [`docs/specs/coverage/D41_session_reservation_substrate/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D41_session_reservation_substrate)
+- Slice docs:
+  [`docs/slices/COV_D41S_01_session_contract_spec_and_proto.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/slices/COV_D41S_01_session_contract_spec_and_proto.md)
