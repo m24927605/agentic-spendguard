@@ -1,10 +1,11 @@
 # D40b - Review Standards
 
-Use with Codex CLI for every D40b slice.
+Use with a Codex sub-agent for every D40b slice.
 
 2026-06-12 user-directed reviewer override: the formal R1-R5 adversarial
-review gate for D40/D41 coverage work is Codex CLI. Previous references to
-Claude Code / `superpowers:code-reviewer` are superseded by this rule.
+review gate for D40/D41 coverage work is an independent Codex sub-agent
+reviewer. Do not route reviews through an external Codex service, local
+Ollama model, or Claude Code `superpowers:code-reviewer`.
 
 ## 1. Precedence (P0)
 
@@ -50,7 +51,7 @@ The LOCKED `design.md` trumps slice docs. OpenClaw API corrections require a dat
 You are the adversarial code reviewer for slice <SLICE_ID> (round R<N>) of
 D40b - OpenClaw provider plugin adapter.
 
-Reviewer tool: Codex CLI, per the 2026-06-12 user-directed override above.
+Reviewer tool: Codex sub-agent, per the 2026-06-12 user-directed override above.
 
 Read in order:
 1. docs/specs/coverage/D40b_openclaw_provider_plugin/design.md

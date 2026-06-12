@@ -195,3 +195,22 @@ D40b uses the TS SDK's single-event `commitEstimated` path: set `outcome` and
 the single-event usage/metadata fields only. It must not set `outcomeKind` for
 this adapter, because `outcomeKind` asks the SDK to emit a companion terminal
 event and violates this slice's exactly-one-terminal-settlement requirement.
+
+### 2026-06-12 - `COV_D40B_05_openclaw_plugin_demo` local-first install/config pin
+
+`OB-V6` is pinned to the committed local-first fixture
+`deploy/demo/openclaw_provider_plugin/openclaw.config.json` plus the runner
+staging path in `deploy/demo/openclaw_provider_plugin/docker-compose.yaml`.
+The fixture identifies the package `@spendguard/openclaw-provider-plugin`, the
+factory `createSpendGuardOpenClawProvider`, the in-process wrapper mode, and
+the `wrapStreamFn` hook pinned by `OB-V3`. The runner validates this fixture
+before contacting the sidecar, stages the package into a Node 22.19
+`node_modules` tree, then invokes the same `wrapStreamFn(ctx)` boundary with
+`ctx.streamFn`, `ctx.provider`, and `ctx.modelId` that D40b wraps in OpenClaw.
+
+This pin deliberately does not reuse D40a's base-URL proxy path. The upstream
+provider is a local OpenAI-compatible counting stub reached from inside the
+OpenClaw provider wrapper, and DENY must leave the stub counter unchanged.
+The fixture is an operator install/config fixture for a trusted OpenClaw
+process; it is not a sandbox boundary and does not claim that arbitrary
+third-party OpenClaw plugins become safe.

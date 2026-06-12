@@ -1,0 +1,39 @@
+{
+  "plugins": {
+    "spendguardProviderPlugin": {
+      "package": "@spendguard/openclaw-provider-plugin",
+      "factory": "createSpendGuardOpenClawProvider",
+      "mode": "in-process-provider-wrapper",
+      "hook": "wrapStreamFn",
+      "trustBoundary": "trusted-openclaw-process",
+      "provider": {
+        "id": "spendguard-demo-upstream-openai",
+        "label": "SpendGuard demo upstream OpenAI-compatible provider",
+        "model": "gpt-4o-mini"
+      },
+      "sidecar": {
+        "socketEnv": "SPENDGUARD_SIDECAR_UDS"
+      },
+      "budget": {
+        "tenantEnv": "SPENDGUARD_TENANT_ID",
+        "budgetEnv": "SPENDGUARD_BUDGET_ID",
+        "windowInstanceEnv": "SPENDGUARD_WINDOW_INSTANCE_ID",
+        "unitEnv": "SPENDGUARD_UNIT_ID",
+        "pricingHashEnv": "SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX"
+      }
+    }
+  },
+  "models": {
+    "providers": {
+      "spendguard-demo-upstream-openai": {
+        "api": "openai-completions",
+        "models": [
+          {
+            "id": "gpt-4o-mini",
+            "name": "GPT-4o mini via SpendGuard OpenClaw provider plugin"
+          }
+        ]
+      }
+    }
+  }
+}
