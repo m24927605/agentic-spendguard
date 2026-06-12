@@ -1,6 +1,6 @@
 # D40a - Implementation
 
-Implementation plan for the OpenClaw base-URL recipe. This deliverable is docs/demo only; it adds no SDK, proto, ledger, or adapter behavior.
+Implementation plan for the OpenClaw base-URL recipe. This deliverable is docs/demo plus a narrow egress-proxy test override; it adds no SDK, proto, ledger, or OpenClaw adapter behavior.
 
 ## 1. File layout
 
@@ -14,8 +14,10 @@ deploy/demo/openclaw_base_url/
   openclaw.config.json
   runner.mjs
   README.md
+deploy/demo/init/bundles/generate.sh
 deploy/demo/verify_step_openclaw_base_url.sql
 deploy/demo/Makefile
+services/egress_proxy/src/forward.rs
 README.md
 CHANGELOG.md
 docs/slices/COV_D40A_01_openclaw_recipe_smoke.md
@@ -54,7 +56,8 @@ All code blocks in `.mdx` that contain braces must use the repo's Astro/Starligh
 `deploy/demo/openclaw_base_url/runner.mjs` performs three calls through OpenClaw:
 
 1. ALLOW: small prompt, non-streaming.
-2. DENY: over-budget prompt or explicit estimate override, must not hit counting stub.
+2. DENY: normal OpenAI-compatible request with `max_tokens: 256` against the
+   D40a overlay's demo hard-cap threshold, must not hit counting stub.
 3. STREAM: streaming response, commits at stream close.
 
 The runner prints the locked success line only after all assertions pass:
@@ -102,3 +105,24 @@ Do not soften row-count assertions to warnings.
 - No frozen fixture edits.
 - No upstream PR.
 - No changes to unrelated demo modes.
+
+## 8. 2026-06-12 implementation amendment
+
+Per `design.md` §11, slice 1 may add the narrow
+`SPENDGUARD_PROXY_OPENAI_BASE_URL` override to
+`services/egress_proxy/src/forward.rs` so the D40a demo can route the proxy's
+upstream call to the local counting stub without a live OpenAI key. The default
+unset behavior must remain byte-for-byte equivalent to the existing routing
+table targets and must be pinned by a unit test.
+
+The `openclaw_base_url` runner validates a committed OpenClaw config fixture
+against the pinned OpenClaw config surface and emits OpenAI-compatible calls
+through the configured `baseUrl`. It must not claim that the full OpenClaw
+gateway binary ran inside the demo stack.
+
+The shared demo contract generator may accept
+`DEMO_HARD_CAP_CLAIM_AMOUNT_ATOMIC_GT`; the default stays `1000000000`.
+`deploy/demo/openclaw_base_url/docker-compose.yaml` sets it to `100` only for
+this overlay, so ALLOW/STREAM stay below the cap while DENY's `max_tokens: 256`
+is stopped before provider dispatch. The generator validates that the env var
+is a non-negative integer before writing `contract.yaml`.

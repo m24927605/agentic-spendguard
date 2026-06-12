@@ -1,0 +1,180 @@
+---
+title: "OpenClaw + SpendGuard (base-URL recipe)"
+description: >-
+  Configure an OpenClaw custom OpenAI-compatible provider whose baseUrl points
+  at the SpendGuard egress proxy. SpendGuard reserves before the provider call
+  and commits after response or stream close; no OpenClaw source change and no
+  OpenClaw plugin install.
+---
+
+OpenClaw supports custom provider entries under `models.providers`. D40a uses
+that surface as a **base-URL recipe**: OpenClaw sends OpenAI-compatible chat
+traffic to the SpendGuard egress proxy, and SpendGuard enforces the budget in
+the egress proxy and sidecar before the provider call.
+
+D40a is a configuration recipe. SpendGuard enforcement happens in the egress
+proxy and sidecar before the provider call. OpenClaw is not modified, and no
+OpenClaw plugin is installed.
+
+## Prerequisites
+
+- OpenClaw with file-based config available. D40a pinned the upstream package
+  metadata at `openclaw/openclaw@d4819948f37d45fe8f1428401316eaae456cdf16`
+  and npm package `openclaw` version `2026.6.2`.
+- A running SpendGuard egress proxy reachable from the OpenClaw process.
+  Local host: `http://localhost:9000/v1`. Docker network:
+  `http://egress-proxy:9000/v1`.
+- A provider credential configured on the SpendGuard proxy path. The
+  OpenClaw-side `apiKey` only needs to be non-empty for the local proxy route.
+
+## Configure the custom provider
+
+Add a custom provider under `models.providers`. The trailing `/v1` is
+mandatory.
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "spendguard/gpt-4o-mini"
+      },
+      "models": {
+        "spendguard/gpt-4o-mini": {
+          "alias": "SpendGuard-gated GPT-4o mini"
+        }
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "spendguard": {
+        "baseUrl": "http://localhost:9000/v1",
+        "apiKey": "${OPENCLAW_SPENDGUARD_API_KEY}",
+        "api": "openai-completions",
+        "timeoutSeconds": 120,
+        "models": [
+          {
+            "id": "gpt-4o-mini",
+            "name": "GPT-4o mini via SpendGuard",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 128000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+Set the provider id and model id to match your upstream. The OpenClaw model
+ref is `provider/model`, so the example primary model is
+`spendguard/gpt-4o-mini`.
+
+## Verify locally
+
+```bash
+make demo-down
+make demo-up DEMO_MODE=openclaw_base_url
+make -C deploy/demo demo-verify-openclaw-base-url
+```
+
+The demo is local and keyless. It validates the committed OpenClaw config
+fixture, routes requests through `http://egress-proxy:9000/v1`, points the
+SpendGuard proxy upstream at a counting stub, and proves three flows:
+
+| Step | Gate |
+|---|---|
+| ALLOW | Provider counter increments once and ledger records reserve + commit. |
+| DENY | SpendGuard returns a block before provider dispatch; provider counter is unchanged. |
+| STREAM | SSE frames include usage and SpendGuard commits after stream close. |
+
+Successful runner line:
+
+```text
+[demo] openclaw_base_url ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+Full example files live in
+[`examples/openclaw-base-url/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/openclaw-base-url).
+
+## Deployment notes
+
+### Local desktop
+
+Use `http://localhost:9000/v1` when OpenClaw and SpendGuard run on the same
+host.
+
+### Docker compose
+
+Use the service DNS name reachable from the OpenClaw container, for example:
+
+```json
+{
+  "models": {
+    "providers": {
+      "spendguard": {
+        "baseUrl": "http://spendguard-egress-proxy:9000/v1"
+      }
+    }
+  }
+}
+```
+
+### Hosted proxy
+
+Use the public HTTPS endpoint for your SpendGuard egress proxy:
+
+```json
+{
+  "models": {
+    "providers": {
+      "spendguard": {
+        "baseUrl": "https://spendguard.example.com/v1"
+      }
+    }
+  }
+}
+```
+
+## Gotchas
+
+- **The trailing `/v1` is mandatory.** OpenClaw's OpenAI-compatible adapter
+  appends the chat-completions path behind the configured base URL.
+- **Use `api: "openai-completions"`.** D40a covers OpenAI-compatible chat
+  completions. Anthropic-compatible custom providers are a separate path.
+- **The OpenClaw-side key is not the upstream key.** SpendGuard receives the
+  inbound authorization header and uses its own provider credential path.
+- **This is not plugin-level coverage.** D40b owns the OpenClaw provider
+  plugin package and in-process adapter work.
+- **Private-network trust follows OpenClaw's provider policy.** The configured
+  `baseUrl` origin is the trusted SpendGuard proxy endpoint; other private
+  destinations still need OpenClaw's explicit request policy opt-in.
+
+## What works today
+
+| Surface | Status |
+|---|---|
+| Custom provider `baseUrl` to SpendGuard egress proxy | Verified by D40a fixture demo |
+| Non-streaming OpenAI-compatible chat | Verified by D40a |
+| Streaming SSE chat completions | Verified by D40a |
+| Deny-before-provider dispatch | Verified by D40a counting-stub gate |
+| OpenClaw provider plugin | D40b, not D40a |
+| Non-OpenAI-compatible provider APIs | Out of scope |
+
+## What next
+
+- [Set a real budget on Kubernetes](../../deployment/helm/)
+- [Open the SpendGuard dashboard](../../operations/dashboard/)
+- Back to the [drop-in landing](../)
+
+**Maintainer docs:** [OpenClaw model providers](https://github.com/openclaw/openclaw/blob/main/docs/concepts/model-providers.md)

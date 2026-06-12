@@ -77,6 +77,35 @@ impl ApiKind {
 }
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
+fn resolve_upstream_url(api_kind: ApiKind) -> String {
+    if let Some(base_url) = std::env::var("SPENDGUARD_PROXY_OPENAI_BASE_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+    {
+        let path = match api_kind {
+            ApiKind::ChatCompletions => "chat/completions",
+            ApiKind::Responses => "responses",
+        };
+        return format!("{base_url}/{path}");
+    }
+
+    match api_kind {
+        ApiKind::ChatCompletions => routing::route("/v1/chat/completions")
+            .map(|cfg| cfg.upstream_url_for("/v1/chat/completions"))
+            .unwrap_or_else(|| {
+                warn!("routing table missing /v1/chat/completions; falling back to hard-coded URL");
+                "https://api.openai.com/v1/chat/completions".to_string()
+            }),
+        ApiKind::Responses => routing::route("/v1/responses")
+            .map(|cfg| cfg.upstream_url_for("/v1/responses"))
+            .unwrap_or_else(|| {
+                warn!("routing table missing /v1/responses; falling back to hard-coded URL");
+                "https://api.openai.com/v1/responses".to_string()
+            }),
+    }
+}
+
 #[derive(Clone)]
 pub struct ForwardState {
     pub http_client: reqwest::Client,
@@ -615,20 +644,7 @@ async fn forward_openai_request(
     // table's per-provider tokenizer kind feeds into estimate_call_cost
     // (Phase C wiring); the SSE parser still keys on ApiKind for the
     // event-shape (Chat Completions vs Responses).
-    let upstream_url = match api_kind {
-        ApiKind::ChatCompletions => routing::route("/v1/chat/completions")
-            .map(|cfg| cfg.upstream_url_for("/v1/chat/completions"))
-            .unwrap_or_else(|| {
-                warn!("routing table missing /v1/chat/completions; falling back to hard-coded URL");
-                "https://api.openai.com/v1/chat/completions".to_string()
-            }),
-        ApiKind::Responses => routing::route("/v1/responses")
-            .map(|cfg| cfg.upstream_url_for("/v1/responses"))
-            .unwrap_or_else(|| {
-                warn!("routing table missing /v1/responses; falling back to hard-coded URL");
-                "https://api.openai.com/v1/responses".to_string()
-            }),
-    };
+    let upstream_url = resolve_upstream_url(api_kind);
 
     // Forward to upstream. We use reqwest's `bytes()` body to preserve
     // byte-identity (no serde re-encode in the request path).
@@ -1389,6 +1405,32 @@ fn parse_usage_from_responses_event(event: &[u8]) -> Option<i64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarGuard {
+        fn new(key: &'static str) -> Self {
+            Self {
+                key,
+                original: std::env::var(key).ok(),
+            }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
 
     #[test]
     fn should_forward_header_allows_openai_org() {
@@ -1416,6 +1458,54 @@ mod tests {
         };
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+
+    #[test]
+    fn resolve_upstream_url_default_openai_paths_unchanged() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::new("SPENDGUARD_PROXY_OPENAI_BASE_URL");
+        std::env::remove_var("SPENDGUARD_PROXY_OPENAI_BASE_URL");
+
+        let chat_route = routing::route("/v1/chat/completions")
+            .expect("routing table must contain /v1/chat/completions");
+        let responses_route =
+            routing::route("/v1/responses").expect("routing table must contain /v1/responses");
+        assert_eq!(
+            chat_route.upstream_url_for("/v1/chat/completions"),
+            "https://api.openai.com/v1/chat/completions"
+        );
+        assert_eq!(
+            responses_route.upstream_url_for("/v1/responses"),
+            "https://api.openai.com/v1/responses"
+        );
+
+        assert_eq!(
+            resolve_upstream_url(ApiKind::ChatCompletions),
+            chat_route.upstream_url_for("/v1/chat/completions")
+        );
+        assert_eq!(
+            resolve_upstream_url(ApiKind::Responses),
+            responses_route.upstream_url_for("/v1/responses")
+        );
+    }
+
+    #[test]
+    fn resolve_upstream_url_openai_base_override_appends_api_path() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvVarGuard::new("SPENDGUARD_PROXY_OPENAI_BASE_URL");
+        std::env::set_var(
+            "SPENDGUARD_PROXY_OPENAI_BASE_URL",
+            "http://counting-stub:8765/v1/",
+        );
+
+        assert_eq!(
+            resolve_upstream_url(ApiKind::ChatCompletions),
+            "http://counting-stub:8765/v1/chat/completions"
+        );
+        assert_eq!(
+            resolve_upstream_url(ApiKind::Responses),
+            "http://counting-stub:8765/v1/responses"
+        );
     }
 
     // SLICE_10 cleanup: pre-existing dead test referring to a removed

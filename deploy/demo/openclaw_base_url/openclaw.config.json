@@ -1,0 +1,48 @@
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "spendguard/gpt-4o-mini"
+      },
+      "models": {
+        "spendguard/gpt-4o-mini": {
+          "alias": "SpendGuard-gated GPT-4o mini",
+          "params": {
+            "extra_body": {
+              "metadata": {
+                "spendguard_demo": "openclaw_base_url"
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "spendguard": {
+        "baseUrl": "http://egress-proxy:9000/v1",
+        "apiKey": "sk-openclaw-spendguard-local",
+        "api": "openai-completions",
+        "timeoutSeconds": 120,
+        "models": [
+          {
+            "id": "gpt-4o-mini",
+            "name": "GPT-4o mini via SpendGuard",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 128000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  }
+}

@@ -11,6 +11,9 @@
 #   DEMO_MODE=decision      handshake + RequestDecision + ConfirmPublishOutcome only
 #   DEMO_MODE=ag_ui_events  COV_D39: spendguard.* AG-UI display events over SSE
 #                           (real sidecar run; verify with demo-verify-ag-ui-events)
+#   DEMO_MODE=openclaw_base_url
+#                           COV_D40A: OpenClaw custom provider baseUrl fixture
+#                           through SpendGuard egress proxy + counting stub
 
 COMPOSE := docker compose -f compose.yaml
 # Default to "decision" mode (Handshake + RequestDecision +
@@ -179,6 +182,22 @@ else ifeq ($(DEMO_MODE),ag_ui_events)
 	    postgres pki-init bundles-init canonical-seed-init manifest-init \
 	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
 	    outbox-forwarder counting-stub ag-ui-runner
+else ifeq ($(DEMO_MODE),openclaw_base_url)
+	@echo "[demo] DEMO_MODE=openclaw_base_url → COV_D40A SLICE 1 (OpenClaw base-URL recipe)."
+	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
+	@echo "[demo]               + egress-proxy + outbox-forwarder."
+	@echo "[demo]   Overlay (deploy/demo/openclaw_base_url/docker-compose.yaml):"
+	@echo "[demo]               + counting-stub (mock OpenAI provider) +"
+	@echo "[demo]               openclaw-runner (Node 22 validating the"
+	@echo "[demo]               committed OpenClaw custom-provider config)."
+	@echo "[demo]   Driver issues 3 OpenAI-compatible calls through the"
+	@echo "[demo]   configured OpenClaw provider baseUrl (ALLOW + DENY +"
+	@echo "[demo]   STREAM), asserts the DENY leaves /_count unchanged,"
+	@echo "[demo]   and uses a local upstream stub — no live OpenAI key."
+	$(COMPOSE) -f openclaw_base_url/docker-compose.yaml up -d --build \
+	    postgres pki-init bundles-init canonical-seed-init manifest-init \
+	    endpoint-catalog ledger canonical-ingest sidecar webhook-receiver \
+	    outbox-forwarder counting-stub egress-proxy
 else ifeq ($(DEMO_MODE),vercel_ai_mastra)
 	@echo "[demo] DEMO_MODE=vercel_ai_mastra → COV_D06 SLICE 7 (Vercel AI SDK middleware, covers Mastra)."
 	@echo "[demo]   Base stack: postgres + ledger + canonical-ingest + sidecar"
@@ -799,6 +818,11 @@ else ifeq ($(DEMO_MODE),ag_ui_events)
 	fi
 	@echo "[demo] verifying COV_D39 SLICE 3 (ag_ui_events 4-frame SSE + ledger join + SQL gates)..."
 	@$(MAKE) demo-verify-ag-ui-events
+else ifeq ($(DEMO_MODE),openclaw_base_url)
+	@echo "[demo] running openclaw-runner (Node 22 + committed OpenClaw config fixture)..."
+	$(COMPOSE) -f openclaw_base_url/docker-compose.yaml run --rm openclaw-runner
+	@echo "[demo] verifying COV_D40A SLICE 1 (openclaw_base_url ALLOW + DENY + STREAM)..."
+	@$(MAKE) demo-verify-openclaw-base-url
 else ifeq ($(DEMO_MODE),vercel_ai_mastra)
 	@echo "[demo] running vercel-ai-mastra-runner (Node 20 + Vercel AI SDK + Mastra alias)..."
 	$(COMPOSE) -f vercel_ai_mastra/docker-compose.yaml run --rm vercel-ai-mastra-runner
@@ -2200,6 +2224,34 @@ demo-verify-ag-ui-events:
 	   sys.exit(0 if calls == 1 else print(f'COV_D39_GATE: counting-stub calls == 1 expected, got {calls}', file=sys.stderr) or 1)"
 	@echo "[demo] COV_D39 ag_ui_events verification done"
 
+demo-verify-openclaw-base-url:
+	@$(COMPOSE) -f openclaw_base_url/docker-compose.yaml exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_openclaw_base_url.sql
+	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
+	@sleep 5
+	@$(COMPOSE) -f openclaw_base_url/docker-compose.yaml exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 -c \
+		"DO \$$\$$ DECLARE v_decision INT; v_outcome INT; BEGIN \
+		   SELECT COUNT(*) INTO v_decision FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.decision'; \
+		   SELECT COUNT(*) INTO v_outcome FROM canonical_events \
+		    WHERE tenant_id = '00000000-0000-4000-8000-000000000001' \
+		      AND event_type = 'spendguard.audit.outcome'; \
+		   IF v_decision <> 3 THEN \
+		     RAISE EXCEPTION 'COV_D40A_GATE: canonical_events.decision == 3 expected (ALLOW + DENY + STREAM), got %', v_decision; \
+		   END IF; \
+		   IF v_outcome <> 2 THEN \
+		     RAISE EXCEPTION 'COV_D40A_GATE: canonical_events.outcome == 2 expected (ALLOW + STREAM only; DENY must not commit), got %', v_outcome; \
+		   END IF; \
+		   RAISE NOTICE 'COV_D40A CANONICAL OK: decision=% outcome=%', v_decision, v_outcome; \
+		 END; \$$\$$;"
+	@$(COMPOSE) -f openclaw_base_url/docker-compose.yaml exec -T counting-stub python -c \
+	  "import urllib.request, json, sys; \
+	   calls = json.load(urllib.request.urlopen('http://localhost:8765/_count', timeout=5))['calls']; \
+	   print(f'[demo] COV_D40A counting-stub calls={calls}'); \
+	   sys.exit(0 if calls == 2 else print(f'COV_D40A_GATE: counting-stub calls == 2 expected (ALLOW + STREAM only; DENY must not dispatch), got {calls}', file=sys.stderr) or 1)"
+	@$(MAKE) demo-verify-outbox-closure
+	@echo "[demo] COV_D40A openclaw_base_url verification done"
+
 demo-verify-litellm-real:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 < verify_step_litellm_real.sql
 	@echo "[demo] waiting 5s for outbox forwarder to land canonical_events rows..."
@@ -2277,7 +2329,7 @@ demo-verify-p1_5:
 	@$(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_canonical -v ON_ERROR_STOP=1 < verify_p1_5_cost_advisor.sql
 	@echo "[demo] Cost Advisor P1.5 rules fixture done"
 
-.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-mastra-processor demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture demo-verify-import-manus-fixture demo-import-manus-fixture demo-verify-import-genspark-fixture demo-verify-all-d05-ur demo-verify-ag-ui-events
+.PHONY: demo-verify-step7 demo-verify-step8 demo-verify-step7_5 demo-verify-step9 demo-verify-ttl-sweep demo-verify-outbox-closure demo-verify-deny demo-verify-pricing demo-verify-p0_6 demo-verify-p1 demo-verify-p1_5 demo-verify-litellm-guardrail demo-verify-envoy-extproc demo-verify-kong-gateway-real demo-verify-dify-plugin-real demo-verify-langchain-ts demo-verify-vercel-ai-mastra demo-verify-mastra-processor demo-verify-openai-agents-ts demo-verify-inngest-agent-kit demo-verify-maf-dotnet demo-verify-maf-python demo-verify-litellm-sdk-real demo-verify-litellm-sdk-deny demo-verify-agent-real-adk demo-verify-subscription-meter demo-verify-import-devin-fixture demo-verify-import-manus-fixture demo-import-manus-fixture demo-verify-import-genspark-fixture demo-verify-all-d05-ur demo-verify-ag-ui-events demo-verify-openclaw-base-url
 
 # HARDEN_D05_UR master verification target — runs all 14+ demos sequentially
 # and asserts each exits 0 with canonical success lines. This target replaces

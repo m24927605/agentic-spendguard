@@ -24,6 +24,8 @@ Use with `superpowers:code-reviewer` for every D40a slice. P0 and P1 findings bl
 | 3.3 | `verify_step_openclaw_base_url.sql` uses hard SQL failures, not warnings. |
 | 3.4 | Demo uses local counting stub for hard gate; no live provider key required. |
 | 3.5 | `unitId`, `windowInstanceId`, and pricing tuple are present in runtime wiring. |
+| 3.6 | If `SPENDGUARD_PROXY_OPENAI_BASE_URL` is used, unset/default behavior still resolves to the existing OpenAI routing table URLs and is unit-tested. |
+| 3.7 | If `DEMO_HARD_CAP_CLAIM_AMOUNT_ATOMIC_GT` is used, its default remains `1000000000` and the lowered value is scoped to the D40a overlay only. |
 
 ## 4. Repository hygiene (P1)
 
@@ -33,6 +35,7 @@ Use with `superpowers:code-reviewer` for every D40a slice. P0 and P1 findings bl
 | 4.2 | No SDK or proto files changed. |
 | 4.3 | No unrelated demo modes changed except shared Makefile routing. |
 | 4.4 | MDX code blocks do not break docs-site build. |
+| 4.5 | The demo runner is described as an OpenClaw config-fixture runner, not proof that the full OpenClaw gateway binary was embedded in the stack. |
 
 ## 5. Reviewer prompt template
 

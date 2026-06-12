@@ -115,3 +115,39 @@ No marker may remain unresolved when D40a closes.
 ## 10. Definition of done
 
 D40a is shipped when both slices are on main, the demo has physically run, `verify_step_openclaw_base_url.sql` is green, OpenClaw is present in the README table as base-URL recipe coverage, and `project_coverage_d40a_shipped.md` exists in memory.
+
+## 11. Dated amendments
+
+### 2026-06-12 - Slice 1 implementation pin for local deterministic demo
+
+Primary OpenClaw sources at implementation time pin the durable config surface:
+`models.providers.<provider>.baseUrl`, `apiKey`, `api: "openai-completions"`,
+`models.providers.<provider>.models[]`, and `agents.defaults.model.primary`.
+OpenClaw also publishes npm package `openclaw` version `2026.6.2`, Docker
+runtime files, and `OPENCLAW_CONFIG_PATH` / `OPENCLAW_CONFIG_DIR` /
+`OPENCLAW_STATE_DIR` environment variables.
+
+This amendment is orchestrator-ratified for Slice 1 and supersedes §2 goal 3
+and §5 topology where they imply the full OpenClaw gateway binary runs inside
+the demo stack. The D40a hard gate remains local and keyless. To avoid a live
+provider key, the demo uses a committed OpenClaw config fixture plus an
+`openclaw-runner` that validates the fixture against the pinned OpenClaw config
+surface and then emits OpenAI-compatible calls matching that provider shape.
+This is not plugin coverage, not full gateway runtime proof, and not a claim
+that the full OpenClaw gateway binary was embedded in the SpendGuard demo
+stack. Full in-process OpenClaw plugin/runtime coverage remains D40b.
+
+The egress proxy may use `SPENDGUARD_PROXY_OPENAI_BASE_URL` in demo/test
+environments to send OpenAI-compatible upstream calls to a local counting stub.
+When unset, the proxy continues to use the existing routing table targets such
+as `https://api.openai.com/v1/chat/completions`; default production behavior is
+unchanged.
+
+The demo contract generator may read
+`DEMO_HARD_CAP_CLAIM_AMOUNT_ATOMIC_GT`; its default remains
+`1000000000`, preserving all existing demo modes. The D40a compose overlay
+sets this value to `100` so the DENY step can use a normal
+OpenAI-compatible request with `max_tokens: 256` to trigger the hard-cap rule.
+This avoids relying on `X-SpendGuard-Estimated-Tokens` as a reserve amount:
+the proxy treats that header as tokenizer input override only, and the
+reservation amount still flows through the Strategy A context-window policy.

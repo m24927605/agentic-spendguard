@@ -20,6 +20,8 @@ Numbered tests use **TP-D40A-XX** for unit/static checks and **TA-D40A-XX** for 
 | TP-D40A-07 | Runner DENY call returns a SpendGuard denial and counting stub remains unchanged. | Pre-dispatch hard gate. |
 | TP-D40A-08 | Runner STREAM call receives stream chunks and commits once at stream close. | Streaming path. |
 | TP-D40A-09 | Runtime env includes `unitId`, `windowInstanceId`, and pricing tuple. | HARDEN_D05_UR/WI day-1 discipline. |
+| TP-D40A-10 | `cargo test --manifest-path services/egress_proxy/Cargo.toml resolve_upstream_url_` pins `SPENDGUARD_PROXY_OPENAI_BASE_URL` override and default OpenAI routes. | Local counting-stub demo without changing production default routing. |
+| TP-D40A-11 | `deploy/demo/init/bundles/generate.sh` defaults `DEMO_HARD_CAP_CLAIM_AMOUNT_ATOMIC_GT` to `1000000000`, validates it as numeric, and the D40a overlay sets it to `100`. | Existing demo contracts stay stable while D40a gets a deterministic local DENY. |
 
 ## 3. Acceptance gates
 
@@ -36,5 +38,5 @@ Numbered tests use **TP-D40A-XX** for unit/static checks and **TA-D40A-XX** for 
 
 | Slice | Tests |
 |---|---|
-| `COV_D40A_01_openclaw_recipe_smoke` | TP-D40A-01..09, TA-D40A-01..05 |
+| `COV_D40A_01_openclaw_recipe_smoke` | TP-D40A-01..11, TA-D40A-01..05 |
 | `COV_D40A_02_openclaw_docs_publish` | TA-D40A-06 plus README/CHANGELOG presence checks |

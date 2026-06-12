@@ -82,6 +82,13 @@ rm -rf "$WORK" && mkdir -p "$WORK"
 DEMO_BUDGET_ID="${DEMO_BUDGET_ID:-44444444-4444-4444-8444-444444444444}"
 DEMO_BUDGET_PLACEHOLDER_ID="${DEMO_BUDGET_PLACEHOLDER_ID:-aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa}"
 CONTRACT_LOGICAL_ID="${CONTRACT_LOGICAL_ID:-33333333-3333-4333-8333-333333333333}"
+DEMO_HARD_CAP_CLAIM_AMOUNT_ATOMIC_GT="${DEMO_HARD_CAP_CLAIM_AMOUNT_ATOMIC_GT:-1000000000}"
+case "$DEMO_HARD_CAP_CLAIM_AMOUNT_ATOMIC_GT" in
+    ''|*[!0-9]*)
+        echo "[bundles] DEMO_HARD_CAP_CLAIM_AMOUNT_ATOMIC_GT must be a non-negative integer, got: $DEMO_HARD_CAP_CLAIM_AMOUNT_ATOMIC_GT" >&2
+        exit 2
+        ;;
+esac
 
 # CA-P3.8: the contract ships with TWO budgets so cost_advisor's
 # transparent index-remap path (services/bundle_registry/src/apply.rs::
@@ -127,7 +134,7 @@ spec:
     - id: hard-cap-deny
       when:
         budget_id: $DEMO_BUDGET_ID
-        claim_amount_atomic_gt: "1000000000"
+        claim_amount_atomic_gt: "$DEMO_HARD_CAP_CLAIM_AMOUNT_ATOMIC_GT"
       then:
         decision: STOP
         reason_code: BUDGET_EXHAUSTED
