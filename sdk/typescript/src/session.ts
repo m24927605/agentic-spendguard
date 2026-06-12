@@ -1,10 +1,10 @@
-// D41 session reservation substrate skeleton.
+// D41 session reservation substrate.
 //
-// This file builds protobuf envelopes for the SR-V1 contract. It intentionally
-// does not perform sidecar RPCs or ledger semantics; D41S_02/D41S_03 own those
-// bodies once the substrate transaction path lands.
+// This file builds protobuf envelopes and public SDK outcome types for the
+// SR-V1/SR-V3 contract. Sidecar RPC bodies live on SpendGuardClient.
 
 import type { Timestamp } from "./_proto/google/protobuf/timestamp.js";
+import type { Error as ProtoError } from "./_proto/spendguard/common/v1/common.js";
 import type { UnitRef as ProtoUnitRef } from "./_proto/spendguard/common/v1/common.js";
 import type {
   CommitSessionDeltaRequest as ProtoCommitSessionDeltaRequest,
@@ -43,6 +43,44 @@ export interface ReleaseSessionRequest {
   reasonCode: string;
   eventTime: Date | number | Timestamp;
   idempotencyKey: string;
+}
+
+export type ReserveSessionOutcome =
+  | {
+      kind: "accepted";
+      sessionReservationId: string;
+      ledgerTransactionId: string;
+      auditSessionEventId: string;
+      ttlExpiresAt: Date | null;
+      reservedAmountAtomic: string;
+      remainingAmountAtomic: string;
+    }
+  | {
+      kind: "denied";
+      auditSessionEventId: string;
+      reasonCodes: readonly string[];
+      matchedRuleIds: readonly string[];
+      error?: ProtoError;
+    };
+
+export interface CommitSessionDeltaOutcome {
+  sessionReservationId: string;
+  streamingCommitId: string;
+  ledgerTransactionId: string;
+  auditSessionEventId: string;
+  committedDeltaAtomic: string;
+  cumulativeCommittedAtomic: string;
+  remainingAmountAtomic: string;
+  recordedAt: Date | null;
+}
+
+export interface ReleaseSessionOutcome {
+  sessionReservationId: string;
+  ledgerTransactionId: string;
+  auditSessionEventId: string;
+  releasedAmountAtomic: string;
+  committedAmountAtomic: string;
+  recordedAt: Date | null;
 }
 
 export function buildReserveSessionRequest(req: ReserveSessionRequest): ProtoReserveSessionRequest {
@@ -143,4 +181,12 @@ function epochMsToTimestamp(epochMs: number): Timestamp {
   const seconds = Math.floor(epochMs / 1000);
   const nanos = (epochMs - seconds * 1000) * 1_000_000;
   return { seconds: seconds.toString(), nanos };
+}
+
+export function timestampToDate(value: Timestamp | undefined): Date | null {
+  if (value === undefined) return null;
+  const seconds =
+    typeof value.seconds === "bigint" ? Number(value.seconds) : Number.parseInt(value.seconds, 10);
+  if (!Number.isFinite(seconds)) return null;
+  return new Date(seconds * 1000 + Math.floor(value.nanos / 1_000_000));
 }

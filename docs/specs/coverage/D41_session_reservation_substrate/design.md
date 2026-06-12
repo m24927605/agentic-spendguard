@@ -232,3 +232,32 @@ the `ledger_transactions` row. The outbox row uses the existing
 existing deferred `ledger_transactions_must_have_audit` invariant remains
 true. D41S_02 tests install that deferred trigger and assert there are no
 ledger transactions without an audit row.
+
+### 2026-06-12 - `COV_D41S_03_sdk_session_client` SR-V3 SDK method pin
+
+`SR-V3` is pinned to `sdk/typescript/src/session.ts`,
+`sdk/typescript/src/client.ts`, `sdk/python/src/spendguard/session.py`, and
+`sdk/python/src/spendguard/client.py`.
+
+TypeScript method names:
+
+```text
+SpendGuardClient.reserveSession(req: ReserveSessionRequest): Promise<ReserveSessionOutcome>
+SpendGuardClient.commitSessionDelta(req: CommitSessionDeltaRequest): Promise<CommitSessionDeltaOutcome>
+SpendGuardClient.releaseSession(req: ReleaseSessionRequest): Promise<ReleaseSessionOutcome>
+```
+
+Python method names:
+
+```text
+await SpendGuardClient.reserve_session(req: ReserveSessionRequest) -> ReserveSessionOutcome
+await SpendGuardClient.commit_session_delta(req: CommitSessionDeltaRequest) -> CommitSessionDeltaOutcome
+await SpendGuardClient.release_session(req: ReleaseSessionRequest) -> ReleaseSessionOutcome
+```
+
+Both SDKs keep the SR-V1 envelope builders as the single request-construction
+path. Client methods require a completed handshake in real mode; reserve fills
+an empty `session_id` / `sessionId` from the negotiated handshake session id.
+Proto `error` outcomes surface as `SpendGuardError`; reserve `denied` outcomes
+remain typed return values so voice adapters can fail closed with denial
+metadata. Disabled mode remains the existing explicit test-only no-op path.

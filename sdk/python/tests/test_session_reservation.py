@@ -5,15 +5,21 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 import pytest
+from google.protobuf.timestamp_pb2 import Timestamp
 
+from spendguard import SpendGuardClient
 from spendguard._proto.spendguard.common.v1 import common_pb2
 from spendguard._proto.spendguard.sidecar_adapter.v1 import (
     adapter_pb2,
     adapter_pb2_grpc,
 )
+from spendguard.client import HandshakeOutcome
 from spendguard.session import (
+    CommitSessionDeltaOutcome,
     CommitSessionDeltaRequest,
+    ReleaseSessionOutcome,
     ReleaseSessionRequest,
+    ReserveSessionAccepted,
     ReserveSessionRequest,
     build_commit_session_delta_request,
     build_release_session_request,
@@ -30,6 +36,24 @@ PRICING = common_pb2.PricingFreeze(
     fx_rate_version="fx-2026-06-12",
     unit_conversion_version="unitconv-2026-06-12",
 )
+HANDSHAKE = HandshakeOutcome(
+    session_id="sidecar-handshake-session",
+    sidecar_version="test-sidecar",
+    schema_bundle_id="schema",
+    schema_bundle_hash=b"",
+    contract_bundle_id="contract",
+    contract_bundle_hash=b"",
+    capability_required=0,
+    signing_key_id="test-key",
+    announcement_signature=b"",
+)
+
+
+def _ts(seconds: int, nanos: int = 0) -> Timestamp:
+    ts = Timestamp()
+    ts.seconds = seconds
+    ts.nanos = nanos
+    return ts
 
 
 def test_sr_v1_exposes_session_rpcs_on_sidecar_adapter() -> None:
@@ -116,6 +140,151 @@ def test_tp_d41s_11_builds_release_session_request() -> None:
     assert decoded.event_time.seconds == 1781233500
     assert decoded.event_time.nanos == 0
     assert decoded.idempotency_key == "sg-d41s-release-1"
+
+
+@pytest.mark.asyncio
+async def test_tp_d41s_11_client_reserve_session_fills_handshake_session() -> None:
+    captured: adapter_pb2.ReserveSessionRequest | None = None
+
+    class Stub:
+        async def ReserveSession(
+            self,
+            req: adapter_pb2.ReserveSessionRequest,
+            *,
+            timeout: float,
+        ) -> adapter_pb2.ReserveSessionOutcome:
+            nonlocal captured
+            captured = req
+            assert timeout == pytest.approx(0.250)
+            return adapter_pb2.ReserveSessionOutcome(
+                accepted=adapter_pb2.ReserveSessionAccepted(
+                    session_reservation_id="sr-voice-1",
+                    ledger_transaction_id="lt-session-reserve-1",
+                    audit_session_event_id="audit-session-reserve-1",
+                    ttl_expires_at=_ts(1781233500),
+                    reserved_amount_atomic="100000",
+                    remaining_amount_atomic="100000",
+                )
+            )
+
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/session-test.sock",
+        tenant_id="tenant-demo",
+    )
+    client._stub = Stub()  # type: ignore[assignment]
+    client._handshake = HANDSHAKE
+
+    outcome = await client.reserve_session(
+        ReserveSessionRequest(
+            tenant_id="tenant-demo",
+            budget_id="budget-voice",
+            window_instance_id="018ff7d0-2c9a-7f28-8d25-cf9486b08d42",
+            unit=UNIT,
+            pricing=PRICING,
+            session_id="",
+            route="pipecat|openai-realtime|gpt-4o-mini-transcribe",
+            estimated_amount_atomic="100000",
+            ttl_seconds=600,
+            idempotency_key="sg-d41s-reserve-client-1",
+        )
+    )
+
+    assert captured is not None
+    assert captured.session_id == "sidecar-handshake-session"
+    assert isinstance(outcome, ReserveSessionAccepted)
+    assert outcome.session_reservation_id == "sr-voice-1"
+    assert outcome.ledger_transaction_id == "lt-session-reserve-1"
+    assert outcome.ttl_expires_at is not None
+    assert outcome.ttl_expires_at.isoformat() == "2026-06-12T03:05:00+00:00"
+
+
+@pytest.mark.asyncio
+async def test_tp_d41s_11_client_commit_and_release_session_map_outcomes() -> None:
+    captured_commit: adapter_pb2.CommitSessionDeltaRequest | None = None
+    captured_release: adapter_pb2.ReleaseSessionRequest | None = None
+
+    class Stub:
+        async def CommitSessionDelta(
+            self,
+            req: adapter_pb2.CommitSessionDeltaRequest,
+            *,
+            timeout: float,
+        ) -> adapter_pb2.CommitSessionDeltaOutcome:
+            nonlocal captured_commit
+            captured_commit = req
+            assert timeout == pytest.approx(0.500)
+            return adapter_pb2.CommitSessionDeltaOutcome(
+                accepted=adapter_pb2.CommitSessionDeltaAccepted(
+                    session_reservation_id="sr-voice-1",
+                    streaming_commit_id="sr-voice-1/delta/000001",
+                    ledger_transaction_id="lt-session-commit-1",
+                    audit_session_event_id="audit-session-commit-1",
+                    committed_delta_atomic="2500",
+                    cumulative_committed_atomic="2500",
+                    remaining_amount_atomic="97500",
+                    recorded_at=_ts(1781233445, 678_000_000),
+                )
+            )
+
+        async def ReleaseSession(
+            self,
+            req: adapter_pb2.ReleaseSessionRequest,
+            *,
+            timeout: float,
+        ) -> adapter_pb2.ReleaseSessionOutcome:
+            nonlocal captured_release
+            captured_release = req
+            assert timeout == pytest.approx(0.150)
+            return adapter_pb2.ReleaseSessionOutcome(
+                accepted=adapter_pb2.ReleaseSessionAccepted(
+                    session_reservation_id="sr-voice-1",
+                    ledger_transaction_id="lt-session-release-1",
+                    audit_session_event_id="audit-session-release-1",
+                    released_amount_atomic="97500",
+                    committed_amount_atomic="2500",
+                    recorded_at=_ts(1781233500),
+                )
+            )
+
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/session-test.sock",
+        tenant_id="tenant-demo",
+    )
+    client._stub = Stub()  # type: ignore[assignment]
+    client._handshake = HANDSHAKE
+
+    commit = await client.commit_session_delta(
+        CommitSessionDeltaRequest(
+            session_reservation_id="sr-voice-1",
+            streaming_commit_id="sr-voice-1/delta/000001",
+            amount_atomic_delta="2500",
+            outcome="SUCCESS",
+            event_time=datetime(2026, 6, 12, 3, 4, 5, 678000, tzinfo=timezone.utc),
+            idempotency_key="sg-d41s-commit-client-1",
+        )
+    )
+    release = await client.release_session(
+        ReleaseSessionRequest(
+            session_reservation_id="sr-voice-1",
+            reason_code="session_completed",
+            event_time=datetime(2026, 6, 12, 3, 5, 0, tzinfo=timezone.utc),
+            idempotency_key="sg-d41s-release-client-1",
+        )
+    )
+
+    assert captured_commit is not None
+    assert captured_commit.outcome == adapter_pb2.CommitSessionDeltaRequest.SUCCESS
+    assert captured_commit.amount_atomic_delta == "2500"
+    assert isinstance(commit, CommitSessionDeltaOutcome)
+    assert commit.remaining_amount_atomic == "97500"
+    assert commit.recorded_at is not None
+    assert commit.recorded_at.isoformat() == "2026-06-12T03:04:05.678000+00:00"
+    assert captured_release is not None
+    assert captured_release.reason_code == "session_completed"
+    assert isinstance(release, ReleaseSessionOutcome)
+    assert release.released_amount_atomic == "97500"
+    assert release.recorded_at is not None
+    assert release.recorded_at.isoformat() == "2026-06-12T03:05:00+00:00"
 
 
 @pytest.mark.parametrize("amount", ["0", "-1", "1.5"])

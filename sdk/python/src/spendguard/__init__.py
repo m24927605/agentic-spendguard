@@ -51,8 +51,13 @@ from .ids import (
 )
 from .run_plan import RunPlan, current_run_plan, with_run_plan
 from .session import (
+    CommitSessionDeltaOutcome,
     CommitSessionDeltaRequest,
+    ReleaseSessionOutcome,
     ReleaseSessionRequest,
+    ReserveSessionAccepted,
+    ReserveSessionDenied,
+    ReserveSessionOutcome,
     ReserveSessionRequest,
     build_commit_session_delta_request,
     build_release_session_request,
@@ -90,9 +95,14 @@ __all__ = [
     "RunPlan",
     "current_run_plan",
     "with_run_plan",
-    # session reservation skeleton (D41S_01)
+    # session reservation substrate (D41S_03)
+    "CommitSessionDeltaOutcome",
     "CommitSessionDeltaRequest",
+    "ReleaseSessionOutcome",
     "ReleaseSessionRequest",
+    "ReserveSessionAccepted",
+    "ReserveSessionDenied",
+    "ReserveSessionOutcome",
     "ReserveSessionRequest",
     "build_commit_session_delta_request",
     "build_release_session_request",

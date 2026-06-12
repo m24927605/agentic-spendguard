@@ -27,7 +27,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
 import grpc
@@ -59,6 +59,20 @@ from .errors import (
     HandshakeError,
     SidecarUnavailable,
     SpendGuardError,
+)
+from .session import (
+    CommitSessionDeltaOutcome,
+    CommitSessionDeltaRequest,
+    ReleaseSessionOutcome,
+    ReleaseSessionRequest,
+    ReserveSessionAccepted,
+    ReserveSessionDenied,
+    ReserveSessionOutcome,
+    ReserveSessionRequest,
+    build_commit_session_delta_request,
+    build_release_session_request,
+    build_reserve_session_request,
+    timestamp_to_datetime,
 )
 
 if TYPE_CHECKING:
@@ -766,6 +780,62 @@ class SpendGuardClient:
         )
 
     # -------------------------------------------------------------------
+    # D41 session reservation substrate
+    # -------------------------------------------------------------------
+
+    async def reserve_session(
+        self, req: ReserveSessionRequest
+    ) -> ReserveSessionOutcome:
+        """Reserve a session-scoped hold for realtime voice spend.
+
+        If ``req.session_id`` is empty, the SDK fills it from the completed
+        sidecar handshake session id. The RPC is otherwise a direct wrapper
+        around the SR-V1 ``ReserveSession`` wire contract.
+        """
+        stub = self._require_stub()
+        session_id = self.session_id
+        wire_req = build_reserve_session_request(
+            replace(req, session_id=req.session_id or session_id)
+        )
+        try:
+            resp: adapter_pb2.ReserveSessionOutcome = await stub.ReserveSession(
+                wire_req, timeout=self._decision_timeout_s
+            )
+        except grpc.aio.AioRpcError as e:
+            raise self._classify_rpc_error(e, op="reserve_session") from e
+        return _map_reserve_session_outcome(resp)
+
+    async def commit_session_delta(
+        self, req: CommitSessionDeltaRequest
+    ) -> CommitSessionDeltaOutcome:
+        """Commit one positive streaming spend delta against a session hold."""
+        stub = self._require_stub()
+        _ = self.session_id
+        wire_req = build_commit_session_delta_request(req)
+        try:
+            resp: adapter_pb2.CommitSessionDeltaOutcome = await stub.CommitSessionDelta(
+                wire_req, timeout=self._trace_timeout_s
+            )
+        except grpc.aio.AioRpcError as e:
+            raise self._classify_rpc_error(e, op="commit_session_delta") from e
+        return _map_commit_session_delta_outcome(resp)
+
+    async def release_session(
+        self, req: ReleaseSessionRequest
+    ) -> ReleaseSessionOutcome:
+        """Release the uncommitted remainder of a session reservation."""
+        stub = self._require_stub()
+        _ = self.session_id
+        wire_req = build_release_session_request(req)
+        try:
+            resp: adapter_pb2.ReleaseSessionOutcome = await stub.ReleaseSession(
+                wire_req, timeout=self._publish_timeout_s
+            )
+        except grpc.aio.AioRpcError as e:
+            raise self._classify_rpc_error(e, op="release_session") from e
+        return _map_release_session_outcome(resp)
+
+    # -------------------------------------------------------------------
     # ConfirmPublishOutcome
     # -------------------------------------------------------------------
 
@@ -992,3 +1062,84 @@ class SpendGuardClient:
             return mapping[name]
         except KeyError as e:
             raise ValueError(f"unknown llm outcome: {name!r}") from e
+
+
+def _raise_proto_error(op: str, err: common_pb2.Error) -> None:
+    raise SpendGuardError(
+        f"sidecar {op} error code={err.code} message={err.message}"
+    )
+
+
+def _map_reserve_session_outcome(
+    resp: adapter_pb2.ReserveSessionOutcome,
+) -> ReserveSessionOutcome:
+    kind = resp.WhichOneof("outcome")
+    if kind == "accepted":
+        accepted = resp.accepted
+        return ReserveSessionAccepted(
+            session_reservation_id=accepted.session_reservation_id,
+            ledger_transaction_id=accepted.ledger_transaction_id,
+            audit_session_event_id=accepted.audit_session_event_id,
+            ttl_expires_at=timestamp_to_datetime(
+                accepted.ttl_expires_at
+                if accepted.HasField("ttl_expires_at")
+                else None
+            ),
+            reserved_amount_atomic=accepted.reserved_amount_atomic,
+            remaining_amount_atomic=accepted.remaining_amount_atomic,
+        )
+    if kind == "denied":
+        denied = resp.denied
+        return ReserveSessionDenied(
+            audit_session_event_id=denied.audit_session_event_id,
+            reason_codes=tuple(denied.reason_codes),
+            matched_rule_ids=tuple(denied.matched_rule_ids),
+            error=denied.error if denied.HasField("error") else None,
+        )
+    if kind == "error":
+        _raise_proto_error("reserve_session", resp.error)
+    raise SpendGuardError("sidecar reserve_session returned empty outcome")
+
+
+def _map_commit_session_delta_outcome(
+    resp: adapter_pb2.CommitSessionDeltaOutcome,
+) -> CommitSessionDeltaOutcome:
+    kind = resp.WhichOneof("outcome")
+    if kind == "accepted":
+        accepted = resp.accepted
+        return CommitSessionDeltaOutcome(
+            session_reservation_id=accepted.session_reservation_id,
+            streaming_commit_id=accepted.streaming_commit_id,
+            ledger_transaction_id=accepted.ledger_transaction_id,
+            audit_session_event_id=accepted.audit_session_event_id,
+            committed_delta_atomic=accepted.committed_delta_atomic,
+            cumulative_committed_atomic=accepted.cumulative_committed_atomic,
+            remaining_amount_atomic=accepted.remaining_amount_atomic,
+            recorded_at=timestamp_to_datetime(
+                accepted.recorded_at if accepted.HasField("recorded_at") else None
+            ),
+        )
+    if kind == "error":
+        _raise_proto_error("commit_session_delta", resp.error)
+    raise SpendGuardError("sidecar commit_session_delta returned empty outcome")
+
+
+def _map_release_session_outcome(
+    resp: adapter_pb2.ReleaseSessionOutcome,
+) -> ReleaseSessionOutcome:
+    kind = resp.WhichOneof("outcome")
+    if kind == "accepted":
+        accepted = resp.accepted
+        return ReleaseSessionOutcome(
+            session_reservation_id=accepted.session_reservation_id,
+            ledger_transaction_id=accepted.ledger_transaction_id,
+            audit_session_event_id=accepted.audit_session_event_id,
+            released_amount_atomic=accepted.released_amount_atomic,
+            committed_amount_atomic=accepted.committed_amount_atomic,
+            recorded_at=timestamp_to_datetime(
+                accepted.recorded_at if accepted.HasField("recorded_at") else None
+            ),
+        )
+    if kind == "error":
+        _raise_proto_error("release_session", resp.error)
+    raise SpendGuardError("sidecar release_session returned empty outcome")

@@ -1,8 +1,7 @@
-"""D41 session reservation substrate skeleton.
+"""D41 session reservation substrate.
 
-This module builds SR-V1 protobuf envelopes only. It intentionally does not
-perform sidecar RPCs or ledger semantics; those land in later D41 substrate
-slices.
+This module builds SR-V1 protobuf envelopes and public SDK outcome dataclasses.
+Sidecar RPC bodies live on ``SpendGuardClient``.
 """
 
 from __future__ import annotations
@@ -48,6 +47,49 @@ class ReleaseSessionRequest:
     reason_code: str
     event_time: datetime | Timestamp
     idempotency_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReserveSessionAccepted:
+    session_reservation_id: str
+    ledger_transaction_id: str
+    audit_session_event_id: str
+    ttl_expires_at: datetime | None
+    reserved_amount_atomic: str
+    remaining_amount_atomic: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReserveSessionDenied:
+    audit_session_event_id: str
+    reason_codes: tuple[str, ...]
+    matched_rule_ids: tuple[str, ...]
+    error: common_pb2.Error | None = None
+
+
+ReserveSessionOutcome = ReserveSessionAccepted | ReserveSessionDenied
+
+
+@dataclass(frozen=True, slots=True)
+class CommitSessionDeltaOutcome:
+    session_reservation_id: str
+    streaming_commit_id: str
+    ledger_transaction_id: str
+    audit_session_event_id: str
+    committed_delta_atomic: str
+    cumulative_committed_atomic: str
+    remaining_amount_atomic: str
+    recorded_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ReleaseSessionOutcome:
+    session_reservation_id: str
+    ledger_transaction_id: str
+    audit_session_event_id: str
+    released_amount_atomic: str
+    committed_amount_atomic: str
+    recorded_at: datetime | None
 
 
 def build_reserve_session_request(
@@ -116,6 +158,12 @@ def _to_timestamp(value: datetime | Timestamp) -> Timestamp:
     ts = Timestamp()
     ts.FromDatetime(dt.astimezone(timezone.utc))
     return ts
+
+
+def timestamp_to_datetime(value: Timestamp | None) -> datetime | None:
+    if value is None or (value.seconds == 0 and value.nanos == 0):
+        return None
+    return value.ToDatetime(tzinfo=timezone.utc)
 
 
 def _assert_positive_decimal(value: str, field: str) -> None:

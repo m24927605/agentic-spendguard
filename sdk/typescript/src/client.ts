@@ -59,12 +59,15 @@ import { RpcError } from "@protobuf-ts/runtime-rpc";
 import { ReservationSource } from "./_proto/spendguard/common/v1/common.js";
 import { SidecarAdapterClient } from "./_proto/spendguard/sidecar_adapter/v1/adapter.client.js";
 import type {
+  CommitSessionDeltaOutcome as ProtoCommitSessionDeltaOutcome,
   DecisionRequest as ProtoDecisionRequest,
   DecisionResponse as ProtoDecisionResponse,
   HandshakeRequest as ProtoHandshakeRequest,
   HandshakeResponse as ProtoHandshakeResponse,
   ReleaseReservationRequest as ProtoReleaseReservationRequest,
   ReleaseReservationResponse as ProtoReleaseReservationResponse,
+  ReleaseSessionOutcome as ProtoReleaseSessionOutcome,
+  ReserveSessionOutcome as ProtoReserveSessionOutcome,
   TraceEvent as ProtoTraceEvent,
   TraceEventAck as ProtoTraceEventAck,
 } from "./_proto/spendguard/sidecar_adapter/v1/adapter.js";
@@ -105,6 +108,18 @@ import { SPENDGUARD_OTEL_ATTR, withOtelSpan } from "./otel.js";
 import { computePromptHash } from "./promptHash.js";
 import { runWithRetry } from "./retry.js";
 import { currentRunPlan } from "./runPlan.js";
+import {
+  type CommitSessionDeltaOutcome as SessionCommitDeltaOutcome,
+  type CommitSessionDeltaRequest as SessionCommitDeltaRequest,
+  type ReleaseSessionOutcome as SessionReleaseOutcome,
+  type ReleaseSessionRequest as SessionReleaseRequest,
+  type ReserveSessionOutcome as SessionReserveOutcome,
+  type ReserveSessionRequest as SessionReserveRequest,
+  buildCommitSessionDeltaRequest,
+  buildReleaseSessionRequest,
+  buildReserveSessionRequest,
+  timestampToDate,
+} from "./session.js";
 import { VERSION } from "./version.js";
 
 // Suppress the unused-import warning by referencing in JSDoc — these are
@@ -1105,6 +1120,149 @@ export class SpendGuardClient implements AsyncDisposable {
           throw mapGrpcStatusToError(err, { rpc: "release", releaseNotFoundAsPlain: true });
         }
         return mapReleaseResponse(resp);
+      },
+    );
+  }
+
+  /**
+   * Reserve a session-scoped hold for a realtime voice session (D41 SR-V3).
+   *
+   * The public request shape mirrors `buildReserveSessionRequest`. When
+   * `req.sessionId` is empty, the SDK fills it from the completed sidecar
+   * handshake so adapter code can bind the session reservation to the active
+   * UDS session without duplicating handshake plumbing.
+   *
+   * @throws HandshakeError before `handshake()` completes.
+   * @throws SidecarUnavailable on UNAVAILABLE / DEADLINE_EXCEEDED / CANCELLED.
+   * @throws SpendGuardError on proto error outcome or unmapped gRPC failure.
+   */
+  async reserveSession(req: SessionReserveRequest): Promise<SessionReserveOutcome> {
+    if (this.cfg.disabled) {
+      buildReserveSessionRequest(req);
+      return makeDisabledReserveSessionOutcome(req);
+    }
+    if (this.handshakeResult === null) {
+      throw new HandshakeError(
+        "reserveSession() requires handshake(); call await client.handshake() before reserveSession()",
+      );
+    }
+    if (this.adapterClient === null) {
+      await this.connect();
+    }
+    const adapter = this.adapterClient;
+    if (adapter === null) {
+      throw new SidecarUnavailable("transport not established for reserveSession");
+    }
+    const grpcReq = buildReserveSessionRequest({
+      ...req,
+      sessionId: req.sessionId || this.handshakeResult.sessionId,
+    });
+    return await withOtelSpan(
+      this.cfg.otelTracer,
+      "reserveSession",
+      {
+        [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
+        [SPENDGUARD_OTEL_ATTR.SDK_VERSION]: this.cfg.sdkVersion,
+      },
+      async () => {
+        try {
+          const resp = await adapter.reserveSession(grpcReq, {
+            timeout: this.cfg.decisionTimeoutMs,
+          }).response;
+          return mapReserveSessionOutcome(resp);
+        } catch (err) {
+          throw mapGrpcStatusToError(err, { rpc: "reserveSession" });
+        }
+      },
+    );
+  }
+
+  /**
+   * Commit one positive streaming spend delta against a session reservation.
+   *
+   * @throws HandshakeError before `handshake()` completes.
+   * @throws SidecarUnavailable on UNAVAILABLE / DEADLINE_EXCEEDED / CANCELLED.
+   * @throws SpendGuardError on proto error outcome or unmapped gRPC failure.
+   */
+  async commitSessionDelta(req: SessionCommitDeltaRequest): Promise<SessionCommitDeltaOutcome> {
+    if (this.cfg.disabled) {
+      buildCommitSessionDeltaRequest(req);
+      return makeDisabledCommitSessionDeltaOutcome(req);
+    }
+    if (this.handshakeResult === null) {
+      throw new HandshakeError(
+        "commitSessionDelta() requires handshake(); call await client.handshake() before commitSessionDelta()",
+      );
+    }
+    if (this.adapterClient === null) {
+      await this.connect();
+    }
+    const adapter = this.adapterClient;
+    if (adapter === null) {
+      throw new SidecarUnavailable("transport not established for commitSessionDelta");
+    }
+    const grpcReq = buildCommitSessionDeltaRequest(req);
+    return await withOtelSpan(
+      this.cfg.otelTracer,
+      "commitSessionDelta",
+      {
+        [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
+        [SPENDGUARD_OTEL_ATTR.SDK_VERSION]: this.cfg.sdkVersion,
+      },
+      async () => {
+        try {
+          const resp = await adapter.commitSessionDelta(grpcReq, {
+            timeout: this.cfg.traceTimeoutMs,
+          }).response;
+          return mapCommitSessionDeltaOutcome(resp);
+        } catch (err) {
+          throw mapGrpcStatusToError(err, { rpc: "commitSessionDelta" });
+        }
+      },
+    );
+  }
+
+  /**
+   * Release the uncommitted remainder of a session reservation.
+   *
+   * @throws HandshakeError before `handshake()` completes.
+   * @throws SidecarUnavailable on UNAVAILABLE / DEADLINE_EXCEEDED / CANCELLED.
+   * @throws SpendGuardError on proto error outcome or unmapped gRPC failure.
+   */
+  async releaseSession(req: SessionReleaseRequest): Promise<SessionReleaseOutcome> {
+    if (this.cfg.disabled) {
+      buildReleaseSessionRequest(req);
+      return makeDisabledReleaseSessionOutcome(req);
+    }
+    if (this.handshakeResult === null) {
+      throw new HandshakeError(
+        "releaseSession() requires handshake(); call await client.handshake() before releaseSession()",
+      );
+    }
+    if (this.adapterClient === null) {
+      await this.connect();
+    }
+    const adapter = this.adapterClient;
+    if (adapter === null) {
+      throw new SidecarUnavailable("transport not established for releaseSession");
+    }
+    const grpcReq = buildReleaseSessionRequest(req);
+    return await withOtelSpan(
+      this.cfg.otelTracer,
+      "releaseSession",
+      {
+        [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
+        [SPENDGUARD_OTEL_ATTR.SDK_VERSION]: this.cfg.sdkVersion,
+      },
+      async () => {
+        try {
+          const resp = await adapter.releaseSession(grpcReq, {
+            timeout: this.cfg.publishTimeoutMs,
+          }).response;
+          return mapReleaseSessionOutcome(resp);
+        } catch (err) {
+          throw mapGrpcStatusToError(err, { rpc: "releaseSession" });
+        }
       },
     );
   }
@@ -2162,6 +2320,44 @@ function makeDisabledReleaseOutcome(req: ReleaseRequest): ReleaseOutcome {
   };
 }
 
+function makeDisabledReserveSessionOutcome(req: SessionReserveRequest): SessionReserveOutcome {
+  return {
+    kind: "accepted",
+    sessionReservationId: `disabled:${req.sessionId || "session"}`,
+    ledgerTransactionId: "",
+    auditSessionEventId: "",
+    ttlExpiresAt: null,
+    reservedAmountAtomic: req.estimatedAmountAtomic,
+    remainingAmountAtomic: req.estimatedAmountAtomic,
+  };
+}
+
+function makeDisabledCommitSessionDeltaOutcome(
+  req: SessionCommitDeltaRequest,
+): SessionCommitDeltaOutcome {
+  return {
+    sessionReservationId: req.sessionReservationId,
+    streamingCommitId: req.streamingCommitId,
+    ledgerTransactionId: "",
+    auditSessionEventId: "",
+    committedDeltaAtomic: req.amountAtomicDelta,
+    cumulativeCommittedAtomic: req.amountAtomicDelta,
+    remainingAmountAtomic: "0",
+    recordedAt: null,
+  };
+}
+
+function makeDisabledReleaseSessionOutcome(req: SessionReleaseRequest): SessionReleaseOutcome {
+  return {
+    sessionReservationId: req.sessionReservationId,
+    ledgerTransactionId: "",
+    auditSessionEventId: "",
+    releasedAmountAtomic: "0",
+    committedAmountAtomic: "0",
+    recordedAt: null,
+  };
+}
+
 /**
  * Disabled-mode `queryBudget()` result — a synthetic zero snapshot at the
  * caller's `asOfSeconds` (or `0` when unset). The unit is forced to
@@ -2203,6 +2399,87 @@ function buildReleaseRequest(
     workloadInstanceId: req.workloadInstanceId ?? "",
     sessionId,
   };
+}
+
+function mapReserveSessionOutcome(resp: ProtoReserveSessionOutcome): SessionReserveOutcome {
+  switch (resp.outcome.oneofKind) {
+    case "accepted": {
+      const accepted = resp.outcome.accepted;
+      return {
+        kind: "accepted",
+        sessionReservationId: accepted.sessionReservationId,
+        ledgerTransactionId: accepted.ledgerTransactionId,
+        auditSessionEventId: accepted.auditSessionEventId,
+        ttlExpiresAt: timestampToDate(accepted.ttlExpiresAt),
+        reservedAmountAtomic: accepted.reservedAmountAtomic,
+        remainingAmountAtomic: accepted.remainingAmountAtomic,
+      };
+    }
+    case "denied": {
+      const denied = resp.outcome.denied;
+      return {
+        kind: "denied",
+        auditSessionEventId: denied.auditSessionEventId,
+        reasonCodes: Object.freeze([...denied.reasonCodes]),
+        matchedRuleIds: Object.freeze([...denied.matchedRuleIds]),
+        ...(denied.error !== undefined ? { error: denied.error } : {}),
+      };
+    }
+    case "error":
+      throw new SpendGuardError(
+        `sidecar reserveSession error code=${resp.outcome.error.code} message=${resp.outcome.error.message}`,
+      );
+    default:
+      throw new SpendGuardError("sidecar reserveSession returned empty outcome");
+  }
+}
+
+function mapCommitSessionDeltaOutcome(
+  resp: ProtoCommitSessionDeltaOutcome,
+): SessionCommitDeltaOutcome {
+  switch (resp.outcome.oneofKind) {
+    case "accepted": {
+      const accepted = resp.outcome.accepted;
+      return {
+        sessionReservationId: accepted.sessionReservationId,
+        streamingCommitId: accepted.streamingCommitId,
+        ledgerTransactionId: accepted.ledgerTransactionId,
+        auditSessionEventId: accepted.auditSessionEventId,
+        committedDeltaAtomic: accepted.committedDeltaAtomic,
+        cumulativeCommittedAtomic: accepted.cumulativeCommittedAtomic,
+        remainingAmountAtomic: accepted.remainingAmountAtomic,
+        recordedAt: timestampToDate(accepted.recordedAt),
+      };
+    }
+    case "error":
+      throw new SpendGuardError(
+        `sidecar commitSessionDelta error code=${resp.outcome.error.code} message=${resp.outcome.error.message}`,
+      );
+    default:
+      throw new SpendGuardError("sidecar commitSessionDelta returned empty outcome");
+  }
+}
+
+function mapReleaseSessionOutcome(resp: ProtoReleaseSessionOutcome): SessionReleaseOutcome {
+  switch (resp.outcome.oneofKind) {
+    case "accepted": {
+      const accepted = resp.outcome.accepted;
+      return {
+        sessionReservationId: accepted.sessionReservationId,
+        ledgerTransactionId: accepted.ledgerTransactionId,
+        auditSessionEventId: accepted.auditSessionEventId,
+        releasedAmountAtomic: accepted.releasedAmountAtomic,
+        committedAmountAtomic: accepted.committedAmountAtomic,
+        recordedAt: timestampToDate(accepted.recordedAt),
+      };
+    }
+    case "error":
+      throw new SpendGuardError(
+        `sidecar releaseSession error code=${resp.outcome.error.code} message=${resp.outcome.error.message}`,
+      );
+    default:
+      throw new SpendGuardError("sidecar releaseSession returned empty outcome");
+  }
 }
 
 /**
