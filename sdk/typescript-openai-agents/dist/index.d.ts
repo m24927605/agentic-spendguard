@@ -243,11 +243,10 @@ declare class SpendGuardAgentsModel implements Model {
  *   16 bytes.
  *
  * @remarks
- * Python parity quirk: for string inputs we render `repr('value')` —
- * Python's `repr()` on a `str` emits `'<escaped>'` with single quotes and
- * `\\` / `\'` escaping. For list-of-message inputs both languages serialize
- * to JSON via the canonical path described in module JSDoc. The
- * cross-language fixture (SLICE 3) gates the agreement.
+ * Python parity quirk: for string inputs we render a Python `repr(str)`-style
+ * literal. For list-of-message inputs both languages serialize to JSON via
+ * the canonical path described in module JSDoc. The cross-language fixture
+ * (SLICE 3) gates the agreement.
  */
 declare function deriveAgentSignature(input: unknown, systemInstructions: string | null | undefined): string;
 

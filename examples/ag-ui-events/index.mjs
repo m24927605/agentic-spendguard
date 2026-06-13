@@ -61,9 +61,9 @@ const HANDSHAKE_TIMEOUT_MS = Number.parseInt(
 const UNIT_SLUG = "usd_micros";
 // Wire-side UnitRef for reserve/commit (HARDEN_D05_UR unitId threading).
 const WIRE_UNIT = { unit: "USD_MICROS", denomination: 1, unitId: UNIT_ID };
-// ALLOW-step claim: a small micro-dollar probe well under the seeded 1B
-// hard-cap (mirrors the langchain_ts adapter's coarse PRE-time estimate).
-const ALLOW_AMOUNT_ATOMIC = "5000";
+// ALLOW-step claim: equal to the displayed fresh-stack snapshot balance and
+// well under the seeded 1B hard-cap.
+const ALLOW_AMOUNT_ATOMIC = "500";
 // DENY-step claim: above the seeded `claim_amount_atomic_gt: "1000000000"`
 // hard-cap rule, so the sidecar contract evaluator denies pre-dispatch.
 const DENY_AMOUNT_ATOMIC = "2000000000";

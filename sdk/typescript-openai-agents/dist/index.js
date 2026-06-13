@@ -41,11 +41,49 @@ function deriveAgentSignature(input, systemInstructions) {
 }
 function renderInputCanonical(input) {
   if (typeof input === "string") {
-    const escaped = input.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-    return `'${escaped}'`;
+    return pythonReprString(input);
   }
   const json = JSON.stringify(input);
   return json ?? "null";
+}
+function pythonReprString(input) {
+  const quote = input.includes("'") && !input.includes('"') ? '"' : "'";
+  let escaped = "";
+  for (const ch of input) {
+    const code = ch.codePointAt(0);
+    if (code === void 0) continue;
+    if (ch === "\\") {
+      escaped += "\\\\";
+    } else if (ch === "\n") {
+      escaped += "\\n";
+    } else if (ch === "	") {
+      escaped += "\\t";
+    } else if (ch === "\r") {
+      escaped += "\\r";
+    } else if (ch === quote) {
+      escaped += `\\${quote}`;
+    } else if (code < 32 || code === 127) {
+      escaped += `\\x${code.toString(16).padStart(2, "0")}`;
+    } else if (!isPythonPrintable(ch, code)) {
+      escaped += pythonReprCodePointEscape(code);
+    } else {
+      escaped += ch;
+    }
+  }
+  return `${quote}${escaped}${quote}`;
+}
+var PYTHON_NON_PRINTABLE_RE = /[\p{C}\p{Z}]/u;
+function isPythonPrintable(ch, code) {
+  return code === 32 || !PYTHON_NON_PRINTABLE_RE.test(ch);
+}
+function pythonReprCodePointEscape(code) {
+  if (code <= 255) {
+    return `\\x${code.toString(16).padStart(2, "0")}`;
+  }
+  if (code <= 65535) {
+    return `\\u${code.toString(16).padStart(4, "0")}`;
+  }
+  return `\\U${code.toString(16).padStart(8, "0")}`;
 }
 
 // src/usage.ts

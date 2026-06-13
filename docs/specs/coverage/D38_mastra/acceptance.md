@@ -52,7 +52,7 @@ Gates a reviewer (`superpowers:code-reviewer`) re-runs to confirm D38 is shipped
 | Gate | Command | Pass condition |
 |---|---|---|
 | A5.1 | `make demo-up DEMO_MODE=mastra_processor` | exit 0; runner prints LOCKED line `[demo] mastra_processor ALL 3 steps PASS (ALLOW + DENY + STREAM)` |
-| A5.2 | (within A5.1) step 2 DENY | runner asserts counting-stub `/_count` UNCHANGED across the DENY step and the rejection is `DecisionDenied` (direct or on the `cause` chain) — live fail-closed + zero-provider-call proof |
+| A5.2 | (within A5.1) step 2 DENY | runner asserts counting-stub `/_count` UNCHANGED across the DENY step and the rejection carries DENY evidence by direct/cause-chain typed error when Mastra preserves it, or by the §6.7 amendment #5 message-match fallback at the Agent boundary — live fail-closed + zero-provider-call proof |
 | A5.3 | `make -C deploy/demo demo-verify-mastra-processor` | `verify_step_mastra_processor.sql` passes against `spendguard_ledger` with `ON_ERROR_STOP=1`: `COV_D38_GATE` assertions — reserve ≥ 2, commit_estimated ≥ 2, denied_decision ≥ 1, INV-2 strict-order (earliest reserve < earliest `spendguard.audit.outcome`), audit decision rows ≥ 2 |
 | A5.4 | (within A5.3) canonical + outbox blocks | cross-DB `spendguard_canonical` decision/outcome count check passes; outbox-closure check passes (mirrors `demo-verify-langchain-ts` target structure) |
 | A5.5 | `grep -n "mastra_processor" deploy/demo/Makefile` | `demo-up` branch + run/verify dispatch branch + `demo-verify-mastra-processor` target + `.PHONY` entry all present |

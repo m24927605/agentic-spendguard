@@ -1,9 +1,10 @@
 // SpendGuard SDK — cross-language fixture harness (SLICE 9 / COV_S05_09).
 //
 // **P0 invariant — review-standards §2.1 / §2.2 / §2.5 + design.md §11**:
-// the TS implementations of `computePromptHash`, `deriveIdempotencyKey`, and
-// `deriveUuidFromSignature` MUST produce byte-identical output to the Python
-// implementations for every fixture in `sdk/fixtures/cross-language/v1.json`.
+// the TS implementations of `computePromptHash`, `deriveIdempotencyKey`,
+// `deriveUuidFromSignature`, and adapter-owned fixture helpers MUST produce
+// byte-identical output to the Python implementations for every fixture in
+// `sdk/fixtures/cross-language/v1.json`.
 //
 // The fixture file is the SINGLE SOURCE OF TRUTH for cross-language parity.
 // It is generated against the Python reference implementation
@@ -37,6 +38,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { blake2b } from "@noble/hashes/blake2";
 import { describe, expect, it } from "vitest";
 
 import { deriveIdempotencyKey, deriveUuidFromSignature } from "../src/ids.js";
@@ -51,7 +53,11 @@ const FIXTURES_PATH = path.resolve(_here, "..", "..", "fixtures", "cross-languag
 
 interface Fixture {
   id: string;
-  fn: "derive_idempotency_key" | "compute_prompt_hash" | "derive_uuid_from_signature";
+  fn:
+    | "derive_idempotency_key"
+    | "compute_prompt_hash"
+    | "derive_uuid_from_signature"
+    | "derive_agent_signature";
   description?: string;
   inputs: Record<string, unknown>;
   expected_output: string;
@@ -75,6 +81,76 @@ function asString(v: unknown, ctx: string): string {
   return v;
 }
 
+function asNullableString(v: unknown, ctx: string): string | null {
+  if (v === null) return null;
+  if (typeof v !== "string") {
+    throw new Error(`Fixture ${ctx} must be a string or null, got ${typeof v}`);
+  }
+  return v;
+}
+
+function hexFromBytes(bytes: Uint8Array): string {
+  let hex = "";
+  for (let i = 0; i < bytes.length; i++) {
+    hex += bytes[i]!.toString(16).padStart(2, "0");
+  }
+  return hex;
+}
+
+function pythonReprString(input: string): string {
+  const quote = input.includes("'") && !input.includes('"') ? '"' : "'";
+  let escaped = "";
+  for (const ch of input) {
+    const code = ch.codePointAt(0);
+    if (code === undefined) continue;
+    if (ch === "\\") {
+      escaped += "\\\\";
+    } else if (ch === "\n") {
+      escaped += "\\n";
+    } else if (ch === "\t") {
+      escaped += "\\t";
+    } else if (ch === "\r") {
+      escaped += "\\r";
+    } else if (ch === quote) {
+      escaped += `\\${quote}`;
+    } else if (code < 0x20 || code === 0x7f) {
+      escaped += `\\x${code.toString(16).padStart(2, "0")}`;
+    } else if (!isPythonPrintable(ch, code)) {
+      escaped += pythonReprCodePointEscape(code);
+    } else {
+      escaped += ch;
+    }
+  }
+  return `${quote}${escaped}${quote}`;
+}
+
+const PYTHON_NON_PRINTABLE_RE = /[\p{C}\p{Z}]/u;
+
+function isPythonPrintable(ch: string, code: number): boolean {
+  return code === 0x20 || !PYTHON_NON_PRINTABLE_RE.test(ch);
+}
+
+function pythonReprCodePointEscape(code: number): string {
+  if (code <= 0xff) {
+    return `\\x${code.toString(16).padStart(2, "0")}`;
+  }
+  if (code <= 0xffff) {
+    return `\\u${code.toString(16).padStart(4, "0")}`;
+  }
+  return `\\U${code.toString(16).padStart(8, "0")}`;
+}
+
+function deriveAgentSignatureFixture(input: unknown, systemInstructions: string | null): string {
+  // Mirrors sdk/typescript-openai-agents/src/signature.ts and Python
+  // spendguard.integrations.openai_agents._signature. Kept local so the
+  // substrate package test does not introduce a dev-time circular dependency
+  // on the OpenAI Agents adapter package.
+  const renderedInput =
+    typeof input === "string" ? pythonReprString(input) : (JSON.stringify(input) ?? "null");
+  const text = `${renderedInput}|${systemInstructions ?? ""}`;
+  return hexFromBytes(blake2b(new TextEncoder().encode(text), { dkLen: 16 }));
+}
+
 function evaluateFixture(f: Fixture): string {
   switch (f.fn) {
     case "derive_idempotency_key":
@@ -95,6 +171,11 @@ function evaluateFixture(f: Fixture): string {
       return deriveUuidFromSignature(asString(f.inputs.signature, `${f.id}.signature`), {
         scope: asString(f.inputs.scope, `${f.id}.scope`),
       });
+    case "derive_agent_signature":
+      return deriveAgentSignatureFixture(
+        f.inputs.input,
+        asNullableString(f.inputs.system_instructions, `${f.id}.system_instructions`),
+      );
     default: {
       // Exhaustiveness gate: unknown `fn` would mean v1.json grew a new
       // function the TS suite hasn't taught itself to dispatch yet.
@@ -116,16 +197,27 @@ describe("cross-language parity v1 (P0 byte-equivalence gate)", () => {
     expect(corpus.fixtures.length).toBeGreaterThanOrEqual(20);
   });
 
-  it("covers all three locked cross-language functions", () => {
+  it("covers all locked cross-language fixture functions", () => {
     const fns = new Set(corpus.fixtures.map((f) => f.fn));
     expect(fns).toContain("derive_idempotency_key");
     expect(fns).toContain("compute_prompt_hash");
     expect(fns).toContain("derive_uuid_from_signature");
+    expect(fns).toContain("derive_agent_signature");
   });
 
   it("has unique fixture ids (catches accidental dup-paste)", () => {
     const ids = corpus.fixtures.map((f) => f.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("derive_agent_signature mirror covers Python repr quote/control edges", () => {
+    expect(deriveAgentSignatureFixture("can't", null)).toBe("c60f3565dd179cae8973a0e1b500a64d");
+    expect(deriveAgentSignatureFixture("line\nbreak", "sys\tinst")).toBe(
+      "d8fa680b4135e57412c6b21d2189a8a3",
+    );
+    expect(deriveAgentSignatureFixture("mix\u2028世界", null)).toBe(
+      "c6cfaaaf3447a3baa6cc6ce5b03b95af",
+    );
   });
 
   for (const fixture of corpus.fixtures) {

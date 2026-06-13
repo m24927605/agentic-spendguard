@@ -2262,7 +2262,8 @@ demo-verify-ag-ui-events:
 	@$(COMPOSE) -f ag_ui_events/docker-compose.yaml run --rm --no-deps sse-probe \
 	  > /tmp/spendguard-ag-ui-capture.sse
 	@python3 ag_ui_events/verify_sse.py /tmp/spendguard-ag-ui-capture.sse \
-	  | tee /tmp/spendguard-ag-ui-verify.out
+	  > /tmp/spendguard-ag-ui-verify.out
+	@cat /tmp/spendguard-ag-ui-verify.out
 	@RES_ID=$$(grep '^RESERVATION_ID=' /tmp/spendguard-ag-ui-verify.out | cut -d= -f2); \
 	  $(COMPOSE) exec -T postgres psql -U spendguard -d spendguard_ledger -v ON_ERROR_STOP=1 -c \
 	  "DO \$$\$$ BEGIN IF NOT EXISTS (SELECT 1 FROM reservations WHERE reservation_id = '$$RES_ID'::uuid AND tenant_id = '00000000-0000-4000-8000-000000000001') THEN RAISE EXCEPTION 'COV_D39_GATE: SSE reservation_id % not found in ledger reservations', '$$RES_ID'; END IF; END; \$$\$$;"

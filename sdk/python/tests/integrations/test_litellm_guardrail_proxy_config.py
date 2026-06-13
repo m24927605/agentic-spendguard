@@ -279,7 +279,7 @@ def test_spendguard_guardrail_factory_inline_resolver_module_loads(
     factory was called rather than the single-tenant closure.
     """
     from spendguard.integrations.litellm import ResolverContext
-    from tests.integrations.fixtures.fake_resolver import (  # type: ignore[import-not-found]  # noqa: E501
+    from integrations.fixtures.fake_resolver import (
         FIXTURE_BUDGET_ID,
         FIXTURE_UNIT_ID,
         FIXTURE_WINDOW_ID,

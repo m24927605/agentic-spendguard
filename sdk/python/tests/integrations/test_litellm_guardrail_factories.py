@@ -713,7 +713,7 @@ def test_resolver_module_env_imports_factory(
     (review-standards 4.3 Blocker).
     """
     from spendguard.integrations.litellm import ResolverContext
-    from tests.integrations.fixtures.fake_resolver import (  # type: ignore[import-not-found]  # noqa: E501
+    from integrations.fixtures.fake_resolver import (
         FIXTURE_BUDGET_ID,
         FIXTURE_UNIT_ID,
         FIXTURE_WINDOW_ID,
@@ -1059,7 +1059,7 @@ def test_from_config_dict_resolver_key(clean_env, fixture_resolver_on_path):
     forward the parsed value verbatim.
     """
     from spendguard.integrations.litellm import ResolverContext
-    from tests.integrations.fixtures.fake_resolver import (  # type: ignore[import-not-found]
+    from integrations.fixtures.fake_resolver import (
         FIXTURE_BUDGET_ID,
     )
 
@@ -1110,7 +1110,7 @@ def test_load_resolver_triple_supports_legacy_dot_syntax(
     'no colon' error. The canonical syntax is still ``pkg.mod:fn``.
     """
     from spendguard.integrations.litellm import ResolverContext
-    from tests.integrations.fixtures.fake_resolver import (  # type: ignore[import-not-found]
+    from integrations.fixtures.fake_resolver import (
         FIXTURE_BUDGET_ID,
     )
 

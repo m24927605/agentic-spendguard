@@ -14,6 +14,7 @@ help:
 	@echo "  make demo-logs         Tail logs from all demo services"
 	@echo "  make demo-clean        demo-down + remove built images"
 	@echo "  make demo-build        Build images without running"
+	@echo "  make demo-verify-ag-ui-events  Verify the AG-UI spend-event demo gate"
 	@echo "  make sdk-ts-proto      Regenerate TS SDK proto stubs (sdk/typescript/src/_proto/)"
 	@echo "  make sdk-ts-proto-check  CI determinism gate: fail if generated tree drifts"
 

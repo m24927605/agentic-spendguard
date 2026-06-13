@@ -38,7 +38,7 @@ Numbered as **TP-XX** (unit/integration, vitest, no live network) and **TA-XX** 
 | TP-10 | **DENY-before-inner-call**: mock sidecar returns DENY → `agent.generate()` (real `@mastra/core` Agent + stub model) rejects AND the stub model records **zero** `doGenerate`/`doStream` invocations | THE core enforcement proof (design §7.3); also pins V2 |
 | TP-11 | Reserve request wire shape: `trigger="LLM_CALL_PRE"`, `stepId="llm_call"`, `route` default `"mastra-llm"`, `decisionId === llmCallId`, `idempotencyKey` matches TP-07 derivation | design §6.2 |
 | TP-12 | `processInputStep` fires once per step including a tool-call continuation step (Agent run with one tool call → 2 reserves) | per-step gating (design §6.1 row 1) |
-| TP-13 | `SidecarUnavailable` from `reserve()` → step aborts; stub model: 0 calls; error (or its `cause` chain) is `instanceof SidecarUnavailable` | **fail-closed on outage** — no log-and-proceed branch |
+| TP-13 | `SidecarUnavailable` from `reserve()` → hook-boundary error is `instanceof SidecarUnavailable`; real Agent step aborts; stub model: 0 calls; Agent-boundary rejection is message-match per design §6.7 amendment #5 | **fail-closed on outage** — no log-and-proceed branch |
 | TP-14 | `DecisionStopped` and `ApprovalRequired` propagate identically (both `instanceof DecisionDenied`) | denial taxonomy |
 | TP-15 | `HandshakeError` (client not handshaken) propagates; 0 model calls | fail-closed completeness |
 | TP-16 | Source-level: `grep -E "catch" src/processor.ts` reserve section contains no catch that continues the step (asserted structurally: a thrown sentinel from a stubbed `client.reserve` always rejects the step promise) | no hidden degradation branch |

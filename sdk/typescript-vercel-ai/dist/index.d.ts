@@ -158,6 +158,6 @@ interface SpendGuardMiddlewareOptions {
  */
 declare function createSpendGuardMiddleware(opts: SpendGuardMiddlewareOptions): LanguageModelV1Middleware;
 
-declare const VERSION: "0.1.0";
+declare const VERSION: "0.2.0";
 
 export { type SpendGuardMiddlewareOptions, VERSION, createSpendGuardMiddleware };

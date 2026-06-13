@@ -13,7 +13,9 @@
 // Canonical rendering — the only place this adapter diverges from Python's
 // exact bytes — is documented inline. The Python wrapper uses `repr(input)`,
 // which is not portable. For:
-//   - `string` input: TS emits `'<escaped>'` mirroring Python `repr('s')`.
+//   - `string` input: TS emits a Python `repr(str)`-style literal for the
+//     supported prompt surface, including quote selection and common control
+//     escapes.
 //   - `AgentInputItem[]` input: both languages emit JSON; the
 //     cross-language fixture (SLICE 3) verifies the agreed canonical shape
 //     end-to-end. Field ordering is NOT sorted — both languages depend on
@@ -42,11 +44,10 @@ import { bytesToHex } from "@noble/hashes/utils";
  *   16 bytes.
  *
  * @remarks
- * Python parity quirk: for string inputs we render `repr('value')` —
- * Python's `repr()` on a `str` emits `'<escaped>'` with single quotes and
- * `\\` / `\'` escaping. For list-of-message inputs both languages serialize
- * to JSON via the canonical path described in module JSDoc. The
- * cross-language fixture (SLICE 3) gates the agreement.
+ * Python parity quirk: for string inputs we render a Python `repr(str)`-style
+ * literal. For list-of-message inputs both languages serialize to JSON via
+ * the canonical path described in module JSDoc. The cross-language fixture
+ * (SLICE 3) gates the agreement.
  */
 export function deriveAgentSignature(
   input: unknown,
@@ -61,7 +62,7 @@ export function deriveAgentSignature(
 /**
  * Render the OpenAI Agents `input` field into a stable string form.
  *
- * - `string` → Python-`repr`-style `'<escaped>'`.
+ * - `string` → Python-`repr(str)`-style quoted literal.
  * - non-`string` (typically `AgentInputItem[]`) → `JSON.stringify(input)`.
  *
  * The Python wrapper does the same — `str` goes through `repr()`, list
@@ -71,17 +72,56 @@ export function deriveAgentSignature(
  */
 function renderInputCanonical(input: unknown): string {
   if (typeof input === "string") {
-    // Python-`repr`-style single-quote rendering. `repr` escapes `\\` first
-    // (so an existing backslash does not turn the following character into
-    // a control-escape), then `'` (the quote character used to wrap the
-    // literal). Order matters: do `\\` BEFORE `'` or the `\'` escape would
-    // double-escape the backslash.
-    const escaped = input.replace(/\\/g, "\\\\").replace(/'/g, "\\'");
-    return `'${escaped}'`;
+    return pythonReprString(input);
   }
   // For non-string inputs we let JSON.stringify drive the canonical form.
   // `JSON.stringify(undefined)` is `undefined` — coerce to "null" so the
   // hash still resolves.
   const json = JSON.stringify(input);
   return json ?? "null";
+}
+
+function pythonReprString(input: string): string {
+  const quote = input.includes("'") && !input.includes('"') ? '"' : "'";
+  let escaped = "";
+  for (const ch of input) {
+    const code = ch.codePointAt(0);
+    if (code === undefined) continue;
+    if (ch === "\\") {
+      escaped += "\\\\";
+    } else if (ch === "\n") {
+      escaped += "\\n";
+    } else if (ch === "\t") {
+      escaped += "\\t";
+    } else if (ch === "\r") {
+      escaped += "\\r";
+    } else if (ch === quote) {
+      escaped += `\\${quote}`;
+    } else if (code < 0x20 || code === 0x7f) {
+      escaped += `\\x${code.toString(16).padStart(2, "0")}`;
+    } else if (!isPythonPrintable(ch, code)) {
+      escaped += pythonReprCodePointEscape(code);
+    } else {
+      escaped += ch;
+    }
+  }
+  return `${quote}${escaped}${quote}`;
+}
+
+const PYTHON_NON_PRINTABLE_RE = /[\p{C}\p{Z}]/u;
+
+function isPythonPrintable(ch: string, code: number): boolean {
+  // Python str.isprintable() keeps ASCII space but escapes other separators
+  // and all control/format/private/surrogate/unassigned code points.
+  return code === 0x20 || !PYTHON_NON_PRINTABLE_RE.test(ch);
+}
+
+function pythonReprCodePointEscape(code: number): string {
+  if (code <= 0xff) {
+    return `\\x${code.toString(16).padStart(2, "0")}`;
+  }
+  if (code <= 0xffff) {
+    return `\\u${code.toString(16).padStart(4, "0")}`;
+  }
+  return `\\U${code.toString(16).padStart(8, "0")}`;
 }

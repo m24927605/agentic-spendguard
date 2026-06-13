@@ -243,6 +243,10 @@ Mirrors D04/D06 exactly: `estimatedTokens = max(1, ceil(stepText.length / 4))`, 
 
 4. **§5 class shell — ADDITIVE `readonly id` divergence note.** The §5 LOCKED class shell shows only `readonly name = "spendguard-processor"`, but the installed `@mastra/core` 1.41.0 `Processor<TId, TTripwireMetadata>` interface REQUIRES `readonly id: TId` (`name` is optional), and the Agent config requires `id` alongside `name`. Per §5's own "typechecks against the installed peer" rule (the `implements Processor` typecheck IS the hook-signature gate), the shipped `SpendGuardProcessor` carries BOTH `readonly id = "spendguard-processor"` and `readonly name = "spendguard-processor"` (same literal; `src/processor.ts`, V1 pin in COV_D38_02). This is not a surface drift: the §5 shell is amended additively, the §5 block above is NOT rewritten, and the public barrel is unchanged.
 
+**2026-06-13 — residual closure (gh #181; D38 V2 cause-chain):**
+
+5. **§7 rule 3 / V2 consumer-reachability erratum.** The shipped V2 pin against `@mastra/core` 1.41.0 proves the enforcement invariant but narrows the catch contract: a plain throw from `processInputStep` halts the step before provider dispatch, and the typed substrate error remains an `instanceof DecisionDenied` / `SidecarUnavailable` / `SpendGuardError` at the hook boundary. At the public `Agent.generate()` / `Agent.stream()` boundary, Mastra serializes processor workflow errors; the rejection preserves the error message but not the class instance or a typed `cause` chain. Therefore the authoritative v1 consumer contract is: **DENY => zero provider calls; hook boundary => typed `instanceof`; Agent boundary => message-match.** The older §7 rule-3 sentence "consumer can reach the typed error via the thrown error or its `cause` chain" is superseded for `@mastra/core` 1.41.0 by this amendment. Revisit only if a future Mastra release preserves processor error causes across the Agent boundary.
+
 | Condition | Error surfaced | Where | Step outcome |
 |---|---|---|---|
 | Invalid options (`client` missing, `tenantId` empty) | `TypeError` | constructor | construction fails |

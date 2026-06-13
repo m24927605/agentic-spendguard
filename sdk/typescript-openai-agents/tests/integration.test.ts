@@ -363,6 +363,14 @@ describe("SLICE 3 integration — cross-language fixture parity", async () => {
     }
   });
 
+  it("deriveAgentSignature mirrors Python repr quote/control edges", () => {
+    expect(deriveAgentSignature("can't", null)).toBe("c60f3565dd179cae8973a0e1b500a64d");
+    expect(deriveAgentSignature("line\nbreak", "sys\tinst")).toBe(
+      "d8fa680b4135e57412c6b21d2189a8a3",
+    );
+    expect(deriveAgentSignature("mix\u2028世界", null)).toBe("c6cfaaaf3447a3baa6cc6ce5b03b95af");
+  });
+
   // Test 15 — every deriveIdempotencyKey row using the LLM_CALL_PRE trigger
   // shape matches the OpenAI-agents-style (runId, stepId, llmCallId) tuple.
   it("deriveIdempotencyKey matches each `derive_idempotency_key` openai_agents row", () => {
