@@ -42,12 +42,13 @@ hex = "0.4"
 
 # SLICE 7 (COV_11): decode the PEM base64 body to DER so the doctor can
 # SHA-256 the cert content (identity-equivalent to the install-time
-# `ca::fingerprint_hex`). Deviation #4: TLS handshake probe is deferred
-# to a follow-up (slice doc §3.2 calls it "optional"); SLICE 7 surfaces
-# TCP reachability only, which is sufficient to distinguish the
-# "proxy not running" failure mode from "proxy running but trust broken"
-# (the latter shows up via the CA-fingerprint check, which already
-# verifies the trust store entry).
+# `ca::fingerprint_hex`). Deviation #4: the proxy probe surfaces TCP
+# reachability only — a CA-validated TLS handshake leg is a tracked
+# follow-up (needs a synchronous rustls client + a custom root store
+# from the on-disk CA PEM). To avoid false confidence in the interim,
+# the `Reachable` render is explicitly labelled "TCP-only liveness; TLS
+# not verified" and the proxy's CA-trust is confirmed separately by the
+# CA-fingerprint check (which verifies the trust-store entry).
 base64 = "0.22"
 
 # R2 fix per security review (M1): PKCS8 key buffers held as Zeroizing<String>

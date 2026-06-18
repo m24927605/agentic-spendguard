@@ -1,7 +1,7 @@
 //! `spendguard calibration-report` CLI core library.
 //!
 //! Spec: `docs/calibration-report-spec-v1alpha1.md`.
-//! Slice: `docs/slices/SLICE_13_calibration_report_cli.md`.
+//! Slice: `docs/internal/slices/SLICE_13_calibration_report_cli.md`.
 //!
 //! ## Architecture (per spec §1.4 v1alpha1 核心哲學)
 //!

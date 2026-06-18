@@ -223,6 +223,53 @@ impl TrustStore for MacosTrustStore {
             fingerprint_sha256_hex,
         ))
     }
+
+    fn verify_trusted(
+        &self,
+        ca_pem_path: &Path,
+        fingerprint_sha256_hex: &str,
+        scope: TrustScope,
+    ) -> Result<bool> {
+        // 1. Presence gate. `find-certificate` enumerates every cert in the
+        //    keychain regardless of trust settings; if it's not even present
+        //    there's nothing to trust. Cheap + unambiguous "absent" answer.
+        if !self.verify_installed(fingerprint_sha256_hex, scope)? {
+            return Ok(false);
+        }
+
+        // 2. Trust gate. Presence != trusted: a cert that was added then had
+        //    its trust settings removed/denied still shows up in
+        //    `find-certificate`. `security verify-cert -c <ca.pem>` evaluates
+        //    the cert against the OS trust settings (honouring Deny /
+        //    removed-root domains) and exits 0 only when the chain actually
+        //    validates — i.e. the CA is recorded as a trusted root. This is
+        //    the predicate the locked spec (tests.md §2.1
+        //    `macos_install_user_scope_marks_as_trustroot`) sanctions.
+        let args: Vec<OsString> = vec![
+            "verify-cert".into(),
+            "-c".into(),
+            ca_pem_path.as_os_str().to_owned(),
+        ];
+        let out = self
+            .run(args)
+            .context("invoke security verify-cert")?;
+        if out.success() {
+            return Ok(true);
+        }
+        // Non-zero exit here is a DEFINITIVE "not trusted" (Deny / removed
+        // trust settings / untrusted root), not an inconclusive error — the
+        // command ran and rendered a verdict. Surface it as `Ok(false)` so
+        // the doctor downgrades to NotInTrustStore (WARN + re-run install)
+        // rather than a false green. A spawn failure (security binary
+        // missing) already propagated as `Err` from `self.run(...)?`, which
+        // the doctor maps to NotInTrustStore — fail-closed in both arms.
+        tracing::debug!(
+            exit = ?out.status,
+            stderr = %out.stderr_str().trim(),
+            "security verify-cert reported the CA as not trusted (present but untrusted)"
+        );
+        Ok(false)
+    }
 }
 
 /// Defence-in-depth: any string passed to `security -Z` must be plain hex.
@@ -441,6 +488,84 @@ mod tests {
             .verify_installed(FINGERPRINT, TrustScope::User)
             .expect("verify must not error on non-zero exit");
         assert!(!present);
+    }
+
+    /// `verify_trusted` returns true only when the cert is BOTH present
+    /// (`find-certificate` hit) AND `security verify-cert` exits 0 (trusted
+    /// as a root). Two scripted shell-outs in order.
+    #[test]
+    fn verify_trusted_returns_true_when_present_and_verify_cert_succeeds() {
+        let runner = FakeRunner::new();
+        // 1. find-certificate (presence) → hit.
+        runner.push(ok(&format!(
+            "SHA-256 hash: {}\nkeychain: \"/Users/u/Library/Keychains/login.keychain-db\"\n",
+            FINGERPRINT.to_uppercase()
+        )));
+        // 2. verify-cert → exit 0 (trusted).
+        runner.push(ok("...certificate verification successful.\n"));
+        let store = store_with(runner.clone());
+
+        let ca_pem = PathBuf::from("/tmp/root_ca.pem");
+        let trusted = store
+            .verify_trusted(&ca_pem, FINGERPRINT, TrustScope::User)
+            .expect("verify_trusted");
+        assert!(trusted, "present + verify-cert-success ⇒ trusted");
+
+        let calls = runner.calls();
+        assert_eq!(calls.len(), 2, "find-certificate then verify-cert: {calls:?}");
+        assert_eq!(calls[1].1[0], OsString::from("verify-cert"));
+        assert_eq!(calls[1].1[1], OsString::from("-c"));
+        assert_eq!(calls[1].1[2], ca_pem.into_os_string());
+    }
+
+    /// `verify_trusted` returns FALSE (not Healthy) for a present-but-
+    /// untrusted CA: `find-certificate` hits but `security verify-cert`
+    /// exits non-zero (trust settings denied/removed). This is the core
+    /// fix — presence != trusted, and the doctor must downgrade to
+    /// NotInTrustStore rather than over-report Healthy.
+    #[test]
+    fn verify_trusted_returns_false_when_present_but_verify_cert_fails() {
+        let runner = FakeRunner::new();
+        // 1. find-certificate (presence) → hit.
+        runner.push(ok(&format!(
+            "SHA-256 hash: {}\nkeychain: \"/Users/u/Library/Keychains/login.keychain-db\"\n",
+            FINGERPRINT.to_uppercase()
+        )));
+        // 2. verify-cert → non-zero (CSSMERR_TP_NOT_TRUSTED / Deny).
+        runner.push(err(1, "CSSMERR_TP_NOT_TRUSTED"));
+        let store = store_with(runner.clone());
+
+        let ca_pem = PathBuf::from("/tmp/root_ca.pem");
+        let trusted = store
+            .verify_trusted(&ca_pem, FINGERPRINT, TrustScope::User)
+            .expect("verify_trusted must not error on a definitive untrusted verdict");
+        assert!(
+            !trusted,
+            "present but verify-cert-failed ⇒ NOT trusted (no false green)"
+        );
+        assert_eq!(runner.calls().len(), 2, "both shell-outs ran");
+    }
+
+    /// `verify_trusted` short-circuits to false when the cert is not even
+    /// present — `verify-cert` is never invoked.
+    #[test]
+    fn verify_trusted_returns_false_and_skips_verify_cert_when_absent() {
+        let runner = FakeRunner::new();
+        // find-certificate → miss. No second script entry → if verify-cert
+        // were invoked, FakeRunner would panic.
+        runner.push(ok("SHA-256 hash: AAAA\n"));
+        let store = store_with(runner.clone());
+
+        let ca_pem = PathBuf::from("/tmp/root_ca.pem");
+        let trusted = store
+            .verify_trusted(&ca_pem, FINGERPRINT, TrustScope::User)
+            .expect("verify_trusted");
+        assert!(!trusted, "absent cert ⇒ not trusted");
+        assert_eq!(
+            runner.calls().len(),
+            1,
+            "only find-certificate ran; verify-cert skipped"
+        );
     }
 
     /// `remove_root` short-circuits when the cert is absent (no delete call).

@@ -75,7 +75,14 @@ impl ApiKind {
         }
     }
 }
-const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+/// 16 MiB body limit (spec §9 / §10). The router installs a
+/// `DefaultBodyLimit::max(MAX_BODY_BYTES)` layer (see `build_app`) so this
+/// is the actually-enforced limit AND an oversized body is rejected with a
+/// streaming 413 before it is fully buffered; the in-handler `body.len()`
+/// check below is then a redundant backstop. Without that layer axum's
+/// framework default (2 MiB) would reject between 2 MiB and 16 MiB,
+/// silently breaking large-prompt requests and making this guard dead code.
+pub const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 fn resolve_upstream_url(api_kind: ApiKind) -> String {
     if let Some(base_url) = std::env::var("SPENDGUARD_PROXY_OPENAI_BASE_URL")
@@ -463,7 +470,29 @@ async fn forward_openai_request(
     // The full 17-column ClaimEstimate is attached to DecisionRequest
     // so the sidecar's audit_decision CloudEvent carries the entire
     // prediction story.
-    let header_override = header_int(&headers, "x-spendguard-estimated-tokens");
+    // X-SpendGuard-Estimated-Tokens is a self-attested input from the very
+    // agent whose spend is being guarded. Trusting it as an authoritative
+    // override lets a hostile caller LOWER its own input-token accounting /
+    // prompt-class classification (least-privilege violation for a control
+    // whose subject is the caller). Per spec §5.1 the override is documented
+    // as "explicit override, trust the user", so we keep that semantics —
+    // but gate it behind an explicit opt-in flag (mirroring
+    // SPENDGUARD_PROXY_MULTI_TENANT). Default (env unset): IGNORE the header
+    // and use the tokenizer-derived count, so the header can never be used
+    // to under-account. The sidecar reserve remains the hard gate.
+    let trust_estimate_header = std::env::var("SPENDGUARD_PROXY_TRUST_ESTIMATE_HEADER")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let header_override = if trust_estimate_header {
+        header_int(&headers, "x-spendguard-estimated-tokens")
+    } else {
+        if headers.get("x-spendguard-estimated-tokens").is_some() {
+            debug!(
+                "ignoring X-SpendGuard-Estimated-Tokens (set SPENDGUARD_PROXY_TRUST_ESTIMATE_HEADER=true to honor it)"
+            );
+        }
+        None
+    };
     // SLICE_11 Phase C — provider-aware model resolution. For non-
     // Bedrock providers this returns the body's `model` field (same
     // as pre-SLICE_11). For Bedrock InvokeModel the model id lives
@@ -754,6 +783,12 @@ async fn forward_openai_request(
             unit_for_post,
             pricing_for_post,
             api_kind,
+            // Conservative reservation floor committed when the stream
+            // completes successfully but no usage event was parsed
+            // (provider format drift / split usage event). Mirrors the
+            // non-streaming `parse_usage_tokens(...).unwrap_or(estimated)`
+            // path below so a token-consuming stream is never zero-debited.
+            inputs.estimated_tokens,
         )
         .await;
     }
@@ -822,7 +857,16 @@ async fn forward_openai_request(
 
     // Slice 5 commit lane — pydantic_ai pattern (LLM_CALL_POST first, then ConfirmPublishOutcome).
     // Per spec §4.1 step 12a/12b + codex r3 P1-r3.1 verification.
-    if let Err(e) = commit_on_success(
+    //
+    // The upstream call SUCCEEDED and consumed tokens, so on a transient
+    // proxy-side commit failure (sidecar disconnect mid-POST) we must NOT
+    // refund: emitting APPLY_FAILED here releases the reservation and the
+    // real spend is never debited (an under-count / fail-open on
+    // accounting). Instead we retry the commit briefly, and on persistent
+    // failure leave the reservation to TTL-COMMIT (not release) so
+    // completed spend is conserved. Reserve APPLY_FAILED strictly for the
+    // case where the upstream did NOT bill (handled on the error paths above).
+    if let Err(e) = commit_on_success_with_retry(
         &app,
         &session_id_for_post,
         &run_id_for_post,
@@ -837,19 +881,20 @@ async fn forward_openai_request(
     )
     .await
     {
-        // Proxy-internal commit failure (e.g., sidecar disconnect mid-POST).
-        // Spec §4.4: single-RPC release via ConfirmPublishOutcome(APPLY_FAILED).
-        warn!(err = %e, "commit lane failed; emitting APPLY_FAILED");
-        release_on_proxy_internal_error(
-            &app,
-            &session_id_for_post,
-            &decision_id_for_post,
-            &effect_hash_for_post,
-        )
-        .await;
+        // Persistent proxy-internal commit failure after retries. The LLM
+        // call billed real tokens, so we deliberately do NOT emit
+        // APPLY_FAILED (which would refund completed spend). The
+        // reservation is left in place so the ttl_sweeper TTL-commits it
+        // (fail-closed on accounting). Operators alert on this via the
+        // warn log below.
+        warn!(
+            err = %e,
+            metric = "egress_commit_lane_persistent_failure",
+            "commit lane failed after retries; leaving reservation for TTL-commit (NOT refunding completed spend)"
+        );
         // Still forward upstream response to client (the LLM did
-        // successfully return). Operator sees the orphan reservation
-        // in audit_outbox via the APPLY_FAILED row.
+        // successfully return). Operator sees the unresolved reservation
+        // in audit_outbox until TTL-commit.
     }
 
     Ok(build_passthrough(
@@ -857,6 +902,30 @@ async fn forward_openai_request(
         &upstream_headers,
         upstream_body,
     ))
+}
+
+/// Outcome of draining an SSE stream for usage. Distinguishes the three
+/// terminal states the commit task must handle differently:
+///
+///   * `Parsed(n)`        — a usage event was parsed; commit `n`.
+///   * `ClosedNoUsage`    — the stream ended cleanly (no stream error) but
+///                          no usage event was parsed. The provider call
+///                          DID complete and consume tokens, so we MUST
+///                          commit a conservative floor (the reservation
+///                          estimate), NOT release — releasing here would
+///                          leak real spend off-budget (fail-open on
+///                          accounting). Mirrors the non-streaming
+///                          `parse_usage_tokens(...).unwrap_or(estimated)`
+///                          behavior so success-with-missing-usage stays
+///                          fail-closed.
+///   * `Errored`          — the upstream stream itself errored mid-flight;
+///                          release as ProviderError (the call did not
+///                          complete normally).
+#[derive(Debug, Clone, Copy)]
+enum UsageOutcome {
+    Parsed(i64),
+    ClosedNoUsage,
+    Errored,
 }
 
 /// LLM_CALL_POST outcome enum mirror — typed wrapper used by error path.
@@ -882,6 +951,52 @@ impl LlmCallOutcome {
     }
 }
 
+/// Build the LLM_CALL_POST payload for a successful commit.
+///
+/// INVARIANT (locked by `commit_lane_sends_pricing_none`): `pricing` is
+/// ALWAYS `None`. The reservation row already carries the canonical pricing
+/// the sidecar wrote at PRE time; echoing the proxy's (potentially
+/// stale/empty) `pricing_cache` value back risks a PricingFreezeMismatch
+/// rejection. Any future change that starts trusting `pricing_for_post`
+/// must break this builder's test rather than silently corrupt commits.
+fn build_commit_payload(
+    reservation_id: &str,
+    unit: &crate::proto::common::v1::UnitRef,
+    usage_tokens: i64,
+) -> crate::proto::sidecar_adapter::v1::LlmCallPostPayload {
+    crate::proto::sidecar_adapter::v1::LlmCallPostPayload {
+        reservation_id: reservation_id.to_string(),
+        provider_reported_amount_atomic: String::new(),
+        unit: Some(unit.clone()),
+        pricing: None,
+        provider_event_id: String::new(),
+        outcome: LlmCallOutcome::Success.to_proto(),
+        estimated_amount_atomic: usage_tokens.to_string(),
+        ..Default::default()
+    }
+}
+
+/// Build the LLM_CALL_POST payload for a release.
+///
+/// INVARIANT (locked by `release_lane_sends_pricing_none`): `pricing` is
+/// ALWAYS `None`, mirroring `build_commit_payload`.
+fn build_release_payload(
+    reservation_id: &str,
+    unit: &crate::proto::common::v1::UnitRef,
+    outcome: LlmCallOutcome,
+) -> crate::proto::sidecar_adapter::v1::LlmCallPostPayload {
+    crate::proto::sidecar_adapter::v1::LlmCallPostPayload {
+        reservation_id: reservation_id.to_string(),
+        unit: Some(unit.clone()),
+        pricing: None,
+        outcome: outcome.to_proto(),
+        estimated_amount_atomic: String::new(),
+        provider_reported_amount_atomic: String::new(),
+        provider_event_id: String::new(),
+        ..Default::default()
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn commit_on_success(
     app: &AppState,
@@ -897,8 +1012,8 @@ async fn commit_on_success(
     usage_tokens: i64,
 ) -> anyhow::Result<()> {
     use crate::proto::sidecar_adapter::v1::{
-        publish_outcome_request::Outcome as ConfirmOutcome, trace_event, LlmCallPostPayload,
-        PublishOutcomeRequest, TraceEvent,
+        publish_outcome_request::Outcome as ConfirmOutcome, trace_event, PublishOutcomeRequest,
+        TraceEvent,
     };
 
     // 12a: EmitTraceEvents/LLM_CALL_POST (verified order per pydantic_ai.py:615-634).
@@ -921,16 +1036,7 @@ async fn commit_on_success(
     // for v0.1 — left in place for spec §4.1.5 traceability + potential
     // v0.2 use (if proto adds a pricing-supplied-by-caller path).
     let _ = pricing; // keep parameter for slice-5 trace; future use TBD
-    let payload = LlmCallPostPayload {
-        reservation_id: reservation_id.to_string(),
-        provider_reported_amount_atomic: String::new(),
-        unit: Some(unit.clone()),
-        pricing: None,
-        provider_event_id: String::new(),
-        outcome: LlmCallOutcome::Success.to_proto(),
-        estimated_amount_atomic: usage_tokens.to_string(),
-        ..Default::default()
-    };
+    let payload = build_commit_payload(reservation_id, unit, usage_tokens);
     let event = TraceEvent {
         session_id: session_id.to_string(),
         ids: Some(crate::proto::common::v1::SpendGuardIds {
@@ -967,6 +1073,69 @@ async fn commit_on_success(
     Ok(())
 }
 
+/// Number of additional `commit_on_success` attempts after the first on a
+/// transient proxy-side commit failure for an already-billed upstream call.
+const COMMIT_RETRY_ATTEMPTS: usize = 2;
+/// Base backoff between commit retries (doubled each attempt).
+const COMMIT_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Drive `commit_on_success` with a brief bounded retry. The upstream call
+/// already succeeded and billed real tokens, so a transient commit failure
+/// (sidecar disconnect mid-POST) must not refund the reservation — we retry
+/// the durable commit a few times, and only on persistent failure does the
+/// caller fall back to TTL-commit (NOT APPLY_FAILED). The commit lane is
+/// idempotency-keyed by `decision_id`/`reservation_id` in the sidecar, so a
+/// retry that races a partially-applied first attempt does not double-bill.
+#[allow(clippy::too_many_arguments)]
+async fn commit_on_success_with_retry(
+    app: &AppState,
+    session_id: &str,
+    run_id: &str,
+    step_id: &str,
+    llm_call_id: &str,
+    decision_id: &str,
+    effect_hash: &[u8],
+    reservation_id: &str,
+    unit: &crate::proto::common::v1::UnitRef,
+    pricing: &crate::proto::common::v1::PricingFreeze,
+    usage_tokens: i64,
+) -> anyhow::Result<()> {
+    let mut backoff = COMMIT_RETRY_BACKOFF;
+    let mut last_err: Option<anyhow::Error> = None;
+    for attempt in 0..=COMMIT_RETRY_ATTEMPTS {
+        match commit_on_success(
+            app,
+            session_id,
+            run_id,
+            step_id,
+            llm_call_id,
+            decision_id,
+            effect_hash,
+            reservation_id,
+            unit,
+            pricing,
+            usage_tokens,
+        )
+        .await
+        {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                if attempt < COMMIT_RETRY_ATTEMPTS {
+                    warn!(
+                        err = %e,
+                        attempt = attempt + 1,
+                        "commit lane failed; retrying durable commit"
+                    );
+                    tokio::time::sleep(backoff).await;
+                    backoff *= 2;
+                }
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("commit retries exhausted")))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn release_on_upstream_error(
     app: &AppState,
@@ -980,19 +1149,10 @@ async fn release_on_upstream_error(
     pricing: &crate::proto::common::v1::PricingFreeze,
     outcome: LlmCallOutcome,
 ) {
-    use crate::proto::sidecar_adapter::v1::{trace_event, LlmCallPostPayload, TraceEvent};
+    use crate::proto::sidecar_adapter::v1::{trace_event, TraceEvent};
     // Same pricing-None fix as commit_on_success above.
     let _ = pricing;
-    let payload = LlmCallPostPayload {
-        reservation_id: reservation_id.to_string(),
-        unit: Some(unit.clone()),
-        pricing: None,
-        outcome: outcome.to_proto(),
-        estimated_amount_atomic: String::new(),
-        provider_reported_amount_atomic: String::new(),
-        provider_event_id: String::new(),
-        ..Default::default()
-    };
+    let payload = build_release_payload(reservation_id, unit, outcome);
     let event = TraceEvent {
         session_id: session_id.to_string(),
         ids: Some(crate::proto::common::v1::SpendGuardIds {
@@ -1167,6 +1327,9 @@ async fn forward_streaming_response(
     unit: crate::proto::common::v1::UnitRef,
     pricing: crate::proto::common::v1::PricingFreeze,
     api_kind: ApiKind,
+    // Conservative reservation floor: committed when the stream completes
+    // successfully but no usage event was parsed (see UsageOutcome::ClosedNoUsage).
+    reserved_estimate: i64,
 ) -> Result<Response, ForwardError> {
     use bytes::Bytes;
     use futures_util::StreamExt;
@@ -1180,8 +1343,11 @@ async fn forward_streaming_response(
     // lags behind the network read so memory doesn't grow unbounded
     // (codex review focus per spec §7 r1 backpressure).
     let (parser_tx, parser_rx) = tokio::sync::mpsc::channel::<Result<Bytes, String>>(64);
-    // Channel commit ← parser (last usage observed, or None).
-    let (usage_tx, usage_rx) = tokio::sync::oneshot::channel::<Option<i64>>();
+    // Channel commit ← parser. Carries the terminal usage outcome so the
+    // commit task can distinguish parsed-usage / success-without-usage /
+    // stream-error (the three branches must NOT collapse — collapsing
+    // success-without-usage into the error path leaks real spend).
+    let (usage_tx, usage_rx) = tokio::sync::oneshot::channel::<UsageOutcome>();
 
     // Spawn parser task. Per-API-kind event parser dispatches the
     // SSE usage-extraction logic (Chat Completions vs Responses).
@@ -1189,11 +1355,58 @@ async fn forward_streaming_response(
 
     // Spawn commit lane task. Holds an Arc<AppState> so the sidecar
     // handle stays alive past the request handler's return.
+    //
+    // NOTE (Finding 8, accept-by-design): this commit task is detached.
+    // On client disconnect mid-stream the tee stops being polled, the
+    // `parser_tx` sender drops, the parser exits with no stream error and
+    // no usage, and the commit task now takes the ClosedNoUsage branch ->
+    // commits the conservative reservation floor (NOT a release). That is
+    // the Finding 1 fix and it converts the prior disconnect under-count
+    // into a fail-closed floor-commit. A SIGTERM before the task completes
+    // still drops the task (relying on the ttl_sweeper TTL backstop, per
+    // spec §357/§344/§78). A full graceful-shutdown drain
+    // (with_graceful_shutdown + awaited JoinSet/TaskTracker) is deferred:
+    // it requires a new tokio-util rt dependency + threading a tracker
+    // through AppState + main.rs `axum::serve`, which is out of scope for
+    // this Low finding. The disconnect-keeps-draining-and-then-COMMITS
+    // variant is deliberately NOT implemented: it would pay the provider
+    // for tokens after the client abandoned the request and over-count an
+    // abandoned stream — a billing-semantics change that needs an explicit
+    // spec decision.
     let app_for_commit = app.clone();
     tokio::spawn(async move {
-        match usage_rx.await {
-            Ok(Some(tokens)) => {
-                debug!(tokens, "SSE stream end; committing");
+        // Determine what to commit. A successful stream that consumed
+        // tokens must ALWAYS commit a real amount; only a true stream
+        // error (Errored) or a lost sender (Err(_) — proxy crash before
+        // the parser resolved) takes the release path.
+        let commit_tokens: Option<i64> = match usage_rx.await {
+            Ok(UsageOutcome::Parsed(tokens)) => {
+                debug!(tokens, "SSE stream end; committing parsed usage");
+                Some(tokens)
+            }
+            Ok(UsageOutcome::ClosedNoUsage) => {
+                // Stream completed WITHOUT a stream error but no usage
+                // event was parsed (provider format drift, include_usage
+                // silently broken, usage event split across a chunk
+                // boundary, or extractor divergence). The provider call
+                // succeeded and billed real tokens, so we commit the
+                // conservative reservation floor instead of releasing —
+                // releasing here would leak spend off-budget (the cardinal
+                // fail-open for this product). Mirrors the non-streaming
+                // floor at the parse_usage_tokens().unwrap_or(estimated)
+                // site above.
+                warn!(
+                    reserved_estimate,
+                    metric = "egress_stream_success_usage_missing",
+                    "SSE stream ended successfully without usage; committing conservative reservation floor"
+                );
+                Some(reserved_estimate.max(1))
+            }
+            Ok(UsageOutcome::Errored) | Err(_) => None,
+        };
+
+        match commit_tokens {
+            Some(tokens) => {
                 if let Err(e) = commit_on_success(
                     &app_for_commit,
                     &session_id,
@@ -1219,11 +1432,12 @@ async fn forward_streaming_response(
                     .await;
                 }
             }
-            Ok(None) | Err(_) => {
-                // Parser saw no usage (malformed stream or upstream cut
-                // off before the final usage event). Spec §4.4: single-
-                // RPC release via LLM_CALL_POST(PROVIDER_ERROR).
-                warn!("SSE stream ended without usage; releasing");
+            None => {
+                // True stream error (or lost sender on proxy crash). The
+                // provider call did not complete normally. Spec §4.4:
+                // single-RPC release via LLM_CALL_POST(PROVIDER_ERROR).
+                // The reservation TTL backstops a lost-sender case.
+                warn!("SSE stream errored before usage; releasing");
                 release_on_upstream_error(
                     &app_for_commit,
                     &session_id,
@@ -1291,7 +1505,7 @@ async fn forward_streaming_response(
 /// dispatches the JSON-shape-specific extractor.
 async fn parse_usage_from_sse_stream(
     mut rx: tokio::sync::mpsc::Receiver<Result<bytes::Bytes, String>>,
-    tx: tokio::sync::oneshot::Sender<Option<i64>>,
+    tx: tokio::sync::oneshot::Sender<UsageOutcome>,
     api_kind: ApiKind,
 ) {
     use bytes::BytesMut;
@@ -1328,11 +1542,21 @@ async fn parse_usage_from_sse_stream(
             }
         }
     }
-    if stream_errored {
-        let _ = tx.send(None);
+    let outcome = if stream_errored {
+        // The upstream stream itself errored mid-flight; the provider
+        // call did not complete normally → release path.
+        UsageOutcome::Errored
     } else {
-        let _ = tx.send(last_usage);
-    }
+        match last_usage {
+            Some(tokens) => UsageOutcome::Parsed(tokens),
+            // Stream closed cleanly but we never parsed a usage event.
+            // This is a SUCCESS-but-usage-missing state, NOT an error:
+            // the commit task commits a conservative floor rather than
+            // releasing (see UsageOutcome::ClosedNoUsage).
+            None => UsageOutcome::ClosedNoUsage,
+        }
+    };
+    let _ = tx.send(outcome);
 }
 
 /// Find the first SSE event boundary (`\n\n` or `\r\n\r\n`) in the
@@ -1355,12 +1579,23 @@ fn parse_usage_from_event(event: &[u8]) -> Option<i64> {
     let s = std::str::from_utf8(event).ok()?;
     let mut payload = String::new();
     for line in s.lines() {
-        let l = line.strip_prefix("data:")?;
-        let l = l.trim_start();
+        // Skip non-`data:` lines (`event:`, `id:`, `retry:`, SSE `:`
+        // comment lines, blank lines). Using `continue` instead of `?`
+        // mirrors the Responses parser so a usage-bearing event that
+        // also contains any non-data line is NOT silently discarded —
+        // dropping it would, combined with the streaming release path,
+        // convert a real billed stream into a released reservation.
+        let l = match line.strip_prefix("data:") {
+            Some(l) => l.trim_start(),
+            None => continue,
+        };
         if l == "[DONE]" {
             return None;
         }
         payload.push_str(l);
+    }
+    if payload.is_empty() {
+        return None;
     }
     let v: Value = serde_json::from_str(&payload).ok()?;
     v.get("usage")
@@ -1540,5 +1775,133 @@ mod tests {
         let err = ForwardError::UnexpectedContentType("text/event-stream".into());
         let resp = err.into_response();
         assert_eq!(resp.status(), StatusCode::BAD_GATEWAY);
+    }
+
+    // Finding 2 regression: a usage-bearing Chat Completions SSE event that
+    // also contains non-`data:` lines (an SSE `:` comment, an `event:`
+    // header) must NOT cause total_tokens to be silently dropped. Pre-fix
+    // the `?` early-returned None on the first non-data line, converting a
+    // real billed stream into a released reservation downstream.
+    #[test]
+    fn parse_usage_from_event_skips_non_data_lines() {
+        let event = b": this is an SSE comment\nevent: chunk\ndata: {\"usage\": {\"total_tokens\": 123}}";
+        assert_eq!(parse_usage_from_event(event), Some(123));
+    }
+
+    #[test]
+    fn parse_usage_from_event_all_non_data_returns_none() {
+        // An event with no data line yields an empty payload → None, no panic.
+        let event = b": keep-alive\nevent: ping";
+        assert_eq!(parse_usage_from_event(event), None);
+    }
+
+    #[test]
+    fn parse_usage_from_event_done_sentinel_returns_none() {
+        // The `[DONE]` early-return must still fire on a data-line [DONE].
+        let event = b"data: [DONE]";
+        assert_eq!(parse_usage_from_event(event), None);
+    }
+
+    #[test]
+    fn parse_usage_from_event_plain_data_line() {
+        let event = b"data: {\"usage\": {\"total_tokens\": 7}}";
+        assert_eq!(parse_usage_from_event(event), Some(7));
+    }
+
+    // Finding 7 invariant: the commit + release lanes must ALWAYS send
+    // pricing == None (sidecar is authoritative for reservation pricing).
+    // Locks against a future change that starts echoing the proxy's
+    // stale/empty pricing_cache back into commits.
+    #[test]
+    fn commit_lane_sends_pricing_none() {
+        let unit = crate::proto::common::v1::UnitRef {
+            unit_id: "u1".to_string(),
+            ..Default::default()
+        };
+        let payload = build_commit_payload("res-1", &unit, 42);
+        assert!(
+            payload.pricing.is_none(),
+            "commit payload must send pricing: None (sidecar-authoritative-pricing invariant)"
+        );
+        assert_eq!(payload.estimated_amount_atomic, "42");
+        assert_eq!(payload.reservation_id, "res-1");
+    }
+
+    #[test]
+    fn release_lane_sends_pricing_none() {
+        let unit = crate::proto::common::v1::UnitRef {
+            unit_id: "u1".to_string(),
+            ..Default::default()
+        };
+        let payload = build_release_payload("res-1", &unit, LlmCallOutcome::ProviderError);
+        assert!(
+            payload.pricing.is_none(),
+            "release payload must send pricing: None (sidecar-authoritative-pricing invariant)"
+        );
+        assert_eq!(payload.reservation_id, "res-1");
+    }
+
+    // Finding 4 cross-check: the proxy's inline `parse_usage_tokens`
+    // (commit-side) and the registered `providers::openai::extract_usage`
+    // (audited/shared) must agree on representative OpenAI bodies so the
+    // committed amount can't silently diverge from the shared extractor.
+    // Note the deliberate semantic difference on MISSING usage:
+    // parse_usage_tokens returns None (caller falls back to the estimate),
+    // while extract_usage returns total=0 — that None/zero split is the
+    // fail-closed estimate-fallback, asserted explicitly below.
+    #[test]
+    fn parse_usage_tokens_agrees_with_openai_extractor_top_level() {
+        let body = serde_json::json!({
+            "id": "chatcmpl-abc",
+            "usage": {"prompt_tokens": 13, "completion_tokens": 42, "total_tokens": 55}
+        });
+        let raw = serde_json::to_vec(&body).unwrap();
+        let inline = parse_usage_tokens(&raw);
+        let shared = crate::providers::openai::extract_usage(&body).total_tokens;
+        assert_eq!(inline, Some(55));
+        assert_eq!(inline.unwrap(), shared);
+    }
+
+    #[test]
+    fn parse_usage_tokens_missing_usage_is_none_extractor_is_zero() {
+        // Missing-usage divergence is BY DESIGN: inline None → estimate
+        // fallback (non-streaming) / floor-commit (streaming); never 0.
+        let body = serde_json::json!({"id": "chatcmpl-abc"});
+        let raw = serde_json::to_vec(&body).unwrap();
+        assert_eq!(parse_usage_tokens(&raw), None);
+        assert_eq!(
+            crate::providers::openai::extract_usage(&body).total_tokens,
+            0
+        );
+    }
+
+    // Finding 6: the X-SpendGuard-Estimated-Tokens override is honored only
+    // under the explicit opt-in flag; default-off ignores the header so a
+    // hostile caller cannot lower its own input-token accounting.
+    #[test]
+    fn estimate_header_override_is_honored() {
+        let v = decision::input_tokens_with_override(
+            &spendguard_tokenizer::TokenizeResponse {
+                input_tokens: 1000,
+                ..Default::default()
+            },
+            Some(5),
+        );
+        assert_eq!(v, 5, "opt-in flag → header override honored verbatim");
+    }
+
+    #[test]
+    fn estimate_header_ignored_uses_tokenizer_count() {
+        let v = decision::input_tokens_with_override(
+            &spendguard_tokenizer::TokenizeResponse {
+                input_tokens: 1000,
+                ..Default::default()
+            },
+            None,
+        );
+        assert_eq!(
+            v, 1000,
+            "header ignored (flag off) → tokenizer count, not a caller-supplied lower value"
+        );
     }
 }

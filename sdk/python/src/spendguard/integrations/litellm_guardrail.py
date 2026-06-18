@@ -78,14 +78,14 @@ Slice 4b ships (this file):
     * Same wiring lands in ``from_config`` so SLICE 5's
       ``proxy_config.yaml`` loader inherits it verbatim.
 
-Anti-scope for SLICE 4b (per ``docs/slices/COV_D11_S4B_resolver_module.md``):
+Anti-scope for SLICE 4b (per ``docs/internal/slices/COV_D11_S4B_resolver_module.md``):
     * No ``proxy_config.yaml`` snippet — SLICE 5.
     * No demo mode — SLICE 6.
     * No docs page — SLICE 7.
     * No re-touch of the 5-var SLICE 4 subset — SLICE 4 tests stay
       unchanged.
 
-Anti-scope for SLICE 4 (per ``docs/slices/COV_D11_S4_env_defaults.md``):
+Anti-scope for SLICE 4 (per ``docs/internal/slices/COV_D11_S4_env_defaults.md``):
     * No ``proxy_config.yaml`` snippet — SLICE 5.
     * No demo mode — SLICE 6.
     * No docs page — SLICE 7.

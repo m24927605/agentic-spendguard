@@ -101,6 +101,21 @@ pub static REQUEST_ID_V4_ACCEPTED_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static ENCODE_TIMEOUT_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static ENCODE_CONCURRENCY_LIMITED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+/// Spec §5.2/§5.3 — denominator for the Tier-3 fallback-rate health SLO.
+/// Incremented once per successfully-encoded tokenize call (after the
+/// encode task returns Ok), regardless of tier, so the ratio
+/// `TIER3_HIT_TOTAL / TOTAL_CALLS` is observable in /metrics and the
+/// §5.3 `tier3_alert_threshold` alert can actually fire.
+pub static TOTAL_CALLS: AtomicU64 = AtomicU64::new(0);
+
+/// Spec §5.2/§5.3 — numerator for the Tier-3 fallback-rate health SLO.
+/// Incremented when a tokenize call resolves to the Tier-3 chars/4×1.05
+/// heuristic (no exact encoder dispatched). A silent rise here means
+/// dispatch coverage has regressed (e.g. a renamed/dropped model ID) and
+/// requests are being under-counted vs the exact BPE — the invariant this
+/// counter exists to surface.
+pub static TIER3_HIT_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 /// Max bytes accepted in `raw_text` (the text-completion shape).
 /// POST_GA_03 / #114: matches the 4 MiB protocol-layer
 /// `max_decoding_message_size` configured in main.rs so the field
@@ -289,6 +304,17 @@ impl TokenizerSvcTrait for TokenizerSvc {
             }
         };
 
+        // Spec §5.2/§5.3 — Tier-3 fallback-rate health SLO. Count every
+        // successfully-encoded call as the denominator, and the Tier-3
+        // (HEURISTIC) branch as the numerator, so /metrics exposes the
+        // live ratio and the `tier3_alert_threshold` alert can fire. A
+        // silent regression to the chars/4×1.05 heuristic under-counts
+        // tokens vs the exact BPE; this is the signal that surfaces it.
+        TOTAL_CALLS.fetch_add(1, Ordering::Relaxed);
+        if lib_resp.tier == "T3" {
+            TIER3_HIT_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+
         // SLICE_05: fire-and-forget shadow event AFTER computing the
         // Tier 2 response. The send is non-blocking; the result is
         // intentionally ignored for hot-path latency, but R2 M5 wires
@@ -429,6 +455,10 @@ fn validate_or_mint_request_id(
 ///     error; identical surface to encoder internal).
 ///   * Asset load failed → `Status::failed_precondition` (same
 ///     server-side state as signature mismatch).
+///   * Request too large → `Status::invalid_argument` (matches the
+///     handler's own M6 DoS-cap rejections; an oversized request is a
+///     caller fault and must fail closed, never collapse into a
+///     permissive token estimate).
 fn map_tokenizer_error(err: TokenizerError) -> Status {
     match err {
         TokenizerError::AssetSignatureMismatch { .. } | TokenizerError::AssetLoadFailed { .. } => {
@@ -437,6 +467,7 @@ fn map_tokenizer_error(err: TokenizerError) -> Status {
         TokenizerError::EncoderInternal { .. } | TokenizerError::DispatchPatternInvalid { .. } => {
             Status::internal(err.to_string())
         }
+        TokenizerError::RequestTooLarge { .. } => Status::invalid_argument(err.to_string()),
     }
 }
 

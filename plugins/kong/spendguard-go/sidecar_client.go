@@ -34,9 +34,19 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// tenantIDPattern is the loose UUID shape enforced on cfg.TenantID.
+// It is deliberately byte-for-byte equivalent to the Lua schema's
+// `match` (schema.lua tenant_id) so the Go and Lua distributions
+// enforce the SAME contract for the same KongPlugin CRD: five
+// hex-digit groups separated by dashes. Accepts a canonical UUID such
+// as `00000000-0000-4000-8000-000000000001` and rejects a bare name
+// like `tenant-name`.
+var tenantIDPattern = regexp.MustCompile(`^[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+-[0-9a-fA-F]+$`)
 
 // SidecarClient is the per-config HTTP client. Build once via
 // `newSidecarClient(cfg)`, reuse across `Access` / `BodyFilter`
@@ -119,6 +129,18 @@ func newSidecarClient(cfg *Config) (*SidecarClient, error) {
 		// up front so the failure mode is loud at configuration
 		// time rather than silent on the first call.
 		return nil, fmt.Errorf("spendguard: sidecar_url must be HTTPS, got %q", cfg.SidecarURL)
+	}
+	// Tenant assertion is mandatory: it scopes every sidecar
+	// budget/RLS decision (config.go §51-55 + the Lua schema mark it
+	// required). An empty/whitespace tenant would let the sidecar
+	// scope a decision to the wrong (or a null) tenant, so we refuse
+	// to load — fail closed per review-standards §1.6. runAccess maps
+	// this error to a 503 SPENDGUARD_FAIL_CLOSED, off the hot path.
+	if strings.TrimSpace(cfg.TenantID) == "" {
+		return nil, errors.New("spendguard: tenant_id required")
+	}
+	if !tenantIDPattern.MatchString(cfg.TenantID) {
+		return nil, fmt.Errorf("spendguard: tenant_id %q is not a valid UUID", cfg.TenantID)
 	}
 	tlsCfg, err := loadTLSConfig(cfg)
 	if err != nil {

@@ -194,15 +194,19 @@ describe("createSpendGuardOpenClawProvider skeleton", () => {
 
     expect(thrown).toBe(providerError);
     expect((commits[0] as { outcome: string }).outcome).toBe("PROVIDER_ERROR");
-    expect((commits[0] as { estimatedAmountAtomic: string }).estimatedAmountAtomic).toBe("3000");
+    // Failed call must RELEASE the reservation (commit zero via the FAILURE
+    // multi-event path), never book the full projected estimate ("3000").
+    expect((commits[0] as { estimatedAmountAtomic: string }).estimatedAmountAtomic).toBe("0");
     expect((commits[0] as { unit: unknown }).unit).toEqual({
       unit: "USD_MICROS",
       denomination: 1,
       unitId: "usd_micros",
     });
     expect((commits[0] as { pricing: unknown }).pricing).toBe(options.pricing);
-    expect((commits[0] as { outcomeKind?: unknown }).outcomeKind).toBe(undefined);
-    expect((commits[0] as { actualErrorMessage?: unknown }).actualErrorMessage).toBe(undefined);
+    expect((commits[0] as { outcomeKind?: unknown }).outcomeKind).toBe("FAILURE");
+    expect((commits[0] as { actualErrorMessage?: unknown }).actualErrorMessage).toBe(
+      "provider failed",
+    );
   });
 
   it("classifies AbortError as RUN_ABORTED", async () => {
@@ -239,6 +243,8 @@ describe("createSpendGuardOpenClawProvider skeleton", () => {
 
     expect(thrown).toBe(abortError);
     expect((commits[0] as { outcome: string }).outcome).toBe("RUN_ABORTED");
+    expect((commits[0] as { estimatedAmountAtomic: string }).estimatedAmountAtomic).toBe("0");
+    expect((commits[0] as { outcomeKind?: unknown }).outcomeKind).toBe("FAILURE");
   });
 
   it("classifies timeout failures as CLIENT_TIMEOUT", async () => {
@@ -274,6 +280,8 @@ describe("createSpendGuardOpenClawProvider skeleton", () => {
 
     expect(thrown).toBe(timeoutError);
     expect((commits[0] as { outcome: string }).outcome).toBe("CLIENT_TIMEOUT");
+    expect((commits[0] as { estimatedAmountAtomic: string }).estimatedAmountAtomic).toBe("0");
+    expect((commits[0] as { outcomeKind?: unknown }).outcomeKind).toBe("FAILURE");
   });
 
   it("propagates commitEstimated failure after a reserved success", async () => {

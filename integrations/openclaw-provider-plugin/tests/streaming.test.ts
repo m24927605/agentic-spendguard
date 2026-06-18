@@ -123,6 +123,8 @@ describe("OpenClaw usage and streaming settlement", () => {
     expect(thrown instanceof Error).toBe(true);
     expect(commits.length).toBe(1);
     expect((commits[0] as { outcome: string }).outcome).toBe("RUN_ABORTED");
+    expect((commits[0] as { estimatedAmountAtomic: string }).estimatedAmountAtomic).toBe("0");
+    expect((commits[0] as { outcomeKind?: unknown }).outcomeKind).toBe("FAILURE");
   });
 
   it("classifies provider stream throws as PROVIDER_ERROR exactly once", async () => {
@@ -162,6 +164,8 @@ describe("OpenClaw usage and streaming settlement", () => {
     expect(thrown instanceof Error).toBe(true);
     expect(commits.length).toBe(1);
     expect((commits[0] as { outcome: string }).outcome).toBe("PROVIDER_ERROR");
+    expect((commits[0] as { estimatedAmountAtomic: string }).estimatedAmountAtomic).toBe("0");
+    expect((commits[0] as { outcomeKind?: unknown }).outcomeKind).toBe("FAILURE");
   });
 
   it("settles RUN_ABORTED exactly once when the consumer returns early", async () => {
@@ -195,6 +199,8 @@ describe("OpenClaw usage and streaming settlement", () => {
 
     expect(commits.length).toBe(1);
     expect((commits[0] as { outcome: string }).outcome).toBe("RUN_ABORTED");
+    expect((commits[0] as { estimatedAmountAtomic: string }).estimatedAmountAtomic).toBe("0");
+    expect((commits[0] as { outcomeKind?: unknown }).outcomeKind).toBe("FAILURE");
   });
 
   it("does not issue a second failure commit when terminal SUCCESS settlement rejects", async () => {

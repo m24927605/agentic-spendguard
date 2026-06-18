@@ -5,7 +5,7 @@
 --   - docs/output-predictor-plugin-contract-v1alpha1.md §8 (control plane API)
 --   - docs/output-predictor-plugin-contract-v1alpha1.md §7 (multi-tenant isolation)
 --   - docs/output-predictor-plugin-contract-v1alpha1.md §3 (mTLS cert pinning)
---   - docs/slices/SLICE_07_output_predictor_plugin_c.md §5
+--   - docs/internal/slices/SLICE_07_output_predictor_plugin_c.md §5
 --
 -- ## Why this table lives in the control_plane DB
 --

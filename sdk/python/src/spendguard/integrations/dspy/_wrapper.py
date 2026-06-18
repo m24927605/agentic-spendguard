@@ -45,6 +45,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import time
 from collections.abc import Callable
 from typing import Any
@@ -130,6 +131,110 @@ _PENDING: dict[str, _CallState] = {}
 # default reservation TTL so a swept entry corresponds to a reservation
 # the ledger will TTL-release naturally.
 _PENDING_TTL_SECONDS = 300
+
+
+# ─────────────────────────────────────────────────────────────────────
+# Sync-from-async bridge — per-callback background event loop in a
+# dedicated daemon thread. DSPy callbacks are sync; the SpendGuard
+# client is async-only and its grpc.aio channel binds to the loop it
+# is first used on. Bare ``asyncio.run`` per call spins up AND tears
+# down a fresh loop each invocation, so the second call drives the
+# channel against a *closed* loop — a fail-open hazard because the POST
+# path swallows the resulting loop error and returns "success" without
+# a recorded commit.
+#
+# Owning ONE persistent loop for the callback's lifetime keeps the
+# channel bound to a single live loop across on_lm_start / on_lm_end.
+# Mirrors the proven llamaindex bridge (``llamaindex/_hook.py``).
+# ─────────────────────────────────────────────────────────────────────
+
+
+class _AsyncBridge:
+    """Per-callback background thread running a persistent asyncio loop.
+
+    Owns one daemon thread and one ``asyncio.AbstractEventLoop``. Each
+    ``run(coro)`` call schedules the coroutine on the background loop
+    via ``run_coroutine_threadsafe`` and blocks on the resulting
+    ``concurrent.futures.Future`` until completion. The loop survives
+    the lifetime of the bridge instance so the client's grpc.aio
+    channel stays bound to one live loop across every callback.
+
+    Mirrors ``spendguard.integrations.llamaindex._hook._AsyncBridge``.
+    """
+
+    def __init__(self) -> None:
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._thread: threading.Thread | None = None
+        self._ready = threading.Event()
+        self._closed = False
+        self._start_lock = threading.Lock()
+
+    def _start(self) -> None:
+        """Spin up the background thread + loop on first use (lazy)."""
+        # Fast path: already started AND loop visible — no lock contention.
+        if self._thread is not None and self._loop is not None:
+            return
+        with self._start_lock:
+            # Double-check under the lock — another thread may have
+            # initialised between the fast-path check and the acquire.
+            if self._thread is None:
+
+                def _run() -> None:
+                    loop = asyncio.new_event_loop()
+                    self._loop = loop
+                    asyncio.set_event_loop(loop)
+                    self._ready.set()
+                    try:
+                        loop.run_forever()
+                    finally:
+                        try:
+                            loop.close()
+                        except Exception:  # noqa: BLE001, S110 — shutdown best-effort
+                            pass  # noqa: S110
+
+                self._thread = threading.Thread(
+                    target=_run,
+                    name="spendguard-dspy-bridge",
+                    daemon=True,
+                )
+                self._thread.start()
+        # Every caller blocks on the ready event until the spawned thread
+        # has installed the loop.
+        self._ready.wait(timeout=5.0)
+        if self._loop is None:
+            raise RuntimeError(
+                "spendguard-dspy-bridge failed to start its asyncio loop "
+                "within 5s; check thread allowance / resource limits."
+            )
+
+    def run(self, coro: Any) -> Any:  # noqa: ANN401 — async client returns vary
+        """Run ``coro`` on the background loop; block on its result.
+
+        Whatever the coroutine raises is re-raised in the calling thread
+        via ``Future.result()`` exception propagation, so fail-closed
+        reserve errors still surface to the DSPy caller unchanged.
+        """
+        if self._closed:
+            raise RuntimeError(
+                "spendguard-dspy-bridge has been closed; construct a "
+                "fresh callback."
+            )
+        self._start()
+        assert self._loop is not None  # _start() guarantees this
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return fut.result()
+
+    def close(self) -> None:
+        """Stop the loop + join the background thread."""
+        if self._closed:
+            return
+        self._closed = True
+        loop = self._loop
+        thread = self._thread
+        if loop is not None and not loop.is_closed():
+            loop.call_soon_threadsafe(loop.stop)
+        if thread is not None:
+            thread.join(timeout=2.0)
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -359,6 +464,12 @@ class SpendGuardDSPyCallback(_CallbackBase):  # type: ignore[misc, valid-type]
         )
         self._fail_closed = fail_closed
         self._route = route
+        # Persistent background loop owned by this callback. Every
+        # sidecar RPC (reserve in on_lm_start, commit/release in
+        # on_lm_end) is dispatched onto it so the client's grpc.aio
+        # channel stays bound to one live loop for the callback's
+        # lifetime. Lazily started on first use.
+        self._bridge = _AsyncBridge()
         self._fail_open_dev: bool = (
             os.environ.get("SPENDGUARD_DSPY_FAIL_OPEN") == "1"
         )
@@ -462,7 +573,7 @@ class SpendGuardDSPyCallback(_CallbackBase):  # type: ignore[misc, valid-type]
         token: contextvars.Token[bool] = _SHIM_IN_FLIGHT.set(True)
 
         try:
-            outcome: DecisionOutcome = asyncio.run(
+            outcome: DecisionOutcome = self._bridge.run(
                 self._client.request_decision(
                     trigger="LLM_CALL_PRE",
                     run_id=run_id,
@@ -616,7 +727,7 @@ class SpendGuardDSPyCallback(_CallbackBase):  # type: ignore[misc, valid-type]
                 provider_event_id = ""
 
             try:
-                asyncio.run(
+                self._bridge.run(
                     self._client.emit_llm_call_post(
                         run_id=state.run_id,
                         step_id=state.step_id,
@@ -642,15 +753,14 @@ class SpendGuardDSPyCallback(_CallbackBase):  # type: ignore[misc, valid-type]
                     post_exc,
                 )
             except RuntimeError as rt_exc:
-                # asyncio.run can raise RuntimeError when called from a
-                # running loop — under on_lm_end this is unexpected
-                # (DSPy 2.6 hooks are sync) but tolerate it so the
-                # original LM exception path is preserved.
+                # The background bridge can raise RuntimeError if its loop
+                # failed to start or the bridge was closed; tolerate it so
+                # the original LM exception path is preserved. The
+                # reservation TTL-sweeps as the durable backstop.
                 log.warning(
                     "spendguard.integrations.dspy: emit_llm_call_post "
-                    "raised RuntimeError for call_id=%s err=%r; likely "
-                    "running inside an event loop — reservation will "
-                    "TTL-sweep.",
+                    "raised RuntimeError for call_id=%s err=%r; bridge "
+                    "loop unavailable — reservation will TTL-sweep.",
                     call_id,
                     rt_exc,
                 )
@@ -787,6 +897,21 @@ class SpendGuardDSPyCallback(_CallbackBase):  # type: ignore[misc, valid-type]
                 window_instance_id=binding.window_instance_id,
             )
         ]
+
+    def close(self) -> None:
+        """Stop the background bridge loop + join its thread.
+
+        Operators should call this on application shutdown. The client
+        is owned by the caller and is NOT closed here. Idempotent.
+        """
+        self._bridge.close()
+
+    def __del__(self) -> None:  # pragma: no cover — GC timing-dependent
+        """Best-effort bridge tear-down at GC time."""
+        try:
+            self._bridge.close()
+        except Exception:  # noqa: BLE001, S110 — GC best-effort
+            pass  # noqa: S110
 
     # ─────────────────────────────────────────────────────────────────
     # Test surface — inspectors

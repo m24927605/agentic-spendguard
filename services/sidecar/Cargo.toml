@@ -49,6 +49,10 @@ sha2 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 base64 = "0.22"
+# X.509 leaf parsing for per-tenant SPIFFE-URI SAN pinning on the HTTP
+# companion mTLS surface (D09 SLICE 6 / HARDEN_08). Mirrors the version
+# used by services/output_predictor for the predictor-client SVID path.
+x509-parser = "0.16"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -130,6 +134,12 @@ http-companion-test-support = ["dep:rcgen"]
 testcontainers = "0.23"
 pretty_assertions = "1"
 tempfile = "3"
+# rcgen is also an optional [dependencies] entry (feature-gated out of
+# release builds). It is additionally a dev-dependency so lib unit tests
+# (`#[cfg(test)]`, e.g. http_companion::mtls::placeholder_for_tests) can
+# mint ephemeral certs without enabling http-companion-test-support.
+# dev-dependencies never link into release binaries.
+rcgen = { version = "0.13" }
 
 # D09 SLICE 1: integration tests use reqwest as an mTLS client. rcgen
 # is gated behind the `http-companion-test-support` feature in

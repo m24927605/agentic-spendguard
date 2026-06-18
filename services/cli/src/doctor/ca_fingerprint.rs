@@ -183,8 +183,16 @@ pub fn check_with_trust(
     // should re-run with the same scope; we don't auto-probe both
     // because that would surface "missing from system" warnings on
     // user-scope installs.
+    //
+    // We call `verify_trusted` (present AND actually trusted as a root),
+    // NOT `verify_installed` (presence only). A present-but-untrusted CA —
+    // e.g. one whose macOS trust settings were denied/removed — must NOT
+    // report Healthy: that over-reports health in the less-safe direction
+    // for a control whose whole job is to confirm the MITM CA is trusted.
+    // `Err(_)` (locked keychain / backend failure / any inconclusive
+    // state) stays fail-closed: it maps to NotInTrustStore, never Healthy.
     let scope = TrustScope::User;
-    match trust.verify_installed(&fingerprint, scope) {
+    match trust.verify_trusted(&pem_path, &fingerprint, scope) {
         Ok(true) => CaCheckResult::Healthy {
             fingerprint,
             trust_store_locations: trust_locations_for(scope),

@@ -123,6 +123,23 @@ pub fn compute_layering(inputs: &LayeringInputs) -> LayeringResult {
         .saturating_add(predicted_remaining_cost_atomic);
 
     // Step 5: code detection.
+    //
+    // BUDGET gate invariant (spec §4.1/§6 reconciled; contract-dsl-spec
+    // -v1alpha2.md §3.1): the gate compares `this_call_reservation +
+    // predicted_remaining_cost` (== `future_commitment_atomic`) against
+    // `budget_remaining_atomic`, which is the LIVE ledger AVAILABLE balance
+    // (sidecar sources it from ledger.QueryBudget `available_atomic`, already
+    // NET of prior reservations / cumulative spend). cumulative_cost_atomic is
+    // therefore DELIBERATELY excluded from this comparison — re-adding it would
+    // double-count prior spend already netted out of `budget_remaining_atomic`
+    // and produce false RUN_BUDGET_PROJECTION_EXCEEDED stops. cumulative is
+    // still folded into the REPORTED `projection_atomic` diagnostic above.
+    // Pinned by `live_available_budget_does_not_double_count_prior_spend` and
+    // `budget_gate_excludes_cumulative_invariant`.
+    //
+    // RUN_BUDGET_PROJECTION_EXCEEDED is an ADVISORY projection code; the ledger
+    // reserve path remains the hard money-stop oracle (single_writer_per_budget
+    // atomic claim), so this advisory gate never substitutes for that fence.
     let mut considered = Vec::with_capacity(3);
     if future_commitment_atomic > inputs.budget_remaining_atomic {
         considered.push(RunCode::BudgetProjectionExceeded);
@@ -228,6 +245,43 @@ mod tests {
         i.budget_remaining_atomic = 999;
         let r = compute_layering(&i);
         assert_eq!(r.emitted_code, Some(RunCode::BudgetProjectionExceeded));
+    }
+
+    #[test]
+    fn budget_gate_excludes_cumulative_invariant() {
+        // INVARIANT (contract-drift reconciliation): `budget_remaining_atomic`
+        // is the LIVE ledger available balance, already net of prior spend.
+        // The BUDGET gate therefore compares ONLY
+        // `this_call_reservation + predicted_remaining_cost` against it and
+        // MUST be invariant to cumulative_cost_atomic. Pinned so a future change
+        // that "makes the code match the older spec formula" (adding cumulative
+        // back into the gate) is caught as a regression — that direction would
+        // double-count and over-trigger this money-stop control.
+        let mut a = baseline_inputs();
+        a.cumulative_cost_atomic = 0;
+        a.this_call_reservation_atomic = 100;
+        a.signal1_predicted_remaining_steps = 4;
+        a.per_step_baseline_atomic = 100; // future predicted = 400
+        a.budget_remaining_atomic = 500; // 100 + 400 == 500, NOT > → no code
+
+        let mut b = a.clone();
+        // Same live-available budget, but a large prior cumulative spend. If the
+        // gate (incorrectly) re-added cumulative, this would now exceed.
+        b.cumulative_cost_atomic = 1_000_000;
+
+        let ra = compute_layering(&a);
+        let rb = compute_layering(&b);
+        assert_eq!(
+            ra.emitted_code, None,
+            "future commitment 500 is not > live available 500"
+        );
+        assert_eq!(
+            rb.emitted_code, ra.emitted_code,
+            "BUDGET gate must be invariant to cumulative_cost_atomic (live available is already net of prior spend)"
+        );
+        // The reported diagnostic projection, by contrast, DOES include cumulative.
+        assert_eq!(ra.projection_atomic, 500); // 0 + 100 + 400
+        assert_eq!(rb.projection_atomic, 1_000_500); // 1_000_000 + 100 + 400
     }
 
     #[test]

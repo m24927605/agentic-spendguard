@@ -6,7 +6,7 @@
 # string, not connected to.
 """COV_D11_S4 — ``SpendGuardGuardrail`` env-driven factory tests.
 
-Tier 1 unit tests per ``docs/slices/COV_D11_S4_env_defaults.md`` test
+Tier 1 unit tests per ``docs/internal/slices/COV_D11_S4_env_defaults.md`` test
 plan + ``docs/specs/coverage/D11_litellm_proxy_plugin/review-standards.md``
 §Slice 4 reviewer checklist (4.1 - 4.7, scope-cut subset).
 

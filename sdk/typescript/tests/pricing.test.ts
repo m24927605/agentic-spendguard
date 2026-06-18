@@ -17,6 +17,7 @@
 
 import { describe, expect, it } from "vitest";
 
+import { PricingMissingError } from "../src/errors.js";
 import { PricingLookup, USD_MICROS_PER_USD } from "../src/pricing.js";
 
 describe("USD_MICROS_PER_USD", () => {
@@ -125,12 +126,40 @@ describe("PricingLookup.usdMicrosForCall()", () => {
     expect(got).toBe(300);
   });
 
-  it("returns 0 µUSD when model is unknown and no default fallback is available", () => {
+  it("THROWS PricingMissingError when a non-zero bucket has no resolvable price (fail-closed, never $0)", () => {
+    expect(() =>
+      pricing.usdMicrosForCall({
+        provider: "fictional",
+        model: "fictional-1",
+        inputTokens: 1000,
+        outputTokens: 500,
+      }),
+    ).toThrowError(PricingMissingError);
+  });
+
+  it("PricingMissingError carries the offending provider/model/tokenKind", () => {
+    try {
+      pricing.usdMicrosForCall({
+        provider: "fictional",
+        model: "fictional-1",
+        inputTokens: 1000,
+      });
+      throw new Error("expected PricingMissingError");
+    } catch (e) {
+      expect(e).toBeInstanceOf(PricingMissingError);
+      const err = e as PricingMissingError;
+      expect(err.provider).toBe("fictional");
+      expect(err.model).toBe("fictional-1");
+      expect(err.tokenKind).toBe("input");
+    }
+  });
+
+  it("does NOT throw for an unknown model when all token counts are 0 (no charge attributed)", () => {
     const got = pricing.usdMicrosForCall({
       provider: "fictional",
       model: "fictional-1",
-      inputTokens: 1000,
-      outputTokens: 500,
+      inputTokens: 0,
+      outputTokens: 0,
     });
     expect(got).toBe(0);
   });

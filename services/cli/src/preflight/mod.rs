@@ -95,11 +95,18 @@ impl<'a> BaseEnv<'a> {
     }
 
     /// Resolved `$HOME` path; gates compute `~/.gemini/oauth_creds.json`
-    /// off this. Panics with a clear message rather than silently
-    /// degrading detection — a missing HOME on the install path is
-    /// already surfaced by the SLICE 5 shell-rc resolver, and the Gemini
-    /// detector treats `home() = "<unset>"` as "not installed" (the
-    /// oauth_creds.json path will not exist).
+    /// off this. When `home` is `None` this returns a `/` sentinel rather
+    /// than panicking, which makes the Gemini detector degrade to
+    /// `NotInstalled` (the `/.gemini/oauth_creds.json` probe will not
+    /// exist).
+    ///
+    /// This read-only degrade is acceptable for the doctor / uninstall
+    /// paths (main.rs), but it is NOT acceptable for the install/mutation
+    /// path: an unresolvable HOME there silently bypasses the Gemini OAuth
+    /// safety gate. The install seam therefore treats `home.is_none()` as
+    /// INCONCLUSIVE and refuses (see
+    /// [`crate::install_with_preflight_env`]); it must not rely on this
+    /// sentinel for a security decision.
     pub fn home(&self) -> &Path {
         // Returning a sentinel "/" rather than panicking keeps the
         // detector pure — the metadata probe below will simply return
@@ -132,15 +139,35 @@ pub enum PreflightRefusal {
     /// GOOGLE_APPLICATION_CREDENTIALS set. Carries the full multi-line
     /// refusal message from the slice doc verbatim.
     GeminiOauthFreetier(String),
+    /// HOME / USERPROFILE could not be resolved on the install/mutation
+    /// path, so the Gemini OAuth gate cannot be evaluated. We treat an
+    /// unresolvable HOME as INCONCLUSIVE (not "not installed") and refuse
+    /// rather than silently bypassing the safety gate. The operator can
+    /// re-run with HOME set or pass `--force-allow-gemini-oauth`.
+    GeminiOauthInconclusiveHome(String),
 }
 
 impl std::fmt::Display for PreflightRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             PreflightRefusal::GeminiOauthFreetier(msg) => f.write_str(msg),
+            PreflightRefusal::GeminiOauthInconclusiveHome(msg) => f.write_str(msg),
         }
     }
 }
+
+/// User-facing refusal when HOME/USERPROFILE cannot be resolved on the
+/// install path, so the Gemini OAuth free-tier gate cannot be evaluated.
+/// The `--force-allow-gemini-oauth` escape hatch already exists, so the
+/// recovery path is wired.
+pub const INCONCLUSIVE_HOME_MESSAGE: &str = "Refusing to install: cannot resolve HOME (neither HOME nor USERPROFILE is set), so SpendGuard cannot check whether Gemini CLI is using OAuth free-tier authentication.
+
+Installing without this check could silently break an existing Gemini CLI sign-in that relies on Google's free OAuth tier.
+
+To proceed:
+  1. Re-run with HOME set (e.g. 'sudo -E', or export HOME), or
+  2. Use 'spendguard install --force-allow-gemini-oauth' to override
+     (your Gemini CLI may stop working until you sign out + re-auth).";
 
 impl std::error::Error for PreflightRefusal {}
 

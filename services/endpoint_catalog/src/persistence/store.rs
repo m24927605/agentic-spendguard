@@ -74,15 +74,31 @@ impl FilesystemStore {
         Ok(Self { root })
     }
 
-    fn path(&self, key: &str) -> std::path::PathBuf {
-        self.root.join(key)
+    /// Resolve a backend key to a path under `root`, failing closed on any
+    /// key that could escape the root. Uses a lexical component check (no
+    /// filesystem access) so it works for `put()` of not-yet-existing files:
+    /// reject `..` (ParentDir), absolute roots (RootDir), and Windows
+    /// prefixes (Prefix). Rejecting — rather than silently sanitizing — keeps
+    /// distinct keys from collapsing onto one path and surfaces caller bugs.
+    fn path(&self, key: &str) -> Result<std::path::PathBuf> {
+        use std::path::Component;
+        let rel = std::path::Path::new(key);
+        for component in rel.components() {
+            match component {
+                Component::Normal(_) | Component::CurDir => {}
+                Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+                    return Err(anyhow!("unsafe storage key rejected: {:?}", key));
+                }
+            }
+        }
+        Ok(self.root.join(key))
     }
 }
 
 #[async_trait]
 impl Store for FilesystemStore {
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let p = self.path(key);
+        let p = self.path(key)?;
         match tokio::fs::read(&p).await {
             Ok(bytes) => Ok(Some(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -91,7 +107,7 @@ impl Store for FilesystemStore {
     }
 
     async fn put(&self, key: &str, body: &[u8], _content_type: &str) -> Result<()> {
-        let p = self.path(key);
+        let p = self.path(key)?;
         if let Some(parent) = p.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -111,7 +127,7 @@ impl Store for FilesystemStore {
     }
 
     async fn list(&self, prefix: &str) -> Result<Vec<String>> {
-        let prefix_path = self.path(prefix);
+        let prefix_path = self.path(prefix)?;
         let mut out = Vec::new();
         let mut rd = match tokio::fs::read_dir(&prefix_path).await {
             Ok(rd) => rd,
@@ -216,5 +232,50 @@ impl Store for S3Store {
             })
             .map(|name| format!("{}{}", prefix, name))
             .collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn store() -> FilesystemStore {
+        FilesystemStore {
+            root: std::path::PathBuf::from("/srv/catalog"),
+        }
+    }
+
+    #[test]
+    fn path_accepts_legitimate_keys() {
+        let s = store();
+        // The exact keys/prefixes the handlers and publisher use.
+        assert_eq!(
+            s.path("manifest.json").unwrap(),
+            std::path::PathBuf::from("/srv/catalog/manifest.json")
+        );
+        assert_eq!(
+            s.path("catalogs/ctlg-rev1.json").unwrap(),
+            std::path::PathBuf::from("/srv/catalog/catalogs/ctlg-rev1.json")
+        );
+        assert_eq!(
+            s.path("catalogs/").unwrap(),
+            std::path::PathBuf::from("/srv/catalog/catalogs/")
+        );
+    }
+
+    #[test]
+    fn path_rejects_traversal_and_absolute_keys() {
+        let s = store();
+        // Fail closed: every escaping key must error, not be silently clamped.
+        for bad in [
+            "..",
+            "../etc/passwd",
+            "../../catalogs/x",
+            "catalogs/../../etc/passwd",
+            "/etc/passwd",
+            "/manifest.json",
+        ] {
+            assert!(s.path(bad).is_err(), "expected rejection for key {bad:?}");
+        }
     }
 }

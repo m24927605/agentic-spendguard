@@ -115,6 +115,7 @@ export {
   DecisionStopped,
   HandshakeError,
   MutationApplyFailed,
+  PricingMissingError,
   SidecarUnavailable,
   SpendGuardConfigError,
   SpendGuardConnectionError,

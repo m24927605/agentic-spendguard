@@ -35,6 +35,8 @@
 
 import type { Span, SpanStatusCode, Tracer } from "@opentelemetry/api";
 
+import type { SpanRecord } from "./config.js";
+
 /**
  * Frozen set of OTel attribute keys that `withOtelSpan` honors. The keys
  * match the table in design.md §6.4 verbatim — adapters that change them
@@ -108,8 +110,18 @@ export type OtelAttributes = Readonly<Record<string, OtelAttributeValue | undefi
  *     span — OTel treats missing keys identically and omitting them keeps the
  *     wire payload tighter).
  *
- * @param tracer Optional OTel `Tracer`. When `undefined`, `fn()` runs
- *   unwrapped. When defined, MUST be an `@opentelemetry/api` v1.9+ tracer.
+ * Lightweight `onSpan` observer:
+ *   - When `onSpan` is provided (and `tracer` is not — the two are mutually
+ *     exclusive per `SpendGuardClientConfig`), each call emits exactly one
+ *     `SpanRecord` to `onSpan` in the `finally` block with the wall-clock
+ *     `startTimeMs` / `durationMs`, the same (scalar) attribute map, and the
+ *     thrown `error` if `fn()` failed. This is the no-OTel-dep tracing path
+ *     advertised by `SpendGuardClientConfig.onSpan`.
+ *   - When BOTH `tracer` and `onSpan` are undefined, `fn()` runs unwrapped
+ *     with zero timing/allocation overhead (unchanged fast path).
+ *
+ * @param tracer Optional OTel `Tracer`. When `undefined`, no OTel span is
+ *   created. When defined, MUST be an `@opentelemetry/api` v1.9+ tracer.
  * @param rpcName Bare RPC name; the span name is `spendguard.<rpcName>`.
  *   Caller MUST NOT prefix with `spendguard.` themselves (this function
  *   does it).
@@ -117,6 +129,9 @@ export type OtelAttributes = Readonly<Record<string, OtelAttributeValue | undefi
  *   are filtered out.
  * @param fn The RPC implementation. Its return value is the function's
  *   return value; its throws are recorded and re-thrown.
+ * @param onSpan Optional `SpanRecord` observer (the lighter-weight tracing
+ *   path for adapters that don't pull `@opentelemetry/api`). Invoked once per
+ *   call in `finally`. Mutually exclusive with `tracer` at the config layer.
  *
  * @returns The result of `fn()`. Rethrows whatever `fn()` throws.
  *
@@ -126,15 +141,17 @@ export type OtelAttributes = Readonly<Record<string, OtelAttributeValue | undefi
  *     [SPENDGUARD_OTEL_ATTR.DECISION_ID]: req.decisionId,
  *   }, async () => {
  *     return await client.requestDecision(...);
- *   });
+ *   }, cfg.onSpan);
  */
 export async function withOtelSpan<T>(
   tracer: Tracer | undefined,
   rpcName: string,
   attributes: OtelAttributes,
   fn: () => Promise<T>,
+  onSpan?: (span: SpanRecord) => void,
 ): Promise<T> {
-  if (tracer === undefined) return await fn();
+  // Fast path: no observability wired at all → run unwrapped, zero overhead.
+  if (tracer === undefined && onSpan === undefined) return await fn();
 
   const spanName = `spendguard.${rpcName}`;
   // Filter undefined attribute values — OTel's `Attributes` map treats
@@ -143,6 +160,24 @@ export async function withOtelSpan<T>(
   for (const [k, v] of Object.entries(attributes)) {
     if (v !== undefined) filtered[k] = v;
   }
+
+  // ── onSpan-only path (no OTel dep) ──────────────────────────────────────
+  if (tracer === undefined) {
+    const startTimeMs = Date.now();
+    let error: Error | undefined;
+    try {
+      return await fn();
+    } catch (err) {
+      error = err instanceof Error ? err : new Error(String(err));
+      throw err;
+    } finally {
+      emitSpanRecord(onSpan, spanName, startTimeMs, filtered, error);
+    }
+  }
+
+  // ── OTel-tracer path (optionally ALSO feeding onSpan for completeness) ──
+  const startTimeMs = Date.now();
+  let observerError: Error | undefined;
   const span: Span = tracer.startSpan(spanName, { attributes: filtered });
   try {
     const result = await fn();
@@ -151,16 +186,54 @@ export async function withOtelSpan<T>(
     // recordException accepts unknown / Error / string; cast to satisfy the
     // overload set. We preserve the original throw — never silently swallow.
     if (err instanceof Error) {
+      observerError = err;
       span.recordException(err);
       span.setStatus({ code: SPAN_STATUS_ERROR, message: err.message });
     } else {
       const message = typeof err === "string" ? err : String(err);
+      observerError = new Error(message);
       span.recordException({ name: "SpendGuardError", message });
       span.setStatus({ code: SPAN_STATUS_ERROR, message });
     }
     throw err;
   } finally {
     span.end();
+    emitSpanRecord(onSpan, spanName, startTimeMs, filtered, observerError);
+  }
+}
+
+/**
+ * Build a `SpanRecord` from the captured timing + scalar attributes and hand
+ * it to `onSpan`. No-op when `onSpan` is undefined. Array-valued attributes
+ * (e.g. reason-code lists) are dropped — `SpanRecord.attributes` is a scalar
+ * map; the start-time attribute set is already all-scalar in practice.
+ */
+function emitSpanRecord(
+  onSpan: ((span: SpanRecord) => void) | undefined,
+  name: string,
+  startTimeMs: number,
+  filtered: Record<string, OtelAttributeValue>,
+  error: Error | undefined,
+): void {
+  if (onSpan === undefined) return;
+  const attributes: Record<string, string | number | boolean> = {};
+  for (const [k, v] of Object.entries(filtered)) {
+    if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+      attributes[k] = v;
+    }
+  }
+  const record: SpanRecord = {
+    name,
+    startTimeMs,
+    durationMs: Date.now() - startTimeMs,
+    attributes,
+    ...(error !== undefined ? { error } : {}),
+  };
+  // Never let an observer callback failure mask the RPC result/throw.
+  try {
+    onSpan(record);
+  } catch {
+    // swallow — observability must not affect enforcement behavior
   }
 }
 

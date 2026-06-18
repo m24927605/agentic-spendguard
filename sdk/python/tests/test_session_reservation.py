@@ -311,7 +311,19 @@ async def test_tp_d41s_11_client_commit_and_release_session_map_outcomes() -> No
     assert release.recorded_at.isoformat() == "2026-06-12T03:05:00+00:00"
 
 
-@pytest.mark.parametrize("amount", ["0", "-1", "1.5"])
+@pytest.mark.parametrize(
+    "amount",
+    [
+        "0",
+        "-1",
+        "1.5",
+        # Non-ASCII Unicode decimal digits: isdecimal() accepts these
+        # but the Rust ledger only takes b'0'..=b'9'. Must fail closed.
+        "٢٥٠٠",  # Arabic-Indic ٢٥٠٠
+        "१००",  # Devanagari १००
+        "²",  # superscript two
+    ],
+)
 def test_tp_d41s_13_rejects_non_positive_commit_delta(amount: str) -> None:
     with pytest.raises(ValueError):
         build_commit_session_delta_request(

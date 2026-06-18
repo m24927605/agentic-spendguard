@@ -5,7 +5,7 @@
 --   - docs/stats-aggregator-spec-v1alpha1.md §5 (authoritative DDL)
 --   - docs/stats-aggregator-spec-v1alpha1.md §3.2 (bucket key)
 --   - docs/stats-aggregator-spec-v1alpha1.md §9 (multi-tenant isolation)
---   - docs/slices/SLICE_06_output_predictor_a_b_stats_aggregator.md §5
+--   - docs/internal/slices/SLICE_06_output_predictor_a_b_stats_aggregator.md §5
 --   - docs/output-predictor-service-spec-v1alpha1.md §4 (B cache consumer)
 --
 -- ## Why this table lives in canonical_ingest DB

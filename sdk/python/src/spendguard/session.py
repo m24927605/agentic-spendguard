@@ -402,7 +402,14 @@ def timestamp_to_datetime(value: Timestamp | None) -> datetime | None:
 
 
 def _assert_positive_decimal(value: str, field: str) -> None:
-    if not value.isdecimal():
+    # Require ASCII digits only. ``isdecimal()`` accepts non-ASCII
+    # Unicode decimal digits (Arabic-Indic, Devanagari, etc.) which
+    # would pass the int() compare here but be a non-ASCII byte string
+    # on the wire — the Rust ledger only accepts b'0'..=b'9', so a
+    # validated amount could disagree with the ledger's normalized
+    # value. ``isascii() and isdigit()`` matches the ledger contract
+    # exactly and fails closed on ambiguous input.
+    if not (value.isascii() and value.isdigit()):
         raise ValueError(f"{field} must be a positive decimal string")
     if int(value) <= 0:
         raise ValueError(f"{field} must be greater than zero")

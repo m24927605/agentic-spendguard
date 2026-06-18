@@ -12,6 +12,8 @@ use std::sync::Arc;
 pub enum CycleOutcome {
     Ok,
     Err,
+    /// S1: cycle skipped because this replica is not the lease leader.
+    Skipped,
 }
 
 impl CycleOutcome {
@@ -19,6 +21,7 @@ impl CycleOutcome {
         match self {
             Self::Ok => "ok",
             Self::Err => "err",
+            Self::Skipped => "skipped",
         }
     }
 }
@@ -27,6 +30,7 @@ impl CycleOutcome {
 pub struct UsagePollerMetricsInner {
     cycles_ok: AtomicU64,
     cycles_err: AtomicU64,
+    cycles_skipped: AtomicU64,
     records_fetched: AtomicU64,
     records_inserted: AtomicU64,
     records_deduped: AtomicU64,
@@ -46,6 +50,7 @@ impl UsagePollerMetrics {
         let target = match outcome {
             CycleOutcome::Ok => &self.inner.cycles_ok,
             CycleOutcome::Err => &self.inner.cycles_err,
+            CycleOutcome::Skipped => &self.inner.cycles_skipped,
         };
         target.fetch_add(1, Ordering::Relaxed);
     }
@@ -73,6 +78,10 @@ impl UsagePollerMetrics {
         out.push_str(&format!(
             "spendguard_usage_poller_cycles_total{{outcome=\"err\"}} {}\n",
             self.inner.cycles_err.load(Ordering::Relaxed),
+        ));
+        out.push_str(&format!(
+            "spendguard_usage_poller_cycles_total{{outcome=\"skipped\"}} {}\n",
+            self.inner.cycles_skipped.load(Ordering::Relaxed),
         ));
         out.push_str(
             "# HELP spendguard_usage_poller_records_total Records counted by lifecycle stage.\n",
@@ -104,9 +113,13 @@ mod tests {
         m.inc_cycle(CycleOutcome::Ok);
         m.inc_cycle(CycleOutcome::Ok);
         m.inc_cycle(CycleOutcome::Err);
+        m.inc_cycle(CycleOutcome::Skipped);
+        m.inc_cycle(CycleOutcome::Skipped);
+        m.inc_cycle(CycleOutcome::Skipped);
         let txt = m.render();
         assert!(txt.contains("cycles_total{outcome=\"ok\"} 2"));
         assert!(txt.contains("cycles_total{outcome=\"err\"} 1"));
+        assert!(txt.contains("cycles_total{outcome=\"skipped\"} 3"));
     }
 
     #[test]

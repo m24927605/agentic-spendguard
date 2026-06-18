@@ -12,6 +12,7 @@
 import type { Attributes, Span, Tracer } from "@opentelemetry/api";
 import { describe, expect, it, vi } from "vitest";
 
+import type { SpanRecord } from "../src/config.js";
 import { SPENDGUARD_OTEL_ATTR, setOtelSpanAttributes, withOtelSpan } from "../src/otel.js";
 
 // ── Mock tracer ────────────────────────────────────────────────────────────
@@ -150,6 +151,59 @@ describe("withOtelSpan — tracer-present path (design §6.4)", () => {
     const attrs = calls[0]?.attributes ?? {};
     expect(attrs["spendguard.tenant_id"]).toBe("t");
     expect("spendguard.decision_id" in attrs).toBe(false);
+  });
+});
+
+describe("withOtelSpan — onSpan observer path (no OTel dep)", () => {
+  it("invokes onSpan once with a SpanRecord on success", async () => {
+    const records: SpanRecord[] = [];
+    const out = await withOtelSpan(
+      undefined,
+      "reserve",
+      { [SPENDGUARD_OTEL_ATTR.TENANT_ID]: "t", [SPENDGUARD_OTEL_ATTR.DECISION_ID]: undefined },
+      async () => "ok",
+      (r) => records.push(r),
+    );
+    expect(out).toBe("ok");
+    expect(records).toHaveLength(1);
+    expect(records[0]?.name).toBe("spendguard.reserve");
+    expect(records[0]?.attributes["spendguard.tenant_id"]).toBe("t");
+    // undefined attribute dropped
+    expect("spendguard.decision_id" in (records[0]?.attributes ?? {})).toBe(false);
+    expect(typeof records[0]?.startTimeMs).toBe("number");
+    expect(typeof records[0]?.durationMs).toBe("number");
+    expect(records[0]?.error).toBeUndefined();
+  });
+
+  it("invokes onSpan with the error set when fn() throws, and rethrows", async () => {
+    const records: SpanRecord[] = [];
+    const err = new Error("boom");
+    await expect(
+      withOtelSpan(
+        undefined,
+        "reserve",
+        {},
+        async () => {
+          throw err;
+        },
+        (r) => records.push(r),
+      ),
+    ).rejects.toBe(err);
+    expect(records).toHaveLength(1);
+    expect(records[0]?.error).toBe(err);
+  });
+
+  it("an onSpan callback that throws does not mask the RPC result", async () => {
+    const out = await withOtelSpan(
+      undefined,
+      "reserve",
+      {},
+      async () => "ok",
+      () => {
+        throw new Error("observer blew up");
+      },
+    );
+    expect(out).toBe("ok");
   });
 });
 

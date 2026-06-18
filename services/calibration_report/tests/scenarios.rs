@@ -2,7 +2,7 @@
 //!
 //! Spec ancestor: `docs/calibration-report-spec-v1alpha1.md` §0.2
 //! (DRAFT → LOCKED criterion #4: 5 synthetic scenarios) +
-//! `docs/slices/SLICE_13_calibration_report_cli.md` §8.4.
+//! `docs/internal/slices/SLICE_13_calibration_report_cli.md` §8.4.
 //!
 //! Five synthetic scenarios + cross-tenant rejection + window
 //! validation. Each test builds a `Report` fixture directly and

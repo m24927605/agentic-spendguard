@@ -3,7 +3,7 @@
 # tokens; the test never speaks to an actual sidecar / LLM provider.
 """COV_D11_S2 — ``SpendGuardGuardrail.async_pre_call_hook`` wiring tests.
 
-Tier 1 unit tests per ``docs/slices/COV_D11_S2_pre_call.md`` test plan
+Tier 1 unit tests per ``docs/internal/slices/COV_D11_S2_pre_call.md`` test plan
 + ``docs/specs/coverage/D11_litellm_proxy_plugin/review-standards.md``
 §Slice 2 reviewer checklist (2.1 - 2.4).
 

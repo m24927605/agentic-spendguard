@@ -1,7 +1,7 @@
 -- Down-migration: reverse 0046_audit_outbox_prediction_columns.sql
 -- (round-2 fix m2; round-3 fixes M4 + M10).
 --
--- Spec ref: docs/slices/SLICE_01_canonical_events_migration.md §11
+-- Spec ref: docs/internal/slices/SLICE_01_canonical_events_migration.md §11
 --   rollback plan.
 --
 -- ## Rollback order (per slice §11; round-4 fix B1 — header rewritten to
@@ -39,7 +39,7 @@
 -- Round-4 M4 rename: the GUC name embeds the migration number so a
 -- single SET ... = 'on' cannot cascade across multiple destructive
 -- down files. Each file requires its own SET. The exact form to use is
--- documented in docs/slices/SLICE_01_canonical_events_migration.md §11
+-- documented in docs/internal/slices/SLICE_01_canonical_events_migration.md §11
 -- rollback runbook with the quoting convention.
 --
 -- Round-5 N12-A: SET, NOT SET LOCAL. The migration runner invokes psql

@@ -75,6 +75,8 @@
 use crate::trust::{CommandOutput, CommandRunner, StdCommandRunner, TrustStore};
 use crate::TrustScope;
 use anyhow::{anyhow, Context, Result};
+use base64::Engine as _;
+use sha2::{Digest, Sha256};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -643,13 +645,65 @@ fn copy_pem_into(src: &Path, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// True when the file at `path` contains `fingerprint_hex` as a case-
-/// insensitive substring on any line. Used both for anchor-file probing
-/// and merged-bundle probing.
+/// True when the CA/PEM bundle at `path` contains a certificate whose
+/// DER-encoded SHA-256 equals `fingerprint_hex`.
+///
+/// The anchor file (a verbatim copy of the CA PEM) and the distro merged
+/// bundle (`/etc/ssl/certs/ca-certificates.crt`,
+/// `/etc/pki/.../tls-ca-bundle.pem`) only ever contain
+/// `-----BEGIN CERTIFICATE-----` + base64(DER) blocks — never the cert's
+/// SHA-256 fingerprint as text. A plain substring grep for the hex
+/// therefore *always* missed and reported a correctly-installed CA as
+/// absent. Instead we iterate each `BEGIN/END CERTIFICATE` block, DER-hash
+/// it, and compare to the target.
+///
+/// Fail-closed contract:
+/// - A whole-file read failure propagates as `Err` (which the caller maps
+///   to "not in store" — never to a match).
+/// - A per-block base64/parse failure is skipped-and-continued; it is
+///   never treated as a match. We only return `Ok(true)` on a confirmed
+///   DER-hash equality, never on an ambiguous block.
 fn file_contains_fingerprint(path: &Path, fingerprint_hex: &str) -> Result<bool> {
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("read trust-bundle {}", path.display()))?;
-    Ok(haystack_contains_fingerprint(&contents, fingerprint_hex))
+    Ok(bundle_contains_cert_fingerprint(&contents, fingerprint_hex))
+}
+
+/// Iterate every `BEGIN/END CERTIFICATE` block in `bundle`, DER-hash each,
+/// and return `true` as soon as one matches `fingerprint_hex`
+/// (case-insensitive). Blocks that fail to base64-decode are skipped — an
+/// unparseable block is never a match, preserving the fail-closed contract
+/// (we report "trusted" only on a confirmed identity match).
+fn bundle_contains_cert_fingerprint(bundle: &str, fingerprint_hex: &str) -> bool {
+    let target = fingerprint_hex.to_ascii_lowercase();
+    let mut body = String::new();
+    let mut in_block = false;
+    for line in bundle.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("-----BEGIN") && trimmed.contains("CERTIFICATE") {
+            in_block = true;
+            body.clear();
+            continue;
+        }
+        if trimmed.starts_with("-----END") && trimmed.contains("CERTIFICATE") {
+            in_block = false;
+            // Decode + DER-hash this block; skip-and-continue on any
+            // failure so a malformed block can never short-circuit to a
+            // match.
+            if let Ok(der) = base64::engine::general_purpose::STANDARD.decode(body.as_bytes()) {
+                let digest = Sha256::digest(&der);
+                if hex::encode(digest) == target {
+                    return true;
+                }
+            }
+            body.clear();
+            continue;
+        }
+        if in_block {
+            body.push_str(trimmed);
+        }
+    }
+    false
 }
 
 /// Same defence-in-depth as the macOS backend: any string passed onto the
@@ -1021,8 +1075,10 @@ ID_LIKE=debian
         assert!(msg.contains("fail-closed"));
     }
 
-    /// `verify_installed` returns true when the fingerprint is in the
-    /// merged bundle file.
+    /// `verify_installed` returns true when a certificate whose DER SHA-256
+    /// equals the target is present in the merged bundle — matched by
+    /// DER-hashing each PEM block, NOT by grepping for the hex (which a real
+    /// `update-ca-certificates`-produced bundle never contains as text).
     #[test]
     fn verify_installed_finds_fingerprint_in_merged_bundle() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1030,21 +1086,58 @@ ID_LIKE=debian
         // verify_installed → no shell-out for Debian when merged bundle hits.
         let anchor = tmp.path().join("anchors/spendguard.crt");
         let bundle = tmp.path().join("ca-certificates.crt");
+
+        // Real CA PEM (what update-ca-certificates concatenates into the
+        // merged bundle). Surround it with a decoy cert + comment lines so
+        // we prove the block-iterating DER hash finds the *right* cert.
+        let root = crate::ca::generate_root_ca().expect("issue CA");
+        let fp = crate::ca::fingerprint_hex(&root.fingerprint_sha256);
+        let decoy = crate::ca::generate_root_ca().expect("issue decoy CA");
         // Anchor absent on purpose so we exercise the merged-bundle path.
         std::fs::write(
             &bundle,
             format!(
-                "# SpendGuard\n# SHA-256 Fingerprint: {}\n-----BEGIN CERTIFICATE-----\nfoo\n",
-                FINGERPRINT.to_uppercase()
+                "# /etc/ssl/certs/ca-certificates.crt\n{}{}",
+                decoy.cert_pem, root.cert_pem
             ),
         )
         .expect("seed bundle");
 
         let store = tempdir_debian_store(runner.clone(), anchor, bundle);
         let present = store
-            .verify_installed(FINGERPRINT, TrustScope::System)
+            .verify_installed(&fp, TrustScope::System)
             .expect("verify");
-        assert!(present, "fingerprint should be detected case-insensitively");
+        assert!(present, "DER-hash of the CA block should match the target");
+        assert!(runner.calls().is_empty(), "no shell-out expected");
+    }
+
+    /// `verify_installed` returns false when the bundle holds real certs but
+    /// none whose DER SHA-256 matches the target — the negative companion to
+    /// the merged-bundle hit, proving we do not over-match.
+    #[test]
+    fn verify_installed_false_when_bundle_lacks_target_cert() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runner = FakeRunner::new();
+        let anchor = tmp.path().join("anchors/spendguard.crt");
+        let bundle = tmp.path().join("ca-certificates.crt");
+
+        // Bundle contains a real, well-formed cert — but NOT the one we
+        // probe for. A plain substring grep would still miss; the DER-hash
+        // path must also (correctly) miss.
+        let present_ca = crate::ca::generate_root_ca().expect("issue present CA");
+        let absent_ca = crate::ca::generate_root_ca().expect("issue absent CA");
+        let absent_fp = crate::ca::fingerprint_hex(&absent_ca.fingerprint_sha256);
+        std::fs::write(
+            &bundle,
+            format!("# bundle\n{}", present_ca.cert_pem),
+        )
+        .expect("seed bundle");
+
+        let store = tempdir_debian_store(runner.clone(), anchor, bundle);
+        let present = store
+            .verify_installed(&absent_fp, TrustScope::System)
+            .expect("verify must not error");
+        assert!(!present, "absent cert must not match");
         assert!(runner.calls().is_empty(), "no shell-out expected");
     }
 

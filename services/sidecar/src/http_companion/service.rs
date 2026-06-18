@@ -521,10 +521,13 @@ impl DecisionService for RealDecisionService {
             ));
         }
         if req.tenant_id != self.cfg.tenant_id {
-            // SVID enforcement happens at the mTLS layer (review-
-            // standards §2.3) but we still gate on tenant_id assertion
-            // matching the sidecar's configured tenant for defense in
-            // depth.
+            // Cryptographic workload binding is enforced at the mTLS layer
+            // ONLY when `http_companion_expected_client_spiffe_uri` is set
+            // (the companion verifier pins the leaf URI SAN at the
+            // handshake — see http_companion::mtls). This in-body
+            // tenant_id check is defense in depth and, when the SVID pin
+            // is unset, the sole tenant gate — a same-CA peer can satisfy
+            // it, so production MUST configure the SVID pin.
             return Err(DecisionServiceError::InvalidRequest(format!(
                 "decision: tenant_id '{}' does not match sidecar tenant '{}'",
                 req.tenant_id, self.cfg.tenant_id

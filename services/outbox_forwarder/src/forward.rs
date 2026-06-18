@@ -161,6 +161,18 @@ pub async fn forward_batch(state: &mut AppState) -> anyhow::Result<usize> {
     Ok(total)
 }
 
+/// Apply the batch's forwarding-state transitions.
+///
+/// The UPDATE re-asserts `a.pending_forward = TRUE` so the write is idempotent
+/// under concurrency: claim-time `FOR UPDATE SKIP LOCKED` already prevents two
+/// pollers from selecting the same row in overlapping SELECTs, but during a
+/// leader-lease handoff (or `leader_election_mode = disabled`) two pods can
+/// still finish forwarding the same row in sequence. Re-checking the pending
+/// flag ensures only the first finalizer flips `pending_forward`/`forwarded_at`
+/// and bumps `forward_attempts`; a second pod's stale update matches zero rows
+/// (no double increment, no clobbered last_forward_error). canonical_ingest
+/// dedups the append by event_id, so the second send is already a `Deduped`
+/// no-op — correctness does not depend on leader election.
 async fn apply_updates(state: &AppState, updates: &[UpdateRow]) -> anyhow::Result<()> {
     let mut qb: QueryBuilder<sqlx::Postgres> = QueryBuilder::new(
         "UPDATE audit_outbox AS a \
@@ -179,7 +191,8 @@ async fn apply_updates(state: &AppState, updates: &[UpdateRow]) -> anyhow::Resul
     });
     qb.push(
         ") AS v(recorded_month, audit_outbox_id, pending_forward, forwarded_at, last_forward_error) \
-          WHERE a.recorded_month = v.recorded_month AND a.audit_outbox_id = v.audit_outbox_id",
+          WHERE a.recorded_month = v.recorded_month AND a.audit_outbox_id = v.audit_outbox_id \
+            AND a.pending_forward = TRUE",
     );
 
     qb.build().execute(&state.pg).await?;

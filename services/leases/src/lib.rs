@@ -375,14 +375,29 @@ impl LeaseManager for K8sLease {
                     .unwrap_or(now);
                 let prior_transitions = spec.lease_transitions.unwrap_or(0);
 
+                // resourceVersion observed in this GET. Threaded into every
+                // mutating PATCH below as a `metadata.resourceVersion`
+                // optimistic-lock precondition: the apiserver rejects the
+                // write with 409 Conflict if another pod has mutated the
+                // Lease since we read it. This is the CAS that prevents
+                // split-brain dual leaders on the takeover path (case 4)
+                // and stops a stalled renew (case 3) from re-asserting
+                // leadership over a lease another pod has already taken.
+                let observed_rv = lease.metadata.resource_version.clone();
+
                 if holder.as_deref() == Some(self.workload_id.as_str()) {
-                    // 3) Held by us — PATCH renewTime.
+                    // 3) Held by us — PATCH renewTime under a resourceVersion
+                    //    precondition. If we lost the lease (a concurrent
+                    //    takeover bumped resourceVersion), the PATCH 409s and
+                    //    we fall back to Standby/retry rather than falsely
+                    //    re-claiming Leader.
                     let patch = serde_json::json!({
+                        "metadata": { "resourceVersion": observed_rv },
                         "spec": {
                             "renewTime": MicroTime(now),
                         }
                     });
-                    let _ = self
+                    match self
                         .api
                         .patch(
                             &self.lease_name,
@@ -390,22 +405,53 @@ impl LeaseManager for K8sLease {
                             &kube::api::Patch::Merge(&patch),
                         )
                         .await
-                        .map_err(|e| LeaseError::Invalid(format!("k8s PATCH renewTime: {e}")))?;
-                    let token = derive_k8s_token(&lease);
-                    let expires =
-                        now + chrono::Duration::seconds(self.lease_duration_seconds as i64);
-                    Ok(LeaseAttempt {
-                        state: LeaseState::Leader {
-                            token,
-                            expires_at: expires,
-                            transition_count: prior_transitions as i64,
-                        },
-                        event_type: "renewed".into(),
-                    })
+                    {
+                        Ok(_) => {
+                            let token = derive_k8s_token(&lease);
+                            let expires = now
+                                + chrono::Duration::seconds(self.lease_duration_seconds as i64);
+                            Ok(LeaseAttempt {
+                                state: LeaseState::Leader {
+                                    token,
+                                    expires_at: expires,
+                                    transition_count: prior_transitions as i64,
+                                },
+                                event_type: "renewed".into(),
+                            })
+                        }
+                        Err(e) if is_optimistic_lock_conflict(&e) => {
+                            // Lost the lease between GET and PATCH. Fail
+                            // closed: report Standby so no leader-only work
+                            // runs; the loop re-acquires next tick.
+                            debug!(
+                                lease = %self.lease_name,
+                                workload = %self.workload_id,
+                                "k8s renew lost optimistic lock (409); yielding to current holder"
+                            );
+                            Ok(LeaseAttempt {
+                                state: LeaseState::Standby {
+                                    holder_workload_id: holder.unwrap_or_default(),
+                                    observed_expiry,
+                                },
+                                event_type: "renew-conflict".into(),
+                            })
+                        }
+                        Err(e) => {
+                            Err(LeaseError::Invalid(format!("k8s PATCH renewTime: {e}")))
+                        }
+                    }
                 } else if observed_expiry < now {
-                    // 4) Held by someone else but expired → take over.
+                    // 4) Held by someone else but expired → take over, but
+                    //    ONLY if no one else beats us to it. The
+                    //    resourceVersion precondition makes the takeover an
+                    //    atomic compare-and-swap: two standby pods that both
+                    //    observed the same expired lease both attempt this
+                    //    PATCH, but the apiserver accepts exactly one (the
+                    //    other gets 409 Conflict and becomes Standby). This
+                    //    closes the split-brain dual-leader window.
                     let new_transitions = prior_transitions + 1;
                     let patch = serde_json::json!({
+                        "metadata": { "resourceVersion": observed_rv },
                         "spec": {
                             "holderIdentity":   self.workload_id,
                             "acquireTime":      MicroTime(now),
@@ -413,7 +459,7 @@ impl LeaseManager for K8sLease {
                             "leaseTransitions": new_transitions,
                         }
                     });
-                    let patched = self
+                    match self
                         .api
                         .patch(
                             &self.lease_name,
@@ -421,18 +467,40 @@ impl LeaseManager for K8sLease {
                             &kube::api::Patch::Merge(&patch),
                         )
                         .await
-                        .map_err(|e| LeaseError::Invalid(format!("k8s PATCH takeover: {e}")))?;
-                    let token = derive_k8s_token(&patched);
-                    let expires =
-                        now + chrono::Duration::seconds(self.lease_duration_seconds as i64);
-                    Ok(LeaseAttempt {
-                        state: LeaseState::Leader {
-                            token,
-                            expires_at: expires,
-                            transition_count: new_transitions as i64,
-                        },
-                        event_type: "transitioned".into(),
-                    })
+                    {
+                        Ok(patched) => {
+                            let token = derive_k8s_token(&patched);
+                            let expires = now
+                                + chrono::Duration::seconds(self.lease_duration_seconds as i64);
+                            Ok(LeaseAttempt {
+                                state: LeaseState::Leader {
+                                    token,
+                                    expires_at: expires,
+                                    transition_count: new_transitions as i64,
+                                },
+                                event_type: "transitioned".into(),
+                            })
+                        }
+                        Err(e) if is_optimistic_lock_conflict(&e) => {
+                            // Another pod won the takeover race. Fail closed:
+                            // we are NOT the leader. Standby + retry.
+                            debug!(
+                                lease = %self.lease_name,
+                                workload = %self.workload_id,
+                                "k8s takeover lost CAS (409); another pod won the election"
+                            );
+                            Ok(LeaseAttempt {
+                                state: LeaseState::Standby {
+                                    holder_workload_id: holder.unwrap_or_default(),
+                                    observed_expiry,
+                                },
+                                event_type: "takeover-conflict".into(),
+                            })
+                        }
+                        Err(e) => {
+                            Err(LeaseError::Invalid(format!("k8s PATCH takeover: {e}")))
+                        }
+                    }
                 } else {
                     // 5) Held by another fresh holder → standby.
                     Ok(LeaseAttempt {
@@ -449,9 +517,61 @@ impl LeaseManager for K8sLease {
 
     async fn release(&self, _token: Uuid) -> Result<(), LeaseError> {
         use kube::api::PatchParams;
-        // Best-effort: clear holderIdentity. Other pods will take over
-        // via expiry anyway, so failure here is not fatal.
+        // Best-effort, holder-guarded clear. We must NOT null out the
+        // holderIdentity of a *fresh* leader: a displaced ex-leader that
+        // releases late could otherwise wipe the new holder, forcing an
+        // avoidable election gap. Guard with a fresh GET (fast-path holder
+        // check) + a resourceVersion precondition on the PATCH so the clear
+        // is an atomic compare-and-swap — if another pod took over between
+        // our GET and PATCH, the resourceVersion changes and the apiserver
+        // rejects the clear with 409 Conflict. Release is best-effort by
+        // contract: any benign loss-of-ownership (we're not the holder, the
+        // lease is gone, or a concurrent takeover) is success, logged at
+        // debug; only an unexpected transport/server error warns. We never
+        // surface an error from release — the loop only warns and TTL
+        // takeover is the backstop.
+        let current = match self.api.get_opt(&self.lease_name).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(
+                    err = %e,
+                    lease = %self.lease_name,
+                    "k8s release GET failed; relying on TTL takeover"
+                );
+                return Ok(());
+            }
+        };
+        let Some(current) = current else {
+            // Lease already gone — nothing to clear, someone else owns the
+            // lifecycle now. Benign.
+            debug!(
+                lease = %self.lease_name,
+                workload = %self.workload_id,
+                "k8s release no-op (lease absent)"
+            );
+            return Ok(());
+        };
+        let current_holder = current
+            .spec
+            .as_ref()
+            .and_then(|s| s.holder_identity.as_deref());
+        if current_holder != Some(self.workload_id.as_str()) {
+            // We're no longer the holder (another pod took over, or it was
+            // already cleared). Do NOT clear someone else's claim. Benign.
+            debug!(
+                lease = %self.lease_name,
+                workload = %self.workload_id,
+                held_by = ?current_holder,
+                "k8s release no-op (not the current holder)"
+            );
+            return Ok(());
+        }
+        // Still the holder per this GET. Clear under a resourceVersion
+        // precondition so a takeover racing our PATCH is rejected (409)
+        // rather than clobbering the new leader.
+        let observed_rv = current.metadata.resource_version.clone();
         let patch = serde_json::json!({
+            "metadata": { "resourceVersion": observed_rv },
             "spec": {
                 "holderIdentity": null,
                 "renewTime":      null,
@@ -467,6 +587,17 @@ impl LeaseManager for K8sLease {
             .await
         {
             Ok(_) => Ok(()),
+            Err(e) if is_optimistic_lock_conflict(&e) => {
+                // A concurrent takeover won between our GET and PATCH. The
+                // new leader's claim is intact (our clear was rejected).
+                // Benign by release contract.
+                debug!(
+                    lease = %self.lease_name,
+                    workload = %self.workload_id,
+                    "k8s release lost CAS (409); fresh holder retained, clear skipped"
+                );
+                Ok(())
+            }
             Err(e) => {
                 tracing::warn!(
                     err = %e,
@@ -485,6 +616,17 @@ impl LeaseManager for K8sLease {
     fn workload_id(&self) -> &str {
         &self.workload_id
     }
+}
+
+/// True when a kube error is an optimistic-concurrency conflict — i.e.
+/// our `metadata.resourceVersion` precondition lost a race because another
+/// pod mutated the Lease first. The apiserver returns HTTP 409 Conflict
+/// (`ErrorResponse.code == 409`) for a stale-resourceVersion write. Callers
+/// MUST treat this as "we are not / no longer the leader" and fail closed
+/// (Standby / skip the clear), never as a transient error to retry into a
+/// spurious Leader claim.
+fn is_optimistic_lock_conflict(err: &kube::Error) -> bool {
+    matches!(err, kube::Error::Api(resp) if resp.code == 409)
 }
 
 /// Derive a stable token for a K8s Lease epoch. PostgresLease uses a
@@ -817,5 +959,226 @@ mod tests {
         let t1 = derive_k8s_token(&mk(1));
         let t2 = derive_k8s_token(&mk(2));
         assert_ne!(t1, t2, "different transitions must yield different tokens");
+    }
+
+    /// The optimistic-lock classifier MUST recognise a 409 ApiError (the
+    /// apiserver's response to a stale `metadata.resourceVersion`
+    /// precondition) and MUST NOT mis-classify other failures as a
+    /// benign conflict — otherwise a real transport/server error would be
+    /// swallowed into a spurious Standby instead of surfacing for retry.
+    #[test]
+    fn optimistic_lock_conflict_classifier() {
+        let conflict = kube::Error::Api(kube::core::ErrorResponse {
+            status: "Failure".into(),
+            message: "the object has been modified".into(),
+            reason: "Conflict".into(),
+            code: 409,
+        });
+        assert!(
+            is_optimistic_lock_conflict(&conflict),
+            "409 ApiError must be treated as an optimistic-lock conflict"
+        );
+
+        let not_found = kube::Error::Api(kube::core::ErrorResponse {
+            status: "Failure".into(),
+            message: "leases.coordination.k8s.io not found".into(),
+            reason: "NotFound".into(),
+            code: 404,
+        });
+        assert!(
+            !is_optimistic_lock_conflict(&not_found),
+            "404 must NOT be classified as a CAS conflict"
+        );
+
+        let forbidden = kube::Error::Api(kube::core::ErrorResponse {
+            status: "Failure".into(),
+            message: "forbidden".into(),
+            reason: "Forbidden".into(),
+            code: 403,
+        });
+        assert!(
+            !is_optimistic_lock_conflict(&forbidden),
+            "403 must NOT be classified as a CAS conflict"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Mock-apiserver K8sLease tests (no live cluster). We hand a
+    // `tower-test` mock service to `kube::Client::new` and script the
+    // exact GET/PATCH exchange `try_acquire`/`release` performs, asserting
+    // the fail-closed mapping of a 409 (resourceVersion precondition lost)
+    // to Standby on takeover/renew, and to a no-op clear on release.
+    // -------------------------------------------------------------------
+
+    use kube::client::Body;
+
+    /// Build a K8sLease whose Api is backed by a mock service. Returns the
+    /// lease plus the mock `Handle` so the test can script responses.
+    fn mock_k8s_lease(
+        workload_id: &str,
+    ) -> (
+        K8sLease,
+        tower_test::mock::Handle<http::Request<Body>, http::Response<Body>>,
+    ) {
+        let (svc, handle) = tower_test::mock::pair::<http::Request<Body>, http::Response<Body>>();
+        let client = kube::Client::new(svc, "sg-system");
+        let api: kube::Api<k8s_openapi::api::coordination::v1::Lease> =
+            kube::Api::namespaced(client, "sg-system");
+        let lease = K8sLease::with_api(
+            "sg-system".into(),
+            "sg-outbox".into(),
+            workload_id.into(),
+            30,
+            api,
+        );
+        (lease, handle)
+    }
+
+    fn ok_json(value: serde_json::Value) -> http::Response<Body> {
+        http::Response::builder()
+            .status(200)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&value).unwrap()))
+            .unwrap()
+    }
+
+    fn conflict_409() -> http::Response<Body> {
+        let status = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Status",
+            "status": "Failure",
+            "message": "Operation cannot be fulfilled on leases.coordination.k8s.io \"sg-outbox\": the object has been modified",
+            "reason": "Conflict",
+            "code": 409,
+        });
+        http::Response::builder()
+            .status(409)
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_vec(&status).unwrap()))
+            .unwrap()
+    }
+
+    /// An *expired* lease held by another pod that we lose the takeover CAS
+    /// on (apiserver returns 409) MUST resolve to Standby — never Leader.
+    /// This is the split-brain regression guard mirroring the Postgres
+    /// single-leader invariant.
+    #[tokio::test]
+    async fn takeover_conflict_maps_to_standby_not_leader() {
+        let (lease, handle) = mock_k8s_lease("pod-b");
+        let server = tokio::spawn(async move {
+            let mut handle = std::pin::pin!(handle);
+            // 1) GET — return an expired lease held by pod-a.
+            let (req, send) = handle.next_request().await.expect("GET expected");
+            assert_eq!(req.method(), http::Method::GET);
+            let expired_renew = Utc::now() - chrono::Duration::seconds(120);
+            send.send_response(ok_json(serde_json::json!({
+                "apiVersion": "coordination.k8s.io/v1",
+                "kind": "Lease",
+                "metadata": { "name": "sg-outbox", "namespace": "sg-system", "resourceVersion": "100", "uid": "abc" },
+                "spec": {
+                    "holderIdentity": "pod-a",
+                    "leaseDurationSeconds": 30,
+                    "renewTime": expired_renew.to_rfc3339(),
+                    "leaseTransitions": 4
+                }
+            })));
+            // 2) PATCH takeover — lose the CAS: another pod bumped rv first.
+            let (req, send) = handle.next_request().await.expect("PATCH expected");
+            assert_eq!(req.method(), http::Method::PATCH);
+            send.send_response(conflict_409());
+        });
+
+        let attempt = lease.try_acquire().await.expect("try_acquire ok");
+        match attempt.state {
+            LeaseState::Standby { .. } => {}
+            other => panic!("takeover CAS loss must yield Standby, got {other:?}"),
+        }
+        assert_eq!(attempt.event_type, "takeover-conflict");
+        server.await.unwrap();
+    }
+
+    /// A renew whose resourceVersion precondition is rejected (we silently
+    /// lost the lease to a takeover) MUST yield Standby, not a stale Leader.
+    #[tokio::test]
+    async fn renew_conflict_maps_to_standby_not_leader() {
+        let (lease, handle) = mock_k8s_lease("pod-a");
+        let server = tokio::spawn(async move {
+            let mut handle = std::pin::pin!(handle);
+            // 1) GET — lease still shows us as holder (cached view).
+            let (req, send) = handle.next_request().await.expect("GET expected");
+            assert_eq!(req.method(), http::Method::GET);
+            let fresh_renew = Utc::now();
+            send.send_response(ok_json(serde_json::json!({
+                "apiVersion": "coordination.k8s.io/v1",
+                "kind": "Lease",
+                "metadata": { "name": "sg-outbox", "namespace": "sg-system", "resourceVersion": "200", "uid": "abc" },
+                "spec": {
+                    "holderIdentity": "pod-a",
+                    "leaseDurationSeconds": 30,
+                    "renewTime": fresh_renew.to_rfc3339(),
+                    "leaseTransitions": 4
+                }
+            })));
+            // 2) PATCH renew — 409: lost the lease between GET and PATCH.
+            let (req, send) = handle.next_request().await.expect("PATCH expected");
+            assert_eq!(req.method(), http::Method::PATCH);
+            send.send_response(conflict_409());
+        });
+
+        let attempt = lease.try_acquire().await.expect("try_acquire ok");
+        match attempt.state {
+            LeaseState::Standby { .. } => {}
+            other => panic!("renew CAS loss must yield Standby, got {other:?}"),
+        }
+        assert_eq!(attempt.event_type, "renew-conflict");
+        server.await.unwrap();
+    }
+
+    /// A stale ex-holder's release against a lease now owned by a fresh
+    /// holder MUST be a no-op (single GET, no PATCH) — it must not null out
+    /// the new leader's holderIdentity.
+    #[tokio::test]
+    async fn release_by_stale_holder_is_noop_against_fresh_holder() {
+        let (lease, handle) = mock_k8s_lease("pod-a");
+        let server = tokio::spawn(async move {
+            let mut handle = std::pin::pin!(handle);
+            // GET — lease now held by pod-b (we, pod-a, were displaced).
+            let (req, send) = handle.next_request().await.expect("GET expected");
+            assert_eq!(req.method(), http::Method::GET);
+            send.send_response(ok_json(serde_json::json!({
+                "apiVersion": "coordination.k8s.io/v1",
+                "kind": "Lease",
+                "metadata": { "name": "sg-outbox", "namespace": "sg-system", "resourceVersion": "300", "uid": "abc" },
+                "spec": {
+                    "holderIdentity": "pod-b",
+                    "leaseDurationSeconds": 30,
+                    "renewTime": Utc::now().to_rfc3339(),
+                    "leaseTransitions": 5
+                }
+            })));
+            // No PATCH must follow. After `release` returns and the lease
+            // (mock service) is dropped, `next_request()` resolves to None.
+            // A bounded timeout guards against a regression that *does*
+            // issue a PATCH (which would otherwise hang awaiting a
+            // response): if any further request arrives, fail loudly.
+            match tokio::time::timeout(Duration::from_secs(5), handle.next_request()).await {
+                Ok(None) => {} // service dropped, no further request — correct
+                Ok(Some((req, _))) => {
+                    panic!(
+                        "stale-holder release must NOT issue a clearing {} request",
+                        req.method()
+                    )
+                }
+                Err(_) => panic!("timed out waiting for mock service to close"),
+            }
+        });
+
+        // Release returns Ok regardless (best-effort contract) but must not
+        // have patched — enforced by the server task above. Drop the lease
+        // (and thus the mock service) so the server's `next_request()`
+        // resolves to None instead of blocking.
+        lease.release(Uuid::nil()).await.expect("release ok");
+        drop(lease);
+        server.await.unwrap();
     }
 }

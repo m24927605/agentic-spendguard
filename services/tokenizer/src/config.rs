@@ -94,8 +94,10 @@ pub struct Config {
 
     /// Anthropic API key for `POST /v1/messages/count_tokens`. Empty =
     /// Anthropic shadow path disabled (worker still runs for Gemini).
-    /// Read from a file path when prefixed with `file://` so K8s
-    /// Secret mounts work cleanly (see Helm tokenizer.yaml).
+    /// The value is used verbatim as the bearer credential; the Helm
+    /// chart injects it via `valueFrom.secretKeyRef` (see
+    /// `charts/spendguard/templates/tokenizer.yaml`), so no `file://`
+    /// indirection is performed here.
     #[serde(default)]
     pub anthropic_api_key: String,
 

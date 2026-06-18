@@ -13,7 +13,7 @@
 // R2 retires the SLICE 7 R1 IDENTITY-propagation shape (runId / parentRunId /
 // traceparent / tracestate / budgetGrantJti) and ships the LOCKED BUDGET-HINT
 // shape ({plannedCalls, plannedTools}). See `runPlan.ts` R2 retirement note
-// and `docs/slices/COV_S05_07_d05_run_plan.md` R2 amendment footer.
+// and `docs/internal/slices/COV_S05_07_d05_run_plan.md` R2 amendment footer.
 //
 // Each test runs inside its own scope so an outer `withRunPlan` cannot bleed
 // into a subsequent test through AsyncLocalStorage. We add explicit "no plan"

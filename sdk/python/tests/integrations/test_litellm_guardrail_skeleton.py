@@ -3,7 +3,7 @@
 # are appropriate for unit tests that never write to disk.
 """COV_D11_S1 — ``SpendGuardGuardrail`` skeleton tests.
 
-Tier 1 unit tests per ``docs/slices/COV_D11_S1_guardrail_class.md``
+Tier 1 unit tests per ``docs/internal/slices/COV_D11_S1_guardrail_class.md``
 test plan + ``docs/specs/coverage/D11_litellm_proxy_plugin/review-standards.md``
 §Slice 1 reviewer checklist (1.1 - 1.5).
 

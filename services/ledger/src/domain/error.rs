@@ -214,6 +214,14 @@ pub fn map_pg_error(err: sqlx::Error) -> DomainError {
                 "40P03" => DomainError::InvalidRequest(msg.to_string()),
                 // P0001 = raise_exception (default for plpgsql RAISE without
                 // explicit code). Disambiguate by message text.
+                // Main reserve path (post_ledger_transaction) hard cap:
+                // the available_budget floor (migration 0063) raises this as a
+                // BUSINESS DENY, not a transport fault — surface it as the
+                // proto Error variant (BudgetExhausted), NOT a retriable gRPC
+                // status. Must precede the generic P0001 catch-all below.
+                "P0001" if msg.contains("BUDGET_EXHAUSTED") => {
+                    DomainError::BudgetExhausted(msg.to_string())
+                }
                 "P0001" if msg.contains("PRICING_VERSION_UNKNOWN") => {
                     DomainError::PricingVersionUnknown(msg.to_string())
                 }

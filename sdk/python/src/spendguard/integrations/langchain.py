@@ -54,8 +54,9 @@ from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
 from ..client import DecisionOutcome, SpendGuardClient
-from ..errors import DecisionDenied, DecisionSkipped
+from ..errors import DecisionDenied, DecisionSkipped, SpendGuardError
 import hashlib
+import logging
 
 from ..ids import (
     derive_idempotency_key,
@@ -147,6 +148,23 @@ def _default_call_signature(messages: Sequence[BaseMessage]) -> str:
     """
     payload = "\n".join(f"{type(m).__name__}:{m.content!s}" for m in messages)
     return hashlib.blake2b(payload.encode("utf-8"), digest_size=16).hexdigest()
+
+
+log = logging.getLogger("spendguard.integrations.langchain")
+
+
+def _classify_exception(exc: BaseException) -> str:
+    """Classify an inner-call exception into a POST outcome label.
+
+    Mirrors the autogen / openai_agents reference: use
+    ``type(exc).__name__ == "CancelledError"`` rather than
+    ``isinstance(exc, asyncio.CancelledError)`` so anyio / trio
+    ``CancelledError`` variants raised across event loops still map to
+    ``CANCELLED``.
+    """
+    if type(exc).__name__ == "CancelledError":
+        return "CANCELLED"
+    return "FAILURE"
 
 
 class SpendGuardChatModel(BaseChatModel):
@@ -307,9 +325,47 @@ class SpendGuardChatModel(BaseChatModel):
         )
 
         # 2) Inner LangChain model call.
-        inner_result: ChatResult = await self.inner._agenerate(
-            messages, stop=stop, run_manager=run_manager, **kwargs
-        )
+        #    A provider error or CancelledError must release the PRE
+        #    reservation and write a FAILURE / CANCELLED anchor before
+        #    re-raising, mirroring litellm.py:1066-1092. `except
+        #    BaseException` is required because CancelledError derives
+        #    from BaseException; the handler re-raises unconditionally to
+        #    preserve cancel semantics.
+        try:
+            inner_result: ChatResult = await self.inner._agenerate(
+                messages, stop=stop, run_manager=run_manager, **kwargs
+            )
+        except BaseException as call_exc:
+            # Best-effort release; the emit is wrapped so a failing
+            # release RPC never masks the original inner exception. The
+            # reservation TTL-sweeps as the durable backstop. Guard on
+            # reservation_ids being non-empty (parity with the SUCCESS
+            # branch) so a trigger-skip / DEGRADE-no-reservation path
+            # never index-errors.
+            if outcome.reservation_ids:
+                try:
+                    await self.client.emit_llm_call_post(
+                        run_id=ctx.run_id,
+                        step_id=step_id,
+                        llm_call_id=llm_call_id,
+                        decision_id=outcome.decision_id,
+                        reservation_id=outcome.reservation_ids[0],
+                        provider_reported_amount_atomic="0",
+                        estimated_amount_atomic="0",
+                        unit=self.unit,
+                        pricing=self.pricing,
+                        provider_event_id="",
+                        outcome=_classify_exception(call_exc),
+                    )
+                except SpendGuardError as rel_exc:
+                    log.warning(
+                        "spendguard.integrations.langchain: release RPC "
+                        "failed on exception path for llm_call_id=%s "
+                        "err=%r — reservation will TTL-sweep",
+                        llm_call_id,
+                        rel_exc,
+                    )
+            raise
 
         # 3) Extract usage from response. LangChain conventions:
         #    AIMessage.usage_metadata has total_tokens (LangChain ≥0.3),

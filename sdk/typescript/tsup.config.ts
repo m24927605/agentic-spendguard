@@ -1,6 +1,6 @@
 // tsup build configuration for @spendguard/sdk.
 //
-// SLICE 3 (`docs/slices/COV_S05_03_d05_client_skeleton.md`) populates the
+// SLICE 3 (`docs/internal/slices/COV_S05_03_d05_client_skeleton.md`) populates the
 // entry map for the modules its scope adds:
 //   - index (full barrel)
 //   - client / config / errors / env / version (subpath leaves)

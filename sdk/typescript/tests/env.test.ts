@@ -124,6 +124,18 @@ describe("resolveEnvConfig — SPENDGUARD_DISABLE", () => {
   });
 });
 
+describe("resolveEnvConfig — SPENDGUARD_PROFILE", () => {
+  it("reads the profile lowercased into the snapshot", () => {
+    expect(resolveEnvConfig({ SPENDGUARD_PROFILE: "DEMO" }).profile).toBe("demo");
+    expect(resolveEnvConfig({ SPENDGUARD_PROFILE: "production" }).profile).toBe("production");
+  });
+
+  it("leaves profile undefined when unset or empty", () => {
+    expect(resolveEnvConfig({}).profile).toBeUndefined();
+    expect(resolveEnvConfig({ SPENDGUARD_PROFILE: "" }).profile).toBeUndefined();
+  });
+});
+
 describe("resolveEnvConfig — SPENDGUARD_RUN_PROJECTION_DEFAULT", () => {
   it("reads value into snapshot", () => {
     expect(

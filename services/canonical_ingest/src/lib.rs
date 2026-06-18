@@ -4,6 +4,7 @@ pub mod domain;
 pub mod handlers;
 pub mod metrics;
 pub mod persistence;
+pub mod producer_identity;
 pub mod server;
 pub mod verifier;
 

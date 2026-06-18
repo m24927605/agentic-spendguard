@@ -49,11 +49,45 @@ pub async fn signal_1_predicted_remaining_steps(
     steps_completed: i64,
     cold_start_default_run_length: i32,
 ) -> Result<(i32, bool), Signal1Error> {
-    let p95_steps = match pool {
-        Some(p) => query_p95_steps(p, tenant_id, agent_id).await?,
-        None => None,
-    };
+    let p95_steps = fetch_p95_steps(pool, tenant_id, agent_id).await?;
+    Ok(signal_1_from_p95(
+        p95_steps,
+        steps_completed,
+        cold_start_default_run_length,
+    ))
+}
 
+/// Fetch ONLY the raw 30-day P95 run length for `(tenant_id, agent_id)`,
+/// independent of `steps_completed`. Returns `None` on cache miss (cold-start)
+/// or when no pool is configured (skeleton mode).
+///
+/// Split out from [`signal_1_predicted_remaining_steps`] so callers that may
+/// recompute the projection multiple times for the SAME run (e.g. server.rs's
+/// optimistic-retry loop under same-run contention) can issue the DB round-trip
+/// ONCE before the loop and then re-apply the cheap [`signal_1_from_p95`]
+/// arithmetic per iteration. The query inputs (`tenant_id`, `agent_id`) are
+/// stable across a single Project call — `steps_completed` is NOT, which is why
+/// only the query (not the arithmetic) is hoistable.
+pub async fn fetch_p95_steps(
+    pool: Option<&PgPool>,
+    tenant_id: Uuid,
+    agent_id: &str,
+) -> Result<Option<f32>, Signal1Error> {
+    match pool {
+        Some(p) => Ok(query_p95_steps(p, tenant_id, agent_id).await?),
+        None => Ok(None),
+    }
+}
+
+/// Pure arithmetic half of Signal 1: turn a (possibly absent) raw P95 plus the
+/// CURRENT `steps_completed` into `(predicted_remaining_steps, is_cold_start)`.
+/// Cheap and side-effect-free, so it is safe to re-evaluate on every retry of
+/// an optimistic loop without re-issuing the DB query.
+pub fn signal_1_from_p95(
+    p95_steps: Option<f32>,
+    steps_completed: i64,
+    cold_start_default_run_length: i32,
+) -> (i32, bool) {
     match p95_steps {
         Some(p95) => {
             // p95 is REAL (f32 wire); round to nearest int, floor at 0.
@@ -66,7 +100,7 @@ pub async fn signal_1_predicted_remaining_steps(
             let remaining = (p95_int as i64 - steps_completed)
                 .max(0)
                 .min(i32::MAX as i64) as i32;
-            Ok((remaining, false))
+            (remaining, false)
         }
         None => {
             // Cache miss → cold-start default per spec §3.2.
@@ -76,7 +110,7 @@ pub async fn signal_1_predicted_remaining_steps(
             let remaining = (cold_start_default_run_length as i64 - steps_completed)
                 .max(0)
                 .min(i32::MAX as i64) as i32;
-            Ok((remaining, true))
+            (remaining, true)
         }
     }
 }
@@ -158,5 +192,32 @@ mod tests {
                 .await
                 .expect("ok");
         assert_eq!(remaining, 15);
+    }
+
+    /// The pure arithmetic half MUST recompute against the CURRENT
+    /// steps_completed each time it is called — this is the property the
+    /// server.rs optimistic-retry loop relies on after hoisting the DB query
+    /// out of the loop. A cached p95 re-applied with a freshly-incremented
+    /// steps_completed yields the correctly-decremented remaining (NOT a stale
+    /// undercount), which keeps the projection / BUDGET gate fail-closed.
+    #[test]
+    fn from_p95_recomputes_per_steps_completed() {
+        let p95 = Some(20.0_f32);
+        assert_eq!(signal_1_from_p95(p95, 5, 10), (15, false));
+        // Same cached p95, one more step landed → remaining decremented.
+        assert_eq!(signal_1_from_p95(p95, 6, 10), (14, false));
+        // Past p95 → clamps at 0, never negative.
+        assert_eq!(signal_1_from_p95(p95, 25, 10), (0, false));
+    }
+
+    /// Cache miss preserves cold-start semantics through the split helper, and
+    /// `fetch_p95_steps(None, ..)` yields None (cold-start) with no pool.
+    #[tokio::test]
+    async fn fetch_p95_none_pool_is_cold_start() {
+        let p95 = fetch_p95_steps(None, Uuid::new_v4(), "ag-1")
+            .await
+            .expect("ok");
+        assert_eq!(p95, None);
+        assert_eq!(signal_1_from_p95(p95, 0, 10), (10, true));
     }
 }

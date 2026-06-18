@@ -82,19 +82,25 @@ func (m *mockKong) LogErr(msg string) {
 // mockSidecar implements sidecarTransport. Each test pre-loads the
 // response shape it wants to exercise.
 type mockSidecar struct {
-	tokenizeResp    TokenizeResponse
-	tokenizeErr     error
-	decisionResp    DecisionResponseBody
-	decisionErr     error
-	traceResp       TraceAckBody
-	traceErr        error
-	tokenizeCalls   int
-	decisionCalls   int
-	traceCalls      int
-	lastTokenizeReq TokenizeRequest
-	lastDecisionReq DecisionRequestBody
-	lastTraceReq    TraceRequestBody
-	mu              sync.Mutex
+	tokenizeResp TokenizeResponse
+	tokenizeErr  error
+	decisionResp DecisionResponseBody
+	decisionErr  error
+	traceResp    TraceAckBody
+	traceErr     error
+	// traceErrsRemaining, when > 0, makes the first N Trace calls
+	// return traceTransientErr and then fall through to the normal
+	// (traceResp, traceErr) result — used to exercise the body_filter
+	// commit-lane bounded retry recovering from a transient blip.
+	traceErrsRemaining int
+	traceTransientErr  error
+	tokenizeCalls      int
+	decisionCalls      int
+	traceCalls         int
+	lastTokenizeReq    TokenizeRequest
+	lastDecisionReq    DecisionRequestBody
+	lastTraceReq       TraceRequestBody
+	mu                 sync.Mutex
 }
 
 func (m *mockSidecar) Tokenize(_ context.Context, req TokenizeRequest) (TokenizeResponse, error) {
@@ -116,6 +122,10 @@ func (m *mockSidecar) Trace(_ context.Context, req TraceRequestBody) (TraceAckBo
 	defer m.mu.Unlock()
 	m.traceCalls++
 	m.lastTraceReq = req
+	if m.traceErrsRemaining > 0 {
+		m.traceErrsRemaining--
+		return TraceAckBody{}, m.traceTransientErr
+	}
 	return m.traceResp, m.traceErr
 }
 

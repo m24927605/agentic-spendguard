@@ -1,9 +1,11 @@
 //! Adapter UDS gRPC server (Sidecar §3 + §5; Stage 2 §11).
 //!
 //! Transport: gRPC over Unix Domain Socket. Auth: SO_PEERCRED (peer uid
-//! match). POC accepts any local connection; production verifies that
-//! `peer_uid == expected_app_uid` and `peer_pid` is in the same pod's
-//! process group.
+//! match), enforced at the listener accept loop in `main.rs`: connections
+//! whose peer uid != `adapter_expected_peer_uid` (default: the sidecar's
+//! own effective uid) are dropped before reaching tonic, and the socket
+//! is chmod 0660 after bind. This guards the local in-pod adapter path;
+//! the sibling-pod / hostPath production shape relies on mTLS+SPIFFE.
 //!
 //! Implemented RPCs:
 //!   * Handshake — validates protocol version + capability advertisement.
@@ -225,20 +227,69 @@ impl AdapterUds {
         let bundle = self.state.inner.contract_bundle.read().clone();
         let schema = self.state.inner.schema_bundle.read().clone();
         let session_id = uuid::Uuid::now_v7().to_string();
+        let sidecar_version = env!("CARGO_PKG_VERSION").to_string();
+        let signer = &self.state.inner.signer;
+
+        // Trust anchor (auth-trust): produce a real announcement signature
+        // and a contract-bundle signature with the per-process producer
+        // signer so an adapter can cryptographically verify it is talking
+        // to a legitimate sidecar and that the advertised contract bundle
+        // is authentic. Empty signatures (the prior POC placeholder) gave
+        // an adapter no way to distinguish a real sidecar from a rogue
+        // local process. Signing is fail-closed: a sign error returns a
+        // gRPC error rather than emitting an unsigned (empty) handshake.
+        let signing_key_id = signer.key_id().to_string();
+
+        // Contract bundle signature: sign over (bundle_id, bundle_hash)
+        // so the adapter can pin the advertised bundle to this signer.
+        let contract_bundle = match bundle {
+            Some(b) => {
+                let mut canonical = Vec::new();
+                canonical.extend_from_slice(b"spendguard.handshake.contract_bundle\0");
+                canonical.extend_from_slice(b.bundle_id.to_string().as_bytes());
+                canonical.push(0);
+                canonical.extend_from_slice(&b.bundle_hash);
+                let sig = signer.sign(&canonical).await.map_err(|e| {
+                    Status::internal(format!("handshake contract bundle signing failed: {e}"))
+                })?;
+                Some(crate::proto::common::v1::ContractBundleRef {
+                    bundle_id: b.bundle_id.to_string(),
+                    bundle_hash: b.bundle_hash.into(),
+                    bundle_signature: sig.bytes.into(),
+                    signing_key_id: b.signing_key_id,
+                })
+            }
+            None => None,
+        };
+
+        // Announcement signature: sign over the canonical announcement
+        // tuple (version, session, capability, advertised bundle ids).
+        let mut announcement = Vec::new();
+        announcement.extend_from_slice(b"spendguard.handshake.announcement\0");
+        announcement.extend_from_slice(sidecar_version.as_bytes());
+        announcement.push(0);
+        announcement.extend_from_slice(session_id.as_bytes());
+        announcement.push(0);
+        announcement.extend_from_slice(self.cfg.tenant_id.as_bytes());
+        announcement.push(0);
+        announcement.extend_from_slice(&0x40u32.to_be_bytes()); // capability_required
+        if let Some(cb) = contract_bundle.as_ref() {
+            announcement.extend_from_slice(cb.bundle_id.as_bytes());
+            announcement.push(0);
+            announcement.extend_from_slice(&cb.bundle_hash);
+        }
+        let announcement_signature = signer.sign(&announcement).await.map_err(|e| {
+            Status::internal(format!("handshake announcement signing failed: {e}"))
+        })?;
 
         let response = HandshakeResponse {
-            sidecar_version: env!("CARGO_PKG_VERSION").to_string(),
+            sidecar_version,
             schema_bundle: schema.map(|s| crate::proto::common::v1::SchemaBundleRef {
                 schema_bundle_id: s.bundle_id.to_string(),
                 schema_bundle_hash: s.bundle_hash.into(),
                 canonical_schema_version: s.canonical_schema_version,
             }),
-            contract_bundle: bundle.map(|b| crate::proto::common::v1::ContractBundleRef {
-                bundle_id: b.bundle_id.to_string(),
-                bundle_hash: b.bundle_hash.into(),
-                bundle_signature: vec![].into(),
-                signing_key_id: b.signing_key_id,
-            }),
+            contract_bundle,
             capability_required: 0x40, // L3 (per Sidecar §3.3)
             active_key_epochs: Some(
                 crate::proto::sidecar_adapter::v1::handshake_response::KeyEpochs {
@@ -248,10 +299,12 @@ impl AdapterUds {
             ),
             protocol_version: 1,
             session_id,
-            // Announcement signing deferred to vertical slice; POC sidecars
-            // emit empty signature. Adapter MUST treat empty as "POC mode".
-            signing_key_id: String::new(),
-            announcement_signature: vec![].into(),
+            // Real producer signer; the `disabled` stub signer still emits
+            // a stable (empty-byte) signature with key_id "disabled" so a
+            // demo profile can detect POC mode by signing_key_id rather
+            // than by an unauthenticated empty-signature heuristic.
+            signing_key_id,
+            announcement_signature: announcement_signature.bytes.into(),
         };
         Ok(Response::new(response))
     }
@@ -345,18 +398,14 @@ impl AdapterUds {
             let decision_uuid = match uuid::Uuid::parse_str(&req.decision_id) {
                 Ok(u) => u,
                 Err(e) => {
-                    return Ok(Response::new(PublishOutcomeResponse {
-                        audit_outcome_event_id: String::new(),
-                        recorded_at: Some(prost_types::Timestamp {
-                            seconds: Utc::now().timestamp(),
-                            nanos: Utc::now().timestamp_subsec_nanos() as i32,
-                        }),
-                        error: Some(crate::proto::common::v1::Error {
-                            code: crate::proto::common::v1::error::Code::Unspecified as i32,
-                            message: format!("decision_id parse: {e}"),
-                            details: Default::default(),
-                        }),
-                    }));
+                    // Honest gRPC Status: a malformed decision_id is a
+                    // client error and no reservation was located. Surface
+                    // it via Status (consistent with release_reservation)
+                    // so the caller does not treat a never-attempted
+                    // release as success.
+                    return Err(Status::invalid_argument(format!(
+                        "decision_id parse: {e}"
+                    )));
                 }
             };
             let reservation_id = self
@@ -409,14 +458,16 @@ impl AdapterUds {
                         }
                         Err(e) => {
                             warn!(error = %e, "Release failed for APPLY_FAILED path");
-                            return Ok(Response::new(PublishOutcomeResponse {
-                                audit_outcome_event_id: String::new(),
-                                recorded_at: Some(prost_types::Timestamp {
-                                    seconds: Utc::now().timestamp(),
-                                    nanos: Utc::now().timestamp_subsec_nanos() as i32,
-                                }),
-                                error: Some(e.to_proto()),
-                            }));
+                            // Fail-closed: surface a real gRPC failure
+                            // (mirrors release_reservation_inner) so a
+                            // caller checking only the gRPC Status — the
+                            // normal tonic idiom — does NOT assume the
+                            // reservation was released. Transient
+                            // LedgerClient -> Unavailable errors stay
+                            // retryable. The held reservation otherwise
+                            // remains outstanding (money double-reserved)
+                            // until TTL.
+                            return Err(e.to_status());
                         }
                     }
                 }
@@ -426,19 +477,18 @@ impl AdapterUds {
                         "ConfirmPublishOutcome.APPLY_FAILED but decision_id_to_reservation index miss \
                          (POC limitation: sidecar restart loses map; reservation will TTL-release)"
                     );
-                    return Ok(Response::new(PublishOutcomeResponse {
-                        audit_outcome_event_id: String::new(),
-                        recorded_at: Some(prost_types::Timestamp {
-                            seconds: Utc::now().timestamp(),
-                            nanos: Utc::now().timestamp_subsec_nanos() as i32,
-                        }),
-                        error: Some(crate::proto::common::v1::Error {
-                            code: crate::proto::common::v1::error::Code::Unspecified as i32,
-                            message: "reservation context lost (sidecar restart); reservation will TTL-release"
-                                .into(),
-                            details: Default::default(),
-                        }),
-                    }));
+                    // The reservation is genuinely NOT released here (the
+                    // in-memory decision_id->reservation index was lost on
+                    // restart); it only TTL-releases later. Surface a
+                    // non-OK Status so a caller checking only the gRPC
+                    // Status does not record a still-held reservation as
+                    // released. failed_precondition signals "no durable
+                    // index to act on" rather than a transient/retryable
+                    // condition.
+                    return Err(Status::failed_precondition(
+                        "reservation context lost (sidecar restart); \
+                         reservation will TTL-release",
+                    ));
                 }
             }
         }
@@ -1828,6 +1878,9 @@ mod post_ga_01_release_tests {
             http_companion_host: "127.0.0.1".into(),
             http_companion_allow_pod_network: false,
             http_companion_max_body_bytes: 4 * 1024 * 1024,
+            allow_untrusted_subscription_meter: false,
+            adapter_expected_peer_uid: None,
+            http_companion_expected_client_spiffe_uri: String::new(),
         }
     }
 

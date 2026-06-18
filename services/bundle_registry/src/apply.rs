@@ -4,7 +4,7 @@
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::Value;
 use sqlx::PgPool;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::bundle;
@@ -13,6 +13,18 @@ use crate::Config;
 pub struct ApplyResult {
     pub new_bundle_hash: String,
 }
+
+/// Namespace half of the two-int `pg_advisory_lock(int4, int4)` key
+/// used to serialize the bundle read-patch-write critical section.
+/// Pinned constant so every bundle_registry session (the NOTIFY
+/// listener path AND the periodic recovery sweep path — both call
+/// `process_approval` on the same pool) computes the same lock key for
+/// a given bundle id and therefore mutually exclude. The low half is
+/// `hashtext(<contract_bundle_id>)` computed Postgres-side so we don't
+/// reimplement (and risk drifting from) a hash function in Rust.
+///
+/// "BRAP" = Bundle Registry APply.
+const BUNDLE_APPLY_LOCK_NAMESPACE: i32 = 0x4252_4150; // "BRAP"
 
 pub async fn process_approval(
     pool: &PgPool,
@@ -64,7 +76,82 @@ pub async fn process_approval(
         "approval row fetched"
     );
 
-    // 2. Load the current contract bundle from disk.
+    // 2. Serialize the read-patch-write critical section.
+    //
+    //    process_approval runs from TWO concurrent callers on the same
+    //    pool: the NOTIFY listener loop and the periodic recovery sweep
+    //    (main.rs:147-149). apply is idempotent for the SAME approval,
+    //    but two DIFFERENT approved approvals applied concurrently each
+    //    read the same OLD bundle, apply only their own patch, and the
+    //    second atomic rename clobbers the first — silently dropping an
+    //    approved guardrail change from the published bundle.
+    //
+    //    Fix: hold a Postgres SESSION-level advisory lock keyed on the
+    //    bundle id for the WHOLE read→pack→rename→runtime.env sequence,
+    //    and re-read the bundle bytes INSIDE the lock (the load-bearing
+    //    detail — a lock acquired after the read protects nothing). We
+    //    use `pg_advisory_lock` (blocking), not `pg_try_advisory_lock`:
+    //    the loser must serialize and re-apply (idempotent / convergent),
+    //    not skip. Contention blocks rather than failing open, so this
+    //    preserves fail-closed semantics.
+    //
+    //    The lock is held on a single pinned connection checked out from
+    //    the pool. `pg_advisory_xact_lock` would NOT work here: it
+    //    auto-releases at transaction end, before the synchronous
+    //    std::fs writes complete, leaving the file I/O unprotected. We
+    //    take a session lock and explicitly unlock on EVERY exit path.
+    let mut lock_conn = pool
+        .acquire()
+        .await
+        .context("acquire pool conn for bundle apply advisory lock")?;
+    sqlx::query("SELECT pg_advisory_lock($1, hashtext($2))")
+        .bind(BUNDLE_APPLY_LOCK_NAMESPACE)
+        .bind(&config.contract_bundle_id)
+        .execute(&mut *lock_conn)
+        .await
+        .context("pg_advisory_lock for bundle apply")?;
+    debug!(
+        contract_bundle_id = %config.contract_bundle_id,
+        "acquired bundle apply advisory lock"
+    );
+
+    // Run the file-touching work under the lock, then ALWAYS release the
+    // session lock on the same connection (success or error path) before
+    // returning. `apply_under_lock` does the in-lock read + patch + write.
+    let result = apply_under_lock(approval_id, &patch, config);
+
+    if let Err(e) = sqlx::query("SELECT pg_advisory_unlock($1, hashtext($2))")
+        .bind(BUNDLE_APPLY_LOCK_NAMESPACE)
+        .bind(&config.contract_bundle_id)
+        .execute(&mut *lock_conn)
+        .await
+    {
+        // Non-fatal: the session-level lock auto-releases when this
+        // connection is dropped (returned to / reset by the pool) or the
+        // session disconnects, so we never leak the lock past this
+        // connection's lifetime. Surface it loudly so operators notice.
+        warn!(
+            contract_bundle_id = %config.contract_bundle_id,
+            error = %e,
+            "pg_advisory_unlock failed; lock releases on connection drop"
+        );
+    } else {
+        debug!(
+            contract_bundle_id = %config.contract_bundle_id,
+            "released bundle apply advisory lock"
+        );
+    }
+    drop(lock_conn);
+
+    result
+}
+
+/// Read the current bundle, apply the RFC-6902 patch, re-pack, and
+/// publish the new bytes + runtime.env hash. MUST be called while the
+/// bundle apply advisory lock is held — the disk read at the top is the
+/// in-lock re-read that makes the read-modify-write race-free.
+fn apply_under_lock(approval_id: Uuid, patch: &Value, config: &Config) -> Result<ApplyResult> {
+    // 2a. Load the current contract bundle from disk (in-lock re-read).
     let bundle_path = config
         .contract_bundle_dir
         .join(format!("{}.tgz", config.contract_bundle_id));
@@ -82,7 +169,7 @@ pub async fn process_approval(
     //    YAML → JSON → patch → JSON → YAML round-trip. The patch
     //    `test` op in the first slot pins identity (CA-P3.1); the
     //    `replace` op then mutates the leaf.
-    let new_contract_yaml = apply_patch_to_yaml(&current_bundle.contract_yaml, &patch)
+    let new_contract_yaml = apply_patch_to_yaml(&current_bundle.contract_yaml, patch)
         .context("apply RFC-6902 patch to contract YAML")?;
 
     // 4. Re-build the .tgz deterministically (same flags as

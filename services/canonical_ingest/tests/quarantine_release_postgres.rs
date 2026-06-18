@@ -802,7 +802,28 @@ async fn quarantined_outcome_release_preserves_aggregator_mirrors() {
     );
     assert_eq!(row.get::<i64, _>("actual_output_tokens"), 29);
 
+    // This test only needs the count scan (proving the two released rows
+    // landed in canonical_events). The prediction-mirror cross-check is
+    // unimplemented and now fails closed, so use the legacy count path
+    // (`check_prediction_mirror = false`).
     let summary = verify_chain(
+        &fx.pool,
+        &VerifyChainArgs {
+            tenant_id: Some(tenant_id),
+            check_prediction_mirror: false,
+            from: None,
+            to: None,
+        },
+    )
+    .await
+    .expect("verify chain summary");
+    assert_eq!(summary.rows_scanned, 2);
+    assert_eq!(summary.rows_skipped_legacy, 0);
+
+    // Fail-closed guard: the prediction-mirror cross-check is not
+    // implemented, so requesting it must return an explicit error rather
+    // than a silently-passing summary.
+    let err = verify_chain(
         &fx.pool,
         &VerifyChainArgs {
             tenant_id: Some(tenant_id),
@@ -812,7 +833,9 @@ async fn quarantined_outcome_release_preserves_aggregator_mirrors() {
         },
     )
     .await
-    .expect("verify chain summary");
-    assert_eq!(summary.rows_scanned, 2);
-    assert_eq!(summary.rows_skipped_legacy, 0);
+    .expect_err("prediction-mirror cross-check must fail closed");
+    assert!(
+        format!("{err}").contains("not implemented"),
+        "unexpected error: {err}"
+    );
 }

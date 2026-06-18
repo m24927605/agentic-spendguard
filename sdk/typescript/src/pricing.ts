@@ -16,6 +16,8 @@
 //   - implementation.md §8 (`src/pricing.ts`)
 //   - tests.md §3.4 (pricing computation matrix)
 
+import { PricingMissingError } from "./errors.js";
+
 /** USD micros per USD — 1 USD = 1,000,000 µUSD. */
 export const USD_MICROS_PER_USD = 1_000_000;
 
@@ -74,6 +76,17 @@ export class PricingLookup {
    * customer — never under-charge due to FP truncation). The minimum
    * returned value is `1` (we never claim zero cost on a non-zero token
    * count).
+   *
+   * Fail-closed: when a token bucket has a non-zero count but NEITHER the
+   * specific kind NOR the default kind has a configured price, this throws
+   * {@link PricingMissingError} instead of silently charging $0. Coercing a
+   * missing price to 0 would under-count the budget — the exact under-charge
+   * the guardrail exists to prevent — and unknown/new models are precisely
+   * the ones most likely to be mispriced. Buckets with a zero count never
+   * trigger this (no charge is attributed, so a missing price is irrelevant).
+   *
+   * @throws {@link PricingMissingError} when a non-zero token bucket has no
+   *   resolvable price.
    */
   usdMicrosForCall(args: {
     provider: string;
@@ -85,10 +98,18 @@ export class PricingLookup {
     let usd = 0;
     const charge = (kind: string, count: number): void => {
       if (count <= 0) return;
+      // Preserve the existing default-kind fallback; only the FINAL `?? 0`
+      // coercion is removed — a still-missing price now fails loud.
       const p =
         this.pricePerMillion(args.provider, args.model, kind) ??
-        this.pricePerMillion(args.provider, args.model, this.defaultKind) ??
-        0;
+        this.pricePerMillion(args.provider, args.model, this.defaultKind);
+      if (p === null) {
+        throw new PricingMissingError({
+          provider: args.provider,
+          model: args.model,
+          tokenKind: kind,
+        });
+      }
       usd += (count * p) / 1_000_000;
     };
     charge("input", args.inputTokens ?? 0);

@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use anyhow::{anyhow, Context, Result};
 use tonic::transport::Server;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 use spendguard_sidecar::{
@@ -331,10 +331,64 @@ async fn main() -> Result<()> {
             .context("remove stale uds")?;
     }
     let uds_listener = tokio::net::UnixListener::bind(&uds_path).context("bind uds listener")?;
+
+    // Socket permission hardening (auth-trust): after bind the socket
+    // inherits the process umask (commonly world-connectable). Restrict
+    // to owner+group (0o660) so an unrelated UID on the host — e.g. a
+    // sibling process under a hostPath mount — cannot speak the adapter
+    // gRPC contract. Mirrors the tokenizer UDS hardening and the Helm
+    // `fsGroup: 65532`. Fail closed: a chmod failure aborts startup
+    // rather than serving a world-accessible socket.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&uds_path, std::fs::Permissions::from_mode(0o660))
+            .with_context(|| format!("chmod 0660 uds `{}`", uds_path.display()))?;
+    }
+
+    // SO_PEERCRED peer-uid enforcement (auth-trust): only accept
+    // connections whose peer uid matches the expected in-pod adapter uid.
+    // When unconfigured we default to the sidecar's own effective uid
+    // (never fail-open). A missing/mismatched credential drops the
+    // connection (fail closed) before tonic ever sees it. This guards the
+    // LOCAL UDS adapter path; the sibling-pod / hostPath production shape
+    // enforces mTLS+SPIFFE instead.
+    let expected_peer_uid = cfg
+        .adapter_expected_peer_uid
+        .unwrap_or_else(|| nix::unistd::getuid().as_raw());
+    info!(
+        uds = %uds_path.display(),
+        mode = "0660",
+        expected_peer_uid,
+        "adapter UDS socket permissions set + peer-uid gate armed"
+    );
     let incoming = async_stream::stream! {
         loop {
             match uds_listener.accept().await {
-                Ok((stream, _addr)) => yield Ok::<_, std::io::Error>(stream),
+                Ok((stream, _addr)) => {
+                    match stream.peer_cred() {
+                        Ok(cred) if cred.uid() == expected_peer_uid => {
+                            yield Ok::<_, std::io::Error>(stream)
+                        }
+                        Ok(cred) => {
+                            warn!(
+                                peer_uid = cred.uid(),
+                                expected_peer_uid,
+                                "adapter UDS: rejecting connection from \
+                                 unexpected peer uid (SO_PEERCRED gate)"
+                            );
+                            // Drop `stream` => connection closed. Do NOT
+                            // yield: fail closed.
+                        }
+                        Err(e) => {
+                            warn!(
+                                err = %e,
+                                "adapter UDS: rejecting connection — could \
+                                 not read peer credentials (SO_PEERCRED gate)"
+                            );
+                            // Drop `stream` => connection closed. Fail closed.
+                        }
+                    }
+                }
                 Err(e) => yield Err(e),
             }
         }
@@ -610,10 +664,24 @@ async fn build_http_companion_config(
     cfg: &Config,
     mtls: &MTlsPaths,
 ) -> Result<HttpCompanionConfig> {
-    let tls = spendguard_sidecar::http_companion::mtls::ServerTlsConfig::from_pem_files(
+    // D09 SLICE 6 / HARDEN_08: pin the connecting client to an exact
+    // SPIFFE URI SAN when configured, so a same-CA peer cannot connect on
+    // the strength of the shared workload CA alone (fail-closed at the
+    // handshake). Empty config preserves legacy CA-chain-only behavior
+    // with a startup warning emitted by the verifier constructor.
+    let expected_client_spiffe_uri = {
+        let s = cfg.http_companion_expected_client_spiffe_uri.trim();
+        if s.is_empty() {
+            None
+        } else {
+            Some(s.to_string())
+        }
+    };
+    let tls = spendguard_sidecar::http_companion::mtls::ServerTlsConfig::from_pem_files_with_uri_pin(
         std::path::Path::new(&mtls.workload_cert_pem),
         std::path::Path::new(&mtls.workload_key_pem),
         std::path::Path::new(&mtls.trust_ca_pem),
+        expected_client_spiffe_uri,
     )
     .context("D09 SLICE 1: load http_companion mTLS PEMs")?;
     Ok(HttpCompanionConfig {

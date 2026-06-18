@@ -1,6 +1,6 @@
 //! Routing surface for the egress proxy.
 //!
-//! COV_01 (`docs/slices/COV_01_envoy_extproc_skeleton.md`) extracted
+//! COV_01 (`docs/internal/slices/COV_01_envoy_extproc_skeleton.md`) extracted
 //! [`ProviderKind`], [`RequestShape`], [`UsageMetrics`], [`ProviderConfig`],
 //! [`ROUTING_TABLE`], `route()`, [`resolve_model_id`], and
 //! [`resolve_tokenizer_kind`] into the shared `spendguard-provider-routing`

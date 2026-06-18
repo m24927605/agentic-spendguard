@@ -19,6 +19,17 @@
 //!
 //! Critically, this lane NEVER calls the ledger and NEVER opens a
 //! transaction — that's the whole point of the meter-only flow.
+//!
+//! SECURITY (auth-trust): because the cap is derived entirely from
+//! client-supplied `runtime_metadata` and there is no fencing-backed
+//! oracle, the caller is the entry gate in
+//! `decision::transaction::run_through_reserve`, which refuses to enter
+//! this lane unless the operator has set the server-side opt-in
+//! `allow_untrusted_subscription_meter`. Without that flag the request is
+//! rejected (fail-closed) rather than honored with an untrusted cap. The
+//! per-request cap fields below remain advisory until the ledger-backed
+//! `subscription_meters` lookup replaces them in the post-D13 hardening
+//! slice.
 
 use chrono::Utc;
 use uuid::Uuid;

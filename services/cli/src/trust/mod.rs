@@ -124,7 +124,47 @@ pub trait TrustStore {
     /// Return `Ok(true)` when `fingerprint_sha256_hex` is present in the
     /// scope's trust store.  Returns `Ok(false)` when the cert is absent.
     /// Errors only on backend failure (e.g. `security` binary missing).
+    ///
+    /// NOTE: "present" is NOT the same as "trusted as a root". A cert that
+    /// was installed then had its trust settings denied/removed can still
+    /// be enumerated by the store. This method is intentionally a
+    /// PRESENCE check — `remove_root` relies on it as an idempotency
+    /// short-circuit ("is it there, so should I delete it?"). For the
+    /// doctor's "is the MITM CA actually trusted?" question, use
+    /// [`TrustStore::verify_trusted`] instead.
     fn verify_installed(&self, fingerprint_sha256_hex: &str, scope: TrustScope) -> Result<bool>;
+
+    /// Return `Ok(true)` when the CA at `ca_pem_path`
+    /// (`fingerprint_sha256_hex` is its DER SHA-256) is BOTH present in the
+    /// scope's trust store AND recorded/evaluated as a trusted root —
+    /// i.e. the OS would actually honour it when validating a TLS chain.
+    ///
+    /// This is the predicate the **doctor** uses to decide
+    /// `CaCheckResult::Healthy`: presence alone (`verify_installed`)
+    /// over-reports health for a present-but-untrusted CA, which is the
+    /// less-safe direction for a control that confirms the MITM CA is
+    /// trusted.
+    ///
+    /// Fail-closed contract: any inconclusive / error / locked-keychain
+    /// state MUST surface as `Err` (which the doctor maps to
+    /// `NotInTrustStore`), never as `Ok(true)`.
+    ///
+    /// The default implementation delegates to [`verify_installed`] —
+    /// backends whose store cannot represent a present-but-untrusted state
+    /// (the Linux merged-bundle / anchor model and the Windows `Root`
+    /// store: a cert in those locations IS trusted) keep presence as their
+    /// trust signal. The macOS backend overrides this to additionally run
+    /// `security verify-cert`, which evaluates the chain and honours Deny
+    /// trust settings.
+    fn verify_trusted(
+        &self,
+        ca_pem_path: &Path,
+        fingerprint_sha256_hex: &str,
+        scope: TrustScope,
+    ) -> Result<bool> {
+        let _ = ca_pem_path;
+        self.verify_installed(fingerprint_sha256_hex, scope)
+    }
 }
 
 /// Dispatch to the platform-specific backend.

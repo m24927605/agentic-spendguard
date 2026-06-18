@@ -27,7 +27,7 @@
 //   - docs/specs/coverage/D05_ts_sdk_substrate/design.md §11.
 //   - docs/specs/coverage/D05_ts_sdk_substrate/review-standards.md §2
 //     (P0 cross-language byte-equivalence gate).
-//   - docs/slices/COV_S05_09_d05_cross_language_fixtures.md.
+//   - docs/internal/slices/COV_S05_09_d05_cross_language_fixtures.md.
 //
 // Failure-mode contract: when a fixture drifts, the assertion error includes
 // the fixture id + fn + canonicalised inputs so failures point at the exact

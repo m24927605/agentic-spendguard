@@ -40,6 +40,7 @@ The migration index as of HARDEN_03 R2:
 | 0021 | GA_08         | canonical_events run recovery index for run_cost_projector             |
 | 0022 | POST_GA_06    | prediction_drift_alert cooldown table                                  |
 | 0023 | POST_GA_08    | cache RLS nil-sentinel removal + freshness index evidence comment      |
+| 0024 | sec-hardening | canonical_event_replay_dedup reaper (bounded growth; batched, grace)   |
 
 ## The 0014 gap
 
@@ -96,6 +97,9 @@ DROP POLICY IF EXISTS run_length_distribution_cache_tenant_isolation
     ON run_length_distribution_cache;
 -- Recreate the pre-POST_GA_08 policies only if rolling back the
 -- nil-sentinel removal is explicitly accepted as a security regression.
+
+-- 0024
+DROP FUNCTION IF EXISTS reap_canonical_event_replay_dedup(INTERVAL, INTEGER, INTEGER);
 ```
 
 ## RLS contract (SLICE_06 R2)

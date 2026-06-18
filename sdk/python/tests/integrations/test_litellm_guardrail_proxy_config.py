@@ -4,7 +4,7 @@
 # inspected as strings only).
 """COV_D11_S5 — ``spendguard_guardrail_factory`` proxy_config.yaml tests.
 
-Tier 1 unit tests per ``docs/slices/COV_D11_S5_proxy_config_entry.md``
+Tier 1 unit tests per ``docs/internal/slices/COV_D11_S5_proxy_config_entry.md``
 test plan + ``docs/specs/coverage/D11_litellm_proxy_plugin/review-standards.md``
 §Slice 5 reviewer checklist (5.1 - 5.4).
 

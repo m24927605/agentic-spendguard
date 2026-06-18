@@ -3,14 +3,28 @@
 //! Issues a TCP connect to the resolved `host:port` (default
 //! `localhost:8443`) with a 5-second deadline. Surfaces three outcomes:
 //!
-//! - [`ProxyCheckResult::Reachable`] — TCP handshake completed.
+//! - [`ProxyCheckResult::Reachable`] — TCP handshake completed. NOTE:
+//!   this is a **TCP-only liveness** signal, NOT confirmation that the
+//!   SpendGuard proxy is terminating TLS with the expected leaf cert.
+//!   Any process listening on the port satisfies it. We therefore label
+//!   the render explicitly ("TLS not verified") so a green line is not
+//!   read as "the egress-guard TLS control is healthy". The CA-trust leg
+//!   is confirmed independently by the [`crate::doctor::ca_fingerprint`]
+//!   check. `Reachable` is still REQUIRED by
+//!   [`crate::doctor::DoctorReport::is_healthy`] (the proxy must be at
+//!   least TCP-up), so this honesty-relabel does not weaken the gate.
 //! - [`ProxyCheckResult::ProxyUnreachable`] — connect failed (connection
 //!   refused, timeout, DNS error).
-//! - [`ProxyCheckResult::TlsHandshakeFailed`] — reserved for a future
-//!   slice. Per deviation #4 in `Cargo.toml`, SLICE 7 ships TCP-only;
-//!   the TLS handshake leg lives in a follow-up because the rustls
-//!   client config plumbing would expand the surface area beyond the
-//!   slice doc's "≥18 unit + 3 lib-level integration" budget.
+//! - [`ProxyCheckResult::TlsHandshakeFailed`] — reserved for the
+//!   TLS-validation follow-up. Per deviation #4 in `Cargo.toml`, SLICE 7
+//!   ships TCP-only; the CA-validated rustls handshake leg (perform a
+//!   client handshake against the configured CA root and verify the leaf
+//!   SAN/issuer, emitting this variant on failure) is a tracked
+//!   follow-up. It needs a synchronous rustls client stack + a custom
+//!   root store loaded from the on-disk CA PEM — the surface-area
+//!   expansion the slice author deferred — and would make the gate
+//!   strictly stronger (everything other than `Reachable` already fails
+//!   `is_healthy`).
 //!
 //! ## Anti-scope
 //!
@@ -48,7 +62,15 @@ impl ProxyCheckResult {
         match self {
             Self::Reachable { addr } => {
                 let head = paint("OK", Color::Green, use_color);
-                format!("{head} TCP to {addr} (5s deadline)")
+                // Be explicit that this is a TCP-only liveness check, NOT a
+                // TLS-validated handshake: any process listening on the port
+                // (a stale/unrelated service, a port-forward, a different
+                // proxy) satisfies it. The CA-trust leg is confirmed
+                // separately by the `ca_fingerprint` check; the proxy's own
+                // leaf-cert / TLS-termination validation is a tracked
+                // follow-up (see module header). Operators must not read
+                // this line as "the SpendGuard TLS control is verified".
+                format!("{head} TCP reachable {addr} (TCP-only liveness, 5s deadline; TLS not verified)")
             }
             Self::ProxyUnreachable { addr, error } => {
                 let head = paint("FAIL", Color::Red, use_color);
@@ -312,7 +334,15 @@ mod tests {
         let reachable = ProxyCheckResult::Reachable {
             addr: "127.0.0.1:8443".into(),
         };
-        assert!(reachable.render(false).contains("OK"));
+        let reachable_render = reachable.render(false);
+        assert!(reachable_render.contains("OK"));
+        // Honesty contract: the Reachable line must NOT imply TLS was
+        // verified — it is a TCP-only liveness signal. Guard against a
+        // future render edit silently restoring the misleading wording.
+        assert!(
+            reachable_render.contains("TCP-only") && reachable_render.contains("TLS not verified"),
+            "Reachable render must disclose it is TCP-only and TLS-unverified, got: {reachable_render}"
+        );
         let unreachable = ProxyCheckResult::ProxyUnreachable {
             addr: "127.0.0.1:8443".into(),
             error: "connection refused".into(),

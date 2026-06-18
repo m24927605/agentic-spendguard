@@ -241,18 +241,34 @@ pub fn check_signing_mode(env_prefix: &str, profile: &str) -> CheckResult {
             return CheckResult::skipped("signing.mode_configured", format!("env {var} unset"))
         }
     };
-    if mode == "disabled" && profile != "demo" {
-        return CheckResult::fail(
+    // Validate against the same allow-list the audit-producing services use
+    // at startup (`SigningMode::parse` in services/signing/src/lib.rs accepts
+    // exactly `local | kms | disabled`). Any other spelling — typos like
+    // `diabled`, `off`, or the env-set-but-empty `""` case — is a
+    // misconfiguration that would silently disable/break signing, so it must
+    // Fail closed rather than fall through to Pass.
+    match mode.as_str() {
+        "local" | "kms" => CheckResult::pass(
+            "signing.mode_configured",
+            format!("{var}={mode}, profile={profile}"),
+        ),
+        "disabled" if profile == "demo" => CheckResult::pass(
+            "signing.mode_configured",
+            format!("{var}={mode}, profile={profile}"),
+        ),
+        "disabled" => CheckResult::fail(
             "signing.mode_configured",
             "SIGNING_DISABLED_OUTSIDE_DEMO",
             format!("{var}=disabled with profile={profile}"),
             "set SPENDGUARD_PROFILE=demo OR pick mode=local|kms",
-        );
+        ),
+        other => CheckResult::fail(
+            "signing.mode_configured",
+            "SIGNING_MODE_INVALID",
+            format!("{var}={other:?} is not a recognized signing mode (expected local|kms)"),
+            "set SPENDGUARD_<service>_SIGNING_MODE to local|kms (or disabled under profile=demo)",
+        ),
     }
-    CheckResult::pass(
-        "signing.mode_configured",
-        format!("{var}={mode}, profile={profile}"),
-    )
 }
 
 /// Pricing snapshot freshness — query the latest pricing_versions.cut_at
@@ -441,6 +457,49 @@ mod tests {
         let r = check_signing_mode("S21_TEST_DEMO", "demo");
         assert_eq!(r.status, CheckStatus::Pass);
         std::env::remove_var("S21_TEST_DEMO_SIGNING_MODE");
+    }
+
+    #[test]
+    fn check_signing_mode_passes_for_local_and_kms() {
+        std::env::set_var("S21_TEST_LOCAL_SIGNING_MODE", "local");
+        let r = check_signing_mode("S21_TEST_LOCAL", "production");
+        assert_eq!(r.status, CheckStatus::Pass);
+        std::env::remove_var("S21_TEST_LOCAL_SIGNING_MODE");
+
+        std::env::set_var("S21_TEST_KMS_SIGNING_MODE", "kms");
+        let r = check_signing_mode("S21_TEST_KMS", "production");
+        assert_eq!(r.status, CheckStatus::Pass);
+        std::env::remove_var("S21_TEST_KMS_SIGNING_MODE");
+    }
+
+    #[test]
+    fn check_signing_mode_fails_on_unrecognized_value() {
+        // Typo / garbage / `off` must not fall through to Pass.
+        std::env::set_var("S21_TEST_TYPO_SIGNING_MODE", "diabled");
+        let r = check_signing_mode("S21_TEST_TYPO", "production");
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert_eq!(r.code.as_deref(), Some("SIGNING_MODE_INVALID"));
+        std::env::remove_var("S21_TEST_TYPO_SIGNING_MODE");
+    }
+
+    #[test]
+    fn check_signing_mode_fails_on_empty_value() {
+        // Env-set-but-empty is a real misconfiguration, not "unset".
+        std::env::set_var("S21_TEST_EMPTY_SIGNING_MODE", "");
+        let r = check_signing_mode("S21_TEST_EMPTY", "production");
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert_eq!(r.code.as_deref(), Some("SIGNING_MODE_INVALID"));
+        std::env::remove_var("S21_TEST_EMPTY_SIGNING_MODE");
+    }
+
+    #[test]
+    fn check_signing_mode_fails_on_unrecognized_value_even_in_demo() {
+        // demo only excuses `disabled`, not arbitrary unknown strings.
+        std::env::set_var("S21_TEST_DEMO_GARBAGE_SIGNING_MODE", "off");
+        let r = check_signing_mode("S21_TEST_DEMO_GARBAGE", "demo");
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert_eq!(r.code.as_deref(), Some("SIGNING_MODE_INVALID"));
+        std::env::remove_var("S21_TEST_DEMO_GARBAGE_SIGNING_MODE");
     }
 
     #[test]

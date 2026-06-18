@@ -109,7 +109,7 @@ Connect-RPC Authorization header from the Cursor IDE binary to
   Customer's existing secret-manager backing the D02 trust store.
   No new secret material is introduced by D17.
 * **Audit redaction.** Per
-  [POST_GA_03](../../docs/specs/post_ga_backlog/POST_GA_03_tokenizer_runtime_hardening.md)
+  [POST_GA_03](../../docs/internal/slices/POST_GA_03_tokenizer_runtime_hardening.md)
   the SpendGuard sidecar redacts message-body fields beyond
   `model` / `max_tokens` / `temperature` in audit events when the
   tenant has the redaction policy bound. Cursor traffic is no

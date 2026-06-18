@@ -302,7 +302,14 @@ impl FailPolicyMatrix {
             }
         }
 
-        if any_fail_open && profile == "production" && !_explicit_ack {
+        // Fail-closed profile gate. The ack requirement must default to
+        // STRICT: only an exact, normalized `demo` posture is allowed to
+        // overlay fail-open cells without `_acknowledge_risk_of_fail_open`.
+        // Anything else — empty/unset, `prod`, `Production`, a typo, or any
+        // unrecognized value — is treated as production-strict and REQUIRES
+        // the explicit ack. This avoids the prior exact-string brittleness
+        // where any non-`production` value silently disabled the gate.
+        if any_fail_open && !profile_is_demo(profile) && !_explicit_ack {
             return Err(PolicyError::FailOpenWithoutAck);
         }
 
@@ -364,6 +371,24 @@ impl FailPolicyMatrix {
             }
         }
     }
+}
+
+// ============================================================================
+// Profile gate
+// ============================================================================
+
+/// Normalize an operator-supplied profile string and decide whether it
+/// represents the relaxed `demo` posture (the only posture allowed to
+/// overlay fail-open cells without an explicit ack).
+///
+/// Fail-closed by construction: ONLY a value that trims+lowercases to
+/// exactly `"demo"` returns `true`. Every other value — empty/unset,
+/// `"prod"`, `"Production"`, whitespace, or any unrecognized string —
+/// returns `false` and is therefore treated as production-strict,
+/// requiring `_acknowledge_risk_of_fail_open` before any fail-open cell
+/// is accepted.
+fn profile_is_demo(profile: &str) -> bool {
+    profile.trim().eq_ignore_ascii_case("demo")
 }
 
 // ============================================================================
@@ -483,6 +508,50 @@ mod tests {
             "ledger": {"non_monetary_tool": "fail_open_with_marker"}
         }"#;
         FailPolicyMatrix::from_json(raw, "demo").expect("demo does not require ack");
+    }
+
+    #[test]
+    fn from_json_demo_profile_is_normalized_case_and_whitespace_insensitive() {
+        // The relaxed posture is recognized regardless of casing or
+        // surrounding whitespace, so a benign demo config isn't rejected.
+        let raw = r#"{
+            "ledger": {"non_monetary_tool": "fail_open_with_marker"}
+        }"#;
+        for p in ["demo", "DEMO", "Demo", "  demo  ", "\tdemo\n"] {
+            FailPolicyMatrix::from_json(raw, p)
+                .unwrap_or_else(|e| panic!("profile {p:?} should be treated as demo, got {e:?}"));
+        }
+    }
+
+    #[test]
+    fn from_json_any_non_demo_profile_requires_ack_for_fail_open() {
+        // Fail-closed default: anything that does not normalize to exactly
+        // `demo` is production-strict and must carry the explicit ack before
+        // overlaying any fail-open cell. This closes the prior exact-string
+        // `== "production"` gap where empty/unset/"prod"/"Production"/typos
+        // silently disabled the safety gate.
+        let raw = r#"{
+            "ledger": {"non_monetary_tool": "fail_open_with_marker"}
+        }"#;
+        for p in ["production", "prod", "Production", "", "   ", "staging", "demoo"] {
+            let err = FailPolicyMatrix::from_json(raw, p)
+                .err()
+                .unwrap_or_else(|| panic!("profile {p:?} should require ack but was accepted"));
+            assert!(
+                matches!(err, PolicyError::FailOpenWithoutAck),
+                "profile {p:?} expected FailOpenWithoutAck, got {err:?}"
+            );
+        }
+
+        // With the ack, every non-demo profile accepts the overlay.
+        let raw_ack = r#"{
+            "_acknowledge_risk_of_fail_open": true,
+            "ledger": {"non_monetary_tool": "fail_open_with_marker"}
+        }"#;
+        for p in ["production", "prod", "Production", "", "staging"] {
+            FailPolicyMatrix::from_json(raw_ack, p)
+                .unwrap_or_else(|e| panic!("ack should allow fail-open for {p:?}, got {e:?}"));
+        }
     }
 
     #[test]

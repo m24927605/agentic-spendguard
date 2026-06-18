@@ -1,7 +1,7 @@
 # ruff: noqa: ANN001, ANN201, ANN202
 """COV_D11_S5 — packaging extras + module-path resolution tests.
 
-Tier 1 unit tests per ``docs/slices/COV_D11_S5_proxy_config_entry.md``
+Tier 1 unit tests per ``docs/internal/slices/COV_D11_S5_proxy_config_entry.md``
 test plan + ``docs/specs/coverage/D11_litellm_proxy_plugin/review-standards.md``
 §Slice 5 reviewer checklist (5.2 Blocker: ``litellm-guardrail`` extra
 exists with the correct floor; existing ``litellm`` extra unchanged).

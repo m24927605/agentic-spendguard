@@ -51,6 +51,8 @@
 //   - `withRunPlan` — SLICE 7.
 //   - OTel / retry / idempotency cache — SLICE 8.
 
+import { createHash } from "node:crypto";
+
 import { type ChannelCredentials, credentials as grpcCredentials } from "@grpc/grpc-js";
 import type { status as GrpcStatus, ServiceError } from "@grpc/grpc-js";
 import { GrpcTransport } from "@protobuf-ts/grpc-transport";
@@ -104,7 +106,7 @@ import {
   SpendGuardConnectionError,
   SpendGuardError,
 } from "./errors.js";
-import { SPENDGUARD_OTEL_ATTR, withOtelSpan } from "./otel.js";
+import { type OtelAttributes, SPENDGUARD_OTEL_ATTR, withOtelSpan } from "./otel.js";
 import { computePromptHash } from "./promptHash.js";
 import { runWithRetry } from "./retry.js";
 import { currentRunPlan } from "./runPlan.js";
@@ -147,7 +149,28 @@ export interface HandshakeOutcome {
   contractBundleId: string;
   contractBundleHash: Uint8Array;
   capabilityRequired: number;
+  /**
+   * Key id the sidecar reports for `announcementSignature`. **Pass-through
+   * only in v0.1.x — NOT verified by the SDK.** See `announcementSignature`.
+   */
   signingKeyId: string;
+  /**
+   * Sidecar-supplied announcement signature.
+   *
+   * **PASS-THROUGH ONLY (v0.1.x): these bytes are surfaced verbatim and are
+   * NOT cryptographically verified by the SDK.** Trust rests entirely on the
+   * local UDS transport: the sidecar enforces the kernel `SO_PEERCRED`
+   * peer-credential check, which is the trust anchor under the documented
+   * local-socket threat model. The SDK does not (yet) verify
+   * `announcementSignature` against a pinned `signingKeyId` / control-plane
+   * public key.
+   *
+   * Pinned-key verification is deferred to the future non-local transport
+   * (the forward-reserved `runtime: "fetch"` / TLS path), where the UDS peer-
+   * cred anchor no longer applies. Until then, callers MUST NOT treat a
+   * non-empty `announcementSignature` as an independent proof of sidecar
+   * authenticity. Empty when the sidecar omits it.
+   */
   announcementSignature: Uint8Array;
 }
 
@@ -345,6 +368,16 @@ export interface ReleaseRequest {
 }
 
 export interface ReleaseOutcome {
+  /**
+   * Audit-chain signature for the release event, as reported by the sidecar.
+   *
+   * **PASS-THROUGH ONLY (v0.1.x): NOT cryptographically verified by the SDK.**
+   * Like `HandshakeOutcome.announcementSignature`, trust rests on the local
+   * UDS `SO_PEERCRED` peer-credential anchor; these are unvalidated bytes the
+   * adapter may forward but MUST NOT treat as independent proof. Pinned-key
+   * verification is deferred to the future non-local (TLS) transport. Empty
+   * when the sidecar omits it.
+   */
   auditEventSignature: Uint8Array;
   ledgerTransactionId: string;
   releasedReservationIds: readonly string[];
@@ -402,7 +435,7 @@ export type EmitLlmCallPostRequest = CommitEstimatedRequest;
 // is gone.
 
 const SLICE_7_NOT_WIRED =
-  "not yet wired — SLICE 7 (see docs/slices/COV_S05_05_d05_release_query.md anti-scope)";
+  "not yet wired — SLICE 7 (see docs/internal/slices/COV_S05_05_d05_release_query.md anti-scope)";
 
 // ── SLICE 5 §9.4 placeholder marker ────────────────────────────────────────
 //
@@ -415,6 +448,65 @@ const SLICE_7_NOT_WIRED =
 // NOT_FOUND.
 const QUERY_BUDGET_NOT_YET_WIRED =
   "query_budget not yet wired in sidecar; tracked at https://github.com/m24927605/agentic-spendguard/issues/TBD-queryBudget";
+
+/**
+ * Resolve the effective `disabled` flag for the client, applying the
+ * fail-closed gate on the env-var path and emitting a loud one-time warning
+ * when enforcement is actually turned off.
+ *
+ * Rules (mirror Rust `DisabledSigner::for_profile`, services/signing/src/lib.rs):
+ *   - Explicit `disabled: true` constructor option: honored unconditionally
+ *     (a deliberate code-level opt-in; unit suites depend on it).
+ *   - `SPENDGUARD_DISABLE` env var: honored ONLY when `SPENDGUARD_PROFILE=demo`.
+ *     Outside the demo profile the env signal is IGNORED (enforcement stays
+ *     ON) and a warning is emitted so the misconfiguration is visible — a
+ *     single stray env var can never silently defeat enforcement in production.
+ *
+ * The warning is emitted via `process.emitWarning` (not `console`) so the SDK
+ * stays dependency-free and adapters can route the warning through their own
+ * `process.on("warning", ...)` handler.
+ */
+function resolveDisabled(
+  explicitDisabled: boolean | undefined,
+  envSnapshot: import("./env.js").ResolvedEnvConfig,
+): boolean {
+  if (explicitDisabled === true) {
+    emitDisabledWarning(
+      "SpendGuard ENFORCEMENT DISABLED via the explicit `disabled: true` option — " +
+        "all decisions return CONTINUE with no reservation and no audit record. " +
+        "This is for tests only and must never be set in production.",
+    );
+    return true;
+  }
+  if (envSnapshot.disabled === true) {
+    if (envSnapshot.profile === "demo") {
+      emitDisabledWarning(
+        "SpendGuard ENFORCEMENT DISABLED via SPENDGUARD_DISABLE under " +
+          "SPENDGUARD_PROFILE=demo — all decisions return CONTINUE with no " +
+          "reservation and no audit record. Never set this in production.",
+      );
+      return true;
+    }
+    // Fail-closed: refuse to disable from a bare env var outside the demo
+    // profile. Keep enforcement ON and make the ignored signal visible.
+    emitDisabledWarning(
+      `SPENDGUARD_DISABLE is set but SPENDGUARD_PROFILE is not 'demo' (got ${JSON.stringify(envSnapshot.profile ?? "")}); IGNORING the disable request and keeping enforcement ON. To intentionally disable enforcement (tests/demos only) set SPENDGUARD_PROFILE=demo or pass \`disabled: true\` explicitly.`,
+    );
+    return false;
+  }
+  return false;
+}
+
+/** Emit a process-level warning for disabled-mode state. */
+function emitDisabledWarning(message: string): void {
+  // `process.emitWarning` is always available on Node >= 20.10 (engines floor);
+  // guard defensively for non-Node runtimes that polyfill `process` partially.
+  const proc = (globalThis as { process?: { emitWarning?: (m: string, name?: string) => void } })
+    .process;
+  if (proc?.emitWarning !== undefined) {
+    proc.emitWarning(message, "SpendGuardEnforcementWarning");
+  }
+}
 
 // ── SpendGuardClient ──────────────────────────────────────────────────────
 
@@ -482,6 +574,18 @@ export class SpendGuardClient implements AsyncDisposable {
     const socketPath = rawOpts.socketPath ?? envSnapshot.socketPath ?? "";
     const tenantId = rawOpts.tenantId ?? envSnapshot.tenantId ?? "";
 
+    // ── Enforcement-disable resolution (fail-closed gate) ──────────────────
+    //
+    // Disabled mode turns EVERY decision into CONTINUE with no reservation and
+    // no audit record. A single mis-set env var must NEVER be able to defeat
+    // enforcement in production. We mirror the Rust signing service's
+    // `DisabledSigner::for_profile` (services/signing/src/lib.rs): the
+    // env-var path (`SPENDGUARD_DISABLE`) is honored ONLY when
+    // `SPENDGUARD_PROFILE=demo`. The explicit `disabled: true` constructor
+    // option still works unconditionally — unit suites depend on it and it
+    // requires a deliberate code-level opt-in, not a stray env var.
+    const disabled = resolveDisabled(rawOpts.disabled, envSnapshot);
+
     const cfg: ResolvedConfig = {
       socketPath,
       tenantId,
@@ -500,7 +604,7 @@ export class SpendGuardClient implements AsyncDisposable {
       publishTimeoutMs: rawOpts.publishTimeoutMs ?? DEFAULT_PUBLISH_TIMEOUT_MS,
       traceTimeoutMs: rawOpts.traceTimeoutMs ?? DEFAULT_TRACE_TIMEOUT_MS,
       runtime: rawOpts.runtime ?? "uds-grpc",
-      disabled: rawOpts.disabled ?? envSnapshot.disabled ?? false,
+      disabled,
       runProjectionDefault: rawOpts.runProjectionDefault ?? envSnapshot.runProjectionDefault ?? "",
     };
     if (rawOpts.onSpan !== undefined) {
@@ -515,6 +619,22 @@ export class SpendGuardClient implements AsyncDisposable {
 
     validateConfig(cfg);
     this.cfg = Object.freeze(cfg);
+  }
+
+  /**
+   * Wrap an RPC body in the configured observability hook(s). Threads BOTH
+   * `cfg.otelTracer` and `cfg.onSpan` into `withOtelSpan` so every RPC site
+   * gets span emission uniformly — the documented `onSpan` observer (the
+   * no-OTel-dep path) is invoked once per RPC, fixing the prior drift where
+   * `onSpan` was stored but never called. The two are mutually exclusive at
+   * config-validation time, so at most one fires.
+   */
+  private withSpan<T>(
+    rpcName: string,
+    attributes: OtelAttributes,
+    fn: () => Promise<T>,
+  ): Promise<T> {
+    return withOtelSpan(this.cfg.otelTracer, rpcName, attributes, fn, this.cfg.onSpan);
   }
 
   /**
@@ -564,7 +684,13 @@ export class SpendGuardClient implements AsyncDisposable {
       ...(envSnapshot.handshakeTimeoutMs !== undefined
         ? { handshakeTimeoutMs: envSnapshot.handshakeTimeoutMs }
         : {}),
-      ...(envSnapshot.disabled !== undefined ? { disabled: envSnapshot.disabled } : {}),
+      // NOTE: we deliberately do NOT promote `envSnapshot.disabled` into an
+      // explicit `disabled: true` option here. Doing so would bypass the
+      // fail-closed profile gate in `resolveDisabled` (an explicit option is
+      // honored unconditionally). The constructor re-reads the env itself and
+      // applies the `SPENDGUARD_PROFILE=demo` gate to the env-var disable
+      // path. An explicit `overrides.disabled` (deliberate code-level opt-in)
+      // still wins via the spread below.
       ...overrides,
     };
     return new SpendGuardClient(merged);
@@ -767,8 +893,7 @@ export class SpendGuardClient implements AsyncDisposable {
     // failure should surface to the caller, not silently retry (retrying a
     // handshake against a broken sidecar would mask the broken-sidecar signal
     // the caller needs to see).
-    const resp: ProtoHandshakeResponse = await withOtelSpan(
-      this.cfg.otelTracer,
+    const resp: ProtoHandshakeResponse = await this.withSpan(
       "handshake",
       {
         [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
@@ -852,8 +977,16 @@ export class SpendGuardClient implements AsyncDisposable {
     // its OWN idempotency cache (it MUST — it is the correctness gate); the
     // local cache lives ABOVE it for latency.
     const cache = this.cfg.idempotencyCache;
+    // Bind the cache entry to the request identity so a reused idempotencyKey
+    // for a logically different reserve does NOT short-circuit the sidecar.
+    // A body-hash mismatch is treated as a MISS → falls through to the
+    // authoritative gate (fail-closed; can only add a round trip, never skip).
+    const bodyHash =
+      cache !== undefined && req.idempotencyKey.length > 0
+        ? computeReserveBodyHash(req)
+        : undefined;
     if (cache !== undefined && req.idempotencyKey.length > 0) {
-      const cached = cache.get(req.idempotencyKey);
+      const cached = cache.get(req.idempotencyKey, bodyHash);
       if (cached !== undefined) return cached;
     }
     if (this.adapterClient === null) {
@@ -865,8 +998,7 @@ export class SpendGuardClient implements AsyncDisposable {
     }
     const grpcReq = this.buildDecisionRequest(req);
     // ── SLICE 8 — wrap RPC in OTel span (design.md §6.4) + retry helper ────
-    return await withOtelSpan(
-      this.cfg.otelTracer,
+    return await this.withSpan(
       "reserve",
       {
         [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
@@ -903,7 +1035,7 @@ export class SpendGuardClient implements AsyncDisposable {
         // the cache key is the SAME idempotencyKey the sidecar would dedupe
         // on, so a same-process retry observes the cached outcome.
         if (cache !== undefined && req.idempotencyKey.length > 0) {
-          cache.set(req.idempotencyKey, outcome);
+          cache.set(req.idempotencyKey, outcome, undefined, bodyHash);
         }
         return outcome;
       },
@@ -1000,8 +1132,7 @@ export class SpendGuardClient implements AsyncDisposable {
     // duplicate event). The sidecar's own idempotency dedup on
     // `providerEventId` handles same-tenant repeat events; transient failures
     // here surface to the adapter for routing.
-    await withOtelSpan(
-      this.cfg.otelTracer,
+    await this.withSpan(
       "commitEstimated",
       {
         [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
@@ -1102,8 +1233,7 @@ export class SpendGuardClient implements AsyncDisposable {
     // per reservation lifetime — a retry inside the SDK would mask the
     // unavailable signal the adapter needs to escalate to its own retry
     // budget (e.g. queued release-on-restart).
-    return await withOtelSpan(
-      this.cfg.otelTracer,
+    return await this.withSpan(
       "release",
       {
         [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
@@ -1157,8 +1287,7 @@ export class SpendGuardClient implements AsyncDisposable {
       ...req,
       sessionId: req.sessionId || this.handshakeResult.sessionId,
     });
-    return await withOtelSpan(
-      this.cfg.otelTracer,
+    return await this.withSpan(
       "reserveSession",
       {
         [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
@@ -1202,8 +1331,7 @@ export class SpendGuardClient implements AsyncDisposable {
       throw new SidecarUnavailable("transport not established for commitSessionDelta");
     }
     const grpcReq = buildCommitSessionDeltaRequest(req);
-    return await withOtelSpan(
-      this.cfg.otelTracer,
+    return await this.withSpan(
       "commitSessionDelta",
       {
         [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
@@ -1247,8 +1375,7 @@ export class SpendGuardClient implements AsyncDisposable {
       throw new SidecarUnavailable("transport not established for releaseSession");
     }
     const grpcReq = buildReleaseSessionRequest(req);
-    return await withOtelSpan(
-      this.cfg.otelTracer,
+    return await this.withSpan(
       "releaseSession",
       {
         [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
@@ -1294,8 +1421,7 @@ export class SpendGuardClient implements AsyncDisposable {
     // The not-yet-wired throw inside the callback records as a span exception
     // via `withOtelSpan` — observability dashboards can see the call attempt
     // even before the §9.4 wire lands.
-    return await withOtelSpan(
-      this.cfg.otelTracer,
+    return await this.withSpan(
       "queryBudget",
       {
         [SPENDGUARD_OTEL_ATTR.TENANT_ID]: this.cfg.tenantId,
@@ -2048,6 +2174,65 @@ function mapDecisionResponse(resp: ProtoDecisionResponse, tenantId: string): Dec
   });
 }
 
+// ── Idempotency cache body-identity hash ──────────────────────────────────
+
+/**
+ * Stable, in-process hash of a `ReserveRequest`'s identity for binding
+ * idempotency-cache entries to the request body.
+ *
+ * Why: `cfg.idempotencyCache` is keyed on the caller-supplied
+ * `idempotencyKey`. A cache HIT short-circuits the UDS round trip entirely, so
+ * the sidecar (the correctness gate) never re-evaluates. If an adapter reuses
+ * an `idempotencyKey` for a logically DIFFERENT reserve (different claims /
+ * amount / route / window / pricing), a key-only cache would return the prior
+ * CONTINUE — allowing spend against a stale decision the sidecar never saw.
+ * Binding the entry to this hash makes a key-hit-with-different-body fall
+ * through to the sidecar (see `InMemoryIdempotencyCache.get`).
+ *
+ * This hash is a LOCAL latency-optimisation discriminator only — it is NOT a
+ * wire value and needs NO cross-language byte-equivalence. It MUST, however,
+ * be deterministic within a process and cover every field that changes the
+ * ledger/sidecar decision, so the local fall-through decision provably agrees
+ * with the sidecar's accept / IDEMPOTENCY_CONFLICT decision. We therefore hash
+ * the FULL request identity (all decision-affecting fields) via a canonical
+ * JSON encoding with sorted keys.
+ *
+ * `idempotencyKey` is intentionally EXCLUDED from the hashed body (it is the
+ * cache key, not part of the identity being disambiguated under that key).
+ *
+ * Exported for the cache-collision regression test; not part of the LOCKED
+ * public surface (no index.ts re-export).
+ */
+export function computeReserveBodyHash(req: ReserveRequest): string {
+  const { idempotencyKey: _omit, ...identity } = req;
+  return createHash("sha256").update(canonicalStableJson(identity), "utf8").digest("hex");
+}
+
+/**
+ * Deterministic JSON encoding with lexicographically sorted object keys.
+ * Handles `bigint` (ClaimEstimate carries `number | bigint` fields, which
+ * `JSON.stringify` rejects) and `Uint8Array`. Arrays preserve order;
+ * `undefined` object properties are omitted so present-vs-absent is stable.
+ */
+function canonicalStableJson(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "bigint") return `"bigint:${value.toString()}"`;
+  if (value instanceof Uint8Array) return `"bytes:${Buffer.from(value).toString("base64")}"`;
+  if (Array.isArray(value)) {
+    return `[${value.map((v) => canonicalStableJson(v)).join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    const keys = Object.keys(obj)
+      .filter((k) => obj[k] !== undefined)
+      .sort();
+    const parts = keys.map((k) => `${JSON.stringify(k)}:${canonicalStableJson(obj[k])}`);
+    return `{${parts.join(",")}}`;
+  }
+  // string | number | boolean — JSON.stringify is already canonical here.
+  return JSON.stringify(value);
+}
+
 // ── Central gRPC Status → typed-error mapper (SLICE 5) ────────────────────
 
 /**
@@ -2069,9 +2254,17 @@ function mapDecisionResponse(resp: ProtoDecisionResponse, tenantId: string): Dec
  *      compatibility + forward-compat hook).
  *
  * TODO(cross-component-slice): when the sidecar sets
- * `x-spendguard-reason-code` trailer alongside `e.to_status()`, the
- * message-string parse becomes secondary. Track at the cross-component
- * sidecar trailer extension slice (NOT in scope for D05 SLICE 5).
+ * `x-spendguard-reason-code` trailer alongside `e.to_status()`, flip the
+ * trailer to PRIMARY and demote the message-string parse to SECONDARY —
+ * **but keep the message-string parse as a fallback, do NOT retire it**
+ * (production still relies on it for backward compat; dropping it would strip
+ * the discriminator from every FAILED_PRECONDITION). The reorder is GATED on
+ * the sidecar change shipping first; flipping the order before then is a no-op
+ * at best and a regression at worst. Track at the cross-component sidecar
+ * trailer extension slice (NOT in scope for D05 SLICE 5). Until then, the
+ * message-string prefixes are pinned to the Rust `DomainError::Display`
+ * strings by `tests/reason-code-contract.test.ts`, so a Rust reword fails CI
+ * instead of silently demoting conflicts in production.
  */
 const REASON_CODE_HEADER = "x-spendguard-reason-code";
 
@@ -2092,7 +2285,11 @@ const REASON_CODE_HEADER = "x-spendguard-reason-code";
  * Ordered ARRAY (not a map): longest / most-specific prefixes FIRST so a
  * shorter prefix doesn't accidentally swallow a longer one.
  */
-const REASON_CODE_PREFIXES: ReadonlyArray<readonly [string, string]> = [
+// Exported for the cross-component contract test (tests/reason-code-contract.test.ts)
+// that pins each prefix to the corresponding Rust `DomainError::Display` string,
+// so a Rust reword fails CI instead of silently demoting in production. Not part
+// of the LOCKED public surface (no index.ts re-export).
+export const REASON_CODE_PREFIXES: ReadonlyArray<readonly [string, string]> = [
   // Forward-compat: bracket-tagged emission from the resume path.
   ["[bundle_hot_reloaded]", "BUNDLE_HOT_RELOADED"],
   // Defensive: matches the test fixture wording ("bundle hot-reloaded ...")

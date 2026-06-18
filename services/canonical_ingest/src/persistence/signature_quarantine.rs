@@ -7,6 +7,19 @@ use sqlx::PgPool;
 
 use crate::{domain::error::DomainError, proto::common::v1::CloudEvent};
 
+/// Metadata recorded when the stored `claimed_canonical_bytes` are a
+/// truncated copy of an oversized canonical form. The full SHA-256 of
+/// the ORIGINAL (untruncated) bytes is preserved so the forensic record
+/// is verifiable even though the stored payload is clipped — the event
+/// is durably recorded instead of being silently dropped.
+#[derive(Debug, Clone)]
+pub struct TruncationNote {
+    /// Length of the original (pre-truncation) canonical bytes.
+    pub original_len: usize,
+    /// Lowercase hex SHA-256 of the original (pre-truncation) bytes.
+    pub original_sha256_hex: String,
+}
+
 /// Insert one quarantine row. `reason` MUST match the CHECK constraint
 /// in migration 0007.
 pub async fn insert(
@@ -14,6 +27,19 @@ pub async fn insert(
     evt: &CloudEvent,
     canonical_bytes: &[u8],
     reason: &str,
+) -> Result<(), DomainError> {
+    insert_with_truncation(pool, evt, canonical_bytes, reason, None).await
+}
+
+/// Insert one quarantine row, optionally recording that
+/// `canonical_bytes` is a truncated copy of an oversized canonical form
+/// (the full SHA-256 + original length are stored in `debug_info`).
+pub async fn insert_with_truncation(
+    pool: &PgPool,
+    evt: &CloudEvent,
+    canonical_bytes: &[u8],
+    reason: &str,
+    truncation: Option<TruncationNote>,
 ) -> Result<(), DomainError> {
     // Derive signing_algorithm from key_id prefix (mirror of migration
     // 0024's CASE expression). Stored alongside so quarantine triage
@@ -33,6 +59,9 @@ pub async fn insert(
     let debug_info = json!({
         "claimed_signature_len": evt.producer_signature.len(),
         "canonical_form": if evt.producer_id.starts_with("ledger:") { "json" } else { "proto" },
+        "canonical_truncated": truncation.is_some(),
+        "canonical_original_len": truncation.as_ref().map(|t| t.original_len),
+        "canonical_original_sha256": truncation.as_ref().map(|t| t.original_sha256_hex.clone()),
     });
 
     sqlx::query(

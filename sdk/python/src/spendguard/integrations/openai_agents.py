@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import contextvars
 import hashlib
+import logging
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -120,9 +121,29 @@ ClaimEstimator = Callable[[Any], list[Any]]
 """Project BudgetClaim list from the model `input` payload (str | list[Item])."""
 
 
+log = logging.getLogger("spendguard.integrations.openai_agents")
+
+
 def _signature(input_payload: Any, system_instructions: str | None) -> str:
     text = repr(input_payload) + "|" + (system_instructions or "")
     return hashlib.blake2b(text.encode("utf-8"), digest_size=16).hexdigest()
+
+
+def _classify_exception(exc: BaseException) -> str:
+    """Classify an inner-call exception into a POST outcome label.
+
+    Mirrors the autogen reference (``_hook.py:286-302``): use
+    ``type(exc).__name__ == "CancelledError"`` rather than
+    ``isinstance(exc, asyncio.CancelledError)`` so anyio / trio
+    ``CancelledError`` variants raised across event loops still map to
+    ``CANCELLED``.
+
+    Returns ``"CANCELLED"`` when the type name matches, else
+    ``"FAILURE"``.
+    """
+    if type(exc).__name__ == "CancelledError":
+        return "CANCELLED"
+    return "FAILURE"
 
 
 class SpendGuardAgentsModel(_AgentsModel):  # type: ignore[misc, valid-type]
@@ -214,18 +235,58 @@ class SpendGuardAgentsModel(_AgentsModel):  # type: ignore[misc, valid-type]
 
         # Delegate to inner Model. agents.Model.get_response signature
         # uses keyword-only args after `tracing`; pass them through.
-        inner_response = await self._inner.get_response(
-            system_instructions,
-            input,
-            model_settings,
-            tools,
-            output_schema,
-            handoffs,
-            tracing,
-            previous_response_id=previous_response_id,
-            conversation_id=conversation_id,
-            prompt=prompt,
-        )
+        #
+        # A provider error or CancelledError must release the PRE
+        # reservation and write a FAILURE / CANCELLED anchor before
+        # re-raising — mirrors the autogen reference (_hook.py:514-565)
+        # so a failed/cancelled call never leaves a dangling reservation
+        # or a hole in the audit chain. `except BaseException` is
+        # required: CancelledError derives from BaseException.
+        try:
+            inner_response = await self._inner.get_response(
+                system_instructions,
+                input,
+                model_settings,
+                tools,
+                output_schema,
+                handoffs,
+                tracing,
+                previous_response_id=previous_response_id,
+                conversation_id=conversation_id,
+                prompt=prompt,
+            )
+        except BaseException as exc:
+            # POST fires for FAILURE / CANCELLED only when a reservation
+            # was issued. The best-effort emit is wrapped so a failing
+            # release RPC never masks the original inner exception; the
+            # reservation TTL-sweeps as the durable backstop.
+            if outcome.reservation_ids:
+                outcome_kind = _classify_exception(exc)
+                try:
+                    await self._client.emit_llm_call_post(
+                        run_id=ctx.run_id,
+                        step_id=step_id,
+                        llm_call_id=llm_call_id,
+                        decision_id=outcome.decision_id,
+                        reservation_id=outcome.reservation_ids[0],
+                        provider_reported_amount_atomic="",
+                        estimated_amount_atomic="0",
+                        unit=self._unit,
+                        pricing=self._pricing,
+                        provider_event_id="",
+                        outcome=outcome_kind,
+                    )
+                except Exception as post_exc:  # noqa: BLE001
+                    log.warning(
+                        "spendguard.integrations.openai_agents: "
+                        "emit_llm_call_post failed on exception path "
+                        "(run_id=%s sig=%s err=%r) — reservation will "
+                        "TTL-sweep",
+                        ctx.run_id,
+                        signature[:8],
+                        post_exc,
+                    )
+            raise
 
         # Extract usage from ModelResponse (validated against
         # openai-agents 0.17.0 — has `usage` Usage field with

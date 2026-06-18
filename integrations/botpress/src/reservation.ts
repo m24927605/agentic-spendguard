@@ -34,8 +34,41 @@
 //   - No module-level mutable state (review-standards.md §3 cross-cutting,
 //     §2.8 Slice 2). All state lives on the instance.
 
+import { readFileSync } from "node:fs";
+import { isAbsolute, normalize } from "node:path";
 import { computePromptHash, deriveIdempotencyKey, newUuid7 } from "@spendguard/sdk";
 import { type Configuration, SpendGuardConfigError, assertRequiredConfig } from "./config.js";
+
+// --------------------------------------------------------------------
+// undici interop shims
+// --------------------------------------------------------------------
+// Node's global `fetch` is backed by undici and accepts an undici
+// `Dispatcher` via the (non-standard) `dispatcher` request option — a Node
+// `https.Agent` is silently ignored, so a client certificate MUST be wired
+// through an undici `Agent`. undici ships inside Node but is not importable as
+// a bare specifier under this package's NodeNext + verbatimModuleSyntax build,
+// and is not declared as a dependency here, so we resolve it at runtime via a
+// computed-specifier dynamic import. When mTLS material is configured but
+// undici cannot be loaded, we FAIL CLOSED (throw) rather than silently dialing
+// without a client certificate.
+
+// `@types/node` already types `RequestInit.dispatcher` as undici's
+// `Dispatcher` (via undici-types), so we reuse that exact type for the agent
+// rather than redeclaring a narrower one that would fail the strict
+// assignability check under `exactOptionalPropertyTypes`.
+type UndiciDispatcher = NonNullable<RequestInit["dispatcher"]>;
+
+interface UndiciAgentConnectOptions {
+  cert: string;
+  key: string;
+  ca: string;
+}
+interface UndiciAgentCtor {
+  new (opts: { connect: UndiciAgentConnectOptions }): UndiciDispatcher;
+}
+interface UndiciModule {
+  Agent: UndiciAgentCtor;
+}
 
 // --------------------------------------------------------------------
 // Public data carriers
@@ -171,6 +204,17 @@ export class SpendGuardReservation {
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly reserveDeadlineMs: number;
   private readonly commitDeadlineMs: number;
+  /** Whether a caller injected a transport (`fetchImpl`). When true the
+   *  caller owns TLS and the mTLS dispatcher is not built — this is the
+   *  test/seam path (mirrors the Kong Go plugin's `httpStubClient` bypass). */
+  private readonly transportInjected: boolean;
+  /** Resolved + traversal-cleaned mTLS PEM paths, or null when no client
+   *  certificate is configured. */
+  private readonly tlsPaths: { cert: string; key: string; ca: string } | null;
+  /** Memoised undici mTLS dispatcher promise. Built lazily on first request
+   *  so a missing `undici` fails the call (fail closed) rather than the whole
+   *  process at import time. */
+  private dispatcherPromise: Promise<UndiciDispatcher> | null = null;
 
   constructor(
     config: Partial<Configuration>,
@@ -186,9 +230,48 @@ export class SpendGuardReservation {
     this.cfg = config;
     this.failOpenDev =
       opts.failOpenDevOverride ?? (process.env.SPENDGUARD_BOTPRESS_FAIL_OPEN ?? "").trim() === "1";
+    this.transportInjected = opts.fetchImpl !== undefined;
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.reserveDeadlineMs = opts.reserveDeadlineMs ?? 5_000;
     this.commitDeadlineMs = opts.commitDeadlineMs ?? 5_000;
+    // Resolve mTLS material once at construction. `assertRequiredConfig`
+    // already enforced all-or-none + a secure URL, so here we only normalise
+    // and traversal-check the PEM paths (mirrors the Go plugin's loadPEM
+    // path-traversal defense). Skipped entirely when a transport is injected.
+    this.tlsPaths =
+      this.transportInjected || this.cfg.tlsCertPath === undefined
+        ? null
+        : {
+            cert: cleanPemPath(this.cfg.tlsCertPath, "tlsCertPath"),
+            key: cleanPemPath(this.cfg.tlsKeyPath as string, "tlsKeyPath"),
+            ca: cleanPemPath(this.cfg.tlsRootCaPath as string, "tlsRootCaPath"),
+          };
+  }
+
+  /**
+   * Build (and memoise) the undici mTLS dispatcher from the configured PEM
+   * material. FAIL CLOSED: if `undici` cannot be loaded, the returned promise
+   * rejects, so the dependent `postJson` throws and the reserve/commit path
+   * fails closed rather than dialing without a client certificate.
+   */
+  private mtlsDispatcher(): Promise<UndiciDispatcher> {
+    if (this.dispatcherPromise === null) {
+      const paths = this.tlsPaths;
+      if (paths === null) {
+        this.dispatcherPromise = Promise.reject(new Error("no mTLS material configured"));
+      } else {
+        this.dispatcherPromise = (async () => {
+          const undici = await loadUndici();
+          const cert = readFileSync(paths.cert, "utf8");
+          const key = readFileSync(paths.key, "utf8");
+          const ca = readFileSync(paths.ca, "utf8");
+          return new undici.Agent({ connect: { cert, key, ca } });
+        })();
+        // Don't let an unhandled rejection escape before the first await.
+        this.dispatcherPromise.catch(() => {});
+      }
+    }
+    return this.dispatcherPromise;
   }
 
   /**
@@ -321,6 +404,36 @@ export class SpendGuardReservation {
       );
     }
 
+    // Fail-closed default: ONLY a verdict of exactly `ALLOW` carrying a
+    // non-empty `reservation_id` is allowed to proceed. Anything else — an
+    // empty/unknown verdict, or an ALLOW without a reservation_id — means the
+    // companion is mis-wired or returned a malformed response; treating it as
+    // ALLOW would leak uncounted spend (the call would run with no reservation
+    // and never commit). Mirror the Kong Go plugin's empty-reservation
+    // (access.go:207-213) and unknown-verdict (access.go:231-235) fail-closed
+    // branches. The dev escape (`SPENDGUARD_BOTPRESS_FAIL_OPEN=1`) follows the
+    // same shape as the DEGRADE branch above: warn + sentinel handle, never a
+    // silent allow.
+    if (resp.verdict !== "ALLOW" || resp.reservation_id.length === 0) {
+      const detail =
+        resp.verdict !== "ALLOW"
+          ? `unexpected verdict ${JSON.stringify(resp.verdict)}`
+          : "ALLOW without reservation_id";
+      if (this.failOpenDev) {
+        console.warn(`spendguard:botpress: fail-open dev mode active; ${detail} treated as ALLOW`);
+        return {
+          decisionId: resp.decision_id ?? "",
+          reservationId: "",
+          llmCallId,
+          runId,
+          stepId,
+          estimatorSnapshot,
+          conversationId: ctx.conversationId,
+        };
+      }
+      throw new SidecarUnavailable(`SpendGuard decision malformed: ${detail}`);
+    }
+
     return {
       decisionId: resp.decision_id,
       reservationId: resp.reservation_id,
@@ -416,12 +529,20 @@ export class SpendGuardReservation {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), deadlineMs);
     try {
-      const resp = await this.fetchImpl(url, {
+      const init: RequestInit = {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
         signal: controller.signal,
-      });
+      };
+      // Attach the undici mTLS dispatcher when a client certificate is
+      // configured. If building it fails (e.g. undici unavailable), the await
+      // rejects here and the request fails closed — never falls through to a
+      // plaintext / no-client-cert dial.
+      if (this.tlsPaths !== null) {
+        init.dispatcher = await this.mtlsDispatcher();
+      }
+      const resp = await this.fetchImpl(url, init);
       if (!resp.ok) {
         const text = await safeReadText(resp);
         throw new Error(`sidecar ${path} returned HTTP ${resp.status}: ${text.slice(0, 200)}`);
@@ -464,6 +585,50 @@ function classifyFailure(exc: unknown): "CANCELLED" | "TIMEOUT" | "FAILURE" {
   return "FAILURE";
 }
 
+/**
+ * Normalise + traversal-check an mTLS PEM path. Mirrors the Kong Go plugin's
+ * `loadPEM` defense (filepath.Clean + reject `..`). Production wiring mounts
+ * these from the SpendGuard sidecar Secret; an absolute, traversal-free path
+ * is required so a misconfigured relative/`..` path cannot read arbitrary
+ * files. Throws `SpendGuardConfigError` (fail closed) on a rejected path.
+ */
+function cleanPemPath(raw: string, field: string): string {
+  const clean = normalize(raw);
+  if (clean.split(/[/\\]/).includes("..")) {
+    throw new SpendGuardConfigError(`spendguard:botpress: ${field} path rejected (traversal)`);
+  }
+  if (!isAbsolute(clean)) {
+    throw new SpendGuardConfigError(`spendguard:botpress: ${field} must be an absolute path`);
+  }
+  return clean;
+}
+
+/**
+ * Runtime-resolve `undici` via a computed specifier so the NodeNext +
+ * verbatimModuleSyntax build does not require it as a static dependency.
+ * undici ships inside Node (it backs global `fetch`) but, when it is not
+ * installed as a package and not exposed as a bare import, this resolution
+ * fails — in which case the caller fails closed. The specifier is built from a
+ * constant so the type checker treats the import as `Promise<any>` rather than
+ * resolving (and failing on) the missing module.
+ */
+async function loadUndici(): Promise<UndiciModule> {
+  const specifier = ["un", "dici"].join("");
+  try {
+    const mod = (await import(specifier)) as unknown as Partial<UndiciModule>;
+    if (typeof mod.Agent !== "function") {
+      throw new Error("undici module did not export Agent");
+    }
+    return mod as UndiciModule;
+  } catch (err) {
+    throw new SidecarUnavailable(
+      `spendguard:botpress: mTLS dispatcher unavailable (undici not loadable): ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+  }
+}
+
 /** Redact a URL down to the scheme + host + path so logs do not leak the
  *  port the loopback companion lives on or any embedded auth material.
  *  Operator-visible breadcrumb only; INV-6. */
@@ -497,4 +662,5 @@ export const __internal = {
   classifyFailure,
   redact,
   joinUrl,
+  cleanPemPath,
 };

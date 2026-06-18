@@ -18,7 +18,34 @@ use crate::{
 
 const REASON_STR: &str = "TTL_EXPIRED";
 
-pub async fn sweep_one(state: &mut AppState, row: ExpiredRow) -> anyhow::Result<()> {
+/// Outcome of a single ledger release attempt.
+///
+/// Distinguishes a genuine release (`Released`/`Replay` — idempotent
+/// success) from a ledger refusal (`Refused`, e.g.
+/// RESERVATION_STATE_CONFLICT / TTL_NOT_EXPIRED), a transport failure
+/// (`TransportError`), or a malformed response (`MissingOutcome`). The
+/// caller maps `Released`/`Replay` to the swept-ok counter and the rest
+/// to swept-err so the success metric reflects actual releases rather
+/// than "the row was visited". In every case the reservation stays
+/// `reserved` and is retried next cycle (fail-closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SweepOutcome {
+    Released,
+    Replay,
+    Refused,
+    TransportError,
+    MissingOutcome,
+}
+
+impl SweepOutcome {
+    /// True only when the reservation was actually released (including
+    /// an idempotent replay). Drives the swept-ok vs swept-err metric.
+    pub fn is_success(self) -> bool {
+        matches!(self, SweepOutcome::Released | SweepOutcome::Replay)
+    }
+}
+
+pub async fn sweep_one(state: &mut AppState, row: ExpiredRow) -> anyhow::Result<SweepOutcome> {
     let reservation_set_id = derive_reservation_set_id(&row.original_decision_id);
     let canonical = release_hash(
         &row.tenant_id,
@@ -86,7 +113,7 @@ pub async fn sweep_one(state: &mut AppState, row: ExpiredRow) -> anyhow::Result<
         producer_sequence: producer_seq,
     };
 
-    match state.ledger_client.release(req).await {
+    let outcome = match state.ledger_client.release(req).await {
         Ok(resp) => match resp.into_inner().outcome {
             Some(Outcome::Success(s)) => {
                 info!(
@@ -94,6 +121,7 @@ pub async fn sweep_one(state: &mut AppState, row: ExpiredRow) -> anyhow::Result<
                     ledger_tx = %s.ledger_transaction_id,
                     "TTL released"
                 );
+                SweepOutcome::Released
             }
             Some(Outcome::Replay(r)) => {
                 info!(
@@ -101,6 +129,7 @@ pub async fn sweep_one(state: &mut AppState, row: ExpiredRow) -> anyhow::Result<
                     ledger_tx = %r.ledger_transaction_id,
                     "TTL release replay"
                 );
+                SweepOutcome::Replay
             }
             Some(Outcome::Error(e)) => {
                 // Common: RESERVATION_STATE_CONFLICT (sidecar already
@@ -112,18 +141,29 @@ pub async fn sweep_one(state: &mut AppState, row: ExpiredRow) -> anyhow::Result<
                     message = %e.message,
                     "release error"
                 );
+                SweepOutcome::Refused
             }
-            None => warn!("ledger response missing outcome"),
+            None => {
+                warn!("ledger response missing outcome");
+                SweepOutcome::MissingOutcome
+            }
         },
-        Err(grpc_status) => warn!(
-            reservation_id = %row.reservation_id,
-            status = %grpc_status,
-            "release gRPC failed"
-        ),
-    }
+        Err(grpc_status) => {
+            warn!(
+                reservation_id = %row.reservation_id,
+                status = %grpc_status,
+                "release gRPC failed"
+            );
+            SweepOutcome::TransportError
+        }
+    };
 
     // Marker — keeps base64 import linked if future encoding needed.
     let _ = base64::engine::general_purpose::STANDARD.encode([]);
 
-    Ok(())
+    // The reservation stays `reserved` and is retried next cycle for
+    // every non-`Released`/`Replay` outcome (fail-closed). The caller
+    // uses `SweepOutcome::is_success()` to pick the swept-ok vs
+    // swept-err counter so the success metric reflects actual releases.
+    Ok(outcome)
 }

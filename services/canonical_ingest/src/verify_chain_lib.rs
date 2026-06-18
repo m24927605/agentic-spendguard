@@ -81,26 +81,48 @@ pub fn event_type_requires_prediction_mirror(event_type: &str) -> bool {
 
 /// Run the verify-chain replay over the configured Postgres pool.
 ///
-/// SLICE_13 Phase C ships this as a thin scan loop that mirrors the
-/// SLICE_10-activated semantics of the bin:
+/// This counts canonical_events rows in the window and reports how many
+/// carry NULL prediction-mirror columns (legacy pre-SLICE_06 rows). It
+/// does **not** verify producer signatures and does **not** perform the
+/// per-row prediction-mirror cross-check (re-decoding the embedded
+/// CloudEvent and comparing column <-> proto field) — that needs the
+/// verifier/key-registry wiring which is not yet present here.
 ///
-///   * Rows with non-NULL mirror columns are eligible for the full
-///     check; we count them as scanned + skipped_legacy is bumped for
-///     NULL-mirror rows.
-///   * Signature verification is **not** wired in Phase C because it
-///     requires the verifier instance (key registry); the report
-///     wrapper passes a configured verifier in a follow-up patch.
-///   * Returns the summary so the calibration-report CLI can decide
-///     whether to abort the report.
+/// ## Fail-closed contract (security fix)
 ///
-/// This is the gate-clean shape: no silent-pass (the SLICE_10 fix
-/// applies). When `rows_scanned` is zero AND `tenant_id` was supplied,
-/// the caller should warn — the window may be empty for legitimate
-/// reasons but it's worth surfacing.
+/// Because the per-row cross-check is unimplemented, returning
+/// `Ok(VerifyChainSummary { rows_failed: 0, .. })` when
+/// `check_prediction_mirror == true` would be a silent fail-open: the
+/// calibration-report cron gate (which always passes
+/// `check_prediction_mirror = true`) would stay green regardless of
+/// whether the on-disk audit_outbox prediction columns actually match
+/// the signed CloudEvent proto bytes. This mirrors the same fail-open
+/// the `verify-chain` binary closes.
+///
+/// So this function FAILS CLOSED: when `check_prediction_mirror` is true
+/// it returns an explicit error (which both callers map to a non-zero
+/// exit code) instead of a success summary it cannot back up. Callers
+/// that only want the legacy NULL-prediction count scan must set
+/// `check_prediction_mirror = false`.
 pub async fn verify_chain(
     pool: &sqlx::PgPool,
     args: &VerifyChainArgs,
 ) -> Result<VerifyChainSummary, sqlx::Error> {
+    // Fail-closed: the per-row prediction-mirror cross-check is not
+    // implemented in this build. Do not emit a green summary the gate
+    // cannot back up — return an explicit error so the calibration-report
+    // cron / CLI exit non-zero instead of silently passing.
+    if args.check_prediction_mirror {
+        return Err(sqlx::Error::Configuration(
+            "verify-chain prediction-mirror cross-check is not implemented \
+             in this build (requires a live ledger DB + verifier/key-registry \
+             wiring); refusing to report a passing audit-integrity result. \
+             Pass check_prediction_mirror=false to run only the legacy \
+             NULL-prediction count scan."
+                .into(),
+        ));
+    }
+
     // Count canonical_events rows in the window.
     //
     // RLS scope: the calibration-report CLI sets

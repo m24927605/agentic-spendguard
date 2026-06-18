@@ -13,7 +13,10 @@ use std::time::Duration;
 
 use chrono::{Duration as ChronoDuration, Utc};
 use pretty_assertions::assert_eq;
-use spendguard_stats_aggregator::aggregation::aggregate_output_distribution;
+use spendguard_stats_aggregator::aggregation::{
+    aggregate_output_distribution, discover_active_tenants,
+};
+use spendguard_stats_aggregator::run_length::aggregate_run_length;
 use spendguard_stats_aggregator::drift_detector::{
     DriftAlertCooldown, DriftAlertCooldownDecision, DriftAlertEmissionAttempt,
     DriftAlertEmissionDecision, DriftAlertKey, PostgresDriftAlertCooldownStore,
@@ -288,6 +291,49 @@ async fn seed_sparse_outcome_pair(
         model: None,
         agent_id: None,
         prompt_class: None,
+    })
+    .await;
+}
+
+/// Seed a single DECISION event with no paired outcome — models a
+/// decision-heavy / outcome-light tenant (e.g. heavy DENY traffic or
+/// runs that never complete an outcome). Such a tenant must still be
+/// discovered so aggregate_run_length populates
+/// run_length_distribution_cache; otherwise run_cost_projector Signal 1
+/// is stuck on the cold-start default.
+async fn seed_decision_only(
+    pool: &PgPool,
+    tenant_id: Uuid,
+    seq: i64,
+    age_days: i32,
+    run_id: Uuid,
+) {
+    let decision_id = Uuid::new_v4();
+    let decision_event_id = Uuid::new_v4();
+
+    insert_global_key(
+        pool,
+        decision_event_id,
+        tenant_id,
+        Some(decision_id),
+        "spendguard.audit.decision",
+        age_days,
+    )
+    .await;
+    insert_canonical_event(CanonicalSeed {
+        pool,
+        event_id: decision_event_id,
+        tenant_id,
+        decision_id: Some(decision_id),
+        run_id: Some(run_id),
+        event_type: "spendguard.audit.decision",
+        seq,
+        age_days,
+        actual_input_tokens: None,
+        actual_output_tokens: None,
+        model: Some("gpt-4o-mini"),
+        agent_id: Some("agent-alpha"),
+        prompt_class: Some("chat_short"),
     })
     .await;
 }
@@ -1009,4 +1055,68 @@ async fn drift_alert_cooldown_postgres_rejects_non_finite_z_scores() {
         );
         let _ = tx.rollback().await;
     }
+}
+
+/// Regression: a decision-heavy / outcome-light tenant (decisions but no
+/// completed outcomes — e.g. heavy DENY traffic) must still be discovered
+/// by discover_active_tenants and have its run-length cache populated by
+/// aggregate_run_length. Before the fix, discovery was outcome-only, so
+/// such tenants were never in the cycle's tenant list and
+/// run_length_distribution_cache stayed permanently empty, pinning
+/// run_cost_projector Signal 1 to the cold-start default.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn discover_includes_decision_only_tenant_and_run_length_populates() {
+    let Some(fx) = setup_postgres().await else {
+        return;
+    };
+    let decision_only_tenant = Uuid::new_v4();
+
+    // Seed two runs, each with several decision steps, and NO outcomes.
+    let run_a = Uuid::new_v4();
+    let run_b = Uuid::new_v4();
+    for step in 0..5 {
+        seed_decision_only(&fx.owner_pool, decision_only_tenant, step, 3, run_a).await;
+    }
+    for step in 5..8 {
+        seed_decision_only(&fx.owner_pool, decision_only_tenant, step, 3, run_b).await;
+    }
+
+    // discover_active_tenants must now surface this tenant despite the
+    // complete absence of outcome events.
+    let tenants = discover_active_tenants(&fx.app_pool)
+        .await
+        .expect("discover active tenants");
+    assert!(
+        tenants.contains(&decision_only_tenant),
+        "decision-only tenant missing from discovery: {tenants:?}"
+    );
+
+    // aggregate_run_length must populate the run-length cache for it.
+    aggregate_run_length(&fx.app_pool, decision_only_tenant)
+        .await
+        .expect("aggregate run length for decision-only tenant");
+
+    let mut tx = fx.app_pool.begin().await.expect("begin RLS read tx");
+    sqlx::query("SELECT set_config('app.current_tenant_id', $1, true)")
+        .bind(decision_only_tenant.to_string())
+        .execute(&mut *tx)
+        .await
+        .expect("set RLS tenant");
+    let row = sqlx::query(
+        r#"
+        SELECT sample_size_30d, p50_steps_30d
+        FROM run_length_distribution_cache
+        WHERE tenant_id = $1
+          AND agent_id = 'agent-alpha'
+        "#,
+    )
+    .bind(decision_only_tenant)
+    .fetch_one(&mut *tx)
+    .await
+    .expect("run_length cache row must exist for decision-only tenant");
+    // Two distinct run_ids → sample_size_30d (count of runs) == 2.
+    assert_eq!(row.get::<i32, _>("sample_size_30d"), 2);
+    // p50 over run lengths {5, 3} is finite and positive.
+    assert!(row.get::<f32, _>("p50_steps_30d") > 0.0);
+    tx.commit().await.expect("commit RLS read tx");
 }

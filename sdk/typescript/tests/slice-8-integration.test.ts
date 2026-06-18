@@ -18,6 +18,7 @@ import {
   DecisionStopped,
   InMemoryIdempotencyCache,
   NoopIdempotencyCache,
+  type SpanRecord,
   SpendGuardClient,
 } from "../src/index.js";
 import { MockSidecar, makeStopResponse } from "./_support/mockSidecar.js";
@@ -123,6 +124,44 @@ describe("SLICE 8 integration — idempotencyCache wiring inside reserve()", () 
       expect(out2).toBe(out1); // identity-equal — same outcome reference
       // Sidecar count UNCHANGED because cache short-circuit
       expect(mock.decisionsServed).toBe(requestsBefore);
+      await client.close();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it("same idempotencyKey but DIFFERENT body falls through to the sidecar (no stale CONTINUE)", async () => {
+    const mock = await MockSidecar.start();
+    const cache = new InMemoryIdempotencyCache();
+    try {
+      const client = new SpendGuardClient({
+        socketPath: mock.socketPath,
+        tenantId: "t",
+        idempotencyCache: cache,
+      });
+      await client.connect();
+      await client.handshake();
+      // First reserve populates the cache under the shared key.
+      await client.reserve(reserveReq({ idempotencyKey: "sg-collide" }));
+      const requestsBefore = mock.decisionsServed;
+      // Second reserve REUSES the key but for a logically different request
+      // (different amount + route). A key-only cache would return the stale
+      // CONTINUE; the body-hash binding must force a sidecar round trip.
+      await client.reserve(
+        reserveReq({
+          idempotencyKey: "sg-collide",
+          route: "anthropic|claude-3-5-sonnet",
+          projectedClaims: [
+            {
+              scopeId: "tenant/test/global",
+              amountAtomic: "999999",
+              unit: { unit: "USD_MICROS", denomination: 1 },
+            },
+          ],
+        }),
+      );
+      // The sidecar WAS contacted again — the collision did not short-circuit.
+      expect(mock.decisionsServed).toBe(requestsBefore + 1);
       await client.close();
     } finally {
       await mock.close();
@@ -305,6 +344,56 @@ describe("SLICE 8 integration — otelTracer wiring across all 5 wired RPCs", ()
       await client.reserve(reserveReq());
       // Nothing to assert directly — the test would have crashed if any span
       // emission code paths tried to touch an undefined tracer.
+      await client.close();
+    } finally {
+      await mock.close();
+    }
+  });
+});
+
+describe("SLICE 8 integration — onSpan observer wiring (no OTel dep path)", () => {
+  it("reserve() invokes cfg.onSpan once with a SpanRecord for the RPC", async () => {
+    const mock = await MockSidecar.start();
+    const records: SpanRecord[] = [];
+    try {
+      const client = new SpendGuardClient({
+        socketPath: mock.socketPath,
+        tenantId: "t",
+        onSpan: (r) => records.push(r),
+      });
+      await client.connect();
+      await client.handshake();
+      await client.reserve(reserveReq());
+      const reserveRecord = records.find((r) => r.name === "spendguard.reserve");
+      expect(reserveRecord).toBeDefined();
+      // handshake also emits a record (both RPCs are wired uniformly).
+      expect(records.some((r) => r.name === "spendguard.handshake")).toBe(true);
+      expect(reserveRecord?.attributes["spendguard.tenant_id"]).toBe("t");
+      expect(typeof reserveRecord?.startTimeMs).toBe("number");
+      expect(typeof reserveRecord?.durationMs).toBe("number");
+      expect(reserveRecord?.error).toBeUndefined();
+      await client.close();
+    } finally {
+      await mock.close();
+    }
+  });
+
+  it("onSpan receives the error when the RPC throws (e.g. STOP decision)", async () => {
+    const mock = await MockSidecar.start({
+      onRequestDecision: () => makeStopResponse({ decisionId: "d-stop" }),
+    });
+    const records: SpanRecord[] = [];
+    try {
+      const client = new SpendGuardClient({
+        socketPath: mock.socketPath,
+        tenantId: "t",
+        onSpan: (r) => records.push(r),
+      });
+      await client.connect();
+      await client.handshake();
+      await expect(client.reserve(reserveReq())).rejects.toBeInstanceOf(DecisionStopped);
+      const reserveRecord = records.find((r) => r.name === "spendguard.reserve");
+      expect(reserveRecord?.error).toBeInstanceOf(Error);
       await client.close();
     } finally {
       await mock.close();

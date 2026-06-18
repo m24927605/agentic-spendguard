@@ -173,12 +173,24 @@ pub async fn release_lock_conn(mut conn: PoolConnection<Postgres>) -> Result<(),
 /// recorded_month partition-pruning predicate so the planner stays on
 /// the active monthly partitions instead of scanning the default
 /// partition.
+///
+/// Discovery membership covers BOTH outcome and decision events. The
+/// scheduler runs aggregate_output_distribution (outcome-driven) AND
+/// aggregate_run_length (decision-driven) for every discovered tenant.
+/// A tenant that produced decisions but no completed outcomes (heavy
+/// DENY traffic, runs that never finish) would otherwise never be
+/// discovered, leaving run_length_distribution_cache permanently empty
+/// and the run_cost_projector Signal 1 stuck on the cold-start default.
+/// The membership predicate uses `event_type IN (...)` — a single
+/// grouped condition that preserves the AND-chained window/partition
+/// filters (a bare `OR event_type = ...` would shift operator
+/// precedence and silently drop those filters).
 pub async fn discover_active_tenants(pool: &PgPool) -> Result<Vec<Uuid>, anyhow::Error> {
     let rows = sqlx::query(
         r#"
         SELECT DISTINCT tenant_id
         FROM canonical_events
-        WHERE event_type = 'spendguard.audit.outcome'
+        WHERE event_type IN ('spendguard.audit.outcome', 'spendguard.audit.decision')
           AND ingest_at >= now() - interval '30 days'
           AND recorded_month >= DATE_TRUNC('month', now() - interval '30 days')::DATE
         "#,

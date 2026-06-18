@@ -258,6 +258,15 @@ fn build_app(
         // Spec: docs/specs/egress-proxy-v0.3-responses-api.md.
         .route("/v1/responses", post(forward::responses))
         .with_state(state)
+        // Align the enforced body limit with the documented/coded 16 MiB
+        // (spec §9/§10). Without this, axum's framework default (2 MiB)
+        // rejects bodies between 2 MiB and 16 MiB with a 413 before the
+        // handler's explicit `body.len()` check ever runs, silently
+        // breaking large-prompt requests and making the 16 MiB guard dead
+        // code. `max()` (not `disable()`) keeps the streaming early 413 for
+        // oversized bodies so the proxy never fully buffers an oversized
+        // request; the in-handler check remains a redundant backstop.
+        .layer(axum::extract::DefaultBodyLimit::max(forward::MAX_BODY_BYTES))
         .layer(
             // Defense layer 1 per spec §8: do NOT include headers in
             // request spans. RedactedAuth (defense layer 2) is the

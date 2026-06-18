@@ -35,6 +35,7 @@ const ENV_KEYS = [
   "SPENDGUARD_DECISION_TIMEOUT_MS",
   "SPENDGUARD_HANDSHAKE_TIMEOUT_MS",
   "SPENDGUARD_DISABLE",
+  "SPENDGUARD_PROFILE",
   "SPENDGUARD_RUN_PROJECTION_DEFAULT",
 ] as const;
 
@@ -457,18 +458,36 @@ describe("SpendGuardClient.fromEnv()", () => {
     expect(client.config.runProjectionDefault).toBe("STRICT_CEILING");
   });
 
-  it("EN-04: SPENDGUARD_DISABLE=1 enables disabled mode", () => {
+  it("EN-04: SPENDGUARD_DISABLE=1 under SPENDGUARD_PROFILE=demo enables disabled mode", () => {
     process.env.SPENDGUARD_TENANT_ID = "t";
     process.env.SPENDGUARD_DISABLE = "1";
+    process.env.SPENDGUARD_PROFILE = "demo";
     const client = SpendGuardClient.fromEnv();
     expect(client.config.disabled).toBe(true);
   });
 
-  it("EN-04: SPENDGUARD_DISABLE=true (any case) enables disabled mode", () => {
+  it("EN-04: SPENDGUARD_DISABLE=true (any case) under demo profile enables disabled mode", () => {
     process.env.SPENDGUARD_TENANT_ID = "t";
     process.env.SPENDGUARD_DISABLE = "TRUE";
+    process.env.SPENDGUARD_PROFILE = "DEMO"; // case-insensitive
     const client = SpendGuardClient.fromEnv();
     expect(client.config.disabled).toBe(true);
+  });
+
+  it("EN-04 (fail-closed): SPENDGUARD_DISABLE WITHOUT demo profile is IGNORED (enforcement stays on)", () => {
+    process.env.SPENDGUARD_TENANT_ID = "t";
+    process.env.SPENDGUARD_DISABLE = "1";
+    // No SPENDGUARD_PROFILE — a stray env var must not defeat enforcement.
+    const client = SpendGuardClient.fromEnv();
+    expect(client.config.disabled).toBe(false);
+  });
+
+  it("EN-04 (fail-closed): SPENDGUARD_DISABLE with a non-demo profile is IGNORED", () => {
+    process.env.SPENDGUARD_TENANT_ID = "t";
+    process.env.SPENDGUARD_DISABLE = "1";
+    process.env.SPENDGUARD_PROFILE = "production";
+    const client = SpendGuardClient.fromEnv();
+    expect(client.config.disabled).toBe(false);
   });
 
   it("EN-05: missing SPENDGUARD_TENANT_ID throws SpendGuardConfigError", () => {

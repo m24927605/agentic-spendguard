@@ -180,6 +180,33 @@ pub async fn query_decision_outcome(
     .await
     .map_err(map_pg_error)?;
 
+    Ok(reduce_decision_outcome_rows(rows))
+}
+
+/// One audit_outbox+ledger_transactions row joined for a decision_id, in
+/// `ORDER BY recorded_at ASC` order. Tuple shape mirrors the query above.
+type DecisionOutcomeRow = (
+    String,                          // event_type
+    Uuid,                            // audit_decision_event_id
+    Uuid,                            // ledger_transaction_id
+    chrono::DateTime<chrono::Utc>,   // recorded_at
+    String,                          // operation_kind
+    Uuid,                            // decision_id (original)
+    Option<serde_json::Value>,       // minimal_replay_response
+    serde_json::Value,               // cloudevent_payload
+);
+
+/// Reduce the joined decision rows to a `DecisionOutcome`.
+///
+/// The response's `ledger_transaction_id` is the DECISION anchor (the
+/// reserve/deny tx), per `QueryDecisionOutcomeResponse.ledger_transaction_id`
+/// docs and `ReservationContext.decision_id`. It MUST come from the
+/// `spendguard.audit.decision` row — NOT the last-sorted row, which for a
+/// committed/released decision is the audit.outcome's DIFFERENT
+/// commit/release tx. This matches the sibling
+/// `query_decision_outcome_by_idempotency_key`, which returns the decision
+/// row's tx. Pure function so the contract can be unit-tested without a DB.
+fn reduce_decision_outcome_rows(rows: Vec<DecisionOutcomeRow>) -> DecisionOutcome {
     let mut decision_event = None;
     let mut outcome_event = None;
     let mut last_updated = None;
@@ -190,10 +217,12 @@ pub async fn query_decision_outcome(
         rows
     {
         last_updated = Some(recorded);
-        tx_id = Some(ltx);
         match kind.as_str() {
             "spendguard.audit.decision" => {
                 decision_event = Some(audit_id);
+                // Anchor on the decision tx; do NOT let a later audit.outcome
+                // row overwrite it.
+                tx_id = Some(ltx);
                 replay = replay_metadata(
                     operation_kind,
                     original_decision_id,
@@ -202,7 +231,17 @@ pub async fn query_decision_outcome(
                     payload,
                 );
             }
-            "spendguard.audit.outcome" => outcome_event = Some(audit_id),
+            "spendguard.audit.outcome" => {
+                outcome_event = Some(audit_id);
+                // Fallback only: if the decision row is absent (schema drift /
+                // partial chain) but an outcome row exists, still surface a tx
+                // anchor so callers aren't left with NULL. The decision arm
+                // takes precedence whenever both are present, regardless of
+                // row order.
+                if tx_id.is_none() {
+                    tx_id = Some(ltx);
+                }
+            }
             _ => {}
         }
     }
@@ -215,14 +254,14 @@ pub async fn query_decision_outcome(
         Stage::NotFound
     };
 
-    Ok(DecisionOutcome {
+    DecisionOutcome {
         stage,
         ledger_transaction_id: tx_id,
         audit_decision_event_id: decision_event,
         audit_outcome_event_id: outcome_event,
         last_updated_at: last_updated,
         replay,
-    })
+    }
 }
 
 /// Query the original reserve/deny decision for an adapter idempotency key.
@@ -478,6 +517,84 @@ mod tests {
             metadata.operation_id,
             derive_reservation_set_id(&decision_id).to_string()
         );
+    }
+
+    fn decision_row(
+        kind: &str,
+        ltx: Uuid,
+        recorded_secs: i64,
+        decision_id: Uuid,
+    ) -> DecisionOutcomeRow {
+        (
+            kind.to_string(),
+            Uuid::new_v4(),
+            ltx,
+            chrono::DateTime::from_timestamp(recorded_secs, 0).unwrap(),
+            "reserve".to_string(),
+            decision_id,
+            Some(json!({})),
+            json!({ "data_b64": "" }),
+        )
+    }
+
+    #[test]
+    fn decision_outcome_anchors_on_decision_tx_not_outcome_tx() {
+        // A decision that has progressed to outcome has TWO different ledger
+        // transactions: the reserve (decision) tx and the commit/release
+        // (outcome) tx. ORDER BY recorded_at ASC puts decision first, outcome
+        // second. The response's ledger_transaction_id must be the DECISION
+        // tx, not the last-sorted outcome tx.
+        let decision_id = Uuid::new_v4();
+        let decision_tx = Uuid::new_v4();
+        let outcome_tx = Uuid::new_v4();
+        assert_ne!(decision_tx, outcome_tx);
+
+        let rows = vec![
+            decision_row("spendguard.audit.decision", decision_tx, 100, decision_id),
+            decision_row("spendguard.audit.outcome", outcome_tx, 200, decision_id),
+        ];
+
+        let outcome = reduce_decision_outcome_rows(rows);
+        assert_eq!(outcome.stage, Stage::AuditOutcomeRecorded);
+        assert_eq!(
+            outcome.ledger_transaction_id,
+            Some(decision_tx),
+            "ledger_transaction_id must be the decision tx, not the outcome tx"
+        );
+    }
+
+    #[test]
+    fn decision_outcome_decision_wins_even_when_outcome_sorts_first() {
+        // Defense in depth: even if recorded_at ordering placed the outcome
+        // row before the decision row, the decision tx must still win.
+        let decision_id = Uuid::new_v4();
+        let decision_tx = Uuid::new_v4();
+        let outcome_tx = Uuid::new_v4();
+
+        let rows = vec![
+            decision_row("spendguard.audit.outcome", outcome_tx, 100, decision_id),
+            decision_row("spendguard.audit.decision", decision_tx, 200, decision_id),
+        ];
+
+        let outcome = reduce_decision_outcome_rows(rows);
+        assert_eq!(outcome.ledger_transaction_id, Some(decision_tx));
+    }
+
+    #[test]
+    fn decision_outcome_falls_back_to_outcome_tx_when_no_decision_row() {
+        // Partial chain (decision row absent): still surface a tx anchor.
+        let decision_id = Uuid::new_v4();
+        let outcome_tx = Uuid::new_v4();
+        let rows = vec![decision_row(
+            "spendguard.audit.outcome",
+            outcome_tx,
+            100,
+            decision_id,
+        )];
+
+        let outcome = reduce_decision_outcome_rows(rows);
+        assert_eq!(outcome.stage, Stage::AuditOutcomeRecorded);
+        assert_eq!(outcome.ledger_transaction_id, Some(outcome_tx));
     }
 
     #[test]

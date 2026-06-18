@@ -116,7 +116,14 @@ impl GeminiClient {
                 .get("totalTokens")
                 .and_then(|v| v.as_u64())
                 .ok_or_else(|| {
-                    ProviderError::Schema(format!("missing or non-u64 `totalTokens` in: {parsed}"))
+                    // Size-bound the embedded body to match the redaction
+                    // discipline of the error-status branches below
+                    // (truncate_body). A malformed/huge upstream body must
+                    // not become an unbounded error/log line.
+                    ProviderError::Schema(format!(
+                        "missing or non-u64 `totalTokens` in: {}",
+                        truncate_body(parsed.to_string())
+                    ))
                 })?;
             return Ok(ProviderCount {
                 input_tokens: count,

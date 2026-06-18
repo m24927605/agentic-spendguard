@@ -18,7 +18,7 @@ Per-provider modules (lazy-imported by ``estimator_for_model``):
 
 Spec ref ``tokenizer-service-spec-v1alpha1.md`` §3 + §3.1; SLICE_12
 SDK-side mirror of the Rust ``crates/spendguard-tokenizer`` dispatch
-table. See ``docs/slices/SLICE_12_sdk_default_estimators.md``.
+table. See ``docs/internal/slices/SLICE_12_sdk_default_estimators.md``.
 """
 
 from .dispatch import (

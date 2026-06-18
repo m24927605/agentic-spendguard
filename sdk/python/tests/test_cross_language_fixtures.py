@@ -26,7 +26,7 @@ Spec refs:
 - docs/specs/coverage/D05_ts_sdk_substrate/design.md §11.
 - docs/specs/coverage/D05_ts_sdk_substrate/review-standards.md §2.5
   (shared fixture file consumed by Python + Rust + TS suites).
-- docs/slices/COV_S05_09_d05_cross_language_fixtures.md.
+- docs/internal/slices/COV_S05_09_d05_cross_language_fixtures.md.
 """
 
 from __future__ import annotations

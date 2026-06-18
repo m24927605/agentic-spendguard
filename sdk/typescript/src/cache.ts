@@ -36,19 +36,29 @@ import type { DecisionOutcome } from "./client.js";
  * Idempotency cache contract. Adapters consume via
  * `SpendGuardClientConfig.idempotencyCache?: IdempotencyCache`.
  *
- * - `get(key)` MUST return the cached outcome for `key` when it is fresh
- *   (TTL-window unexpired), else `undefined`. Implementations MAY treat the
- *   read as a recency signal (LRU move-to-front); MUST NOT bump the TTL.
- * - `set(key, outcome, ttlMs?)` stores the outcome. Optional `ttlMs` overrides
- *   the cache's default TTL for this entry. Implementations MAY evict in
- *   amortised O(1) to honor a `maxEntries` cap.
+ * - `get(key, bodyHash?)` MUST return the cached outcome for `key` when it is
+ *   fresh (TTL-window unexpired) AND — when both the caller and the stored
+ *   entry carry a `bodyHash` — the hashes match; else `undefined`.
+ *   Implementations MAY treat the read as a recency signal (LRU
+ *   move-to-front); MUST NOT bump the TTL.
+ * - `set(key, outcome, ttlMs?, bodyHash?)` stores the outcome. Optional `ttlMs`
+ *   overrides the cache's default TTL for this entry. Optional `bodyHash` binds
+ *   the entry to the request identity that produced `outcome` so a later
+ *   `get(key, otherHash)` with a colliding key but a different body falls
+ *   through (returns `undefined`) instead of returning a stale decision.
+ *   Implementations MAY evict in amortised O(1) to honor a `maxEntries` cap.
  * - `clear()` resets the cache to empty.
  * - `size` is a snapshot getter; readers MAY observe a non-monotonic value
  *   across concurrent sets (no atomicity guarantee).
+ *
+ * The `bodyHash` parameters are OPTIONAL and additive: callers that omit them
+ * get key-only semantics (unchanged from v0.1.0). `SpendGuardClient.reserve()`
+ * always supplies a `bodyHash` so a reused `idempotencyKey` for a logically
+ * different request never short-circuits the authoritative sidecar gate.
  */
 export interface IdempotencyCache {
-  get(key: string): DecisionOutcome | undefined;
-  set(key: string, outcome: DecisionOutcome, ttlMs?: number): void;
+  get(key: string, bodyHash?: string): DecisionOutcome | undefined;
+  set(key: string, outcome: DecisionOutcome, ttlMs?: number, bodyHash?: string): void;
   clear(): void;
   readonly size: number;
 }
@@ -91,6 +101,14 @@ export interface InMemoryIdempotencyCacheOptions {
 interface CacheEntry {
   outcome: DecisionOutcome;
   expiresAt: number;
+  /**
+   * Optional stable hash of the request identity that produced `outcome`.
+   * When present, a `get(key, bodyHash)` whose `bodyHash` differs is treated
+   * as a MISS so a colliding/reused idempotency key for a logically different
+   * request falls through to the authoritative sidecar gate. `undefined` for
+   * entries stored without a body hash (key-only legacy semantics).
+   */
+  bodyHash?: string;
 }
 
 /**
@@ -125,7 +143,7 @@ export class InMemoryIdempotencyCache implements IdempotencyCache {
     this.now = opts.now ?? Date.now;
   }
 
-  get(key: string): DecisionOutcome | undefined {
+  get(key: string, bodyHash?: string): DecisionOutcome | undefined {
     const entry = this.entries.get(key);
     if (entry === undefined) return undefined;
     if (entry.expiresAt <= this.now()) {
@@ -134,17 +152,32 @@ export class InMemoryIdempotencyCache implements IdempotencyCache {
       this.entries.delete(key);
       return undefined;
     }
+    // Body-identity guard: when BOTH the caller and the stored entry carry a
+    // body hash and they disagree, this is a key collision for a logically
+    // different request — treat it as a MISS so the caller falls through to
+    // the authoritative sidecar. We do NOT evict the existing entry (the
+    // original request may still legitimately replay it). Fail-closed: a
+    // mismatch can only ever ADD a sidecar round trip, never skip one.
+    if (bodyHash !== undefined && entry.bodyHash !== undefined && entry.bodyHash !== bodyHash) {
+      return undefined;
+    }
     // LRU move-to-front: re-insert so this key becomes the most recent.
     this.entries.delete(key);
     this.entries.set(key, entry);
     return entry.outcome;
   }
 
-  set(key: string, outcome: DecisionOutcome, ttlMs?: number): void {
-    const ttl = ttlMs !== undefined ? clampPositive(ttlMs) : this.defaultTtlMs;
+  set(key: string, outcome: DecisionOutcome, ttlMs?: number, bodyHash?: string): void {
+    // Per-call TTL falls back to THIS cache's default TTL on garbage — NOT to
+    // the max-entries constant. Reusing `clampPositive` here (a count clamp)
+    // would yield a nonsensical ~1s TTL for `set(key, outcome, 0)` / negative /
+    // NaN inputs; `clampTtl` keeps the count-vs-duration fallbacks separate.
+    const ttl = ttlMs !== undefined ? clampTtl(ttlMs, this.defaultTtlMs) : this.defaultTtlMs;
     // Delete first so re-set moves to MRU end (Map preserves insertion order).
     this.entries.delete(key);
-    this.entries.set(key, { outcome, expiresAt: this.now() + ttl });
+    const entry: CacheEntry = { outcome, expiresAt: this.now() + ttl };
+    if (bodyHash !== undefined) entry.bodyHash = bodyHash;
+    this.entries.set(key, entry);
     while (this.entries.size > this.maxEntries) {
       const oldestKey = this.entries.keys().next().value as string | undefined;
       if (oldestKey === undefined) break;
@@ -172,10 +205,10 @@ export class InMemoryIdempotencyCache implements IdempotencyCache {
  * The `size` getter always returns 0; `clear()` is a no-op.
  */
 export class NoopIdempotencyCache implements IdempotencyCache {
-  get(_key: string): DecisionOutcome | undefined {
+  get(_key: string, _bodyHash?: string): DecisionOutcome | undefined {
     return undefined;
   }
-  set(_key: string, _outcome: DecisionOutcome, _ttlMs?: number): void {
+  set(_key: string, _outcome: DecisionOutcome, _ttlMs?: number, _bodyHash?: string): void {
     // intentional no-op
   }
   clear(): void {
@@ -190,6 +223,19 @@ export class NoopIdempotencyCache implements IdempotencyCache {
 function clampPositive(value: number): number {
   if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
     return DEFAULT_CACHE_MAX_ENTRIES;
+  }
+  return value;
+}
+
+/**
+ * Clamp a per-entry TTL (milliseconds) to a positive finite integer, falling
+ * back to `fallback` (the cache's default TTL) on garbage. Distinct from
+ * `clampPositive`, whose fallback is the max-entries COUNT constant — a TTL
+ * must never inherit a count constant as its duration.
+ */
+function clampTtl(value: number, fallback: number): number {
+  if (!Number.isFinite(value) || !Number.isInteger(value) || value <= 0) {
+    return fallback;
   }
   return value;
 }

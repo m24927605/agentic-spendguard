@@ -224,22 +224,39 @@ pub(crate) fn extract_enrichment(req: &DecisionRequest) -> AuditEnrichment {
                 }
             }
             // Architect P0: WARN on unknown keys (PII smuggling guard).
-            // We don't iterate the full m.fields map for performance;
-            // adapters that drift add a new field that's known to be
-            // intentional via the spec process. Per architect, debug-
-            // level rate-limited log on unknown keys is sufficient.
-            for (k, _v) in m.fields.iter() {
-                if !SPENDGUARD_ENRICHMENT_ALLOWLIST.contains(&k.as_str())
-                    // Cost Advisor P0.5 keys that DO belong elsewhere
-                    // (already extracted as top-level fields), not a
-                    // smuggling signal:
-                    && k != "prompt_hash"
-                {
+            //
+            // This loop is a PURE DIAGNOSTIC: enrichment above uses only
+            // the allowlist forward-lookup, and unknown keys are already
+            // dropped (never enriched) regardless of whether we scan. The
+            // scan is therefore skipped entirely unless DEBUG is enabled
+            // (a no-op on the warm decision path at the default info
+            // level), and even then it is bounded so a caller cannot use
+            // a very large untrusted runtime_metadata map to inflate
+            // decision latency / log volume over the UDS. The decision and
+            // the enriched payload are identical with or without it.
+            const ENRICHMENT_UNKNOWN_KEY_SCAN_CAP: usize = 32;
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                if m.fields.len() > ENRICHMENT_UNKNOWN_KEY_SCAN_CAP {
                     tracing::debug!(
-                        unknown_key = %k,
-                        "spendguard enrichment: dropped key not in \
-                         allowlist (DESIGN.md §8.2a)",
+                        field_count = m.fields.len(),
+                        scan_cap = ENRICHMENT_UNKNOWN_KEY_SCAN_CAP,
+                        "spendguard enrichment: runtime_metadata field count \
+                         exceeds scan cap; truncating unknown-key diagnostic",
                     );
+                }
+                for (k, _v) in m.fields.iter().take(ENRICHMENT_UNKNOWN_KEY_SCAN_CAP) {
+                    if !SPENDGUARD_ENRICHMENT_ALLOWLIST.contains(&k.as_str())
+                        // Cost Advisor P0.5 keys that DO belong elsewhere
+                        // (already extracted as top-level fields), not a
+                        // smuggling signal:
+                        && k != "prompt_hash"
+                    {
+                        tracing::debug!(
+                            unknown_key = %k,
+                            "spendguard enrichment: dropped key not in \
+                             allowlist (DESIGN.md §8.2a)",
+                        );
+                    }
                 }
             }
             if obj.is_empty() {
@@ -648,9 +665,29 @@ pub async fn run_through_reserve(
     // meter snapshot in `subscription_meter` and returns CONTINUE (or
     // STOP when a hard-cap fires).  See
     // subscription_meter::route_decision_request for the full lane.
+    //
+    // SECURITY (auth-trust): the meter lane derives its entire cap from
+    // client-supplied `runtime_metadata` and NEVER opens a ledger
+    // transaction. A caller that simply sets
+    // `reservation_source = SUBSCRIPTION_METER` (and omits the cap) would
+    // otherwise spend unbounded on the flat-fee lane with no fencing-backed
+    // oracle. Until the ledger-backed `subscription_meters` lookup lands,
+    // the lane is gated behind an explicit server-side opt-in
+    // (`allow_untrusted_subscription_meter`, default false in production).
+    // When not opted in we fail CLOSED — reject the request as an
+    // unconfigured meter lane rather than honoring an untrusted cap.
     if req.reservation_source
         == crate::proto::common::v1::ReservationSource::SubscriptionMeter as i32
     {
+        if !cfg.allow_untrusted_subscription_meter {
+            return Err(DomainError::InvalidRequest(
+                "subscription-meter lane is not enabled on this sidecar \
+                 (set allow_untrusted_subscription_meter only with a \
+                 server-side ledger-backed cap source); refusing to honor \
+                 client-supplied caps"
+                    .into(),
+            ));
+        }
         return crate::subscription_meter::route_decision_request(cfg, state, ctx, req);
     }
 

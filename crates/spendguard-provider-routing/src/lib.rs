@@ -228,8 +228,16 @@ fn build_routing_table() -> Vec<ProviderConfig> {
                 r"^/v1/projects/([^/]+)/locations/([^/]+)/publishers/google/models/([^:]+):generateContent$",
             )
             .expect("vertex generateContent path regex"),
+            // The inbound pattern is the GCP-token-authenticated Vertex AI form
+            // (captures project/location/model). The real Vertex host is
+            // region-scoped: {location}-aiplatform.googleapis.com. The public
+            // generativelanguage.googleapis.com host is the API-key Gemini route
+            // (a separate provider row, added by the D02 Vertex/Gemini forwarding
+            // work) and does NOT serve the /v1/projects/.../publishers/google/...
+            // path. {1} (location) is interpolated into the host via the
+            // whole-string replace in `upstream_url_for`.
             upstream_url_template:
-                "https://generativelanguage.googleapis.com/v1/projects/{0}/locations/{1}/publishers/google/models/{2}:generateContent",
+                "https://{1}-aiplatform.googleapis.com/v1/projects/{0}/locations/{1}/publishers/google/models/{2}:generateContent",
             request_shape: RequestShape::VertexGenerateContent,
             tokenizer_kind: EncoderKind::Gemini,
             usage_extractor: extractors.vertex,
@@ -450,6 +458,21 @@ mod tests {
         assert!(url.contains("my-proj"));
         assert!(url.contains("us-central1"));
         assert!(url.contains("gemini-1.5-pro"));
+        // GCP-token Vertex traffic MUST go to the region-scoped aiplatform host,
+        // NOT the public API-key Gemini host (generativelanguage.googleapis.com).
+        // The {location} capture is interpolated into the host.
+        assert!(
+            url.contains("aiplatform"),
+            "vertex must resolve to the region-scoped aiplatform host, got {url}"
+        );
+        assert!(
+            url.starts_with("https://us-central1-aiplatform.googleapis.com/"),
+            "vertex host must be region-scoped, got {url}"
+        );
+        assert!(
+            !url.contains("generativelanguage.googleapis.com"),
+            "GCP-token Vertex must not route to the public Gemini API-key host, got {url}"
+        );
     }
 
     #[test]

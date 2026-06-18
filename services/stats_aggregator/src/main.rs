@@ -73,6 +73,34 @@ async fn main() -> Result<()> {
     }
     let cycle_seconds = cfg.cycle_seconds.max(60);
 
+    // ── Validate drift thresholds (boot-time fail-closed gate) ────────
+    //
+    // These govern the drift-detection safety signal, not a tunable like
+    // cycle_seconds, so an out-of-range value is an operator
+    // misconfiguration we bail on rather than clamp.
+    //
+    //   * drift_z_threshold: should_emit_drift_alert treats a non-finite
+    //     or <= 0 threshold as "suppress all", silently disabling ALL
+    //     drift detection with only a per-bucket log. Require finite > 0.
+    //   * min_samples_for_alert: a negative floor makes every bucket pass
+    //     `n7d >= min_samples_for_alert`, flooding the immutable audit
+    //     chain with alerts on tiny/noisy samples. Require >= 1.
+    if !(cfg.drift_z_threshold.is_finite() && cfg.drift_z_threshold > 0.0) {
+        anyhow::bail!(
+            "SPENDGUARD_STATS_AGGREGATOR_DRIFT_Z_THRESHOLD must be a finite value > 0.0 \
+             (got {}); a non-positive or non-finite threshold silently disables ALL drift \
+             detection",
+            cfg.drift_z_threshold
+        );
+    }
+    if cfg.min_samples_for_alert < 1 {
+        anyhow::bail!(
+            "SPENDGUARD_STATS_AGGREGATOR_MIN_SAMPLES_FOR_ALERT must be >= 1 (got {}); \
+             a value < 1 floods the audit chain with drift alerts on tiny samples",
+            cfg.min_samples_for_alert
+        );
+    }
+
     // ── Connect to canonical_ingest DB ────────────────────────────
     let pool = sqlx::postgres::PgPoolOptions::new()
         .max_connections(8)

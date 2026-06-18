@@ -4,7 +4,7 @@
 --
 -- Spec ancestors:
 --   - docs/stats-aggregator-spec-v1alpha1.md §6 (authoritative DDL)
---   - docs/slices/SLICE_06_output_predictor_a_b_stats_aggregator.md §5
+--   - docs/internal/slices/SLICE_06_output_predictor_a_b_stats_aggregator.md §5
 --   - docs/run-cost-projector-spec-v1alpha1.md Signal 1 (downstream consumer)
 --
 -- ## Purpose

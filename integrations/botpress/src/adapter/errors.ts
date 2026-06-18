@@ -25,19 +25,38 @@ import { DecisionDenied, SidecarUnavailable, SpendGuardConfigError } from "../re
  * (sdk/python/src/spendguard/integrations/litellm.py:806-820).
  */
 export function toRuntimeError(err: unknown): RuntimeError {
+  // The Botpress runtime routes conversation-side handlers off the `code`
+  // field on the RuntimeError, so the stable BUDGET_DENIED / BUDGET_DEGRADED /
+  // BUDGET_CONFIG identifier MUST be carried through. @botpress/sdk's
+  // RuntimeError constructor is message-only with a separate mutable `code`
+  // field (index.d.ts: `constructor(message: string)` + `code?: string`), so
+  // we assign the code after construction rather than passing an options bag —
+  // a two-arg form would fail to type-check against the SDK and the extra arg
+  // would be ignored at runtime.
   if (err instanceof DecisionDenied) {
-    return new RuntimeError(`SpendGuard denied: ${err.message}`);
+    const rt = new RuntimeError(`SpendGuard denied: ${err.message}`);
+    rt.code = err.code; // "BUDGET_DENIED"
+    return rt;
   }
   if (err instanceof SidecarUnavailable) {
-    return new RuntimeError(`SpendGuard degraded: ${err.message}`);
+    const rt = new RuntimeError(`SpendGuard degraded: ${err.message}`);
+    rt.code = err.code; // "BUDGET_DEGRADED"
+    return rt;
   }
   if (err instanceof SpendGuardConfigError) {
-    return new RuntimeError(`SpendGuard config: ${err.message}`);
+    const rt = new RuntimeError(`SpendGuard config: ${err.message}`);
+    rt.code = err.code; // "BUDGET_CONFIG"
+    return rt;
   }
   if (err instanceof RuntimeError) {
     return err;
   }
-  return new RuntimeError(`SpendGuard config: ${err instanceof Error ? err.message : String(err)}`);
+  // Unknown-error-is-config fallback (mirrors the Python LiteLLM callback).
+  const rt = new RuntimeError(
+    `SpendGuard config: ${err instanceof Error ? err.message : String(err)}`,
+  );
+  rt.code = "BUDGET_CONFIG";
+  return rt;
 }
 
 /**

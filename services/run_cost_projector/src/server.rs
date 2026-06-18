@@ -43,7 +43,7 @@ use crate::proto::run_cost_projector::v1::{
     TerminateRunRequest, TerminateRunResponse,
 };
 use crate::recovery::recover_from_audit_chain;
-use crate::signal_1::signal_1_predicted_remaining_steps;
+use crate::signal_1::{fetch_p95_steps, signal_1_from_p95};
 use crate::signal_2::{evaluate_drift, DriftVerdict};
 use crate::state_cache::{RunState, RunStateCache, RunStateKey};
 
@@ -396,6 +396,38 @@ impl RunCostProjector for RunCostProjectorSvc {
             }
         };
 
+        // ── Signal 1 DB round-trip: hoist the raw P95 fetch ABOVE the loop.
+        //
+        // The fetch inputs (tenant_id, agent_id) are stable across this Project
+        // call, but the optimistic-retry loop below may iterate when another
+        // distinct Project mutates the run during compute. Re-issuing the DB
+        // query on every contended retry amplifies load and risks the 5ms p99
+        // SLO, so we query the raw P95 ONCE here and re-apply only the cheap
+        // `max(0, p95 - steps_completed)` arithmetic (signal_1_from_p95) per
+        // iteration against the FRESH steps_completed snapshot. steps_completed
+        // is NOT hoisted — it is precisely the field that mutates between
+        // retries, so hoisting the full Signal-1 call would undercount.
+        //
+        // Fail-closed: on fetch error we fall through to the cold-start path
+        // (spec §10), exactly as the prior inline call did — the raw
+        // cold_start_run_length is used as predicted_remaining (is_cold = true),
+        // independent of steps_completed, preserving the prior conservative
+        // (projection-inflating) behavior on the DB-error path.
+        let p95_fetch = fetch_p95_steps(self.pool.as_ref(), tenant_id, &req.agent_id).await;
+        let (p95_steps_cached, signal1_fetch_errored): (Option<f32>, bool) = match p95_fetch {
+            Ok(p95) => (p95, false),
+            Err(e) => {
+                // Per spec §10: stats_aggregator cache unreachable → cold-start.
+                warn!(
+                    tenant_id = %tenant_id,
+                    run_id = %run_id,
+                    err = %e,
+                    "Signal 1 query failed; using cold-start default"
+                );
+                (None, true)
+            }
+        };
+
         loop {
             // ── Acquire per-run mutex; snapshot inputs we need under the lock.
             let (
@@ -436,25 +468,21 @@ impl RunCostProjector for RunCostProjectorSvc {
                 None => 0,
             };
 
-            // ── Signal 1: historical P95 or cold-start.
-            let (s1_predicted_steps, s1_is_cold) = signal_1_predicted_remaining_steps(
-                self.pool.as_ref(),
-                tenant_id,
-                &req.agent_id,
-                steps_completed,
-                self.cfg.cold_start_run_length,
-            )
-            .await
-            .unwrap_or_else(|e| {
-                // Per spec §10: stats_aggregator cache unreachable → fall to cold-start.
-                warn!(
-                    tenant_id = %tenant_id,
-                    run_id = %run_id,
-                    err = %e,
-                    "Signal 1 query failed; using cold-start default"
-                );
+            // ── Signal 1: historical P95 or cold-start. The DB round-trip was
+            // hoisted above the loop (p95_steps_cached); here we re-apply only
+            // the cheap arithmetic against the CURRENT steps_completed snapshot
+            // so retries don't re-query. On a Signal-1 DB-error we preserve the
+            // prior conservative fallback: raw cold_start_run_length as the
+            // predicted remaining (no step subtraction).
+            let (s1_predicted_steps, s1_is_cold) = if signal1_fetch_errored {
                 (self.cfg.cold_start_run_length, true)
-            });
+            } else {
+                signal_1_from_p95(
+                    p95_steps_cached,
+                    steps_completed,
+                    self.cfg.cold_start_run_length,
+                )
+            };
 
             // ── Layering compute (pure).
             let inputs = LayeringInputs {

@@ -19,8 +19,12 @@
 //!
 //! JWKS caching. Keys are fetched on first miss + refreshed every
 //! `jwks_refresh_seconds` (default 3600). A failed refresh keeps the
-//! existing cache (fail-open for liveness; the operator gets a metric
-//! / log line) — but a cold start with unreachable JWKS hard-fails.
+//! existing cache for liveness (the operator gets a stable log event) —
+//! but only up to `jwks_max_stale_seconds` (default 4x the refresh
+//! interval). Once the cache exceeds that hard ceiling, validation
+//! fails closed (503) so a key the IdP revoked cannot keep validating
+//! while the JWKS endpoint is unreachable. A cold start with
+//! unreachable JWKS hard-fails immediately.
 //!
 //! Out of scope for S17 (S18 covers): per-route role enforcement,
 //! tenant-scoped DB queries, audit log of mutating actions.
@@ -176,8 +180,39 @@ pub struct JwtConfig {
     pub jwks_url: String,
     pub clock_skew_seconds: u64,
     pub jwks_refresh_seconds: u64,
+    /// Hard upper bound on how long a previously-fetched JWKS cache may
+    /// be served after a refresh starts failing. Once exceeded the cache
+    /// is treated as invalid and validation fails closed (503) instead
+    /// of accepting tokens signed by keys an IdP may have revoked. A
+    /// small multiple of `jwks_refresh_seconds` keeps a short
+    /// stale-serving window for liveness while bounding revocation lag.
+    pub jwks_max_stale_seconds: u64,
+    /// Explicit allowlist of signing algorithms the validator accepts.
+    /// Pinned from configuration / OIDC discovery rather than trusting
+    /// the token's own `alg` header. Defaults fail-closed to the
+    /// asymmetric algorithms supported by the JWKS loader (RSA + EC);
+    /// operators narrow this to exactly what their IdP advertises via
+    /// `<PREFIX>_OIDC_ALLOWED_ALGS`.
+    pub allowed_algs: Vec<Algorithm>,
     pub groups_claim: String,
     pub tenant_ids_claim: String,
+}
+
+/// Fail-closed default signing-algorithm allowlist: the asymmetric
+/// families the JWKS loader (`jwk_to_decoding_key`) can actually
+/// materialize keys for. Symmetric (`HS*`) is intentionally excluded so
+/// an `oct` key entering the JWKS can never be used for verification.
+fn default_allowed_algs() -> Vec<Algorithm> {
+    vec![
+        Algorithm::RS256,
+        Algorithm::RS384,
+        Algorithm::RS512,
+        Algorithm::PS256,
+        Algorithm::PS384,
+        Algorithm::PS512,
+        Algorithm::ES256,
+        Algorithm::ES384,
+    ]
 }
 
 impl Default for JwtConfig {
@@ -188,6 +223,8 @@ impl Default for JwtConfig {
             jwks_url: String::new(),
             clock_skew_seconds: 60,
             jwks_refresh_seconds: 3600,
+            jwks_max_stale_seconds: 3600 * 4,
+            allowed_algs: default_allowed_algs(),
             groups_claim: "groups".into(),
             tenant_ids_claim: "spendguard:tenant_ids".into(),
         }
@@ -251,11 +288,29 @@ impl AuthConfig {
                     .ok()
                     .and_then(|s| s.parse().ok())
                     .unwrap_or(60);
-                let jwks_refresh_seconds =
+                let jwks_refresh_seconds: u64 =
                     std::env::var(format!("{prefix}_OIDC_JWKS_REFRESH_SECONDS"))
                         .ok()
                         .and_then(|s| s.parse().ok())
                         .unwrap_or(3600);
+                // Hard staleness ceiling: serve-stale-on-failure is bounded
+                // to this many seconds. Defaults to 4x the refresh interval
+                // so a single failed refresh tolerates a brief outage but
+                // sustained JWKS unavailability fails closed.
+                let jwks_max_stale_seconds =
+                    std::env::var(format!("{prefix}_OIDC_JWKS_MAX_STALE_SECONDS"))
+                        .ok()
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(jwks_refresh_seconds.saturating_mul(4));
+                // Operator-pinned signing-algorithm allowlist. Comma- or
+                // space-separated (e.g. "RS256,ES256"). Unknown/unsupported
+                // tokens are dropped; if parsing yields nothing we keep the
+                // fail-closed asymmetric default rather than accepting all.
+                let allowed_algs = std::env::var(format!("{prefix}_OIDC_ALLOWED_ALGS"))
+                    .ok()
+                    .map(|raw| parse_allowed_algs(&raw))
+                    .filter(|algs| !algs.is_empty())
+                    .unwrap_or_else(default_allowed_algs);
                 let groups_claim = std::env::var(format!("{prefix}_OIDC_GROUPS_CLAIM"))
                     .unwrap_or_else(|_| "groups".into());
                 let tenant_ids_claim = std::env::var(format!("{prefix}_OIDC_TENANT_IDS_CLAIM"))
@@ -266,6 +321,8 @@ impl AuthConfig {
                     jwks_url,
                     clock_skew_seconds,
                     jwks_refresh_seconds,
+                    jwks_max_stale_seconds,
+                    allowed_algs,
                     groups_claim,
                     tenant_ids_claim,
                 })
@@ -355,6 +412,26 @@ impl HttpJwksProvider {
         }
     }
 
+    /// Age of the current cache in seconds, or `None` if never fetched
+    /// (cold start). Used to enforce the hard staleness ceiling on both
+    /// the refresh and the read paths.
+    fn cache_age_seconds(&self) -> Option<i64> {
+        let s = self.inner.read();
+        s.fetched_at.map(|t| (Utc::now() - t).num_seconds())
+    }
+
+    /// True once the cache is older than the hard staleness ceiling. Past
+    /// this point keys must NOT be served even if a refresh is not
+    /// currently due — a revoked key must stop validating within the
+    /// bound (fail-closed). A never-fetched cache is not "too stale" here;
+    /// the cold-start case is handled separately as a hard failure.
+    fn cache_too_stale(&self) -> bool {
+        match self.cache_age_seconds() {
+            Some(age) => age > self.cfg.jwks_max_stale_seconds as i64,
+            None => false,
+        }
+    }
+
     async fn refresh_if_stale(&self) -> Result<(), AuthError> {
         let needs_refresh = {
             let s = self.inner.read();
@@ -379,11 +456,52 @@ impl HttpJwksProvider {
                 Ok(())
             }
             Err(e) => {
-                let s = self.inner.read();
-                if s.fetched_at.is_none() {
+                let (fetched_at_none, age) = {
+                    let s = self.inner.read();
+                    (
+                        s.fetched_at.is_none(),
+                        s.fetched_at.map(|t| (Utc::now() - t).num_seconds()),
+                    )
+                };
+                // Cold start with unreachable JWKS: no cache to fall back
+                // on — hard fail (unchanged invariant).
+                if fetched_at_none {
                     return Err(e);
                 }
-                warn!(error = %e, "JWKS refresh failed; serving stale cache");
+                // Bounded stale-serving: tolerate transient JWKS outages by
+                // serving the existing cache, but only until the hard
+                // ceiling. Past the ceiling a revoked key must stop
+                // validating, so fail closed (surfaces as 503) instead of
+                // accepting potentially-revoked keys indefinitely.
+                let age_secs = age.unwrap_or(i64::MAX);
+                if age_secs > self.cfg.jwks_max_stale_seconds as i64 {
+                    // Stable, alertable event: sustained JWKS outage has
+                    // pushed the cache past its max-staleness ceiling and
+                    // auth is now failing closed.
+                    warn!(
+                        target: "spendguard_auth::jwks",
+                        error = %e,
+                        cache_age_seconds = age_secs,
+                        max_stale_seconds = self.cfg.jwks_max_stale_seconds,
+                        event = "jwks_max_stale_exceeded_failing_closed",
+                        "JWKS refresh failed and cache exceeded max staleness; failing closed"
+                    );
+                    return Err(AuthError::JwksFetch(format!(
+                        "JWKS unreachable and cache exceeded max staleness ({age_secs}s > {}s)",
+                        self.cfg.jwks_max_stale_seconds
+                    )));
+                }
+                // Within the bound: serve stale for liveness, but make the
+                // degraded state visible with a stable event for log-based
+                // alerting.
+                warn!(
+                    target: "spendguard_auth::jwks",
+                    error = %e,
+                    cache_age_seconds = age_secs,
+                    max_stale_seconds = self.cfg.jwks_max_stale_seconds,
+                    event = "jwks_serving_stale_cache",
+                    "JWKS refresh failed; serving stale cache within max-staleness bound"
+                );
                 Ok(())
             }
         }
@@ -421,6 +539,25 @@ impl HttpJwksProvider {
 impl JwksProvider for HttpJwksProvider {
     async fn key_for(&self, kid: &str) -> Result<DecodingKey, AuthError> {
         self.refresh_if_stale().await?;
+        // Read-path enforcement of the staleness ceiling: independent of
+        // whether a refresh was attempted above. If the cache is past the
+        // hard bound (e.g. refresh not yet due but a prior stale-serve
+        // aged it out, or max_stale < refresh interval), do not serve any
+        // key — fail closed so revoked keys cannot validate.
+        if self.cache_too_stale() {
+            let age = self.cache_age_seconds().unwrap_or(i64::MAX);
+            warn!(
+                target: "spendguard_auth::jwks",
+                cache_age_seconds = age,
+                max_stale_seconds = self.cfg.jwks_max_stale_seconds,
+                event = "jwks_max_stale_exceeded_failing_closed",
+                "JWKS cache exceeded max staleness on lookup; failing closed"
+            );
+            return Err(AuthError::JwksFetch(format!(
+                "JWKS cache exceeded max staleness ({age}s > {}s)",
+                self.cfg.jwks_max_stale_seconds
+            )));
+        }
         let s = self.inner.read();
         s.keys
             .get(kid)
@@ -494,7 +631,27 @@ impl JwtValidator {
             .ok_or_else(|| AuthError::InvalidToken("missing kid".into()))?;
         let key = self.jwks.key_for(&kid).await?;
 
-        let mut validation = Validation::new(detect_alg(&header.alg));
+        // Pin the accepted signing algorithms to the operator-configured
+        // allowlist rather than trusting the token's own `alg` header.
+        // This prevents a holder of any JWKS-verifiable token from
+        // substituting a same-family algorithm the operator did not intend
+        // to accept, and ensures an `oct`/`HS*` key can never be used.
+        let allowed_algs = if self.cfg.allowed_algs.is_empty() {
+            // A directly-constructed JwtConfig with an empty allowlist
+            // would accept nothing; treat it as a misconfiguration and
+            // fail closed rather than indexing an empty slice.
+            return Err(AuthError::Infra(
+                "JWT allowed_algs is empty; refusing to validate".into(),
+            ));
+        } else {
+            self.cfg.allowed_algs.clone()
+        };
+        let mut validation = Validation::new(allowed_algs[0]);
+        validation.algorithms = allowed_algs;
+        // Enforce presence of the security-critical claims at the library
+        // layer so binding does not depend on the deserialized struct
+        // shape — refactor-safe against `iss`/`aud` ever becoming Option.
+        validation.set_required_spec_claims(&["exp", "iss", "aud"]);
         validation.set_audience(&[self.cfg.audience.clone()]);
         validation.set_issuer(&[self.cfg.issuer.clone()]);
         validation.leeway = self.cfg.clock_skew_seconds;
@@ -538,8 +695,33 @@ impl JwtValidator {
     }
 }
 
-fn detect_alg(alg: &Algorithm) -> Algorithm {
-    *alg
+/// Parse an operator-supplied signing-algorithm allowlist (comma- or
+/// whitespace-separated, case-insensitive, e.g. "RS256, ES256").
+/// Unrecognized tokens are dropped — the caller falls back to the
+/// fail-closed asymmetric default when the result is empty so a typo
+/// can never silently widen the accepted set to "any".
+fn parse_allowed_algs(raw: &str) -> Vec<Algorithm> {
+    raw.split([',', ' ', '\t', '\n'])
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .filter_map(|name| match name.to_ascii_uppercase().as_str() {
+            "RS256" => Some(Algorithm::RS256),
+            "RS384" => Some(Algorithm::RS384),
+            "RS512" => Some(Algorithm::RS512),
+            "PS256" => Some(Algorithm::PS256),
+            "PS384" => Some(Algorithm::PS384),
+            "PS512" => Some(Algorithm::PS512),
+            "ES256" => Some(Algorithm::ES256),
+            "ES384" => Some(Algorithm::ES384),
+            // HS* and EdDSA are intentionally not selectable here: HS*
+            // would re-open the symmetric-key confusion risk this pin
+            // exists to close, and the JWKS loader emits no EdDSA keys.
+            other => {
+                warn!(alg = other, "ignoring unknown OIDC allowed alg");
+                None
+            }
+        })
+        .collect()
 }
 
 fn extract_string_array(claims: &serde_json::Value, name: &str) -> Vec<String> {
@@ -974,6 +1156,12 @@ mod tests {
             jwks_url: "https://unused".into(),
             clock_skew_seconds: 60,
             jwks_refresh_seconds: 3600,
+            jwks_max_stale_seconds: 3600 * 4,
+            // These tests sign with a shared secret (HS256) because the
+            // fake JWKS can mint arbitrary kids without asymmetric key
+            // material; the production default excludes HS*. Pin HS256
+            // explicitly here so the validator accepts the test tokens.
+            allowed_algs: vec![Algorithm::HS256],
             groups_claim: "groups".into(),
             tenant_ids_claim: "spendguard:tenant_ids".into(),
         };
@@ -1095,6 +1283,145 @@ mod tests {
         assert_eq!(p.groups, vec!["g1".to_string(), "g2".to_string()]);
         // S17 leaves roles empty (S18 wires them).
         assert!(p.roles.is_empty());
+    }
+
+    #[tokio::test]
+    async fn jwt_validator_rejects_alg_not_in_allowlist() {
+        // The fake JWKS signs with HS256, but pin the allowlist to an
+        // asymmetric set. jsonwebtoken's family check would already block
+        // RS<->HS confusion, but this proves the validator honors the
+        // explicit allowlist rather than the token's own header.
+        let secret = b"test-shared-secret-for-jwt-tests-32";
+        let kid = "test-kid-1";
+        let cfg = JwtConfig {
+            issuer: "iss".into(),
+            audience: "aud".into(),
+            jwks_url: "https://unused".into(),
+            clock_skew_seconds: 60,
+            jwks_refresh_seconds: 3600,
+            jwks_max_stale_seconds: 3600 * 4,
+            allowed_algs: vec![Algorithm::RS256, Algorithm::ES256],
+            groups_claim: "groups".into(),
+            tenant_ids_claim: "spendguard:tenant_ids".into(),
+        };
+        let mut keys = HashMap::new();
+        keys.insert(kid.to_string(), DecodingKey::from_secret(secret));
+        let v = JwtValidator::with_jwks(cfg, Arc::new(FakeJwks { keys }));
+        let enc = EncodingKey::from_secret(secret);
+        let exp = (Utc::now() + chrono::Duration::seconds(60)).timestamp();
+        let token = issue_jwt(&enc, kid, "iss", "aud", "u", exp, vec![], vec![]);
+        let err = v.validate(&token).await.unwrap_err();
+        // HS256 is not in the pinned allowlist -> rejected, fail-closed.
+        assert!(matches!(err, AuthError::InvalidToken(_)), "got {err:?}");
+    }
+
+    #[tokio::test]
+    async fn jwt_validator_empty_allowlist_fails_closed() {
+        let secret = b"test-shared-secret-for-jwt-tests-32";
+        let kid = "test-kid-1";
+        let cfg = JwtConfig {
+            issuer: "iss".into(),
+            audience: "aud".into(),
+            jwks_url: "https://unused".into(),
+            clock_skew_seconds: 60,
+            jwks_refresh_seconds: 3600,
+            jwks_max_stale_seconds: 3600 * 4,
+            allowed_algs: vec![],
+            groups_claim: "groups".into(),
+            tenant_ids_claim: "spendguard:tenant_ids".into(),
+        };
+        let mut keys = HashMap::new();
+        keys.insert(kid.to_string(), DecodingKey::from_secret(secret));
+        let v = JwtValidator::with_jwks(cfg, Arc::new(FakeJwks { keys }));
+        let enc = EncodingKey::from_secret(secret);
+        let exp = (Utc::now() + chrono::Duration::seconds(60)).timestamp();
+        let token = issue_jwt(&enc, kid, "iss", "aud", "u", exp, vec![], vec![]);
+        let err = v.validate(&token).await.unwrap_err();
+        assert!(matches!(err, AuthError::Infra(_)), "got {err:?}");
+    }
+
+    #[test]
+    fn parse_allowed_algs_drops_unknown_and_symmetric() {
+        let algs = parse_allowed_algs("RS256, es256 HS256 garbage");
+        assert!(algs.contains(&Algorithm::RS256));
+        assert!(algs.contains(&Algorithm::ES256));
+        // HS256 and the bogus token are intentionally dropped.
+        assert!(!algs.contains(&Algorithm::HS256));
+        assert_eq!(algs.len(), 2);
+        // Empty / all-garbage input yields an empty vec so the caller
+        // falls back to the fail-closed default rather than "accept all".
+        assert!(parse_allowed_algs("nonsense oct").is_empty());
+    }
+
+    #[tokio::test]
+    async fn jwks_lookup_fails_closed_past_max_staleness_ceiling() {
+        // Build an HttpJwksProvider with a populated cache whose
+        // fetched_at is older than the staleness ceiling. The JWKS URL is
+        // unreachable, so a refresh attempt would also fail — the
+        // provider must fail closed rather than serve the stale key.
+        let cfg = JwtConfig {
+            issuer: "iss".into(),
+            audience: "aud".into(),
+            jwks_url: "http://127.0.0.1:1/unreachable".into(),
+            clock_skew_seconds: 60,
+            jwks_refresh_seconds: 3600,
+            jwks_max_stale_seconds: 100,
+            allowed_algs: vec![Algorithm::RS256],
+            groups_claim: "groups".into(),
+            tenant_ids_claim: "spendguard:tenant_ids".into(),
+        };
+        let provider = HttpJwksProvider::new(cfg);
+        {
+            let mut s = provider.inner.write();
+            s.keys.insert(
+                "kid-1".to_string(),
+                DecodingKey::from_secret(b"whatever"),
+            );
+            // 200s old; ceiling is 100s -> beyond the bound.
+            s.fetched_at = Some(Utc::now() - chrono::Duration::seconds(200));
+        }
+        let err = match provider.key_for("kid-1").await {
+            Ok(_) => panic!("expected fail-closed past staleness ceiling"),
+            Err(e) => e,
+        };
+        // Past the ceiling with an unreachable endpoint -> JwksFetch
+        // (surfaces as 503), NOT a served stale key.
+        assert!(matches!(err, AuthError::JwksFetch(_)), "got {err:?}");
+        assert_eq!(err.status_code(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn jwks_lookup_serves_fresh_cache_within_ceiling() {
+        // A recently-fetched cache (well within both the refresh interval
+        // and the ceiling) is served without any network access.
+        let cfg = JwtConfig {
+            issuer: "iss".into(),
+            audience: "aud".into(),
+            jwks_url: "http://127.0.0.1:1/unreachable".into(),
+            clock_skew_seconds: 60,
+            jwks_refresh_seconds: 3600,
+            jwks_max_stale_seconds: 100,
+            allowed_algs: vec![Algorithm::RS256],
+            groups_claim: "groups".into(),
+            tenant_ids_claim: "spendguard:tenant_ids".into(),
+        };
+        let provider = HttpJwksProvider::new(cfg);
+        {
+            let mut s = provider.inner.write();
+            s.keys.insert(
+                "kid-1".to_string(),
+                DecodingKey::from_secret(b"whatever"),
+            );
+            s.fetched_at = Some(Utc::now());
+        }
+        // Known kid is served; refresh not due so no fetch is attempted.
+        assert!(provider.key_for("kid-1").await.is_ok());
+        // Unknown kid still maps to UnknownKid (not a staleness error).
+        let err = match provider.key_for("nope").await {
+            Ok(_) => panic!("expected UnknownKid for absent kid"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, AuthError::UnknownKid(_)), "got {err:?}");
     }
 
     #[test]

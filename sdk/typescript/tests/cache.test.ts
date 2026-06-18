@@ -45,6 +45,33 @@ describe("InMemoryIdempotencyCache — get/set round-trip", () => {
     expect(cache.get("sg-key-1")).toBe(outcome);
   });
 
+  // Body-identity binding (idempotency-key collision protection).
+  it("get with a MISMATCHED bodyHash is a miss (collision falls through)", () => {
+    const cache = new InMemoryIdempotencyCache();
+    const outcome = mkOutcome("d1");
+    cache.set("sg-key", outcome, undefined, "hash-A");
+    // Same key, different body hash → treated as a miss.
+    expect(cache.get("sg-key", "hash-B")).toBeUndefined();
+    // Original body hash still hits.
+    expect(cache.get("sg-key", "hash-A")).toBe(outcome);
+    // A mismatch must NOT evict the live entry (original request may replay).
+    expect(cache.size).toBe(1);
+  });
+
+  it("get with a MATCHING bodyHash returns the stored outcome", () => {
+    const cache = new InMemoryIdempotencyCache();
+    const outcome = mkOutcome("d1");
+    cache.set("sg-key", outcome, undefined, "hash-A");
+    expect(cache.get("sg-key", "hash-A")).toBe(outcome);
+  });
+
+  it("get without a bodyHash still hits (key-only legacy semantics preserved)", () => {
+    const cache = new InMemoryIdempotencyCache();
+    const outcome = mkOutcome("d1");
+    cache.set("sg-key", outcome, undefined, "hash-A");
+    expect(cache.get("sg-key")).toBe(outcome);
+  });
+
   it("get on an unset key returns undefined", () => {
     const cache = new InMemoryIdempotencyCache();
     expect(cache.get("never-set")).toBeUndefined();
@@ -220,4 +247,25 @@ describe("InMemoryIdempotencyCache — garbage-input clamping", () => {
     // Should still be retrievable since negative ttl is clamped to default 5m
     expect(cache.get("k")).toBeDefined();
   });
+
+  // Regression: garbage per-call ttlMs must fall back to defaultTtlMs, NOT to
+  // the max-entries count constant (1024ms). See clampTtl in cache.ts.
+  it.each([0, -5, Number.NaN, Number.POSITIVE_INFINITY, 1.5])(
+    "per-call ttlMs=%s falls back to defaultTtlMs (not the 1024 count constant)",
+    (badTtl) => {
+      let now = 1_000;
+      const cache = new InMemoryIdempotencyCache({
+        defaultTtlMs: 100_000, // 100s — well past the bogus 1024ms
+        now: () => now,
+      });
+      cache.set("k", mkOutcome("v"), badTtl);
+      // If the old clampPositive(1024) bug were present, this would already be
+      // expired at now=2_000; with the default 100s TTL it is still live.
+      now = 2_000;
+      expect(cache.get("k")).toBeDefined();
+      // And it does expire at the DEFAULT TTL boundary, proving we used 100s.
+      now = 1_000 + 100_000;
+      expect(cache.get("k")).toBeUndefined();
+    },
+  );
 });

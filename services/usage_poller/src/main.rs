@@ -7,6 +7,9 @@
 
 use anyhow::Context;
 use serde::Deserialize;
+use spendguard_leases::{
+    spawn_lease_loop, DisabledLease, K8sLease, LeaseConfig, LeaseManager, LeaseState, PostgresLease,
+};
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,10 +55,51 @@ struct Config {
     /// to `0.0.0.0:9099` per the round-2 port table. Empty disables.
     #[serde(default = "default_metrics_addr")]
     metrics_addr: String,
+
+    // Phase 5 S1 — leader election (mirrors ttl_sweeper /
+    // retention_sweeper). The poller MUST be a singleton: each replica
+    // keeps its own in-memory cursor and calls the provider API
+    // independently, so running >1 replica without a leader multiplies
+    // provider-API load N× (cost + 429 risk). Only the leader polls.
+    // Env keys are prefixed by `envy::prefixed("SPENDGUARD_USAGE_POLLER_")`
+    // below, e.g. SPENDGUARD_USAGE_POLLER_LEADER_ELECTION_MODE.
+    #[serde(default = "default_lease_mode")]
+    leader_election_mode: String,
+    #[serde(default = "default_lease_name")]
+    leader_lease_name: String,
+    #[serde(default)]
+    workload_instance_id: String,
+    #[serde(default = "default_lease_region")]
+    leader_region: String,
+    #[serde(default = "default_lease_ttl_ms")]
+    leader_lease_ttl_ms: u64,
+    #[serde(default = "default_lease_renew_ms")]
+    leader_renew_interval_ms: u64,
+    #[serde(default = "default_lease_retry_ms")]
+    leader_retry_interval_ms: u64,
 }
 
 fn default_metrics_addr() -> String {
     "0.0.0.0:9099".to_string()
+}
+
+fn default_lease_mode() -> String {
+    "postgres".into()
+}
+fn default_lease_name() -> String {
+    "usage-poller".into()
+}
+fn default_lease_region() -> String {
+    "demo".into()
+}
+fn default_lease_ttl_ms() -> u64 {
+    15_000
+}
+fn default_lease_renew_ms() -> u64 {
+    5_000
+}
+fn default_lease_retry_ms() -> u64 {
+    1_000
 }
 
 fn default_provider_kind() -> String {
@@ -89,11 +133,32 @@ async fn main() -> anyhow::Result<()> {
         .from_env()
         .context("loading config")?;
 
+    // S1: validate leader-election config before any side effect so a
+    // misconfigured lease fails closed at startup (a stalled-renewal
+    // window that never expires would let two replicas poll forever).
+    let valid_modes = ["postgres", "k8s", "disabled"];
+    if !valid_modes.contains(&cfg.leader_election_mode.as_str()) {
+        anyhow::bail!(
+            "SPENDGUARD_USAGE_POLLER_LEADER_ELECTION_MODE must be one of {:?}, got {}",
+            valid_modes,
+            cfg.leader_election_mode
+        );
+    }
+    if cfg.leader_renew_interval_ms >= cfg.leader_lease_ttl_ms {
+        anyhow::bail!(
+            "leader_renew_interval_ms ({}) must be < leader_lease_ttl_ms ({})",
+            cfg.leader_renew_interval_ms,
+            cfg.leader_lease_ttl_ms
+        );
+    }
+
     info!(
         provider_kind = %cfg.provider_kind,
         poll_interval = cfg.poll_interval_seconds,
         safety_lag = cfg.safety_lag_seconds,
         overlap_minutes = cfg.overlap_minutes,
+        leader_mode = %cfg.leader_election_mode,
+        lease_name = %cfg.leader_lease_name,
         "S11: usage poller starting"
     );
 
@@ -187,39 +252,141 @@ async fn main() -> anyhow::Result<()> {
         info!(addr = %cfg.metrics_addr, "metrics server bound");
     }
 
-    loop {
-        let now = chrono::Utc::now();
-        let window_to = now - chrono::Duration::seconds(cfg.safety_lag_seconds as i64);
-        let window_from = cursor - chrono::Duration::minutes(cfg.overlap_minutes);
-        let window = PollWindow {
-            from: window_from,
-            to: window_to,
-        };
+    // Phase 5 S1: leader election. Only the leader polls so >1 replica
+    // doesn't multiply provider-API load / cursors. Mirrors
+    // ttl_sweeper / retention_sweeper.
+    let lease_cfg = LeaseConfig {
+        lease_name: cfg.leader_lease_name.clone(),
+        workload_id: if cfg.workload_instance_id.is_empty() {
+            // Fallback identifier; production deployments populate via
+            // the downward API.
+            format!("usage-poller-{}", uuid::Uuid::new_v4())
+        } else {
+            cfg.workload_instance_id.clone()
+        },
+        region: cfg.leader_region.clone(),
+        ttl: Duration::from_millis(cfg.leader_lease_ttl_ms),
+        renew_interval: Duration::from_millis(cfg.leader_renew_interval_ms),
+        retry_interval: Duration::from_millis(cfg.leader_retry_interval_ms),
+    };
+    let manager: Arc<dyn LeaseManager> = match cfg.leader_election_mode.as_str() {
+        "postgres" => Arc::new(PostgresLease::new(pool.clone(), lease_cfg.clone())?),
+        "k8s" => {
+            let namespace = std::env::var("SPENDGUARD_LEADER_K8S_NAMESPACE")
+                .unwrap_or_else(|_| "default".into());
+            let ttl_seconds = std::cmp::max(1, (cfg.leader_lease_ttl_ms / 1000) as i32);
+            Arc::new(
+                K8sLease::new(
+                    namespace,
+                    lease_cfg.lease_name.clone(),
+                    lease_cfg.workload_id.clone(),
+                    ttl_seconds,
+                )
+                .await?,
+            )
+        }
+        "disabled" => Arc::new(DisabledLease {
+            lease_name: lease_cfg.lease_name.clone(),
+            workload_id: lease_cfg.workload_id.clone(),
+        }),
+        // Unreachable: validated above, but fail closed.
+        other => anyhow::bail!("unknown leader_election_mode {other}"),
+    };
+    let guard = spawn_lease_loop(manager, lease_cfg);
 
-        match poll_once(&*client, &pool, window).await {
-            Ok(outcome) => {
-                metrics.inc_cycle(CycleOutcome::Ok);
-                metrics.add_records(
-                    outcome.fetched as u64,
-                    outcome.inserted as u64,
-                    outcome.deduped as u64,
-                );
-                info!(
-                    fetched = outcome.fetched,
-                    inserted = outcome.inserted,
-                    deduped = outcome.deduped,
-                    "S11: cycle ok"
-                );
-                cursor = window_to;
+    // Track whether we were leading on the previous tick. When a
+    // standby is promoted, its in-memory cursor is stale (seeded once
+    // at startup); re-seed from MAX(observed_at) on takeover so the
+    // promoted leader resumes from where the prior leader left off.
+    // Idempotent inserts make an over-conservative cursor safe.
+    let mut was_leader = false;
+
+    info!("entering poll loop");
+
+    loop {
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                info!("ctrl-c received; exiting");
+                break;
             }
-            Err(e) => {
-                metrics.inc_cycle(CycleOutcome::Err);
-                warn!(err = %e, "S11: poll cycle failed; retaining last-success cursor");
+            _ = tokio::time::sleep(Duration::from_secs(cfg.poll_interval_seconds)) => {
+                let s = guard.state_rx.borrow().clone();
+                // Round-9 P2: expiry-aware is_leader_now() — a stalled
+                // renewal must not keep this replica polling after
+                // another pod has taken over the lease.
+                if !s.is_leader_now() {
+                    metrics.inc_cycle(CycleOutcome::Skipped);
+                    was_leader = false;
+                    match &s {
+                        LeaseState::Leader { expires_at, .. } => {
+                            warn!(expires_at = %expires_at, "lease expired locally; skip poll until renewed");
+                        }
+                        LeaseState::Standby { holder_workload_id, .. } => {
+                            tracing::debug!(held_by = %holder_workload_id, "standby — skip poll");
+                        }
+                        LeaseState::Unknown => {
+                            warn!("lease state Unknown — skip poll");
+                        }
+                    }
+                    continue;
+                }
+
+                if !was_leader {
+                    was_leader = true;
+                    let resume: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                        "SELECT MAX(observed_at) FROM provider_usage_records WHERE provider = $1",
+                    )
+                    .bind(&cfg.provider_kind)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap_or(None);
+                    if let Some(t) = resume {
+                        // Never advance the cursor forward on takeover —
+                        // only pull it back to be safe. The overlap +
+                        // idempotency cover any gap.
+                        let promoted = std::cmp::min(cursor, t);
+                        info!(resume_from = %promoted, "S11: promoted to leader; cursor re-seeded");
+                        cursor = promoted;
+                    } else {
+                        info!("S11: promoted to leader; no prior records, cursor unchanged");
+                    }
+                }
+
+                let now = chrono::Utc::now();
+                let window_to = now - chrono::Duration::seconds(cfg.safety_lag_seconds as i64);
+                let window_from = cursor - chrono::Duration::minutes(cfg.overlap_minutes);
+                let window = PollWindow {
+                    from: window_from,
+                    to: window_to,
+                };
+
+                match poll_once(&*client, &pool, window).await {
+                    Ok(outcome) => {
+                        metrics.inc_cycle(CycleOutcome::Ok);
+                        metrics.add_records(
+                            outcome.fetched as u64,
+                            outcome.inserted as u64,
+                            outcome.deduped as u64,
+                        );
+                        info!(
+                            fetched = outcome.fetched,
+                            inserted = outcome.inserted,
+                            deduped = outcome.deduped,
+                            "S11: cycle ok (leader)"
+                        );
+                        cursor = window_to;
+                    }
+                    Err(e) => {
+                        metrics.inc_cycle(CycleOutcome::Err);
+                        warn!(err = %e, "S11: poll cycle failed; retaining last-success cursor");
+                    }
+                }
             }
         }
-
-        tokio::time::sleep(Duration::from_secs(cfg.poll_interval_seconds)).await;
     }
+
+    guard.shutdown().await;
+    Ok(())
 }
 
 /// Round-2 #11: minimal HTTP /metrics endpoint.

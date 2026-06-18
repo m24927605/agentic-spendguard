@@ -96,6 +96,32 @@ pub struct Config {
     #[serde(default)]
     pub allow_untrusted_budget_metadata: bool,
 
+    /// D13 subscription-meter lane opt-in.
+    ///
+    /// The `RESERVATION_SOURCE_SUBSCRIPTION_METER` lane derives its entire
+    /// cap (hard_cap / current_consumed) from client-supplied
+    /// `runtime_metadata` and NEVER opens a ledger transaction, so honoring
+    /// it without a server-side opt-in turns the meter flag into a general
+    /// ledger-bypass / unlimited-spend switch (a missing client hard cap
+    /// would read as "no cap"). Until the ledger-backed `subscription_meters`
+    /// lookup lands (post-D13 hardening slice), production MUST leave this
+    /// false so the meter lane fails closed (DENY / FailedPrecondition)
+    /// instead of silently honoring untrusted caps. Mirrors
+    /// `allow_untrusted_budget_metadata`.
+    #[serde(default)]
+    pub allow_untrusted_subscription_meter: bool,
+
+    /// Expected peer UID for the in-pod adapter connecting over the UDS.
+    ///
+    /// The adapter UDS server enforces `SO_PEERCRED` peer-uid matching: any
+    /// accepted `UnixStream` whose peer uid != this value is dropped before
+    /// it reaches tonic (fail-closed). When unset (`None`) the server
+    /// defaults to the sidecar process's own effective uid (`getuid`) —
+    /// never fail-open. Only applies to the local UDS adapter path; the
+    /// sibling-pod / hostPath production shape enforces mTLS+SPIFFE instead.
+    #[serde(default)]
+    pub adapter_expected_peer_uid: Option<u32>,
+
     /// Health probe bind (kubelet readiness/liveness).
     #[serde(default = "default_health_addr")]
     pub health_addr: String,
@@ -197,6 +223,21 @@ pub struct Config {
     /// POST_GA_03 sidecar token-encoder cap.
     #[serde(default = "default_http_companion_max_body_bytes")]
     pub http_companion_max_body_bytes: usize,
+
+    /// Expected SPIFFE URI SAN the connecting HTTP-companion client
+    /// (Kong/Coze/Botpress plugin) MUST present in its mTLS leaf cert.
+    ///
+    /// WebPKI CA-chain validation alone accepts ANY leaf signed by a CA
+    /// in the bundle, so a same-CA peer (another tenant's plugin, a
+    /// sibling service) could otherwise connect and satisfy only the
+    /// in-body `tenant_id == cfg.tenant_id` string check. When set, the
+    /// companion mTLS verifier additionally pins this exact URI SAN at
+    /// the handshake (fail-closed; mismatch aborts the handshake, no
+    /// decision/audit side effect). Empty/unset leaves the legacy SLICE 1
+    /// CA-chain-only behavior with a startup warning. Production SHOULD
+    /// set this (e.g. `spiffe://spendguard.platform/ns/<ns>/sa/<plugin>`).
+    #[serde(default)]
+    pub http_companion_expected_client_spiffe_uri: String,
 }
 
 fn default_uds_path() -> String {

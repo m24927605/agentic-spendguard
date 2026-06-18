@@ -13,7 +13,7 @@ path = "src/main.rs"
 # (--check-prediction-mirror) + NOT_IMPLEMENTED stub; full per-row scan
 # implementation lands in SLICE_06 alongside producer-side mirror writes.
 # See docs/audit-chain-prediction-extension-v1alpha1.md §11.3 +
-# docs/slices/SLICE_01_canonical_events_migration.md §10.
+# docs/internal/slices/SLICE_01_canonical_events_migration.md §10.
 [[bin]]
 name = "verify-chain"
 path = "src/bin/verify_chain.rs"
@@ -50,6 +50,12 @@ ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 sha2 = "0.10"
 hex = "0.4"
 base64 = "0.22"
+
+# Producer-identity binding (auth-trust): parse the client mTLS leaf
+# cert's SPIFFE URI SAN so canonical_ingest can assert it matches the
+# declared producer_id instead of trusting "has a cert from our CA".
+# Matches services/output_predictor's HARDEN_08 SVID parsing version.
+x509-parser = "0.16"
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

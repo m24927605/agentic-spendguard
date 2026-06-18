@@ -10,7 +10,7 @@
 -- Spec ancestors:
 --   - docs/stats-aggregator-spec-v1alpha1.md §4.1 (aggregation source)
 --   - docs/audit-chain-prediction-extension-v1alpha1.md §2 (mirror discipline)
---   - docs/slices/SLICE_06_output_predictor_a_b_stats_aggregator.md
+--   - docs/internal/slices/SLICE_06_output_predictor_a_b_stats_aggregator.md
 --   - 0013_canonical_events_prediction_columns.sql (prior mirror precedent)
 --
 -- ## R2 review motivation

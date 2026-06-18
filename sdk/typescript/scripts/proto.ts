@@ -7,7 +7,7 @@
  * `sdk/typescript/src/_proto/` using the `@protobuf-ts/plugin` plugin
  * (locked decision: spec set §9.6 — chosen over `ts-proto` for stability).
  *
- * Slice spec: `docs/slices/COV_S05_02_d05_proto_codegen.md`.
+ * Slice spec: `docs/internal/slices/COV_S05_02_d05_proto_codegen.md`.
  * Design refs: `docs/specs/coverage/D05_ts_sdk_substrate/design.md`
  *   §4.1 subpath table, §6.2 codegen, §7 codegen pipeline diagram,
  *   §9.6 locked plugin, §10 bundle budget (≤ 250 KB unminified).

@@ -44,6 +44,16 @@ export interface ResolvedEnvConfig {
   handshakeTimeoutMs?: number;
   runProjectionDefault?: import("./config.js").RunProjectionPolicy;
   disabled?: boolean;
+  /**
+   * Deployment profile, read verbatim from `SPENDGUARD_PROFILE`. The
+   * constructor uses this to gate the env-var disable path: a bare
+   * `SPENDGUARD_DISABLE` ONLY takes effect when `SPENDGUARD_PROFILE=demo`,
+   * mirroring the Rust signing service's `DisabledSigner::for_profile`
+   * (`services/signing/src/lib.rs`) so a single mis-set env var cannot defeat
+   * enforcement in production. Lowercased for case-insensitive comparison;
+   * `undefined` when unset.
+   */
+  profile?: string;
 }
 
 /**
@@ -94,8 +104,20 @@ export function resolveEnvConfig(env: NodeJS.ProcessEnv = process.env): Resolved
     out.runProjectionDefault = runProjectionDefault;
   }
 
+  // Profile — read verbatim (lowercased) so the constructor can gate the
+  // env-var disable path behind `SPENDGUARD_PROFILE=demo` (see ResolvedEnvConfig).
+  const profile = env.SPENDGUARD_PROFILE;
+  if (profile !== undefined && profile.length > 0) {
+    out.profile = profile.toLowerCase();
+  }
+
   // Disabled — accepted spellings per design §5.1 ("1" / "true"). Case
   // insensitive for ergonomics.
+  //
+  // NOTE: this only records the RAW env signal. The constructor REFUSES to
+  // honor it unless `SPENDGUARD_PROFILE=demo`, so a single mis-set env var
+  // cannot silently turn enforcement off in production. The explicit
+  // `disabled: true` constructor option is unaffected (tests rely on it).
   const disabled = env.SPENDGUARD_DISABLE;
   if (disabled !== undefined) {
     const norm = disabled.toLowerCase();

@@ -708,11 +708,12 @@ fn init_tracing() {
 fn render_metrics(encoder_boot_metrics: &[EncoderBootMetric]) -> String {
     use spendguard_tokenizer_service::server::{
         ENCODE_CONCURRENCY_LIMITED_TOTAL, ENCODE_TIMEOUT_TOTAL, INVALID_REQUEST_ID_TOTAL,
-        REQUEST_ID_V4_ACCEPTED_TOTAL,
+        REQUEST_ID_V4_ACCEPTED_TOTAL, TIER3_HIT_TOTAL, TOTAL_CALLS,
     };
     use spendguard_tokenizer_service::shadow::worker::{
         ALERT_ONCALL_ESCALATION_TOTAL, PROVIDER_COUNT_TOKENS_SCHEMA_DRIFT, SHADOW_DROPPED_FULL,
-        SHADOW_SKIPPED_CHAT_SHAPE, SHADOW_WORKER_DEAD, TOKENIZER_RATE_LIMITED_TOTAL,
+        SHADOW_SAMPLE_INSERT_FAILED_TOTAL, SHADOW_SKIPPED_CHAT_SHAPE, SHADOW_WORKER_DEAD,
+        TOKENIZER_RATE_LIMITED_TOTAL,
     };
     use std::sync::atomic::Ordering;
     let dropped_full = SHADOW_DROPPED_FULL.load(Ordering::Relaxed);
@@ -725,14 +726,17 @@ fn render_metrics(encoder_boot_metrics: &[EncoderBootMetric]) -> String {
     let encode_timeouts = ENCODE_TIMEOUT_TOTAL.load(Ordering::Relaxed);
     let encode_concurrency_limited = ENCODE_CONCURRENCY_LIMITED_TOTAL.load(Ordering::Relaxed);
     let rate_limited = TOKENIZER_RATE_LIMITED_TOTAL.load(Ordering::Relaxed);
+    let tier3_hits = TIER3_HIT_TOTAL.load(Ordering::Relaxed);
+    let total_calls = TOTAL_CALLS.load(Ordering::Relaxed);
+    let sample_insert_failed = SHADOW_SAMPLE_INSERT_FAILED_TOTAL.load(Ordering::Relaxed);
     let mut body = format!(
         "# HELP spendguard_tokenizer_tier3_hit_total \
          Number of Tier 3 fallback hits (spec §5.2).\n\
          # TYPE spendguard_tokenizer_tier3_hit_total counter\n\
-         spendguard_tokenizer_tier3_hit_total 0\n\
+         spendguard_tokenizer_tier3_hit_total {tier3_hits}\n\
          # HELP spendguard_tokenizer_total_calls Total tokenize calls.\n\
          # TYPE spendguard_tokenizer_total_calls counter\n\
-         spendguard_tokenizer_total_calls 0\n\
+         spendguard_tokenizer_total_calls {total_calls}\n\
          # HELP spendguard_tokenizer_shadow_dropped_full_total \
          Shadow events dropped because the worker channel was full (R2 M5).\n\
          # TYPE spendguard_tokenizer_shadow_dropped_full_total counter\n\
@@ -772,7 +776,11 @@ fn render_metrics(encoder_boot_metrics: &[EncoderBootMetric]) -> String {
          # HELP spendguard_tokenizer_rate_limited_total \
          Tier 1 count_tokens shadow samples skipped by per-tenant quota.\n\
          # TYPE spendguard_tokenizer_rate_limited_total counter\n\
-         spendguard_tokenizer_rate_limited_total{{reason=\"count_tokens_quota\"}} {rate_limited}\n",
+         spendguard_tokenizer_rate_limited_total{{reason=\"count_tokens_quota\"}} {rate_limited}\n\
+         # HELP spendguard_tokenizer_shadow_sample_insert_failed_total \
+         Shadow t1_samples INSERTs that failed (e.g. missing monthly partition after 2026-08-01) — drift alert suppressed to avoid a dangling audit reference (0051_tokenizer_t1_samples.sql §149-151).\n\
+         # TYPE spendguard_tokenizer_shadow_sample_insert_failed_total counter\n\
+         spendguard_tokenizer_shadow_sample_insert_failed_total {sample_insert_failed}\n",
     );
     body.push_str(
         "# HELP spendguard_tokenizer_encoder_boot_duration_ms \

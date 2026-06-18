@@ -71,6 +71,7 @@ pub mod dispatch;
 pub mod encoder_cache;
 pub mod encoders;
 pub mod error;
+pub mod request_caps;
 pub mod tier3;
 pub mod versions;
 
@@ -85,6 +86,10 @@ pub use dispatch::DispatchEntry;
 pub use encoder_cache::{EncoderBootMetric, EncoderCache};
 pub use encoders::{EncodeResult, Encoder, EncoderKind};
 pub use error::TokenizerError;
+pub use request_caps::{
+    MAX_MESSAGES, MAX_MESSAGE_CONTENT_LEN, MAX_MODEL_LEN, MAX_RAW_TEXT_LEN,
+    TOKENIZER_REQUEST_CAP_BYTES,
+};
 pub use tier3::tier3_fallback;
 pub use versions::{
     initial_seed_rows, slice04_seed_rows, TokenizerVersionId, TokenizerVersionRow,
@@ -240,8 +245,19 @@ impl Tokenizer {
     /// table; unknown models route to Tier 3 fallback. Per spec
     /// §3.4 — envelope tokens added per-kind (SLICE_03 OpenAI uses
     /// the published "3 tokens per message + 1 token for role" rule).
+    ///
+    /// DoS defense-in-depth: per-field size caps are enforced HERE so
+    /// the in-process library form genuinely self-defends with the same
+    /// bound as the gRPC service form (see [`crate::request_caps`]) —
+    /// previously these caps lived only in the tonic handler, leaving
+    /// the hot-path library caller (sidecar / egress) unguarded. An
+    /// oversized request returns [`TokenizerError::RequestTooLarge`]
+    /// (a distinct variant) BEFORE any encoder buffer is allocated, so
+    /// callers can fail closed rather than encode an unbounded prompt.
     pub fn tokenize(&self, req: &TokenizeRequest) -> Result<TokenizeResponse, TokenizerError> {
         let start = std::time::Instant::now();
+
+        request_caps::validate(req)?;
 
         let resp = match self.dispatch.lookup(&req.model) {
             Some(entry) => self.cache.tokenize_with_entry(entry, req)?,
@@ -296,5 +312,29 @@ mod tests {
         assert_eq!(resp.kind, "HEURISTIC");
         assert!(resp.fallback_char_count > 0);
         assert!((resp.fallback_margin_ratio - 1.05).abs() < 1e-6);
+    }
+
+    #[test]
+    fn tokenize_rejects_oversized_request_with_distinct_error() {
+        // The library form must self-defend with the same DoS bound as
+        // the gRPC handler: an oversized field is rejected before any
+        // dispatch / encode work, and surfaces the distinct
+        // `RequestTooLarge` variant so callers can fail closed.
+        let dispatch = Arc::new(dispatch::DispatchTable::compile().unwrap());
+        let cache = EncoderCache::test_empty();
+        let tokenizer = Tokenizer { cache, dispatch };
+
+        let req = TokenizeRequest {
+            model: "gpt-4o-mini".to_string(),
+            raw_text: "x".repeat(request_caps::MAX_RAW_TEXT_LEN + 1),
+            ..Default::default()
+        };
+        let err = tokenizer
+            .tokenize(&req)
+            .expect_err("oversized request must be rejected by the library");
+        assert!(
+            err.is_request_too_large(),
+            "must surface the distinct RequestTooLarge variant, got: {err:?}"
+        );
     }
 }

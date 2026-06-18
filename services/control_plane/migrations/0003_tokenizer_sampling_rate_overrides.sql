@@ -5,7 +5,7 @@
 -- Spec ancestors:
 --   - docs/tokenizer-service-spec-v1alpha1.md §4.1 (per-tenant/model
 --     operator override surface)
---   - docs/slices/HARDEN_03_production_blocker_gh_triage.md §2 (#137)
+--   - docs/internal/slices/HARDEN_03_production_blocker_gh_triage.md §2 (#137)
 --
 -- Control plane originally shipped POST/GET /v1/tokenizer/sampling-rate as
 -- an echo-only skeleton. This table makes overrides durable across pod

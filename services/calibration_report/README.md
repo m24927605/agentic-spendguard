@@ -4,7 +4,7 @@ SLICE_13 deliverable. Operator-facing CLI that turns SpendGuard's
 audit chain into actionable calibration evidence.
 
 **Spec ancestor**: [`docs/calibration-report-spec-v1alpha1.md`](../../docs/calibration-report-spec-v1alpha1.md)
-**Slice ancestor**: [`docs/slices/SLICE_13_calibration_report_cli.md`](../../docs/slices/SLICE_13_calibration_report_cli.md)
+**Slice ancestor**: [`docs/internal/slices/SLICE_13_calibration_report_cli.md`](../../docs/internal/slices/SLICE_13_calibration_report_cli.md)
 
 ## What this CLI does
 
@@ -55,6 +55,16 @@ spendguard-calibration-report \
 | `--auth-subject <subj>` | env | mTLS subject / operator id. |
 | `--auth-tenants <list>` | env | Comma-separated allowed tenant scope. |
 | `--self-audit <bool>` | `true` | Emit `report_generated` CloudEvent. |
+
+> **Auth trust boundary (§5.2).** `--auth-subject` and `--auth-tenants`
+> are **not** self-verified by this binary — the CLI cannot validate an
+> mTLS subject on its own. They MUST be injected by a trusted,
+> mTLS-terminating wrapper/launcher; a caller who can set the flags can
+> assert any value. The authoritative cross-tenant isolation is DB RLS;
+> the scope check is a fail-closed guard layered on top. To avoid a
+> mis-wired deployment silently falling back to the un-scoped allow path,
+> supplying exactly one of the two flags is **refused** (exit 2): set
+> both (authenticated, scoped) or neither (single-tenant / demo).
 
 ### Exit codes (spec §2.3)
 

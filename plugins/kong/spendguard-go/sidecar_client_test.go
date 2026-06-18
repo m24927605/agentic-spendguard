@@ -38,6 +38,54 @@ func TestNewSidecarClient_RejectsNilConfig(t *testing.T) {
 	}
 }
 
+// TestNewSidecarClient_RejectsEmptyTenant covers the SLICE 3
+// fail-closed tenant assertion (config.go §51-55). A valid HTTPS URL
+// with an empty tenant_id must refuse to load rather than send an
+// empty tenant assertion to the sidecar.
+func TestNewSidecarClient_RejectsEmptyTenant(t *testing.T) {
+	for _, tenant := range []string{"", "   ", "\t"} {
+		_, err := newSidecarClient(&Config{
+			SidecarURL: "https://spendguard.svc:8443",
+			TenantID:   tenant,
+		})
+		if err == nil || !strings.Contains(err.Error(), "tenant_id required") {
+			t.Fatalf("empty tenant %q must error with tenant_id required: %v", tenant, err)
+		}
+	}
+}
+
+// TestNewSidecarClient_RejectsNonUUIDTenant mirrors the Lua schema's
+// rejection of a bare tenant name (schema 01-schema_spec.lua) so both
+// distributions enforce the same UUID contract.
+func TestNewSidecarClient_RejectsNonUUIDTenant(t *testing.T) {
+	_, err := newSidecarClient(&Config{
+		SidecarURL: "https://spendguard.svc:8443",
+		TenantID:   "tenant-name",
+	})
+	if err == nil || !strings.Contains(err.Error(), "valid UUID") {
+		t.Fatalf("non-UUID tenant must error as invalid UUID: %v", err)
+	}
+}
+
+// TestNewSidecarClient_TenantPassesThenTLSFails proves a well-formed
+// UUID tenant clears the tenant gate: the only remaining failure is
+// the (expected) missing-cert TLS error, NOT a tenant error.
+func TestNewSidecarClient_TenantPassesThenTLSFails(t *testing.T) {
+	_, err := newSidecarClient(&Config{
+		SidecarURL: "https://spendguard.svc:8443",
+		TenantID:   "00000000-0000-4000-8000-000000000001",
+	})
+	if err == nil {
+		t.Fatal("expected a TLS error from missing certs")
+	}
+	if strings.Contains(err.Error(), "tenant_id") {
+		t.Fatalf("valid UUID tenant must pass the tenant gate, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "tls") {
+		t.Fatalf("expected the failure to be the TLS path, got: %v", err)
+	}
+}
+
 func TestLoadPEM_RejectsPathTraversal(t *testing.T) {
 	_, err := loadPEM("", "../../etc/passwd", "client_cert")
 	if err == nil || !strings.Contains(err.Error(), "traversal") {

@@ -139,6 +139,13 @@ pub enum ShadowOutcome {
     /// Provider returned schema drift OR auth failure; sample skipped,
     /// breaker NOT incremented.
     ProviderSchemaOrAuth,
+    /// Provider call returned, but the t1_samples row failed to persist
+    /// (e.g. a missing monthly partition after 2026-08-01 — see
+    /// `0051_tokenizer_t1_samples.sql`). The drift alert is intentionally
+    /// SUPPRESSED so the immutable audit chain never receives a signed
+    /// CloudEvent referencing a sample_id that was never written. The
+    /// loss is surfaced via `SHADOW_SAMPLE_INSERT_FAILED_TOTAL`.
+    PersistFailed,
 }
 
 /// Optional source of durable per-(tenant, model) sampling overrides.
@@ -488,8 +495,27 @@ pub async fn process_one(event: &ShadowEvent, deps: &ShadowWorkerDeps) -> Shadow
     // Persist FIRST so the t1_samples row exists before the CloudEvent
     // emission. If emission fails we still have the underlying drift
     // signal in the DB for operator triage.
+    //
+    // Data-integrity gate: if the INSERT fails (e.g. a missing monthly
+    // partition after `2026-08-01` — see 0051_tokenizer_t1_samples.sql
+    // lines 139-151), we MUST NOT proceed to emit_drift_alert: the
+    // signed CloudEvent would carry a `sample_id` for a row that was
+    // never written, planting a dangling reference in the immutable
+    // audit chain and breaking the forensic pivot the event exists for.
+    // A logged + metered dropped alert is strictly safer than a signed
+    // alert pointing at a phantom sample. The migration (lines 148-151)
+    // promises SHADOW_SAMPLE_INSERT_FAILED_TOTAL ticks here.
     if let Err(e) = deps.persister.persist(sample_row).await {
-        error!(error = ?e, "failed to persist tokenizer_t1_samples row");
+        SHADOW_SAMPLE_INSERT_FAILED_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        error!(
+            error = ?e,
+            sample_id = %sample_id,
+            drift_alert_decided = alert,
+            "failed to persist tokenizer_t1_samples row — suppressing drift alert to avoid \
+             a dangling audit reference (likely a missing monthly partition; ship the next \
+             partition and watch spendguard_tokenizer_shadow_sample_insert_failed_total)"
+        );
+        return ShadowOutcome::PersistFailed;
     }
 
     if alert {
@@ -581,6 +607,15 @@ pub static SHADOW_WORKER_DEAD: std::sync::atomic::AtomicU64 = std::sync::atomic:
 /// R2 M2 — chat-shape (messages array) requests skipped from shadow
 /// sampling because the SLICE_05 flatten was a false-positive source.
 pub static SHADOW_SKIPPED_CHAT_SHAPE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// `0051_tokenizer_t1_samples.sql` (lines 148-151) promises this
+/// Prometheus counter ticks when a shadow sample INSERT fails — most
+/// commonly a missing monthly partition after the pre-created window
+/// ends (`2026-08-01`). Incrementing it (instead of only `error!`-logging)
+/// lets operators alert on the time-bomb and ship the next partition
+/// before drift-detection persistence silently degrades.
+pub static SHADOW_SAMPLE_INSERT_FAILED_TOTAL: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(0);
 
 /// R2 M11 — Tier 1 provider returned a response that failed to parse

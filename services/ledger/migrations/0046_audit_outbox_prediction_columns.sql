@@ -2,7 +2,7 @@
 -- immutability trigger + TRUNCATE guard, atomic).
 --
 -- Spec: docs/audit-chain-prediction-extension-v1alpha1.md §2 + §4.1 + §5
--- Slice: docs/slices/SLICE_01_canonical_events_migration.md
+-- Slice: docs/internal/slices/SLICE_01_canonical_events_migration.md
 --
 -- 18 new nullable columns on audit_outbox:
 --   * 11 decision-side prediction columns (§2.1) — note: 11 not 10 per

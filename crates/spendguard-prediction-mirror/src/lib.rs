@@ -10,11 +10,12 @@
 //! that writes an audit row — sidecar, webhook_receiver, ttl_sweeper,
 //! ledger invoice_reconcile — and every consumer that compares the two
 //! representations — verify-chain `--check-prediction-mirror`,
-//! calibration-report SQL aggregations — must agree on the 10 NULL
+//! calibration-report SQL aggregations — must agree on the 11 NULL
 //! mappings (round-3 fix M2 added the prediction_confidence +
 //! prediction_sample_size pairs that were missed in round-2; round-4
 //! fix M10 added run_steps_completed_so_far after round-4 M1 promoted
-//! tag 313 from int32 to int64):
+//! tag 313 from int32 to int64; the tag-300 0↔NULL reconciliation added
+//! predicted_a_tokens, listed last below):
 //!
 //!   * `predicted_b_tokens         IS NULL`    ⇔ proto tag 301 = `0`
 //!   * `predicted_c_tokens         IS NULL`    ⇔ proto tag 302 = `0`
@@ -27,42 +28,81 @@
 //!   * `delta_b_ratio              IS NULL`    ⇔ proto tag 316 = `0.0`
 //!   * `delta_c_ratio              IS NULL`    ⇔ proto tag 317 = `0.0`
 //!
-//! Plus `predicted_a_tokens` (tag 300) which has no NULL case but is
-//! included for round-trip symmetry. Total: 10 NULL mappings + 1
-//! no-NULL variant = 11 [`MirrorField`] discriminants.
+//!   * `predicted_a_tokens         IS NULL`    ⇔ proto tag 300 = `0`
+//!
+//! `predicted_a_tokens` (tag 300) was historically documented as a
+//! "no NULL case" field, but the SHIPPED contract is 0 ⇔ NULL: migration
+//! 0046 admits `predicted_a_tokens IS NULL`, its nonzero CHECK is
+//! `IS NULL OR > 0` (0 is rejected), the partial NOT-NULL CHECK only
+//! applies past the 2027-01-01 cutoff, trigger 0052 collapses 0→NULL,
+//! and the real producer writes 0 as SQL NULL via `nonzero_i64`. So tag
+//! 300 is the 11th NULL mapping, not a no-NULL outlier. Total: 11 NULL
+//! mappings = 11 [`MirrorField`] discriminants.
 //!
 //! If sidecar.rs and webhook_receiver.rs implement the translation
 //! independently, **drift is inevitable** — one service might encode
 //! NULL as `0` while another encodes it as `i64::MIN`, breaking
 //! verify-chain on cross-service decisions. Centralising the
-//! translation in this crate keeps the mapping in a single audited
-//! file.
+//! translation in this crate is intended to keep the mapping in a
+//! single audited file.
+//!
+//! ## ⚠️ Wiring status — this crate is NOT yet the single source of truth
+//!
+//! As of this writing the crate is **only a `[dev-dependencies]` entry**
+//! of `services/canonical_ingest` (Cargo.toml), wired solely so the
+//! compile-fence test `tests/mirror_crate_compile_fence.rs` keeps the
+//! public API from drifting. **No production code path calls
+//! [`column_to_proto_sentinel`] / [`proto_to_column_value`].** The real
+//! producer
+//! `canonical_ingest::handlers::append_events::prediction_columns_from_event`
+//! reimplements the NULL↔sentinel translation inline (`nonzero_i64`,
+//! `nonempty`, `uuid_nonempty`, `nonzero_f32`, plus the run-projection
+//! sentinel tuple — see [`run_projection_columns`] below).
+//!
+//! Therefore the "single audited source of truth" guarantee is **not yet
+//! realized** — it is an aspiration this crate is shaped to support, not
+//! a property the system currently has. Until the producer is refactored
+//! to delegate (the cross-cutting change tracked for SLICE_06: promote
+//! this crate to `[dependencies]` and route
+//! `prediction_columns_from_event` through these helpers), the crate
+//! provides API-shape stability via the compile fence and a tested
+//! reference implementation — but two implementations of the mapping
+//! still coexist. Do not represent the mirror invariant as enforced by
+//! this crate alone.
 //!
 //! ## Producer-side preconditions (round-3 fix M13)
 //!
 //! Because the sentinel mapping collapses NULL with proto3 default for
-//! token-count fields, producers MUST satisfy two preconditions BEFORE
+//! token-count fields, producers MUST satisfy these preconditions BEFORE
 //! calling [`column_to_proto_sentinel`]:
 //!
-//!   1. `predicted_a_tokens > 0` on every `.decision` row. Strategy A
-//!      ceiling has no semantic interpretation for 0.
+//!   1. `predicted_a_tokens` is EITHER NULL (absent) OR `> 0`. A
+//!      Strategy-A ceiling of literally 0 has no semantic meaning and is
+//!      written as SQL NULL (0 ⇔ NULL on the wire), matching the B/C
+//!      convention. (Until round-N this was documented as ">0 always",
+//!      which contradicted the shipped 0→NULL producer + trigger 0052.)
 //!   2. `predicted_b_tokens > 0` when `prediction_strategy_used = 'B'`.
 //!   3. `predicted_c_tokens > 0` when `prediction_strategy_used = 'C'`.
 //!
-//! Migration 0046 step 3b (round-3) enforces these as CHECK constraints
-//! on the SQL boundary as defense-in-depth.
+//! Migration 0046 enforces these as CHECK constraints on the SQL
+//! boundary as defense-in-depth: each `*_nonzero_chk` reads
+//! `IS NULL OR > 0`, i.e. NULL is permitted and 0 is rejected.
 //!
 //! ## Scope (round-2 origin, round-4 current)
 //!
 //! SLICE_01 lands the helper crate with type-erased Rust signatures
-//! that match the spec §6.3 table, plus 8 unit tests covering every
+//! that match the spec §6.3 table, plus unit tests covering every
 //! sentinel-bearing column (round-3 M2 added 2 tests for
 //! prediction_confidence + prediction_sample_size; round-4 M10 added 1
-//! test for run_steps_completed_so_far). SLICE_06 producers will
-//! import this crate and replace their inline NULL↔sentinel
+//! test for run_steps_completed_so_far; tag-300 0↔NULL added with the
+//! shipped-contract reconciliation). The intended SLICE_06 cross-cutting
+//! change is for the producers to import this crate as a regular
+//! `[dependencies]` entry and replace their inline NULL↔sentinel
 //! translations with [`column_to_proto_sentinel`] /
-//! [`proto_to_column_value`] calls. Until then, the crate is dep-free
-//! (only `uuid`) and compiles in isolation.
+//! [`proto_to_column_value`] / [`run_projection_columns`] calls. Until
+//! that refactor lands the crate is dep-free (only `uuid`), compiles in
+//! isolation, and is NOT on any production path (see the wiring-status
+//! warning above).
 //!
 //! ## SLICE_06 extension scope (round-4 fix M15)
 //!
@@ -91,7 +131,11 @@ use uuid::Uuid;
 /// Tag numbers reference `proto/spendguard/common/v1/common.proto`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MirrorField {
-    /// Tag 300 — `predicted_a_tokens` (BIGINT NOT NULL on .decision).
+    /// Tag 300 — `predicted_a_tokens` (BIGINT NULL = absent/0 ceiling).
+    /// Shipped contract is 0 ⇔ NULL (migration 0046 + trigger 0052), so
+    /// the proto3 default 0 collides with column-NULL exactly like the
+    /// B/C-token arms. The pre-2027-cutoff NOT-NULL CHECK is not yet in
+    /// force, so the crate must treat tag 300 as NULL-tolerant.
     PredictedATokens,
     /// Tag 301 — `predicted_b_tokens` (BIGINT NULL = sample bucket < 30).
     PredictedBTokens,
@@ -164,8 +208,20 @@ pub enum ColumnValue {
 /// the column value variant (programmer error caught in unit tests).
 pub fn column_to_proto_sentinel(field: MirrorField, col: ColumnValue) -> ProtoValue {
     match (field, col) {
-        // ===== Tag 300: predicted_a_tokens — always populated.
-        // No NULL case per spec §2.1; we still accept BigInt for symmetry.
+        // ===== Tag 300: predicted_a_tokens — NULL → 0 sentinel.
+        // The SHIPPED production contract is 0 ⇔ NULL, identical to the
+        // B/C-token arms below: migration 0046 admits `predicted_a_tokens
+        // IS NULL` (line 156), the partial NOT-NULL CHECK only bites past
+        // the 2027-01-01 cutoff (line 262), the nonzero CHECK reads
+        // `IS NULL OR > 0` (line 340, i.e. 0 is *rejected*, NULL is fine),
+        // and trigger 0052 collapses 0→NULL via `NULLIF(...,0)` (line 45).
+        // The real producer prediction_columns_from_event
+        // (append_events.rs:625) writes 0 as SQL NULL through nonzero_i64.
+        // We therefore mirror the shipped 0↔NULL convention here so the
+        // crate cannot diverge from the producer / SQL boundary. (The
+        // pre-cutoff "A is always populated" claim in some spec prose is
+        // aspirational, not the current shipped truth.)
+        (MirrorField::PredictedATokens, ColumnValue::NullBigInt) => ProtoValue::I64(0),
         (MirrorField::PredictedATokens, ColumnValue::BigInt(v)) => ProtoValue::I64(v),
 
         // ===== Tag 301/302: predicted_b/c_tokens — NULL → 0 sentinel.
@@ -243,6 +299,10 @@ pub fn column_to_proto_sentinel(field: MirrorField, col: ColumnValue) -> ProtoVa
 /// the proto value variant (programmer error caught in unit tests).
 pub fn proto_to_column_value(field: MirrorField, proto: ProtoValue) -> ColumnValue {
     match (field, proto) {
+        // Tag 300: 0 ⇔ NULL, mirroring the shipped 0->NULL producer/SQL
+        // convention (see column_to_proto_sentinel above). Must precede
+        // the catch-all I64(v) arm.
+        (MirrorField::PredictedATokens, ProtoValue::I64(0)) => ColumnValue::NullBigInt,
         (MirrorField::PredictedATokens, ProtoValue::I64(v)) => ColumnValue::BigInt(v),
 
         (MirrorField::PredictedBTokens, ProtoValue::I64(0)) => ColumnValue::NullBigInt,
@@ -297,6 +357,108 @@ pub fn proto_to_column_value(field: MirrorField, proto: ProtoValue) -> ColumnVal
     }
 }
 
+/// Run-projection wire sentinels carried on every `.decision` event for
+/// the three step-projection fields (tags 311/312/313). Producers read
+/// these from the CloudEvent extension; consumers read them off the wire.
+///
+/// The proto3 defaults collide with legitimate values, so the absence of
+/// a projection cannot be inferred from any single field — it is a
+/// *composite* sentinel tuple. This mirrors the producer's inline
+/// `projector_unreachable` / `projector_absent_default` checks in
+/// `canonical_ingest::handlers::append_events::prediction_columns_from_event`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RunProjectionWire {
+    /// Tag 311 — `run_projection_at_decision_atomic` (atomic-scaled
+    /// projected run cost; proto3 default `0`).
+    pub at_decision_atomic: i64,
+    /// Tag 312 — `run_predicted_remaining_steps` (`-1` = projector
+    /// unreachable, `0` = projector-absent default).
+    pub predicted_remaining_steps: i32,
+    /// Tag 313 — `run_steps_completed_so_far` (proto3 default `0`).
+    pub steps_completed_so_far: i64,
+}
+
+/// SQL column values for the three run-projection fields, NULL when the
+/// projection is absent (projector unreachable, projector-absent default,
+/// or non-decision event).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RunProjectionColumns {
+    /// `run_projection_at_decision_atomic` BIGINT, NULL when no projector.
+    pub at_decision_atomic: ColumnValueI64,
+    /// `run_predicted_remaining_steps` INT, NULL when no projector or `-1`.
+    pub predicted_remaining_steps: ColumnValueI32,
+    /// `run_steps_completed_so_far` BIGINT, NULL when no projector.
+    pub steps_completed_so_far: ColumnValueI64,
+}
+
+/// Minimal nullable-i64 column, kept distinct from the type-erased
+/// [`ColumnValue`] so the run-projection helper has a precise return type.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ColumnValueI64 {
+    Null,
+    Value(i64),
+}
+
+/// Minimal nullable-i32 column. See [`ColumnValueI64`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ColumnValueI32 {
+    Null,
+    Value(i32),
+}
+
+/// Translate the run-projection wire sentinel tuple to the three SQL
+/// column values, fail-CLOSED: any tuple that matches the
+/// projector-unreachable (`-1`) or projector-absent-default (`0/0/0`)
+/// shape, or any non-`.decision` event, collapses ALL THREE columns to
+/// NULL so an absent projection can never be mistaken for a real one.
+///
+/// This is the single audited implementation of the composite gate that
+/// `prediction_columns_from_event` currently reimplements inline
+/// (append_events.rs `projector_unreachable` / `projector_absent_default`
+/// / `no_projector`). Wiring the producer through this helper is the
+/// SLICE_06 cross-cutting change that makes the run-projection mirror a
+/// genuine single source of truth.
+///
+/// `is_decision` must be `true` only for `spendguard.audit.decision`
+/// events; for any other event type the projection columns are always
+/// NULL (the producer never populates them off-decision).
+pub fn run_projection_columns(is_decision: bool, wire: RunProjectionWire) -> RunProjectionColumns {
+    // Composite sentinel detection — byte-identical to the producer's
+    // inline checks. Both shapes require at_decision_atomic == 0 AND
+    // steps_completed_so_far == 0; they differ only on the remaining-steps
+    // sentinel (-1 unreachable vs 0 absent-default).
+    let projector_unreachable = wire.at_decision_atomic == 0
+        && wire.predicted_remaining_steps == -1
+        && wire.steps_completed_so_far == 0;
+    let projector_absent_default = wire.at_decision_atomic == 0
+        && wire.predicted_remaining_steps == 0
+        && wire.steps_completed_so_far == 0;
+    let no_projector = !is_decision || projector_unreachable || projector_absent_default;
+
+    if no_projector {
+        // Fail closed: absent projection => all three columns NULL. Never
+        // surface a partial/ambiguous projection.
+        return RunProjectionColumns {
+            at_decision_atomic: ColumnValueI64::Null,
+            predicted_remaining_steps: ColumnValueI32::Null,
+            steps_completed_so_far: ColumnValueI64::Null,
+        };
+    }
+
+    RunProjectionColumns {
+        at_decision_atomic: ColumnValueI64::Value(wire.at_decision_atomic),
+        // -1 is the projector-unreachable sentinel for tag 312 even when
+        // the other two fields are populated; map it to NULL like the
+        // producer's `|| evt.run_predicted_remaining_steps == -1` arm.
+        predicted_remaining_steps: if wire.predicted_remaining_steps == -1 {
+            ColumnValueI32::Null
+        } else {
+            ColumnValueI32::Value(wire.predicted_remaining_steps)
+        },
+        steps_completed_so_far: ColumnValueI64::Value(wire.steps_completed_so_far),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -307,6 +469,26 @@ mod tests {
     //   column → proto sentinel → column == original column
     // for both NULL and non-NULL inputs.
     // ============================================================
+
+    #[test]
+    fn predicted_a_tokens_null_roundtrip() {
+        // SHIPPED contract is 0 ⇔ NULL for tag 300 (migration 0046 +
+        // trigger 0052 + producer nonzero_i64). Without the NullBigInt
+        // arm the crate would map NULL-A → panic and proto 0 → BigInt(0),
+        // diverging from the producer which writes 0 as SQL NULL.
+
+        // NULL → 0 → NULL
+        let p = column_to_proto_sentinel(MirrorField::PredictedATokens, ColumnValue::NullBigInt);
+        assert_eq!(p, ProtoValue::I64(0));
+        let c = proto_to_column_value(MirrorField::PredictedATokens, p);
+        assert_eq!(c, ColumnValue::NullBigInt);
+
+        // 1024 → 1024 → 1024 (normal Strategy A ceiling)
+        let p = column_to_proto_sentinel(MirrorField::PredictedATokens, ColumnValue::BigInt(1024));
+        assert_eq!(p, ProtoValue::I64(1024));
+        let c = proto_to_column_value(MirrorField::PredictedATokens, p);
+        assert_eq!(c, ColumnValue::BigInt(1024));
+    }
 
     #[test]
     fn predicted_b_tokens_null_roundtrip() {
@@ -504,5 +686,115 @@ mod tests {
         // Per spec §3.3, calibration-report filters `WHERE
         // delta_b_ratio > 0`, so this collision is a known design
         // trade-off, not a bug in the helper.
+    }
+
+    // ============================================================
+    // run_projection_columns: the composite run-projection sentinel
+    // tuple. Tests assert byte-equivalence with the producer's inline
+    // projector_unreachable / projector_absent_default / no_projector
+    // gating (append_events.rs:616-670) and verify fail-CLOSED behaviour
+    // (absent projection => all three columns NULL).
+    // ============================================================
+
+    #[test]
+    fn run_projection_unreachable_sentinel_all_null() {
+        // (0, -1, 0) is the projector-unreachable shape: all three NULL.
+        let cols = run_projection_columns(
+            true,
+            RunProjectionWire {
+                at_decision_atomic: 0,
+                predicted_remaining_steps: -1,
+                steps_completed_so_far: 0,
+            },
+        );
+        assert_eq!(cols.at_decision_atomic, ColumnValueI64::Null);
+        assert_eq!(cols.predicted_remaining_steps, ColumnValueI32::Null);
+        assert_eq!(cols.steps_completed_so_far, ColumnValueI64::Null);
+    }
+
+    #[test]
+    fn run_projection_absent_default_sentinel_all_null() {
+        // (0, 0, 0) is the projector-absent-default shape: all three NULL.
+        let cols = run_projection_columns(
+            true,
+            RunProjectionWire {
+                at_decision_atomic: 0,
+                predicted_remaining_steps: 0,
+                steps_completed_so_far: 0,
+            },
+        );
+        assert_eq!(cols.at_decision_atomic, ColumnValueI64::Null);
+        assert_eq!(cols.predicted_remaining_steps, ColumnValueI32::Null);
+        assert_eq!(cols.steps_completed_so_far, ColumnValueI64::Null);
+    }
+
+    #[test]
+    fn run_projection_non_decision_event_all_null() {
+        // Non-.decision events never carry a projection even with a
+        // populated-looking tuple — fail closed to NULL.
+        let cols = run_projection_columns(
+            false,
+            RunProjectionWire {
+                at_decision_atomic: 4200,
+                predicted_remaining_steps: 3,
+                steps_completed_so_far: 5,
+            },
+        );
+        assert_eq!(cols.at_decision_atomic, ColumnValueI64::Null);
+        assert_eq!(cols.predicted_remaining_steps, ColumnValueI32::Null);
+        assert_eq!(cols.steps_completed_so_far, ColumnValueI64::Null);
+    }
+
+    #[test]
+    fn run_projection_populated_passthrough() {
+        // A real projection passes all three columns through unchanged.
+        let cols = run_projection_columns(
+            true,
+            RunProjectionWire {
+                at_decision_atomic: 4200,
+                predicted_remaining_steps: 3,
+                steps_completed_so_far: 5,
+            },
+        );
+        assert_eq!(cols.at_decision_atomic, ColumnValueI64::Value(4200));
+        assert_eq!(cols.predicted_remaining_steps, ColumnValueI32::Value(3));
+        assert_eq!(cols.steps_completed_so_far, ColumnValueI64::Value(5));
+    }
+
+    #[test]
+    fn run_projection_remaining_steps_minus_one_only_field_null() {
+        // -1 on remaining-steps maps to NULL for THAT field even when the
+        // other two are populated (so the tuple is not the all-zero
+        // unreachable shape). Matches the producer's
+        // `|| evt.run_predicted_remaining_steps == -1` arm.
+        let cols = run_projection_columns(
+            true,
+            RunProjectionWire {
+                at_decision_atomic: 4200,
+                predicted_remaining_steps: -1,
+                steps_completed_so_far: 5,
+            },
+        );
+        assert_eq!(cols.at_decision_atomic, ColumnValueI64::Value(4200));
+        assert_eq!(cols.predicted_remaining_steps, ColumnValueI32::Null);
+        assert_eq!(cols.steps_completed_so_far, ColumnValueI64::Value(5));
+    }
+
+    #[test]
+    fn run_projection_zero_remaining_steps_is_real_when_other_fields_set() {
+        // (4200, 0, 5) is NOT the absent-default shape (atomic != 0), so
+        // 0 remaining steps is a genuine "0 steps left" projection, not a
+        // sentinel. The field passes through as Value(0).
+        let cols = run_projection_columns(
+            true,
+            RunProjectionWire {
+                at_decision_atomic: 4200,
+                predicted_remaining_steps: 0,
+                steps_completed_so_far: 5,
+            },
+        );
+        assert_eq!(cols.at_decision_atomic, ColumnValueI64::Value(4200));
+        assert_eq!(cols.predicted_remaining_steps, ColumnValueI32::Value(0));
+        assert_eq!(cols.steps_completed_so_far, ColumnValueI64::Value(5));
     }
 }

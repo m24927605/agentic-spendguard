@@ -193,6 +193,17 @@ function SpendGuardHandler:access(conf)
   -- (6) Verdict branch.
   local verdict = dec_resp.verdict
   if verdict == "ALLOW" then
+    -- Sidecar contract: ALLOW must carry a reservation_id. An empty
+    -- one means the companion is mis-wired; fail closed (mirrors the
+    -- Go plugin's access.go:207-213). The unconditional `return`
+    -- after `_fail_open_or_deny` is required: even in the fail-open
+    -- branch we must NOT fall through and stash an empty
+    -- reservation_id (which body_filter would then silently skip on
+    -- the `#reservation_id == 0` marker check, dropping the commit).
+    if not dec_resp.reservation_id or #dec_resp.reservation_id == 0 then
+      _fail_open_or_deny(conf, 503, "SPENDGUARD_RESERVATION_MISSING", "ALLOW without reservation_id")
+      return
+    end
     kong.ctx.shared[CTX_RESERVATION_ID] = dec_resp.reservation_id
     kong.ctx.shared[CTX_PROVIDER] = provider
   elseif verdict == "DENY" then
@@ -289,12 +300,26 @@ function SpendGuardHandler:body_filter(conf)
     end
   end
 
+  -- The sidecar requires actual_amount_atomic on ACCEPTED; an empty
+  -- field forces the estimated-amount commit lane (handlers.rs) and
+  -- mis-counts realized spend. Mirror body_filter.go:201-202 by
+  -- surfacing the total token count as the realized amount. The
+  -- sidecar validates this field as a decimal-integer STRING
+  -- (service.rs is_ascii_digit), so we tostring() it — a Lua number
+  -- would encode as a JSON number and trip a 400. Only set it on
+  -- ACCEPTED; the REJECTED release lane does not read it.
+  local actual_amount_atomic
+  if outcome == "ACCEPTED" then
+    actual_amount_atomic = tostring((input_tokens or 0) + (output_tokens or 0))
+  end
+
   local _, terr = client.trace(conf, {
     reservation_id = reservation_id,
     outcome = outcome,
     provider_event_id = provider_event_id,
     input_tokens = input_tokens,
     output_tokens = output_tokens,
+    actual_amount_atomic = actual_amount_atomic,
   })
   if terr then
     -- review-standards §5.6: commit-lane timeouts log but do not

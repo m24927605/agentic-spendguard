@@ -15,16 +15,24 @@
 //! proto-field — lands in SLICE_06 along with the producer-side mirror
 //! logic that populates the fields in the first place.
 //!
-//! ## Round-3 fix M5 — non-zero exit on default flag
+//! ## Non-zero exit on default flag (fail-closed audit gate)
 //!
-//! Round-2 exited 0 even with `--check-prediction-mirror=true` (default).
-//! That's a silent-pass CI vector: any CI gate that runs
-//! `verify-chain && echo green` succeeds before SLICE_06 even ships.
-//! Round-3 changes the contract: when `--check-prediction-mirror=true`
-//! AND implementation is still stub, exit code 2 with a stderr message
-//! pointing at `--no-check-prediction-mirror` for legacy-NULL scans.
-//! Operators get an observable, fail-closed signal — wiring this into CI
-//! before SLICE_06 lands is now safe.
+//! The default `--check-prediction-mirror=true` must NOT exit 0 while
+//! the per-row cross-check is unimplemented. An earlier "SLICE_10
+//! activated" revision emitted a success summary and returned 0 even
+//! though it performed no Postgres scan, no CloudEvent re-decode, and no
+//! column<->proto comparison — a silent fail-open: any CI/cron gate that
+//! runs `verify-chain && echo green` passed regardless of whether the
+//! on-disk audit_outbox prediction columns matched the signed CloudEvent
+//! proto bytes (the documented §11.3 integrity check).
+//!
+//! Until the real per-row scan ships, the contract is fail-closed: with
+//! `--check-prediction-mirror=true` the binary exits code 2 with a
+//! structured NOT_IMPLEMENTED summary pointing at
+//! `--no-check-prediction-mirror` for legacy-NULL scans. The library
+//! entry point (`verify_chain_lib::verify_chain`, used by the
+//! calibration-report cron gate) is fixed in lockstep to return an
+//! explicit error in the same condition.
 //!
 //! ## Stopping rule rationale
 //!
@@ -40,7 +48,7 @@
 //!   3. Keep round-2 atomic: schema fix + flag scaffold, no
 //!      half-implemented verification.
 //!
-//! The deferral is documented in `docs/slices/SLICE_01_canonical_events_migration.md`
+//! The deferral is documented in `docs/internal/slices/SLICE_01_canonical_events_migration.md`
 //! §10 and is consistent with the round-1 deferred-items rule.
 
 use std::process::ExitCode;
@@ -160,16 +168,16 @@ OPTIONS:
         Print this help and exit.
 
 STATUS:
-    SLICE_01 ships the flag scaffold only. The per-row scan path
-    currently emits structured NOT_IMPLEMENTED log lines.
-    Default (`--check-prediction-mirror=true`) exits with code 2 — a
-    silent-pass CI gate before SLICE_06 lands is the failure mode this
-    closes (round-3 fix M5). Pass `--no-check-prediction-mirror` to
+    The per-row prediction-mirror cross-check is NOT implemented in this
+    build (it requires a live ledger DB + verifier/key-registry wiring).
+    To stay fail-closed, the default (`--check-prediction-mirror=true`)
+    exits with code 2 instead of emitting a green exit it cannot back up
+    — a silent-pass audit gate (`verify-chain && echo green`) is the
+    failure mode this closes. Pass `--no-check-prediction-mirror` to
     acknowledge the legacy-NULL scan only (exits 0 for legacy-only
     audits where no tag 300-317 fields exist yet).
-    Full implementation lands in SLICE_06 alongside the producer-side
-    mirror writes. See:
-        docs/slices/SLICE_01_canonical_events_migration.md §10
+    See:
+        docs/internal/slices/SLICE_01_canonical_events_migration.md §10
         docs/audit-chain-prediction-extension-v1alpha1.md §11
 "#
     );
@@ -198,41 +206,42 @@ fn run(args: Args) -> ExitCode {
     });
     println!("{line}");
 
-    // SLICE_10 Phase E: activate the verify-chain mirror check.
+    // Security fix (fail-open audit gate): `--check-prediction-mirror`
+    // (default ON) must NOT exit 0 while the per-row cross-check is
+    // unimplemented.
     //
-    // SLICE_06+SLICE_09 lit up the producer-side mirror writes:
-    //   * SLICE_06: predicted_a/b/c + tokenizer_tier/version_id +
-    //     strategy fields wired via output_predictor.
-    //   * SLICE_09: 3 run-level cols via run_cost_projector.
-    //   * SLICE_10: ClaimEstimate carries ALL 17 columns from
-    //     egress_proxy into sidecar audit_decision CloudEvent.
+    // The previous SLICE_10 code emitted a "SLICE_10_ACTIVATED" summary
+    // line and returned SUCCESS even though it performed NO Postgres
+    // scan, NO CloudEvent re-decode, and NO column<->proto comparison.
+    // Any CI/cron gate running `verify-chain && echo green` therefore
+    // passed regardless of whether the on-disk audit_outbox prediction
+    // columns matched the signed CloudEvent proto bytes — a silent
+    // fail-open of the documented §11.3 integrity check.
     //
-    // Per Round-3 fix M5 the contract was: exit 2 until producer-side
-    // writes ship. With SLICE_10 the producers DO write the columns,
-    // so we now emit a "scan complete" line and exit 0 when
-    // --check-prediction-mirror=true is the default. The full
-    // per-row Postgres scan (reading audit_outbox.predicted_a_tokens
-    // etc. and re-decoding the CloudEvent for cross-check) is still
-    // a SLICE-extra deliverable since it requires a live ledger DB
-    // — but the gate is no longer silent-pass.
-    //
-    // Operators on legacy NULL-prediction databases (pre-SLICE_06
-    // rows still in audit_outbox) keep using
-    // `--no-check-prediction-mirror` for those scans.
+    // Until the real per-row scan ships (it needs a live ledger DB +
+    // verifier/key-registry wiring — the same dependency the library
+    // helper punted on), this binary is fail-CLOSED: with the default
+    // `--check-prediction-mirror=true` it emits a structured
+    // NOT_IMPLEMENTED summary and exits non-zero (code 2). Operators who
+    // explicitly want only the legacy NULL-prediction scan pass
+    // `--no-check-prediction-mirror`, which exits 0.
     if args.check_prediction_mirror {
         let line = serde_json::json!({
-            "level": "info",
+            "level": "error",
             "event": "verify_chain.mirror_scan_summary",
-            "status": "SLICE_10_ACTIVATED",
-            "note": "Producer-side mirror writes are live as of SLICE_10. \
-                     Per-row cross-check (audit_outbox column ↔ CloudEvent \
-                     proto field) requires --postgres-url; not exercised in \
-                     this stub but no longer silent-pass.",
+            "status": "NOT_IMPLEMENTED_FAIL_CLOSED",
+            "note": "Per-row prediction-mirror cross-check (audit_outbox \
+                     column <-> CloudEvent proto field) is not implemented \
+                     in this build; exiting non-zero so the gate is \
+                     fail-closed rather than silently green. Pass \
+                     --no-check-prediction-mirror to run only the legacy \
+                     NULL-prediction scan.",
             "check_prediction_mirror": args.check_prediction_mirror,
             "tenant_id": args.tenant_id,
             "spec_ref": "docs/audit-chain-prediction-extension-v1alpha1.md §11.3",
         });
-        println!("{line}");
+        eprintln!("{line}");
+        return ExitCode::from(2);
     }
 
     ExitCode::SUCCESS
@@ -381,19 +390,23 @@ mod tests {
     }
 
     #[test]
-    fn run_default_flag_exits_zero_after_slice10() {
-        // SLICE_10 Phase E: producer-side mirror writes are now live
-        // (SLICE_06 + SLICE_09 + SLICE_10 chain). Default flag exits 0
-        // with the SLICE_10_ACTIVATED status line on stdout. The
-        // per-row Postgres cross-check is still a SLICE-extra
-        // deliverable but the gate is no longer silent-pass.
+    fn run_default_flag_fails_closed_with_nonzero_exit() {
+        // Fail-closed audit gate: the per-row prediction-mirror
+        // cross-check is unimplemented in this build, so the default
+        // `--check-prediction-mirror=true` MUST exit non-zero (code 2)
+        // rather than emit a green exit it cannot back up. This is the
+        // silent fail-open that previously let `verify-chain && echo
+        // green` pass without comparing audit_outbox columns against the
+        // signed CloudEvent proto bytes.
         let args = Args {
             check_prediction_mirror: true,
             tenant_id: None,
             help: false,
         };
         let code = run(args);
-        assert_eq!(ec_repr(code), ec_repr(ExitCode::SUCCESS));
+        assert_eq!(ec_repr(code), ec_repr(ExitCode::from(2)));
+        // Must NOT be SUCCESS.
+        assert_ne!(ec_repr(code), ec_repr(ExitCode::SUCCESS));
     }
 
     #[test]

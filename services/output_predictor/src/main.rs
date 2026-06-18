@@ -640,8 +640,9 @@ fn render_metrics() -> String {
         FAILURE_BY_MODE_INVALID_CONFIDENCE, FAILURE_BY_MODE_INVALID_OVERFLOW,
         FAILURE_BY_MODE_INVALID_ZERO_OR_NEGATIVE, FAILURE_BY_MODE_NOT_CONFIGURED,
         FAILURE_BY_MODE_NOT_SERVING, FAILURE_BY_MODE_TIMEOUT, FAILURE_BY_MODE_TLS_ERROR,
-        UNKNOWN_CONTEXT_WINDOW_TOTAL,
+        OUTPUT_PREDICTOR_ADAPTIVE_RESERVATION_BELOW_A_TOTAL, UNKNOWN_CONTEXT_WINDOW_TOTAL,
     };
+    use spendguard_output_predictor::endpoint_cache::ENDPOINT_CACHE_STALE_ENABLED_DB_ERROR_SERVE_TOTAL;
     use std::sync::atomic::Ordering;
     // SLICE_07 Phase E: surface the spec §9.1 customer_predictor_* counters.
     // The 10 per-mode counters cover the spec §5.1 8 documented failure
@@ -663,6 +664,20 @@ fn render_metrics() -> String {
     body.push_str(&format!(
         "spendguard_output_predictor_rate_limited_total {}\n",
         predict_rate_limited_total()
+    ));
+    body.push_str(&format!(
+        "# HELP spendguard_output_predictor_adaptive_reservation_below_a_total \
+         ADAPTIVE_CEILING Predict responses whose reserved strategy value is below the Strategy A floor (spec §5 opt-in budget/safety tradeoff).\n\
+         # TYPE spendguard_output_predictor_adaptive_reservation_below_a_total counter\n\
+         spendguard_output_predictor_adaptive_reservation_below_a_total {}\n",
+        OUTPUT_PREDICTOR_ADAPTIVE_RESERVATION_BELOW_A_TOTAL.load(Ordering::Relaxed)
+    ));
+    body.push_str(&format!(
+        "# HELP spendguard_output_predictor_endpoint_cache_stale_enabled_db_error_serve_total \
+         Times a stale ENABLED plugin endpoint was served through a control-plane DB error (kill-switch-defeat window is active while this increments).\n\
+         # TYPE spendguard_output_predictor_endpoint_cache_stale_enabled_db_error_serve_total counter\n\
+         spendguard_output_predictor_endpoint_cache_stale_enabled_db_error_serve_total {}\n",
+        ENDPOINT_CACHE_STALE_ENABLED_DB_ERROR_SERVE_TOTAL.load(Ordering::Relaxed)
     ));
     body.push_str(
         "# HELP spendguard_output_predictor_predict_latency_seconds Predict RPC latency histogram in seconds.\n\

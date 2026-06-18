@@ -326,3 +326,36 @@ export class MutationApplyFailed extends SpendGuardError {
 export class SpendGuardDecisionError extends SpendGuardError {
   override name = "SpendGuardDecisionError";
 }
+
+/**
+ * Thrown by `PricingLookup.usdMicrosForCall` when a token bucket has a
+ * non-zero count but NO configured price for either the specific token kind
+ * or the default kind.
+ *
+ * Fail-closed rationale: the previous behavior silently coerced the missing
+ * price to `0`, booking a `$0` charge for the call and under-counting the
+ * budget — exactly the under-charge failure mode the guardrail exists to
+ * prevent. Unknown / new models (the most likely to be mispriced) were
+ * precisely the ones that escaped accounting. Refusing loudly forces the
+ * adapter to supply a price (or explicitly handle the gap) rather than leak
+ * spend. Carries the offending `provider` / `model` / `tokenKind` so the
+ * caller can pinpoint the missing pricing-table row.
+ */
+export class PricingMissingError extends SpendGuardError {
+  override name = "PricingMissingError";
+  readonly provider: string;
+  readonly model: string;
+  readonly tokenKind: string;
+  constructor(
+    args: { provider: string; model: string; tokenKind: string },
+    opts?: { cause?: unknown },
+  ) {
+    super(
+      `no price configured for provider=${JSON.stringify(args.provider)} model=${JSON.stringify(args.model)} tokenKind=${JSON.stringify(args.tokenKind)} (neither the specific kind nor the default kind has a price); refusing to charge $0 — supply a price for this model or handle PricingMissingError`,
+      opts,
+    );
+    this.provider = args.provider;
+    this.model = args.model;
+    this.tokenKind = args.tokenKind;
+  }
+}

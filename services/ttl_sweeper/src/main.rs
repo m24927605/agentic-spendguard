@@ -150,8 +150,16 @@ async fn main() -> anyhow::Result<()> {
                                 info!(count = rows.len(), "found expired reservations (leader)");
                                 for row in rows {
                                     match sweep_one(&mut state, row).await {
-                                        Ok(_) => metrics.add_swept(1, true),
+                                        // Only an actual release (incl. idempotent
+                                        // replay) counts as swept-ok. A ledger
+                                        // refusal / transport error / missing outcome
+                                        // leaves the reservation `reserved` for next
+                                        // cycle, so it is swept-err — the success
+                                        // metric must not overstate releases.
+                                        Ok(outcome) => metrics.add_swept(1, outcome.is_success()),
                                         Err(e) => {
+                                            // Local signing/serialization failure:
+                                            // also a non-release, counted swept-err.
                                             metrics.add_swept(1, false);
                                             error!(error = ?e, "sweep_one failed");
                                         }

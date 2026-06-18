@@ -5,8 +5,13 @@
 //! `ttl_sweeper` shape (lease + poll loop + round-9 `is_leader_now()`
 //! gating). NEVER deletes — migration 0028's BEFORE DELETE triggers
 //! reject deletes regardless. Redaction is in-place UPDATE to a
-//! marker JSONB; the canonical SHA-256 hash of the original bytes is
-//! preserved in a sibling field so the audit chain stays valid.
+//! marker JSONB; a best-effort SHA-256 digest of the Postgres-normalized
+//! `data` JSONB is preserved in a sibling field for operator forensics.
+//! NOTE: this digest is NOT the original signed bytes — `cloudevent_payload`
+//! is stored as JSONB at rest (migration 0009), so Postgres normalized key
+//! order/whitespace at INSERT time and the original canonical serialization
+//! is unrecoverable here. The audit chain's integrity is anchored by the
+//! separate `cloudevent_payload_signature` (BYTEA), not by this digest.
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -61,9 +66,12 @@ fn redacted_marker(now: DateTime<Utc>) -> serde_json::Value {
 }
 
 /// Sweep audit_outbox: redact `cloudevent_payload->'data'` rows whose
-/// tenant's `prompt_retention_days` window has elapsed. Preserves the
-/// SHA-256 hash of the original bytes in `_data_sha256_hex` so audit
-/// chain hash continuity holds for future verifiers.
+/// tenant's `prompt_retention_days` window has elapsed. Preserves a
+/// best-effort SHA-256 digest of the Postgres-normalized `data` JSONB in
+/// `_data_sha256_hex` for operator forensics. This digest is NOT the
+/// original signed bytes (see module header) and must not be treated as
+/// an audit-chain continuity anchor — that role belongs to the separate
+/// `cloudevent_payload_signature`.
 pub async fn sweep_audit_outbox_prompts(
     pool: &PgPool,
     batch_size: i64,
@@ -95,6 +103,8 @@ pub async fn sweep_audit_outbox_prompts(
     let mut rows_failed = 0i64;
 
     for (audit_id, data) in candidates {
+        // Best-effort digest of the Postgres-normalized `data` JSONB for
+        // operator forensics — NOT the original signed bytes (see header).
         let data_bytes = data.to_string().into_bytes();
         let mut h = Sha256::new();
         h.update(&data_bytes);
@@ -102,15 +112,19 @@ pub async fn sweep_audit_outbox_prompts(
         let now = Utc::now();
         let marker = redacted_marker(now);
 
+        // `audit_outbox.cloudevent_payload` is protected by the
+        // `audit_outbox_immutability` trigger (migration 0011, re-asserted
+        // in 0046), which rejects ANY change to that column. A raw UPDATE
+        // here is unconditionally rejected (errcode 42P10), so redaction
+        // MUST go through the SECURITY DEFINER `redact_audit_outbox_data`
+        // SP, which is the only path the trigger surgically exempts: it
+        // permits a `cloudevent_payload` change ONLY when the sole delta is
+        // `data` -> the redaction marker plus the addition of
+        // `_data_sha256_hex`, and is gated to the dedicated
+        // `retention_redaction_role`. The SP itself asserts that invariant
+        // so a buggy caller cannot widen the exemption.
         let result = sqlx::query(
-            r#"
-            UPDATE audit_outbox
-               SET cloudevent_payload =
-                       jsonb_set(
-                           jsonb_set(cloudevent_payload, '{data}', $2::JSONB, true),
-                           '{_data_sha256_hex}', to_jsonb($3::TEXT), true)
-             WHERE audit_outbox_id = $1
-            "#,
+            r#"SELECT redact_audit_outbox_data($1, $2::JSONB, $3::TEXT)"#,
         )
         .bind(audit_id)
         .bind(&marker)
@@ -121,6 +135,10 @@ pub async fn sweep_audit_outbox_prompts(
         match result {
             Ok(_) => rows_redacted += 1,
             Err(e) => {
+                // Fail-closed surfacing: a failed redaction means
+                // retained prompt text past the retention window. Caller
+                // (main.rs) escalates rows_failed > 0 to error! + alert so
+                // this can never be a silent compliance gap again.
                 warn!(audit_id = %audit_id, err = %e, "audit_outbox redaction failed");
                 rows_failed += 1;
             }

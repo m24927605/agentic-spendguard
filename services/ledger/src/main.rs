@@ -81,7 +81,25 @@ async fn main() -> anyhow::Result<()> {
             .tls_config(tls_cfg)
             .context("apply server TLS config")?;
     } else {
+        // Fail-closed gate: plaintext gRPC gives the ledger ZERO cryptographic
+        // peer identity, so a caller that can reach the port can claim any
+        // tenant_id / workload_instance_id. That is acceptable ONLY for POC /
+        // demo. In a production profile, refuse to start rather than silently
+        // accept the trust-boundary hole. Keyed off the existing
+        // SPENDGUARD_PROFILE (mirrors the durability escape-hatch gate in
+        // persistence::pool::verify_durability_settings); the demo sets
+        // profile=demo AND supplies full mTLS material, so it is unaffected.
+        let profile = std::env::var("SPENDGUARD_PROFILE").unwrap_or_default();
+        if profile == "production" {
+            anyhow::bail!(
+                "ledger server refusing to start in production profile WITHOUT \
+                 mTLS: no client cert means no cryptographic peer identity and \
+                 callers could spoof any tenant_id/workload_instance_id. Set \
+                 SPENDGUARD_LEDGER_TLS_{{CERT,KEY,CA}}_PEM."
+            );
+        }
         warn!(
+            profile = %profile,
             "ledger server starting WITHOUT mTLS — only acceptable in \
              POC dev mode. Set SPENDGUARD_LEDGER_TLS_{{CERT,KEY,CA}}_PEM \
              for production-correct mTLS."

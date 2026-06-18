@@ -90,6 +90,20 @@ pub const DEFAULT_PREDICT_RATE_LIMIT_PER_TENANT_PER_SECOND: u32 = 1000;
 pub const DEFAULT_PREDICT_RATE_LIMIT_TENANT_CAPACITY: usize = 4096;
 pub static OUTPUT_PREDICTOR_RATE_LIMITED_TOTAL: AtomicU64 = AtomicU64::new(0);
 
+/// Backend F-correctness (architecture-spec §5 `ADAPTIVE_CEILING`):
+/// count Predict responses where the policy is `ADAPTIVE_CEILING` and the
+/// reserved strategy's raw value is BELOW Strategy A. This is spec-allowed
+/// (the opt-in policy deliberately trades A's safety headroom for budget
+/// utilization, core invariant #3) but it is the only path where the
+/// reservation can drop below the worst-case A floor, so a buggy/stale B
+/// or adversarial customer plugin can silently weaken the spend guard. The
+/// real guardrail — "remaining_budget < 2 × A → switch reservation back to
+/// A" — lives at the sidecar (the budget authority); output_predictor has
+/// no budget context. Until that lands, this counter + the warn! below
+/// make the reservation-below-A window OBSERVABLE so operators can see how
+/// often the adaptive policy is spending its safety margin.
+pub static OUTPUT_PREDICTOR_ADAPTIVE_RESERVATION_BELOW_A_TOTAL: AtomicU64 = AtomicU64::new(0);
+
 pub fn predict_outcome_samples() -> [(&'static str, u64); 2] {
     [
         (
@@ -325,7 +339,25 @@ impl PredictRateLimiter {
         let burst = f64::from(self.limit_per_second);
         let mut tenants = self.tenants.lock();
         if !tenants.contains_key(&tenant_id) {
-            if tenants.len() >= self.tenant_capacity {
+            // Backend F-rate-limiter: tenant_id is attacker-controllable
+            // (no inbound per-tenant identity binding — see the
+            // accepted-trust-boundary note in `predict()`), so the bucket
+            // keyspace is NOT bounded by the real tenant set. Rejecting
+            // every NEW tenant once `tenant_capacity` distinct UUIDs have
+            // been observed would let a caller permanently deny Predict to
+            // genuinely-new tenants by filling the map with fabricated
+            // UUIDs (durable per-pod DoS). Instead, when at capacity, try
+            // to evict one FULLY-REFILLED idle bucket before admitting the
+            // newcomer: a bucket sitting at full burst carries no
+            // rate-limit debt, so dropping it cannot leak budget or let an
+            // active tenant exceed its rate (its bucket is never the one
+            // evicted because it is not at full burst). If no bucket is
+            // idle-at-full-burst, every retained bucket is actively
+            // throttling and we fail closed (reject the newcomer) rather
+            // than drop a bucket that is doing real work.
+            if tenants.len() >= self.tenant_capacity
+                && !evict_one_full_idle_bucket(&mut tenants, burst, now)
+            {
                 return false;
             }
             tenants.insert(
@@ -352,6 +384,43 @@ impl PredictRateLimiter {
         } else {
             false
         }
+    }
+}
+
+/// Evict at most one tenant bucket that has lazily refilled to (or above)
+/// full burst as of `now`, i.e. a bucket whose owner has not consumed a
+/// token recently. Returns `true` iff a bucket was removed.
+///
+/// Safety: a bucket at full burst is indistinguishable from a never-seen
+/// tenant — it holds no rate-limit debt, so evicting it cannot let any
+/// caller exceed its configured rate (a re-appearing evicted tenant simply
+/// gets a fresh full-burst bucket, which is exactly what an idle bucket
+/// already granted). Buckets that are actively throttling (refilled tokens
+/// `< burst`) are never selected, so this never drops a bucket doing real
+/// enforcement work; in that case the caller fails closed and rejects the
+/// newcomer. We compute the refilled value with the same lazy-refill math
+/// as `check_at` so a bucket that has simply been idle (stale `tokens`,
+/// old `last_refill`) is correctly recognised as full.
+fn evict_one_full_idle_bucket(
+    tenants: &mut HashMap<uuid::Uuid, TenantRateState>,
+    burst: f64,
+    now: Instant,
+) -> bool {
+    let victim = tenants.iter().find_map(|(id, state)| {
+        let elapsed = now.saturating_duration_since(state.last_refill);
+        let refilled = (state.tokens + elapsed.as_secs_f64() * burst).min(burst);
+        if refilled >= burst {
+            Some(*id)
+        } else {
+            None
+        }
+    });
+    match victim {
+        Some(id) => {
+            tenants.remove(&id);
+            true
+        }
+        None => false,
     }
 }
 
@@ -438,6 +507,33 @@ impl OutputPredictorTrait for OutputPredictorSvc {
         // Parse tenant_id at gRPC boundary per SLICE_05 R2 B5 convention.
         // We don't actually need the Uuid value for compute_a, but
         // compute_b requires it for the RLS session variable + bucket key.
+        //
+        // ── ACCEPTED TRUST BOUNDARY (Backend F-auth-trust) ──────────────
+        // `req.tenant_id` is taken from the wire body and is NOT bound to
+        // the caller's mTLS/SVID identity here. This is deliberate and is
+        // the documented trust anchor for tenant isolation in v1alpha1:
+        //
+        //   * The inbound caller is a SINGLE shared multi-tenant
+        //     egress_proxy / sidecar component, not a per-tenant workload.
+        //     It cannot present a per-tenant client cert, so there is no
+        //     per-tenant SVID at this hop to bind `req.tenant_id` against.
+        //     (The per-tenant SVID infra in plugin_svid.rs is for the
+        //     OUTBOUND predictor→customer-plugin direction only.)
+        //   * Tenant authorization is therefore anchored UPSTREAM at the
+        //     sidecar trust boundary + NetworkPolicy (only the trusted,
+        //     CA-authenticated SpendGuard sidecar may reach this RPC), and
+        //     the predictor trusts the tenant_id it asserts.
+        //   * Defense-in-depth still applies per-call: every DB read runs
+        //     under RLS via `SET LOCAL app.current_tenant_id`, and the
+        //     Strategy B / Strategy C paths additionally re-verify the
+        //     returned row's tenant_id (TenantBindingViolation) so an RLS
+        //     misconfiguration cannot silently leak cross-tenant rows.
+        //
+        // The missing INBOUND per-caller-tenant binding (a SpendGuard-
+        // internal signed tenant claim, or per-tenant caller SVIDs) is a
+        // design item tracked cross-cutting — it requires changes to the
+        // egress_proxy→predictor client (which currently connects without
+        // a per-tenant identity) and is out of scope for this service.
         let tenant_uuid = match uuid::Uuid::parse_str(&req.tenant_id) {
             Ok(u) => u,
             Err(e) => {
@@ -650,6 +746,41 @@ impl OutputPredictorTrait for OutputPredictorSvc {
         // ── Selector ──────────────────────────────────────────────────
         let (reserved, prediction_used) =
             selector::select_strategy(&req.prediction_policy, a, b.as_ref().map(|v| v.value), c);
+
+        // Backend F-correctness: observability for reservation-below-A.
+        // Only `ADAPTIVE_CEILING` can reserve below the Strategy A floor
+        // (per architecture-spec §5; the other three policies always
+        // reserve A). The numeric reservation amount is selected downstream
+        // in egress_proxy/forward.rs, but the reserved STRATEGY label and
+        // the three raw values are known here, so we can detect when the
+        // chosen reservation value is below A and surface it. This does NOT
+        // clamp the value (that would defeat the opt-in policy) — it only
+        // records the event so operators can see the spend guard's safety
+        // margin being traded. The actual remaining-budget guardrail is the
+        // sidecar's responsibility (it owns budget state).
+        if req.prediction_policy == "ADAPTIVE_CEILING" {
+            let reserved_value = match reserved {
+                Strategy::A => Some(a),
+                Strategy::B => b.as_ref().map(|v| v.value),
+                Strategy::C => c,
+            };
+            if let Some(rv) = reserved_value {
+                if rv < a {
+                    OUTPUT_PREDICTOR_ADAPTIVE_RESERVATION_BELOW_A_TOTAL
+                        .fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        tenant_id = %req.tenant_id,
+                        model = %req.model,
+                        reserved_strategy = %reserved,
+                        reserved_value = rv,
+                        strategy_a = a,
+                        "ADAPTIVE_CEILING reserved below Strategy A floor — \
+                         budget utilization traded for safety headroom (spec §5); \
+                         remaining-budget guardrail is enforced at the sidecar"
+                    );
+                }
+            }
+        }
 
         // Map cold-start layer + extract confidence/sample_size from the
         // chosen B/C. SLICE_07: Strategy C populates from PredictionC
@@ -978,7 +1109,11 @@ mod tests {
     }
 
     #[test]
-    fn predict_rate_limiter_capacity_rejects_new_tenant_without_evicting_existing() {
+    fn predict_rate_limiter_capacity_does_not_evict_actively_throttling_bucket() {
+        // Backend F-rate-limiter: when the only retained bucket is still
+        // actively throttling (its owner just consumed its token and is
+        // below full burst), a new tenant must NOT be allowed to evict it
+        // — that bucket is doing real enforcement work, so we fail closed.
         let limiter = PredictRateLimiter::new(1, 1);
         let tenant_a = uuid::Uuid::new_v4();
         let tenant_b = uuid::Uuid::new_v4();
@@ -987,12 +1122,41 @@ mod tests {
         assert!(limiter.check_at(tenant_a, now));
         assert!(
             !limiter.check_at(tenant_b, now),
-            "capacity exhaustion must fail closed instead of evicting an existing tenant bucket"
+            "capacity exhaustion must fail closed rather than evict a bucket still under burst"
         );
         assert!(
             limiter.check_at(tenant_a, now + Duration::from_secs(1)),
             "existing tenant state must survive capacity pressure and refill"
         );
+    }
+
+    #[test]
+    fn predict_rate_limiter_evicts_full_idle_bucket_for_new_tenant() {
+        // Backend F-rate-limiter: tenant_id is attacker-controllable, so a
+        // never-evicting limiter lets a caller fill `tenant_capacity` with
+        // fabricated UUIDs and permanently deny Predict to genuinely-new
+        // tenants. When at capacity, a bucket that has lazily refilled to
+        // full burst (idle, no rate-limit debt) is safe to evict to admit
+        // a new tenant. This proves the table self-heals against the
+        // table-exhaustion DoS without weakening any active bucket.
+        let limiter = PredictRateLimiter::new(1, 1);
+        let tenant_a = uuid::Uuid::new_v4();
+        let tenant_b = uuid::Uuid::new_v4();
+        let now = Instant::now();
+
+        // tenant_a takes its token, then goes idle long enough to refill.
+        assert!(limiter.check_at(tenant_a, now));
+        let later = now + Duration::from_secs(5);
+
+        // tenant_a's bucket is now full-burst-idle as of `later`; the new
+        // tenant_b evicts it and is admitted instead of being denied.
+        assert!(
+            limiter.check_at(tenant_b, later),
+            "a new tenant must evict a full, idle bucket instead of being permanently denied"
+        );
+        // Capacity is still 1 — tenant_b's fresh bucket displaced the idle
+        // tenant_a bucket rather than growing the map unbounded.
+        assert_eq!(limiter.tenants.lock().len(), 1, "capacity bound preserved");
     }
 
     #[tokio::test]

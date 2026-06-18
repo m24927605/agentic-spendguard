@@ -289,6 +289,15 @@ async function settle(
       pricing: pending.pricing,
       providerEventId: outcome === "SUCCESS" ? (usage?.providerEventId ?? "") : "",
       outcome,
+      // On a non-SUCCESS outcome the upstream provider consumed nothing (or the
+      // call was aborted/timed out), so the reservation must be RELEASED rather
+      // than committed at the full projected estimate. The SDK's multi-event
+      // path (`outcomeKind: "FAILURE"` + `estimatedAmountAtomic: "0"`) books a
+      // zero commit and emits the FAILURE outcome event so the sidecar releases
+      // the held reservation — mirroring the langchain handler's
+      // PROVIDER_ERROR/FAILURE release semantics (handler.ts handleLLMError) and
+      // the Botpress/Dify release-on-failure contract. Fail-closed is preserved:
+      // a settlement RPC error still throws below.
       ...(outcome === "SUCCESS"
         ? successUsageFields(usage)
         : failureMetadata(outcome, error)),
@@ -321,11 +330,18 @@ function estimateAmountAtomic(
   outcome: SettlementOutcome,
   usage: OpenClawUsage | undefined,
 ): string {
-  if (outcome === "SUCCESS" && usage !== undefined) {
-    const total = BigInt(usage.inputTokens ?? 0) + BigInt(usage.outputTokens ?? 0);
-    if (total > 0n) return total.toString();
+  if (outcome === "SUCCESS") {
+    if (usage !== undefined) {
+      const total = BigInt(usage.inputTokens ?? 0) + BigInt(usage.outputTokens ?? 0);
+      if (total > 0n) return total.toString();
+    }
+    return reservation.projectedAmountAtomic;
   }
-  return reservation.projectedAmountAtomic;
+  // Non-SUCCESS: commit zero so the FAILURE outcome event releases the
+  // reservation instead of booking the full projected estimate. Only valid on
+  // the multi-event path (`outcomeKind: "FAILURE"`); the single-event ledger
+  // path rejects amount<=0.
+  return "0";
 }
 
 function successUsageFields(
@@ -346,11 +362,14 @@ function failureMetadata(
     spendguard_outcome: outcome,
     error_message: error ?? "",
   });
-  if (outcome === "PROVIDER_ERROR") {
-    return { providerResponseMetadata: metadata };
-  }
+  // `outcomeKind: "FAILURE"` selects the SDK's multi-event path: the zero-amount
+  // POST event plus a FAILURE outcome event that releases the held reservation
+  // (no over-billing of failed calls). `actualErrorMessage` threads the provider
+  // failure reason onto the outcome event's JSON envelope.
   return {
     providerResponseMetadata: metadata,
+    outcomeKind: "FAILURE",
+    actualErrorMessage: error ?? "",
   };
 }
 

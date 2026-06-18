@@ -56,6 +56,7 @@
 //!   evict to surface the change immediately.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -65,6 +66,17 @@ use thiserror::Error;
 use tokio::sync::Mutex as AsyncMutex;
 use tracing::warn;
 use uuid::Uuid;
+
+/// Backend F-fail-open: count every time a STALE but still-ENABLED plugin
+/// endpoint snapshot is served to Strategy C through a control-plane DB
+/// error. While this counter is incrementing, an operator who flipped
+/// `enabled = FALSE` (kill switch) has NOT yet been observed by this pod —
+/// the cached enabled copy keeps being trusted for up to
+/// `enabled_stale_on_db_error_ttl`. This path was previously SILENT (no
+/// metric, no log), so operators could not see the kill-switch-defeat
+/// window was open. Surfaced as
+/// `spendguard_output_predictor_endpoint_cache_stale_enabled_db_error_serve_total`.
+pub static ENDPOINT_CACHE_STALE_ENABLED_DB_ERROR_SERVE_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 /// Per spec §6.3 — periodic health-check cadence is 30s; cache TTL
 /// must be ≤ that so a `force-reset` from the control plane is
@@ -83,7 +95,27 @@ pub const DEFAULT_REFRESH_TTL: Duration = Duration::from_secs(5);
 /// POST_GA_09 / #175: bounded stale serve window for DB errors.
 /// Stale entries older than this are treated as unsafe and the DB
 /// error falls back to Strategy B instead.
+///
+/// This is the ceiling for DISABLED endpoints (where a stale serve is moot
+/// — `endpoint_result_from_cached` refuses any disabled row regardless of
+/// freshness). ENABLED endpoints use the much shorter
+/// `DEFAULT_ENABLED_STALE_ON_DB_ERROR_TTL` below.
 pub const DEFAULT_STALE_ON_DB_ERROR_TTL: Duration = Duration::from_secs(300);
+
+/// Backend F-fail-open: asymmetric, much shorter stale ceiling for ENABLED
+/// endpoints. Serving a stale ENABLED endpoint through a DB error risks
+/// continuing to call a plugin an operator has kill-switched
+/// (`enabled = FALSE`) but whose disable this pod has not yet observed.
+/// The full 300s `DEFAULT_STALE_ON_DB_ERROR_TTL` left that
+/// kill-switch-defeat window open for multiple minutes. 30s is generous
+/// enough to ride out transient control-plane DB blips (preserving the
+/// POST_GA_09 / #175 intent of not amplifying a blip into a Strategy C
+/// fall-to-B storm) while closing the multi-minute revocation gap. Falling
+/// to B past this ceiling is itself fail-closed: B is the conservative
+/// reservation path, so a tighter enabled ceiling only makes the system
+/// MORE conservative. A disabled endpoint is already refused, so its stale
+/// ceiling stays at the generous `DEFAULT_STALE_ON_DB_ERROR_TTL`.
+pub const DEFAULT_ENABLED_STALE_ON_DB_ERROR_TTL: Duration = Duration::from_secs(30);
 
 /// POST_GA_09 / #174: after one reload observes a miss or serves stale
 /// through a DB error, queued same-tenant callers reuse that result for
@@ -159,6 +191,10 @@ pub struct EndpointCache {
     pool: Option<PgPool>,
     refresh_ttl: Duration,
     stale_on_db_error_ttl: Duration,
+    /// Backend F-fail-open: asymmetric, shorter stale ceiling applied only
+    /// to ENABLED endpoints so a kill-switched plugin cannot keep being
+    /// called for the full 300s window during a control-plane DB outage.
+    enabled_stale_on_db_error_ttl: Duration,
     reload_result_backoff_ttl: Duration,
     not_configured_backoff_capacity: usize,
     entries: RwLock<HashMap<Uuid, Cached>>,
@@ -184,10 +220,16 @@ impl EndpointCache {
                  control_plane gate."
             );
         }
+        // The ENABLED ceiling is the asymmetric short window, but never
+        // longer than the overall stale ceiling (so a caller-tightened
+        // `stale_on_db_error_ttl` still bounds it).
+        let enabled_stale_on_db_error_ttl =
+            DEFAULT_ENABLED_STALE_ON_DB_ERROR_TTL.min(stale_on_db_error_ttl);
         Arc::new(Self {
             pool,
             refresh_ttl,
             stale_on_db_error_ttl,
+            enabled_stale_on_db_error_ttl,
             reload_result_backoff_ttl: DEFAULT_RELOAD_RESULT_BACKOFF_TTL,
             not_configured_backoff_capacity: DEFAULT_NOT_CONFIGURED_BACKOFF_CAPACITY,
             entries: RwLock::new(HashMap::new()),
@@ -316,6 +358,26 @@ impl EndpointCache {
         let mut entries = self.entries.write();
         let cached = entries.get_mut(tenant)?;
         let result = self.result_if_stale_within_db_error_ttl(tenant, cached, now)?;
+        // Backend F-fail-open: this is the actual DB-error serve site (not
+        // the 1s backoff replay), so surface the kill-switch-defeat window
+        // here exactly once per reload attempt instead of once per queued
+        // caller. We only count/warn for ENABLED endpoints, because a
+        // disabled stale row is refused by `endpoint_result_from_cached`
+        // and never reaches the plugin.
+        if cached.endpoint.enabled && matches!(result, Ok(_)) {
+            ENDPOINT_CACHE_STALE_ENABLED_DB_ERROR_SERVE_TOTAL.fetch_add(1, Ordering::Relaxed);
+            let stale_for = now.duration_since(cached.loaded_at);
+            warn!(
+                tenant_id = %tenant,
+                endpoint_url = %cached.endpoint.endpoint_url,
+                stale_for_secs = stale_for.as_secs_f64(),
+                enabled_stale_ttl_secs = self.enabled_stale_on_db_error_ttl.as_secs_f64(),
+                "serving STALE enabled plugin endpoint through control-plane DB error — \
+                 a kill-switch (enabled=false) flipped during this window is NOT yet \
+                 observed by this pod; window closes at the enabled stale ceiling, then \
+                 Strategy C falls to B (fail-closed)"
+            );
+        }
         cached.stale_reload_backoff_until = Some(now + self.reload_result_backoff_ttl);
         Some(result)
     }
@@ -326,7 +388,18 @@ impl EndpointCache {
         cached: &Cached,
         now: Instant,
     ) -> Option<Result<Arc<PluginEndpoint>, EndpointCacheError>> {
-        if now.duration_since(cached.loaded_at) > self.stale_on_db_error_ttl {
+        let age = now.duration_since(cached.loaded_at);
+        if age > self.stale_on_db_error_ttl {
+            return None;
+        }
+        // Backend F-fail-open: asymmetric ceiling. An ENABLED endpoint is
+        // the dangerous case — serving it stale risks calling a plugin an
+        // operator kill-switched (enabled=false) but whose disable this pod
+        // has not yet observed. Bound it to the much shorter enabled
+        // ceiling so the revocation window is closed in tens of seconds,
+        // then fall to B (conservative, fail-closed). A DISABLED endpoint
+        // is already refused below, so it stays under the generous ceiling.
+        if cached.endpoint.enabled && age > self.enabled_stale_on_db_error_ttl {
             return None;
         }
         Some(endpoint_result_from_cached(tenant, cached.endpoint.clone()))
@@ -672,7 +745,12 @@ mod tests {
 
     #[tokio::test]
     async fn db_error_serves_bounded_stale_enabled_endpoint() {
+        // Fast acquire timeout so the forced DB error returns promptly;
+        // otherwise the default 30s pool-acquire delay would age the seeded
+        // entry past the asymmetric enabled stale ceiling before the error
+        // surfaces, masking the intended stale-serve path.
         let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
             .connect_lazy("postgres://spendguard:spendguard@127.0.0.1:1/spendguard")
             .expect("lazy pool");
         let cache = EndpointCache::new_with_stale_ttl(
@@ -704,6 +782,104 @@ mod tests {
         assert!(
             cached.stale_reload_backoff_until.is_some(),
             "DB-error stale serve must set a short reload backoff for queued callers"
+        );
+    }
+
+    #[tokio::test]
+    async fn db_error_serve_of_stale_enabled_endpoint_increments_metric() {
+        // Backend F-fail-open: serving a stale ENABLED endpoint through a
+        // DB error must be observable (previously SILENT). The counter and
+        // a warn log mark that the kill-switch-defeat window is open.
+        let before = ENDPOINT_CACHE_STALE_ENABLED_DB_ERROR_SERVE_TOTAL.load(Ordering::Relaxed);
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://spendguard:spendguard@127.0.0.1:1/spendguard")
+            .expect("lazy pool");
+        let cache = EndpointCache::new_with_stale_ttl(
+            Some(pool),
+            Duration::from_millis(1),
+            Duration::from_secs(300),
+        );
+        let tenant = Uuid::new_v4();
+        let mut row = ep(true);
+        row.tenant_id = tenant;
+        cache.entries.write().insert(
+            tenant,
+            cached(
+                row,
+                Instant::now()
+                    .checked_sub(Duration::from_secs(2))
+                    .unwrap_or_else(Instant::now),
+            ),
+        );
+
+        cache
+            .lookup(&tenant)
+            .await
+            .expect("within-ceiling stale enabled endpoint serves");
+        assert!(
+            ENDPOINT_CACHE_STALE_ENABLED_DB_ERROR_SERVE_TOTAL.load(Ordering::Relaxed) > before,
+            "stale-enabled DB-error serve must increment the observability counter"
+        );
+    }
+
+    #[tokio::test]
+    async fn db_error_enabled_endpoint_stale_beyond_enabled_ceiling_falls_to_b() {
+        // Backend F-fail-open: an ENABLED endpoint stale beyond the short
+        // asymmetric enabled ceiling (30s) — but still within the generous
+        // overall 300s ceiling — must NOT keep being served, so a kill
+        // switch flipped during a DB outage cannot defeat enforcement for
+        // minutes. The DB error surfaces (Strategy C then falls to B).
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(Duration::from_secs(1))
+            .connect_lazy("postgres://spendguard:spendguard@127.0.0.1:1/spendguard")
+            .expect("lazy pool");
+        let cache = EndpointCache::new_with_stale_ttl(
+            Some(pool),
+            Duration::from_millis(1),
+            Duration::from_secs(300),
+        );
+        let tenant = Uuid::new_v4();
+        let mut row = ep(true);
+        row.tenant_id = tenant;
+        cache.entries.write().insert(
+            tenant,
+            cached(
+                row,
+                // 60s > 30s enabled ceiling, but < 300s overall ceiling.
+                Instant::now()
+                    .checked_sub(Duration::from_secs(60))
+                    .unwrap_or_else(Instant::now),
+            ),
+        );
+
+        let err = cache
+            .lookup(&tenant)
+            .await
+            .expect_err("enabled endpoint past the enabled ceiling must not serve");
+        match err {
+            EndpointCacheError::Sql(_) => {}
+            other => panic!("expected SQL error past enabled ceiling, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn enabled_stale_ceiling_is_shorter_than_overall_and_bounded() {
+        // Backend F-fail-open: the asymmetric enabled ceiling default is
+        // 30s and is never longer than the overall stale ceiling.
+        assert_eq!(DEFAULT_ENABLED_STALE_ON_DB_ERROR_TTL, Duration::from_secs(30));
+        assert!(DEFAULT_ENABLED_STALE_ON_DB_ERROR_TTL < DEFAULT_STALE_ON_DB_ERROR_TTL);
+        // A caller passing a stale ceiling shorter than 30s clamps the
+        // enabled ceiling down too (min).
+        let cache = EndpointCache::new_with_stale_ttl(
+            None,
+            Duration::from_millis(1),
+            Duration::from_secs(5),
+        );
+        assert_eq!(
+            cache.enabled_stale_on_db_error_ttl,
+            Duration::from_secs(5),
+            "enabled ceiling must not exceed the overall stale ceiling"
         );
     }
 

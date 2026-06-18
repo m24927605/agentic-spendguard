@@ -162,6 +162,22 @@ pub async fn recover_from_audit_chain(
     // until enough new calls land to dominate. This is acceptable per spec
     // §7.4 — recovery prioritizes step counter correctness; cost is rebuilt
     // by observation.
+    //
+    // BEST-EFFORT DIAGNOSTIC CONTRACT (downstream consumers MUST honor): the
+    // `run_projection_at_decision_atomic` value written to the audit row for the
+    // first few Project calls after a cold-cache recovery is UNDER-COUNTED by up
+    // to the pre-eviction `cumulative_cost_atomic`, because cumulative is reset
+    // to 0 here and rebuilt by observation. Calibration / dashboard / Signal-2
+    // drift-baseline consumers MUST NOT treat a post-recovery projection dip as a
+    // real cost-trajectory drop. This corrupts ONLY the reported diagnostic
+    // projection — it does NOT weaken any spend-stop control: the
+    // RUN_BUDGET_PROJECTION_EXCEEDED gate (layering.rs) compares
+    // `this_call + predicted_remaining` against the LIVE ledger available balance
+    // and is invariant to cumulative_cost_atomic, and the ledger reserve path
+    // remains the hard money-stop oracle. The undercount is bounded and
+    // self-healing. (Phase E: seed cumulative from
+    // cloudevent_payload->>'cumulative_cost_atomic' once the sidecar populates it
+    // — see `_projection_hint` below, kept parsed but intentionally NOT applied.)
     state.cumulative_cost_atomic = 0;
     state.per_step_costs = Vec::new();
     state.last_predicted_remaining_cost = None;

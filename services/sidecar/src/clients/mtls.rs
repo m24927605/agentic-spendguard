@@ -3,6 +3,18 @@
 //! POC: cert-manager external issuer (per Stage 2 §12.1) populates
 //! /var/run/secrets/spendguard/{tls.crt,tls.key,ca.crt} on the sidecar pod.
 //! On startup we load these into a tonic ClientTlsConfig.
+//!
+//! SECURITY (auth-trust) — scope note: tonic's `ClientTlsConfig` performs
+//! WebPKI CA-chain validation + SNI hostname matching only. It does NOT
+//! pin the upstream server's SPIFFE-URI SAN or leaf SPKI, so any server
+//! holding a cert signed by the shared trust CA that also matches the SNI
+//! would be accepted. The matching outbound SAN/SPKI pin (mirroring the
+//! inbound `http_companion::mtls::SpiffeUriPinningClientVerifier` and
+//! `output_predictor`'s `FingerprintPinningVerifier`) requires replacing
+//! the tonic connect path with a custom rustls `ServerCertVerifier` via
+//! `connect_with_connector` across all three client modules; it is tracked
+//! as a follow-up and is NOT claimed here. Do not advertise outbound SVID
+//! pinning until that lands.
 
 use anyhow::{Context, Result};
 use tonic::transport::{Certificate, ClientTlsConfig, Identity};

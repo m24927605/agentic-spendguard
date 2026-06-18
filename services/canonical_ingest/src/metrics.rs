@@ -44,6 +44,12 @@ pub struct IngestMetricsInner {
     pub quarantined_key_expired: AtomicU64,
     pub quarantined_key_not_yet_valid: AtomicU64,
     pub quarantined_key_revoked: AtomicU64,
+    /// Fail-closed observability: the quarantine row could NOT be
+    /// durably persisted (the insert failed). The event is reported with
+    /// a non-terminal status so the forwarder re-sends it; this counter
+    /// lets operators alert on a quarantine-table outage that would
+    /// otherwise hide tamper/forgery evidence.
+    pub quarantine_write_failed: AtomicU64,
 }
 
 #[derive(Clone, Default)]
@@ -112,6 +118,15 @@ impl IngestMetrics {
     pub fn inc_invalid_signature_admitted(&self) {
         self.inner
             .invalid_signature_admitted
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Fail-closed observability: a quarantine row could not be durably
+    /// persisted. The caller surfaces a non-terminal event status so the
+    /// forwarder re-sends; this counter feeds the operator alert.
+    pub fn inc_quarantine_write_failed(&self) {
+        self.inner
+            .quarantine_write_failed
             .fetch_add(1, Ordering::Relaxed);
     }
 
@@ -201,6 +216,13 @@ impl IngestMetrics {
             i.invalid_signature_admitted.load(Ordering::Relaxed)
         ));
 
+        out.push_str("# HELP spendguard_ingest_quarantine_write_failed_total Quarantine rows that could not be durably persisted; the event is re-sent (non-terminal status). Alert on any increase.\n");
+        out.push_str("# TYPE spendguard_ingest_quarantine_write_failed_total counter\n");
+        out.push_str(&format!(
+            "spendguard_ingest_quarantine_write_failed_total {}\n",
+            i.quarantine_write_failed.load(Ordering::Relaxed)
+        ));
+
         out
     }
 }
@@ -261,6 +283,17 @@ mod tests {
             "spendguard_ingest_events_rejected_invalid_signature_total{route=\"enforcement\"} 1"
         ));
         assert!(txt.contains("spendguard_ingest_events_pre_s6_admitted_total 1"));
+    }
+
+    #[test]
+    fn quarantine_write_failed_counter_renders() {
+        let m = IngestMetrics::new();
+        let txt = m.render();
+        assert!(txt.contains("spendguard_ingest_quarantine_write_failed_total 0"));
+        m.inc_quarantine_write_failed();
+        m.inc_quarantine_write_failed();
+        let txt = m.render();
+        assert!(txt.contains("spendguard_ingest_quarantine_write_failed_total 2"));
     }
 
     #[test]

@@ -49,4 +49,41 @@ pub enum TokenizerError {
         encoder: &'static str,
         message: String,
     },
+
+    /// A request field exceeded its DoS-protection size cap (Round-2
+    /// fix M6 / Round-3 N3, see [`crate::request_caps`]). Returned by
+    /// [`crate::request_caps::validate`] before any encoder buffer is
+    /// allocated.
+    ///
+    /// This is a **distinct** variant — kept separate from
+    /// `EncoderInternal` — so in-process callers can recognise an
+    /// oversized-request rejection and map it to a fail-closed decision
+    /// (DENY / large-request guard) instead of a permissive fallback.
+    /// See [`TokenizerError::is_request_too_large`].
+    #[error(
+        "request field `{field}` exceeds cap: {actual_bytes} > {limit_bytes} \
+         (M6 DoS cap)"
+    )]
+    RequestTooLarge {
+        /// Offending field: `model`, `raw_text`, `messages`, or
+        /// `messages.content`.
+        field: &'static str,
+        /// Observed size. Byte length for text fields; element count for
+        /// the `messages` array bound.
+        actual_bytes: usize,
+        /// The exceeded cap.
+        limit_bytes: usize,
+    },
+}
+
+impl TokenizerError {
+    /// True iff this is a [`TokenizerError::RequestTooLarge`] rejection.
+    ///
+    /// In-process callers MUST branch on this to fail closed: an
+    /// oversized request must never collapse into a 0-token / permissive
+    /// estimate that under-counts the budget. Genuine internal errors
+    /// (`EncoderInternal`, etc.) keep their existing handling.
+    pub fn is_request_too_large(&self) -> bool {
+        matches!(self, TokenizerError::RequestTooLarge { .. })
+    }
 }

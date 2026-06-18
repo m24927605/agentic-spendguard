@@ -1,9 +1,10 @@
 // Tests for the SLICE 4 BodyFilter commit flow. Per review-standards
-// §5 we exercise: chunk accumulation, end-of-body single-trace
-// invariant (§5.1), plugin-side dedup flag (§5.2), missing
-// reservation_id silent skip (§5.3), provider parse failure →
-// REJECTED (§5.4-5.5), upstream 5xx → REJECTED, commit-timeout
-// non-exit (§5.6), OpenAI + Anthropic usage parsing.
+// §5 we exercise: single-shot full-body read + exactly-once trace
+// (§5.1), plugin-side dedup flag (§5.2), missing reservation_id silent
+// skip (§5.3), provider parse failure → REJECTED (§5.4-5.5), upstream
+// 5xx → REJECTED, commit-lane bounded retry + non-exit (§5.6), and the
+// real-PDK RawBodyResult contract (resolveRawBody) including the
+// oversized-body temp-file branch.
 
 package main
 
@@ -11,19 +12,26 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/Kong/go-pdk/server/kong_plugin_protocol"
 )
 
-// mockBodyKong is the BodyFilter analogue of mockKong.
+// mockBodyKong is the BodyFilter analogue of mockKong. It models the
+// REAL Kong PDK contract: `kong.service.response.get_raw_body` returns
+// the entire buffered body in a single call (see GetFullBody), not a
+// chunk stream.
 type mockBodyKong struct {
 	mu             sync.Mutex
 	shared         map[string]string
 	sharedRaw      map[string]interface{}
 	sharedSetErr   map[string]error
-	chunkQueue     [][]byte
-	chunkErr       error
+	body           []byte
+	bodyErr        error
 	upstreamStatus int
 	statusErr      error
 	warnLogs       []string
@@ -45,17 +53,6 @@ func (m *mockBodyKong) GetSharedString(key string) (string, error) {
 	}
 	return "", nil
 }
-func (m *mockBodyKong) GetSharedAny(key string) (interface{}, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if v, ok := m.sharedRaw[key]; ok {
-		return v, nil
-	}
-	if v, ok := m.shared[key]; ok {
-		return v, nil
-	}
-	return nil, nil
-}
 func (m *mockBodyKong) SetShared(key string, value interface{}) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -68,18 +65,18 @@ func (m *mockBodyKong) SetShared(key string, value interface{}) error {
 	m.sharedRaw[key] = value
 	return nil
 }
-func (m *mockBodyKong) GetChunk() ([]byte, error) {
+
+// GetFullBody returns the full buffered body in one shot, matching the
+// real PDK `get_raw_body` semantics. The chunk-stream model used by an
+// earlier (broken) version of this mock never fired the commit on real
+// Kong because get_raw_body never returns an empty-chunk terminator.
+func (m *mockBodyKong) GetFullBody() ([]byte, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.chunkErr != nil {
-		return nil, m.chunkErr
+	if m.bodyErr != nil {
+		return nil, m.bodyErr
 	}
-	if len(m.chunkQueue) == 0 {
-		return []byte{}, nil
-	}
-	c := m.chunkQueue[0]
-	m.chunkQueue = m.chunkQueue[1:]
-	return c, nil
+	return m.body, nil
 }
 func (m *mockBodyKong) GetUpstreamStatus() (int, error) { return m.upstreamStatus, m.statusErr }
 func (m *mockBodyKong) LogWarn(msg string) {
@@ -141,35 +138,35 @@ func TestBodyFilter_NoReservationSkipsSilently(t *testing.T) {
 	}
 }
 
-// TestBodyFilter_ChunkedAccumulationFiresOnceOnEOB — §5.1 single
-// trace at end-of-body across multiple chunks.
-func TestBodyFilter_ChunkedAccumulationFiresOnceOnEOB(t *testing.T) {
+// TestBodyFilter_SingleShotFiresOnceOnFullBody — §5.1: the full
+// buffered body arrives in one get_raw_body call and the trace fires
+// exactly once. Re-invoking body_filter (Kong teardown replay) must
+// NOT fire a second trace — the dedup flag short-circuits it. This is
+// the regression guard for the original bug where the code waited for
+// an empty-chunk terminator that real Kong never sends, so the commit
+// never fired at all.
+func TestBodyFilter_SingleShotFiresOnceOnFullBody(t *testing.T) {
 	k := newMockBodyKong()
 	k.shared[CtxKeyReservationID] = "res-1"
 	k.shared[CtxKeyProvider] = string(ProviderOpenAI)
 	k.upstreamStatus = 200
-
-	full := openaiResponseBody(t)
-	split := len(full) / 2
-	k.chunkQueue = [][]byte{full[:split], full[split:], {}}
+	k.body = openaiResponseBody(t)
 
 	sc := &mockSidecar{traceResp: TraceAckBody{Verdict: "ACCEPTED", LedgerTransactionID: "lt-1"}}
 	cfg := &Config{TimeoutMS: 500}
 
-	// First chunk — buffer.
-	runBodyFilterWithDeps(k, cfg, sc)
-	if sc.traceCalls != 0 {
-		t.Fatal("trace fired on partial body")
-	}
-	// Second chunk — buffer.
-	runBodyFilterWithDeps(k, cfg, sc)
-	if sc.traceCalls != 0 {
-		t.Fatal("trace fired on second partial chunk")
-	}
-	// Final empty chunk — should fire trace exactly once.
+	// Single body_filter invocation with the full buffered body —
+	// must commit immediately, no waiting for a non-existent
+	// terminator.
 	runBodyFilterWithDeps(k, cfg, sc)
 	if sc.traceCalls != 1 {
-		t.Fatalf("trace must fire exactly once on EOB: got %d", sc.traceCalls)
+		t.Fatalf("trace must fire exactly once on the full-body read: got %d", sc.traceCalls)
+	}
+	// Kong re-invokes body_filter on teardown — dedup flag must
+	// short-circuit so the count stays at exactly 1.
+	runBodyFilterWithDeps(k, cfg, sc)
+	if sc.traceCalls != 1 {
+		t.Fatalf("re-entry must dedup; want 1 trace call, got %d", sc.traceCalls)
 	}
 	if sc.lastTraceReq.Outcome != "ACCEPTED" {
 		t.Fatalf("trace outcome: want ACCEPTED, got %s", sc.lastTraceReq.Outcome)
@@ -188,19 +185,17 @@ func TestBodyFilter_PluginSideDedupFlag(t *testing.T) {
 	k := newMockBodyKong()
 	k.shared[CtxKeyReservationID] = "res-2"
 	k.shared[CtxKeyProvider] = string(ProviderOpenAI)
-	k.chunkQueue = [][]byte{openaiResponseBody(t), {}}
+	k.body = openaiResponseBody(t)
 
 	sc := &mockSidecar{traceResp: TraceAckBody{Verdict: "ACCEPTED"}}
 	cfg := &Config{TimeoutMS: 500}
 
-	// Fire end-to-end.
-	runBodyFilterWithDeps(k, cfg, sc) // buffer
-	runBodyFilterWithDeps(k, cfg, sc) // EOB → commit
+	// Fire end-to-end on the first invocation.
+	runBodyFilterWithDeps(k, cfg, sc)
 	if sc.traceCalls != 1 {
-		t.Fatalf("trace not fired on EOB: %d calls", sc.traceCalls)
+		t.Fatalf("trace not fired on full-body read: %d calls", sc.traceCalls)
 	}
 	// Simulate Kong re-entry (committed flag is set).
-	k.chunkQueue = [][]byte{{}}
 	runBodyFilterWithDeps(k, cfg, sc)
 	if sc.traceCalls != 1 {
 		t.Fatalf("dedup failed; want 1 trace call, got %d", sc.traceCalls)
@@ -213,12 +208,11 @@ func TestBodyFilter_OpenAIUsageParsing(t *testing.T) {
 	k := newMockBodyKong()
 	k.shared[CtxKeyReservationID] = "r-oai"
 	k.shared[CtxKeyProvider] = string(ProviderOpenAI)
-	k.chunkQueue = [][]byte{openaiResponseBody(t), {}}
+	k.body = openaiResponseBody(t)
 
 	sc := &mockSidecar{traceResp: TraceAckBody{Verdict: "ACCEPTED"}}
 	cfg := &Config{TimeoutMS: 500}
-	runBodyFilterWithDeps(k, cfg, sc) // buffer
-	runBodyFilterWithDeps(k, cfg, sc) // EOB
+	runBodyFilterWithDeps(k, cfg, sc)
 
 	if sc.lastTraceReq.ProviderEventID == nil || *sc.lastTraceReq.ProviderEventID != "chatcmpl-test-1" {
 		t.Fatalf("openai response id not propagated: %v", sc.lastTraceReq.ProviderEventID)
@@ -233,12 +227,11 @@ func TestBodyFilter_AnthropicUsageParsing(t *testing.T) {
 	k := newMockBodyKong()
 	k.shared[CtxKeyReservationID] = "r-anth"
 	k.shared[CtxKeyProvider] = string(ProviderAnthropic)
-	k.chunkQueue = [][]byte{anthropicResponseBody(t), {}}
+	k.body = anthropicResponseBody(t)
 
 	sc := &mockSidecar{traceResp: TraceAckBody{Verdict: "ACCEPTED"}}
 	cfg := &Config{TimeoutMS: 500}
-	runBodyFilterWithDeps(k, cfg, sc) // buffer
-	runBodyFilterWithDeps(k, cfg, sc) // EOB
+	runBodyFilterWithDeps(k, cfg, sc)
 
 	if sc.lastTraceReq.InputTokens == nil || *sc.lastTraceReq.InputTokens != 5 {
 		t.Fatalf("anthropic input_tokens: want 5, got %v", sc.lastTraceReq.InputTokens)
@@ -260,12 +253,11 @@ func TestBodyFilter_Upstream5xxEmitsRejected(t *testing.T) {
 	k.upstreamStatus = 502
 	// Some 5xx bodies are HTML; the parser shouldn't even be
 	// called because of the early upstream-status check.
-	k.chunkQueue = [][]byte{[]byte("<html>502 Bad Gateway</html>"), {}}
+	k.body = []byte("<html>502 Bad Gateway</html>")
 
 	sc := &mockSidecar{traceResp: TraceAckBody{Verdict: "REJECTED"}}
 	cfg := &Config{TimeoutMS: 500}
-	runBodyFilterWithDeps(k, cfg, sc) // buffer
-	runBodyFilterWithDeps(k, cfg, sc) // EOB
+	runBodyFilterWithDeps(k, cfg, sc)
 
 	if sc.traceCalls != 1 {
 		t.Fatalf("5xx trace not fired: %d calls", sc.traceCalls)
@@ -281,12 +273,11 @@ func TestBodyFilter_MalformedJSONEmitsRejected(t *testing.T) {
 	k := newMockBodyKong()
 	k.shared[CtxKeyReservationID] = "r-bad"
 	k.shared[CtxKeyProvider] = string(ProviderOpenAI)
-	k.chunkQueue = [][]byte{[]byte("not json"), {}}
+	k.body = []byte("not json")
 
 	sc := &mockSidecar{traceResp: TraceAckBody{Verdict: "REJECTED"}}
 	cfg := &Config{TimeoutMS: 500}
-	runBodyFilterWithDeps(k, cfg, sc) // buffer
-	runBodyFilterWithDeps(k, cfg, sc) // EOB
+	runBodyFilterWithDeps(k, cfg, sc)
 
 	if sc.traceCalls != 1 {
 		t.Fatalf("malformed body trace not fired: %d calls", sc.traceCalls)
@@ -305,12 +296,11 @@ func TestBodyFilter_UnknownProviderEmitsRejected(t *testing.T) {
 	k := newMockBodyKong()
 	k.shared[CtxKeyReservationID] = "r-unknown"
 	k.shared[CtxKeyProvider] = "cohere"
-	k.chunkQueue = [][]byte{[]byte(`{"id":"x","usage":{"input":5}}`), {}}
+	k.body = []byte(`{"id":"x","usage":{"input":5}}`)
 
 	sc := &mockSidecar{traceResp: TraceAckBody{Verdict: "REJECTED"}}
 	cfg := &Config{TimeoutMS: 500}
-	runBodyFilterWithDeps(k, cfg, sc) // buffer
-	runBodyFilterWithDeps(k, cfg, sc) // EOB
+	runBodyFilterWithDeps(k, cfg, sc)
 
 	if sc.traceCalls != 1 {
 		t.Fatalf("unknown provider trace not fired: %d calls", sc.traceCalls)
@@ -322,55 +312,106 @@ func TestBodyFilter_UnknownProviderEmitsRejected(t *testing.T) {
 
 // TestBodyFilter_CommitTimeoutDoesNotShortCircuit — §5.6 sidecar
 // failure on the commit lane MUST NOT exit the request (response
-// already in flight). The trace warn is logged.
+// already in flight). The trace warn is logged. With a persistently
+// failing sidecar the bounded retry exhausts its attempts but still
+// does not panic/exit, and the dedup flag stays set so re-entry won't
+// re-attempt.
 func TestBodyFilter_CommitTimeoutDoesNotShortCircuit(t *testing.T) {
 	k := newMockBodyKong()
 	k.shared[CtxKeyReservationID] = "r-tot"
 	k.shared[CtxKeyProvider] = string(ProviderOpenAI)
-	k.chunkQueue = [][]byte{openaiResponseBody(t), {}}
+	k.body = openaiResponseBody(t)
 
 	sc := &mockSidecar{
 		traceErr: errors.New("context deadline exceeded"),
 	}
 	cfg := &Config{TimeoutMS: 500}
-	runBodyFilterWithDeps(k, cfg, sc) // buffer
-	runBodyFilterWithDeps(k, cfg, sc) // EOB
+	runBodyFilterWithDeps(k, cfg, sc)
 
-	// Trace was attempted exactly once.
-	if sc.traceCalls != 1 {
-		t.Fatalf("trace must attempt once on commit lane: %d calls", sc.traceCalls)
+	// Bounded retry: every attempt fails, so we exhaust the cap.
+	if sc.traceCalls != commitMaxAttempts {
+		t.Fatalf("commit lane must retry up to the cap: want %d calls, got %d",
+			commitMaxAttempts, sc.traceCalls)
 	}
 	// Failure logged but no panic. Plugin-side dedup still set.
 	if k.shared[CtxKeyCommitted] != "1" {
 		t.Fatal("committed flag not set after timeout")
 	}
+	// Re-entry must NOT re-attempt — dedup short-circuits.
+	runBodyFilterWithDeps(k, cfg, sc)
+	if sc.traceCalls != commitMaxAttempts {
+		t.Fatalf("re-entry re-attempted commit; want %d, got %d", commitMaxAttempts, sc.traceCalls)
+	}
 }
 
-// TestBodyFilter_SetSharedFailureLogsButDoesNotPanic — defensive
-// path: if SetShared fails during buffering, log and continue.
-func TestBodyFilter_SetSharedFailureLogsButDoesNotPanic(t *testing.T) {
+// TestBodyFilter_CommitRetriesThenSucceeds — the bounded commit-lane
+// retry recovers a transient sidecar blip so a realized-spend commit
+// is NOT silently dropped to TTL-sweep. The first attempt fails, the
+// second succeeds; the commit is idempotent on reservation_id so the
+// retry is safe against double-commit.
+func TestBodyFilter_CommitRetriesThenSucceeds(t *testing.T) {
 	k := newMockBodyKong()
-	k.shared[CtxKeyReservationID] = "r-share-err"
+	k.shared[CtxKeyReservationID] = "r-retry"
 	k.shared[CtxKeyProvider] = string(ProviderOpenAI)
-	k.sharedSetErr = map[string]error{
-		CtxKeyBodyBuffer: errors.New("ctx.shared write rejected"),
+	k.body = openaiResponseBody(t)
+
+	sc := &mockSidecar{
+		traceResp:          TraceAckBody{Verdict: "ACCEPTED", LedgerTransactionID: "lt-retry"},
+		traceTransientErr:  errors.New("connection reset"),
+		traceErrsRemaining: 1, // fail once (transient), then succeed
 	}
-	k.chunkQueue = [][]byte{[]byte(`{"partial":true}`), {}}
+	cfg := &Config{TimeoutMS: 500}
+	runBodyFilterWithDeps(k, cfg, sc)
+
+	if sc.traceCalls != 2 {
+		t.Fatalf("commit must retry once then succeed: want 2 calls, got %d", sc.traceCalls)
+	}
+	if sc.lastTraceReq.Outcome != "ACCEPTED" {
+		t.Fatalf("recovered commit outcome: want ACCEPTED, got %s", sc.lastTraceReq.Outcome)
+	}
+	// No leftover warn for a recovered commit.
+	if strings.Contains(strings.Join(k.warnLogs, " "), "trace failed") {
+		t.Fatalf("recovered commit must not log a failure: %v", k.warnLogs)
+	}
+}
+
+// TestBodyFilter_BodyReadErrorEmitsRejected — defensive path: if
+// get_raw_body errors we cannot know realized usage, so we RELEASE the
+// reservation (REJECTED) rather than leaving it to TTL-sweep, and we
+// log the failure. Fail-closed: a hold is never left permanently open.
+func TestBodyFilter_BodyReadErrorEmitsRejected(t *testing.T) {
+	k := newMockBodyKong()
+	k.shared[CtxKeyReservationID] = "r-body-err"
+	k.shared[CtxKeyProvider] = string(ProviderOpenAI)
+	k.bodyErr = errors.New("get_raw_body failed")
 
 	sc := &mockSidecar{traceResp: TraceAckBody{Verdict: "REJECTED"}}
 	cfg := &Config{TimeoutMS: 500}
-	// First call: SetShared(buffer) fails; we log+return.
 	runBodyFilterWithDeps(k, cfg, sc)
-	if sc.traceCalls != 0 {
-		t.Fatal("trace fired despite SetShared failure mid-buffer")
-	}
-	// Second call: empty chunk fires the trace on the now-empty
-	// (because SetShared failed) buffer. parseProviderUsage fails
-	// (empty body) and emits REJECTED, which is correct fail-closed
-	// commit semantics.
-	runBodyFilterWithDeps(k, cfg, sc)
+
 	if sc.traceCalls != 1 || sc.lastTraceReq.Outcome != "REJECTED" {
 		t.Fatalf("expected one REJECTED trace, got calls=%d outcome=%s", sc.traceCalls, sc.lastTraceReq.Outcome)
+	}
+	if !strings.Contains(strings.Join(k.warnLogs, " "), "get body") {
+		t.Fatalf("body-read failure warning missing; logs=%v", k.warnLogs)
+	}
+}
+
+// TestBodyFilter_EmptyBodyEmitsRejected — an empty buffered body (no
+// usage to commit) must RELEASE, not silently commit zeros.
+func TestBodyFilter_EmptyBodyEmitsRejected(t *testing.T) {
+	k := newMockBodyKong()
+	k.shared[CtxKeyReservationID] = "r-empty"
+	k.shared[CtxKeyProvider] = string(ProviderOpenAI)
+	k.upstreamStatus = 200
+	k.body = nil
+
+	sc := &mockSidecar{traceResp: TraceAckBody{Verdict: "REJECTED"}}
+	cfg := &Config{TimeoutMS: 500}
+	runBodyFilterWithDeps(k, cfg, sc)
+
+	if sc.traceCalls != 1 || sc.lastTraceReq.Outcome != "REJECTED" {
+		t.Fatalf("empty body must RELEASE: calls=%d outcome=%s", sc.traceCalls, sc.lastTraceReq.Outcome)
 	}
 }
 
@@ -406,13 +447,86 @@ func TestParseProviderUsage_EmptyBodyRejected(t *testing.T) {
 	}
 }
 
-// TestIsFinalChunk_BoundaryConditions — Kong terminator semantics.
-func TestIsFinalChunk_BoundaryConditions(t *testing.T) {
-	if !isFinalChunk([]byte{}) {
-		t.Fatal("empty must be final")
+// TestResolveRawBody_RealPDKContract drives the actual go-pdk
+// `RawBodyResult` protobuf — the same type
+// `kong.service.response.get_raw_body` populates on a live Kong —
+// through the adapter's body resolver. This replaces the old synthetic
+// chunk-queue mock that did not match the real PDK contract (the real
+// API returns the WHOLE body in one call, optionally via a temp-file
+// path for oversized bodies). It proves all three oneof branches the
+// PDK can send are handled, including the temp-file branch the stock
+// `Response.GetRawBody()` helper silently drops.
+func TestResolveRawBody_RealPDKContract(t *testing.T) {
+	t.Run("inline_content_full_body", func(t *testing.T) {
+		want := []byte(`{"usage":{"prompt_tokens":3,"completion_tokens":4}}`)
+		out := &kong_plugin_protocol.RawBodyResult{
+			Kind: &kong_plugin_protocol.RawBodyResult_Content{Content: want},
+		}
+		got, err := resolveRawBody(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("inline content mismatch: got %q", got)
+		}
+	})
+
+	t.Run("oversized_body_temp_file", func(t *testing.T) {
+		// Kong spills bodies larger than the Nginx buffer to a temp
+		// file and returns the path; we must read it back rather than
+		// treat the response as empty.
+		dir := t.TempDir()
+		path := filepath.Join(dir, "resp.json")
+		want := []byte(`{"usage":{"input_tokens":11,"output_tokens":22}}`)
+		if err := os.WriteFile(path, want, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		out := &kong_plugin_protocol.RawBodyResult{
+			Kind: &kong_plugin_protocol.RawBodyResult_BodyFilepath{BodyFilepath: path},
+		}
+		got, err := resolveRawBody(out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != string(want) {
+			t.Fatalf("temp-file body mismatch: got %q", got)
+		}
+	})
+
+	t.Run("error_branch", func(t *testing.T) {
+		out := &kong_plugin_protocol.RawBodyResult{
+			Kind: &kong_plugin_protocol.RawBodyResult_Error{Error: "buffer too small"},
+		}
+		_, err := resolveRawBody(out)
+		if err == nil || !strings.Contains(err.Error(), "buffer too small") {
+			t.Fatalf("error branch must surface the PDK error: %v", err)
+		}
+	})
+}
+
+// TestResolveRawBody_TempFileFeedsUsageParse closes the loop: a body
+// that arrives via the temp-file branch is parsed for usage exactly
+// like an inline body, so an oversized but valid response still
+// commits realized spend (not a spurious RELEASE).
+func TestResolveRawBody_TempFileFeedsUsageParse(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "resp.json")
+	if err := os.WriteFile(path, openaiResponseBody(t), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	if isFinalChunk([]byte("a")) {
-		t.Fatal("non-empty must not be final")
+	out := &kong_plugin_protocol.RawBodyResult{
+		Kind: &kong_plugin_protocol.RawBodyResult_BodyFilepath{BodyFilepath: path},
+	}
+	body, err := resolveRawBody(out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage, err := parseProviderUsage(string(ProviderOpenAI), body)
+	if err != nil {
+		t.Fatalf("oversized valid body must parse: %v", err)
+	}
+	if usage.InputTokens != 8 || usage.OutputTokens != 16 {
+		t.Fatalf("temp-file usage parse wrong: %+v", usage)
 	}
 }
 

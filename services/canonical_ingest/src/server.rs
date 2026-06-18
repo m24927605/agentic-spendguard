@@ -46,12 +46,22 @@ impl CanonicalIngest for CanonicalIngestService {
         &self,
         req: Request<AppendEventsRequest>,
     ) -> Result<Response<AppendEventsResponse>, Status> {
+        // Auth-trust: capture the client mTLS leaf cert (DER) BEFORE
+        // `into_inner()` drops the connection extensions. The handler
+        // binds it to the declared producer_id when
+        // `require_producer_spiffe_san` is enabled. We clone only the
+        // leaf (first cert in the chain) to keep the buffer small.
+        let peer_leaf_der: Option<Vec<u8>> = req
+            .peer_certs()
+            .and_then(|certs| certs.first().map(|c| c.as_ref().to_vec()));
+
         let resp = handlers::append_events::handle(
             &self.pool,
             &self.cfg,
             self.verifier.as_deref(),
             &self.metrics,
             req.into_inner(),
+            peer_leaf_der.as_deref(),
         )
         .await?;
         Ok(Response::new(resp))

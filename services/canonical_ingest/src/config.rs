@@ -64,6 +64,21 @@ pub struct Config {
 
     #[serde(default)]
     pub tls_ca_pem: Option<String>,
+
+    /// Auth-trust: when true, AppendEvents asserts that the client mTLS
+    /// leaf cert's SPIFFE URI SAN
+    /// (`spiffe://spendguard.platform/audit-producer/<producer_id>`)
+    /// binds to the declared `producer_id`, rejecting mismatches /
+    /// missing / unparseable SANs with `Unauthenticated`. CA issuance
+    /// alone is not identity — without this, any workload with a
+    /// CA-valid cert can spoof an arbitrary producer_id / tenant_id.
+    ///
+    /// Default OFF for a safe rollout: existing forwarders may present
+    /// certs without a SPIFFE URI SAN. Issue audit-producer SANs to all
+    /// producers first, then flip this to true. Once enabled the binding
+    /// is strictly fail-closed.
+    #[serde(default)]
+    pub require_producer_spiffe_san: bool,
 }
 
 fn default_bind_addr() -> String {

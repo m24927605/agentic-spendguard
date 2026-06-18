@@ -92,6 +92,14 @@ pub struct Cli {
     /// cross-tenant rejection (§5.2) compares this to `--tenant`. For
     /// production deployments this is set by mTLS termination upstream;
     /// for dev/demo the operator passes `SPENDGUARD_CALIBRATION_AUTH_SUBJECT`.
+    ///
+    /// TRUST BOUNDARY (§5.2): this value is NOT self-verified by the
+    /// binary — the CLI cannot validate an mTLS subject on its own. It
+    /// MUST be injected by a trusted, mTLS-terminating wrapper/launcher;
+    /// a caller who can set this flag can assert any subject. The
+    /// authoritative cross-tenant isolation is RLS at the DB (the
+    /// connection's role + `app.current_tenant_id`), not this check; this
+    /// check is a fail-closed guard layered on top of it.
     #[arg(long, env = "SPENDGUARD_CALIBRATION_AUTH_SUBJECT")]
     pub auth_subject: Option<String>,
 
@@ -99,6 +107,12 @@ pub struct Cli {
     /// deploys pass a comma-separated list; single-tenant deploys pass
     /// one UUID. Cross-tenant queries (caller's scope does not contain
     /// `--tenant`) exit 2 (spec §5.2).
+    ///
+    /// TRUST BOUNDARY (§5.2): like `--auth-subject`, this is NOT
+    /// self-asserted — it MUST be injected by the trusted mTLS-terminating
+    /// wrapper, not chosen by the querying operator. The binary cannot
+    /// distinguish a legitimately-scoped caller from one who set the flag
+    /// themselves; the real boundary is DB RLS. See `check_tenant_scope`.
     #[arg(long, env = "SPENDGUARD_CALIBRATION_AUTH_TENANTS")]
     pub auth_tenants: Option<String>,
 
@@ -172,10 +186,22 @@ impl Cli {
     /// query `--tenant`. Returns `Ok(false)` for refusal; `Err` for
     /// missing / malformed inputs.
     ///
+    /// NOTE on the trust boundary: `--auth-subject` / `--auth-tenants`
+    /// are NOT self-verified by this binary (see their flag docs). They
+    /// must be injected by a trusted mTLS-terminating wrapper. The
+    /// authoritative isolation is DB RLS; this check is a fail-closed
+    /// guard layered on top.
+    ///
     /// Behaviour:
-    ///   * If `--auth-tenants` is unset → returns `Ok(true)` (assume
-    ///     the deployment is single-tenant + un-scoped, e.g. demo).
-    ///   * If `--auth-tenants` is set → caller must list the requested
+    ///   * Both `--auth-subject` and `--auth-tenants` unset → `Ok(true)`
+    ///     (single-tenant / un-scoped deployment, e.g. demo). RLS is the
+    ///     only boundary in this mode.
+    ///   * Exactly one of `--auth-subject` / `--auth-tenants` set →
+    ///     `Ok(false)` (refuse). A deployment that supplies one but drops
+    ///     the other is mis-wired: the intent is to be authenticated but
+    ///     the scope (or subject) is missing, so we fail closed rather
+    ///     than fall through to the un-scoped allow path.
+    ///   * `--auth-tenants` set → caller must list the requested
     ///     `--tenant` in the comma-separated scope.
     ///   * `--tenant` must parse as a UUID.
     pub fn check_tenant_scope(&self) -> Result<bool, String> {
@@ -186,9 +212,15 @@ impl Cli {
         // Validate UUID shape so a malformed value cannot silently
         // accept a typo-as-tenant.
         uuid::Uuid::parse_str(tenant).map_err(|e| format!("--tenant is not a valid UUID: {e}"))?;
-        match self.auth_tenants.as_deref() {
-            None => Ok(true),
-            Some(scope) => {
+        match (self.auth_subject.as_deref(), self.auth_tenants.as_deref()) {
+            // Fully un-scoped: single-tenant / demo. RLS is the boundary.
+            (None, None) => Ok(true),
+            // Mis-wired: one half of the authenticated-deploy contract is
+            // present but the other was dropped. Fail closed instead of
+            // falling through to the un-scoped allow.
+            (Some(_), None) | (None, Some(_)) => Ok(false),
+            // Scoped: caller must list the requested tenant.
+            (Some(_), Some(scope)) => {
                 let allowed = scope
                     .split(',')
                     .map(|s| s.trim())
@@ -301,16 +333,21 @@ mod tests {
 
     #[test]
     fn tenant_scope_check_allows_when_no_auth_tenants_set() {
-        // Single-tenant / un-scoped deployment.
+        // Fully un-scoped single-tenant / demo deployment: neither
+        // --auth-subject nor --auth-tenants is set. RLS is the boundary.
         let cli = parse(&["--tenant", "00000000-0000-4000-8000-000000000001"]);
         assert_eq!(cli.check_tenant_scope().unwrap(), true);
     }
 
     #[test]
     fn tenant_scope_check_allows_when_listed() {
+        // Authenticated deploy: BOTH subject and scope present, tenant in
+        // scope → allowed.
         let cli = parse(&[
             "--tenant",
             "00000000-0000-4000-8000-000000000001",
+            "--auth-subject",
+            "operator@example.com",
             "--auth-tenants",
             "00000000-0000-4000-8000-000000000001,00000000-0000-4000-8000-000000000002",
         ]);
@@ -319,9 +356,39 @@ mod tests {
 
     #[test]
     fn tenant_scope_check_rejects_when_unlisted() {
+        // Authenticated deploy: tenant not in the caller's scope → refuse.
         let cli = parse(&[
             "--tenant",
             "00000000-0000-4000-8000-000000000099",
+            "--auth-subject",
+            "operator@example.com",
+            "--auth-tenants",
+            "00000000-0000-4000-8000-000000000001",
+        ]);
+        assert_eq!(cli.check_tenant_scope().unwrap(), false);
+    }
+
+    #[test]
+    fn tenant_scope_check_refuses_subject_without_scope() {
+        // Mis-wired authenticated deploy: subject present but the tenant
+        // scope was dropped. Must fail closed, not fall through to the
+        // un-scoped allow path.
+        let cli = parse(&[
+            "--tenant",
+            "00000000-0000-4000-8000-000000000001",
+            "--auth-subject",
+            "operator@example.com",
+        ]);
+        assert_eq!(cli.check_tenant_scope().unwrap(), false);
+    }
+
+    #[test]
+    fn tenant_scope_check_refuses_scope_without_subject() {
+        // Symmetric mis-wiring: scope present but subject dropped. The
+        // scope is unauthenticated, so fail closed rather than honour it.
+        let cli = parse(&[
+            "--tenant",
+            "00000000-0000-4000-8000-000000000001",
             "--auth-tenants",
             "00000000-0000-4000-8000-000000000001",
         ]);

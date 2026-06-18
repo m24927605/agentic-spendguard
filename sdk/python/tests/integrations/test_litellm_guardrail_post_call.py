@@ -3,7 +3,7 @@
 # tokens; the test never speaks to an actual sidecar / LLM provider.
 """COV_D11_S3 — ``SpendGuardGuardrail`` post-call hook wiring tests.
 
-Tier 1 unit tests per ``docs/slices/COV_D11_S3_commit_release.md`` test
+Tier 1 unit tests per ``docs/internal/slices/COV_D11_S3_commit_release.md`` test
 plan + ``docs/specs/coverage/D11_litellm_proxy_plugin/review-standards.md``
 §Slice 3 reviewer checklist (3.1 - 3.5).
 

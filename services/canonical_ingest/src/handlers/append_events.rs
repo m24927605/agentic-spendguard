@@ -59,6 +59,7 @@ pub async fn handle(
     verifier: Option<&dyn Verifier>,
     metrics: &IngestMetrics,
     req: AppendEventsRequest,
+    peer_leaf_der: Option<&[u8]>,
 ) -> Result<AppendEventsResponse, tonic::Status> {
     // Validate batch envelope.
     if req.producer_id.is_empty() {
@@ -66,6 +67,42 @@ pub async fn handle(
     }
     if req.events.is_empty() {
         return Err(tonic::Status::invalid_argument("events must not be empty"));
+    }
+
+    // Auth-trust: bind the authenticated client identity to the declared
+    // producer_id. CA issuance alone is not identity — without this any
+    // workload with a CA-valid cert could spoof an arbitrary producer_id
+    // / tenant_id. Enforcement is gated on `require_producer_spiffe_san`
+    // for a safe SAN rollout; once enabled it is strictly fail-closed
+    // (missing / unparseable / mismatched SAN => Unauthenticated).
+    if cfg.require_producer_spiffe_san {
+        if let Err(e) =
+            crate::producer_identity::assert_producer_binding(peer_leaf_der, &req.producer_id)
+        {
+            warn!(
+                producer_id = %req.producer_id,
+                err = %e,
+                "rejecting AppendEvents: producer SPIFFE identity binding failed"
+            );
+            return Err(tonic::Status::unauthenticated(e.to_string()));
+        }
+        // Each event's producer_id must match the authenticated batch
+        // envelope producer_id, so a per-event field cannot smuggle a
+        // different (unauthenticated) producer identity past the SAN
+        // binding above.
+        for evt in &req.events {
+            if evt.producer_id != req.producer_id {
+                warn!(
+                    batch_producer_id = %req.producer_id,
+                    event_producer_id = %evt.producer_id,
+                    event_id = %evt.id,
+                    "rejecting AppendEvents: per-event producer_id diverges from authenticated batch identity"
+                );
+                return Err(tonic::Status::unauthenticated(
+                    "event producer_id does not match authenticated batch producer_id",
+                ));
+            }
+        }
     }
     let bundle_ref = req
         .schema_bundle
@@ -764,6 +801,7 @@ mod tests {
             tls_cert_pem: None,
             tls_key_pem: None,
             tls_ca_pem: None,
+            require_producer_spiffe_san: false,
         }
     }
 
@@ -802,6 +840,7 @@ mod tests {
             None,
             &IngestMetrics::new(),
             req,
+            None,
         )
         .await
         .expect_err("request should be rejected before storage access")
@@ -1166,13 +1205,30 @@ async fn verify_or_handle(
     }
 }
 
+/// Maximum canonical-byte payload persisted into the quarantine row.
+/// Beyond this the bytes are stored truncated (plus the full SHA-256 of
+/// the original), so a forensic record always survives — the event is
+/// never silently dropped.
+const QUARANTINE_CANONICAL_CAP: usize = 1_048_576;
+
 /// Persist the offending event in `audit_signature_quarantine` and
-/// return the EventResult the handler surfaces. On insert failure we
-/// fail-open with a Quarantined status — the audit invariant is
-/// preserved (the row was rejected from the canonical log) even if the
-/// quarantine write fails (operator sees the gRPC status + the metric
-/// counter; row is dropped, which is acceptable at the quarantine
-/// boundary).
+/// return the EventResult the handler surfaces.
+///
+/// Fail-closed contract: a signature-verification failure is a
+/// tamper/forgery signal, so the forensic record must NOT be lost.
+///
+///   * If the canonical bytes exceed the cap we store a TRUNCATED copy
+///     plus the full SHA-256 of the original (and its length), instead
+///     of dropping the event. The record is still verifiable and the
+///     event is durably captured.
+///   * If the quarantine insert FAILS (table unavailable, etc.) we do
+///     NOT claim `QUARANTINED` — that would be a contract-lie asserting
+///     the tamper evidence was durably recorded when it was not.
+///     Instead we bump `quarantine_write_failed` (for alerting) and
+///     return a non-terminal status, so the outbox forwarder keeps the
+///     row pending and re-sends it on the next cycle (per-event retry,
+///     no batch-level failure). Once the table recovers the retry
+///     persists the evidence.
 async fn write_quarantine(
     pool: &PgPool,
     evt: &CloudEvent,
@@ -1180,24 +1236,52 @@ async fn write_quarantine(
     metrics: &IngestMetrics,
 ) -> EventResult {
     let canonical = canonical_bytes(evt);
-    if canonical.len() > 1_048_576 {
-        metrics.inc_quarantined(QuarantineReason::Oversized);
+
+    // Oversized canonical bytes: store a truncated copy + the full
+    // SHA-256 so the forensic record survives (no silent drop).
+    let (stored_bytes, truncation): (&[u8], Option<signature_quarantine::TruncationNote>) =
+        if canonical.len() > QUARANTINE_CANONICAL_CAP {
+            metrics.inc_quarantined(QuarantineReason::Oversized);
+            let original_sha256_hex = hex::encode(Sha256::digest(&canonical));
+            warn!(
+                event_id = %evt.id,
+                len = canonical.len(),
+                sha256 = %original_sha256_hex,
+                "quarantine: canonical bytes exceed cap; storing truncated copy + full digest"
+            );
+            (
+                &canonical[..QUARANTINE_CANONICAL_CAP],
+                Some(signature_quarantine::TruncationNote {
+                    original_len: canonical.len(),
+                    original_sha256_hex,
+                }),
+            )
+        } else {
+            (&canonical[..], None)
+        };
+
+    if let Err(e) =
+        signature_quarantine::insert_with_truncation(pool, evt, stored_bytes, reason, truncation)
+            .await
+    {
+        // Fail-closed: the evidence was NOT durably recorded. Do not lie
+        // with a terminal QUARANTINED status; alert + return a
+        // non-terminal status so the forwarder re-sends.
+        metrics.inc_quarantine_write_failed();
         warn!(
             event_id = %evt.id,
-            len = canonical.len(),
-            "quarantine: canonical bytes too large; dropping"
+            err = %e,
+            "audit_signature_quarantine insert failed; surfacing non-terminal status for re-send"
         );
         return error_result(
             &evt.id,
-            EventStatus::Quarantined,
-            DomainError::InvalidRequest(
-                "oversized canonical bytes; dropped at quarantine boundary".into(),
-            ),
+            EventStatus::Unspecified,
+            DomainError::Internal(anyhow::anyhow!(
+                "quarantine write failed ({reason}); event NOT durably recorded, retry pending"
+            )),
         );
     }
-    if let Err(e) = signature_quarantine::insert(pool, evt, &canonical, reason).await {
-        warn!(event_id = %evt.id, err = %e, "audit_signature_quarantine insert failed");
-    }
+
     error_result(
         &evt.id,
         EventStatus::Quarantined,

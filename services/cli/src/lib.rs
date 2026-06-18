@@ -401,6 +401,22 @@ fn install_with_preflight_env(
     fn leak_str(s: String) -> &'static str {
         Box::leak(s.into_boxed_str())
     }
+    let overrides = opts.preflight_overrides();
+
+    // Security gate, install-path only: an unresolvable HOME means the
+    // Gemini OAuth free-tier probe (`~/.gemini/oauth_creds.json`) would
+    // resolve against a `/` sentinel and silently report "not installed",
+    // bypassing the T10 gate. Treat that as INCONCLUSIVE and refuse rather
+    // than fail-open. The `--force-allow-gemini-oauth` escape hatch (which
+    // already bypasses the freetier gate below) also bypasses this one, so
+    // the operator keeps an explicit override path. Doctor / uninstall
+    // (read-only) keep the `/`-sentinel degrade — they never call here.
+    if home.is_none() && !overrides.allow_gemini_oauth {
+        return Err(PreflightRefusal::GeminiOauthInconclusiveHome(
+            preflight::INCONCLUSIVE_HOME_MESSAGE.to_string(),
+        ));
+    }
+
     let gemini_api_key = std::env::var("GEMINI_API_KEY").ok().map(leak_str);
     let google_application_credentials = std::env::var("GOOGLE_APPLICATION_CREDENTIALS")
         .ok()
@@ -410,7 +426,7 @@ fn install_with_preflight_env(
         gemini_api_key,
         google_application_credentials,
     };
-    preflight::run_preflight(&env, opts.preflight_overrides())
+    preflight::run_preflight(&env, overrides)
 }
 
 /// Re-export so the install seam can propagate the refusal up via `?`
@@ -905,7 +921,11 @@ mod tests {
             scope: TrustScope::User,
             ca_out: Some(tmp.path().to_path_buf()),
             shell: None,
-            force_allow_gemini_oauth: false,
+            // This test passes home=None and exercises install mechanics,
+            // not the Gemini gate. The inconclusive-HOME gate now refuses
+            // an install with an unresolvable HOME unless overridden, so
+            // set the documented escape flag to keep the test's intent.
+            force_allow_gemini_oauth: true,
         };
         let backend = NoopTrustStore::default();
         let report = install_with_backends(
@@ -961,7 +981,9 @@ mod tests {
             scope: TrustScope::User,
             ca_out: Some(tmp.path().to_path_buf()),
             shell: None,
-            force_allow_gemini_oauth: false,
+            // home=None; exercising trust-backend wiring, not the Gemini
+            // gate — bypass the inconclusive-HOME refusal via the flag.
+            force_allow_gemini_oauth: true,
         };
         let backend = NoopTrustStore::default();
         let report = install_with_backends(
@@ -1095,7 +1117,9 @@ mod tests {
             scope: TrustScope::User,
             ca_out: Some(tmp.path().to_path_buf()),
             shell: None,
-            force_allow_gemini_oauth: false,
+            // home=None; exercising key-file mode bits, not the Gemini
+            // gate — bypass the inconclusive-HOME refusal via the flag.
+            force_allow_gemini_oauth: true,
         };
         let backend = NoopTrustStore::default();
         let report = install_with_backends(
@@ -1141,7 +1165,9 @@ mod tests {
             scope: TrustScope::User,
             ca_out: Some(tmp.path().to_path_buf()),
             shell: None,
-            force_allow_gemini_oauth: false,
+            // home=None; exercising key-file re-permission on reinstall,
+            // not the Gemini gate — bypass the inconclusive-HOME refusal.
+            force_allow_gemini_oauth: true,
         };
         let backend = NoopTrustStore::default();
         let report = install_with_backends(
@@ -1318,7 +1344,10 @@ mod tests {
             scope: TrustScope::User,
             ca_out: Some(ca_tmp.path().to_path_buf()),
             shell: None,
-            force_allow_gemini_oauth: false,
+            // home=None; exercising cmd.exe shell detection + breadcrumb
+            // vars, not the Gemini gate — bypass the inconclusive-HOME
+            // refusal via the documented escape flag.
+            force_allow_gemini_oauth: true,
         };
         let env = shell::EnvView {
             shell: Some("cmd.exe"),
@@ -1483,6 +1512,89 @@ mod tests {
         assert!(bashrc.exists(), ".bashrc must be written");
         let content = std::fs::read_to_string(&bashrc).expect("read .bashrc");
         assert!(content.contains("HTTPS_PROXY"));
+    }
+
+    /// SLICE 6 (HOME-inconclusive gate): `install_with_backends` with
+    /// `home=None` (HOME / USERPROFILE both unset — minimal container,
+    /// `sudo` without -E) and no `--force-allow-gemini-oauth` must REFUSE
+    /// rather than silently bypass the Gemini OAuth gate via the `/`
+    /// sentinel. This is the fail-closed regression: an unresolvable HOME
+    /// is INCONCLUSIVE, not "not installed".
+    #[test]
+    fn slice6_install_refuses_when_home_unresolvable_without_force_flag() {
+        let ca_tmp = tempfile::tempdir().expect("ca tempdir");
+
+        let opts = InstallOpts {
+            scope: TrustScope::User,
+            ca_out: Some(ca_tmp.path().to_path_buf()),
+            shell: Some(ShellKind::Bash),
+            force_allow_gemini_oauth: false,
+        };
+        let backend = NoopTrustStore::default();
+        let env = shell::EnvView {
+            shell: Some("/bin/bash"),
+            ..Default::default()
+        };
+
+        let err = install_with_backends(&opts, &backend, None, env, DEFAULT_PROXY_URL)
+            .expect_err("install MUST refuse when HOME is unresolvable");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("Refusing to install"),
+            "refusal message must surface in anyhow chain, got: {msg}"
+        );
+        assert!(
+            msg.contains("cannot resolve HOME"),
+            "refusal must name the unresolvable-HOME cause, got: {msg}"
+        );
+        assert!(
+            msg.contains("--force-allow-gemini-oauth"),
+            "refusal must surface the override flag, got: {msg}"
+        );
+
+        // No CA file written — issuance never ran (gate is before issuance).
+        let pem_files: Vec<_> = std::fs::read_dir(ca_tmp.path())
+            .expect("read ca_tmp")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            pem_files.is_empty(),
+            "no PEM files should have been written; found: {pem_files:?}"
+        );
+
+        // Trust backend `add_root` never called.
+        let added = backend.added.lock().unwrap().clone();
+        assert!(
+            added.is_empty(),
+            "add_root MUST NOT have been called; got: {added:?}"
+        );
+    }
+
+    /// SLICE 6 (HOME-inconclusive gate): `--force-allow-gemini-oauth=true`
+    /// bypasses the inconclusive-HOME refusal too — the operator's explicit
+    /// override keeps a recovery path even when HOME cannot be resolved.
+    #[test]
+    fn slice6_install_proceeds_when_home_unresolvable_but_force_flag_set() {
+        let ca_tmp = tempfile::tempdir().expect("ca tempdir");
+
+        let opts = InstallOpts {
+            scope: TrustScope::User,
+            ca_out: Some(ca_tmp.path().to_path_buf()),
+            // No shell rc write: with home=None there is no rc target, and
+            // resolve_shell would have nowhere to write. Keep the assertion
+            // focused on the gate bypass + CA issuance.
+            shell: None,
+            force_allow_gemini_oauth: true,
+        };
+        let backend = NoopTrustStore::default();
+        let env = shell::EnvView::default();
+
+        let report = install_with_backends(&opts, &backend, None, env, DEFAULT_PROXY_URL)
+            .expect("install with force flag must proceed despite unresolvable HOME");
+
+        assert!(report.ca_pem_path.exists(), "CA PEM must be written");
+        let added = backend.added.lock().unwrap().clone();
+        assert_eq!(added.len(), 1, "add_root must have been called once");
     }
 
     /// SLICE 6: `uninstall_with_backends` bypasses preflight entirely.

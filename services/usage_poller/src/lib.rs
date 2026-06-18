@@ -22,7 +22,12 @@
 //! events; the overlap catches updates to events that landed slightly
 //! before the previous cursor. Idempotency on
 //! `provider_usage_record_hash(provider, account, event_id, kind)`
-//! handles re-observations correctly.
+//! handles re-observations correctly. For OpenAI/Anthropic, which have
+//! no per-row id and re-report the same bucket with higher aggregates
+//! as usage settles, the synthesized `provider_event_id` folds in the
+//! settled token totals (lib.rs v2: prefix `v2:...:row:`) so an upward
+//! correction is a NEW immutable `pending` row for the reconciliation
+//! matcher to adjust against — never silently dropped by ON CONFLICT.
 //!
 //! Spec acceptance criteria:
 //!   * "Mock OpenAI usage response imports successfully" — covered.
@@ -32,10 +37,15 @@
 //!     — late-arriving rows that match an existing reservation will
 //!     be observation-only (handled by S10's matching SP); the poller
 //!     does not double-debit.
-//!   * "API outage preserves last successful cursor and alerts" —
-//!     cursor is persisted in `provider_usage_poller_state`; the
-//!     poller logs at warn on transient errors and at error after
-//!     N consecutive failures (alertable).
+//!   * "API outage preserves last successful cursor and alerts" — the
+//!     in-memory cursor only advances on a successful cycle, so a
+//!     transient error retains the last-success cursor; on restart /
+//!     leader handoff the cursor re-seeds from
+//!     `MAX(observed_at) WHERE provider = ...` (idempotent inserts make
+//!     an over-conservative seed safe). The dedicated
+//!     `provider_usage_poller_state` durable-cursor table is still a
+//!     followup. The poller logs at warn on transient errors
+//!     (alertable via the cycles_total{outcome="err"} metric).
 
 pub mod metrics;
 
@@ -345,11 +355,23 @@ impl ProviderClient for OpenAiClient {
                 let bucket_end =
                     DateTime::<Utc>::from_timestamp(bucket.end_time, 0).unwrap_or(bucket_observed);
                 for r in bucket.results {
+                    let total = r
+                        .input_tokens
+                        .unwrap_or(0)
+                        .saturating_add(r.output_tokens.unwrap_or(0));
                     // Synthesize a stable provider_event_id from the
-                    // bucket window + project + model + api_key. OpenAI
-                    // doesn't expose a per-row id today — we derive a
-                    // deterministic one so re-polling the same window
-                    // is idempotent via record_hash.
+                    // bucket window + project + model + api_key + the
+                    // settled token totals. OpenAI doesn't expose a
+                    // per-row id today and re-reports the SAME bucket
+                    // with HIGHER aggregates as usage settles. If the
+                    // id keyed only on the window, a settled-upward
+                    // re-poll would collide on idempotency_key and the
+                    // higher counts would be dropped by ON CONFLICT DO
+                    // NOTHING — silently under-counting spend. Folding
+                    // the token totals in makes a settled bucket a
+                    // brand-new immutable `pending` row that the
+                    // reconciliation matcher adjusts against (delta),
+                    // while genuinely identical re-polls still dedup.
                     let mut keyparts = String::new();
                     keyparts.push_str(&bucket.start_time.to_string());
                     keyparts.push(':');
@@ -360,16 +382,18 @@ impl ProviderClient for OpenAiClient {
                     keyparts.push_str(r.api_key_id.as_deref().unwrap_or("nokey"));
                     keyparts.push(':');
                     keyparts.push_str(r.model.as_deref().unwrap_or("nomodel"));
+                    keyparts.push(':');
+                    keyparts.push_str(&r.input_tokens.unwrap_or(0).to_string());
+                    keyparts.push(':');
+                    keyparts.push_str(&r.output_tokens.unwrap_or(0).to_string());
+                    keyparts.push(':');
+                    keyparts.push_str(&total.to_string());
                     let provider_event_id = {
                         let mut h = Sha256::new();
-                        h.update(b"v1:openai:row:");
+                        h.update(b"v2:openai:row:");
                         h.update(keyparts.as_bytes());
                         hex::encode(h.finalize())
                     };
-                    let total = r
-                        .input_tokens
-                        .unwrap_or(0)
-                        .saturating_add(r.output_tokens.unwrap_or(0));
                     all.push(UsageObservation {
                         provider: "openai".into(),
                         provider_account: r.project_id.clone().unwrap_or_default(),
@@ -587,6 +611,22 @@ impl ProviderClient for AnthropicClient {
                     .map(|d| d.with_timezone(&Utc))
                     .unwrap_or_else(Utc::now);
                 for r in bucket.results {
+                    let input_total = r
+                        .uncached_input_tokens
+                        .unwrap_or(0)
+                        .saturating_add(r.cache_creation_input_tokens.unwrap_or(0))
+                        .saturating_add(r.cache_read_input_tokens.unwrap_or(0));
+                    let total = input_total.saturating_add(r.output_tokens.unwrap_or(0));
+                    // Fold the settled token totals into the synthesized
+                    // id (see the OpenAI path for the full rationale):
+                    // Anthropic re-reports the same window with higher
+                    // aggregates as usage settles, so keying only on the
+                    // window would let ON CONFLICT DO NOTHING drop the
+                    // upward correction and under-count spend. Folding
+                    // every constituent token component + the totals in
+                    // makes a settled re-report a new immutable `pending`
+                    // row for the matcher to adjust against, while exact
+                    // re-polls still dedup.
                     let mut keyparts = String::new();
                     keyparts.push_str(bucket.starts_at.as_deref().unwrap_or(""));
                     keyparts.push(':');
@@ -597,18 +637,22 @@ impl ProviderClient for AnthropicClient {
                     keyparts.push_str(r.api_key_id.as_deref().unwrap_or("nokey"));
                     keyparts.push(':');
                     keyparts.push_str(r.model.as_deref().unwrap_or("nomodel"));
+                    keyparts.push(':');
+                    keyparts.push_str(&r.uncached_input_tokens.unwrap_or(0).to_string());
+                    keyparts.push(':');
+                    keyparts.push_str(&r.cache_creation_input_tokens.unwrap_or(0).to_string());
+                    keyparts.push(':');
+                    keyparts.push_str(&r.cache_read_input_tokens.unwrap_or(0).to_string());
+                    keyparts.push(':');
+                    keyparts.push_str(&r.output_tokens.unwrap_or(0).to_string());
+                    keyparts.push(':');
+                    keyparts.push_str(&total.to_string());
                     let provider_event_id = {
                         let mut h = Sha256::new();
-                        h.update(b"v1:anthropic:row:");
+                        h.update(b"v2:anthropic:row:");
                         h.update(keyparts.as_bytes());
                         hex::encode(h.finalize())
                     };
-                    let input_total = r
-                        .uncached_input_tokens
-                        .unwrap_or(0)
-                        .saturating_add(r.cache_creation_input_tokens.unwrap_or(0))
-                        .saturating_add(r.cache_read_input_tokens.unwrap_or(0));
-                    let total = input_total.saturating_add(r.output_tokens.unwrap_or(0));
                     all.push(UsageObservation {
                         provider: "anthropic".into(),
                         provider_account: r.workspace_id.clone().unwrap_or_default(),
@@ -874,7 +918,7 @@ mod tests {
     /// reqwest with rustls under the hood. Tests that build a real
     /// `OpenAiClient::new(...)` / `AnthropicClient::new(...)` should call
     /// `ensure_crypto_provider()` first to avoid the same panic that the
-    /// service mains hit before F1 landed (see docs/launches/v1-phase1-bug-report.md).
+    /// service mains hit before F1 landed (see docs/internal/launches/v1-phase1-bug-report.md).
     static CRYPTO_INIT: Once = Once::new();
     fn ensure_crypto_provider() {
         CRYPTO_INIT.call_once(|| {
@@ -1146,6 +1190,105 @@ mod tests {
             .fetch_usage(Utc::now() - chrono::Duration::hours(1), Utc::now())
             .await
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn openai_settled_upward_bucket_is_a_new_record_not_dropped() {
+        // Regression: OpenAI re-reports the SAME bucket window with a
+        // higher aggregate as usage settles. The synthesized
+        // provider_event_id must fold in the token totals so the
+        // settled-upward re-report becomes a DISTINCT record_hash —
+        // otherwise ON CONFLICT (idempotency_key) DO NOTHING silently
+        // discards the correction and spend under-counts.
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        fn body(input: i64, output: i64) -> serde_json::Value {
+            serde_json::json!({
+                "object": "page",
+                "data": [{
+                    "object": "bucket",
+                    "start_time": 1730000000_i64,
+                    "end_time":   1730000060_i64,
+                    "results": [{
+                        "object": "organization.usage.completions.result",
+                        "input_tokens":  input,
+                        "output_tokens": output,
+                        "num_model_requests": 1,
+                        "project_id": "proj_demo",
+                        "api_key_id": "key_demo",
+                        "model":      "gpt-4o-mini"
+                    }]
+                }],
+                "has_more":  false,
+                "next_page": null
+            })
+        }
+
+        // First observation of the bucket: 100/200.
+        let server1 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/organization/usage/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body(100, 200)))
+            .mount(&server1)
+            .await;
+        let c1 = OpenAiClient::with_base_url("sk".into(), None, None, server1.uri());
+        let first = c1
+            .fetch_usage(Utc::now() - chrono::Duration::hours(1), Utc::now())
+            .await
+            .unwrap();
+
+        // Same bucket window settles upward: 150/260.
+        let server2 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/organization/usage/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body(150, 260)))
+            .mount(&server2)
+            .await;
+        let c2 = OpenAiClient::with_base_url("sk".into(), None, None, server2.uri());
+        let settled = c2
+            .fetch_usage(Utc::now() - chrono::Duration::hours(1), Utc::now())
+            .await
+            .unwrap();
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(settled.len(), 1);
+        // Distinct event ids → distinct record_hash → the settled-up
+        // row is NOT swallowed by ON CONFLICT DO NOTHING.
+        assert_ne!(
+            first[0].provider_event_id, settled[0].provider_event_id,
+            "settled-upward bucket must yield a distinct provider_event_id"
+        );
+        let h_first = record_hash(
+            &first[0].provider,
+            &first[0].provider_account,
+            &first[0].provider_event_id,
+            &first[0].event_kind,
+        );
+        let h_settled = record_hash(
+            &settled[0].provider,
+            &settled[0].provider_account,
+            &settled[0].provider_event_id,
+            &settled[0].event_kind,
+        );
+        assert_ne!(h_first, h_settled);
+
+        // But an IDENTICAL re-poll still dedups to the same id.
+        let server3 = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/organization/usage/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body(100, 200)))
+            .mount(&server3)
+            .await;
+        let c3 = OpenAiClient::with_base_url("sk".into(), None, None, server3.uri());
+        let repoll = c3
+            .fetch_usage(Utc::now() - chrono::Duration::hours(1), Utc::now())
+            .await
+            .unwrap();
+        assert_eq!(
+            first[0].provider_event_id, repoll[0].provider_event_id,
+            "identical re-poll must dedup to the same provider_event_id"
+        );
     }
 
     #[test]

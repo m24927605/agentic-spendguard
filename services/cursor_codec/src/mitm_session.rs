@@ -336,11 +336,7 @@ impl<S: SidecarLane, U: UpstreamConnector> MitmSession<S, U> {
         };
 
         // 6. Extract actual output tokens for commit.
-        let actual_output_tokens = chunks
-            .iter()
-            .map(|c| c.usage.as_ref().map(|u| u.completion_tokens).unwrap_or(0))
-            .max()
-            .unwrap_or(0);
+        let actual_output_tokens = commit_output_tokens(&chunks);
 
         // 7. Commit.
         self.sidecar
@@ -383,6 +379,65 @@ fn build_cursor_response_wire(chunks: &[OpenAiChatResponseChunk]) -> Result<Byte
     };
     out.extend_from_slice(&reencode_frame_with_payload(&eos, Bytes::new()));
     Ok(Bytes::from(out))
+}
+
+/// Derive the output-token count to commit from the response chunks.
+///
+/// ## Why this is not just `max(completion_tokens)`
+///
+/// The translator never sets `stream_options.include_usage` on the
+/// forwarded request, so most backends stream WITHOUT a terminal usage
+/// block. A naive `max(completion_tokens).unwrap_or(0)` then commits
+/// `0` for every successful streaming call — silently under-metering
+/// spend (a fail-OPEN data-integrity bug: real money leaks past the
+/// guardrail because the ledger believes nothing was consumed).
+///
+/// The fix distinguishes the two ways the count can be zero:
+///
+/// 1. **At least one chunk carried a usage block.** The provider told
+///    us the truth — trust it. We take the maximum `completion_tokens`
+///    across the usage blocks (OpenAI reports a single cumulative count
+///    on the terminal chunk; `max` is robust if a backend reports
+///    per-chunk deltas). A genuine `0` here (empty / refused / filtered
+///    completion) is PRESERVED — we do NOT floor it, because flooring a
+///    truthful zero would over-bill.
+///
+/// 2. **No chunk carried any usage block.** We have no provider-reported
+///    actuals, so committing `0` would under-meter. Instead we fall back
+///    to estimating from the streamed delta content (the fallback
+///    [`crate::translate::extract_openai_output_tokens`] documents). The
+///    estimate is fail-closed: `ceil(chars / 4)` (the workspace's
+///    chars-per-token proxy), rounding partial tokens UP and yielding at
+///    least `1` whenever any content was actually streamed. A stream
+///    that produced no content at all still commits `0` — the legitimate
+///    empty-completion case.
+fn commit_output_tokens(chunks: &[OpenAiChatResponseChunk]) -> u32 {
+    // Provider-reported path: trust the usage block(s) if any are present,
+    // preserving a truthful zero.
+    let mut saw_usage = false;
+    let mut reported = 0u32;
+    for c in chunks {
+        if let Some(usage) = c.usage.as_ref() {
+            saw_usage = true;
+            reported = reported.max(usage.completion_tokens);
+        }
+    }
+    if saw_usage {
+        return reported;
+    }
+
+    // Absence-of-usage fallback: estimate from streamed delta content so
+    // a usage-less stream is never silently committed as zero spend.
+    let streamed_chars: usize = chunks
+        .iter()
+        .flat_map(|c| c.choices.iter())
+        .filter_map(|choice| choice.delta.content.as_deref())
+        .map(|content| content.chars().count())
+        .sum();
+
+    // `div_ceil` rounds partial tokens UP (fail-closed). Saturating cast
+    // guards the (practically unreachable) >u32::MAX-token case.
+    u32::try_from(streamed_chars.div_ceil(4)).unwrap_or(u32::MAX)
 }
 
 // ============================================================================
@@ -621,6 +676,43 @@ mod tests {
         ]
     }
 
+    /// A streaming response with NO usage block on any chunk — the
+    /// common case, because the translator never sets
+    /// `stream_options.include_usage`. `content` is split into two
+    /// streamed deltas so the absence-of-usage fallback has data to
+    /// estimate from.
+    fn streaming_response_no_usage(content: &str) -> Vec<OpenAiChatResponseChunk> {
+        let (a, b) = content.split_at(content.len() / 2);
+        vec![
+            OpenAiChatResponseChunk {
+                model: "gpt-4o-mini".to_string(),
+                choices: vec![OpenAiChunkChoice {
+                    index: 0,
+                    delta: OpenAiChunkDelta {
+                        role: Some("assistant".to_string()),
+                        content: Some(a.to_string()),
+                    },
+                    finish_reason: None,
+                }],
+                usage: None,
+                extra: Default::default(),
+            },
+            OpenAiChatResponseChunk {
+                model: "gpt-4o-mini".to_string(),
+                choices: vec![OpenAiChunkChoice {
+                    index: 0,
+                    delta: OpenAiChunkDelta {
+                        role: None,
+                        content: Some(b.to_string()),
+                    },
+                    finish_reason: Some("stop".to_string()),
+                }],
+                usage: None,
+                extra: Default::default(),
+            },
+        ]
+    }
+
     /// (1) Full reserve + commit cycle on the happy path.
     #[tokio::test]
     async fn reserve_then_commit_on_success() {
@@ -819,5 +911,66 @@ mod tests {
         );
         assert_eq!(upstream.forward_count(), 0);
         assert_eq!(sidecar.commit_count(), 0);
+    }
+
+    /// (10) Usage-present path is unchanged: commit the reported count.
+    #[test]
+    fn commit_tokens_trusts_reported_usage() {
+        let chunks = streaming_response(17);
+        assert_eq!(commit_output_tokens(&chunks), 17);
+    }
+
+    /// (11) A truthful zero (empty / refused completion, usage block
+    /// present) is PRESERVED — we must not floor it, that would over-bill.
+    #[test]
+    fn commit_tokens_preserves_genuine_zero_when_usage_present() {
+        let chunks = streaming_response(0);
+        assert_eq!(
+            commit_output_tokens(&chunks),
+            0,
+            "a provider-reported zero must not be floored"
+        );
+    }
+
+    /// (12) The fail-OPEN bug: a usage-less stream that actually carried
+    /// content must NOT commit zero. It falls back to a ceil(chars/4)
+    /// estimate so spend is metered.
+    #[test]
+    fn commit_tokens_estimates_when_no_usage_block() {
+        // 20 streamed chars → ceil(20/4) = 5 estimated output tokens.
+        let chunks = streaming_response_no_usage("abcdefghijklmnopqrst");
+        assert_eq!(commit_output_tokens(&chunks), 5);
+    }
+
+    /// (13) A usage-less stream with NO content at all is a legitimate
+    /// empty completion → commit zero (do not synthesize spend).
+    #[test]
+    fn commit_tokens_zero_when_no_usage_and_no_content() {
+        let chunks = streaming_response_no_usage("");
+        assert_eq!(commit_output_tokens(&chunks), 0);
+    }
+
+    /// (14) End-to-end: a successful streaming call without a usage block
+    /// commits a NONZERO estimate, not silent zero. This is the
+    /// regression guard for the under-metering fail-open.
+    #[tokio::test]
+    async fn streaming_without_usage_commits_nonzero_estimate() {
+        let sidecar = Arc::new(InMemorySidecar::new());
+        // 12 streamed chars → ceil(12/4) = 3.
+        let upstream = Arc::new(CountedUpstream::returning(streaming_response_no_usage(
+            "hello world!",
+        )));
+        let session = MitmSession::new(Arc::clone(&sidecar), Arc::clone(&upstream));
+
+        let bytes = cursor_request_bytes("gpt-4o-mini", "hello");
+        let result = session.run(&bytes).await.unwrap();
+
+        assert_eq!(result.committed, Some(true));
+        assert_eq!(sidecar.commit_count(), 1);
+        let commits = sidecar.commit_calls();
+        assert_eq!(
+            commits[0].2, 3,
+            "usage-less stream must commit the ceil(chars/4) estimate, not 0"
+        );
     }
 }

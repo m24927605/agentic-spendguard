@@ -113,13 +113,29 @@ pub async fn forward_once(
     cfg: &AuditForwarderConfig,
     client: &mut CanonicalIngestClient<Channel>,
 ) -> Result<ForwardSummary, anyhow::Error> {
-    let mut tx = pool.begin().await.context("begin audit forward tx")?;
-    let rows = fetch_pending_rows(&mut tx, cfg.batch_size).await?;
+    // Claim a batch of pending rows under FOR UPDATE SKIP LOCKED, then
+    // release the row locks immediately by committing the claim tx. We
+    // deliberately do NOT hold the lock-holding tx across the
+    // canonical_ingest AppendEvents network RPC: holding row locks over a
+    // network call lengthens lock-hold time and risks pool starvation when
+    // canonical_ingest is slow. Releasing locks early is redelivery-safe
+    // because mark_forwarded re-asserts `forwarded_at IS NULL` and
+    // canonical_ingest dedups by event_id, so a re-send is a no-op
+    // `Deduped` rather than a duplicate append.
+    let rows = {
+        let mut claim_tx = pool.begin().await.context("begin audit claim tx")?;
+        let rows = fetch_pending_rows(&mut claim_tx, cfg.batch_size).await?;
+        claim_tx.commit().await.context("commit audit claim tx")?;
+        rows
+    };
     if rows.is_empty() {
-        tx.commit().await?;
         return Ok(ForwardSummary { forwarded: 0 });
     }
 
+    // Forward sequentially in the SELECT's `ORDER BY tenant_id,
+    // producer_sequence` order. canonical_ingest enforces per-tenant
+    // ordering via AwaitingPrecedingDecision, so within a tenant rows MUST
+    // be appended in producer_sequence order and MUST NOT be parallelized.
     let mut forwarded = 0usize;
     for row in rows {
         let (req, signature) = build_signed_append_request(&row, signer, cfg).await?;
@@ -129,11 +145,16 @@ pub async fn forward_once(
             .context("canonical_ingest AppendEvents for control-plane audit")?
             .into_inner();
         ensure_append_accepted(resp)?;
-        mark_forwarded(&mut tx, row.audit_outbox_id, &signature).await?;
+        // Only mark forwarded AFTER the append is confirmed accepted. A
+        // short follow-up tx flips forwarded_at; if the process crashes
+        // before this commit the row stays pending and is re-sent next
+        // cycle (idempotent), never lost (fail-closed).
+        let mut mark_tx = pool.begin().await.context("begin audit mark tx")?;
+        mark_forwarded(&mut mark_tx, row.audit_outbox_id, &signature).await?;
+        mark_tx.commit().await.context("commit audit mark tx")?;
         forwarded += 1;
     }
 
-    tx.commit().await.context("commit audit forward tx")?;
     Ok(ForwardSummary { forwarded })
 }
 

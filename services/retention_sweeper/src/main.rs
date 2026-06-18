@@ -22,8 +22,34 @@ use spendguard_leases::{
 };
 
 use spendguard_retention_sweeper::{
-    log_sweep, sweep_audit_outbox_prompts, sweep_provider_usage_raw,
+    log_sweep, sweep_audit_outbox_prompts, sweep_provider_usage_raw, SweepOutcome,
 };
+
+/// Fail-closed surfacing for partial redaction failures.
+///
+/// A `rows_failed > 0` outcome means the retention/redaction control did
+/// NOT redact some rows whose retention window has elapsed — i.e. raw
+/// prompt / provider payload is being retained past the configured policy.
+/// Before this, the per-row error was only swallowed into
+/// `retention_sweeper_log` with nobody alerted, so the compliance control
+/// could fail silently and indefinitely. Emitting an `error!` here gives
+/// alerting (log-based `level=ERROR` rule + the `retention_redaction_failed`
+/// structured field) a hook to page on, converting a silent compliance gap
+/// into a loud, actionable signal.
+fn alert_on_redaction_failures(table: &str, out: &SweepOutcome) {
+    if out.rows_failed > 0 {
+        error!(
+            retention_redaction_failed = true,
+            table = table,
+            sweep_kind = out.sweep_kind.as_str(),
+            rows_examined = out.rows_examined,
+            rows_redacted = out.rows_redacted,
+            rows_failed = out.rows_failed,
+            "retention redaction left rows unredacted past their retention window — \
+             prompt/provider data retained beyond policy; investigate immediately"
+        );
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct Config {
@@ -174,6 +200,13 @@ async fn main() -> anyhow::Result<()> {
                 // Two passes per cycle: prompt redaction, then provider_raw.
                 match sweep_audit_outbox_prompts(&pool, cfg.batch_size).await {
                     Ok(out) => {
+                        // Fail-closed surfacing: rows_failed > 0 means
+                        // prompt text was retained past its retention
+                        // window (a compliance control silently failing).
+                        // Escalate to error! so alerting picks it up —
+                        // previously this was swallowed into the side log
+                        // table only (the original silent-failure bug).
+                        alert_on_redaction_failures("audit_outbox", &out);
                         if let Err(e) = log_sweep(&pool, &out).await {
                             error!(err = %e, "log_sweep failed for audit_outbox");
                         }
@@ -182,6 +215,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 match sweep_provider_usage_raw(&pool, cfg.batch_size).await {
                     Ok(out) => {
+                        alert_on_redaction_failures("provider_usage_records", &out);
                         if let Err(e) = log_sweep(&pool, &out).await {
                             error!(err = %e, "log_sweep failed for provider_usage_records");
                         }

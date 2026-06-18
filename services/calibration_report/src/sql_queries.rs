@@ -122,6 +122,12 @@ FROM canonical_events
 WHERE tenant_id = $1
   AND event_type = 'spendguard.audit.decision'
   AND event_time BETWEEN $2 AND $3
+  -- Partition-prune: canonical_events is PARTITION BY RANGE (recorded_month)
+  -- (migration 0002). recorded_month = date_trunc('month', event_time) at
+  -- ingest (append.rs), so this is a strict superset of the event_time
+  -- window and drops no in-window row. Mirrors aggregation.rs/recovery.rs.
+  AND recorded_month >= date_trunc('month', $2)::date
+  AND recorded_month <  date_trunc('month', $3)::date + interval '1 month'
 GROUP BY tokenizer_tier
 ORDER BY tokenizer_tier NULLS LAST
 "#;
@@ -199,9 +205,19 @@ WITH paired AS (
     ON decision.decision_id = outcome.decision_id
    AND outcome.event_type = 'spendguard.audit.outcome'
    AND outcome.tenant_id  = decision.tenant_id
+   -- Partition-prune the outcome side (see decision predicate below).
+   AND outcome.recorded_month >= date_trunc('month', $2)::date
+   AND outcome.recorded_month <  date_trunc('month', $3)::date + interval '1 month'
   WHERE decision.tenant_id = $1
     AND decision.event_type = 'spendguard.audit.decision'
     AND decision.event_time BETWEEN $2 AND $3
+    -- Partition-prune: canonical_events is PARTITION BY RANGE
+    -- (recorded_month). recorded_month = date_trunc('month', event_time) at
+    -- ingest, so this is a strict superset of the event_time window and
+    -- drops no in-window row. Applied per alias (decision + outcome) to
+    -- prune both join inputs, mirroring aggregation.rs lines 259/263.
+    AND decision.recorded_month >= date_trunc('month', $2)::date
+    AND decision.recorded_month <  date_trunc('month', $3)::date + interval '1 month'
     AND outcome.actual_output_tokens IS NOT NULL
     AND decision.prediction_strategy_used IN ('A', 'B', 'C')
 )
@@ -295,6 +311,10 @@ WITH decoded AS (
   WHERE tenant_id = $1
     AND event_type = 'spendguard.audit.prediction_drift_alert.v1alpha1'
     AND event_time BETWEEN $2 AND $3
+    -- Partition-prune (see TIER_DISTRIBUTION_SQL); strict superset of the
+    -- event_time window, drops no in-window row.
+    AND recorded_month >= date_trunc('month', $2)::date
+    AND recorded_month <  date_trunc('month', $3)::date + interval '1 month'
 )
 SELECT
     event_id::text,
@@ -352,6 +372,10 @@ WITH decoded AS (
     AND event_type = 'spendguard.audit.decision'
     AND run_id IS NOT NULL
     AND event_time BETWEEN $2 AND $3
+    -- Partition-prune (see TIER_DISTRIBUTION_SQL); strict superset of the
+    -- event_time window, drops no in-window row.
+    AND recorded_month >= date_trunc('month', $2)::date
+    AND recorded_month <  date_trunc('month', $3)::date + interval '1 month'
 ),
 run_flags AS (
   SELECT

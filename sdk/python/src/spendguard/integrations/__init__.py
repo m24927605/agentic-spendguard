@@ -21,7 +21,7 @@ Top-level convenience re-export (PEP 562 lazy ``__getattr__``):
 The lazy hook keeps ``import spendguard.integrations`` lightweight (no
 forced ``litellm`` import) while still surfacing the new D11 entry
 point on the integrations namespace per
-``docs/slices/COV_D11_S1_guardrail_class.md`` test-plan step 3.
+``docs/internal/slices/COV_D11_S1_guardrail_class.md`` test-plan step 3.
 """
 
 from __future__ import annotations
