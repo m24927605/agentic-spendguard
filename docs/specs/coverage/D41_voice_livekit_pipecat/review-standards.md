@@ -15,10 +15,11 @@ Ollama model, or Claude Code `superpowers:code-reviewer`.
 
 | Check | Pass condition |
 |---|---|
-| 2.1 | Adapter uses `reserve_session`, `commit_session_delta`, and `release_session`; no local per-request approximation. |
+| 2.1 | `D41_sidecar_session_bridge` is already shipped before adapter runtime behavior lands. |
 | 2.2 | Adapter fails closed if session reserve fails. |
 | 2.3 | Paid provider connection does not start before reserve succeeds. |
 | 2.4 | Commit deltas are positive and idempotent. |
+| 2.5 | Adapter uses `reserve_session`, `commit_session_delta`, and `release_session`; no local per-request approximation. |
 
 ## 3. Unit/pricing tuple (P0)
 
@@ -54,12 +55,14 @@ Reviewer tool: Codex sub-agent, per the 2026-06-12 user-directed override above.
 
 Read in order:
 1. docs/specs/coverage/D41_session_reservation_substrate/design.md
-2. docs/specs/coverage/D41_voice_livekit_pipecat/design.md
-3. docs/specs/coverage/D41_voice_livekit_pipecat/review-standards.md
-4. docs/slices/<SLICE_ID>.md
-5. The diff under review: <DIFF_REF>
+2. docs/specs/coverage/D41_sidecar_session_bridge/design.md
+3. docs/specs/coverage/D41_voice_livekit_pipecat/design.md
+4. docs/specs/coverage/D41_voice_livekit_pipecat/review-standards.md
+5. docs/internal/slices/<SLICE_ID>.md
+6. The diff under review: <DIFF_REF>
 
-Block on per-request lifecycle workarounds, fail-open reserve behavior, missing
+Block on runtime adapter behavior landing before the sidecar session bridge,
+per-request lifecycle workarounds, fail-open reserve behavior, missing
 unit/window/pricing tuple, unpinned framework API assumptions, or fake demo
 evidence. Verify the slice's V41 markers and applicable acceptance gates.
 

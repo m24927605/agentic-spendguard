@@ -20,8 +20,8 @@ deploy/demo/Makefile
 services/egress_proxy/src/forward.rs
 README.md
 CHANGELOG.md
-docs/slices/COV_D40A_01_openclaw_recipe_smoke.md
-docs/slices/COV_D40A_02_openclaw_docs_publish.md
+docs/internal/slices/COV_D40A_01_openclaw_recipe_smoke.md
+docs/internal/slices/COV_D40A_02_openclaw_docs_publish.md
 ```
 
 ## 2. Docs page skeleton

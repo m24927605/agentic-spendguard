@@ -3,7 +3,7 @@
 > **Status**: draft
 > **Phase**: post-HARDEN operationalization
 > **Base**: `main` at `38fdab1` after HARDEN_08
-> **Drives**: `docs/slices/GA_01_*.md` through `docs/slices/GA_10_*.md`
+> **Drives**: `docs/internal/slices/GA_01_*.md` through `docs/internal/slices/GA_10_*.md`
 > **Owner**: Staff+ readiness panel; codex CLI implementer and adversarial reviewer
 
 ---
@@ -12,7 +12,7 @@
 
 HARDEN_01 through HARDEN_08 brought the predictor upgrade to the internal production-ready code threshold. This GA Readiness phase converts that hardened codebase into an externally operable product: release packaging, production deployment guides, observability, runbooks, soak/load evidence, plugin onboarding, security signoff, and backlog triage.
 
-This phase is docs-first. The design documents and slice implementation documents land before production code changes. Implementation then proceeds slice-by-slice. Every slice must pass local acceptance gates, codex CLI adversarial review through AIT, and merge/push/memory recording before the next slice starts.
+This phase is docs-first. The design documents and slice implementation documents land before production code changes. Implementation then proceeds slice-by-slice. Every slice must pass local acceptance gates, codex CLI review, and merge/push/memory recording before the next slice starts.
 
 ---
 
@@ -74,16 +74,10 @@ Every implementation slice follows:
 1. `git checkout -b ga/GA_NN_<name> main`
 2. Implement the slice doc's file-level changes in small atomic commits.
 3. Run all acceptance gates in the slice doc.
-4. Run adversarial review:
+4. Run review:
 
 ```bash
-ait run \
-  --adapter codex \
-  --review-mode adversarial \
-  --base main \
-  --branch ga/GA_NN_<name> \
-  --slice-doc docs/slices/GA_NN_<name>.md \
-  --review-budget deep
+codex review --base main
 ```
 
 5. Fix every Blocker, Major, and Minor in-slice.
@@ -104,7 +98,7 @@ ait run \
 | Postgres 16 migration verification | Any SQL, migration doc, rollback doc, or DB-facing code touched |
 | `make demo-up DEMO_MODE=<relevant>` | Any runtime flow, runbook, demo, or acceptance proof touched |
 | `verify-chain` or audit DB probe | Any audit chain, outbox, canonical ingest, signing, replay, or plugin registration path touched |
-| Evidence under `docs/reviews/ga-readiness/<slice>/` | Any benchmark, soak, load, or operational drill claim |
+| Evidence under `docs/internal/reviews/ga-readiness/<slice>/` | Any benchmark, soak, load, or operational drill claim |
 
 No slice may claim a gate passed without running the command or recording why the gate does not apply.
 
@@ -197,7 +191,7 @@ This phase is complete only when:
 |---|---|
 | GA-LD-01 | Docs-first; no implementation before this spec and all GA slice docs land. |
 | GA-LD-02 | No GitHub PRs for this all-AI workflow. |
-| GA-LD-03 | Codex CLI through AIT adversarial mode is the required reviewer. |
+| GA-LD-03 | Codex CLI review is the required reviewer. |
 | GA-LD-04 | Max 5 review rounds; Staff+ arbitration after R5 is final. |
 | GA-LD-05 | Findings are fixed in-slice unless explicitly cross-slice. |
 | GA-LD-06 | Real-stack evidence is required for soak/load claims. |

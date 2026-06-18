@@ -50,3 +50,24 @@ Any failure caused by D41 substrate blocks closeout.
 - [ ] Session demo physically run after `make demo-down`.
 - [ ] Existing request-scoped lifecycle unchanged.
 - [ ] D41 adapter docs reference this substrate instead of inventing local lifecycle rules.
+
+## 7. Follow-up bridge prerequisite
+
+The substrate ship checklist above is not enough for LiveKit/Pipecat runtime
+adapter work. Before any adapter calls `ReserveSession`,
+`CommitSessionDelta`, or `ReleaseSession`, ship:
+
+```text
+docs/specs/coverage/D41_sidecar_session_bridge/
+docs/internal/slices/COV_D41S_06_sidecar_session_bridge.md
+```
+
+Minimum bridge gates:
+
+| Gate | Command | Pass condition |
+|---|---|---|
+| B1 | `cargo test --manifest-path services/ledger/Cargo.toml session_bridge` | Ledger session gRPC tests pass. |
+| B2 | `cargo test --manifest-path services/sidecar/Cargo.toml session_bridge` | Sidecar bridge tests pass. |
+| B3 | `make demo-down` | exit 0. |
+| B4 | `make demo-up DEMO_MODE=session_bridge` | prints `[demo] session_bridge ALL 5 steps PASS (RESERVE + COMMIT + REPLAY + DENY + RELEASE)`. |
+| B5 | `make -C deploy/demo demo-verify-session-bridge` | sidecar-path ledger/canonical SQL gates pass. |

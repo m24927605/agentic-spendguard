@@ -1,7 +1,7 @@
 # GA Readiness Review Standard v1alpha1
 
 > **Status**: draft
-> **Reviewer**: codex CLI through AIT adversarial mode
+> **Reviewer**: codex CLI review
 
 ---
 
@@ -10,16 +10,10 @@
 Every GA slice review uses:
 
 ```bash
-ait run \
-  --adapter codex \
-  --review-mode adversarial \
-  --base main \
-  --branch ga/GA_NN_<name> \
-  --slice-doc docs/slices/GA_NN_<name>.md \
-  --review-budget deep
+codex review --base main
 ```
 
-If the local AIT wrapper rejects a flag, record the failure and dispatch a separate codex CLI adversarial reviewer with the same base, branch, and slice doc context. Do not switch to the claude-code adapter.
+Run the review from the slice branch and include the slice doc path in the review notes when recording findings. Do not switch to the claude-code adapter.
 
 ---
 

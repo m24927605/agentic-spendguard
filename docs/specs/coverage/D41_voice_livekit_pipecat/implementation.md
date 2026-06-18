@@ -1,5 +1,18 @@
 # D41 voice adapters - Implementation
 
+## 0. Runtime prerequisite
+
+Before implementing `SpendGuardVoiceSession` runtime calls or any
+LiveKit/Pipecat reserve/delta/release behavior, ship the sidecar bridge:
+
+```text
+docs/specs/coverage/D41_sidecar_session_bridge/
+docs/internal/slices/COV_D41S_06_sidecar_session_bridge.md
+```
+
+The adapters call sidecar UDS session RPCs through the SDK. They must never
+call the direct `post_session_*` SQL procedures used by the substrate demo.
+
 ## 1. File layout
 
 ```text

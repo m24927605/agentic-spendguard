@@ -54,7 +54,7 @@ Ruling: merge-with-residuals | block | rework
 | Security / threat model | Security Engineer |
 | Pragmatic impl judgment | Senior Developer |
 
-Summarizer defaults to Software Architect. Materials follow [`docs/review-standards/staff-panel-arbitration-process.md`](../review-standards/staff-panel-arbitration-process.md) §2.
+Summarizer defaults to Software Architect. Materials follow [`docs/internal/review-standards/staff-panel-arbitration-process.md`](../internal/review-standards/staff-panel-arbitration-process.md) §2.
 
 ### §1.4 Spec set per deliverable
 
@@ -68,7 +68,7 @@ Each deliverable produces 5 documents (under `docs/specs/coverage/<deliverable>/
 
 ### §1.5 Slice doc per slice
 
-Each slice produces a doc under `docs/slices/COV_<seq>_<deliverable>_<slice>.md` with:
+Each slice produces a doc under `docs/internal/slices/COV_<seq>_<deliverable>_<slice>.md` with:
 
 - Scope (1-2 paragraphs)
 - Files touched
@@ -210,7 +210,7 @@ docs/specs/coverage/
 ├── ...
 └── D37_n8n_community_node/
 
-docs/slices/
+docs/internal/slices/
 ├── COV_01_envoy_extproc_skeleton.md
 ├── COV_02_envoy_extproc_token_counter.md
 ├── ...

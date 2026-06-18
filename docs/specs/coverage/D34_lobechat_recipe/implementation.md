@@ -35,7 +35,7 @@ deploy/demo/
   compose.yaml                                                # MODIFIED Slice 1 (adds lobechat + lobechat-smoke services)
   lobechat_smoke.sh                                           # NEW Slice 1
   verify_step_lobechat_real.sql                               # NEW Slice 1
-docs/slices/
+docs/internal/slices/
   COV_<seq>_d34_recipe_and_smoke.md                           # NEW Slice 1 slice doc
   COV_<seq+1>_d34_screenshots.md                              # NEW Slice 2 slice doc (optional)
 ```

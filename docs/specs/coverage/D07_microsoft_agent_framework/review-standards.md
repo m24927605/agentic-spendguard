@@ -2,7 +2,7 @@
 
 > Status: Proposed. Sibling: `design.md`, `implementation.md`, `tests.md`, `acceptance.md`.
 > Used by: `superpowers:code-reviewer` skill on every slice R1–R5 round.
-> Aligns with: `docs/review-standards/staff-panel-arbitration-process.md` (R5 escalation), build plan §1.
+> Aligns with: `docs/internal/review-standards/staff-panel-arbitration-process.md` (R5 escalation), build plan §1.
 
 ## 1. Reviewer mandate
 

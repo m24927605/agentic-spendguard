@@ -97,7 +97,7 @@ with `superpowers:code-reviewer`.
 The reviewer is given:
 
 - This `review-standards.md` document.
-- The slice doc under `docs/slices/COV_NN_*.md`.
+- The slice doc under `docs/internal/slices/COV_NN_*.md`.
 - The slice diff (`git diff main..<slice-branch>`).
 - `acceptance.md` for cross-reference.
 - The D03 spec set (sibling cross-link target).

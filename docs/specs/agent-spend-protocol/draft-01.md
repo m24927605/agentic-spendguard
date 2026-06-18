@@ -328,7 +328,7 @@ Provider-specific extensions (e.g. for LiteLLM: `litellm_call_id`, `model`, `tea
 
 ## 6. Compatibility
 
-- **OpenTelemetry GenAI** — ASP composes with OTel GenAI by emitting span events on the GenAI span. The event names follow the [parallel OTel SIG proposal](../../proposals/otel-genai-spend-extension.md): `gen_ai.spend.reserve`, `gen_ai.spend.commit`, `gen_ai.spend.release`, `gen_ai.spend.audit`. Earlier drafts of this spec used the bare `asp.*` prefix; that has been retired in favor of the OTel-aligned names.
+- **OpenTelemetry GenAI** — ASP composes with OTel GenAI by emitting span events on the GenAI span. The event names follow the [parallel OTel SIG proposal](../../internal/proposals/otel-genai-spend-extension.md): `gen_ai.spend.reserve`, `gen_ai.spend.commit`, `gen_ai.spend.release`, `gen_ai.spend.audit`. Earlier drafts of this spec used the bare `asp.*` prefix; that has been retired in favor of the OTel-aligned names.
 - **FOCUS 1.0** — `commit` observations SHOULD be exportable to FOCUS-compliant billing schemas for daily reconciliation against provider invoices. Mapping is one-way (FOCUS → ASP can't reconstruct decisions; ASP → FOCUS can produce a charge feed).
 - **`crosswalk/budget_reservation.yaml`** — verbs and decision shape are the upstream canonical set. The `crosswalk/asp.yaml` crosswalk PR is planned for Draft-02.
 - **APS / AgentID / x402 / ERC-8004** — accepted as inputs to `identity`. ASP does NOT replace identity layers and does NOT prescribe how `actor` is established.

@@ -118,7 +118,7 @@ This checklist is what `superpowers:code-reviewer` runs per slice (R1-R5). Each 
 
 - [ ] All slice-specific gates above pass.
 - [ ] `git status` clean modulo the slice's own files.
-- [ ] Slice doc under `docs/slices/COV_D19_S<N>_*.md` exists with the required sections (scope, files touched, test plan, backlinks, anti-scope).
+- [ ] Slice doc under `docs/internal/slices/COV_D19_S<N>_*.md` exists with the required sections (scope, files touched, test plan, backlinks, anti-scope).
 - [ ] Commit message follows project convention (`feat(adk): <one-line summary>` for impl slices; `test(adk): ...`; `docs(adk): ...`).
 
 ## §10. Deliverable-exit (after S5)

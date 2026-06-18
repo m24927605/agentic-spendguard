@@ -45,7 +45,7 @@ docs/specs/coverage/D03_base_url_landing/
   tests.md
   acceptance.md
   review-standards.md
-docs/slices/
+docs/internal/slices/
   COV_03_base_url_landing_skeleton.md                       # NEW Slice 1 (slice doc)
   COV_04_base_url_landing_copy_polish.md                    # NEW Slice 2 (slice doc)
   COV_05_base_url_landing_picker_mdx.md                     # NEW Slice 3 (optional; slice doc)
@@ -289,7 +289,7 @@ No other section of `astro.config.mjs` changes.
   per §3.2.
 - `docs/site-v2/src/content/docs/docs/drop-in/lobechat.md` — stub
   per §3.2.
-- `docs/slices/COV_03_base_url_landing_skeleton.md` — slice doc per
+- `docs/internal/slices/COV_03_base_url_landing_skeleton.md` — slice doc per
   build plan §1.5.
 
 **Modifies:**
@@ -334,7 +334,7 @@ No other section of `astro.config.mjs` changes.
 
 **Adds:**
 
-- `docs/slices/COV_04_base_url_landing_copy_polish.md` — slice doc.
+- `docs/internal/slices/COV_04_base_url_landing_copy_polish.md` — slice doc.
 - `docs/site-v2/.screenshots/drop-in-1280.png` — baseline at 1280px.
 - `docs/site-v2/.screenshots/drop-in-375.png` — baseline at 375px.
 
@@ -360,7 +360,7 @@ files and the comparison happens in CI only. See `tests.md` §4.)
   a `<select>` element listing the 14 tools, with a small inline
   script that updates the URL hash to the matching anchor on
   selection and smooth-scrolls to the H3.
-- `docs/slices/COV_05_base_url_landing_picker_mdx.md` — slice doc.
+- `docs/internal/slices/COV_05_base_url_landing_picker_mdx.md` — slice doc.
 
 **Renames:**
 

@@ -97,7 +97,7 @@ report of findings; the implementer fixes them; the skill re-runs.
 The reviewer is given:
 
 - This `review-standards.md` document (the rubric).
-- The slice doc under `docs/slices/COV_NN_*.md`.
+- The slice doc under `docs/internal/slices/COV_NN_*.md`.
 - The slice's diff (`git diff main..<slice-branch>`).
 - `acceptance.md` for cross-reference.
 - The link to the strategy memo
@@ -190,7 +190,7 @@ Each review log contains:
 ## 4. R5 Staff+ panel arbitration
 
 Triggered when R5 still has P0 / P1 findings unresolved. The panel
-follows `docs/review-standards/staff-panel-arbitration-process.md` §2
+follows `docs/internal/review-standards/staff-panel-arbitration-process.md` §2
 (referenced in the build plan).
 
 ### 4.1 Panel composition

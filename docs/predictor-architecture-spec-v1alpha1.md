@@ -408,7 +408,7 @@ Review-standards 對應：
 1. 9 sibling specs 並行寫作（per `design/predictor-upgrade` branch order）→ 各自走 maintainer review + adversarial review → merge to `main`
 2. 15 slice docs 並行寫作 → 各自 maintainer review → merge to `main`
 3. SLICE_01 schema migration 啟動（per HANDOFF §13.7 implementation phase 流程）
-4. 每 slice 走 `ait run --adapter claude-code --review adversarial --review-budget deep` 至多 5 輪；round-5 fail 啟用 Staff+ panel per `staff-panel-arbitration-process.md`
+4. 每 slice 走 `codex review --base main` 至多 5 輪；round-5 fail 啟用 Staff+ panel per `staff-panel-arbitration-process.md`
 5. 所有 15 slices merged 後跑 SLICE_15 E2E benchmark；calibration-report CLI 對 design partner POC tenant 連續輸出 7 日 → 本 spec set 整套 LOCKED
 
 ---

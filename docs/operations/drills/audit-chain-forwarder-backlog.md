@@ -32,7 +32,7 @@ Canonical-ingest restart is the primary recovery action. The outbox-forwarder sh
 
 ## Evidence
 
-The drill writes `docs/reviews/ga-readiness/GA_06_alerting_runbooks_drills/outbox_lag_recovery.json` with pending counts, lag metrics, and scrape excerpts.
+The drill writes `docs/internal/reviews/ga-readiness/GA_06_alerting_runbooks_drills/outbox_lag_recovery.json` with pending counts, lag metrics, and scrape excerpts.
 
 ## Safety
 

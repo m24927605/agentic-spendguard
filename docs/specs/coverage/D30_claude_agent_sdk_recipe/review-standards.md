@@ -70,7 +70,7 @@ Per the build plan §1.1. Every slice goes through up to five rounds with `super
 The reviewer is given:
 
 - This `review-standards.md` document (the rubric).
-- The slice doc under `docs/slices/COV_NN_*.md`.
+- The slice doc under `docs/internal/slices/COV_NN_*.md`.
 - The slice's diff (`git diff main..<slice-branch>`).
 - `acceptance.md` for cross-reference.
 - The link to the strategy memo (`docs/strategy/framework-coverage-2026-06.md`).
@@ -154,7 +154,7 @@ Each review log contains:
 
 ## 4. R5 Staff+ panel arbitration
 
-Triggered when R5 still has P0 / P1 findings unresolved. The panel follows `docs/review-standards/staff-panel-arbitration-process.md` §2.
+Triggered when R5 still has P0 / P1 findings unresolved. The panel follows `docs/internal/review-standards/staff-panel-arbitration-process.md` §2.
 
 ### 4.1 Panel composition
 

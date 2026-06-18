@@ -4,13 +4,13 @@
 **Used by:** `superpowers:code-reviewer` skill, R1 through R5 per build plan §1.1
 **Round-pass rule (LOCKED, build plan §1.1):** A round passes only when the reviewer's finding list is empty after fixes. Severity (Blocker / Major / Minor) is for triage / changelog only; all findings gate the round.
 
-This checklist is the slice-specific extension to the universal cross-cutting checklist at [`docs/review-standards/predictor-review-checklist.md`](../../../review-standards/predictor-review-checklist.md) §1. Reviewer runs the universal checklist plus the per-slice §2-§8 below.
+This checklist is the slice-specific extension to the universal cross-cutting checklist at [`docs/internal/review-standards/predictor-review-checklist.md`](../../../internal/review-standards/predictor-review-checklist.md) §1. Reviewer runs the universal checklist plus the per-slice §2-§8 below.
 
 ---
 
 ## §1. Universal checks (re-applied per slice)
 
-Reviewer MUST apply the universal §1 checklist from [`docs/review-standards/predictor-review-checklist.md`](../../../review-standards/predictor-review-checklist.md). Specifically these clauses bind on every D01 slice:
+Reviewer MUST apply the universal §1 checklist from [`docs/internal/review-standards/predictor-review-checklist.md`](../../../internal/review-standards/predictor-review-checklist.md). Specifically these clauses bind on every D01 slice:
 
 - §1.1 audit-chain coverage (D01 emits via existing sidecar — see §8 below for the "no direct writes" rule)
 - §1.2 tokenizer tier discipline (Tier 2 hot path < 1ms; no Tier 1 from ExtProc hot path)
@@ -217,7 +217,7 @@ Every R1+ review must spot-check these end-to-end invariants:
 
 ## §10. Severity definitions (triage only, not pass gate)
 
-Per [`predictor-review-checklist.md`](../../../review-standards/predictor-review-checklist.md) §3:
+Per [`predictor-review-checklist.md`](../../../internal/review-standards/predictor-review-checklist.md) §3:
 
 - **Blocker** — audit chain regression; mTLS / SVID bypass; fail-open by default; proto change; ledger change; benchmark p99 budget miss; any test failure.
 - **Major** — observability gap; missing error path; spec-implementation drift; sidecar coupling violation (e.g. direct ledger access from ExtProc).
@@ -229,7 +229,7 @@ Per [`predictor-review-checklist.md`](../../../review-standards/predictor-review
 
 ## §11. Round-pass rule (locked)
 
-Round pass = the round's reviewer finding list is empty after fixes. R5 still fails → Staff+ panel arbitration per [`staff-panel-arbitration-process.md`](../../../review-standards/staff-panel-arbitration-process.md).
+Round pass = the round's reviewer finding list is empty after fixes. R5 still fails → Staff+ panel arbitration per [`staff-panel-arbitration-process.md`](../../../internal/review-standards/staff-panel-arbitration-process.md).
 
 ---
 

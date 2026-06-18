@@ -38,7 +38,7 @@ Every production deployment slice must also run a production render with the sli
 Evidence belongs under:
 
 ```text
-docs/reviews/ga-readiness/GA_NN_<name>/
+docs/internal/reviews/ga-readiness/GA_NN_<name>/
 ```
 
 The minimum bundle is:

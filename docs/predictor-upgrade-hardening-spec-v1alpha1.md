@@ -3,7 +3,7 @@
 > **Status**: draft (2026-05-31)
 > **Phase**: post-SLICE_15 production hardening
 > **Spec ancestors**: `predictor-architecture-spec-v1alpha1.md` (umbrella; LOCKED 2026-05-30), and the 9 sub-specs locked at the same time
-> **Drives**: `docs/slices/HARDEN_01_*.md` through `docs/slices/HARDEN_08_*.md`
+> **Drives**: `docs/internal/slices/HARDEN_01_*.md` through `docs/internal/slices/HARDEN_08_*.md`
 > **Owner**: Staff+ design panel (Software Architect lead; codex CLI as reviewer)
 
 ---
@@ -31,7 +31,7 @@ The HARDEN phase is strictly additive: no locked spec invariant is reopened; eve
 
 ### 2.1 Codex CLI as canonical reviewer
 
-Per `feedback_hardening_workflow.md` (2026-05-31 directive), the canonical adversarial reviewer for every HARDEN slice is **codex CLI dispatched by AIT**. The `claude-code` adapter is not used for this phase. Rationale:
+Per `feedback_hardening_workflow.md` (2026-05-31 directive), the canonical reviewer for every HARDEN slice is **codex CLI review**. The `claude-code` adapter is not used for this phase. Rationale:
 
 - The honest-gap directive was issued by a maintainer who wants a single adversarial gate, not a 4-reviewer panel.
 - Codex CLI's adversarial mode is the independent second opinion already proven during SLICE_02–SLICE_07 cross-checks.
@@ -40,16 +40,10 @@ Per `feedback_hardening_workflow.md` (2026-05-31 directive), the canonical adver
 The concrete invocation is:
 
 ```bash
-ait run \
-  --adapter codex \
-  --review-mode adversarial \
-  --base main \
-  --branch harden/HARDEN_NN_<name> \
-  --slice-doc docs/slices/HARDEN_NN_*.md \
-  --review-budget deep
+codex review --base main
 ```
 
-Each HARDEN slice's §12 (AIT execution notes) MUST name codex CLI via this AIT invocation and MUST NOT name the claude-code adapter.
+Each HARDEN slice's §12 (review execution notes) MUST name codex CLI via this invocation and MUST NOT name the claude-code adapter.
 
 ### 2.2 Max 5 codex review rounds per slice
 
@@ -64,7 +58,7 @@ If round 5 still has findings after the implementer's fix attempt, the slice esc
 
 ### 2.3 Staff+ panel arbitration on round-5 fail
 
-Identical process to `staff-panel-arbitration-process.md`, but dispatched through separate `ait run --adapter codex --review-mode adversarial` invocations. The panel composition for HARDEN slices is:
+Identical process to `staff-panel-arbitration-process.md`, but dispatched through separate codex CLI review invocations. The panel composition for HARDEN slices is:
 
 - Software Architect (always)
 - Backend Architect (always)
@@ -167,7 +161,7 @@ These decisions are LOCKED for the duration of the HARDEN phase and require a v1
 
 ### 4.1 LD-H-01: codex CLI is the canonical reviewer
 
-Stated in §2.1. The `claude-code` adapter is never used during HARDEN. Staff+ arbitration, when required, is run as separate AIT codex invocations for each panel role.
+Stated in §2.1. The `claude-code` adapter is never used during HARDEN. Staff+ arbitration, when required, is run as separate codex CLI review invocations for each panel role.
 
 ### 4.2 LD-H-02: 5-round budget + arbitration escalation
 
@@ -257,4 +251,4 @@ When (1)–(8) are green, this spec is LOCKED and the next phase is v1alpha2 des
 
 ---
 
-*Spec version: predictor-upgrade-hardening-spec v1alpha1 (draft 2026-05-31) | Drives: HARDEN_01–HARDEN_08 slice docs | Locked-in design decisions: §4 | Reviewer: codex CLI via AIT | Panel-arbitration backstop: Staff+ codex panel via AIT | Branch: `design/predictor-upgrade-hardening`*
+*Spec version: predictor-upgrade-hardening-spec v1alpha1 (draft 2026-05-31) | Drives: HARDEN_01–HARDEN_08 slice docs | Locked-in design decisions: §4 | Reviewer: codex CLI review | Panel-arbitration backstop: Staff+ codex panel | Branch: `design/predictor-upgrade-hardening`*

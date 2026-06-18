@@ -103,3 +103,19 @@ Python options use snake_case. Missing `unit_id`, `window_instance_id`, or prici
 ## 9. Definition of done
 
 D41 is shipped when D41 session substrate is already on main, both adapters use it, `voice_session_guard` demo passes, and docs state clearly that voice coverage is session-scoped reservation with streaming commits.
+
+## 10. Dated implementation amendments
+
+### 2026-06-13 - Sidecar bridge prerequisite
+
+The phrase "D41 session substrate is already on main" in §9 now means both:
+
+1. `D41_session_reservation_substrate` direct-ledger substrate is shipped.
+2. `D41_sidecar_session_bridge` is shipped, replacing the sidecar UDS
+   `UNIMPLEMENTED` session stubs with a real Ledger gRPC bridge.
+
+LiveKit/Pipecat adapters must not start against the fail-closed stubs in
+`services/sidecar/src/server/adapter_uds.rs`. Adapter slices may read this
+spec and pin framework APIs, but any reserve/delta/release runtime behavior is
+blocked until `COV_D41S_06_sidecar_session_bridge` is on main and the
+`session_bridge` demo gate passes.

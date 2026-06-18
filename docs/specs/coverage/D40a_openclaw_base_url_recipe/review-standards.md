@@ -53,7 +53,7 @@ Reviewer tool: Codex sub-agent, per the 2026-06-12 user-directed override above.
 Read in order:
 1. docs/specs/coverage/D40a_openclaw_base_url_recipe/design.md
 2. docs/specs/coverage/D40a_openclaw_base_url_recipe/review-standards.md
-3. docs/slices/<SLICE_ID>.md
+3. docs/internal/slices/<SLICE_ID>.md
 4. The diff under review: <DIFF_REF>
 
 Apply review-standards §1-§4. Treat claim drift and fake demo evidence as

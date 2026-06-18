@@ -3,7 +3,7 @@
 > **Status**: draft
 > **Phase**: post-GA backlog execution
 > **Base**: `main` at `c80a1e2` after GA_10
-> **Drives**: `docs/slices/POST_GA_01_*.md` through `docs/slices/POST_GA_10_*.md`
+> **Drives**: `docs/internal/slices/POST_GA_01_*.md` through `docs/internal/slices/POST_GA_10_*.md`
 > **Owner**: Staff+ post-GA panel; codex CLI implementer and adversarial reviewer
 
 ---
@@ -95,7 +95,7 @@ Every slice follows:
 2. Implement only that slice's §4 file-level change list.
 3. Commit in small units with `Co-Authored-By: Codex <codex@openai.com>`.
 4. Run all acceptance gates in the slice doc.
-5. Dispatch adversarial review with codex CLI through AIT.
+5. Dispatch codex CLI review directly.
 6. Fix every Blocker, Major, and Minor in-slice.
 7. Repeat review up to 5 rounds.
 8. If round 5 still has findings, run Staff+ arbitration and follow the
@@ -143,7 +143,7 @@ Each slice must include:
 - Helm demo and production render gates when deploy surfaces are touched
 - migration smoke gates when SQL is touched
 - demo gates when runtime behavior is touched
-- evidence files under `docs/reviews/post-ga/POST_GA_NN_<name>/`
+- evidence files under `docs/internal/reviews/post-ga/POST_GA_NN_<name>/`
 - an issue closure checklist
 
 For docs-only slices, `scripts/ga/validate-post-ga-docs.sh`, `git diff
@@ -193,13 +193,13 @@ touch critical paths. Rollback rules:
 
 ---
 
-## §12. AIT Execution Notes
+## §12. Review Execution Notes
 
-Reviewer: codex CLI via `ait run --adapter codex --review-mode adversarial`. Max 5 rounds. Staff+ panel arbitration if 5 rounds fail.
+Reviewer: codex CLI via `codex review --base main`. Max 5 rounds. Staff+ panel arbitration if 5 rounds fail.
 
-If the local AIT wrapper rejects `--review-mode`, record the parser
-failure and use the codex CLI review fallback with the same base,
-branch, and slice doc. Do not use the claude-code adapter.
+Run the review from the slice branch and include the slice doc path in
+the review notes when recording findings. Do not use the claude-code
+adapter.
 
 ---
 
@@ -222,5 +222,5 @@ branch, and slice doc. Do not use the claude-code adapter.
 - [ ] All ten POST_GA slice docs exist
 - [ ] `scripts/ga/validate-post-ga-docs.sh` passes
 - [ ] Staff+ decisions are recorded in §13 of every slice
-- [ ] AIT execution sentence appears in every slice §12
+- [ ] Review execution sentence appears in every slice §12
 - [ ] Main implementation starts only after docs are merged/pushed

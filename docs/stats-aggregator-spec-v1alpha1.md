@@ -322,7 +322,7 @@ hot-lookup index. Hot lookup uses the primary key. The freshness index
 supports range probes such as "which buckets are older than the
 staleness threshold" and SLO probes such as `max(computed_at)`; planner
 evidence lives in
-`docs/reviews/post-ga/POST_GA_08_db_index_and_rls_polish/`.
+`docs/internal/reviews/post-ga/POST_GA_08_db_index_and_rls_polish/`.
 
 `sample_size_7d` and `sample_size_30d` are COUNT-derived values and must
 never be negative. Migrations pin this with CHECK constraints; the

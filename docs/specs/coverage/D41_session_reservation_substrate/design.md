@@ -388,3 +388,21 @@ canonical audit path directly. A follow-up bridge slice must wire the sidecar
 RPC handlers to an explicit ledger session API before LiveKit/Pipecat adapters
 call these methods. Voice adapters must not treat the fail-closed stubs as
 usable runtime coverage.
+
+### 2026-06-13 - SR-V6 sidecar-to-ledger bridge spec pin
+
+The follow-up bridge slice named above is pinned to
+[`D41_sidecar_session_bridge`](../D41_sidecar_session_bridge/design.md) and
+[`COV_D41S_06_sidecar_session_bridge.md`](../../../internal/slices/COV_D41S_06_sidecar_session_bridge.md).
+This is an additive runtime bridge over the shipped session reservation
+substrate, not a rewrite of SR-V1..SR-V5.
+
+`SR-V6` is the bridge marker: sidecar adapter UDS
+`ReserveSession` / `CommitSessionDelta` / `ReleaseSession` must route over
+the existing mTLS Ledger gRPC client to internal Ledger session RPCs, whose
+handlers call `services/ledger/src/session_reservations.rs` and the
+`post_session_*` SQL functions. The sidecar must not connect directly to
+Postgres and must not invent a per-request voice fallback.
+
+LiveKit/Pipecat adapter implementation remains blocked until `SR-V6` is on
+main and the `session_bridge` demo gate proves the sidecar UDS path.

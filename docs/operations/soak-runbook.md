@@ -36,9 +36,9 @@ The release gate should run from a clean checkout with no unrelated compose stac
 
 The harness writes:
 
-- `docs/reviews/ga-readiness/GA_07_soak_harness/ga_soak_snapshots.jsonl`
-- `docs/reviews/ga-readiness/GA_07_soak_harness/ga_soak_summary.json`
-- `docs/reviews/ga-readiness/GA_07_soak_harness/ga_soak_baseline.json`
+- `docs/internal/reviews/ga-readiness/GA_07_soak_harness/ga_soak_snapshots.jsonl`
+- `docs/internal/reviews/ga-readiness/GA_07_soak_harness/ga_soak_summary.json`
+- `docs/internal/reviews/ga-readiness/GA_07_soak_harness/ga_soak_baseline.json`
 
 Attach all three files to release evidence. The JSONL file is intentionally append-only during the run so a failed soak still leaves the last successful snapshot.
 

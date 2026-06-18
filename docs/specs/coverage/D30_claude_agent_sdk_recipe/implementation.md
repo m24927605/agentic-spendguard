@@ -42,7 +42,7 @@ docs/specs/coverage/D30_claude_agent_sdk_recipe/
   acceptance.md
   review-standards.md
 
-docs/slices/
+docs/internal/slices/
   COV_<N>_d30_doc_and_python_smoke.md                       # NEW Slice 1
   COV_<N+1>_d30_typescript_smoke.md                         # NEW Slice 2
 ```

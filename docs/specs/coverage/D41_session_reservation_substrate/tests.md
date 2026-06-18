@@ -53,3 +53,11 @@
 | `COV_D41S_03_sdk_session_client` | TP-D41S-10..13 |
 | `COV_D41S_04_streaming_commit_and_reconnect` | TP-D41S-02..08, reconnect replay tests |
 | `COV_D41S_05_substrate_demo_gate` | TP-D41S-15..17, TA-D41S-01..07 |
+
+## 6. Bridge follow-up
+
+Runtime sidecar coverage is specified separately in
+[`D41_sidecar_session_bridge/tests.md`](../D41_sidecar_session_bridge/tests.md).
+Those tests are not a substitute for the direct-ledger D41S substrate tests:
+bridge closeout must run both the new sidecar-path gates and the existing
+`session_reservation` direct substrate demo.

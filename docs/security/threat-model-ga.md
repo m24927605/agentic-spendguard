@@ -48,7 +48,7 @@ This model covers the predictor upgrade GA deployment path:
 - [x] Runtime images run as UID 65532.
 - [x] Publish workflow has SBOM/provenance/signing/scanning.
 - [x] Mutable `latest` promotion is removed from publish workflow.
-- [x] Local scan gate emits evidence under `docs/reviews/ga-readiness/GA_09_security_signoff_supply_chain/`.
+- [x] Local scan gate emits evidence under `docs/internal/reviews/ga-readiness/GA_09_security_signoff_supply_chain/`.
 
 ## Open Assurance Item
 

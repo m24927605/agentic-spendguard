@@ -99,3 +99,20 @@ Locked success line:
 ## 6. Backward compatibility
 
 Existing request-scoped `reserve`, `commitEstimated`, and `release` APIs must remain unchanged. All existing adapter demos are non-regression gates at substrate closeout; D41 substrate may not break D38/D39 or D04/D06/D08/D29 TS adapter demos.
+
+## 7. Sidecar bridge follow-up
+
+The substrate closeout intentionally left the sidecar adapter UDS session RPCs
+as fail-closed `UNIMPLEMENTED` stubs. Runtime adapter coverage requires the
+follow-up bridge spec:
+
+```text
+docs/specs/coverage/D41_sidecar_session_bridge/
+docs/internal/slices/COV_D41S_06_sidecar_session_bridge.md
+```
+
+Implementation order is locked:
+
+1. Keep this direct-ledger substrate demo green.
+2. Ship `COV_D41S_06_sidecar_session_bridge`.
+3. Only then implement D41 LiveKit/Pipecat adapters.

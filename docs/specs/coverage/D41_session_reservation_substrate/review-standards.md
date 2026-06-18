@@ -57,7 +57,7 @@ Reviewer tool: Codex sub-agent, per the 2026-06-12 user-directed override above.
 Read in order:
 1. docs/specs/coverage/D41_session_reservation_substrate/design.md
 2. docs/specs/coverage/D41_session_reservation_substrate/review-standards.md
-3. docs/slices/<SLICE_ID>.md
+3. docs/internal/slices/<SLICE_ID>.md
 4. The diff under review: <DIFF_REF>
 
 Block on violations of ledger invariants, idempotency, fail-closed reserve,
