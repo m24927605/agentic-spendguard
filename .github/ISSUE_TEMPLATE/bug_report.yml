@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a problem in SpendGuard (not a security vulnerability)
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for filing a bug. **Do not report security vulnerabilities here** —
+        see [SECURITY.md](../../SECURITY.md) for private reporting.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and its impact.
+      placeholder: When I ..., SpendGuard ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Include the demo mode / commands if relevant.
+      placeholder: |
+        1. make demo-up DEMO_MODE=...
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - egress_proxy
+        - sidecar
+        - ledger
+        - canonical_ingest / audit chain
+        - output_predictor / tokenizer / projector
+        - SDK (Python)
+        - SDK (TypeScript)
+        - plugin / integration
+        - Helm / deploy
+        - other / not sure
+    validations:
+      required: true
+  - type: textarea
+    id: env
+    attributes:
+      label: Environment
+      description: Version/commit, OS, how you're running it (demo, Helm, ...).
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste logs or stack traces. Redact secrets and tenant data.
+      render: shell
