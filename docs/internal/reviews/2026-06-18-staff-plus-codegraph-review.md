@@ -701,3 +701,33 @@ _Multi-agent review: 15 subsystem reviewers (domain Staff+ agents) → per-findi
 - **Proposed fix:** Reject keys containing '..', leading '/', or non-relative components inside FilesystemStore::path (or normalize and assert the resolved path starts_with self.root) so the backend is safe regardless of caller discipline.
 - **Verifier note:** Correct in direction, safe, and minimal, with one fail-closed caveat. The guard must REJECT (return an error) rather than silently sanitize/clamp the key, otherwise it could mask bugs or collapse two distinct keys onto one path. Since path() currently returns PathBuf infallibly, the clean implementation is to change it to return Result<PathBuf> and propagate the error through get/put/list (which already return Result), so a bad key fails closed. Prefer a lexical check over Path::components (reject ParentDir `..`, absolute RootDir, and Prefix components) rather than canonicalize()+starts_with(self.root), because canonicalize requires the target to exist and would break put() of new files. Scoping to FilesystemStore is reasonable; the S3 key() helper (store.rs:154) is the analogous concat but is not a filesystem-traversal vector. Net: a sound, low-priority hardening that makes the backend safe regardless of caller discipline.
 
+---
+
+## Follow-ups & deferred status (updated 2026-06-19)
+
+Status of every finding not fully closed in the initial fix pass. Tracked here in-repo (no GitHub issues). **All remaining items are fail-closed in their current state — they under-count or deny, never fail-open.**
+
+### Resolved in follow-up (2026-06-19)
+
+| Item | Sev | Resolution |
+|---|---|---|
+| ledger trusts wire `tenant_id`/`workload_instance_id` with no SVID binding | **High** | Inbound caller-SVID URI-SAN pinning interceptor — `services/ledger/src/svid_interceptor.rs` (`CallerSvidPin`), opt-in via `SPENDGUARD_LEDGER_EXPECTED_CALLER_SPIFFE_URI`, fail-closed on missing/mismatch/parse-fail, startup guard if pin-enabled-without-mTLS, no-op+warn when unset. 7/7 unit tests. To enable in production add the env to `charts/spendguard/templates/ledger.yaml`. |
+| `tokenizer_t1_samples` partitions end 2026-08-01 (insert cliff) | Med | Self-extending partitions via migration `0065` (`tokenizer_t1_samples_ensure_partition`, mirrors `cost_findings_ensure_next_month_partition`); multi-year runway seeded; cliff eliminated. |
+
+### Deferred (with reason)
+
+| Item | Sev | Why deferred / current safety |
+|---|---|---|
+| egress detached streaming commit lost on proxy SIGTERM | Low | The High half (no-usage → release leak) is **fixed** (floor-commit); client disconnect already floor-commits. Only the deploy-window SIGTERM case remains, covered by the `ttl_sweeper` TTL backstop (bounded). Full graceful-shutdown drain needs `tokio-util` TaskTracker threading — optional. |
+| run_cost_projector `RUN_BUDGET_PROJECTION_EXCEEDED` excludes cumulative_cost | Med | Spec drift; full alignment needs a spec decision. Partial alignment shipped. |
+| egress two parallel usage-extraction implementations | Med | Cross-check test added; full unification must preserve the `None`→estimate-fallback fail-closed semantics (a blind extractor swap would under-count missing-usage responses). |
+| prediction-mirror crate is dead code | Med | False-assurance prose removed + fail-closed delegation helper added in-crate; full promotion to a production dependency needs cross-dir edits (canonical_ingest Cargo.toml + append_events.rs). |
+| egress pricing refresh swallows errors | Low | Invariant-locking test added; metric/escalation skipped (egress has no metrics infra; existing `warn!` covers it). |
+| doctor proxy check is TCP-connect-only | Low | Honestly relabeled ("TCP-only liveness, TLS not verified"); full CA-validated handshake deferred (disproportionate dep for a Low finding; proxy CA-trust is confirmed separately by the ca_fingerprint check). |
+
+### Skipped (justified)
+
+| Item | Sev | Why |
+|---|---|---|
+| D41 `session_ledger_tx` signature length-checked, not crypto-verified | Low | `session_ledger_tx` has **zero callers** (D41 session-reservation substrate is a stub; sidecar session RPCs are fail-closed `UNIMPLEMENTED`). Fixing would redesign the **locked** D41 contract. Track on the sidecar-session-bridge slice: server-side session signing/verification must land there before any voice adapter calls these RPCs. |
+

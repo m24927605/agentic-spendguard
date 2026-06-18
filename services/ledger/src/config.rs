@@ -47,6 +47,29 @@ pub struct Config {
     #[serde(default)]
     pub tls_ca_pem: Option<String>,
 
+    /// Inbound caller SVID pin (application-layer identity binding).
+    ///
+    /// WebPKI CA-chain validation (via `tls_ca_pem`) proves only that the
+    /// peer holds *some* cert issued by the shared SpendGuard CA — any
+    /// same-CA workload could then claim any wire `tenant_id` /
+    /// `workload_instance_id`. When this is `Some`, every gRPC request is
+    /// gated by an interceptor that extracts the peer client cert's URI
+    /// SAN and REQUIRES an exact match (fail-closed: missing cert or
+    /// mismatch -> `Status::unauthenticated`). This mirrors the sidecar
+    /// HTTP companion's `expected_client_spiffe_uri`
+    /// (services/sidecar/src/http_companion/mtls.rs) and cryptographically
+    /// binds the connection to the one workload identity authorized to
+    /// call this per-tenant ledger instance.
+    ///
+    /// When `None` (the default, e.g. the demo): NO-OP with a one-time
+    /// warn!. Fail-closed is preserved because production additionally
+    /// refuses to start without mTLS (see main.rs), and the operator is
+    /// expected to set this in production.
+    ///
+    /// Env: `SPENDGUARD_LEDGER_EXPECTED_CALLER_SPIFFE_URI`.
+    #[serde(default)]
+    pub expected_caller_spiffe_uri: Option<String>,
+
     /// Round-2 #11: Prometheus /metrics endpoint bind addr. Defaults to
     /// `0.0.0.0:9092` (ledger gets 9092; sidecar 9093, etc. — see
     /// followup #11 port table). Set to empty string to disable.

@@ -8,6 +8,7 @@ use tracing_subscriber::EnvFilter;
 use spendguard_ledger::{
     config::Config, metrics::LedgerMetrics, persistence,
     proto::ledger::v1::ledger_server::LedgerServer, server::LedgerService,
+    svid_interceptor::CallerSvidPin,
 };
 
 #[tokio::main]
@@ -69,9 +70,32 @@ async fn main() -> anyhow::Result<()> {
 
     let tls = build_server_tls_config(&cfg).context("loading mTLS server config")?;
 
+    // Inbound caller SVID URI-SAN pin (application-layer identity binding
+    // on top of WebPKI CA-chain validation). When set, every gRPC request
+    // is gated by an interceptor that requires the peer client cert's URI
+    // SAN to exactly match `expected_caller_spiffe_uri`; otherwise it is a
+    // no-op (with a one-time warn). Mirrors the sidecar HTTP companion.
+    let caller_pin = CallerSvidPin::new(cfg.expected_caller_spiffe_uri.clone());
+    caller_pin.log_mode();
+
+    // A pin that requires a peer client cert is unsatisfiable without
+    // mTLS: `peer_certs()` is always `None` on a plaintext connection, so
+    // every request would be rejected. That is a hard operator
+    // misconfiguration — fail closed at startup with an actionable error
+    // rather than silently bricking the service.
+    if caller_pin.is_enforced() && tls.is_none() {
+        anyhow::bail!(
+            "SPENDGUARD_LEDGER_EXPECTED_CALLER_SPIFFE_URI is set but mTLS is \
+             not configured: the caller SVID pin reads the peer client \
+             certificate, which only exists under mTLS. Configure \
+             SPENDGUARD_LEDGER_TLS_{{CERT,KEY,CA}}_PEM, or unset the pin."
+        );
+    }
+
     info!(
         addr = %addr,
         mtls = tls.is_some(),
+        caller_svid_pin = caller_pin.is_enforced(),
         "listening"
     );
 
@@ -106,8 +130,13 @@ async fn main() -> anyhow::Result<()> {
         );
     }
 
+    // Wrap the LedgerServer with the caller-SVID interceptor. When the
+    // pin is unset the interceptor is a pass-through; when set it gates
+    // every request on the peer cert URI SAN before any handler runs.
+    let server_svc = LedgerServer::with_interceptor(svc, move |req| caller_pin.intercept(req));
+
     builder
-        .add_service(LedgerServer::new(svc))
+        .add_service(server_svc)
         .serve(addr)
         .await
         .context("gRPC server terminated")?;

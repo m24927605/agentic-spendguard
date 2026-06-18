@@ -34,6 +34,9 @@ sqlx = { version = "0.8", features = [
 
 # Crypto / encoding
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
+# Inbound SVID URI-SAN pinning (mirrors services/sidecar/src/http_companion/mtls.rs
+# and services/output_predictor/src/plugin_svid.rs, both on the 0.16 line).
+x509-parser = "0.16"
 sha2 = "0.10"
 hex = "0.4"
 rand = "0.8"
@@ -81,3 +84,5 @@ prost-build = "0.13"
 testcontainers = "0.23"
 testcontainers-modules = { version = "0.11", features = ["postgres"] }
 pretty_assertions = "1"
+# Inbound SVID interceptor tests: synthesize leaf certs carrying URI SANs.
+rcgen = { version = "0.13", features = ["pem", "x509-parser"] }
