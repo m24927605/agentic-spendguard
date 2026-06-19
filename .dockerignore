@@ -10,7 +10,11 @@
 **/.mypy_cache/
 **/.ruff_cache/
 **/node_modules/
+# Match suffixed virtualenvs too (e.g. sdk/python/.venv-d05) — these are
+# large untracked trees that previously bloated the demo build context and
+# filled the Docker VM disk ("no space left on device").
 **/.venv/
+**/.venv-*/
 **/venv/
 **/.env
 **/.DS_Store

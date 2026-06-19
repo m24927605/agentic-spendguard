@@ -920,8 +920,11 @@ pub async fn run_through_reserve(
         audit_decision_event_id: audit_decision_event_id.to_string(),
         producer_sequence,
         idempotency: Some(idempotency),
-        fencing: Some(fencing),
-        claims,
+        // Clone claims / fencing / pricing into the request so the originals
+        // remain available for the BUDGET_EXHAUSTED -> fail-closed STOP
+        // fallback below (the ledger budget floor can deny this reserve).
+        fencing: Some(fencing.clone()),
+        claims: claims.clone(),
         lock_order_token: None, // server derives
         // TTL from config (Codex TTL r1 P1.4). Default 600s; demo
         // ttl_sweep overrides to 5s. Phase 2 derives TTL from the
@@ -932,7 +935,7 @@ pub async fn run_through_reserve(
             nanos: 0,
         }),
         audit_event: Some(cloudevent),
-        pricing: Some(pricing),
+        pricing: Some(pricing.clone()),
         contract_bundle: Some(ContractBundleRef {
             bundle_id: bundle.bundle_id.to_string(),
             bundle_hash: bundle.bundle_hash.clone().into(),
@@ -1034,6 +1037,65 @@ pub async fn run_through_reserve(
                 subscription_meter: None,
             })
         }
+        Some(Outcome::Error(e)) if is_ledger_budget_exhausted(e.code) => {
+            // Ledger hard-cap floor (migration 0063 `assert_available_budget_floor`)
+            // RAISED BUDGET_EXHAUSTED: this reserve would drive `available_budget`
+            // negative. The ledger — not the sidecar — is the authority for the spend
+            // hard cap (Contract DSL §contract-dsl-spec-v1alpha2 line 138:
+            // BUDGET_EXHAUSTED fires "在 ledger reservation 階段 (hard cap)"). This is
+            // a BUSINESS DENY, not a transport fault.
+            //
+            // Surfacing it as `DecisionStage` would map to a gRPC INTERNAL status
+            // (domain/error.rs `to_status`) — and adapters that fail-OPEN on
+            // operational/INTERNAL errors would then SILENTLY BYPASS the budget cap
+            // (fail-open on budget exhaustion). Instead convert it to a clean
+            // fail-CLOSED terminal STOP via the DENY lane: this records the
+            // audit_decision row so Contract §6.1 「無 audit 則無 effect」 still holds,
+            // and returns a terminal DecisionResponse the adapter raises as a
+            // DecisionStopped (403) deny.
+            //
+            // Safety: the failed ReserveSet rolled back its ENTIRE Postgres tx (the
+            // RAISE in post_ledger_transaction step 10b aborts after the step-8/9/11
+            // INSERTs), so no `reserve` row persisted — the denied_decision SP's
+            // cross-kind exclusivity check passes for this idempotency key, and the
+            // producer_sequence consumed by the aborted reserve is free to reuse.
+            tracing::info!(
+                decision_id = %decision_id,
+                ledger_detail = %e.message,
+                "reserve denied by ledger budget floor (BUDGET_EXHAUSTED); \
+                 recording fail-closed terminal STOP instead of propagating INTERNAL",
+            );
+            let mut deny_reason_codes = reason_codes.clone();
+            if !deny_reason_codes.iter().any(|c| c == "BUDGET_EXHAUSTED") {
+                deny_reason_codes.push("BUDGET_EXHAUSTED".to_string());
+            }
+            // effect_hash above was computed for the (now-overridden) CONTINUE
+            // decision; recompute it for the STOP we actually emit.
+            let stop_effect_hash = compute_effect_hash(&snapshot_hash, Decision::Stop);
+            run_record_denied_decision(
+                state,
+                ctx,
+                &decision_id,
+                &audit_decision_event_id,
+                producer_sequence,
+                &snapshot_hash,
+                Decision::Stop,
+                &matched_rules,
+                &deny_reason_codes,
+                &claims,
+                &pricing,
+                &fencing,
+                &bundle,
+                &schema_bundle_id,
+                &adapter_idempotency_key,
+                &request_fingerprint_hex,
+                stop_effect_hash,
+                &enrichment,
+                projector_response_ref,
+                claim_estimate_ref,
+            )
+            .await
+        }
         Some(Outcome::Error(e)) => Err(DomainError::DecisionStage(format!(
             "ReserveSet error code={} msg={}",
             e.code, e.message
@@ -1042,6 +1104,20 @@ pub async fn run_through_reserve(
             "ReserveSet response empty oneof".into(),
         )),
     }
+}
+
+/// Returns true when a `ReserveSet` `Outcome::Error` proto code is the
+/// ledger's budget hard-cap denial (migration 0063
+/// `assert_available_budget_floor` raising `BUDGET_EXHAUSTED`).
+///
+/// Such errors are BUSINESS denials, not transport faults: the reserve path
+/// converts them to a fail-CLOSED terminal STOP rather than propagating an
+/// `INTERNAL` status that fail-open adapters would BYPASS the budget cap on.
+/// The match is intentionally narrow — ONLY the exact `BudgetExhausted` code
+/// is reclassified, so a genuine transport / invariant fault never gets
+/// masked as a budget STOP.
+fn is_ledger_budget_exhausted(error_code: i32) -> bool {
+    error_code == crate::proto::common::v1::error::Code::BudgetExhausted as i32
 }
 
 fn compute_snapshot_hash(req: &DecisionRequest, tenant_id: &str) -> [u8; 32] {
@@ -2383,6 +2459,45 @@ mod release_error_mapping_tests {
     fn unknown_proto_code_still_maps_to_internal_domain_error() {
         let err = map_proto_error_to_domain::<()>(9999, "unexpected".into()).unwrap_err();
         assert!(matches!(err, DomainError::DecisionStage(_)));
+    }
+
+    // ── migration 0063 budget-floor fail-closed contract ──────────────────
+    //
+    // A ReserveSet returning `Outcome::Error{code = BUDGET_EXHAUSTED}` is the
+    // ledger hard cap (the budget floor would drive available_budget < 0). The
+    // reserve path must treat ONLY that exact code as a fail-closed terminal
+    // STOP; every other reserve-error code stays a transport/invariant fault
+    // (DecisionStage -> INTERNAL) so real faults are never masked as budget
+    // denials.
+    #[test]
+    fn budget_exhausted_proto_code_recognised_as_ledger_hard_cap() {
+        assert!(super::is_ledger_budget_exhausted(
+            ProtoCode::BudgetExhausted as i32
+        ));
+    }
+
+    #[test]
+    fn non_budget_reserve_error_codes_are_not_reclassified() {
+        for code in [
+            ProtoCode::Unspecified,
+            ProtoCode::IdempotencyConflict,
+            ProtoCode::FencingEpochStale,
+            ProtoCode::PricingFreezeMismatch,
+            ProtoCode::ReservationStateConflict,
+            ProtoCode::AuditInvariantViolated,
+        ] {
+            assert!(
+                !super::is_ledger_budget_exhausted(code as i32),
+                "proto code {code:?} must NOT be reclassified as a budget STOP",
+            );
+        }
+    }
+
+    #[test]
+    fn stop_is_a_valid_denied_lane_label() {
+        // The budget-floor fallback routes through the DENY lane as STOP; the
+        // lane must accept it (else the fallback would error out).
+        assert_eq!(super::denied_decision_label(Decision::Stop), Some("STOP"));
     }
 }
 
