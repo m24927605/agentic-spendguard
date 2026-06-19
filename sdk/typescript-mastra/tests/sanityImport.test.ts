@@ -16,7 +16,7 @@ import { DecisionDenied, SidecarUnavailable, SpendGuardError, VERSION } from "..
 
 describe("COV_D38_01 sanity import", () => {
   it("exports VERSION matching package.json#version", () => {
-    expect(VERSION).toBe("0.1.0");
+    expect(VERSION).toBe("0.1.1");
     expect(VERSION).toBe(pkg.version);
   });
 

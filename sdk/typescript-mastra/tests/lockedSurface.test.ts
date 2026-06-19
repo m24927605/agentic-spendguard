@@ -49,7 +49,7 @@ describe("COV_D38_02 locked surface (TP-01..TP-06)", () => {
     // Type-only exports (SpendGuardProcessorOptions / ClaimEstimator /
     // ClaimEstimatorInput) are proven by tests/_support/sampleConsumer.ts
     // importing them under `pnpm run typecheck` (A4.3).
-    expect(VERSION).toBe("0.1.0");
+    expect(VERSION).toBe("0.1.1");
   });
 
   it("TP-02: SpendGuardProcessor satisfies the installed Processor type (V1 gate)", () => {

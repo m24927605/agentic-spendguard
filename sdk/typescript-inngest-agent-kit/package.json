@@ -1,6 +1,6 @@
 {
   "name": "@spendguard/inngest-agent-kit",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Inngest AgentKit adapter for SpendGuard budget guardrails — drop-in via `wrapWithSpendGuard(step.ai, client, opts)` inside an Inngest function, retry-safe by step identity.",
   "license": "Apache-2.0",
   "author": "Michael Chen <m24927605@gmail.com>",
@@ -62,13 +62,13 @@
     "prepublishOnly": "bash scripts/prepublish.sh"
   },
   "peerDependencies": {
-    "@spendguard/sdk": "workspace:*",
+    "@spendguard/sdk": "^0.5.0",
     "@inngest/agent-kit": ">=0.13 <1"
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
     "@inngest/agent-kit": "^0.13.2",
-    "@spendguard/sdk": "workspace:*",
+    "@spendguard/sdk": "^0.5.0",
     "@types/node": "^20.14.0",
     "inngest": "^3.43.1",
     "tsup": "^8.3.0",

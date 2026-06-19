@@ -4,4 +4,4 @@
 // SLICE 6: dropped the `-pre` tag for the first public release. The
 // `scripts/version-check.sh` gate enforces strict equality with
 // `package.json#version`.
-export const VERSION = "0.1.0" as const;
+export const VERSION = "0.1.1" as const;

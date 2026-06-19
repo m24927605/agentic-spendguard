@@ -1,6 +1,6 @@
 {
   "name": "@spendguard/vercel-ai",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Vercel AI SDK middleware for SpendGuard budget guardrails (covers Mastra Agents via subpath alias)",
   "license": "Apache-2.0",
   "author": "Michael Chen <m24927605@gmail.com>",
@@ -62,7 +62,7 @@
     "prepublishOnly": "bash scripts/prepublish.sh"
   },
   "peerDependencies": {
-    "@spendguard/sdk": "workspace:*",
+    "@spendguard/sdk": "^0.5.0",
     "ai": ">=4.0.0 <5",
     "zod": ">=3.22.0"
   },
@@ -73,7 +73,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^1.9.4",
-    "@spendguard/sdk": "workspace:*",
+    "@spendguard/sdk": "^0.5.0",
     "@types/node": "^20.14.0",
     "ai": "^4.0.0",
     "tsup": "^8.3.0",
