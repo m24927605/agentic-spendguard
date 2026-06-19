@@ -8,14 +8,14 @@ Reserve budget *before* the provider is called — refuse the call the moment th
 budget is gone, with a signed audit trail of why. Not another dashboard that
 shows you the bill after it lands.
 
-🔌 Works with **40+ agent frameworks & tools** — LangChain · OpenAI Agents ·
-Vercel AI SDK · Mastra · LlamaIndex · n8n · Dify · LiteLLM · and any
-OpenAI-compatible client.
+🔌 **~20 in-process gating adapters** — LangChain · OpenAI Agents · Vercel AI ·
+Mastra · LlamaIndex · AutoGen · Strands · n8n · Dify · LiteLLM … — plus drop-in
+recipes for any OpenAI-compatible client.
 
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![PyPI: spendguard-sdk](https://img.shields.io/pypi/v/spendguard-sdk?label=pypi)](https://pypi.org/project/spendguard-sdk/)
 [![npm: @spendguard/sdk](https://img.shields.io/npm/v/@spendguard/sdk?label=npm)](https://www.npmjs.com/package/@spendguard/sdk)
-[![40+ integrations](https://img.shields.io/badge/integrations-40%2B-brightgreen)](docs/integrations.md)
+[![gating adapters: ~20](https://img.shields.io/badge/gating%20adapters-~20-brightgreen)](docs/integrations.md)
 [![Rust](https://img.shields.io/badge/core-Rust-orange)](services/)
 [![Postgres 16 ledger](https://img.shields.io/badge/ledger-Postgres%2016-336791)](services/ledger/migrations/)
 [![wire: mTLS gRPC](https://img.shields.io/badge/wire-mTLS%20gRPC-purple)](proto/)
@@ -126,7 +126,8 @@ bypass the gate.
 ## 🔌 Integrations
 
 Two ways in: a **drop-in proxy** (one env var, no code) or a **framework
-adapter** (wrap the model object). 40+ integrations ship — the installable ones:
+adapter** (wrap the model object). ~20 in-process gating adapters + drop-in
+recipes ship — the installable ones:
 
 ### 🧩 Agent frameworks
 
@@ -164,7 +165,7 @@ adapter** (wrap the model object). 40+ integrations ship — the installable one
 | OpenClaw | custom-provider `baseUrl` (or `npm i @spendguard/openclaw-provider-plugin`) |
 | Anthropic `claude-agent-sdk` | egress proxy + root CA (BYOK) |
 
-**→ Full 40+ matrix** — incl. AG-UI spend events, LiveKit/Pipecat voice reservations,
+**→ Full matrix (~40 surfaces — adapters + recipes + importers + experimental)** — incl. AG-UI spend events, LiveKit/Pipecat voice reservations,
 vendor-VM usage importers (Devin · Manus · Genspark), the Microsoft Agent Governance
 Toolkit ([merged upstream](https://github.com/microsoft/agent-governance-toolkit/pull/2398)),
 install snippets, and per-integration demo gates: **[docs/integrations.md](docs/integrations.md).**
@@ -232,8 +233,9 @@ internal mTLS. See [Quick start](#-quick-start).
 
 ## Status
 
-Single-maintainer, Apache-2.0, **Beta**. Strong demo coverage (40+ integrations,
-each with a green `DEMO_MODE` gate) and a signed, tamper-evident audit chain;
+Single-maintainer, Apache-2.0, **Beta**. ~20 in-process gating adapters plus
+drop-in recipes / billing importers, most with a `DEMO_MODE` gate, and a
+signed, tamper-evident audit chain;
 limited production usage so far. The wire spec and audit invariants are
 append-only — **open an issue before touching `proto/` or `migrations/`.** PRs
 welcome.
