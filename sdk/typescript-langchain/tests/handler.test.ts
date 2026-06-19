@@ -277,6 +277,30 @@ describe("handleChatModelStart — reserve wiring", () => {
     expect(getInflight(handler).size).toBe(0);
   });
 
+  it("reserve foreign-realm DENY (statusCode 403, NOT instanceof) → still fails CLOSED (dual-package hazard)", async () => {
+    // Regression: a duplicate @spendguard/sdk copy in the consumer's module
+    // tree throws a DecisionStopped from a DIFFERENT realm, so `instanceof
+    // DecisionDenied` is false. The structural statusCode===403 marker must
+    // still fail closed — otherwise the budget DENY silently passes through
+    // (the original fail-OPEN bug found by the integration-QA L3 demo).
+    const handler = new SpendGuardCallbackHandler(makeOptions());
+    const mock = getMock(handler);
+    const foreignDeny = Object.assign(
+      new Error('sidecar STOP terminal=true reasons=["BUDGET_EXHAUSTED"]'),
+      { name: "DecisionStopped", statusCode: 403 },
+    );
+    expect(foreignDeny instanceof DecisionDenied).toBe(false); // precondition
+    mock.reserve.mockRejectedValueOnce(foreignDeny);
+
+    await expect(
+      handler.handleChatModelStart(FAKE_SERIALIZED, makeMessages("hi"), RUN_ID_A),
+    ).rejects.toBe(foreignDeny);
+
+    expect(getInflight(handler).size).toBe(0);
+    // Must NOT have logged "LLM call proceeds without budget gate".
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it("reserve SidecarUnavailable → does NOT block; logs warn; no inflight entry", async () => {
     const handler = new SpendGuardCallbackHandler(makeOptions());
     const mock = getMock(handler);

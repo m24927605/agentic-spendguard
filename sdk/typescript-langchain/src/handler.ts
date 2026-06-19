@@ -292,7 +292,22 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
       // `DecisionDenied` covers DENY + STOP + APPROVAL_REQUIRED (subclasses)
       // — those MUST propagate so the LangChain run halts before the
       // provider request fires (review-standards §4.1, §4.7).
-      if (err instanceof DecisionDenied) {
+      // Fail CLOSED on any policy decision (DENY / STOP / SKIP / APPROVAL).
+      // Check the structural `statusCode === 403` marker in ADDITION to
+      // `instanceof DecisionDenied`: a dual copy of @spendguard/sdk in the
+      // consumer's module tree (the classic dual-package hazard) makes the
+      // cross-realm `instanceof` return false even for a genuine
+      // `DecisionStopped`, which would otherwise fail this budget gate OPEN —
+      // the worst possible outcome for a spend control. `DecisionDenied` and
+      // every subclass lock `statusCode === 403` (errors.ts); operational
+      // errors (`SidecarUnavailable`, statusCode 503) are NOT 403 and still
+      // fail open below.
+      if (
+        err instanceof DecisionDenied ||
+        (typeof err === "object" &&
+          err !== null &&
+          (err as { statusCode?: unknown }).statusCode === 403)
+      ) {
         throw err;
       }
       // Anything else — `SidecarUnavailable`, transport hiccups, ack
