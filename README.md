@@ -153,13 +153,37 @@ async with SpendGuardClient(socket_path="/var/run/spendguard/adapter.sock",
     # CONTINUE → make the call; DecisionStopped / ApprovalRequired raise.
 ```
 
-## 🚀 Deploy
+## 🚀 Running it
 
-- **Local / demo:** [`deploy/demo/compose.yaml`](deploy/demo/compose.yaml) —
-  full stack with PKI bootstrap and internal mTLS (`make demo-up`).
-- **Kubernetes:** [`charts/spendguard/`](charts/spendguard/) — DaemonSet
-  sidecar + core Deployments; `chart.profile=production` enforces required-input
-  gates at render time.
+**Try it (demo, ~1 min):** `make demo-up DEMO_MODE=proxy` — the full stack via
+[`deploy/demo/compose.yaml`](deploy/demo/compose.yaml) with PKI bootstrap and
+internal mTLS. See [Quick start](#-quick-start).
+
+**Run it for real (Kubernetes):**
+
+1. Provision **Postgres 16**, **cert-manager** (internal mTLS), and — for
+   production signing — **AWS KMS** (ECDSA P-256 via IRSA).
+2. Install the stack with the production profile:
+   ```bash
+   helm install spendguard charts/spendguard \
+     -f charts/spendguard/values-production.example.yaml \
+     --set chart.profile=production
+   ```
+   `chart.profile=production` is **fail-closed at render time** — it refuses to
+   template without a real DB Secret, signed audit mode, real bundle/trust-root
+   hashes, mTLS/SVID settings, and an explicit NetworkPolicy posture.
+3. Point your app at the deployed egress proxy — the same one line as the demo:
+   ```python
+   base_url = "https://<egress-proxy-host>/v1"
+   ```
+
+→ Production values contract: [`docs/deployment/production-helm-values.md`](docs/deployment/production-helm-values.md)
+· Migrate / roll back: [`docs/operations/`](docs/operations/)
+· Validate a render on `kind`: [`scripts/helm-validate-kind.sh`](scripts/helm-validate-kind.sh)
+
+> **Beta — validate before production.** The production profile is
+> `kind`-validated but has limited real-world usage; pilot it behind your own
+> checks first.
 
 ## 📚 Documentation
 
