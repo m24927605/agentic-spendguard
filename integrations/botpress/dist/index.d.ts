@@ -23,64 +23,135 @@ type Configuration$1 = {
 type Configurations = {};
 
 type Input$1 = {
-    /** Model to use; defaults to the first listed model */
     model?: {
-        /** Provider-qualified model id, e.g. openai:gpt-4o-mini */
+        /** Provider-qualified model id, e.g. gpt-4o-mini */
         id: string;
-        /** Human-facing model name */
-        name: string;
     };
-    /** Prompt messages */
-    messages: Array<{
-        /** Message role */
-        role: "system" | "user" | "assistant" | "tool";
-        /** Message text content */
-        content: string;
-    }>;
-    /** Optional system prompt */
+    /**
+     * Reasoning effort level to use for models that support reasoning. Specifying "none" will indicate the LLM to not use reasoning (for models that support optional reasoning). A "dynamic" effort will indicate the provider to automatically determine the reasoning effort (if supported by the provider). If not provided the model will not use reasoning for models with optional reasoning or use the default reasoning effort specified by the provider for reasoning-only models.
+     * Note: A higher reasoning effort will incur in higher output token charges from the LLM provider.
+     */
+    reasoningEffort?: "low" | "medium" | "high" | "dynamic" | "none";
+    /** Optional system prompt to guide the model */
     systemPrompt?: string;
-    /** Operator-declared output cap; drives the SpendGuard reserve estimate */
+    /** Array of messages for the model to process */
+    messages: Array<{
+        role: "user" | "assistant";
+        type?: "text" | "tool_calls" | "tool_result" | "multipart";
+        /** Required if `type` is "tool_calls" */
+        toolCalls?: Array<{
+            id: string;
+            type: "function";
+            function: {
+                name: string;
+                arguments: /** Some LLMs may generate invalid JSON for a tool call, so this will be `null` when it happens. */ {
+                    [key: string]: any;
+                } | null;
+            };
+        }>;
+        /** Required if `type` is "tool_result" */
+        toolResultCallId?: string;
+        content: string | Array<{
+            type: "text" | "image";
+            /** Indicates the MIME type of the content. If not provided it will be detected from the content-type header of the provided URL. */
+            mimeType?: string;
+            /** Required if part type is "text" */
+            text?: string;
+            /** Required if part type is "image" */
+            url?: string;
+        }> | null;
+    }>;
+    /** Response format expected from the model. If "json_object" is chosen, you must instruct the model to generate JSON either via the system prompt or a user message. */
+    responseFormat?: "text" | "json_object";
+    /** Maximum number of tokens allowed in the generated response */
     maxTokens?: number;
-    /** Sampling temperature */
+    /** Sampling temperature for the model. Higher values result in more random outputs. */
     temperature?: number;
-    /** Nucleus sampling cutoff */
+    /** Top-p sampling parameter. Limits sampling to the smallest set of tokens with a cumulative probability above the threshold. */
     topP?: number;
-    /** Stop sequences */
+    /** Sequences where the model should stop generating further tokens. */
     stopSequences?: string[];
-    /** Opaque end-user id forwarded upstream */
+    /** List of tools available for the model to use */
+    tools?: Array<{
+        type: "function";
+        function: {
+            /** Function name */
+            name: string;
+            description?: string;
+            /** JSON schema of the function arguments */
+            argumentsSchema?: {};
+        };
+    }>;
+    /** The chosen tool to use for content generation */
+    toolChoice?: {
+        type?: "auto" | "specific" | "any" | "none" | "";
+        /** Required if `type` is "specific" */
+        functionName?: string;
+    };
+    /** Unique identifier of the user that sent the prompt */
     userId?: string;
+    /** Set to `true` to output debug information to the bot logs */
+    debug?: boolean;
+    /** Contextual metadata about the prompt */
+    meta?: {
+        /** Source of the prompt, e.g. agent/:id/:version cards/ai-generate, cards/ai-task, nodes/autonomous, etc. */
+        promptSource?: string;
+        promptCategory?: string;
+        /** Name of the integration that originally received the message that initiated this action */
+        integrationName?: string;
+    };
 };
 
 type Output$1 = {
-    /** Provider response id */
+    /** Response ID from LLM provider */
     id: string;
-    /** Upstream provider that served the call */
+    /** LLM provider name */
     provider: string;
-    /** Model id that served the call */
+    /** The name of the LLM model that was used */
     model: string;
-    /** Generated choices */
+    /** Array of generated message choices from the model */
     choices: Array<{
-        /** Always assistant for generated content */
+        type?: "text" | "tool_calls" | "tool_result" | "multipart";
+        /** Required if `type` is "tool_calls" */
+        toolCalls?: Array<{
+            id: string;
+            type: "function";
+            function: {
+                name: string;
+                arguments: /** Some LLMs may generate invalid JSON for a tool call, so this will be `null` when it happens. */ {
+                    [key: string]: any;
+                } | null;
+            };
+        }>;
+        /** Required if `type` is "tool_result" */
+        toolResultCallId?: string;
+        content: string | Array<{
+            type: "text" | "image";
+            /** Indicates the MIME type of the content. If not provided it will be detected from the content-type header of the provided URL. */
+            mimeType?: string;
+            /** Required if part type is "text" */
+            text?: string;
+            /** Required if part type is "image" */
+            url?: string;
+        }> | null;
         role: "assistant";
-        /** Content type — text only in v1 */
-        type: "text";
-        /** Generated text */
-        content: string;
-        /** Choice index */
         index: number;
-        /** Why generation stopped */
-        stopReason: "stop" | "max_tokens" | "content_filter" | "other";
+        stopReason: "stop" | "max_tokens" | "tool_calls" | "content_filter" | "other";
     }>;
-    /** Real token usage committed to SpendGuard */
+    /** A breakdown of token usage and cost information */
     usage: {
-        /** Prompt / input token count */
+        /** Number of input tokens used by the model */
         inputTokens: number;
-        /** Completion / output token count */
+        /** Cost of the input tokens received by the model, in U.S. dollars */
+        inputCost: number;
+        /** Number of output tokens used by the model */
         outputTokens: number;
+        /** Cost of the output tokens generated by the model, in U.S. dollars */
+        outputCost: number;
     };
-    /** Botpress billing envelope */
+    /** Metadata added by Botpress */
     botpress: {
-        /** Cost in USD as reported to Botpress billing */
+        /** Total cost of the content generation, in U.S. dollars */
         cost: number;
     };
 };
@@ -93,12 +164,25 @@ type GenerateContent = {
 type Input = {};
 
 type Output = {
-    /** Models this integration can route to */
     models: Array<{
-        /** Provider-qualified model id, e.g. openai:gpt-4o-mini */
+        /** Unique identifier of the large language model */
         id: string;
-        /** Human-facing model name */
         name: string;
+        description: string;
+        tags: Array<"recommended" | "deprecated" | "general-purpose" | "low-cost" | "vision" | "coding" | "agents" | "function-calling" | "roleplay" | "storytelling" | "reasoning" | "preview" | "speech-to-text" | "image-generation" | "text-to-speech">;
+        input: {
+            maxTokens: number;
+            /** Cost per 1 million tokens, in U.S. dollars */
+            costPer1MTokens: number;
+        };
+        output: {
+            maxTokens: number;
+            /** Cost per 1 million tokens, in U.S. dollars */
+            costPer1MTokens: number;
+        };
+    } & {
+        /** Provider-qualified model id, e.g. gpt-4o-mini */
+        id: string;
     }>;
 };
 
@@ -119,10 +203,8 @@ type Events = {};
 type States = {};
 
 type ModelRef$1 = {
-    /** Provider-qualified model id, e.g. openai:gpt-4o-mini */
+    /** Provider-qualified model id, e.g. gpt-4o-mini */
     id: string;
-    /** Human-facing model name */
-    name: string;
 };
 
 type Entities = {
@@ -404,34 +486,44 @@ declare class SpendGuardReservation {
     private postJson;
 }
 
-/** A reference to one upstream model the integration exposes. Mirrors the
- *  llm interface `modelRef` entity (id + human-facing name). */
+/** The `id` field of the `llm` interface `modelRef` entity. The interface
+ *  declares `modelRef = z.object({ id: <string> }).catchall(z.never())` and
+ *  references it from both action schemas via `z.ref("modelRef")`. We supply
+ *  the concrete `id` schema here so `integration.definition.ts` can build the
+ *  matching `modelRef` entity (mirroring the first-party OpenAI integration's
+ *  `entities.modelRef.schema = z.object({ id: <languageModelId> })`). */
+declare const LanguageModelIdSchema: z.ZodString;
+/** A reference to one upstream model the integration exposes — the runtime
+ *  projection of the `llm` interface `modelRef` entity (`{ id }`). Note the
+ *  interface `modelRef` carries ONLY `id` (no `name`); the human-facing name
+ *  lives on the `listLanguageModels` model rows, not on the ref. */
 declare const ModelRefSchema: z.ZodObject<{
     id: z.ZodString;
-    name: z.ZodString;
 }, "strip", {
     id: string;
-    name: string;
 }, {
     id: string;
-    name: string;
 }>;
 type ModelRef = z.infer<typeof ModelRefSchema>;
-/** One message in the prompt. Botpress normalises tool/assistant/user roles
- *  into this shape before invoking generateContent. `content` is the text
- *  the SpendGuard prompt-hash is computed over. */
+/** One message in the internal prompt representation. The `llm` interface
+ *  restricts message roles to `user | assistant`, but the SpendGuard prompt
+ *  hash + token estimate also fold in the `systemPrompt` (mapped to a
+ *  synthetic `system` message by the binding), so the internal role set is
+ *  wider. `content` is the flattened text the prompt-hash is computed over. */
 declare const MessageSchema: z.ZodObject<{
     role: z.ZodEnum<["system", "user", "assistant", "tool"]>;
     content: z.ZodString;
 }, "strip", {
-    role: "system" | "user" | "assistant" | "tool";
+    role: "assistant" | "system" | "user" | "tool";
     content: string;
 }, {
-    role: "system" | "user" | "assistant" | "tool";
+    role: "assistant" | "system" | "user" | "tool";
     content: string;
 }>;
 type Message = z.infer<typeof MessageSchema>;
-/** Per-call token usage echoed back from the upstream provider. */
+/** Per-call token usage echoed back from the upstream provider (internal). The
+ *  interface output additionally carries `inputCost` / `outputCost`; those are
+ *  filled in by the action boundary in `src/index.ts`. */
 declare const UsageSchema: z.ZodObject<{
     inputTokens: z.ZodNumber;
     outputTokens: z.ZodNumber;
@@ -443,7 +535,9 @@ declare const UsageSchema: z.ZodObject<{
     outputTokens: number;
 }>;
 type Usage = z.infer<typeof UsageSchema>;
-/** One generated choice. */
+/** One generated choice (internal). SpendGuard emits a single text choice; the
+ *  interface output `stopReason` additionally allows `tool_calls`, which this
+ *  text-only surface never produces. */
 declare const ChoiceSchema: z.ZodObject<{
     role: z.ZodLiteral<"assistant">;
     type: z.ZodLiteral<"text">;
@@ -452,37 +546,37 @@ declare const ChoiceSchema: z.ZodObject<{
     stopReason: z.ZodEnum<["stop", "max_tokens", "content_filter", "other"]>;
 }, "strip", {
     role: "assistant";
-    content: string;
     type: "text";
+    content: string;
     index: number;
     stopReason: "stop" | "max_tokens" | "content_filter" | "other";
 }, {
     role: "assistant";
-    content: string;
     type: "text";
+    content: string;
     index: number;
     stopReason: "stop" | "max_tokens" | "content_filter" | "other";
 }>;
 type Choice = z.infer<typeof ChoiceSchema>;
+/** Internal `generateContent` input — the simplified projection the SpendGuard
+ *  pipeline consumes. `src/index.ts` builds this from the interface's richer
+ *  action input. */
 declare const GenerateContentInputSchema: z.ZodObject<{
     model: z.ZodOptional<z.ZodObject<{
         id: z.ZodString;
-        name: z.ZodString;
     }, "strip", {
         id: string;
-        name: string;
     }, {
         id: string;
-        name: string;
     }>>;
     messages: z.ZodArray<z.ZodObject<{
         role: z.ZodEnum<["system", "user", "assistant", "tool"]>;
         content: z.ZodString;
     }, "strip", {
-        role: "system" | "user" | "assistant" | "tool";
+        role: "assistant" | "system" | "user" | "tool";
         content: string;
     }, {
-        role: "system" | "user" | "assistant" | "tool";
+        role: "assistant" | "system" | "user" | "tool";
         content: string;
     }>, "many">;
     systemPrompt: z.ZodOptional<z.ZodString>;
@@ -493,36 +587,37 @@ declare const GenerateContentInputSchema: z.ZodObject<{
     userId: z.ZodOptional<z.ZodString>;
 }, "strip", {
     messages: {
-        role: "system" | "user" | "assistant" | "tool";
+        role: "assistant" | "system" | "user" | "tool";
         content: string;
     }[];
     model?: {
         id: string;
-        name: string;
     } | undefined;
-    systemPrompt?: string | undefined;
     maxTokens?: number | undefined;
+    systemPrompt?: string | undefined;
     temperature?: number | undefined;
     topP?: number | undefined;
     stopSequences?: string[] | undefined;
     userId?: string | undefined;
 }, {
     messages: {
-        role: "system" | "user" | "assistant" | "tool";
+        role: "assistant" | "system" | "user" | "tool";
         content: string;
     }[];
     model?: {
         id: string;
-        name: string;
     } | undefined;
-    systemPrompt?: string | undefined;
     maxTokens?: number | undefined;
+    systemPrompt?: string | undefined;
     temperature?: number | undefined;
     topP?: number | undefined;
     stopSequences?: string[] | undefined;
     userId?: string | undefined;
 }>;
 type GenerateContentInput = z.infer<typeof GenerateContentInputSchema>;
+/** Internal `generateContent` output. Structurally a subset of the interface
+ *  output (single text choice, no cost fields); `src/index.ts` widens it to
+ *  the interface output by adding `usage.inputCost` / `usage.outputCost`. */
 declare const GenerateContentOutputSchema: z.ZodObject<{
     id: z.ZodString;
     provider: z.ZodString;
@@ -535,14 +630,14 @@ declare const GenerateContentOutputSchema: z.ZodObject<{
         stopReason: z.ZodEnum<["stop", "max_tokens", "content_filter", "other"]>;
     }, "strip", {
         role: "assistant";
-        content: string;
         type: "text";
+        content: string;
         index: number;
         stopReason: "stop" | "max_tokens" | "content_filter" | "other";
     }, {
         role: "assistant";
-        content: string;
         type: "text";
+        content: string;
         index: number;
         stopReason: "stop" | "max_tokens" | "content_filter" | "other";
     }>, "many">;
@@ -565,12 +660,12 @@ declare const GenerateContentOutputSchema: z.ZodObject<{
     }>;
 }, "strip", {
     id: string;
-    model: string;
     provider: string;
+    model: string;
     choices: {
         role: "assistant";
-        content: string;
         type: "text";
+        content: string;
         index: number;
         stopReason: "stop" | "max_tokens" | "content_filter" | "other";
     }[];
@@ -583,12 +678,12 @@ declare const GenerateContentOutputSchema: z.ZodObject<{
     };
 }, {
     id: string;
-    model: string;
     provider: string;
+    model: string;
     choices: {
         role: "assistant";
-        content: string;
         type: "text";
+        content: string;
         index: number;
         stopReason: "stop" | "max_tokens" | "content_filter" | "other";
     }[];
@@ -601,28 +696,146 @@ declare const GenerateContentOutputSchema: z.ZodObject<{
     };
 }>;
 type GenerateContentOutput = z.infer<typeof GenerateContentOutputSchema>;
+/** One row of the `listLanguageModels` catalog — matches the `llm` interface
+ *  model shape (`modelRef` intersected with the model metadata Botpress Studio
+ *  renders in the model picker). */
+declare const LanguageModelSchema: z.ZodObject<{
+    id: z.ZodString;
+    name: z.ZodString;
+    description: z.ZodString;
+    tags: z.ZodArray<z.ZodEnum<["recommended", "deprecated", "general-purpose", "low-cost", "vision", "coding", "agents", "function-calling", "roleplay", "storytelling", "reasoning", "preview", "speech-to-text", "image-generation", "text-to-speech"]>, "many">;
+    input: z.ZodObject<{
+        maxTokens: z.ZodNumber;
+        costPer1MTokens: z.ZodNumber;
+    }, "strip", {
+        maxTokens: number;
+        costPer1MTokens: number;
+    }, {
+        maxTokens: number;
+        costPer1MTokens: number;
+    }>;
+    output: z.ZodObject<{
+        maxTokens: z.ZodNumber;
+        costPer1MTokens: z.ZodNumber;
+    }, "strip", {
+        maxTokens: number;
+        costPer1MTokens: number;
+    }, {
+        maxTokens: number;
+        costPer1MTokens: number;
+    }>;
+}, "strip", {
+    input: {
+        maxTokens: number;
+        costPer1MTokens: number;
+    };
+    id: string;
+    name: string;
+    description: string;
+    tags: ("recommended" | "deprecated" | "general-purpose" | "low-cost" | "vision" | "coding" | "agents" | "function-calling" | "roleplay" | "storytelling" | "reasoning" | "preview" | "speech-to-text" | "image-generation" | "text-to-speech")[];
+    output: {
+        maxTokens: number;
+        costPer1MTokens: number;
+    };
+}, {
+    input: {
+        maxTokens: number;
+        costPer1MTokens: number;
+    };
+    id: string;
+    name: string;
+    description: string;
+    tags: ("recommended" | "deprecated" | "general-purpose" | "low-cost" | "vision" | "coding" | "agents" | "function-calling" | "roleplay" | "storytelling" | "reasoning" | "preview" | "speech-to-text" | "image-generation" | "text-to-speech")[];
+    output: {
+        maxTokens: number;
+        costPer1MTokens: number;
+    };
+}>;
+type LanguageModel = z.infer<typeof LanguageModelSchema>;
 declare const ListLanguageModelsInputSchema: z.ZodObject<{}, "strip", {}, {}>;
 type ListLanguageModelsInput = z.infer<typeof ListLanguageModelsInputSchema>;
 declare const ListLanguageModelsOutputSchema: z.ZodObject<{
     models: z.ZodArray<z.ZodObject<{
         id: z.ZodString;
         name: z.ZodString;
+        description: z.ZodString;
+        tags: z.ZodArray<z.ZodEnum<["recommended", "deprecated", "general-purpose", "low-cost", "vision", "coding", "agents", "function-calling", "roleplay", "storytelling", "reasoning", "preview", "speech-to-text", "image-generation", "text-to-speech"]>, "many">;
+        input: z.ZodObject<{
+            maxTokens: z.ZodNumber;
+            costPer1MTokens: z.ZodNumber;
+        }, "strip", {
+            maxTokens: number;
+            costPer1MTokens: number;
+        }, {
+            maxTokens: number;
+            costPer1MTokens: number;
+        }>;
+        output: z.ZodObject<{
+            maxTokens: z.ZodNumber;
+            costPer1MTokens: z.ZodNumber;
+        }, "strip", {
+            maxTokens: number;
+            costPer1MTokens: number;
+        }, {
+            maxTokens: number;
+            costPer1MTokens: number;
+        }>;
     }, "strip", {
+        input: {
+            maxTokens: number;
+            costPer1MTokens: number;
+        };
         id: string;
         name: string;
+        description: string;
+        tags: ("recommended" | "deprecated" | "general-purpose" | "low-cost" | "vision" | "coding" | "agents" | "function-calling" | "roleplay" | "storytelling" | "reasoning" | "preview" | "speech-to-text" | "image-generation" | "text-to-speech")[];
+        output: {
+            maxTokens: number;
+            costPer1MTokens: number;
+        };
     }, {
+        input: {
+            maxTokens: number;
+            costPer1MTokens: number;
+        };
         id: string;
         name: string;
+        description: string;
+        tags: ("recommended" | "deprecated" | "general-purpose" | "low-cost" | "vision" | "coding" | "agents" | "function-calling" | "roleplay" | "storytelling" | "reasoning" | "preview" | "speech-to-text" | "image-generation" | "text-to-speech")[];
+        output: {
+            maxTokens: number;
+            costPer1MTokens: number;
+        };
     }>, "many">;
 }, "strip", {
     models: {
+        input: {
+            maxTokens: number;
+            costPer1MTokens: number;
+        };
         id: string;
         name: string;
+        description: string;
+        tags: ("recommended" | "deprecated" | "general-purpose" | "low-cost" | "vision" | "coding" | "agents" | "function-calling" | "roleplay" | "storytelling" | "reasoning" | "preview" | "speech-to-text" | "image-generation" | "text-to-speech")[];
+        output: {
+            maxTokens: number;
+            costPer1MTokens: number;
+        };
     }[];
 }, {
     models: {
+        input: {
+            maxTokens: number;
+            costPer1MTokens: number;
+        };
         id: string;
         name: string;
+        description: string;
+        tags: ("recommended" | "deprecated" | "general-purpose" | "low-cost" | "vision" | "coding" | "agents" | "function-calling" | "roleplay" | "storytelling" | "reasoning" | "preview" | "speech-to-text" | "image-generation" | "text-to-speech")[];
+        output: {
+            maxTokens: number;
+            costPer1MTokens: number;
+        };
     }[];
 }>;
 type ListLanguageModelsOutput = z.infer<typeof ListLanguageModelsOutputSchema>;
@@ -633,6 +846,9 @@ type schemas_GenerateContentInput = GenerateContentInput;
 declare const schemas_GenerateContentInputSchema: typeof GenerateContentInputSchema;
 type schemas_GenerateContentOutput = GenerateContentOutput;
 declare const schemas_GenerateContentOutputSchema: typeof GenerateContentOutputSchema;
+type schemas_LanguageModel = LanguageModel;
+declare const schemas_LanguageModelIdSchema: typeof LanguageModelIdSchema;
+declare const schemas_LanguageModelSchema: typeof LanguageModelSchema;
 type schemas_ListLanguageModelsInput = ListLanguageModelsInput;
 declare const schemas_ListLanguageModelsInputSchema: typeof ListLanguageModelsInputSchema;
 type schemas_ListLanguageModelsOutput = ListLanguageModelsOutput;
@@ -644,7 +860,7 @@ declare const schemas_ModelRefSchema: typeof ModelRefSchema;
 type schemas_Usage = Usage;
 declare const schemas_UsageSchema: typeof UsageSchema;
 declare namespace schemas {
-  export { type schemas_Choice as Choice, schemas_ChoiceSchema as ChoiceSchema, type schemas_GenerateContentInput as GenerateContentInput, schemas_GenerateContentInputSchema as GenerateContentInputSchema, type schemas_GenerateContentOutput as GenerateContentOutput, schemas_GenerateContentOutputSchema as GenerateContentOutputSchema, type schemas_ListLanguageModelsInput as ListLanguageModelsInput, schemas_ListLanguageModelsInputSchema as ListLanguageModelsInputSchema, type schemas_ListLanguageModelsOutput as ListLanguageModelsOutput, schemas_ListLanguageModelsOutputSchema as ListLanguageModelsOutputSchema, type schemas_Message as Message, schemas_MessageSchema as MessageSchema, type schemas_ModelRef as ModelRef, schemas_ModelRefSchema as ModelRefSchema, type schemas_Usage as Usage, schemas_UsageSchema as UsageSchema };
+  export { type schemas_Choice as Choice, schemas_ChoiceSchema as ChoiceSchema, type schemas_GenerateContentInput as GenerateContentInput, schemas_GenerateContentInputSchema as GenerateContentInputSchema, type schemas_GenerateContentOutput as GenerateContentOutput, schemas_GenerateContentOutputSchema as GenerateContentOutputSchema, type schemas_LanguageModel as LanguageModel, schemas_LanguageModelIdSchema as LanguageModelIdSchema, schemas_LanguageModelSchema as LanguageModelSchema, type schemas_ListLanguageModelsInput as ListLanguageModelsInput, schemas_ListLanguageModelsInputSchema as ListLanguageModelsInputSchema, type schemas_ListLanguageModelsOutput as ListLanguageModelsOutput, schemas_ListLanguageModelsOutputSchema as ListLanguageModelsOutputSchema, type schemas_Message as Message, schemas_MessageSchema as MessageSchema, type schemas_ModelRef as ModelRef, schemas_ModelRefSchema as ModelRefSchema, type schemas_Usage as Usage, schemas_UsageSchema as UsageSchema };
 }
 
 /** Minimal Botpress integration handler context the binding depends on. */
@@ -777,6 +993,36 @@ declare function runGenerateContent(args: GenerateContentArgs): Promise<Generate
 /** Return the models SpendGuard can route to for the configured provider. */
 declare function runListLanguageModels(configuration: Configuration): ListLanguageModelsOutput;
 
+/** The interface `generateContent` input, as generated by `bp build`. */
+type InterfaceGenerateContentInput = Input$1;
+/** The interface `generateContent` output, as generated by `bp build`. */
+type InterfaceGenerateContentOutput = Output$1;
+type InterfaceMessage = InterfaceGenerateContentInput["messages"][number];
+type InterfaceContent = InterfaceMessage["content"];
+/**
+ * Flatten an interface message `content` (string | multipart array | null) to
+ * the plain text the SpendGuard prompt-hash + token estimate operate over.
+ * - `null`            -> "" (e.g. an assistant message that is purely tool
+ *                        calls carries `content: null`).
+ * - `string`          -> as-is.
+ * - multipart array   -> the concatenation of the text parts; non-text parts
+ *                        (images) contribute nothing to the text estimate.
+ */
+declare function flattenContent(content: InterfaceContent): string;
+/**
+ * Narrow the interface `generateContent` input to the internal
+ * `GenerateContentInput` the SpendGuard pipeline consumes. The interface
+ * `modelRef` carries only `{ id }`; the internal model ref mirrors it.
+ */
+declare function toInternalInput(input: InterfaceGenerateContentInput): GenerateContentInput;
+/**
+ * Widen the internal `GenerateContentOutput` to the interface output. The
+ * interface `usage` requires per-token cost fields the SpendGuard pipeline does
+ * not compute (the sidecar ledger is the source of truth for cost); they are
+ * reported as 0 and the aggregate advisory `botpress.cost` is preserved.
+ */
+declare function toInterfaceOutput(output: GenerateContentOutput): InterfaceGenerateContentOutput;
+
 interface ValidateArgs {
     readonly configuration: Configuration;
     /** Override the reservation used for the probe — unit tests inject a
@@ -792,4 +1038,4 @@ declare function validateConfiguration(args: ValidateArgs): Promise<void>;
 
 declare const _default: Integration;
 
-export { type BotpressActionCtx, type BotpressCallContext, type Configuration, ConfigurationObjectSchema, ConfigurationSchema, DecisionDenied, type ForwardFn, type ForwardRequest, type ForwardResult, type GenerateContentArgs, type MinimalLogger, ProviderForwardError, type ReservationHandle, SidecarUnavailable, type SpendGuardCode, SpendGuardConfigError, SpendGuardReservation, VERSION, codeFor, _default as default, defaultForward, schemas as llmSchemas, pickTenantId, resolveMaxTokens, resolveModel, runGenerateContent, runListLanguageModels, runtimeErrorCode, toBindingFromActionInput, toForwardRequest, toGenerateContentOutput, toRuntimeError, validateConfiguration };
+export { type BotpressActionCtx, type BotpressCallContext, type Configuration, ConfigurationObjectSchema, ConfigurationSchema, DecisionDenied, type ForwardFn, type ForwardRequest, type ForwardResult, type GenerateContentArgs, type InterfaceGenerateContentInput, type InterfaceGenerateContentOutput, type MinimalLogger, ProviderForwardError, type ReservationHandle, SidecarUnavailable, type SpendGuardCode, SpendGuardConfigError, SpendGuardReservation, VERSION, codeFor, _default as default, defaultForward, flattenContent, schemas as llmSchemas, pickTenantId, resolveMaxTokens, resolveModel, runGenerateContent, runListLanguageModels, runtimeErrorCode, toBindingFromActionInput, toForwardRequest, toGenerateContentOutput, toInterfaceOutput, toInternalInput, toRuntimeError, validateConfiguration };

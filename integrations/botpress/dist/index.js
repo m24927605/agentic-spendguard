@@ -734,19 +734,108 @@ async function runGenerateContent(args) {
   return toGenerateContentOutput(result, configuration.upstreamProvider, cost(realUsage));
 }
 
+// src/llm/interfaceAdapter.ts
+function flattenContent(content) {
+  if (content === null) {
+    return "";
+  }
+  if (typeof content === "string") {
+    return content;
+  }
+  return content.filter((part) => part.type === "text").map((part) => part.text ?? "").join("");
+}
+function toInternalMessage(message) {
+  return { role: message.role, content: flattenContent(message.content) };
+}
+function toInternalInput(input) {
+  return {
+    model: input.model !== void 0 ? { id: input.model.id } : void 0,
+    messages: input.messages.map(toInternalMessage),
+    systemPrompt: input.systemPrompt,
+    maxTokens: input.maxTokens,
+    temperature: input.temperature,
+    topP: input.topP,
+    stopSequences: input.stopSequences,
+    userId: input.userId
+  };
+}
+function toInterfaceOutput(output) {
+  return {
+    id: output.id,
+    provider: output.provider,
+    model: output.model,
+    choices: output.choices.map((choice) => ({
+      role: choice.role,
+      type: choice.type,
+      content: choice.content,
+      index: choice.index,
+      stopReason: choice.stopReason
+    })),
+    usage: {
+      inputTokens: output.usage.inputTokens,
+      inputCost: 0,
+      outputTokens: output.usage.outputTokens,
+      outputCost: 0
+    },
+    botpress: { cost: output.botpress.cost }
+  };
+}
+
 // src/llm/listLanguageModels.ts
 var MODELS_BY_PROVIDER = {
   openai: [
-    { id: "gpt-4o", name: "OpenAI GPT-4o" },
-    { id: "gpt-4o-mini", name: "OpenAI GPT-4o mini" }
+    {
+      id: "gpt-4o",
+      name: "OpenAI GPT-4o",
+      description: "OpenAI flagship multimodal model.",
+      tags: ["recommended", "general-purpose", "vision", "function-calling", "agents"],
+      input: { maxTokens: 128e3, costPer1MTokens: 2.5 },
+      output: { maxTokens: 16384, costPer1MTokens: 10 }
+    },
+    {
+      id: "gpt-4o-mini",
+      name: "OpenAI GPT-4o mini",
+      description: "Smaller, low-cost OpenAI multimodal model.",
+      tags: ["low-cost", "general-purpose", "vision", "function-calling"],
+      input: { maxTokens: 128e3, costPer1MTokens: 0.15 },
+      output: { maxTokens: 16384, costPer1MTokens: 0.6 }
+    }
   ],
   anthropic: [
-    { id: "claude-3-5-sonnet-latest", name: "Anthropic Claude 3.5 Sonnet" },
-    { id: "claude-3-5-haiku-latest", name: "Anthropic Claude 3.5 Haiku" }
+    {
+      id: "claude-3-5-sonnet-latest",
+      name: "Anthropic Claude 3.5 Sonnet",
+      description: "Anthropic balanced model for general-purpose agent work.",
+      tags: ["recommended", "general-purpose", "vision", "coding", "agents"],
+      input: { maxTokens: 2e5, costPer1MTokens: 3 },
+      output: { maxTokens: 8192, costPer1MTokens: 15 }
+    },
+    {
+      id: "claude-3-5-haiku-latest",
+      name: "Anthropic Claude 3.5 Haiku",
+      description: "Fast, low-cost Anthropic model.",
+      tags: ["low-cost", "general-purpose", "function-calling"],
+      input: { maxTokens: 2e5, costPer1MTokens: 0.8 },
+      output: { maxTokens: 8192, costPer1MTokens: 4 }
+    }
   ],
   bedrock: [
-    { id: "anthropic.claude-3-5-sonnet", name: "Bedrock Claude 3.5 Sonnet" },
-    { id: "anthropic.claude-3-5-haiku", name: "Bedrock Claude 3.5 Haiku" }
+    {
+      id: "anthropic.claude-3-5-sonnet",
+      name: "Bedrock Claude 3.5 Sonnet",
+      description: "Anthropic Claude 3.5 Sonnet served via Amazon Bedrock.",
+      tags: ["recommended", "general-purpose", "vision", "coding", "agents"],
+      input: { maxTokens: 2e5, costPer1MTokens: 3 },
+      output: { maxTokens: 8192, costPer1MTokens: 15 }
+    },
+    {
+      id: "anthropic.claude-3-5-haiku",
+      name: "Bedrock Claude 3.5 Haiku",
+      description: "Fast, low-cost Anthropic model served via Amazon Bedrock.",
+      tags: ["low-cost", "general-purpose", "function-calling"],
+      input: { maxTokens: 2e5, costPer1MTokens: 0.8 },
+      output: { maxTokens: 8192, costPer1MTokens: 4 }
+    }
   ]
 };
 function runListLanguageModels(configuration) {
@@ -764,19 +853,21 @@ __export(schemas_exports, {
   ChoiceSchema: () => ChoiceSchema,
   GenerateContentInputSchema: () => GenerateContentInputSchema,
   GenerateContentOutputSchema: () => GenerateContentOutputSchema,
+  LanguageModelIdSchema: () => LanguageModelIdSchema,
+  LanguageModelSchema: () => LanguageModelSchema,
   ListLanguageModelsInputSchema: () => ListLanguageModelsInputSchema,
   ListLanguageModelsOutputSchema: () => ListLanguageModelsOutputSchema,
   MessageSchema: () => MessageSchema,
   ModelRefSchema: () => ModelRefSchema,
   UsageSchema: () => UsageSchema
 });
+var LanguageModelIdSchema = z.string().title("LLM Model ID").describe("Provider-qualified model id, e.g. gpt-4o-mini");
 var ModelRefSchema = z.object({
-  id: z.string().describe("Provider-qualified model id, e.g. openai:gpt-4o-mini"),
-  name: z.string().describe("Human-facing model name")
+  id: LanguageModelIdSchema
 });
 var MessageSchema = z.object({
   role: z.enum(["system", "user", "assistant", "tool"]).describe("Message role"),
-  content: z.string().describe("Message text content")
+  content: z.string().describe("Flattened message text content")
 });
 var UsageSchema = z.object({
   inputTokens: z.number().describe("Prompt / input token count"),
@@ -790,8 +881,8 @@ var ChoiceSchema = z.object({
   stopReason: z.enum(["stop", "max_tokens", "content_filter", "other"]).describe("Why generation stopped")
 });
 var GenerateContentInputSchema = z.object({
-  model: ModelRefSchema.optional().describe("Model to use; defaults to the first listed model"),
-  messages: z.array(MessageSchema).describe("Prompt messages"),
+  model: ModelRefSchema.optional().describe("Model to use; defaults to the provider default"),
+  messages: z.array(MessageSchema).describe("Prompt messages (content flattened to text)"),
   systemPrompt: z.string().optional().describe("Optional system prompt"),
   maxTokens: z.number().optional().describe("Operator-declared output cap; drives the SpendGuard reserve estimate"),
   temperature: z.number().optional().describe("Sampling temperature"),
@@ -807,9 +898,41 @@ var GenerateContentOutputSchema = z.object({
   usage: UsageSchema.describe("Real token usage committed to SpendGuard"),
   botpress: z.object({ cost: z.number().describe("Cost in USD as reported to Botpress billing") }).describe("Botpress billing envelope")
 });
+var LanguageModelSchema = z.object({
+  id: LanguageModelIdSchema,
+  name: z.string().describe("Human-facing model name"),
+  description: z.string().describe("Short model description"),
+  tags: z.array(
+    z.enum([
+      "recommended",
+      "deprecated",
+      "general-purpose",
+      "low-cost",
+      "vision",
+      "coding",
+      "agents",
+      "function-calling",
+      "roleplay",
+      "storytelling",
+      "reasoning",
+      "preview",
+      "speech-to-text",
+      "image-generation",
+      "text-to-speech"
+    ])
+  ).describe("Capability / lifecycle tags rendered in the model picker"),
+  input: z.object({
+    maxTokens: z.number().describe("Max input tokens"),
+    costPer1MTokens: z.number().describe("Input cost per 1M tokens, USD")
+  }).describe("Input limits + pricing"),
+  output: z.object({
+    maxTokens: z.number().describe("Max output tokens"),
+    costPer1MTokens: z.number().describe("Output cost per 1M tokens, USD")
+  }).describe("Output limits + pricing")
+});
 var ListLanguageModelsInputSchema = z.object({});
 var ListLanguageModelsOutputSchema = z.object({
-  models: z.array(ModelRefSchema).describe("Models this integration can route to")
+  models: z.array(LanguageModelSchema).describe("Models this integration can route to")
 });
 
 // src/index.ts
@@ -828,16 +951,19 @@ var src_default = new Integration2({
   },
   actions: {
     // The SpendGuard gate point. Reserve -> forward -> commit (fail-closed).
+    //
+    // `input` arrives in the `llm` interface's rich `generateContent` shape
+    // (multipart/tool content, reasoning controls, etc.). The boundary adapter
+    // narrows it to the SpendGuard pipeline's internal input, runs the gate,
+    // then widens the internal result back to the interface output shape.
     generateContent: async ({ input, ctx, logger }) => {
-      return runGenerateContent({
-        // The generated `.botpress` input type and our schema-derived
-        // `GenerateContentInput` are both projected from
-        // GenerateContentInputSchema; they are structurally identical.
-        input,
+      const result = await runGenerateContent({
+        input: toInternalInput(input),
         configuration: ctx.configuration,
         ctx: { botId: ctx.botId, integrationId: ctx.integrationId },
         logger: { warn: (m) => logger.forBot().warn(m) }
       });
+      return toInterfaceOutput(result);
     },
     listLanguageModels: async ({ ctx }) => {
       return runListLanguageModels(ctx.configuration);
@@ -845,4 +971,4 @@ var src_default = new Integration2({
   }
 });
 
-export { ConfigurationObjectSchema, ConfigurationSchema, DecisionDenied, ProviderForwardError, SidecarUnavailable, SpendGuardConfigError, SpendGuardReservation, VERSION, codeFor, src_default as default, defaultForward, schemas_exports as llmSchemas, pickTenantId, resolveMaxTokens, resolveModel, runGenerateContent, runListLanguageModels, runtimeErrorCode, toBindingFromActionInput, toForwardRequest, toGenerateContentOutput, toRuntimeError, validateConfiguration };
+export { ConfigurationObjectSchema, ConfigurationSchema, DecisionDenied, ProviderForwardError, SidecarUnavailable, SpendGuardConfigError, SpendGuardReservation, VERSION, codeFor, src_default as default, defaultForward, flattenContent, schemas_exports as llmSchemas, pickTenantId, resolveMaxTokens, resolveModel, runGenerateContent, runListLanguageModels, runtimeErrorCode, toBindingFromActionInput, toForwardRequest, toGenerateContentOutput, toInterfaceOutput, toInternalInput, toRuntimeError, validateConfiguration };

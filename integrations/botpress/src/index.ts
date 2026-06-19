@@ -16,8 +16,8 @@
 
 import { validateConfiguration } from "./lifecycle/validateConfiguration.js";
 import { runGenerateContent } from "./llm/generateContent.js";
+import { toInterfaceOutput, toInternalInput } from "./llm/interfaceAdapter.js";
 import { runListLanguageModels } from "./llm/listLanguageModels.js";
-import type { GenerateContentInput } from "./llm/schemas.js";
 import * as bp from ".botpress";
 
 // ── Public surface — named exports ────────────────────────────────────
@@ -53,6 +53,15 @@ export type { ForwardFn, ForwardRequest, ForwardResult } from "./provider/forwar
 export { runGenerateContent } from "./llm/generateContent.js";
 export type { GenerateContentArgs, MinimalLogger } from "./llm/generateContent.js";
 export { runListLanguageModels } from "./llm/listLanguageModels.js";
+export {
+  flattenContent,
+  toInterfaceOutput,
+  toInternalInput,
+} from "./llm/interfaceAdapter.js";
+export type {
+  InterfaceGenerateContentInput,
+  InterfaceGenerateContentOutput,
+} from "./llm/interfaceAdapter.js";
 export * as llmSchemas from "./llm/schemas.js";
 export { validateConfiguration } from "./lifecycle/validateConfiguration.js";
 
@@ -74,16 +83,19 @@ export default new bp.Integration({
   handler: async () => {},
   actions: {
     // The SpendGuard gate point. Reserve -> forward -> commit (fail-closed).
+    //
+    // `input` arrives in the `llm` interface's rich `generateContent` shape
+    // (multipart/tool content, reasoning controls, etc.). The boundary adapter
+    // narrows it to the SpendGuard pipeline's internal input, runs the gate,
+    // then widens the internal result back to the interface output shape.
     generateContent: async ({ input, ctx, logger }) => {
-      return runGenerateContent({
-        // The generated `.botpress` input type and our schema-derived
-        // `GenerateContentInput` are both projected from
-        // GenerateContentInputSchema; they are structurally identical.
-        input: input as GenerateContentInput,
+      const result = await runGenerateContent({
+        input: toInternalInput(input),
         configuration: ctx.configuration,
         ctx: { botId: ctx.botId, integrationId: ctx.integrationId },
         logger: { warn: (m: string) => logger.forBot().warn(m) },
       });
+      return toInterfaceOutput(result);
     },
     listLanguageModels: async ({ ctx }) => {
       return runListLanguageModels(ctx.configuration);

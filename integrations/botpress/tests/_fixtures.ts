@@ -30,7 +30,8 @@ export function makeGenerateContentInput(
   overrides: Partial<GenerateContentInput> = {},
 ): GenerateContentInput {
   return {
-    model: { id: "gpt-4o-mini", name: "OpenAI GPT-4o mini" },
+    // The `llm` interface `modelRef` carries only `id` (no `name`).
+    model: { id: "gpt-4o-mini" },
     messages: [{ role: "user", content: "hello" }],
     maxTokens: 100,
     ...overrides,

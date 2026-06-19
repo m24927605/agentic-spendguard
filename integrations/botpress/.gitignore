@@ -4,9 +4,10 @@
 .botpress/
 
 # Botpress CLI installs interface/integration packages here via `bp add`.
-# Not used in this integration (native actions, no `.extend(llm)`), but ignore
-# it defensively so a stray `bp add` does not get committed.
-bp_modules/
+# This integration adopts the formal `llm` interface via `.extend(llm)`, so
+# `bp_modules/llm/` is REQUIRED at build time. `bp add` needs Botpress Cloud
+# auth, which CI does not have, so the resolved interface package is VENDORED
+# (committed) rather than re-fetched. Do NOT ignore it.
 
 # tsup/tsc scratch dirs.
 dist-tests/
