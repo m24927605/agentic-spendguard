@@ -27,13 +27,9 @@ describe("Flowise chatflow fixtures", () => {
     expect(flow.nodes).toHaveLength(3);
     expect(flow.edges).toHaveLength(2);
     const nodeNames = flow.nodes.map((n) => n.data.name).sort();
-    expect(nodeNames).toEqual([
-      "chatOpenAI",
-      "conversationChain",
-      "spendGuardChatModelWrapper",
-    ]);
-    const wrapperInputs = flow.nodes.find((n) => n.data.name === "spendGuardChatModelWrapper")
-      ?.data.inputs;
+    expect(nodeNames).toEqual(["chatOpenAI", "conversationChain", "spendGuardChatModelWrapper"]);
+    const wrapperInputs = flow.nodes.find((n) => n.data.name === "spendGuardChatModelWrapper")?.data
+      .inputs;
     expect(wrapperInputs?.tenantId).toBe("00000000-0000-4000-8000-000000000001");
     expect(wrapperInputs?.budgetId).toBe("44444444-4444-4444-8444-444444444444");
   });
@@ -41,8 +37,8 @@ describe("Flowise chatflow fixtures", () => {
   it("chatflow_deny.json — same shape but claimEstimatorJson forces a DENY", () => {
     const flow = loadChatflow("chatflow_deny.json");
     expect(flow.nodes).toHaveLength(3);
-    const wrapperInputs = flow.nodes.find((n) => n.data.name === "spendGuardChatModelWrapper")
-      ?.data.inputs;
+    const wrapperInputs = flow.nodes.find((n) => n.data.name === "spendGuardChatModelWrapper")?.data
+      .inputs;
     const claimJson = wrapperInputs?.claimEstimatorJson;
     expect(typeof claimJson).toBe("string");
     const parsed = JSON.parse(claimJson as string);

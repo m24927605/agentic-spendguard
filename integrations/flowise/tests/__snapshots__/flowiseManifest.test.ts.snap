@@ -1,0 +1,54 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`Flowise INode manifest — public canvas surface > snapshot — inputs array (rename or reorder will break this) 1`] = `
+[
+  {
+    "label": "Chat Model",
+    "name": "chatModel",
+    "type": "BaseChatModel",
+  },
+  {
+    "label": "Tenant ID",
+    "name": "tenantId",
+    "type": "string",
+  },
+  {
+    "label": "Budget ID",
+    "name": "budgetId",
+    "type": "string",
+  },
+  {
+    "label": "Budget Window Instance ID",
+    "name": "windowInstanceId",
+    "type": "string",
+  },
+  {
+    "default": "usd_micros",
+    "label": "Unit",
+    "name": "unit",
+    "type": "string",
+  },
+  {
+    "description": "Defaults to env SPENDGUARD_SIDECAR_UDS. Path to the SpendGuard sidecar's Unix-domain socket.",
+    "label": "Sidecar UDS Path",
+    "name": "sidecarUds",
+    "optional": true,
+    "type": "string",
+  },
+  {
+    "default": "llm.call",
+    "label": "Route",
+    "name": "route",
+    "optional": true,
+    "type": "string",
+  },
+  {
+    "description": "JSON describing a fixed claim, e.g. {"amountAtomic":"1000000","scopeId":"default"}. Omit for a conservative $1 USD-micros default per call.",
+    "label": "Claim Estimator (JSON)",
+    "name": "claimEstimatorJson",
+    "optional": true,
+    "rows": 4,
+    "type": "string",
+  },
+]
+`;

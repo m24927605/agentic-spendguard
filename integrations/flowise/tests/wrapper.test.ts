@@ -6,8 +6,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { _resetCacheForTests, _setClientFactoryForTests } from "../src/clientCache.js";
 import {
-  _setHandlerFactoryForTests,
   SpendGuardChatModelWrapper,
+  _setHandlerFactoryForTests,
 } from "../src/nodes/SpendGuardChatModelWrapper.js";
 import { createChatModel } from "./_support/mockChatModel.js";
 import { createMockClientFactory } from "./_support/mockSidecar.js";
@@ -29,6 +29,7 @@ beforeEach(() => {
   invokedArgs = [];
   factoryInvocations = 0;
   prevSidecarEnv = process.env.SPENDGUARD_SIDECAR_UDS;
+  // biome-ignore lint/performance/noDelete: must unset the env-var key; `= undefined` would coerce to the string "undefined" and break the no-env tests.
   delete process.env.SPENDGUARD_SIDECAR_UDS;
 
   _setClientFactoryForTests(createMockClientFactory());
@@ -51,6 +52,7 @@ afterEach(() => {
   _resetCacheForTests();
   _setHandlerFactoryForTests(undefined);
   if (prevSidecarEnv === undefined) {
+    // biome-ignore lint/performance/noDelete: unset the env-var key, do not stringify it.
     delete process.env.SPENDGUARD_SIDECAR_UDS;
   } else {
     process.env.SPENDGUARD_SIDECAR_UDS = prevSidecarEnv;
@@ -111,37 +113,37 @@ describe("SpendGuardChatModelWrapper", () => {
 
   it("W-05 missing chatModel — throws explicit error", async () => {
     const w = new SpendGuardChatModelWrapper();
-    await expect(
-      w.init({ inputs: inputs({ chatModel: undefined }) }, "", {}),
-    ).rejects.toThrow(/chatModel input is required/);
+    await expect(w.init({ inputs: inputs({ chatModel: undefined }) }, "", {})).rejects.toThrow(
+      /chatModel input is required/,
+    );
   });
 
   it("W-06 missing tenantId — throws aggregate error including 'tenantId'", async () => {
     const w = new SpendGuardChatModelWrapper();
-    await expect(
-      w.init({ inputs: inputs({ tenantId: "" }) }, "", {}),
-    ).rejects.toThrow(/tenantId, budgetId, windowInstanceId/);
+    await expect(w.init({ inputs: inputs({ tenantId: "" }) }, "", {})).rejects.toThrow(
+      /tenantId, budgetId, windowInstanceId/,
+    );
   });
 
   it("W-07 missing budgetId — throws aggregate error", async () => {
     const w = new SpendGuardChatModelWrapper();
-    await expect(
-      w.init({ inputs: inputs({ budgetId: "" }) }, "", {}),
-    ).rejects.toThrow(/tenantId, budgetId, windowInstanceId/);
+    await expect(w.init({ inputs: inputs({ budgetId: "" }) }, "", {})).rejects.toThrow(
+      /tenantId, budgetId, windowInstanceId/,
+    );
   });
 
   it("W-08 missing windowInstanceId — throws aggregate error", async () => {
     const w = new SpendGuardChatModelWrapper();
-    await expect(
-      w.init({ inputs: inputs({ windowInstanceId: "" }) }, "", {}),
-    ).rejects.toThrow(/windowInstanceId/);
+    await expect(w.init({ inputs: inputs({ windowInstanceId: "" }) }, "", {})).rejects.toThrow(
+      /windowInstanceId/,
+    );
   });
 
   it("W-09 missing sidecarUds and no env — throws aggregate error", async () => {
     const w = new SpendGuardChatModelWrapper();
-    await expect(
-      w.init({ inputs: inputs({ sidecarUds: "" }) }, "", {}),
-    ).rejects.toThrow(/sidecarUds \(or env SPENDGUARD_SIDECAR_UDS\)/);
+    await expect(w.init({ inputs: inputs({ sidecarUds: "" }) }, "", {})).rejects.toThrow(
+      /sidecarUds \(or env SPENDGUARD_SIDECAR_UDS\)/,
+    );
   });
 
   it("W-10 env fallback — SPENDGUARD_SIDECAR_UDS picked up when sidecarUds blank", async () => {
@@ -188,9 +190,7 @@ describe("SpendGuardChatModelWrapper", () => {
     const w = new SpendGuardChatModelWrapper();
     await w.init({ inputs: inputs() }, "", {});
     const claims = invokedArgs[0]?.claimEstimator();
-    expect(claims).toEqual([
-      { scopeId: "default", amountAtomic: "1000000", unit: "usd_micros" },
-    ]);
+    expect(claims).toEqual([{ scopeId: "default", amountAtomic: "1000000", unit: "usd_micros" }]);
   });
 
   it("W-15 client cache reuse — two init() calls share the same SpendGuardClient", async () => {

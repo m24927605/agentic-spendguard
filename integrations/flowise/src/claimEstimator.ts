@@ -64,9 +64,7 @@ export function buildClaimEstimator({ json, unit }: BuildClaimEstimatorArgs): Cl
     );
   }
   if (typeof parsed !== "object" || parsed === null) {
-    throw new Error(
-      "SpendGuardChatModelWrapper: claimEstimatorJson must be a JSON object",
-    );
+    throw new Error("SpendGuardChatModelWrapper: claimEstimatorJson must be a JSON object");
   }
   const claim = parsed as ClaimJsonShape;
   if (typeof claim.amountAtomic !== "string" || !claim.amountAtomic) {
@@ -79,7 +77,8 @@ export function buildClaimEstimator({ json, unit }: BuildClaimEstimatorArgs): Cl
       `SpendGuardChatModelWrapper: claimEstimatorJson.amountAtomic must be a decimal string, got '${claim.amountAtomic}'`,
     );
   }
-  const scopeId = typeof claim.scopeId === "string" && claim.scopeId ? claim.scopeId : DEFAULT_CLAIM_SCOPE;
+  const scopeId =
+    typeof claim.scopeId === "string" && claim.scopeId ? claim.scopeId : DEFAULT_CLAIM_SCOPE;
   const claimUnit = typeof claim.unit === "string" && claim.unit ? claim.unit : unit;
   return (): ClaimEntry[] => [
     { scopeId, amountAtomic: claim.amountAtomic as string, unit: claimUnit },

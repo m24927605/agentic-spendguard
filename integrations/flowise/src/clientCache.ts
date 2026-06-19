@@ -59,7 +59,8 @@ async function defaultFactory(k: CacheKey): Promise<CachedClient> {
   // doesn't `require('@spendguard/sdk')` until `getOrCreateClient` is
   // actually called, so a Flowise installation that never lands a
   // wrapper node won't fail to load even without the peer installed.
-  const sdkModule = (await import("@spendguard/sdk")) as {
+  // Real module type is richer than this subset; go through `unknown` (TS2352).
+  const sdkModule = (await import("@spendguard/sdk")) as unknown as {
     SpendGuardClient: new (opts: {
       socketPath: string;
       tenantId: string;

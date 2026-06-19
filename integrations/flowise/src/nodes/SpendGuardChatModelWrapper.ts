@@ -15,8 +15,8 @@
 //   - `module.exports = { nodeClass }` shim because Flowise's loader
 //     reads `nodeClass` off the file's default export.
 
-import { buildClaimEstimator, type ClaimEstimatorFn } from "../claimEstimator.js";
-import { getOrCreateClient, type CachedClient } from "../clientCache.js";
+import { type ClaimEstimatorFn, buildClaimEstimator } from "../claimEstimator.js";
+import { type CachedClient, getOrCreateClient } from "../clientCache.js";
 import { VERSION } from "../version.js";
 
 // Structural Flowise INode types — kept local so the package compiles
@@ -62,9 +62,7 @@ interface HandlerFactoryDeps {
  * Lazy import of `@spendguard/langchain` — keeps the peerDep contract
  * honest. Override in tests via `_setHandlerFactoryForTests`.
  */
-let handlerFactoryOverride:
-  | ((deps: HandlerFactoryDeps) => Promise<unknown>)
-  | undefined;
+let handlerFactoryOverride: ((deps: HandlerFactoryDeps) => Promise<unknown>) | undefined;
 
 export function _setHandlerFactoryForTests(
   factory: ((deps: HandlerFactoryDeps) => Promise<unknown>) | undefined,
@@ -145,9 +143,7 @@ export class SpendGuardChatModelWrapper {
   ): Promise<unknown> {
     const chatModel = nodeData.inputs?.chatModel as MutableChatModel | undefined;
     if (!chatModel) {
-      throw new Error(
-        "SpendGuardChatModelWrapper: chatModel input is required",
-      );
+      throw new Error("SpendGuardChatModelWrapper: chatModel input is required");
     }
 
     const tenantId = String(nodeData.inputs?.tenantId ?? "").trim();
@@ -156,8 +152,10 @@ export class SpendGuardChatModelWrapper {
     const unit = String(nodeData.inputs?.unit ?? "usd_micros").trim() || "usd_micros";
     const route = String(nodeData.inputs?.route ?? "llm.call").trim() || "llm.call";
     const claimEstimatorJson = String(nodeData.inputs?.claimEstimatorJson ?? "");
+    // Use `||` not `??`: a blank sidecarUds (empty string) must fall back to
+    // the env var, per the field's documented default behaviour.
     const sidecarUds = String(
-      nodeData.inputs?.sidecarUds ?? process.env.SPENDGUARD_SIDECAR_UDS ?? "",
+      nodeData.inputs?.sidecarUds || process.env.SPENDGUARD_SIDECAR_UDS || "",
     ).trim();
 
     if (!tenantId || !budgetId || !windowInstanceId || !sidecarUds) {

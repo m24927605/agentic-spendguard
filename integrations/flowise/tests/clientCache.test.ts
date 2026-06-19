@@ -74,9 +74,9 @@ describe("getOrCreateClient", () => {
     _setClientFactoryForTests(async () => {
       throw new Error("sidecar down");
     });
-    await expect(
-      getOrCreateClient({ sidecarUds: "/run/sg.sock", tenantId: "t1" }),
-    ).rejects.toThrow(/sidecar down/);
+    await expect(getOrCreateClient({ sidecarUds: "/run/sg.sock", tenantId: "t1" })).rejects.toThrow(
+      /sidecar down/,
+    );
     expect(_cacheSize()).toBe(0);
   });
 });

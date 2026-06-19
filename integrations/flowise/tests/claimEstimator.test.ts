@@ -7,9 +7,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
-  buildClaimEstimator,
   DEFAULT_CLAIM_ATOMIC,
   DEFAULT_CLAIM_SCOPE,
+  buildClaimEstimator,
 } from "../src/claimEstimator.js";
 
 describe("buildClaimEstimator", () => {
@@ -82,15 +82,15 @@ describe("buildClaimEstimator", () => {
   });
 
   it("CE-07 error — invalid JSON surface includes 'is not valid JSON'", () => {
-    expect(() =>
-      buildClaimEstimator({ json: "{not-json}", unit: "usd_micros" }),
-    ).toThrowError(/claimEstimatorJson is not valid JSON/);
+    expect(() => buildClaimEstimator({ json: "{not-json}", unit: "usd_micros" })).toThrowError(
+      /claimEstimatorJson is not valid JSON/,
+    );
   });
 
   it("CE-bonus — JSON arrays / primitives are rejected with a clear message", () => {
-    expect(() =>
-      buildClaimEstimator({ json: "42", unit: "usd_micros" }),
-    ).toThrowError(/claimEstimatorJson must be a JSON object/);
+    expect(() => buildClaimEstimator({ json: "42", unit: "usd_micros" })).toThrowError(
+      /claimEstimatorJson must be a JSON object/,
+    );
     expect(() =>
       buildClaimEstimator({ json: JSON.stringify(["a"]), unit: "usd_micros" }),
     ).toThrowError(/must include 'amountAtomic'/);
