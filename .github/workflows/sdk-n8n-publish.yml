@@ -56,7 +56,7 @@ jobs:
       - name: Install deps (workspace-aware, frozen lockfile)
         # --filter so the publish installs only this package's subtree,
         # NOT the whole workspace (flowise pulls puppeteer/chromium which hangs CI).
-        run: pnpm install --frozen-lockfile --filter "n8n-nodes-spendguard..."
+        run: pnpm install --frozen-lockfile --filter "n8n-nodes-spendguard..." --filter "@spendguard/sdk..."
 
       - name: Build @spendguard/sdk (workspace dependency)
         # The adapter typechecks against @spendguard/sdk's emitted .d.ts in

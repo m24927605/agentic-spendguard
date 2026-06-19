@@ -79,7 +79,7 @@ jobs:
         # @spendguard/sdk workspace link resolves correctly.
         # --filter so the publish installs only this package's subtree,
         # NOT the whole workspace (flowise pulls puppeteer/chromium which hangs CI).
-        run: pnpm install --frozen-lockfile --filter "@spendguard/vercel-ai..."
+        run: pnpm install --frozen-lockfile --filter "@spendguard/vercel-ai..." --filter "@spendguard/sdk..."
 
       - name: Build @spendguard/sdk (workspace dependency)
         # The adapter typechecks against @spendguard/sdk's emitted .d.ts in
