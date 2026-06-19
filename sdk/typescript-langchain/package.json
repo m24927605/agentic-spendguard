@@ -1,6 +1,6 @@
 {
   "name": "@spendguard/langchain",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "LangChain TS callback handler for SpendGuard budget guardrails",
   "license": "Apache-2.0",
   "author": "Michael Chen <m24927605@gmail.com>",

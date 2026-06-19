@@ -1,6 +1,6 @@
 {
   "name": "n8n-nodes-spendguard",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "SpendGuard pre-call budget enforcement for n8n AI Agent workflows — drop a sub-node between Chat Model and AI Agent.",
   "license": "Apache-2.0",
   "author": "Michael Chen <m24927605@gmail.com>",
