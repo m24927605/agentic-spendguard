@@ -7,6 +7,16 @@
 name: spendguard-demo
 
 services:
+  # The Node runner below runs as root (uid 0) so it can write its npm
+  # node_modules into the root-owned named volume. The sidecar's SO_PEERCRED
+  # gate defaults to the sidecar's own uid (65532) and would reject the root
+  # peer. For this demo (whose only adapter peer is the root Node runner) tell
+  # the sidecar to expect uid 0. Production never uses this local-UDS path —
+  # it enforces mTLS + SPIFFE instead (see sidecar main.rs peer-uid comment).
+  sidecar:
+    environment:
+      SPENDGUARD_SIDECAR_ADAPTER_EXPECTED_PEER_UID: "0"
+
   bundles-init:
     environment:
       DEMO_HARD_CAP_CLAIM_AMOUNT_ATOMIC_GT: "100"
