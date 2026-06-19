@@ -375,9 +375,7 @@ export function wrapWithSpendGuard(
         unit: claimUnit,
         // HARDEN_D05_WI — thread caller-supplied windowInstanceId onto the
         // wire claim (substrate coerces omitted to "").
-        ...(options.windowInstanceId
-          ? { windowInstanceId: options.windowInstanceId }
-          : {}),
+        ...(options.windowInstanceId ? { windowInstanceId: options.windowInstanceId } : {}),
       },
     ]);
   }

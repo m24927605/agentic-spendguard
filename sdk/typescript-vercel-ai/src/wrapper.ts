@@ -409,8 +409,7 @@ async function safeCommit(
   if (outcome.outcomeKind === "SUCCESS") {
     try {
       estimatedAmountAtomic = (
-        BigInt(outcome.actualInputTokensWire || "0") +
-        BigInt(outcome.actualOutputTokensWire || "0")
+        BigInt(outcome.actualInputTokensWire || "0") + BigInt(outcome.actualOutputTokensWire || "0")
       ).toString();
     } catch {
       estimatedAmountAtomic = "0";

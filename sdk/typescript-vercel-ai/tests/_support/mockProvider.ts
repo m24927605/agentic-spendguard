@@ -27,11 +27,7 @@
 // The provider-specific surface (`provider` string + `modelId`) is also
 // preserved so middleware tests can assert per-provider routing if needed.
 
-import type {
-  LanguageModelV1,
-  LanguageModelV1CallOptions,
-  LanguageModelV1StreamPart,
-} from "ai";
+import type { LanguageModelV1, LanguageModelV1CallOptions, LanguageModelV1StreamPart } from "ai";
 
 /**
  * `LanguageModelV1FinishReason` mirror — the canonical type lives in
@@ -111,14 +107,16 @@ export class MockOpenAIModel implements LanguageModelV1 {
   private readonly errorOnNthGenerate: number | undefined;
   private readonly errorMessage: string;
 
-  constructor(opts: {
-    modelId?: string;
-    generateFixture?: RecordedGenerateResponse;
-    streamFixture?: RecordedStreamSequence;
-    /** Throw on the Nth `doGenerate` (1-indexed). */
-    errorOnNthGenerate?: number;
-    errorMessage?: string;
-  } = {}) {
+  constructor(
+    opts: {
+      modelId?: string;
+      generateFixture?: RecordedGenerateResponse;
+      streamFixture?: RecordedStreamSequence;
+      /** Throw on the Nth `doGenerate` (1-indexed). */
+      errorOnNthGenerate?: number;
+      errorMessage?: string;
+    } = {},
+  ) {
     this.modelId = opts.modelId ?? "gpt-4o-mini";
     this.generateFixture = opts.generateFixture ?? OPENAI_FIXTURES.simpleAllow;
     this.streamFixture = opts.streamFixture ?? OPENAI_FIXTURES.simpleStream;
@@ -134,12 +132,12 @@ export class MockOpenAIModel implements LanguageModelV1 {
   // declaring the methods as ordinary functions that explicitly return
   // a Promise, which IS a PromiseLike. The wire-level behaviour is
   // identical.
-  doGenerate(
-    options: LanguageModelV1CallOptions,
-  ): ReturnType<LanguageModelV1["doGenerate"]> {
+  doGenerate(options: LanguageModelV1CallOptions): ReturnType<LanguageModelV1["doGenerate"]> {
     this.generateCalls.push(options);
-    if (this.errorOnNthGenerate !== undefined &&
-        this.generateCalls.length === this.errorOnNthGenerate) {
+    if (
+      this.errorOnNthGenerate !== undefined &&
+      this.generateCalls.length === this.errorOnNthGenerate
+    ) {
       return Promise.reject(new Error(this.errorMessage));
     }
     const fx = this.generateFixture;
@@ -159,9 +157,7 @@ export class MockOpenAIModel implements LanguageModelV1 {
     });
   }
 
-  doStream(
-    options: LanguageModelV1CallOptions,
-  ): ReturnType<LanguageModelV1["doStream"]> {
+  doStream(options: LanguageModelV1CallOptions): ReturnType<LanguageModelV1["doStream"]> {
     this.streamCalls.push(options);
     const fx = this.streamFixture;
     const stream = new ReadableStream<LanguageModelV1StreamPart>({
@@ -223,28 +219,31 @@ export class MockAnthropicModel implements LanguageModelV1 {
   private readonly errorOnNthGenerate: number | undefined;
   private readonly errorMessage: string;
 
-  constructor(opts: {
-    modelId?: string;
-    generateFixture?: RecordedGenerateResponse;
-    streamFixture?: RecordedStreamSequence;
-    errorOnNthGenerate?: number;
-    errorMessage?: string;
-  } = {}) {
+  constructor(
+    opts: {
+      modelId?: string;
+      generateFixture?: RecordedGenerateResponse;
+      streamFixture?: RecordedStreamSequence;
+      errorOnNthGenerate?: number;
+      errorMessage?: string;
+    } = {},
+  ) {
     this.modelId = opts.modelId ?? "claude-3-5-sonnet-20241022";
     this.generateFixture = opts.generateFixture ?? ANTHROPIC_FIXTURES.simpleAllow;
     this.streamFixture = opts.streamFixture ?? ANTHROPIC_FIXTURES.simpleStream;
     this.errorOnNthGenerate = opts.errorOnNthGenerate;
-    this.errorMessage = opts.errorMessage ?? "synthetic anthropic provider error (overloaded_error)";
+    this.errorMessage =
+      opts.errorMessage ?? "synthetic anthropic provider error (overloaded_error)";
   }
 
   // See `MockOpenAIModel.doGenerate` comment for the
   // PromiseLike vs Promise return-type rationale.
-  doGenerate(
-    options: LanguageModelV1CallOptions,
-  ): ReturnType<LanguageModelV1["doGenerate"]> {
+  doGenerate(options: LanguageModelV1CallOptions): ReturnType<LanguageModelV1["doGenerate"]> {
     this.generateCalls.push(options);
-    if (this.errorOnNthGenerate !== undefined &&
-        this.generateCalls.length === this.errorOnNthGenerate) {
+    if (
+      this.errorOnNthGenerate !== undefined &&
+      this.generateCalls.length === this.errorOnNthGenerate
+    ) {
       return Promise.reject(new Error(this.errorMessage));
     }
     const fx = this.generateFixture;
@@ -264,9 +263,7 @@ export class MockAnthropicModel implements LanguageModelV1 {
     });
   }
 
-  doStream(
-    options: LanguageModelV1CallOptions,
-  ): ReturnType<LanguageModelV1["doStream"]> {
+  doStream(options: LanguageModelV1CallOptions): ReturnType<LanguageModelV1["doStream"]> {
     this.streamCalls.push(options);
     const fx = this.streamFixture;
     const stream = new ReadableStream<LanguageModelV1StreamPart>({
@@ -329,7 +326,7 @@ export const OPENAI_FIXTURES: {
     ],
   },
   bigCompletion: {
-    text: "this is a longer openai completion " + "x".repeat(200),
+    text: `this is a longer openai completion ${"x".repeat(200)}`,
     usage: { promptTokens: 50, completionTokens: 250 },
     finishReason: "stop",
   },
@@ -377,7 +374,7 @@ export const ANTHROPIC_FIXTURES: {
     ],
   },
   bigCompletion: {
-    text: "this is a longer anthropic completion " + "y".repeat(180),
+    text: `this is a longer anthropic completion ${"y".repeat(180)}`,
     usage: { promptTokens: 40, completionTokens: 210 },
     finishReason: "stop",
   },

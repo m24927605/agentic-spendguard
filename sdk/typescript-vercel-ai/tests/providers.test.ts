@@ -31,7 +31,6 @@ import type { LanguageModelV1, LanguageModelV1StreamPart } from "ai";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { _internalStashFor, createSpendGuardMiddleware } from "../src/middleware.js";
 import type { SpendGuardMiddlewareOptions } from "../src/options.js";
-import { MockSpendGuardClient } from "./_support/mockSidecar.js";
 import {
   ANTHROPIC_FIXTURES,
   MockAnthropicModel,
@@ -39,6 +38,7 @@ import {
   OPENAI_FIXTURES,
   makeCallOptions,
 } from "./_support/mockProvider.js";
+import { MockSpendGuardClient } from "./_support/mockSidecar.js";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
 
@@ -188,9 +188,9 @@ describe("D06 SLICE 6 — OpenAI provider: wrapGenerate", () => {
     const params = makeCallOptions("blocked openai call");
     if (!middleware.transformParams) throw new Error("transformParams missing");
 
-    await expect(
-      middleware.transformParams({ type: "generate", params }),
-    ).rejects.toBeInstanceOf(DecisionDenied);
+    await expect(middleware.transformParams({ type: "generate", params })).rejects.toBeInstanceOf(
+      DecisionDenied,
+    );
 
     // Critical: the upstream OpenAI provider was NEVER hit.
     expect(model.generateCalls).toHaveLength(0);
@@ -243,9 +243,7 @@ describe("D06 SLICE 6 — Anthropic provider: wrapGenerate", () => {
     const { middleware } = makeMiddlewareWith(sidecar);
     const params = makeCallOptions("trigger anthropic overload");
 
-    await expect(driveGenerate(middleware, model, params)).rejects.toThrow(
-      /overloaded_error/,
-    );
+    await expect(driveGenerate(middleware, model, params)).rejects.toThrow(/overloaded_error/);
 
     expect(sidecar.commitCalls).toHaveLength(1);
     const commit = sidecar.commitCalls[0]?.request as CommitEstimatedRequest;
@@ -314,9 +312,9 @@ describe("D06 SLICE 6 — wrapStream across providers", () => {
     const params = makeCallOptions("denied anthropic stream");
     if (!middleware.transformParams) throw new Error("transformParams missing");
 
-    await expect(
-      middleware.transformParams({ type: "stream", params }),
-    ).rejects.toBeInstanceOf(DecisionDenied);
+    await expect(middleware.transformParams({ type: "stream", params })).rejects.toBeInstanceOf(
+      DecisionDenied,
+    );
 
     expect(model.streamCalls).toHaveLength(0);
     expect(model.generateCalls).toHaveLength(0);

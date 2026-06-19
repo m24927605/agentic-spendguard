@@ -33,9 +33,7 @@
 // See `docs/site-v2/src/content/docs/docs/integrations/vercel-ai.mdx` for
 // the Mastra-side usage walkthrough.
 
-export {
-  createSpendGuardMiddleware as createSpendGuardLanguageMiddleware,
-} from "./middleware.js";
+export { createSpendGuardMiddleware as createSpendGuardLanguageMiddleware } from "./middleware.js";
 
 // Re-export the supporting types verbatim so a Mastra-only import is
 // self-sufficient — no second import from the root `@spendguard/vercel-ai`

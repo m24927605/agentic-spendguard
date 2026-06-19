@@ -233,9 +233,7 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
       unit,
       // HARDEN_D05_WI — thread caller-supplied windowInstanceId onto the
       // wire claim (substrate coerces omitted to "").
-      ...(this.opts.windowInstanceId
-        ? { windowInstanceId: this.opts.windowInstanceId }
-        : {}),
+      ...(this.opts.windowInstanceId ? { windowInstanceId: this.opts.windowInstanceId } : {}),
     };
   }
 
@@ -360,8 +358,7 @@ export class SpendGuardCallbackHandler extends BaseCallbackHandler {
     // claim estimate — the PRE-call estimate IS the canonical "estimated"
     // amount for the step.
     const usageSum = (usage?.promptTokens ?? 0) + (usage?.completionTokens ?? 0);
-    const estimatedAmountAtomic =
-      usageSum > 0 ? String(usageSum) : pending.estimatedAmountAtomic;
+    const estimatedAmountAtomic = usageSum > 0 ? String(usageSum) : pending.estimatedAmountAtomic;
     const req: CommitEstimatedRequest = {
       runId,
       stepId: STEP_ID_LLM_CALL,
