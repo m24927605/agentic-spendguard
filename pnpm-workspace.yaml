@@ -18,4 +18,5 @@ packages:
   - "sdk/typescript-n8n"
   - "sdk/typescript-ag-ui"
   - "sdk/typescript-mastra"
+  - "integrations/botpress"
   - "docs/site-v2"

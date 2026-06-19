@@ -1,81 +1,90 @@
-// Botpress hook input → SpendGuard `BotpressCallContext` adapter.
+// `generateContent` action input -> SpendGuard `BotpressCallContext` adapter.
 //
-// review-standards.md §3.1 / §3.3 / AD01 / AD02 — derive
-// `botId` / `conversationId` / `userId` / `model` / `messages` / `maxTokens`
-// from the Botpress hook payload and override `tenantId` from the
-// configuration when explicitly set (Slice 2 design.md §5 conversation
-// mapping).
+// Derives the SpendGuard call context from the Botpress `generateContent`
+// action payload (`input` + `ctx`). The Botpress LLM router calls this action
+// with the prompt messages, the chosen model, and an operator-declared
+// `maxTokens` cap; SpendGuard reserves against that cap and commits real usage
+// after the upstream call returns.
 //
-// We type-shape the Botpress hook input loosely so a future Botpress 0.7.x
-// patch can add fields without invalidating our binding. The runtime
-// signature is documented in `@botpress/sdk@^0.7`'s Integration type's
-// `hooks.beforeAiGeneration` / `hooks.afterAiGeneration` arguments.
+// `ctx` is the Botpress integration handler context — `ctx.botId` /
+// `ctx.integrationId` identify the install. We map `botId` onto the SpendGuard
+// `conversationId`/`botId` correlation fields since the action payload does not
+// carry a Botpress conversation id (LLM calls are conversation-agnostic at the
+// provider boundary).
 
 import type { Configuration } from "../config.js";
+import type { GenerateContentInput, ModelRef } from "../llm/schemas.js";
 import type { BotpressCallContext } from "../reservation.js";
 
-/**
- * Minimal Botpress hook input shape the adapter depends on.
- *
- * The real Botpress hook input is `{ ctx, client, data, configuration }`.
- * We only pull from `ctx` (botId) and `data` (everything else). The
- * configuration is threaded separately because it has already been Zod-
- * validated by Botpress before the hook fires.
- */
-export interface BotpressHookInput {
-  ctx: {
-    readonly botId: string;
-  };
-  data: {
-    readonly conversationId?: string;
-    readonly userId?: string;
-    readonly model?: string;
-    readonly maxTokens?: number;
-    readonly input?: {
-      readonly messages?: ReadonlyArray<{ role?: string; content?: string }>;
-    };
-    /** Sometimes the messages live at the top of `data` rather than
-     *  under `data.input`. Both shapes are observed across Botpress 0.7.x
-     *  patch versions. The binding code prefers `data.input.messages` and
-     *  falls back to `data.messages`. */
-    readonly messages?: ReadonlyArray<{ role?: string; content?: string }>;
-  };
+/** Minimal Botpress integration handler context the binding depends on. */
+export interface BotpressActionCtx {
+  readonly botId: string;
+  readonly integrationId?: string;
+}
+
+/** Default per-provider model id used when the action input omits `model`. */
+const DEFAULT_MODEL: Record<Configuration["upstreamProvider"], string> = {
+  openai: "gpt-4o-mini",
+  anthropic: "claude-3-5-haiku-latest",
+  bedrock: "anthropic.claude-3-5-haiku",
+};
+
+/** Default reserve cap when the action input omits `maxTokens`. Matches the
+ *  legacy estimator floor used elsewhere in SpendGuard. */
+export const DEFAULT_MAX_TOKENS = 1024;
+
+/** Resolve the model id to forward + reserve under: explicit input model id,
+ *  else the provider default. */
+export function resolveModel(input: GenerateContentInput, configuration: Configuration): string {
+  const explicit: ModelRef | undefined = input.model;
+  if (explicit !== undefined && explicit.id.length > 0) {
+    return explicit.id;
+  }
+  return DEFAULT_MODEL[configuration.upstreamProvider];
+}
+
+/** Resolve the output-token cap that drives both the SpendGuard reserve
+ *  estimate and the upstream `max_tokens` field. */
+export function resolveMaxTokens(input: GenerateContentInput): number {
+  return input.maxTokens !== undefined && input.maxTokens > 0
+    ? input.maxTokens
+    : DEFAULT_MAX_TOKENS;
 }
 
 /**
- * Build a `BotpressCallContext` from the Botpress hook input + the
- * operator-supplied configuration. The tenant id falls back to the bot id
- * when `configuration.tenantId` is empty (review-standards.md §3 AD01),
- * but Zod's `min(1)` on `tenantId` means the empty-string path is only
- * reachable via direct (test-only) construction.
+ * Build a `BotpressCallContext` from the `generateContent` action input + the
+ * operator-supplied configuration + the handler `ctx`. The system prompt, when
+ * present, is prepended to the message list so the SpendGuard prompt-hash and
+ * token estimate cover it.
  */
-export function toBindingFromHookInput(args: {
-  readonly input: BotpressHookInput;
+export function toBindingFromActionInput(args: {
+  readonly input: GenerateContentInput;
   readonly configuration: Configuration;
+  readonly ctx: BotpressActionCtx;
 }): BotpressCallContext {
-  const { input, configuration } = args;
-  const data = input.data;
-  const messagesRaw = data.input?.messages ?? data.messages ?? [];
-  const messages: ReadonlyArray<{ role: string; content: string }> = messagesRaw.map((m) => ({
-    role: m.role ?? "user",
-    content: m.content ?? "",
-  }));
+  const { input, configuration, ctx } = args;
+  const systemMessages =
+    input.systemPrompt !== undefined && input.systemPrompt.length > 0
+      ? [{ role: "system", content: input.systemPrompt }]
+      : [];
+  const messages: ReadonlyArray<{ role: string; content: string }> = [
+    ...systemMessages,
+    ...input.messages.map((m) => ({ role: m.role, content: m.content })),
+  ];
   return {
-    botId: input.ctx.botId,
-    conversationId: data.conversationId ?? `conv-${input.ctx.botId}`,
-    userId: data.userId ?? "anonymous",
-    model: data.model ?? "unknown",
+    botId: ctx.botId,
+    conversationId: `bot-${ctx.botId}`,
+    userId: input.userId ?? "anonymous",
+    model: resolveModel(input, configuration),
     messages,
-    maxTokens: data.maxTokens ?? 1024,
+    maxTokens: resolveMaxTokens(input),
   };
 }
 
 /**
- * Convenience function — pick the binding tenant id. Promoted to a named
- * helper because AD01 / AD02 test it as a unit and the precedence rule is
- * load-bearing. (Configuration `tenantId` is Zod-validated as non-empty in
- * production, but the binding layer remains tolerant of synthetic test
- * configurations.)
+ * Pick the binding tenant id. Configuration `tenantId` is Zod-validated as
+ * non-empty in production; the binding stays tolerant of synthetic test
+ * configurations and falls back to the bot id.
  */
 export function pickTenantId(configuration: Configuration, botId: string): string {
   return configuration.tenantId.length > 0 ? configuration.tenantId : botId;

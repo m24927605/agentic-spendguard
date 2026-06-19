@@ -1,71 +1,88 @@
-// SpendGuard error → Botpress `RuntimeError` translator.
+// SpendGuard error -> Botpress `RuntimeError` translator.
 //
-// review-standards.md §3.7 / §3.8 / AD04 / AD05 / AD06:
-//   - DecisionDenied             → RuntimeError(code="BUDGET_DENIED")
-//   - SidecarUnavailable         → RuntimeError(code="BUDGET_DEGRADED")
-//   - SpendGuardConfigError      → RuntimeError(code="BUDGET_CONFIG")
+//   - DecisionDenied        -> RuntimeError carrying spendguardCode=BUDGET_DENIED
+//   - SidecarUnavailable    -> RuntimeError carrying spendguardCode=BUDGET_DEGRADED
+//   - SpendGuardConfigError -> RuntimeError carrying spendguardCode=BUDGET_CONFIG
 //
-// The Botpress runtime uses the `code` field on the RuntimeError to route
-// the error into deterministic conversation-side handlers (per
-// @botpress/sdk@0.7 docs); the codes above are stable wire identifiers the
-// docs page advertises (docs/site-v2/.../botpress.mdx).
+// IMPORTANT — the real `RuntimeError` (re-exported from `@botpress/client`,
+// extending `BaseApiError`) has a READ-ONLY `code` field that is fixed to the
+// HTTP status `400` for the Runtime error type. It is NOT a free-form string
+// slot, so the stable SpendGuard wire identifier (BUDGET_DENIED / ... ) CANNOT
+// be assigned to `rt.code`. Instead we thread it through the constructor's
+// `metadata` bag (`{ spendguardCode }`) and embed it in the message, where
+// Botpress surfaces it to operators and conversation-side error handlers.
 //
-// We import RuntimeError from @botpress/sdk; the unit tests use the same
-// import so the constructor identity matches what the Botpress runtime
-// instantiates at hook-dispatch time.
-
+// RuntimeError constructor signature (client 1.46.x):
+//   new RuntimeError(message: string, error?: Error, id?: string,
+//                    metadata?: Record<string, unknown>)
+//
+// Tests assert the SpendGuard code via `runtimeErrorCode(rt)` (reads the
+// metadata bag) and `codeFor(err)` (reads the source error), so they never
+// depend on the read-only numeric `code`.
 import { RuntimeError } from "@botpress/sdk";
 import { DecisionDenied, SidecarUnavailable, SpendGuardConfigError } from "../reservation.js";
 
+export type SpendGuardCode = "BUDGET_DENIED" | "BUDGET_DEGRADED" | "BUDGET_CONFIG";
+
+/** Build a Botpress RuntimeError carrying the stable SpendGuard code in its
+ *  metadata bag (since the numeric `code` field is read-only). */
+function runtimeError(
+  spendguardCode: SpendGuardCode,
+  message: string,
+  cause?: Error,
+): RuntimeError {
+  return new RuntimeError(message, cause, undefined, { spendguardCode });
+}
+
 /**
- * Translate any SpendGuard-flavoured error to a Botpress `RuntimeError`
- * carrying a stable `code` field. Unrecognised inputs flow through as a
- * `BUDGET_CONFIG` runtime error with the original message preserved — this
- * mirrors the Python LiteLLM callback's "unknown-error-is-config" fallback
+ * Translate any SpendGuard-flavoured error to a Botpress `RuntimeError`.
+ * Unrecognised inputs flow through as a `BUDGET_CONFIG` runtime error with the
+ * original message preserved — this mirrors the Python LiteLLM callback's
+ * "unknown-error-is-config" fallback
  * (sdk/python/src/spendguard/integrations/litellm.py:806-820).
  */
 export function toRuntimeError(err: unknown): RuntimeError {
-  // The Botpress runtime routes conversation-side handlers off the `code`
-  // field on the RuntimeError, so the stable BUDGET_DENIED / BUDGET_DEGRADED /
-  // BUDGET_CONFIG identifier MUST be carried through. @botpress/sdk's
-  // RuntimeError constructor is message-only with a separate mutable `code`
-  // field (index.d.ts: `constructor(message: string)` + `code?: string`), so
-  // we assign the code after construction rather than passing an options bag —
-  // a two-arg form would fail to type-check against the SDK and the extra arg
-  // would be ignored at runtime.
   if (err instanceof DecisionDenied) {
-    const rt = new RuntimeError(`SpendGuard denied: ${err.message}`);
-    rt.code = err.code; // "BUDGET_DENIED"
-    return rt;
+    return runtimeError("BUDGET_DENIED", `SpendGuard denied: ${err.message}`, err);
   }
   if (err instanceof SidecarUnavailable) {
-    const rt = new RuntimeError(`SpendGuard degraded: ${err.message}`);
-    rt.code = err.code; // "BUDGET_DEGRADED"
-    return rt;
+    return runtimeError("BUDGET_DEGRADED", `SpendGuard degraded: ${err.message}`, err);
   }
   if (err instanceof SpendGuardConfigError) {
-    const rt = new RuntimeError(`SpendGuard config: ${err.message}`);
-    rt.code = err.code; // "BUDGET_CONFIG"
-    return rt;
+    return runtimeError("BUDGET_CONFIG", `SpendGuard config: ${err.message}`, err);
   }
   if (err instanceof RuntimeError) {
     return err;
   }
   // Unknown-error-is-config fallback (mirrors the Python LiteLLM callback).
-  const rt = new RuntimeError(
+  const cause = err instanceof Error ? err : undefined;
+  return runtimeError(
+    "BUDGET_CONFIG",
     `SpendGuard config: ${err instanceof Error ? err.message : String(err)}`,
+    cause,
   );
-  rt.code = "BUDGET_CONFIG";
-  return rt;
 }
 
 /**
- * Inspect the `code` a runtime error carries, given a SpendGuard-typed
- * input. Lets the unit tests assert AD04-AD06 without depending on Botpress's
- * internal RuntimeError shape.
+ * Read the SpendGuard code a translated RuntimeError carries (from its
+ * metadata bag). Returns `undefined` if the RuntimeError was not minted by
+ * `toRuntimeError`. Lets tests assert the translation without depending on
+ * Botpress's internal numeric `code`.
+ */
+export function runtimeErrorCode(rt: RuntimeError): SpendGuardCode | undefined {
+  const meta = (rt as { metadata?: Record<string, unknown> }).metadata;
+  const code = meta?.spendguardCode;
+  return code === "BUDGET_DENIED" || code === "BUDGET_DEGRADED" || code === "BUDGET_CONFIG"
+    ? code
+    : undefined;
+}
+
+/**
+ * Inspect the `code` a SpendGuard-typed source error carries. Lets the unit
+ * tests assert the error -> code mapping at the source.
  */
 export function codeFor(
   err: DecisionDenied | SidecarUnavailable | SpendGuardConfigError,
-): "BUDGET_DENIED" | "BUDGET_DEGRADED" | "BUDGET_CONFIG" {
+): SpendGuardCode {
   return err.code;
 }

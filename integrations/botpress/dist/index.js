@@ -1,17 +1,61 @@
-import { z, Integration, RuntimeError } from '@botpress/sdk';
+import * as sdk from '@botpress/sdk';
+import { z, RuntimeError } from '@botpress/sdk';
+import { readFileSync } from 'fs';
+import { normalize, isAbsolute } from 'path';
 import { newUuid7, deriveIdempotencyKey, computePromptHash } from '@spendguard/sdk';
 
-// src/index.ts
-var ConfigurationSchema = z.object({
-  sidecarUrl: z.string().url().describe("HTTP companion URL (loopback or sidecar-pod port)"),
+var __defProp = Object.defineProperty;
+var __export = (target, all) => {
+  for (var name in all)
+    __defProp(target, name, { get: all[name], enumerable: true });
+};
+var ConfigurationObjectSchema = z.object({
+  sidecarUrl: z.string().url().refine(isSecureSidecarUrl, {
+    message: "sidecarUrl must be https:// (plaintext http:// is allowed only for loopback hosts 127.0.0.1/::1/localhost)"
+  }).describe("HTTPS companion URL (plaintext http:// allowed only for loopback)"),
   spendguardBudgetId: z.string().min(1).describe("UUID of the SpendGuard budget to charge"),
   spendguardWindowInstanceId: z.string().min(1).describe("UUID of the SpendGuard window instance"),
   upstreamProvider: z.enum(["openai", "anthropic", "bedrock"]).describe("Upstream provider Botpress dispatches to"),
   tenantId: z.string().min(1).describe("Operator tenant identifier"),
-  tlsCertPath: z.string().optional().describe("Path to SVID cert PEM"),
-  tlsKeyPath: z.string().optional().describe("Path to SVID key PEM"),
-  tlsRootCaPath: z.string().optional().describe("Path to sidecar CA PEM")
+  tlsCertPath: z.string().min(1).optional().describe("Path to SVID cert PEM"),
+  tlsKeyPath: z.string().min(1).optional().describe("Path to SVID key PEM"),
+  tlsRootCaPath: z.string().min(1).optional().describe("Path to sidecar CA PEM")
 });
+var ConfigurationSchema = z.object({
+  sidecarUrl: z.string().url().refine(isSecureSidecarUrl, {
+    message: "sidecarUrl must be https:// (plaintext http:// is allowed only for loopback hosts 127.0.0.1/::1/localhost)"
+  }).describe("HTTPS companion URL (plaintext http:// allowed only for loopback)"),
+  spendguardBudgetId: z.string().min(1).describe("UUID of the SpendGuard budget to charge"),
+  spendguardWindowInstanceId: z.string().min(1).describe("UUID of the SpendGuard window instance"),
+  upstreamProvider: z.enum(["openai", "anthropic", "bedrock"]).describe("Upstream provider Botpress dispatches to"),
+  tenantId: z.string().min(1).describe("Operator tenant identifier"),
+  tlsCertPath: z.string().min(1).optional().describe("Path to SVID cert PEM"),
+  tlsKeyPath: z.string().min(1).optional().describe("Path to SVID key PEM"),
+  tlsRootCaPath: z.string().min(1).optional().describe("Path to sidecar CA PEM")
+}).refine(
+  (cfg) => {
+    const present = [cfg.tlsCertPath, cfg.tlsKeyPath, cfg.tlsRootCaPath].filter(
+      (p) => p !== void 0
+    ).length;
+    return present === 0 || present === 3;
+  },
+  {
+    message: "tlsCertPath, tlsKeyPath and tlsRootCaPath must be supplied together (all three) or not at all",
+    path: ["tlsCertPath"]
+  }
+);
+var LOOPBACK_HOSTS = /* @__PURE__ */ new Set(["127.0.0.1", "::1", "localhost"]);
+function isSecureSidecarUrl(raw) {
+  let u;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.protocol === "https:") return true;
+  if (u.protocol !== "http:") return false;
+  return LOOPBACK_HOSTS.has(u.hostname.toLowerCase());
+}
 function assertRequiredConfig(cfg) {
   const missing = [];
   if (!cfg.sidecarUrl) missing.push("sidecarUrl");
@@ -24,6 +68,29 @@ function assertRequiredConfig(cfg) {
       `spendguard:botpress: missing required configuration field(s): ${missing.join(", ")}`
     );
   }
+  if (!isSecureSidecarUrl(cfg.sidecarUrl)) {
+    throw new SpendGuardConfigError(
+      `spendguard:botpress: sidecarUrl must be https:// (plaintext http:// is allowed only for loopback hosts); got ${redactUrlForError(
+        cfg.sidecarUrl
+      )}`
+    );
+  }
+  const tlsPresent = [cfg.tlsCertPath, cfg.tlsKeyPath, cfg.tlsRootCaPath].filter(
+    (p) => p !== void 0 && p !== ""
+  ).length;
+  if (tlsPresent !== 0 && tlsPresent !== 3) {
+    throw new SpendGuardConfigError(
+      "spendguard:botpress: tlsCertPath, tlsKeyPath and tlsRootCaPath must be supplied together (all three) or not at all"
+    );
+  }
+}
+function redactUrlForError(raw) {
+  try {
+    const u = new URL(raw);
+    return `${u.protocol}//${u.hostname}`;
+  } catch {
+    return "(invalid sidecarUrl)";
+  }
 }
 var SpendGuardConfigError = class extends Error {
   code = "BUDGET_CONFIG";
@@ -32,6 +99,8 @@ var SpendGuardConfigError = class extends Error {
     this.name = "SpendGuardConfigError";
   }
 };
+
+// src/reservation.ts
 var DecisionDenied = class extends Error {
   code = "BUDGET_DENIED";
   reasonCodes;
@@ -57,13 +126,55 @@ var SpendGuardReservation = class {
   fetchImpl;
   reserveDeadlineMs;
   commitDeadlineMs;
+  /** Whether a caller injected a transport (`fetchImpl`). When true the
+   *  caller owns TLS and the mTLS dispatcher is not built — this is the
+   *  test/seam path (mirrors the Kong Go plugin's `httpStubClient` bypass). */
+  transportInjected;
+  /** Resolved + traversal-cleaned mTLS PEM paths, or null when no client
+   *  certificate is configured. */
+  tlsPaths;
+  /** Memoised undici mTLS dispatcher promise. Built lazily on first request
+   *  so a missing `undici` fails the call (fail closed) rather than the whole
+   *  process at import time. */
+  dispatcherPromise = null;
   constructor(config, opts = {}) {
     assertRequiredConfig(config);
     this.cfg = config;
     this.failOpenDev = opts.failOpenDevOverride ?? (process.env.SPENDGUARD_BOTPRESS_FAIL_OPEN ?? "").trim() === "1";
+    this.transportInjected = opts.fetchImpl !== void 0;
     this.fetchImpl = opts.fetchImpl ?? globalThis.fetch.bind(globalThis);
     this.reserveDeadlineMs = opts.reserveDeadlineMs ?? 5e3;
     this.commitDeadlineMs = opts.commitDeadlineMs ?? 5e3;
+    this.tlsPaths = this.transportInjected || this.cfg.tlsCertPath === void 0 ? null : {
+      cert: cleanPemPath(this.cfg.tlsCertPath, "tlsCertPath"),
+      key: cleanPemPath(this.cfg.tlsKeyPath, "tlsKeyPath"),
+      ca: cleanPemPath(this.cfg.tlsRootCaPath, "tlsRootCaPath")
+    };
+  }
+  /**
+   * Build (and memoise) the undici mTLS dispatcher from the configured PEM
+   * material. FAIL CLOSED: if `undici` cannot be loaded, the returned promise
+   * rejects, so the dependent `postJson` throws and the reserve/commit path
+   * fails closed rather than dialing without a client certificate.
+   */
+  mtlsDispatcher() {
+    if (this.dispatcherPromise === null) {
+      const paths = this.tlsPaths;
+      if (paths === null) {
+        this.dispatcherPromise = Promise.reject(new Error("no mTLS material configured"));
+      } else {
+        this.dispatcherPromise = (async () => {
+          const undici = await loadUndici();
+          const cert = readFileSync(paths.cert, "utf8");
+          const key = readFileSync(paths.key, "utf8");
+          const ca = readFileSync(paths.ca, "utf8");
+          return new undici.Agent({ connect: { cert, key, ca } });
+        })();
+        this.dispatcherPromise.catch(() => {
+        });
+      }
+    }
+    return this.dispatcherPromise;
   }
   /**
    * Reserve projected spend with the sidecar.
@@ -174,6 +285,22 @@ var SpendGuardReservation = class {
         `SpendGuard DEGRADE: ${resp.reason_codes?.join(",") ?? "sidecar_degraded"}`
       );
     }
+    if (resp.verdict !== "ALLOW" || resp.reservation_id.length === 0) {
+      const detail = resp.verdict !== "ALLOW" ? `unexpected verdict ${JSON.stringify(resp.verdict)}` : "ALLOW without reservation_id";
+      if (this.failOpenDev) {
+        console.warn(`spendguard:botpress: fail-open dev mode active; ${detail} treated as ALLOW`);
+        return {
+          decisionId: resp.decision_id ?? "",
+          reservationId: "",
+          llmCallId,
+          runId,
+          stepId,
+          estimatorSnapshot,
+          conversationId: ctx.conversationId
+        };
+      }
+      throw new SidecarUnavailable(`SpendGuard decision malformed: ${detail}`);
+    }
     return {
       decisionId: resp.decision_id,
       reservationId: resp.reservation_id,
@@ -252,12 +379,16 @@ var SpendGuardReservation = class {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), deadlineMs);
     try {
-      const resp = await this.fetchImpl(url, {
+      const init = {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
         signal: controller.signal
-      });
+      };
+      if (this.tlsPaths !== null) {
+        init.dispatcher = await this.mtlsDispatcher();
+      }
+      const resp = await this.fetchImpl(url, init);
       if (!resp.ok) {
         const text = await safeReadText(resp);
         throw new Error(`sidecar ${path} returned HTTP ${resp.status}: ${text.slice(0, 200)}`);
@@ -282,6 +413,30 @@ function classifyFailure(exc) {
   if (/timeout|deadline/i.test(blob)) return "TIMEOUT";
   return "FAILURE";
 }
+function cleanPemPath(raw, field) {
+  const clean = normalize(raw);
+  if (clean.split(/[/\\]/).includes("..")) {
+    throw new SpendGuardConfigError(`spendguard:botpress: ${field} path rejected (traversal)`);
+  }
+  if (!isAbsolute(clean)) {
+    throw new SpendGuardConfigError(`spendguard:botpress: ${field} must be an absolute path`);
+  }
+  return clean;
+}
+async function loadUndici() {
+  const specifier = ["un", "dici"].join("");
+  try {
+    const mod = await import(specifier);
+    if (typeof mod.Agent !== "function") {
+      throw new Error("undici module did not export Agent");
+    }
+    return mod;
+  } catch (err) {
+    throw new SidecarUnavailable(
+      `spendguard:botpress: mTLS dispatcher unavailable (undici not loadable): ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+}
 function redact(url) {
   try {
     const u = new URL(url);
@@ -303,157 +458,36 @@ async function safeReadText(resp) {
 }
 
 // src/adapter/errors.ts
+function runtimeError(spendguardCode, message, cause) {
+  return new RuntimeError(message, cause, void 0, { spendguardCode });
+}
 function toRuntimeError(err) {
   if (err instanceof DecisionDenied) {
-    return new RuntimeError(`SpendGuard denied: ${err.message}`);
+    return runtimeError("BUDGET_DENIED", `SpendGuard denied: ${err.message}`, err);
   }
   if (err instanceof SidecarUnavailable) {
-    return new RuntimeError(`SpendGuard degraded: ${err.message}`);
+    return runtimeError("BUDGET_DEGRADED", `SpendGuard degraded: ${err.message}`, err);
   }
   if (err instanceof SpendGuardConfigError) {
-    return new RuntimeError(`SpendGuard config: ${err.message}`);
+    return runtimeError("BUDGET_CONFIG", `SpendGuard config: ${err.message}`, err);
   }
   if (err instanceof RuntimeError) {
     return err;
   }
-  return new RuntimeError(`SpendGuard config: ${err instanceof Error ? err.message : String(err)}`);
+  const cause = err instanceof Error ? err : void 0;
+  return runtimeError(
+    "BUDGET_CONFIG",
+    `SpendGuard config: ${err instanceof Error ? err.message : String(err)}`,
+    cause
+  );
+}
+function runtimeErrorCode(rt) {
+  const meta = rt.metadata;
+  const code = meta?.spendguardCode;
+  return code === "BUDGET_DENIED" || code === "BUDGET_DEGRADED" || code === "BUDGET_CONFIG" ? code : void 0;
 }
 function codeFor(err) {
   return err.code;
-}
-
-// src/adapter/usage.ts
-function extractUsageFromBotpressEvent(data) {
-  if (data === void 0) return void 0;
-  const primary = data.payload?.usage ?? data.usage;
-  if (primary !== void 0) {
-    if (typeof primary.inputTokens === "number" || typeof primary.outputTokens === "number") {
-      return {
-        inputTokens: primary.inputTokens ?? 0,
-        outputTokens: primary.outputTokens ?? 0
-      };
-    }
-  }
-  const raw = data.response?.usage;
-  if (raw !== void 0) {
-    const inputTokens = raw.input_tokens ?? raw.prompt_tokens;
-    const outputTokens = raw.output_tokens ?? raw.completion_tokens;
-    if (typeof inputTokens === "number" || typeof outputTokens === "number") {
-      return {
-        inputTokens: inputTokens ?? 0,
-        outputTokens: outputTokens ?? 0
-      };
-    }
-  }
-  return void 0;
-}
-function snapshotToUsage(snapshot) {
-  return {
-    inputTokens: snapshot.inputTokens,
-    outputTokens: snapshot.outputTokens
-  };
-}
-function pickProviderEventId(data) {
-  return data?.providerEventId ?? "";
-}
-
-// src/hooks/afterAiGeneration.ts
-async function runAfterAiGeneration(args) {
-  const data = args.input.data;
-  const handle = data._spendguardHandle;
-  if (handle === void 0) {
-    return { data };
-  }
-  const reservation = args.reservationOverride ?? new SpendGuardReservation(args.configuration);
-  const cancelled = data._cancelled === true;
-  if (cancelled) {
-    await reservation.releaseFailure(
-      handle,
-      Object.assign(new Error("Botpress conversation cancelled"), {
-        name: "AbortError"
-      })
-    );
-    clearHandle(data);
-    return { data };
-  }
-  const realUsage = extractUsageFromBotpressEvent(
-    data
-  );
-  const providerEventId = pickProviderEventId(data);
-  try {
-    await reservation.commitSuccess(handle, realUsage, providerEventId);
-  } catch (commitErr) {
-    try {
-      await reservation.releaseFailure(handle, commitErr);
-    } catch (releaseErr) {
-      console.warn(
-        `spendguard:botpress: release-after-commit-failure swallowed for handle=${handle.reservationId}: ${releaseErr instanceof Error ? releaseErr.message : String(releaseErr)}`
-      );
-    }
-    clearHandle(data);
-    throw toRuntimeError(commitErr);
-  }
-  clearHandle(data);
-  return { data };
-}
-function clearHandle(data, handle) {
-  if ((process.env.SPENDGUARD_BOTPRESS_KEEP_HANDLE ?? "").trim() === "1") {
-    return;
-  }
-  try {
-    data._spendguardHandle = void 0;
-  } catch {
-  }
-}
-
-// src/adapter/binding.ts
-function toBindingFromHookInput(args) {
-  const { input, configuration } = args;
-  const data = input.data;
-  const messagesRaw = data.input?.messages ?? data.messages ?? [];
-  const messages = messagesRaw.map((m) => ({
-    role: m.role ?? "user",
-    content: m.content ?? ""
-  }));
-  return {
-    botId: input.ctx.botId,
-    conversationId: data.conversationId ?? `conv-${input.ctx.botId}`,
-    userId: data.userId ?? "anonymous",
-    model: data.model ?? "unknown",
-    messages,
-    maxTokens: data.maxTokens ?? 1024
-  };
-}
-function pickTenantId(configuration, botId) {
-  return configuration.tenantId.length > 0 ? configuration.tenantId : botId;
-}
-
-// src/hooks/beforeAiGeneration.ts
-async function runBeforeAiGeneration(args) {
-  let reservation;
-  try {
-    reservation = args.reservationOverride ?? new SpendGuardReservation(args.configuration);
-  } catch (err) {
-    throw toRuntimeError(err);
-  }
-  const ctx = toBindingFromHookInput({
-    input: args.input,
-    configuration: args.configuration
-  });
-  let handle;
-  try {
-    handle = await reservation.reserve(ctx);
-  } catch (err) {
-    throw toRuntimeError(err);
-  }
-  const stash = args.input.data;
-  Object.defineProperty(stash, "_spendguardHandle", {
-    value: handle,
-    writable: true,
-    enumerable: false,
-    configurable: true
-  });
-  return { data: stash };
 }
 
 // src/lifecycle/validateConfiguration.ts
@@ -476,49 +510,339 @@ async function validateConfiguration(args) {
   }
 }
 
+// src/adapter/binding.ts
+var DEFAULT_MODEL = {
+  openai: "gpt-4o-mini",
+  anthropic: "claude-3-5-haiku-latest",
+  bedrock: "anthropic.claude-3-5-haiku"
+};
+var DEFAULT_MAX_TOKENS = 1024;
+function resolveModel(input, configuration) {
+  const explicit = input.model;
+  if (explicit !== void 0 && explicit.id.length > 0) {
+    return explicit.id;
+  }
+  return DEFAULT_MODEL[configuration.upstreamProvider];
+}
+function resolveMaxTokens(input) {
+  return input.maxTokens !== void 0 && input.maxTokens > 0 ? input.maxTokens : DEFAULT_MAX_TOKENS;
+}
+function toBindingFromActionInput(args) {
+  const { input, configuration, ctx } = args;
+  const systemMessages = input.systemPrompt !== void 0 && input.systemPrompt.length > 0 ? [{ role: "system", content: input.systemPrompt }] : [];
+  const messages = [
+    ...systemMessages,
+    ...input.messages.map((m) => ({ role: m.role, content: m.content }))
+  ];
+  return {
+    botId: ctx.botId,
+    conversationId: `bot-${ctx.botId}`,
+    userId: input.userId ?? "anonymous",
+    model: resolveModel(input, configuration),
+    messages,
+    maxTokens: resolveMaxTokens(input)
+  };
+}
+function pickTenantId(configuration, botId) {
+  return configuration.tenantId.length > 0 ? configuration.tenantId : botId;
+}
+
+// src/provider/forward.ts
+var ProviderForwardError = class extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ProviderForwardError";
+  }
+};
+function toForwardRequest(input, config, resolvedModel, resolvedMaxTokens) {
+  return {
+    provider: config.upstreamProvider,
+    model: resolvedModel,
+    messages: input.messages,
+    systemPrompt: input.systemPrompt,
+    maxTokens: resolvedMaxTokens,
+    temperature: input.temperature,
+    topP: input.topP,
+    stopSequences: input.stopSequences,
+    userId: input.userId
+  };
+}
+function toGenerateContentOutput(result, provider, cost) {
+  return {
+    id: result.id,
+    provider,
+    model: result.model,
+    choices: [
+      {
+        role: "assistant",
+        type: "text",
+        content: result.content,
+        index: 0,
+        stopReason: result.stopReason
+      }
+    ],
+    usage: {
+      inputTokens: result.inputTokens,
+      outputTokens: result.outputTokens
+    },
+    botpress: { cost }
+  };
+}
+var PROVIDER_ENDPOINTS = {
+  openai: { url: "https://api.openai.com/v1/chat/completions", apiKeyEnv: "OPENAI_API_KEY" },
+  anthropic: { url: "https://api.anthropic.com/v1/messages", apiKeyEnv: "ANTHROPIC_API_KEY" },
+  bedrock: {
+    url: process.env.BEDROCK_OPENAI_GATEWAY_URL ?? "",
+    apiKeyEnv: "BEDROCK_API_KEY"
+  }
+};
+var defaultForward = async (req) => {
+  const endpoint = PROVIDER_ENDPOINTS[req.provider];
+  const apiKey = (process.env[endpoint.apiKeyEnv] ?? "").trim();
+  if (apiKey.length === 0) {
+    throw new ProviderForwardError(
+      `spendguard:botpress: ${endpoint.apiKeyEnv} is not set; cannot forward to ${req.provider}`
+    );
+  }
+  if (endpoint.url.length === 0) {
+    throw new ProviderForwardError(
+      `spendguard:botpress: no endpoint configured for provider ${req.provider}`
+    );
+  }
+  if (req.provider === "anthropic") {
+    return forwardAnthropic(req, endpoint.url, apiKey);
+  }
+  return forwardOpenAiCompatible(req, endpoint.url, apiKey);
+};
+async function forwardOpenAiCompatible(req, url, apiKey) {
+  const messages = req.systemPrompt ? [{ role: "system", content: req.systemPrompt }, ...req.messages] : [...req.messages];
+  const body = {
+    model: req.model,
+    messages,
+    max_tokens: req.maxTokens,
+    ...req.temperature !== void 0 ? { temperature: req.temperature } : {},
+    ...req.topP !== void 0 ? { top_p: req.topP } : {},
+    ...req.stopSequences !== void 0 ? { stop: req.stopSequences } : {},
+    ...req.userId !== void 0 ? { user: req.userId } : {}
+  };
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    throw new ProviderForwardError(`upstream ${req.provider} returned HTTP ${resp.status}`);
+  }
+  const json = await resp.json();
+  const choice = json.choices?.[0];
+  return {
+    id: json.id ?? "",
+    model: json.model ?? req.model,
+    content: choice?.message?.content ?? "",
+    stopReason: mapStopReason(choice?.finish_reason),
+    inputTokens: json.usage?.prompt_tokens ?? 0,
+    outputTokens: json.usage?.completion_tokens ?? 0
+  };
+}
+async function forwardAnthropic(req, url, apiKey) {
+  const body = {
+    model: req.model,
+    max_tokens: req.maxTokens,
+    ...req.systemPrompt !== void 0 ? { system: req.systemPrompt } : {},
+    ...req.temperature !== void 0 ? { temperature: req.temperature } : {},
+    ...req.topP !== void 0 ? { top_p: req.topP } : {},
+    ...req.stopSequences !== void 0 ? { stop_sequences: req.stopSequences } : {},
+    messages: req.messages.map((m) => ({ role: m.role, content: m.content }))
+  };
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": apiKey,
+      "anthropic-version": "2023-06-01"
+    },
+    body: JSON.stringify(body)
+  });
+  if (!resp.ok) {
+    throw new ProviderForwardError(`upstream anthropic returned HTTP ${resp.status}`);
+  }
+  const json = await resp.json();
+  const text = (json.content ?? []).filter((b) => b.type === "text").map((b) => b.text ?? "").join("");
+  return {
+    id: json.id ?? "",
+    model: json.model ?? req.model,
+    content: text,
+    stopReason: mapStopReason(json.stop_reason),
+    inputTokens: json.usage?.input_tokens ?? 0,
+    outputTokens: json.usage?.output_tokens ?? 0
+  };
+}
+function mapStopReason(raw) {
+  switch (raw) {
+    case "stop":
+    case "end_turn":
+    case "stop_sequence":
+      return "stop";
+    case "length":
+    case "max_tokens":
+      return "max_tokens";
+    case "content_filter":
+      return "content_filter";
+    default:
+      return "other";
+  }
+}
+
+// src/llm/generateContent.ts
+async function runGenerateContent(args) {
+  const { input, configuration, ctx } = args;
+  const forward = args.forward ?? defaultForward;
+  const cost = args.costResolver ?? (() => 0);
+  let reservation;
+  try {
+    reservation = args.reservationOverride ?? new SpendGuardReservation(configuration);
+  } catch (err) {
+    throw toRuntimeError(err);
+  }
+  const callCtx = toBindingFromActionInput({ input, configuration, ctx });
+  let handle;
+  try {
+    handle = await reservation.reserve(callCtx);
+  } catch (err) {
+    throw toRuntimeError(err);
+  }
+  const resolvedModel = resolveModel(input, configuration);
+  const resolvedMaxTokens = resolveMaxTokens(input);
+  const forwardReq = toForwardRequest(input, configuration, resolvedModel, resolvedMaxTokens);
+  let result;
+  try {
+    result = await forward(forwardReq);
+  } catch (err) {
+    await reservation.releaseFailure(handle, err);
+    const providerErr = err instanceof ProviderForwardError ? err : new ProviderForwardError(
+      `spendguard:botpress: upstream forward failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+    throw toRuntimeError(providerErr);
+  }
+  const realUsage = { inputTokens: result.inputTokens, outputTokens: result.outputTokens };
+  try {
+    await reservation.commitSuccess(handle, realUsage, result.id);
+  } catch (commitErr) {
+    await reservation.releaseFailure(handle, commitErr);
+    throw toRuntimeError(commitErr);
+  }
+  return toGenerateContentOutput(result, configuration.upstreamProvider, cost(realUsage));
+}
+
+// src/llm/listLanguageModels.ts
+var MODELS_BY_PROVIDER = {
+  openai: [
+    { id: "gpt-4o", name: "OpenAI GPT-4o" },
+    { id: "gpt-4o-mini", name: "OpenAI GPT-4o mini" }
+  ],
+  anthropic: [
+    { id: "claude-3-5-sonnet-latest", name: "Anthropic Claude 3.5 Sonnet" },
+    { id: "claude-3-5-haiku-latest", name: "Anthropic Claude 3.5 Haiku" }
+  ],
+  bedrock: [
+    { id: "anthropic.claude-3-5-sonnet", name: "Bedrock Claude 3.5 Sonnet" },
+    { id: "anthropic.claude-3-5-haiku", name: "Bedrock Claude 3.5 Haiku" }
+  ]
+};
+function runListLanguageModels(configuration) {
+  return { models: [...MODELS_BY_PROVIDER[configuration.upstreamProvider]] };
+}
+var Integration2 = class extends sdk.Integration {
+};
+
 // src/version.ts
 var VERSION = "0.1.0";
 
+// src/llm/schemas.ts
+var schemas_exports = {};
+__export(schemas_exports, {
+  ChoiceSchema: () => ChoiceSchema,
+  GenerateContentInputSchema: () => GenerateContentInputSchema,
+  GenerateContentOutputSchema: () => GenerateContentOutputSchema,
+  ListLanguageModelsInputSchema: () => ListLanguageModelsInputSchema,
+  ListLanguageModelsOutputSchema: () => ListLanguageModelsOutputSchema,
+  MessageSchema: () => MessageSchema,
+  ModelRefSchema: () => ModelRefSchema,
+  UsageSchema: () => UsageSchema
+});
+var ModelRefSchema = z.object({
+  id: z.string().describe("Provider-qualified model id, e.g. openai:gpt-4o-mini"),
+  name: z.string().describe("Human-facing model name")
+});
+var MessageSchema = z.object({
+  role: z.enum(["system", "user", "assistant", "tool"]).describe("Message role"),
+  content: z.string().describe("Message text content")
+});
+var UsageSchema = z.object({
+  inputTokens: z.number().describe("Prompt / input token count"),
+  outputTokens: z.number().describe("Completion / output token count")
+});
+var ChoiceSchema = z.object({
+  role: z.literal("assistant").describe("Always assistant for generated content"),
+  type: z.literal("text").describe("Content type \u2014 text only in v1"),
+  content: z.string().describe("Generated text"),
+  index: z.number().describe("Choice index"),
+  stopReason: z.enum(["stop", "max_tokens", "content_filter", "other"]).describe("Why generation stopped")
+});
+var GenerateContentInputSchema = z.object({
+  model: ModelRefSchema.optional().describe("Model to use; defaults to the first listed model"),
+  messages: z.array(MessageSchema).describe("Prompt messages"),
+  systemPrompt: z.string().optional().describe("Optional system prompt"),
+  maxTokens: z.number().optional().describe("Operator-declared output cap; drives the SpendGuard reserve estimate"),
+  temperature: z.number().optional().describe("Sampling temperature"),
+  topP: z.number().optional().describe("Nucleus sampling cutoff"),
+  stopSequences: z.array(z.string()).optional().describe("Stop sequences"),
+  userId: z.string().optional().describe("Opaque end-user id forwarded upstream")
+});
+var GenerateContentOutputSchema = z.object({
+  id: z.string().describe("Provider response id"),
+  provider: z.string().describe("Upstream provider that served the call"),
+  model: z.string().describe("Model id that served the call"),
+  choices: z.array(ChoiceSchema).describe("Generated choices"),
+  usage: UsageSchema.describe("Real token usage committed to SpendGuard"),
+  botpress: z.object({ cost: z.number().describe("Cost in USD as reported to Botpress billing") }).describe("Botpress billing envelope")
+});
+var ListLanguageModelsInputSchema = z.object({});
+var ListLanguageModelsOutputSchema = z.object({
+  models: z.array(ModelRefSchema).describe("Models this integration can route to")
+});
+
 // src/index.ts
-var src_default = new Integration({
-  configuration: { schema: ConfigurationSchema },
-  register: async ({ configuration }) => {
-    await validateConfiguration({ configuration });
+var src_default = new Integration2({
+  // INV-4: prove the SpendGuard sidecar wiring at install time with a
+  // 1-token reserve + release roundtrip. A bad sidecar URL / mTLS material /
+  // budget id fails the install rather than the first conversation.
+  register: async ({ ctx }) => {
+    await validateConfiguration({ configuration: ctx.configuration });
   },
   unregister: async () => {
   },
   channels: {},
-  actions: {},
-  hooks: {
-    beforeAiGeneration: async ({
-      ctx,
-      data,
-      configuration
-    }) => {
-      const out = await runBeforeAiGeneration({
-        input: {
-          ctx,
-          data
-        },
-        configuration
+  // No webhook surface: SpendGuard is invoked synchronously via actions.
+  handler: async () => {
+  },
+  actions: {
+    // The SpendGuard gate point. Reserve -> forward -> commit (fail-closed).
+    generateContent: async ({ input, ctx, logger }) => {
+      return runGenerateContent({
+        // The generated `.botpress` input type and our schema-derived
+        // `GenerateContentInput` are both projected from
+        // GenerateContentInputSchema; they are structurally identical.
+        input,
+        configuration: ctx.configuration,
+        ctx: { botId: ctx.botId, integrationId: ctx.integrationId },
+        logger: { warn: (m) => logger.forBot().warn(m) }
       });
-      return { data: out.data };
     },
-    afterAiGeneration: async ({
-      ctx,
-      data,
-      configuration
-    }) => {
-      const out = await runAfterAiGeneration({
-        input: {
-          ctx,
-          data
-        },
-        configuration
-      });
-      return { data: out.data };
+    listLanguageModels: async ({ ctx }) => {
+      return runListLanguageModels(ctx.configuration);
     }
   }
 });
 
-export { ConfigurationSchema, DecisionDenied, SidecarUnavailable, SpendGuardConfigError, SpendGuardReservation, VERSION, codeFor, src_default as default, extractUsageFromBotpressEvent, pickProviderEventId, pickTenantId, runAfterAiGeneration, runBeforeAiGeneration, snapshotToUsage, toBindingFromHookInput, toRuntimeError, validateConfiguration };
+export { ConfigurationObjectSchema, ConfigurationSchema, DecisionDenied, ProviderForwardError, SidecarUnavailable, SpendGuardConfigError, SpendGuardReservation, VERSION, codeFor, src_default as default, defaultForward, schemas_exports as llmSchemas, pickTenantId, resolveMaxTokens, resolveModel, runGenerateContent, runListLanguageModels, runtimeErrorCode, toBindingFromActionInput, toForwardRequest, toGenerateContentOutput, toRuntimeError, validateConfiguration };

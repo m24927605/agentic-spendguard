@@ -1,17 +1,19 @@
-// Zod configuration schema for @spendguard/botpress-integration.
+// Configuration schema for @spendguard/botpress-integration.
 //
-// review-standards.md §2.1 / §2.2 LOCKED — fields and upstreamProvider enum.
-// Botpress's `new Integration({ configuration: { schema } })` wires this Zod
-// schema as the source of truth for register-time validation: the operator
-// fills the form, Botpress parses against this schema, and only well-formed
-// configurations reach `validateConfiguration`.
+// Fields + upstreamProvider enum (openai | anthropic | bedrock). The
+// `IntegrationDefinition` in integration.definition.ts wires
+// `ConfigurationObjectSchema` (the un-refined base, below) as the install-time
+// form schema: the operator fills the form, Botpress parses against it, and
+// only well-formed configurations reach `register` -> `validateConfiguration`.
+// The cross-field refinements live on `ConfigurationSchema` and are
+// re-enforced fail-closed at runtime by `assertRequiredConfig`.
 //
-// Defensive note on the Zod import: Botpress 0.7 re-exports zod as a named
-// export from `@botpress/sdk`. Importing from `@botpress/sdk` (instead of
-// pulling a second copy from `zod`) guarantees the Zod instance the Botpress
-// runtime uses to validate the form matches the instance we used to declare
-// the schema — without this, an `instanceof ZodObject` check on the
-// Botpress side would silently fail and the form would refuse to save.
+// Defensive note on the schema import: `@botpress/sdk` re-exports its zui
+// `z` (a zod-compatible builder). Importing `z` from `@botpress/sdk` (instead
+// of pulling a separate copy from the `zod` package) guarantees the schema
+// instance the Botpress runtime validates against matches the instance we used
+// to declare the schema — otherwise a cross-instance `instanceof` check on the
+// Botpress side would fail and the definition would refuse to build.
 //
 // LOCKED upstreamProvider enum (review-standards.md §2.2):
 //   - `openai` / `anthropic` / `bedrock` only.
@@ -35,6 +37,38 @@ import { z } from "@botpress/sdk";
  *                                  `src/reservation.ts` (see §3.3 D09 mTLS
  *                                  contract).
  */
+/**
+ * Base object schema (no cross-field refinements). Botpress's
+ * `IntegrationDefinition` config + action schemas must be a plain
+ * `ZodObject` / `ZodRecord` (`z.ZuiObjectSchema`); a `.refine()` produces a
+ * `ZodEffects`, which the definition's `SchemaDefinition` constraint rejects.
+ *
+ * `integration.definition.ts` consumes THIS schema so `bp build` codegen sees
+ * a well-typed config object. The cross-field invariants (transport-security +
+ * all-or-none mTLS) are re-enforced fail-closed at runtime by
+ * `assertRequiredConfig` inside `SpendGuardReservation`'s constructor, so the
+ * deeper checks are never skipped on the live path.
+ */
+export const ConfigurationObjectSchema = z.object({
+  sidecarUrl: z
+    .string()
+    .url()
+    .refine(isSecureSidecarUrl, {
+      message:
+        "sidecarUrl must be https:// (plaintext http:// is allowed only for loopback hosts 127.0.0.1/::1/localhost)",
+    })
+    .describe("HTTPS companion URL (plaintext http:// allowed only for loopback)"),
+  spendguardBudgetId: z.string().min(1).describe("UUID of the SpendGuard budget to charge"),
+  spendguardWindowInstanceId: z.string().min(1).describe("UUID of the SpendGuard window instance"),
+  upstreamProvider: z
+    .enum(["openai", "anthropic", "bedrock"])
+    .describe("Upstream provider Botpress dispatches to"),
+  tenantId: z.string().min(1).describe("Operator tenant identifier"),
+  tlsCertPath: z.string().min(1).optional().describe("Path to SVID cert PEM"),
+  tlsKeyPath: z.string().min(1).optional().describe("Path to SVID key PEM"),
+  tlsRootCaPath: z.string().min(1).optional().describe("Path to sidecar CA PEM"),
+});
+
 export const ConfigurationSchema = z
   .object({
     sidecarUrl: z

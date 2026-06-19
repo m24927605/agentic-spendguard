@@ -1,13 +1,25 @@
-# D32 SLICE 4 — integration-tier CI for @spendguard/botpress-integration.
+# CI for @spendguard/botpress-integration.
 #
-# Runs on PRs that touch `integrations/botpress/**`. Boots a real Botpress
-# v12 container via testcontainers-node and exercises I01–I04. The unit
-# tier (37 tests) runs as part of the publish workflow + every push;
-# this workflow is the heavier path that pulls the ~800 MB Botpress
-# image so unrelated PRs don't pay the cost.
+# SpendGuard is a Botpress LLM-provider integration: it implements the
+# `generateContent` action (the point Botpress calls for an LLM completion),
+# reserving budget with the SpendGuard sidecar before forwarding to the
+# upstream provider and committing real usage afterwards.
 #
-# review-standards.md §4.7 / §4.8 / §4.9: path-filter + docker layer
-# cache + vitest.integration.config.ts gating.
+# The pipeline (all offline / no Botpress Cloud auth):
+#   1. Install the pnpm workspace (frozen lockfile).
+#   2. Build the @spendguard/sdk workspace dependency (its dist/ is gitignored,
+#      and the integration imports its runtime helpers — computePromptHash,
+#      deriveIdempotencyKey, newUuid7 — so the dist must exist before tests).
+#   3. Generate the Botpress `.botpress` typings via `bp build` (offline
+#      codegen from integration.definition.ts; `.botpress/` is gitignored).
+#   4. Lint (biome via dlx), typecheck (tsc x2), build (tsup), unit tests
+#      (vitest).
+#
+# The Docker / real-Botpress-server integration tier is intentionally NOT run
+# here: the previous hook-based integration tests targeted an architecture
+# (`beforeAiGeneration` / `afterAiGeneration` bot hooks) that does not exist in
+# the real @botpress/sdk. A real end-to-end tier (booting a Botpress bot that
+# routes LLM calls through this provider integration) is tracked separately.
 
 name: Botpress integration CI
 
@@ -24,11 +36,10 @@ on:
       - ".github/workflows/botpress-integration-ci.yml"
 
 jobs:
-  integration-tier:
+  unit-tier:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: integrations/botpress
+    env:
+      COREPACK_ENABLE_DOWNLOAD_PROMPT: "0"
     steps:
       - uses: actions/checkout@v4
 
@@ -41,10 +52,24 @@ jobs:
         with:
           node-version: "22"
           cache: pnpm
+          # The lockfile lives at the repo root: the SDK + all adapters /
+          # integrations share one pnpm workspace (see pnpm-workspace.yaml).
           cache-dependency-path: pnpm-lock.yaml
 
-      - name: Install deps
+      - name: Install deps (workspace-aware, frozen lockfile)
         run: pnpm install --frozen-lockfile
+
+      - name: Build @spendguard/sdk (workspace dependency)
+        # The integration imports the SDK's runtime helpers; its dist/ is
+        # gitignored, so build it before typecheck/test resolve the package.
+        run: pnpm --filter @spendguard/sdk run build
+
+      - name: Generate Botpress typings (offline codegen)
+        # `bp build` reads integration.definition.ts and generates the
+        # .botpress/ typings the runtime imports as `import * as bp from
+        # '.botpress'`. Fully offline — no Botpress Cloud login required.
+        working-directory: integrations/botpress
+        run: pnpm exec bp build -y
 
       - name: Lint
         # The root pnpm-lock.yaml resolved @biomejs/biome's platform binary for
@@ -52,29 +77,17 @@ jobs:
         # can't find the biome native binary on the Linux runner. Run the pinned
         # biome via dlx, which fetches the correct platform build. (Permanent
         # fix: regenerate the lockfile with pnpm supportedArchitectures.)
+        working-directory: integrations/botpress
         run: pnpm dlx @biomejs/biome@1.9.4 check src tests
 
       - name: Typecheck
+        working-directory: integrations/botpress
         run: pnpm run typecheck
 
       - name: Build
+        working-directory: integrations/botpress
         run: pnpm run build
 
-      - name: Unit tests (37 tests)
+      - name: Unit tests
+        working-directory: integrations/botpress
         run: pnpm run test
-
-      - name: Docker layer cache (Botpress v12 image)
-        # The Botpress image is ~800 MB; amortise across runs.
-        uses: actions/cache@v4
-        with:
-          path: /tmp/.docker-cache
-          key: docker-botpress-server-v12.30.x
-
-      - name: Integration tests (I01–I04 against real Botpress v12)
-        # When SPENDGUARD_BOTPRESS_USE_DOCKER=1 is set, the suite spins up
-        # the real Botpress v12 testcontainer. Otherwise it runs the
-        # in-process emulation (still I01–I04, same assertion surface).
-        # CI sets the flag to exercise the heavy path.
-        env:
-          SPENDGUARD_BOTPRESS_USE_DOCKER: "1"
-        run: pnpm run test:integration

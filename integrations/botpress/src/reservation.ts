@@ -75,9 +75,9 @@ interface UndiciModule {
 // --------------------------------------------------------------------
 
 /**
- * Inputs the reservation sees per Botpress AI hook call. Built by
- * `src/adapter/binding.ts` from the Botpress hook input — `data.conversationId`
- * / `ctx.botId` / `data.model` / `data.input.messages` / `data.input.maxTokens`.
+ * Inputs the reservation sees per `generateContent` action call. Built by
+ * `src/adapter/binding.ts` from the action input + handler ctx — `ctx.botId` /
+ * `input.model` / `input.messages` / `input.systemPrompt` / `input.maxTokens`.
  */
 export interface BotpressCallContext {
   readonly botId: string;
@@ -91,13 +91,12 @@ export interface BotpressCallContext {
 }
 
 /**
- * State carried from `reserve` → `commitSuccess` / `releaseFailure` for one
- * AI hook call. Stashed on `data._spendguardHandle` between
- * `beforeAiGeneration` and `afterAiGeneration` (review-standards.md §3.11).
+ * State carried from `reserve` → `commitSuccess` / `releaseFailure` within one
+ * `generateContent` action invocation. Held in a local variable across the
+ * reserve -> forward -> commit sequence (src/llm/generateContent.ts); there is
+ * no cross-call stash — the whole lifecycle runs inside a single action call.
  *
- * Readonly + plain-object so it survives the synchronous stash on the
- * Botpress hook payload object without surprising the runtime's
- * JSON-serialisation pass.
+ * Readonly + plain-object for cheap structural equality in tests.
  */
 export interface ReservationHandle {
   readonly decisionId: string;
