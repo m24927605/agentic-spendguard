@@ -119,21 +119,49 @@ bypass the gate.
 
 ## 🔌 Integrations
 
-Two ways in: a **drop-in proxy** (one env var, no code change) or a
-**framework adapter** (wrap the model object). Highlights:
+Two ways in: a **drop-in proxy** (one env var, no code) or a **framework
+adapter** (wrap the model object). 40+ integrations ship — the installable ones:
 
-- **Proxies / gateways:** LiteLLM (proxy, guardrail, SDK shim), Kong AI
-  Gateway, Envoy ext_proc, any OpenAI-compatible base URL (AnythingLLM,
-  LobeChat, OpenClaw, Coze, …).
-- **Python frameworks:** OpenAI Agents, LangChain / LangGraph, Pydantic-AI,
-  Google ADK, AWS Strands, DSPy, Agno, AutoGen / AG2, LlamaIndex, CrewAI,
-  SmolAgents, Letta.
-- **TS / JS:** Vercel AI SDK, Mastra, LangChain.js, OpenAI Agents (TS), Inngest
-  AgentKit, n8n, Flowise, Botpress.
-- **.NET + Python:** Microsoft Agent Framework, Microsoft Agent Governance
-  Toolkit ([merged upstream](https://github.com/microsoft/agent-governance-toolkit/pull/2398)).
+### 🧩 Agent frameworks
 
-**→ Full matrix, install snippets, and demo gates: [docs/integrations.md](docs/integrations.md).**
+| Framework | Install |
+|---|---|
+| LangChain / LangGraph | `pip install 'spendguard-sdk[langchain]'` · `npm i @spendguard/langchain` |
+| OpenAI Agents SDK | `pip install 'spendguard-sdk[openai-agents]'` · `npm i @spendguard/openai-agents` |
+| Vercel AI SDK | `npm i @spendguard/vercel-ai` |
+| Mastra | `npm i @spendguard/mastra` |
+| Inngest AgentKit | `npm i @spendguard/inngest-agent-kit` |
+| Pydantic-AI · Google ADK · AWS Strands · LlamaIndex | `pip install 'spendguard-sdk[<name>]'` |
+| DSPy · Agno · BeeAI · AutoGen / AG2 · SmolAgents · Letta · Atomic Agents | `pip install 'spendguard-sdk[<name>]'` |
+| Microsoft Agent Framework | `pip install 'spendguard-sdk[agent-framework]'` · .NET adapter in [`sdk/dotnet-agent-framework/`](sdk/dotnet-agent-framework/) |
+
+### 🔧 No-code / visual builders & gateways
+
+| Tool | Install |
+|---|---|
+| n8n | `n8n-nodes-spendguard` (community node) |
+| Flowise | `npm i @spendguard/flowise-nodes` (custom node) |
+| Botpress | `npm i @spendguard/botpress-integration` |
+| Dify | model-provider plugin — [`plugins/dify/`](plugins/dify/) |
+| Langflow | custom component — [`plugins/langflow/`](plugins/langflow/) |
+| Kong AI Gateway | Go plugin — [`plugins/kong/`](plugins/kong/) |
+| LiteLLM (proxy guardrail · callback · SDK shim) | `pip install 'spendguard-sdk[litellm]'` |
+
+### ⚡ Drop-in — one env var, no SDK
+
+| Tool | How |
+|---|---|
+| Any OpenAI-compatible client | `base_url=<proxy>` |
+| LobeChat | `OPENAI_PROXY_URL=<proxy>` |
+| AnythingLLM | Generic-OpenAI provider Base URL |
+| Coze Studio | model-provider Base URL |
+| OpenClaw | custom-provider `baseUrl` (or `npm i @spendguard/openclaw-provider-plugin`) |
+| Anthropic `claude-agent-sdk` | egress proxy + root CA (BYOK) |
+
+**→ Full 40+ matrix** — incl. AG-UI spend events, LiveKit/Pipecat voice reservations,
+vendor-VM usage importers (Devin · Manus · Genspark), the Microsoft Agent Governance
+Toolkit ([merged upstream](https://github.com/microsoft/agent-governance-toolkit/pull/2398)),
+install snippets, and per-integration demo gates: **[docs/integrations.md](docs/integrations.md).**
 
 ## 📦 SDK
 
@@ -198,7 +226,7 @@ internal mTLS. See [Quick start](#-quick-start).
 
 ## Status
 
-Single-maintainer, Apache-2.0, **Beta**. Strong demo coverage (30+ integrations,
+Single-maintainer, Apache-2.0, **Beta**. Strong demo coverage (40+ integrations,
 each with a green `DEMO_MODE` gate) and a signed, tamper-evident audit chain;
 limited production usage so far. The wire spec and audit invariants are
 append-only — **open an issue before touching `proto/` or `migrations/`.** PRs
