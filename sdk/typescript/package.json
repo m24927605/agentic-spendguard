@@ -1,6 +1,6 @@
 {
   "name": "@spendguard/sdk",
-  "version": "0.1.0",
+  "version": "0.5.0",
   "description": "SpendGuard SDK — runtime safety layer client for AI agent frameworks (TypeScript half; mirror of spendguard-sdk on PyPI). v0.1.0 is the first public release; see CHANGELOG.md.",
   "license": "Apache-2.0",
   "author": "Michael Chen <m24927605@gmail.com>",

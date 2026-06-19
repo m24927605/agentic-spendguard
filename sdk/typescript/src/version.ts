@@ -15,7 +15,7 @@
  * The published `@spendguard/sdk` version. Mirror of the Python SDK
  * `spendguard.__version__` (which lives at `0.5.1` on PyPI as of 2026-05-31).
  *
- * SLICE 10 (`COV_S05_10`) wires the publish pipeline; `0.1.0` is the first
- * publishable release.
+ * SLICE 10 (`COV_S05_10`) wires the publish pipeline. First npm release is
+ * `0.5.0`, chosen to track the Python SDK line (PyPI is at 0.6.0).
  */
-export const VERSION = "0.1.0" as const;
+export const VERSION = "0.5.0" as const;

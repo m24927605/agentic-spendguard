@@ -13,7 +13,11 @@ surface — see
 
 ---
 
-## [Unreleased]
+## [0.5.0] — 2026-06-19
+
+First public npm release of `@spendguard/sdk`. Version chosen to track the
+Python SDK line (PyPI at 0.6.0) rather than continue the internal 0.1.x
+sequence; no 0.2–0.4 npm releases exist.
 
 ### Added
 
