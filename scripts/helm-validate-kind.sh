@@ -462,8 +462,17 @@ signing:
   profile: demo
   strictVerification: false
 EOF
+# Image-tag overrides go in a SEPARATE values file, layered as a second `-f`.
+# Appending them to values.yaml would create duplicate top-level keys
+# (statsAggregator:, sidecar:, outboxForwarder:); helm's YAML parser keeps only
+# the LAST mapping for a duplicate key, silently dropping base fields such as
+# statsAggregator.databaseSecretEnabled (which gates the
+# SPENDGUARD_STATS_AGGREGATOR_DATABASE_URL env this script asserts) and
+# sidecar.contractBundleHashHex. helm DOES deep-merge across multiple `-f`
+# files, so a separate override file preserves BOTH the base fields and tags.
+VALUE_FILES=(-f "${WORK_DIR}/values.yaml")
 if [ -n "${KIND_IMAGE_TAG:-}" ]; then
-    cat >> "${WORK_DIR}/values.yaml" <<EOF
+    cat > "${WORK_DIR}/values-images.yaml" <<EOF
 ledger:
   image:
     tag: "${KIND_IMAGE_TAG}"
@@ -498,13 +507,14 @@ ttlSweeper:
   image:
     tag: "${KIND_IMAGE_TAG}"
 EOF
+    VALUE_FILES+=(-f "${WORK_DIR}/values-images.yaml")
 fi
 
 rendered_image_for_workload() {
     local workload="$1"
     helm template spendguard "${REPO_ROOT}/charts/spendguard" \
         --namespace "${NAMESPACE}" \
-        -f "${WORK_DIR}/values.yaml" \
+        "${VALUE_FILES[@]}" \
     | awk -v workload="${workload}" '
         /^kind: (Deployment|DaemonSet)$/ {want=1; in_metadata=0; name=""; next}
         want && /^metadata:/ {in_metadata=1; next}
@@ -608,7 +618,7 @@ while IFS= read -r rendered_workload; do
 done < <(
     helm template spendguard "${REPO_ROOT}/charts/spendguard" \
         --namespace "${NAMESPACE}" \
-        -f "${WORK_DIR}/values.yaml" \
+        "${VALUE_FILES[@]}" \
     | awk '/^kind: (Deployment|DaemonSet)$/ {kind=$2; want=1; next}
            want && /^metadata:/ {meta=1; next}
            want && meta && /^  name:/ {print $2; want=0; meta=0}'
@@ -634,7 +644,7 @@ fi
 log "  rendered ${#RENDERED_WORKLOADS[@]}/${EXPECTED_COUNT} expected chart workloads"
 if ! helm template spendguard "${REPO_ROOT}/charts/spendguard" \
     --namespace "${NAMESPACE}" \
-    -f "${WORK_DIR}/values.yaml" \
+    "${VALUE_FILES[@]}" \
     | awk '
         /^kind: Deployment$/ {in_deploy=1; in_stats=0; next}
         in_deploy && /^metadata:/ {in_metadata=1; next}
@@ -650,7 +660,7 @@ log "  stats-aggregator DB Secret env rendered"
 
 helm --kube-context "${KUBECTL_CTX}" upgrade --install spendguard "${REPO_ROOT}/charts/spendguard" \
     --namespace "${NAMESPACE}" \
-    -f "${WORK_DIR}/values.yaml" \
+    "${VALUE_FILES[@]}" \
     --wait --timeout "${HELM_TIMEOUT}" || {
     log "WARN: helm install --wait timed out; collecting pod state below"
 }
