@@ -8,8 +8,14 @@ Reserve budget *before* the provider is called — refuse the call the moment th
 budget is gone, with a signed audit trail of why. Not another dashboard that
 shows you the bill after it lands.
 
+🔌 Works with **40+ agent frameworks & tools** — LangChain · OpenAI Agents ·
+Vercel AI SDK · Mastra · LlamaIndex · n8n · Dify · LiteLLM · and any
+OpenAI-compatible client.
+
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 [![PyPI: spendguard-sdk](https://img.shields.io/pypi/v/spendguard-sdk?label=pypi)](https://pypi.org/project/spendguard-sdk/)
+[![npm: @spendguard/sdk](https://img.shields.io/npm/v/@spendguard/sdk?label=npm)](https://www.npmjs.com/package/@spendguard/sdk)
+[![40+ integrations](https://img.shields.io/badge/integrations-40%2B-brightgreen)](docs/integrations.md)
 [![Rust](https://img.shields.io/badge/core-Rust-orange)](services/)
 [![Postgres 16 ledger](https://img.shields.io/badge/ledger-Postgres%2016-336791)](services/ledger/migrations/)
 [![wire: mTLS gRPC](https://img.shields.io/badge/wire-mTLS%20gRPC-purple)](proto/)
