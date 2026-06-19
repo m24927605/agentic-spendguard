@@ -1,0 +1,80 @@
+# Auto-publish @spendguard/ag-ui to npm with provenance.
+#
+# Trigger: any GitHub release tagged `ag-ui-v*` (e.g. `ag-ui-v0.1.0`).
+# Auth:   NODE_AUTH_TOKEN (the NPM_TOKEN repo secret, a granular access token
+#         with bypass-2FA) authenticates the publish; --provenance attaches a
+#         signed build attestation from GitHub Actions. Once a Trusted
+#         Publisher entry is added on npm the token can be revoked.
+#
+# Future releases: `gh release create ag-ui-v0.1.0 --title "..." --notes "..."`
+# CI then runs version-check -> lint -> typecheck -> test -> build -> size and
+# only then `npm publish --provenance --access public`.
+
+name: Publish @spendguard/ag-ui to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # allow manual trigger for re-publish testing
+
+jobs:
+  publish:
+    # Only fire for ag-ui-v* tags; other release tags are ignored so each
+    # package's release cadence stays independent.
+    if: startsWith(github.ref, 'refs/tags/ag-ui-v')
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@spendguard/ag-ui/v/${{ github.ref_name }}
+    defaults:
+      run:
+        working-directory: sdk/typescript-ag-ui
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          # The package is part of the repo-root pnpm workspace; cache against
+          # the root lockfile.
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install deps (workspace-aware, frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify version parity (package.json vs src/version.ts)
+        run: bash scripts/version-check.sh
+
+      - name: Lint
+        # biome native binary is darwin-only in the root lockfile; dlx fetches the Linux build.
+        run: pnpm dlx @biomejs/biome@1.9.4 check src tests
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Build (tsup ESM + .d.ts emit)
+        run: pnpm run build
+
+      - name: Prepublish (version-check + build refresh)
+        run: bash scripts/prepublish.sh
+
+      - name: Size budget
+        run: bash scripts/size-budget.sh
+
+      - name: Publish to npm (provenance)
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

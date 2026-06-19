@@ -1,0 +1,80 @@
+# Auto-publish n8n-nodes-spendguard to npm with provenance.
+#
+# Trigger: any GitHub release tagged `n8n-v*` (e.g. `n8n-v0.1.0`).
+# Auth:   NODE_AUTH_TOKEN (the NPM_TOKEN repo secret, a granular access token
+#         with bypass-2FA) authenticates the publish; --provenance attaches a
+#         signed build attestation from GitHub Actions.
+#
+# Naming note: this is an n8n community node and is therefore published
+# UNSCOPED as `n8n-nodes-spendguard` (n8n discovers community nodes by the
+# `n8n-nodes-` prefix + the `n8n-community-node-package` keyword), unlike the
+# scoped `@spendguard/*` adapters. The source lives at `sdk/typescript-n8n/`.
+#
+# Future releases: `gh release create n8n-v0.1.0 --title "..." --notes "..."`
+# CI then runs lint -> typecheck -> test -> build -> size and only then
+# `npm publish --provenance --access public`.
+
+name: Publish n8n-nodes-spendguard to npm
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:  # allow manual trigger for re-publish testing
+
+jobs:
+  publish:
+    # Only fire for n8n-v* tags; other release tags are ignored so each
+    # package's release cadence stays independent.
+    if: startsWith(github.ref, 'refs/tags/n8n-v')
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/n8n-nodes-spendguard/v/${{ github.ref_name }}
+    defaults:
+      run:
+        working-directory: sdk/typescript-n8n
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+          # The package is part of the repo-root pnpm workspace; cache against
+          # the root lockfile.
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install deps (workspace-aware, frozen lockfile)
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        # biome native binary is darwin-only in the root lockfile; dlx fetches the Linux build.
+        run: pnpm dlx @biomejs/biome@1.9.4 check src tests
+
+      - name: Typecheck
+        run: pnpm run typecheck
+
+      - name: Test
+        run: pnpm run test
+
+      - name: Build (tsc + copy node/credential assets)
+        run: pnpm run build
+
+      - name: Size budget
+        run: bash scripts/size-budget.sh
+
+      - name: Publish to npm (provenance)
+        # Unscoped community-node package; --access public is the default but
+        # kept explicit. NODE_AUTH_TOKEN is the granular bypass-2FA token.
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

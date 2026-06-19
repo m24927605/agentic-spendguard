@@ -67,7 +67,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
           # `cache: pnpm` requires the lockfile to be in cwd, but we
           # override cwd via defaults.run.working-directory. The lockfile
@@ -88,7 +88,8 @@ jobs:
         run: bash scripts/version-check.sh
 
       - name: Lint
-        run: pnpm run lint
+        # biome native binary is darwin-only in the root lockfile; dlx fetches the Linux build.
+        run: pnpm dlx @biomejs/biome@1.9.4 check src tests
 
       - name: Typecheck
         run: pnpm run typecheck
