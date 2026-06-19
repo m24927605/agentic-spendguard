@@ -52,7 +52,7 @@ jobs:
         # Fail fast here so a botched build never lands on PyPI.
         run: |
           set -euo pipefail
-          WHEEL=$(ls plugins/langflow/dist/spendguard_langflow_component-*.whl | head -n1)
+          WHEEL=$(find plugins/langflow/dist -maxdepth 1 -name 'spendguard_langflow_component-*.whl' | head -n1)
           echo "Inspecting wheel: $WHEEL"
           unzip -l "$WHEEL" | grep -E 'spendguard_chat_model_wrapper\.yaml'
 

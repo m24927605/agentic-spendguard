@@ -4,7 +4,7 @@
 # safety net. The publish workflow (sdk-ts-publish.yml, wired in COV_S05_10)
 # inherits these same gates.
 #
-# Slice reference: docs/slices/COV_S05_02_d05_proto_codegen.md
+# Slice reference: docs/internal/slices/COV_S05_02_d05_proto_codegen.md
 #                  docs/specs/coverage/D05_ts_sdk_substrate/design.md §7, §10
 #
 # Determinism gate (the load-bearing one):
@@ -64,7 +64,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: pnpm
           cache-dependency-path: pnpm-lock.yaml
 

@@ -1,8 +1,8 @@
 # SLICE_15 — Predictor-upgrade benchmark CI workflow.
 #
 # Spec ancestors:
-#   - docs/slices/SLICE_15_end_to_end_benchmark.md §8.5 (CI integration)
-#   - docs/slices/SLICE_15_end_to_end_benchmark.md §9 #7 (CI run-time < 30 min)
+#   - docs/internal/slices/SLICE_15_end_to_end_benchmark.md §8.5 (CI integration)
+#   - docs/internal/slices/SLICE_15_end_to_end_benchmark.md §9 #7 (CI run-time < 30 min)
 #   - docs/predictor-architecture-spec-v1alpha1.md §0.2 lock criterion #4 + #5
 #
 # What this workflow does on every PR to `main`:
