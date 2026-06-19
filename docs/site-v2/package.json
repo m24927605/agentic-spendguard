@@ -14,7 +14,7 @@
   "dependencies": {
     "@astrojs/starlight": "^0.39.2",
     "@tailwindcss/vite": "^4.3.0",
-    "astro": "^6.3.1",
+    "astro": "^6.4.6",
     "sharp": "^0.34.5",
     "tailwindcss": "^4.3.0"
   },
@@ -22,5 +22,8 @@
     "@astrojs/check": "^0.9.9",
     "@playwright/test": "^1.60.0",
     "typescript": "^6.0.3"
+  },
+  "overrides": {
+    "vite": "^7.3.5"
   }
 }
