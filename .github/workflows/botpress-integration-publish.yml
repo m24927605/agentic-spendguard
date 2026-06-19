@@ -95,7 +95,9 @@ jobs:
         run: pnpm run build
 
       - name: Pack dry-run (verify tarball manifest)
-        run: pnpm pack --dry-run
+        # `pnpm pack` has no --dry-run; use npm pack --dry-run, which lists the
+        # tarball contents without writing a file.
+        run: npm pack --dry-run
 
       - name: Publish to npm (Trusted Publisher OIDC + provenance)
         # `--provenance` requires id-token: write (set on the job).
