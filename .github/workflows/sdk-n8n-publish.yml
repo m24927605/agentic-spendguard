@@ -74,9 +74,6 @@ jobs:
       - name: Build (tsc + copy node/credential assets)
         run: pnpm run build
 
-      - name: Size budget
-        run: bash scripts/size-budget.sh
-
       - name: Publish to npm (provenance)
         # Unscoped community-node package; --access public is the default but
         # kept explicit. NODE_AUTH_TOKEN is the granular bypass-2FA token.

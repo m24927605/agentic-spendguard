@@ -76,6 +76,11 @@ jobs:
         # dist/; the SDK dist is gitignored, so build it before typecheck.
         run: pnpm --filter @spendguard/sdk run build
 
+      - name: Generate Botpress typings (offline codegen)
+        # `bp build` generates the gitignored `.botpress/` typings the runtime
+        # imports as `import * as bp from '.botpress'`. Offline, no Cloud login.
+        run: pnpm exec bp build -y
+
       - name: Lint
         # biome native binary is darwin-only in the root lockfile; dlx fetches the Linux build.
         run: pnpm dlx @biomejs/biome@1.9.4 check src tests
