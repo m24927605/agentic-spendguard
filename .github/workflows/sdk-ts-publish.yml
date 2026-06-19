@@ -45,6 +45,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install protoc
+        # proto:check (below) runs codegen via scripts/proto.ts which needs
+        # protoc. Pin libprotoc 35 to match the version that generated the
+        # committed src/_proto tree (mirrors sdk-ts-ci.yml). apt protoc 3.21
+        # is too old for the bundled google/protobuf well-known imports.
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "35.0"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Install pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -53,13 +63,14 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           registry-url: "https://registry.npmjs.org"
-          # `cache: pnpm` requires the lockfile to be in cwd, but we override
-          # cwd via defaults.run.working-directory. Explicitly point at the
-          # lockfile so the cache populates correctly.
+          # The SDK is part of the repo-root pnpm workspace; there is no
+          # standalone sdk/typescript/pnpm-lock.yaml. Point the cache at the
+          # root lockfile (matches sdk-ts-ci.yml). node 22: node 20 fails the
+          # isolated-vm native build at install (v8::SourceLocation).
           cache: pnpm
-          cache-dependency-path: sdk/typescript/pnpm-lock.yaml
+          cache-dependency-path: pnpm-lock.yaml
 
       - name: Install deps
         run: pnpm install --frozen-lockfile
@@ -75,7 +86,11 @@ jobs:
         run: pnpm run proto:check
 
       - name: Lint
-        run: pnpm run lint
+        # The root pnpm-lock.yaml resolved @biomejs/biome's platform binary for
+        # darwin only (lockfile generated on macOS), so `pnpm run lint` can't
+        # find the biome native binary on Linux. Run the pinned biome via dlx,
+        # which fetches the correct platform build (matches botpress CI).
+        run: pnpm dlx @biomejs/biome@1.9.4 check src tests scripts
 
       - name: Typecheck
         run: pnpm run typecheck
