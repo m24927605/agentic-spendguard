@@ -44,14 +44,22 @@ running compliance reviews.
 | `recorded_at`                           | metadata   |                                                         |
 
 The S19 redaction sweeper, when prompt_retention_days has
-elapsed, sets `cloudevent_payload->'data'` to a marker
-JSONB (`{"_redacted": true, "redacted_at": "..."}`) and
-copies the SHA-256 hash of the original bytes to a separate
-`cloudevent_payload->'_data_sha256_hex'` field. The audit
-chain hash stays valid because the producer_signature was
-computed over the ORIGINAL bytes; verifiers re-derive
-canonical bytes from the redacted form's hash + the
-remaining metadata.
+elapsed, redacts in place through the SECURITY DEFINER
+`redact_audit_outbox_data` SP (migration 0064): it sets
+`cloudevent_payload->'data'` to a marker JSONB
+(`{"_redacted": true, "redacted_at": "..."}`) and writes a
+best-effort SHA-256 digest of the Postgres-normalized `data`
+JSONB to a separate `cloudevent_payload->'_data_sha256_hex'`
+field for operator forensics. This digest is NOT the original
+signed bytes and MUST NOT be treated as an audit-chain
+continuity anchor: `cloudevent_payload` is stored as JSONB at
+rest (migration 0009), so Postgres normalized key order and
+whitespace at INSERT time and the original canonical
+serialization is unrecoverable here. The audit chain's
+integrity is anchored by the separate
+`cloudevent_payload_signature` (Ed25519), which redaction
+invalidates by design — verifiers detect redacted rows via the
+marker, not by re-deriving canonical bytes from the digest.
 
 ### `provider_usage_records`
 

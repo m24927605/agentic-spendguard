@@ -17,7 +17,7 @@ docs=(
   "$ROOT/docs/slices/POST_GA_10_test_quality.md"
 )
 
-required_ait='Reviewer: codex CLI via `ait run --adapter codex --review-mode adversarial`. Max 5 rounds. Staff+ panel arbitration if 5 rounds fail.'
+required_review='Reviewer: codex CLI via `codex review --base main`. Max 5 rounds. Staff+ panel arbitration if 5 rounds fail.'
 
 [[ -f "$MASTER" ]] || {
   echo "missing master spec: $MASTER" >&2
@@ -35,8 +35,8 @@ for doc in "${docs[@]}"; do
       exit 1
     fi
   done
-  if ! grep -Fq "$required_ait" "$doc"; then
-    echo "missing required AIT execution sentence in $doc" >&2
+  if ! grep -Fq "$required_review" "$doc"; then
+    echo "missing required review execution sentence in $doc" >&2
     exit 1
   fi
   if ! grep -q "Staff" "$doc"; then

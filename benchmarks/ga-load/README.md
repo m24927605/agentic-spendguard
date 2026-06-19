@@ -18,6 +18,6 @@ The harness:
 - fills the Strategy C audit mirror with a conservative synthetic value because the local compose stack does not mount a customer predictor plugin
 - records p50/p95/p99/max latency for tokenizer, output_predictor, sidecar decision, publish confirmation, trace emit, and end-to-end request time
 - verifies zero operation errors, outbox drain, canonical audit integrity, and live service metric counters
-- writes evidence under `docs/reviews/ga-readiness/GA_08_scale_performance_slo_proof/`
+- writes evidence under `docs/internal/reviews/ga-readiness/GA_08_scale_performance_slo_proof/`
 
 Use `--no-reset` only for targeted debugging. Merge evidence must come from a clean source commit and a fresh stack.

@@ -14,7 +14,7 @@ Release-grade invocation:
 scripts/soak/ga-soak.sh --duration 24h --interval 5m --profile local
 ```
 
-Evidence is written under `docs/reviews/ga-readiness/GA_07_soak_harness/`:
+Evidence is written under `docs/internal/reviews/ga-readiness/GA_07_soak_harness/`:
 
 - `ga_soak_snapshots.jsonl` contains one JSON object per snapshot.
 - `ga_soak_summary.json` contains the final pass/fail rollup.

@@ -96,7 +96,7 @@ documented).
   → renders cleanly. (Multi-pod is unblocked at the Helm level.)
 - Integration tests in `services/leases/tests/integration_postgres.rs`
   spin up Postgres via `testcontainers`. Local-Mac validation
-  deferred (no Docker daemon writes from this AIT context); test
+  deferred (no Docker daemon writes from this local context); test
   code is committed and runs in any CI host with Docker.
 
 ### Adversarial review conclusion

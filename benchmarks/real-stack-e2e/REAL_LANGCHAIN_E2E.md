@@ -2,7 +2,7 @@
 
 **Date**: 2026-05-13
 **Branch**: `main` after F1 + F2 + F3a merge (HEAD `e198273`)
-**Purpose**: V1 Phase 1-4 from `docs/SPENDGUARD_VIRAL_PLAYBOOK.todo.md` — prove the **real** Rust sidecar stack (not the benchmark shim) works end-to-end with a **real** LangChain agent calling **real** OpenAI.
+**Purpose**: V1 Phase 1-4 from `docs/internal/marketing/SPENDGUARD_VIRAL_PLAYBOOK.todo.md` — prove the **real** Rust sidecar stack (not the benchmark shim) works end-to-end with a **real** LangChain agent calling **real** OpenAI.
 
 This is the precondition for opening upstream framework docs PRs (P2-4). Without this evidence, any LangChain maintainer trying `make demo-up` would see the stack panic at startup and close the PR as premature.
 
@@ -328,9 +328,9 @@ This is sufficient to open the P2-4 LangChain upstream docs PR honestly: the PR 
 
 ## Related
 
-- `../../docs/SPENDGUARD_VIRAL_PLAYBOOK.md` — strategic plan
-- `../../docs/SPENDGUARD_VIRAL_PLAYBOOK.todo.md` — open work tracker
-- `../../docs/launches/v1-real-stack-e2e-prompt.md` — V1 session prompt
-- `../../docs/launches/v1-phase1-bug-report.md` — F1 root-cause + fix history
-- `../../docs/launches/p2-4-langchain-pr-prompt.md` — next-session prompt (now unblocked)
+- `../../docs/internal/marketing/SPENDGUARD_VIRAL_PLAYBOOK.md` — strategic plan
+- `../../docs/internal/marketing/SPENDGUARD_VIRAL_PLAYBOOK.todo.md` — open work tracker
+- `../../docs/internal/launches/v1-real-stack-e2e-prompt.md` — V1 session prompt
+- `../../docs/internal/launches/v1-phase1-bug-report.md` — F1 root-cause + fix history
+- `../../docs/internal/launches/p2-4-langchain-pr-prompt.md` — next-session prompt (now unblocked)
 - `../runaway-loop/RESULTS.md` — three-way benchmark with shim/mock (different concern from this V1)

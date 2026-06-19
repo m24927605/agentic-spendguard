@@ -44,7 +44,6 @@ metadata_locked() {
 MANIFEST_LIST="$(mktemp -t spendguard-cargo-manifests.XXXXXX)"
 find . \
     -path './.git' -prune -o \
-    -path './.ait' -prune -o \
     -path '*/target' -prune -o \
     -name Cargo.toml -print \
     | sort >"${MANIFEST_LIST}"

@@ -67,7 +67,8 @@ reject tuple drift.
 Current closeout status: the sidecar UDS methods are compile-safe,
 fail-closed `UNIMPLEMENTED` stubs. The local D41 demo validates the ledger
 session lifecycle and canonical audit path directly. A sidecar-to-ledger bridge
-slice must land before LiveKit or Pipecat adapters call the session RPCs.
+slice, `COV_D41S_06_sidecar_session_bridge`, must land before LiveKit or
+Pipecat adapters call the session RPCs.
 
 ## Audit Chain
 
@@ -118,11 +119,23 @@ three demo session reservation IDs.
 ## Adapter Handoff
 
 LiveKit and Pipecat adapter work should reference the locked D41 substrate
-design instead of inventing a local voice lifecycle. Adapter code is expected
-to translate framework session/room IDs into `session_id`, reserve before paid
-provider work starts, commit positive streaming deltas with stable
-`streaming_commit_id` values, and release on session end while relying on TTL
-for crash recovery.
+design and the sidecar bridge spec instead of inventing a local voice
+lifecycle. Adapter code is expected to translate framework session/room IDs
+into `session_id`, reserve before paid provider work starts, commit positive
+streaming deltas with stable `streaming_commit_id` values, and release on
+session end while relying on TTL for crash recovery.
+
+Runtime adapter work is blocked until the sidecar bridge demo proves the UDS
+path:
+
+<div is:raw>
+
+```bash
+make -C deploy/demo demo-up DEMO_MODE=session_bridge
+make -C deploy/demo demo-verify-session-bridge
+```
+
+</div>
 
 ## Links
 
@@ -130,5 +143,7 @@ for crash recovery.
   [`deploy/demo/session_reservation/`](https://github.com/m24927605/agentic-spendguard/tree/main/deploy/demo/session_reservation)
 - Locked substrate spec:
   [`docs/specs/coverage/D41_session_reservation_substrate/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D41_session_reservation_substrate)
+- Sidecar bridge spec:
+  [`docs/specs/coverage/D41_sidecar_session_bridge/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D41_sidecar_session_bridge)
 - Slice docs:
   [`docs/slices/COV_D41S_01_session_contract_spec_and_proto.md`](https://github.com/m24927605/agentic-spendguard/blob/main/docs/slices/COV_D41S_01_session_contract_spec_and_proto.md)
