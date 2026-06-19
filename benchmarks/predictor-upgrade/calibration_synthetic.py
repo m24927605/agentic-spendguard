@@ -2,8 +2,8 @@
 """SLICE_15 — Calibration accuracy measurement on synthetic workload.
 
 Spec ancestors:
-  - docs/slices/SLICE_15_end_to_end_benchmark.md §2 (calibration accuracy)
-  - docs/slices/SLICE_15_end_to_end_benchmark.md §8.3 (P95 within 5%)
+  - docs/internal/slices/SLICE_15_end_to_end_benchmark.md §2 (calibration accuracy)
+  - docs/internal/slices/SLICE_15_end_to_end_benchmark.md §8.3 (P95 within 5%)
   - docs/calibration-report-spec-v1alpha1.md (calibration metric definitions)
 
 What this script does:

@@ -2,8 +2,8 @@
 """SLICE_15 — E2E agent test driving the full predictor-upgrade decision flow.
 
 Spec ancestors:
-  - docs/slices/SLICE_15_end_to_end_benchmark.md §2 (E2E agent run)
-  - docs/slices/SLICE_15_end_to_end_benchmark.md §8.1 (three-framework pass)
+  - docs/internal/slices/SLICE_15_end_to_end_benchmark.md §2 (E2E agent run)
+  - docs/internal/slices/SLICE_15_end_to_end_benchmark.md §8.1 (three-framework pass)
   - docs/predictor-architecture-spec-v1alpha1.md §4 (component architecture)
 
 What this script verifies:

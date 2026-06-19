@@ -8,7 +8,7 @@
 //! Spec refs:
 //!   - docs/specs/coverage/D01_envoy_extproc/design.md §3 locked decisions
 //!   - docs/specs/coverage/D01_envoy_extproc/implementation.md §1 module layout
-//!   - docs/slices/COV_01_envoy_extproc_skeleton.md scope
+//!   - docs/internal/slices/COV_01_envoy_extproc_skeleton.md scope
 //!
 //! Re-exports the tonic-generated proto types under [`proto`] so external
 //! tests can construct `ProcessingRequest` / `ProcessingResponse` messages

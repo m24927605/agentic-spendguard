@@ -8,7 +8,7 @@
 //! Spec refs:
 //!   - docs/specs/coverage/D01_envoy_extproc/design.md §3.3 (transport hard-switch), §3.4 (fail-closed)
 //!   - docs/specs/coverage/D01_envoy_extproc/implementation.md §3 + §11
-//!   - docs/slices/COV_06_envoy_extproc_helm.md
+//!   - docs/internal/slices/COV_06_envoy_extproc_helm.md
 //!
 //! Fail-closed on the sidecar handshake: if the sidecar isn't reachable
 //! within the startup deadline, the process exits non-zero so a

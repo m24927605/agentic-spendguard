@@ -2,9 +2,9 @@
 //
 // Spec refs:
 //   - docs/specs/coverage/D01_envoy_extproc/implementation.md §1 layout
-//   - docs/slices/COV_01_envoy_extproc_skeleton.md §2 (tonic-build against
+//   - docs/internal/slices/COV_01_envoy_extproc_skeleton.md §2 (tonic-build against
 //     vendored ExtProc proto under proto/envoy/service/ext_proc/v3/)
-//   - docs/slices/COV_03_envoy_extproc_budget_query.md §"Files touched"
+//   - docs/internal/slices/COV_03_envoy_extproc_budget_query.md §"Files touched"
 //     (SLICE 3 adds the SpendGuard sidecar_adapter proto as a tonic CLIENT
 //     stub so the new sidecar_client.rs can invoke RequestDecision)
 //

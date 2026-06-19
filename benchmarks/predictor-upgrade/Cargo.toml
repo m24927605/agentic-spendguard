@@ -3,8 +3,8 @@
 # predictor upgrade) against LiteLLM proxy + Portkey (when available).
 #
 # Spec ancestors:
-#   - docs/slices/SLICE_15_end_to_end_benchmark.md §2 (burst benchmark)
-#   - docs/slices/SLICE_15_end_to_end_benchmark.md §8.2 (acceptance criteria)
+#   - docs/internal/slices/SLICE_15_end_to_end_benchmark.md §2 (burst benchmark)
+#   - docs/internal/slices/SLICE_15_end_to_end_benchmark.md §8.2 (acceptance criteria)
 #   - docs/predictor-architecture-spec-v1alpha1.md §0.2 lock criterion #5
 #     (Tier 3 heuristic hit rate < 0.1%)
 #   - docs/contract-dsl-spec-v1alpha1.md §14 (decision latency SLO < 50ms)

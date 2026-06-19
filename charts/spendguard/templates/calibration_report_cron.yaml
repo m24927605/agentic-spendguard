@@ -10,7 +10,7 @@
 # SLICE_13 Phase D: scheduled calibration-report emission.
 #
 # Spec ancestor: docs/calibration-report-spec-v1alpha1.md §5.3 +
-# docs/slices/SLICE_13_calibration_report_cli.md §4.1.
+# docs/internal/slices/SLICE_13_calibration_report_cli.md §4.1.
 #
 # This CronJob runs the spendguard-calibration-report binary on the
 # configured schedule (default: daily 04:00 UTC) and pushes the report

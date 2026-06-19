@@ -1,6 +1,6 @@
 // tsup build configuration for @spendguard/langchain.
 //
-// SLICE 1 (`docs/slices/COV_D04_S1_pkg_init.md`) ships only the package
+// SLICE 1 (`docs/internal/slices/COV_D04_S1_pkg_init.md`) ships only the package
 // skeleton — entry map is just the barrel. SLICE 2 will add the
 // SpendGuardCallbackHandler module.
 //

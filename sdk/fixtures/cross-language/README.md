@@ -149,7 +149,7 @@ original scattered fixtures remain in place; SLICE 10 may collapse them.
 
 ## References
 
-- Slice doc: [`docs/slices/COV_S05_09_d05_cross_language_fixtures.md`](../../../docs/slices/COV_S05_09_d05_cross_language_fixtures.md).
+- Slice doc: [`docs/internal/slices/COV_S05_09_d05_cross_language_fixtures.md`](../../../docs/internal/slices/COV_S05_09_d05_cross_language_fixtures.md).
 - Design: [`docs/specs/coverage/D05_ts_sdk_substrate/design.md`](../../../docs/specs/coverage/D05_ts_sdk_substrate/design.md) §11.
 - Review standards (P0 gate): [`docs/specs/coverage/D05_ts_sdk_substrate/review-standards.md`](../../../docs/specs/coverage/D05_ts_sdk_substrate/review-standards.md) §2.
 - Test plan: [`docs/specs/coverage/D05_ts_sdk_substrate/tests.md`](../../../docs/specs/coverage/D05_ts_sdk_substrate/tests.md) §3.9.

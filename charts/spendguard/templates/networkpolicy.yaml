@@ -1,6 +1,6 @@
 {{- /* SLICE_11 Phase D — NetworkPolicy template for L2 bypass-resistance.
 
-Spec ref: docs/slices/SLICE_11_multi_provider_routing.md §2 + §9.5
+Spec ref: docs/internal/slices/SLICE_11_multi_provider_routing.md §2 + §9.5
 ("NetworkPolicy enforcement actually blocks egress").
 
 L2 capability semantics (per README L2 row): the egress_proxy is the
@@ -379,7 +379,7 @@ L2 promise enforceable at install time.
 {{- if eq .Values.chart.profile "production" -}}
 {{- if not .Values.networkPolicy.enabled -}}
 {{- if not .Values.networkPolicy.acknowledgeNoNetworkPolicy -}}
-{{- fail "chart.profile=production requires networkPolicy.enabled=true OR explicit networkPolicy.acknowledgeNoNetworkPolicy=true (L2 advisory-mode opt-out). See README L2 capability row + docs/slices/SLICE_11_multi_provider_routing.md §9.5." -}}
+{{- fail "chart.profile=production requires networkPolicy.enabled=true OR explicit networkPolicy.acknowledgeNoNetworkPolicy=true (L2 advisory-mode opt-out). See README L2 capability row + docs/internal/slices/SLICE_11_multi_provider_routing.md §9.5." -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}

@@ -40,7 +40,7 @@
 //!   - docs/specs/coverage/D01_envoy_extproc/design.md §3.4, §3.5
 //!   - docs/specs/coverage/D01_envoy_extproc/implementation.md §7
 //!   - docs/specs/coverage/D01_envoy_extproc/review-standards.md §5
-//!   - docs/slices/COV_04_envoy_extproc_audit_emit.md
+//!   - docs/internal/slices/COV_04_envoy_extproc_audit_emit.md
 //!   - services/egress_proxy/src/forward.rs:846-1007 (LlmCallOutcome pattern)
 //!   - proto/spendguard/sidecar_adapter/v1/adapter.proto §LlmCallPostPayload
 

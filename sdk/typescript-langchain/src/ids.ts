@@ -4,7 +4,7 @@
 //
 // SLICE 3 wires only the `LLM_CALL_PRE` trigger — that is the single boundary
 // where the adapter calls `client.reserve()`. The mapping rule (LOCKED for
-// SLICE 3 per docs/slices/COV_D04_S3_reserve_commit_wiring.md):
+// SLICE 3 per docs/internal/slices/COV_D04_S3_reserve_commit_wiring.md):
 //
 //   - `sessionId`   := `parentRunId ?? runId`
 //                      LangChain's `parentRunId` is the run-manager UUID of

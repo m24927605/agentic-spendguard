@@ -1,6 +1,6 @@
 // SLICE 3 — SpendGuardCallbackHandler reserve/commit wiring tests.
 //
-// Scope (per docs/slices/COV_D04_S3_reserve_commit_wiring.md):
+// Scope (per docs/internal/slices/COV_D04_S3_reserve_commit_wiring.md):
 //   - Reserve success → inflight stashed (decisionId + reservationId).
 //   - Reserve DENY → throws `DecisionDenied` (instanceof preserved).
 //   - Reserve `SidecarUnavailable` → does NOT block, logs warn, no inflight.

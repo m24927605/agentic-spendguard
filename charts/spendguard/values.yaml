@@ -538,7 +538,7 @@ runCostProjector:
 
 # ── egress_proxy service (SLICE_10) ─────────────────────────────────
 # Spec: docs/specs/auto-instrument-egress-proxy-spec.md v7;
-#       docs/slices/SLICE_10_egress_proxy_decision_rewrite.md.
+#       docs/internal/slices/SLICE_10_egress_proxy_decision_rewrite.md.
 #
 # HTTP proxy for SpendGuard: drop-in OpenAI-compatible endpoint that
 # gates LLM calls via the sidecar UDS before forwarding. SLICE_10
@@ -743,7 +743,7 @@ kongPlugin:
     limits:   { cpu: "1",    memory: "512Mi" }
 
 # ── SLICE_11 — NetworkPolicy for L2 bypass-resistance ───────────────
-# Spec: docs/slices/SLICE_11_multi_provider_routing.md §2 + §9.5.
+# Spec: docs/internal/slices/SLICE_11_multi_provider_routing.md §2 + §9.5.
 #
 # L2 capability semantics (per README): the egress_proxy is the
 # single hard-block point for external LLM API egress. Without a

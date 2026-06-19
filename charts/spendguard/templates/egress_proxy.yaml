@@ -2,7 +2,7 @@
 {{- $component := "egress-proxy" }}
 {{- /* SLICE_10 — egress_proxy Deployment.
        Spec: docs/specs/auto-instrument-egress-proxy-spec.md v7
-            + docs/slices/SLICE_10_egress_proxy_decision_rewrite.md.
+            + docs/internal/slices/SLICE_10_egress_proxy_decision_rewrite.md.
 
        Pattern mirrors charts/spendguard/templates/output_predictor.yaml
        Container security baseline:

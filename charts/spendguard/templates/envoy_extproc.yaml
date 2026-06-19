@@ -9,7 +9,7 @@ Spec refs:
   - docs/specs/coverage/D01_envoy_extproc/design.md §3.4 (deny-on-fail-closed)
   - docs/specs/coverage/D01_envoy_extproc/implementation.md §6
   - docs/specs/coverage/D01_envoy_extproc/review-standards.md §7.1
-  - docs/slices/COV_06_envoy_extproc_helm.md
+  - docs/internal/slices/COV_06_envoy_extproc_helm.md
 
 Resources rendered when envoyExtproc.enabled=true:
   - Deployment   — main gRPC server + readyz probe + SVID volume + SecurityContext

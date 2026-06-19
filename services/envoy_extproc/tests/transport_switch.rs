@@ -9,7 +9,7 @@
 //! Spec refs:
 //!   - docs/specs/coverage/D01_envoy_extproc/design.md §3.3 (transport hard-switch)
 //!   - docs/specs/coverage/D01_envoy_extproc/review-standards.md §7.1 (Blocker class)
-//!   - docs/slices/COV_06_envoy_extproc_helm.md
+//!   - docs/internal/slices/COV_06_envoy_extproc_helm.md
 
 use std::path::PathBuf;
 use std::time::Duration;

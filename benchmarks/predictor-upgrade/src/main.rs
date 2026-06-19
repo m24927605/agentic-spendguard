@@ -1,7 +1,7 @@
 //! SLICE_15 concurrent-burst benchmark harness.
 //!
 //! Spec ancestors:
-//!   - docs/slices/SLICE_15_end_to_end_benchmark.md §2 + §8.2
+//!   - docs/internal/slices/SLICE_15_end_to_end_benchmark.md §2 + §8.2
 //!   - docs/predictor-architecture-spec-v1alpha1.md §0.2 lock criterion #5
 //!   - docs/contract-dsl-spec-v1alpha1.md §14 (p99 < 50ms decision SLO)
 //!

@@ -2,7 +2,7 @@
 """SLICE_15 — Verify all 21 predictor-upgrade audit columns are populated.
 
 Spec ancestors:
-  - docs/slices/SLICE_15_end_to_end_benchmark.md §8.1 (acceptance criteria)
+  - docs/internal/slices/SLICE_15_end_to_end_benchmark.md §8.1 (acceptance criteria)
   - docs/audit-chain-prediction-extension-v1alpha1.md §2 (column inventory)
   - docs/predictor-architecture-spec-v1alpha1.md §0.2 lock criterion #4
     (verify-chain regression green after new column writes)

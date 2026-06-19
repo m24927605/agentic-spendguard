@@ -28,7 +28,7 @@
 //! Spec refs:
 //!   - docs/specs/coverage/D01_envoy_extproc/design.md §3.5 (wire-format scope)
 //!   - docs/specs/coverage/D01_envoy_extproc/review-standards.md §5.1, §5.2
-//!   - docs/slices/COV_04_envoy_extproc_audit_emit.md
+//!   - docs/internal/slices/COV_04_envoy_extproc_audit_emit.md
 
 use thiserror::Error;
 

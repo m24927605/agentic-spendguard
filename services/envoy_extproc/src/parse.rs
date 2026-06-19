@@ -3,7 +3,7 @@
 //! Spec refs:
 //!   - docs/specs/coverage/D01_envoy_extproc/design.md §3.2 (token counting reuses egress_proxy routing)
 //!   - docs/specs/coverage/D01_envoy_extproc/implementation.md §5 (parse_request_body shape)
-//!   - docs/slices/COV_02_envoy_extproc_token_counter.md (this slice scope)
+//!   - docs/internal/slices/COV_02_envoy_extproc_token_counter.md (this slice scope)
 //!
 //! Wraps `spendguard-provider-routing::route` + per-provider JSON shape
 //! extraction. The returned [`ParsedRequest`] carries everything

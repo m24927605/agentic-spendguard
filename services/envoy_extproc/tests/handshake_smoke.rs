@@ -7,7 +7,7 @@
 //! mock ExtProc client, send a Handshake frame (RequestHeaders),
 //! expect a CONTINUE ACK, close.
 //!
-//! Slice doc: docs/slices/COV_01_envoy_extproc_skeleton.md §"Test/verification plan" item 4.
+//! Slice doc: docs/internal/slices/COV_01_envoy_extproc_skeleton.md §"Test/verification plan" item 4.
 //!
 //! ## SLICE 2
 //! Request-Body phase integration — server stashes a ClaimEstimate into
@@ -186,7 +186,7 @@ async fn request_headers_first_frame_treated_as_handshake_returns_continue() {
 /// body and assert the per-stream state map has a `ClaimEstimate` with
 /// `input_tokens > 0` for the test stream id (`x-request-id`).
 ///
-/// Spec ref: docs/slices/COV_02_envoy_extproc_token_counter.md
+/// Spec ref: docs/internal/slices/COV_02_envoy_extproc_token_counter.md
 /// §"Test/verification plan" item 2 (integration test extending this
 /// file).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
