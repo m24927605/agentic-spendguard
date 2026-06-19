@@ -80,7 +80,9 @@ jobs:
         # committed lockfile exactly. The install runs from the package
         # directory but pnpm walks up to the workspace root so the
         # @spendguard/sdk workspace link resolves correctly.
-        run: pnpm install --frozen-lockfile
+        # --filter so the publish installs only this package's subtree,
+        # NOT the whole workspace (flowise pulls puppeteer/chromium which hangs CI).
+        run: pnpm install --frozen-lockfile --filter "@spendguard/mastra..."
 
       - name: Build @spendguard/sdk (workspace dependency)
         # The adapter typechecks against @spendguard/sdk's emitted .d.ts in
