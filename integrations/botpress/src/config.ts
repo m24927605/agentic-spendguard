@@ -53,10 +53,10 @@ export const ConfigurationObjectSchema = z.object({
   sidecarUrl: z
     .string()
     .url()
-    .refine(isSecureSidecarUrl, {
-      message:
-        "sidecarUrl must be https:// (plaintext http:// is allowed only for loopback hosts 127.0.0.1/::1/localhost)",
-    })
+    // The https-except-loopback rule is intentionally NOT a `.refine()` here:
+    // a field-level refine is a ZodEffects, which Botpress's ZUI->JSON-schema
+    // converter rejects at `bp deploy`. It is enforced fail-closed at runtime in
+    // `assertRequiredConfig` (below) via `isSecureSidecarUrl`.
     .describe("HTTPS companion URL (plaintext http:// allowed only for loopback)"),
   spendguardBudgetId: z.string().min(1).describe("UUID of the SpendGuard budget to charge"),
   spendguardWindowInstanceId: z.string().min(1).describe("UUID of the SpendGuard window instance"),
