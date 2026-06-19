@@ -226,7 +226,19 @@ export function createSpendGuardMiddleware(
         // `DecisionDenied` (and `DecisionStopped` / `ApprovalRequired`
         // subclasses) MUST propagate so the SDK caller halts before
         // `doGenerate()` fires — review-standards §7.1 / §7.2.
-        if (err instanceof DecisionDenied) {
+        // Also accept the structural `statusCode === 403` marker: a duplicate
+        // copy of @spendguard/sdk in the consumer's module tree (the
+        // dual-package hazard) makes the cross-realm `instanceof` return false
+        // even for a genuine `DecisionStopped`, which would otherwise fail this
+        // budget gate OPEN. Every `DecisionDenied` subclass locks
+        // `statusCode === 403`; operational errors (`SidecarUnavailable`, 503)
+        // are NOT 403 and still fail open below.
+        if (
+          err instanceof DecisionDenied ||
+          (typeof err === "object" &&
+            err !== null &&
+            (err as { statusCode?: unknown }).statusCode === 403)
+        ) {
           throw err;
         }
         // Anything else — `SidecarUnavailable`, transport hiccups, ack

@@ -318,6 +318,26 @@ describe("transformParams — error propagation (SLICE 3)", () => {
     expect(_internalStashFor(params)).toBeUndefined();
   });
 
+  it("foreign-realm DENY (statusCode 403, NOT instanceof) → still rethrows (dual-package hazard)", async () => {
+    // Regression: a duplicate @spendguard/sdk copy in the consumer's module
+    // tree throws a DecisionStopped from a DIFFERENT realm, so `instanceof
+    // DecisionDenied` is false. The structural statusCode===403 marker must
+    // still fail closed — otherwise the budget DENY silently passes through.
+    const opts = makeOptions();
+    const mw = createSpendGuardMiddleware(opts);
+    const foreignDeny = Object.assign(
+      new Error('sidecar STOP terminal=true reasons=["BUDGET_EXHAUSTED"]'),
+      { name: "DecisionStopped", statusCode: 403 },
+    );
+    expect(foreignDeny instanceof DecisionDenied).toBe(false); // precondition
+    getMockReserve(opts).mockRejectedValueOnce(foreignDeny);
+
+    const params = makeParams("hi");
+    await expect(callTransformParams(mw, params)).rejects.toBe(foreignDeny);
+    expect(_internalStashFor(params)).toBeUndefined();
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
   it("SidecarUnavailable does NOT block — passes through with warn, no stash", async () => {
     const opts = makeOptions();
     const mw = createSpendGuardMiddleware(opts);
