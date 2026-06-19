@@ -47,7 +47,12 @@ jobs:
         run: pnpm install --frozen-lockfile
 
       - name: Lint
-        run: pnpm run lint
+        # The root pnpm-lock.yaml resolved @biomejs/biome's platform binary for
+        # darwin only (the lockfile was generated on macOS), so `pnpm run lint`
+        # can't find the biome native binary on the Linux runner. Run the pinned
+        # biome via dlx, which fetches the correct platform build. (Permanent
+        # fix: regenerate the lockfile with pnpm supportedArchitectures.)
+        run: pnpm dlx @biomejs/biome@1.9.4 check src tests
 
       - name: Typecheck
         run: pnpm run typecheck
