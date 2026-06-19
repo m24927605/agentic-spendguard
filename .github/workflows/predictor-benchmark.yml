@@ -125,7 +125,7 @@ jobs:
         # Real SpendGuard numbers come from release benchmarks (see
         # benchmarks/predictor-upgrade/RESULTS.md§Reproducing).
         run: |
-          ./target/release/predictor-upgrade-bench \
+          ../../target/release/predictor-upgrade-bench \
             --bursts 1,10,100 \
             --warmup 10 \
             --samples 50 \

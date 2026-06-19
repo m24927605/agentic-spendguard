@@ -47,13 +47,16 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install protoc
-        # protoc is required by sdk/typescript/scripts/proto.ts. The
-        # @protobuf-ts/plugin ships only the language-emitter plugin and
-        # shells out to the system protoc for parsing.
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends protobuf-compiler
-          protoc --version
+        # protoc is required by sdk/typescript/scripts/proto.ts. Pin to the
+        # version that generated the committed _proto tree (libprotoc 35) so
+        # the determinism gate matches. The apt `protobuf-compiler` is far too
+        # old (libprotoc 3.21) and cannot resolve the bundled google/protobuf
+        # well-known type imports (Import "google/protobuf/timestamp.proto"
+        # was not found).
+        uses: arduino/setup-protoc@v3
+        with:
+          version: "35.0"
+          repo-token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: pnpm/action-setup@v4
         with:
