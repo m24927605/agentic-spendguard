@@ -42,7 +42,7 @@ const outcome = {
 
 describe("createSpendGuardOpenClawProvider skeleton", () => {
   it("exports the package version", () => {
-    expect(VERSION).toBe("0.1.0-pre");
+    expect(VERSION).toBe("0.1.0");
   });
 
   it("preserves upstream identity and catalog behavior", async () => {
