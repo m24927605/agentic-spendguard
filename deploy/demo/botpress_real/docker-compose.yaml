@@ -25,6 +25,13 @@
 name: spendguard-demo
 
 services:
+  sidecar:
+    # Demo Node runner connects to the adapter UDS as root (uid 0) to write
+    # its node_modules named volume; the sidecar SO_PEERCRED gate defaults to
+    # its own uid (65532) and would reject it. Accept root for this demo.
+    # Production uses mTLS+SPIFFE, never this local-UDS path.
+    environment:
+      SPENDGUARD_SIDECAR_ADAPTER_EXPECTED_PEER_UID: "0"
   # ── counting-stub ────────────────────────────────────────────────────
   # In-network mock OpenAI / Anthropic / Bedrock provider. Identical to
   # the dify_plugin / inngest_agent_kit overlays' counting-stub.
