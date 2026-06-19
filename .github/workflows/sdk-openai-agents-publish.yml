@@ -81,6 +81,11 @@ jobs:
         # @spendguard/sdk workspace link resolves correctly.
         run: pnpm install --frozen-lockfile
 
+      - name: Build @spendguard/sdk (workspace dependency)
+        # The adapter typechecks against @spendguard/sdk's emitted .d.ts in
+        # dist/; the SDK dist is gitignored, so build it before typecheck.
+        run: pnpm --filter @spendguard/sdk run build
+
       - name: Verify version parity (package.json vs src/version.ts)
         run: bash scripts/version-check.sh
 

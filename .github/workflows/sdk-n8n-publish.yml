@@ -56,6 +56,11 @@ jobs:
       - name: Install deps (workspace-aware, frozen lockfile)
         run: pnpm install --frozen-lockfile
 
+      - name: Build @spendguard/sdk (workspace dependency)
+        # The adapter typechecks against @spendguard/sdk's emitted .d.ts in
+        # dist/; the SDK dist is gitignored, so build it before typecheck.
+        run: pnpm --filter @spendguard/sdk run build
+
       - name: Lint
         # biome native binary is darwin-only in the root lockfile; dlx fetches the Linux build.
         run: pnpm dlx @biomejs/biome@1.9.4 check src tests
