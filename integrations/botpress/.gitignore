@@ -9,5 +9,15 @@
 # auth, which CI does not have, so the resolved interface package is VENDORED
 # (committed) rather than re-fetched. Do NOT ignore it.
 
+# Built output — produced fresh by `bp build` (Botpress codegen) + `tsup`. NOT
+# committed: the integration CI + publish workflows build it from source, the
+# `bp deploy` flow builds its own, and the local demo driver
+# (deploy/demo/botpress_real/run_botpress_demo.mjs) is self-contained and never
+# imports the package. A committed copy could only drift from source — exactly
+# the stale-dist bug fixed for the other adapters. Matches flowise/openclaw and
+# sdk/typescript (core). botpress is excluded from the dist-drift gate because
+# its build needs `bp build` codegen, which the gate's clean checkout can't run.
+dist/
+
 # tsup/tsc scratch dirs.
 dist-tests/
