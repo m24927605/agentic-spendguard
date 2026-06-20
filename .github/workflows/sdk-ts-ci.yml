@@ -21,12 +21,18 @@ on:
     branches: [main]
     paths:
       - "sdk/typescript/**"
+      - "sdk/typescript-*/**"
+      - "integrations/**"
       - "proto/spendguard/**"
+      - "scripts/verify-ts-dist-fresh.sh"
       - ".github/workflows/sdk-ts-ci.yml"
   pull_request:
     paths:
       - "sdk/typescript/**"
+      - "sdk/typescript-*/**"
+      - "integrations/**"
       - "proto/spendguard/**"
+      - "scripts/verify-ts-dist-fresh.sh"
       - ".github/workflows/sdk-ts-ci.yml"
   workflow_dispatch: {}
 
@@ -92,3 +98,35 @@ jobs:
         # to make sure the slice's package.json scripts wiring doesn't
         # regress (gate #6 of the slice's verification plan).
         run: pnpm --filter @spendguard/sdk run build
+
+  ts-adapter-dist-drift:
+    # Determinism gate for the COMMITTED adapter dist/ bundles. The demo runner
+    # images vendor these verbatim (file: deps against the workspace mount), so a
+    # dist/ that lags its src/ ships stale code into every demo and the npm
+    # tarball — e.g. a fail-closed `statusCode === 403` fix that lived in source
+    # but never reached the built bundle (caught 2026-06-20 for vercel-ai + n8n).
+    # Builds are deterministic (cold == warm), so a fresh build of a clean tree
+    # produces zero diff. Mirrors the proto-codegen gate above.
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install deps (workspace-aware, lockfile-frozen)
+        run: pnpm install --frozen-lockfile
+
+      - name: Verify committed TS adapter dist matches source
+        # Rebuilds every committed-dist adapter and fails if any tracked dist/
+        # drifts. Red here = run `pnpm -r build` (or `make sdk-ts-dist`) and
+        # commit the dist/ changes.
+        run: bash scripts/verify-ts-dist-fresh.sh

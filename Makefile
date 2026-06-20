@@ -5,7 +5,7 @@
 
 .PHONY: demo-up demo-down demo-logs demo-clean demo-build help \
         demo-verify-ag-ui-events demo-verify-mastra-processor \
-        sdk-ts-proto sdk-ts-proto-check
+        sdk-ts-proto sdk-ts-proto-check sdk-ts-dist sdk-ts-dist-check
 
 help:
 	@echo "Targets:"
@@ -17,6 +17,8 @@ help:
 	@echo "  make demo-verify-ag-ui-events  Verify the AG-UI spend-event demo gate"
 	@echo "  make sdk-ts-proto      Regenerate TS SDK proto stubs (sdk/typescript/src/_proto/)"
 	@echo "  make sdk-ts-proto-check  CI determinism gate: fail if generated tree drifts"
+	@echo "  make sdk-ts-dist       Rebuild every TS adapter dist/ from source (pnpm -r build)"
+	@echo "  make sdk-ts-dist-check   CI determinism gate: fail if any committed adapter dist is stale"
 
 demo-up demo-down demo-logs demo-clean demo-build demo-verify-ag-ui-events demo-verify-mastra-processor:
 	$(MAKE) -C deploy/demo $@
@@ -29,3 +31,14 @@ sdk-ts-proto:
 
 sdk-ts-proto-check:
 	pnpm --filter @spendguard/sdk run proto:check
+
+# Rebuild every committed-dist TS adapter from source. The demo runner images
+# vendor these dist/ bundles verbatim, so they MUST track src/.
+sdk-ts-dist:
+	pnpm -r build
+
+# Determinism gate: rebuild the committed-dist adapters and fail if any tracked
+# dist/ drifts from a fresh build (i.e. someone edited src/ without rebuilding
+# the bundle the demos + npm tarball ship). Mirrors sdk-ts-proto-check.
+sdk-ts-dist-check:
+	bash scripts/verify-ts-dist-fresh.sh
