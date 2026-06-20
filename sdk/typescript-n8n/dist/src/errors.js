@@ -47,9 +47,16 @@ function mapToNodeApiError(node, err) {
             httpCode: "428",
         });
     }
+    // The structural `statusCode === 403` marker is checked alongside
+    // `instanceof` so a foreign-realm DENY (dual copy of @spendguard/sdk in the
+    // n8n install tree) still surfaces as a 403 NodeApiError rather than a
+    // generic failure. Every `DecisionDenied` subclass locks `statusCode === 403`.
     if (err instanceof sdk_1.DecisionStopped ||
         err instanceof sdk_1.DecisionDenied ||
-        err instanceof sdk_1.DecisionSkipped) {
+        err instanceof sdk_1.DecisionSkipped ||
+        (typeof err === "object" &&
+            err !== null &&
+            err.statusCode === 403)) {
         const reasonCodes = readReasonCodes(err);
         const reasons = reasonCodes.length > 0 ? reasonCodes.join(", ") : "decision_denied";
         const decisionId = readStringField(err, "decisionId");
