@@ -101,7 +101,11 @@ const PRICING = process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX
 
 // Demo claim amounts (atomic): ALLOW/STREAM stay far under the seeded
 // 1B-atomic hard cap; DENY blows past it (design §10 step 2).
-const ALLOW_AMOUNT_ATOMIC = "100000";
+// ALLOW + STREAM each open a real reserve (2 reserves total) against the USD
+// monetary unit funded 100000 µUSD; keep each well under that so both land.
+// Was "100000" (the entire budget) — the migration-0063 budget floor rejects
+// the 2nd reserve once the 1st is held.
+const ALLOW_AMOUNT_ATOMIC = "5000";
 const DENY_AMOUNT_ATOMIC = "2000000000";
 
 /** Probe the counting stub's `/_count` endpoint; returns the running tally. */

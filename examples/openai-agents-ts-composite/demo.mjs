@@ -377,7 +377,15 @@ async function realMain() {
         run(denyAgent, "trigger openai_agents_ts deny"),
       );
     } catch (err) {
-      denied = err instanceof DecisionDenied;
+      // Recognize a fail-closed deny structurally. Under the dual-package
+      // hazard (two @spendguard/sdk copies in the demo's module tree) the
+      // adapter's thrown DecisionStopped comes from a different realm, so
+      // `instanceof DecisionDenied` returns false even though it IS a deny
+      // (err.name === "DecisionStopped"). Every DecisionDenied subclass locks
+      // `statusCode === 403`, so accept that marker too.
+      denied =
+        err instanceof DecisionDenied ||
+        (typeof err === "object" && err !== null && err.statusCode === 403);
       denyKind = err instanceof Error ? err.name ?? "Error" : "non-Error";
       console.log(`[demo] (2) DENY caught ${denyKind}: ${err instanceof Error ? err.message : err}`);
     }

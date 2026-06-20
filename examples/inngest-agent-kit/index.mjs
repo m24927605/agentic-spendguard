@@ -397,7 +397,11 @@ async function realMain() {
     const claimEstimator = () => [
       {
         scopeId: BUDGET_ID,
-        amountAtomic: "1000000",
+        // µUSD claim against the USD monetary unit (88888888, funded 100000
+        // µUSD). Was "1000000" ($1) — exceeds every seeded unit's funding, so
+        // the migration-0063 budget floor raises BUDGET_EXHAUSTED (now a
+        // fail-closed STOP). ALLOW + the single deduped retry stay well under.
+        amountAtomic: "5000",
         unit: {
           unit: "USD_MICROS",
           denomination: 1,
@@ -469,7 +473,13 @@ async function realMain() {
         makeCtx({ runId: newUuid7(), stepId: "step-real-deny", attempt: 0 }),
       );
     } catch (err) {
-      denied = err instanceof DecisionDenied;
+      // Structural fail-closed recognition (dual-package hazard): the
+      // adapter's DecisionStopped may come from another @spendguard/sdk realm,
+      // so `instanceof DecisionDenied` can be false even for a genuine deny;
+      // every deny subclass locks `statusCode === 403`, so accept that too.
+      denied =
+        err instanceof DecisionDenied ||
+        (typeof err === "object" && err !== null && err.statusCode === 403);
       console.log(
         `[demo] (2) DENY caught ${err?.name ?? "Error"}: ${err instanceof Error ? err.message : err}`,
       );

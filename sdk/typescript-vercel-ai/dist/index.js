@@ -1,1 +1,1 @@
-export { DecisionDenied, SidecarUnavailable, SpendGuardError, VERSION, createSpendGuardMiddleware } from './chunk-UFSUNA4F.js';
+export { DecisionDenied, SidecarUnavailable, SpendGuardError, VERSION, createSpendGuardMiddleware } from './chunk-XWJJZDG4.js';

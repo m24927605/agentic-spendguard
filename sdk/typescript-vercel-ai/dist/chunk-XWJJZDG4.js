@@ -280,7 +280,7 @@ function createSpendGuardMiddleware(opts) {
       try {
         outcome = await opts.client.reserve(req);
       } catch (err) {
-        if (err instanceof DecisionDenied) {
+        if (err instanceof DecisionDenied || typeof err === "object" && err !== null && err.statusCode === 403) {
           throw err;
         }
         const reason = err instanceof Error ? err.message : String(err);
@@ -363,6 +363,6 @@ function projectClaim(params, opts) {
 }
 
 // src/version.ts
-var VERSION = "0.2.0";
+var VERSION = "0.2.2";
 
 export { VERSION, createSpendGuardMiddleware };
