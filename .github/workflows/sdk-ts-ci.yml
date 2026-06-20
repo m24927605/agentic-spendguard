@@ -22,7 +22,6 @@ on:
     paths:
       - "sdk/typescript/**"
       - "sdk/typescript-*/**"
-      - "integrations/**"
       - "proto/spendguard/**"
       - "scripts/verify-ts-dist-fresh.sh"
       - ".github/workflows/sdk-ts-ci.yml"
@@ -30,7 +29,6 @@ on:
     paths:
       - "sdk/typescript/**"
       - "sdk/typescript-*/**"
-      - "integrations/**"
       - "proto/spendguard/**"
       - "scripts/verify-ts-dist-fresh.sh"
       - ".github/workflows/sdk-ts-ci.yml"

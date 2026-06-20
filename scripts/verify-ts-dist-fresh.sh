@@ -21,15 +21,22 @@
 # Packages WITHOUT committed dist (core @spendguard/sdk, flowise, openclaw) are
 # intentionally excluded: they build dist fresh and gitignore it, so there is
 # nothing to drift.
+#
+# integrations/botpress is ALSO excluded even though it commits dist: its build
+# imports the Botpress-generated `.botpress` types module, which only exists
+# after `bp` CLI codegen in a Botpress workspace. A clean `pnpm install` checkout
+# (CI) cannot resolve it, so botpress dist is built locally and not gate-checked.
+# The seven tsup adapters below build purely from src/ + the workspace and ARE
+# reproducible cross-platform (pinned esbuild via the frozen lockfile).
 
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-# Committed-dist packages + their workspace deps (the trailing `...` pulls in
-# @spendguard/sdk so adapters build against a fresh core). docs/site-v2 and the
-# build-fresh flowise/openclaw packages are deliberately not built here.
-echo "[verify-ts-dist] rebuilding committed-dist TS packages from source..."
+# Committed-dist tsup adapters + their workspace deps (the trailing `...` pulls
+# in @spendguard/sdk so adapters build against a fresh core). docs/site-v2,
+# flowise, openclaw (build-fresh) and botpress (Botpress codegen) are not built.
+echo "[verify-ts-dist] rebuilding committed-dist tsup adapters from source..."
 pnpm \
   --filter "@spendguard/langchain..." \
   --filter "@spendguard/vercel-ai..." \
@@ -38,7 +45,6 @@ pnpm \
   --filter "n8n-nodes-spendguard..." \
   --filter "@spendguard/ag-ui..." \
   --filter "@spendguard/mastra..." \
-  --filter "@spendguard/botpress-integration..." \
   build
 
 DIST_PATHS=(
@@ -49,7 +55,6 @@ DIST_PATHS=(
   sdk/typescript-n8n/dist
   sdk/typescript-ag-ui/dist
   sdk/typescript-mastra/dist
-  integrations/botpress/dist
 )
 
 if git diff --quiet -- "${DIST_PATHS[@]}"; then
