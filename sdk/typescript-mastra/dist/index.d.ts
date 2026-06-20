@@ -139,6 +139,6 @@ declare class SpendGuardProcessor implements Processor {
     private settleCommit;
 }
 
-declare const VERSION: "0.1.0";
+declare const VERSION: "0.1.1";
 
 export { type ClaimEstimator, type ClaimEstimatorInput, SpendGuardProcessor, type SpendGuardProcessorOptions, VERSION };

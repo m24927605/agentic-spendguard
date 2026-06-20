@@ -223,6 +223,6 @@ declare class SpendGuardCallbackHandler extends BaseCallbackHandler {
     private safeCommit;
 }
 
-declare const VERSION: "0.1.0-pre";
+declare const VERSION: "0.1.2";
 
 export { SpendGuardCallbackHandler, type SpendGuardCallbackHandlerOptions, VERSION };

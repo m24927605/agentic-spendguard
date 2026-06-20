@@ -266,7 +266,7 @@ declare const VERSION = "0.1.0";
  * deeper checks are never skipped on the live path.
  */
 declare const ConfigurationObjectSchema: z.ZodObject<{
-    sidecarUrl: z.ZodEffects<z.ZodString, string, string>;
+    sidecarUrl: z.ZodString;
     spendguardBudgetId: z.ZodString;
     spendguardWindowInstanceId: z.ZodString;
     upstreamProvider: z.ZodEnum<["openai", "anthropic", "bedrock"]>;

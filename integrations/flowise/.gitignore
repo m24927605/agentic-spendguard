@@ -1,0 +1,4 @@
+# Built output — produced fresh by `pnpm build` (and by the demo runner
+# image build). NOT committed: this package builds its dist on demand, so a
+# committed copy could only drift from source. Mirrors sdk/typescript/.gitignore.
+dist/

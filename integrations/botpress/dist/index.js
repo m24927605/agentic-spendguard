@@ -10,9 +10,7 @@ var __export = (target, all) => {
     __defProp(target, name, { get: all[name], enumerable: true });
 };
 var ConfigurationObjectSchema = z.object({
-  sidecarUrl: z.string().url().refine(isSecureSidecarUrl, {
-    message: "sidecarUrl must be https:// (plaintext http:// is allowed only for loopback hosts 127.0.0.1/::1/localhost)"
-  }).describe("HTTPS companion URL (plaintext http:// allowed only for loopback)"),
+  sidecarUrl: z.string().url().describe("HTTPS companion URL (plaintext http:// allowed only for loopback)"),
   spendguardBudgetId: z.string().min(1).describe("UUID of the SpendGuard budget to charge"),
   spendguardWindowInstanceId: z.string().min(1).describe("UUID of the SpendGuard window instance"),
   upstreamProvider: z.enum(["openai", "anthropic", "bedrock"]).describe("Upstream provider Botpress dispatches to"),

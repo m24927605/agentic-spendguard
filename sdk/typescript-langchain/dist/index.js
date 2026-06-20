@@ -131,7 +131,7 @@ var SpendGuardCallbackHandler = class extends BaseCallbackHandler {
     try {
       outcome = await this.client.reserve(req);
     } catch (err) {
-      if (err instanceof DecisionDenied) {
+      if (err instanceof DecisionDenied || typeof err === "object" && err !== null && err.statusCode === 403) {
         throw err;
       }
       const reason = err instanceof Error ? err.message : String(err);
@@ -320,6 +320,6 @@ function readTokenCount(bag, keys) {
 }
 
 // src/version.ts
-var VERSION = "0.1.0-pre";
+var VERSION = "0.1.2";
 
 export { SpendGuardCallbackHandler, VERSION };
