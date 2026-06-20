@@ -1,5 +1,0 @@
-obj/Debug/net8.0/spendguard/sidecar_adapter/v1/Adapter.cs \
-obj/Debug/net8.0/spendguard/sidecar_adapter/v1/AdapterGrpc.cs: /Users/michael.chen/.nuget/packages/grpc.tools/2.65.0/build/native/include/google/protobuf/timestamp.proto\
- /Users/michael.chen/.nuget/packages/grpc.tools/2.65.0/build/native/include/google/protobuf/struct.proto\
- Protos/spendguard/common/v1/common.proto\
- Protos/spendguard/sidecar_adapter/v1/adapter.proto
