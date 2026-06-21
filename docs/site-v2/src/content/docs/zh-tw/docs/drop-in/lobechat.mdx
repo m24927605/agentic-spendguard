@@ -1,0 +1,168 @@
+---
+title: "LobeChat + SpendGuard(透過 OPENAI_PROXY_URL drop-in)"
+description: >-
+  只要設一個環境變數,就能把 LobeChat 的 OpenAI provider 指向跑起來的 SpendGuard
+  egress proxy。每次對話呼叫前先 reserve、回來後再 commit;不用改 LobeChat 程式碼、
+  不用 fork、也不用裝 plugin。
+---
+
+LobeChat([LobeHub](https://lobehub.com/),Apache-2.0,55k+ stars,Docker
+一等公民)認得 `OPENAI_PROXY_URL` 這個環境變數,它會把每一次 server 端對話的
+OpenAI 上游改寫掉。SpendGuard 在 `/v1/chat/completions` 提供一個相容 OpenAI 的
+endpoint。只要在 LobeChat container 上設好這一個環境變數,SpendGuard 呼叫前的
+budget gate 跟 KMS-signed 稽核鏈,就會擋在每一場 LobeChat session 的請求路徑上。
+五分鐘、一個環境變數、一個驗證步驟。
+
+## 事前準備
+
+- LobeChat 自架(Docker、Vercel 或 Kubernetes)。這份 recipe 驗證時釘的 image 是
+  `lobehub/lobe-chat:1.40.0`。LobeChat Cloud 沒辦法指向
+  `localhost` 上的 SpendGuard;請用 [Helm chart](../../deployment/helm/)
+  部署 SpendGuard,然後改用公開 URL。
+- 一個從 LobeChat 連得到的 SpendGuard egress proxy。最快的做法是從
+  SpendGuard repo 的 clone 跑 `make demo-up DEMO_MODE=proxy`(會綁在
+  `http://localhost:9000/v1`)。正式環境的部署則用
+  [Helm chart](../../deployment/helm/)。
+- 一把真的 OpenAI / Azure OpenAI key — SpendGuard 會轉發到真正的上游,並
+  忽略進來的 `Authorization` header。
+
+## 步驟 1:在 LobeChat container 上設 `OPENAI_PROXY_URL`
+
+唯一關鍵的環境變數就是 `OPENAI_PROXY_URL`。container 啟動時把它設成你 SpendGuard
+egress proxy 的 `/v1` endpoint。
+
+```bash
+docker run -d --name lobe-chat \
+    -p 3210:3210 \
+    -e OPENAI_API_KEY=sk-... \
+    -e OPENAI_PROXY_URL=http://host.docker.internal:9000/v1 \
+    -e ACCESS_CODE=your-access-code \
+    -e NEXT_PUBLIC_SERVICE_MODE=server \
+    lobehub/lobe-chat:1.40.0
+```
+
+結尾的 `/v1` 一定要加 — LobeChat 會把 `/chat/completions` 接在你設的值後面。
+少了 `/v1` 就會變成 `http://host.docker.internal:9000/chat/completions`,
+這條路徑 egress proxy 是不認的。
+
+## 步驟 2:確認環境變數有吃進去
+
+```bash
+docker exec lobe-chat env | grep OPENAI_PROXY_URL
+# OPENAI_PROXY_URL=http://host.docker.internal:9000/v1
+```
+
+如果這個環境變數是空的,代表你的 `docker run` 把它漏掉了。請明確設定它,
+或改用步驟 5 的 compose 片段。
+
+## 步驟 3:從 LobeChat UI 送一筆測試對話
+
+用瀏覽器打開 `http://localhost:3210`,輸入你的 `ACCESS_CODE`,在預設的
+`OpenAI / gpt-4o-mini` session 開一場新對話,送出「Say hi」。LobeChat 的
+server route 會 POST 到 `/api/chat/openai`,它會讀 `OPENAI_PROXY_URL` 並把請求
+轉發到 SpendGuard 的 `/v1/chat/completions`。SpendGuard 接著呼叫 contract、
+reserve 預測出來的 token、轉發給 OpenAI,等回應回來再 commit 實際用量。
+
+## 步驟 4:做端到端驗證
+
+```bash
+# From a clone of github.com/m24927605/agentic-spendguard:
+export OPENAI_API_KEY=sk-...
+make demo-up DEMO_MODE=lobechat_real
+```
+
+這個 smoke 會把 SpendGuard 跟 LobeChat 一起拉起來,並在 compose 的環境變數
+區塊裡設好 `OPENAI_PROXY_URL`,透過 LobeChat 的 `/api/chat/openai` route 送一筆
+對話,然後驗證 Postgres 裡的稽核鏈,確認這筆呼叫剛好有一列 `reserve` 跟一列
+`commit_estimated`。跑成功的話會印出 `[lobechat-smoke] OK: reserve+commit verified`。
+
+不想 clone 也想拿到完整的檔案?看
+[`examples/lobechat/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/lobechat)。
+把那個 env 檔丟進你現有的 LobeChat 部署,下次 container 重啟之後,每一場對話
+就都會走 SpendGuard。
+
+## 步驟 5:docker-compose 片段(接近正式環境)
+
+```yaml
+services:
+  lobe-chat:
+    image: lobehub/lobe-chat:1.40.0
+    ports:
+      - "3210:3210"
+    environment:
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      OPENAI_PROXY_URL: http://spendguard-egress-proxy:9000/v1
+      ACCESS_CODE: ${LOBECHAT_ACCESS_CODE}
+      NEXT_PUBLIC_SERVICE_MODE: server
+    depends_on:
+      spendguard-egress-proxy:
+        condition: service_healthy
+```
+
+## 部署注意事項
+
+### Docker / docker-compose
+
+Docker image 是 `lobehub/lobe-chat:1.40.0`。如果你要保留對話紀錄,記得在
+`/app/data` 掛一個 volume(server 模式預設用 in-memory store,container 一重啟
+聊天歷史就沒了)。
+
+### Vercel
+
+跑在 Vercel 上的 LobeChat 會從 Vercel 專案的 Environment Variables 面板繼承
+`OPENAI_PROXY_URL`。把這個環境變數加進去,值填你 SpendGuard egress proxy 的
+正式 URL — 可以是 Kubernetes Service URL,或一個 hosted 的 SpendGuard URL。
+填 `localhost` 在 Vercel 的 edge runtime 上是不會通的。
+
+### LobeChat Cloud(lobechat.com)
+
+LobeChat Cloud 連不到 `localhost` 上的 SpendGuard。請用
+[Helm chart](../../deployment/helm/) 部署 SpendGuard,然後拿公開的 Kubernetes
+Service URL(或你 hosted 的 SpendGuard URL)當 proxy URL。
+
+### Client 模式(瀏覽器端持金鑰)
+
+建議用 server 模式(也就是這份 recipe 的預設)。如果你非得用 client 模式跑
+LobeChat,那每個使用者就得在 UI 裡逐 session 自己覆寫 base URL:
+**Settings → Language Model → OpenAI → API Proxy Address** → 填你的
+SpendGuard URL。逐 session 的覆寫不吃 `OPENAI_PROXY_URL`;這個環境變數只對
+server route 有效,而 client 模式的瀏覽器一旦使用者忘了逐 session 覆寫,就會
+直接打 OpenAI。
+
+## 常見地雷
+
+- **結尾的 `/v1` 不能少。** LobeChat 會把 `/chat/completions` 接在你
+  `OPENAI_PROXY_URL` 設的值後面。少了 `/v1`,egress proxy 的路徑就對不上。
+- **`OPENAI_API_KEY` 會原樣送出,但上游會丟掉。** SpendGuard 的 egress proxy
+  會忽略進來的 `Authorization` header,改用它自己設定裡的上游憑證。LobeChat 端
+  那把 key 存在的唯一目的,是讓 LobeChat「有 key」的檢查能過關。
+- **`ACCESS_CODE` 守的是 UI,不是 API。** ACCESS_CODE 擋的是匿名的瀏覽器
+  session;`/api/chat/openai` 這條 server route 仍然要求在 `X-LOBE-CHAT-AUTH`
+  請求 header 裡帶 access code。每個打 API 的呼叫端都要設。
+- **Client 模式會繞過這個環境變數。** `OPENAI_PROXY_URL` 只有 LobeChat server
+  會讀。Client 模式的瀏覽器除非使用者在 UI 裡設了逐 session 的覆寫,否則就直接
+  打 OpenAI。
+- **串流是 OK 的。** LobeChat 用 Server-Sent Events 來串流對話回應;SpendGuard
+  的 egress proxy 會注入 `stream_options.include_usage=true`,並在收尾的
+  `[DONE]` 事件上 commit。
+
+## 目前可用的範圍
+
+| 功能面 | 狀態 |
+|---|---|
+| Server 模式對話(非串流) | 端到端已驗證 |
+| Server 模式對話(串流 SSE) | 端到端已驗證 |
+| 透過 `OPENAI_PROXY_URL` 走 OpenAI / Azure OpenAI 上游 | 端到端已驗證 |
+| Anthropic / Bedrock / Vertex / Gemini provider 區塊 | 不在範圍內(LobeChat 讀各 provider 專屬的環境變數;這份 recipe 只涵蓋 OpenAI proxy) |
+| Client 模式(瀏覽器端金鑰) | 已用 UI 覆寫的方式記錄;沒有 smoke 涵蓋 |
+| Plugin marketplace、TTS、image、vision | 不在範圍內 |
+| LobeChat Cloud | 不在範圍內(連不到 `localhost`;只能走 Helm) |
+
+## 接下來
+
+- [在 Kubernetes 上設一個真的 budget](../../deployment/helm/)
+- [打開 SpendGuard dashboard](../../operations/dashboard/)
+- [把你 stack 的其他部分也罩進來(Pattern 3 安裝)](../../deployment/docker-compose/)
+- 回到 [drop-in 起始頁](../)
+
+**維護方文件:** [LobeChat — Environment Variables: `OPENAI_PROXY_URL`](https://lobehub.com/docs/self-hosting/environment-variables/model-provider#openai_proxy_url)

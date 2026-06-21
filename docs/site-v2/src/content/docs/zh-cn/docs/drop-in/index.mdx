@@ -1,0 +1,313 @@
+---
+title: "30 秒接入 SpendGuard(base URL 类工具,一行配置搞定)"
+description: >-
+  凡是已经支持 OpenAI 兼容 base URL 的工具——LiteLLM
+  proxy、Aider、Continue、Cline / Roo Code、OpenHands、Goose、Zed AI、
+  GitHub Copilot CLI、Tabnine Enterprise、AnythingLLM、LobeChat、Cody
+  self-hosted、Augment、Dify、OpenClaw——开箱即可接入 Agentic SpendGuard。
+  一个环境变量或一行配置,不装 SDK,不改代码。
+---
+
+import DropInPicker from '../../../../../components/DropInPicker.astro';
+
+如果你的 agent 栈已经在用 OpenAI 兼容的客户端,接入 SpendGuard 只需改一个
+base URL。在 `http://localhost:9000/v1` 起一个 SpendGuard egress proxy,
+把工具指过去,每次模型调用都会先过 SpendGuard 的 pre-call budget gate
+和 KMS-signed audit chain,然后才真正打到上游 provider。不装 SDK、不改
+代码、不重新构建。在下面的矩阵里找到你的工具,把它官方文档里指定的那一行
+复制过去,下一次调用就受治理了。
+
+## Pattern 2 的工作原理
+
+这些工具本身都支持自定义 OpenAI 兼容 base URL。SpendGuard 自己也跑了一个
+OpenAI 兼容 endpoint;设好环境变量(或一行配置),工具的流量就会先经过
+SpendGuard,再到 OpenAI / Anthropic / Bedrock。Pattern 2 区别于
+Pattern 1(进程内 SDK middleware,用于 adapter 类集成)和
+Pattern 3(egress proxy + CA 安装,用于 Claude Code、Codex 这类封闭的
+BYOK CLI)。
+
+## 本地起 proxy(30 秒)
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard
+export OPENAI_API_KEY=sk-...
+make demo-up DEMO_MODE=proxy
+```
+
+egress proxy 绑定在 `http://localhost:9000/v1`。把下面任意一个工具指过去就行。
+
+## 找到你的工具
+
+矩阵列出了每个工具维护方文档里指定的确切环境变量名或配置 key。`已验证`
+这一列区分了三种情况:我们已经对着 egress proxy 端到端跑通的行(`Live`)、
+配置与维护方公开文档一致但我们自己没做过冒烟测试的行(`Spec`),以及工具
+自家 changelog 原生记录、无需 SpendGuard 专项测试的行(`Vendor-native`)。
+
+用下面的快速过滤器按配置类型(环境变量、配置文件或 admin UI)收窄范围、
+按工具名搜索,并直接跳到对应工具的小节。
+
+<DropInPicker />
+
+下面这张静态矩阵带有上游来源链接和本页其余部分引用的行号;上面的过滤器
+只是同一份数据之上的一层快速过滤。
+
+| # | 工具 | Provider 字段 | 确切取值 | 上游来源 | 已验证 | Recipe |
+|---|------|----------------|-------------|-----------------|----------|--------|
+| 1 | [LiteLLM (proxy mode)](#litellm) | 环境变量 | `OPENAI_API_BASE=http://localhost:9000/v1` | [docs.litellm.ai](https://docs.litellm.ai/docs/proxy/config_settings) | Spec | [Open ↗](./litellm/) |
+| 2 | [Aider](#aider) | 环境变量 | `OPENAI_API_BASE=http://localhost:9000/v1` | [aider.chat](https://aider.chat/docs/llms/openai-compat.html) | Spec | [Open ↗](./aider/) |
+| 3 | [Continue](#continue) | YAML `apiBase` | `apiBase: http://localhost:9000/v1` | [docs.continue.dev](https://docs.continue.dev/customization/models) | Spec | [Open ↗](./continue/) |
+| 4 | [Cline / Roo Code (BYOK)](#cline-roo-code) | UI 字段 | 自定义 OpenAI provider,Base URL `http://localhost:9000/v1` | [docs.cline.bot](https://docs.cline.bot/getting-started/byok) | Spec | [Open ↗](./cline-roo-code/) |
+| 5 | [OpenHands (BYOK)](#openhands) | UI 字段 | LLM custom endpoint `http://localhost:9000/v1` | [docs.all-hands.dev](https://docs.all-hands.dev/usage/llms/custom-llm-configs) | Spec | [Open ↗](./openhands/) |
+| 6 | [Goose](#goose) | 环境变量 | `OPENAI_HOST=http://localhost:9000` | [block.github.io/goose](https://block.github.io/goose/docs/getting-started/installation) | Spec | [Open ↗](./goose/) |
+| 7 | [Zed AI](#zed) | TOML key | `api_url = "http://localhost:9000/v1"` | [zed.dev](https://zed.dev/docs/ai/configuration) | Vendor-native | [Open ↗](./zed/) |
+| 8 | [GitHub Copilot CLI (BYOK)](#copilot-cli) | 环境变量 | `COPILOT_PROVIDER_BASE_URL=http://localhost:9000/v1` | [docs.github.com](https://docs.github.com/en/copilot/github-copilot-cli/using-byok) | Vendor-native | [Open ↗](./copilot-cli/) |
+| 9 | [Tabnine Enterprise](#tabnine) | Admin UI | BYO LLM endpoint `http://localhost:9000/v1` | [docs.tabnine.com](https://docs.tabnine.com/main/software-configuration/connect-custom-llm) | Spec | [Open ↗](./tabnine/) |
+| 10 | [AnythingLLM](#anythingllm) | Admin UI | 通用 OpenAI provider,Base URL `http://localhost:9000/v1` | [docs.anythingllm.com](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url) | Live | [Open ↗](./anythingllm/) |
+| 11 | [LobeChat](#lobechat) | 环境变量 | `OPENAI_PROXY_URL=http://localhost:9000/v1` | [lobehub.com](https://lobehub.com/docs/self-hosting/environment-variables/model-provider#openai_proxy_url) | Live | [Open ↗](./lobechat/) |
+| 12 | [Cody self-hosted Enterprise](#cody) | Site config | Sourcegraph relay endpoint `http://localhost:9000/v1` | [sourcegraph.com](https://sourcegraph.com/docs/cody/clients/install-vscode) | Spec | [Open ↗](./cody/) |
+| 13 | [Augment (BYOK)](#augment) | UI 字段 | LLM custom endpoint `http://localhost:9000/v1` | [docs.augmentcode.com](https://docs.augmentcode.com/setup/byok) | Spec | [Open ↗](./augment/) |
+| 14 | [Dify](#dify) | Plugin manifest | Custom Model Provider plugin → base URL `http://localhost:9000/v1` | [docs.dify.ai](https://docs.dify.ai/plugins/model-provider) | Spec | [Open ↗](./dify/) |
+| 15 | [CrewAI Studio (via LiteLLM)](#litellm) | 间接 | 用第 1 行——把 CrewAI 指向 LiteLLM proxy,再把 LiteLLM 指向 SpendGuard | [docs.litellm.ai](https://docs.litellm.ai/docs/proxy/config_settings) | Spec | [Open ↗](./litellm/) |
+| 16 | [OpenClaw](#openclaw) | 配置文件 | `models.providers.spendguard.baseUrl: http://localhost:9000/v1`,搭配 `api: "openai-completions"` | [github.com/openclaw/openclaw](https://github.com/openclaw/openclaw/blob/main/docs/concepts/model-providers.md) | Live | [Open ↗](./openclaw/) |
+
+已经在生产环境跑 SpendGuard 了?把 `http://localhost:9000/v1` 换成你的
+SpendGuard egress proxy URL——一个 Kubernetes Service URL、pod 内的
+sidecar URL,或者托管的 SpendGuard URL。相对路径永远是 `/v1`。生产环境
+的 hostname 模式见 [Helm 部署指南](../deployment/helm/)。
+
+## 各工具配置
+
+下面每一节都是上面矩阵链接指向的 H3 锚点。复制代码块,在 shell 或配置里
+设好,该工具的下一次调用就会过 SpendGuard。完整流程——验证步骤和已知
+坑点——在侧边栏每个工具的 recipe 页面里。
+
+<h3 id="litellm">LiteLLM</h3>
+
+当你设了 OpenAI provider 但在某条 route 上没有显式 base URL 时,
+LiteLLM proxy mode 会读 `OPENAI_API_BASE` 作为上游 endpoint。在执行
+`litellm --config config.yaml` 之前 export 这个变量(或者写进
+`config.yaml` 的 environment block)。
+
+```bash
+export OPENAI_API_BASE=http://localhost:9000/v1
+```
+
+来源:[LiteLLM proxy config settings](https://docs.litellm.ai/docs/proxy/config_settings)。
+
+<h3 id="aider">Aider</h3>
+
+Aider 从环境里读 `OPENAI_API_BASE`,每次 chat completion 都走它。在你
+启动 `aider` 的那个 shell 里设好这个环境变量。
+
+```bash
+export OPENAI_API_BASE=http://localhost:9000/v1
+```
+
+来源:[Aider OpenAI-compatible APIs guide](https://aider.chat/docs/llms/openai-compat.html)。
+
+<h3 id="continue">Continue</h3>
+
+Continue 从 `config.yaml` 里每个 model 条目读 `apiBase`(对 OpenAI
+provider 来说在该 model 的 `config` block 下)。改完 YAML 后重新加载
+IDE 扩展。
+
+```yaml
+models:
+  - name: SpendGuard-gated GPT-4o
+    provider: openai
+    model: gpt-4o
+    config:
+      apiBase: http://localhost:9000/v1
+```
+
+来源:[Continue model customization](https://docs.continue.dev/customization/models)。
+
+<h3 id="cline-roo-code">Cline / Roo Code (BYOK)</h3>
+
+在 Cline 或 Roo Code 扩展设置里,选 **OpenAI Compatible** provider,
+填 **Base URL** 字段。不需要环境变量——这是个纯 UI 设置,会持久化到
+workspace 配置里。
+
+```text
+Provider:  OpenAI Compatible
+Base URL:  http://localhost:9000/v1
+API Key:   <any value the proxy will forward upstream>
+```
+
+来源:[Cline BYOK guide](https://docs.cline.bot/getting-started/byok)。
+
+<h3 id="openhands">OpenHands (BYOK)</h3>
+
+OpenHands 的 UI 在 Settings → LLM → Custom Provider 下暴露了一个
+**Custom LLM endpoint** 字段。把 SpendGuard egress URL 填进去,
+OpenHands 在该 workspace 的每次模型调用都会用它。
+
+```text
+Settings → LLM → Custom Provider → Endpoint
+http://localhost:9000/v1
+```
+
+来源:[OpenHands custom LLM configs](https://docs.all-hands.dev/usage/llms/custom-llm-configs)。
+
+<h3 id="goose">Goose</h3>
+
+Goose 读 `OPENAI_HOST`(是 host,不是完整 base URL——对 OpenAI provider
+来说 Goose 自己会补 `/v1`)。在你启动 `goose` 的那个 shell 里 export
+这个变量。
+
+```bash
+export OPENAI_HOST=http://localhost:9000
+```
+
+来源:[Goose installation guide](https://block.github.io/goose/docs/getting-started/installation)。
+
+<h3 id="zed">Zed AI</h3>
+
+Zed AI 的配置是 `settings.json` 里的 TOML(Zed 按文件扩展名决定读
+JSON 还是 TOML)。在 OpenAI provider block 里加一个 `api_url`。
+
+```toml
+[ai.openai]
+api_url = "http://localhost:9000/v1"
+```
+
+来源:[Zed AI configuration](https://zed.dev/docs/ai/configuration)。
+
+<h3 id="copilot-cli">GitHub Copilot CLI (BYOK)</h3>
+
+`gh copilot` 的 GA-2026-04-07 BYOK 版本会为 OpenAI 兼容 provider 认
+`COPILOT_PROVIDER_BASE_URL`。export 这个变量,`gh copilot` 下次调用
+就会读到。
+
+```bash
+export COPILOT_PROVIDER_BASE_URL=http://localhost:9000/v1
+```
+
+来源:[GitHub Copilot CLI BYOK reference](https://docs.github.com/en/copilot/github-copilot-cli/using-byok)。
+
+<h3 id="tabnine">Tabnine Enterprise</h3>
+
+Tabnine Enterprise 的 admin UI 有一个 **Connect Custom LLM** 表单,
+用于 self-hosted endpoint。把 SpendGuard egress URL 粘进 endpoint
+字段保存;改动会推送到该 tenant 上的每个 Tabnine seat。
+
+```text
+Admin → AI Models → Connect Custom LLM → Endpoint URL
+http://localhost:9000/v1
+```
+
+来源:[Tabnine connect custom LLM](https://docs.tabnine.com/main/software-configuration/connect-custom-llm)。
+
+<h3 id="anythingllm">AnythingLLM</h3>
+
+AnythingLLM 在 **Settings → LLM Preference** 下自带一个 **Generic
+OpenAI** provider 磁贴。选这个磁贴,把 Base URL 设成你的 SpendGuard
+egress endpoint(末尾的 `/v1` 必填),API Key 填任意非空值即可。完整的
+逐工具流程——四个确切字段、Docker / Desktop / Cloud 注意点、
+`DEMO_MODE=anythingllm_real` 冒烟测试——在 [AnythingLLM recipe](./anythingllm/) 里。
+
+```text
+Settings → LLM Preference → Generic OpenAI → Base URL
+http://localhost:9000/v1
+```
+
+来源:[AnythingLLM custom OpenAI base URL](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url)。
+
+<h3 id="lobechat">LobeChat</h3>
+
+LobeChat 认一个 `OPENAI_PROXY_URL` 环境变量,它会把 `/api/chat/openai`
+上每次 server-side chat 的 OpenAI 上游地址改写掉。在 container 启动时设好,每次
+chat 都会过 SpendGuard,不用改 LobeChat 代码。完整的逐工具流程——
+Docker / Vercel / Cloud / Client-mode 注意点、`DEMO_MODE=lobechat_real`
+冒烟测试——在 [LobeChat recipe](./lobechat/) 里。
+
+```text
+docker run -e OPENAI_PROXY_URL=http://localhost:9000/v1 \
+           -e ACCESS_CODE=... -p 3210:3210 lobehub/lobe-chat:1.40.0
+```
+
+来源:[LobeChat — `OPENAI_PROXY_URL` env var](https://lobehub.com/docs/self-hosting/environment-variables/model-provider#openai_proxy_url)。
+
+<h3 id="openclaw">OpenClaw</h3>
+
+OpenClaw 支持在 `models.providers` 下配自定义 provider 条目。把 provider
+的 `baseUrl` 设成 SpendGuard egress endpoint,OpenAI 兼容的 chat 流量用
+`api: "openai-completions"`。完整的逐工具流程——fixture 配置、本地 /
+Docker URL、`DEMO_MODE=openclaw_base_url` 冒烟测试,以及 D40b plugin
+边界——在 [OpenClaw recipe](./openclaw/) 里。
+
+```json
+{
+  "models": {
+    "providers": {
+      "spendguard": {
+        "baseUrl": "http://localhost:9000/v1",
+        "api": "openai-completions"
+      }
+    }
+  }
+}
+```
+
+来源:[OpenClaw model providers](https://github.com/openclaw/openclaw/blob/main/docs/concepts/model-providers.md)。
+
+<h3 id="cody">Cody self-hosted Enterprise</h3>
+
+Sourcegraph Cody self-hosted 用一个 site-config block 配 completions
+relay endpoint。改 `site-config.json`,把 relay 指向 SpendGuard。
+
+```json
+{
+  "cody.completions.endpoint": "http://localhost:9000/v1"
+}
+```
+
+来源:[Cody self-hosted install guide](https://sourcegraph.com/docs/cody/clients/install-vscode)。
+
+<h3 id="augment">Augment (BYOK)</h3>
+
+Augment 的 BYOK 流程在 workspace 设置页有一个 **LLM custom endpoint**
+字段。把 SpendGuard URL 粘进去保存,Augment 每次模型调用都会用它。
+
+```text
+Settings → BYOK → LLM Custom Endpoint
+http://localhost:9000/v1
+```
+
+来源:[Augment BYOK setup](https://docs.augmentcode.com/setup/byok)。
+
+<h3 id="dify">Dify</h3>
+
+Dify 通过它的 **Model Provider Plugin** 机制接自定义 OpenAI 兼容
+endpoint。plugin manifest 声明 base URL;把它加载进你的 Dify workspace,
+选成默认 provider。
+
+```yaml
+type: model-provider
+provider: openai-compatible
+base_url: http://localhost:9000/v1
+```
+
+来源:[Dify model provider plugin](https://docs.dify.ai/plugins/model-provider)。
+
+## 当前能跑的范围
+
+上面的矩阵就是 **drop-in surface**:截至 2026-06-06,维护方文档公开记录了
+自定义 OpenAI 兼容 base URL 的工具。`已验证`这一列反映的是 SpendGuard
+自己对每一行的声明;对于运行时已验证的客户端 SDK(openai-python、
+LangChain ChatOpenAI、LangGraph、openai-agents 简写、streaming),见
+README 的 `What works today` 表。
+
+## 下一步做什么
+
+- [在 Kubernetes 上开一个真实 budget](../deployment/helm/)
+- [打开 SpendGuard dashboard](../operations/dashboard/)
+- [覆盖你栈里其余部分(Pattern 3 egress proxy)](../deployment/docker-compose/)
+- [接一个 framework SDK(Pattern 1)](../integrations/openai-agents/)
+- [SpendGuard 与 Cloudflare AI Gateway、Databricks Unity、Portkey 的对比](../posts/agent-spend-governance-gap/)
+
+上面 `Recipe` 列里链接的逐工具深入页面是 SLICE-2 / D33 / D34 的完整
+流程(前置条件、确切配置 block、验证步骤、坑点)。在 Slice 1 阶段,每个
+`Open ↗` 链接都先解析到一个 `Coming soon` 占位页;该工具的环境变量或
+配置行就在上面的矩阵里,也在本页逐工具的 H3 小节里重复列出。

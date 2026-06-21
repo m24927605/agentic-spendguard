@@ -1,0 +1,134 @@
+---
+title: "AnythingLLM + SpendGuard(通过 Generic OpenAI provider 直接接入)"
+description: >-
+  把 AnythingLLM 的 Generic OpenAI provider 指向一个运行中的 SpendGuard egress
+  proxy。每次对话在调用前 reserve、调用后 commit;不改 AnythingLLM 代码、不 fork、不装插件。
+---
+
+AnythingLLM([Mintplex Labs](https://anythingllm.com/),MIT 协议,30+ 提供商,
+桌面端 + Docker + 自托管)自带一个 **Generic OpenAI** provider,它的
+Base URL 字段接受任意 OpenAI 兼容端点。SpendGuard 在 `/v1/chat/completions`
+暴露了一个 OpenAI 兼容端点。把前者指向后者,SpendGuard 的调用前预算闸门和
+KMS-signed 审计链就插进了每一次 AnythingLLM workspace 对话的请求路径里。
+五分钟,一个面板,一步验证。
+
+## 前置条件
+
+- 本地跑着 AnythingLLM(Docker、桌面端或自托管)。本 recipe 验证用的是
+  pin 死的镜像 `mintplexlabs/anythingllm:1.8.4`。
+- 一个 AnythingLLM 能访问到的、运行中的 SpendGuard egress proxy。最快的
+  路子是从 SpendGuard 仓库的 clone 里跑 `make demo-up DEMO_MODE=proxy`
+  (绑定到 `http://localhost:9000/v1`)。生产部署用
+  [Helm chart](../../deployment/helm/)。
+- 一把真实的 OpenAI / Anthropic / Bedrock / Vertex / Azure OpenAI key——
+  SpendGuard 会转发到真正的上游,并忽略入站的 `Authorization` header。
+
+## 第 1 步:打开 LLM Preference 面板
+
+在 AnythingLLM 左侧栏点 **Settings → LLM Preference**,面板里是一排 provider
+磁贴。
+
+## 第 2 步:选 Generic OpenAI provider
+
+往下翻到 **Generic OpenAI**(不是 "OpenAI"——那个磁贴直接打到
+`api.openai.com`,不暴露 Base URL 字段)。点 **Generic OpenAI** 磁贴。
+
+## 第 3 步:填四个字段
+
+| 字段 | 值 | 说明 |
+|---|---|---|
+| **Base URL** | `http://localhost:9000/v1` | 或者你自己的 SpendGuard egress proxy URL。末尾的 `/v1` 必须有——AnythingLLM 会在你粘贴的内容后面拼 `/chat/completions`。 |
+| **API Key** | `sk-anythingllm-spendguard` | 任意非空字符串。SpendGuard 的 egress proxy 会忽略它,改用自己配置里的上游凭证。 |
+| **Chat Model Name** | `gpt-4o-mini` | 真实上游期望的 model 标识。SpendGuard 不会改写它。 |
+| **Token context window** | `128000` | 只是 AnythingLLM 端的限流提示。reservation 大小由 SpendGuard 的 contract 决定。 |
+
+点 **Save Settings**。
+
+## 第 4 步:发一条测试对话
+
+打开任意 Workspace 发条消息。AnythingLLM 会 POST 到 SpendGuard 的
+`/v1/chat/completions`;SpendGuard 调 contract,reserve 预测出的 token 数,
+转发到真实上游,拿到响应后再 commit 实际用量。
+
+## 端到端验证
+
+```bash
+# From a clone of github.com/m24927605/agentic-spendguard:
+export OPENAI_API_KEY=sk-...
+make demo-up DEMO_MODE=anythingllm_real
+```
+
+这个 smoke 会拉起 SpendGuard 加 AnythingLLM,通过 AnythingLLM 的
+`/api/v1/system/update-env` 端点配好 Generic OpenAI provider,发一条对话,
+然后断言 Postgres 里的审计链针对这次调用显示出一条 `reserve` 行和一条
+`commit_estimated` 行。跑成功会打印 `[anythingllm-smoke] OK: reserve+commit
+verified`。
+
+不想 clone 又想拿到完整文件集?看
+[`examples/anythingllm/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/anythingllm)。
+把 env 文件和 update-env JSON 丢进你现有的 AnythingLLM 部署里,面板起来就
+是配置好的。
+
+## 部署注意点
+
+### Docker
+
+Docker 镜像是 `mintplexlabs/anythingllm:1.8.4`。把它的 `STORAGE_DIR`
+指向一个 host volume,这样配置能跨重启持久化:
+
+```bash
+docker run -d \
+  -p 3001:3001 \
+  -v anythingllm-storage:/app/server/storage \
+  -e STORAGE_DIR=/app/server/storage \
+  mintplexlabs/anythingllm:1.8.4
+```
+
+### 桌面端
+
+AnythingLLM 桌面端只有 GUI。按上面第 1-4 步做;"端到端验证" 那个 smoke 不
+适用(桌面端没有 admin API)。想确认 SpendGuard 收到了这次调用,打开
+`http://localhost:8090` 的 SpendGuard dashboard,在你下次对话时盯着审计流看。
+
+### AnythingLLM Cloud
+
+AnythingLLM Cloud 访问不到 `localhost` 上的 SpendGuard。用
+[Helm chart](../../deployment/helm/) 部署 SpendGuard,然后把公网的
+Kubernetes Service URL(或你 sidecar 注入的 hostname)填进 Base URL。
+
+## 坑
+
+- **末尾的 `/v1` 是必须的。** AnythingLLM 会在你的 Base URL 后面拼
+  `/chat/completions`。漏了 `/v1` 就会变成
+  `http://localhost:9000/chat/completions`,egress proxy 匹配不上。
+- **是 Generic OpenAI,不是 OpenAI。** provider 网格里那个纯 `OpenAI`
+  磁贴不暴露 Base URL 字段。只有 **Generic OpenAI** 磁贴才有。
+- **`API Key` 字段会原样发出,但被丢弃。** SpendGuard 的 egress proxy
+  忽略入站的 `Authorization` header,改用自己配置里的上游凭证。
+  AnythingLLM 端这把 key 只是为了过 AnythingLLM 的 "字段非空" 校验。
+- **流式可用。** AnythingLLM 用 Server-Sent Events 做流式响应;SpendGuard
+  egress proxy 会注入 `stream_options.include_usage=true`,并在收尾的
+  `[DONE]` 事件上 commit。
+- **一个 Workspace,一个 provider。** AnythingLLM 把 LLM Preference 全局
+  应用到所有 Workspace。想把流量拆成走 SpendGuard 闸门的和直连的两路,
+  就跑两个 AnythingLLM 实例。
+
+## 现在能用的部分
+
+| 能力面 | 状态 |
+|---|---|
+| Workspace 对话(非流式) | 端到端已验证 |
+| Workspace 对话(流式 SSE) | 端到端已验证 |
+| OpenAI / Anthropic / Bedrock / Vertex / Azure OpenAI 上游 | 走 SpendGuard 的多 provider 矩阵 |
+| AnythingLLM Embedding provider | 不在范围内(embedding 没有 SpendGuard 闸门) |
+| Agent-Skills、语音、多模态 | 不在范围内 |
+| AnythingLLM 桌面端验证 harness | 不在范围内(没有 admin API) |
+
+## 接下来
+
+- [在 Kubernetes 上设一个真实预算](../../deployment/helm/)
+- [打开 SpendGuard dashboard](../../operations/dashboard/)
+- [覆盖你技术栈的其余部分(Pattern 3 安装)](../../deployment/docker-compose/)
+- 回到 [drop-in 落地页](../)
+
+**维护方文档:** [AnythingLLM — Custom OpenAI Base URL](https://docs.anythingllm.com/llm-configuration/custom-openai-base-url)

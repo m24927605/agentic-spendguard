@@ -1,0 +1,181 @@
+---
+title: "OpenClaw + SpendGuard（base-URL 配方）"
+description: >-
+  给 OpenClaw 配一个自定义的 OpenAI-compatible provider，把它的 baseUrl 指向
+  SpendGuard egress proxy。SpendGuard 在 provider 调用前 reserve、在响应返回或
+  stream 关闭后 commit；不改 OpenClaw 源码，也不装 OpenClaw 插件。
+---
+
+OpenClaw 在 `models.providers` 下支持自定义 provider 条目。D40a 就是基于这个能力
+做的一个 **base-URL 配方**：OpenClaw 把 OpenAI-compatible 的 chat 流量发到
+SpendGuard egress proxy，SpendGuard 在 egress proxy 和 sidecar 里、在 provider
+调用之前就把预算管控做掉。
+
+D40a 是一个配置配方。SpendGuard 的管控发生在 egress proxy 和 sidecar 里，在
+provider 调用之前。OpenClaw 本身不动，也不装任何 OpenClaw 插件。
+
+## 前置条件
+
+- 一套带文件式配置的 OpenClaw。D40a 把上游包元数据钉在
+  `openclaw/openclaw@d4819948f37d45fe8f1428401316eaae456cdf16`，
+  npm 包 `openclaw` 版本 `2026.6.2`。
+- 一个跑着的 SpendGuard egress proxy，OpenClaw 进程能连到它。
+  本机：`http://localhost:9000/v1`。Docker 网络内：
+  `http://egress-proxy:9000/v1`。
+- 在 SpendGuard proxy 这条路径上配好 provider 凭据。OpenClaw 侧的
+  `apiKey` 只要非空就行，给本地 proxy 路由用。
+
+## 配置自定义 provider
+
+在 `models.providers` 下加一个自定义 provider。结尾的 `/v1` 是必须的。
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "spendguard/gpt-4o-mini"
+      },
+      "models": {
+        "spendguard/gpt-4o-mini": {
+          "alias": "SpendGuard-gated GPT-4o mini"
+        }
+      }
+    }
+  },
+  "models": {
+    "mode": "merge",
+    "providers": {
+      "spendguard": {
+        "baseUrl": "http://localhost:9000/v1",
+        "apiKey": "non-secret-placeholder-do-not-use-real-key",
+        "api": "openai-completions",
+        "timeoutSeconds": 120,
+        "models": [
+          {
+            "id": "gpt-4o-mini",
+            "name": "GPT-4o mini via SpendGuard",
+            "reasoning": false,
+            "input": ["text"],
+            "cost": {
+              "input": 0,
+              "output": 0,
+              "cacheRead": 0,
+              "cacheWrite": 0
+            },
+            "contextWindow": 128000,
+            "maxTokens": 8192
+          }
+        ]
+      }
+    }
+  }
+}
+```
+
+上面的 `apiKey` 是个占位用的非密值，只是用来满足 OpenClaw 对 provider 字段非空的
+要求。别在 OpenClaw 配置里塞真实上游 provider key——无论是本地冒烟测试还是这套
+配方的生产用法都别这么干；上游凭据归 SpendGuard egress proxy 管，出站的
+authorization header 由它替换。
+
+把 provider id 和 model id 改成跟你的上游对齐。OpenClaw 的 model ref 是
+`provider/model` 格式，所以示例里的 primary model 是
+`spendguard/gpt-4o-mini`。
+
+## 本地验证
+
+```bash
+make demo-down
+make demo-up DEMO_MODE=openclaw_base_url
+make -C deploy/demo demo-verify-openclaw-base-url
+```
+
+这个 demo 是本地的、无 key 的。它会校验提交进来的 OpenClaw 配置 fixture，把请
+求经 `http://egress-proxy:9000/v1` 路由出去，把 SpendGuard proxy 的上游指到一个
+计数桩，验证三条流程：
+
+| 步骤 | 校验点 |
+|---|---|
+| ALLOW | provider 计数器加一，ledger 记下 reserve + commit。 |
+| DENY | SpendGuard 在 provider 派发前返回 block；provider 计数器不变。 |
+| STREAM | SSE 帧里带 usage，SpendGuard 在 stream 关闭后 commit。 |
+
+成功时的 runner 输出行：
+
+```text
+[demo] openclaw_base_url ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+完整示例文件在
+[`examples/openclaw-base-url/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/openclaw-base-url)。
+
+## 部署说明
+
+### 本地桌面
+
+OpenClaw 和 SpendGuard 在同一台主机上跑时，用 `http://localhost:9000/v1`。
+
+### Docker compose
+
+用 OpenClaw 容器能解析到的服务 DNS 名，比如：
+
+```json
+{
+  "models": {
+    "providers": {
+      "spendguard": {
+        "baseUrl": "http://spendguard-egress-proxy:9000/v1"
+      }
+    }
+  }
+}
+```
+
+### 托管 proxy
+
+用你 SpendGuard egress proxy 的公网 HTTPS 端点：
+
+```json
+{
+  "models": {
+    "providers": {
+      "spendguard": {
+        "baseUrl": "https://spendguard.example.com/v1"
+      }
+    }
+  }
+}
+```
+
+## 注意点
+
+- **结尾的 `/v1` 必须有。** OpenClaw 的 OpenAI-compatible adapter 会在配好的
+  base URL 后面拼上 chat-completions 路径。
+- **用 `api: "openai-completions"`。** D40a 覆盖的是 OpenAI-compatible 的 chat
+  completions。Anthropic-compatible 的自定义 provider 是另一条路径。
+- **OpenClaw 侧的 key 不是上游 key。** SpendGuard 收到入站的 authorization
+  header，自己走它那条 provider 凭据路径。
+- **这不是插件级别的覆盖。** OpenClaw provider 插件包和进程内 adapter 那块归
+  D40b 管。
+- **私网信任跟着 OpenClaw 的 provider policy 走。** 把配好的 `baseUrl` origin
+  当作可信的 SpendGuard proxy 端点，放行其他私网目的地之前先查 OpenClaw 的
+  provider policy。
+
+## 当前可用的能力
+
+| 能力 | 状态 |
+|---|---|
+| 自定义 provider `baseUrl` 指向 SpendGuard egress proxy | D40a fixture demo 已验证 |
+| 非流式 OpenAI-compatible chat | D40a 已验证 |
+| 流式 SSE chat completions | D40a 已验证 |
+| provider 派发前 deny | D40a 计数桩 gate 已验证 |
+| OpenClaw provider 插件 | 归 D40b，不在 D40a |
+| 非 OpenAI-compatible 的 provider API | 不在范围内 |
+
+## 下一步
+
+- [在 Kubernetes 上配真实预算](../../deployment/helm/)
+- [打开 SpendGuard dashboard](../../operations/dashboard/)
+- 回到 [drop-in 落地页](../)
+
+**维护者文档：** [OpenClaw model providers](https://github.com/openclaw/openclaw/blob/main/docs/concepts/model-providers.md)
