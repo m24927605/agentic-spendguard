@@ -1,0 +1,16 @@
+---
+title: "用 SpendGuard 接入 Augment(BYOK)"
+description: >-
+  把 Augment 的 LLM 自定义 endpoint 指向一个跑起来的 SpendGuard egress proxy,
+  即可接入 SpendGuard。教程编写中;具体的 UI 操作步骤见 drop-in 着陆页。
+pagefind: false
+---
+
+## 即将上线
+
+完整教程——前置条件、具体的 UI 操作步骤、验证步骤和那些坑——会在后续
+slice 补上。在那之前,要配置的就一项,即
+[drop-in 着陆页矩阵](../#find-your-tool)的第 13 行:在 Augment BYOK 配置里,
+把 LLM 自定义 endpoint 设成 `http://localhost:9000/v1`。
+
+来源:[Augment BYOK setup](https://docs.augmentcode.com/setup/byok)。

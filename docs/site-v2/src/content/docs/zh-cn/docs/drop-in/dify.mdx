@@ -1,0 +1,17 @@
+---
+title: "在 Dify 里接入 SpendGuard"
+description: >-
+  在 Dify 里注册一个自定义 Model Provider 插件,把 manifest 的
+  base URL 指向正在运行的 SpendGuard egress proxy,即可接入
+  SpendGuard。方案还在完善中,完整的插件 manifest 见 drop-in 落地页。
+pagefind: false
+---
+
+## 即将上线
+
+完整流程——前置条件、确切的插件 manifest、验证步骤,以及那些坑——
+会在后续 slice 里补齐。在那之前,要配的就是
+[drop-in 工具矩阵](../#find-your-tool)里的第 14 行:注册一个自定义 Model
+Provider 插件,把它的 base URL 设成 `http://localhost:9000/v1`。
+
+来源:[Dify Model Provider plugin](https://docs.dify.ai/plugins/model-provider)。

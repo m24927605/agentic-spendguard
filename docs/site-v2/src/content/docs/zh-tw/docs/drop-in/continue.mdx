@@ -1,0 +1,20 @@
+---
+title: "用 Continue 接 SpendGuard"
+description: >-
+  在 config.yaml 裡把 apiBase 指到一個正在跑的 SpendGuard egress proxy,
+  就能把 SpendGuard 接進 Continue。recipe 還在補,完整的 config
+  區塊先看 drop-in 首頁。
+pagefind: false
+---
+
+## 即將推出
+
+完整教學 — 前置需求、確切的 YAML key 路徑、驗證步驟,還有各種雷點 — 會在後續的
+slice 補上。在那之前,你要設的就是
+[drop-in 對照表](../#find-your-tool)第 3 列那一行:
+
+```yaml
+apiBase: http://localhost:9000/v1
+```
+
+Source: [Continue customization → models](https://docs.continue.dev/customization/models).

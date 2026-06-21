@@ -1,0 +1,20 @@
+---
+title: "LiteLLM proxy 模式接入 SpendGuard"
+description: >-
+  把 OPENAI_API_BASE 指向一个运行中的 SpendGuard egress proxy，即可在 LiteLLM
+  proxy 模式下接入 SpendGuard。完整教程还在补，确切的环境变量字符串在 drop-in
+  落地页上。
+pagefind: false
+---
+
+## 即将上线
+
+完整流程——前置条件、确切的环境变量、验证步骤和踩坑点——会在后续 slice 里补齐。
+在那之前，要设的环境变量就是
+[drop-in 落地页矩阵](../#find-your-tool)第 1 行：
+
+```bash
+export OPENAI_API_BASE=http://localhost:9000/v1
+```
+
+来源：[LiteLLM proxy config settings](https://docs.litellm.ai/docs/proxy/config_settings)。

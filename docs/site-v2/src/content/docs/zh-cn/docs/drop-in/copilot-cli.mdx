@@ -1,0 +1,21 @@
+---
+title: "用 SpendGuard 接管 GitHub Copilot CLI(BYOK)"
+description: >-
+  把 COPILOT_PROVIDER_BASE_URL 指向跑着的 SpendGuard egress proxy,即可在
+  GitHub Copilot CLI 的 BYOK 模式下接入 SpendGuard。配方还在补全;具体的环境变量
+  字符串见 drop-in 落地页。
+pagefind: false
+---
+
+## 即将上线
+
+完整流程——前置条件、具体环境变量、验证步骤和那些坑——会在后续 slice 里补上。
+在那之前,要设的环境变量就是
+[drop-in 落地页矩阵](../#find-your-tool)的第 8 行:
+
+```bash
+export COPILOT_PROVIDER_BASE_URL=http://localhost:9000/v1
+```
+
+来源:[GitHub Copilot CLI BYOK](https://docs.github.com/en/copilot/github-copilot-cli/using-byok)
+(2026-04-07 GA)。

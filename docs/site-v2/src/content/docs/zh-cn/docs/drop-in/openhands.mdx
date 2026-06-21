@@ -1,0 +1,16 @@
+---
+title: "在 OpenHands(BYOK)里用 SpendGuard"
+description: >-
+  给 OpenHands 配一个 LLM 自定义端点、指向正在运行的 SpendGuard egress proxy,
+  即可接入 SpendGuard。操作指南还在完善中;具体的 UI 操作步骤见 drop-in 落地页。
+pagefind: false
+---
+
+## 即将上线
+
+完整教程——前置条件、具体的 UI 操作步骤、验证步骤和踩坑点——会在后续 slice
+里补上。在那之前,要用的配置就是
+[drop-in 落地页矩阵](../#find-your-tool)的第 5 行:在 Settings → LLM 里加一个
+自定义提供商,把端点指向 `http://localhost:9000/v1` 即可。
+
+来源:[OpenHands custom LLM configs](https://docs.all-hands.dev/usage/llms/custom-llm-configs)。

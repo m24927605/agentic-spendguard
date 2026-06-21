@@ -1,0 +1,17 @@
+---
+title: "Cody 自托管 Enterprise 集成 SpendGuard"
+description: >-
+  把 Cody 自托管 Enterprise 接入 SpendGuard：在 Sourcegraph
+  site-config 里把 relay 端点指向正在运行的 SpendGuard egress
+  proxy 即可。教程完善中，完整 config 块见 drop-in 落地页。
+pagefind: false
+---
+
+## 即将上线
+
+完整流程——前置条件、确切的 site-config 块、验证步骤以及各种坑——会在后续
+slice 里补上。在那之前，要配的就是
+[drop-in 落地页矩阵](../#find-your-tool)第 12 行那一项：把 Sourcegraph
+relay 端点指向 `http://localhost:9000/v1`。
+
+来源：[Cody self-hosted Enterprise install](https://sourcegraph.com/docs/cody/clients/install-vscode)。

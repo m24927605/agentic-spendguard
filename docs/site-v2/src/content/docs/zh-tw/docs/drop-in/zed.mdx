@@ -1,0 +1,19 @@
+---
+title: "Zed AI 搭配 SpendGuard"
+description: >-
+  在 Zed 設定裡把 api_url 指向跑起來的 SpendGuard egress proxy,就能把
+  SpendGuard 接進 Zed AI。Recipe 還在做;確切那行設定放在 drop-in landing 上。
+pagefind: false
+---
+
+## 即將推出
+
+完整教學 — 前置需求、確切那行設定、驗證步驟跟踩雷提醒 — 會在後續的
+slice 補上。在那之前,要設的就是
+[drop-in landing 對照表](../#find-your-tool)的第 7 列:
+
+```toml
+api_url = "http://localhost:9000/v1"
+```
+
+來源:[Zed AI configuration](https://zed.dev/docs/ai/configuration)。

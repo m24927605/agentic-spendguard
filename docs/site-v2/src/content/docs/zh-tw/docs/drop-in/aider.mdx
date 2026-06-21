@@ -1,0 +1,19 @@
+---
+title: "用 SpendGuard 接 Aider"
+description: >-
+  把 OPENAI_API_BASE 指到一個跑著的 SpendGuard egress proxy,Aider 就直接接上了。
+  完整教學還在寫,確切的環境變數字串在 drop-in 對照頁上。
+pagefind: false
+---
+
+## 即將推出
+
+完整流程 — 前置需求、確切的環境變數、驗證步驟、還有那些雷 — 會在後續的
+slice 補上。在那之前,你要設的環境變數就是這條,對應
+[drop-in 對照表](../#find-your-tool)的 row 2:
+
+```bash
+export OPENAI_API_BASE=http://localhost:9000/v1
+```
+
+來源:[Aider OpenAI-compatible APIs guide](https://aider.chat/docs/llms/openai-compat.html)。
