@@ -43,6 +43,13 @@ If you've used Stripe: this is **auth/capture, applied to LLM tokens.** Reserve
 the estimated cost pre-call; capture the real `usage` post-call. Idempotent,
 atomic, fail-closed.
 
+<p align="center">
+  <img src="docs/assets/phase3-wedge-deny.svg" width="800"
+       alt="Terminal demo: a $2000 claim hits a $1000 hard cap; the adapter raises DecisionStopped (BUDGET_EXHAUSTED) before any provider call, and a denied_decision row is written to the append-only audit ledger.">
+</p>
+
+<p align="center"><sub>A $2000 claim against a $1000 hard cap — <b>refused before the provider is called</b>, with a signed <code>denied_decision</code> audit row. Reproduce locally: <code>make demo-up DEMO_MODE=deny</code></sub></p>
+
 ## 🚀 Quick start
 
 ```bash
@@ -108,6 +115,38 @@ agent ──HTTP──▶ egress-proxy ──UDS gRPC──▶ sidecar ──mTL
 3. **Ledger + audit chain** (Postgres) — append-only double-entry ledger; the
    **hard cap is enforced in the ledger itself** (`BUDGET_EXHAUSTED`).
    `audit_outbox` rows are immutable (DB triggers) and signed — tamper-evident.
+
+Per request — reserve before the call, capture the real cost after, refuse the
+moment budget is gone:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Agent
+    participant P as Egress proxy
+    participant S as Sidecar
+    participant L as Ledger (Postgres)
+    participant M as LLM provider
+
+    A->>P: chat request
+    P->>S: RequestDecision (projected cost)
+    S->>L: ReserveSet — atomic, hard cap in the ledger
+    alt budget available
+        L-->>S: reserved + signed audit row
+        S-->>P: CONTINUE
+        P->>M: forward call (byte-identical)
+        M-->>P: response + real usage
+        P->>S: CommitEstimated — capture actual
+        S->>L: committed_spend + audit outcome
+        P-->>A: response
+    else budget gone (BUDGET_EXHAUSTED)
+        L-->>S: BUDGET_EXHAUSTED
+        S-->>P: STOP + signed denied_decision
+        P--xM: provider never called
+        P-->>A: HTTP 429
+    end
+    Note over S,L: reserve = auth · commit = capture · fail-closed
+```
 
 → Full details in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
