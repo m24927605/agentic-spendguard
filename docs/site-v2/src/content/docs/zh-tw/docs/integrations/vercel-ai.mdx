@@ -1,0 +1,311 @@
+---
+title: "Vercel AI SDK middleware（同時涵蓋 Mastra）"
+description: >-
+  把 Agentic SpendGuard 當成 Vercel AI SDK v4 的 LanguageModelV1Middleware 裝上去。
+  透過 wrapLanguageModel({ middleware: createSpendGuardMiddleware(...) })
+  直接掛到任何 @ai-sdk/* provider 上 —— 在上游 provider 的 HTTP request 發出去之前
+  就先做好 pre-call budget reservation，串流結束時再 commit 對帳真正的 token
+  用量，並留下帶簽章的稽核軌跡。透過 @spendguard/vercel-ai/mastra 這個 subpath alias
+  也一併涵蓋 Mastra Agents。
+---
+
+
+> Vercel AI SDK v4+（`ai`）是 TS 這邊主流的 LLM router。Mastra Agents 底層其實也是
+> 在呼叫 `ai` 的 `generateText` / `streamText`，所以一個 middleware 兩邊生態系一起
+> 涵蓋。SpendGuard 以 `createSpendGuardMiddleware` 形式出貨 —— 就是一個標準的
+> `LanguageModelV1Middleware`，透過 `wrapLanguageModel({ model, middleware })`
+> 直接掛到任何 `@ai-sdk/*` provider 上。不用 subclass model，也不用 fork proxy。
+> Mastra 使用者則是透過 `@spendguard/vercel-ai/mastra` 這個 subpath alias，
+> 以 Mastra 慣用的名稱 import 同一個 factory。
+
+> **在用 Mastra？請看 [`@spendguard/mastra`](/docs/integrations/mastra/)** ——
+> 那才是推薦的 Mastra 整合（deliverable D38）。Mastra 從 v0.14.0 起就有自己的
+> agent loop；本頁所涵蓋的範圍僅限於**明確交給 Mastra 的 AI SDK model 實例**
+> （`/mastra` subpath alias 對這條路徑仍維持發布且可用），至於走 model-router-string
+> 的 Agents 因為沒有 `wrapLanguageModel` 的注入點，要靠 `@spendguard/mastra` 的
+> `SpendGuardProcessor` 在 agent-step 邊界去攔。詳見
+> [`D06 design.md` §9](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D06_vercel_ai_sdk/design.md)
+> 那份標註 2026-06-10 的 amendment。
+
+## Install
+
+```bash
+pnpm add @spendguard/sdk @spendguard/vercel-ai ai
+```
+
+`@spendguard/sdk`、`ai`（Vercel AI SDK）跟 `zod` 都宣告成 peer
+dependencies，所以這個 adapter 一個版本都不釘 —— 由你專案的 lockfile
+說了算。需要 Node 20.10+（底層 substrate 用到 `await using` 跟穩定版的
+`AsyncLocalStorage`）。
+
+要打真正的 provider HTTP，就把你要用的官方 `@ai-sdk/*` provider 加進來：
+
+```bash
+pnpm add @ai-sdk/openai     # or @ai-sdk/anthropic, @ai-sdk/google, ...
+```
+
+## Quick start
+
+最精簡的端到端接法 —— 把 `SpendGuardClient` 連到 sidecar 的 UDS，
+建好 middleware，丟給 `wrapLanguageModel`，再拿包好的 model 配
+`generateText` 用：
+
+```ts
+import { generateText, wrapLanguageModel } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { SpendGuardClient } from "@spendguard/sdk";
+import { createSpendGuardMiddleware } from "@spendguard/vercel-ai";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  runtimeKind: "vercel-ai-js",
+});
+await client.connect();
+await client.handshake();
+
+const middleware = createSpendGuardMiddleware({
+  client,
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  budgetId: "44444444-4444-4444-8444-444444444444",
+});
+
+const model = wrapLanguageModel({
+  model: openai("gpt-4o-mini"),
+  middleware,
+});
+
+try {
+  const { text } = await generateText({
+    model,
+    prompt: "hello vercel ai",
+  });
+  console.log(text);
+} finally {
+  await client.close();
+}
+```
+
+每次 `generateText` / `streamText` 呼叫實際發生的事：
+
+1. middleware 的 `transformParams({ params })` 會從 `params` 這個 reference
+   推導出一組穩定的 `(runId, idempotencyKey)`，投射出一筆粗略的 pre-call
+   `BudgetClaim`，然後呼叫 `client.reserve({ trigger: "LLM_CALL_PRE", ... })`。
+2. 一旦遇到 `DecisionDenied`（DENY / STOP / APPROVAL_REQUIRED），middleware
+   就把它 rethrow 出去 —— `generateText` 會在內層 `doGenerate()` 的 HTTP
+   呼叫發出去**之前**就停下來。
+3. 成功的話，這筆 inflight 的 `(decisionId, reservationId)` 會以 params 的
+   reference 本身為 key，存進一個
+   `WeakMap<LanguageModelV1CallOptions, StashEntry>`。接著 provider 的
+   `doGenerate()` 才發出去。
+4. `wrapGenerate` 會從 `result.usage` 取出 provider 回報的
+   `(promptTokens, completionTokens)`（v4 canonical camelCase 跟
+   OpenAI-passthrough snake_case 兩種形狀都收），然後透過
+   `client.commitEstimated(...)` 送出一筆 `SUCCESS` commit。
+5. 串流（`streamText`）這邊，`wrapStream` 會在
+   `ReadableStream<LanguageModelV1StreamPart>` 上面套一層 `TransformStream`，
+   把每個 part 原封不動往下游轉，同時盯著終結的 `finish` part，等到
+   consumer 把 stream 抽乾時非同步送出一筆 `SUCCESS` commit。串流中途出錯
+   則送出 `FAILURE` commit。
+
+## Mastra Agents —— 同一個 middleware，換個 alias import
+
+Mastra Agents 底層也是在呼叫 `ai` 的 `generateText` / `streamText`，所以
+同一個 `LanguageModelV1Middleware` 兩邊生態系是 byte-for-byte 一起涵蓋的。
+Mastra 使用者透過 `/mastra` subpath alias，以 Mastra 慣用的名稱 import
+這個 factory：
+
+```ts
+import { Agent } from "@mastra/core";
+import { wrapLanguageModel } from "ai";
+import { openai } from "@ai-sdk/openai";
+import { createSpendGuardLanguageMiddleware } from "@spendguard/vercel-ai/mastra";
+
+const middleware = createSpendGuardLanguageMiddleware({
+  client,
+  tenantId: "tenant-prod",
+  budgetId: "...",
+});
+
+const guardedModel = wrapLanguageModel({
+  model: openai("gpt-4o-mini"),
+  middleware,
+});
+
+const agent = new Agent({
+  name: "my-budget-aware-agent",
+  model: guardedModel,
+});
+
+// agent.generate(...) and agent.stream(...) now reserve before each
+// LLM call and commit after; deny + approval flows propagate as typed errors.
+```
+
+`@spendguard/vercel-ai/mastra` 那個 factory 是個 function-reference
+alias —— 跟 root export 是嚴格相等（`===`）的。一個 factory，兩條 import 路徑。
+
+## Configuration
+
+middleware 的 options 介面支援 `unitId` pass-through（在 runner 環境裡設好
+`SPENDGUARD_UNIT_ID`，再把它當成 `unitId` option 傳進去）。設計上預期的那組更完整的
+`windowInstanceId` / pricing / `claimEstimator` 欄位則延到後面的 slice 再補。
+
+<table>
+  <thead>
+    <tr><th>Option</th><th>Type</th><th>Required</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>client</code></td><td><code>SpendGuardClient</code></td><td>YES</td><td>從 <code>@spendguard/sdk</code> 設定好的 substrate client。這個 adapter 不掌管 client 的生命週期 —— 由 consumer 自己呼叫 <code>connect()</code> / <code>handshake()</code> / <code>close()</code>。</td></tr>
+    <tr><td><code>tenantId</code></td><td><code>string</code></td><td>YES</td><td>這次呼叫要計費到的 tenant UUID。會轉給 substrate 當作 <code>reserve()</code> 的 claim scope，也是 idempotency-key canonical tuple 的第一個欄位。</td></tr>
+    <tr><td><code>budgetId</code></td><td><code>string</code></td><td>NO</td><td>當成投射出來那筆 claim 的 <code>scopeId</code> 用的 budget UUID。沒設的話，middleware 會退回用 <code>tenantId</code> 當 scopeId。</td></tr>
+  </tbody>
+</table>
+
+之後某個 minor 版（`v0.x`）會把這個介面照 design.md §4 那組 superset
+逐欄補齊（`windowInstanceId`、`unit`、`pricing`、`claimEstimator`、`route`、
+`callSignature`、`runIdProvider`、`providerEventIdExtractor`）。這些擴充都是
+additive 的 optional 欄位 —— 對 v0.1.0 的形狀不會造成 breaking change。
+
+## Streaming semantics
+
+`wrapStream` 回傳的內層 `{ stream, rawCall, rawResponse, warnings }`
+除了 `stream` 以外原封不動。被換掉的那個 `stream` 是一個由
+`TransformStream` 產出的 `ReadableStream<LanguageModelV1StreamPart>`，它會：
+
+1. 把每個 `LanguageModelV1StreamPart` 都 byte-for-byte 往下游轉 ——
+   consumer 看到的就是沒被動過的原始 stream。
+2. 盯著每個 part，看到終結的 `finish` event 就把它的
+   `usage: {promptTokens, completionTokens}` payload 快照下來。
+3. 等到 stream 的 `flush()`（consumer 抽乾了），就針對抓下來的那組 usage tuple
+   非同步送出一筆 `SUCCESS` commit。
+4. 如果是 stream 這側出錯、或上游 throw，就送出一筆帶錯誤訊息的
+   `FAILURE` commit，並把錯誤往下游傳出去。
+5. 用一個 `terminal` boolean 旗標擋住 finish/error 的 race，確保
+   `SUCCESS` / `FAILURE` 剛好只會觸發其中一個。
+
+commit 這側就算失敗（例如 finish 之後 sidecar UNAVAILABLE）也不會弄壞
+stream —— substrate 的 TTL reconciler 會透過 audit chain 把任何沒收掉的
+reservation 收乾淨。
+
+## Limitations
+
+**SpendGuard 的 Vercel AI SDK middleware 只做 pre-call ＋ 串流結束時 commit。**
+middleware 是在上游 provider 的 HTTP 呼叫**之前**攔，串流跑完**之後**才 commit。
+在你把它擺到長串流回應前面、或想倚賴 D06 完整設計介面之前，有幾件事要先弄清楚：
+
+- **走的是 Vercel AI SDK v4 的 `LanguageModelV1Middleware` 形狀 —— 還不是
+  v5。** D06 的 spec 是對著 AI SDK v5（`LanguageModelV2`）寫的。目前的
+  `ai@^4` peer 接的是 v1；這個 middleware 是原生對著那個介面做的。等 AI SDK
+  v5 變成預設 peer 時，v5 的遷移會是 additive 的。
+- **`transformParams` 靠 throw 來 halt，這條路徑是整個機制的命脈。** middleware 裡
+  少了那條 rethrow 路徑，`wrapLanguageModel` 會把 decision-denied 訊號吞掉，
+  budget gate 就永遠擋不住 LLM 呼叫。所以 middleware 是直接從
+  `transformParams` 把 `DecisionDenied`（以及它的 `DecisionStopped` /
+  `ApprovalRequired` 子類別）throw 出來，讓 AI SDK 的呼叫端看得到 typed error。
+- **串流回應沒有 mid-stream cap。** SpendGuard 是在 pre-call 時 reserve
+  預測的 budget，commit 則發生在串流結束、對著真正的 `usage` 做。middleware
+  不會為了攔住 token 輸出而把一個 mid-flight 的 stream 拆掉 —— 超用的部分會
+  進到 audit chain、在 commit 時反映出來，但那些 token 早就已經吐出去了。
+- **DEGRADE 的 patch 套用失敗會以 `MutationApplyFailed` 形式冒出來。**
+  跟 Python `pydantic_ai.py::SpendGuardModel` v0.5.1 的立場一致。內建的
+  claim mutation 留到後面的 slice 再做。
+- **tool-call 在 loop 中途不做 gating。** 每個 tool call 都是它自己的一個
+  AI SDK event；substrate 是逐次呼叫處理 PRE/POST。跨 tool 的 budget
+  enforcement 是 contract layer 的事，不歸 middleware 管。
+
+## Demo
+
+附帶一套 docker-compose demo，會對著真正的 `generateText` / `streamText` ＋
+sidecar ＋ counting-stub provider 端到端把整個 ALLOW ＋ DENY ＋ STREAM
+矩陣跑過一遍，啟動時也順帶做 Mastra alias 的 parity check：
+
+```bash
+make demo-up DEMO_MODE=vercel_ai_mastra
+```
+
+這個 mode 會啟動 `postgres + sidecar + vercel-ai-mastra-runner +
+counting-stub`，接著從
+[`examples/vercel-ai-mastra/`](https://github.com/m24927605/agentic-spendguard/blob/main/examples/vercel-ai-mastra/)
+這支 Node 範例跑三次呼叫：
+
+- **ALLOW** —— budget 之內的小訊息。`transformParams` 觸發 PRE，
+  `client.reserve()` 回 ALLOW，包好的 model 的 `doGenerate()` HTTP 呼叫發出去，
+  counter +1，`wrapGenerate` 帶著真正的 token 用量送出一筆 `SUCCESS` commit。
+- **DENY** —— `spendguard_estimate_override=2000000000` 直接爆掉預設好的
+  1B hard-cap。sidecar 的 contract evaluator 送出 `SPENDGUARD_DENY`，
+  `transformParams` throw 出 `DecisionDenied`，`generateText` 在上游 HTTP
+  呼叫**之前**就停下來。counting-stub 的 counter 維持不變（證明 gate 是
+  在 pre-call 觸發的）。
+- **STREAM** —— `streamText` 透過 `result.textStream` 這個 async iterator
+  消費。PRE 在 stream 開啟時觸發一次，POST 在 stream 結束時對著真正的
+  `usage.completionTokens` commit 一次。
+
+乾淨跑完一輪的成功行：
+
+```
+[demo] vercel_ai_mastra ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+完整細節跟 verify-SQL gates 在
+[`deploy/demo/vercel_ai_mastra/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/vercel_ai_mastra/README.md)。
+
+## Troubleshooting
+
+啟動時跟第一次呼叫常見的錯誤。substrate 的 typed exceptions 都從
+`@spendguard/vercel-ai` 再 export 出來，所以你不用多 import 一次就能直接對
+`DecisionDenied` / `SidecarUnavailable` 做 pattern-match。
+
+- **`DecisionDenied: reserve() denied by contract`** —— 這是預期行為，
+  發生在 budget 用完、或某條 contract rule 送出 `SPENDGUARD_DENY` 的時候。
+  middleware 會把它 rethrow，`generateText` 停下來，上游 provider 的 HTTP
+  呼叫完全不會發出去。去翻 sidecar log 看是哪條 rule 命中；ledger 裡那筆
+  decision row 會帶著 `decision_context.contract_rule`。
+
+- **budget gate 沒擋住 —— provider 呼叫照樣發出去。** 幾乎都是因為
+  middleware 根本沒被串進 `wrapLanguageModel`。檢查一下你丟給
+  `generateText` 的那個 model —— 它**必須**是包好的那個，而不是原始的
+  `openai("...")` / `anthropic("...")` reference。把
+  `middleware.transformParams.toString()` 印出來重現一下 —— 它不應該是
+  identity function。
+
+- **`SidecarUnavailable: handshake timeout`** —— sidecar 的 UDS 路徑
+  （`SPENDGUARD_SIDECAR_UDS`，預設 `/var/run/spendguard/adapter.sock`）
+  連不到。確認 sidecar container 有起來、socket 檔案存在、而且你的 Node
+  process 對它有讀寫權限。在 demo overlay 裡這是由
+  `deploy/demo/vercel_ai_mastra/docker-compose.yaml` 接好的；在 demo 之外，
+  就把同一個 socket 路徑 mount 進你 Node container 的
+  `/var/run/spendguard/`。middleware 在 reserve 路徑上會把
+  `SidecarUnavailable` 吞掉（降級模式 —— LLM 呼叫不經 gate 直接放行）。
+  建構期 `client.handshake()` 的失敗則會直接丟回給呼叫端。
+
+- **`@spendguard/vercel-ai/mastra` import 解析出來是 `undefined`** ——
+  確認你的 bundler 有遵守套件的 `exports` map。`/mastra` 這個 subpath 宣告
+  在 `package.json#exports`，靠 Node 的 ESM resolution 解析。比較舊的
+  bundler（esbuild < 0.20、Webpack 4）可能要另外加 alias entry。
+
+- **`generateText: typed error not DecisionDenied`** —— 你直接從
+  `@spendguard/sdk` import 了 `DecisionDenied`，但包好的 model 的 middleware
+  是從 `@spendguard/vercel-ai` throw 的。class identity 是**有**保留的
+  （re-export，不是 subclass），所以不管你從哪邊 import，
+  `err instanceof DecisionDenied` 都會成立。如果這個檢查掛了，八成是你的
+  `node_modules` tree 裡有重複的 `@spendguard/sdk`。
+
+- **commit 時的 token 數跟 provider 回報的對不起來。** middleware 的
+  `extractUsageFromGenerate` 兩種形狀都收：AI SDK v4 canonical camelCase
+  （`{promptTokens, completionTokens}`）跟 OpenAI-passthrough snake_case
+  （`{prompt_tokens, completion_tokens}`）。如果兩種都不在（很少見，這是
+  防禦性的 fallback），commit 會把缺的欄位送 `0` —— 用
+  `rawResponse?.headers` 去看 provider 的原始回應。
+
+## Related
+
+- [Quickstart](../../quickstart/) —— 五分鐘把整套 SpendGuard stack 拉起來
+- [LangChain.js callback handler](../langchain-ts/) —— 這個 middleware 的
+  LangChain.js 姊妹版（callback-handler 形狀；走 LangChain 慣用法）
+- [Pydantic-AI](../pydantic-ai/) —— Python 姊妹版
+- [Contract YAML reference](../../contracts/yaml/) —— 撰寫 allow/stop 規則
+- 其他 adapter 整合：
+  [LangChain & LangGraph (Python)](../langchain/) ·
+  [OpenAI Agents SDK](../openai-agents/) ·
+  [Microsoft AGT](../agt/) ·
+  [LiteLLM proxy guardrail](../litellm-proxy/)

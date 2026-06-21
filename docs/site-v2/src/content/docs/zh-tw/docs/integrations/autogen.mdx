@@ -1,0 +1,228 @@
+---
+title: "用 SpendGuard 做 AutoGen / AG2 預算控管"
+description: >-
+  替 AutoGen 0.4+(Microsoft)和 AG2(社群 fork)做呼叫前的 token
+  預算把關,用的是 Agentic SpendGuard。一個 wrapper class 就能
+  同時涵蓋兩條 lineage,因為它們的 LLM 抽象層都是同一個
+  autogen_core.models.ChatCompletionClient —— AG2 是原封不動把這個
+  namespace vendored 進去的。
+---
+
+> 你的 AutoGen `AssistantAgent` 在 `MagenticOneGroupChat` 或 `Swarm`
+> 裡跑 `await agent.on_messages(...)`,結果哪一步把預算燒爆你根本看不
+> 出來 —— 等到帳單來了才知道。SpendGuard 直接 subclass 了 AutoGen 0.4+
+> 和 AG2 底層共用的那個 ABC(`autogen_core.models.ChatCompletionClient`),
+> 並把一個 inner client 包起來,所以每一次 `create()` 呼叫都會在上游 HTTP
+> 發出去**之前**先對預算做 reserve。一個 class 涵蓋兩條 lineage,零設定 ——
+> 你只要改一下 `AssistantAgent` 的 import 路徑就好。
+
+## 為什麼你會想要這個
+
+- **一個 wrapper,兩條 lineage。** AutoGen 0.4+(Microsoft,2026-02 起進入
+  maintenance mode)和 AG2(社群 fork,約 48k stars,Apache-2.0)共用同一個
+  原封不動的 `autogen_core.models.ChatCompletionClient`。SpendGuard subclass
+  了這個 ABC、把 inner client 包起來;同一個 wrapper 不管是哪一條 lineage 的
+  `AssistantAgent`、`MagenticOneGroupChat` 還是 `Swarm` 都能用。
+- **一個 wrapper,涵蓋所有 provider。** AutoGen 的 `ChatCompletionClient`
+  抽象層位在 vendor SDK 邊界**之上**
+  (`OpenAIChatCompletionClient` / `AnthropicChatCompletionClient` /
+  `AzureAIChatCompletionClient` / LiteLLM-routed)。在 ABC 這一層做把關,
+  代表一個 wrapper 實例就把它們全包了;你不用為每家 vendor 各寫一份 adapter。
+- **呼叫前就拒絕,不是事後算帳。** DENY 會直接從 `create()` 丟出
+  `DecisionDenied`。`ChatCompletionClient` 在兩條 lineage 的 create path 上
+  都沒有 framework 端的 catch(已對 autogen-core 0.4.0 和 ag2 0.7.0 驗證過),
+  所以這個 raise 會乾淨地傳到 `AssistantAgent` 呼叫端 —— 上游的 model 呼叫
+  **絕對不會**發出去。
+- **稽核 + 簽核 pipeline 跟其他每個 framework 共用。**
+  這個 wrapper 寫進去的是同一個 SpendGuard ledger,跟 LangChain、
+  Pydantic-AI、OpenAI Agents、Google ADK、AWS Strands、DSPy、Agno
+  和 BeeAI 這幾個整合都一樣。共用的 `spendguard_run_context`
+  contextvar(從 `spendguard.integrations.openai_agents` 重用過來的)
+  意味著:一個包住 AutoGen agent 的 LangChain parent run,會重用
+  同一個 `run_id`。
+
+## 安裝設定(60 秒)
+
+```bash
+pip install 'spendguard-sdk[autogen]'
+# Then pick your lineage:
+pip install autogen-agentchat>=0.4 autogen-ext[openai]   # Microsoft AutoGen 0.4+
+# OR
+pip install ag2>=0.7                                     # AG2 community fork
+```
+
+用 demo stack 把 sidecar 拉起來:
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## 決策表
+
+| 如果你用的是 | 安裝 | 整合 import |
+|---|---|---|
+| AutoGen 0.4+(Microsoft) | `pip install 'spendguard-sdk[autogen]' autogen-agentchat autogen-ext[openai]` | `from spendguard.integrations.autogen import SpendGuardChatCompletionClient` |
+| AG2(社群 fork) | `pip install 'spendguard-sdk[autogen]' ag2` | (同一個 import) |
+| 透過 LiteLLM 做 routing | D12 shim 會 transitively 涵蓋 | 見 [LiteLLM SDK shim 文件](/docs/integrations/litellm-sdk-shim/) |
+
+## 接起來
+
+```python
+import asyncio
+
+from autogen_agentchat.agents import AssistantAgent  # or `from ag2.agents import AssistantAgent`
+from autogen_core import CancellationToken
+from autogen_core.models import UserMessage
+from autogen_ext.models.openai import OpenAIChatCompletionClient
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.autogen import (
+    SpendGuardChatCompletionClient,
+    RunContext, run_context,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    def estimate(messages):
+        return [common_pb2.BudgetClaim(
+            budget_id="my-budget",
+            unit=unit,
+            amount_atomic="500",
+            direction=common_pb2.BudgetClaim.DEBIT,
+            window_instance_id="my-window",
+        )]
+
+    guarded = SpendGuardChatCompletionClient(
+        inner=OpenAIChatCompletionClient(model="gpt-4o-mini"),
+        client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate,
+    )
+
+    agent = AssistantAgent(name="x", model_client=guarded)
+
+    async with run_context(RunContext(run_id="my-run-1")):
+        result = await agent.on_messages(
+            [UserMessage(content="Say hello in three words.", source="user")],
+            CancellationToken(),
+        )
+    print(result.chat_message.content)
+
+
+asyncio.run(main())
+```
+
+**`claim_estimator` 是必填的。** 照 design.md §5 的說法,這個 wrapper 不會
+附一個預設的 estimator,因為 `ChatCompletionClient.model` 在各家 vendor
+實作之間並沒有標準化 —— `OpenAIChatCompletionClient.model` 有,但
+`AnthropicChatCompletionClient` 用的是 `_model_name`。這個 projection
+要由 operator 自己提供。
+
+## 運作原理
+
+```text
+AssistantAgent.on_messages(...)
+  → SpendGuardChatCompletionClient.create(messages, tools, ...)
+      ├─ ctx = current_run_context()
+      ├─ signature = blake2b(messages | tools | extra_create_args)
+      ├─ llm_call_id / decision_id derived from signature
+      ├─ sidecar.RequestDecision(LLM_CALL_PRE, projected_claims)
+      │     ALLOW   → continue
+      │     DENY    → DecisionDenied propagates (no inner HTTP)
+      ├─ inner.create(messages, tools, ...)           ← provider HTTP
+      └─ sidecar.emit_llm_call_post(SUCCESS|FAILURE|CANCELLED,
+                                    estimated=usage.prompt + completion)
+```
+
+這個 wrapper subclass 了 `autogen_core.models.ChatCompletionClient`,但
+沒有去呼叫 `super().__init__()`(這個 ABC 在兩條 lineage 裡都沒有共用 state ——
+在 module load 時驗證過)。inner client 是用 composition 持有的:SpendGuard
+從來不會直接去 instantiate `OpenAIChatCompletionClient` /
+`AnthropicChatCompletionClient` / 任何 vendor SDK。
+
+`LINEAGE` 這個常數會告訴你,跟 `autogen-core` 一起載入的是哪一條 lineage:
+
+```python
+from spendguard.integrations.autogen import LINEAGE
+print(LINEAGE)  # "autogen" / "ag2" / "both" / "core-only"
+```
+
+但這純粹是 **telemetry** —— `create()` 和 `create_stream()` 裡的 business
+logic **絕對不會**依它分支(review-standards §1.1 把 gate path 上任何
+`LINEAGE` 的條件判斷都列為 Blocker finding)。同一個 wrapper 實例不管哪一條
+lineage 都能用。
+
+## 跨語言的 run-context 共享
+
+`RunContext` / `run_context()` / `current_run_context()` 這幾個 symbol 是
+從 `spendguard.integrations.openai_agents` re-export 出來的(如果沒裝
+`[openai-agents]` extra,則會 fallback 到一個 contextvar 名稱等價的版本)。
+一個混用 OpenAI Agents、AutoGen 和 Pydantic-AI 的跨語言 stack,在同一個 run
+裡會共用一條 trace,因為這三個 adapter 讀的都是同一個 module-level 的
+`spendguard_run_context` contextvar。
+
+```python
+from spendguard.integrations.openai_agents import RunContext, run_context
+
+async with run_context(RunContext(run_id="polyglot-run-1")):
+    # Both calls land under the same run_id in the ledger:
+    await openai_agents_runner.run(agent, "...")
+    await autogen_assistant.on_messages([...], cancellation_token)
+```
+
+## 串流
+
+`create_stream()` 在這個版本是直接 pass-through 給 inner client。串流的把關
+是在 model 邊界把**整段** stream 包起來;串流中間的 tool 呼叫會 inherit
+parent 的 reservation。逐 chunk 的把關則列為後續要跟 OpenAI Agents POC
+對齊的工作。
+
+## 取消
+
+當 framework 透過 `CancellationToken` 取消時,inner client 會丟出
+`asyncio.CancelledError`(AutoGen)或 anyio 的等價物(AG2)。這個 wrapper
+是用 type name 來分類這個 exception 的(`type(exc).__name__ == "CancelledError"`
+—— 跟 D12 LiteLLM shim 的做法一致,避開跨 loop 的 `isinstance` 不一致問題),
+然後發出 `emit_llm_call_post(outcome="CANCELLED")`,讓 projector 把
+reservation 釋放掉。
+
+## 限制
+
+D24 v1 明確地**不**處理以下任何一項:
+
+- **逐 token 的串流把關。** 逐 chunk 的把關保留給 D24.1。
+- **`count_tokens()` / `total_usage()` / `remaining_tokens()` 的 side
+  effects。** 這幾個 method 都原封不動 pass-through 給 inner client ——
+  這是 `AssistantAgent` 的 token-budget caps 所需要的(在 wrapper 這層加
+  counter 或 timer 會把 cap 的邏輯搞亂)。
+- **AG2 專屬的 extensions**(例如 `register_for_llm` decorator)。
+  那些是 AG2-only 的東西,跟 LLM gate 是正交的。
+- **Microsoft AGT 整合**(D7,已經透過
+  `spendguard.integrations.agt` ship 出去了)。AGT 是另一個 framework,
+  不是 AutoGen。
+
+## 參考
+
+* Spec:`docs/specs/coverage/D24_autogen_ag2/`
+* Module:`sdk/python/src/spendguard/integrations/autogen/`
+* Demo overlay:`deploy/demo/agent_real_autogen/`
+* Test suite:`sdk/python/tests/integrations/autogen/`

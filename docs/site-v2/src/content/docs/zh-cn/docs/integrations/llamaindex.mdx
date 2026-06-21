@@ -1,0 +1,265 @@
+---
+title: "用 SpendGuard 管控 LlamaIndex 预算"
+description: >-
+  给 LlamaIndex（当下主流 RAG 框架）做调用前的 token 预算管控。D27 的
+  CallbackManager handler 拦住 OpenAI / Anthropic / Gemini / Bedrock
+  Converse 各家 provider 的每一个 CBEventType.LLM 事件。走 LiteLLM
+  路由的那条路径由 D12 顺带覆盖。
+---
+
+> 你那句 `VectorStoreIndex(...).as_query_engine().query("...")`，最后会
+> 派发进 `OpenAI(model="gpt-4o-mini")._chat` —— 把你现在接好的所有
+> provider 级 SpendGuard 适配器统统绕过去。SpendGuard 的做法是在
+> `Settings.callback_manager` 上注册一个 `BaseCallbackHandler`，这样每个
+> `CBEventType.LLM` 事件都会在上游 provider 的 HTTP 真正发出之前先向预算
+> reserve。一个 handler 实例覆盖所有 provider 子包 —— OpenAI、Anthropic、
+> Gemini、Bedrock Converse —— 因为拦截点落在 LlamaIndex 的事件边界上，而不
+> 是某个 model 子类上。
+
+## 先看这个：两条路径的覆盖矩阵
+
+LlamaIndex 的 provider 分两条路。D27 覆盖其中一条，另一条由 D12（LiteLLM
+SDK shim）顺带覆盖。具体走哪条，取决于你 import 的是哪个 LlamaIndex
+provider 包。
+
+| LlamaIndex package | Coverage | Install |
+|--------------------|----------|---------|
+| `llama-index-llms-litellm` (`LiteLLM(...)`) | **D12** ([LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/)) —— 顺带覆盖 | `pip install 'spendguard-sdk'` + `spendguard_litellm_shim.install(...)` |
+| `llama-index-llms-openai` (`OpenAI(...)`) | **D27**（本页） | `pip install 'spendguard-sdk[llamaindex]'` |
+| `llama-index-llms-anthropic` | **D27** | （同上） |
+| `llama-index-llms-gemini` / `-google-genai` | **D27** | （同上） |
+| `llama-index-llms-bedrock-converse` | **D27** | （同上） |
+
+混用场景下，运维同时装 **D12 + D27**。D12 的 contextvar 递归保护会挡住走
+LiteLLM 路由那条内层调用上的重复 reserve（LlamaIndex 事件照常 PRE 触发，
+D12 把内层 `acompletion` 的 reserve 短路掉）。
+
+如果你直接滑过表格去找"真正的"答案：答案就是这张表。走 LiteLLM 路由和走
+直连 provider 这两条路，用的是不同的集成。
+
+## 为什么要用它
+
+- **一个 handler，吃下 LlamaIndex 所有 provider。** LlamaIndex 的
+  `BaseCallbackHandler` + `CBEventType.LLM` 位于 vendor SDK 边界之上。
+  SpendGuard 直接继承这个 handler ABC，按事件类型拦截；一个 handler
+  实例对 `OpenAI` / `Anthropic` / `Gemini` / `BedrockConverse` 一视同仁。
+  你不用为每家 vendor 写适配器。
+- **按事件拦截，而不是按 query。** LlamaIndex 的 `QueryEngine` 会把一次
+  用户 query 扇出成多次 LLM 调用（retriever 打分、refinement、合成）。
+  在 query 这一层拦截会过量发放 reservation。D27 落在 `CBEventType.LLM`
+  事件层，能看到 query engine 派发的每一次 LLM 调用。
+- **过滤就是一次 enum 比较。** 非 LLM 事件
+  （`CBEventType.EMBEDDING` / `RETRIEVE` / `CHUNK` / `QUERY` /
+  `NODE_PARSING`）直接 early-return，零 sidecar 调用。占了 80%+ 的那些
+  非 LLM 回调触发，开销基本可以忽略。
+- **调用前拒绝，而不是事后记账。** DENY 直接从 `on_event_start()` 抛出
+  `SpendGuardLlamaIndexDenied`。LlamaIndex 的 `CallbackManager.event(...)`
+  context manager 会把这个异常向外传播，穿过外层的 `LLM.chat` /
+  `LLM.predict` 调用，时机在上游 provider 的 HTTP 发出之前 —— 这点用一个
+  在 DENY 回合零命中的计数 stub 验证过。
+- **审计 + 审批管线和所有其他框架共用一套。** 这个 handler 写入的
+  SpendGuard ledger，和 LangChain、Pydantic-AI、OpenAI Agents、Google
+  ADK、AWS Strands、DSPy、Agno、BeeAI、AutoGen / AG2、SmolAgents、Letta
+  这些集成是同一个。
+
+## 配置（60 秒）
+
+```bash
+pip install 'spendguard-sdk[llamaindex]'
+# Install whichever provider sub-package you actually use:
+pip install llama-index-llms-openai            # OpenAI
+# pip install llama-index-llms-anthropic       # Anthropic
+# pip install llama-index-llms-gemini          # Gemini
+# pip install llama-index-llms-bedrock-converse # Bedrock Converse
+```
+
+`[llamaindex]` 这个 extra 只解析 `llama-index-core>=0.12` —— provider
+子包要运维自己装，因为大多数团队就只挑一家 vendor。handler 不在乎你用哪
+家；vendor 检测靠的是响应的形状，不是解析类名。
+
+用 demo stack 起一个 sidecar：
+
+```bash
+git clone https://github.com/m24927605/agentic-spendguard.git
+cd agentic-spendguard && make demo-up
+```
+
+## 接线
+
+```python
+import asyncio
+
+from llama_index.core import Settings, VectorStoreIndex, Document
+from llama_index.core.callbacks import CallbackManager
+from llama_index.llms.openai import OpenAI
+
+from spendguard import SpendGuardClient
+from spendguard.integrations.llamaindex import (
+    SpendGuardLlamaIndexHandler,
+    SpendGuardLlamaIndexDenied,
+)
+from spendguard._proto.spendguard.common.v1 import common_pb2
+
+
+async def main() -> None:
+    client = SpendGuardClient(
+        socket_path="/var/run/spendguard/adapter.sock",
+        tenant_id="00000000-0000-4000-8000-000000000001",
+    )
+    await client.connect()
+    await client.handshake()
+
+    unit = common_pb2.UnitRef(
+        unit_id="usd_micros",
+        token_kind="output_token",
+        model_family="gpt-4",
+    )
+    pricing = common_pb2.PricingFreeze(pricing_version="2026-q2")
+
+    handler = SpendGuardLlamaIndexHandler(
+        client=client,
+        budget_id="my-budget",
+        window_instance_id="my-window",
+        unit=unit,
+        pricing=pricing,
+        # claim_estimator is OPTIONAL: when omitted, the handler
+        # dispatches off payload[EventPayload.SERIALIZED]["model"]
+        # via the project-wide default estimator.
+    )
+
+    # ONE registration; propagates to every LLM in the query graph.
+    Settings.callback_manager = CallbackManager([handler])
+    Settings.llm = OpenAI(model="gpt-4o-mini")
+
+    docs = [Document(text="The budget cap is 100 atomic units per window.")]
+    index = VectorStoreIndex.from_documents(docs)
+    response = index.as_query_engine().query("What is the budget cap?")
+    print(response)
+
+    # DENY:
+    try:
+        index.as_query_engine().query("...")
+    except SpendGuardLlamaIndexDenied as exc:
+        print(f"denied: {exc.reason_codes}")
+
+
+asyncio.run(main())
+```
+
+**`claim_estimator` 是可选的。** 不传时，handler 会根据
+`payload[EventPayload.SERIALIZED]["model"]` 里的 model 字段，派发到项目
+全局的默认 estimator。家族检测：`"gpt-*"` / `"o1*"` → OpenAI；
+`"claude-*"` → Anthropic；`"gemini-*"` → Gemini；`"anthropic.*"` /
+`"amazon.*"` → Bedrock；其余 → 退回 chars/4，并按 (model, process)
+维度做一次 `warnings.warn`。
+
+## 它怎么工作
+
+```text
+Settings.callback_manager = CallbackManager([handler])
+  ↓ query_engine.query("...")
+  ↓ LLM._llm_predict / _chat
+  ↓ on_event_start(CBEventType.LLM, payload={MESSAGES|PROMPT, SERIALIZED}, event_id=...)
+    → SpendGuardLlamaIndexHandler._on_llm_start
+       ├─ signature = blake2b(model | messages, digest_size=16)
+       ├─ llm_call_id / decision_id derived from signature
+       ├─ run_id = run_id_fn(payload) → trace_id → parent_id → derived UUID
+       ├─ client.request_decision(LLM_CALL_PRE, projected_claims)
+       │     CONTINUE → stash by event_id in self._state
+       │     DENY     → SpendGuardLlamaIndexDenied raises (provider HTTP never dispatched)
+       └─ return
+  ↓ (if ALLOW) provider HTTP
+  ↓ on_event_end(CBEventType.LLM, payload={RESPONSE}, event_id=...)
+    → SpendGuardLlamaIndexHandler._on_llm_end
+       ├─ pending = self._state.pop(event_id)
+       ├─ total_tokens = _extract_total_tokens(response)
+       │     ├─ OpenAI:  raw["usage"]["total_tokens"]
+       │     ├─ Anthropic:  raw["usage"]["input_tokens"] + ["output_tokens"]
+       │     ├─ Gemini:  raw["usage_metadata"]["total_token_count"]
+       │     └─ Bedrock Converse:  raw["usage"]["inputTokens"] + ["outputTokens"]
+       └─ client.emit_llm_call_post(SUCCESS, estimated=total_tokens)
+```
+
+handler 把每次 LLM 调用的状态以 `event_id`（LlamaIndex 的跨调用关联键）
+为 key，存在 `self._state: dict[str, _PendingCall]` 里。并发的 query
+engine（通过 `concurrent.futures` 派发）按 LlamaIndex 约定会拿到各自不同
+的 `event_id`，所以这个 stash 在并行派发下是隔离安全的。
+
+### 同步-异步桥接
+
+LlamaIndex 的回调约定是完全同步的 —— `on_event_start` / `on_event_end`
+都是从 `CallbackManager.event(...)` context manager 内部调用的，不管外层
+query 是同步（`.query()`）还是异步（`.aquery()`）。而 SpendGuard 的
+client 只有异步接口。handler 自己持有一个 per-instance 的守护线程 +
+asyncio loop，把每个 `client.request_decision(...)` /
+`emit_llm_call_post(...)` 协程通过 `asyncio.run_coroutine_threadsafe`
+丢上去跑。这样就避开了 `nest_asyncio`，对 `.query()` 和 `.aquery()`
+一样好使。
+
+## Run-ID 解析级联
+
+handler 按 design.md §5 的级联来解析 SpendGuard 的 `run_id`：
+
+1. `run_id_fn(payload)` —— 构造时传了非默认的 `run_id_fn` 的话，只要它
+   返回非空字符串，就以它为准。
+2. `self._trace_id` —— 通过 handler 上的 `start_trace(trace_id)` 设置；
+   LlamaIndex 的 `CallbackManager.start_trace_with_id("run-abc")` 会在每
+   个已注册的 handler 上调用它。
+3. `parent_id` —— LlamaIndex 事件图里的 parent。派发子图时没有重新
+   `start_trace`，这个就派上用场。
+4. 从 payload signature 推导出的 UUID —— 按 `(model, messages)` 确定性
+   生成，所以重试会复用同一个 `run_id`。
+
+用 `start_trace` / `end_trace` 来显式绑一个 run id：
+
+```python
+Settings.callback_manager.start_trace_with_id("my-run-1")
+response = index.as_query_engine().query("...")
+Settings.callback_manager.end_trace_with_id("my-run-1")
+```
+
+## D27 不覆盖什么
+
+- **LlamaIndex.TS**（`@llamaindex/cloud` 以及 TypeScript 移植版）——
+  回调形状不一样，留给单独的 JS 适配器交付。
+- **流式的 chunk 内拦截。** `CBEventType.CHUNK` 只是观测用的；commit 在
+  回合边界触发（和 LangChain / OpenAI Agents 的先例对齐）。这个
+  reservation 覆盖的是整段流式响应。
+- **`CBEventType.EMBEDDING` / `RETRIEVE` 的拦截。** Embedding 成本是另一
+  条预算轴，`BudgetClaim` 形状也不同；这个 handler 在入口处就显式把非
+  LLM 事件过滤掉了。
+- **重复拦截走 LiteLLM 路由那条路径。** 运维装 D12 即可；contextvar 保护
+  会挡住重复 reserve。见本页顶部那张矩阵。
+- **由 SpendGuard 去改 `Settings`。** handler 不会把自己自动注册到
+  `Settings.callback_manager` 上。注册由运维显式接线，这样 handler 装在
+  哪儿，在集成点上一眼就能看见。
+
+## 跑一下 demo
+
+```bash
+cd deploy/demo
+# Stub variant — no API key, uses MockLLM (CI gate):
+make demo DEMO_MODE=agent_real_llamaindex_stub
+# Live variant — points llama-index-llms-openai at the counting-stub:
+make demo DEMO_MODE=agent_real_llamaindex
+```
+
+这会把完整的 sidecar stack 拉起来，在一个 runner 容器里装上
+`spendguard-sdk[llamaindex]` 和 `llama-index-llms-openai`，然后通过
+`Settings.callback_manager = CallbackManager([handler])` 跑一遍
+`VectorStoreIndex.from_documents` → `query_engine.query(...)` 的完整
+流程。验证 gate 会断言：ledger 里在 `tenant_id =
+00000000-0000-4000-8000-000000000001` 下有一对 `reserve` +
+`commit_estimated`，并且 canonical event log 里有一条
+`spendguard.audit.decision` 记录。
+
+## 另见
+
+- [D12 LiteLLM SDK shim](/docs/integrations/litellm-sdk-shim/) ——
+  顺带覆盖 `llama-index-llms-litellm`。和 D27 安全共存（D27 在 LlamaIndex
+  事件层 reserve，D12 在它的 in-flight contextvar 置位时于 LiteLLM 层
+  短路）。
+- [LangChain](/docs/integrations/langchain/) —— callback-handler 模式的
+  姊妹参考（LangChain 的 `BaseCallbackHandler`）。
+- [Source: `spendguard/integrations/llamaindex`](https://github.com/m24927605/agentic-spendguard/tree/main/sdk/python/src/spendguard/integrations/llamaindex)
+- [Source: D27 design spec](https://github.com/m24927605/agentic-spendguard/blob/main/docs/specs/coverage/D27_llamaindex/design.md)

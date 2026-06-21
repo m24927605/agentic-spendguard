@@ -1,0 +1,230 @@
+---
+title: "LiteLLM proxy guardrail"
+description: >-
+  把 Agentic SpendGuard 作为一等公民的 LiteLLM proxy guardrail 接入，零 callback
+  fork。对 proxy 服务的任何 /v1/chat/completions 请求做 pre-call 预算预留，带签名审计链，
+  默认 fail-closed。
+---
+
+
+> 2026 年运维人员最先找到的入口就是 LiteLLM 的 `guardrails:` 注册表。SpendGuard 以
+> `SpendGuardGuardrail` 的形式落地在那里，所以你的 `proxy_config.yaml` 里只要一段
+> yaml，就能 gate 住 proxy 服务的每一个 `/v1/chat/completions` 请求 —— 单租户安装
+> 不需要 fork 任何 Python 模块。
+
+## 为什么用 guardrail 而不是 callback
+
+LiteLLM 有两处入口可以挡在一次模型调用前面：
+
+- **`litellm_settings.callbacks:`** —— 老的 `CustomLogger` 路径
+  （`spendguard.integrations.litellm.SpendGuardLiteLLMCallback`）。仍然支持，仍然有测试覆盖。
+  但稍微复杂一点的部署，就得在 `PYTHONPATH` 上挂一个 fork 出来的 Python 模块。
+- **`guardrails:`** —— 更新的 `CustomGuardrail` 注册表，也是 LiteLLM Cloud 和 2026
+  年文档引导运维人员去用的那个。SpendGuard 以 `SpendGuardGuardrail` 落地在这里。单租户安装这就是
+  零 Python 路径：配置全部落在 `proxy_config.yaml` + 环境变量里。
+
+底层两条路径共用同一套 reserve / commit / release 流程（组合，不是重复实现）。新装的话推荐
+guardrail 这一面。
+
+## 安装
+
+```bash
+pip install 'spendguard-sdk[litellm-guardrail]'
+```
+
+正规的 extras 名字是 `litellm-guardrail`（注意是连字符 —— 不是 `litellm-proxy`）。它会 pin
+住 `litellm[proxy]>=1.55.0`，这是 `CustomGuardrail` 注册面第一个稳定的版本。老的 `litellm`
+extra（下限 `>=1.50.0`）没动，所以走 callback 路径的安装不会被强制升级。
+
+## 快速上手
+
+把这段 yaml 塞进你的 `proxy_config.yaml`：
+
+```yaml
+model_list:
+  - model_name: gpt-4o-mini
+    litellm_params:
+      model: openai/gpt-4o-mini
+      api_key: os.environ/OPENAI_API_KEY
+
+guardrails:
+  - guardrail_name: spendguard
+    litellm_params:
+      guardrail: spendguard.integrations.litellm_guardrail.spendguard_guardrail_factory
+      mode: pre_call
+      default_on: true
+
+litellm_settings:
+  drop_params: true
+
+general_settings:
+  master_key: os.environ/LITELLM_MASTER_KEY
+```
+
+然后导出两个必填环境变量，启动 proxy：
+
+```bash
+export SPENDGUARD_TENANT_ID="<your-tenant-uuid>"
+export SPENDGUARD_SIDECAR_ADDRESS="unix:///var/run/spendguard/adapter.sock"
+litellm --config proxy_config.yaml
+```
+
+单租户安装到此为止。factory 在 proxy 启动时读取 `SPENDGUARD_*` 环境变量，构建 resolver +
+estimator + reconciler 三件套，并把 `SpendGuardGuardrail` 注册到 `model_list` 里的每一个
+模型上。
+
+### 关于那个点分模块路径
+
+`guardrail:` 的值必须从头到尾都用点 ——
+`spendguard.integrations.litellm_guardrail.spendguard_guardrail_factory` ——
+**不能**用 `module:function` 那种冒号写法。LiteLLM 的 `get_instance_fn` 只认点分这一种形态：
+它按最后一个 `.` 切开，拿到 attribute + 模块路径。冒号写法（Python entry point 里常见的那种）
+会静默解析失败。
+
+## 配置
+
+### 环境变量
+
+factory 读 9 个环境变量。前两个每次安装都必填；其余的用来 gate 可选行为以及多租户 resolver 路径。
+
+<table>
+  <thead>
+    <tr><th>Var</th><th>Required</th><th>Default</th><th>Description</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>SPENDGUARD_TENANT_ID</code></td><td>YES</td><td>—</td><td>sidecar 把预留绑到哪个租户标识上。</td></tr>
+    <tr><td><code>SPENDGUARD_SIDECAR_ADDRESS</code></td><td>YES</td><td>—</td><td>sidecar 端点。UDS 用 <code>unix:///path/to.sock</code>（pod 内推荐），TCP 用 <code>http(s)://host:port</code>。</td></tr>
+    <tr><td><code>SPENDGUARD_API_KEY</code></td><td>NO</td><td>—</td><td>sidecar 启用鉴权时的 API key。纯 UDS 安装可省略。</td></tr>
+    <tr><td><code>SPENDGUARD_DISABLED</code></td><td>NO</td><td><code>false</code></td><td>设成 <code>true</code>/<code>1</code>/<code>yes</code> 让 guardrail 短路成 no-op。在没部署 sidecar 的 CI 里很有用。</td></tr>
+    <tr><td><code>SPENDGUARD_PROXY_TIMEOUT_MS</code></td><td>NO</td><td><code>5000</code></td><td>每次调用 sidecar 的超时，单位毫秒。</td></tr>
+    <tr><td><code>SPENDGUARD_RESOLVER_MODULE</code></td><td>NO</td><td>—</td><td><code>pkg.mod:fn</code> 或 <code>pkg.mod.fn</code> 点分路径，返回一个 <code>(resolver, reconciler_or_None, factory)</code> 三元组。任何非单租户部署都必填。</td></tr>
+    <tr><td><code>SPENDGUARD_BUDGET_ID</code></td><td>NO&#42;</td><td>—</td><td>&#42;当 <code>SPENDGUARD_RESOLVER_MODULE</code> 未设时必填。单租户绑定：budget UUID。</td></tr>
+    <tr><td><code>SPENDGUARD_WINDOW_INSTANCE_ID</code></td><td>NO&#42;</td><td>—</td><td>&#42;当 <code>SPENDGUARD_RESOLVER_MODULE</code> 未设时必填。单租户绑定：window instance UUID。</td></tr>
+    <tr><td><code>SPENDGUARD_UNIT_ID</code></td><td>NO&#42;</td><td>—</td><td>&#42;当 <code>SPENDGUARD_RESOLVER_MODULE</code> 未设时必填。单租户绑定：unit UUID。</td></tr>
+  </tbody>
+</table>
+
+### yaml 内联配置
+
+每个环境变量都有 `litellm_params:` 下的内联等价项。内联 key 覆盖环境变量。内联这一面是环境变量的
+超集：它多了 4 个 pricing-version key，把价格快照 pin 到某个已知 release（否则 factory 会退回
+到 sidecar 当前的快照）。
+
+<table>
+  <thead>
+    <tr><th>Inline key</th><th>Env var equivalent</th><th>Notes</th></tr>
+  </thead>
+  <tbody>
+    <tr><td><code>tenant_id</code></td><td><code>SPENDGUARD_TENANT_ID</code></td><td>—</td></tr>
+    <tr><td><code>sidecar_address</code></td><td><code>SPENDGUARD_SIDECAR_ADDRESS</code></td><td>—</td></tr>
+    <tr><td><code>api_key</code></td><td><code>SPENDGUARD_API_KEY</code></td><td>—</td></tr>
+    <tr><td><code>disabled</code></td><td><code>SPENDGUARD_DISABLED</code></td><td>布尔；yaml 的 <code>true</code>/<code>false</code> 都接受。</td></tr>
+    <tr><td><code>proxy_timeout_ms</code></td><td><code>SPENDGUARD_PROXY_TIMEOUT_MS</code></td><td>整数。</td></tr>
+    <tr><td><code>resolver_module</code></td><td><code>SPENDGUARD_RESOLVER_MODULE</code></td><td>—</td></tr>
+    <tr><td><code>budget_id</code></td><td><code>SPENDGUARD_BUDGET_ID</code></td><td>仅单租户绑定。</td></tr>
+    <tr><td><code>window_instance_id</code></td><td><code>SPENDGUARD_WINDOW_INSTANCE_ID</code></td><td>仅单租户绑定。</td></tr>
+    <tr><td><code>unit_id</code></td><td><code>SPENDGUARD_UNIT_ID</code></td><td>仅单租户绑定。</td></tr>
+    <tr><td><code>pricing_version</code></td><td>(none)</td><td>把价格快照 pin 到某个 release tag。</td></tr>
+    <tr><td><code>fx_rate_version</code></td><td>(none)</td><td>把 FX 汇率快照 pin 到某个 release tag。</td></tr>
+    <tr><td><code>unit_conversion_version</code></td><td>(none)</td><td>把单位换算快照 pin 到某个 tag。</td></tr>
+    <tr><td><code>price_snapshot_hash_hex</code></td><td>(none)</td><td>64 个 hex 字符（32 字节）—— 内容寻址的快照 hash。</td></tr>
+  </tbody>
+</table>
+
+### 优先级
+
+解析顺序，优先级从高到低：
+
+1. **内联 yaml `litellm_params:`** 在某个 key 被设成非空值时，压过环境变量。
+2. **`SPENDGUARD_*` 环境变量** 填补内联留下的空缺。
+3. **`SPENDGUARD_RESOLVER_MODULE`**（环境变量或内联）整个覆盖单租户绑定。一旦设了它，
+   `SPENDGUARD_BUDGET_ID` / `WINDOW_INSTANCE_ID` / `UNIT_ID` 这几个变量就不再读取 ——
+   你的 resolver 函数按每个请求返回它想要的任意绑定形态。
+
+## 限制
+
+**SpendGuard 的 LiteLLM guardrail 集成只做 INV-5 流末 commit。** 也就是说 gate 跑在 pre-call
+时刻，对账跑在流末 —— 没有逐 token 在传输途中触发的 cap。
+
+把它摆在长流式响应前面、上线之前，有几件重要的事要知道：
+
+- **流式响应上没有逐 token cap。** SpendGuard 在 pre-call 时刻预留预测出来的预算。commit 发生在
+  流末，对的是真实的 `response.usage.completion_tokens`（或者 provider 归一化后的等价字段）。
+  proxy 绝不会为了停掉 token 发射而把传输途中的流拆掉。
+- **超额只记录，不拦截。** 如果一个流在途中超出预留预算，请求**不会**被中途掐断。超额的部分
+  落进签名审计链，并在 commit 时刻反映到租户的运行余额上，但那些 token 早就发给调用方了。
+- **没有 #8842 闭环。** LiteLLM 上游 issue #8842（途中由 guardrail 驱动的取消）是另一条独立的
+  workstream。今天这个 guardrail 面暴露的是一个 `pre_call` gate，加上
+  `async_post_call_success_hook` / `async_post_call_failure_hook` 这两个流末 finalizer ——
+  没有 `during_stream` 这种 cap 点。
+
+**要硬性的逐 token cap，请用 egress proxy 集成**（见 [Drop-in: LiteLLM proxy mode](../drop-in/litellm/)，
+它走 Envoy ExtProc gate）。egress 路径能直接拒掉上游 HTTP 请求，也能把流从途中切断；guardrail
+路径做不到。
+
+## Demo
+
+打包的 docker-compose demo 会拿一个真实的 LiteLLM proxy + sidecar + 计数 provider stub，端到端
+证明完整的 ALLOW + DENY + STREAM 矩阵：
+
+```bash
+make demo-up DEMO_MODE=litellm_guardrail
+```
+
+这个模式会拉起 `postgres + sidecar + litellm-guardrail-proxy + counting-stub`，然后发三次调用：
+
+- **ALLOW** —— 预算内的小消息 → HTTP 200，stub 计数器 +1，sidecar 里存在一条预留记录，
+  `decision_context.mode = 'proxy'`。
+- **DENY** —— `spendguard_estimate_override=2000000000` 撞穿种子里的 1B 硬上限 → HTTP 4xx，
+  **stub 计数器不变**（证明 gate 在上游调用之前就触发了）。
+- **STREAM** —— 预算内的 `stream=True` → HTTP 200，stub 计数器 +1，流末 commit 记录对账真实的
+  `completion_tokens`。
+
+跑干净时的成功行：
+
+```
+[demo] litellm_guardrail ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+完整细节和 verify-SQL gate 在
+[`deploy/demo/litellm_guardrail/README.md`](https://github.com/m24927605/agentic-spendguard/blob/main/deploy/demo/litellm_guardrail/README.md)。
+
+## 故障排查
+
+常见的启动期和首次调用错误。所有 `SpendGuardConfigError` 消息都会点名出问题的变量，方便你 grep
+proxy 日志。
+
+- **`SpendGuardConfigError: missing env var SPENDGUARD_TENANT_ID`** ——
+  在 proxy 环境里设 `SPENDGUARD_TENANT_ID`，或者在 `spendguard` guardrail 条目的
+  `litellm_params:` 下内联加一个 `tenant_id:`。
+
+- **`SpendGuardConfigError: missing env var SPENDGUARD_SIDECAR_ADDRESS`** ——
+  把 `SPENDGUARD_SIDECAR_ADDRESS` 设成能解析到 sidecar 的 `unix:///path/to.sock`（UDS，推荐）
+  或 `http(s)://host:port`（TCP）端点。内联同样的修法是 `sidecar_address:`。
+
+- **`SpendGuardConfigError: budget_resolver returned None`** —— 要么把
+  `SPENDGUARD_RESOLVER_MODULE` 设成一个返回三元组 `(resolver, reconciler_or_None, factory)`
+  的合法 Python 路径，**要么**把单租户绑定配齐（`SPENDGUARD_BUDGET_ID` +
+  `SPENDGUARD_WINDOW_INSTANCE_ID` + `SPENDGUARD_UNIT_ID`）。两种分派形态都没配全时，factory
+  在启动时 fail closed。
+
+- **`SpendGuardConfigError: could not import resolver module 'pkg.mod:fn'`** ——
+  反复核对点分隔符：LiteLLM 的 `get_instance_fn` 不接受冒号。把 `pkg.mod:fn` 改成 `pkg.mod.fn`。
+  同时确认模块在 proxy 的 `PYTHONPATH` 上 —— 一个常见的坑是把 resolver 模块塞进了运维镜像，
+  却忘了 `pip install -e .`。
+
+- **`ModuleNotFoundError: No module named 'spendguard.integrations.litellm_guardrail'`** ——
+  你装了基础 SDK 但没带 guardrail extras。跑
+  `pip install 'spendguard-sdk[litellm-guardrail]'`（注意正规的 extras 名字；`litellm-proxy`
+  不是真的 extra，装了等于什么都没装）。
+
+- **`ImportError: spendguard.integrations.litellm_guardrail requires LiteLLM with guardrail support`** ——
+  你的 `litellm[proxy]` 比 1.55 老。用 `pip install 'litellm[proxy]>=1.55.0'` 升级，或者重装
+  那个 pin 住下限的 guardrail extras。
+
+## 相关
+
+- [Quickstart](../../quickstart/) —— 5 分钟拉起完整的 SpendGuard 栈
+- [Contract YAML reference](../../contracts/yaml/) —— 编写 allow/stop 规则
+- [Drop-in: LiteLLM proxy mode](../../drop-in/litellm/) —— 走 egress 路径的逐 token cap 替代方案
+- 其它 adapter 集成：[Pydantic-AI](../pydantic-ai/) · [LangChain & LangGraph](../langchain/) · [OpenAI Agents SDK](../openai-agents/) · [Microsoft AGT](../agt/)

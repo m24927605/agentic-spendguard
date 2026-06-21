@@ -1,0 +1,210 @@
+---
+title: "Mastra Processor(硬性预算闸门)"
+description: >-
+  通过 @spendguard/mastra 的 SpendGuardProcessor 为 Mastra Agent 提供硬性、
+  fail-closed、dispatch 前的预算管控 —— 覆盖 model-router 字符串和显式的
+  AI SDK 实例,在 agent-step processor 边界生效,背后是 SpendGuard sidecar、
+  Postgres ledger 和签名 audit chain。
+---
+
+> **Fail-closed,dispatch 前生效。**`SpendGuardProcessor` 在 provider 调用离开
+> 进程之前,就先对持久化的 SpendGuard ledger 做预算 reserve。sidecar 返回 DENY ——
+> 或者 sidecar 根本不可达 —— 都会让这个 agent step 带着 typed error 终止。没有
+> fail-open 开关,也没有 env 逃生口。
+
+[Mastra](https://mastra.ai) 自 v0.14.0 起接管了自己的 agent loop ——
+`@mastra/core` 不再调用 `ai` 里的 `generateText` / `streamText`。它招牌的
+model-router 字符串语法(`model: "openai/gpt-4o"`,支持 40+ provider)在内部完成
+模型解析,**完全没有给 `wrapLanguageModel` 留注入点**,所以
+[Vercel AI SDK middleware](/docs/integrations/vercel-ai/)(D06)够不到那条路径。
+`@spendguard/mastra` 在上一层做闸门:Mastra 的
+[`Processor` interface](https://mastra.ai/reference/processors/processor-interface)
+会在每个 agent step 前后跑 lifecycle hook —— 包括 tool-call 续接 —— 跟模型从哪来无关。
+D06 管的是一个*模型实例*;这个 adapter 管的是一个 *agent step*。
+
+每个 step:
+
+1. `processInputStep` → **RESERVE**(`LLM_CALL_PRE`)—— DENY / STOP /
+   approval-required / sidecar 不可达全部 throw;provider 调用根本不会发出。
+2. `processLLMResponse` → **SUCCESS commit**,带上 provider usage 实际值(只要它
+   暴露出来,commit 就结算到 usage 之和;usage 缺失时结算到 reserve 时的估算值)。
+   commit 永远和 reservation tuple 对得上 —— 同一个 unit、同一份 pricing freeze。
+3. `processOutputStep` → backstop commit(每个 reservation 最多一次 commit);
+   provider error 走 FAILURE commit 结算。
+4. 崩溃 / 硬 abort 且没有任何 hook 触发 → 由 sidecar TTL sweep 来结算这条悬空的
+   reservation。
+
+流式是整个 step 打包处理:第一个 chunk 之前 reserve 一次,stream 跑完之后 commit
+一次。没有 per-chunk 闸门。
+
+## 与 Mastra 自带 `CostGuardProcessor` 的定位对比
+
+只做事实对比,数据来源是上游自己的文档:
+
+| 维度 | Mastra `CostGuardProcessor`(按它自己的文档) | `@spendguard/mastra` 的 `SpendGuardProcessor` |
+|---|---|---|
+| 管控时机 | 在观测到成本数据之后;成本**异步**持久化 | **dispatch 前**:在 provider 调用离开进程之前就 reserve 预算 |
+| 上限语义 | "把 `maxCost` 当成 best-effort 阈值,不是硬上限" | 硬上限:对持久化 ledger 做 reservation;DENY 直接中止该 step |
+| 失败姿态 | context 缺失 / 查询失败时 **fail-open** | **Fail-closed**:sidecar 不可达或 DENY ⇒ step 带着 typed error abort |
+| 后端存储 | 需要 OLAP 可观测性存储(DuckDB/ClickHouse;metrics 不支持 Postgres) | SpendGuard sidecar + Postgres ledger + 签名 audit chain(其它每个 SpendGuard adapter 都已经在用) |
+| 作用范围 | run / resource / thread,block 或 warn | 通过 SpendGuard contract DSL 作用于 tenant / budget / window;预算跨 Python、LangChain、proxy、gateway 各 adapter 共享 |
+| 跨 runtime 预算 | 仅限 Mastra | 同一个 `budget_id` 在每个 SpendGuard 集成里统一管控 |
+
+两者互补:`CostGuardProcessor` 仍然是一层不错的软告警 UX;
+`SpendGuardProcessor` 才是硬管控层。
+
+## 安装
+
+<div is:raw>
+
+```bash
+pnpm add @spendguard/sdk @spendguard/mastra @mastra/core
+```
+
+</div>
+
+`@spendguard/sdk` 和 `@mastra/core`(`>=1.0.0 <2`)是 peer dependency。Node
+`>=22.13.0`(Mastra 1.x 的下限)。仅 ESM。
+
+## 快速上手
+
+通过 Agent 的 `inputProcessors` 列表挂载(这是安装的 `@mastra/core` 1.x 的挂载
+key —— 它同时驱动 reserve 和 SUCCESS commit)。把**同一个实例**也挂到
+`outputProcessors` 上:这样才能为流式 step 的排序装上 backstop commit 兜底。
+
+<div is:raw>
+
+```ts
+import { Agent } from "@mastra/core/agent";
+import { SpendGuardClient } from "@spendguard/sdk";
+import { SpendGuardProcessor } from "@spendguard/mastra";
+
+const client = new SpendGuardClient({
+  socketPath: "/var/run/spendguard/adapter.sock",
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  runtimeKind: "mastra-js",
+});
+await client.connect();
+await client.handshake();
+
+const guard = new SpendGuardProcessor({
+  client,
+  tenantId: "00000000-0000-4000-8000-000000000001",
+  budgetId: "44444444-4444-4444-8444-444444444444",
+  // Ledger-backed reserves MUST set the ledger unit-row UUID:
+  unitId: process.env.SPENDGUARD_UNIT_ID,
+});
+
+const agent = new Agent({
+  id: "guarded-agent",
+  name: "guarded-agent",
+  instructions: "You are a budget-guarded assistant.",
+  model: "openai/gpt-4o-mini", // router string — no wrapLanguageModel needed
+  inputProcessors: [guard],
+  outputProcessors: [guard], // same instance: arms the backstop commit
+});
+
+const result = await agent.generate("hello mastra");
+console.log(result.text);
+```
+
+</div>
+
+显式的 AI SDK 模型实例(`model: openai("gpt-4o-mini")`)挂载方式完全一样 ——
+processor 边界跟模型来源无关。
+
+### Pricing freeze(生产环境 sidecar)
+
+生产环境 sidecar 会给每条 reservation 盖上当前加载 bundle 的 pricing freeze,并
+**拒绝**那些重复带空 tuple 的 commit(`pricing freeze mismatch`)。把 freeze 通过
+`pricing` 选项传进去 —— demo 里是按标准 env 约定取的:
+
+<div is:raw>
+
+```ts
+const guarded = new SpendGuardProcessor({
+  client,
+  tenantId,
+  pricing: {
+    pricingVersion: process.env.SPENDGUARD_PRICING_VERSION ?? "",
+    pricingHash: Uint8Array.from(
+      Buffer.from(process.env.SPENDGUARD_PRICE_SNAPSHOT_HASH_HEX ?? "", "hex"),
+    ),
+    fxRateVersion: process.env.SPENDGUARD_FX_RATE_VERSION ?? "",
+    unitConversionVersion: process.env.SPENDGUARD_UNIT_CONVERSION_VERSION ?? "",
+  },
+});
+```
+
+</div>
+
+只有面对 recipe 式 / 无 bundle 的 sidecar 时才省略 `pricing`(这时 reserve 也跟着
+带空 tuple)。自定义 `claimEstimator` 会整个替换掉默认的 claim projection ——
+它产出的 claim 会原样转发到 `ReserveRequest.projectedClaims` 上,而这也是唯一携带
+`windowInstanceId` 的位置;commit 路径复用 reserve 时的 unit,所以 estimator 提供的
+`unit` / `unitId` 会全程一路沿用、端到端生效。
+
+### 捕获 denial
+
+processor 会从 reserve hook 里抛出 `@spendguard/sdk` 的 typed error。Mastra
+1.41.0 会在它内部的 workflow engine 里把 processor error 序列化掉,所以**消费侧的
+catch 契约是两层的**([gh #181](https://github.com/m24927605/agentic-spendguard/issues/181)):
+
+- **Agent 边界**(`agent.generate()` 的 rejection):typed error 的 *message*
+  被保留,但 class 实例没了 —— 要按 message 匹配,例如
+  `/sidecar (DENY|STOP|SKIP|REQUIRE_APPROVAL)/`。
+- **Hook 边界**(同一条 pipeline 里你自己的 processor):`instanceof DecisionDenied`
+  成立,能 catch 住所有 denial 变体(`DecisionStopped`、`ApprovalRequired` 都是其子类)。
+
+## 已知限制
+
+> **辅助 LLM 调用** —— Mastra memory 标题生成、`ModerationProcessor` 的分类器调用、
+> scorer。**不在** v1 范围内。这是已记录的已知限制;变通办法:用 D06 的
+> `wrapLanguageModel`(即 [Vercel AI SDK middleware](/docs/integrations/vercel-ai/))
+> 显式包住那些模型。这些调用走的是 agent-step processor pipeline 之外的模型,**不会**
+> 被 `SpendGuardProcessor` 管控。
+
+- **Router 字符串解析到的是 OpenAI Responses API**(已对着 `@mastra/core` 1.41.0
+  验证):router 路径确实尊重 `OPENAI_BASE_URL`,但解析出来的模型走的是
+  `POST /v1/responses`。如果你的 gateway/stub 只服务 `/v1/chat/completions`,就给
+  Agent 一个显式的 AI SDK 实例 —— 两条路径上的管控是完全一样的。
+- **`withMastra()`(plain-AI-SDK 挂载)在 v1 里不支持** —— 它是随独立的
+  `@mastra/ai-sdk` 包发的,在这个 adapter 的 peer set 之外。请用 Mastra `Agent`,
+  或者用 D06 来管控 plain AI SDK 调用。
+- **Mastra `Workflow` step 闸门**和 **tool-call PRE 闸门**是 v2 候选;
+  `processInputStep` 已经能在每次 tool 结果之后管控那次 LLM 调用了。
+- 流式是整个 step 打包处理 —— per-chunk 闸门明确不在范围内。
+
+## 跑 demo
+
+<div is:raw>
+
+```bash
+make demo-up DEMO_MODE=mastra_processor
+make -C deploy/demo demo-verify-mastra-processor
+```
+
+</div>
+
+会拉起 postgres + sidecar + counting-stub 以及一个真实的 `@mastra/core` Agent
+runner([`examples/mastra-processor/`](https://github.com/m24927605/agentic-spendguard/tree/main/examples/mastra-processor)),
+端到端证明 ALLOW + DENY + STREAM —— DENY 那一步会显示 provider stub 的命中计数器
+**没有**动过,这就是现场跑出来的 fail-closed 实证:
+
+<div is:raw>
+
+```text
+[demo] mastra_processor ALL 3 steps PASS (ALLOW + DENY + STREAM)
+```
+
+</div>
+
+随后硬性 SQL 闸门(`COV_D38_GATE`)会断言 reserve/commit/deny 行、严格的
+reserve-before-outcome 排序,以及真实 ledger 里的 audit-chain 闭合。
+
+## 链接
+
+- npm:[`@spendguard/mastra`](https://www.npmjs.com/package/@spendguard/mastra)
+- 锁定的 spec 集合:[`docs/specs/coverage/D38_mastra/`](https://github.com/m24927605/agentic-spendguard/tree/main/docs/specs/coverage/D38_mastra)
+- 姊妹 adapter:[Vercel AI SDK middleware](/docs/integrations/vercel-ai/)
+  —— 显式的 AI SDK 模型实例(AI SDK v4 线)
