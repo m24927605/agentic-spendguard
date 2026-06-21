@@ -2,6 +2,8 @@
 
 # 🛡️ Agentic SpendGuard
 
+**English** · [繁體中文](README.zh-TW.md) · [简体中文](README.zh-CN.md)
+
 **The spend firewall for LLM agents.**
 
 Reserve budget *before* the provider is called — refuse the call the moment the
