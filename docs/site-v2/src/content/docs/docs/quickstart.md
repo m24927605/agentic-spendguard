@@ -18,8 +18,8 @@ From `git clone` to a green DENY demo in ≈5 minutes.
 ## 1. Clone and bring up the stack
 
 ```bash
-git clone https://github.com/m24927605/agentic-flow-cost-evaluation
-cd agentic-flow-cost-evaluation/deploy/demo
+git clone https://github.com/m24927605/agentic-spendguard
+cd agentic-spendguard/deploy/demo
 
 docker compose down -v --remove-orphans   # clean state
 DEMO_MODE=deny make demo-up

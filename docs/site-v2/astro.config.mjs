@@ -20,6 +20,17 @@ export default defineConfig({
         },
       ],
       customCss: ['./src/styles/global.css'],
+      // i18n: English is the root (un-prefixed) locale; Traditional/Simplified
+      // Chinese serve under /zh-tw/* and /zh-cn/*. Starlight ships UI strings
+      // for both zh-TW and zh-CN, and falls back to English for any page not
+      // yet translated under src/content/docs/<locale>/. The custom landing
+      // (src/pages/index.astro) is English-only and outside this routing.
+      defaultLocale: 'root',
+      locales: {
+        root: { label: 'English', lang: 'en' },
+        'zh-tw': { label: '繁體中文', lang: 'zh-TW' },
+        'zh-cn': { label: '简体中文', lang: 'zh-CN' },
+      },
       // Docs surface lives entirely under /docs/*. The root `/` route is
       // owned by src/pages/index.astro (custom landing, no Starlight chrome).
       sidebar: [
