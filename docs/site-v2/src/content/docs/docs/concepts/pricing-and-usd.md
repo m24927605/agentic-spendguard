@@ -23,5 +23,5 @@ The flow:
 The `multi_provider_usd` demo mode shows this end-to-end with real
 OpenAI + Anthropic in the same session against a shared USD budget.
 
-See [pricing.py](https://github.com/m24927605/agentic-flow-cost-evaluation/blob/main/sdk/python/src/spendguard/pricing.py)
+See [pricing.py](https://github.com/m24927605/agentic-spendguard/blob/main/sdk/python/src/spendguard/pricing.py)
 for the helper that does the conversion.

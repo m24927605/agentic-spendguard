@@ -2,7 +2,7 @@
 title: "Ledger schema"
 ---
 
-Migrations live in [services/ledger/migrations/](https://github.com/m24927605/agentic-flow-cost-evaluation/tree/main/services/ledger/migrations).
+Migrations live in [services/ledger/migrations/](https://github.com/m24927605/agentic-spendguard/tree/main/services/ledger/migrations).
 
 | Migration | Purpose |
 |---|---|

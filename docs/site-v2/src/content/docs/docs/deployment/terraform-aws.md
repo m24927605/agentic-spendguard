@@ -21,4 +21,4 @@ Provisions VPC + EKS + RDS Postgres + Secrets Manager + S3 bundle
 bucket + IRSA policy.
 
 Cost estimates and POC limits in
-[terraform/aws/README.md](https://github.com/m24927605/agentic-flow-cost-evaluation/blob/main/terraform/aws/README.md).
+[terraform/aws/README.md](https://github.com/m24927605/agentic-spendguard/blob/main/terraform/aws/README.md).

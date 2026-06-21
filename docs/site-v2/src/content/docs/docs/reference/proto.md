@@ -3,7 +3,7 @@ title: "Wire protocol (proto)"
 ---
 
 Sidecar ↔ ledger ↔ canonical ingest gRPC contracts live under
-[proto/spendguard/](https://github.com/m24927605/agentic-flow-cost-evaluation/tree/main/proto/spendguard):
+[proto/spendguard/](https://github.com/m24927605/agentic-spendguard/tree/main/proto/spendguard):
 
 - `common/v1/common.proto` — shared types (BudgetClaim, CloudEvent,
   Idempotency, Fencing, Replay, Error, etc.)
