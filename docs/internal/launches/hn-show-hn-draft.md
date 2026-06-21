@@ -11,6 +11,8 @@ Per `docs/internal/marketing/seo-plan.md` §1 Lever 4 sequencing: dev.to / Mediu
 
 > **Positioning v2 (post-egress-proxy, 2026-05-17)**: lead with the **1-env-var auto-instrument claim** (`OPENAI_BASE_URL=...`, no SDK install, no code change). That's the Helicone-class onboarding bar, but with fail-closed enforcement, KMS-signed audit chain, and operator-approval workflow underneath. The previous "enterprise infra differentiation" lead (Stripe auth/capture / multi-tenant / L0-L3) becomes the SECOND-HALF differentiator vs Helicone / Portkey / LiteLLM (who all proxy your traffic but make decisions post-hoc). Drop "pre-call budget caps" framing (AgentGuard owns that wedge) AND drop sidecar-UDS-first framing (that's wrapper-mode, not the launch path).
 
+> **Positioning v3 (2026-06-21, post-benchmark + `make try`)**: there's now a stronger opener than any positioning *claim* — a one-command **proof**. `git clone … && make try` runs the reproducible runaway-loop benchmark (no API key, mock LLM) and shows SpendGuard stop a runaway loop *pre-call* at **$0.90** while `agent-guard` burns **$18** (+1700%) and `agentbudget` overshoots post-call to $1.08. **Lead with the benchmark, not a claim.** Crucially, this *reverses* the v2 decision to cede the "pre-call enforcement" wedge to AgentGuard: the benchmark shows AgentGuard silently **no-ops on a self-hosted base URL** (i.e. the moment you put any gateway in front of your provider), so SpendGuard can re-claim "the only one that actually stops the call before the money's spent" — with a reproducible receipt. Keep the 1-env-var proxy as the "now wire it into your own calls" second beat. (Be scrupulously fair to the other tools — the benchmark README's "honest critiques" section is the credibility anchor when HN scrutinizes the competitor numbers.)
+
 ---
 
 ## Title options (rebrand-safe, ≤80 chars)
@@ -30,12 +32,18 @@ HN truncates titles around 80 characters. Pick one when ready to send.
 ## Body
 
 ```text
-TL;DR — set OPENAI_BASE_URL=http://localhost:9000/v1 and your existing
-agent code (LangChain, openai-agents, Pydantic-AI, raw openai-python —
-any of them) now has a hard-cap budget. The proxy fail-closes STOP
-decisions before the HTTP request reaches OpenAI. Every CONTINUE and
-every STOP is signed and written to an append-only Postgres audit
-chain. No SDK install, no code change.
+TL;DR — `git clone … && make try` runs a reproducible benchmark (Docker
+only, no API key, mock LLM) that shows SpendGuard stop a runaway agent
+loop *before* the money is spent — $0.90 on a $1.00 budget — while two
+other drop-in budget tools overshoot to $1.08 and $18.
+
+To put it in front of your own calls: set
+OPENAI_BASE_URL=http://localhost:9000/v1 and your existing agent code
+(LangChain, openai-agents, Pydantic-AI, raw openai-python — any of them)
+now has a hard-cap budget. The proxy fail-closes STOP decisions before
+the HTTP request reaches OpenAI. Every CONTINUE and every STOP is signed
+and written to an append-only Postgres audit chain. No SDK install, no
+code change.
 
 Why I built it: a Pydantic-AI agent hit a tool error at 3 AM and
 retried the same gpt-4o call ~30 times before anyone noticed. The
@@ -112,10 +120,11 @@ What it isn't:
 - v0.1 proxy is OpenAI Chat Completions only and non-streaming.
   SSE pass-through is v0.2; Anthropic + Bedrock adapters after that.
 
-Tech stack: Rust 1.91 sidecar + axum egress proxy, Postgres 15
+Tech stack: Rust 1.91 sidecar + axum egress proxy, Postgres 16
 ledger with append-only audit_outbox and DB-enforced immutability
 triggers, mTLS gRPC between every service, signed CloudEvents,
-Python SDK on PyPI for the wrapper-mode path.
+Python SDK on PyPI + a published npm adapter family for the
+wrapper-mode path.
 
 Repo:       https://github.com/m24927605/agentic-spendguard
 Docs:       https://agenticspendguard.dev/
