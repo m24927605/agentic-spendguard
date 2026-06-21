@@ -52,9 +52,23 @@ atomic, fail-closed.
 
 ## 🚀 Quick start
 
+### 1. See it stop a runaway loop — 30 s, no API key
+
 ```bash
 git clone https://github.com/m24927605/agentic-spendguard.git
 cd agentic-spendguard
+make try          # Docker only — no OpenAI key, no real spend
+```
+
+`make try` runs the [runaway-loop benchmark](#-benchmark): an agent tries 100
+calls against a $1.00 budget, head-to-head with two other budget tools, against
+a **mock** LLM (so no provider key and nothing real is spent). You'll watch
+SpendGuard stop *pre-call* at **$0.90** while `agent-guard` runs the loop all the
+way to **$18** — 20× over budget — without noticing.
+
+### 2. Put it in front of your own `gpt-4o` calls
+
+```bash
 export OPENAI_API_KEY=sk-...
 make demo-up DEMO_MODE=proxy
 ```
@@ -80,8 +94,12 @@ client.chat.completions.create(model="gpt-4o-mini", messages=[...])
 ## 📊 Benchmark
 
 Identical fixture — 100 attempted calls, $1.00 budget, $0.18/call — through
-three drop-in budget tools, measured against a ground-truth pricing table
-(`make benchmark`):
+three drop-in budget tools, measured against a ground-truth pricing table:
+
+<p align="center">
+  <img src="docs/assets/runaway-loop-benchmark.svg" width="800"
+       alt="Runaway-loop benchmark output: agentbudget overshoots to $1.08, agent-guard runs all 100 calls to $18.00 (+1700%) and self-reports $0 spent, SpendGuard stops pre-call at $0.90 — under budget.">
+</p>
 
 | Runner | Wire calls | $ spent | Overshoot |
 |---|---:|---:|---:|
@@ -90,8 +108,9 @@ three drop-in budget tools, measured against a ground-truth pricing table
 | `agent-guard` | 100 | $18.00 | **+1700%** ❌ (no-ops on a self-hosted base URL) |
 
 SpendGuard does **pre-call reservation** against the ledger and refuses call #6
-before it leaves the runner. Reproducible in
-[`benchmarks/runaway-loop/`](benchmarks/runaway-loop/).
+before it leaves the runner — the only one of the three that never overspends.
+Run it yourself: **`make try`** (or `make benchmark` in
+[`benchmarks/runaway-loop/`](benchmarks/runaway-loop/)).
 
 ## 🛡️ How it works
 

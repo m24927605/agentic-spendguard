@@ -3,12 +3,13 @@
 # Most heavy lifting lives in subproject Makefiles; this file is the
 # operator's entry point for the demo bring-up flow.
 
-.PHONY: demo-up demo-down demo-logs demo-clean demo-build help \
+.PHONY: try bench demo-up demo-down demo-logs demo-clean demo-build help \
         demo-verify-ag-ui-events demo-verify-mastra-processor \
         sdk-ts-proto sdk-ts-proto-check sdk-ts-dist sdk-ts-dist-check
 
 help:
 	@echo "Targets:"
+	@echo "  make try               Try it in ~30s — runaway-loop benchmark (Docker only, no API key)"
 	@echo "  make demo-up           Bring up the full E2E demo + run the demo container"
 	@echo "  make demo-down         Stop containers and remove named volumes"
 	@echo "  make demo-logs         Tail logs from all demo services"
@@ -22,6 +23,13 @@ help:
 
 demo-up demo-down demo-logs demo-clean demo-build demo-verify-ag-ui-events demo-verify-mastra-processor:
 	$(MAKE) -C deploy/demo $@
+
+# One-command "try it" (the README's front door): the runaway-loop benchmark.
+# Docker only — no OpenAI key, no real spend (mock LLM). Builds the runners then
+# shows SpendGuard's pre-call reservation stop a runaway agent loop head-to-head
+# against agentbudget + agent-guard. `bench` is an alias.
+try bench:
+	$(MAKE) -C benchmarks/runaway-loop benchmark
 
 # Mirrors `make -C sdk/python proto`. Delegates to pnpm so the codegen script
 # is the single source of truth (see sdk/typescript/scripts/proto.ts).
