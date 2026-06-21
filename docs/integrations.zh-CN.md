@@ -1,40 +1,40 @@
 # Integrations
 
-**English** · [繁體中文](integrations.zh-TW.md) · [简体中文](integrations.zh-CN.md)
+[English](integrations.md) · [繁體中文](integrations.zh-TW.md) · **简体中文**
 
-SpendGuard gates LLM spend across two integration styles:
+SpendGuard 通过两种集成方式管控 LLM 开销:
 
-- **Pattern 1 — drop-in proxy (no code change):** point any OpenAI-compatible
-  client at the SpendGuard egress proxy with one env var. Covers Chat
-  Completions and the Responses API.
-- **Pattern 2 — SDK / framework adapter:** wrap the model object in your
-  framework for approval workflows, model degradation, multi-budget claims,
-  and per-call gating.
+- **方式 1 —— drop-in proxy(不用改 code):** 用一个环境变量,把任何 OpenAI 兼容的
+  client 指到 SpendGuard 的 egress proxy。覆盖 Chat Completions 和 Responses API。
+- **方式 2 —— SDK / framework adapter:** 在你的框架里把 model 对象包一层,支持
+  approval 流程、model 降级、多预算 claim,以及逐次调用的把关。
 
-See the [Architecture](../ARCHITECTURE.md) for how a request flows through the
-proxy, sidecar, and ledger.
+request 怎么流过 proxy、sidecar、ledger,看 [架构](../ARCHITECTURE.md)。
 
 ---
 
-## Verified one-env-var clients
+## 已验证的 one-env-var client
 
-The 1-env-var claim is verified end-to-end against real providers for:
+“一个环境变量”这个说法,以下这些是对真实 provider 端到端验证过的:
 
-| Client | Status | What you change |
+| Client | 状态 | 你要改的东西 |
 |---|:---:|---|
 | 🐍 `openai-python` (`from openai import OpenAI`) | ✅ | `base_url=...` |
 | 🦜 LangChain `ChatOpenAI` | ✅ | `base_url=...` |
-| 🕸️ LangGraph (via `ChatOpenAI`) | ✅ | `base_url=...` |
-| 🤖 openai-agents shorthand `Agent(model="...")` | ✅ | `OPENAI_BASE_URL=...` |
-| 🌊 Streaming (`stream:true`) on both endpoints | ✅ | (transparent) |
-
+| 🕸️ LangGraph(通过 `ChatOpenAI`) | ✅ | `base_url=...` |
+| 🤖 openai-agents 简写 `Agent(model="...")` | ✅ | `OPENAI_BASE_URL=...` |
+| 🌊 两个 endpoint 上的 Streaming(`stream:true`) | ✅ | (透明,无需改动) |
 
 ---
 
-## Framework & gateway adapters
+## 框架与 gateway adapter
 
-Each adapter gates every model call at the framework boundary and is proven by
-a `DEMO_MODE` gate (see [Demo modes](#demo-modes) below).
+每个 adapter 都在框架边界把每一次 model 调用管住,而且都有一个 `DEMO_MODE` 关卡
+佐证(见下方 [Demo 模式](#demo-模式))。
+
+> 下面这张完整对照表 —— 每个 adapter 的 module、拦截点(what gets gated)、可以运行的
+> example —— **刻意保留英文**:里面全是 code identifier、方法名、版本 pin、`DEVIATION` /
+> `INV` 标签,母语工程师看的就是这些原文。每一行都对应一个 `DEMO_MODE` 关卡。
 
 | Framework | Module | What gets gated | Runnable example |
 |---|---|---|---|
@@ -86,54 +86,54 @@ a `DEMO_MODE` gate (see [Demo modes](#demo-modes) below).
 
 ---
 
-## Demo modes
+## Demo 模式
 
-Every integration ships a runnable demo gate. Bring one up with `make demo-up
-DEMO_MODE=<name>` (run `make demo-down` first to wipe stale volumes):
+每个集成都附一个可以直接运行的 demo 关卡。用 `make demo-up DEMO_MODE=<name>` 把它拉起来
+(先跑 `make demo-down` 清掉旧的 volume):
 
 ```bash
-make demo-up DEMO_MODE=decision               # CONTINUE flow
-make demo-up DEMO_MODE=deny                   # hard-cap → STOP
+make demo-up DEMO_MODE=decision               # CONTINUE 流程
+make demo-up DEMO_MODE=deny                   # hard cap → STOP
 make demo-up DEMO_MODE=approval               # REQUIRE_APPROVAL → resume()
-make demo-up DEMO_MODE=ttl_sweep              # reservation TTL release
-make demo-up DEMO_MODE=agent_real             # real OpenAI via Pydantic-AI
-make demo-up DEMO_MODE=agent_real_anthropic   # real Anthropic
+make demo-up DEMO_MODE=ttl_sweep              # reservation TTL 释放
+make demo-up DEMO_MODE=agent_real             # 通过 Pydantic-AI 打真实 OpenAI
+make demo-up DEMO_MODE=agent_real_anthropic   # 真实 Anthropic
 make demo-up DEMO_MODE=agent_real_langgraph   # LangGraph
-make demo-up DEMO_MODE=agent_real_openai_agents          # OpenAI Agents SDK (wrapper)
-make demo-up DEMO_MODE=agent_real_openai_agents_proxy    # openai-agents via proxy ⭐
-make demo-up DEMO_MODE=agent_real_adk                    # Google ADK (Python) ⭐ D19
-make demo-up DEMO_MODE=agent_real_strands                # AWS Strands (Python) ⭐ D20
-make demo-up DEMO_MODE=agent_real_strands_deny           # AWS Strands DENY proof
-make demo-up DEMO_MODE=agent_real_dspy                   # DSPy (Python) ⭐ D21
-make demo-up DEMO_MODE=agent_real_agno                   # Agno (Python) ⭐ D22
-make demo-up DEMO_MODE=agent_real_beeai                  # BeeAI Framework (Python) ⭐ D23
-make demo-up DEMO_MODE=agent_real_autogen                # AutoGen 0.4+ (Python) ⭐ D24
-make demo-up DEMO_MODE=agent_real_ag2                    # AG2 lineage (same wrapper) ⭐ D24
-make demo-up DEMO_MODE=agent_real_smolagents             # SmolAgents (Python) ⭐ D25
-make demo-up DEMO_MODE=agent_real_letta                  # Letta (Python — library mode) ⭐ D26
-make demo-up DEMO_MODE=agent_real_llamaindex             # LlamaIndex (Python) ⭐ D27
-make demo-up DEMO_MODE=agent_real_llamaindex_stub        # LlamaIndex (Python) — MockLLM CI gate ⭐ D27
-make demo-up DEMO_MODE=agent_real_atomic_agents          # Atomic Agents + Instructor (Python) ⭐ D28
-make demo-up DEMO_MODE=litellm_real           # LiteLLM proxy: ALLOW+DENY+STREAM+MULTI-TEAM ⭐
-make demo-up DEMO_MODE=litellm_deny           # LiteLLM proxy: 3 fail-closed sub-steps
-make demo-up DEMO_MODE=langchain_ts           # LangChain.js: ALLOW+DENY+STREAM
-make demo-up DEMO_MODE=vercel_ai_mastra       # Vercel AI SDK (covers Mastra): ALLOW+DENY+STREAM ⭐
-make demo-up DEMO_MODE=inngest_agent_kit      # Inngest AgentKit: ALLOW+DENY+RETRY_DEDUP ⭐
-make demo-up DEMO_MODE=maf_dotnet_real        # Microsoft Agent Framework .NET: ALLOW+DENY+ALLOW2 ⭐
-make demo-up DEMO_MODE=maf_python_real        # Microsoft Agent Framework Python: ALLOW+DENY+ALLOW2 ⭐
-make demo-up DEMO_MODE=dify_plugin_real       # Dify Model Provider Plugin: ALLOW+DENY+STREAM ⭐
-make demo-up DEMO_MODE=botpress_real          # Botpress Integration SDK: ALLOW+DENY+STREAM ⭐ D32
-make demo-up DEMO_MODE=flowise_real           # Flowise custom node: ALLOW+DENY+STREAM ⭐ D35
-make demo-up DEMO_MODE=langflow_real          # Langflow custom component: ALLOW+DENY+STREAM ⭐ D36
-make demo-up DEMO_MODE=n8n_real               # n8n community node: ALLOW+DENY+STREAM ⭐ D37
-make demo-up DEMO_MODE=coze_studio_real       # Coze Studio (ByteDance, no-code): ALLOW+DENY+STREAM ⭐ D31
-make demo-up DEMO_MODE=anythingllm_real       # AnythingLLM Generic OpenAI provider: ALLOW round-trip ⭐ D33
-make demo-up DEMO_MODE=lobechat_real          # LobeChat OPENAI_PROXY_URL: ALLOW round-trip ⭐ D34
-make demo-up DEMO_MODE=litellm_sdk_real       # LiteLLM SDK shim: ALLOW+STREAM+TRANSITIVE/CrewAI ⭐
-make demo-up DEMO_MODE=litellm_sdk_deny       # LiteLLM SDK shim: 3 fail-closed sub-steps
-make demo-up DEMO_MODE=cursor_mitm_fixture    # Cursor MITM codec fixture replay (EXPERIMENTAL — SOW only)
-make demo-up DEMO_MODE=subscription_meter     # Claude Code Pro + Codex on ChatGPT Plus — meter / soft_cap / hard_cap (synthetic 429) ⭐ D13
-make demo-up DEMO_MODE=maf_python_with_agt    # MAF + AGT coexistence smoke
-make demo-up DEMO_MODE=approval_hot_reload    # frozen-pricing regression
-make demo-up DEMO_MODE=multi_provider_usd     # multi-provider USD normalization
+make demo-up DEMO_MODE=agent_real_openai_agents          # OpenAI Agents SDK(wrapper)
+make demo-up DEMO_MODE=agent_real_openai_agents_proxy    # openai-agents 走 proxy ⭐
+make demo-up DEMO_MODE=agent_real_adk                    # Google ADK(Python)⭐ D19
+make demo-up DEMO_MODE=agent_real_strands                # AWS Strands(Python)⭐ D20
+make demo-up DEMO_MODE=agent_real_strands_deny           # AWS Strands DENY 证明
+make demo-up DEMO_MODE=agent_real_dspy                   # DSPy(Python)⭐ D21
+make demo-up DEMO_MODE=agent_real_agno                   # Agno(Python)⭐ D22
+make demo-up DEMO_MODE=agent_real_beeai                  # BeeAI Framework(Python)⭐ D23
+make demo-up DEMO_MODE=agent_real_autogen                # AutoGen 0.4+(Python)⭐ D24
+make demo-up DEMO_MODE=agent_real_ag2                    # AG2 lineage(同一个 wrapper)⭐ D24
+make demo-up DEMO_MODE=agent_real_smolagents             # SmolAgents(Python)⭐ D25
+make demo-up DEMO_MODE=agent_real_letta                  # Letta(Python —— library 模式)⭐ D26
+make demo-up DEMO_MODE=agent_real_llamaindex             # LlamaIndex(Python)⭐ D27
+make demo-up DEMO_MODE=agent_real_llamaindex_stub        # LlamaIndex(Python)—— MockLLM CI 关卡 ⭐ D27
+make demo-up DEMO_MODE=agent_real_atomic_agents          # Atomic Agents + Instructor(Python)⭐ D28
+make demo-up DEMO_MODE=litellm_real           # LiteLLM proxy:ALLOW+DENY+STREAM+MULTI-TEAM ⭐
+make demo-up DEMO_MODE=litellm_deny           # LiteLLM proxy:3 个 fail-closed 子步骤
+make demo-up DEMO_MODE=langchain_ts           # LangChain.js:ALLOW+DENY+STREAM
+make demo-up DEMO_MODE=vercel_ai_mastra       # Vercel AI SDK(覆盖 Mastra):ALLOW+DENY+STREAM ⭐
+make demo-up DEMO_MODE=inngest_agent_kit      # Inngest AgentKit:ALLOW+DENY+RETRY_DEDUP ⭐
+make demo-up DEMO_MODE=maf_dotnet_real        # Microsoft Agent Framework .NET:ALLOW+DENY+ALLOW2 ⭐
+make demo-up DEMO_MODE=maf_python_real        # Microsoft Agent Framework Python:ALLOW+DENY+ALLOW2 ⭐
+make demo-up DEMO_MODE=dify_plugin_real       # Dify Model Provider Plugin:ALLOW+DENY+STREAM ⭐
+make demo-up DEMO_MODE=botpress_real          # Botpress Integration SDK:ALLOW+DENY+STREAM ⭐ D32
+make demo-up DEMO_MODE=flowise_real           # Flowise 自定义 node:ALLOW+DENY+STREAM ⭐ D35
+make demo-up DEMO_MODE=langflow_real          # Langflow 自定义 component:ALLOW+DENY+STREAM ⭐ D36
+make demo-up DEMO_MODE=n8n_real               # n8n 社区 node:ALLOW+DENY+STREAM ⭐ D37
+make demo-up DEMO_MODE=coze_studio_real       # Coze Studio(ByteDance,no-code):ALLOW+DENY+STREAM ⭐ D31
+make demo-up DEMO_MODE=anythingllm_real       # AnythingLLM Generic OpenAI provider:ALLOW 往返 ⭐ D33
+make demo-up DEMO_MODE=lobechat_real          # LobeChat OPENAI_PROXY_URL:ALLOW 往返 ⭐ D34
+make demo-up DEMO_MODE=litellm_sdk_real       # LiteLLM SDK shim:ALLOW+STREAM+TRANSITIVE/CrewAI ⭐
+make demo-up DEMO_MODE=litellm_sdk_deny       # LiteLLM SDK shim:3 个 fail-closed 子步骤
+make demo-up DEMO_MODE=cursor_mitm_fixture    # Cursor MITM codec fixture replay(实验性 —— 仅限 SOW)
+make demo-up DEMO_MODE=subscription_meter     # Claude Code Pro + ChatGPT Plus 上的 Codex —— meter / soft_cap / hard_cap(合成 429)⭐ D13
+make demo-up DEMO_MODE=maf_python_with_agt    # MAF + AGT 共存 smoke
+make demo-up DEMO_MODE=approval_hot_reload    # frozen-pricing 回归
+make demo-up DEMO_MODE=multi_provider_usd     # 多 provider 的 USD normalization
 ```
