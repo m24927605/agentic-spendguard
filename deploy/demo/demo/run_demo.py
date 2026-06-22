@@ -1784,15 +1784,29 @@ async def run_deny_conformance_mode() -> int:
         unit_conversion_version=unit_conv,
     )
 
-    n = len(deny_conformance.REGISTRY)
-    print(f"[demo] deny-conformance: driving {n} adapters through a 2B budget-bust")
-    passed, results = await deny_conformance.run_conformance(
-        client,
-        budget_id=budget_id,
-        window_instance_id=window_id,
-        unit=unit,
-        pricing=pricing,
-    )
+    # Real counting HTTP provider (OpenAI /v1/chat/completions shape) so each
+    # adapter's ALLOW leg makes a genuine framework call we can observe, and the
+    # DENY leg can prove zero provider HTTP (counter unchanged). No fakes.
+    counting_runner = await _start_counting_provider()
+    base_url = "http://127.0.0.1:8765/v1"
+    try:
+        n = len(deny_conformance.REGISTRY)
+        print(
+            f"[demo] deny-conformance: driving {n} real adapters through a real "
+            f"ALLOW + a 2B budget-bust DENY against the counting provider"
+        )
+        passed, results = await deny_conformance.run_conformance(
+            client,
+            budget_id=budget_id,
+            window_instance_id=window_id,
+            unit=unit,
+            pricing=pricing,
+            base_url=base_url,
+            counting=_COUNTING_PROVIDER_HITS,
+        )
+    finally:
+        await counting_runner.cleanup()
+        print("[demo] counting provider stopped")
     await client.close()
 
     print("[demo] === DENY-CONFORMANCE RESULTS ===")
@@ -1800,12 +1814,13 @@ async def run_deny_conformance_mode() -> int:
         print(f"[demo]   {status:<12} {name:<16} {detail}")
     total = len(results)
     print(
-        f"[demo] {passed}/{total} adapters enforced DENY before the provider call"
+        f"[demo] {passed}/{total} adapters: real ALLOW reached provider, real DENY "
+        f"fail-closed before it"
     )
     if passed != total:
         failed = [n for n, st, _ in results if st != "PASS"]
         print(
-            f"[demo] FATAL: {total - passed} adapter(s) did NOT enforce DENY: {failed}",
+            f"[demo] FATAL: {total - passed} adapter(s) failed deny-conformance: {failed}",
             file=sys.stderr,
         )
         return 1
