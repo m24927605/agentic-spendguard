@@ -197,12 +197,12 @@ services:
         . /opt/venv/bin/activate
 
         echo "[smolagents-runner] installing in-tree spendguard-sdk[smolagents]..."
-        # Install best-effort and fall back to the duck-typed driver
-        # path when smolagents isn't available.
-        pip install -e '/opt/spendguard/sdk/python' || true
-        pip install 'smolagents>=1.5,<2' || \
-          echo "[smolagents-runner] smolagents install failed — driver "\
-               "will use duck-typed shapes (CI smoke path)."
+        # smolagents' OpenAIServerModel needs the `openai` package (the
+        # [openai] extra) — without it OpenAIServerModel.create_client raises
+        # ModuleNotFoundError. The driver now FATALs on import failure (no
+        # duck-typed fallback), so install the real deps.
+        pip install -e '/opt/spendguard/sdk/python'
+        pip install 'smolagents[openai]>=1.5,<2' 'openai>=1.0'
 
         echo "[smolagents-runner] sidecar UDS ready check..."
         for i in $$(seq 1 60); do

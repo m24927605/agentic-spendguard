@@ -12,11 +12,11 @@
 --     request_decision before inner.generate fires)
 --   - commit_estimated >= 1 (ALLOW path: wrapper's POST commits with
 --     real ChatMessage.token_usage.input_tokens + output_tokens)
---   - denied_decision >= 0 (DENY variant optional — the wrapper
---     raises DecisionDenied directly out of generate() — no
---     framework-side catch in smolagents.MultiStepAgent.step means the
---     raise reaches the CodeAgent.run caller cleanly; counting-stub
---     hits stay flat).
+--   - denied_decision >= 1 (the live driver ALWAYS runs a real DENY turn:
+--     a real CodeAgent.run with a 2B raw claim hits the contract
+--     hard-cap-deny rule; the wrapper raises DecisionDenied BEFORE
+--     inner.generate so the provider HTTP never fires and the counting-stub
+--     stays flat. No fabrication.)
 --
 -- INV-2 strict-order proof: the runner-side observation already proves
 -- the live ordering (the model is NEVER called on the DENY path because
@@ -82,6 +82,13 @@ BEGIN
     END IF;
     IF v_commit < 1 THEN
         RAISE EXCEPTION 'COV_D25_GATE: ledger_transactions.commit_estimated >= 1 expected (ALLOW), got %', v_commit;
+    END IF;
+    -- The live driver now ALWAYS exercises a real DENY turn: a real
+    -- CodeAgent.run with a 2B raw claim hits the contract hard-cap-deny rule,
+    -- so the wrapper raises DecisionDenied before inner.generate and the
+    -- sidecar records a denied_decision. No fabrication.
+    IF v_denied < 1 THEN
+        RAISE EXCEPTION 'COV_D25_GATE: ledger_transactions.denied_decision >= 1 expected (real DENY turn), got %', v_denied;
     END IF;
 
     RAISE NOTICE 'COV_D25 LEDGER OK: reserve=% commit=% denied=%',

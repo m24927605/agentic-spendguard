@@ -5670,15 +5670,21 @@ async def run_autogen_mode(lineage: str = "autogen") -> int:  # noqa: PLR0915
 
 
 async def run_smolagents_mode() -> int:  # noqa: PLR0915
-    """COV_D25: drive SmolAgents `CodeAgent` through SpendGuardSmolModel.
+    """COV_D25: drive a REAL SmolAgents `CodeAgent` through SpendGuardSmolModel.
 
-    The default flow exercises a single ALLOW pass through the wrapper.
-    The DENY assertion path is covered by the unit suite +
-    verify_step_agent_real_smolagents.sql; here we keep the demo small
-    and provable so the Makefile target stays under 30 seconds.
+    No fakes: the agent_real_smolagents runner ships smolagents, so an
+    ImportError is FATAL (return 8) — no duck-typed SimpleNamespace fallback.
+    Both turns drive a real `CodeAgent.run(...)` (not just the wrapper's
+    generate) so the demo proves smolagents itself does not swallow the gate:
+      * ALLOW — the OpenAIServerModel reaches the counting-stub (post>pre).
+      * DENY  — flip ONE estimator to a 2B raw claim → contract hard-cap-deny;
+        the wrapper raises DecisionDenied from request_decision BEFORE
+        inner.generate, so the provider HTTP never fires. The load-bearing
+        proof is the FLAT counting-stub (vs the ALLOW positive control that
+        incremented). smolagents may surface the block raw or wrapped — we
+        walk the __cause__/__context__ chain and report which.
     """
     import contextvars
-    from types import SimpleNamespace
 
     from spendguard import SpendGuardClient, new_uuid7
     from spendguard._proto.spendguard.common.v1 import common_pb2
@@ -5773,12 +5779,18 @@ async def run_smolagents_mode() -> int:  # noqa: PLR0915
                 "spendguard_run_context", default=None,
             )
 
+    # One estimator drives BOTH turns: a mutable flag flips a small ALLOW
+    # claim to a 2B raw claim that trips the demo contract's 1B
+    # hard-cap-deny rule (the SAME mechanism autogen/agno use).
+    deny_state = {"deny": False}
+
     def estimate_claims(_messages):
+        amount = "2000000000" if deny_state["deny"] else "500"
         return [
             common_pb2.BudgetClaim(
                 budget_id=budget_id,
                 unit=unit,
-                amount_atomic="500",
+                amount_atomic=amount,
                 direction=common_pb2.BudgetClaim.DEBIT,
                 window_instance_id=window_id,
             ),
@@ -5791,169 +5803,148 @@ async def run_smolagents_mode() -> int:  # noqa: PLR0915
         "SPENDGUARD_COUNTING_STUB_URL", "http://counting-stub:8765"
     )
 
-    real_smolagents_used = False
     try:
-        from smolagents import OpenAIServerModel  # type: ignore[import-not-found]
-
-        inner = OpenAIServerModel(
-            model_id="gpt-4o-mini",
-            api_base=f"{counting_stub_url}/v1",
-            api_key="sk-spendguard-demo-stub",
-        )
-        guarded = SpendGuardSmolModel(
-            inner=inner,
-            client=client,
-            budget_id=budget_id,
-            window_instance_id=window_id,
-            unit=unit,
-            pricing=pricing,
-            claim_estimator=estimate_claims,
-        )
-        # Bind the host loop so the wrapper's sync generate() submits
-        # sidecar coros back to this outer asyncio.run loop (the grpc.aio
-        # channel inside `client` was bound here at handshake time).
-        guarded.bind_loop(asyncio.get_running_loop())
-        step_cb = spendguard_step_callback(client, run_id=run_id)
-
-        from smolagents.models import ChatMessage, MessageRole  # type: ignore[import-not-found]
-
-        messages = [
-            ChatMessage(
-                role=MessageRole.USER,
-                content="Say hello in three words.",
-                tool_calls=None,
-                raw=None,
-                token_usage=None,
-            ),
-        ]
-
-        # smolagents Model.generate is SYNC; the wrapper bridges to
-        # async via asyncio.run, which would conflict with this outer
-        # async run_demo loop. Drive the wrapper inside a thread
-        # executor with the contextvar copied, so the wrapper's
-        # asyncio.run runs on its own loop. Mirrors the test fixture
-        # path (_drive_sync_generate).
-        def _sync_runner():
-            _RUN_CONTEXT.set(SmolRunContext(run_id=run_id))
-            return guarded.generate(messages)
-
-        ctx_copy = contextvars.copy_context()
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None, lambda: ctx_copy.run(_sync_runner)
-        )
-
-        # Fire an informational step callback — proves the step
-        # callback helper does NOT call request_decision (only the
-        # wrapper's generate does the gating).
-        action_step = SimpleNamespace(step_number=1)
-        step_cb(action_step)
-
-        content_snippet = (
-            (result.content or "")[:48]
-            if hasattr(result, "content")
-            else str(result)[:48]
-        )
-        print(
-            f"[demo] agent_real_smolagents run completed: ALLOW path "
-            f"content={content_snippet!r}"
-        )
-        real_smolagents_used = True
+        from smolagents import CodeAgent, OpenAIServerModel  # type: ignore[import-not-found]
     except ImportError as exc:
+        # No fabrication: the agent_real_smolagents runner ships smolagents.
         print(
-            f"[demo] smolagents not importable ({exc}); using "
-            "duck-typed driver path (CI smoke gate).",
+            f"[demo] FATAL: smolagents not importable in the smolagents runner "
+            f"({exc}); refusing to fake a pass.",
             file=sys.stderr,
         )
-    except Exception as exc:  # noqa: BLE001
+        await client.close()
+        return 8
+
+    # OpenAIServerModel reads its `api_base` ctor param (points at the
+    # counting-stub). The wrapper gates each generate(); bind_loop submits
+    # the wrapper's sidecar coros back to THIS loop (the grpc.aio channel
+    # inside `client` was bound here at handshake time).
+    inner = OpenAIServerModel(
+        model_id="gpt-4o-mini",
+        api_base=f"{counting_stub_url}/v1",
+        api_key="sk-spendguard-demo-stub",
+    )
+    guarded = SpendGuardSmolModel(
+        inner=inner,
+        client=client,
+        budget_id=budget_id,
+        window_instance_id=window_id,
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate_claims,
+    )
+    guarded.bind_loop(asyncio.get_running_loop())
+
+    # A real CodeAgent (no tools, max_steps=1) driven by the guarded model.
+    # The counting-stub returns a non-code completion so CodeAgent can't reach
+    # a final_answer — that is FINE: the ALLOW proof is that the provider was
+    # reached (counting-stub increments); a post-gate parse/max-steps error is
+    # expected and caught. CodeAgent.run() is SYNC and the wrapper's generate()
+    # is SYNC (bridging to the host loop), so we drive run() inside a thread
+    # executor with the smolagents run-context bound in that thread.
+    agent = CodeAgent(tools=[], model=guarded, max_steps=1)
+    loop = asyncio.get_running_loop()
+
+    def _drive(task: str, rid: str):
+        _RUN_CONTEXT.set(SmolRunContext(run_id=rid))
+        try:
+            return ("ok", agent.run(task))
+        except BaseException as exc:  # noqa: BLE001 — capture for chain-walk
+            return ("err", exc)
+
+    # ── ALLOW turn ──────────────────────────────────────────────────
+    pre = _read_counting_stub_hits_sync()
+    ctx_copy = contextvars.copy_context()
+    kind, payload = await loop.run_in_executor(
+        None,
+        lambda: ctx_copy.run(
+            lambda: _drive("Say hello in three words.", run_id)
+        ),
+    )
+    post = _read_counting_stub_hits_sync()
+    if post <= pre:
+        detail = (
+            f"{type(payload).__name__}: {payload}" if kind == "err" else payload
+        )
         print(
-            f"[demo] SpendGuardSmolModel.generate raised "
-            f"{type(exc).__name__}: {exc}; falling back to duck-typed path.",
+            f"[demo] FATAL: smolagents ALLOW did not reach provider "
+            f"(counting-stub {pre} -> {post}); run={kind} {str(detail)[:120]}",
             file=sys.stderr,
         )
+        await client.close()
+        return 7
+    allow_detail = (
+        type(payload).__name__ if kind == "err" else str(payload)[:48]
+    )
+    print(
+        f"[demo] agent_real_smolagents ALLOW ok — real CodeAgent.run reached "
+        f"provider (run={kind} {allow_detail!r}); counting {pre} -> {post}"
+    )
 
-    if not real_smolagents_used:
-        # Duck-typed driver — call wrapper.generate directly without an
-        # OpenAIServerModel. The wrapper has no smolagents dependency
-        # at runtime; only the demo's optional agent layer does.
+    # ── DENY turn (REAL — no fabrication) ───────────────────────────
+    # Flip the SAME estimator to a 2B raw claim → contract hard-cap-deny.
+    # SpendGuardSmolModel.generate raises DecisionDenied from request_decision
+    # BEFORE inner.generate, so the OpenAIServerModel HTTP never fires. The
+    # load-bearing proof is the FLAT counting-stub (vs the ALLOW positive
+    # control that just incremented — which rules out a CodeAgent setup error
+    # as the cause of a flat counter). smolagents may surface the block raw or
+    # wrapped (AgentGenerationError / AgentError) — we walk the
+    # __cause__/__context__ chain and report which.
+    from spendguard.errors import DecisionDenied
+    deny_state["deny"] = True
+    pre_deny = _read_counting_stub_hits_sync()
+    ctx_copy2 = contextvars.copy_context()
+    kind_d, payload_d = await loop.run_in_executor(
+        None,
+        lambda: ctx_copy2.run(lambda: _drive("DENY test", f"{run_id}:deny")),
+    )
+    post_deny = _read_counting_stub_hits_sync()
 
-        class _FakeInner:
-            """Minimal duck-typed inner Model matching the wrapper's needs."""
-
-            def __init__(self):
-                self.model_id = "duck-typed-smol"
-                self.calls = 0
-
-            def generate(
-                self,
-                messages,
-                stop_sequences=None,
-                response_format=None,
-                tools_to_call_from=None,
-                **_kwargs,
-            ):
-                self.calls += 1
-                # Shape mirrors smolagents.models.ChatMessage with
-                # token_usage carrying input/output tokens.
-                return SimpleNamespace(
-                    role="assistant",
-                    content="hi from duck-typed inner",
-                    tool_calls=None,
-                    raw=None,
-                    token_usage=SimpleNamespace(
-                        input_tokens=12, output_tokens=20,
-                    ),
-                )
-
-            def __call__(self, messages, **kwargs):
-                return self.generate(messages, **kwargs)
-
-        inner = _FakeInner()
-        guarded = SpendGuardSmolModel(
-            inner=inner,
-            client=client,
-            budget_id=budget_id,
-            window_instance_id=window_id,
-            unit=unit,
-            pricing=pricing,
-            claim_estimator=estimate_claims,
-        )
-        # Same loop-binding as the real-smolagents path above — submit
-        # sidecar coros back to the outer asyncio.run loop.
-        guarded.bind_loop(asyncio.get_running_loop())
-        step_cb = spendguard_step_callback(client, run_id=run_id)
-        messages = [
-            SimpleNamespace(
-                role="user",
-                content="Say hello in three words.",
-                tool_calls=None,
-                raw=None,
-                token_usage=None,
-            ),
-        ]
-
-        def _sync_runner_stub():
-            _RUN_CONTEXT.set(SmolRunContext(run_id=run_id))
-            return guarded.generate(messages)
-
-        ctx_copy = contextvars.copy_context()
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(
-            None, lambda: ctx_copy.run(_sync_runner_stub)
-        )
-        # Fire one step callback to prove informational telemetry path.
-        action_step = SimpleNamespace(step_number=1)
-        step_cb(action_step)
-
-        total = (
-            result.token_usage.input_tokens + result.token_usage.output_tokens
-        )
+    # Load-bearing: the model was NEVER reached on the DENY turn.
+    if post_deny != pre_deny:
         print(
-            f"[demo] agent_real_smolagents run completed: ALLOW path "
-            f"(stub) inner_calls={inner.calls} usage_total={total}"
+            f"[demo] FATAL: smolagents DENY turn hit the provider "
+            f"(counting-stub {pre_deny} -> {post_deny})",
+            file=sys.stderr,
         )
+        await client.close()
+        return 7
+
+    denied_in_chain = False
+    if kind_d == "err":
+        cur, seen = payload_d, set()
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            if isinstance(cur, DecisionDenied):
+                denied_in_chain = True
+                break
+            cur = cur.__cause__ or cur.__context__
+    if kind_d == "err" and denied_in_chain:
+        how = "DecisionDenied propagated out of CodeAgent.run"
+    elif kind_d == "err":
+        how = (
+            f"smolagents wrapped the block as {type(payload_d).__name__} "
+            "(counting-flat + ALLOW positive control prove the model was blocked)"
+        )
+    else:
+        # A clean return with a FLAT counter means CodeAgent never reached the
+        # provider (the gate blocked the first generate); smolagents folded the
+        # denied step into a result instead of raising. Spend was still
+        # prevented (counter flat). Honest, not a fake.
+        how = (
+            "smolagents returned a result without raising; counting-flat + the "
+            "ALLOW positive control prove the model was never called"
+        )
+    print(
+        "[demo] agent_real_smolagents DENY ok — real CodeAgent.run blocked "
+        f"({how}); counting-stub UNCHANGED ({pre_deny} -> {post_deny})"
+    )
 
     await client.close()
+    print(
+        "[demo] agent_real_smolagents ALL steps PASS "
+        "(real ALLOW + real DENY via SpendGuardSmolModel, no fakes)"
+    )
     return 0
 
 
