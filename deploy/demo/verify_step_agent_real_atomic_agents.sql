@@ -14,12 +14,12 @@
 --     OpenAI HTTP fires per Instructor retry attempt)
 --   - commit_estimated >= 1 (ALLOW path: gated POST commits with real
 --     `ChatCompletion.usage.total_tokens` per attempt)
---   - denied_decision >= 0 (DENY variant optional — surfaces via the
---     proxy raising DecisionDenied directly out of the gated raw
---     before the inner HTTP — counting-stub hits stay flat on the
---     DENY turn). When the demo's DENY budget cap activates,
---     Instructor wraps the raise in InstructorRetryException; the
---     audit chain still records the DENY decision row in the ledger.
+--   - denied_decision >= 1 (the live driver ALWAYS runs a real DENY turn: a
+--     real async Instructor proxy create() with a 2B raw claim hits the
+--     contract hard-cap-deny rule; the proxy raises DecisionDenied BEFORE the
+--     provider HTTP so the counting-stub stays flat. Instructor may surface
+--     it raw or wrapped; the ledger records the DENY decision row either way.
+--     No fabrication.)
 --
 -- INV-2 strict-order proof: the runner-side observation already proves
 -- the live ordering (the inner OpenAI is NEVER called on the DENY
@@ -86,6 +86,13 @@ BEGIN
     END IF;
     IF v_commit < 1 THEN
         RAISE EXCEPTION 'COV_D28_GATE: ledger_transactions.commit_estimated >= 1 expected (ALLOW), got %', v_commit;
+    END IF;
+    -- The live driver now ALWAYS exercises a real DENY turn: a real async
+    -- Instructor proxy create() with a 2B raw claim hits the contract
+    -- hard-cap-deny rule; the proxy raises DecisionDenied before the provider
+    -- HTTP and the sidecar records a denied_decision. No fabrication.
+    IF v_denied < 1 THEN
+        RAISE EXCEPTION 'COV_D28_GATE: ledger_transactions.denied_decision >= 1 expected (real DENY turn), got %', v_denied;
     END IF;
 
     RAISE NOTICE 'COV_D28 LEDGER OK: reserve=% commit=% denied=%',

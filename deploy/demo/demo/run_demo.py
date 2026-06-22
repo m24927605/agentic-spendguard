@@ -6736,9 +6736,23 @@ async def run_llamaindex_mode() -> int:  # noqa: PLR0915
 
 
 async def run_atomic_agents_mode() -> int:  # noqa: PLR0915
-    """COV_D28: drive Atomic Agents BaseAgent through SpendGuard wrap."""
-    from types import SimpleNamespace
+    """COV_D28: drive Atomic Agents' Instructor LLM gate through SpendGuard.
 
+    No fakes: the agent_real_atomic_agents runner ships instructor + openai,
+    so an ImportError is FATAL (return 8) — no duck-typed SimpleNamespace
+    fallback. Atomic Agents delegates EVERY LLM call to Instructor; the
+    SpendGuard gate sits at Instructor's per-attempt raw create. We drive the
+    REAL async Instructor proxy (instructor.from_openai(AsyncOpenAI(...)) →
+    SpendGuardAsyncInstructorProxy) which awaits the sidecar DIRECTLY on this
+    loop — no asyncio.run, so the main-loop-bound grpc client is reused
+    cross-loop-free (the sync proxy's asyncio.run path would fail with
+    "Future attached to a different loop").
+      * ALLOW — create() reaches the counting-stub (post>pre); a post-gate
+        Instructor parse/retry error on the stub's non-tool response is fine.
+      * DENY  — flip ONE estimator to a 2B raw claim → contract hard-cap-deny;
+        the proxy raises DecisionDenied from request_decision BEFORE the
+        provider HTTP, so the counting-stub stays flat (load-bearing proof).
+    """
     from spendguard import SpendGuardClient, new_uuid7
     from spendguard._proto.spendguard.common.v1 import common_pb2
 
@@ -6807,12 +6821,18 @@ async def run_atomic_agents_mode() -> int:  # noqa: PLR0915
     atomic_run_context = hook_mod.run_context
     print("[demo] atomic_agents adapter loaded via package-bypass")
 
+    # One estimator drives BOTH turns: a mutable flag flips a small ALLOW
+    # claim to a 2B raw claim that trips the demo contract's 1B
+    # hard-cap-deny rule (the SAME mechanism autogen/agno/smolagents use).
+    deny_state = {"deny": False}
+
     def estimate_claims(_kwargs: dict) -> list:
+        amount = "2000000000" if deny_state["deny"] else "500"
         return [
             common_pb2.BudgetClaim(
                 budget_id=budget_id,
                 unit=unit,
-                amount_atomic="500",
+                amount_atomic=amount,
                 direction=common_pb2.BudgetClaim.DEBIT,
                 window_instance_id=window_id,
             ),
@@ -6821,186 +6841,136 @@ async def run_atomic_agents_mode() -> int:  # noqa: PLR0915
     run_id = str(new_uuid7())
     print(f"[demo] atomic_agents run_id={run_id}")
 
-    real_atomic_used = False
     try:
         import instructor  # type: ignore[import-not-found]
-        from openai import OpenAI  # type: ignore[import-not-found]
+        from openai import AsyncOpenAI  # type: ignore[import-not-found]
         from pydantic import BaseModel  # type: ignore[import-not-found]
-
-        # Try Atomic Agents itself; fall back to driving the wrapped
-        # Instructor directly when atomic-agents isn't installed.
-        try:
-            from atomic_agents.agents.base_agent import (  # type: ignore[import-not-found]
-                BaseAgent,
-                BaseAgentConfig,
-            )
-            from atomic_agents.lib.components.system_prompt_generator import (  # type: ignore[import-not-found]
-                SystemPromptGenerator,
-            )
-            has_atomic_agents = True
-        except ImportError:
-            has_atomic_agents = False
-            print(
-                "[demo] atomic-agents not installed; falling back to "
-                "Instructor-only driver path (still proves the gate).",
-                file=sys.stderr,
-            )
-
-        class Answer(BaseModel):
-            final: str
-
-        raw = instructor.from_openai(OpenAI(), mode=instructor.Mode.TOOLS)
-        guarded = wrap_instructor_client(
-            raw,
-            spendguard_client=client,
-            budget_id=budget_id,
-            window_instance_id=window_id,
-            unit=unit,
-            pricing=pricing,
-            claim_estimator=estimate_claims,
+    except ImportError as exc:
+        # No fabrication: the agent_real_atomic_agents runner ships
+        # instructor + openai + pydantic.
+        print(
+            f"[demo] FATAL: instructor/openai/pydantic not importable in the "
+            f"atomic_agents runner ({exc}); refusing to fake a pass.",
+            file=sys.stderr,
         )
+        await client.close()
+        return 8
 
-        async with atomic_run_context(AtomicRunContext(run_id=run_id)):
-            if has_atomic_agents:
-                # Atomic Agents 2.x: BaseAgentConfig signature varies
-                # by minor; the proxy is the load-bearing surface, so
-                # we drive ``guarded.chat.completions.create_with_completion``
-                # directly when BaseAgentConfig wiring fluctuates.
-                try:
-                    spg = SystemPromptGenerator(background=["Be concise."])
-                    config = BaseAgentConfig(
-                        client=guarded,
-                        model="gpt-4o-mini",
-                        system_prompt_generator=spg,
-                        input_schema=BaseModel,
-                        output_schema=Answer,
-                    )
-                    agent = BaseAgent(config)
-                    # Atomic Agents BaseAgent.run signature varies across
-                    # 2.x minors; fall through if it raises.
-                    try:
-                        result = agent.run({"query": "Say hi."})
-                        content = getattr(result, "final", str(result))[:48]
-                        print(
-                            f"[demo] agent_real_atomic_agents BaseAgent.run "
-                            f"completed: ALLOW path content={content!r}"
-                        )
-                    except Exception as run_exc:  # noqa: BLE001
-                        print(
-                            f"[demo] BaseAgent.run failed ({type(run_exc).__name__}: "
-                            f"{run_exc}); falling back to direct proxy drive.",
-                            file=sys.stderr,
-                        )
-                        raise
-                except Exception:  # noqa: BLE001
-                    # Drive the wrapped Instructor directly — the proxy
-                    # is the load-bearing surface.
-                    parsed, raw_completion = await asyncio.to_thread(
-                        guarded.chat.completions.create_with_completion,
-                        model="gpt-4o-mini",
-                        response_model=Answer,
-                        messages=[{"role": "user", "content": "Say hi."}],
-                    )
-                    print(
-                        f"[demo] agent_real_atomic_agents proxy drive "
-                        f"completed: ALLOW path final={parsed.final!r} "
-                        f"usage_total={raw_completion.usage.total_tokens}"
-                    )
-            else:
-                parsed, raw_completion = await asyncio.to_thread(
-                    guarded.chat.completions.create_with_completion,
+    class Answer(BaseModel):
+        final: str
+
+    # AsyncOpenAI reads OPENAI_BASE_URL/OPENAI_API_KEY from env (the overlay
+    # points both at the counting-stub). The factory dispatches an
+    # AsyncInstructor to SpendGuardAsyncInstructorProxy, which awaits the
+    # sidecar directly on THIS loop (no asyncio.run → no cross-loop error).
+    raw = instructor.from_openai(AsyncOpenAI(), mode=instructor.Mode.TOOLS)
+    guarded = wrap_instructor_client(
+        raw,
+        spendguard_client=client,
+        budget_id=budget_id,
+        window_instance_id=window_id,
+        unit=unit,
+        pricing=pricing,
+        claim_estimator=estimate_claims,
+    )
+    proxy_kind = type(guarded).__name__
+    print(f"[demo] atomic_agents proxy = {proxy_kind}")
+
+    async def _drive(prompt: str, rid: str):
+        async with atomic_run_context(AtomicRunContext(run_id=rid)):
+            try:
+                parsed = await guarded.chat.completions.create(
                     model="gpt-4o-mini",
                     response_model=Answer,
-                    messages=[{"role": "user", "content": "Say hi."}],
+                    messages=[{"role": "user", "content": prompt}],
+                    max_retries=1,
                 )
-                print(
-                    f"[demo] agent_real_atomic_agents proxy-direct "
-                    f"completed: ALLOW path final={parsed.final!r} "
-                    f"usage_total={raw_completion.usage.total_tokens}"
-                )
-        real_atomic_used = True
-    except ImportError as exc:
+                return ("ok", parsed)
+            except BaseException as exc:  # noqa: BLE001 — capture for chain-walk
+                return ("err", exc)
+
+    # ── ALLOW turn ──────────────────────────────────────────────────
+    pre = _read_counting_stub_hits_sync()
+    kind, payload = await _drive("Say hi.", run_id)
+    post = _read_counting_stub_hits_sync()
+    if post <= pre:
+        detail = (
+            f"{type(payload).__name__}: {payload}" if kind == "err" else payload
+        )
         print(
-            f"[demo] instructor / openai / pydantic not importable ({exc}); "
-            "using duck-typed driver path (CI smoke gate).",
+            f"[demo] FATAL: atomic_agents ALLOW did not reach provider "
+            f"(counting-stub {pre} -> {post}); run={kind} {str(detail)[:120]}",
             file=sys.stderr,
         )
-    except Exception as exc:  # noqa: BLE001
+        await client.close()
+        return 7
+    allow_detail = (
+        type(payload).__name__ if kind == "err" else str(payload)[:48]
+    )
+    print(
+        f"[demo] agent_real_atomic_agents ALLOW ok — real Instructor proxy "
+        f"create() reached provider (run={kind} {allow_detail!r}); "
+        f"counting {pre} -> {post}"
+    )
+
+    # ── DENY turn (REAL — no fabrication) ───────────────────────────
+    # Flip the SAME estimator to a 2B raw claim → contract hard-cap-deny.
+    # The proxy raises DecisionDenied from request_decision BEFORE the raw
+    # provider create, so the AsyncOpenAI HTTP never fires. Instructor does
+    # not retry a non-validation exception, so it propagates out of create()
+    # directly. The load-bearing proof is the FLAT counting-stub (vs the
+    # ALLOW positive control that incremented).
+    from spendguard.errors import DecisionDenied
+    deny_state["deny"] = True
+    pre_deny = _read_counting_stub_hits_sync()
+    kind_d, payload_d = await _drive("DENY test", f"{run_id}:deny")
+    post_deny = _read_counting_stub_hits_sync()
+
+    if post_deny != pre_deny:
         print(
-            f"[demo] proxy drive raised {type(exc).__name__}: {exc}; "
-            "falling back to duck-typed path.",
+            f"[demo] FATAL: atomic_agents DENY turn hit the provider "
+            f"(counting-stub {pre_deny} -> {post_deny})",
             file=sys.stderr,
         )
+        await client.close()
+        return 7
 
-    if not real_atomic_used:
-        # Duck-typed driver — directly call the proxy's gated raw
-        # method (which the proxy exposes as `_gated_raw_create`).
-        # Build a minimal duck-typed Instructor stand-in so the
-        # factory's isinstance dispatch + raw-method resolution works.
-        # CI smoke gate: stub atomic-agents/openai/instructor are
-        # absent.
-        class _FakeOAIChatCompletions:
-            def __init__(self) -> None:
-                self.calls = 0
-
-            def create(self, **kwargs):
-                self.calls += 1
-                return SimpleNamespace(
-                    id=f"chatcmpl-stub-{self.calls}",
-                    usage=SimpleNamespace(
-                        prompt_tokens=12, completion_tokens=20, total_tokens=32
-                    ),
-                )
-
-        class _FakeOAIChat:
-            def __init__(self) -> None:
-                self.completions = _FakeOAIChatCompletions()
-
-        class _FakeOAIClient:
-            def __init__(self) -> None:
-                self.chat = _FakeOAIChat()
-
-        try:
-            from instructor import Instructor, Mode  # type: ignore[import-not-found]
-            from instructor import patch as instructor_patch
-            raw_client = _FakeOAIClient()
-            fake_instructor = Instructor(
-                client=raw_client,
-                create=instructor_patch(
-                    create=raw_client.chat.completions.create, mode=Mode.TOOLS
-                ),
-                mode=Mode.TOOLS,
-            )
-        except ImportError:
-            print(
-                "[demo] instructor still not importable; demo cannot drive "
-                "the proxy without it. Skipping smoke run with PASS exit.",
-                file=sys.stderr,
-            )
-            await client.close()
-            return 0
-        guarded = wrap_instructor_client(
-            fake_instructor,
-            spendguard_client=client,
-            budget_id=budget_id,
-            window_instance_id=window_id,
-            unit=unit,
-            pricing=pricing,
-            claim_estimator=estimate_claims,
-        )
-        async with atomic_run_context(AtomicRunContext(run_id=run_id)):
-            result = await asyncio.to_thread(
-                guarded._gated_raw_create,
-                model="gpt-4o-mini",
-                messages=[{"role": "user", "content": "Say hi."}],
-            )
+    denied_in_chain = False
+    if kind_d == "err":
+        cur, seen = payload_d, set()
+        while cur is not None and id(cur) not in seen:
+            seen.add(id(cur))
+            if isinstance(cur, DecisionDenied):
+                denied_in_chain = True
+                break
+            cur = cur.__cause__ or cur.__context__
+    if kind_d != "err":
+        # A clean return on the DENY turn means the gate did NOT block —
+        # a real failure, not something to fake.
         print(
-            f"[demo] agent_real_atomic_agents stub drive completed: "
-            f"ALLOW path inner_calls={raw_client.chat.completions.calls} "
-            f"usage_total={result.usage.total_tokens}"
+            "[demo] FATAL: atomic_agents DENY turn returned a result without "
+            f"raising (payload={str(payload_d)[:64]!r}) — the gate did not "
+            "block. Refusing to fake a pass.",
+            file=sys.stderr,
         )
+        await client.close()
+        return 7
+    how = (
+        "DecisionDenied propagated out of Instructor.create"
+        if denied_in_chain
+        else f"Instructor wrapped the block as {type(payload_d).__name__} "
+        "(counting-flat + ALLOW positive control prove the model was blocked)"
+    )
+    print(
+        "[demo] agent_real_atomic_agents DENY ok — real Instructor proxy "
+        f"blocked ({how}); counting-stub UNCHANGED ({pre_deny} -> {post_deny})"
+    )
 
     await client.close()
+    print(
+        "[demo] agent_real_atomic_agents ALL steps PASS "
+        "(real ALLOW + real DENY via SpendGuardAsyncInstructorProxy, no fakes)"
+    )
     return 0
 
 
