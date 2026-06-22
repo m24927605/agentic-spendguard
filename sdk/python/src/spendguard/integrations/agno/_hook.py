@@ -28,19 +28,29 @@ Lifecycle (per design.md §5)::
         │    RunError / missing metrics → emit_llm_call_post(PROVIDER_ERROR)
         └─ if slot missing → log warning + no-op (never commit w/o reserve)
 
-DEVIATION-1 vs spec §6.5 (locked):
-    Spec asserts "STOP / DENY raises DecisionDenied — Agno propagates the
-    exception out of arun()". Agno's actual 2.x hook loop catches
-    ``Exception`` and only re-raises ``InputCheckError`` /
-    ``OutputCheckError`` (see ``agno.agent._hooks.aexecute_pre_hooks``
-    line ~195 — ``except (InputCheckError, OutputCheckError) as e:
-    raise e ... except Exception: log_exception(...)``). Without the
-    wrap a DENY would be silently logged and the model would still be
-    called, violating review-standards §3 "PRE before vendor SDK". The
-    wrap raises ``InputCheckError(message, additional_data={...})``
-    with the original ``DecisionDenied`` chained as ``__cause__`` so
-    downstream callers still catch by ``DecisionDenied`` via the
-    ``__cause__`` chain.
+DEVIATION-1 vs spec §6.5 (locked) — REVISED against agno 2.6.18 reality:
+    Spec asserted "STOP / DENY raises DecisionDenied — Agno propagates the
+    exception out of arun()". That is NOT how agno behaves. Agno's hook
+    loop catches ``Exception`` and only treats ``InputCheckError`` /
+    ``OutputCheckError`` as a guardrail halt (see
+    ``agno.agent._hooks.aexecute_pre_hooks`` — ``except (InputCheckError,
+    OutputCheckError): <halt> ... except Exception: log_exception(...)``).
+    A plain exception would be *logged* and the model would still be
+    called, so wrapping the ``DecisionDenied`` into an ``InputCheckError``
+    is load-bearing: it is what HALTS the model before the vendor SDK
+    (review-standards §3 "PRE before vendor SDK").
+
+    BUT the halt does NOT surface as a raised exception out of
+    ``Agent.arun()``. Verified against the installed agno 2.6.18 wheel: a
+    pre_hook raising ``InputCheckError`` makes ``arun()`` RETURN a
+    ``RunOutput(status=RunStatus.error, content="<msg>")`` — no exception
+    reaches the caller. The enforcement is still real (the model HTTP
+    never fires; SpendGuard records a denied_decision), but callers MUST
+    detect the deny via ``RunOutput.status`` (an error/cancelled status),
+    NOT by catching ``DecisionDenied``. The wrap still chains the original
+    ``DecisionDenied`` as ``__cause__`` for the rare agno build that does
+    re-raise, and ``additional_data`` carries ``decision_id`` /
+    ``reason_codes`` for introspection.
 
 DEVIATION-2 vs spec §6.9 (locked):
     Spec asserts the post-hook async function declares ``(agent,
@@ -371,9 +381,11 @@ class SpendGuardAgnoPreHook:
                     decision_context_json=decision_context,
                 )
             except DecisionDenied as denied:
-                # DEVIATION-1: wrap into InputCheckError so Agno
-                # actually halts. The original DecisionDenied chains
-                # via __cause__ so downstream catches still work.
+                # DEVIATION-1: wrap into InputCheckError so Agno actually
+                # HALTS the model before the vendor SDK. On agno 2.6.x the
+                # halt surfaces as a RunOutput(status=error) out of arun()
+                # (NOT a raised exception); the original DecisionDenied is
+                # chained via __cause__ regardless.
                 _raise_halt_for_deny(denied)
 
             # Stash for the matching post-hook.

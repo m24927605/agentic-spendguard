@@ -4,22 +4,22 @@ Lets users write ``from spendguard.integrations.agno import
 DecisionDenied`` without remembering the cross-module path. Parity
 with the ADK / Strands / MAF adapters' ``_errors.py``.
 
-Per design.md §5 the DENY path raises ``DecisionDenied`` directly. In
-Agno's actual 2.x ``aexecute_pre_hooks`` runtime, the loop catches
-``Exception`` but **propagates ``InputCheckError``** unchanged (see
-``agno.agent._hooks.aexecute_pre_hooks`` line 195 and following). The
-pre-hook therefore wraps the ``DecisionDenied`` into an
-``InputCheckError`` so Agno actually halts the run — the original
-``DecisionDenied`` is preserved on ``__cause__`` for downstream
-catch-by-type.
+Per design.md §5 the DENY path raises ``DecisionDenied`` directly. The
+pre-hook wraps it into an ``InputCheckError`` so Agno HALTS the run
+before the vendor SDK fires; the original ``DecisionDenied`` is
+preserved on ``__cause__``.
 
-DEVIATION-1 vs spec §6 (locked): the spec asserted "STOP / DENY raises
-``DecisionDenied`` — Agno propagates the exception out of arun()".
-Agno's 2.x hook loop silently swallows everything that is not an
-``Input/OutputCheckError``, so without the wrap a DENY would be
-*logged* and the model would still be called. The wrap is the only
-correctness-preserving path; bypassing it would violate review
-standards §3 "PRE before vendor SDK".
+DEVIATION-1 vs spec §6 (locked) — REVISED against agno 2.6.18: the spec
+asserted "STOP / DENY raises ``DecisionDenied`` — Agno propagates the
+exception out of arun()". That is false. Agno's hook loop swallows
+everything that is not an ``Input/OutputCheckError`` (so without the
+wrap a DENY would be *logged* and the model would still be called — the
+wrap is load-bearing), AND the ``InputCheckError`` halt does NOT
+propagate out of ``Agent.arun()`` either: ``arun()`` RETURNS a
+``RunOutput(status=RunStatus.error)`` (verified against the 2.6.18
+wheel). Callers detect the deny via ``RunOutput.status``, not by
+catching ``DecisionDenied``. The model is still blocked (PRE before
+vendor SDK, review standards §3).
 """
 
 from __future__ import annotations

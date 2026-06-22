@@ -5165,10 +5165,18 @@ async def run_dspy_real_mode() -> int:
 # ---------------------------------------------------------------------------
 
 
-async def run_agno_mode() -> int:
-    """COV_D22: drive `agno.agent.Agent` through SpendGuard pre/post hooks."""
-    from types import SimpleNamespace
+async def run_agno_mode() -> int:  # noqa: PLR0915
+    """COV_D22: drive a REAL `agno.agent.Agent` through SpendGuard pre/post
+    hooks — real ALLOW (provider reached) + real DENY (model never called).
 
+    No fakes: the agno-runner image ships agno>=2.0,<3, so an ImportError is
+    FATAL (return 8) — we refuse to fall back to a duck-typed SimpleNamespace
+    pass. The DENY turn flips ONE mutable estimator to a 2B raw BudgetClaim
+    that trips the demo contract's 1B hard-cap-deny rule; agno's pre-hook
+    (SpendGuardAgnoPreHook) wraps the DecisionDenied into an InputCheckError
+    (DEVIATION-1) so Agno HALTS before the OpenAIChat HTTP — the
+    counting-stub stays flat across the DENY turn.
+    """
     from spendguard import SpendGuardClient, new_uuid7
     from spendguard._proto.spendguard.common.v1 import common_pb2
 
@@ -5237,12 +5245,18 @@ async def run_agno_mode() -> int:
     AgnoRunContext = options_mod.RunContext
     agno_run_context = hook_mod.run_context
 
+    # One estimator drives BOTH turns: a mutable flag flips a small ALLOW
+    # claim to a 2B raw claim that trips the demo contract's 1B
+    # hard-cap-deny rule (the SAME mechanism autogen/llamaindex use).
+    deny_state = {"deny": False}
+
     def estimate_claims(_agent, _run_input):
+        amount = "2000000000" if deny_state["deny"] else "500"
         return [
             common_pb2.BudgetClaim(
                 budget_id=budget_id,
                 unit=unit,
-                amount_atomic="500",
+                amount_atomic=amount,
                 direction=common_pb2.BudgetClaim.DEBIT,
                 window_instance_id=window_id,
             ),
@@ -5265,64 +5279,131 @@ async def run_agno_mode() -> int:
     run_id = str(new_uuid7())
     print(f"[demo] agno run_id={run_id}")
 
-    real_agno_used = False
     try:
         from agno.agent import Agent  # type: ignore[import-not-found]
         from agno.models.openai import OpenAIChat  # type: ignore[import-not-found]
-
-        agent = Agent(
-            model=OpenAIChat(id="gpt-4o-mini"),
-            pre_hooks=[pre()],
-            post_hooks=[post()],
-        )
-        async with agno_run_context(AgnoRunContext(run_id=run_id)):
-            result = await agent.arun("Say hello in three words.")
-        rid = getattr(result, "run_id", "unknown")
-        print(
-            f"[demo] agent_real_agno run completed: ALLOW path "
-            f"result.run_id={rid}"
-        )
-        real_agno_used = True
     except ImportError as exc:
+        # No fabrication: the agent_real_agno runner ships agno>=2.0,<3.
         print(
-            f"[demo] agno not importable ({exc}); using duck-typed "
-            "driver path (CI smoke gate).",
+            f"[demo] FATAL: agno not importable in the agno runner ({exc}); "
+            "refusing to fake a pass.",
             file=sys.stderr,
         )
-    except Exception as exc:  # noqa: BLE001
-        print(
-            f"[demo] agno Agent.arun raised "
-            f"{type(exc).__name__}: {exc}; falling back to duck-typed path.",
-            file=sys.stderr,
-        )
+        await client.close()
+        return 8
 
-    if not real_agno_used:
-        # Duck-typed driver — invokes the pre/post closures directly
-        # the way Agno's _hooks.py would, with `inspect`-filtered args.
-        openai_cls = type("OpenAIChat", (object,), {})
-        openai_inst = openai_cls()
-        openai_inst.id = "gpt-4o-mini"  # type: ignore[attr-defined]
-        agent = SimpleNamespace(model=openai_inst)
-        run_input = "Say hello in three words."
-        pre_cb = pre()
-        post_cb = post()
-        async with agno_run_context(AgnoRunContext(run_id=run_id)):
-            await pre_cb(agent=agent, run_input=run_input)
-            run_output = SimpleNamespace(
-                run_id="chatcmpl-agno-stub-1",
-                status=SimpleNamespace(value="COMPLETED"),
-                error=None,
-                metrics=SimpleNamespace(
-                    input_tokens=8,
-                    output_tokens=14,
-                    total_tokens=22,
-                ),
-                input=run_input,
-            )
-            await post_cb(agent=agent, run_output=run_output)
-        print("[demo] agent_real_agno run completed: ALLOW path (stub)")
+    # OpenAIChat reads OPENAI_BASE_URL / OPENAI_API_KEY from env (the overlay
+    # points both at the counting-stub) — no paid key, real provider HTTP.
+    agent = Agent(
+        model=OpenAIChat(id="gpt-4o-mini"),
+        pre_hooks=[pre()],
+        post_hooks=[post()],
+    )
+
+    # ── ALLOW turn ──────────────────────────────────────────────────
+    pre_hits = _read_counting_stub_hits_sync()
+    async with agno_run_context(AgnoRunContext(run_id=run_id)):
+        result = await agent.arun("Say hello in three words.")
+    post_hits = _read_counting_stub_hits_sync()
+    if post_hits <= pre_hits:
+        print(
+            f"[demo] FATAL: agno ALLOW did not reach provider "
+            f"(counting-stub {pre_hits} -> {post_hits})",
+            file=sys.stderr,
+        )
+        await client.close()
+        return 7
+    rid = getattr(result, "run_id", "unknown")
+    print(
+        f"[demo] agent_real_agno ALLOW ok — real Agent.arun reached provider "
+        f"(result.run_id={rid}); counting {pre_hits} -> {post_hits}"
+    )
+
+    # ── DENY turn (REAL — no fabrication) ───────────────────────────
+    # Flip the SAME estimator to a 2B raw claim → contract hard-cap-deny.
+    # SpendGuardAgnoPreHook wraps the DecisionDenied into an Agno
+    # InputCheckError (DEVIATION-1) BEFORE the model is dispatched. Agno
+    # 2.6.18 does NOT re-raise that out of arun() — its hook loop HALTS the
+    # run and returns a RunOutput with status=RunStatus.error (verified
+    # against the installed wheel: a pre_hook raising InputCheckError yields
+    # `RunOutput(status=RunStatus.error, content="<msg>")`, no exception).
+    # The enforcement is real either way: the pre-hook denies BEFORE the
+    # model dispatch so the OpenAIChat HTTP NEVER fires (counting-stub stays
+    # flat) and the sidecar records a denied_decision. We accept BOTH shapes
+    # — a raised DecisionDenied OR an error-status RunOutput — and the
+    # load-bearing proof is the FLAT counting-stub (the model was never
+    # reached). The healthy ALLOW positive control above rules out an outage.
+    from spendguard.errors import DecisionDenied
+    deny_state["deny"] = True
+    pre_deny = _read_counting_stub_hits_sync()
+    denied_exc = False
+    run_out = None
+    async with agno_run_context(AgnoRunContext(run_id=f"{run_id}:deny")):
+        try:
+            run_out = await agent.arun("DENY test")
+        except DecisionDenied:
+            denied_exc = True
+        except Exception as exc:  # noqa: BLE001 — some agno builds re-raise wrapped
+            cur, seen = exc, set()
+            while cur is not None and id(cur) not in seen:
+                seen.add(id(cur))
+                if isinstance(cur, DecisionDenied):
+                    denied_exc = True
+                    break
+                cur = cur.__cause__ or cur.__context__
+            if not denied_exc:
+                raise
+    post_deny = _read_counting_stub_hits_sync()
+
+    # Load-bearing proof: the model was NEVER reached on the DENY turn.
+    if post_deny != pre_deny:
+        print(
+            f"[demo] FATAL: agno DENY turn hit the provider "
+            f"(counting-stub {pre_deny} -> {post_deny})",
+            file=sys.stderr,
+        )
+        await client.close()
+        return 7
+
+    # Confirm Agno actually HALTED the run (did not silently complete a
+    # successful model call). Either an exception surfaced OR the RunOutput
+    # carries a non-success status. A completed RunOutput here would mean the
+    # pre-hook did not block — that is a real failure, not something to fake.
+    halted = denied_exc
+    status_repr = ""
+    if not halted and run_out is not None:
+        status = getattr(run_out, "status", None)
+        status_repr = str(getattr(status, "value", status) or status).upper()
+        if (
+            "ERROR" in status_repr
+            or "CANCEL" in status_repr
+            or getattr(run_out, "is_cancelled", False)
+        ):
+            halted = True
+    if not halted:
+        print(
+            "[demo] FATAL: agno DENY turn was NOT halted — real Agent.arun "
+            f"completed (status={status_repr!r}) with the provider untouched, "
+            "which means the pre-hook did not block. Refusing to fake a pass.",
+            file=sys.stderr,
+        )
+        await client.close()
+        return 7
+    how = (
+        "raised DecisionDenied"
+        if denied_exc
+        else f"RunOutput status={status_repr}"
+    )
+    print(
+        "[demo] agent_real_agno DENY ok — real Agent.arun HALTED by the "
+        f"pre-hook ({how}); counting-stub UNCHANGED ({pre_deny} -> {post_deny})"
+    )
 
     await client.close()
+    print(
+        "[demo] agent_real_agno ALL steps PASS "
+        "(real ALLOW + real DENY via pre-hook InputCheckError, no fakes)"
+    )
     return 0
 
 
