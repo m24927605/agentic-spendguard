@@ -71,3 +71,112 @@ CVE-2026-54283
 # SpendGuard's AWS usage (KMS signing, Bedrock) never processes untrusted/client-supplied CRLs,
 # so the malformed-CRL parse path is never hit. (entry 3)
 GHSA-82j2-j2ch-gfr8
+
+# =====================================================================
+# JS/TS workspace dev/peer dependencies (root pnpm-lock.yaml) — added 2026-06-22
+# =====================================================================
+# Every id below is a vulnerability in a JavaScript/TypeScript dependency that
+# exists ONLY in the root pnpm-lock.yaml dev/build tree. NONE ships in any
+# published @spendguard npm package. Audited 2026-06-22:
+#   * @spendguard/sdk runtime deps = @protobuf-ts/* + @grpc/grpc-js (>=1.14.0,
+#     which EXCLUDES the vulnerable 1.13.1) + @noble/hashes — none CVE'd.
+#   * The framework adapters (langchain, vercel-ai, openai-agents, mastra,
+#     inngest-agent-kit, n8n, ag-ui) declare the framework as a peerDependency
+#     and ship only @spendguard/sdk.
+#   * @spendguard/flowise-nodes declares `flowise-components` as a peerDependency
+#     (>=2.0.0); the Flowise HOST provides it — it is NOT bundled.
+# Almost all of these are dragged into the *dev* install by flowise-components
+# @3.1.2 (onnx-proto->protobufjs, canvas/jsdom->tar, langchain-community->
+# langchain-core 0.2.x/langsmith, mcp servers, otel, xlsx) so the Flowise
+# integration can be type-built + tested locally. Not reachable by a shipped
+# artifact.
+#
+# WHY NOT BUMPED: third-party flowise-components deep transitives; forcing the
+# major bumps (tar 6->7, protobufjs 6->8, mcp 0.5->1.25, otel 0.54->0.218,
+# langchain-core 0.2->0.3, xlsx off-npm) via pnpm overrides risks breaking
+# flowise-components for ZERO shipped-security benefit, and CI runs pnpm 9 (a
+# pnpm-10 lockfile regen risks --frozen-lockfile drift). Re-evaluate if
+# flowise-components ships a patched 3.x or the Flowise dev integration is dropped.
+
+
+# @grpc/grpc-js 1.13.1 (flowise-components) — server crash via malformed request / compressed message. @spendguard/sdk ships >=1.14.0 (excludes 1.13.1).
+CVE-2026-48068
+CVE-2026-48069
+
+# @langchain/core 0.2.36 (flowise -> @langchain/community) — arbitrary code execution. @spendguard/langchain adapter requires core >=0.3 (peer, safe); 0.2.x is flowise-dev-only.
+CVE-2025-68665
+
+# @modelcontextprotocol/sdk 0.5.0/1.0.1 (flowise -> mcp server nodes) — auth/ReDoS. flowise-dev-only.
+CVE-2025-66414
+CVE-2026-0621
+
+# @opentelemetry/auto-instrumentations-node + sdk-node (flowise-components) — exporter crash via malformed HTTP. flowise-dev-only.
+CVE-2026-44902
+
+# axios 1.7.7/1.12.0/1.13.6 (flowise + langchain dev tree) — SSRF/DoS/proto-pollution/proxy-cred leak family. No published @spendguard pkg depends on axios.
+CVE-2025-27152
+CVE-2025-58754
+CVE-2026-25639
+CVE-2026-42033
+CVE-2026-42035
+CVE-2026-42043
+CVE-2026-42264
+CVE-2026-44486
+CVE-2026-44487
+CVE-2026-44488
+CVE-2026-44492
+CVE-2026-44494
+CVE-2026-44495
+CVE-2026-44496
+
+# fast-xml-parser 5.2.5 (flowise/aws dev tree) — ReDoS/prototype-pollution. flowise-dev-only.
+CVE-2026-25128
+CVE-2026-25896
+CVE-2026-26278
+CVE-2026-33036
+
+# form-data 4.0.0 (flowise/axios dev tree) — unsafe random boundary / param injection. flowise-dev-only.
+CVE-2025-7783
+CVE-2026-12143
+
+# hono 4.12.23 (flowise dev tree) — flowise-dev-only.
+CVE-2026-54290
+
+# langsmith 0.1.68/0.3.87/0.4.12 (flowise -> langchain dev tree) — flowise-dev-only.
+CVE-2026-45134
+
+# protobufjs 6.11.6 (flowise -> onnx-proto) — prototype pollution. The SDK uses @protobuf-ts, not protobufjs. flowise-dev-only.
+CVE-2026-41242
+CVE-2026-44289
+CVE-2026-44290
+CVE-2026-44291
+CVE-2026-44293
+CVE-2026-48712
+
+# tar 6.2.1 (flowise -> node-pre-gyp/canvas) — path traversal / symlink. tar 7 is a breaking major for that subtree. flowise-dev-only.
+CVE-2026-23745
+CVE-2026-23950
+CVE-2026-24842
+CVE-2026-26960
+CVE-2026-29786
+CVE-2026-31802
+
+# tar-fs 3.0.4 (flowise dev tree) — path traversal. flowise-dev-only.
+CVE-2024-12905
+CVE-2025-48387
+CVE-2025-59343
+
+# tmp 0.0.33 (flowise dev tree) — symlink dir write. flowise-dev-only.
+CVE-2026-44705
+
+# ws 8.13.0 (flowise dev tree) — DoS via headers / unhandled. flowise-dev-only.
+CVE-2024-37890
+CVE-2026-48779
+
+# xlsx 0.18.5 (flowise-components) — prototype pollution / ReDoS. SheetJS moved off npm; 0.20.x is not npm-installable. flowise-dev-only.
+CVE-2023-30533
+CVE-2024-22363
+
+# langsmith 0.8.4 (sdk/python/uv.lock) — fixed in 0.8.18; blocked by the same
+# pre-existing un-regenerable uv.lock conflict documented above (entry 2).
+GHSA-f4xh-w4cj-qxq8
